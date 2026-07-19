@@ -174,36 +174,60 @@ public:
         gizmoMesh_ = e.device()->createLineMesh(gz.data(), (u32)gz.size());
 
         sel_ = 1; // the Cube
-        azimuth_=0.9f; elevation_=0.35f; distScale_=1.0f;
+        camPos_ = Vec3{7.0f, 7.0f, 4.5f};
+        const Vec3 d = (Vec3{0,0,1} - camPos_).getSafeNormal();
+        yaw_ = std::atan2(d.y, d.x);
+        pitch_ = std::asin(d.z);
     }
 
     void onUpdate(Engine& e, const Timestep& t) override {
-        bool over = e.device()->uiWantsMouse();
 #if AVER_WITH_IMGUI
         if (e.device()->uiActive()) {
             const ImGuiIO& io = ImGui::GetIO();
-            if (!over) {
-                if (io.MouseDown[1]) { azimuth_ -= io.MouseDelta.x*0.01f; elevation_ += io.MouseDelta.y*0.01f; }
-                if (io.MouseWheel != 0) distScale_ *= (1.0f - io.MouseWheel*0.1f);
-            }
-            elevation_ = elevation_<0.02f?0.02f:(elevation_>1.5f?1.5f:elevation_);
-            distScale_ = distScale_<0.2f?0.2f:(distScale_>6.0f?6.0f:distScale_);
-            if (autoOrbit_ && !io.MouseDown[0] && !io.MouseDown[1]) azimuth_ += t.dt*0.25f;
-        } else
-#endif
-        { if (autoOrbit_) azimuth_ += t.dt*0.25f; }
+            const bool overUI = io.WantCaptureMouse;
 
-        const Vec3 center{0,0,1};
-        const f32 dist = 8.0f*distScale_;
-        const f32 ch = std::cos(elevation_);
-        const Vec3 eye = center + Vec3{std::cos(azimuth_)*ch, std::sin(azimuth_)*ch, std::sin(elevation_)}*dist;
+            // Right mouse enters fly mode (look + WASD/QE), like Unreal's viewport.
+            if (ImGui::IsMouseClicked(1) && !overUI) flying_ = true;
+            if (!io.MouseDown[1]) flying_ = false;
+
+            if (flying_) {
+                yaw_   += io.MouseDelta.x * 0.005f;
+                pitch_ -= io.MouseDelta.y * 0.005f;
+                pitch_ = pitch_ < -1.54f ? -1.54f : (pitch_ > 1.54f ? 1.54f : pitch_);
+                if (io.MouseWheel != 0.0f) {
+                    flySpeed_ *= (1.0f + io.MouseWheel * 0.15f);
+                    flySpeed_ = flySpeed_ < 0.5f ? 0.5f : (flySpeed_ > 200.0f ? 200.0f : flySpeed_);
+                }
+            }
+
+            const Vec3 fwd = camForward();
+            const Vec3 up{0, 0, 1};
+            const Vec3 right = cross(up, fwd).getSafeNormal();
+
+            if (flying_ && !io.WantCaptureKeyboard) {
+                const f32 sp = flySpeed_ * t.dt;
+                if (ImGui::IsKeyDown(ImGuiKey_W)) camPos_ += fwd * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_S)) camPos_ -= fwd * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_D)) camPos_ += right * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_A)) camPos_ -= right * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_E)) camPos_ += up * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_Q)) camPos_ -= up * sp;
+            } else if (!overUI) {
+                if (io.MouseWheel != 0.0f) camPos_ += fwd * io.MouseWheel * (flySpeed_ * 0.15f); // dolly
+                if (io.MouseDown[2]) { camPos_ -= right * io.MouseDelta.x * 0.02f; camPos_ += up * io.MouseDelta.y * 0.02f; } // MMB pan
+            }
+            if (!io.WantCaptureKeyboard && ImGui::IsKeyPressed(ImGuiKey_F) && sel_ >= 0 && sel_ < (int)objects_.size())
+                camPos_ = objects_[sel_].pos - fwd * 6.0f; // focus selection
+        }
+#endif
+        const Vec3 fwd = camForward();
         const f32 aspect = viewAspect(e);
-        const Mat4 view = Mat4::lookAtLH(eye, center, Vec3{0,0,1});
-        const Mat4 proj = Mat4::perspectiveLH(radians(52.0f), aspect, 0.1f, 4000.0f);
+        const Mat4 view = Mat4::lookAtLH(camPos_, camPos_ + fwd, Vec3{0,0,1});
+        const Mat4 proj = Mat4::perspectiveLH(radians(60.0f), aspect, 0.05f, 5000.0f);
         const Mat4 viewProj = view * proj;
         const Mat4 invVP = viewProj.inverse();
-        e.device()->setCamera(&viewProj.m[0][0], &invVP.m[0][0], &eye.x);
-        invVP_ = invVP; eye_ = eye;
+        e.device()->setCamera(&viewProj.m[0][0], &invVP.m[0][0], &camPos_.x);
+        invVP_ = invVP; eye_ = camPos_;
 
         const Vec3 ld = Vec3{sunAz_, sunAlt_, sunUp_}.getSafeNormal();
         e.device()->setLight(&ld.x, sunColor_, sunAmbient_);
@@ -237,6 +261,9 @@ public:
 
 private:
     static f32 viewAspect(Engine& e){ return (e.window()&&e.window()->height())?(f32)e.window()->width()/e.window()->height():1.777f; }
+    Vec3 camForward() const {
+        return Vec3{ std::cos(pitch_)*std::cos(yaw_), std::cos(pitch_)*std::sin(yaw_), std::sin(pitch_) };
+    }
 
     void handleManip(Engine& e) {
 #if AVER_WITH_IMGUI
@@ -297,7 +324,7 @@ private:
             ImGui::Separator();
             if (ImGui::BeginMenu("File")){ if(ImGui::MenuItem("New Level")) {} if(ImGui::MenuItem("Exit")) e.requestExit(); ImGui::EndMenu(); }
             if (ImGui::BeginMenu("Edit")){ ImGui::MenuItem("Undo"); ImGui::MenuItem("Redo"); ImGui::EndMenu(); }
-            if (ImGui::BeginMenu("View")){ ImGui::MenuItem("Auto-orbit",nullptr,&autoOrbit_); ImGui::MenuItem("Grid",nullptr,&showGrid_); ImGui::MenuItem("Wireframe",nullptr,&wireframe_); ImGui::EndMenu(); }
+            if (ImGui::BeginMenu("View")){ ImGui::MenuItem("Grid",nullptr,&showGrid_); ImGui::MenuItem("Wireframe",nullptr,&wireframe_); ImGui::EndMenu(); }
             ImGui::EndMainMenuBar();
         }
 
@@ -314,7 +341,7 @@ private:
         }
         ImGui::Checkbox("Grid", &showGrid_); ImGui::SameLine();
         ImGui::Checkbox("Wireframe", &wireframe_); ImGui::SameLine();
-        ImGui::TextDisabled("| 1-4 tools  click: select  L-drag: %s  R-drag: orbit  wheel: zoom", kToolNames[(int)tool_]);
+        ImGui::TextDisabled("| RMB: fly (WASD/QE)  wheel: speed  MMB: pan  F: focus   |   1-4 tools, click: select, L-drag: %s", kToolNames[(int)tool_]);
         ImGui::End();
 
         const f32 y0 = top+40, rightW=320, bottomH=150;
@@ -388,8 +415,10 @@ private:
     std::vector<MeshObj> objects_;
     int sel_ = 1;
     Tool tool_ = Tool::Select;
-    bool autoOrbit_ = true;
-    f32 azimuth_=0.9f, elevation_=0.35f, distScale_=1.0f;
+    // Free-fly editor camera (Unreal-style): position + yaw/pitch, no auto-orbit.
+    Vec3 camPos_{7.0f, 7.0f, 4.5f};
+    f32 yaw_ = 0.0f, pitch_ = 0.0f, flySpeed_ = 8.0f;
+    bool flying_ = false;
     // sun
     f32 sunAz_=0.35f, sunAlt_=0.4f, sunUp_=0.85f, sunColor_[3]={1.0f,0.96f,0.9f}, sunAmbient_=0.28f;
     // sky + atmosphere
