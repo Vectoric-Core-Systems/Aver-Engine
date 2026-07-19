@@ -76,20 +76,28 @@ D3D12_RESOURCE_DESC bufferDesc(u64 bytes) {
 const char* kShaderHLSL = R"(
 cbuffer PerFrame : register(b0) {
     float4x4 gViewProj;
+    float4x4 gInvViewProj;
+    float4   gCamPos;      // xyz
     float4   gLightDir;    // xyz = direction TO light
     float4   gLightColor;  // rgb
     float4   gAmbient;     // rgb
+    float4   gSkyZenith;   // rgb
+    float4   gSkyHorizon;  // rgb
+    float4   gFogColor;    // rgb, a = density
 };
 cbuffer PerObject : register(b1) {
     float4x4 gWorld;
     float4   gBaseColor;
 };
+
+// ---- lit mesh with distance fog ----
 struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; };
-struct VSOut { float4 pos : SV_POSITION; float3 nrmWS : NORMAL; };
+struct VSOut { float4 pos : SV_POSITION; float3 nrmWS : NORMAL; float3 wpos : TEXCOORD0; };
 
 VSOut VSMain(VSIn i) {
     VSOut o;
     float4 wp = mul(float4(i.pos, 1.0), gWorld);
+    o.wpos = wp.xyz;
     o.pos = mul(wp, gViewProj);
     o.nrmWS = mul(float4(i.nrm, 0.0), gWorld).xyz;
     return o;
@@ -98,15 +106,43 @@ float4 PSMain(VSOut i) : SV_TARGET {
     float3 N = normalize(i.nrmWS);
     float ndl = saturate(dot(N, normalize(gLightDir.xyz)));
     float3 col = gBaseColor.rgb * (gAmbient.rgb + gLightColor.rgb * ndl);
+    float dist = length(i.wpos - gCamPos.xyz);
+    float fog = 1.0 - exp(-dist * gFogColor.a);
+    col = lerp(col, gFogColor.rgb, saturate(fog));
     return float4(col, gBaseColor.a);
+}
+
+// ---- procedural sky (fullscreen triangle via SV_VertexID) ----
+struct SkyOut { float4 pos : SV_POSITION; float2 ndc : TEXCOORD0; };
+SkyOut VSky(uint id : SV_VertexID) {
+    SkyOut o;
+    float2 uv = float2((id << 1) & 2, id & 2);
+    o.ndc = uv * 2.0 - 1.0;
+    o.pos = float4(o.ndc, 1.0, 1.0);
+    return o;
+}
+float4 PSky(SkyOut i) : SV_TARGET {
+    float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
+    float3 world = far.xyz / far.w;
+    float3 ray = normalize(world - gCamPos.xyz);
+    float3 sky = lerp(gSkyHorizon.rgb, gSkyZenith.rgb, pow(saturate(ray.z), 0.5));
+    float sd = saturate(dot(ray, normalize(gLightDir.xyz)));
+    sky += gLightColor.rgb * pow(sd, 900.0) * 3.0;   // sun disk
+    sky += gLightColor.rgb * pow(sd, 12.0) * 0.12;   // sun glow
+    return float4(sky, 1.0);
 }
 )";
 
 struct PerFrameCB {
     f32 viewProj[16];
+    f32 invViewProj[16];
+    f32 camPos[4];
     f32 lightDir[4];
     f32 lightColor[4];
     f32 ambient[4];
+    f32 skyZenith[4];
+    f32 skyHorizon[4];
+    f32 fogColor[4]; // a = density
 };
 
 struct GpuMesh {
@@ -152,14 +188,21 @@ public:
 
     void setClearColor(f32 r, f32 g, f32 b, f32 a) override { clear_[0] = r; clear_[1] = g; clear_[2] = b; clear_[3] = a; }
 
-    void setCamera(const f32 viewProj[16], const f32 camPos[3]) override {
+    void setCamera(const f32 viewProj[16], const f32 invViewProj[16], const f32 camPos[3]) override {
         std::memcpy(frameCB_.viewProj, viewProj, sizeof(frameCB_.viewProj));
-        (void)camPos;
+        std::memcpy(frameCB_.invViewProj, invViewProj, sizeof(frameCB_.invViewProj));
+        frameCB_.camPos[0] = camPos[0]; frameCB_.camPos[1] = camPos[1]; frameCB_.camPos[2] = camPos[2]; frameCB_.camPos[3] = 1;
     }
     void setLight(const f32 dir[3], const f32 color[3], f32 ambient) override {
         frameCB_.lightDir[0] = dir[0]; frameCB_.lightDir[1] = dir[1]; frameCB_.lightDir[2] = dir[2]; frameCB_.lightDir[3] = 0;
         frameCB_.lightColor[0] = color[0]; frameCB_.lightColor[1] = color[1]; frameCB_.lightColor[2] = color[2]; frameCB_.lightColor[3] = 0;
         frameCB_.ambient[0] = frameCB_.ambient[1] = frameCB_.ambient[2] = ambient; frameCB_.ambient[3] = 0;
+    }
+    void setSky(bool enabled, const f32 zenith[3], const f32 horizon[3], const f32 fogColor[3], f32 fogDensity) override {
+        skyEnabled_ = enabled;
+        for (int i = 0; i < 3; ++i) { frameCB_.skyZenith[i] = zenith[i]; frameCB_.skyHorizon[i] = horizon[i]; frameCB_.fogColor[i] = fogColor[i]; }
+        frameCB_.skyZenith[3] = frameCB_.skyHorizon[3] = 0;
+        frameCB_.fogColor[3] = fogDensity;
     }
 
     MeshHandle createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override;
@@ -212,6 +255,8 @@ private:
 
     ComPtr<ID3D12RootSignature> rootSig_;
     ComPtr<ID3D12PipelineState> pso_;
+    ComPtr<ID3D12PipelineState> skyPso_;
+    bool skyEnabled_ = false;
     ComPtr<ID3D12Resource> frameCBs_[kFrameCount];
     u8* frameCBPtr_[kFrameCount] = {nullptr, nullptr};
 
@@ -340,6 +385,31 @@ bool D3D12Device::createPipeline() {
     pso.DSVFormat = kDepthFormat;
     pso.SampleDesc.Count = 1;
     if (!hrOk(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pso_)), "CreateGraphicsPipelineState")) return false;
+
+    // Sky pipeline: fullscreen triangle, no input layout, no depth.
+    ComPtr<ID3DBlob> vsky, psky;
+    if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, "VSky", "vs_5_1", compileFlags, 0, &vsky, &err))) {
+        AVER_ERROR("[RHI.D3D12] VSky compile: {}", err ? static_cast<const char*>(err->GetBufferPointer()) : "?"); return false;
+    }
+    if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, "PSky", "ps_5_1", compileFlags, 0, &psky, &err))) {
+        AVER_ERROR("[RHI.D3D12] PSky compile: {}", err ? static_cast<const char*>(err->GetBufferPointer()) : "?"); return false;
+    }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC sp{};
+    sp.pRootSignature = rootSig_.Get();
+    sp.VS = {vsky->GetBufferPointer(), vsky->GetBufferSize()};
+    sp.PS = {psky->GetBufferPointer(), psky->GetBufferSize()};
+    sp.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    sp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    sp.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    sp.DepthStencilState.DepthEnable = FALSE;
+    sp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    sp.SampleMask = UINT_MAX;
+    sp.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    sp.NumRenderTargets = 1;
+    sp.RTVFormats[0] = kBackbufferFormat;
+    sp.DSVFormat = kDepthFormat;
+    sp.SampleDesc.Count = 1;
+    if (!hrOk(device_->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&skyPso_)), "CreateGraphicsPipelineState(sky)")) return false;
 
     // Per-frame constant buffers (one per frame in flight), persistently mapped.
     auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
@@ -482,6 +552,14 @@ void D3D12Device::beginFrame() {
     cmdList_->SetGraphicsRootSignature(rootSig_.Get());
     cmdList_->SetGraphicsRootConstantBufferView(0, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    // Procedural sky first (fullscreen, no depth), then meshes draw over it.
+    if (skyEnabled_) {
+        cmdList_->SetPipelineState(skyPso_.Get());
+        cmdList_->IASetVertexBuffers(0, 0, nullptr);
+        cmdList_->DrawInstanced(3, 1, 0, 0);
+    }
+    cmdList_->SetPipelineState(pso_.Get());
 }
 
 void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4]) {

@@ -85,6 +85,8 @@ bool Window::create(const WindowDesc& desc) {
     wc.hInstance = inst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = kClassName;
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));   // app icon resource (Sandbox.rc)
+    wc.hIconSm = wc.hIcon;
     RegisterClassExW(&wc); // ignore "already registered" on repeat
 
     DWORD style = desc.resizable ? WS_OVERLAPPEDWINDOW

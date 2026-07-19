@@ -4,7 +4,27 @@
 #include <filesystem>
 #include <fstream>
 
+#if defined(_WIN32)
+#include <Windows.h>
+#endif
+
 namespace aver {
+
+std::string executableDir() {
+#if defined(_WIN32)
+    wchar_t buf[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    std::wstring w(buf, n);
+    const auto p = w.find_last_of(L"\\/");
+    if (p != std::wstring::npos) w = w.substr(0, p);
+    const int len = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s(static_cast<usize>(len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), len, nullptr, nullptr);
+    return s;
+#else
+    return ".";
+#endif
+}
 
 bool fileExists(const std::string& path) {
     std::error_code ec;

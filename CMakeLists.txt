@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(AverEngine VERSION 0.1.0 LANGUAGES C CXX)
+project(AverEngine VERSION 0.1.0 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # Aver Engine — royalty-free, modular 3D engine (see docs/ARCHITECTURE.md).

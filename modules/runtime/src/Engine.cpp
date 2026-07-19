@@ -2,6 +2,8 @@
 #include "aver/runtime/Application.hpp"
 
 #include "aver/platform/Window.hpp"
+#include "aver/platform/Splash.hpp"
+#include "aver/platform/FileSystem.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
 
@@ -13,6 +15,10 @@ Engine::~Engine() = default;
 int Engine::run(Application* app) {
     BootConfig cfg = app->config();
     AVER_INFO("Aver Engine 0.1.0 starting (headless={}, maxFrames={})", cfg.headless, cfg.maxFrames);
+
+    // --- Splash (shown during startup) ---
+    Splash splash;
+    if (!cfg.headless) splash.show(executableDir() + "\\splash.png");
 
     // --- Window (optional; fall back to headless on failure) ---
     if (!cfg.headless) {
@@ -48,6 +54,7 @@ int Engine::run(Application* app) {
     }
 
     app->onInit(*this);
+    if (!cfg.headless) splash.close(1100); // keep the splash up briefly, then reveal the editor
 
     // --- Frame loop ---
     Clock frameClock;

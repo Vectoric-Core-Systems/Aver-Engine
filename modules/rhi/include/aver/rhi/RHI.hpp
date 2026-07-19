@@ -67,9 +67,18 @@ public:
                                   const u32* indices, u32 indexCount) {
         (void)verts; (void)vertexCount; (void)indices; (void)indexCount; return 0;
     }
-    // Per-frame camera (row-major, row-vector viewProj = view*proj) and directional light.
-    virtual void setCamera(const f32 viewProj[16], const f32 cameraPos[3]) { (void)viewProj; (void)cameraPos; }
+    // Per-frame camera (row-major, row-vector viewProj = view*proj). invViewProj is used
+    // to reconstruct world-space rays for the procedural sky.
+    virtual void setCamera(const f32 viewProj[16], const f32 invViewProj[16], const f32 cameraPos[3]) {
+        (void)viewProj; (void)invViewProj; (void)cameraPos;
+    }
     virtual void setLight(const f32 dirToLight[3], const f32 color[3], f32 ambient) { (void)dirToLight; (void)color; (void)ambient; }
+    // Procedural sky + distance-fog atmosphere. When enabled, a gradient sky (with a sun
+    // disk along the light direction) is drawn behind the scene and meshes fade to fogColor.
+    virtual void setSky(bool enabled, const f32 zenith[3], const f32 horizon[3],
+                        const f32 fogColor[3], f32 fogDensity) {
+        (void)enabled; (void)zenith; (void)horizon; (void)fogColor; (void)fogDensity;
+    }
     // Record one draw of `mesh` with a world matrix (row-major) and base colour.
     virtual void drawMesh(MeshHandle mesh, const f32 world[16], const f32 baseColor[4]) {
         (void)mesh; (void)world; (void)baseColor;
