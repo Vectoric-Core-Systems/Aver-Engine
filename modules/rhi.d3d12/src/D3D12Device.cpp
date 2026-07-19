@@ -174,6 +174,18 @@ float4 PSky(SkyOut i) : SV_TARGET {
     sky += sunC * pow(sd, 12.0) * 0.30;    // sun glow
     return float4(toGamma(acesTonemap(sky)), 1.0);
 }
+
+// ---- unlit coloured lines (grid / gizmo) ----
+struct LVSIn  { float3 pos : POSITION; float3 col : COLOR; };
+struct LVSOut { float4 pos : SV_POSITION; float3 col : COLOR; };
+LVSOut VSLine(LVSIn i) {
+    LVSOut o;
+    float4 wp = mul(float4(i.pos, 1.0), gWorld);
+    o.pos = mul(wp, gViewProj);
+    o.col = i.col;
+    return o;
+}
+float4 PSLine(LVSOut i) : SV_TARGET { return float4(i.col, 1.0); }
 )";
 
 struct PerFrameCB {
@@ -194,6 +206,12 @@ struct GpuMesh {
     D3D12_VERTEX_BUFFER_VIEW vbv{};
     D3D12_INDEX_BUFFER_VIEW ibv{};
     u32 indexCount = 0;
+};
+
+struct GpuLineMesh {
+    ComPtr<ID3D12Resource> vb;
+    D3D12_VERTEX_BUFFER_VIEW vbv{};
+    u32 count = 0;
 };
 
 class D3D12Device;
@@ -250,6 +268,9 @@ public:
 
     MeshHandle createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override;
     void drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) override;
+    LineHandle createLineMesh(const LineVertex* verts, u32 count) override;
+    void drawLines(LineHandle mesh, const f32 world[16]) override;
+    void setWireframe(bool on) override { wireframe_ = on; }
 
     void requestCapture(u32 x, u32 y) override { capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
     bool getCapture(f32 out[4]) override {
@@ -302,7 +323,11 @@ private:
     ComPtr<ID3D12RootSignature> rootSig_;
     ComPtr<ID3D12PipelineState> pso_;
     ComPtr<ID3D12PipelineState> skyPso_;
+    ComPtr<ID3D12PipelineState> wirePso_;
+    ComPtr<ID3D12PipelineState> linePso_;
     bool skyEnabled_ = false;
+    bool wireframe_ = false;
+    std::vector<GpuLineMesh> lineMeshes_;
     ComPtr<ID3D12Resource> frameCBs_[kFrameCount];
     u8* frameCBPtr_[kFrameCount] = {nullptr, nullptr};
 
@@ -458,6 +483,43 @@ bool D3D12Device::createPipeline() {
     sp.DSVFormat = kDepthFormat;
     sp.SampleDesc.Count = kSampleCount;
     if (!hrOk(device_->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&skyPso_)), "CreateGraphicsPipelineState(sky)")) return false;
+
+    // Wireframe variant of the mesh PSO.
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    if (!hrOk(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&wirePso_)), "wire pso")) return false;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+
+    // Line PSO (grid / gizmo): pos+colour, line list, depth-tested, no depth write.
+    ComPtr<ID3DBlob> vln, pln;
+    if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, "VSLine", "vs_5_1", compileFlags, 0, &vln, &err))) {
+        AVER_ERROR("[RHI.D3D12] VSLine compile: {}", err ? static_cast<const char*>(err->GetBufferPointer()) : "?"); return false;
+    }
+    if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, "PSLine", "ps_5_1", compileFlags, 0, &pln, &err))) {
+        AVER_ERROR("[RHI.D3D12] PSLine compile: {}", err ? static_cast<const char*>(err->GetBufferPointer()) : "?"); return false;
+    }
+    D3D12_INPUT_ELEMENT_DESC lineLayout[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR",    0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC lp{};
+    lp.pRootSignature = rootSig_.Get();
+    lp.VS = {vln->GetBufferPointer(), vln->GetBufferSize()};
+    lp.PS = {pln->GetBufferPointer(), pln->GetBufferSize()};
+    lp.InputLayout = {lineLayout, 2};
+    lp.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    lp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    lp.RasterizerState.MultisampleEnable = TRUE;
+    lp.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    lp.DepthStencilState.DepthEnable = TRUE;
+    lp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    lp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    lp.SampleMask = UINT_MAX;
+    lp.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+    lp.NumRenderTargets = 1;
+    lp.RTVFormats[0] = kBackbufferFormat;
+    lp.DSVFormat = kDepthFormat;
+    lp.SampleDesc.Count = kSampleCount;
+    if (!hrOk(device_->CreateGraphicsPipelineState(&lp, IID_PPV_ARGS(&linePso_)), "line pso")) return false;
 
     // Per-frame constant buffers (one per frame in flight), persistently mapped.
     auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
@@ -633,6 +695,8 @@ void D3D12Device::beginFrame() {
 void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) {
     if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
     const GpuMesh& m = meshes_[mesh - 1];
+    cmdList_->SetPipelineState(wireframe_ ? wirePso_.Get() : pso_.Get());
+    cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     f32 consts[24];
     std::memcpy(consts, world, 16 * sizeof(f32));
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
@@ -641,6 +705,33 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
     cmdList_->IASetIndexBuffer(&m.ibv);
     cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+}
+
+LineHandle D3D12Device::createLineMesh(const LineVertex* verts, u32 count) {
+    if (!device_ || count == 0) return 0;
+    GpuLineMesh m;
+    m.count = count;
+    const u64 bytes = static_cast<u64>(count) * sizeof(LineVertex);
+    auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+    auto d = bufferDesc(bytes);
+    if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m.vb)), "line vb")) return 0;
+    void* p = nullptr; D3D12_RANGE none{0, 0};
+    m.vb->Map(0, &none, &p); std::memcpy(p, verts, bytes); m.vb->Unmap(0, nullptr);
+    m.vbv.BufferLocation = m.vb->GetGPUVirtualAddress();
+    m.vbv.SizeInBytes = static_cast<UINT>(bytes);
+    m.vbv.StrideInBytes = sizeof(LineVertex);
+    lineMeshes_.push_back(std::move(m));
+    return static_cast<LineHandle>(lineMeshes_.size());
+}
+
+void D3D12Device::drawLines(LineHandle mesh, const f32 world[16]) {
+    if (!hasSwapchain_ || mesh == 0 || mesh > lineMeshes_.size()) return;
+    const GpuLineMesh& m = lineMeshes_[mesh - 1];
+    cmdList_->SetPipelineState(linePso_.Get());
+    cmdList_->SetGraphicsRoot32BitConstants(1, 16, world, 0); // gWorld only
+    cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+    cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
+    cmdList_->DrawInstanced(m.count, 1, 0, 0);
 }
 
 void D3D12Device::endFrame() {

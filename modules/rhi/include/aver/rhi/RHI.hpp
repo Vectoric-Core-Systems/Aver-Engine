@@ -36,6 +36,13 @@ struct MeshVertex {
 
 using MeshHandle = u32; // 0 = invalid
 
+// Line vertex: position + colour (unlit), for grids/gizmos/debug.
+struct LineVertex {
+    f32 px, py, pz;
+    f32 r, g, b;
+};
+using LineHandle = u32; // 0 = invalid
+
 struct DeviceDesc {
     // Preference order; createDevice() returns the first compiled-in backend that
     // initialises, falling back to Null.
@@ -85,6 +92,13 @@ public:
                           f32 metallic, f32 roughness) {
         (void)mesh; (void)world; (void)baseColor; (void)metallic; (void)roughness;
     }
+
+    // Unlit line geometry (grid, gizmos): per-vertex colour, drawn as a line list.
+    virtual LineHandle createLineMesh(const LineVertex* verts, u32 count) { (void)verts; (void)count; return 0; }
+    virtual void drawLines(LineHandle mesh, const f32 world[16]) { (void)mesh; (void)world; }
+
+    // Render subsequent meshes as wireframe until toggled off.
+    virtual void setWireframe(bool on) { (void)on; }
 
     // Verification: capture the backbuffer pixel at (x,y) during the next presented
     // frame. Poll getCapture() afterward. Lets tests confirm objects actually rasterize.

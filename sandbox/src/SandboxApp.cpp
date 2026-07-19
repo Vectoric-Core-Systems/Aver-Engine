@@ -12,6 +12,7 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -41,6 +42,48 @@ static Quat quatFromEulerDeg(const Vec3& e) {
             Quat::fromAxisAngle({1,0,0}, radians(e.x))).normalized();
 }
 
+// Row-vector transforms (v * M) for picking.
+static Vec3 xformPoint(const Mat4& m, const Vec3& p) {
+    return { p.x*m.m[0][0]+p.y*m.m[1][0]+p.z*m.m[2][0]+m.m[3][0],
+             p.x*m.m[0][1]+p.y*m.m[1][1]+p.z*m.m[2][1]+m.m[3][1],
+             p.x*m.m[0][2]+p.y*m.m[1][2]+p.z*m.m[2][2]+m.m[3][2] };
+}
+static Vec3 xformVec(const Mat4& m, const Vec3& v) {
+    return { v.x*m.m[0][0]+v.y*m.m[1][0]+v.z*m.m[2][0],
+             v.x*m.m[0][1]+v.y*m.m[1][1]+v.z*m.m[2][1],
+             v.x*m.m[0][2]+v.y*m.m[1][2]+v.z*m.m[2][2] };
+}
+static bool rayAabb(const Vec3& o, const Vec3& d, const Vec3& mn, const Vec3& mx, f32& tHit) {
+    f32 tmin = 0.0f, tmax = 1e30f;
+    for (int a = 0; a < 3; ++a) {
+        const f32 od = (&o.x)[a], dd = (&d.x)[a], lo = (&mn.x)[a], hi = (&mx.x)[a];
+        if (std::fabs(dd) < 1e-8f) { if (od < lo || od > hi) return false; }
+        else {
+            f32 t1 = (lo - od) / dd, t2 = (hi - od) / dd;
+            if (t1 > t2) std::swap(t1, t2);
+            tmin = std::fmax(tmin, t1); tmax = std::fmin(tmax, t2);
+            if (tmin > tmax) return false;
+        }
+    }
+    tHit = tmin; return true;
+}
+static void buildGrid(std::vector<rhi::LineVertex>& v, f32 ext, f32 step) {
+    const f32 g = 0.26f;
+    for (f32 x = -ext; x <= ext + 0.001f; x += step) {
+        v.push_back({x, -ext, 0.02f, g, g, g}); v.push_back({x, ext, 0.02f, g, g, g});
+    }
+    for (f32 y = -ext; y <= ext + 0.001f; y += step) {
+        v.push_back({-ext, y, 0.02f, g, g, g}); v.push_back({ext, y, 0.02f, g, g, g});
+    }
+    v.push_back({0,0,0.03f, 0.80f,0.25f,0.25f}); v.push_back({ext,0,0.03f, 0.80f,0.25f,0.25f}); // +X
+    v.push_back({0,0,0.03f, 0.28f,0.72f,0.30f}); v.push_back({0,ext,0.03f, 0.28f,0.72f,0.30f}); // +Y
+}
+static void buildGizmo(std::vector<rhi::LineVertex>& v, f32 len) {
+    v.push_back({0,0,0, 0.92f,0.22f,0.22f}); v.push_back({len,0,0, 0.92f,0.22f,0.22f});
+    v.push_back({0,0,0, 0.24f,0.85f,0.28f}); v.push_back({0,len,0, 0.24f,0.85f,0.28f});
+    v.push_back({0,0,0, 0.32f,0.52f,1.0f});  v.push_back({0,0,len, 0.32f,0.52f,1.0f});
+}
+
 enum class Tool { Select, Move, Rotate, Scale };
 static const char* kToolNames[4] = {"Select", "Move", "Rotate", "Scale"};
 
@@ -52,6 +95,7 @@ struct MeshObj {
     f32 color[4] = {0.8f,0.4f,0.25f,1};
     f32 metallic = 0.0f, roughness = 0.5f;
     bool visible = true;
+    Vec3 aabbMin{-1,-1,-1}, aabbMax{1,1,1}; // local-space bounds (for picking)
 };
 
 #if AVER_WITH_IMGUI
@@ -102,6 +146,7 @@ public:
         MeshObj floor; floor.name="Floor"; floor.mesh=ground; floor.tris=(u32)gi.size()/3;
         floor.color[0]=0.34f; floor.color[1]=0.35f; floor.color[2]=0.37f;
         floor.metallic=0.0f; floor.roughness=0.9f;
+        floor.aabbMin=Vec3{-40,-40,-0.05f}; floor.aabbMax=Vec3{40,40,0.05f};
         objects_.push_back(floor);
         MeshObj c; c.name="Cube"; c.mesh=cube; c.tris=(u32)ci.size()/3; c.pos=Vec3{0,0,1};
         c.color[0]=0.85f; c.color[1]=0.36f; c.color[2]=0.22f;
@@ -118,9 +163,16 @@ public:
                 for (auto& n : beam.nodes) appendBox(bv,bi,n.x,n.y,n.z,dot);
                 MeshObj cg; cg.name="Vehicle Cage"; cg.mesh=e.device()->createMesh(bv.data(),(u32)bv.size(),bi.data(),(u32)bi.size());
                 cg.tris=(u32)bi.size()/3; cg.color[0]=0.85f;cg.color[1]=0.36f;cg.color[2]=0.22f;
+                cg.aabbMin=bb.min; cg.aabbMax=bb.max;
                 objects_.push_back(cg);
             }
         }
+
+        std::vector<rhi::LineVertex> gl; buildGrid(gl, 40.0f, 2.0f);
+        gridMesh_ = e.device()->createLineMesh(gl.data(), (u32)gl.size());
+        std::vector<rhi::LineVertex> gz; buildGizmo(gz, 1.8f);
+        gizmoMesh_ = e.device()->createLineMesh(gz.data(), (u32)gz.size());
+
         sel_ = 1; // the Cube
         azimuth_=0.9f; elevation_=0.35f; distScale_=1.0f;
     }
@@ -151,6 +203,7 @@ public:
         const Mat4 viewProj = view * proj;
         const Mat4 invVP = viewProj.inverse();
         e.device()->setCamera(&viewProj.m[0][0], &invVP.m[0][0], &eye.x);
+        invVP_ = invVP; eye_ = eye;
 
         const Vec3 ld = Vec3{sunAz_, sunAlt_, sunUp_}.getSafeNormal();
         e.device()->setLight(&ld.x, sunColor_, sunAmbient_);
@@ -160,6 +213,7 @@ public:
 
     void onRender(Engine& e) override {
         handleManip(e);
+        e.device()->setWireframe(wireframe_);
         for (int i=0;i<(int)objects_.size();++i) {
             MeshObj& o = objects_[i];
             if (!o.visible) continue;
@@ -168,6 +222,12 @@ public:
             f32 col[4]={o.color[0],o.color[1],o.color[2],1};
             if (i==sel_) for (int k=0;k<3;++k) col[k]=std::fmin(1.0f,col[k]*1.3f+0.10f);
             e.device()->drawMesh(o.mesh, &w.m[0][0], col, o.metallic, o.roughness);
+        }
+        e.device()->setWireframe(false); // lines are always solid
+        if (showGrid_) { Mat4 id = Mat4::identity(); e.device()->drawLines(gridMesh_, &id.m[0][0]); }
+        if (sel_>=0 && sel_<(int)objects_.size()) {
+            Mat4 g = Mat4::translation(objects_[sel_].pos);
+            e.device()->drawLines(gizmoMesh_, &g.m[0][0]);
         }
         buildUI(e);
         captureCheck(e);
@@ -186,7 +246,11 @@ private:
         if (ImGui::IsKeyPressed(ImGuiKey_2)) tool_=Tool::Move;
         if (ImGui::IsKeyPressed(ImGuiKey_3)) tool_=Tool::Rotate;
         if (ImGui::IsKeyPressed(ImGuiKey_4)) tool_=Tool::Scale;
-        if (io.WantCaptureMouse || !io.MouseDown[0] || tool_==Tool::Select) return;
+        if (tool_==Tool::Select) {
+            if (!io.WantCaptureMouse && ImGui::IsMouseClicked(0)) pick(e, io);
+            return;
+        }
+        if (io.WantCaptureMouse || !io.MouseDown[0]) return;
         if (sel_<0 || sel_>=(int)objects_.size()) return;
         MeshObj& o = objects_[sel_]; f32 dx=io.MouseDelta.x, dy=io.MouseDelta.y;
         if (tool_==Tool::Move){ o.pos.x+=dx*0.02f; o.pos.z-=dy*0.02f; }
@@ -196,6 +260,31 @@ private:
         (void)e;
 #endif
     }
+
+#if AVER_WITH_IMGUI
+    void pick(Engine& e, const ImGuiIO& io) {
+        const f32 W = e.window()?(f32)e.window()->width():1600.f;
+        const f32 H = e.window()?(f32)e.window()->height():900.f;
+        const f32 nx = io.MousePos.x / W * 2.f - 1.f;
+        const f32 ny = 1.f - io.MousePos.y / H * 2.f;
+        const Mat4& iv = invVP_;
+        const f32 rx = nx*iv.m[0][0]+ny*iv.m[1][0]+iv.m[2][0]+iv.m[3][0];
+        const f32 ry = nx*iv.m[0][1]+ny*iv.m[1][1]+iv.m[2][1]+iv.m[3][1];
+        const f32 rz = nx*iv.m[0][2]+ny*iv.m[1][2]+iv.m[2][2]+iv.m[3][2];
+        const f32 rw = nx*iv.m[0][3]+ny*iv.m[1][3]+iv.m[2][3]+iv.m[3][3];
+        const Vec3 farW{rx/rw, ry/rw, rz/rw};
+        const Vec3 ro = eye_, rd = farW - eye_;
+        int best=-1; f32 bestT=1e30f;
+        for (int i=0;i<(int)objects_.size();++i){
+            MeshObj& o=objects_[i]; if(!o.visible) continue;
+            Transform tr; tr.position=o.pos; tr.rotation=quatFromEulerDeg(o.rotDeg); tr.scale=o.scale;
+            const Mat4 iw = tr.toMatrix().inverse();
+            const Vec3 lo=xformPoint(iw,ro), ld=xformVec(iw,rd);
+            f32 t; if (rayAabb(lo,ld,o.aabbMin,o.aabbMax,t) && t<bestT){ bestT=t; best=i; }
+        }
+        sel_ = best;
+    }
+#endif
 
     void buildUI(Engine& e) {
 #if AVER_WITH_IMGUI
@@ -208,7 +297,7 @@ private:
             ImGui::Separator();
             if (ImGui::BeginMenu("File")){ if(ImGui::MenuItem("New Level")) {} if(ImGui::MenuItem("Exit")) e.requestExit(); ImGui::EndMenu(); }
             if (ImGui::BeginMenu("Edit")){ ImGui::MenuItem("Undo"); ImGui::MenuItem("Redo"); ImGui::EndMenu(); }
-            if (ImGui::BeginMenu("View")){ ImGui::MenuItem("Auto-orbit",nullptr,&autoOrbit_); ImGui::EndMenu(); }
+            if (ImGui::BeginMenu("View")){ ImGui::MenuItem("Auto-orbit",nullptr,&autoOrbit_); ImGui::MenuItem("Grid",nullptr,&showGrid_); ImGui::MenuItem("Wireframe",nullptr,&wireframe_); ImGui::EndMenu(); }
             ImGui::EndMainMenuBar();
         }
 
@@ -223,7 +312,9 @@ private:
             if (on) ImGui::PopStyleColor();
             ImGui::SameLine();
         }
-        ImGui::TextDisabled("| keys 1-4   L-drag: %s   R-drag: orbit   wheel: zoom", kToolNames[(int)tool_]);
+        ImGui::Checkbox("Grid", &showGrid_); ImGui::SameLine();
+        ImGui::Checkbox("Wireframe", &wireframe_); ImGui::SameLine();
+        ImGui::TextDisabled("| 1-4 tools  click: select  L-drag: %s  R-drag: orbit  wheel: zoom", kToolNames[(int)tool_]);
         ImGui::End();
 
         const f32 y0 = top+40, rightW=320, bottomH=150;
@@ -305,6 +396,10 @@ private:
     f32 skyZenith_[3]={0.19f,0.42f,0.78f}, skyHorizon_[3]={0.72f,0.80f,0.90f};
     f32 fogColor_[3]={0.70f,0.78f,0.88f}, fogDensity_=0.014f;
     bool capDone_=false;
+    // editor viewport aids
+    rhi::LineHandle gridMesh_=0, gizmoMesh_=0;
+    bool showGrid_=true, wireframe_=false;
+    Mat4 invVP_; Vec3 eye_{0,0,0};
 };
 
 Application* createApplication(int argc, char** argv) {
