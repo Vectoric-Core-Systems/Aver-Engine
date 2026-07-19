@@ -1,1 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none" role="img" aria-label="Aver Engine AE monogram" class="ae"><title>Aver Engine — AE monogram</title><desc>Italic, forward-leaning A and E letterforms with a racing-orange crossbar and a tapered speed streak.</desc><style>.ae{color:#181818}@media (prefers-color-scheme:dark){.ae{color:#F2F2F2}}</style><g transform="translate(41,0) skewX(-10)"><g stroke="currentColor" stroke-width="24" stroke-linecap="butt" stroke-linejoin="miter"><path d="M28 194 L62 62 L72 62 L106 194"/><path d="M138 62 L138 194"/><path d="M138 62 L190 62"/><path d="M138 194 L190 194"/></g><path d="M40 128 L94 128" stroke="#F04E23" stroke-width="24" stroke-linecap="butt"/><polygon points="138,116 180,116 214,128 180,140 138,140" fill="#F04E23"/></g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none" role="img" aria-label="Aver Engine AE monogram" shape-rendering="geometricPrecision">
+  <title>Aver Engine — velocity AE</title>
+  <style>svg{color:#181818}@media (prefers-color-scheme:dark){svg{color:#F2F2F2}}</style>
+  <g transform="translate(44,0) skewX(-10)">
+    <g stroke="currentColor" stroke-width="24" stroke-linecap="butt" stroke-linejoin="miter">
+      <path d="M26,196 L60,60 L70,60 L104,196"/>
+      <path d="M136,60 L136,196"/>
+      <path d="M136,60 L188,60"/>
+      <path d="M136,196 L188,196"/>
+    </g>
+    <path d="M38,128 L92,128" stroke="#F04E23" stroke-width="24" stroke-linecap="butt"/>
+    <polygon points="136,116 178,116 216,128 178,140 136,140" fill="#F04E23"/>
+  </g>
+</svg>
