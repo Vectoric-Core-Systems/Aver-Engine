@@ -7,11 +7,17 @@
   <defs>
     <mask id="aeCut" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
       <rect width="256" height="256" fill="#fff"/>
-      <g fill="none" stroke="#000" stroke-width="20" stroke-linejoin="miter" stroke-linecap="butt" stroke-miterlimit="8">
-        <path d="M60,190 L84,118 L108,190"/>
-        <path d="M69,162 L99,162"/>
-        <path d="M196,126 L150,126 L150,190 L196,190"/>
-        <path d="M150,155 L184,155"/>
+      <g fill="none" stroke="#000" stroke-width="15" stroke-linejoin="miter" stroke-linecap="butt">
+        <g transform="matrix(0.98,0.56,0,1,30,78)">
+          <path d="M24,88 L50,10 L76,88"/>
+          <path d="M34,58 L66,58"/>
+        </g>
+        <g transform="matrix(0.98,-0.56,0,1,128,134)">
+          <path d="M28,14 L28,84"/>
+          <path d="M28,14 L70,14"/>
+          <path d="M28,49 L62,49"/>
+          <path d="M28,84 L70,84"/>
+        </g>
       </g>
     </mask>
   </defs>
