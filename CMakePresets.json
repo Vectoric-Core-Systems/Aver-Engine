@@ -1,0 +1,27 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "msvc-ninja",
+      "displayName": "MSVC x64 (Ninja)",
+      "description": "Requires a VS Developer environment (run scripts/build.bat which calls vcvars64).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_MAKE_PROGRAM": "C:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
+      }
+    },
+    {
+      "name": "msvc-ninja-release",
+      "inherits": "msvc-ninja",
+      "displayName": "MSVC x64 Release (Ninja)",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "msvc-ninja", "configurePreset": "msvc-ninja" },
+    { "name": "msvc-ninja-release", "configurePreset": "msvc-ninja-release" }
+  ]
+}

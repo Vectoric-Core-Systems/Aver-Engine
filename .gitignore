@@ -1,0 +1,35 @@
+# --- Build outputs ---
+/build/
+/out/
+[Bb]in/
+[Oo]bj/
+/dist/
+
+# --- CMake ---
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake.stamp
+
+# --- Rust ---
+**/target/
+Cargo.lock
+
+# --- .NET / C# ---
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+.vs/
+
+# --- Editor / OS ---
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+Thumbs.db
+.DS_Store
+
+# --- Third-party fetched deps (kept out of VCS; pulled by CMake) ---
+/third_party/_deps/

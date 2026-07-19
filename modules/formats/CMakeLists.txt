@@ -1,0 +1,9 @@
+aver_add_module(Aver.Formats
+  SOURCES
+    src/OcBeam.cpp
+    src/OcMap.cpp
+  DEPS
+    Aver.Core
+    Aver.Platform
+    Aver.Assets
+)

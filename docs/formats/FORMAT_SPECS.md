@@ -1,0 +1,546 @@
+# Aver Engine — Asset Format System Design (`AVR1` container + `.oc*` family)
+
+Status: authoritative design spec, v1. Target repo: `C:/Users/User/Documents/Aver Engine`. Scope: on-disk formats only (container, legacy preservation, seven new native formats, versioning, cook/DDC, migration, C ABI loader surface). All numeric widths are exact and little-endian unless stated. This document is implementation-ready: a C++ writer/reader, a Rust cooker, and a C# importer can be built directly from the byte tables below.
+
+---
+
+## 0. Design principles (why this shape)
+
+1. **Two-tier: preserve-as-text, add-as-container.** The four legacy OpenConstructor formats (`.ocbeam`, `.ocaero`, `.ocmap`, `.scene`) are line-based UTF-8 text that must load *byte-identically*. They are **not** wrapped, re-encoded, or containerized. New bulk asset types get a single unified binary container (`AVR1`). New graph/authoring types stay human-readable text in the same lexical dialect as the OC family (`#` comments, `KEY{ ... }` sections, comma rows, optional trailing `;`).
+2. **Pay-for-what-you-use / modular.** Everything is a chunked container: a reader loads only the chunks it needs; unknown chunks are skipped, not fatal. No monolithic "everything asset." This is the anti-Unreal-bloat contract at the format layer.
+3. **Author-once / consume-by-both.** Formats carry no engine-runtime pointers, no reflection blobs. The same file feeds the C++ renderer, the C# editor, and the Rust cooker across the C ABI. This mirrors the existing `OCNetTypes`/`oc_sim` philosophy (plain data crosses every seam).
+4. **One coordinate contract, everywhere** (from recon `arch §1`): **cm, +Z up, +X forward, +Y right, left-handed.** Import from glTF/Blender applies the fixed conversion `(x,y,z) → (x,-z,y)` with `SCALE = 0.01` (m→cm), plus the render/physics `bMirrorY` correction. These conversions happen **at import**, never at runtime load — every native binary file is already in engine space.
+5. **Royalty-free only.** Container hashing = xxHash3 / BLAKE3 (BSD-2 / CC0-Apache). Compression = zstd + LZ4 (both BSD). Texture codecs = BCn (unencumbered DX standard), ASTC (Khronos royalty-free), Basis Universal / KTX2 (Apache-2.0). Image decode = stb_image (public domain). glTF/JSON parse = self-contained (the OCCompiler already ships one). No GPL, no patent-bearing tech.
+6. **GPU-driven-ready.** `.ocmesh` ships meshlets + cull cones so a mesh-shader / GPU-culling path (UE5-Nanite-class, Source-2-class) is possible on DX12/Vulkan, while the position stream stays a standalone `R32G32B32_FLOAT` buffer so the existing GPU cage-deform compute pass (recon `gpudeform §7`) can alias it as a UAV with zero copy.
+
+---
+
+## 1. Format taxonomy
+
+| Ext | Kind | On-disk | Container | Purpose | Status |
+|---|---|---|---|---|---|
+| `.ocbeam` | Soft-body cage source | **text** | none | Vehicle mass-spring cage + embedded glTF + rig + collision + aero directives | **PRESERVE (unchanged)** |
+| `.ocaero` | Baked aero table | **text** | none | Wind-tunnel force/CoP grid over yaw×pitch×ride | **PRESERVE (unchanged)** |
+| `.ocmap` | Compiled world | **text** | none | Object-reference placements + env table | **PRESERVE (unchanged)** |
+| `.scene` | World authoring input | **text** | none | Human-authored placement list (→ `.ocmap`/`.ocworld`) | **PRESERVE (unchanged)** |
+| `.octrack` | Track variant of `.ocmap` | **text** | none | Same grammar as `.ocmap` (kept for content compat) | **PRESERVE (unchanged)** |
+| `.ocmesh` | Static mesh | **binary** | `AVR1`/`MESH` | Vertex streams, indices, submeshes, LODs, meshlets, bounds, optional collision + cage-bind | **NEW** |
+| `.octex` | Texture | **binary** | `AVR1`/`TEX ` | Mip chain over BCn/ASTC/Basis/raw, color space, sampler | **NEW** |
+| `.ocmat` | Material | **text** (cooked → `MATL` chunk) | none / `AVR1` | PBR metallic-roughness params + texture bindings + optional node graph | **NEW** |
+| `.ocskel` | Skeletal mesh + skeleton | **binary** | `AVR1`/`SKEL` | Bones + skin binding + embedded `.ocmesh` geometry | **NEW** |
+| `.ocanim` | Animation clip | **binary** | `AVR1`/`ANIM` | Full-fidelity keyframe TRS tracks (fixes 30fps/cubic loss) | **NEW** |
+| `.ocprefab` | Prefab | **text** | none | Reusable node tree + component list + asset refs + overrides | **NEW** |
+| `.ocworld` | Native scene/world | **text** (cooked → `WRLD` chunk) | none / `AVR1` | **Superset of `.ocmap`** — scene graph, streaming, lighting, terrain, prefab instances | **NEW** |
+| `.ocpak` | Cooked package | **binary** | `AVR1`/`PAK ` | Bundle of cooked assets for shipping (DDC output) | **NEW** |
+
+Rationale for text vs binary: **graphs and small authoring data stay text** (materials, prefabs, worlds, the legacy family) — diffable, hand-editable, mergeable in VCS, matching OC ergonomics. **Bulk geometry/pixel/track data is binary** (mesh, texture, skeletal, animation) — mmap-able, GPU-uploadable, compact. Text formats have a *cooked* binary projection (a chunk inside `.ocpak`) for shipping; the text form remains the source of truth.
+
+---
+
+## 2. Common conventions (shared by all native binary formats)
+
+### 2.1 Coordinate system, units, handedness
+Identical to recon `arch §1`: **length = cm (f32); +Z up; vehicle-local +X fwd / +Y right; left-handed.** Rotations stored as quaternions `(x,y,z,w)`, identity `(0,0,0,1)`. Matrices, where stored, are **row-major 4×4** in engine convention (import transposes glTF's column-major). All spatial data in a native binary file is already engine-space (conversions done at import).
+
+### 2.2 Endianness, alignment, padding
+- **Endianness: little-endian** for every multi-byte field (x64/ARM64 native; matches all recon wire/asset code).
+- **Base alignment: 16 bytes.** Every chunk's file offset is a multiple of 16.
+- **GPU-upload alignment: 256 bytes.** Chunks flagged `GPU_UPLOADABLE` (vertex/index/meshlet/texture-mip data) are aligned to 256 so they can be `memcpy`'d straight into a D3D12/Vulkan upload heap without a re-pack.
+- Padding bytes are zero. Reserved fields are zero. Readers must tolerate (skip) nonzero reserved bytes for forward compat unless a flag says otherwise.
+
+### 2.3 Primitive encodings (used throughout)
+| Name | Layout | Notes |
+|---|---|---|
+| `u8/u16/u32/u64`, `i8..i64` | LE integers | — |
+| `f16` | IEEE half (16-bit) | UV / HDR quantization |
+| `f32/f64` | IEEE float/double | positions f32; DDC timestamps f64 |
+| `FourCC` | 4 ASCII bytes as `u32` LE | e.g. `'MESH'` = `0x4853454D` |
+| `GUID` | 16 bytes | 128-bit asset identity (see §2.5) |
+| `StringRef` | `u32` | byte offset into the file's `STRT` chunk; `0xFFFFFFFF` = null |
+| `STRT entry` | `u16 len` + `len` UTF-8 bytes | at the referenced offset (matches net-wire `[u16 len]` string convention) |
+| `vec3f` | 3×`f32` (12 B) | position/normal |
+| `quat` | 4×`f32` (16 B) or QTangent (§5.4) | rotation |
+| `AABB` | 6×`f32` (24 B) | minXYZ, maxXYZ |
+| `Sphere` | 4×`f32` (16 B) | centerXYZ, radius |
+
+**Quantized position decode** (when `PositionQuantized`): stored `R16G16B16A16_UNORM` `q`; `pos = AABB.min + (q/65535) * (AABB.max - AABB.min)`.
+**Octahedral normal** (alt normal format): standard oct decode of `RG16_SNORM`.
+**QTangent decode:** see §5.4.
+
+### 2.4 Hashing & compression (royalty-free)
+- **Chunk & content hashes: xxHash3-64** (BSD-2). Fast integrity + change detection.
+- **Content-addressed DDC / Merkle roots: BLAKE3-256** (CC0/Apache-2.0). Ties into the net map-parity `mapRoot` (32 B) and `HashAlgo` enum (`Blake3=2`).
+- **Legacy compatibility hash: FNV-1a-64** retained exactly (recon `ocmap §3.1.1`) for `.ocmap`/`.ocworld` `ID` content-id so existing worlds keep the same id.
+- **Compression per chunk:** `0=none`, `1=zstd`, `2=lz4`. Source assets: none. Cooked: zstd (level tuned per chunk class). GPU chunks in a cooked package may be `none` if the target streams uncompressed, or zstd with a decompress-to-upload-heap step.
+
+### 2.5 Asset identity (GUID) and cross-references
+Every native asset carries a stable 128-bit `GUID` in its container header. Cross-asset references use `GUID` (primary) plus a `StringRef` fallback path for human tooling. This generalizes the existing single-id contract (`FOCVehicleId`, `.ocbeam` NODE id ↔ bone `node_<id>`, `.ocaero` `PART.Name` ↔ `.ocbeam` `PART`). The importer maintains a **GUID ↔ source-path** map (`.ocmeta` sidecars, §13) so moving files never breaks references.
+
+---
+
+## 3. The unified container — `AVR1`
+
+### 3.1 File header (fixed 64 bytes, offset 0)
+| Off | Size | Type | Field | Notes |
+|---|---|---|---|---|
+| 0x00 | 4 | FourCC | `Magic0` = `'AVR1'` (`0x31525641`) | primary container magic |
+| 0x04 | 4 | FourCC | `Subtype` | `'MESH'`,`'TEX '`,`'SKEL'`,`'ANIM'`,`'MATL'`,`'PREF'`,`'WRLD'`,`'PAK '` |
+| 0x08 | 2 | u16 | `ContainerVersion` | framework version = **1** |
+| 0x0A | 2 | u16 | `ContentVersion` | per-subtype schema version |
+| 0x0C | 2 | u16 | `MinReaderVersion` | reader must be ≥ this ContainerVersion or refuse |
+| 0x0E | 1 | u8 | `Endianness` | `0`=LE (only value in v1) |
+| 0x0F | 1 | u8 | `AlignLog2` | base align = `1<<AlignLog2`; default `4` (16 B) |
+| 0x10 | 4 | u32 | `HeaderSize` | = 64 (allows future growth) |
+| 0x14 | 4 | u32 | `ChunkCount` | number of chunk-directory entries |
+| 0x18 | 8 | u64 | `ChunkDirOffset` | file offset of the chunk directory |
+| 0x20 | 8 | u64 | `FileSize` | total bytes (integrity) |
+| 0x28 | 16 | GUID | `AssetGuid` | stable asset identity |
+| 0x38 | 4 | u32 | `Flags` | bit0 `Cooked`, bit1 `Compressed`, bit2 `HasSourceHash`, bit3 `BigEndianReserved` |
+| 0x3C | 4 | u32 | `HeaderCrc` | CRC32C of bytes 0x00–0x3B (cheap header sanity) |
+
+Magic disambiguation: text formats have no magic bytes at 0x00 (`.ocmat`/`.ocworld`/`.ocprefab` begin with an `OCMAT 1` / `OCWORLD 1` / `OCPREFAB 1` version line, §7/§10/§11). A loader dispatches by reading the first 4 bytes: `'AVR1'` → binary container; else → text line-parser. Legacy `.ocbeam`/`.ocaero`/`.ocmap`/`.scene` keep their own `OCBEAM 1`/`OCAERO 1`/`OCMAP 1` first lines (unchanged).
+
+### 3.2 Chunk directory (array of `ChunkCount` × 40-byte entries, at `ChunkDirOffset`)
+| Off | Size | Type | Field | Notes |
+|---|---|---|---|---|
+| 0x00 | 4 | FourCC | `ChunkId` | e.g. `'MHDR'`,`'VTXS'`,`'IDXS'`,`'MLET'`,`'STRT'` |
+| 0x04 | 2 | u16 | `ChunkVersion` | per-chunk schema version |
+| 0x06 | 1 | u8 | `Compression` | `0`none `1`zstd `2`lz4 |
+| 0x07 | 1 | u8 | `ChunkFlags` | bit0 `Required` (unknown+required ⇒ refuse), bit1 `GpuUploadable` (256-align), bit2 `Text` |
+| 0x08 | 8 | u64 | `Offset` | file offset of chunk payload (aligned) |
+| 0x10 | 8 | u64 | `SizeOnDisk` | compressed bytes |
+| 0x18 | 8 | u64 | `SizeUncompressed` | == SizeOnDisk if Compression=0 |
+| 0x20 | 8 | u64 | `Hash` | xxHash3-64 of the **uncompressed** payload |
+
+**Chunk framework rules (the compat contract):**
+- Chunks may appear in any order; the directory is authoritative. Duplicate `ChunkId` is illegal except where a spec says a chunk is arrayed (none in v1).
+- **Forward compat:** a reader encountering an unknown `ChunkId` **skips it** unless `Required` is set (then it refuses to load and reports the id). This lets v2 add chunks that v1 readers ignore.
+- **Backward compat:** a reader on a newer file checks `MinReaderVersion`; a writer only sets `Required` on chunks whose absence would corrupt interpretation.
+- **Chunk versioning:** within a known chunk, additive fields grow the struct; readers use `SizeUncompressed` and documented field offsets, reading `min(known_size, on_disk_size)` and zero-filling the rest. Never reorder existing fields.
+- Every file with `StringRef`s carries exactly one `STRT` chunk (the string table).
+
+### 3.3 String table chunk `STRT`
+A blob of `u16`-length-prefixed UTF-8 entries. `StringRef` = byte offset of an entry; entry = `[u16 len][len bytes]`. Offset `0xFFFFFFFF` = null. Offset `0` is reserved to always contain the empty string (`len=0`).
+
+---
+
+## 4. Legacy preservation — the load-direct contract
+
+These four (plus `.octrack`) are **frozen text formats**. The engine ships faithful parsers that reproduce the exact semantics extracted in recon. No migration, no re-save required to load. Rules:
+
+### 4.1 `.ocbeam` (recon `ocbeam`)
+- Reader = a UE-free reimplementation of `ParseOcbeam`: line-trim, single trailing `;` strip, `#` comments, section keywords by `StartsWith`, `}` resets mode; `MATERIAL/NODE/BEAM/PANEL/PART`; skip-until-`}` for `BONE/SKIN/ANIM`; `GLB/COLLISION/HULL` mode-none; `REBOUND`/`SCALE`/`NORMALIZE`/`GLBXFORM` directives.
+- **MATERIAL field-count fix (recon `ocbeam §11.1`):** accept **10–13** fields; fields 10–12 default (`TearStrainTension=-1`, `TearStrainCompression=-1`, `Density=1.0`). This resolves the shipped-parser-drops-13-field bug; existing 10-field samples still load.
+- Coordinate/units preserved exactly (cm, X fwd/Y right/Z up; glTF→cage `(x,-z,y)`; render Y-mirror). PART `DETACH=` position-independent; PANEL 4th material override supported; `PartID` prefix parsed-and-discarded.
+- The **embedded `GLB{}`** is extracted at import time and cooked into `.ocmesh`/`.octex`/`.ocmat`/`.ocskel` (§14.2). At *runtime load* of a loose `.ocbeam`, the glb path is skipped exactly as the shipped runtime does.
+
+### 4.2 `.ocaero` (recon `ocaero`)
+- Reader reproduces `ParseOcaero`: `#` strip, `OCAERO` line skipped, `HEADER{}`/`PART{}`, `ParseFloats` token heuristic, nearest-axis snap, flatten `slot = (yi*NP+pi)*NR+ri`, 9- and 10-field rows, ascending-axis assumption. Trilinear `SampleBaked` and the `flowDir`/inverse-attitude conventions are runtime concerns, not format concerns — the *format* is preserved verbatim.
+- Fix flagged but non-breaking: **validate** the `OCAERO 1` version (recon notes it's currently unchecked); reject unknown major versions.
+
+### 4.3 `.ocmap` / `.octrack` / `.scene` (recon `ocmap`)
+- `.scene` reader: `#` truncate, trim, optional `;`, `\s+` tokenize, `MAP`/`CLIENT umap`/placement rows (`asset x y z yaw pitch roll [scale]`), `.ocbeam`→DEFORM classification, `d()` parse-fail→0.0.
+- `.ocmap` reader: full record catalog (`OCMAP/ID/NAME/BUILD/ALGO/ROOT/CLIENT/SURFACE/GROUND/KILLZ/SPAWN/PLACE/DEFORM`), tolerates `SPAWN` (python-only), **accepts mixed LF/CRLF per line** (recon documented the writer's mixed endings).
+- **`ID` = FNV-1a-64(NAME)** reproduced exactly (verified `demoworld → 0x376B85BC4D1A03BA`). **`ROOT`** currently a placeholder; the Aver writer emits a real BLAKE3-256 Merkle over placements+asset-content-hashes (recon-intended), but the **reader accepts any 64-hex ROOT** for back-compat.
+- **Port fixes (writer only):** emit uniform **LF**; use **invariant/C locale** for floats (kills the comma-decimal corruption bug). Readers stay maximally tolerant.
+
+### 4.4 Round-trip guarantee
+`.ocworld` is a strict superset of `.ocmap` (§11). Loading an `.ocmap` and re-saving as `.ocworld` is lossless; downgrading an `.ocworld` that uses only `.ocmap`-expressible features back to `.ocmap` is lossless. `.scene` → `.ocmap`/`.ocworld` is the existing compile step, preserved.
+
+---
+
+## 5. `.ocmesh` — static mesh (full byte layout)
+
+Subtype `'MESH'`. This is the centerpiece. Chunks: `MHDR` (required), `STRT`, `VTXS` (vertex data), `IDXS` (index data), `MLET` (meshlets, optional), `COLL` (collision, optional), `CBND` (cage-bind, optional), `MADR` (material-slot table).
+
+### 5.1 `MHDR` — mesh header
+| Off | Size | Type | Field | Notes |
+|---|---|---|---|---|
+| 0x00 | 4 | u32 | `MeshFlags` | see below |
+| 0x04 | 1 | u8 | `LODCount` | ≥1 |
+| 0x05 | 1 | u8 | `SubmeshCount` | material-slot groups |
+| 0x06 | 1 | u8 | `StreamCount` | vertex-stream descriptors |
+| 0x07 | 1 | u8 | `UVChannelCount` | 0–4 |
+| 0x08 | 24 | AABB | `BoundsAABB` | whole-mesh, engine cm |
+| 0x20 | 16 | Sphere | `BoundsSphere` | whole-mesh |
+| 0x30 | 4 | u32 | `MaterialSlotCount` | == SubmeshCount unless slots shared |
+| 0x34 | 4 | u32 | `Reserved` | 0 |
+| 0x38 | … | StreamDesc[StreamCount] | vertex-stream table | 8 B each (§5.2) |
+| … | … | LodDesc[LODCount] | LOD table | 56 B each (§5.5) |
+| … | … | SubmeshDesc[SubmeshCount] | mesh-level submesh table | 12 B each (§5.6) |
+| … | … | SubmeshRange[LODCount*SubmeshCount] | per-LOD ranges | 40 B each (§5.6) |
+
+`MeshFlags`: bit0 `HasColor`, bit1 `HasUV1`, bit2 `HasMeshlets`, bit3 `Index32` (else 16-bit), bit4 `PositionQuantized`, bit5 `HasSkin` (JOINTS/WEIGHTS streams present — used by `.ocskel`), bit6 `HasCollision`, bit7 `HasCageBind`, bit8 `Deformable` (position stream MUST stay `R32G32B32_FLOAT` + standalone for GPU cage-deform), bit9 `TwoSided`, bit10 `NegativeScaleBaked` (winding pre-reversed for the `bMirrorY` case, recon `arch §1`).
+
+### 5.2 `StreamDesc` (8 bytes each)
+| Off | Size | Type | Field | Notes |
+|---|---|---|---|---|
+| 0x00 | 1 | u8 | `Semantic` | 0 POSITION, 1 TANGENT_FRAME, 2 UV0, 3 UV1, 4 COLOR, 5 JOINTS, 6 WEIGHTS |
+| 0x01 | 1 | u8 | `Format` | vertex-format enum (§5.3) |
+| 0x02 | 1 | u8 | `BindSlot` | physical buffer/binding index |
+| 0x03 | 1 | u8 | `Flags` | bit0 `Interleaved` |
+| 0x04 | 2 | u16 | `Stride` | bytes between consecutive verts in this buffer |
+| 0x06 | 2 | u16 | `OffsetInStride` | byte offset within the interleaved vertex |
+
+**Canonical stream grouping** (mirrors UE `FStaticMeshVertexBuffers`, satisfies the GPU-deform requirement recon `gpudeform §7`):
+- **BindSlot 0 — Position buffer:** POSITION only, `R32G32B32_FLOAT`, stride 12, tightly packed. Standalone so a compute UAV can alias it and every raster pass (depth/shadow/velocity) reads position from slot 0.
+- **BindSlot 1 — Attribute buffer (interleaved):** TANGENT_FRAME (QTangent, 8 B) + UV0 (`R16G16_FLOAT`, 4 B) [+ UV1 4 B] [+ per-vertex extras].
+- **BindSlot 2 — Color buffer:** COLOR `R8G8B8A8_UNORM`, 4 B (present iff `HasColor`).
+- **BindSlot 3/4 — JOINTS/WEIGHTS** (skeletal only; `HasSkin`).
+
+### 5.3 Vertex-format enum
+| Val | Format | Bytes | Typical semantic |
+|---|---|---|---|
+| 0 | `R32G32B32_FLOAT` | 12 | POSITION (deformable) |
+| 1 | `R16G16B16A16_SNORM` | 8 | TANGENT_FRAME (QTangent) |
+| 2 | `R16G16_FLOAT` | 4 | UV (half) |
+| 3 | `R16G16_UNORM` | 4 | UV (quantized over UV bounds) |
+| 4 | `R8G8B8A8_UNORM` | 4 | COLOR / WEIGHTS |
+| 5 | `R16G16B16A16_UNORM` | 8 | POSITION (quantized over AABB) |
+| 6 | `R8G8B8A8_UINT` | 4 | JOINTS (4×u8) |
+| 7 | `R16G16B16A16_UINT` | 8 | JOINTS (4×u16, >255 bones) |
+| 8 | `R10G10B10A2_UNORM` | 4 | normal-only (alt octahedral) |
+| 9 | `R32G32B32A32_FLOAT` | 16 | POSITION+pad / debug |
+
+### 5.4 Tangent frame (QTangent, format 1)
+Full TBN encoded as a unit quaternion, stored `R16G16B16A16_SNORM` (8 B). Decode: `q = snorm16→[-1,1]`, renormalize; `normal = rotate(q, +Z)`, `tangent = rotate(q, +X)`, `bitangent = rotate(q, +Y) * sign`, where the **bitangent handedness sign is folded into the quaternion's `w` sign** (if `w < 0`, flip). This is the Source-2/CryEngine convention: one 8-byte field for the whole basis, mirror-map safe. Importer computes tangents (MikkTSpace-equivalent, public-domain algorithm) from UV0 when the source lacks them.
+
+### 5.5 `LodDesc` (56 bytes each) — points into `VTXS`/`IDXS`/`MLET`
+| Off | Size | Type | Field |
+|---|---|---|---|
+| 0x00 | 4 | u32 | `VertexCount` |
+| 0x04 | 4 | u32 | `IndexCount` |
+| 0x08 | 8 | u64 | `VtxOffset` (into `VTXS`) |
+| 0x10 | 8 | u64 | `VtxSize` |
+| 0x18 | 8 | u64 | `IdxOffset` (into `IDXS`) |
+| 0x20 | 8 | u64 | `IdxSize` |
+| 0x28 | 8 | u64 | `MeshletOffset` (into `MLET`, 0 if none) |
+| 0x30 | 4 | u32 | `MeshletCount` |
+| 0x34 | 4 | f32 | `ScreenErrorThreshold` (LOD-select metric, screen-space error in px at reference resolution) |
+
+Per-LOD vertex layout inside `VTXS` = the LOD's slot-0 position block, then slot-1 attribute block, then slot-2 color block, each aligned to 16 B, described by the stream strides. `IDXS` holds `IndexCount` × (2 or 4 B) per LOD.
+
+### 5.6 Submeshes
+`SubmeshDesc` (12 B, mesh-level): `u32 MaterialSlot`, `StringRef Name`, `u32 Flags`.
+`SubmeshRange` (40 B, indexed `[lod*SubmeshCount + submesh]`): `u32 IndexStart`, `u32 IndexCount`, `u32 BaseVertex`, `u32 VertexCount`, `Sphere BoundsSphere` (16 B), `u32 MeshletStart`, `u32 MeshletCount`.
+
+### 5.7 `MLET` — meshlets (GPU-driven rendering)
+Limits: **64 vertices / 124 primitives** per meshlet (mesh-shader & DXR friendly). Layout, four back-to-back sub-arrays (offsets from the LOD's `MeshletOffset`):
+1. **MeshletDesc[]** (12 B each): `u32 VertexIndexOffset` (into sub-array 3), `u32 TriangleOffset` (into sub-array 4, in bytes), `u8 VertexCount`, `u8 TriangleCount`, `u16 Pad`.
+2. **MeshletBounds[]** (32 B each): `Sphere Bounds` (16 B) + `f32[3] ConeApex` (12 B) + `i8[3] ConeAxis` (snorm) + `i8 ConeCutoff` (snorm). Enables cluster cone-culling.
+3. **MeshletVertices[]** (`u32`): indices into the LOD vertex buffer.
+4. **MeshletTriangles[]** (`u8`): 3 local indices per triangle (0–63), tightly packed; each meshlet's block padded to 4 B.
+
+A raster fallback (no mesh shaders): ignore `MLET`, draw `IDXS` directly. Generated by meshoptimizer (`meshopt_buildMeshlets`, MIT) at cook time.
+
+### 5.8 `COLL` — collision (optional, `HasCollision`)
+Reuses the cage-hull concept from `.ocbeam COLLISION{}`. Body: `u32 HullCount`, then per hull `{u32 VertCount; vec3f[VertCount]}` (convex hulls, engine cm), then optional `u32 TriMeshVertCount/IndexCount` + data for a concave collision mesh. This lets baked cage collision (`Scripts/bake_cage_collision.py` output) live in the mesh asset.
+
+### 5.9 `CBND` — precomputed cage bind (optional, `HasCageBind`)
+Stores the result of `BindToCage` (recon `gpudeform §6`) so the vehicle body skins to its cage without runtime rebind: `u8 K` (1–8), `u32 CageNodeCount`, then per vertex `K`×`{i32 CageNodeId; f32 Weight}` (weights pre-normalized inverse-distance; `-1` node = unused slot). This directly feeds `BindNodeIdx`/`BindNodeWt` GPU buffers. Optional — runtime can still bind on the fly.
+
+---
+
+## 6. `.octex` — texture
+
+Subtype `'TEX '`. Chunks: `THDR` (required), `MIPS` (pixel data, `GpuUploadable`), optional `SRC ` (original PNG/JPEG/KTX2 bytes for re-cook), `STRT`.
+
+### 6.1 `THDR`
+| Off | Size | Type | Field | Notes |
+|---|---|---|---|---|
+| 0x00 | 4 | u32 | `Width` |
+| 0x04 | 4 | u32 | `Height` |
+| 0x08 | 4 | u32 | `Depth` | 1 for 2D |
+| 0x0C | 2 | u16 | `ArrayLayers` | ≥1 (cube = 6) |
+| 0x0E | 1 | u8 | `MipCount` |
+| 0x0F | 1 | u8 | `Dimension` | 0=2D,1=3D,2=Cube,3=2DArray |
+| 0x10 | 2 | u16 | `Codec` | §6.2 |
+| 0x12 | 1 | u8 | `ColorSpace` | 0=linear,1=sRGB |
+| 0x13 | 1 | u8 | `Swizzle` | packed 4×2-bit (R/G/B/A source) |
+| 0x14 | 1 | u8 | `WrapU` | 0 repeat,1 clamp,2 mirror |
+| 0x15 | 1 | u8 | `WrapV` | — |
+| 0x16 | 1 | u8 | `Filter` | 0 point,1 linear,2 aniso |
+| 0x17 | 1 | u8 | `Flags` | bit0 `Premultiplied`, bit1 `NormalMap`, bit2 `HasSource` |
+| 0x18 | … | MipDesc[MipCount*ArrayLayers] | mip table | 24 B each |
+
+`MipDesc` (24 B): `u32 Width`, `u32 Height`, `u64 Offset` (into `MIPS`), `u64 SizeOnDisk` (per-mip may be individually zstd'd for streaming).
+
+### 6.2 Codec enum (royalty-free)
+| Val | Codec | Use / license |
+|---|---|---|
+| 0 | `RGBA8_RAW` | uncompressed 32-bpp |
+| 1 | `RGBA16F_RAW` | HDR uncompressed |
+| 2 | `BC1` | RGB/1-bit A (DX standard, unencumbered) |
+| 3 | `BC3` | RGBA |
+| 4 | `BC4` | 1-channel (roughness/height) |
+| 5 | `BC5` | 2-channel (normal XY) |
+| 6 | `BC6H` | HDR |
+| 7 | `BC7` | high-quality RGBA |
+| 8 | `ASTC_4x4`…`ASTC_8x8` (sub-enum in `Swizzle` hi bits) | Khronos royalty-free |
+| 9 | `BASIS_UASTC` (KTX2) | Apache-2.0, transcodes to BCn/ASTC/ETC at load |
+| 10 | `BASIS_ETC1S` (KTX2) | Apache-2.0, smallest |
+
+Cook policy: albedo/emissive → BC7 (sRGB) or Basis-UASTC for cross-platform; normal → BC5; ORM/mask → BC4/BC7; HDR/IBL → BC6H. Source PNG/JPEG decoded with stb_image at import; the `SRC ` chunk optionally retains original bytes so a different platform target can re-transcode from a KTX2/UASTC intermediate without the original file.
+
+---
+
+## 7. `.ocmat` — material (text, cooked → `MATL` chunk)
+
+Human-readable, OC-dialect. First line `OCMAT 1`. PBR metallic-roughness matching the glTF import model (recon `assets §0`, `arch §6`). Example:
+
+```
+OCMAT 1
+# Ferrari 499P carbon body
+SHADER standard            # standard | unlit | clearcoat | glass | decal
+BLEND opaque               # opaque | masked <cutoff> | translucent | additive
+CULL back                  # back | front | none
+FLAGS twosided=0 castshadow=1
+
+PARAM baseColorFactor 1.0 1.0 1.0 1.0
+PARAM metallicFactor 1.0
+PARAM roughnessFactor 0.45
+PARAM emissiveFactor 0.0 0.0 0.0
+PARAM normalScale 1.0
+PARAM occlusionStrength 1.0
+
+TEX baseColor   {guid:0x…}  uv0 sRGB
+TEX metalRough  {guid:0x…}  uv0 linear     # B=metallic, G=roughness (glTF MR)
+TEX normal      {guid:0x…}  uv0 normal
+TEX emissive    {guid:0x…}  uv0 sRGB
+TEX occlusion   {guid:0x…}  uv0 linear
+
+# Optional custom node graph (only for SHADER custom)
+GRAPH{
+  NODE 0 TexSample baseColor
+  NODE 1 Multiply in0=0 in1=param:baseColorFactor
+  OUT BaseColor 1
+}
+```
+
+Rules: `TEX slot {guid:…|path:…} uvN colorspace` binds an `.octex` by GUID (path fallback). `PARAM` scalars/vectors are shading defaults; a material **instance** (`.ocmat` with `PARENT {guid}`) overrides only listed params (Unreal-MID-equivalent, pay-for-what-you-use). The optional `GRAPH{}` block is a small node list (evaluated by the material compiler to HLSL/SPIR-V permutations); most materials never need it. Cooked: the compiler resolves the graph to a shader-permutation key + a packed parameter block stored in a `MATL` chunk inside `.ocpak`. This deliberately avoids the UE editor-material-recompile crash (recon `arch §6`): compilation is offline, runtime just binds params + a precompiled PSO.
+
+---
+
+## 8. `.ocskel` — skeletal mesh + skeleton
+
+Subtype `'SKEL'`. **Reuses the `.ocmesh` chunks** (`MHDR/VTXS/IDXS/MLET/MADR`) with `HasSkin` set (JOINTS/WEIGHTS streams present in the attribute buffers), and adds `SKEL` (bones) + `SKIN` (bind metadata). This is the reuse win: one geometry codepath.
+
+### 8.1 `SKEL` — skeleton
+| Off | Size | Type | Field |
+|---|---|---|---|
+| 0x00 | 4 | u32 | `BoneCount` |
+| 0x04 | 4 | u32 | `RootBone` (index, or 0xFFFFFFFF) |
+| 0x08 | … | BoneDesc[BoneCount] | bone table |
+
+`BoneDesc` (per bone): `StringRef Name`, `i32 Parent` (−1 root), `vec3f LocalTranslation`, `quat LocalRotation`, `vec3f LocalScale`, `f32[16] InverseBind` (row-major, engine space). Bones named `node_<id>` map 1:1 to `.ocbeam` NODE ids (recon `arch §2`) — this is how a skeletal body binds to its soft-body cage.
+
+Fidelity fixes over the OCCompiler rig extraction (recon `assets §9`): **multi-skin support** (store `u8 SkinIndex` per skin group instead of "skin[0] only"), and skeleton stored in **engine space** (import bakes the glTF-space→engine orientation rather than deferring to a runtime `GltfToCage`).
+
+### 8.2 `SKIN` — skin binding
+| Off | Size | Type | Field |
+|---|---|---|---|
+| 0x00 | 1 | u8 | `InfluencesPerVertex` | 4 or 8 (fixes the fixed-4 limit) |
+| 0x01 | 3 | pad | |
+| 0x04 | 4 | u32 | `SkinnedVertexCount` (== LOD0 VertexCount) |
+| 0x08 | … | — | (bind positions optional; runtime uses SKEL inverse-binds) |
+
+JOINTS/WEIGHTS live in the vertex attribute buffers (`R8G8B8A8_UINT`/`R16G16B16A16_UINT` + `R8G8B8A8_UNORM` normalized). The **canonical vertex-order contract** that OCCompiler relied on implicitly is now explicit: SKIN indices are 1:1 with `VTXS` vertex order in this same file — no external UE `OcGltf` ordering dependency.
+
+---
+
+## 9. `.ocanim` — animation clip
+
+Subtype `'ANIM'`. Fixes the three fidelity losses from recon `assets §7/§9`: **no forced 30 fps resample**, **cubicspline tangents preserved**, **step curves preserved**. Chunks: `AHDR` (required), `TRKS` (track data), `STRT`.
+
+### 9.1 `AHDR`
+| Off | Size | Type | Field |
+|---|---|---|---|
+| 0x00 | 4 | f32 | `Duration` (seconds) |
+| 0x04 | 4 | u32 | `TrackCount` |
+| 0x08 | 1 | u8 | `Storage` | 0=keyframed (full fidelity), 1=baked-uniform (resampled, runtime-cheap) |
+| 0x09 | 1 | u8 | `Flags` | bit0 `Loop`, bit1 `AdditiveBase`, bit2 `RootMotion` |
+| 0x0A | 2 | u16 | `SampleRate` | for `Storage=1` (e.g. 30/60), else 0 |
+| 0x0C | 4 | StringRef | `SkeletonRef` | target skeleton name/guid hint |
+| 0x10 | … | TrackDesc[TrackCount] | 24 B each |
+
+### 9.2 `TrackDesc` (24 B)
+`u16 BoneIndex`, `u8 ChannelMask` (bit0 T, bit1 R, bit2 S — matches `.ocbeam` ANIM mask), `u8 Interp` (0 LINEAR, 1 STEP, 2 CUBICSPLINE), `u64 KeyDataOffset` (into `TRKS`), `u32 KeyCount`, `u32 Reserved`.
+
+### 9.3 `TRKS` key layout
+Per track, for each present channel, a sub-array. **Keyframed** (`Storage=0`): each key = `f32 Time` + value(s): T/S = 3×f32, R = 4×f32 quat; for `CUBICSPLINE`, each key = `Time` + `inTangent` + `value` + `outTangent` (glTF cubic spec preserved). **Baked-uniform** (`Storage=1`): no per-key time; `KeyCount = round(Duration*SampleRate)+1` samples at `frame/SampleRate`, values only (this is the runtime-fast form, equivalent to the current `.ocbeam` ANIM but with chosen rate). Quaternions renormalized on read; slerp for LINEAR, hold for STEP, Hermite for CUBICSPLINE. A cooker can emit both: keep the keyframed source, bake a uniform variant into `.ocpak` for shipping.
+
+---
+
+## 10. `.ocprefab` — prefab (text)
+
+First line `OCPREFAB 1`. A reusable node tree of transforms + components + asset references + property overrides. This is what bundles a *vehicle* (cage + aero + body meshes + materials) or a *track prop* into one authorable unit.
+
+```
+OCPREFAB 1
+NAME Ferrari499P
+NODE root  T 0 0 0  R 0 0 0 1  S 1 1 1
+  COMPONENT VehicleCage  cage={ocbeam:Ferrari499P.ocbeam}  aero={ocaero:Ferrari499P.ocaero}
+  COMPONENT MeshRenderer mesh={guid:0x…} materials=[{guid:0x…},{guid:0x…}]
+  NODE frontWing  parent=root  T 120 0 40  R 0 0 0 1  S 1 1 1
+    COMPONENT MeshRenderer mesh={guid:0x…} materials=[{guid:0x…}]
+    COMPONENT AeroLink part=RearWing
+OVERRIDE root.MeshRenderer.materials[0].baseColorFactor 0.8 0.0 0.0 1.0
+```
+
+Rules: nodes form a tree via `parent=`; components are named + typed with key=value props; asset refs by `{kind:pathOrGuid}`; `OVERRIDE <node>.<component>.<prop>` patches. A prefab may reference other prefabs (`COMPONENT PrefabInstance prefab={guid:…}` + overrides) → nested prefabs. References the legacy `.ocbeam`/`.ocaero` directly, so vehicle content composes cleanly. Cooked → `PREF` chunk (flattened node/component/override tables) in `.ocpak`.
+
+---
+
+## 11. `.ocworld` — native scene/world (superset of `.ocmap`)
+
+First line `OCWORLD 1`. **Every `.ocmap` record is a legal `.ocworld` record** (identity/env/placement lines parse identically), so an `.ocmap` is a valid — if minimal — `.ocworld`, and the round-trip in §4.4 holds. On top of `.ocmap`, `.ocworld` adds a scene graph, streaming, lighting/environment, terrain/georef, and prefab instancing.
+
+```
+OCWORLD 1
+# --- identity block: byte-compatible with .ocmap ---
+ID 0x376B85BC4D1A03BA          # FNV-1a-64(NAME), unchanged algorithm
+NAME demoworld
+BUILD 1
+ALGO 3
+ROOT <blake3-256 merkle over placements + asset content>   # real root now (reader tolerant)
+CLIENT scene                   # or: CLIENT umap <path> (legacy passthrough)
+
+# --- env block: .ocmap records verbatim ---
+SURFACE 0 tarmac 1.00 0.015 0.30
+SURFACE 1 kerb   0.92 0.020 0.40
+SURFACE 2 grass  0.45 0.090 0.35
+GROUND 0.0 0
+KILLZ -5000.0
+SPAWN 0 0 100 0
+
+# --- .ocmap placements still valid ---
+DEFORM tyre_barrier.ocbeam 12000.0 800.0 0.0 90.0 0.0 0.0 rubber
+PLACE  kerb_4m 1200.0 400.0 0.0 0.0 0.0 0.0 1.000
+
+# --- NEW: scene graph, non-uniform scale, prefab instances, GUID refs ---
+LAYER static
+NODE grandstand parent=world  T 5000 -800 0  R 0 0 0 1  S 1 1 1
+  PLACEG {guid:0x…} scale3=1 1 1            # GUID placement, non-uniform scale
+  PREFAB {ocprefab:barrier_stack.ocprefab}  T 0 0 0
+
+# --- NEW: streaming cells (anti-bloat / pay-for-what-you-use) ---
+CELL grid 25600 25600           # cell size cm; instances auto-bucketed by AABB
+STREAM cell_12_7 aabb=… assets=[{guid:…},…]
+
+# --- NEW: lighting / environment ---
+ENV sky {octex-cube guid:0x…} intensity 1.0
+SUN dir -0.3 -0.4 -0.85 color 1.0 0.98 0.92 lux 100000
+FOG exp density 0.0002 color 0.7 0.8 0.9
+
+# --- NEW: terrain / georef (Cesium-style dormant hook) ---
+GEOREF wgs84 lat 45.6156 lon 9.2811 alt 162.0    # origin for real-world tracks (Monza)
+TERRAIN heightfield {guid:0x…} extent 800000 800000
+```
+
+Notes: `PLACE` (asset-name + transform, `.ocmap` style) and `PLACEG` (GUID + non-uniform scale) coexist; `DEFORM` unchanged (soft-body barriers). `LAYER`/`NODE`/`CELL`/`STREAM` give hierarchical + streamable worlds without the monolithic-level bloat. `GEOREF`/`TERRAIN` are the georeferenced-world hook the recon flagged as the likely dormant-Cesium role (`arch §6/§8`) — specified but engine-optional. Cooked `.ocworld` → `WRLD` chunk (flattened instance/cell/light tables) + a BLAKE3 Merkle `ROOT` computed over placements and referenced asset content hashes (the recon-intended real ROOT), and a `mapContentId` for the net map-parity gate (`net §4`).
+
+---
+
+## 12. Versioning & compatibility
+
+- **Two version axes:** `ContainerVersion` (the `AVR1` framework) and `ContentVersion` (per-subtype schema). Text formats carry a single `OC<NAME> <n>` line.
+- **`MinReaderVersion`** lets a writer mark a file that older readers must refuse rather than misread.
+- **Forward compat:** unknown chunks skipped unless `Required`; unknown text sections skipped (OC-family behavior). New optional fields append to a chunk struct; readers honor `SizeUncompressed` and zero-fill unknown tails. New enum values must have a defined fallback (e.g. unknown vertex format ⇒ refuse that stream; unknown texture codec ⇒ if `SRC ` present, re-transcode, else refuse).
+- **Backward compat:** writers never remove or reorder existing fields; deprecations set a `Deprecated` chunk flag and keep the field. A `MIGR` note chunk may record the source version chain.
+- **Deterministic writes:** stable field order, sorted chunk directory, zeroed padding ⇒ identical bytes for identical input (clean diffs, cache hits).
+
+---
+
+## 13. Cooked / DDC / packaging
+
+- **Source vs cooked.** Source = text (`.ocmat/.ocprefab/.ocworld` + legacy `.oc*`) and importer-neutral binaries. Cooked = platform-specialized, compressed, GPU-aligned, source stripped. Cooked artifacts live in `.ocpak` (subtype `'PAK '`), a container whose chunks are complete embedded assets (each with its own header) plus a `TOC ` chunk (`GUID → {chunkIndex, offset, size, subtype, dependencies[]}`).
+- **DDC key.** `BLAKE3( sourceContentHash ‖ importerVersion ‖ targetPlatform ‖ cookSettings )`. A hit reuses the cooked blob. This is the offline analogue of UE's import-compile step (recon `arch §4`): `.ocbeam`/`.ocaero` compile once to a `UVehicleCageAsset`-equivalent; the Aver equivalent is a cooked cage chunk keyed the same way.
+- **`.ocmeta` sidecars.** Each source asset gets a text `.ocmeta` (JSON-ish) holding its `GUID`, import settings, and source-file hash — so GUIDs are stable across moves and re-imports, and the cooker knows when to re-cook.
+- **Platform variants.** Cook targets pick texture codecs (BC7/BC6H desktop vs ASTC mobile vs Basis universal), index width, position quantization, and whether to keep meshlets. Deformable vehicle-body meshes are exempt from position quantization (bit8 `Deformable`).
+- **Streaming.** Mip data (`MIPS`) and per-LOD mesh blocks are individually addressable + individually compressed so higher mips / finer LODs stream on demand; `.ocworld` `CELL`/`STREAM` records drive spatial streaming.
+
+---
+
+## 14. Migration path
+
+### 14.1 Legacy load-direct (zero migration)
+`.ocbeam`, `.ocaero`, `.ocmap`, `.scene`, `.octrack` load unchanged through the faithful parsers (§4). No conversion, no re-save. They remain the source of truth for cages, aero, and worlds. Cooking them (optional) produces cage/aero/world chunks in `.ocpak` but the text stays canonical.
+
+### 14.2 Extract the embedded GLB (closes the biggest gap)
+Today geometry/PBR/textures survive only as base64 `.glb` bytes inside `.ocbeam` (recon `assets §0/§9`). The Aver importer:
+1. Runs the `.ocbeam` parser; on `GLB{}`, base64-decodes to raw `.glb`.
+2. Applies the recorded `GLBXFORM` (`yup/forward/mirror`) + `SCALE`/bounds-fit exactly as the UE factory did (`(x,-z,y)`, forward rotation, Y-mirror, per-axis AABB fit) so geometry lands in engine cm space with winding fixed.
+3. Emits one **`.ocmesh`** per glTF part (submeshes = parts, names preserved to match `PART`/`FVehicleCagePartMesh`), **`.octex`** per image (PNG/JPEG via stb_image → BC7/BC5), **`.ocmat`** per glTF material (metallic-roughness → §7), and **`.ocskel`**/**`.ocanim`** if the glb has a skin/animations (rig extracted like `GltfRig`, but multi-skin + full-fidelity anim per §8/§9).
+4. Optionally writes a **`.ocprefab`** binding the new meshes/materials to the original `.ocbeam` cage + `.ocaero`, so the vehicle is one asset.
+
+After this, the opaque embedded-glb handoff is eliminated; `.ocbeam` can shrink to just the cage (glb optional/legacy).
+
+### 14.3 UE `.uasset`-derived content
+Recon (`assets §8`) shows the OCCompiler `.uasset` reader extracts only **component lists** (names + FRACTURE/DEFORM kind), not geometry. So mesh geometry is **not** taken from `.uasset`; it comes from the original glTF/OBJ/FBX sources (or the embedded glb, §14.2) via the importer. The `.uasset` component list is used only to author the corresponding `.ocprefab` component set (FRACTURE→fracturable part, DEFORM→skeletal part). No dependence on Epic's package binary at runtime — the fragile `.uasset` parse stays an editor-time import convenience.
+
+### 14.4 Toolchain (polyglot)
+- **Rust asset pipeline** (`aver-cook`) does import + cook + DDC over the C ABI: glTF/OBJ/PNG/JPEG in → `.ocmesh/.octex/.ocmat/.ocskel/.ocanim` out → `.ocpak`. glTF/JSON parse and image decode use permissive crates (or FFI to the C core).
+- **C++ engine core** provides the authoritative readers (`libaver_assets`) exposed via the C ABI (§15); the C# editor P/Invokes them; the Rust tools FFI them. One reader implementation, three languages — matching the engine's polyglot spine.
+- **C# editor** authors `.ocmat/.ocprefab/.ocworld` (text) and triggers cooks.
+
+---
+
+## 15. C ABI loader surface (the interop backbone)
+
+A stable `extern "C"` surface so C#/Rust bind identically (mirrors the existing `oc_sim`/`oc_match` ABI style, out-pointer returns, `*_abi_version()` guard):
+
+```c
+uint32_t     ocasset_abi_version(void);              /* == 1 */
+
+/* open by bytes or path; returns opaque handle or NULL */
+OcAsset*     ocasset_open_memory(const void* data, uint64_t size);
+OcAsset*     ocasset_open_file(const char* utf8_path);
+void         ocasset_close(OcAsset*);
+
+/* container introspection */
+uint32_t     ocasset_subtype(const OcAsset*);        /* FourCC */
+uint16_t     ocasset_content_version(const OcAsset*);
+void         ocasset_guid(const OcAsset*, uint8_t out_guid[16]);
+uint32_t     ocasset_chunk_count(const OcAsset*);
+int          ocasset_find_chunk(const OcAsset*, uint32_t fourcc, OcChunkView* out);
+/* OcChunkView { const void* ptr; uint64_t size; uint16_t version; } — decompressed, engine-space */
+
+/* legacy text formats (faithful parsers) — parse into POD out-structs */
+int          ocbeam_parse(const char* text, uint64_t len, OcBeamData* out);
+int          ocaero_parse(const char* text, uint64_t len, OcAeroData* out);
+int          ocmap_parse (const char* text, uint64_t len, OcMapData*  out);
+
+/* typed mesh accessor built on chunk views */
+int          ocmesh_get_header(const OcAsset*, OcMeshHeader* out);
+int          ocmesh_get_lod(const OcAsset*, uint32_t lod, OcMeshLod* out);
+```
+
+All returns are error codes (`0`=ok); all geometry/pixels handed back are already little-endian engine-space, decompressed, ready for GPU upload (respecting the 256-B alignment so the caller can copy straight to an upload heap). Struct returns use out-pointers (no cross-ABI struct-by-value).
+
+---
+
+## 16. Licensing summary (royalty-free posture)
+
+| Concern | Choice | License |
+|---|---|---|
+| Hashing | xxHash3 / BLAKE3 / FNV-1a (compat) | BSD-2 / CC0-Apache / public-domain |
+| Compression | zstd, LZ4 | BSD |
+| Texture GPU codecs | BCn, ASTC | unencumbered DX standard / Khronos royalty-free |
+| Texture supercompression | Basis Universal / KTX2 | Apache-2.0 |
+| Image decode | stb_image | public domain |
+| glTF/JSON parse | self-contained (OCCompiler-style) | own code |
+| Mesh optimize / meshlets | meshoptimizer | MIT |
+| Tangents | MikkTSpace-equivalent | public domain |
+
+No GPL runtime, no Unreal-derived tech, no royalty-bearing codecs. Every dependency is MIT/BSD/zlib/Apache-2.0/public-domain, satisfying the hard requirement.
+
+---
+
+### Deliverable file map (paths this design implies under `C:/Users/User/Documents/Aver Engine`)
+- `docs/formats/` — this spec split per format (container, ocmesh, octex, ocmat, ocskel, ocanim, ocprefab, ocworld, legacy).
+- `engine/assets/` — C++ readers/writers (`libaver_assets`) + C ABI header `include/ocasset.h`.
+- `tools/aver-cook/` — Rust importer/cooker.
+- `editor/` — C# authoring for text formats.
+- `samples/` — round-trip the existing `Ferrari499P.ocbeam/.ocaero` and `demoworld.scene/.ocmap` to prove byte-fidelity load and lossless `.ocworld` upgrade.
+
+This design preserves the four legacy formats byte-for-byte, gives the seven missing asset types real versioned formats under one skippable-chunk container, keeps authoring data human-readable while making bulk data GPU-ready and GPU-driven-capable, and provides a concrete import/cook/DDC path that finally lifts geometry/material/texture/skeleton/animation data out of the opaque embedded-glb and into first-class, royalty-free native formats.
