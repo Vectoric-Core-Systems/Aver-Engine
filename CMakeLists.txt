@@ -30,6 +30,7 @@ option(AVER_RHI_D3D11  "DirectX 11 backend"           ON)
 option(AVER_RHI_VULKAN "Vulkan backend (needs Vulkan SDK)" OFF)
 option(AVER_BUILD_SANDBOX "Build the sandbox sample app" ON)
 option(AVER_BUILD_TESTS "Build test executables" ON)
+option(AVER_ENABLE_UI "In-window editor UI (Dear ImGui)" ON)
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -41,6 +42,11 @@ if(MSVC)
 endif()
 
 message(STATUS "Aver Engine ${PROJECT_VERSION} | D3D12=${AVER_RHI_D3D12} D3D11=${AVER_RHI_D3D11} Vulkan=${AVER_RHI_VULKAN}")
+
+# ---- Third-party (royalty-free) ----
+if(AVER_ENABLE_UI)
+  add_subdirectory(third_party/imgui)
+endif()
 
 # ---- Tier 0-6 implemented modules ----
 add_subdirectory(modules/core)

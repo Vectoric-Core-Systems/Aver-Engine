@@ -1,0 +1,15 @@
+<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" shape-rendering="geometricPrecision">
+  <!-- Neutral letterforms: theme-adaptive via currentColor (reads on dark #1e1e1e and light) -->
+  <g fill="currentColor">
+    <!-- A: left diagonal leg (leans forward with the E's speed tips) -->
+    <polygon points="102,56 128,56 66,200 40,200"/>
+    <!-- Shared vertical stem: A's right leg AND E's spine -->
+    <polygon points="116,56 138,56 138,200 116,200"/>
+    <!-- Single horizontal bar: A's crossbar AND E's middle arm (shorter, angled tip) -->
+    <polygon points="76,117 192,117 180,139 76,139"/>
+    <!-- E: bottom bar (forward-leaning terminal) -->
+    <polygon points="138,178 210,178 198,200 138,200"/>
+  </g>
+  <!-- Single accent: E's top bar as the leading 'speed line' -->
+  <polygon fill="#FF5B2E" points="138,56 210,56 198,78 138,78"/>
+</svg>

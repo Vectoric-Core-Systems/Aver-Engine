@@ -69,4 +69,13 @@ IDevice* createDevice(const DeviceDesc& desc) {
 
 void destroyDevice(IDevice* device) { delete device; }
 
+// UI window-message routing registry (set by whichever backend hosts ImGui).
+namespace {
+UiWndProcFn g_uiWndProc = nullptr;
+}
+void registerUiWndProc(UiWndProcFn fn) { g_uiWndProc = fn; }
+bool uiWndProc(void* hwnd, u32 msg, u64 wparam, i64 lparam) {
+    return g_uiWndProc ? g_uiWndProc(hwnd, msg, wparam, lparam) : false;
+}
+
 } // namespace aver::rhi

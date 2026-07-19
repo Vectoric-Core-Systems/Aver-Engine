@@ -36,6 +36,12 @@ public:
 
     void setEventCallback(EventCallback cb, void* user) { callback_ = cb; callbackUser_ = user; }
 
+    // Raw OS message hook (e.g. for Dear ImGui input). Returns true if the message was
+    // consumed. Kept as a plain fn-ptr so Platform needs no UI dependency.
+    using MessageHook = bool (*)(void* hwnd, u32 msg, u64 wparam, i64 lparam);
+    void setMessageHook(MessageHook h) { messageHook_ = h; }
+    MessageHook messageHook() const { return messageHook_; }
+
     // Internal: invoked by the platform message handler.
     void dispatch(const Event& e);
 
@@ -46,6 +52,7 @@ private:
     bool shouldClose_ = false;
     EventCallback callback_ = nullptr;
     void* callbackUser_ = nullptr;
+    MessageHook messageHook_ = nullptr;
 };
 
 } // namespace aver

@@ -40,6 +40,11 @@ int Engine::run(Application* app) {
         sd.width = window_->width();
         sd.height = window_->height();
         swapchain_ = device_->createSwapchain(sd);
+
+        // In-window editor UI (Dear ImGui). Route raw window messages to it.
+        if (device_->uiInit(window_->nativeHandle())) {
+            window_->setMessageHook(&rhi::uiWndProc);
+        }
     }
 
     app->onInit(*this);
@@ -68,8 +73,9 @@ int Engine::run(Application* app) {
         app->onUpdate(*this, time_);
 
         device_->beginFrame();
+        device_->uiNewFrame();   // ImGui NewFrame; the app builds widgets in onRender
         app->onRender(*this);
-        device_->endFrame();
+        device_->endFrame();     // records ImGui draw data before present
         if (swapchain_) swapchain_->present();
 
         if (cfg.maxFrames != 0 && time_.frame >= cfg.maxFrames) {

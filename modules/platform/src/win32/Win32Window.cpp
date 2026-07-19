@@ -27,6 +27,13 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     auto* self = reinterpret_cast<Window*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (!self) return DefWindowProcW(hwnd, msg, wParam, lParam);
 
+    // Let a UI (ImGui) inspect the raw message first; if it fully consumes it, stop.
+    if (auto hook = self->messageHook()) {
+        if (hook(hwnd, static_cast<u32>(msg), static_cast<u64>(wParam), static_cast<i64>(lParam))) {
+            return 0;
+        }
+    }
+
     switch (msg) {
         case WM_CLOSE: {
             Event e; e.type = EventType::WindowClose;

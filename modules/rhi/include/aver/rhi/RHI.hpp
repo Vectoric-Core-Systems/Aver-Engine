@@ -1,6 +1,8 @@
 #pragma once
 #include "aver/core/Types.hpp"
 
+#include <vector>
+
 // Aver RHI — the single render-hardware abstraction every GPU consumer targets.
 // Backends (D3D12/D3D11/Vulkan) implement these interfaces; a Null backend always
 // exists as a fallback so the engine runs headless / on unsupported hardware.
@@ -77,9 +79,29 @@ public:
     // frame. Poll getCapture() afterward. Lets tests confirm objects actually rasterize.
     virtual void requestCapture(u32 x, u32 y) { (void)x; (void)y; }
     virtual bool getCapture(f32 outRGBA[4]) { (void)outRGBA; return false; }
+    // Full captured frame (tight RGBA8, top-to-bottom) after a requestCapture completes.
+    virtual bool getFrameImage(std::vector<u8>& outRGBA, u32& w, u32& h) { (void)outRGBA; (void)w; (void)h; return false; }
+
+    // ----- In-window UI (Dear ImGui) -----
+    // Initialise ImGui on this device for the given native window. Returns false if the
+    // backend has no UI support. After init, build widgets between uiNewFrame() (called
+    // by the engine after beginFrame) and endFrame() (which records the UI draw data).
+    virtual bool uiInit(void* windowHandle) { (void)windowHandle; return false; }
+    virtual void uiNewFrame() {}
+    virtual void uiShutdown() {}
+    virtual bool uiActive() const { return false; }
+    virtual bool uiWantsMouse() const { return false; }    // true when the cursor is over UI
+    virtual bool uiWantsKeyboard() const { return false; }
 };
 
 IDevice* createDevice(const DeviceDesc& desc = {});
 void destroyDevice(IDevice* device);
+
+// ----- UI (Dear ImGui) window-message routing -----
+// A backend that hosts ImGui registers a handler here; the platform Window forwards raw
+// messages to uiWndProc so ImGui receives input without Platform depending on the UI.
+using UiWndProcFn = bool (*)(void* hwnd, u32 msg, u64 wparam, i64 lparam);
+void registerUiWndProc(UiWndProcFn fn);
+bool uiWndProc(void* hwnd, u32 msg, u64 wparam, i64 lparam);
 
 } // namespace aver::rhi

@@ -1,0 +1,23 @@
+<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Aver Engine AE monogram">
+  <title>Aver Engine — AE monogram</title>
+  <style>
+    svg { color: #15181e; }
+    @media (prefers-color-scheme: dark) { svg { color: #EAEDF2; } }
+  </style>
+  <defs>
+    <mask id="aeCut" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
+      <rect width="256" height="256" fill="#fff"/>
+      <g fill="none" stroke="#000" stroke-width="19" stroke-linejoin="miter" stroke-linecap="butt" stroke-miterlimit="6">
+        <path d="M60,194 L80,118 L112,194"/>
+        <path d="M67.9,164 L99.4,164"/>
+        <path d="M200,118 L150,118 L150,194 L200,194"/>
+        <path d="M150,156 L190,156"/>
+      </g>
+    </mask>
+  </defs>
+  <g mask="url(#aeCut)">
+    <path d="M32.74,73 L128,128 L128,238 L32.74,183 Z" fill="currentColor"/>
+    <path d="M223.26,73 L128,128 L128,238 L223.26,183 Z" fill="currentColor" opacity="0.72"/>
+    <path d="M128,18 L223.26,73 L128,128 L32.74,73 Z" fill="#F26522"/>
+  </g>
+</svg>

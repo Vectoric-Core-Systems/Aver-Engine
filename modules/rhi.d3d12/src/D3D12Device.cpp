@@ -14,6 +14,14 @@
 #include <string>
 #include <vector>
 
+#if AVER_WITH_IMGUI
+#include "imgui.h"
+#include "backends/imgui_impl_win32.h"
+#include "backends/imgui_impl_dx12.h"
+// The impl header intentionally leaves this for the app's WndProc TU to declare.
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+#endif
+
 using Microsoft::WRL::ComPtr;
 
 namespace aver::rhi {
@@ -45,6 +53,13 @@ D3D12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE type) {
     p.VisibleNodeMask = 1;
     return p;
 }
+
+#if AVER_WITH_IMGUI
+static bool imguiWndProc(void* hwnd, u32 msg, u64 w, i64 l) {
+    return ImGui_ImplWin32_WndProcHandler(static_cast<HWND>(hwnd), static_cast<UINT>(msg),
+                                          static_cast<WPARAM>(w), static_cast<LPARAM>(l)) != 0;
+}
+#endif
 
 D3D12_RESOURCE_DESC bufferDesc(u64 bytes) {
     D3D12_RESOURCE_DESC d{};
@@ -118,7 +133,14 @@ private:
 class D3D12Device final : public IDevice {
 public:
     bool init(const DeviceDesc& desc);
-    ~D3D12Device() override { waitForGpu(); if (fenceEvent_) CloseHandle(fenceEvent_); }
+    ~D3D12Device() override { waitForGpu(); uiShutdown(); if (fenceEvent_) CloseHandle(fenceEvent_); }
+
+    bool uiInit(void* hwnd) override;
+    void uiNewFrame() override;
+    void uiShutdown() override;
+    bool uiActive() const override { return uiActive_; }
+    bool uiWantsMouse() const override;
+    bool uiWantsKeyboard() const override;
 
     Backend backend() const override { return Backend::D3D12; }
     const char* adapterName() const override { return adapterName_.c_str(); }
@@ -147,6 +169,11 @@ public:
     bool getCapture(f32 out[4]) override {
         if (!captureReady_) return false;
         for (int i = 0; i < 4; ++i) out[i] = captured_[i];
+        return true;
+    }
+    bool getFrameImage(std::vector<u8>& out, u32& w, u32& h) override {
+        if (frameImage_.empty()) return false;
+        out = frameImage_; w = frameImageW_; h = frameImageH_;
         return true;
     }
 
@@ -193,6 +220,11 @@ private:
     bool captureReq_ = false, captureReady_ = false;
     u32 capX_ = 0, capY_ = 0;
     f32 captured_[4] = {0, 0, 0, 0};
+    std::vector<u8> frameImage_;
+    u32 frameImageW_ = 0, frameImageH_ = 0;
+
+    ComPtr<ID3D12DescriptorHeap> uiSrvHeap_;
+    bool uiActive_ = false;
 
     std::vector<GpuMesh> meshes_;
     PerFrameCB frameCB_{};
@@ -466,6 +498,19 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
 
 void D3D12Device::endFrame() {
     if (!hasSwapchain_) return;
+
+#if AVER_WITH_IMGUI
+    if (uiActive_) {
+        ImGui::Render();
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
+        rtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
+        cmdList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        ID3D12DescriptorHeap* heaps[] = {uiSrvHeap_.Get()};
+        cmdList_->SetDescriptorHeaps(1, heaps);
+        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmdList_.Get());
+    }
+#endif
+
     ID3D12Resource* bb = renderTargets_[frameIndex_].Get();
     if (captureReq_ && captureBuf_) {
         auto toCopy = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -491,12 +536,23 @@ void D3D12Device::present() {
     if (captureReq_ && captureBuf_) {
         waitForGpu(); // ensure the copy completed
         void* mapped = nullptr;
-        D3D12_RANGE r{0, static_cast<SIZE_T>(captureFp_.Footprint.RowPitch) * height_};
-        if (SUCCEEDED(captureBuf_->Map(0, &r, &mapped))) {
+        // nullptr read-range = "may read whole resource" (avoids E_INVALIDARG when
+        // RowPitch*height exceeds the buffer's copyable-footprint total).
+        if (SUCCEEDED(captureBuf_->Map(0, nullptr, &mapped))) {
             const u32 x = capX_ < width_ ? capX_ : width_ - 1;
             const u32 y = capY_ < height_ ? capY_ : height_ - 1;
-            const u8* px = static_cast<const u8*>(mapped) + static_cast<SIZE_T>(y) * captureFp_.Footprint.RowPitch + static_cast<SIZE_T>(x) * 4;
+            const u8* base = static_cast<const u8*>(mapped);
+            const u8* px = base + static_cast<SIZE_T>(y) * captureFp_.Footprint.RowPitch + static_cast<SIZE_T>(x) * 4;
             captured_[0] = px[0] / 255.0f; captured_[1] = px[1] / 255.0f; captured_[2] = px[2] / 255.0f; captured_[3] = px[3] / 255.0f;
+
+            // Also keep the whole frame (tight RGBA) for screenshots.
+            frameImageW_ = width_; frameImageH_ = height_;
+            frameImage_.resize(static_cast<usize>(width_) * height_ * 4);
+            for (u32 yy = 0; yy < height_; ++yy) {
+                std::memcpy(&frameImage_[static_cast<usize>(yy) * width_ * 4],
+                            base + static_cast<usize>(yy) * captureFp_.Footprint.RowPitch,
+                            static_cast<usize>(width_) * 4);
+            }
             captureBuf_->Unmap(0, nullptr);
             captureReady_ = true;
         }
@@ -544,6 +600,84 @@ void D3D12Device::waitForGpu() {
         WaitForSingleObject(fenceEvent_, INFINITE);
     }
     fenceValues_[frameIndex_] = v + 1;
+}
+
+bool D3D12Device::uiInit(void* hwnd) {
+#if AVER_WITH_IMGUI
+    if (uiActive_) return true;
+    if (!device_ || !hwnd) return false;
+
+    D3D12_DESCRIPTOR_HEAP_DESC sh{};
+    sh.NumDescriptors = 1;
+    sh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    sh.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (!hrOk(device_->CreateDescriptorHeap(&sh, IID_PPV_ARGS(&uiSrvHeap_)), "UI SRV heap")) return false;
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.IniFilename = nullptr; // don't write imgui.ini into the cwd
+    ImGui::StyleColorsDark();
+
+    if (!ImGui_ImplWin32_Init(hwnd)) { AVER_ERROR("[RHI.D3D12] ImGui_ImplWin32_Init failed"); return false; }
+
+    ImGui_ImplDX12_InitInfo info{};
+    info.Device = device_.Get();
+    info.CommandQueue = queue_.Get(); // used for the font-atlas upload (ImGui 1.92)
+    info.NumFramesInFlight = static_cast<int>(kFrameCount);
+    info.RTVFormat = kBackbufferFormat;
+    info.SrvDescriptorHeap = uiSrvHeap_.Get();
+    info.LegacySingleSrvCpuDescriptor = uiSrvHeap_->GetCPUDescriptorHandleForHeapStart();
+    info.LegacySingleSrvGpuDescriptor = uiSrvHeap_->GetGPUDescriptorHandleForHeapStart();
+    if (!ImGui_ImplDX12_Init(&info)) {
+        AVER_ERROR("[RHI.D3D12] ImGui_ImplDX12_Init failed");
+        return false;
+    }
+    registerUiWndProc(&imguiWndProc);
+    uiActive_ = true;
+    AVER_INFO("[RHI.D3D12] ImGui UI initialised (docking)");
+    return true;
+#else
+    (void)hwnd;
+    return false;
+#endif
+}
+
+void D3D12Device::uiNewFrame() {
+#if AVER_WITH_IMGUI
+    if (!uiActive_) return;
+    ImGui_ImplDX12_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+#endif
+}
+
+void D3D12Device::uiShutdown() {
+#if AVER_WITH_IMGUI
+    if (!uiActive_) return;
+    ImGui_ImplDX12_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+    registerUiWndProc(nullptr);
+    uiActive_ = false;
+#endif
+}
+
+bool D3D12Device::uiWantsMouse() const {
+#if AVER_WITH_IMGUI
+    return uiActive_ && ImGui::GetIO().WantCaptureMouse;
+#else
+    return false;
+#endif
+}
+
+bool D3D12Device::uiWantsKeyboard() const {
+#if AVER_WITH_IMGUI
+    return uiActive_ && ImGui::GetIO().WantCaptureKeyboard;
+#else
+    return false;
+#endif
 }
 
 bool D3D12Device::selfTest(const f32 in[4], f32 out[4]) {
