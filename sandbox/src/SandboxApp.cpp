@@ -335,7 +335,9 @@ private:
     // -1 = none. Rotate mode has no centre handle.
     int pickAxis(const Vec3& origin, f32 L, f32 mx, f32 my) const {
         f32 ox, oy; if (!project(origin, ox, oy)) return -1;
-        const f32 thr = 9.0f * dpi_;
+        // Generous grab tolerance: the gizmo draws as 1px lines, which are hard to hit
+        // precisely on a hi-DPI display, so accept clicks well away from the exact pixel.
+        const f32 thr = 16.0f * dpi_;
         if (tool_ == Tool::Rotate) {
             int best=-1; f32 bestD=thr;
             for (int a=0;a<3;++a) {
@@ -352,8 +354,8 @@ private:
             }
             return best;
         }
-        // Move / Scale: small centre hotspot, else nearest axis segment.
-        if (std::sqrt((mx-ox)*(mx-ox)+(my-oy)*(my-oy)) < 9.0f*dpi_) return 3;
+        // Move / Scale: centre hotspot (screen-plane move / uniform scale), else nearest axis.
+        if (std::sqrt((mx-ox)*(mx-ox)+(my-oy)*(my-oy)) < 13.0f*dpi_) return 3;
         int best=-1; f32 bestD=thr;
         for (int a=0;a<3;++a) {
             f32 tx, ty; if (!project(origin + kAxisDir[a]*L, tx, ty)) continue;
@@ -397,9 +399,9 @@ private:
         f32 ox, oy; if (!project(o.pos, ox, oy)) return;
         const f32 a0=std::atan2(py-oy, px-ox), a1=std::atan2(my-oy, mx-ox);
         f32 da=a1-a0; while (da> kPi) da-=kTwoPi; while (da< -kPi) da+=kTwoPi;
-        // Screen y is down, so a positive screen angle reads clockwise. Flip by the axis
-        // facing so the object visually follows the cursor around the ring.
-        const f32 s = dot(kAxisDir[activeAxis_], camForward()) >= 0.0f ? 1.0f : -1.0f;
+        // Rotate so the object follows the cursor around the ring. The sign depends on which
+        // way the ring's axis faces the camera (screen y is down => flip accordingly).
+        const f32 s = dot(kAxisDir[activeAxis_], camForward()) >= 0.0f ? -1.0f : 1.0f;
         f32& comp = (&o.rotDeg.x)[activeAxis_];
         comp += degrees(da) * s;
         if (snapRot_) comp = snapf(comp, rotSnap_);

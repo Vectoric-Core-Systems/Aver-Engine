@@ -168,6 +168,11 @@ ab2264a Aver Engine foundation: modular core + .oc* format loaders
 - Gizmo manipulation is drag-anywhere-on-handle (screen-projection), not full 3D handle
   raycast. Rotate increments a world-axis Euler component (exact only when other Euler
   components are 0) — acceptable for now; revisit with quaternion objects.
+- Gizmos draw as 1px lines (D3D12 has no wide lines); at hi-DPI they're thin, so `pickAxis`
+  uses a generous grab tolerance (16px logical for axes/rings, 13px for the centre handle,
+  scaled by dpi). A future thick-gizmo pass would build them from triangles.
+- Rotate follow-cursor sign is `-sign(axis·camForward)` (screen-y-down handedness). If a
+  ring ever feels reversed, that one factor is the knob.
 - `.rc` needs `enable_language(RC)`; RC path is relative to the .rc file.
 - Line endings: Git warns LF→CRLF (harmless).
 
