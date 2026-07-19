@@ -31,6 +31,10 @@ public:
 
     u32 width() const { return width_; }
     u32 height() const { return height_; }
+    // Display scale factor for this window's monitor (1.0 = 96 DPI, 1.5 = 150%, ...).
+    // The process is per-monitor DPI aware, so width()/height() are physical pixels and
+    // UI should be scaled by this to stay a consistent physical size across displays.
+    f32 dpiScale() const { return dpiScale_; }
     void* nativeHandle() const { return nativeHandle_; } // HWND on Windows
     bool valid() const { return nativeHandle_ != nullptr; }
 
@@ -44,11 +48,13 @@ public:
 
     // Internal: invoked by the platform message handler.
     void dispatch(const Event& e);
+    void setDpiScale(f32 s) { dpiScale_ = s; }
 
 private:
     void* nativeHandle_ = nullptr;
     u32 width_ = 0;
     u32 height_ = 0;
+    f32 dpiScale_ = 1.0f;
     bool shouldClose_ = false;
     EventCallback callback_ = nullptr;
     void* callbackUser_ = nullptr;

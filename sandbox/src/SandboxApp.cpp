@@ -14,12 +14,19 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 
 namespace aver {
+
+// Engine axis convention: +X forward, +Y right, +Z up (see Math.hpp). Gizmo colours
+// follow the usual X=red, Y=green, Z=blue mapping; highlight = amber.
+static const Vec3 kAxisDir[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+static const Vec3 kAxisCol[3] = {{0.92f, 0.24f, 0.24f}, {0.36f, 0.82f, 0.30f}, {0.30f, 0.55f, 1.0f}};
+static const Vec3 kAxisHi = {1.0f, 0.80f, 0.15f};
 
 static void appendBox(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, f32 cx, f32 cy, f32 cz, f32 h) {
     const f32 p[8][3] = {{-h,-h,-h},{h,-h,-h},{h,h,-h},{-h,h,-h},{-h,-h,h},{h,-h,h},{h,h,h},{-h,h,h}};
@@ -41,6 +48,7 @@ static Quat quatFromEulerDeg(const Vec3& e) {
     return (Quat::fromAxisAngle({0,0,1}, radians(e.z)) * Quat::fromAxisAngle({0,1,0}, radians(e.y)) *
             Quat::fromAxisAngle({1,0,0}, radians(e.x))).normalized();
 }
+static f32 snapf(f32 v, f32 step) { return step > 0.0f ? std::round(v / step) * step : v; }
 
 // Row-vector transforms (v * M) for picking.
 static Vec3 xformPoint(const Mat4& m, const Vec3& p) {
@@ -75,13 +83,40 @@ static void buildGrid(std::vector<rhi::LineVertex>& v, f32 ext, f32 step) {
     for (f32 y = -ext; y <= ext + 0.001f; y += step) {
         v.push_back({-ext, y, 0.02f, g, g, g}); v.push_back({ext, y, 0.02f, g, g, g});
     }
-    v.push_back({0,0,0.03f, 0.80f,0.25f,0.25f}); v.push_back({ext,0,0.03f, 0.80f,0.25f,0.25f}); // +X
-    v.push_back({0,0,0.03f, 0.28f,0.72f,0.30f}); v.push_back({0,ext,0.03f, 0.28f,0.72f,0.30f}); // +Y
+    v.push_back({0,0,0.03f, 0.80f,0.25f,0.25f}); v.push_back({ext,0,0.03f, 0.80f,0.25f,0.25f}); // +X (forward)
+    v.push_back({0,0,0.03f, 0.28f,0.72f,0.30f}); v.push_back({0,ext,0.03f, 0.28f,0.72f,0.30f}); // +Y (right)
 }
-static void buildGizmo(std::vector<rhi::LineVertex>& v, f32 len) {
-    v.push_back({0,0,0, 0.92f,0.22f,0.22f}); v.push_back({len,0,0, 0.92f,0.22f,0.22f});
-    v.push_back({0,0,0, 0.24f,0.85f,0.28f}); v.push_back({0,len,0, 0.24f,0.85f,0.28f});
-    v.push_back({0,0,0, 0.32f,0.52f,1.0f});  v.push_back({0,0,len, 0.32f,0.52f,1.0f});
+
+// ---- per-mode gizmo geometry (unit-size, local space; scaled by the world matrix) ----
+static void gzLine(std::vector<rhi::LineVertex>& v, const Vec3& a, const Vec3& b, const Vec3& c) {
+    v.push_back({a.x,a.y,a.z, c.x,c.y,c.z}); v.push_back({b.x,b.y,b.z, c.x,c.y,c.z});
+}
+static std::vector<rhi::LineVertex> buildMoveAxis(int a, const Vec3& c) {
+    std::vector<rhi::LineVertex> v;
+    const Vec3 A = kAxisDir[a], P = kAxisDir[(a+1)%3], Q = kAxisDir[(a+2)%3];
+    gzLine(v, {0,0,0}, A, c);                                  // shaft
+    const Vec3 tip = A, base = A * 0.80f;                      // conical arrowhead
+    for (int k = 0; k < 4; ++k) { f32 t = k * (kPi * 0.5f); Vec3 r = P*(std::cos(t)*0.07f) + Q*(std::sin(t)*0.07f); gzLine(v, base+r, tip, c); }
+    return v;
+}
+static std::vector<rhi::LineVertex> buildRotRing(int a, const Vec3& c) {
+    std::vector<rhi::LineVertex> v;
+    const Vec3 P = kAxisDir[(a+1)%3], Q = kAxisDir[(a+2)%3];
+    const int N = 64; Vec3 prev{};
+    for (int k = 0; k <= N; ++k) { f32 t = k * (kTwoPi / N); Vec3 p = P*std::cos(t) + Q*std::sin(t); if (k > 0) gzLine(v, prev, p, c); prev = p; }
+    return v;
+}
+static std::vector<rhi::LineVertex> buildScaleAxis(int a, const Vec3& c) {
+    std::vector<rhi::LineVertex> v;
+    const Vec3 A = kAxisDir[a], P = kAxisDir[(a+1)%3], Q = kAxisDir[(a+2)%3];
+    gzLine(v, {0,0,0}, A * 0.86f, c);                         // shaft
+    const Vec3 ctr = A * 0.93f; const f32 h = 0.07f;          // small box at the tip
+    Vec3 cor[8]; int i = 0;
+    for (int sx = -1; sx <= 1; sx += 2) for (int sy = -1; sy <= 1; sy += 2) for (int sz = -1; sz <= 1; sz += 2)
+        cor[i++] = ctr + A*(h*sx) + P*(h*sy) + Q*(h*sz);
+    const int e[12][2] = {{0,1},{2,3},{4,5},{6,7},{0,2},{1,3},{4,6},{5,7},{0,4},{1,5},{2,6},{3,7}};
+    for (auto& pr : e) gzLine(v, cor[pr[0]], cor[pr[1]], c);
+    return v;
 }
 
 enum class Tool { Select, Move, Rotate, Scale };
@@ -123,8 +158,8 @@ static void applyUnrealStyle() {
 
 class SandboxApp final : public Application {
 public:
-    SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::string shot)
-        : maxFrames_(maxFrames), headless_(headless), beamPath_(std::move(beamPath)), shot_(std::move(shot)) {}
+    SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::string shot, Tool initialTool)
+        : maxFrames_(maxFrames), headless_(headless), beamPath_(std::move(beamPath)), shot_(std::move(shot)), initialTool_(initialTool) {}
 
     BootConfig config() const override {
         BootConfig c; c.windowTitle="Aver Engine \xE2\x80\x94 Editor"; c.windowWidth=1600; c.windowHeight=900;
@@ -134,7 +169,12 @@ public:
     void onInit(Engine& e) override {
         AVER_INFO("[Sandbox] backend={} adapter='{}'", rhi::backendName(e.device()->backend()), e.device()->adapterName());
 #if AVER_WITH_IMGUI
-        if (e.device()->uiActive()) applyUnrealStyle();
+        if (e.device()->uiActive()) {
+            applyUnrealStyle();
+            dpi_ = e.window() ? e.window()->dpiScale() : 1.0f;
+            if (dpi_ > 1.01f) { ImGui::GetStyle().ScaleAllSizes(dpi_); ImGui::GetIO().FontGlobalScale = dpi_; }
+            AVER_INFO("[Sandbox] DPI scale {:.2f}", dpi_);
+        }
 #endif
         // --- default "blank .ocmap": ground floor + cube + sun + sky + atmosphere ---
         std::vector<rhi::MeshVertex> gv, gi_v; std::vector<u32> gi, ci;
@@ -170,9 +210,18 @@ public:
 
         std::vector<rhi::LineVertex> gl; buildGrid(gl, 40.0f, 2.0f);
         gridMesh_ = e.device()->createLineMesh(gl.data(), (u32)gl.size());
-        std::vector<rhi::LineVertex> gz; buildGizmo(gz, 1.8f);
-        gizmoMesh_ = e.device()->createLineMesh(gz.data(), (u32)gz.size());
 
+        // Per-mode gizmos: normal + amber-highlight variant of each axis.
+        for (int a = 0; a < 3; ++a) {
+            auto mv=buildMoveAxis(a,kAxisCol[a]);   gzMove_[a]  =e.device()->createLineMesh(mv.data(),(u32)mv.size());
+            auto mh=buildMoveAxis(a,kAxisHi);       gzMoveHi_[a]=e.device()->createLineMesh(mh.data(),(u32)mh.size());
+            auto rr=buildRotRing(a,kAxisCol[a]);    gzRot_[a]   =e.device()->createLineMesh(rr.data(),(u32)rr.size());
+            auto rh=buildRotRing(a,kAxisHi);        gzRotHi_[a] =e.device()->createLineMesh(rh.data(),(u32)rh.size());
+            auto sc=buildScaleAxis(a,kAxisCol[a]);  gzScale_[a] =e.device()->createLineMesh(sc.data(),(u32)sc.size());
+            auto sh=buildScaleAxis(a,kAxisHi);      gzScaleHi_[a]=e.device()->createLineMesh(sh.data(),(u32)sh.size());
+        }
+
+        tool_ = initialTool_;
         sel_ = 1; // the Cube
         camPos_ = Vec3{7.0f, 7.0f, 4.5f};
         const Vec3 d = (Vec3{0,0,1} - camPos_).getSafeNormal();
@@ -191,12 +240,12 @@ public:
             if (!io.MouseDown[1]) flying_ = false;
 
             if (flying_) {
-                yaw_   += io.MouseDelta.x * 0.005f;
-                pitch_ -= io.MouseDelta.y * 0.005f;
+                yaw_   += io.MouseDelta.x * lookSpeed_;
+                pitch_ -= io.MouseDelta.y * lookSpeed_;
                 pitch_ = pitch_ < -1.54f ? -1.54f : (pitch_ > 1.54f ? 1.54f : pitch_);
                 if (io.MouseWheel != 0.0f) {
                     flySpeed_ *= (1.0f + io.MouseWheel * 0.15f);
-                    flySpeed_ = flySpeed_ < 0.5f ? 0.5f : (flySpeed_ > 200.0f ? 200.0f : flySpeed_);
+                    flySpeed_ = flySpeed_ < 0.5f ? 0.5f : (flySpeed_ > 400.0f ? 400.0f : flySpeed_);
                 }
             }
 
@@ -227,7 +276,7 @@ public:
         const Mat4 viewProj = view * proj;
         const Mat4 invVP = viewProj.inverse();
         e.device()->setCamera(&viewProj.m[0][0], &invVP.m[0][0], &camPos_.x);
-        invVP_ = invVP; eye_ = camPos_;
+        invVP_ = invVP; viewProj_ = viewProj; eye_ = camPos_;
 
         const Vec3 ld = Vec3{sunAz_, sunAlt_, sunUp_}.getSafeNormal();
         e.device()->setLight(&ld.x, sunColor_, sunAmbient_);
@@ -249,10 +298,7 @@ public:
         }
         e.device()->setWireframe(false); // lines are always solid
         if (showGrid_) { Mat4 id = Mat4::identity(); e.device()->drawLines(gridMesh_, &id.m[0][0]); }
-        if (sel_>=0 && sel_<(int)objects_.size()) {
-            Mat4 g = Mat4::translation(objects_[sel_].pos);
-            e.device()->drawLines(gizmoMesh_, &g.m[0][0]);
-        }
+        drawGizmo(e);
         buildUI(e);
         captureCheck(e);
     }
@@ -264,28 +310,156 @@ private:
     Vec3 camForward() const {
         return Vec3{ std::cos(pitch_)*std::cos(yaw_), std::cos(pitch_)*std::sin(yaw_), std::sin(pitch_) };
     }
+    bool movableSelected() const { return sel_ >= 0 && sel_ < (int)objects_.size(); }
+    f32 gizmoLen(const Vec3& origin) const { f32 L = dist(eye_, origin) * 0.17f; return L < 0.5f ? 0.5f : L; }
+
+    // Project a world point to screen pixels (row-vector clip = p * viewProj).
+    bool project(const Vec3& wp, f32& sx, f32& sy) const {
+        const Mat4& m = viewProj_;
+        const f32 x = wp.x*m.m[0][0]+wp.y*m.m[1][0]+wp.z*m.m[2][0]+m.m[3][0];
+        const f32 y = wp.x*m.m[0][1]+wp.y*m.m[1][1]+wp.z*m.m[2][1]+m.m[3][1];
+        const f32 w = wp.x*m.m[0][3]+wp.y*m.m[1][3]+wp.z*m.m[2][3]+m.m[3][3];
+        if (w <= 1e-4f) return false;
+        sx = (x / w * 0.5f + 0.5f) * W_;
+        sy = (1.0f - (y / w * 0.5f + 0.5f)) * H_;
+        return true;
+    }
+    static f32 distToSeg(f32 px, f32 py, f32 ax, f32 ay, f32 bx, f32 by) {
+        const f32 vx=bx-ax, vy=by-ay, wx=px-ax, wy=py-ay;
+        const f32 len2=vx*vx+vy*vy; f32 t = len2>1e-6f ? (wx*vx+wy*vy)/len2 : 0.0f;
+        t = t<0?0:(t>1?1:t); const f32 cx=ax+vx*t, cy=ay+vy*t;
+        return std::sqrt((px-cx)*(px-cx)+(py-cy)*(py-cy));
+    }
+
+    // Which gizmo handle is under the cursor: 0..2 axis, 3 = centre (screen-plane/uniform),
+    // -1 = none. Rotate mode has no centre handle.
+    int pickAxis(const Vec3& origin, f32 L, f32 mx, f32 my) const {
+        f32 ox, oy; if (!project(origin, ox, oy)) return -1;
+        const f32 thr = 9.0f * dpi_;
+        if (tool_ == Tool::Rotate) {
+            int best=-1; f32 bestD=thr;
+            for (int a=0;a<3;++a) {
+                const Vec3 P=kAxisDir[(a+1)%3], Q=kAxisDir[(a+2)%3];
+                f32 pxx=0, pyy=0; bool havePrev=false, first=true; f32 dmin=1e9f;
+                const int N=48;
+                for (int k=0;k<=N;++k) {
+                    const f32 t=k*(kTwoPi/N);
+                    Vec3 wp = origin + (P*std::cos(t) + Q*std::sin(t)) * L; f32 sx, sy;
+                    if (project(wp, sx, sy)) { if (havePrev && !first) { f32 d=distToSeg(mx,my,pxx,pyy,sx,sy); if (d<dmin) dmin=d; } pxx=sx; pyy=sy; havePrev=true; first=false; }
+                    else havePrev=false;
+                }
+                if (dmin<bestD) { bestD=dmin; best=a; }
+            }
+            return best;
+        }
+        // Move / Scale: small centre hotspot, else nearest axis segment.
+        if (std::sqrt((mx-ox)*(mx-ox)+(my-oy)*(my-oy)) < 9.0f*dpi_) return 3;
+        int best=-1; f32 bestD=thr;
+        for (int a=0;a<3;++a) {
+            f32 tx, ty; if (!project(origin + kAxisDir[a]*L, tx, ty)) continue;
+            const f32 d=distToSeg(mx,my,ox,oy,tx,ty);
+            if (d<bestD) { bestD=d; best=a; }
+        }
+        return best;
+    }
+
+    void applyMove(MeshObj& o, f32 dx, f32 dy) {
+        if (activeAxis_ == 3) { // screen-plane move along camera right/up
+            const Vec3 fwd = camForward();
+            const Vec3 s = cross(Vec3{0,0,1}, fwd).getSafeNormal();
+            const Vec3 u = cross(fwd, s);
+            const f32 wpp = 2.0f * std::tan(radians(30.0f)) * dist(eye_, o.pos) / (H_ > 1 ? H_ : 900.0f);
+            o.pos += s * (dx * wpp) + u * (-dy * wpp);
+        } else {
+            const Vec3 A = kAxisDir[activeAxis_];
+            f32 s0x,s0y,s1x,s1y;
+            if (project(o.pos, s0x, s0y) && project(o.pos + A, s1x, s1y)) {
+                const f32 px=s1x-s0x, py=s1y-s0y, pl2=px*px+py*py;
+                if (pl2 > 1e-4f) o.pos += A * ((dx*px + dy*py) / pl2); // pixels -> world units along axis
+            }
+        }
+        if (snapMove_) for (int k=0;k<3;++k) (&o.pos.x)[k] = snapf((&o.pos.x)[k], moveSnap_);
+    }
+    void applyScale(MeshObj& o, f32 dx, f32 dy) {
+        auto bump = [&](int a, f32 amt){ f32& c=(&o.scale.x)[a]; c += amt; if (c<0.02f) c=0.02f; };
+        if (activeAxis_ == 3) { const f32 amt=(dx - dy)/80.0f; for (int a=0;a<3;++a) bump(a, amt); }
+        else {
+            const Vec3 A = kAxisDir[activeAxis_];
+            f32 s0x,s0y,s1x,s1y;
+            if (project(o.pos, s0x, s0y) && project(o.pos + A, s1x, s1y)) {
+                const f32 px=s1x-s0x, py=s1y-s0y, pl=std::sqrt(px*px+py*py);
+                if (pl > 1e-3f) bump(activeAxis_, ((dx*px + dy*py)/pl) / 60.0f);
+            }
+        }
+        if (snapScale_) for (int k=0;k<3;++k) (&o.scale.x)[k] = std::fmax(0.02f, snapf((&o.scale.x)[k], scaleSnap_));
+    }
+    void applyRotate(MeshObj& o, f32 px, f32 py, f32 mx, f32 my) {
+        f32 ox, oy; if (!project(o.pos, ox, oy)) return;
+        const f32 a0=std::atan2(py-oy, px-ox), a1=std::atan2(my-oy, mx-ox);
+        f32 da=a1-a0; while (da> kPi) da-=kTwoPi; while (da< -kPi) da+=kTwoPi;
+        // Screen y is down, so a positive screen angle reads clockwise. Flip by the axis
+        // facing so the object visually follows the cursor around the ring.
+        const f32 s = dot(kAxisDir[activeAxis_], camForward()) >= 0.0f ? 1.0f : -1.0f;
+        f32& comp = (&o.rotDeg.x)[activeAxis_];
+        comp += degrees(da) * s;
+        if (snapRot_) comp = snapf(comp, rotSnap_);
+    }
 
     void handleManip(Engine& e) {
 #if AVER_WITH_IMGUI
         if (!e.device()->uiActive()) return;
         const ImGuiIO& io = ImGui::GetIO();
-        if (ImGui::IsKeyPressed(ImGuiKey_1)) tool_=Tool::Select;
-        if (ImGui::IsKeyPressed(ImGuiKey_2)) tool_=Tool::Move;
-        if (ImGui::IsKeyPressed(ImGuiKey_3)) tool_=Tool::Rotate;
-        if (ImGui::IsKeyPressed(ImGuiKey_4)) tool_=Tool::Scale;
-        if (tool_==Tool::Select) {
-            if (!io.WantCaptureMouse && ImGui::IsMouseClicked(0)) pick(e, io);
-            return;
+        W_ = e.window()?(f32)e.window()->width():1600.f;
+        H_ = e.window()?(f32)e.window()->height():900.f;
+
+        if (!io.WantCaptureKeyboard) {
+            if (ImGui::IsKeyPressed(ImGuiKey_1)) tool_=Tool::Select;
+            if (ImGui::IsKeyPressed(ImGuiKey_2)) tool_=Tool::Move;
+            if (ImGui::IsKeyPressed(ImGuiKey_3)) tool_=Tool::Rotate;
+            if (ImGui::IsKeyPressed(ImGuiKey_4)) tool_=Tool::Scale;
         }
-        if (io.WantCaptureMouse || !io.MouseDown[0]) return;
-        if (sel_<0 || sel_>=(int)objects_.size()) return;
-        MeshObj& o = objects_[sel_]; f32 dx=io.MouseDelta.x, dy=io.MouseDelta.y;
-        if (tool_==Tool::Move){ o.pos.x+=dx*0.02f; o.pos.z-=dy*0.02f; }
-        else if (tool_==Tool::Rotate){ o.rotDeg.z+=dx*0.5f; o.rotDeg.x+=dy*0.5f; }
-        else if (tool_==Tool::Scale){ f32 s=1+dx*0.005f; o.scale=o.scale*(s>0.05f?s:0.05f); }
+        const f32 mx=io.MousePos.x, my=io.MousePos.y;
+
+        // Hover highlight when idle over a handle.
+        hoverAxis_ = -1;
+        if (tool_!=Tool::Select && movableSelected() && !dragging_ && !io.WantCaptureMouse)
+            hoverAxis_ = pickAxis(objects_[sel_].pos, gizmoLen(objects_[sel_].pos), mx, my);
+
+        if (ImGui::IsMouseClicked(0) && !io.WantCaptureMouse) {
+            int ax = -1;
+            if (tool_!=Tool::Select && movableSelected())
+                ax = pickAxis(objects_[sel_].pos, gizmoLen(objects_[sel_].pos), mx, my);
+            if (ax >= 0) { dragging_=true; activeAxis_=ax; prevMouseX_=mx; prevMouseY_=my; }
+            else pick(e, io); // no handle grabbed -> (re)select whatever is under the cursor
+        }
+        if (!io.MouseDown[0]) { dragging_=false; activeAxis_=-1; }
+
+        if (dragging_ && movableSelected()) {
+            MeshObj& o = objects_[sel_];
+            const f32 dx=mx-prevMouseX_, dy=my-prevMouseY_;
+            if (tool_==Tool::Move)        applyMove(o, dx, dy);
+            else if (tool_==Tool::Rotate) applyRotate(o, prevMouseX_, prevMouseY_, mx, my);
+            else if (tool_==Tool::Scale)  applyScale(o, dx, dy);
+            prevMouseX_=mx; prevMouseY_=my;
+        }
 #else
         (void)e;
 #endif
+    }
+
+    void drawGizmo(Engine& e) {
+        if (tool_==Tool::Select || !movableSelected()) return;
+        const Vec3 O = objects_[sel_].pos;
+        const f32 L = gizmoLen(O);
+        const Mat4 w = Mat4::scale(Vec3{L,L,L}) * Mat4::translation(O);
+        const rhi::LineHandle* nrm = tool_==Tool::Move ? gzMove_ : tool_==Tool::Rotate ? gzRot_ : gzScale_;
+        const rhi::LineHandle* hi  = tool_==Tool::Move ? gzMoveHi_ : tool_==Tool::Rotate ? gzRotHi_ : gzScaleHi_;
+        e.device()->setLineDepth(false); // draw gizmo on top of geometry
+        for (int a=0;a<3;++a) {
+            const bool active = (dragging_ && a==activeAxis_) || (!dragging_ && a==hoverAxis_);
+            e.device()->drawLines(active ? hi[a] : nrm[a], &w.m[0][0]);
+        }
+        e.device()->setLineDepth(true);
     }
 
 #if AVER_WITH_IMGUI
@@ -311,6 +485,36 @@ private:
         }
         sel_ = best;
     }
+
+    // A compact vector icon (kind: 0 Select, 1 Move, 2 Rotate, 3 Scale) drawn into a cell.
+    void drawToolGlyph(ImDrawList* dl, ImVec2 p, f32 sz, int kind, ImU32 fg) const {
+        auto P = [&](f32 fx, f32 fy){ return ImVec2(p.x+fx*sz, p.y+fy*sz); };
+        const f32 th = std::fmax(1.6f, 2.0f*dpi_);
+        if (kind == 0) { // pointer/cursor
+            dl->AddTriangleFilled(P(0.30f,0.20f), P(0.30f,0.70f), P(0.45f,0.56f), fg);
+            dl->AddTriangleFilled(P(0.30f,0.20f), P(0.45f,0.56f), P(0.63f,0.49f), fg);
+            dl->AddLine(P(0.47f,0.55f), P(0.61f,0.80f), fg, th*1.6f);
+        } else if (kind == 1) { // 4-way move
+            dl->AddLine(P(0.5f,0.15f), P(0.5f,0.85f), fg, th);
+            dl->AddLine(P(0.15f,0.5f), P(0.85f,0.5f), fg, th);
+            const f32 a = 0.08f*sz;
+            dl->AddTriangleFilled(P(0.5f,0.11f), ImVec2(P(0.5f,0.25f).x-a,P(0.5f,0.25f).y), ImVec2(P(0.5f,0.25f).x+a,P(0.5f,0.25f).y), fg);
+            dl->AddTriangleFilled(P(0.5f,0.89f), ImVec2(P(0.5f,0.75f).x-a,P(0.5f,0.75f).y), ImVec2(P(0.5f,0.75f).x+a,P(0.5f,0.75f).y), fg);
+            dl->AddTriangleFilled(P(0.11f,0.5f), ImVec2(P(0.25f,0.5f).x,P(0.25f,0.5f).y-a), ImVec2(P(0.25f,0.5f).x,P(0.25f,0.5f).y+a), fg);
+            dl->AddTriangleFilled(P(0.89f,0.5f), ImVec2(P(0.75f,0.5f).x,P(0.75f,0.5f).y-a), ImVec2(P(0.75f,0.5f).x,P(0.75f,0.5f).y+a), fg);
+        } else if (kind == 2) { // rotate arc + arrowhead
+            const ImVec2 c = P(0.5f,0.5f); const f32 r = 0.30f*sz;
+            dl->PathArcTo(c, r, -2.30f, 1.15f, 24); dl->PathStroke(fg, 0, th);
+            const f32 ea=1.15f; const ImVec2 end(c.x+std::cos(ea)*r, c.y+std::sin(ea)*r); const f32 a=0.07f*sz;
+            dl->AddTriangleFilled(ImVec2(end.x-a,end.y-a*0.4f), ImVec2(end.x+a*0.6f,end.y-a), ImVec2(end.x+a*0.2f,end.y+a), fg);
+        } else { // scale: diagonal + boxes
+            dl->AddLine(P(0.26f,0.74f), P(0.74f,0.26f), fg, th);
+            const ImVec2 tl=P(0.74f,0.26f); const f32 b=0.10f*sz;
+            dl->AddRectFilled(ImVec2(tl.x-b,tl.y-b), ImVec2(tl.x+b,tl.y+b), fg, 1.5f);
+            const ImVec2 br=P(0.26f,0.74f); const f32 b2=0.07f*sz;
+            dl->AddRect(ImVec2(br.x-b2,br.y-b2), ImVec2(br.x+b2,br.y+b2), fg, 1.0f, 0, th);
+        }
+    }
 #endif
 
     void buildUI(Engine& e) {
@@ -328,23 +532,83 @@ private:
             ImGui::EndMainMenuBar();
         }
 
-        const f32 top = ImGui::GetFrameHeight();
-        // Toolbar (top strip): tool/selection modes — Select first.
-        ImGui::SetNextWindowPos(ImVec2(0, top)); ImGui::SetNextWindowSize(ImVec2(W, 40));
-        ImGui::Begin("##toolbar", nullptr, ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar);
-        for (int i=0;i<4;++i){
-            const bool on = (int)tool_==i;
-            if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.95f,0.42f,0.13f,0.85f));
-            if (ImGui::Button(kToolNames[i], ImVec2(74,24))) tool_=(Tool)i;
-            if (on) ImGui::PopStyleColor();
-            ImGui::SameLine();
+        const f32 menuH = ImGui::GetFrameHeight();
+        const f32 icon = 30.0f*dpi_;
+        const f32 toolbarH = icon + 14.0f*dpi_;
+        const f32 gap = 8.0f*dpi_, tiny = 2.0f*dpi_, caretW = 15.0f*dpi_;
+
+        // Transform toolbar: icon tools tucked in the top-middle, just above the viewport.
+        ImGui::SetNextWindowPos(ImVec2(0, menuH)); ImGui::SetNextWindowSize(ImVec2(W, toolbarH));
+        ImGui::Begin("##toolbar", nullptr, ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|
+                     ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoBringToFrontOnFocus|ImGuiWindowFlags_NoNavFocus);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        auto toolBtn = [&](const char* id, int kind, bool active)->bool {
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton(id, ImVec2(icon, icon));
+            const bool hov = ImGui::IsItemHovered(), clk = ImGui::IsItemClicked();
+            const ImU32 bg = active ? IM_COL32(232,110,35,235) : (hov ? IM_COL32(74,76,82,255) : IM_COL32(48,49,54,255));
+            dl->AddRectFilled(p, ImVec2(p.x+icon,p.y+icon), bg, 5.0f);
+            dl->AddRect(p, ImVec2(p.x+icon,p.y+icon), IM_COL32(0,0,0,120), 5.0f);
+            drawToolGlyph(dl, p, icon, kind, IM_COL32(236,237,240,255));
+            return clk;
+        };
+        auto caretBtn = [&](const char* id, bool on)->bool {
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton(id, ImVec2(caretW, icon));
+            const bool hov = ImGui::IsItemHovered(), clk = ImGui::IsItemClicked();
+            if (hov) dl->AddRectFilled(p, ImVec2(p.x+caretW,p.y+icon), IM_COL32(74,76,82,255), 4.0f);
+            const ImVec2 c(p.x+caretW*0.5f, p.y+icon*0.5f); const f32 s=3.0f*dpi_;
+            const ImU32 col = on ? IM_COL32(232,150,60,255) : IM_COL32(190,191,195,255);
+            dl->AddTriangleFilled(ImVec2(c.x-s,c.y-s*0.6f), ImVec2(c.x+s,c.y-s*0.6f), ImVec2(c.x,c.y+s*0.8f), col);
+            return clk;
+        };
+
+        const f32 groupW = icon + 3.0f*(gap + icon + tiny + caretW);
+        f32 startX = (W - groupW) * 0.5f; if (startX < 8.0f*dpi_) startX = 8.0f*dpi_;
+        ImGui::SetCursorPosY((toolbarH - icon) * 0.5f);
+        ImGui::SetCursorPosX(startX);
+
+        if (toolBtn("##tSel", 0, tool_==Tool::Select)) tool_=Tool::Select;
+        ImGui::SameLine(0, gap);
+        if (toolBtn("##tMove", 1, tool_==Tool::Move)) tool_=Tool::Move;
+        ImGui::SameLine(0, tiny); if (caretBtn("##cMove", snapMove_)) ImGui::OpenPopup("snapMove");
+        ImGui::SameLine(0, gap);
+        if (toolBtn("##tRot", 2, tool_==Tool::Rotate)) tool_=Tool::Rotate;
+        ImGui::SameLine(0, tiny); if (caretBtn("##cRot", snapRot_)) ImGui::OpenPopup("snapRot");
+        ImGui::SameLine(0, gap);
+        if (toolBtn("##tScl", 3, tool_==Tool::Scale)) tool_=Tool::Scale;
+        ImGui::SameLine(0, tiny); if (caretBtn("##cScl", snapScale_)) ImGui::OpenPopup("snapScale");
+
+        if (ImGui::BeginPopup("snapMove")) {
+            ImGui::Checkbox("Grid snap (position)", &snapMove_); ImGui::Separator();
+            const f32 opts[] = {0.1f,0.25f,0.5f,1,2,5,10,50,100};
+            for (f32 f : opts){ char b[24]; std::snprintf(b,sizeof b,"%g units", f); if (ImGui::Selectable(b, moveSnap_==f)){ moveSnap_=f; snapMove_=true; } }
+            ImGui::EndPopup();
         }
-        ImGui::Checkbox("Grid", &showGrid_); ImGui::SameLine();
-        ImGui::Checkbox("Wireframe", &wireframe_); ImGui::SameLine();
-        ImGui::TextDisabled("| RMB: fly (WASD/QE)  wheel: speed  MMB: pan  F: focus   |   1-4 tools, click: select, L-drag: %s", kToolNames[(int)tool_]);
+        if (ImGui::BeginPopup("snapRot")) {
+            ImGui::Checkbox("Angle snap (rotation)", &snapRot_); ImGui::Separator();
+            const f32 opts[] = {1,5,10,15,30,45,90};
+            for (f32 f : opts){ char b[24]; std::snprintf(b,sizeof b,"%g\xC2\xB0", f); if (ImGui::Selectable(b, rotSnap_==f)){ rotSnap_=f; snapRot_=true; } }
+            ImGui::EndPopup();
+        }
+        if (ImGui::BeginPopup("snapScale")) {
+            ImGui::Checkbox("Scale snap", &snapScale_); ImGui::Separator();
+            const f32 opts[] = {0.05f,0.1f,0.25f,0.5f,1};
+            for (f32 f : opts){ char b[24]; std::snprintf(b,sizeof b,"%g", f); if (ImGui::Selectable(b, scaleSnap_==f)){ scaleSnap_=f; snapScale_=true; } }
+            ImGui::EndPopup();
+        }
+
+        // Grid / Wireframe toggles, right-aligned in the same strip (only if they clear the
+        // centred tool group; otherwise they stay reachable from the View menu).
+        if (startX + groupW < W - 240.0f*dpi_) {
+            ImGui::SetCursorPosX(W - 220.0f*dpi_);
+            ImGui::SetCursorPosY((toolbarH - ImGui::GetFrameHeight()) * 0.5f);
+            ImGui::Checkbox("Grid", &showGrid_); ImGui::SameLine(); ImGui::Checkbox("Wireframe", &wireframe_);
+        }
         ImGui::End();
 
-        const f32 y0 = top+40, rightW=320, bottomH=150;
+        const f32 y0 = menuH + toolbarH, rightW = 320.0f*dpi_, bottomH = 150.0f*dpi_;
         // World Outliner (top-right)
         ImGui::SetNextWindowPos(ImVec2(W-rightW, y0)); ImGui::SetNextWindowSize(ImVec2(rightW,(H-y0-bottomH)*0.5f));
         ImGui::Begin("World Outliner");
@@ -382,15 +646,15 @@ private:
         ImGui::SetNextWindowPos(ImVec2(0, H-bottomH)); ImGui::SetNextWindowSize(ImVec2(W, bottomH));
         ImGui::Begin("Output Log");
         const f32 dt=e.time().dt;
-        ImGui::Text("Aver Engine 0.1  |  %s  |  %s", rhi::backendName(e.device()->backend()), e.device()->adapterName());
+        ImGui::Text("Aver Engine 0.1  |  %s  |  %s  |  DPI %.0f%%", rhi::backendName(e.device()->backend()), e.device()->adapterName(), dpi_*100.f);
         ImGui::Text("FPS %.0f (%.2f ms)   objects %zu   tool %s   frame %llu",
                     dt>1e-6f?1.f/dt:0.f, dt*1000.f, objects_.size(), kToolNames[(int)tool_], (unsigned long long)e.time().frame);
         ImGui::End();
 
         // Viewport HUD (bottom-left overlay)
-        ImGui::SetNextWindowPos(ImVec2(10, H-bottomH-30)); ImGui::SetNextWindowBgAlpha(0.35f);
+        ImGui::SetNextWindowPos(ImVec2(10, H-bottomH-30*dpi_)); ImGui::SetNextWindowBgAlpha(0.35f);
         ImGui::Begin("##hud", nullptr, ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoInputs);
-        ImGui::Text("Perspective  |  Lit  |  %s", kToolNames[(int)tool_]);
+        ImGui::Text("Perspective | Lit | %s   \xE2\x80\x94   RMB fly (WASD/QE)  wheel speed  MMB pan  F focus   1-4 tools", kToolNames[(int)tool_]);
         ImGui::End();
 #else
         (void)e;
@@ -412,12 +676,13 @@ private:
     }
 
     u64 maxFrames_; bool headless_; std::string beamPath_, shot_;
+    Tool initialTool_ = Tool::Select;
     std::vector<MeshObj> objects_;
     int sel_ = 1;
     Tool tool_ = Tool::Select;
     // Free-fly editor camera (Unreal-style): position + yaw/pitch, no auto-orbit.
     Vec3 camPos_{7.0f, 7.0f, 4.5f};
-    f32 yaw_ = 0.0f, pitch_ = 0.0f, flySpeed_ = 8.0f;
+    f32 yaw_ = 0.0f, pitch_ = 0.0f, flySpeed_ = 12.0f, lookSpeed_ = 0.005f;
     bool flying_ = false;
     // sun
     f32 sunAz_=0.35f, sunAlt_=0.4f, sunUp_=0.85f, sunColor_[3]={1.0f,0.96f,0.9f}, sunAmbient_=0.28f;
@@ -426,20 +691,36 @@ private:
     f32 fogColor_[3]={0.70f,0.78f,0.88f}, fogDensity_=0.014f;
     bool capDone_=false;
     // editor viewport aids
-    rhi::LineHandle gridMesh_=0, gizmoMesh_=0;
+    rhi::LineHandle gridMesh_=0;
+    rhi::LineHandle gzMove_[3]={0,0,0}, gzMoveHi_[3]={0,0,0};
+    rhi::LineHandle gzRot_[3]={0,0,0}, gzRotHi_[3]={0,0,0};
+    rhi::LineHandle gzScale_[3]={0,0,0}, gzScaleHi_[3]={0,0,0};
     bool showGrid_=true, wireframe_=false;
-    Mat4 invVP_; Vec3 eye_{0,0,0};
+    // gizmo interaction
+    bool dragging_=false; int activeAxis_=-1, hoverAxis_=-1;
+    f32 prevMouseX_=0, prevMouseY_=0;
+    // snapping (off by default; toggled from the toolbar carets)
+    bool snapMove_=false, snapRot_=false, snapScale_=false;
+    f32 moveSnap_=1.0f, rotSnap_=15.0f, scaleSnap_=0.25f;
+    // frame state
+    f32 dpi_=1.0f, W_=1600, H_=900;
+    Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false; std::string beam, shot;
+    u64 frames=0; bool headless=false; std::string beam, shot; Tool tool=Tool::Select;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
+        else if (!std::strcmp(argv[i],"--tool") && i+1<argc) {
+            const char* t=argv[++i];
+            tool = !std::strcmp(t,"move")?Tool::Move : !std::strcmp(t,"rotate")?Tool::Rotate :
+                   !std::strcmp(t,"scale")?Tool::Scale : Tool::Select;
+        }
         else if (argv[i][0]!='-') beam=argv[i];
     }
-    return new SandboxApp(frames, headless, beam, shot);
+    return new SandboxApp(frames, headless, beam, shot, tool);
 }
 
 } // namespace aver

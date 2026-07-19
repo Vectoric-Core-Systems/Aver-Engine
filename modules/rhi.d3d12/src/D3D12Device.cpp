@@ -271,6 +271,7 @@ public:
     LineHandle createLineMesh(const LineVertex* verts, u32 count) override;
     void drawLines(LineHandle mesh, const f32 world[16]) override;
     void setWireframe(bool on) override { wireframe_ = on; }
+    void setLineDepth(bool testDepth) override { lineDepth_ = testDepth; }
 
     void requestCapture(u32 x, u32 y) override { capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
     bool getCapture(f32 out[4]) override {
@@ -325,8 +326,10 @@ private:
     ComPtr<ID3D12PipelineState> skyPso_;
     ComPtr<ID3D12PipelineState> wirePso_;
     ComPtr<ID3D12PipelineState> linePso_;
+    ComPtr<ID3D12PipelineState> lineOverlayPso_; // no depth test: editor gizmos on top
     bool skyEnabled_ = false;
     bool wireframe_ = false;
+    bool lineDepth_ = true;
     std::vector<GpuLineMesh> lineMeshes_;
     ComPtr<ID3D12Resource> frameCBs_[kFrameCount];
     u8* frameCBPtr_[kFrameCount] = {nullptr, nullptr};
@@ -520,6 +523,11 @@ bool D3D12Device::createPipeline() {
     lp.DSVFormat = kDepthFormat;
     lp.SampleDesc.Count = kSampleCount;
     if (!hrOk(device_->CreateGraphicsPipelineState(&lp, IID_PPV_ARGS(&linePso_)), "line pso")) return false;
+
+    // Overlay line PSO: same as above but no depth test — gizmos stay visible on top.
+    lp.DepthStencilState.DepthEnable = FALSE;
+    lp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    if (!hrOk(device_->CreateGraphicsPipelineState(&lp, IID_PPV_ARGS(&lineOverlayPso_)), "line overlay pso")) return false;
 
     // Per-frame constant buffers (one per frame in flight), persistently mapped.
     auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
@@ -727,7 +735,7 @@ LineHandle D3D12Device::createLineMesh(const LineVertex* verts, u32 count) {
 void D3D12Device::drawLines(LineHandle mesh, const f32 world[16]) {
     if (!hasSwapchain_ || mesh == 0 || mesh > lineMeshes_.size()) return;
     const GpuLineMesh& m = lineMeshes_[mesh - 1];
-    cmdList_->SetPipelineState(linePso_.Get());
+    cmdList_->SetPipelineState(lineDepth_ ? linePso_.Get() : lineOverlayPso_.Get());
     cmdList_->SetGraphicsRoot32BitConstants(1, 16, world, 0); // gWorld only
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
     cmdList_->IASetVertexBuffers(0, 1, &m.vbv);

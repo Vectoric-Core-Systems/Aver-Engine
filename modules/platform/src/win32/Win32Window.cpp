@@ -9,6 +9,43 @@ namespace aver {
 
 static const wchar_t* kClassName = L"AverEngineWindow";
 
+// Make the process per-monitor DPI aware (once) so the OS never bitmap-upscales our
+// window — that virtualisation is what makes a hi-DPI viewport look soft and feel
+// sluggish. Done dynamically so we still link/run on older Windows.
+static void enableDpiAwareness() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+        using SetCtxFn = BOOL(WINAPI*)(void*); // SetProcessDpiAwarenessContext
+        if (auto set = reinterpret_cast<SetCtxFn>(reinterpret_cast<void*>(
+                GetProcAddress(user32, "SetProcessDpiAwarenessContext")))) {
+            // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4
+            if (set(reinterpret_cast<void*>(static_cast<intptr_t>(-4)))) return;
+            set(reinterpret_cast<void*>(static_cast<intptr_t>(-3))); // ..._PER_MONITOR_AWARE
+            return;
+        }
+    }
+    SetProcessDPIAware(); // legacy fallback (system-DPI aware)
+}
+
+// Query a window's DPI scale (1.0 == 96 DPI). GetDpiForWindow is Win10+; fall back to
+// the device-context DPI otherwise.
+static f32 queryDpiScale(HWND hwnd) {
+    if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+        using GetDpiFn = UINT(WINAPI*)(HWND);
+        if (auto get = reinterpret_cast<GetDpiFn>(reinterpret_cast<void*>(
+                GetProcAddress(user32, "GetDpiForWindow")))) {
+            const UINT dpi = get(hwnd);
+            if (dpi) return static_cast<f32>(dpi) / 96.0f;
+        }
+    }
+    HDC dc = GetDC(hwnd);
+    const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSX) : 96;
+    if (dc) ReleaseDC(hwnd, dc);
+    return dpi ? static_cast<f32>(dpi) / 96.0f : 1.0f;
+}
+
 static std::wstring utf8ToWide(const std::string& s) {
     if (s.empty()) return {};
     const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
@@ -47,6 +84,15 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             self->dispatch(e);
             return 0;
         }
+        case WM_DPICHANGED: {
+            // Monitor changed / DPI changed: adopt the OS-suggested window rect and record
+            // the new scale so the UI rescales. A WM_SIZE follows and resizes the swapchain.
+            self->setDpiScale(static_cast<f32>(HIWORD(wParam)) / 96.0f);
+            const RECT* r = reinterpret_cast<const RECT*>(lParam);
+            SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            return 0;
+        }
         case WM_KEYDOWN:
         case WM_KEYUP: {
             Event e; e.type = EventType::Key;
@@ -76,6 +122,7 @@ void Window::dispatch(const Event& e) {
 }
 
 bool Window::create(const WindowDesc& desc) {
+    enableDpiAwareness(); // must precede any window creation
     HINSTANCE inst = GetModuleHandleW(nullptr);
 
     WNDCLASSEXW wc = {};
@@ -110,6 +157,28 @@ bool Window::create(const WindowDesc& desc) {
     nativeHandle_ = hwnd;
     width_ = desc.width;
     height_ = desc.height;
+    dpiScale_ = queryDpiScale(hwnd);
+
+    // The requested size is a logical (96-DPI) design size. Scale it to the display's DPI
+    // so the window opens at a sensible physical size, then clamp to the monitor work area
+    // and centre it (a 1600x900 physical window on a 300% display would be unusably small).
+    {
+        int cw = static_cast<int>(desc.width * dpiScale_ + 0.5f);
+        int ch = static_cast<int>(desc.height * dpiScale_ + 0.5f);
+        MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+            const int waW = mi.rcWork.right - mi.rcWork.left;
+            const int waH = mi.rcWork.bottom - mi.rcWork.top;
+            if (cw > waW * 92 / 100) cw = waW * 92 / 100;
+            if (ch > waH * 92 / 100) ch = waH * 92 / 100;
+            RECT wr = {0, 0, cw, ch};
+            AdjustWindowRect(&wr, style, FALSE);
+            const int winW = wr.right - wr.left, winH = wr.bottom - wr.top;
+            const int x = mi.rcWork.left + (waW - winW) / 2;
+            const int y = mi.rcWork.top + (waH - winH) / 2;
+            SetWindowPos(hwnd, nullptr, x, y, winW, winH, SWP_NOZORDER | SWP_NOACTIVATE); // WM_SIZE updates width_/height_
+        }
+    }
 
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);

@@ -100,6 +100,10 @@ public:
     // Render subsequent meshes as wireframe until toggled off.
     virtual void setWireframe(bool on) { (void)on; }
 
+    // Line depth testing. Default true (grids occlude behind geometry); set false to draw
+    // subsequent lines as an always-on-top overlay (editor gizmos) until toggled back on.
+    virtual void setLineDepth(bool testDepth) { (void)testDepth; }
+
     // Verification: capture the backbuffer pixel at (x,y) during the next presented
     // frame. Poll getCapture() afterward. Lets tests confirm objects actually rasterize.
     virtual void requestCapture(u32 x, u32 y) { (void)x; (void)y; }

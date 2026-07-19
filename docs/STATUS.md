@@ -77,21 +77,34 @@ Content lives OUTSIDE the engine: example project at
 - Shaders: HLSL compiled at runtime with **D3DCompile → SM5.1 DXBC** (DXC/SM6 later).
 - RHI API: `createDevice/createSwapchain/beginFrame/endFrame`, `setClearColor/setCamera
   (viewProj,invViewProj,camPos)/setLight/setSky`, `createMesh/drawMesh(mesh,world,color,
-  metallic,roughness)/createLineMesh/drawLines/setWireframe`, `uiInit/uiNewFrame/uiShutdown/
+  metallic,roughness)/createLineMesh/drawLines/setWireframe/setLineDepth`, `uiInit/uiNewFrame/uiShutdown/
   uiWantsMouse/uiActive`, `requestCapture/getCapture/getFrameImage` (PNG via stb).
 - Verified ~60 FPS on **AMD Radeon RX 7800 XT**.
 
 ## 4. Editor (sandbox) — implemented
 
 Dear ImGui (docking) hosted inside the D3D12 backend; dark Unreal-style theme.
-- Menu bar (AE badge), toolbar with **Select first/active** (Move/Rotate/Scale, keys 1-4)
-  + Grid/Wireframe checkboxes, World Outliner, Details (live transform/color/metallic/
-  roughness, or sun & sky params), Output Log, viewport HUD.
+- **DPI-aware**: the process is per-monitor DPI aware (Win32Window), the window opens at a
+  DPI-scaled logical size clamped to the monitor work area, and ImGui is scaled by
+  `Window::dpiScale()` (`ScaleAllSizes` + `FontGlobalScale`). Fixes the soft/sluggish
+  bitmap-upscaled viewport on hi-DPI displays (dev machine reports 300%).
+- **Icon toolbar** tucked top-centre just under the menu bar: vector-drawn Unreal-style
+  icons (Select ▸ Move ▸ Rotate ▸ Scale), each transform tool with a **snap dropdown caret**
+  (grid/angle/scale increments, toggleable). Keys 1-4. Grid/Wireframe right-aligned.
+- **Per-mode 3D gizmos** at the selection, drawn as an always-on-top overlay
+  (`setLineDepth(false)`): Move = axis arrows, Rotate = 3 rings, Scale = axis + end-boxes.
+  Only the active tool's gizmo shows; hovered/active axis highlights amber.
+- **Axis-constrained manipulation** (screen-projection drag): grab an axis handle to move/
+  scale along it, the centre handle for screen-plane move / uniform scale; Rotate follows the
+  cursor around the ring. Optional snapping. X=fwd(red), Y=right(green), Z=up(blue).
+- Panels: World Outliner, Details (live transform/color/metallic/roughness, or sun & sky),
+  Output Log, viewport HUD.
 - **Free-fly camera** (Unreal-style, NOT orbit): RMB look + WASD/QE fly (wheel = speed);
   wheel dollies; MMB pans; F focuses selection. No auto-orbit.
 - **Click-to-pick** selection (camera ray vs per-object local AABB via inverse world).
-- **Transform gizmo** (RGB axes) at selection; **ground grid** with world axes.
 - Default scene ("blank map") = ground floor + cube + directional sun + sky + fog.
+- Dev/testing arg: `--tool <select|move|rotate|scale>` opens straight into a tool (used for
+  screenshot verification since headless capture can't inject mouse input).
 
 ## 5. Formats — implemented loaders
 
@@ -140,6 +153,15 @@ ab2264a Aver Engine foundation: modular core + .oc* format loaders
   `ImGui_ImplWin32_WndProcHandler`; link `dwmapi imm32`.
 - MSAA color AND depth must share the sample count; ImGui renders 1x on the resolved backbuffer.
 - Editor camera is free-fly, NOT orbit — do not reintroduce auto-orbit.
+- Process must stay per-monitor DPI aware (Win32Window `enableDpiAwareness`); window sizing
+  is DPI-scaled + work-area-clamped. Don't create the window before awareness is set, and
+  don't feed logical coords to the swapchain (window width/height are physical pixels).
+- Gizmos render via a no-depth overlay line PSO (`setLineDepth(false)`); toggle depth back on
+  after so the grid still occludes correctly. Line meshes are prebuilt in `onInit` (never
+  per-frame — `createLineMesh` never frees).
+- Gizmo manipulation is drag-anywhere-on-handle (screen-projection), not full 3D handle
+  raycast. Rotate increments a world-axis Euler component (exact only when other Euler
+  components are 0) — acceptable for now; revisit with quaternion objects.
 - `.rc` needs `enable_language(RC)`; RC path is relative to the .rc file.
 - Line endings: Git warns LF→CRLF (harmless).
 
