@@ -26,11 +26,20 @@ public:
     const Timestep& time() const { return time_; }
 
 private:
+    // One frame: sync swapchain to the window size, update, render, present. Runs from the
+    // main loop AND from the window's modal-loop timer so the viewport keeps rendering while
+    // the OS is dragging/sizing/maximising the window (otherwise it appears frozen).
+    void frameStep();
+    static void renderTickThunk(void* self);
+
     Window* window_ = nullptr;
     rhi::IDevice* device_ = nullptr;
     rhi::ISwapchain* swapchain_ = nullptr;
+    Application* app_ = nullptr;
+    Clock frameClock_;
     Timestep time_;
     bool exit_ = false;
+    bool inFrame_ = false;
 };
 
 } // namespace aver

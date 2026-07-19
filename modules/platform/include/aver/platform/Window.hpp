@@ -46,6 +46,13 @@ public:
     void setMessageHook(MessageHook h) { messageHook_ = h; }
     MessageHook messageHook() const { return messageHook_; }
 
+    // Render-tick callback: invoked while the OS is running a modal move/size loop (which
+    // otherwise blocks the engine's frame loop and freezes the viewport). Plain fn-ptr so
+    // Platform stays free of any Runtime dependency.
+    using RenderTickFn = void (*)(void* user);
+    void setRenderTick(RenderTickFn fn, void* user) { renderTick_ = fn; renderTickUser_ = user; }
+    void onRenderTick() { if (renderTick_) renderTick_(renderTickUser_); }
+
     // Internal: invoked by the platform message handler.
     void dispatch(const Event& e);
     void setDpiScale(f32 s) { dpiScale_ = s; }
@@ -59,6 +66,8 @@ private:
     EventCallback callback_ = nullptr;
     void* callbackUser_ = nullptr;
     MessageHook messageHook_ = nullptr;
+    RenderTickFn renderTick_ = nullptr;
+    void* renderTickUser_ = nullptr;
 };
 
 } // namespace aver

@@ -53,44 +53,28 @@ int Engine::run(Application* app) {
         }
     }
 
+    app_ = app;
     app->onInit(*this);
+    // Render one frame per modal-loop timer tick so drag/size/maximise doesn't freeze the view.
+    if (window_) window_->setRenderTick(&Engine::renderTickThunk, this);
     if (!cfg.headless) splash.close(1100); // keep the splash up briefly, then reveal the editor
 
     // --- Frame loop ---
-    Clock frameClock;
+    frameClock_ = Clock{};
     time_ = {};
     while (!exit_) {
         if (window_) {
             window_->pumpEvents();
             if (window_->shouldClose()) break;
-            // Forward window resizes to the swapchain (no-op for the Null backend).
-            if (swapchain_) {
-                const u32 w = window_->width(), h = window_->height();
-                if (w != 0 && h != 0 && (w != swapchain_->width() || h != swapchain_->height())) {
-                    swapchain_->resize(w, h);
-                }
-            }
         }
-
-        const f64 dt = frameClock.restart();
-        time_.dt = static_cast<f32>(dt);
-        time_.total += time_.dt;
-        time_.frame += 1;
-
-        app->onUpdate(*this, time_);
-
-        device_->beginFrame();
-        device_->uiNewFrame();   // ImGui NewFrame; the app builds widgets in onRender
-        app->onRender(*this);
-        device_->endFrame();     // records ImGui draw data before present
-        if (swapchain_) swapchain_->present();
-
+        frameStep();
         if (cfg.maxFrames != 0 && time_.frame >= cfg.maxFrames) {
             AVER_INFO("[Engine] reached maxFrames={}, exiting", cfg.maxFrames);
             break;
         }
     }
 
+    if (window_) window_->setRenderTick(nullptr, nullptr);
     app->onShutdown(*this);
 
     delete swapchain_;
@@ -105,6 +89,37 @@ int Engine::run(Application* app) {
 
     AVER_INFO("Aver Engine stopped after {} frame(s)", time_.frame);
     return 0;
+}
+
+void Engine::frameStep() {
+    if (!device_ || !app_ || inFrame_) return; // guard re-entrancy (timer tick vs main loop)
+    inFrame_ = true;
+
+    // Keep the swapchain matched to the window's client size (physical pixels).
+    if (window_ && swapchain_) {
+        const u32 w = window_->width(), h = window_->height();
+        if (w != 0 && h != 0 && (w != swapchain_->width() || h != swapchain_->height()))
+            swapchain_->resize(w, h);
+    }
+
+    const f64 dt = frameClock_.restart();
+    time_.dt = static_cast<f32>(dt);
+    time_.total += time_.dt;
+    time_.frame += 1;
+
+    app_->onUpdate(*this, time_);
+    device_->beginFrame();
+    device_->uiNewFrame();   // ImGui NewFrame; the app builds widgets in onRender
+    app_->onRender(*this);
+    device_->endFrame();     // records ImGui draw data before present
+    if (swapchain_) swapchain_->present();
+
+    inFrame_ = false;
+}
+
+void Engine::renderTickThunk(void* self) {
+    auto* e = static_cast<Engine*>(self);
+    if (e && !e->exit_) e->frameStep();
 }
 
 } // namespace aver

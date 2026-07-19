@@ -156,6 +156,12 @@ ab2264a Aver Engine foundation: modular core + .oc* format loaders
 - Process must stay per-monitor DPI aware (Win32Window `enableDpiAwareness`); window sizing
   is DPI-scaled + work-area-clamped. Don't create the window before awareness is set, and
   don't feed logical coords to the swapchain (window width/height are physical pixels).
+- **Modal-loop rendering**: a window drag/resize/maximise runs the OS's own message pump
+  inside `DefWindowProc`, which starves the engine frame loop and freezes the viewport. Fixed
+  by `Engine::frameStep()` (the extracted per-frame body) being driven from a `WM_TIMER` set
+  on `WM_ENTERSIZEMOVE`..`WM_EXITSIZEMOVE` and from `WM_SIZE`, via `Window::setRenderTick`.
+  `frameStep()` is re-entrancy guarded (`inFrame_`). Don't move the frame body back inline or
+  the freeze returns; don't call `pumpEvents` from the tick (the modal loop already pumps).
 - Gizmos render via a no-depth overlay line PSO (`setLineDepth(false)`); toggle depth back on
   after so the grid still occludes correctly. Line meshes are prebuilt in `onInit` (never
   per-frame — `createLineMesh` never frees).

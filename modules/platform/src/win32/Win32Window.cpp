@@ -82,8 +82,17 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             Event e; e.type = EventType::WindowResize;
             e.width = LOWORD(lParam); e.height = HIWORD(lParam);
             self->dispatch(e);
+            // Repaint immediately at the new size (maximise/restore/snap happen outside the
+            // main loop's control flow, so render here or the view shows a stale frame).
+            if (wParam != SIZE_MINIMIZED) self->onRenderTick();
             return 0;
         }
+        // A modal move/size loop runs its own message pump inside DefWindowProc, starving the
+        // engine's frame loop. Drive rendering from a timer for its duration so the viewport
+        // keeps updating live instead of freezing.
+        case WM_ENTERSIZEMOVE: SetTimer(hwnd, 1, USER_TIMER_MINIMUM, nullptr); return 0;
+        case WM_EXITSIZEMOVE:  KillTimer(hwnd, 1); return 0;
+        case WM_TIMER: if (wParam == 1) { self->onRenderTick(); return 0; } break;
         case WM_DPICHANGED: {
             // Monitor changed / DPI changed: adopt the OS-suggested window rect and record
             // the new scale so the UI rescales. A WM_SIZE follows and resizes the swapchain.
