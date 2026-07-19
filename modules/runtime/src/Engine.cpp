@@ -51,6 +51,13 @@ int Engine::run(Application* app) {
         if (window_) {
             window_->pumpEvents();
             if (window_->shouldClose()) break;
+            // Forward window resizes to the swapchain (no-op for the Null backend).
+            if (swapchain_) {
+                const u32 w = window_->width(), h = window_->height();
+                if (w != 0 && h != 0 && (w != swapchain_->width() || h != swapchain_->height())) {
+                    swapchain_->resize(w, h);
+                }
+            }
         }
 
         const f64 dt = frameClock.restart();

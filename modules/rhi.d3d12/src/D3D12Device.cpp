@@ -1,14 +1,620 @@
+// DirectX 12 backend for Aver.RHI — device, swapchain, depth buffer, a lit-mesh
+// pipeline (HLSL Lambert shading compiled at runtime), immediate draw path, an
+// offscreen GPU self-test, and a backbuffer capture for verification. Hand-rolled
+// D3D12 structs (no d3dx12.h). Falls back to nullptr if D3D12 is unavailable.
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
 
-// Phase 1 stub. Returning nullptr makes createDevice() fall through to the next
-// preferred backend (ultimately Null). Phase 3 implements the real D3D12 device
-// (DXGI factory, ID3D12Device, command queues, swapchain) here.
-namespace aver::rhi::detail {
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#include <d3dcompiler.h>
+#include <wrl/client.h>
 
-IDevice* createD3D12Device(const DeviceDesc&) {
-    AVER_TRACE("[RHI.D3D12] backend stub — real device arrives in Phase 3");
-    return nullptr;
+#include <cstring>
+#include <string>
+#include <vector>
+
+using Microsoft::WRL::ComPtr;
+
+namespace aver::rhi {
+namespace {
+
+constexpr u32 kFrameCount = 2;
+constexpr DXGI_FORMAT kBackbufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
+
+bool hrOk(HRESULT hr, const char* what) {
+    if (FAILED(hr)) { AVER_ERROR("[RHI.D3D12] {} failed (hr=0x{:08X})", what, static_cast<u32>(hr)); return false; }
+    return true;
 }
 
-} // namespace aver::rhi::detail
+D3D12_RESOURCE_BARRIER transition(ID3D12Resource* res, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = res;
+    b.Transition.StateBefore = before;
+    b.Transition.StateAfter = after;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    return b;
+}
+
+D3D12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE type) {
+    D3D12_HEAP_PROPERTIES p{};
+    p.Type = type;
+    p.CreationNodeMask = 1;
+    p.VisibleNodeMask = 1;
+    return p;
+}
+
+D3D12_RESOURCE_DESC bufferDesc(u64 bytes) {
+    D3D12_RESOURCE_DESC d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = bytes;
+    d.Height = 1;
+    d.DepthOrArraySize = 1;
+    d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    return d;
+}
+
+const char* kShaderHLSL = R"(
+cbuffer PerFrame : register(b0) {
+    float4x4 gViewProj;
+    float4   gLightDir;    // xyz = direction TO light
+    float4   gLightColor;  // rgb
+    float4   gAmbient;     // rgb
+};
+cbuffer PerObject : register(b1) {
+    float4x4 gWorld;
+    float4   gBaseColor;
+};
+struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; };
+struct VSOut { float4 pos : SV_POSITION; float3 nrmWS : NORMAL; };
+
+VSOut VSMain(VSIn i) {
+    VSOut o;
+    float4 wp = mul(float4(i.pos, 1.0), gWorld);
+    o.pos = mul(wp, gViewProj);
+    o.nrmWS = mul(float4(i.nrm, 0.0), gWorld).xyz;
+    return o;
+}
+float4 PSMain(VSOut i) : SV_TARGET {
+    float3 N = normalize(i.nrmWS);
+    float ndl = saturate(dot(N, normalize(gLightDir.xyz)));
+    float3 col = gBaseColor.rgb * (gAmbient.rgb + gLightColor.rgb * ndl);
+    return float4(col, gBaseColor.a);
+}
+)";
+
+struct PerFrameCB {
+    f32 viewProj[16];
+    f32 lightDir[4];
+    f32 lightColor[4];
+    f32 ambient[4];
+};
+
+struct GpuMesh {
+    ComPtr<ID3D12Resource> vb;
+    ComPtr<ID3D12Resource> ib;
+    D3D12_VERTEX_BUFFER_VIEW vbv{};
+    D3D12_INDEX_BUFFER_VIEW ibv{};
+    u32 indexCount = 0;
+};
+
+class D3D12Device;
+
+class D3D12Swapchain final : public ISwapchain {
+public:
+    explicit D3D12Swapchain(D3D12Device* dev) : dev_(dev) {}
+    void present() override;
+    void resize(u32 w, u32 h) override;
+    u32 width() const override;
+    u32 height() const override;
+private:
+    D3D12Device* dev_;
+};
+
+class D3D12Device final : public IDevice {
+public:
+    bool init(const DeviceDesc& desc);
+    ~D3D12Device() override { waitForGpu(); if (fenceEvent_) CloseHandle(fenceEvent_); }
+
+    Backend backend() const override { return Backend::D3D12; }
+    const char* adapterName() const override { return adapterName_.c_str(); }
+
+    ISwapchain* createSwapchain(const SwapchainDesc& d) override {
+        if (!createSwapchainResources(d)) return nullptr;
+        return new D3D12Swapchain(this);
+    }
+
+    void setClearColor(f32 r, f32 g, f32 b, f32 a) override { clear_[0] = r; clear_[1] = g; clear_[2] = b; clear_[3] = a; }
+
+    void setCamera(const f32 viewProj[16], const f32 camPos[3]) override {
+        std::memcpy(frameCB_.viewProj, viewProj, sizeof(frameCB_.viewProj));
+        (void)camPos;
+    }
+    void setLight(const f32 dir[3], const f32 color[3], f32 ambient) override {
+        frameCB_.lightDir[0] = dir[0]; frameCB_.lightDir[1] = dir[1]; frameCB_.lightDir[2] = dir[2]; frameCB_.lightDir[3] = 0;
+        frameCB_.lightColor[0] = color[0]; frameCB_.lightColor[1] = color[1]; frameCB_.lightColor[2] = color[2]; frameCB_.lightColor[3] = 0;
+        frameCB_.ambient[0] = frameCB_.ambient[1] = frameCB_.ambient[2] = ambient; frameCB_.ambient[3] = 0;
+    }
+
+    MeshHandle createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override;
+    void drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4]) override;
+
+    void requestCapture(u32 x, u32 y) override { capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
+    bool getCapture(f32 out[4]) override {
+        if (!captureReady_) return false;
+        for (int i = 0; i < 4; ++i) out[i] = captured_[i];
+        return true;
+    }
+
+    void beginFrame() override;
+    void endFrame() override;
+    void present();
+    void resize(u32 w, u32 h);
+    u32 width() const { return width_; }
+    u32 height() const { return height_; }
+
+    bool selfTest(const f32 in[4], f32 out[4]) override;
+
+private:
+    bool createPipeline();
+    bool createSwapchainResources(const SwapchainDesc& d);
+    void createRenderTargetViews();
+    bool createDepthBuffer();
+    void moveToNextFrame();
+    void waitForGpu();
+
+    ComPtr<IDXGIFactory6> factory_;
+    ComPtr<ID3D12Device> device_;
+    ComPtr<ID3D12CommandQueue> queue_;
+    ComPtr<IDXGISwapChain3> swapChain_;
+    ComPtr<ID3D12DescriptorHeap> rtvHeap_;
+    ComPtr<ID3D12DescriptorHeap> dsvHeap_;
+    ComPtr<ID3D12Resource> renderTargets_[kFrameCount];
+    ComPtr<ID3D12Resource> depthBuffer_;
+    ComPtr<ID3D12CommandAllocator> allocators_[kFrameCount];
+    ComPtr<ID3D12GraphicsCommandList> cmdList_;
+    ComPtr<ID3D12Fence> fence_;
+    HANDLE fenceEvent_ = nullptr;
+    u64 fenceValues_[kFrameCount] = {0, 0};
+    u32 frameIndex_ = 0;
+    u32 rtvSize_ = 0;
+
+    ComPtr<ID3D12RootSignature> rootSig_;
+    ComPtr<ID3D12PipelineState> pso_;
+    ComPtr<ID3D12Resource> frameCBs_[kFrameCount];
+    u8* frameCBPtr_[kFrameCount] = {nullptr, nullptr};
+
+    ComPtr<ID3D12Resource> captureBuf_;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT captureFp_{};
+    bool captureReq_ = false, captureReady_ = false;
+    u32 capX_ = 0, capY_ = 0;
+    f32 captured_[4] = {0, 0, 0, 0};
+
+    std::vector<GpuMesh> meshes_;
+    PerFrameCB frameCB_{};
+    u32 width_ = 0, height_ = 0;
+    bool hasSwapchain_ = false;
+    f32 clear_[4] = {0.10f, 0.12f, 0.16f, 1.0f};
+    std::string adapterName_ = "D3D12 Device";
+};
+
+void D3D12Swapchain::present() { dev_->present(); }
+void D3D12Swapchain::resize(u32 w, u32 h) { dev_->resize(w, h); }
+u32 D3D12Swapchain::width() const { return dev_->width(); }
+u32 D3D12Swapchain::height() const { return dev_->height(); }
+
+bool D3D12Device::init(const DeviceDesc& desc) {
+    UINT factoryFlags = 0;
+    if (desc.enableDebug) {
+        ComPtr<ID3D12Debug> dbg;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) {
+            dbg->EnableDebugLayer();
+            factoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+            AVER_TRACE("[RHI.D3D12] debug layer enabled");
+        }
+    }
+    if (!hrOk(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&factory_)), "CreateDXGIFactory2")) return false;
+
+    ComPtr<IDXGIAdapter1> adapter;
+    for (UINT i = 0; factory_->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)) != DXGI_ERROR_NOT_FOUND; ++i) {
+        DXGI_ADAPTER_DESC1 ad{};
+        adapter->GetDesc1(&ad);
+        if (ad.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) { adapter.Reset(); continue; }
+        if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_)))) {
+            char name[128];
+            std::wcstombs(name, ad.Description, sizeof(name) - 1);
+            name[sizeof(name) - 1] = '\0';
+            adapterName_ = name;
+            break;
+        }
+        adapter.Reset();
+    }
+    if (!device_) { AVER_WARN("[RHI.D3D12] no compatible hardware adapter"); return false; }
+
+    D3D12_COMMAND_QUEUE_DESC qd{};
+    qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    if (!hrOk(device_->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue_)), "CreateCommandQueue")) return false;
+
+    if (!hrOk(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)), "CreateFence")) return false;
+    fenceEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!fenceEvent_) { AVER_ERROR("[RHI.D3D12] CreateEvent failed"); return false; }
+
+    // Sensible default light so meshes are lit before the app sets one.
+    const f32 d[3] = {0.3f, 0.4f, 0.85f}, c[3] = {1, 1, 1};
+    setLight(d, c, 0.15f);
+
+    if (!createPipeline()) return false;
+
+    AVER_INFO("[RHI.D3D12] device ready on adapter '{}'", adapterName_);
+    return true;
+}
+
+bool D3D12Device::createPipeline() {
+    // Root signature: b0 = per-frame CBV, b1 = 20 root constants (world + colour).
+    D3D12_ROOT_PARAMETER params[2] = {};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    params[0].Descriptor.ShaderRegister = 0;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[1].Constants.ShaderRegister = 1;
+    params[1].Constants.Num32BitValues = 20;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_ROOT_SIGNATURE_DESC rsd{};
+    rsd.NumParameters = 2;
+    rsd.pParameters = params;
+    rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ComPtr<ID3DBlob> rsBlob, rsErr;
+    if (!hrOk(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &rsBlob, &rsErr), "SerializeRootSignature")) return false;
+    if (!hrOk(device_->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(&rootSig_)), "CreateRootSignature")) return false;
+
+    UINT compileFlags = D3DCOMPILE_PACK_MATRIX_ROW_MAJOR | D3DCOMPILE_ENABLE_STRICTNESS;
+    ComPtr<ID3DBlob> vs, ps, err;
+    if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, "VSMain", "vs_5_1", compileFlags, 0, &vs, &err))) {
+        AVER_ERROR("[RHI.D3D12] VS compile: {}", err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+        return false;
+    }
+    if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, "PSMain", "ps_5_1", compileFlags, 0, &ps, &err))) {
+        AVER_ERROR("[RHI.D3D12] PS compile: {}", err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+        return false;
+    }
+
+    D3D12_INPUT_ELEMENT_DESC layout[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.pRootSignature = rootSig_.Get();
+    pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+    pso.InputLayout = {layout, 2};
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.DepthStencilState.DepthEnable = TRUE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = kBackbufferFormat;
+    pso.DSVFormat = kDepthFormat;
+    pso.SampleDesc.Count = 1;
+    if (!hrOk(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pso_)), "CreateGraphicsPipelineState")) return false;
+
+    // Per-frame constant buffers (one per frame in flight), persistently mapped.
+    auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+    auto cbd = bufferDesc(256);
+    for (u32 i = 0; i < kFrameCount; ++i) {
+        if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &cbd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&frameCBs_[i])), "create per-frame CB")) return false;
+        D3D12_RANGE none{0, 0};
+        frameCBs_[i]->Map(0, &none, reinterpret_cast<void**>(&frameCBPtr_[i]));
+    }
+    return true;
+}
+
+bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
+    if (!d.windowHandle) { AVER_WARN("[RHI.D3D12] createSwapchain without a window (headless)"); return false; }
+    width_ = d.width; height_ = d.height;
+
+    DXGI_SWAP_CHAIN_DESC1 sd{};
+    sd.Width = width_; sd.Height = height_;
+    sd.Format = kBackbufferFormat;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.BufferCount = kFrameCount;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    sd.SampleDesc.Count = 1;
+
+    HWND hwnd = static_cast<HWND>(d.windowHandle);
+    ComPtr<IDXGISwapChain1> sc1;
+    if (!hrOk(factory_->CreateSwapChainForHwnd(queue_.Get(), hwnd, &sd, nullptr, nullptr, &sc1), "CreateSwapChainForHwnd")) return false;
+    factory_->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+    if (!hrOk(sc1.As(&swapChain_), "As IDXGISwapChain3")) return false;
+    frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
+
+    D3D12_DESCRIPTOR_HEAP_DESC hd{};
+    hd.NumDescriptors = kFrameCount;
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    if (!hrOk(device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&rtvHeap_)), "RTV heap")) return false;
+    rtvSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
+    D3D12_DESCRIPTOR_HEAP_DESC dd{};
+    dd.NumDescriptors = 1;
+    dd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    if (!hrOk(device_->CreateDescriptorHeap(&dd, IID_PPV_ARGS(&dsvHeap_)), "DSV heap")) return false;
+
+    createRenderTargetViews();
+    if (!createDepthBuffer()) return false;
+
+    for (u32 i = 0; i < kFrameCount; ++i) {
+        if (!hrOk(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocators_[i])), "CreateCommandAllocator")) return false;
+    }
+    if (!hrOk(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocators_[0].Get(), nullptr, IID_PPV_ARGS(&cmdList_)), "CreateCommandList")) return false;
+    cmdList_->Close();
+
+    // Capture readback buffer sized to the backbuffer footprint.
+    D3D12_RESOURCE_DESC bbDesc = renderTargets_[0]->GetDesc();
+    UINT64 total = 0;
+    device_->GetCopyableFootprints(&bbDesc, 0, 1, 0, &captureFp_, nullptr, nullptr, &total);
+    auto rbHeap = heapProps(D3D12_HEAP_TYPE_READBACK);
+    auto rbDesc = bufferDesc(total);
+    hrOk(device_->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &rbDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&captureBuf_)), "capture buffer");
+
+    fenceValues_[frameIndex_] = 1;
+    hasSwapchain_ = true;
+    AVER_INFO("[RHI.D3D12] swapchain {}x{} + depth (D32) ({} buffers, FLIP_DISCARD)", width_, height_, kFrameCount);
+    return true;
+}
+
+void D3D12Device::createRenderTargetViews() {
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
+    for (u32 i = 0; i < kFrameCount; ++i) {
+        swapChain_->GetBuffer(i, IID_PPV_ARGS(&renderTargets_[i]));
+        device_->CreateRenderTargetView(renderTargets_[i].Get(), nullptr, rtv);
+        rtv.ptr += rtvSize_;
+    }
+}
+
+bool D3D12Device::createDepthBuffer() {
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = width_; td.Height = height_;
+    td.DepthOrArraySize = 1; td.MipLevels = 1;
+    td.Format = kDepthFormat; td.SampleDesc.Count = 1;
+    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+    D3D12_CLEAR_VALUE cv{}; cv.Format = kDepthFormat; cv.DepthStencil.Depth = 1.0f;
+    auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+    if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv, IID_PPV_ARGS(&depthBuffer_)), "depth buffer")) return false;
+    device_->CreateDepthStencilView(depthBuffer_.Get(), nullptr, dsvHeap_->GetCPUDescriptorHandleForHeapStart());
+    return true;
+}
+
+MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) {
+    if (!device_ || vcount == 0 || icount == 0) return 0;
+    GpuMesh m;
+    m.indexCount = icount;
+    const u64 vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
+    const u64 ibytes = static_cast<u64>(icount) * sizeof(u32);
+    auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+
+    auto vd = bufferDesc(vbytes);
+    if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &vd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m.vb)), "mesh VB")) return 0;
+    auto id = bufferDesc(ibytes);
+    if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &id, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m.ib)), "mesh IB")) return 0;
+
+    void* p = nullptr;
+    D3D12_RANGE none{0, 0};
+    m.vb->Map(0, &none, &p); std::memcpy(p, verts, vbytes); m.vb->Unmap(0, nullptr);
+    m.ib->Map(0, &none, &p); std::memcpy(p, indices, ibytes); m.ib->Unmap(0, nullptr);
+
+    m.vbv.BufferLocation = m.vb->GetGPUVirtualAddress();
+    m.vbv.SizeInBytes = static_cast<UINT>(vbytes);
+    m.vbv.StrideInBytes = sizeof(MeshVertex);
+    m.ibv.BufferLocation = m.ib->GetGPUVirtualAddress();
+    m.ibv.SizeInBytes = static_cast<UINT>(ibytes);
+    m.ibv.Format = DXGI_FORMAT_R32_UINT;
+
+    meshes_.push_back(std::move(m));
+    return static_cast<MeshHandle>(meshes_.size()); // handle = index + 1
+}
+
+void D3D12Device::beginFrame() {
+    if (!hasSwapchain_) return;
+    allocators_[frameIndex_]->Reset();
+    cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
+
+    auto toRT = transition(renderTargets_[frameIndex_].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    cmdList_->ResourceBarrier(1, &toRT);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
+    rtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = dsvHeap_->GetCPUDescriptorHandleForHeapStart();
+    cmdList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+    cmdList_->ClearRenderTargetView(rtv, clear_, 0, nullptr);
+    cmdList_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+    D3D12_VIEWPORT vp{0, 0, static_cast<f32>(width_), static_cast<f32>(height_), 0.0f, 1.0f};
+    D3D12_RECT sc{0, 0, static_cast<LONG>(width_), static_cast<LONG>(height_)};
+    cmdList_->RSSetViewports(1, &vp);
+    cmdList_->RSSetScissorRects(1, &sc);
+
+    std::memcpy(frameCBPtr_[frameIndex_], &frameCB_, sizeof(PerFrameCB));
+    cmdList_->SetGraphicsRootSignature(rootSig_.Get());
+    cmdList_->SetGraphicsRootConstantBufferView(0, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
+    cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+}
+
+void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
+    if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
+    const GpuMesh& m = meshes_[mesh - 1];
+    f32 consts[20];
+    std::memcpy(consts, world, 16 * sizeof(f32));
+    std::memcpy(consts + 16, color, 4 * sizeof(f32));
+    cmdList_->SetGraphicsRoot32BitConstants(1, 20, consts, 0);
+    cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
+    cmdList_->IASetIndexBuffer(&m.ibv);
+    cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+}
+
+void D3D12Device::endFrame() {
+    if (!hasSwapchain_) return;
+    ID3D12Resource* bb = renderTargets_[frameIndex_].Get();
+    if (captureReq_ && captureBuf_) {
+        auto toCopy = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        cmdList_->ResourceBarrier(1, &toCopy);
+        D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = bb; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = captureBuf_.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = captureFp_;
+        cmdList_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        auto toPresent = transition(bb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+        cmdList_->ResourceBarrier(1, &toPresent);
+    } else {
+        auto toPresent = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+        cmdList_->ResourceBarrier(1, &toPresent);
+    }
+    cmdList_->Close();
+    ID3D12CommandList* lists[] = {cmdList_.Get()};
+    queue_->ExecuteCommandLists(1, lists);
+}
+
+void D3D12Device::present() {
+    if (!hasSwapchain_) return;
+    swapChain_->Present(1, 0);
+
+    if (captureReq_ && captureBuf_) {
+        waitForGpu(); // ensure the copy completed
+        void* mapped = nullptr;
+        D3D12_RANGE r{0, static_cast<SIZE_T>(captureFp_.Footprint.RowPitch) * height_};
+        if (SUCCEEDED(captureBuf_->Map(0, &r, &mapped))) {
+            const u32 x = capX_ < width_ ? capX_ : width_ - 1;
+            const u32 y = capY_ < height_ ? capY_ : height_ - 1;
+            const u8* px = static_cast<const u8*>(mapped) + static_cast<SIZE_T>(y) * captureFp_.Footprint.RowPitch + static_cast<SIZE_T>(x) * 4;
+            captured_[0] = px[0] / 255.0f; captured_[1] = px[1] / 255.0f; captured_[2] = px[2] / 255.0f; captured_[3] = px[3] / 255.0f;
+            captureBuf_->Unmap(0, nullptr);
+            captureReady_ = true;
+        }
+        captureReq_ = false;
+    }
+    moveToNextFrame();
+}
+
+void D3D12Device::resize(u32 w, u32 h) {
+    if (!hasSwapchain_ || w == 0 || h == 0 || (w == width_ && h == height_)) return;
+    waitForGpu();
+    for (auto& rt : renderTargets_) rt.Reset();
+    depthBuffer_.Reset();
+    if (!hrOk(swapChain_->ResizeBuffers(kFrameCount, w, h, kBackbufferFormat, 0), "ResizeBuffers")) return;
+    width_ = w; height_ = h;
+    frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
+    createRenderTargetViews();
+    createDepthBuffer();
+    D3D12_RESOURCE_DESC bbDesc = renderTargets_[0]->GetDesc();
+    UINT64 total = 0;
+    device_->GetCopyableFootprints(&bbDesc, 0, 1, 0, &captureFp_, nullptr, nullptr, &total);
+    auto rbHeap = heapProps(D3D12_HEAP_TYPE_READBACK);
+    auto rbDesc = bufferDesc(total);
+    device_->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &rbDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&captureBuf_));
+    AVER_TRACE("[RHI.D3D12] resized to {}x{}", w, h);
+}
+
+void D3D12Device::moveToNextFrame() {
+    const u64 current = fenceValues_[frameIndex_];
+    queue_->Signal(fence_.Get(), current);
+    frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
+    if (fence_->GetCompletedValue() < fenceValues_[frameIndex_]) {
+        fence_->SetEventOnCompletion(fenceValues_[frameIndex_], fenceEvent_);
+        WaitForSingleObject(fenceEvent_, INFINITE);
+    }
+    fenceValues_[frameIndex_] = current + 1;
+}
+
+void D3D12Device::waitForGpu() {
+    if (!queue_ || !fence_ || !fenceEvent_) return;
+    const u64 v = fenceValues_[frameIndex_];
+    if (FAILED(queue_->Signal(fence_.Get(), v))) return;
+    if (fence_->GetCompletedValue() < v) {
+        fence_->SetEventOnCompletion(v, fenceEvent_);
+        WaitForSingleObject(fenceEvent_, INFINITE);
+    }
+    fenceValues_[frameIndex_] = v + 1;
+}
+
+bool D3D12Device::selfTest(const f32 in[4], f32 out[4]) {
+    constexpr UINT kW = 8, kH = 8;
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = kW; td.Height = kH; td.DepthOrArraySize = 1; td.MipLevels = 1;
+    td.Format = kBackbufferFormat; td.SampleDesc.Count = 1;
+    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+    D3D12_CLEAR_VALUE cv{}; cv.Format = kBackbufferFormat;
+    for (int i = 0; i < 4; ++i) cv.Color[i] = in[i];
+
+    auto defHeap = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+    ComPtr<ID3D12Resource> rt;
+    if (!hrOk(device_->CreateCommittedResource(&defHeap, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&rt)), "selfTest RT")) return false;
+
+    D3D12_DESCRIPTOR_HEAP_DESC hd{}; hd.NumDescriptors = 1; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    ComPtr<ID3D12DescriptorHeap> heap;
+    if (!hrOk(device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap)), "selfTest RTV heap")) return false;
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = heap->GetCPUDescriptorHandleForHeapStart();
+    device_->CreateRenderTargetView(rt.Get(), nullptr, rtv);
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    UINT64 total = 0;
+    device_->GetCopyableFootprints(&td, 0, 1, 0, &fp, nullptr, nullptr, &total);
+    auto rbHeap = heapProps(D3D12_HEAP_TYPE_READBACK);
+    auto rbDesc = bufferDesc(total);
+    ComPtr<ID3D12Resource> readback;
+    if (!hrOk(device_->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &rbDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)), "selfTest readback")) return false;
+
+    ComPtr<ID3D12CommandAllocator> alloc;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    if (!hrOk(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc)), "selfTest alloc")) return false;
+    if (!hrOk(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr, IID_PPV_ARGS(&list)), "selfTest list")) return false;
+
+    list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    list->ClearRenderTargetView(rtv, in, 0, nullptr);
+    auto toCopy = transition(rt.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    list->ResourceBarrier(1, &toCopy);
+    D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = rt.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = readback.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = fp;
+    list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    list->Close();
+    ID3D12CommandList* lists[] = {list.Get()};
+    queue_->ExecuteCommandLists(1, lists);
+
+    ComPtr<ID3D12Fence> f;
+    if (!hrOk(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "selfTest fence")) return false;
+    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    queue_->Signal(f.Get(), 1);
+    if (f->GetCompletedValue() < 1) { f->SetEventOnCompletion(1, ev); WaitForSingleObject(ev, INFINITE); }
+    CloseHandle(ev);
+
+    void* mapped = nullptr;
+    D3D12_RANGE range{0, static_cast<SIZE_T>(fp.Footprint.RowPitch)};
+    if (!hrOk(readback->Map(0, &range, &mapped), "selfTest Map")) return false;
+    const auto* px = static_cast<const u8*>(mapped);
+    out[0] = px[0] / 255.0f; out[1] = px[1] / 255.0f; out[2] = px[2] / 255.0f; out[3] = px[3] / 255.0f;
+    readback->Unmap(0, nullptr);
+    return true;
+}
+
+} // namespace
+
+namespace detail {
+IDevice* createD3D12Device(const DeviceDesc& desc) {
+    auto* dev = new D3D12Device();
+    if (!dev->init(desc)) { delete dev; return nullptr; }
+    return dev;
+}
+} // namespace detail
+
+} // namespace aver::rhi
