@@ -1,41 +1,33 @@
-<svg viewBox="0 0 640 160" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AVER ENGINE" shape-rendering="geometricPrecision">
+<svg viewBox="0 0 720 190" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Aver Engine" shape-rendering="geometricPrecision">
   <title>Aver Engine — horizontal lockup</title>
-  <style>svg{color:#15181e}@media (prefers-color-scheme:dark){svg{color:#EAEDF2}}</style>
+  <style>
+    svg{color:#15181e}
+    @media (prefers-color-scheme:dark){svg{color:#EAEDF2}}
+    .wm{font-family:"Century Gothic","Gill Sans MT","Poppins","Futura","Segoe UI",sans-serif;font-weight:600;letter-spacing:0.5px;}
+  </style>
   <defs>
     <mask id="aeCutW" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
       <rect width="256" height="256" fill="#fff"/>
-      <g fill="none" stroke="#000" stroke-width="15" stroke-linejoin="miter" stroke-linecap="butt">
+      <g fill="none" stroke="#000" stroke-width="15" stroke-linejoin="round" stroke-linecap="butt">
         <g transform="matrix(0.98,0.56,0,1,30,78)">
-          <path d="M24,88 L50,10 L76,88"/>
-          <path d="M34,58 L66,58"/>
+          <path d="M26,84 L50,22 L74,84"/>
+          <path d="M36,58 L64,58"/>
         </g>
         <g transform="matrix(0.98,-0.56,0,1,128,134)">
-          <path d="M28,14 L28,84"/>
-          <path d="M28,14 L70,14"/>
-          <path d="M28,49 L62,49"/>
-          <path d="M28,84 L70,84"/>
+          <path d="M28,16 L28,82"/>
+          <path d="M28,16 L66,16"/>
+          <path d="M28,49 L60,49"/>
+          <path d="M28,82 L66,82"/>
         </g>
       </g>
     </mask>
   </defs>
-  <g transform="translate(12,16) scale(0.5)">
+  <g transform="translate(22,29) scale(0.52)">
     <g mask="url(#aeCutW)">
       <polygon points="30,78 128,134 128,234 30,178" fill="currentColor"/>
       <polygon points="128,134 226,78 226,178 128,234" fill="currentColor" opacity="0.72"/>
       <polygon points="128,22 226,78 128,134 30,78" fill="#F26522"/>
     </g>
   </g>
-  <g fill="none" stroke="currentColor" stroke-width="11" stroke-linecap="butt" stroke-linejoin="miter">
-    <path d="M175,110 L190,50 L205,110"/><path d="M181,86 L199,86"/>
-    <path d="M217,50 L232,110 L247,50"/>
-    <path d="M289,50 L259,50 L259,110 L289,110"/><path d="M259,80 L283,80"/>
-    <path d="M301,110 L301,50 L323,50 L331,60 L331,74 L323,84 L301,84"/><path d="M315,84 L331,110"/>
-    <path d="M401,50 L371,50 L371,110 L401,110"/><path d="M371,80 L395,80"/>
-    <path d="M413,110 L413,50 L443,110 L443,50"/>
-    <path d="M485,64 L477,50 L463,50 L455,60 L455,100 L463,110 L479,110 L485,102 L485,84 L471,84"/>
-    <path d="M505,50 L505,110"/>
-    <path d="M523,110 L523,50 L553,110 L553,50"/>
-    <path d="M595,50 L565,50 L565,110 L595,110"/><path d="M565,80 L589,80"/>
-  </g>
-  <polygon fill="#F26522" points="345,74 355,84 345,94 335,84"/>
+  <text x="188" y="122" class="wm" font-size="72" fill="currentColor">Aver Engine</text>
 </svg>
