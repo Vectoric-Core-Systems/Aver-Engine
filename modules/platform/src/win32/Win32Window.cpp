@@ -82,16 +82,30 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             Event e; e.type = EventType::WindowResize;
             e.width = LOWORD(lParam); e.height = HIWORD(lParam);
             self->dispatch(e);
-            // Repaint immediately at the new size (maximise/restore/snap happen outside the
-            // main loop's control flow, so render here or the view shows a stale frame).
-            if (wParam != SIZE_MINIMIZED) self->onRenderTick();
+            // A WM_SIZE inside a modal loop means the user is resizing (not moving): latch it
+            // so the engine stops presenting until the drag ends (Present mid-resize deadlocks
+            // the DWM). Do NOT render here either — rendering from inside a window-state-change
+            // message deadlocks the same way (this is the WM_SIZE a maximise sends).
+            if (self->inModalSize()) self->setModalResize(true);
             return 0;
         }
         // A modal move/size loop runs its own message pump inside DefWindowProc, starving the
         // engine's frame loop. Drive rendering from a timer for its duration so the viewport
-        // keeps updating live instead of freezing.
-        case WM_ENTERSIZEMOVE: SetTimer(hwnd, 1, USER_TIMER_MINIMUM, nullptr); return 0;
-        case WM_EXITSIZEMOVE:  KillTimer(hwnd, 1); return 0;
+        // keeps updating live instead of freezing. The timer fires at an idle point in the
+        // modal loop (unlike WM_SIZE), so Present here does not deadlock with the DWM.
+        case WM_NCLBUTTONDOWN: {
+            // Remember whether this grab is on a resize border/corner (vs the caption). We can
+            // render live during a move but must NOT present during a resize (DWM deadlock).
+            const bool resize = (wParam >= HTLEFT && wParam <= HTBOTTOMRIGHT) || wParam == HTGROWBOX;
+            self->setResizeGrab(resize);
+            break; // let DefWindowProc run the modal loop
+        }
+        case WM_ENTERSIZEMOVE:
+            self->setModalSize(true);
+            if (!self->isResizeGrab()) SetTimer(hwnd, 1, USER_TIMER_MINIMUM, nullptr); // live render for moves only
+            return 0;
+        case WM_EXITSIZEMOVE:
+            self->setModalSize(false); self->setResizeGrab(false); KillTimer(hwnd, 1); return 0;
         case WM_TIMER: if (wParam == 1) { self->onRenderTick(); return 0; } break;
         case WM_DPICHANGED: {
             // Monitor changed / DPI changed: adopt the OS-suggested window rect and record

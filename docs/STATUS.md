@@ -156,12 +156,24 @@ ab2264a Aver Engine foundation: modular core + .oc* format loaders
 - Process must stay per-monitor DPI aware (Win32Window `enableDpiAwareness`); window sizing
   is DPI-scaled + work-area-clamped. Don't create the window before awareness is set, and
   don't feed logical coords to the swapchain (window width/height are physical pixels).
-- **Modal-loop rendering**: a window drag/resize/maximise runs the OS's own message pump
-  inside `DefWindowProc`, which starves the engine frame loop and freezes the viewport. Fixed
-  by `Engine::frameStep()` (the extracted per-frame body) being driven from a `WM_TIMER` set
-  on `WM_ENTERSIZEMOVE`..`WM_EXITSIZEMOVE` and from `WM_SIZE`, via `Window::setRenderTick`.
-  `frameStep()` is re-entrancy guarded (`inFrame_`). Don't move the frame body back inline or
-  the freeze returns; don't call `pumpEvents` from the tick (the modal loop already pumps).
+- **Modal-loop rendering**: a window move/size/maximise runs the OS's own message pump inside
+  `DefWindowProc`, starving the engine loop and freezing the viewport. `Engine::frameStep()`
+  (the per-frame body, re-entrancy-guarded by `inFrame_`) is driven from a `WM_TIMER` set
+  between `WM_ENTERSIZEMOVE`/`WM_EXITSIZEMOVE`, via `Window::setRenderTick`. Rules learned the
+  hard way (do NOT regress):
+  - **Never render (Present/ResizeBuffers) from inside a window-state-change message** (the
+    `WM_SIZE` a maximise sends) — deadlocks the DWM. Let the main loop pick up the new size.
+  - **Never Present during an active resize modal loop** — also a DWM deadlock. Detect a resize
+    grab from the `WM_NCLBUTTONDOWN` hit-test (`Window::isResizeGrab()`) and start the render
+    timer only for moves. A resize freezes-but-recovers (updates on release); a move renders live.
+  - **Skip `ResizeBuffers` while `inModalSize()`**; resize once the drag ends.
+- **D3D12 frame sync = wait-before-reuse** (D3D12Device): one monotonic `nextFence_`, signalled
+  after each Present; `fenceValues_[backbuffer]` records that frame's value; `beginFrame`
+  reacquires `GetCurrentBackBufferIndex()` and waits for that buffer's fence. The old
+  frame-buffering pattern assumed the backbuffer index alternates 0,1,0,1 — `ResizeBuffers`
+  resets it to 0, desyncing the fence so the wait targeted a never-signalled value =>
+  intermittent post-maximise/resize deadlock. Do NOT reintroduce a parity-based fence scheme.
+  Waits are bounded (5 s) and log `GetDeviceRemovedReason` instead of hanging forever on a TDR.
 - Gizmos render via a no-depth overlay line PSO (`setLineDepth(false)`); toggle depth back on
   after so the grid still occludes correctly. Line meshes are prebuilt in `onInit` (never
   per-frame — `createLineMesh` never frees).

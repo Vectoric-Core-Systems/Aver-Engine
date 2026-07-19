@@ -53,9 +53,21 @@ public:
     void setRenderTick(RenderTickFn fn, void* user) { renderTick_ = fn; renderTickUser_ = user; }
     void onRenderTick() { if (renderTick_) renderTick_(renderTickUser_); }
 
+    // Modal move/size loop state (between WM_ENTERSIZEMOVE and WM_EXITSIZEMOVE). A move is
+    // safe to render live; an active resize is NOT — both Present and ResizeBuffers deadlock
+    // the DWM mid-resize — so the engine renders during a move and skips rendering during a
+    // resize (the view updates once the drag ends). `modalResize_` latches on the first
+    // WM_SIZE seen inside the loop, which is what distinguishes a resize from a move.
+    bool inModalSize() const { return modalSize_; }
+    bool inModalResize() const { return modalResize_; }
+    bool isResizeGrab() const { return resizeGrab_; }
+
     // Internal: invoked by the platform message handler.
     void dispatch(const Event& e);
     void setDpiScale(f32 s) { dpiScale_ = s; }
+    void setModalSize(bool b) { modalSize_ = b; modalResize_ = false; }
+    void setModalResize(bool b) { modalResize_ = b; }
+    void setResizeGrab(bool b) { resizeGrab_ = b; }
 
 private:
     void* nativeHandle_ = nullptr;
@@ -68,6 +80,9 @@ private:
     MessageHook messageHook_ = nullptr;
     RenderTickFn renderTick_ = nullptr;
     void* renderTickUser_ = nullptr;
+    bool modalSize_ = false;
+    bool modalResize_ = false;
+    bool resizeGrab_ = false;
 };
 
 } // namespace aver

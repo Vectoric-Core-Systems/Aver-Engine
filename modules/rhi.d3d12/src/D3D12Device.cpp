@@ -300,7 +300,6 @@ private:
     void createRenderTargetViews();
     bool createDepthBuffer();
     bool createMsaaColor();
-    void moveToNextFrame();
     void waitForGpu();
 
     ComPtr<IDXGIFactory6> factory_;
@@ -317,7 +316,12 @@ private:
     ComPtr<ID3D12GraphicsCommandList> cmdList_;
     ComPtr<ID3D12Fence> fence_;
     HANDLE fenceEvent_ = nullptr;
+    // Wait-before-reuse frame sync: `nextFence_` is a single monotonic counter; signalled once
+    // per submitted frame. `fenceValues_[i]` records the fence value that retires backbuffer i's
+    // last frame, so beginFrame waits on exactly that before reusing the buffer. Robust across
+    // ResizeBuffers (which resets the buffer index) — no back-buffer-parity assumptions.
     u64 fenceValues_[kFrameCount] = {0, 0};
+    u64 nextFence_ = 0;
     u32 frameIndex_ = 0;
     u32 rtvSize_ = 0;
 
@@ -594,7 +598,7 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
     auto rbDesc = bufferDesc(total);
     hrOk(device_->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &rbDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&captureBuf_)), "capture buffer");
 
-    fenceValues_[frameIndex_] = 1;
+    fenceValues_[0] = fenceValues_[1] = 0; nextFence_ = 0; // no frames retired yet
     hasSwapchain_ = true;
     AVER_INFO("[RHI.D3D12] swapchain {}x{} + depth (D32) ({} buffers, FLIP_DISCARD)", width_, height_, kFrameCount);
     return true;
@@ -671,6 +675,16 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
 
 void D3D12Device::beginFrame() {
     if (!hasSwapchain_) return;
+    // Render into whichever backbuffer is current now; wait for its previous frame to finish on
+    // the GPU before recycling its allocator. This is the only fence wait in the frame and it
+    // can never block on an unsignalled value (fenceValues_ only holds already-signalled ones).
+    frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
+    const u64 want = fenceValues_[frameIndex_];
+    if (want != 0 && fence_->GetCompletedValue() < want) {
+        fence_->SetEventOnCompletion(want, fenceEvent_);
+        if (WaitForSingleObject(fenceEvent_, 5000) == WAIT_TIMEOUT)
+            AVER_ERROR("[RHI.D3D12] GPU frame wait timed out (device removed 0x{:08X})", static_cast<u32>(device_->GetDeviceRemovedReason()));
+    }
     allocators_[frameIndex_]->Reset();
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
 
@@ -791,6 +805,11 @@ void D3D12Device::present() {
     if (!hasSwapchain_) return;
     swapChain_->Present(1, 0);
 
+    // Mark this frame on the timeline and record it for the backbuffer we just rendered, so the
+    // next beginFrame that recycles this buffer waits for exactly this frame to retire.
+    queue_->Signal(fence_.Get(), ++nextFence_);
+    fenceValues_[frameIndex_] = nextFence_;
+
     if (captureReq_ && captureBuf_) {
         waitForGpu(); // ensure the copy completed
         void* mapped = nullptr;
@@ -816,18 +835,19 @@ void D3D12Device::present() {
         }
         captureReq_ = false;
     }
-    moveToNextFrame();
 }
 
 void D3D12Device::resize(u32 w, u32 h) {
     if (!hasSwapchain_ || w == 0 || h == 0 || (w == width_ && h == height_)) return;
-    waitForGpu();
+    waitForGpu(); // GPU idle: all backbuffer references retired before ResizeBuffers
     for (auto& rt : renderTargets_) rt.Reset();
     depthBuffer_.Reset();
     msaaColor_.Reset();
     if (!hrOk(swapChain_->ResizeBuffers(kFrameCount, w, h, kBackbufferFormat, 0), "ResizeBuffers")) return;
     width_ = w; height_ = h;
-    frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
+    // GPU is idle, so no backbuffer has pending work; clear per-buffer fences (beginFrame reacquires
+    // the current index and will not wrongly wait). No back-buffer-parity assumptions to break.
+    for (u32 n = 0; n < kFrameCount; ++n) fenceValues_[n] = 0;
     createRenderTargetViews();
     createDepthBuffer();
     createMsaaColor();
@@ -840,26 +860,15 @@ void D3D12Device::resize(u32 w, u32 h) {
     AVER_TRACE("[RHI.D3D12] resized to {}x{}", w, h);
 }
 
-void D3D12Device::moveToNextFrame() {
-    const u64 current = fenceValues_[frameIndex_];
-    queue_->Signal(fence_.Get(), current);
-    frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
-    if (fence_->GetCompletedValue() < fenceValues_[frameIndex_]) {
-        fence_->SetEventOnCompletion(fenceValues_[frameIndex_], fenceEvent_);
-        WaitForSingleObject(fenceEvent_, INFINITE);
-    }
-    fenceValues_[frameIndex_] = current + 1;
-}
-
 void D3D12Device::waitForGpu() {
     if (!queue_ || !fence_ || !fenceEvent_) return;
-    const u64 v = fenceValues_[frameIndex_];
+    const u64 v = ++nextFence_;
     if (FAILED(queue_->Signal(fence_.Get(), v))) return;
     if (fence_->GetCompletedValue() < v) {
         fence_->SetEventOnCompletion(v, fenceEvent_);
-        WaitForSingleObject(fenceEvent_, INFINITE);
+        if (WaitForSingleObject(fenceEvent_, 5000) == WAIT_TIMEOUT)
+            AVER_ERROR("[RHI.D3D12] waitForGpu timed out (device removed 0x{:08X})", static_cast<u32>(device_->GetDeviceRemovedReason()));
     }
-    fenceValues_[frameIndex_] = v + 1;
 }
 
 bool D3D12Device::uiInit(void* hwnd) {
