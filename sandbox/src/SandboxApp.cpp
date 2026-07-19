@@ -50,6 +50,7 @@ struct MeshObj {
     u32 tris = 0;
     Vec3 pos{0,0,0}, rotDeg{0,0,0}, scale{1,1,1};
     f32 color[4] = {0.8f,0.4f,0.25f,1};
+    f32 metallic = 0.0f, roughness = 0.5f;
     bool visible = true;
 };
 
@@ -100,9 +101,11 @@ public:
 
         MeshObj floor; floor.name="Floor"; floor.mesh=ground; floor.tris=(u32)gi.size()/3;
         floor.color[0]=0.34f; floor.color[1]=0.35f; floor.color[2]=0.37f;
+        floor.metallic=0.0f; floor.roughness=0.9f;
         objects_.push_back(floor);
         MeshObj c; c.name="Cube"; c.mesh=cube; c.tris=(u32)ci.size()/3; c.pos=Vec3{0,0,1};
         c.color[0]=0.85f; c.color[1]=0.36f; c.color[2]=0.22f;
+        c.metallic=0.1f; c.roughness=0.35f;
         objects_.push_back(c);
 
         if (!beamPath_.empty()) {
@@ -164,7 +167,7 @@ public:
             Mat4 w = tr.toMatrix();
             f32 col[4]={o.color[0],o.color[1],o.color[2],1};
             if (i==sel_) for (int k=0;k<3;++k) col[k]=std::fmin(1.0f,col[k]*1.3f+0.10f);
-            e.device()->drawMesh(o.mesh, &w.m[0][0], col);
+            e.device()->drawMesh(o.mesh, &w.m[0][0], col, o.metallic, o.roughness);
         }
         buildUI(e);
         captureCheck(e);
@@ -242,7 +245,10 @@ private:
             ImGui::DragFloat3("Location", &o.pos.x, 0.05f);
             ImGui::DragFloat3("Rotation", &o.rotDeg.x, 1.0f);
             ImGui::DragFloat3("Scale", &o.scale.x, 0.01f, 0.02f, 100.f);
-            ImGui::ColorEdit3("Color", o.color); ImGui::Checkbox("Visible", &o.visible);
+            ImGui::ColorEdit3("Color", o.color);
+            ImGui::SliderFloat("Metallic", &o.metallic, 0.0f, 1.0f);
+            ImGui::SliderFloat("Roughness", &o.roughness, 0.02f, 1.0f);
+            ImGui::Checkbox("Visible", &o.visible);
         } else if (sel_==-2){
             ImGui::TextUnformatted("Directional Light"); ImGui::Separator();
             ImGui::SliderFloat("Azimuth", &sunAz_, -1, 1); ImGui::SliderFloat("Altitude", &sunAlt_, -1, 1); ImGui::SliderFloat("Up", &sunUp_, 0.05f, 2);

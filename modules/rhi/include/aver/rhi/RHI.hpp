@@ -79,9 +79,11 @@ public:
                         const f32 fogColor[3], f32 fogDensity) {
         (void)enabled; (void)zenith; (void)horizon; (void)fogColor; (void)fogDensity;
     }
-    // Record one draw of `mesh` with a world matrix (row-major) and base colour.
-    virtual void drawMesh(MeshHandle mesh, const f32 world[16], const f32 baseColor[4]) {
-        (void)mesh; (void)world; (void)baseColor;
+    // Record one draw of `mesh` with a world matrix (row-major), base colour, and PBR
+    // metallic/roughness (0..1).
+    virtual void drawMesh(MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
+                          f32 metallic, f32 roughness) {
+        (void)mesh; (void)world; (void)baseColor; (void)metallic; (void)roughness;
     }
 
     // Verification: capture the backbuffer pixel at (x,y) during the next presented

@@ -28,6 +28,7 @@ namespace aver::rhi {
 namespace {
 
 constexpr u32 kFrameCount = 2;
+constexpr u32 kSampleCount = 4; // MSAA
 constexpr DXGI_FORMAT kBackbufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
 
@@ -88,9 +89,19 @@ cbuffer PerFrame : register(b0) {
 cbuffer PerObject : register(b1) {
     float4x4 gWorld;
     float4   gBaseColor;
+    float4   gMaterial;   // x=metallic, y=roughness, z=unlit(0/1)
 };
 
-// ---- lit mesh with distance fog ----
+static const float PI = 3.14159265;
+float3 acesTonemap(float3 x){ return saturate((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14)); }
+float3 toGamma(float3 c){ return pow(max(c,0.0), 1.0/2.2); }
+float3 srgbToLin(float3 c){ return pow(max(c,0.0), 2.2); }
+float3 skyColor(float3 dir){ float3 c = lerp(gSkyHorizon.rgb, gSkyZenith.rgb, pow(saturate(dir.z*0.5+0.5), 0.65)); return srgbToLin(c); }
+float3 fresnelSchlick(float ct, float3 F0){ return F0 + (1.0-F0)*pow(saturate(1.0-ct),5.0); }
+float distGGX(float ndh, float a){ float a2=a*a; float d=ndh*ndh*(a2-1.0)+1.0; return a2/(PI*d*d+1e-6); }
+float geomSchlick(float nd, float k){ return nd/(nd*(1.0-k)+k); }
+
+// ---- PBR mesh with sky ambient + distance fog ----
 struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; };
 struct VSOut { float4 pos : SV_POSITION; float3 nrmWS : NORMAL; float3 wpos : TEXCOORD0; };
 
@@ -104,12 +115,44 @@ VSOut VSMain(VSIn i) {
 }
 float4 PSMain(VSOut i) : SV_TARGET {
     float3 N = normalize(i.nrmWS);
-    float ndl = saturate(dot(N, normalize(gLightDir.xyz)));
-    float3 col = gBaseColor.rgb * (gAmbient.rgb + gLightColor.rgb * ndl);
+    float3 V = normalize(gCamPos.xyz - i.wpos);
+    float3 L = normalize(gLightDir.xyz);
+    float3 H = normalize(V + L);
+    float metallic = saturate(gMaterial.x);
+    float rough = clamp(gMaterial.y, 0.045, 1.0);
+
+    if (gMaterial.z > 0.5) { // unlit (gizmo/grid): authored display colour, no lighting
+        return float4(gBaseColor.rgb, gBaseColor.a);
+    }
+
+    float3 albedo = srgbToLin(gBaseColor.rgb);
+    float3 lightC = srgbToLin(gLightColor.rgb) * 3.0; // sun radiance
+    float ndv = saturate(dot(N, V));
+    float ndl = saturate(dot(N, L));
+    float3 F0 = lerp(0.04.xxx, albedo, metallic);
+
+    // direct (Cook-Torrance GGX)
+    float a = rough * rough;
+    float k = (rough + 1.0); k = k * k / 8.0;
+    float D = distGGX(saturate(dot(N, H)), a);
+    float G = geomSchlick(ndv, k) * geomSchlick(ndl, k);
+    float3 F = fresnelSchlick(saturate(dot(H, V)), F0);
+    float3 spec = (D * G * F) / (4.0 * ndv * ndl + 1e-4);
+    float3 kd = (1.0 - F) * (1.0 - metallic);
+    float3 direct = (kd * albedo / PI + spec) * lightC * ndl;
+
+    // ambient: sky hemisphere irradiance (linear) + crude spec reflection of the sky
+    float3 ambient = kd * albedo * skyColor(N) * gAmbient.r;
+    float3 R = reflect(-V, N);
+    float3 envSpec = skyColor(R) * fresnelSchlick(ndv, F0) * (1.0 - rough);
+    float3 color = direct + ambient + envSpec * 0.35;
+
+    // distance fog (linear space)
     float dist = length(i.wpos - gCamPos.xyz);
     float fog = 1.0 - exp(-dist * gFogColor.a);
-    col = lerp(col, gFogColor.rgb, saturate(fog));
-    return float4(col, gBaseColor.a);
+    color = lerp(color, srgbToLin(gFogColor.rgb), saturate(fog));
+
+    return float4(toGamma(acesTonemap(color)), gBaseColor.a);
 }
 
 // ---- procedural sky (fullscreen triangle via SV_VertexID) ----
@@ -123,13 +166,13 @@ SkyOut VSky(uint id : SV_VertexID) {
 }
 float4 PSky(SkyOut i) : SV_TARGET {
     float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
-    float3 world = far.xyz / far.w;
-    float3 ray = normalize(world - gCamPos.xyz);
-    float3 sky = lerp(gSkyHorizon.rgb, gSkyZenith.rgb, pow(saturate(ray.z), 0.5));
+    float3 ray = normalize(far.xyz / far.w - gCamPos.xyz);
+    float3 sky = skyColor(ray);
     float sd = saturate(dot(ray, normalize(gLightDir.xyz)));
-    sky += gLightColor.rgb * pow(sd, 900.0) * 3.0;   // sun disk
-    sky += gLightColor.rgb * pow(sd, 12.0) * 0.12;   // sun glow
-    return float4(sky, 1.0);
+    float3 sunC = srgbToLin(gLightColor.rgb);
+    sky += sunC * pow(sd, 2000.0) * 14.0;  // sun disk
+    sky += sunC * pow(sd, 12.0) * 0.30;    // sun glow
+    return float4(toGamma(acesTonemap(sky)), 1.0);
 }
 )";
 
@@ -206,7 +249,7 @@ public:
     }
 
     MeshHandle createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override;
-    void drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4]) override;
+    void drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) override;
 
     void requestCapture(u32 x, u32 y) override { capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
     bool getCapture(f32 out[4]) override {
@@ -234,6 +277,7 @@ private:
     bool createSwapchainResources(const SwapchainDesc& d);
     void createRenderTargetViews();
     bool createDepthBuffer();
+    bool createMsaaColor();
     void moveToNextFrame();
     void waitForGpu();
 
@@ -243,7 +287,9 @@ private:
     ComPtr<IDXGISwapChain3> swapChain_;
     ComPtr<ID3D12DescriptorHeap> rtvHeap_;
     ComPtr<ID3D12DescriptorHeap> dsvHeap_;
+    ComPtr<ID3D12DescriptorHeap> msaaRtvHeap_;
     ComPtr<ID3D12Resource> renderTargets_[kFrameCount];
+    ComPtr<ID3D12Resource> msaaColor_;
     ComPtr<ID3D12Resource> depthBuffer_;
     ComPtr<ID3D12CommandAllocator> allocators_[kFrameCount];
     ComPtr<ID3D12GraphicsCommandList> cmdList_;
@@ -338,7 +384,7 @@ bool D3D12Device::createPipeline() {
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[1].Constants.ShaderRegister = 1;
-    params[1].Constants.Num32BitValues = 20;
+    params[1].Constants.Num32BitValues = 24;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC rsd{};
@@ -374,6 +420,7 @@ bool D3D12Device::createPipeline() {
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.RasterizerState.MultisampleEnable = TRUE;
     pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     pso.DepthStencilState.DepthEnable = TRUE;
     pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
@@ -383,7 +430,7 @@ bool D3D12Device::createPipeline() {
     pso.NumRenderTargets = 1;
     pso.RTVFormats[0] = kBackbufferFormat;
     pso.DSVFormat = kDepthFormat;
-    pso.SampleDesc.Count = 1;
+    pso.SampleDesc.Count = kSampleCount;
     if (!hrOk(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pso_)), "CreateGraphicsPipelineState")) return false;
 
     // Sky pipeline: fullscreen triangle, no input layout, no depth.
@@ -400,6 +447,7 @@ bool D3D12Device::createPipeline() {
     sp.PS = {psky->GetBufferPointer(), psky->GetBufferSize()};
     sp.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     sp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    sp.RasterizerState.MultisampleEnable = TRUE;
     sp.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     sp.DepthStencilState.DepthEnable = FALSE;
     sp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
@@ -408,7 +456,7 @@ bool D3D12Device::createPipeline() {
     sp.NumRenderTargets = 1;
     sp.RTVFormats[0] = kBackbufferFormat;
     sp.DSVFormat = kDepthFormat;
-    sp.SampleDesc.Count = 1;
+    sp.SampleDesc.Count = kSampleCount;
     if (!hrOk(device_->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&skyPso_)), "CreateGraphicsPipelineState(sky)")) return false;
 
     // Per-frame constant buffers (one per frame in flight), persistently mapped.
@@ -453,7 +501,14 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
     if (!hrOk(device_->CreateDescriptorHeap(&dd, IID_PPV_ARGS(&dsvHeap_)), "DSV heap")) return false;
 
     createRenderTargetViews();
+
+    D3D12_DESCRIPTOR_HEAP_DESC mh{};
+    mh.NumDescriptors = 1;
+    mh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    if (!hrOk(device_->CreateDescriptorHeap(&mh, IID_PPV_ARGS(&msaaRtvHeap_)), "MSAA RTV heap")) return false;
+
     if (!createDepthBuffer()) return false;
+    if (!createMsaaColor()) return false;
 
     for (u32 i = 0; i < kFrameCount; ++i) {
         if (!hrOk(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocators_[i])), "CreateCommandAllocator")) return false;
@@ -489,13 +544,29 @@ bool D3D12Device::createDepthBuffer() {
     td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     td.Width = width_; td.Height = height_;
     td.DepthOrArraySize = 1; td.MipLevels = 1;
-    td.Format = kDepthFormat; td.SampleDesc.Count = 1;
+    td.Format = kDepthFormat; td.SampleDesc.Count = kSampleCount;
     td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
     D3D12_CLEAR_VALUE cv{}; cv.Format = kDepthFormat; cv.DepthStencil.Depth = 1.0f;
     auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
     if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv, IID_PPV_ARGS(&depthBuffer_)), "depth buffer")) return false;
     device_->CreateDepthStencilView(depthBuffer_.Get(), nullptr, dsvHeap_->GetCPUDescriptorHandleForHeapStart());
+    return true;
+}
+
+bool D3D12Device::createMsaaColor() {
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = width_; td.Height = height_;
+    td.DepthOrArraySize = 1; td.MipLevels = 1;
+    td.Format = kBackbufferFormat; td.SampleDesc.Count = kSampleCount;
+    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+    D3D12_CLEAR_VALUE cv{}; cv.Format = kBackbufferFormat;
+    cv.Color[0] = 0.10f; cv.Color[1] = 0.12f; cv.Color[2] = 0.16f; cv.Color[3] = 1.0f;
+    auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+    if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&msaaColor_)), "msaa color")) return false;
+    device_->CreateRenderTargetView(msaaColor_.Get(), nullptr, msaaRtvHeap_->GetCPUDescriptorHandleForHeapStart());
     return true;
 }
 
@@ -533,14 +604,11 @@ void D3D12Device::beginFrame() {
     allocators_[frameIndex_]->Reset();
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
 
-    auto toRT = transition(renderTargets_[frameIndex_].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    cmdList_->ResourceBarrier(1, &toRT);
-
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
+    // Scene renders into the MSAA color + depth targets; endFrame resolves to backbuffer.
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = msaaRtvHeap_->GetCPUDescriptorHandleForHeapStart();
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = dsvHeap_->GetCPUDescriptorHandleForHeapStart();
     cmdList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
-    cmdList_->ClearRenderTargetView(rtv, clear_, 0, nullptr);
+    if (!skyEnabled_) cmdList_->ClearRenderTargetView(rtv, clear_, 0, nullptr); // sky covers all pixels
     cmdList_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
     D3D12_VIEWPORT vp{0, 0, static_cast<f32>(width_), static_cast<f32>(height_), 0.0f, 1.0f};
@@ -562,13 +630,14 @@ void D3D12Device::beginFrame() {
     cmdList_->SetPipelineState(pso_.Get());
 }
 
-void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
+void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) {
     if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
     const GpuMesh& m = meshes_[mesh - 1];
-    f32 consts[20];
+    f32 consts[24];
     std::memcpy(consts, world, 16 * sizeof(f32));
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
-    cmdList_->SetGraphicsRoot32BitConstants(1, 20, consts, 0);
+    consts[20] = metallic; consts[21] = roughness; consts[22] = 0.0f; consts[23] = 0.0f;
+    cmdList_->SetGraphicsRoot32BitConstants(1, 24, consts, 0);
     cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
     cmdList_->IASetIndexBuffer(&m.ibv);
     cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
@@ -576,6 +645,20 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
 
 void D3D12Device::endFrame() {
     if (!hasSwapchain_) return;
+    ID3D12Resource* bb = renderTargets_[frameIndex_].Get();
+
+    // Resolve the MSAA scene target into the (single-sample) backbuffer.
+    D3D12_RESOURCE_BARRIER pre[2] = {
+        transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RESOLVE_SOURCE),
+        transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RESOLVE_DEST),
+    };
+    cmdList_->ResourceBarrier(2, pre);
+    cmdList_->ResolveSubresource(bb, 0, msaaColor_.Get(), 0, kBackbufferFormat);
+    D3D12_RESOURCE_BARRIER post[2] = {
+        transition(bb, D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET),
+        transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RESOLVE_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+    };
+    cmdList_->ResourceBarrier(2, post);
 
 #if AVER_WITH_IMGUI
     if (uiActive_) {
@@ -588,8 +671,6 @@ void D3D12Device::endFrame() {
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmdList_.Get());
     }
 #endif
-
-    ID3D12Resource* bb = renderTargets_[frameIndex_].Get();
     if (captureReq_ && captureBuf_) {
         auto toCopy = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
         cmdList_->ResourceBarrier(1, &toCopy);
@@ -644,11 +725,13 @@ void D3D12Device::resize(u32 w, u32 h) {
     waitForGpu();
     for (auto& rt : renderTargets_) rt.Reset();
     depthBuffer_.Reset();
+    msaaColor_.Reset();
     if (!hrOk(swapChain_->ResizeBuffers(kFrameCount, w, h, kBackbufferFormat, 0), "ResizeBuffers")) return;
     width_ = w; height_ = h;
     frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
     createRenderTargetViews();
     createDepthBuffer();
+    createMsaaColor();
     D3D12_RESOURCE_DESC bbDesc = renderTargets_[0]->GetDesc();
     UINT64 total = 0;
     device_->GetCopyableFootprints(&bbDesc, 0, 1, 0, &captureFp_, nullptr, nullptr, &total);
