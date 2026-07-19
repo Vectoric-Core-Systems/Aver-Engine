@@ -394,7 +394,7 @@ Everything else in this file (physics sim flags, Niagara FX, convex cook) is eng
 
 ### P0 — Core math & containers (touch every line of the solver)
 
-| UE type | Where | Royalty-free replacement |
+| UE type | Where | Permissively-licensed replacement |
 |---|---|---|
 | `FVector` (double in UE5) | all node/beam math | `oc::Vec3` (`Vec3.h`) — **already exists**; add `Dist`, `DistSquared`, `GetSafeNormal`, `Size`/`SizeSquared` (currently only `Dot/Cross/Length/LengthSq/Normalized`) |
 | `FVector3f` | snapshot `Disp` | keep `oc::Vec3` (already float) |

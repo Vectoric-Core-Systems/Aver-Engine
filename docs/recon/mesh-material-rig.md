@@ -231,7 +231,7 @@ Throws if offsets are out of range (targets UE 5.7 layout only, 2137–2138). On
 
 ## 9. Data that currently has NO storage format (needs new `.oc*` formats)
 
-The compiler's own persisted format (`.ocbeam`, `writeOcbeamDataFile` 1245) stores the **physics cage** (MATERIAL/NODE/BEAM/PANEL/PART), the **rig** (BONE/SKIN/ANIM), and the **entire source `.glb` base64-embedded** (GLB{} + GLBXFORM orientation flags, 1284–1292). For a native royalty-free engine you must design real formats for the following, because they either have no first-class format or are only smuggled through the opaque embedded glb:
+The compiler's own persisted format (`.ocbeam`, `writeOcbeamDataFile` 1245) stores the **physics cage** (MATERIAL/NODE/BEAM/PANEL/PART), the **rig** (BONE/SKIN/ANIM), and the **entire source `.glb` base64-embedded** (GLB{} + GLBXFORM orientation flags, 1284–1292). For a native permissively-licensed engine you must design real formats for the following, because they either have no first-class format or are only smuggled through the opaque embedded glb:
 
 | New format (suggested) | Data that needs it | Why it's unformatted today | Evidence |
 |---|---|---|---|

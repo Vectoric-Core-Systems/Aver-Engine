@@ -1,6 +1,6 @@
 # Aver Engine — Rendering Architecture Design
 
-**Target:** Unreal Engine 5 + Valve Source 2 visual quality, built exclusively on royalty-free / permissive-licensed technology (MIT / BSD / zlib / Apache-2.0 / public-domain). No GPL runtime, no royalty-bearing tech (no DLSS, no UE TSR, no Simplygon, no Umbra, no Wwise).
+**Target:** Unreal Engine 5 + Valve Source 2 visual quality, built exclusively on permissively-licensed technology (MIT / BSD / zlib / Apache-2.0 / public-domain). No GPL runtime, no proprietary tech (no DLSS, no UE TSR, no Simplygon, no Umbra, no Wwise).
 **Backends:** Direct3D 12 (primary), Direct3D 11 (compatibility), Vulkan (scaffolded, OFF until Vulkan SDK present).
 **Repo state:** `C:/Users/User/Documents/Aver Engine` is empty (git + `.gitignore` + `.editorconfig` only) — this is a greenfield design, not a refactor.
 
@@ -19,9 +19,9 @@ This document is the rendering-layer counterpart to the existing engine recon. I
 
 ---
 
-## 1. Royalty-free technology map (the license backbone)
+## 1. Permissively-licensed technology map (the license backbone)
 
-Every third-party component is chosen for a permissive license. This table is the legal spine of the whole design; nothing GPL or royalty-bearing appears in the runtime.
+Every third-party component is chosen for a permissive license. This table is the legal spine of the whole design; nothing GPL or proprietary appears in the runtime.
 
 | Capability | Library / technique | License | Role |
 |---|---|---|---|
@@ -50,15 +50,15 @@ Every third-party component is chosen for a permissive license. This table is th
 | Debug/editor overlay UI | **Dear ImGui** | MIT | In-viewport debug HUD, render-graph inspector |
 | Math (optional) | in-house SIMD, or **GLM** | — / MIT | Extend the existing `oc::Vec3` |
 
-Ray tracing APIs themselves — **DXR** (Direct3D 12) and **VK_KHR_ray_tracing** (Vulkan) — are royalty-free parts of the platform; using hardware RT incurs no license fee. We use them where present and provide non-RT fallbacks everywhere (DX11 has no RT).
+Ray tracing APIs themselves — **DXR** (Direct3D 12) and **VK_KHR_ray_tracing** (Vulkan) — are permissively-licensed parts of the platform; using hardware RT incurs no license fee. We use them where present and provide non-RT fallbacks everywhere (DX11 has no RT).
 
 **Explicitly rejected (and their free replacement):**
 
-| Proprietary / royalty tech | Why rejected | Free replacement |
+| Proprietary tech | Why rejected | Free replacement |
 |---|---|---|
 | NVIDIA DLSS (2/3) | Proprietary SDK, hardware-locked, license terms | FSR 2/3 (MIT) |
 | Intel XeSS (XMX path) | Proprietary weights on the fast path | FSR 2/3 (MIT); XeSS DP4a only if ever relicensed |
-| Epic **TSR** / Nanite / Lumen (as code) | UE EULA, royalty-bearing | In-house TAA/TAAU + FSR; meshlet GPU-driven; DDGI/Brixelizer GI |
+| Epic **TSR** / Nanite / Lumen (as code) | UE EULA, proprietary | In-house TAA/TAAU + FSR; meshlet GPU-driven; DDGI/Brixelizer GI |
 | NVIDIA RTXGI SDK (as code) | SDK license | Implement DDGI from the *published paper*; or Brixelizer GI (MIT) |
 | Simplygon (auto-LOD) | Commercial | meshoptimizer simplify (MIT) |
 | Umbra (occlusion) | Commercial | GPU Hi-Z occlusion culling (in-house) |
@@ -107,7 +107,7 @@ Two resource kinds, thin over the natives:
 - **RHIComputePipeline** = CS + layout. The cage-deform pass is a compute pipeline.
 - **RHIMeshPipeline** = optional AS+MS+PS for the meshlet geometry path (DX12 Ultimate / VK_EXT_mesh_shader). Absent → the renderer falls back to indirect-draw with a classic VS.
 
-Pipeline creation is **async** with a synchronous fast-lane: request → background compile → use last-known-good or a "loading" pipeline until ready. This is how we avoid UE's notorious PSO stutter without a royalty-bearing precompiler.
+Pipeline creation is **async** with a synchronous fast-lane: request → background compile → use last-known-good or a "loading" pipeline until ready. This is how we avoid UE's notorious PSO stutter without a proprietary precompiler.
 
 ### 2.5 Bindless / descriptor strategy (the key architectural fork)
 
@@ -225,7 +225,7 @@ Rationale, weighed for *this* title (a destructible racing sim):
 - **Phase 2 — Virtual Shadow Maps (VSM)** for the high-resolution, many-light look UE5 is known for. Our VSM is a from-paper implementation (concept, not UE code): a **sparse virtual clipmap** with a page table, on-demand page allocation driven by which pages the depth buffer actually samples, **caching of static pages** (the track doesn't move; only the cars and debris invalidate pages), and page-level LOD. This is a large but tractable effort and is the single biggest "UE5 shadow parity" item. VSM requires bindless + compute → **Modern path only**; DX11 stays on CSM.
 - **Contact shadows** (screen-space ray-marched short shadows) add cheap high-frequency detail on both paths — important for debris and crumpled-panel self-shadowing.
 
-### 4.4 Global illumination (royalty-free) — options and recommendation
+### 4.4 Global illumination (permissively-licensed) — options and recommendation
 
 | Option | License path | Pros | Cons | Fit |
 |---|---|---|---|---|
@@ -243,7 +243,7 @@ Rationale, weighed for *this* title (a destructible racing sim):
 4. **GTAO** (in-house, from the Activision paper) or **FidelityFX CACAO** (MIT) for ambient occlusion.
 5. **Reflections:** **FidelityFX SSSR** (MIT, stochastic SSR + denoiser) as the base; **DXR ray-traced reflections** where HW RT exists (glossy car paint, glass); reflection probes / a sky cubemap as the off-screen fallback.
 
-For a mostly-outdoor racing sim, a strong **physically-based sky/atmosphere** (Hillaire's precomputed scattering, published/free) + baked static GI + Brixelizer/DDGI dynamic bounce + SSGI + GTAO + SSSR gives a look competitive with UE5 outdoor scenes without any royalty tech.
+For a mostly-outdoor racing sim, a strong **physically-based sky/atmosphere** (Hillaire's precomputed scattering, published/free) + baked static GI + Brixelizer/DDGI dynamic bounce + SSGI + GTAO + SSSR gives a look competitive with UE5 outdoor scenes without any proprietary tech.
 
 ### 4.5 Volumetrics
 
@@ -267,7 +267,7 @@ hand-written HLSL      ───────────────────
                                             └─FXC/DXC-legacy──▶ DXBC SM5.0 (D3D11)
 ```
 
-- **DXC** (royalty-free, LLVM/NCSA) is the primary compiler: it emits **DXIL** for DX12 and **SPIR-V** for Vulkan from the *same* HLSL source (SM6.0+). This is the modern, supported, free path — no SPIRV-Cross needed for the forward direction.
+- **DXC** (permissively-licensed, LLVM/NCSA) is the primary compiler: it emits **DXIL** for DX12 and **SPIR-V** for Vulkan from the *same* HLSL source (SM6.0+). This is the modern, supported, free path — no SPIRV-Cross needed for the forward direction.
 - **DX11** needs DXBC (SM5.0). Options: (a) compile the same HLSL with **FXC** (or DXC's legacy DXBC path) restricted to an SM5-compatible subset, feature-gating bindless/wave-ops/SM6 constructs behind `#if AVER_BINDLESS` macros; or (b) DXC→SPIR-V→**SPIRV-Cross**→HLSL SM5→FXC for shaders that are hard to keep dual-source. Path (a) is default (simpler, faster); path (b) is the escape hatch. The material codegen emits both a "modern" and a "compat" entry variant.
 - **Reflection** via D3D12 shader reflection (DXIL) and **SPIRV-Reflect** (SPIR-V) auto-generates the **RHIPipelineLayout** (root signature / descriptor set layout), so binding declarations are never hand-maintained and can't drift between backends. This directly solves the recon's observation that `VehicleDeform.usf` relied on UE's auto-reflection — we replicate that convenience portably.
 
@@ -286,7 +286,7 @@ The offline permutation compile lives in the **Rust tooling** module (asset pipe
 
 ## 6. Post-processing / AA / upscaling
 
-All royalty-free; each proprietary feature has a named MIT/permissive replacement.
+All permissively-licensed; each proprietary feature has a named MIT/permissive replacement.
 
 | Stage | Technique | License | Replaces |
 |---|---|---|---|
@@ -392,13 +392,13 @@ Each optional module (VSM, DDGI, meshlet geometry) is a plugin that registers in
 
 Parity legend: **Full** = matches UE5/Source 2; **High** = ~90%, minor gaps; **Partial** = usable subset, visible gaps; **Limited** = present but clearly behind. Effort: S (weeks), M (1–3 mo), L (3–6 mo), XL (6–12+ mo), per capability, small team.
 
-| UE5 / Source 2 capability | Aver approach (royalty-free) | Backends | Parity | Effort | Notes / honest gaps |
+| UE5 / Source 2 capability | Aver approach (permissively-licensed) | Backends | Parity | Effort | Notes / honest gaps |
 |---|---|---|---|---|---|
 | **Nanite** (virtualized geometry) | meshoptimizer meshlets + cluster-LOD DAG + GPU-driven (mesh shaders) + streaming | DX12/VK | **Partial→High** | XL | No software micro-tri rasterizer; clamp min LOD; not unbounded density. Compat: discrete LODs. |
 | **Lumen** (dynamic GI) | Brixelizer GI (MIT) and/or DDGI (from paper) + SSGI + baked LM | DX12/VK (bake: all) | **Partial→High** | L–XL | Diffuse strong; full detailed specular GI is the gap. DX11: baked only. |
 | **Virtual Shadow Maps** | From-paper sparse VSM (page table, static caching) | DX12/VK | **High** | L | Big but tractable. DX11: CSM only. |
 | Cascaded shadow maps | In-house CSM + PCSS + static cache | all | **Full** | M | — |
-| Ray-traced reflections | DXR/VK_KHR RT (royalty-free API) + SSSR fallback | DX12/VK (RT HW) | **High** | M | SSSR (MIT) everywhere; RT where HW present. DX11: SSR-lite. |
+| Ray-traced reflections | DXR/VK_KHR RT (permissively-licensed API) + SSSR fallback | DX12/VK (RT HW) | **High** | M | SSSR (MIT) everywhere; RT where HW present. DX11: SSR-lite. |
 | Screen-space reflections | FidelityFX SSSR (MIT) | all | **Full** | S | Turnkey MIT. |
 | **PBR materials** (metal-rough, clearcoat, cloth, skin) | Material graph → HLSL uber-shader, multiple shading models | all | **Full** | M | Car-paint clearcoat is first-class. |
 | Material graph editor | C# node editor → HLSL codegen | all | **High** | L | Runtime consumes compiled variants. |
@@ -417,7 +417,7 @@ Parity legend: **Full** = matches UE5/Source 2; **High** = ~90%, minor gaps; **P
 | Bindless resources | SM6.6 heap / VK descriptor indexing | DX12/VK | **Full** | M | DX11: slot-based cache (feature off). |
 | Async compute | Dedicated queue + timeline sync | DX12/VK | **Full** | M | DX11: inline. |
 | Transient memory aliasing | D3D12MA / VMA placed+aliased | DX12/VK | **Full** | M | DX11: pooled reuse (no true alias). |
-| Hardware ray tracing | DXR / VK_KHR (royalty-free) | DX12/VK+HW | **Full (API)** | M | Used for RT reflections/GI where present. |
+| Hardware ray tracing | DXR / VK_KHR (permissively-licensed) | DX12/VK+HW | **Full (API)** | M | Used for RT reflections/GI where present. |
 | Cesium-style georef terrain streaming | *Deferred* — dormant in source; plan our own tiled streaming | — | **Not yet** | XL | Recon flags Cesium as staged/unwired; treat as future module, not a dependency. |
 
 **Where full parity is impractical (stated plainly):** *Nanite's* software micro-triangle rasterizer and truly unbounded geometry, and *Lumen's* full detailed specular software tracing, are the two features where a small team should target a strong subset rather than 1:1 parity. The meshlet+LOD path and Brixelizer/DDGI+SSGI+baked stack get visually close for this title's outdoor, vehicle-centric content, and both degrade gracefully to the DX11 compatibility tier. Everything else in the matrix is Full or High with permissive tech.

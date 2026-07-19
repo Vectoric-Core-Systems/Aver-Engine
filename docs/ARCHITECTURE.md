@@ -318,7 +318,7 @@ AvHandle     aver_assets_load(AvEngine*, const char* path);
 
 ---
 
-## 8. Rendering-quality posture (UE5 + Source 2 class, royalty-free)
+## 8. Rendering-quality posture (UE5 + Source 2 class, permissively-licensed)
 
 All behind `Aver.Render` / `Aver.Render.GI`, RHI-abstracted, permissive-licensed only:
 
@@ -326,7 +326,7 @@ All behind `Aver.Render` / `Aver.Render.GI`, RHI-abstracted, permissive-licensed
 - **GI (the UE5-Lumen / Source2 tier):** surfel + irradiance-probe GI and screen-space GI as the baseline (no SDK needed); optional DXR ray-traced reflections/GI when the D3D12 device supports it. Shipped as the `Aver.Render.GI` opt module so a low-end build pays nothing.
 - **Upscaling/AA:** TAA + **AMD FidelityFX FSR** (MIT).
 - **Materials:** glTF metallic-roughness PBR built with a *runtime* material-graph API (never an editor recompile — the recon's headless-crash lesson).
-- **Third-party (all permissive):** Jolt Physics (MIT), meshoptimizer (MIT), DirectXTex/DirectXMath (MIT), Microsoft DXC (open), FSR (MIT), EnTT (MIT), miniaudio (MIT/public-domain), cgltf/stb (public-domain/MIT), xxHash (BSD), Blake3 (Apache/CC0), Recast/Detour (zlib), Dear ImGui (MIT, editor-debug only). No GPL runtime, no Unreal, no royalty-bearing tech.
+- **Third-party (all permissive):** Jolt Physics (MIT), meshoptimizer (MIT), DirectXTex/DirectXMath (MIT), Microsoft DXC (open), FSR (MIT), EnTT (MIT), miniaudio (MIT/public-domain), cgltf/stb (public-domain/MIT), xxHash (BSD), Blake3 (Apache/CC0), Recast/Detour (zlib), Dear ImGui (MIT, editor-debug only). No GPL runtime, no Unreal, no proprietary tech.
 
 ---
 

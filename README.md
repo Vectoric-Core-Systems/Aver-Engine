@@ -1,6 +1,6 @@
 # Aver Engine
 
-A custom, **modular** 3D game engine built exclusively on **royalty-free / permissive-licensed** libraries (MIT / BSD / zlib / Apache-2.0 / public-domain). It is the successor runtime for the **OpenConstructor** soft-body destructible racing sim — carrying its `.oc*` storage formats forward while replacing Unreal Engine.
+A custom, **modular** 3D game engine built exclusively on **permissively-licensed** libraries (MIT / BSD / zlib / Apache-2.0 / public-domain). It is the successor runtime for the **OpenConstructor** soft-body destructible racing sim — carrying its `.oc*` storage formats forward while replacing Unreal Engine.
 
 - **Polyglot:** C++ (core, RHI, renderer, physics), C (stable ABI), C# (.NET 10 editor + scripting), Rust (asset pipeline).
 - **Render backends:** DirectX 12 (primary), DirectX 11, Vulkan — behind one RHI abstraction.

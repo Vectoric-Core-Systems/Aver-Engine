@@ -191,7 +191,7 @@ Body->AddForceAtLocation(ForceWorld * 100, WorldPos)           (.cpp:444)  # NEW
 Key points for the port:
 - The **full 3-component local force** is applied (drag `Fx`, lateral `Fy`, lift/downforce `Fz`) — not just downforce+drag. It is rotated into world by the body transform and applied **at the interpolated CoP**, so it also produces yaw/pitch/roll moments and aero balance shift.
 - **`Q=(speed/ref)²`** is the only speed scaling; air density is *not* re-applied (baked in).
-- **`NEWTONS_TO_UE = 100`**: engine force units are kg·cm/s²; 1 N = 100 of them (`.cpp:22-25`). A royalty-free engine working in SI (N, metres) drops this factor and converts CoP cm→m instead.
+- **`NEWTONS_TO_UE = 100`**: engine force units are kg·cm/s²; 1 N = 100 of them (`.cpp:22-25`). A permissively-licensed engine working in SI (N, metres) drops this factor and converts CoP cm→m instead.
 - **Ground effect in the baked path** comes **entirely from the ride-height axis interpolation** (the bake pre-computed suction per ride height, §9). `GroundEffectFactor()` is **not** called here — it applies only to the `Surfaces[]` path.
 - Debug read-out (`.cpp:460-472`) computes totals (downforce `Σ max(0,−Fz)·Q`, drag `Σ max(0,−Fx)·Q`, L/D, and a front-balance estimate using a hard-coded `HalfWheelbaseCm=144` for the Ferrari 499P) — display only, not physics.
 

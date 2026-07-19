@@ -260,7 +260,7 @@ The Java converter (`OCMapConverter.java`) is **standalone, zero UE dependency**
 | `world.get_name()`, `world.get_outermost().get_name()` → `CLIENT umap` package.object path | 81-83 | port's client-level reference scheme |
 | `unreal.log(...)` | 150-151 | logging |
 
-Also note the **UE package-path string** baked into `CLIENT umap` (`/Game/...Name.Name`) is a UE asset reference; a royalty-free port needs its own client-level addressing scheme (or `CLIENT scene` build-from-assets).
+Also note the **UE package-path string** baked into `CLIENT umap` (`/Game/...Name.Name`) is a UE asset reference; a permissively-licensed port needs its own client-level addressing scheme (or `CLIENT scene` build-from-assets).
 
 ---
 

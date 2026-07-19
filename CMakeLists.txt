@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 project(AverEngine VERSION 0.1.0 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
-# Aver Engine — royalty-free, modular 3D engine (see docs/ARCHITECTURE.md).
+# Aver Engine — permissively-licensed, modular 3D engine (see docs/ARCHITECTURE.md).
 # Strict-DAG modules; pay-for-what-you-use. This top-level file only wires the
 # modules that are IMPLEMENTED. Skeleton-only modules under modules/ carry a
 # README describing their eventual responsibility and are added as they land.
@@ -43,7 +43,7 @@ endif()
 
 message(STATUS "Aver Engine ${PROJECT_VERSION} | D3D12=${AVER_RHI_D3D12} D3D11=${AVER_RHI_D3D11} Vulkan=${AVER_RHI_VULKAN}")
 
-# ---- Third-party (royalty-free) ----
+# ---- Third-party (permissively-licensed) ----
 if(AVER_ENABLE_UI)
   add_subdirectory(third_party/imgui)
 endif()

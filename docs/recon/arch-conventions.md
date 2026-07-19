@@ -1,6 +1,6 @@
 # OpenConstructor27 — North-Star Engine Conventions (extracted from source)
 
-Faithful spec for re-implementation in a royalty-free C++ engine. Every non-obvious claim is cited `file:line`. Ambiguities are flagged inline. "UE dependency" = must be provided natively by the new engine.
+Faithful spec for re-implementation in a permissively-licensed C++ engine. Every non-obvious claim is cited `file:line`. Ambiguities are flagged inline. "UE dependency" = must be provided natively by the new engine.
 
 Sources read: `OpenConstructor27.uproject`, `Source/OpenConstructor27/OpenConstructor27.Build.cs`, `CLAUDE.md`, `Docs/ART_PIPELINE_SPEC.md`, `OCSimCore/{include/oc_sim.h, src/oc_sim.cpp, src/math/Vec3.h, CMakeLists.txt}`, `Source/.../Net/OCNetTypes.h`, `Plugins/OCShaders/*`, `ATTRIBUTIONS.txt`.
 

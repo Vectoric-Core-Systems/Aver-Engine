@@ -10,7 +10,7 @@ Status: authoritative design spec, v1. Target repo: `C:/Users/User/Documents/Ave
 2. **Pay-for-what-you-use / modular.** Everything is a chunked container: a reader loads only the chunks it needs; unknown chunks are skipped, not fatal. No monolithic "everything asset." This is the anti-Unreal-bloat contract at the format layer.
 3. **Author-once / consume-by-both.** Formats carry no engine-runtime pointers, no reflection blobs. The same file feeds the C++ renderer, the C# editor, and the Rust cooker across the C ABI. This mirrors the existing `OCNetTypes`/`oc_sim` philosophy (plain data crosses every seam).
 4. **One coordinate contract, everywhere** (from recon `arch §1`): **cm, +Z up, +X forward, +Y right, left-handed.** Import from glTF/Blender applies the fixed conversion `(x,y,z) → (x,-z,y)` with `SCALE = 0.01` (m→cm), plus the render/physics `bMirrorY` correction. These conversions happen **at import**, never at runtime load — every native binary file is already in engine space.
-5. **Royalty-free only.** Container hashing = xxHash3 / BLAKE3 (BSD-2 / CC0-Apache). Compression = zstd + LZ4 (both BSD). Texture codecs = BCn (unencumbered DX standard), ASTC (Khronos royalty-free), Basis Universal / KTX2 (Apache-2.0). Image decode = stb_image (public domain). glTF/JSON parse = self-contained (the OCCompiler already ships one). No GPL, no patent-bearing tech.
+5. **Permissively-licensed only.** Container hashing = xxHash3 / BLAKE3 (BSD-2 / CC0-Apache). Compression = zstd + LZ4 (both BSD). Texture codecs = BCn (unencumbered DX standard), ASTC (Khronos permissively-licensed), Basis Universal / KTX2 (Apache-2.0). Image decode = stb_image (public domain). glTF/JSON parse = self-contained (the OCCompiler already ships one). No GPL, no patent-bearing tech.
 6. **GPU-driven-ready.** `.ocmesh` ships meshlets + cull cones so a mesh-shader / GPU-culling path (UE5-Nanite-class, Source-2-class) is possible on DX12/Vulkan, while the position stream stays a standalone `R32G32B32_FLOAT` buffer so the existing GPU cage-deform compute pass (recon `gpudeform §7`) can alias it as a UAV with zero copy.
 
 ---
@@ -67,7 +67,7 @@ Identical to recon `arch §1`: **length = cm (f32); +Z up; vehicle-local +X fwd 
 **Octahedral normal** (alt normal format): standard oct decode of `RG16_SNORM`.
 **QTangent decode:** see §5.4.
 
-### 2.4 Hashing & compression (royalty-free)
+### 2.4 Hashing & compression (permissively-licensed)
 - **Chunk & content hashes: xxHash3-64** (BSD-2). Fast integrity + change detection.
 - **Content-addressed DDC / Merkle roots: BLAKE3-256** (CC0/Apache-2.0). Ties into the net map-parity `mapRoot` (32 B) and `HashAlgo` enum (`Blake3=2`).
 - **Legacy compatibility hash: FNV-1a-64** retained exactly (recon `ocmap §3.1.1`) for `.ocmap`/`.ocworld` `ID` content-id so existing worlds keep the same id.
@@ -265,7 +265,7 @@ Subtype `'TEX '`. Chunks: `THDR` (required), `MIPS` (pixel data, `GpuUploadable`
 
 `MipDesc` (24 B): `u32 Width`, `u32 Height`, `u64 Offset` (into `MIPS`), `u64 SizeOnDisk` (per-mip may be individually zstd'd for streaming).
 
-### 6.2 Codec enum (royalty-free)
+### 6.2 Codec enum (permissively-licensed)
 | Val | Codec | Use / license |
 |---|---|---|
 | 0 | `RGBA8_RAW` | uncompressed 32-bpp |
@@ -276,7 +276,7 @@ Subtype `'TEX '`. Chunks: `THDR` (required), `MIPS` (pixel data, `GpuUploadable`
 | 5 | `BC5` | 2-channel (normal XY) |
 | 6 | `BC6H` | HDR |
 | 7 | `BC7` | high-quality RGBA |
-| 8 | `ASTC_4x4`…`ASTC_8x8` (sub-enum in `Swizzle` hi bits) | Khronos royalty-free |
+| 8 | `ASTC_4x4`…`ASTC_8x8` (sub-enum in `Swizzle` hi bits) | Khronos permissively-licensed |
 | 9 | `BASIS_UASTC` (KTX2) | Apache-2.0, transcodes to BCn/ASTC/ETC at load |
 | 10 | `BASIS_ETC1S` (KTX2) | Apache-2.0, smallest |
 
@@ -519,20 +519,20 @@ All returns are error codes (`0`=ok); all geometry/pixels handed back are alread
 
 ---
 
-## 16. Licensing summary (royalty-free posture)
+## 16. Licensing summary (permissively-licensed posture)
 
 | Concern | Choice | License |
 |---|---|---|
 | Hashing | xxHash3 / BLAKE3 / FNV-1a (compat) | BSD-2 / CC0-Apache / public-domain |
 | Compression | zstd, LZ4 | BSD |
-| Texture GPU codecs | BCn, ASTC | unencumbered DX standard / Khronos royalty-free |
+| Texture GPU codecs | BCn, ASTC | unencumbered DX standard / Khronos permissively-licensed |
 | Texture supercompression | Basis Universal / KTX2 | Apache-2.0 |
 | Image decode | stb_image | public domain |
 | glTF/JSON parse | self-contained (OCCompiler-style) | own code |
 | Mesh optimize / meshlets | meshoptimizer | MIT |
 | Tangents | MikkTSpace-equivalent | public domain |
 
-No GPL runtime, no Unreal-derived tech, no royalty-bearing codecs. Every dependency is MIT/BSD/zlib/Apache-2.0/public-domain, satisfying the hard requirement.
+No GPL runtime, no Unreal-derived tech, no proprietary codecs. Every dependency is MIT/BSD/zlib/Apache-2.0/public-domain, satisfying the hard requirement.
 
 ---
 
@@ -543,4 +543,4 @@ No GPL runtime, no Unreal-derived tech, no royalty-bearing codecs. Every depende
 - `editor/` — C# authoring for text formats.
 - `samples/` — round-trip the existing `Ferrari499P.ocbeam/.ocaero` and `demoworld.scene/.ocmap` to prove byte-fidelity load and lossless `.ocworld` upgrade.
 
-This design preserves the four legacy formats byte-for-byte, gives the seven missing asset types real versioned formats under one skippable-chunk container, keeps authoring data human-readable while making bulk data GPU-ready and GPU-driven-capable, and provides a concrete import/cook/DDC path that finally lifts geometry/material/texture/skeleton/animation data out of the opaque embedded-glb and into first-class, royalty-free native formats.
+This design preserves the four legacy formats byte-for-byte, gives the seven missing asset types real versioned formats under one skippable-chunk container, keeps authoring data human-readable while making bulk data GPU-ready and GPU-driven-capable, and provides a concrete import/cook/DDC path that finally lifts geometry/material/texture/skeleton/animation data out of the opaque embedded-glb and into first-class, permissively-licensed native formats.

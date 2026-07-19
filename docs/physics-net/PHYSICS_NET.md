@@ -4,7 +4,7 @@ The repo is empty (fresh greenfield), so this is a from-scratch module design. B
 
 # Aver Engine — Physics/Sim + Networking Modules — UE-Free Port Design
 
-Faithful re-implementation of the OpenConstructor27 soft-body vehicle solver, aerodynamics, fracture/debris, and networking as separately-buildable Aver Engine modules. Every behavior below is traced to the authoritative recon; where the recon flags an ambiguity or discrepancy, the resolution is called out inline. Royalty-free only: no UE types, no Chaos, no GPL. C++20 core, stable `extern "C"` ABI, C# editor over P/Invoke, Rust asset pipeline over FFI.
+Faithful re-implementation of the OpenConstructor27 soft-body vehicle solver, aerodynamics, fracture/debris, and networking as separately-buildable Aver Engine modules. Every behavior below is traced to the authoritative recon; where the recon flags an ambiguity or discrepancy, the resolution is called out inline. Permissively-licensed only: no UE types, no Chaos, no GPL. C++20 core, stable `extern "C"` ABI, C# editor over P/Invoke, Rust asset pipeline over FFI.
 
 ---
 
@@ -536,7 +536,7 @@ Two halves: an **offline bake tool** (was editor-only Voronoi) and a **runtime d
 
 ### 4.1 Offline fracture bake (Rust `aver.pipeline` + C++ helper)
 
-The UE `OC27FractureLibrary` is entirely `#if WITH_EDITOR` — the runtime never calls it. In Aver it becomes an **asset-pipeline step**: scatter Voronoi sites → planar-cell cut → emit pre-diced shard meshes stored in the compiled asset. No runtime code. Royalty-free geometry: use a permissive Voronoi/half-plane clipper (e.g. MIT `voro`-style or a hand-rolled clipper), not UE `PlanarCut`/`Voronoi`. Fracturable parts ship with their shards; the runtime only instantiates them.
+The UE `OC27FractureLibrary` is entirely `#if WITH_EDITOR` — the runtime never calls it. In Aver it becomes an **asset-pipeline step**: scatter Voronoi sites → planar-cell cut → emit pre-diced shard meshes stored in the compiled asset. No runtime code. Permissively-licensed geometry: use a permissive Voronoi/half-plane clipper (e.g. MIT `voro`-style or a hand-rolled clipper), not UE `PlanarCut`/`Voronoi`. Fracturable parts ship with their shards; the runtime only instantiates them.
 
 ### 4.2 Runtime debris (`DebrisChunk`, from `OCDebrisChunk`)
 
