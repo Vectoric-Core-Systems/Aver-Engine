@@ -315,27 +315,31 @@ public:
                 camPos_ = objects_[sel_].pos - fwd * 6.0f; // focus selection
         }
 #endif
+        // The geometry path is a DEVICE setting, not a feature's: it decides how every draw reaches
+        // the rasteriser. Pushed OUTSIDE the module guard, or a build without Voxi could never
+        // select it -- and an unreachable path is an untested one.
+#if AVER_MODULE_VOXI
+        e.device()->setMeshShaders(voxi::Renderer::get().settings().meshShaders);
+#else
+        e.device()->setMeshShaders(msOverride_);   // --ms
+#endif
 #if AVER_MODULE_VOXI
         // Voxi owns the AA setting; push it to the device when it changes (rebuilds targets+PSOs).
         if (voxi::Renderer::get().consumeMsaaDirty())
             e.device()->setSampleCount(static_cast<u32>(voxi::Renderer::get().settings().msaa));
 
-        // The mesh-shader toggle is the only render setting the DEVICE still owns: it selects the
-        // geometry path for every draw, not the behaviour of any one effect.
-        {
+        // Everything the feature owns — GI, the volume's placement in the world, shadows, ray
+        // tracing — goes to the feature directly. Routing any of it through IDevice would put
+        // feature vocabulary back into the generic interface, which is the whole point of the
+        // refactor.
+        if (voxiAttached_) {
             const voxi::Settings& vs = voxi::Renderer::get().settings();
-            e.device()->setMeshShaders(vs.meshShaders);
-            // Everything else — GI, the volume's placement in the world, shadows, ray tracing —
-            // goes to the feature directly. Routing it through IDevice would put feature vocabulary
-            // back into the generic interface, which is the whole point of the refactor.
-            if (voxiAttached_) {
-                const f32 c[3] = {giCenter_.x, giCenter_.y, giCenter_.z};
-                voxiRenderer_.setSettings(vs);
-                voxiRenderer_.setVolume(c, giExtent_);
-                voxiRenderer_.setDebugView(giDebugView_);
-                const Vec3 sd = Vec3{sunAz_, sunAlt_, sunUp_}.getSafeNormal();
-                voxiRenderer_.setSun(&sd.x, sunColor_, sunAmbient_);
-            }
+            const f32 c[3] = {giCenter_.x, giCenter_.y, giCenter_.z};
+            voxiRenderer_.setSettings(vs);
+            voxiRenderer_.setVolume(c, giExtent_);
+            voxiRenderer_.setDebugView(giDebugView_);
+            const Vec3 sd = Vec3{sunAz_, sunAlt_, sunUp_}.getSafeNormal();
+            voxiRenderer_.setSun(&sd.x, sunColor_, sunAmbient_);
         }
 #endif
         // Confine the scene to the dockspace's central node (latched by buildUI last frame).
