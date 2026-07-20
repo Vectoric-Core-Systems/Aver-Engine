@@ -169,6 +169,11 @@ struct PipelineLayout {
     // Logical constant slot k maps to register b(k). A non-zero word count makes it ROOT CONSTANTS,
     // written with setConstants; zero makes it a ROOT CBV, written with setConstantBuffer. A slot
     // cannot be both, and setConstants on a CBV slot (or the reverse) is a binding error.
+    //
+    // Slot 0 is RESERVED for the engine per-frame block (kEngineFrameConstantRegister). It is a root
+    // CBV that the BACKEND binds on every setPipeline, because binding a root signature discards
+    // every root argument and a feature has no way to supply the engine's own frame data. Leave
+    // constantDwords[0] at zero; a feature must never be able to observe b0 unbound.
     u32 constantDwords[kMaxConstantSlots] = {};
     SamplerDesc samplers[4] = {};
     u32 samplerCount = 0;         // s0..s(n-1)
@@ -260,6 +265,9 @@ constexpr u32 kMeshShaderTrisPerGroup = 64;
 // the mesh geometry block sits above both.
 constexpr u32 kMeshGeometryConstantRegister = 5;
 constexpr u32 kFeatureFrameConstantRegister = 4;
+// b0 is the engine's PerFrame block (gViewProj, gCamPos, gLightDir, gLightColor, gAmbient, gSky*).
+// Owned and bound by the backend on every pipeline bind — see PipelineLayout::constantDwords.
+constexpr u32 kEngineFrameConstantRegister = 0;
 static_assert(kFeatureFrameConstantRegister < kMaxConstantSlots,
               "a feature must be able to DECLARE the register it is told to put frame constants at");
 static_assert(kMeshGeometryConstantRegister >= kMaxConstantSlots,

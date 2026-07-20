@@ -1088,10 +1088,14 @@ public:
 private:
     // Suballocate `bytes` of transient upload memory for the frame being recorded.
     D3D12_GPU_VIRTUAL_ADDRESS ringAlloc(const void* data, u32 bytes);
+    // Give every root CBV the pipeline declares a valid address, so no draw can read an unset one.
+    void bindDeclaredRootCbvs(const RhiPipeline* p);
+    D3D12_GPU_VIRTUAL_ADDRESS zeroCbv();
 
     D3D12Device* dev_;
     D3D12ResourceFactory* res_;
     const RhiPipeline* pipe_ = nullptr;
+    ComPtr<ID3D12Resource> zeroCB_;   // shared zero-filled CBV for declared-but-unsupplied slots
 
     ComPtr<ID3D12Resource> ring_[kFrameCount];
     u8* ringPtr_[kFrameCount] = {};
@@ -3743,6 +3747,52 @@ void D3D12RenderContext::setPipeline(PipelineHandle h) {
     }
     dev_->cmdList_->SetPipelineState(p->pso.Get());
     pipe_ = p;
+
+    bindDeclaredRootCbvs(p);
+}
+
+// Binding a root signature discards EVERY root argument, and the cache declares all kMaxConstantSlots
+// whether or not the bound shader reads them, so after this point any slot nobody writes is a root
+// CBV pointing nowhere. Executing a draw with one is undefined behaviour and the D3D12 debug layer
+// cannot see it — it validates API use, and this is not API misuse. On this RDNA part it faulted the
+// IA+GS voxelise pipeline outright (device hung, 0x141 TDR) while the mesh pipeline survived and
+// merely read zeros, writing fully-opaque black voxels. Same defect, two symptoms.
+//
+// So every declared slot is given a real address here rather than left to the feature to remember:
+// slot 0 gets the engine PerFrame block, which is data no feature owns or could supply, and the rest
+// get a zero-filled buffer that setConstants/setConstantBuffer then overwrite as usual. Nothing the
+// caller does or forgets can leave an unset root CBV live at a draw.
+void D3D12RenderContext::bindDeclaredRootCbvs(const RhiPipeline* p) {
+    const u32 f = dev_->frameIndex_ < kFrameCount ? dev_->frameIndex_ : 0;
+    const D3D12_GPU_VIRTUAL_ADDRESS zero = zeroCbv();
+    for (u32 s = 0; s < kMaxConstantSlots; ++s) {
+        if (p->slotParam[s] < 0 || p->slotDwords[s] != 0) continue;   // absent, or root constants
+        D3D12_GPU_VIRTUAL_ADDRESS va = zero;
+        if (s == kEngineFrameConstantRegister && dev_->frameCBs_[f])
+            va = dev_->frameCBs_[f]->GetGPUVirtualAddress();
+        if (!va) continue;
+        const UINT param = static_cast<UINT>(p->slotParam[s]);
+        if (p->compute) dev_->cmdList_->SetComputeRootConstantBufferView(param, va);
+        else            dev_->cmdList_->SetGraphicsRootConstantBufferView(param, va);
+    }
+}
+
+// One 256-byte zeroed upload buffer for the device's lifetime. It is never written after creation,
+// so every pipeline that has no data for a declared slot can share it.
+D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderContext::zeroCbv() {
+    if (!zeroCB_) {
+        auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+        auto rd = bufferDesc(256);
+        if (!hrOk(dev_->device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &rd,
+                  D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&zeroCB_)), "rhi zero CBV")) return 0;
+        void* ptr = nullptr;
+        D3D12_RANGE none{0, 0};
+        if (SUCCEEDED(zeroCB_->Map(0, &none, &ptr)) && ptr) {
+            std::memset(ptr, 0, 256);
+            zeroCB_->Unmap(0, nullptr);
+        }
+    }
+    return zeroCB_ ? zeroCB_->GetGPUVirtualAddress() : 0;
 }
 
 void D3D12RenderContext::setViewport(u32 x, u32 y, u32 w, u32 h) {
