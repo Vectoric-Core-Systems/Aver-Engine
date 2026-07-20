@@ -1344,7 +1344,11 @@ bool D3D12Device::createPipeline() {
     if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "VSMain", "vs_5_1", &vs))) {
         return false;
     }
-    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "PSMainVoxi", "ps_5_1", &ps))) {
+    // PSMainPlain, and only PSMainPlain: the shadow lookup and the cone trace are terms inside the
+    // FEATURE's pixel shader now. This pipeline is what a scene with no Voxi registered gets, and
+    // it is unshadowed with no GI by design — the alternative is the backend keeping a second copy
+    // of shading it no longer owns.
+    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "PSMainPlain", "ps_5_1", &ps))) {
         return false;
     }
 
@@ -1474,12 +1478,14 @@ bool D3D12Device::initRayTracing() {
     if (caps_.rayTracingTier < 11 || caps_.shaderModel < 65 || !caps_.dxcAvailable) return false;
     if (FAILED(device_.As(&device5_))) return false;
 
-    // Second PS variant compiled at SM 6.5 with AVER_RT so RayQuery is available. The SM 6.0
-    // variant stays the default, so a device without DXR still gets a working renderer.
+    // Kept as a PIPELINE only. The RayQuery sun shadow moved into the feature's own scene variants,
+    // so this one carries PSMainPlain like every other backend scene pipeline; what it still proves
+    // is that the device can create an SM 6.5 graphics pipeline at all, which is what rtSupported_
+    // reports to the caps line and the --rt toggle.
     ComPtr<ID3DBlob> vs, ps;
     if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "VSMain", "vs_5_1", &vs))) return false;
-    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "PSMainVoxi", "ps_5_1", &ps, "ps_6_5", "AVER_RT=1"))) {
-        AVER_WARN("[RHI.D3D12] RayQuery shader failed to compile; ray tracing stays off");
+    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "PSMainPlain", "ps_5_1", &ps, "ps_6_5", nullptr))) {
+        AVER_WARN("[RHI.D3D12] SM 6.5 scene shader failed to compile; ray tracing stays off");
         return false;
     }
     D3D12_INPUT_ELEMENT_DESC layout[] = {
@@ -1588,10 +1594,10 @@ bool D3D12Device::initMeshShaders() {
                   const char* defs = "AVER_MS=1") {
         return SUCCEEDED(shaderCompiler().compile(sceneShaderSource().c_str(), entry, fxcTarget, &out, target, defs));
     };
-    if (!ok("MSMain",     "vs_5_1", "ms_6_5", ms)    ||
-        !ok("MSVoxel",    "vs_5_1", "ms_6_5", msVox) ||
-        !ok("PSMainVoxi", "ps_5_1", "ps_6_5", ps)    ||
-        !ok("PSVoxel",    "ps_5_1", "ps_6_5", psVox)) {
+    if (!ok("MSMain",      "vs_5_1", "ms_6_5", ms)    ||
+        !ok("MSVoxel",     "vs_5_1", "ms_6_5", msVox) ||
+        !ok("PSMainPlain", "ps_5_1", "ps_6_5", ps)    ||
+        !ok("PSVoxel",     "ps_5_1", "ps_6_5", psVox)) {
         AVER_WARN("[RHI.D3D12] mesh shaders failed to compile; the IA path stays in use");
         return false;
     }
@@ -1616,10 +1622,11 @@ bool D3D12Device::initMeshShaders() {
     D3D12_PIPELINE_STATE_STREAM_DESC sd{sizeof(s), &s};
     if (!hrOk(device2->CreatePipelineState(&sd, IID_PPV_ARGS(&msPso_)), "mesh pso")) return false;
 
-    // Mesh shaders + RayQuery in one pipeline. Without this the two settings would be mutually
-    // exclusive for the lit pass, which is exactly the D3D12 Ultimate combination being targeted.
+    // Mesh shaders + RayQuery in one pipeline. The combination now matters to the FEATURE's scene
+    // variants; the backend keeps its own so the msActive_ && rtActive_ selection below still has
+    // something to bind when no feature is registered.
     msRtPso_.Reset();
-    if (rtSupported_ && ok("PSMainVoxi", "ps_5_1", "ps_6_5", psRt, "AVER_MS=1;AVER_RT=1")) {
+    if (rtSupported_ && ok("PSMainPlain", "ps_5_1", "ps_6_5", psRt)) {
         MeshPsoStream r = s;
         r.ps = D3D12_SHADER_BYTECODE{psRt->GetBufferPointer(), psRt->GetBufferSize()};
         D3D12_PIPELINE_STATE_STREAM_DESC rd{sizeof(r), &r};
@@ -2316,14 +2323,8 @@ void D3D12Device::beginFrame() {
         return;
     }
 
-    // Debug view replaces the whole scene with a raymarch of the volume.
-    if (giReady_ && gi_.enabled && gi_.debugView) {
-        cmdList_->SetPipelineState(voxelDebugPso_.Get());
-        cmdList_->IASetVertexBuffers(0, 0, nullptr);
-        cmdList_->DrawInstanced(3, 1, 0, 0);
-        cmdList_->SetPipelineState(pso_.Get());
-        return;
-    }
+    // The GI debug view belongs to the feature's scenePass/suppressesScene above. The backend's own
+    // raymarch is gone: two owners of "replace the scene" would race on which one returns first.
 
     // Procedural sky first (fullscreen, no depth), then meshes draw over it.
     if (skyEnabled_) {
@@ -2348,9 +2349,8 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         vd.metallic = metallic; vd.roughness = roughness;
         voxelDraws_.push_back(vd);
     }
-    // The GI debug view replaces the scene with a raymarch of the volume, so skip the lit draw --
-    // but only AFTER capturing above, or the volume would never be filled.
-    if (gi_.enabled && gi_.debugView) return;
+    // A feature replacing the scene (the GI debug view) means no lit draw -- but only AFTER
+    // capturing above, or the volume the raymarch reads would never be filled.
     for (IRenderFeature* f : features_) if (f->suppressesScene()) return;
 
     // A feature may own the scene's lit pipeline: shading it contributes can live INSIDE the pixel
@@ -2427,8 +2427,9 @@ LineHandle D3D12Device::createLineMesh(const LineVertex* verts, u32 count) {
 
 void D3D12Device::drawLines(LineHandle mesh, const f32 world[16]) {
     if (!hasSwapchain_ || mesh == 0 || mesh > lineMeshes_.size()) return;
-    if (gi_.enabled && gi_.debugView) return; // grid/gizmo would overlay the volume raymarch
-    for (IRenderFeature* f : features_) if (f->suppressesScene()) return;   // same, for a feature's
+    // The grid and the gizmos would float over whatever replaced the scene, and a screenshot is the
+    // only thing that ever shows it: the probe reads one pixel and misses an overlay entirely.
+    for (IRenderFeature* f : features_) if (f->suppressesScene()) return;
     const GpuLineMesh& m = lineMeshes_[mesh - 1];
     bindGraphicsRoot(rootSig_.Get()); // lines have no mesh-shader variant; a mesh draw may have switched
     cmdList_->SetPipelineState(lineDepth_ ? linePso_.Get() : lineOverlayPso_.Get());

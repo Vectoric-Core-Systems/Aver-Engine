@@ -54,8 +54,10 @@ public:
     // Runs before the scene's targets are bound, because every one of those passes owns its own
     // render targets and viewport.
     void prePass(rhi::IRenderContext& ctx) override;
-    // True when GI or ray tracing is on: the scene must then be drawn with Voxi's pipeline
-    // variants, because the cone trace and RayQuery live inside the lit pixel shader.
+    // True whenever the feature initialised. Voxi owns the lit pixel shader outright now: the sun
+    // shadow (map or ray) and the cone-traced bounce both live INSIDE it, so a scene drawn with the
+    // backend's own pipeline is unshadowed with no GI. That is the clean cut — shading a feature
+    // contributes cannot be expressed as an extra pass.
     bool overridesScenePipeline() const override;
     // Voxi's binding set is handed out unconditionally, even while the backend still owns the scene
     // pipelines: t0/t1/t2/u0 are Voxi's descriptors now, and Tier 1 requires every declared table to
@@ -70,6 +72,17 @@ public:
     // backend would then call the base's `return 0` and silently fall back with no diagnostic.
     rhi::PipelineHandle scenePipeline(bool meshShaders, bool wireframe) const override;
 
+    // The debug view replaces the scene entirely with a raymarch of the volume. Suppression has to
+    // cover the backend's LINE draws as well, or the editor grid and gizmos float over the raymarch
+    // — visible in a screenshot and completely invisible to the probe.
+    bool suppressesScene() const override;
+    void scenePass(rhi::IRenderContext& ctx) override;
+
+    // Only the pipelines that BAKE the sample count and target formats are rebuilt: the four scene
+    // variants and the debug view. The shadow, voxelise, clear, resolve and mip pipelines are pinned
+    // to sampleCount 1 and target formats they own, so rebuilding them would be pure churn.
+    void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth) override;
+
     // Status for the settings UI / C# bindings, derived from the device caps captured at init.
     bool giReady() const { return giReady_; }
     bool rayTracingActive() const { return rtActive_; }
@@ -78,6 +91,10 @@ private:
     bool createShadowResources();
     bool createVoxelVolume(u32 resolution);
     bool createPipelines();
+    // The subset that bakes sample count and render-target formats. Called from createPipelines()
+    // and again from onRenderTargetsChanged(); a missing rebuild is a draw-time PSO/RTV
+    // incompatibility, not a creation-time error, so it surfaces a long way from its cause.
+    bool createScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth);
     void shadowPass(rhi::IRenderContext& ctx);
     void buildAccelerationStructures(rhi::IRenderContext& ctx);
     void voxelizePass(rhi::IRenderContext& ctx);

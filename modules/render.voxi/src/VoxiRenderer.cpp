@@ -54,6 +54,35 @@ rhi::PipelineLayout giLayout() {
     return l;
 }
 
+// Shader blobs are CPU-side only: a pipeline copies what it needs at creation. Collecting them
+// means the whole batch is released on every exit path, including the early returns a failed
+// rebuild takes.
+struct ShaderScope {
+    explicit ShaderScope(rhi::IResourceFactory& r) : res(r) {}
+    ~ShaderScope() { for (rhi::ShaderHandle h : owned) res.destroyShader(h); }
+    ShaderScope(const ShaderScope&) = delete;
+    ShaderScope& operator=(const ShaderScope&) = delete;
+
+    rhi::ShaderHandle operator()(const char* entry, rhi::ShaderStage stage, u32 sm,
+                                 const char* defines) {
+        rhi::ShaderDesc sd;
+        sd.source  = kVoxiHLSL;
+        // ONE owner for the shared cbuffer layouts, vertex structures and shading. Copying them
+        // here would create a cross-module ABI with no compiler behind it.
+        sd.prelude = rhi::sharedShaderPrelude();
+        sd.entry   = entry;
+        sd.stage   = stage;
+        sd.minShaderModel = sm;
+        sd.defines = defines;
+        const rhi::ShaderHandle h = res.createShader(sd);
+        if (h) owned.push_back(h);
+        return h;
+    }
+
+    rhi::IResourceFactory& res;
+    std::vector<rhi::ShaderHandle> owned;
+};
+
 } // namespace
 
 // ---------------------------------------------------------------- lifecycle
@@ -410,7 +439,33 @@ bool VoxiRenderer::sceneConstants(const void** data, u32* bytes) const {
     return true;
 }
 
-bool VoxiRenderer::overridesScenePipeline() const { return false; }
+// Unconditional once the feature is up: shadowing and the cone-traced bounce are terms inside the
+// lit pixel shader, so declining any frame would silently swap the whole scene to the backend's
+// unshadowed shading rather than merely turning GI off.
+bool VoxiRenderer::overridesScenePipeline() const { return giReady_; }
+
+// The debug view is a GI diagnostic, so it needs GI actually running: with the volume switched off
+// the raymarch would show whatever the last enabled frame left behind.
+bool VoxiRenderer::suppressesScene() const { return giReady_ && giEnabled() && debugView_; }
+
+// The colour target and the viewport are already bound by the backend; the raymarch owns nothing of
+// its own. prePass has forced the cone-trace gate off (voxelParams.w), so the lit pass — which is
+// not recorded at all this frame — could not also trace.
+void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
+    if (!debugPso_) return;
+    ctx.pushMarker("Voxi debug view");
+    ctx.setPipeline(debugPso_);
+    ctx.setBindingSet(bindings_);
+    ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+    ctx.drawFullscreen();
+    ctx.popMarker();
+}
+
+void VoxiRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth) {
+    if (!res_ || !giReady_) return;
+    if (!createScenePipelines(sampleCount, color, depth))
+        AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for {} sample(s)", sampleCount);
+}
 
 rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool wireframe) const {
     // Wireframe has no mesh-shader variant and Voxi builds no wireframe pipeline at all, so decline
@@ -538,27 +593,11 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
 // ---------------------------------------------------------------- pipelines
 
 bool VoxiRenderer::createPipelines() {
-    // Optional geometry / tracing paths, gated exactly as the backend gates its own: mesh shaders
-    // and RayQuery share the same D3D12 Ultimate floor.
+    // Optional geometry path, gated exactly as the backend gates its own: mesh shaders and RayQuery
+    // share the same D3D12 Ultimate floor.
     const bool msOk = caps_.meshShaderTier > 0 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
-    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
 
-    // Shader blobs are CPU-side only, consumed at pipeline creation; released together at the end.
-    std::vector<rhi::ShaderHandle> owned;
-    auto compile = [&](const char* entry, rhi::ShaderStage stage, u32 sm, const char* defines) {
-        rhi::ShaderDesc sd;
-        sd.source  = kVoxiHLSL;
-        // ONE owner for the shared cbuffer layouts, vertex structures and shading. Copying them
-        // here would create a cross-module ABI with no compiler behind it.
-        sd.prelude = rhi::sharedShaderPrelude();
-        sd.entry   = entry;
-        sd.stage   = stage;
-        sd.minShaderModel = sm;
-        sd.defines = defines;
-        const rhi::ShaderHandle h = res_->createShader(sd);
-        if (h) owned.push_back(h);
-        return h;
-    };
+    ShaderScope compile(*res_);
 
     const rhi::PipelineLayout gi = giLayout();
 
@@ -641,10 +680,32 @@ bool VoxiRenderer::createPipelines() {
     }
     if (!mipPso_) AVER_ERROR("[Voxi] mip filter pipeline unavailable");
 
-    // Pipelines that draw into the scene must match the targets the device is using right now.
-    const u32 samples = dev_->sampleCount();
-    const rhi::Format colorFmt = dev_->backbufferFormat();
-    const rhi::Format depthFmt = dev_->depthFormat();
+    // --- 6-10. everything that bakes the sample count and the target formats, against whatever the
+    // device is using right now. Same call the backend makes again whenever those change. ---
+    const bool sceneOk = createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(),
+                                              dev_->depthFormat());
+
+    return shadowPso_ && voxelPso_ && clearPso_ && mipPso_ && sceneOk;
+}
+
+// Split out of createPipelines because these five bake the sample count and the render-target
+// formats: MSAA is a runtime setting, and a pipeline whose SampleDesc disagrees with the bound
+// target is rejected at DRAW time, a long way from anything that looks like its cause.
+bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth) {
+    // RayQuery shares the D3D12 Ultimate floor with mesh shaders; both variants are optional and
+    // their absence is reported, never fatal.
+    const bool msOk = caps_.meshShaderTier > 0 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
+    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
+
+    // Destroyed before the replacements are built, not after: on a rebuild these handles are the
+    // only reference to the old pipelines, and the factory defers the release behind the GPU fence
+    // anyway, so there is nothing to be gained by keeping them alive across the creation.
+    const rhi::PipelineHandle stale[] = {debugPso_, scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_};
+    for (rhi::PipelineHandle p : stale) if (p) res_->destroyPipeline(p);
+    debugPso_ = scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
+
+    ShaderScope compile(*res_);
+    const rhi::PipelineLayout gi = giLayout();
 
     // --- 6. debug: raymarch the volume to screen (shares the prelude's fullscreen triangle). ---
     const rhi::ShaderHandle vsky = compile("VSky", rhi::ShaderStage::Vertex, 60, nullptr);
@@ -654,8 +715,10 @@ bool VoxiRenderer::createPipelines() {
         p.layout = gi;
         p.cull = rhi::CullMode::None;
         p.renderTargetCount = 1;
-        p.renderTargets[0] = colorFmt;
-        p.sampleCount = samples;
+        p.renderTargets[0] = color;
+        // No depth at all, which is why the debug view needs no depthFormat: it replaces the scene
+        // rather than sharing a target with it.
+        p.sampleCount = sampleCount;
         debugPso_ = res_->createGraphicsPipeline(p);
     }
     if (!debugPso_) AVER_ERROR("[Voxi] voxel debug pipeline unavailable");
@@ -667,9 +730,9 @@ bool VoxiRenderer::createPipelines() {
     scene.cull = rhi::CullMode::None;
     scene.depth = {true, true, rhi::CompareOp::Less};
     scene.renderTargetCount = 1;
-    scene.renderTargets[0] = colorFmt;
-    scene.depthFormat = depthFmt;
-    scene.sampleCount = samples;
+    scene.renderTargets[0] = color;
+    scene.depthFormat = depth;
+    scene.sampleCount = sampleCount;
 
     const rhi::ShaderHandle vsMain = compile("VSMain", rhi::ShaderStage::Vertex, 60, nullptr);
     const rhi::ShaderHandle psVoxi = compile("PSMainVoxi", rhi::ShaderStage::Pixel, 60, nullptr);
@@ -706,9 +769,9 @@ bool VoxiRenderer::createPipelines() {
     }
     if (msOk && rtOk && !sceneMsRtPso_) AVER_WARN("[Voxi] mesh-shader + ray-tracing scene variant unavailable");
 
-    for (rhi::ShaderHandle h : owned) res_->destroyShader(h);
-
-    return shadowPso_ && voxelPso_ && clearPso_ && mipPso_ && debugPso_ && scenePso_;
+    // Only the two mandatory ones: the mesh-shader and RayQuery variants are optional by design and
+    // scenePipeline() falls back when they are absent.
+    return debugPso_ && scenePso_;
 }
 
 } // namespace aver::voxi
