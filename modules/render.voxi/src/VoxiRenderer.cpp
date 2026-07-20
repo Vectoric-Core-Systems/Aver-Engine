@@ -176,12 +176,6 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
     draws_.push_back(d);
 }
 
-// TEMP DIAGNOSTIC: AVER_DIAG is a comma-list of switches to isolate the hang.
-static bool diag(const char* what) {
-    const char* e = std::getenv("AVER_DIAG");
-    return e && std::strstr(e, what) != nullptr;
-}
-
 // ---------------------------------------------------------------- feature hooks
 
 void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
@@ -198,10 +192,10 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     cb_.voxelParams[2] = settings_.giMaxDistance;
     cb_.voxelParams[3] = (giEnabled() && !debugView_) ? 1.0f : 0.0f;   // gates the cone trace
 
-    if (!diag("noshadow")) shadowPass(ctx);
+    shadowPass(ctx);
     if (giEnabled()) {
-        if (!diag("novox")) voxelizePass(ctx);
-        if (!diag("nomip")) filterMips(ctx);
+        voxelizePass(ctx);
+        filterMips(ctx);
     }
 }
 
@@ -257,17 +251,15 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     // Injection only writes the voxels its triangles cover, so without a clear a voxel lit once
     // stays lit and moving geometry drags a radiance trail behind it. Only mip 0: the filter below
     // fully overwrites every coarser level.
-    if (!diag("noclear")) {
     ctx.setPipeline(clearPso_);
     ctx.setBindingSet(clearBindings_);
     const u32 cg = (res + 3) / 4;
     ctx.dispatch(cg, cg, cg);
     ctx.uavBarrierTexture(voxelTex_);   // injection must see the cleared volume
-    }
 
     // Mesh shaders remove the geometry shader from voxelisation entirely, which is the point of the
     // variant: GS is emulated on every AMD GCN part.
-    const bool useMs = (settings_.meshShaders || diag("forcems")) && voxelMsPso_;
+    const bool useMs = settings_.meshShaders && voxelMsPso_;
     ctx.setPipeline(useMs ? voxelMsPso_ : voxelPso_);
     ctx.setBindingSet(bindings_);
     ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
@@ -277,7 +269,6 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     // Deliberately NOT skipped when the list is empty: a scene emptied of geometry must end up with
     // a cleared volume rather than keeping the last frame's radiance for ever.
     for (const Draw& d : drawsPrev_) {
-        if (diag("nodraw")) break;
         f32 consts[24];
         std::memcpy(consts, d.world, 16 * sizeof(f32));
         std::memcpy(consts + 16, d.color, 4 * sizeof(f32));

@@ -696,7 +696,7 @@ public:
     }
     bool meshShadersActive() const override { return msActive_; }
 
-    void requestCapture(u32 x, u32 y) override { AVER_ERROR("[DIAG] requestCapture {} {} hasSwap={} buf={}", x, y, (int)hasSwapchain_, (void*)captureBuf_.Get()); capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
+    void requestCapture(u32 x, u32 y) override { capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
     bool getCapture(f32 out[4]) override {
         if (!captureReady_) return false;
         for (int i = 0; i < 4; ++i) out[i] = captured_[i];
@@ -743,8 +743,6 @@ private:
 
     ComPtr<IDXGIFactory4> factory_;   // 6 is optional (see init); 4 is the baseline
     ComPtr<ID3D12Device> device_;
-    ComPtr<ID3D12InfoQueue> infoQueue_;   // TEMP DIAGNOSTIC
-    void drainInfoQueue(const char* where);
     ComPtr<ID3D12CommandQueue> queue_;
     ComPtr<IDXGISwapChain3> swapChain_;
     ComPtr<ID3D12DescriptorHeap> rtvHeap_;
@@ -1154,14 +1152,6 @@ bool D3D12Device::init(const DeviceDesc& desc) {
         adapter.Reset();
     }
     if (!device_) { AVER_WARN("[RHI.D3D12] no compatible hardware adapter"); return false; }
-
-    // TEMP DIAGNOSTIC
-    if (SUCCEEDED(device_.As(&infoQueue_))) {
-        AVER_ERROR("[DIAG] InfoQueue acquired, debug layer IS live");
-        infoQueue_->SetMuteDebugOutput(FALSE);
-    } else {
-        AVER_ERROR("[DIAG] InfoQueue NOT available - debug layer is NOT active");
-    }
 
     D3D12_COMMAND_QUEUE_DESC qd{};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -2627,28 +2617,11 @@ void D3D12Device::endFrame() {
     queue_->ExecuteCommandLists(1, lists);
 }
 
-// TEMP DIAGNOSTIC
-void D3D12Device::drainInfoQueue(const char* where) {
-    if (!infoQueue_) return;
-    const UINT64 n = infoQueue_->GetNumStoredMessages();
-    for (UINT64 i = 0; i < n; ++i) {
-        SIZE_T len = 0;
-        infoQueue_->GetMessage(i, nullptr, &len);
-        std::vector<char> buf(len);
-        auto* m = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
-        if (SUCCEEDED(infoQueue_->GetMessage(i, m, &len)))
-            AVER_ERROR("[DIAG {}] sev={} id={} : {}", where, (int)m->Severity, (int)m->ID, m->pDescription);
-    }
-    infoQueue_->ClearStoredMessages();
-}
-
 void D3D12Device::present() {
     if (!hasSwapchain_) return;
-    drainInfoQueue("pre-present");
     const HRESULT pr = swapChain_->Present(1, 0);
     if (FAILED(pr))
-        AVER_ERROR("[DIAG] Present failed 0x{:08X} removed=0x{:08X}", (u32)pr, (u32)device_->GetDeviceRemovedReason());
-    drainInfoQueue("post-present");
+        AVER_ERROR("[RHI.D3D12] Present failed 0x{:08X} removed=0x{:08X}", (u32)pr, (u32)device_->GetDeviceRemovedReason());
 
     // Mark this frame on the timeline and record it for the backbuffer we just rendered, so the
     // next beginFrame that recycles this buffer waits for exactly this frame to retire.
@@ -2656,7 +2629,6 @@ void D3D12Device::present() {
     fenceValues_[frameIndex_] = nextFence_;
 
     if (captureReq_ && captureBuf_) {
-        AVER_ERROR("[DIAG] capture path entered, removed=0x{:08X}", (u32)device_->GetDeviceRemovedReason());
         waitForGpu(); // ensure the copy completed
         void* mapped = nullptr;
         // nullptr read-range = "may read whole resource" (avoids E_INVALIDARG when
@@ -2679,7 +2651,7 @@ void D3D12Device::present() {
             captureBuf_->Unmap(0, nullptr);
             captureReady_ = true;
         } else {
-            AVER_ERROR("[DIAG] capture Map FAILED");
+            AVER_ERROR("[RHI.D3D12] capture Map FAILED");
         }
         captureReq_ = false;
     }
