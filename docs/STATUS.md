@@ -126,8 +126,30 @@ Dear ImGui (docking) hosted inside the D3D12 backend; dark Unreal-style theme.
   wheel dollies; MMB pans; F focuses selection. No auto-orbit.
 - **Click-to-pick** selection (camera ray vs per-object local AABB via inverse world).
 - Default scene ("blank map") = ground floor + cube + directional sun + sky + fog.
-- Dev/testing arg: `--tool <select|move|rotate|scale>` opens straight into a tool (used for
-  screenshot verification since headless capture can't inject mouse input).
+- **Project browser** (Unreal-style start screen), shown before the editor chrome in the SAME
+  window and ImGui host — not a launcher exe. Recent projects (persisted to
+  `%LOCALAPPDATA%\AverEngine\recent.txt`, most-recent first, capped at 10, dead entries dropped
+  on read), **New Project…** (scaffolds the `docs/PROJECTS.md` layout under
+  `Documents\Aver Projects`, refusing an existing folder), **Open Project…** (`IFileOpenDialog`
+  from the Windows SDK, plus a typed-path field), and **Skip** — a project is additive, and the
+  editor still runs perfectly with none. Loading one retitles the window and fills the status
+  bar, the Content Browser mount line and Project Settings ▸ Description.
+  **The browser never appears in automation**: it is armed only for an interactive launch with
+  no project, i.e. suppressed by `--frames`, by a `<path>.ocproject` argument, or by `--headless`.
+  That is deliberate and load-bearing — the oracle reads a probe pixel out of the viewport, and a
+  full-screen chooser in front of it would break all 13 gates at once.
+- **Tools menu** (between Window and Build, where Unreal puts it) ▸ **New C# Script…**: writes
+  `<project>/Content/Scripts/<Name>.cs` from a template against the real `Aver.Scripting` API,
+  and on the first script also emits a `Scripts.csproj` referencing the engine's
+  `Aver.Scripting.csproj` so the folder opens as a buildable project rather than a loose `.cs`.
+  Refuses to overwrite; validates the name as a C# identifier. Disabled with an explaining
+  tooltip when no project is loaded. Both the modal and the generated file's header state
+  plainly that **the script will not run** — see §4d, in-process CLR hosting does not exist.
+- Dev/testing args: `--tool <select|move|rotate|scale>` opens straight into a tool, and
+  `--new-script` forces the New C# Script modal open (used for screenshot verification since
+  headless capture can't inject mouse input). `--new-script` is gated on the same
+  "is a project loaded" predicate as the menu item, so a run without one demonstrates the
+  disabled state rather than merely asserting it.
 
 ## 4b. Voxi — first optional module (`modules/render.voxi`)
 
@@ -589,11 +611,20 @@ batch, zero new TDRs. The red-channel wobble below still reproduces (`--gi` 5 ru
 11. **C# cannot drive the live editor.** A standalone C# process P/Invokes its own copy of
     `Aver.Render.Voxi.dll`, so it gets its own settings and empty device caps. Needs in-process
     CLR hosting (hostfxr/CoreCLR). The C ABI is already shaped for it.
+    This is also why **Tools ▸ New C# Script produces a file that never executes**. The editor
+    says so in the modal and in the generated file's header comment rather than letting someone
+    find out by watching a script do nothing. The generated `Scripts.csproj` does compile against
+    `Aver.Scripting` (verified with `dotnet build`: 0 errors) — only execution is missing.
 12. Same caveat blocks the **launcher hardware probe** in `docs/MINIMUM_SPECS.md` §7.
 
 **Editor / engine**
 13. Dock layout does **not persist** (`io.IniFilename` is null) — rebuilt from DockBuilder each run.
-14. Output Log does not capture the real log; Content Browser is a placeholder.
+14. Output Log does not capture the real log. The Content Browser now reports the loaded project
+    and where its `Content/` is mounted, but still **enumerates nothing** — it needs the asset
+    pipeline (§9) before it can list files.
+14b. `.ocproject` is **read-only** in the editor: New Project writes one, but nothing writes an
+    existing manifest back, so Project Settings ▸ Description is a display. `STARTMAP` is
+    recorded and shown but not acted on — there is no scene load yet (item 16).
 15. Toolbar Save / Play / Pause / Stop are **non-functional stubs**.
 16. No scene save/load, no `.ocmesh`, no asset import — the general-purpose roadmap in §9 is
     otherwise untouched.
@@ -615,7 +646,12 @@ batch, zero new TDRs. The red-channel wobble below still reproduces (`--gi` 5 ru
   + Puegot (13-field).
 - `.ocmap` (Aver.Formats/OcMap): faithful to OcMap.cs — identity/surface/env + PLACE/DEFORM;
   **positions as f64**; per-placement ObjectId. Verified `fnv1a64("demoworld")=0x376B85BC4D1A03BA`.
-- `FormatTest.exe` golden-tests both against real files (0 failures).
+- `.ocproject` (Aver.Formats/OcProject): the project manifest from `docs/PROJECTS.md` — NAME,
+  ENGINE, CONTENT, STARTMAP, AUTHOR, plus the manifest's own absolute directory. Unknown keys are
+  ignored (the format is forward-compatible by contract), a leading UTF-8 BOM is stripped, and
+  `ENGINE <name> <minVersion>` is **enforced** against `aver/core/Version.hpp` — a project needing
+  a newer build is refused with a message naming both versions instead of half-loading.
+- `FormatTest.exe` golden-tests `.ocbeam`/`.ocmap` against real files (0 failures).
 - Authoritative sources (NOT in repo): `C:\Users\User\Documents\Unreal Projects\OpenConstructor27`
   and `C:\Users\User\Documents\OpenConstructorSupportAssets`. Recon extracts in `docs/recon/`.
 
