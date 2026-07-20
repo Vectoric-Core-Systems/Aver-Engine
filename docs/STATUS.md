@@ -187,43 +187,45 @@ a cheap A/B oracle (e.g. GI on/off showed red 0.70→0.73 with G/B fixed = orang
   reports `Ready`. Toggle: Project Settings ▸ Rendering ▸ Use mesh shaders, or `--ms`. Verified
   pixel-identical to the IA path (lit `0.34,0.36,0.42`; voxel volume `0.19,0.15,0.17` on both),
   across MSAA 1x/4x/8x rebuilds, and over a 300-frame soak.
+- **Mesh shaders + RayQuery together.** The shader-compiler wrapper now takes a semicolon-separated
+  define list, so `PSMain` builds with both `AVER_MS` and `AVER_RT` and gets its own PSO — the two
+  settings are no longer mutually exclusive. Proven live, not merely built: with `rtShadow` forced
+  to `1.0`, a pixel inside the cube's cast shadow goes from `0.25,0.31,0.40` (shadowed) to
+  `0.43,0.46,0.52` on the MS path, matching the IA path's `0.43,0.46,0.51` to within 1/255.
+  Note the viewport-centre probe CANNOT see the sun term — it lands on the cube's unlit left face
+  where `ndl` is ~0, so any shadow A/B must probe a sunlit or cast-shadow pixel instead.
 
 **Renderer**
-1. **Mesh shaders and RayQuery are mutually exclusive for the lit pass.** There is no `PSMain`
-   variant compiled with both `AVER_MS` and `AVER_RT` — the shader-compiler wrapper takes a single
-   `-D` — so with ray tracing on, lit meshes fall back to the IA path (voxelisation still uses the
-   MS path). Needs multi-define support plus a third PSO. Matters because MS + RT is exactly the
-   D3D12 Ultimate configuration being targeted.
-2. **RT ambient occlusion / reflections.** The TLAS already exists, so this is mostly shader work.
-3. **Path tracing.** Declared only; would reuse the same acceleration structure.
-4. **No temporal accumulation** on GI. With the volume now cleared each frame this is the main
+1. **RT ambient occlusion / reflections.** The TLAS already exists, so this is mostly shader work.
+2. **Path tracing.** Declared only; would reuse the same acceleration structure.
+3. **No temporal accumulation** on GI. With the volume now cleared each frame this is the main
    remaining source of GI instability; there is also an occasional one-frame blip in the shaded
    result (~1 run in 10 reads `0.36` instead of `0.38`) present on BOTH the IA and MS paths, so it
    predates the mesh-shader work — most likely the one-frame-delayed volume replay.
-5. GI is a **single volume**, not cascaded — large scenes will not fit at useful resolution.
-6. Shadow map is **one cascade** at 2048²; no CSM, so large scenes get coarse shadows.
-7. Specular GI is not cone traced (diffuse + AO only).
+4. GI is a **single volume**, not cascaded — large scenes will not fit at useful resolution.
+5. Shadow map is **one cascade** at 2048²; no CSM, so large scenes get coarse shadows.
+6. Specular GI is not cone traced (diffuse + AO only).
 
 **Portability (asked for explicitly: all AMD + NVIDIA DX12 GPUs)**
-8. **Only ever run on one GPU (RX 7800 XT).** The DXR/GI/mesh paths are capability-gated and fall
+7. **Only ever run on one GPU (RX 7800 XT).** The DXR/GI/mesh paths are capability-gated and fall
     back, but have NOT been exercised on NVIDIA or Intel, nor on Resource-Binding-Tier-1 hardware.
     Test before shipping.
-9. D3D11 and Vulkan backends are still **stubs** — D3D12 is the only working backend, so
+8. D3D11 and Vulkan backends are still **stubs** — D3D12 is the only working backend, so
     "supports DirectX 12" is a hard requirement.
 
 **Scripting**
-10. **C# cannot drive the live editor.** A standalone C# process P/Invokes its own copy of
+9. **C# cannot drive the live editor.** A standalone C# process P/Invokes its own copy of
     `Aver.Render.Voxi.dll`, so it gets its own settings and empty device caps. Needs in-process
     CLR hosting (hostfxr/CoreCLR). The C ABI is already shaped for it.
-11. Same caveat blocks the **launcher hardware probe** in `docs/MINIMUM_SPECS.md` §7.
+10. Same caveat blocks the **launcher hardware probe** in `docs/MINIMUM_SPECS.md` §7.
 
 **Editor / engine**
-12. Dock layout does **not persist** (`io.IniFilename` is null) — rebuilt from DockBuilder each run.
-13. Output Log does not capture the real log; Content Browser is a placeholder.
-14. Toolbar Save / Play / Pause / Stop are **non-functional stubs**.
-15. No scene save/load, no `.ocmesh`, no asset import — the general-purpose roadmap in §9 is
+11. Dock layout does **not persist** (`io.IniFilename` is null) — rebuilt from DockBuilder each run.
+12. Output Log does not capture the real log; Content Browser is a placeholder.
+13. Toolbar Save / Play / Pause / Stop are **non-functional stubs**.
+14. No scene save/load, no `.ocmesh`, no asset import — the general-purpose roadmap in §9 is
     otherwise untouched.
-16. `modules/abi` is still an empty skeleton (the C ABI lives in the Voxi module instead).
+15. `modules/abi` is still an empty skeleton (the C ABI lives in the Voxi module instead).
 
 **Decisions taken (do not re-litigate without reason)**
 - Ray tracing targets **DXR 1.1 inline RayQuery only**; DXR 1.0 would add only GPUs that emulate

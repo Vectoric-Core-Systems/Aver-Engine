@@ -60,8 +60,9 @@ public:
     bool usingDxc() const { return compiler_ != nullptr; }
 
     // `target51` is the FXC target, e.g. "vs_5_1"; the SM6 equivalent is derived from it.
-    // `sm6` overrides that (e.g. "ps_6_5" for RayQuery), and `define` adds one -D. Both require
-    // DXC, so a caller using them must have checked the device caps first.
+    // `sm6` overrides that (e.g. "ps_6_5" for RayQuery), and `define` is a semicolon-separated
+    // list of -D macros ("AVER_MS=1;AVER_RT=1"). Both require DXC, so a caller using them must
+    // have checked the device caps first.
     HRESULT compile(const char* src, const char* entry, const char* target51, ID3DBlob** out,
                     const char* sm6 = nullptr, const char* define = nullptr) {
         init();
@@ -80,8 +81,16 @@ public:
         if (sm6) t6 = sm6;
         const std::wstring wEntry(entry, entry + std::strlen(entry));
         const std::wstring wTarget(t6.begin(), t6.end());
-        std::wstring wDefine;
-        if (define) wDefine.assign(define, define + std::strlen(define));
+        // Split on ';' and keep each macro alive for the duration of the Compile call.
+        std::vector<std::wstring> wDefines;
+        if (define) {
+            const std::string all(define);
+            for (size_t b = 0; b <= all.size();) {
+                const size_t e = std::min(all.find(';', b), all.size());
+                if (e > b) wDefines.emplace_back(all.begin() + b, all.begin() + e);
+                b = e + 1;
+            }
+        }
 
         DxcBuffer buf{src, std::strlen(src), DXC_CP_UTF8};
         std::vector<LPCWSTR> args = {
@@ -90,7 +99,7 @@ public:
             L"-Zpr",           // pack matrices row-major: the engine's convention
             L"-HV", L"2021",
         };
-        if (define) { args.push_back(L"-D"); args.push_back(wDefine.c_str()); }
+        for (const std::wstring& d : wDefines) { args.push_back(L"-D"); args.push_back(d.c_str()); }
         ComPtr<IDxcResult> result;
         HRESULT hr = compiler_->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), nullptr, IID_PPV_ARGS(&result));
         if (SUCCEEDED(hr)) result->GetStatus(&hr);
@@ -770,7 +779,7 @@ private:
     // layout, and the MS path adds two root SRVs (vertices, indices) plus a triangle count.
     ComPtr<ID3D12GraphicsCommandList6> cmdList6_;
     ComPtr<ID3D12RootSignature> msRootSig_;
-    ComPtr<ID3D12PipelineState> msPso_, msVoxelPso_;
+    ComPtr<ID3D12PipelineState> msPso_, msVoxelPso_, msRtPso_;
     bool msSupported_ = false, msEnabled_ = false, msActive_ = false;
     ID3D12RootSignature* boundRootSig_ = nullptr;   // raw: cache only, ownership stays in the ComPtrs
     ComPtr<ID3D12Resource> tlas_, tlasScratch_, instanceBuf_;
@@ -1222,9 +1231,10 @@ bool D3D12Device::initMeshShaders() {
 
     // AVER_MS gates the mesh-shader entry points: their syntax is only legal from SM 6.5, so the
     // SM 5.1 compiles of this same source must not see them.
-    ComPtr<ID3DBlob> ms, msVox, ps, psVox;
-    auto ok = [&](const char* entry, const char* fxcTarget, const char* target, ComPtr<ID3DBlob>& out) {
-        return SUCCEEDED(shaderCompiler().compile(kShaderHLSL, entry, fxcTarget, &out, target, "AVER_MS=1"));
+    ComPtr<ID3DBlob> ms, msVox, ps, psVox, psRt;
+    auto ok = [&](const char* entry, const char* fxcTarget, const char* target, ComPtr<ID3DBlob>& out,
+                  const char* defs = "AVER_MS=1") {
+        return SUCCEEDED(shaderCompiler().compile(kShaderHLSL, entry, fxcTarget, &out, target, defs));
     };
     if (!ok("MSMain",  "vs_5_1", "ms_6_5", ms)    ||
         !ok("MSVoxel", "vs_5_1", "ms_6_5", msVox) ||
@@ -1254,6 +1264,17 @@ bool D3D12Device::initMeshShaders() {
     D3D12_PIPELINE_STATE_STREAM_DESC sd{sizeof(s), &s};
     if (!hrOk(device2->CreatePipelineState(&sd, IID_PPV_ARGS(&msPso_)), "mesh pso")) return false;
 
+    // Mesh shaders + RayQuery in one pipeline. Without this the two settings would be mutually
+    // exclusive for the lit pass, which is exactly the D3D12 Ultimate combination being targeted.
+    msRtPso_.Reset();
+    if (rtSupported_ && ok("PSMain", "ps_5_1", "ps_6_5", psRt, "AVER_MS=1;AVER_RT=1")) {
+        MeshPsoStream r = s;
+        r.ps = D3D12_SHADER_BYTECODE{psRt->GetBufferPointer(), psRt->GetBufferSize()};
+        D3D12_PIPELINE_STATE_STREAM_DESC rd{sizeof(r), &r};
+        if (!hrOk(device2->CreatePipelineState(&rd, IID_PPV_ARGS(&msRtPso_)), "mesh+RayQuery pso"))
+            msRtPso_.Reset();   // non-fatal: the lit pass falls back to the IA RayQuery pipeline
+    }
+
     // Voxelisation variant: no render target, no depth — the PS writes only the UAV.
     MeshPsoStream v{};
     v.rootSig = msRootSig_.Get();
@@ -1273,7 +1294,8 @@ bool D3D12Device::initMeshShaders() {
     if (!hrOk(device2->CreatePipelineState(&vd, IID_PPV_ARGS(&msVoxelPso_)), "mesh voxel pso")) return false;
 
     msSupported_ = true;
-    AVER_INFO("[RHI.D3D12] mesh shader path ready (ms_6_5, GS-free voxelisation)");
+    AVER_INFO("[RHI.D3D12] mesh shader path ready (ms_6_5, GS-free voxelisation, RayQuery variant {})",
+              msRtPso_ ? "yes" : "no");
     return true;
 }
 
@@ -1391,6 +1413,7 @@ void D3D12Device::buildRtScene() {
     cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
     D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; b.UAV.pResource = tlas_.Get();
     cmdList_->ResourceBarrier(1, &b);
+    if (!rtActive_) AVER_INFO("[RHI.D3D12] RayQuery active ({} instances)", inst.size());
     rtActive_ = true;
 }
 
@@ -2043,11 +2066,13 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     // but only AFTER capturing above, or the volume would never be filled.
     if (gi_.enabled && gi_.debugView) return;
     const GpuMesh& m = meshes_[mesh - 1];
-    // Wireframe and RayQuery only exist on the IA path, so they win over the mesh-shader toggle.
-    const bool useMs = msActive_ && msPso_ && !wireframe_ && !(rtActive_ && rtPso_);
+    // Wireframe exists only on the IA path, so it wins over the mesh-shader toggle. RayQuery has
+    // a mesh-shader variant; if it failed to build, fall back to the IA RayQuery pipeline.
+    const bool rt = rtActive_ && rtPso_;
+    const bool useMs = msActive_ && msPso_ && !wireframe_ && (!rt || msRtPso_);
     bindGraphicsRoot(useMs ? msRootSig_.Get() : rootSig_.Get());
-    cmdList_->SetPipelineState(useMs ? msPso_.Get()
-                                     : (wireframe_ ? wirePso_.Get() : ((rtActive_ && rtPso_) ? rtPso_.Get() : pso_.Get())));
+    cmdList_->SetPipelineState(useMs ? (rt ? msRtPso_.Get() : msPso_.Get())
+                                     : (wireframe_ ? wirePso_.Get() : (rt ? rtPso_.Get() : pso_.Get())));
     f32 consts[24];
     std::memcpy(consts, world, 16 * sizeof(f32));
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
