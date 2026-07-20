@@ -169,22 +169,7 @@ D3D12_RESOURCE_DESC bufferDesc(u64 bytes) {
     return d;
 }
 
-// Triangles per mesh-shader thread group. Must stay in step with AVER_MS_TRIS in the HLSL below;
-// 64 tris = 192 verts / 64 prims, inside the 256/256 per-group output limit.
-constexpr u32 kMsTrisPerGroup = 64;
-
 const char* kShaderHLSL = R"(
-cbuffer PerFrame : register(b0) {
-    float4x4 gViewProj;
-    float4x4 gInvViewProj;
-    float4   gCamPos;      // xyz
-    float4   gLightDir;    // xyz = direction TO light
-    float4   gLightColor;  // rgb
-    float4   gAmbient;     // rgb
-    float4   gSkyZenith;   // rgb
-    float4   gSkyHorizon;  // rgb
-    float4   gFogColor;    // rgb, a = density
-};
 // Feature-owned frame constants, at the register RHIResources.hpp reserves for exactly this. Split
 // out of b0 so the engine block carries nothing a render feature introduced, and so a pass that
 // recomputes only these (the shadow matrix is not known until the shadow pass runs) re-uploads 112
@@ -194,11 +179,6 @@ cbuffer VoxiFrame : register(b4) {
     float4   gVoxelParams; // x = resolution, y = intensity, z = maxDistance, w = enabled|debug<<1
     float4x4 gLightViewProj;
     float4   gShadowParams; // x = 1/shadowMapSize, y = enabled
-};
-cbuffer PerObject : register(b1) {
-    float4x4 gWorld;
-    float4   gBaseColor;
-    float4   gMaterial;   // x=metallic, y=roughness, z=unlit(0/1)
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -253,7 +233,7 @@ cbuffer MipCB : register(b3) { uint gSrcMip; uint3 _mipPad; };
 float3 voxelUVW(float3 wp) { return (wp - gVoxelOrigin.xyz) * gVoxelOrigin.w; }
 bool insideVolume(float3 uvw) { return all(uvw >= 0.0) && all(uvw <= 1.0); }
 
-// ---- cone tracing (defined before PSMain: HLSL needs definition before use) ----
+// ---- cone tracing (defined before its callers: HLSL needs definition before use) ----
 // March a cone through the volume, widening with distance and reading a coarser mip each step so
 // one sample covers the cone's footprint. Front-to-back alpha compositing.
 float4 traceCone(float3 originWS, float3 dir, float aperture) {
@@ -292,91 +272,29 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     return sum.rgb * gVoxelParams.y;
 }
 
-static const float PI = 3.14159265;
-float3 acesTonemap(float3 x){ return saturate((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14)); }
-float3 toGamma(float3 c){ return pow(max(c,0.0), 1.0/2.2); }
-float3 srgbToLin(float3 c){ return pow(max(c,0.0), 2.2); }
-float3 skyColor(float3 dir){ float3 c = lerp(gSkyHorizon.rgb, gSkyZenith.rgb, pow(saturate(dir.z*0.5+0.5), 0.65)); return srgbToLin(c); }
-float3 fresnelSchlick(float ct, float3 F0){ return F0 + (1.0-F0)*pow(saturate(1.0-ct),5.0); }
-float distGGX(float ndh, float a){ float a2=a*a; float d=ndh*ndh*(a2-1.0)+1.0; return a2/(PI*d*d+1e-6); }
-float geomSchlick(float nd, float k){ return nd/(nd*(1.0-k)+k); }
+// ---- scene pixel shaders: which terms shadeSurface is fed, and nothing else ----
+// No shadowing and no bounce: the surface shading the prelude offers on its own.
+float4 PSMainPlain(VSOut i) : SV_TARGET { return shadeSurface(i, 1.0, float3(0,0,0), 1.0); }
 
-// ---- PBR mesh with sky ambient + distance fog ----
-struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; };
-struct VSOut { float4 pos : SV_POSITION; float3 nrmWS : NORMAL; float3 wpos : TEXCOORD0; };
-
-VSOut VSMain(VSIn i) {
-    VSOut o;
-    float4 wp = mul(float4(i.pos, 1.0), gWorld);
-    o.wpos = wp.xyz;
-    o.pos = mul(wp, gViewProj);
-    o.nrmWS = mul(float4(i.nrm, 0.0), gWorld).xyz;
-    return o;
-}
-float4 PSMain(VSOut i) : SV_TARGET {
+// The Voxi variant: sun visibility from the shadow map (or a ray, under AVER_RT) plus the
+// cone-traced bounce. The radiance handed over is raw - shadeSurface owns the diffuse response.
+float4 PSMainVoxi(VSOut i) : SV_TARGET {
     float3 N = normalize(i.nrmWS);
-    float3 V = normalize(gCamPos.xyz - i.wpos);
     float3 L = normalize(gLightDir.xyz);
-    float3 H = normalize(V + L);
-    float metallic = saturate(gMaterial.x);
-    float rough = clamp(gMaterial.y, 0.045, 1.0);
-
-    if (gMaterial.z > 0.5) { // unlit (gizmo/grid): authored display colour, no lighting
-        return float4(gBaseColor.rgb, gBaseColor.a);
-    }
-
-    float3 albedo = srgbToLin(gBaseColor.rgb);
-    float3 lightC = srgbToLin(gLightColor.rgb) * 3.0; // sun radiance
-    float ndv = saturate(dot(N, V));
     float ndl = saturate(dot(N, L));
-    float3 F0 = lerp(0.04.xxx, albedo, metallic);
-
-    // direct (Cook-Torrance GGX)
-    float a = rough * rough;
-    float k = (rough + 1.0); k = k * k / 8.0;
-    float D = distGGX(saturate(dot(N, H)), a);
-    float G = geomSchlick(ndv, k) * geomSchlick(ndl, k);
-    float3 F = fresnelSchlick(saturate(dot(H, V)), F0);
-    float3 spec = (D * G * F) / (4.0 * ndv * ndl + 1e-4);
-    float3 kd = (1.0 - F) * (1.0 - metallic);
 #if AVER_RT
     const float sunVis = rtShadow(i.wpos, N, L);          // exact ray-traced occlusion
 #else
     const float sunVis = shadowFactor(i.wpos, ndl);       // shadow map + PCF
 #endif
-    float3 direct = (kd * albedo / PI + spec) * lightC * ndl * sunVis;
-
-    // ambient: sky hemisphere irradiance (linear) + crude spec reflection of the sky
-    float3 ambient = kd * albedo * skyColor(N) * gAmbient.r;
-    float3 R = reflect(-V, N);
-    float3 envSpec = skyColor(R) * fresnelSchlick(ndv, F0) * (1.0 - rough);
-
     // Voxi indirect bounce: cone-traced diffuse GI + the ambient occlusion that falls out of it.
-    float3 indirect = 0;
-    if (gVoxelParams.w > 0.5) {
-        float ao;
-        indirect = kd * albedo * coneTracedIndirect(i.wpos, N, ao);
-        ambient *= ao;   // the volume already knows what is occluded
-    }
-    float3 color = direct + ambient + indirect + envSpec * 0.35;
-
-    // distance fog (linear space)
-    float dist = length(i.wpos - gCamPos.xyz);
-    float fog = 1.0 - exp(-dist * gFogColor.a);
-    color = lerp(color, srgbToLin(gFogColor.rgb), saturate(fog));
-
-    return float4(toGamma(acesTonemap(color)), gBaseColor.a);
+    float ao = 1.0;
+    float3 ind = 0;
+    if (gVoxelParams.w > 0.5) ind = coneTracedIndirect(i.wpos, N, ao);
+    return shadeSurface(i, sunVis, ind, ao);
 }
 
 // ---- procedural sky (fullscreen triangle via SV_VertexID) ----
-struct SkyOut { float4 pos : SV_POSITION; float2 ndc : TEXCOORD0; };
-SkyOut VSky(uint id : SV_VertexID) {
-    SkyOut o;
-    float2 uv = float2((id << 1) & 2, id & 2);
-    o.ndc = uv * 2.0 - 1.0;
-    o.pos = float4(o.ndc, 1.0, 1.0);
-    return o;
-}
 float4 PSky(SkyOut i) : SV_TARGET {
     float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
     float3 ray = normalize(far.xyz / far.w - gCamPos.xyz);
@@ -437,47 +355,6 @@ void GSVoxel(triangle VoxOut inp[3], inout TriangleStream<VoxOut> os) {
 }
 
 #if AVER_MS
-// ================= Mesh shader geometry path =================
-// A mesh shader has no input assembler, so it reads the vertex and index buffers itself. Both are
-// bound as ROOT SRVs (raw/structured buffers are allowed there), which keeps the per-mesh cost at
-// two GPU virtual addresses and needs no descriptor heap slots at all.
-//
-// One thread group per 64 triangles, expanded unindexed: 192 vertices / 64 primitives, inside the
-// 256/256 per-group limit. Skipping vertex reuse costs a little duplicate transform work and buys
-// a much simpler shader; meshlet building belongs with the asset pipeline, not here.
-struct MeshVtx { float3 pos; float3 nrm; };
-StructuredBuffer<MeshVtx> gVerts   : register(t3);
-ByteAddressBuffer         gIndices : register(t4);
-cbuffer MeshCB : register(b2) { uint gTriCount; uint3 _msPad; };
-
-#define AVER_MS_TRIS 64
-
-// Triangles this group owns, and where its slice of the output arrays starts.
-uint msTriCount(uint gid) { return min(AVER_MS_TRIS, gTriCount - gid * AVER_MS_TRIS); }
-
-[numthreads(AVER_MS_TRIS, 1, 1)]
-[outputtopology("triangle")]
-void MSMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
-            out vertices VSOut verts[AVER_MS_TRIS * 3],
-            out indices uint3 tris[AVER_MS_TRIS]) {
-    uint count = msTriCount(gid);
-    SetMeshOutputCounts(count * 3, count);   // must run for the whole group, before any output
-    if (gtid >= count) return;
-
-    uint3 idx = gIndices.Load3((gid * AVER_MS_TRIS + gtid) * 12);
-    uint o = gtid * 3;
-    [unroll] for (uint k = 0; k < 3; ++k) {
-        MeshVtx v = gVerts[idx[k]];
-        float4 wp = mul(float4(v.pos, 1.0), gWorld);
-        VSOut ov;
-        ov.wpos  = wp.xyz;
-        ov.pos   = mul(wp, gViewProj);
-        ov.nrmWS = mul(float4(v.nrm, 0.0), gWorld).xyz;
-        verts[o + k] = ov;
-    }
-    tris[gtid] = uint3(o, o + 1, o + 2);
-}
-
 // Voxelisation without a geometry shader. The dominant-axis choice GSVoxel made per primitive is
 // made here instead - the mesh shader is already per-primitive, so the GS stage disappears. That
 // matters because GS is emulated on every AMD GCN part and is markedly slower there.
@@ -570,6 +447,14 @@ float4 PSVoxelDebug(SkyOut i) : SV_TARGET {
     return float4(toGamma(acesTonemap(col)), 1.0);
 }
 )";
+
+// The shared prelude and this backend's own shaders form ONE translation unit; every entry point
+// below is compiled from the concatenation. Joined once and cached because the two halves are
+// immutable and the compile sites are scattered across pipeline creation.
+const std::string& sceneShaderSource() {
+    static const std::string src = std::string(sharedShaderPrelude()) + kShaderHLSL;
+    return src;
+}
 
 struct PerFrameCB {
     f32 viewProj[16];
@@ -1434,10 +1319,10 @@ bool D3D12Device::createPipeline() {
     if (!hrOk(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &rsBlob, &rsErr), "SerializeRootSignature")) return false;
     if (!hrOk(device_->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(&rootSig_)), "CreateRootSignature")) return false;
     ComPtr<ID3DBlob> vs, ps, err;
-    if (FAILED(shaderCompiler().compile(kShaderHLSL, "VSMain", "vs_5_1", &vs))) {
+    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "VSMain", "vs_5_1", &vs))) {
         return false;
     }
-    if (FAILED(shaderCompiler().compile(kShaderHLSL, "PSMain", "ps_5_1", &ps))) {
+    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "PSMainVoxi", "ps_5_1", &ps))) {
         return false;
     }
 
@@ -1469,9 +1354,9 @@ bool D3D12Device::createPipeline() {
 
     // Sky pipeline: fullscreen triangle, no input layout, no depth.
     ComPtr<ID3DBlob> vsky, psky;
-    if (FAILED(shaderCompiler().compile(kShaderHLSL, "VSky", "vs_5_1", &vsky))) { return false;
+    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "VSky", "vs_5_1", &vsky))) { return false;
     }
-    if (FAILED(shaderCompiler().compile(kShaderHLSL, "PSky", "ps_5_1", &psky))) { return false;
+    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "PSky", "ps_5_1", &psky))) { return false;
     }
     D3D12_GRAPHICS_PIPELINE_STATE_DESC sp{};
     sp.pRootSignature = rootSig_.Get();
@@ -1498,9 +1383,9 @@ bool D3D12Device::createPipeline() {
 
     // Line PSO (grid / gizmo): pos+colour, line list, depth-tested, no depth write.
     ComPtr<ID3DBlob> vln, pln;
-    if (FAILED(shaderCompiler().compile(kShaderHLSL, "VSLine", "vs_5_1", &vln))) { return false;
+    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "VSLine", "vs_5_1", &vln))) { return false;
     }
-    if (FAILED(shaderCompiler().compile(kShaderHLSL, "PSLine", "ps_5_1", &pln))) { return false;
+    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "PSLine", "ps_5_1", &pln))) { return false;
     }
     D3D12_INPUT_ELEMENT_DESC lineLayout[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -1570,8 +1455,8 @@ bool D3D12Device::initRayTracing() {
     // Second PS variant compiled at SM 6.5 with AVER_RT so RayQuery is available. The SM 6.0
     // variant stays the default, so a device without DXR still gets a working renderer.
     ComPtr<ID3DBlob> vs, ps;
-    if (FAILED(shaderCompiler().compile(kShaderHLSL, "VSMain", "vs_5_1", &vs))) return false;
-    if (FAILED(shaderCompiler().compile(kShaderHLSL, "PSMain", "ps_5_1", &ps, "ps_6_5", "AVER_RT=1"))) {
+    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "VSMain", "vs_5_1", &vs))) return false;
+    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "PSMainVoxi", "ps_5_1", &ps, "ps_6_5", "AVER_RT=1"))) {
         AVER_WARN("[RHI.D3D12] RayQuery shader failed to compile; ray tracing stays off");
         return false;
     }
@@ -1651,7 +1536,7 @@ bool D3D12Device::initMeshShaders() {
         p[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; p[3].DescriptorTable.NumDescriptorRanges = 1; p[3].DescriptorTable.pDescriptorRanges = &uavRange;
         p[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; p[4].Descriptor.ShaderRegister = 3;  // vertices
         p[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; p[5].Descriptor.ShaderRegister = 4;  // indices
-        p[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; p[6].Constants.ShaderRegister = 2; p[6].Constants.Num32BitValues = 4;
+        p[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; p[6].Constants.ShaderRegister = kMeshGeometryConstantRegister; p[6].Constants.Num32BitValues = 4;
         for (auto& rp : p) rp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
         D3D12_STATIC_SAMPLER_DESC samp{};
@@ -1679,12 +1564,12 @@ bool D3D12Device::initMeshShaders() {
     ComPtr<ID3DBlob> ms, msVox, ps, psVox, psRt;
     auto ok = [&](const char* entry, const char* fxcTarget, const char* target, ComPtr<ID3DBlob>& out,
                   const char* defs = "AVER_MS=1") {
-        return SUCCEEDED(shaderCompiler().compile(kShaderHLSL, entry, fxcTarget, &out, target, defs));
+        return SUCCEEDED(shaderCompiler().compile(sceneShaderSource().c_str(), entry, fxcTarget, &out, target, defs));
     };
-    if (!ok("MSMain",  "vs_5_1", "ms_6_5", ms)    ||
-        !ok("MSVoxel", "vs_5_1", "ms_6_5", msVox) ||
-        !ok("PSMain",  "ps_5_1", "ps_6_5", ps)    ||
-        !ok("PSVoxel", "ps_5_1", "ps_6_5", psVox)) {
+    if (!ok("MSMain",     "vs_5_1", "ms_6_5", ms)    ||
+        !ok("MSVoxel",    "vs_5_1", "ms_6_5", msVox) ||
+        !ok("PSMainVoxi", "ps_5_1", "ps_6_5", ps)    ||
+        !ok("PSVoxel",    "ps_5_1", "ps_6_5", psVox)) {
         AVER_WARN("[RHI.D3D12] mesh shaders failed to compile; the IA path stays in use");
         return false;
     }
@@ -1712,7 +1597,7 @@ bool D3D12Device::initMeshShaders() {
     // Mesh shaders + RayQuery in one pipeline. Without this the two settings would be mutually
     // exclusive for the lit pass, which is exactly the D3D12 Ultimate combination being targeted.
     msRtPso_.Reset();
-    if (rtSupported_ && ok("PSMain", "ps_5_1", "ps_6_5", psRt, "AVER_MS=1;AVER_RT=1")) {
+    if (rtSupported_ && ok("PSMainVoxi", "ps_5_1", "ps_6_5", psRt, "AVER_MS=1;AVER_RT=1")) {
         MeshPsoStream r = s;
         r.ps = D3D12_SHADER_BYTECODE{psRt->GetBufferPointer(), psRt->GetBufferSize()};
         D3D12_PIPELINE_STATE_STREAM_DESC rd{sizeof(r), &r};
@@ -1961,7 +1846,7 @@ bool D3D12Device::createShadowResources() {
     sh.ptr += giSrvSize_; // slot 1 = t1
     device_->CreateShaderResourceView(shadowTex_.Get(), &sv, sh);
     ComPtr<ID3DBlob> vs, err;
-    if (FAILED(shaderCompiler().compile(kShaderHLSL, "VSShadow", "vs_5_1", &vs))) {
+    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "VSShadow", "vs_5_1", &vs))) {
         return false;
     }
     D3D12_INPUT_ELEMENT_DESC layout[] = {
@@ -2120,7 +2005,7 @@ bool D3D12Device::createVoxelVolume(u32 res) {
 bool D3D12Device::createGiPipelines() {
     ComPtr<ID3DBlob> vs, gs, ps;
     auto compile = [&](const char* entry, const char* target, ComPtr<ID3DBlob>& out) {
-        if (FAILED(shaderCompiler().compile(kShaderHLSL, entry, target, &out))) {
+        if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), entry, target, &out))) {
             return false;
         }
         return true;
@@ -2590,7 +2475,7 @@ void D3D12Device::dispatchMesh(const GpuMesh& m) {
     cmdList_->SetGraphicsRootShaderResourceView(5, m.ib->GetGPUVirtualAddress());
     const u32 tc[4] = {tris, 0, 0, 0};
     cmdList_->SetGraphicsRoot32BitConstants(6, 4, tc, 0);
-    cmdList6_->DispatchMesh((tris + kMsTrisPerGroup - 1) / kMsTrisPerGroup, 1, 1);
+    cmdList6_->DispatchMesh((tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
 }
 
 LineHandle D3D12Device::createLineMesh(const LineVertex* verts, u32 count) {

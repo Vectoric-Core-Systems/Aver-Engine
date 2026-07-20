@@ -1,6 +1,7 @@
 aver_add_module(Aver.RHI
   SOURCES
     src/RHI.cpp
+    src/RHIShaders.cpp
     src/null/NullDevice.cpp
   DEPS
     Aver.Core
