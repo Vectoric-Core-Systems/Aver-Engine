@@ -5,6 +5,10 @@
 #include "aver/core/Math.hpp"
 #include "aver/formats/OcBeam.hpp"
 
+#if AVER_MODULE_VOXI
+#include "aver/voxi/Voxi.hpp"   // optional render-feature module (AA / GI / RT / PT settings)
+#endif
+
 #if AVER_WITH_IMGUI
 #include "imgui.h"
 #include "imgui_internal.h" // DockBuilder* (docking layout is built in code: IniFilename is null)
@@ -231,6 +235,22 @@ public:
             auto sh=buildScaleAxis(a,kAxisHi);      gzScaleHi_[a]=e.device()->createLineMesh(sh.data(),(u32)sh.size());
         }
 
+#if AVER_MODULE_VOXI
+        // Hand the GPU's real capabilities to Voxi so its settings reflect this hardware.
+        {
+            const rhi::DeviceCaps c = e.device()->caps();
+            voxi::DeviceInfo di;
+            di.msaaMask = c.msaaMask; di.maxMsaaSamples = c.maxMsaaSamples;
+            di.rayTracingTier = c.rayTracingTier; di.computeShaders = c.computeShaders;
+            di.typedUavLoads = c.typedUavLoads; di.conservativeRaster = c.conservativeRaster;
+            voxi::Renderer::get().setDeviceInfo(di);
+            voxi::Settings s = voxi::Renderer::get().settings();
+            s.msaa = static_cast<voxi::Msaa>(e.device()->sampleCount()); // adopt the live value
+            if (msaaOverride_) s.msaa = static_cast<voxi::Msaa>(msaaOverride_);
+            voxi::Renderer::get().setSettings(s);
+            AVER_INFO("[Voxi] attached: max MSAA {}x, raytracing tier {}", c.maxMsaaSamples, c.rayTracingTier);
+        }
+#endif
         tool_ = initialTool_;
         sel_ = 1; // the Cube
         camPos_ = Vec3{7.0f, 7.0f, 4.5f};
@@ -281,6 +301,11 @@ public:
                 camPos_ = objects_[sel_].pos - fwd * 6.0f; // focus selection
         }
 #endif
+#if AVER_MODULE_VOXI
+        // Voxi owns the AA setting; push it to the device when it changes (rebuilds targets+PSOs).
+        if (voxi::Renderer::get().consumeMsaaDirty())
+            e.device()->setSampleCount(static_cast<u32>(voxi::Renderer::get().settings().msaa));
+#endif
         // Confine the scene to the dockspace's central node (latched by buildUI last frame).
         e.device()->setViewportRect((u32)vpX_, (u32)vpY_, (u32)std::fmax(1.0f, vpW_), (u32)std::fmax(1.0f, vpH_));
 
@@ -320,6 +345,8 @@ public:
     }
 
     void onShutdown(Engine&) override { AVER_INFO("[Sandbox] shutdown"); }
+    void setFocusVoxi(bool b) { focusVoxi_ = b ? 4 : 0; } // --project-settings screenshot aid
+    void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
 
 private:
     // Aspect comes from the viewport rect (the dockspace's central node), not the whole window.
@@ -570,7 +597,12 @@ private:
         if (ImGui::BeginMainMenuBar()) {
             ImGui::TextColored(ImVec4(0.95f,0.42f,0.13f,1),"AE");
             if (ImGui::BeginMenu("File")){ ImGui::MenuItem("New Level"); ImGui::MenuItem("Open Level..."); ImGui::MenuItem("Save Level"); ImGui::Separator(); if(ImGui::MenuItem("Exit")) e.requestExit(); ImGui::EndMenu(); }
-            if (ImGui::BeginMenu("Edit")){ ImGui::MenuItem("Undo","Ctrl+Z"); ImGui::MenuItem("Redo","Ctrl+Y"); ImGui::Separator(); ImGui::MenuItem("Editor Preferences"); ImGui::EndMenu(); }
+            if (ImGui::BeginMenu("Edit")){
+                ImGui::MenuItem("Undo","Ctrl+Z"); ImGui::MenuItem("Redo","Ctrl+Y"); ImGui::Separator();
+                ImGui::MenuItem("Editor Preferences");
+                if (ImGui::MenuItem("Project Settings...")) showProjectSettings_ = true;
+                ImGui::EndMenu();
+            }
             if (ImGui::BeginMenu("Window")){ ImGui::MenuItem("World Outliner"); ImGui::MenuItem("Details"); ImGui::MenuItem("Content Browser"); ImGui::MenuItem("Output Log"); ImGui::Separator(); if (ImGui::MenuItem("Reset Layout")) dockBuilt_=false; ImGui::EndMenu(); }
             if (ImGui::BeginMenu("Build")){ ImGui::MenuItem("Build Lighting"); ImGui::MenuItem("Build Geometry"); ImGui::EndMenu(); }
             if (ImGui::BeginMenu("Select")){ if(ImGui::MenuItem("Select All")) {} if(ImGui::MenuItem("Select None")) sel_=-1; ImGui::EndMenu(); }
@@ -661,6 +693,7 @@ private:
 
         buildPanels(e);
         buildViewportOverlay();
+        buildProjectSettings();
 
         // ---------------- status bar ----------------
         ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH));
@@ -731,6 +764,125 @@ private:
         ImGui::TextDisabled("(log capture wiring is a TODO - this mirrors the console for now)");
         ImGui::End();
     }
+
+    // Project Settings — a floating, categorised window like Unreal's, opened from
+    // Edit > Project Settings. Rendering quality is project-wide, so it lives here rather than
+    // in the per-actor Details panel.
+    void buildProjectSettings() {
+        if (focusVoxi_ > 0) { showProjectSettings_ = true; --focusVoxi_; } // --project-settings (screenshot aid)
+        if (!showProjectSettings_) return;
+
+        const ImGuiViewport* mv = ImGui::GetMainViewport();
+        ImGui::SetNextWindowSize(ImVec2(880.0f*dpi_, 560.0f*dpi_), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(mv->GetCenter().x, mv->GetCenter().y), ImGuiCond_FirstUseEver, ImVec2(0.5f,0.5f));
+        if (!ImGui::Begin("Project Settings", &showProjectSettings_, ImGuiWindowFlags_NoDocking)) { ImGui::End(); return; }
+
+        // Category sidebar (left) + settings page (right).
+        ImGui::BeginChild("##categories", ImVec2(220.0f*dpi_, 0), ImGuiChildFlags_Borders);
+        ImGui::TextDisabled("Project");
+        ImGui::Indent();
+        if (ImGui::Selectable("Description", settingsPage_==0)) settingsPage_=0;
+        ImGui::Unindent();
+        ImGui::TextDisabled("Engine");
+        ImGui::Indent();
+        if (ImGui::Selectable("Rendering", settingsPage_==1)) settingsPage_=1;
+        ImGui::Unindent();
+        ImGui::EndChild();
+
+        ImGui::SameLine();
+        ImGui::BeginChild("##page", ImVec2(0, 0), ImGuiChildFlags_Borders);
+        if (settingsPage_ == 0) {
+            ImGui::TextUnformatted("Description");
+            ImGui::Separator();
+            ImGui::TextDisabled("Project name, version and packaging settings will live here");
+            ImGui::TextDisabled("once the .ocproject manifest is wired up.");
+        } else {
+#if AVER_MODULE_VOXI
+            buildRenderingSettings();
+#else
+            ImGui::TextUnformatted("Rendering");
+            ImGui::Separator();
+            ImGui::TextDisabled("Built without the Voxi render module (-DAVER_MODULE_VOXI=OFF).");
+#endif
+        }
+        ImGui::EndChild();
+        ImGui::End();
+    }
+
+#if AVER_MODULE_VOXI
+    // Voxi render settings page. Every feature reports its real status, so a toggle is never shown
+    // as available when the renderer or the GPU cannot actually do it.
+    void buildRenderingSettings() {
+        using namespace aver::voxi;
+        Renderer& vx = Renderer::get();
+        ImGui::TextUnformatted("Rendering");
+        ImGui::SameLine(); ImGui::TextDisabled("(Voxi render module)");
+        ImGui::Separator();
+
+        Settings s = vx.settings();
+        bool changed = false;
+        // ImGui draws labels to the RIGHT of a widget, so leave them room.
+        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
+
+        // --- anti-aliasing (implemented: really rebuilds the targets and PSOs) ---
+        ImGui::TextUnformatted(Renderer::featureName(Feature::Msaa));
+        const u32 mask = vx.deviceInfo().msaaMask;
+        const u32 counts[4] = {1,2,4,8};
+        const char* labels[4] = {"Off","2x","4x","8x"};
+        for (int i=0;i<4;++i) {
+            const bool ok = (mask & counts[i]) != 0;
+            if (i) ImGui::SameLine();
+            ImGui::BeginDisabled(!ok);
+            if (ImGui::RadioButton(labels[i], static_cast<u32>(s.msaa)==counts[i])) { s.msaa=static_cast<Msaa>(counts[i]); changed=true; }
+            ImGui::EndDisabled();
+        }
+
+        // --- quality-ladder features ---
+        auto qualityRow = [&](Feature f, Quality& slot) {
+            ImGui::Separator();
+            const Status st = vx.status(f);
+            ImGui::TextUnformatted(Renderer::featureName(f));
+            const ImVec4 col = st==Status::Ready ? ImVec4(0.45f,0.85f,0.45f,1)
+                             : st==Status::NotImplemented ? ImVec4(0.95f,0.72f,0.25f,1)
+                                                          : ImVec4(0.75f,0.35f,0.35f,1);
+            ImGui::SameLine(); ImGui::TextColored(col, "[%s]", vx.statusText(f));
+            ImGui::BeginDisabled(st != Status::Ready);
+            int q = static_cast<int>(slot);
+            const char* qs[] = {"Off","Low","Medium","High","Epic"};
+            ImGui::PushID(static_cast<int>(f));
+            if (ImGui::Combo("Quality", &q, qs, 5)) { slot = static_cast<Quality>(q); changed = true; }
+            ImGui::PopID();
+            ImGui::EndDisabled();
+        };
+        qualityRow(Feature::GlobalIllumination, s.globalIllumination);
+
+        // GI tunables stay visible (greyed) so the shape of the feature is discoverable.
+        ImGui::BeginDisabled(vx.status(Feature::GlobalIllumination) != Status::Ready);
+        int res = static_cast<int>(s.voxelResolution);
+        const char* resLabels[] = {"64", "128", "256"};
+        const int resValues[] = {64, 128, 256};
+        int resIdx = res>=256 ? 2 : (res>=128 ? 1 : 0);
+        if (ImGui::Combo("Voxel grid", &resIdx, resLabels, 3)) { s.voxelResolution = (u32)resValues[resIdx]; changed = true; }
+        if (ImGui::SliderFloat("GI intensity", &s.giIntensity, 0.0f, 4.0f)) changed = true;
+        if (ImGui::SliderFloat("GI distance (cm)", &s.giMaxDistance, 100.0f, 20000.0f, "%.0f")) changed = true;
+        ImGui::EndDisabled();
+
+        qualityRow(Feature::RayTracing,  s.rayTracing);
+        qualityRow(Feature::PathTracing, s.pathTracing);
+
+        ImGui::PopItemWidth();
+        ImGui::Separator();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("GPU: max MSAA %ux, raytracing tier %u, compute %s",
+                            vx.deviceInfo().maxMsaaSamples, vx.deviceInfo().rayTracingTier,
+                            vx.deviceInfo().computeShaders ? "yes" : "no");
+        ImGui::TextDisabled("Scriptable from C# via aver_voxi_* (Aver.Scripting)");
+        ImGui::PopTextWrapPos();
+
+        if (changed) vx.setSettings(s);
+        // No ImGui::End() here: this renders as a page inside the Project Settings child region.
+    }
+#endif
 
     // Unreal puts the transform tools and snapping in the VIEWPORT's own overlay bar, not the
     // window toolbar: left group = view options, right group = tools + snapping + camera speed.
@@ -892,15 +1044,21 @@ private:
     // and consumed next frame by the camera aspect, the scene scissor, picking and the gizmo.
     f32 vpX_=0, vpY_=0, vpW_=1600, vpH_=900;
     bool dockBuilt_=false;   // one-shot DockBuilder layout (nothing is persisted to an ini)
+    bool showProjectSettings_=false; // Edit > Project Settings window
+    int  settingsPage_=1;            // 0 = Description, 1 = Rendering
+    int  focusVoxi_=0;               // --project-settings: frames left to force the window open
+    int  msaaOverride_=0;            // --msaa N: apply a sample count at startup
     bool worldSpace_=true;   // gizmo coordinate space toggle (display only for now)
     rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;
     Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false; std::string beam, shot; Tool tool=Tool::Select;
+    u64 frames=0; bool headless=false, focusVoxi=false; std::string beam, shot; Tool tool=Tool::Select; int msaa=0;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
+        else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
+        else if (!std::strcmp(argv[i],"--msaa") && i+1<argc) msaa=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
         else if (!std::strcmp(argv[i],"--tool") && i+1<argc) {
@@ -910,7 +1068,10 @@ Application* createApplication(int argc, char** argv) {
         }
         else if (argv[i][0]!='-') beam=argv[i];
     }
-    return new SandboxApp(frames, headless, beam, shot, tool);
+    auto* app = new SandboxApp(frames, headless, beam, shot, tool);
+    app->setFocusVoxi(focusVoxi);
+    app->setMsaaOverride(msaa);
+    return app;
 }
 
 } // namespace aver

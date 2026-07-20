@@ -28,7 +28,7 @@ namespace aver::rhi {
 namespace {
 
 constexpr u32 kFrameCount = 2;
-constexpr u32 kSampleCount = 4; // MSAA
+constexpr u32 kDefaultSampleCount = 4; // MSAA default; runtime-adjustable via setSampleCount
 constexpr DXGI_FORMAT kBackbufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
 
@@ -241,6 +241,9 @@ public:
 
     Backend backend() const override { return Backend::D3D12; }
     const char* adapterName() const override { return adapterName_.c_str(); }
+    DeviceCaps caps() const override { return caps_; }
+    u32 sampleCount() const override { return sampleCount_; }
+    bool setSampleCount(u32 samples) override;
 
     ISwapchain* createSwapchain(const SwapchainDesc& d) override {
         if (!createSwapchainResources(d)) return nullptr;
@@ -302,6 +305,7 @@ public:
     bool selfTest(const f32 in[4], f32 out[4]) override;
 
 private:
+    void queryCaps();
     bool createPipeline();
     bool createSwapchainResources(const SwapchainDesc& d);
     void createRenderTargetViews();
@@ -360,6 +364,8 @@ private:
     PerFrameCB frameCB_{};
     u32 width_ = 0, height_ = 0;
     u32 vpX_ = 0, vpY_ = 0, vpW_ = 0, vpH_ = 0; // scene sub-rect; w/h == 0 means full backbuffer
+    u32 sampleCount_ = kDefaultSampleCount;     // live MSAA sample count (1 = off)
+    DeviceCaps caps_{};
     bool hasSwapchain_ = false;
     f32 clear_[4] = {0.10f, 0.12f, 0.16f, 1.0f};
     std::string adapterName_ = "D3D12 Device";
@@ -406,6 +412,9 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     fenceEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!fenceEvent_) { AVER_ERROR("[RHI.D3D12] CreateEvent failed"); return false; }
 
+    queryCaps();
+    if (!(caps_.msaaMask & sampleCount_)) sampleCount_ = 1; // fall back if 4x is unsupported
+
     // Sensible default light so meshes are lit before the app sets one.
     const f32 d[3] = {0.3f, 0.4f, 0.85f}, c[3] = {1, 1, 1};
     setLight(d, c, 0.15f);
@@ -413,6 +422,54 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     if (!createPipeline()) return false;
 
     AVER_INFO("[RHI.D3D12] device ready on adapter '{}'", adapterName_);
+    return true;
+}
+
+// Ask the hardware what it can actually do, so the editor only offers real options.
+void D3D12Device::queryCaps() {
+    caps_ = {};
+    caps_.computeShaders = true; // any D3D12 feature-level 11_0 device has compute
+    caps_.msaaMask = 1;          // 1 sample always works
+    caps_.maxMsaaSamples = 1;
+    for (u32 s : {2u, 4u, 8u}) {
+        D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS ms{};
+        ms.Format = kBackbufferFormat;
+        ms.SampleCount = s;
+        if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &ms, sizeof(ms))) && ms.NumQualityLevels > 0) {
+            caps_.msaaMask |= s;
+            caps_.maxMsaaSamples = s;
+        }
+    }
+    D3D12_FEATURE_DATA_D3D12_OPTIONS o{};
+    if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &o, sizeof(o)))) {
+        caps_.typedUavLoads = o.TypedUAVLoadAdditionalFormats != FALSE;
+        caps_.conservativeRaster = o.ConservativeRasterizationTier != D3D12_CONSERVATIVE_RASTERIZATION_TIER_NOT_SUPPORTED;
+    }
+    D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5{};
+    if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof(o5)))) {
+        if (o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1)      caps_.rayTracingTier = 11;
+        else if (o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0) caps_.rayTracingTier = 10;
+    }
+    AVER_INFO("[RHI.D3D12] caps: MSAA up to {}x, raytracing tier {}, typed-UAV-load {}, conservative-raster {}",
+              caps_.maxMsaaSamples, caps_.rayTracingTier, caps_.typedUavLoads, caps_.conservativeRaster);
+}
+
+// Rebuild everything that bakes the sample count: the MSAA colour/depth targets and every PSO.
+bool D3D12Device::setSampleCount(u32 samples) {
+    if (samples == sampleCount_) return true;
+    if (samples != 1 && samples != 2 && samples != 4 && samples != 8) return false;
+    if (!(caps_.msaaMask & samples)) return false;
+
+    waitForGpu(); // PSOs and targets are in flight until the GPU drains
+    const u32 prev = sampleCount_;
+    sampleCount_ = samples;
+    if (!createPipeline()) { sampleCount_ = prev; createPipeline(); return false; } // PSOs carry SampleDesc
+    if (hasSwapchain_) {
+        depthBuffer_.Reset();
+        msaaColor_.Reset();
+        if (!createDepthBuffer() || !createMsaaColor()) { AVER_ERROR("[RHI.D3D12] MSAA {}x target creation failed", samples); return false; }
+    }
+    AVER_INFO("[RHI.D3D12] MSAA set to {}x", samples);
     return true;
 }
 
@@ -470,7 +527,7 @@ bool D3D12Device::createPipeline() {
     pso.NumRenderTargets = 1;
     pso.RTVFormats[0] = kBackbufferFormat;
     pso.DSVFormat = kDepthFormat;
-    pso.SampleDesc.Count = kSampleCount;
+    pso.SampleDesc.Count = sampleCount_;
     if (!hrOk(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pso_)), "CreateGraphicsPipelineState")) return false;
 
     // Sky pipeline: fullscreen triangle, no input layout, no depth.
@@ -496,7 +553,7 @@ bool D3D12Device::createPipeline() {
     sp.NumRenderTargets = 1;
     sp.RTVFormats[0] = kBackbufferFormat;
     sp.DSVFormat = kDepthFormat;
-    sp.SampleDesc.Count = kSampleCount;
+    sp.SampleDesc.Count = sampleCount_;
     if (!hrOk(device_->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&skyPso_)), "CreateGraphicsPipelineState(sky)")) return false;
 
     // Wireframe variant of the mesh PSO.
@@ -533,7 +590,7 @@ bool D3D12Device::createPipeline() {
     lp.NumRenderTargets = 1;
     lp.RTVFormats[0] = kBackbufferFormat;
     lp.DSVFormat = kDepthFormat;
-    lp.SampleDesc.Count = kSampleCount;
+    lp.SampleDesc.Count = sampleCount_;
     if (!hrOk(device_->CreateGraphicsPipelineState(&lp, IID_PPV_ARGS(&linePso_)), "line pso")) return false;
 
     // Overlay line PSO: same as above but no depth test — gizmos stay visible on top.
@@ -626,7 +683,7 @@ bool D3D12Device::createDepthBuffer() {
     td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     td.Width = width_; td.Height = height_;
     td.DepthOrArraySize = 1; td.MipLevels = 1;
-    td.Format = kDepthFormat; td.SampleDesc.Count = kSampleCount;
+    td.Format = kDepthFormat; td.SampleDesc.Count = sampleCount_;
     td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
     D3D12_CLEAR_VALUE cv{}; cv.Format = kDepthFormat; cv.DepthStencil.Depth = 1.0f;
@@ -641,7 +698,7 @@ bool D3D12Device::createMsaaColor() {
     td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     td.Width = width_; td.Height = height_;
     td.DepthOrArraySize = 1; td.MipLevels = 1;
-    td.Format = kBackbufferFormat; td.SampleDesc.Count = kSampleCount;
+    td.Format = kBackbufferFormat; td.SampleDesc.Count = sampleCount_;
     td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
     D3D12_CLEAR_VALUE cv{}; cv.Format = kBackbufferFormat;
@@ -776,16 +833,21 @@ void D3D12Device::endFrame() {
     if (!hasSwapchain_) return;
     ID3D12Resource* bb = renderTargets_[frameIndex_].Get();
 
-    // Resolve the MSAA scene target into the (single-sample) backbuffer.
+    // Move the scene target into the backbuffer. With MSAA on that is a resolve; with MSAA off
+    // (1 sample) ResolveSubresource is illegal, so copy instead.
+    const bool msaa = sampleCount_ > 1;
+    const D3D12_RESOURCE_STATES srcState = msaa ? D3D12_RESOURCE_STATE_RESOLVE_SOURCE : D3D12_RESOURCE_STATE_COPY_SOURCE;
+    const D3D12_RESOURCE_STATES dstState = msaa ? D3D12_RESOURCE_STATE_RESOLVE_DEST   : D3D12_RESOURCE_STATE_COPY_DEST;
     D3D12_RESOURCE_BARRIER pre[2] = {
-        transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RESOLVE_SOURCE),
-        transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RESOLVE_DEST),
+        transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, srcState),
+        transition(bb, D3D12_RESOURCE_STATE_PRESENT, dstState),
     };
     cmdList_->ResourceBarrier(2, pre);
-    cmdList_->ResolveSubresource(bb, 0, msaaColor_.Get(), 0, kBackbufferFormat);
+    if (msaa) cmdList_->ResolveSubresource(bb, 0, msaaColor_.Get(), 0, kBackbufferFormat);
+    else      cmdList_->CopyResource(bb, msaaColor_.Get());
     D3D12_RESOURCE_BARRIER post[2] = {
-        transition(bb, D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET),
-        transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RESOLVE_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+        transition(bb, dstState, D3D12_RESOURCE_STATE_RENDER_TARGET),
+        transition(msaaColor_.Get(), srcState, D3D12_RESOURCE_STATE_RENDER_TARGET),
     };
     cmdList_->ResourceBarrier(2, post);
 

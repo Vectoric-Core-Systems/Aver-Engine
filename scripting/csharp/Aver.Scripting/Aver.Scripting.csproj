@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Aver Engine C# scripting bindings.
+       Binds the Voxi module's C ABI (Aver.Render.Voxi.dll). The DLL is resolved from the
+       engine's build output at run time; see README.md for how the native library is located. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Scripting</AssemblyName>
+    <RootNamespace>Aver.Scripting</RootNamespace>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>

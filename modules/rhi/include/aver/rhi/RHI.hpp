@@ -51,11 +51,29 @@ struct DeviceDesc {
     bool enableDebug = false;
 };
 
+// What the physical device can actually do. Queried once at init; consumers (e.g. the Voxi
+// render module) use it to decide which quality settings are offerable vs greyed out, so the
+// UI never advertises a feature the hardware cannot run.
+struct DeviceCaps {
+    u32 msaaMask = 1;            // bit N set => N samples supported (bits 1,2,4,8)
+    u32 maxMsaaSamples = 1;      // highest supported sample count (1 = no MSAA)
+    u32 rayTracingTier = 0;      // 0 = none, 10 = DXR 1.0, 11 = DXR 1.1
+    bool computeShaders = false;
+    bool typedUavLoads = false;      // needed for voxel radiance read-modify-write
+    bool conservativeRaster = false; // needed for watertight voxelization
+};
+
 class IDevice {
 public:
     virtual ~IDevice() = default;
     virtual Backend backend() const = 0;
     virtual const char* adapterName() const = 0;
+    virtual DeviceCaps caps() const { return {}; }
+
+    // Anti-aliasing sample count. Changing it rebuilds the scene targets and every PSO, so it
+    // is a real (if heavyweight) runtime setting. Returns false if the count is unsupported.
+    virtual u32 sampleCount() const { return 1; }
+    virtual bool setSampleCount(u32 samples) { (void)samples; return false; }
     virtual ISwapchain* createSwapchain(const SwapchainDesc& desc) = 0;
     virtual void beginFrame() = 0; // acquires + clears the current backbuffer
     virtual void endFrame() = 0;   // finalizes the frame's command list

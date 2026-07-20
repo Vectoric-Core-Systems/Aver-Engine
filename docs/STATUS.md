@@ -111,6 +111,28 @@ Dear ImGui (docking) hosted inside the D3D12 backend; dark Unreal-style theme.
 - Dev/testing arg: `--tool <select|move|rotate|scale>` opens straight into a tool (used for
   screenshot verification since headless capture can't inject mouse input).
 
+## 4b. Voxi — first optional module (`modules/render.voxi`)
+
+`Aver.Render.Voxi`, gated by `-DAVER_MODULE_VOXI` (ON by default; OFF still builds/runs).
+Owns the project-wide render quality settings and reports, per feature, whether it is
+`Ready` / `NotImplemented` / `Unsupported` from the real device caps:
+
+- **MSAA — implemented**: Off/2x/4x/8x applied at runtime via `IDevice::setSampleCount`
+  (rebuilds scene targets + all PSOs; 1x uses `CopyResource` since resolve is illegal there).
+- **Global Illumination / Ray Tracing / Path Tracing — declared, not implemented.** The editor
+  greys them out; the setters refuse them. Only `Renderer::status()` changes when they land.
+- Exposed in the editor under **Edit > Project Settings > Rendering** (project-wide, so NOT in
+  the per-actor Details panel).
+- Depends on **Aver.Core only** — the host pushes `DeviceInfo` in, so no RHI leaks into the DLL.
+- Built **SHARED** for C# P/Invoke; C ABI in `include/aver/voxi/voxi_abi.h` (`aver_voxi_*`),
+  bound by `scripting/csharp/Aver.Scripting`. Verify with
+  `dotnet run --project scripting/csharp/Aver.Scripting.Sample`.
+  **Caveat**: a separate C# process gets its own copy of the DLL (own settings, empty caps);
+  scripting the live editor needs in-process CLR hosting, which does not exist yet.
+- Dev flags: `--msaa N` (exercise the runtime switch), `--project-settings` (open the window).
+- This machine reports: MSAA to 8x, **DXR tier 1.1**, typed UAV loads, conservative raster —
+  i.e. everything the voxel GI will need.
+
 ## 5. Formats — implemented loaders
 
 - `.ocbeam` (Aver.Formats/OcBeam): faithful to OCCompiler Main.java + VehicleDamage.cpp —

@@ -33,3 +33,7 @@ Thumbs.db
 
 # --- Third-party fetched deps (kept out of VCS; pulled by CMake) ---
 /third_party/_deps/
+
+# C# scripting build output
+scripting/**/bin/
+scripting/**/obj/

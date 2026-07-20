@@ -32,6 +32,9 @@ option(AVER_BUILD_SANDBOX "Build the sandbox sample app" ON)
 option(AVER_BUILD_TESTS "Build test executables" ON)
 option(AVER_ENABLE_UI "In-window editor UI (Dear ImGui)" ON)
 
+# --- Optional feature modules (the engine builds and runs with these OFF) ---
+option(AVER_MODULE_VOXI "Voxi render module: AA / GI / ray tracing / path tracing settings" ON)
+
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
   add_compile_definitions(
@@ -62,6 +65,9 @@ if(AVER_RHI_D3D11)
 endif()
 if(AVER_RHI_VULKAN)
   add_subdirectory(modules/rhi.vulkan)
+endif()
+if(AVER_MODULE_VOXI)
+  add_subdirectory(modules/render.voxi)   # optional: render feature settings + C ABI for C#
 endif()
 add_subdirectory(modules/runtime)
 
