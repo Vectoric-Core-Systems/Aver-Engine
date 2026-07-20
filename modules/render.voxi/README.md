@@ -10,7 +10,7 @@ device capabilities which of them can actually be used:
 |---|---|
 | **Anti-Aliasing (MSAA)** | **Implemented.** Off / 2x / 4x / 8x, applied at runtime — rebuilds the scene targets and every PSO. |
 | **Global Illumination** | **Implemented.** Voxel cone tracing: voxelise+inject -> mip filter -> 6-cone diffuse gather + AO. |
-| **Ray Tracing** | Declared. Device reports DXR tier; no pipeline yet. |
+| **Ray Tracing** | Declared. Blocked on DXC/SM6.x (see below); most DX12 GPUs have no RT hardware at all. |
 | **Path Tracing** | Declared. Reference tracer; not built yet. |
 
 ## Honest status reporting
@@ -70,7 +70,51 @@ from "cone tracing is broken".
 
 Dev flags: `--gi`, `--gi-debug`.
 
+## Shadowed injection
+
+A 2048^2 directional shadow map is rendered from the sun before voxelisation, and sampled with 3x3
+hardware PCF in BOTH the lit pass and the voxelisation pass. Shadowing the injection matters: a
+surface in shadow must not emit sun radiance into the volume, or bounce light leaks through walls
+and shadowed areas glow. Shadow maps are core feature-level 11_0 - deliberately chosen over
+ray-traced shadows so this works on every DX12 GPU rather than only RT-capable ones.
+
+## Portability (all DX12 GPUs, AMD + NVIDIA + Intel)
+
+Baseline is feature level 11_0. Optional features are queried and gated, never assumed:
+
+| Feature | Gate | Fallback |
+|---|---|---|
+| Conservative rasterisation | `ConservativeRasterizationTier` | Standard raster; thin geometry may miss voxels |
+| MSAA 2x/4x/8x | `MULTISAMPLE_QUALITY_LEVELS` per count | Drops to the highest supported, or off |
+| Ray tracing | `OPTIONS5.RaytracingTier` | Reported `Unsupported`; setting refuses to enable |
+| `IDXGIFactory6` | `QueryInterface` | Falls back to `EnumAdapters1` (Win10 pre-1803) |
+
+Deliberate correctness choices for cross-vendor behaviour:
+- **All descriptor-heap slots are null-filled.** Resource Binding Tier 1 hardware (NVIDIA Kepler /
+  Maxwell gen 1, Intel Haswell/Broadwell) requires every descriptor in a bound table to be valid
+  even when the shader ignores it - and the voxel slots are empty whenever GI is off.
+- **Every pass binds both descriptor tables**, for the same Tier 1 reason.
+- **The radiance volume uses per-mip resource transitions.** The mip filter reads level m-1 through
+  a single-mip SRV while writing level m as a UAV; a whole-chain SRV would demand every mip be in
+  the read state at once. Getting this wrong is undefined behaviour that renders correctly on one
+  vendor and corrupts on another.
+
+Known cost: voxelisation uses a geometry shader for dominant-axis projection. GS is core 11_0 and
+runs everywhere, but is emulated through an off-chip ring buffer on all AMD GCN parts and is
+markedly slower there. A GS-free variant (three instanced passes) is the fix if that bites.
+
+## Ray tracing - why it is not done yet
+
+DXR cannot be expressed in shader model 5.1. Inline ray tracing (`RayQuery`) needs SM 6.5 and a
+full RT pipeline needs `lib_6_3`; this backend compiles HLSL with `D3DCompile` (FXC, SM 5.1), so
+DXR needs the shader pipeline moved to **DXC** first, plus BLAS/TLAS acceleration structures.
+
+Note also that "works on all DX12 GPUs" is impossible for ray tracing by construction: no AMD GCN
+or RDNA 1 part (RX 500, Vega, RX 5000), no pre-Turing NVIDIA, and no pre-Arc Intel has RT hardware.
+The correct behaviour there is exactly what Voxi already does - report `Unsupported` and refuse the
+setting - rather than silently doing nothing.
+
 ## Next
 
-Shadowed injection (the volume currently stores unshadowed direct light), temporal accumulation
-to soften flicker, a cascaded volume for large scenes, and specular cones for glossy reflections.
+DXC migration then inline RayQuery; temporal accumulation to soften flicker; clearing stale voxels
+so moving objects do not leave trails; a cascaded volume for large scenes.

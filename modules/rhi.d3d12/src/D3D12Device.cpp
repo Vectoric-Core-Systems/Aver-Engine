@@ -4,6 +4,7 @@
 // D3D12 structs (no d3dx12.h). Falls back to nullptr if D3D12 is unavailable.
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/core/Math.hpp"   // light-space matrices for the shadow map
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -87,6 +88,8 @@ cbuffer PerFrame : register(b0) {
     float4   gFogColor;    // rgb, a = density
     float4   gVoxelOrigin; // xyz = volume min corner, w = 1/volumeWorldSize
     float4   gVoxelParams; // x = resolution, y = intensity, z = maxDistance, w = enabled|debug<<1
+    float4x4 gLightViewProj;
+    float4   gShadowParams; // x = 1/shadowMapSize, y = enabled
 };
 cbuffer PerObject : register(b1) {
     float4x4 gWorld;
@@ -98,6 +101,26 @@ cbuffer PerObject : register(b1) {
 RWTexture3D<float4> gVoxelUAV : register(u0);
 Texture3D<float4>   gVoxelTex : register(t0);
 SamplerState        gVoxelSamp : register(s0);
+
+// Directional shadow map. Core feature-level 11_0 (no optional caps), so it works on every
+// DX12 GPU - which is why shadowed light injection uses this rather than ray-traced shadows.
+Texture2D<float>          gShadowTex  : register(t1);
+SamplerComparisonState    gShadowSamp : register(s1);
+
+// 3x3 PCF. Returns 1 = fully lit, 0 = fully shadowed.
+float shadowFactor(float3 wpos, float ndl) {
+    if (gShadowParams.y < 0.5) return 1.0;
+    float4 lp = mul(float4(wpos, 1.0), gLightViewProj);
+    float3 p = lp.xyz / lp.w;
+    float2 uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+    if (any(uv < 0.0) || any(uv > 1.0) || p.z > 1.0) return 1.0;  // outside the map = lit
+    float bias = max(0.0015 * (1.0 - ndl), 0.0003);               // depth bias, light-space units
+    float s = 0.0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x)
+        s += gShadowTex.SampleCmpLevelZero(gShadowSamp, uv + float2(x, y) * gShadowParams.x, p.z - bias);
+    return s / 9.0;
+}
 
 // Mip level being read by CSMip (b3: b0/b1 are taken by the graphics root signature).
 cbuffer MipCB : register(b3) { uint gSrcMip; uint3 _mipPad; };
@@ -192,7 +215,7 @@ float4 PSMain(VSOut i) : SV_TARGET {
     float3 F = fresnelSchlick(saturate(dot(H, V)), F0);
     float3 spec = (D * G * F) / (4.0 * ndv * ndl + 1e-4);
     float3 kd = (1.0 - F) * (1.0 - metallic);
-    float3 direct = (kd * albedo / PI + spec) * lightC * ndl;
+    float3 direct = (kd * albedo / PI + spec) * lightC * ndl * shadowFactor(i.wpos, ndl);
 
     // ambient: sky hemisphere irradiance (linear) + crude spec reflection of the sky
     float3 ambient = kd * albedo * skyColor(N) * gAmbient.r;
@@ -248,6 +271,11 @@ LVSOut VSLine(LVSIn i) {
 }
 float4 PSLine(LVSOut i) : SV_TARGET { return float4(i.col, 1.0); }
 
+// Depth-only pass from the sun's point of view (VSIn is declared above).
+float4 VSShadow(VSIn i) : SV_POSITION {
+    return mul(mul(float4(i.pos, 1.0), gWorld), gLightViewProj);
+}
+
 // ================= Voxi: voxelisation =================
 // The scene is rasterised once per frame with no render target; the pixel shader computes direct
 // lighting and writes radiance straight into the 3D volume. Merging "voxelise" and "inject light"
@@ -285,8 +313,11 @@ void PSVoxel(VoxOut i) {
     float3 N = normalize(i.nrm);
     float3 L = normalize(gLightDir.xyz);
     float3 albedo = srgbToLin(gBaseColor.rgb);
-    // Direct sun (no shadowing yet) + sky ambient == the radiance this surface emits into the scene.
-    float3 radiance = albedo * (srgbToLin(gLightColor.rgb) * saturate(dot(N, L)) + skyColor(N) * gAmbient.r);
+    // SHADOWED injection: a surface in shadow must not emit sun radiance into the volume, or the
+    // bounce lighting leaks through walls and shadowed areas glow.
+    float ndl = saturate(dot(N, L));
+    float3 radiance = albedo * (srgbToLin(gLightColor.rgb) * ndl * shadowFactor(i.wpos, ndl)
+                                + skyColor(N) * gAmbient.r);
     int3 c = int3(uvw * gVoxelParams.x);
     gVoxelUAV[c] = float4(radiance, 1.0);   // alpha = occupancy
 }
@@ -338,8 +369,10 @@ struct PerFrameCB {
     f32 skyZenith[4];
     f32 skyHorizon[4];
     f32 fogColor[4];    // a = density
-    f32 voxelOrigin[4]; // xyz = volume min corner, w = 1/volumeWorldSize
-    f32 voxelParams[4]; // x = resolution, y = intensity, z = maxDistance, w = enabled
+    f32 voxelOrigin[4];  // xyz = volume min corner, w = 1/volumeWorldSize
+    f32 voxelParams[4];  // x = resolution, y = intensity, z = maxDistance, w = enabled
+    f32 lightViewProj[16];
+    f32 shadowParams[4]; // x = 1/shadowMapSize, y = enabled
 };
 
 struct GpuMesh {
@@ -449,6 +482,10 @@ public:
 
 private:
     void queryCaps();
+    void bindGiTables();                        // bind heap + both descriptor tables (Tier 1 safety)
+    void voxelBarrier(u32 sub, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to);
+    bool createShadowResources();
+    void shadowPass();
     bool createGiPipelines();
     bool createVoxelVolume(u32 res);
     void voxelizePass();
@@ -459,7 +496,7 @@ private:
     bool createMsaaColor();
     void waitForGpu();
 
-    ComPtr<IDXGIFactory6> factory_;
+    ComPtr<IDXGIFactory4> factory_;   // 6 is optional (see init); 4 is the baseline
     ComPtr<ID3D12Device> device_;
     ComPtr<ID3D12CommandQueue> queue_;
     ComPtr<IDXGISwapChain3> swapChain_;
@@ -516,7 +553,13 @@ private:
     // ---- Voxi voxel-cone-traced GI ----
     GiSettings gi_{};
     ComPtr<ID3D12Resource> voxelTex_;             // R16G16B16A16_FLOAT Texture3D, mipped
-    ComPtr<ID3D12DescriptorHeap> giHeap_;         // shader-visible: [0]=SRV whole chain, [1..]=per-mip UAV
+    // Shader-visible heap: [0]=voxel SRV (t0), [1]=shadow SRV (t1), [2+m]=voxel mip m UAV (u0).
+    ComPtr<ID3D12DescriptorHeap> giHeap_;
+    // Directional shadow map: core FL11_0, so shadowed injection works on every DX12 GPU.
+    ComPtr<ID3D12Resource> shadowTex_;
+    ComPtr<ID3D12DescriptorHeap> shadowDsvHeap_;
+    ComPtr<ID3D12PipelineState> shadowPso_;
+    bool shadowReady_ = false;
     ComPtr<ID3D12PipelineState> voxelPso_, voxelDebugPso_, mipPso_;
     ComPtr<ID3D12RootSignature> mipRootSig_;
     u32 giSrvSize_ = 0, voxelMips_ = 0, voxelResBuilt_ = 0;
@@ -547,8 +590,17 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     }
     if (!hrOk(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&factory_)), "CreateDXGIFactory2")) return false;
 
+    // IDXGIFactory6::EnumAdapterByGpuPreference needs Windows 10 1803+. Fall back to plain
+    // EnumAdapters1 so older Windows (common on the DX12-era GPUs we target) still gets a device.
+    ComPtr<IDXGIFactory6> factory6;
+    const bool haveGpuPref = SUCCEEDED(factory_.As(&factory6));
     ComPtr<IDXGIAdapter1> adapter;
-    for (UINT i = 0; factory_->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)) != DXGI_ERROR_NOT_FOUND; ++i) {
+    for (UINT i = 0; ; ++i) {
+        if (haveGpuPref) {
+            if (factory6->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)) == DXGI_ERROR_NOT_FOUND) break;
+        } else {
+            if (factory_->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+        }
         DXGI_ADAPTER_DESC1 ad{};
         adapter->GetDesc1(&ad);
         if (ad.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) { adapter.Reset(); continue; }
@@ -579,6 +631,7 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     setLight(d, c, 0.15f);
 
     if (!createPipeline()) return false;
+    if (!createShadowResources()) AVER_WARN("[RHI.D3D12] shadow map unavailable; lighting will be unshadowed");
     if (!createGiPipelines()) AVER_WARN("[RHI.D3D12] Voxi GI pipelines unavailable; GI disabled");
 
     AVER_INFO("[RHI.D3D12] device ready on adapter '{}'", adapterName_);
@@ -636,7 +689,7 @@ bool D3D12Device::setSampleCount(u32 samples) {
 bool D3D12Device::createPipeline() {
     // Root signature: b0 = per-frame CBV, b1 = 20 root constants (world + colour).
     // b0 per-frame CBV, b1 root constants, t0 voxel volume (lit pass), u0 voxel volume (voxelise).
-    D3D12_DESCRIPTOR_RANGE srvRange{}; srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; srvRange.NumDescriptors = 1; srvRange.BaseShaderRegister = 0;
+    D3D12_DESCRIPTOR_RANGE srvRange{}; srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; srvRange.NumDescriptors = 2; srvRange.BaseShaderRegister = 0; // t0 voxel, t1 shadow
     D3D12_DESCRIPTOR_RANGE uavRange{}; uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; uavRange.NumDescriptors = 1; uavRange.BaseShaderRegister = 0;
 
     D3D12_ROOT_PARAMETER params[4] = {};
@@ -663,11 +716,20 @@ bool D3D12Device::createPipeline() {
     samp.ShaderRegister = 0;
     samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
+    D3D12_STATIC_SAMPLER_DESC shadowSamp{};
+    shadowSamp.Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT; // hardware PCF
+    shadowSamp.AddressU = shadowSamp.AddressV = shadowSamp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    shadowSamp.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    shadowSamp.MaxLOD = D3D12_FLOAT32_MAX;
+    shadowSamp.ShaderRegister = 1;
+    shadowSamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    const D3D12_STATIC_SAMPLER_DESC samplers[2] = {samp, shadowSamp};
+
     D3D12_ROOT_SIGNATURE_DESC rsd{};
     rsd.NumParameters = 4;
     rsd.pParameters = params;
-    rsd.NumStaticSamplers = 1;
-    rsd.pStaticSamplers = &samp;
+    rsd.NumStaticSamplers = 2;
+    rsd.pStaticSamplers = samplers;
     rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     ComPtr<ID3DBlob> rsBlob, rsErr;
@@ -790,6 +852,177 @@ bool D3D12Device::createPipeline() {
     return true;
 }
 
+// ---------------------------------------------------------------- shared GI/shadow binding
+// Both descriptor tables are bound for every graphics pass. At Resource Binding Tier 1 (NVIDIA
+// Kepler / Maxwell gen 1, Intel Haswell/Broadwell) every descriptor in every table a root
+// signature declares must be valid even if the shader never reads it, so this is not optional.
+void D3D12Device::bindGiTables() {
+    if (!giHeap_) return;
+    ID3D12DescriptorHeap* heaps[] = {giHeap_.Get()};
+    cmdList_->SetDescriptorHeaps(1, heaps);
+    D3D12_GPU_DESCRIPTOR_HANDLE gh = giHeap_->GetGPUDescriptorHandleForHeapStart();
+    cmdList_->SetGraphicsRootDescriptorTable(2, gh);                       // t0 voxel, t1 shadow
+    D3D12_GPU_DESCRIPTOR_HANDLE uav0 = gh; uav0.ptr += 2ull * giSrvSize_;  // u0 = mip 0
+    cmdList_->SetGraphicsRootDescriptorTable(3, uav0);
+}
+
+// Per-subresource (per-mip) transition of the radiance volume.
+void D3D12Device::voxelBarrier(u32 sub, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
+    if (!voxelTex_) return;
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = voxelTex_.Get();
+    b.Transition.StateBefore = from;
+    b.Transition.StateAfter = to;
+    b.Transition.Subresource = sub;
+    cmdList_->ResourceBarrier(1, &b);
+}
+
+// ---------------------------------------------------------------- shadow map
+constexpr u32 kShadowSize = 2048;
+
+bool D3D12Device::createShadowResources() {
+    // Descriptor heap is shared with the GI volume so both live in one shader-visible table.
+    if (!giHeap_) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.NumDescriptors = 2 + 16 + 16;   // t0, t1, per-mip UAVs, per-mip source SRVs
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (!hrOk(device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&giHeap_)), "GI/shadow descriptor heap")) return false;
+        giSrvSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+        // Populate EVERY slot with a null view. Resource Binding Tier 1 hardware requires all
+        // descriptors in a bound table to be valid even when the shader never reads them, and the
+        // voxel slots stay empty whenever GI is switched off.
+        D3D12_CPU_DESCRIPTOR_HANDLE h = giHeap_->GetCPUDescriptorHandleForHeapStart();
+        D3D12_SHADER_RESOURCE_VIEW_DESC ns{};
+        ns.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        ns.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+        ns.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        ns.Texture3D.MipLevels = 1;
+        D3D12_UNORDERED_ACCESS_VIEW_DESC nu{};
+        nu.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        nu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+        nu.Texture3D.WSize = 1;
+        for (u32 i = 0; i < 2u + 16u + 16u; ++i) {
+            D3D12_CPU_DESCRIPTOR_HANDLE d = h; d.ptr += static_cast<SIZE_T>(i) * giSrvSize_;
+            if (i >= 2 && i < 18) device_->CreateUnorderedAccessView(nullptr, nullptr, &nu, d);
+            else                  device_->CreateShaderResourceView(nullptr, &ns, d);
+        }
+    }
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = kShadowSize; td.Height = kShadowSize;
+    td.DepthOrArraySize = 1; td.MipLevels = 1;
+    td.Format = DXGI_FORMAT_R32_TYPELESS;      // typeless: DSV writes D32, SRV reads R32
+    td.SampleDesc.Count = 1;
+    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    D3D12_CLEAR_VALUE cv{}; cv.Format = DXGI_FORMAT_D32_FLOAT; cv.DepthStencil.Depth = 1.0f;
+    auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+    if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td,
+              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv, IID_PPV_ARGS(&shadowTex_)), "shadow map")) return false;
+
+    D3D12_DESCRIPTOR_HEAP_DESC dh{}; dh.NumDescriptors = 1; dh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    if (!hrOk(device_->CreateDescriptorHeap(&dh, IID_PPV_ARGS(&shadowDsvHeap_)), "shadow DSV heap")) return false;
+    D3D12_DEPTH_STENCIL_VIEW_DESC dv{}; dv.Format = DXGI_FORMAT_D32_FLOAT; dv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    device_->CreateDepthStencilView(shadowTex_.Get(), &dv, shadowDsvHeap_->GetCPUDescriptorHandleForHeapStart());
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = DXGI_FORMAT_R32_FLOAT;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2D.MipLevels = 1;
+    D3D12_CPU_DESCRIPTOR_HANDLE sh = giHeap_->GetCPUDescriptorHandleForHeapStart();
+    sh.ptr += giSrvSize_; // slot 1 = t1
+    device_->CreateShaderResourceView(shadowTex_.Get(), &sv, sh);
+
+    UINT compileFlags = D3DCOMPILE_PACK_MATRIX_ROW_MAJOR | D3DCOMPILE_ENABLE_STRICTNESS;
+    ComPtr<ID3DBlob> vs, err;
+    if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, "VSShadow", "vs_5_1", compileFlags, 0, &vs, &err))) {
+        AVER_ERROR("[RHI.D3D12] VSShadow compile: {}", err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+        return false;
+    }
+    D3D12_INPUT_ELEMENT_DESC layout[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC sp{};
+    sp.pRootSignature = rootSig_.Get();
+    sp.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};   // depth-only: no pixel shader
+    sp.InputLayout = {layout, 2};
+    sp.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    sp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    sp.RasterizerState.DepthClipEnable = TRUE;
+    sp.RasterizerState.DepthBias = 0;                 // float depth: rely on slope-scale + shader bias
+    sp.RasterizerState.SlopeScaledDepthBias = 1.5f;
+    sp.DepthStencilState.DepthEnable = TRUE;
+    sp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    sp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    sp.SampleMask = UINT_MAX;
+    sp.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    sp.NumRenderTargets = 0;
+    sp.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    sp.SampleDesc.Count = 1;
+    if (!hrOk(device_->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&shadowPso_)), "shadow pso")) return false;
+
+    shadowReady_ = true;
+    AVER_INFO("[RHI.D3D12] shadow map {}^2 ready", kShadowSize);
+    return true;
+}
+
+// Render the scene depth from the sun, covering the GI volume's bounds.
+void D3D12Device::shadowPass() {
+    if (!shadowReady_ || voxelDrawsPrev_.empty()) { frameCB_.shadowParams[1] = 0.0f; return; }
+
+    // Fit an orthographic light frustum around the volume so the map's resolution is spent where
+    // the GI actually samples it.
+    const Vec3 centre{gi_.center[0], gi_.center[1], gi_.center[2]};
+    const f32 r = gi_.extent > 1.0f ? gi_.extent : 1.0f;
+    Vec3 dir{frameCB_.lightDir[0], frameCB_.lightDir[1], frameCB_.lightDir[2]};
+    dir = dir.getSafeNormal();
+    if (dir.sizeSquared() < 0.5f) dir = Vec3{0.3f, 0.4f, 0.85f}.getSafeNormal();
+    const Vec3 eye = centre + dir * (r * 2.0f);              // gLightDir points TOWARD the light
+    const Vec3 up = std::fabs(dir.z) > 0.95f ? Vec3{1,0,0} : Vec3{0,0,1};
+    const Mat4 view = Mat4::lookAtLH(eye, centre, up);
+    Mat4 proj;                                                // orthographic, row-vector convention
+    proj.m[0][0] = 1.0f / r; proj.m[1][1] = 1.0f / r;
+    proj.m[2][2] = 1.0f / (r * 4.0f); proj.m[3][2] = 0.0f; proj.m[3][3] = 1.0f;
+    const Mat4 lvp = view * proj;
+    std::memcpy(frameCB_.lightViewProj, &lvp.m[0][0], sizeof(frameCB_.lightViewProj));
+    frameCB_.shadowParams[0] = 1.0f / static_cast<f32>(kShadowSize);
+    frameCB_.shadowParams[1] = 1.0f;
+    std::memcpy(frameCBPtr_[frameIndex_], &frameCB_, sizeof(PerFrameCB)); // re-upload with the matrix
+
+    auto toDepth = transition(shadowTex_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    cmdList_->ResourceBarrier(1, &toDepth);
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = shadowDsvHeap_->GetCPUDescriptorHandleForHeapStart();
+    cmdList_->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+    cmdList_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    D3D12_VIEWPORT vp{0, 0, static_cast<f32>(kShadowSize), static_cast<f32>(kShadowSize), 0.0f, 1.0f};
+    D3D12_RECT sc{0, 0, static_cast<LONG>(kShadowSize), static_cast<LONG>(kShadowSize)};
+    cmdList_->RSSetViewports(1, &vp);
+    cmdList_->RSSetScissorRects(1, &sc);
+    cmdList_->SetGraphicsRootSignature(rootSig_.Get());
+    cmdList_->SetGraphicsRootConstantBufferView(0, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
+    // Resource Binding Tier 1 requires EVERY table the root signature declares to be bound, even
+    // when the shader ignores them - otherwise this is UB on Kepler/Maxwell-gen1/Haswell.
+    bindGiTables();
+    cmdList_->SetPipelineState(shadowPso_.Get());
+    cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    for (const VoxelDraw& d : voxelDrawsPrev_) {
+        if (d.mesh == 0 || d.mesh > meshes_.size()) continue;
+        const GpuMesh& m = meshes_[d.mesh - 1];
+        f32 consts[24]{};
+        std::memcpy(consts, d.world, 16 * sizeof(f32));
+        cmdList_->SetGraphicsRoot32BitConstants(1, 24, consts, 0);
+        cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
+        cmdList_->IASetIndexBuffer(&m.ibv);
+        cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+    }
+    auto toRead = transition(shadowTex_.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmdList_->ResourceBarrier(1, &toRead);
+}
+
 // ---------------------------------------------------------------- Voxi GI
 void D3D12Device::setGi(const GiSettings& gi) {
     gi_ = gi;
@@ -797,8 +1030,8 @@ void D3D12Device::setGi(const GiSettings& gi) {
         waitForGpu();
         if (!createVoxelVolume(gi_.resolution)) { gi_.enabled = false; giReady_ = false; }
     }
-    if (!gi_.enabled) return;
-    // Push volume placement into the per-frame CB the shaders read.
+    // Push volume placement into the per-frame CB the shaders read. Done even when GI is off:
+    // the shadow map fits its frustum to these same bounds.
     const f32 size = gi_.extent * 2.0f;
     frameCB_.voxelOrigin[0] = gi_.center[0] - gi_.extent;
     frameCB_.voxelOrigin[1] = gi_.center[1] - gi_.extent;
@@ -826,17 +1059,10 @@ bool D3D12Device::createVoxelVolume(u32 res) {
     td.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
     if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td,
-              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&voxelTex_)), "voxel volume")) return false;
+              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&voxelTex_)), "voxel volume")) return false;
 
-    // Heap layout: [0] = SRV over the whole chain, [1 + m] = UAV for mip m.
-    if (!giHeap_) {
-        D3D12_DESCRIPTOR_HEAP_DESC hd{};
-        hd.NumDescriptors = 1 + 16;
-        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        if (!hrOk(device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&giHeap_)), "GI descriptor heap")) return false;
-        giSrvSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    }
+    // Heap slots: [0] SRV over the whole chain, [1] shadow map SRV, [2 + m] UAV for mip m.
+    if (!giHeap_) { AVER_ERROR("[RHI.D3D12] GI heap missing"); return false; }
     D3D12_CPU_DESCRIPTOR_HANDLE h = giHeap_->GetCPUDescriptorHandleForHeapStart();
     D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
     sv.Format = td.Format;
@@ -850,8 +1076,18 @@ bool D3D12Device::createVoxelVolume(u32 res) {
         uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
         uv.Texture3D.MipSlice = m;
         uv.Texture3D.WSize = res >> m;
-        D3D12_CPU_DESCRIPTOR_HANDLE mh = h; mh.ptr += static_cast<SIZE_T>(1 + m) * giSrvSize_;
+        D3D12_CPU_DESCRIPTOR_HANDLE mh = h; mh.ptr += static_cast<SIZE_T>(2 + m) * giSrvSize_;
         device_->CreateUnorderedAccessView(voxelTex_.Get(), nullptr, &uv, mh);
+        // Single-mip SRV so the mip filter can read level m while writing level m+1: a
+        // whole-chain SRV would require every mip in the read state at once.
+        D3D12_SHADER_RESOURCE_VIEW_DESC ms{};
+        ms.Format = td.Format;
+        ms.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+        ms.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        ms.Texture3D.MostDetailedMip = m;
+        ms.Texture3D.MipLevels = 1;
+        D3D12_CPU_DESCRIPTOR_HANDLE sh2 = h; sh2.ptr += static_cast<SIZE_T>(18 + m) * giSrvSize_;
+        device_->CreateShaderResourceView(voxelTex_.Get(), &ms, sh2);
     }
     voxelResBuilt_ = res;
     giReady_ = voxelPso_ && mipPso_;
@@ -1077,14 +1313,13 @@ void D3D12Device::voxelizePass() {
     if (!giReady_ || !gi_.enabled || voxelDrawsPrev_.empty()) return;
     const u32 res = voxelResBuilt_;
 
-    ID3D12DescriptorHeap* heaps[] = {giHeap_.Get()};
-    cmdList_->SetDescriptorHeaps(1, heaps);
+    // The chain rests in PIXEL_SHADER_RESOURCE between frames; take it back for writing.
+    voxelBarrier(D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
     cmdList_->SetGraphicsRootSignature(rootSig_.Get());
     cmdList_->SetGraphicsRootConstantBufferView(0, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
+    bindGiTables();
     D3D12_GPU_DESCRIPTOR_HANDLE gh = giHeap_->GetGPUDescriptorHandleForHeapStart();
-    D3D12_GPU_DESCRIPTOR_HANDLE uav0 = gh; uav0.ptr += giSrvSize_;      // mip 0 UAV
-    cmdList_->SetGraphicsRootDescriptorTable(2, gh);                     // t0 (unused here)
-    cmdList_->SetGraphicsRootDescriptorTable(3, uav0);                   // u0
 
     // No RTV/DSV: the pixel shader writes only the UAV. Viewport defines the raster resolution.
     cmdList_->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
@@ -1114,18 +1349,23 @@ void D3D12Device::voxelizePass() {
     cmdList_->SetComputeRootSignature(mipRootSig_.Get());
     cmdList_->SetPipelineState(mipPso_.Get());
     for (u32 m = 1; m < voxelMips_; ++m) {
-        // Source mip is read through the whole-chain SRV via SampleLevel/Load in the CS.
-        D3D12_GPU_DESCRIPTOR_HANDLE src = gh;
-        D3D12_GPU_DESCRIPTOR_HANDLE dst = gh; dst.ptr += static_cast<UINT64>(1 + m) * giSrvSize_;
+        // Level m-1 becomes readable; level m stays writable. Per-subresource transitions are
+        // what make read-while-write on one resource legal.
+        voxelBarrier(m - 1, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        D3D12_GPU_DESCRIPTOR_HANDLE src = gh; src.ptr += static_cast<UINT64>(18 + (m - 1)) * giSrvSize_;
+        D3D12_GPU_DESCRIPTOR_HANDLE dst = gh; dst.ptr += static_cast<UINT64>(2 + m) * giSrvSize_;
         cmdList_->SetComputeRootDescriptorTable(0, src);
         cmdList_->SetComputeRootDescriptorTable(1, dst);
-        const u32 srcMip[4] = {m - 1, 0, 0, 0};
+        const u32 srcMip[4] = {0, 0, 0, 0};   // the view already starts at the source mip
         cmdList_->SetComputeRoot32BitConstants(2, 4, srcMip, 0);
         const u32 d = (res >> m) > 0 ? (res >> m) : 1u;
         const u32 g = (d + 3) / 4;
         cmdList_->Dispatch(g, g, g);
         cmdList_->ResourceBarrier(1, &uavB);
     }
+    // Hand the whole chain to the lit pass as a shader resource.
+    voxelBarrier(voxelMips_ - 1, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    voxelBarrier(D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 }
 
 void D3D12Device::beginFrame() {
@@ -1152,6 +1392,7 @@ void D3D12Device::beginFrame() {
     std::memcpy(frameCBPtr_[frameIndex_], &frameCB_, sizeof(PerFrameCB));
     voxelDrawsPrev_.swap(voxelDraws_);
     voxelDraws_.clear();
+    shadowPass();     // must precede voxelisation: injection samples the shadow map
     voxelizePass();
 
     cmdList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
@@ -1173,14 +1414,7 @@ void D3D12Device::beginFrame() {
 
     cmdList_->SetGraphicsRootSignature(rootSig_.Get());
     cmdList_->SetGraphicsRootConstantBufferView(0, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
-    if (giHeap_) { // bind the volume so the lit pass can cone-trace it (t0)
-        ID3D12DescriptorHeap* heaps[] = {giHeap_.Get()};
-        cmdList_->SetDescriptorHeaps(1, heaps);
-        D3D12_GPU_DESCRIPTOR_HANDLE gh = giHeap_->GetGPUDescriptorHandleForHeapStart();
-        cmdList_->SetGraphicsRootDescriptorTable(2, gh);
-        D3D12_GPU_DESCRIPTOR_HANDLE uav0 = gh; uav0.ptr += giSrvSize_;
-        cmdList_->SetGraphicsRootDescriptorTable(3, uav0);
-    }
+    bindGiTables(); // volume (t0) + shadow map (t1) for the lit pass
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     // Debug view replaces the whole scene with a raymarch of the volume.
@@ -1203,8 +1437,9 @@ void D3D12Device::beginFrame() {
 
 void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) {
     if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
-    // Remember the draw so Voxi can replay it into the volume at the start of the next frame.
-    if (gi_.enabled && voxelDraws_.size() < 4096) {
+    // Remember the draw so the shadow and voxel passes can replay it next frame. Captured
+    // unconditionally: the shadow map needs it even when GI is switched off.
+    if (voxelDraws_.size() < 4096) {
         VoxelDraw vd; vd.mesh = mesh;
         std::memcpy(vd.world, world, 16 * sizeof(f32));
         std::memcpy(vd.color, color, 4 * sizeof(f32));
