@@ -57,7 +57,8 @@ modules/
 sandbox/     Sandbox.exe      the editor app (SandboxApp.cpp) + Sandbox.rc (icon)
 tests/formats/ FormatTest.exe golden test for the loaders
 third_party/ imgui/ (docking, MIT) stb/ (stb_image + stb_image_write, PD)
-branding/    logo.svg, ae-mark-*.svg, wordmark.svg, logo.png, icon.ico, splash.png
+branding/    master-lockup.png (HUMAN, source of truth) -> splash.png, icon.ico, logo*.png
+             ai-generated/ (Claude's superseded vector concepts, shipped nowhere), ASSETS.md
 docs/        ARCHITECTURE, formats/, rendering/, physics-net/, recon/, PROJECTS, EDITOR, this file
 ```
 Content lives OUTSIDE the engine: example project at
