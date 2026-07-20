@@ -154,6 +154,46 @@ static bool imguiWndProc(void* hwnd, u32 msg, u64 w, i64 l) {
     return ImGui_ImplWin32_WndProcHandler(static_cast<HWND>(hwnd), static_cast<UINT>(msg),
                                           static_cast<WPARAM>(w), static_cast<LPARAM>(l)) != 0;
 }
+
+// ImGui 1.92 owns a *list* of atlas textures, not one. When the atlas is rebuilt -- because the
+// editor reloaded its font at a new DPI, or simply because enough new glyphs were baked on demand
+// to outgrow the current sheet -- the replacement is created while the outgoing texture is still
+// referenced by in-flight draw data, and only released a frame or two later. The backend's legacy
+// single-descriptor mode asserts on exactly that overlap, so the UI heap holds a small pool and
+// hands descriptors out through these callbacks instead.
+static constexpr u32 kUiSrvCount = 16;
+
+namespace {
+struct UiSrvPool {
+    ID3D12DescriptorHeap* heap = nullptr;
+    u64 cpuBase = 0;
+    u64 gpuBase = 0;
+    u32 stride = 0;
+    bool used[kUiSrvCount] = {};
+};
+UiSrvPool g_uiSrv;
+} // namespace
+
+static void uiSrvAlloc(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* cpu,
+                       D3D12_GPU_DESCRIPTOR_HANDLE* gpu) {
+    for (u32 i = 0; i < kUiSrvCount; ++i) {
+        if (g_uiSrv.used[i]) continue;
+        g_uiSrv.used[i] = true;
+        cpu->ptr = static_cast<SIZE_T>(g_uiSrv.cpuBase + u64(i) * g_uiSrv.stride);
+        gpu->ptr = g_uiSrv.gpuBase + u64(i) * g_uiSrv.stride;
+        return;
+    }
+    // Never expected: ImGui keeps at most a couple of atlas textures alive at once.
+    AVER_ERROR("[RHI.D3D12] UI SRV descriptor pool exhausted ({} in use)", kUiSrvCount);
+    cpu->ptr = 0; gpu->ptr = 0;
+}
+
+static void uiSrvFree(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE cpu,
+                      D3D12_GPU_DESCRIPTOR_HANDLE) {
+    if (!g_uiSrv.stride || cpu.ptr < g_uiSrv.cpuBase) return;
+    const u64 slot = (u64(cpu.ptr) - g_uiSrv.cpuBase) / g_uiSrv.stride;
+    if (slot < kUiSrvCount) g_uiSrv.used[slot] = false;
+}
 #endif
 
 D3D12_RESOURCE_DESC bufferDesc(u64 bytes) {
@@ -1697,10 +1737,15 @@ bool D3D12Device::uiInit(void* hwnd) {
     if (!device_ || !hwnd) return false;
 
     D3D12_DESCRIPTOR_HEAP_DESC sh{};
-    sh.NumDescriptors = 1;
+    sh.NumDescriptors = kUiSrvCount;
     sh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     sh.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (!hrOk(device_->CreateDescriptorHeap(&sh, IID_PPV_ARGS(&uiSrvHeap_)), "UI SRV heap")) return false;
+    g_uiSrv = UiSrvPool{};
+    g_uiSrv.heap = uiSrvHeap_.Get();
+    g_uiSrv.cpuBase = uiSrvHeap_->GetCPUDescriptorHandleForHeapStart().ptr;
+    g_uiSrv.gpuBase = uiSrvHeap_->GetGPUDescriptorHandleForHeapStart().ptr;
+    g_uiSrv.stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -1717,8 +1762,8 @@ bool D3D12Device::uiInit(void* hwnd) {
     info.NumFramesInFlight = static_cast<int>(kFrameCount);
     info.RTVFormat = kBackbufferFormat;
     info.SrvDescriptorHeap = uiSrvHeap_.Get();
-    info.LegacySingleSrvCpuDescriptor = uiSrvHeap_->GetCPUDescriptorHandleForHeapStart();
-    info.LegacySingleSrvGpuDescriptor = uiSrvHeap_->GetGPUDescriptorHandleForHeapStart();
+    info.SrvDescriptorAllocFn = &uiSrvAlloc;
+    info.SrvDescriptorFreeFn = &uiSrvFree;
     if (!ImGui_ImplDX12_Init(&info)) {
         AVER_ERROR("[RHI.D3D12] ImGui_ImplDX12_Init failed");
         return false;
@@ -1749,6 +1794,7 @@ void D3D12Device::uiShutdown() {
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
     registerUiWndProc(nullptr);
+    g_uiSrv = UiSrvPool{};
     uiActive_ = false;
 #endif
 }

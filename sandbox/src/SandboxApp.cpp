@@ -1,5 +1,6 @@
 #include "aver/runtime/EntryPoint.hpp"
 #include "aver/platform/Window.hpp"
+#include "aver/platform/FileSystem.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
@@ -180,14 +181,54 @@ public:
         c.maxFrames=maxFrames_; c.headless=headless_; return c;
     }
 
+#if AVER_WITH_IMGUI
+    // Rebuild the style and the font atlas for `dpi`.
+    //
+    // The glyphs are rasterised at the physical size the display needs (16pt at 300% = 48px)
+    // rather than asked for at 16px and scaled up afterwards. Note that the old
+    // `io.FontGlobalScale = dpi` was NOT smearing a baked atlas: since 1.92 ImGui bakes glyphs on
+    // demand, so that only multiplied the requested size and ProggyClean was re-rasterised, sharp,
+    // at 39px. What made the editor look pixelated was purely that ProggyClean is a 13px pixel
+    // font -- its outlines are square steps, so enlarging it gives clean but blocky letterforms.
+    // Baking the size in is still the right shape for this: it is the supported spelling (the
+    // global scale is the obsolete alias of style.FontScaleMain, and ImGui asserts if both are
+    // used), and it keeps the size the atlas was built for explicit at the call site.
+    //
+    // ScaleAllSizes() is not idempotent, so the style is rebuilt from its unscaled base each time
+    // rather than scaled again on top of an already-scaled style.
+    void applyDpi(f32 dpi) {
+        dpi_ = dpi;
+        applyUnrealStyle();
+        if (dpi_ > 1.01f) ImGui::GetStyle().ScaleAllSizes(dpi_);
+
+        ImGuiIO& io = ImGui::GetIO();
+        io.Fonts->Clear();
+        fontMedium_ = nullptr;
+
+        const std::string dir = executableDir();
+        const std::string regular = dir + "\\Roboto-Regular.ttf";
+        const std::string medium  = dir + "\\Roboto-Medium.ttf";
+        const f32 px = 16.0f * dpi_;
+
+        // A missing font must never stop the editor coming up, so probe before asking ImGui to
+        // load: AddFontFromFileTTF() raises a user assert on a file it cannot open.
+        ImFont* body = fileExists(regular) ? io.Fonts->AddFontFromFileTTF(regular.c_str(), px) : nullptr;
+        if (!body) {
+            AVER_WARN("[Sandbox] '{}' missing or unreadable -- falling back to the built-in bitmap font", regular);
+            io.Fonts->AddFontDefault();
+            return;
+        }
+        io.FontDefault = body;
+        if (fileExists(medium)) fontMedium_ = io.Fonts->AddFontFromFileTTF(medium.c_str(), px);
+    }
+#endif
+
     void onInit(Engine& e) override {
         AVER_INFO("[Sandbox] backend={} adapter='{}'", rhi::backendName(e.device()->backend()), e.device()->adapterName());
 #if AVER_WITH_IMGUI
         if (e.device()->uiActive()) {
-            applyUnrealStyle();
-            dpi_ = e.window() ? e.window()->dpiScale() : 1.0f;
-            if (dpi_ > 1.01f) { ImGui::GetStyle().ScaleAllSizes(dpi_); ImGui::GetIO().FontGlobalScale = dpi_; }
-            AVER_INFO("[Sandbox] DPI scale {:.2f}", dpi_);
+            applyDpi(e.window() ? e.window()->dpiScale() : 1.0f);
+            AVER_INFO("[Sandbox] DPI scale {:.2f}, UI font rasterised at {:.0f}px", dpi_, 16.0f * dpi_);
         }
 #endif
         // --- default "blank .ocmap": ground floor + cube + sun + sky + atmosphere ---
@@ -276,6 +317,16 @@ public:
     void onUpdate(Engine& e, const Timestep& t) override {
 #if AVER_WITH_IMGUI
         if (e.device()->uiActive()) {
+            // Dragging the window to a monitor with a different scale changes the size the glyphs
+            // should have been rasterised at, so re-bake them. Safe here: onUpdate runs before
+            // uiNewFrame(), i.e. outside the ImGui frame, and the atlas may not be touched inside
+            // one. Win32Window latches the new scale from WM_DPICHANGED.
+            const f32 dpi = e.window() ? e.window()->dpiScale() : dpi_;
+            if (std::fabs(dpi - dpi_) > 0.01f) {
+                AVER_INFO("[Sandbox] DPI changed {:.2f} -> {:.2f}, re-rasterising the UI font", dpi_, dpi);
+                applyDpi(dpi);
+            }
+
             const ImGuiIO& io = ImGui::GetIO();
             // The central dock node is a transparent hole, so WantCaptureMouse is false over it
             // AND over any empty dockspace gap — require the cursor to be inside the viewport too.
@@ -644,6 +695,8 @@ private:
 
         // ---------------- menu bar ----------------
         if (ImGui::BeginMainMenuBar()) {
+            // Medium weight on the menu bar, matching Unreal's; 0.0f keeps the size already in use.
+            if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
             ImGui::TextColored(ImVec4(0.95f,0.42f,0.13f,1),"AE");
             if (ImGui::BeginMenu("File")){ ImGui::MenuItem("New Level"); ImGui::MenuItem("Open Level..."); ImGui::MenuItem("Save Level"); ImGui::Separator(); if(ImGui::MenuItem("Exit")) e.requestExit(); ImGui::EndMenu(); }
             if (ImGui::BeginMenu("Edit")){
@@ -656,6 +709,7 @@ private:
             if (ImGui::BeginMenu("Build")){ ImGui::MenuItem("Build Lighting"); ImGui::MenuItem("Build Geometry"); ImGui::EndMenu(); }
             if (ImGui::BeginMenu("Select")){ if(ImGui::MenuItem("Select All")) {} if(ImGui::MenuItem("Select None")) sel_=-1; ImGui::EndMenu(); }
             if (ImGui::BeginMenu("Help")){ ImGui::MenuItem("About Aver Engine"); ImGui::EndMenu(); }
+            if (fontMedium_) ImGui::PopFont();
             ImGui::EndMainMenuBar();
         }
 
@@ -1122,6 +1176,9 @@ private:
     f32 moveSnap_=1.0f, rotSnap_=15.0f, scaleSnap_=0.25f;
     // frame state
     f32 dpi_=1.0f;
+#if AVER_WITH_IMGUI
+    ImFont* fontMedium_=nullptr; // Roboto Medium, for the menu bar; null if only the fallback loaded
+#endif
     // 3D viewport rect = the dockspace's central node, in backbuffer pixels. Latched by buildUI
     // and consumed next frame by the camera aspect, the scene scissor, picking and the gizmo.
     f32 vpX_=0, vpY_=0, vpW_=1600, vpH_=900;

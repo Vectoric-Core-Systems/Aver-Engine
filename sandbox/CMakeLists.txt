@@ -24,6 +24,24 @@ add_custom_target(Sandbox.Splash DEPENDS ${CMAKE_BINARY_DIR}/bin/splash.png)
 add_dependencies(Sandbox Sandbox.Splash)
 set_target_properties(Sandbox.Splash PROPERTIES FOLDER "sandbox")
 
+# Ship the editor UI typeface next to the executable. Same OUTPUT/DEPENDS rule as the splash, and
+# for the same reason -- POST_BUILD would not re-copy a font that changed without the exe relinking.
+set(AVER_UI_FONTS Roboto-Regular.ttf Roboto-Medium.ttf)
+set(AVER_UI_FONT_OUTPUTS)
+foreach(font ${AVER_UI_FONTS})
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/bin/${font}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/third_party/fonts/${font} ${CMAKE_BINARY_DIR}/bin/${font}
+    DEPENDS ${CMAKE_SOURCE_DIR}/third_party/fonts/${font}
+    COMMENT "Staging ${font}"
+    VERBATIM)
+  list(APPEND AVER_UI_FONT_OUTPUTS ${CMAKE_BINARY_DIR}/bin/${font})
+endforeach()
+add_custom_target(Sandbox.Fonts DEPENDS ${AVER_UI_FONT_OUTPUTS})
+add_dependencies(Sandbox Sandbox.Fonts)
+set_target_properties(Sandbox.Fonts PROPERTIES FOLDER "sandbox")
+
 # The resource script embeds the icon, but nothing tells the generator that it reads the .ico -- so
 # replacing the icon would not re-run the resource compiler and the exe would keep the old one.
 set_property(SOURCE Sandbox.rc APPEND PROPERTY
