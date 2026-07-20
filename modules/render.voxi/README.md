@@ -9,7 +9,7 @@ device capabilities which of them can actually be used:
 | Setting | State |
 |---|---|
 | **Anti-Aliasing (MSAA)** | **Implemented.** Off / 2x / 4x / 8x, applied at runtime — rebuilds the scene targets and every PSO. |
-| **Global Illumination** | Declared. Voxel cone tracing; passes not built yet. |
+| **Global Illumination** | **Implemented.** Voxel cone tracing: voxelise+inject -> mip filter -> 6-cone diffuse gather + AO. |
 | **Ray Tracing** | Declared. Device reports DXR tier; no pipeline yet. |
 | **Path Tracing** | Declared. Reference tracer; not built yet. |
 
@@ -48,8 +48,29 @@ dotnet run --project scripting/csharp/Aver.Scripting.Sample
 device caps and its settings are not the editor's. Driving the live editor from script needs the
 CLR hosted in-process — the ABI is already shaped for it, that host just doesn't exist yet.
 
+## How the GI works
+
+1. **Voxelise + inject (one pass).** The scene is rasterised with no render target; a geometry
+   shader projects each triangle along its dominant axis and the pixel shader computes direct
+   sun + sky lighting and writes radiance straight into a `RWTexture3D`. Merging voxelisation
+   with light injection avoids a second full scene traversal. Conservative rasterisation is used
+   when the device reports it, so thin geometry still lights a voxel.
+2. **Mip filter (compute).** `CSMip` box-filters each level into the next. Mip N is the cone
+   footprint at distance N, which is what lets one sample stand in for a whole cone step.
+3. **Cone trace (lit pass).** Six cones over the hemisphere - one along the normal, five in a
+   ring - march the volume, widening with distance and reading a coarser mip each step, composited
+   front-to-back. The alpha that accumulates doubles as ambient occlusion.
+
+Draws are replayed into the volume at the start of the *next* frame, so the volume is one frame
+old. That is imperceptible and avoids restructuring the app's submission order.
+
+**Debug view:** viewport `Lit` dropdown -> *Voxel Radiance (GI debug)* raymarches the volume
+straight to screen. Use it first whenever GI looks wrong - it separates "voxelisation is broken"
+from "cone tracing is broken".
+
+Dev flags: `--gi`, `--gi-debug`.
+
 ## Next
 
-Voxel cone traced GI: voxelize the scene into a 3D radiance/opacity volume each frame, inject
-direct sun light, filter the mip chain, then cone-trace diffuse + AO. The device already reports
-everything that needs (compute, typed UAV loads, conservative rasterization).
+Shadowed injection (the volume currently stores unshadowed direct light), temporal accumulation
+to soften flicker, a cascaded volume for large scenes, and specular cones for glossy reflections.

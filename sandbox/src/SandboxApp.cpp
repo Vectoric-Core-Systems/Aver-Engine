@@ -247,6 +247,7 @@ public:
             voxi::Settings s = voxi::Renderer::get().settings();
             s.msaa = static_cast<voxi::Msaa>(e.device()->sampleCount()); // adopt the live value
             if (msaaOverride_) s.msaa = static_cast<voxi::Msaa>(msaaOverride_);
+            if (giOverride_) s.globalIllumination = static_cast<voxi::Quality>(giOverride_);
             voxi::Renderer::get().setSettings(s);
             AVER_INFO("[Voxi] attached: max MSAA {}x, raytracing tier {}", c.maxMsaaSamples, c.rayTracingTier);
         }
@@ -305,6 +306,20 @@ public:
         // Voxi owns the AA setting; push it to the device when it changes (rebuilds targets+PSOs).
         if (voxi::Renderer::get().consumeMsaaDirty())
             e.device()->setSampleCount(static_cast<u32>(voxi::Renderer::get().settings().msaa));
+
+        // ...and the GI settings, including where the voxel volume sits in the world.
+        {
+            const voxi::Settings& vs = voxi::Renderer::get().settings();
+            rhi::IDevice::GiSettings g;
+            g.enabled     = vs.globalIllumination != voxi::Quality::Off;
+            g.debugView   = giDebugView_;
+            g.resolution  = vs.voxelResolution;
+            g.intensity   = vs.giIntensity;
+            g.maxDistance = vs.giMaxDistance;
+            g.center[0] = giCenter_.x; g.center[1] = giCenter_.y; g.center[2] = giCenter_.z;
+            g.extent    = giExtent_;
+            e.device()->setGi(g);
+        }
 #endif
         // Confine the scene to the dockspace's central node (latched by buildUI last frame).
         e.device()->setViewportRect((u32)vpX_, (u32)vpY_, (u32)std::fmax(1.0f, vpW_), (u32)std::fmax(1.0f, vpH_));
@@ -347,6 +362,7 @@ public:
     void onShutdown(Engine&) override { AVER_INFO("[Sandbox] shutdown"); }
     void setFocusVoxi(bool b) { focusVoxi_ = b ? 4 : 0; } // --project-settings screenshot aid
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
+    void setGiOverride(int q, bool dbg) { giOverride_ = q; giDebugView_ = dbg; } // --gi / --gi-debug
 
 private:
     // Aspect comes from the viewport rect (the dockspace's central node), not the whole window.
@@ -864,7 +880,10 @@ private:
         int resIdx = res>=256 ? 2 : (res>=128 ? 1 : 0);
         if (ImGui::Combo("Voxel grid", &resIdx, resLabels, 3)) { s.voxelResolution = (u32)resValues[resIdx]; changed = true; }
         if (ImGui::SliderFloat("GI intensity", &s.giIntensity, 0.0f, 4.0f)) changed = true;
-        if (ImGui::SliderFloat("GI distance (cm)", &s.giMaxDistance, 100.0f, 20000.0f, "%.0f")) changed = true;
+        if (ImGui::SliderFloat("GI distance", &s.giMaxDistance, 10.0f, 20000.0f, "%.0f")) changed = true;
+        ImGui::DragFloat3("Volume centre", &giCenter_.x, 0.5f);
+        ImGui::DragFloat("Volume extent", &giExtent_, 0.5f, 1.0f, 100000.0f);
+        ImGui::Checkbox("Debug: show voxel radiance", &giDebugView_);
         ImGui::EndDisabled();
 
         qualityRow(Feature::RayTracing,  s.rayTracing);
@@ -912,6 +931,10 @@ private:
             if (ImGui::Selectable("Wireframe", wireframe_)) wireframe_=true;
             ImGui::Selectable("Unlit", false, ImGuiSelectableFlags_Disabled);
             ImGui::Selectable("Detail Lighting", false, ImGuiSelectableFlags_Disabled);
+#if AVER_MODULE_VOXI
+            ImGui::Separator();
+            if (ImGui::Selectable("Voxel Radiance (GI debug)", giDebugView_)) giDebugView_ = !giDebugView_;
+#endif
             ImGui::EndPopup();
         }
         ImGui::SameLine();
@@ -1048,17 +1071,22 @@ private:
     int  settingsPage_=1;            // 0 = Description, 1 = Rendering
     int  focusVoxi_=0;               // --project-settings: frames left to force the window open
     int  msaaOverride_=0;            // --msaa N: apply a sample count at startup
+    int  giOverride_=0;              // --gi: GI quality to apply at startup
     bool worldSpace_=true;   // gizmo coordinate space toggle (display only for now)
+    // Voxi GI volume placement: a cube around the default scene (floor is +/-40, cube at origin).
+    bool giDebugView_=false; Vec3 giCenter_{0,0,8}; f32 giExtent_=44.0f;
     rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;
     Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false; std::string beam, shot; Tool tool=Tool::Select; int msaa=0;
+    u64 frames=0; bool headless=false, focusVoxi=false; std::string beam, shot; Tool tool=Tool::Select; int msaa=0; int gi=0; bool giDbg=false;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
         else if (!std::strcmp(argv[i],"--msaa") && i+1<argc) msaa=std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i],"--gi")) gi=3;
+        else if (!std::strcmp(argv[i],"--gi-debug")) { gi=3; giDbg=true; }
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
         else if (!std::strcmp(argv[i],"--tool") && i+1<argc) {
@@ -1071,6 +1099,7 @@ Application* createApplication(int argc, char** argv) {
     auto* app = new SandboxApp(frames, headless, beam, shot, tool);
     app->setFocusVoxi(focusVoxi);
     app->setMsaaOverride(msaa);
+    app->setGiOverride(gi, giDbg);
     return app;
 }
 

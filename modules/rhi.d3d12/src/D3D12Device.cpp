@@ -85,12 +85,65 @@ cbuffer PerFrame : register(b0) {
     float4   gSkyZenith;   // rgb
     float4   gSkyHorizon;  // rgb
     float4   gFogColor;    // rgb, a = density
+    float4   gVoxelOrigin; // xyz = volume min corner, w = 1/volumeWorldSize
+    float4   gVoxelParams; // x = resolution, y = intensity, z = maxDistance, w = enabled|debug<<1
 };
 cbuffer PerObject : register(b1) {
     float4x4 gWorld;
     float4   gBaseColor;
     float4   gMaterial;   // x=metallic, y=roughness, z=unlit(0/1)
 };
+
+// ---- Voxi: voxel cone traced GI ----
+RWTexture3D<float4> gVoxelUAV : register(u0);
+Texture3D<float4>   gVoxelTex : register(t0);
+SamplerState        gVoxelSamp : register(s0);
+
+// Mip level being read by CSMip (b3: b0/b1 are taken by the graphics root signature).
+cbuffer MipCB : register(b3) { uint gSrcMip; uint3 _mipPad; };
+
+// world -> [0,1] volume coords
+float3 voxelUVW(float3 wp) { return (wp - gVoxelOrigin.xyz) * gVoxelOrigin.w; }
+bool insideVolume(float3 uvw) { return all(uvw >= 0.0) && all(uvw <= 1.0); }
+
+// ---- cone tracing (defined before PSMain: HLSL needs definition before use) ----
+// March a cone through the volume, widening with distance and reading a coarser mip each step so
+// one sample covers the cone's footprint. Front-to-back alpha compositing.
+float4 traceCone(float3 originWS, float3 dir, float aperture) {
+    float voxelWorld = 1.0 / (gVoxelOrigin.w * gVoxelParams.x); // one voxel, world units
+    float dist = voxelWorld * 2.0;                              // start off-surface to avoid self-hit
+    float4 acc = 0;
+    [loop] for (int step = 0; step < 24; ++step) {
+        if (acc.a >= 0.95 || dist > gVoxelParams.z) break;
+        float diameter = max(voxelWorld, 2.0 * aperture * dist);
+        float mip = log2(diameter / voxelWorld);
+        float3 uvw = voxelUVW(originWS + dir * dist);
+        if (!insideVolume(uvw)) break;
+        float4 s = gVoxelTex.SampleLevel(gVoxelSamp, uvw, mip);
+        acc += (1.0 - acc.a) * s;
+        dist += diameter * 0.5;
+    }
+    return acc;
+}
+
+// Six cones over the hemisphere: one along the normal, five in a ring. Enough for smooth bounce
+// lighting without the cost of a full irradiance gather.
+float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
+    float3 up = abs(N.z) < 0.9 ? float3(0,0,1) : float3(1,0,0);
+    float3 T = normalize(cross(up, N)), B = cross(N, T);
+    const float aperture = 0.577;              // ~60 degree cone
+    float4 sum = traceCone(wpos, N, aperture);
+    float occ = sum.a;
+    [unroll] for (int k = 0; k < 5; ++k) {
+        float ang = 1.2566 * k;                // 2*pi/5
+        float3 d = normalize(N * 0.5 + (T * cos(ang) + B * sin(ang)) * 0.866);
+        float4 c = traceCone(wpos, d, aperture);
+        sum += c; occ += c.a;
+    }
+    sum /= 6.0; occ /= 6.0;
+    ao = saturate(1.0 - occ);
+    return sum.rgb * gVoxelParams.y;
+}
 
 static const float PI = 3.14159265;
 float3 acesTonemap(float3 x){ return saturate((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14)); }
@@ -145,7 +198,15 @@ float4 PSMain(VSOut i) : SV_TARGET {
     float3 ambient = kd * albedo * skyColor(N) * gAmbient.r;
     float3 R = reflect(-V, N);
     float3 envSpec = skyColor(R) * fresnelSchlick(ndv, F0) * (1.0 - rough);
-    float3 color = direct + ambient + envSpec * 0.35;
+
+    // Voxi indirect bounce: cone-traced diffuse GI + the ambient occlusion that falls out of it.
+    float3 indirect = 0;
+    if (gVoxelParams.w > 0.5) {
+        float ao;
+        indirect = kd * albedo * coneTracedIndirect(i.wpos, N, ao);
+        ambient *= ao;   // the volume already knows what is occluded
+    }
+    float3 color = direct + ambient + indirect + envSpec * 0.35;
 
     // distance fog (linear space)
     float dist = length(i.wpos - gCamPos.xyz);
@@ -186,6 +247,85 @@ LVSOut VSLine(LVSIn i) {
     return o;
 }
 float4 PSLine(LVSOut i) : SV_TARGET { return float4(i.col, 1.0); }
+
+// ================= Voxi: voxelisation =================
+// The scene is rasterised once per frame with no render target; the pixel shader computes direct
+// lighting and writes radiance straight into the 3D volume. Merging "voxelise" and "inject light"
+// into one pass avoids a second full scene traversal.
+struct VoxOut { float4 pos : SV_POSITION; float3 wpos : TEXCOORD0; float3 nrm : NORMAL; };
+
+VoxOut VSVoxel(VSIn i) {
+    VoxOut o;
+    float4 wp = mul(float4(i.pos, 1.0), gWorld);
+    o.wpos = wp.xyz;
+    o.nrm  = mul(float4(i.nrm, 0.0), gWorld).xyz;
+    o.pos  = wp;                     // world space; the GS picks a projection axis
+    return o;
+}
+
+// Project each triangle along its dominant axis so it covers the most pixels (and therefore the
+// most voxels). The voxel index is recomputed from world position in the PS, so the choice of
+// axis does not affect correctness - only coverage.
+[maxvertexcount(3)]
+void GSVoxel(triangle VoxOut inp[3], inout TriangleStream<VoxOut> os) {
+    float3 n = abs(cross(inp[1].wpos - inp[0].wpos, inp[2].wpos - inp[0].wpos));
+    int axis = (n.x > n.y && n.x > n.z) ? 0 : ((n.y > n.z) ? 1 : 2);
+    [unroll] for (int k = 0; k < 3; ++k) {
+        VoxOut o = inp[k];
+        float3 v = voxelUVW(o.wpos);
+        float2 p = (axis == 0) ? v.yz : ((axis == 1) ? v.xz : v.xy);
+        o.pos = float4(p * 2.0 - 1.0, 0.5, 1.0);
+        os.Append(o);
+    }
+}
+
+void PSVoxel(VoxOut i) {
+    float3 uvw = voxelUVW(i.wpos);
+    if (!insideVolume(uvw)) return;
+    float3 N = normalize(i.nrm);
+    float3 L = normalize(gLightDir.xyz);
+    float3 albedo = srgbToLin(gBaseColor.rgb);
+    // Direct sun (no shadowing yet) + sky ambient == the radiance this surface emits into the scene.
+    float3 radiance = albedo * (srgbToLin(gLightColor.rgb) * saturate(dot(N, L)) + skyColor(N) * gAmbient.r);
+    int3 c = int3(uvw * gVoxelParams.x);
+    gVoxelUAV[c] = float4(radiance, 1.0);   // alpha = occupancy
+}
+
+// ================= Voxi: mip filtering =================
+// Box-filter one mip into the next. Averaging radiance AND occupancy is what lets a wide cone
+// step read a single blurry sample instead of marching every voxel. Reuses the volume bindings
+// (t0 = whole chain, u0 = the destination mip) so no extra registers are needed.
+[numthreads(4,4,4)]
+void CSMip(uint3 id : SV_DispatchThreadID) {
+    int3 s = int3(id) * 2;
+    float4 a = 0;
+    [unroll] for (int x=0;x<2;++x)
+    [unroll] for (int y=0;y<2;++y)
+    [unroll] for (int z=0;z<2;++z)
+        a += gVoxelTex.Load(int4(s + int3(x,y,z), gSrcMip));
+    gVoxelUAV[id] = a * 0.125;
+}
+
+// Debug: raymarch the volume straight to screen so voxelisation can be inspected on its own.
+float4 PSVoxelDebug(SkyOut i) : SV_TARGET {
+    float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
+    float3 ray = normalize(far.xyz / far.w - gCamPos.xyz);
+    float voxelWorld = 1.0 / (gVoxelOrigin.w * gVoxelParams.x);
+    float4 acc = 0;
+    float t = 0;
+    [loop] for (int s = 0; s < 256; ++s) {
+        if (acc.a >= 0.98) break;
+        float3 uvw = voxelUVW(gCamPos.xyz + ray * t);
+        t += voxelWorld;
+        if (t > gVoxelParams.z * 2.0) break;
+        if (!insideVolume(uvw)) continue;
+        float4 v = gVoxelTex.SampleLevel(gVoxelSamp, uvw, 0);
+        acc += (1.0 - acc.a) * v;
+    }
+    float3 bg = skyColor(ray);
+    float3 col = acc.rgb + bg * (1.0 - acc.a);
+    return float4(toGamma(acesTonemap(col)), 1.0);
+}
 )";
 
 struct PerFrameCB {
@@ -197,7 +337,9 @@ struct PerFrameCB {
     f32 ambient[4];
     f32 skyZenith[4];
     f32 skyHorizon[4];
-    f32 fogColor[4]; // a = density
+    f32 fogColor[4];    // a = density
+    f32 voxelOrigin[4]; // xyz = volume min corner, w = 1/volumeWorldSize
+    f32 voxelParams[4]; // x = resolution, y = intensity, z = maxDistance, w = enabled
 };
 
 struct GpuMesh {
@@ -282,6 +424,7 @@ public:
     void drawLines(LineHandle mesh, const f32 world[16]) override;
     void setWireframe(bool on) override { wireframe_ = on; }
     void setLineDepth(bool testDepth) override { lineDepth_ = testDepth; }
+    void setGi(const GiSettings& gi) override;
 
     void requestCapture(u32 x, u32 y) override { capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
     bool getCapture(f32 out[4]) override {
@@ -306,6 +449,9 @@ public:
 
 private:
     void queryCaps();
+    bool createGiPipelines();
+    bool createVoxelVolume(u32 res);
+    void voxelizePass();
     bool createPipeline();
     bool createSwapchainResources(const SwapchainDesc& d);
     void createRenderTargetViews();
@@ -366,6 +512,19 @@ private:
     u32 vpX_ = 0, vpY_ = 0, vpW_ = 0, vpH_ = 0; // scene sub-rect; w/h == 0 means full backbuffer
     u32 sampleCount_ = kDefaultSampleCount;     // live MSAA sample count (1 = off)
     DeviceCaps caps_{};
+
+    // ---- Voxi voxel-cone-traced GI ----
+    GiSettings gi_{};
+    ComPtr<ID3D12Resource> voxelTex_;             // R16G16B16A16_FLOAT Texture3D, mipped
+    ComPtr<ID3D12DescriptorHeap> giHeap_;         // shader-visible: [0]=SRV whole chain, [1..]=per-mip UAV
+    ComPtr<ID3D12PipelineState> voxelPso_, voxelDebugPso_, mipPso_;
+    ComPtr<ID3D12RootSignature> mipRootSig_;
+    u32 giSrvSize_ = 0, voxelMips_ = 0, voxelResBuilt_ = 0;
+    bool giReady_ = false;
+    // Draws are replayed into the voxel volume at the start of the NEXT frame; a one-frame-old
+    // volume is imperceptible and avoids restructuring the app's submission order.
+    struct VoxelDraw { MeshHandle mesh; f32 world[16]; f32 color[4]; f32 metallic, roughness; };
+    std::vector<VoxelDraw> voxelDraws_, voxelDrawsPrev_;
     bool hasSwapchain_ = false;
     f32 clear_[4] = {0.10f, 0.12f, 0.16f, 1.0f};
     std::string adapterName_ = "D3D12 Device";
@@ -420,6 +579,7 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     setLight(d, c, 0.15f);
 
     if (!createPipeline()) return false;
+    if (!createGiPipelines()) AVER_WARN("[RHI.D3D12] Voxi GI pipelines unavailable; GI disabled");
 
     AVER_INFO("[RHI.D3D12] device ready on adapter '{}'", adapterName_);
     return true;
@@ -475,7 +635,11 @@ bool D3D12Device::setSampleCount(u32 samples) {
 
 bool D3D12Device::createPipeline() {
     // Root signature: b0 = per-frame CBV, b1 = 20 root constants (world + colour).
-    D3D12_ROOT_PARAMETER params[2] = {};
+    // b0 per-frame CBV, b1 root constants, t0 voxel volume (lit pass), u0 voxel volume (voxelise).
+    D3D12_DESCRIPTOR_RANGE srvRange{}; srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; srvRange.NumDescriptors = 1; srvRange.BaseShaderRegister = 0;
+    D3D12_DESCRIPTOR_RANGE uavRange{}; uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; uavRange.NumDescriptors = 1; uavRange.BaseShaderRegister = 0;
+
+    D3D12_ROOT_PARAMETER params[4] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -483,10 +647,27 @@ bool D3D12Device::createPipeline() {
     params[1].Constants.ShaderRegister = 1;
     params[1].Constants.Num32BitValues = 24;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[2].DescriptorTable.NumDescriptorRanges = 1;
+    params[2].DescriptorTable.pDescriptorRanges = &srvRange;
+    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[3].DescriptorTable.NumDescriptorRanges = 1;
+    params[3].DescriptorTable.pDescriptorRanges = &uavRange;
+    params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_STATIC_SAMPLER_DESC samp{};
+    samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samp.MaxLOD = D3D12_FLOAT32_MAX;
+    samp.ShaderRegister = 0;
+    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC rsd{};
-    rsd.NumParameters = 2;
+    rsd.NumParameters = 4;
     rsd.pParameters = params;
+    rsd.NumStaticSamplers = 1;
+    rsd.pStaticSamplers = &samp;
     rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     ComPtr<ID3DBlob> rsBlob, rsErr;
@@ -600,12 +781,165 @@ bool D3D12Device::createPipeline() {
 
     // Per-frame constant buffers (one per frame in flight), persistently mapped.
     auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
-    auto cbd = bufferDesc(256);
+    auto cbd = bufferDesc(512); // PerFrameCB grew past 256 with the voxel fields
     for (u32 i = 0; i < kFrameCount; ++i) {
         if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &cbd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&frameCBs_[i])), "create per-frame CB")) return false;
         D3D12_RANGE none{0, 0};
         frameCBs_[i]->Map(0, &none, reinterpret_cast<void**>(&frameCBPtr_[i]));
     }
+    return true;
+}
+
+// ---------------------------------------------------------------- Voxi GI
+void D3D12Device::setGi(const GiSettings& gi) {
+    gi_ = gi;
+    if (gi_.enabled && gi_.resolution != voxelResBuilt_) {
+        waitForGpu();
+        if (!createVoxelVolume(gi_.resolution)) { gi_.enabled = false; giReady_ = false; }
+    }
+    if (!gi_.enabled) return;
+    // Push volume placement into the per-frame CB the shaders read.
+    const f32 size = gi_.extent * 2.0f;
+    frameCB_.voxelOrigin[0] = gi_.center[0] - gi_.extent;
+    frameCB_.voxelOrigin[1] = gi_.center[1] - gi_.extent;
+    frameCB_.voxelOrigin[2] = gi_.center[2] - gi_.extent;
+    frameCB_.voxelOrigin[3] = 1.0f / size;                    // shader multiplies, so store the reciprocal
+    frameCB_.voxelParams[0] = static_cast<f32>(voxelResBuilt_);
+    frameCB_.voxelParams[1] = gi_.intensity;
+    frameCB_.voxelParams[2] = gi_.maxDistance;
+    frameCB_.voxelParams[3] = (giReady_ && !gi_.debugView) ? 1.0f : 0.0f; // gate the cone trace
+}
+
+// Cubic radiance volume with a full mip chain: mip N is the cone footprint at distance N.
+bool D3D12Device::createVoxelVolume(u32 res) {
+    giReady_ = false;
+    voxelTex_.Reset();
+    voxelMips_ = 1;
+    for (u32 r = res; r > 1; r >>= 1) ++voxelMips_;
+
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    td.Width = res; td.Height = res; td.DepthOrArraySize = static_cast<UINT16>(res);
+    td.MipLevels = static_cast<UINT16>(voxelMips_);
+    td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    td.SampleDesc.Count = 1;
+    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+    if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td,
+              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&voxelTex_)), "voxel volume")) return false;
+
+    // Heap layout: [0] = SRV over the whole chain, [1 + m] = UAV for mip m.
+    if (!giHeap_) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.NumDescriptors = 1 + 16;
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (!hrOk(device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&giHeap_)), "GI descriptor heap")) return false;
+        giSrvSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE h = giHeap_->GetCPUDescriptorHandleForHeapStart();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = td.Format;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture3D.MipLevels = voxelMips_;
+    device_->CreateShaderResourceView(voxelTex_.Get(), &sv, h);
+    for (u32 m = 0; m < voxelMips_ && m < 16; ++m) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
+        uv.Format = td.Format;
+        uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+        uv.Texture3D.MipSlice = m;
+        uv.Texture3D.WSize = res >> m;
+        D3D12_CPU_DESCRIPTOR_HANDLE mh = h; mh.ptr += static_cast<SIZE_T>(1 + m) * giSrvSize_;
+        device_->CreateUnorderedAccessView(voxelTex_.Get(), nullptr, &uv, mh);
+    }
+    voxelResBuilt_ = res;
+    giReady_ = voxelPso_ && mipPso_;
+    AVER_INFO("[RHI.D3D12] Voxi volume {}^3, {} mips", res, voxelMips_);
+    return true;
+}
+
+bool D3D12Device::createGiPipelines() {
+    UINT flags = D3DCOMPILE_PACK_MATRIX_ROW_MAJOR | D3DCOMPILE_ENABLE_STRICTNESS;
+    ComPtr<ID3DBlob> vs, gs, ps, err;
+    auto compile = [&](const char* entry, const char* target, ComPtr<ID3DBlob>& out) {
+        if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, entry, target, flags, 0, &out, &err))) {
+            AVER_ERROR("[RHI.D3D12] {} compile: {}", entry, err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+            return false;
+        }
+        return true;
+    };
+    if (!compile("VSVoxel", "vs_5_1", vs) || !compile("GSVoxel", "gs_5_1", gs) || !compile("PSVoxel", "ps_5_1", ps)) return false;
+
+    D3D12_INPUT_ELEMENT_DESC layout[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+    // Rasterise with NO render target and no depth: the pixel shader's only output is the UAV.
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC vp{};
+    vp.pRootSignature = rootSig_.Get();
+    vp.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    vp.GS = {gs->GetBufferPointer(), gs->GetBufferSize()};
+    vp.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+    vp.InputLayout = {layout, 2};
+    vp.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    vp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    vp.RasterizerState.DepthClipEnable = FALSE;
+    // Conservative raster makes thin/edge geometry still light up a voxel (tier checked in caps).
+    vp.RasterizerState.ConservativeRaster = caps_.conservativeRaster
+        ? D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON : D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+    vp.DepthStencilState.DepthEnable = FALSE;
+    vp.SampleMask = UINT_MAX;
+    vp.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    vp.NumRenderTargets = 0;
+    vp.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    vp.SampleDesc.Count = 1;
+    if (!hrOk(device_->CreateGraphicsPipelineState(&vp, IID_PPV_ARGS(&voxelPso_)), "voxel pso")) return false;
+
+    // Debug: fullscreen raymarch of the volume (shares the sky's fullscreen VS).
+    ComPtr<ID3DBlob> vsky, dbg;
+    if (!compile("VSky", "vs_5_1", vsky) || !compile("PSVoxelDebug", "ps_5_1", dbg)) return false;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC dp{};
+    dp.pRootSignature = rootSig_.Get();
+    dp.VS = {vsky->GetBufferPointer(), vsky->GetBufferSize()};
+    dp.PS = {dbg->GetBufferPointer(), dbg->GetBufferSize()};
+    dp.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    dp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    dp.RasterizerState.MultisampleEnable = TRUE;
+    dp.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    dp.DepthStencilState.DepthEnable = FALSE;
+    dp.SampleMask = UINT_MAX;
+    dp.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    dp.NumRenderTargets = 1;
+    dp.RTVFormats[0] = kBackbufferFormat;
+    dp.DSVFormat = kDepthFormat;
+    dp.SampleDesc.Count = sampleCount_;
+    if (!hrOk(device_->CreateGraphicsPipelineState(&dp, IID_PPV_ARGS(&voxelDebugPso_)), "voxel debug pso")) return false;
+
+    // Compute root signature for mip filtering: t0 (src mip) + u0 (dst mip).
+    if (!mipRootSig_) {
+        D3D12_DESCRIPTOR_RANGE sr{}; sr.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; sr.NumDescriptors = 1; sr.BaseShaderRegister = 0;
+        D3D12_DESCRIPTOR_RANGE ur{}; ur.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; ur.NumDescriptors = 1; ur.BaseShaderRegister = 0;
+        D3D12_ROOT_PARAMETER mp[3] = {};
+        mp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        mp[0].DescriptorTable.NumDescriptorRanges = 1; mp[0].DescriptorTable.pDescriptorRanges = &sr;
+        mp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        mp[1].DescriptorTable.NumDescriptorRanges = 1; mp[1].DescriptorTable.pDescriptorRanges = &ur;
+        mp[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; // b3 = source mip level
+        mp[2].Constants.ShaderRegister = 3; mp[2].Constants.Num32BitValues = 4;
+        D3D12_ROOT_SIGNATURE_DESC md{}; md.NumParameters = 3; md.pParameters = mp;
+        ComPtr<ID3DBlob> b, e2;
+        if (!hrOk(D3D12SerializeRootSignature(&md, D3D_ROOT_SIGNATURE_VERSION_1, &b, &e2), "mip root sig")) return false;
+        if (!hrOk(device_->CreateRootSignature(0, b->GetBufferPointer(), b->GetBufferSize(), IID_PPV_ARGS(&mipRootSig_)), "mip root sig create")) return false;
+    }
+    ComPtr<ID3DBlob> cs;
+    if (!compile("CSMip", "cs_5_1", cs)) return false;
+    D3D12_COMPUTE_PIPELINE_STATE_DESC cp{};
+    cp.pRootSignature = mipRootSig_.Get();
+    cp.CS = {cs->GetBufferPointer(), cs->GetBufferSize()};
+    if (!hrOk(device_->CreateComputePipelineState(&cp, IID_PPV_ARGS(&mipPso_)), "mip pso")) return false;
+
+    AVER_INFO("[RHI.D3D12] Voxi pipelines ready (conservative raster {})", caps_.conservativeRaster ? "on" : "off");
     return true;
 }
 
@@ -738,6 +1072,62 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
     return static_cast<MeshHandle>(meshes_.size()); // handle = index + 1
 }
 
+// Rasterise last frame's draws into the radiance volume, then build the mip chain.
+void D3D12Device::voxelizePass() {
+    if (!giReady_ || !gi_.enabled || voxelDrawsPrev_.empty()) return;
+    const u32 res = voxelResBuilt_;
+
+    ID3D12DescriptorHeap* heaps[] = {giHeap_.Get()};
+    cmdList_->SetDescriptorHeaps(1, heaps);
+    cmdList_->SetGraphicsRootSignature(rootSig_.Get());
+    cmdList_->SetGraphicsRootConstantBufferView(0, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
+    D3D12_GPU_DESCRIPTOR_HANDLE gh = giHeap_->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE uav0 = gh; uav0.ptr += giSrvSize_;      // mip 0 UAV
+    cmdList_->SetGraphicsRootDescriptorTable(2, gh);                     // t0 (unused here)
+    cmdList_->SetGraphicsRootDescriptorTable(3, uav0);                   // u0
+
+    // No RTV/DSV: the pixel shader writes only the UAV. Viewport defines the raster resolution.
+    cmdList_->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+    D3D12_VIEWPORT vp{0, 0, static_cast<f32>(res), static_cast<f32>(res), 0.0f, 1.0f};
+    D3D12_RECT sc{0, 0, static_cast<LONG>(res), static_cast<LONG>(res)};
+    cmdList_->RSSetViewports(1, &vp);
+    cmdList_->RSSetScissorRects(1, &sc);
+    cmdList_->SetPipelineState(voxelPso_.Get());
+    cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    for (const VoxelDraw& d : voxelDrawsPrev_) {
+        if (d.mesh == 0 || d.mesh > meshes_.size()) continue;
+        const GpuMesh& m = meshes_[d.mesh - 1];
+        f32 consts[24];
+        std::memcpy(consts, d.world, 16 * sizeof(f32));
+        std::memcpy(consts + 16, d.color, 4 * sizeof(f32));
+        consts[20] = d.metallic; consts[21] = d.roughness; consts[22] = 0.0f; consts[23] = 0.0f;
+        cmdList_->SetGraphicsRoot32BitConstants(1, 24, consts, 0);
+        cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
+        cmdList_->IASetIndexBuffer(&m.ibv);
+        cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+    }
+
+    // Build the mip chain: each level box-filters the one above it.
+    D3D12_RESOURCE_BARRIER uavB{}; uavB.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; uavB.UAV.pResource = voxelTex_.Get();
+    cmdList_->ResourceBarrier(1, &uavB);
+    cmdList_->SetComputeRootSignature(mipRootSig_.Get());
+    cmdList_->SetPipelineState(mipPso_.Get());
+    for (u32 m = 1; m < voxelMips_; ++m) {
+        // Source mip is read through the whole-chain SRV via SampleLevel/Load in the CS.
+        D3D12_GPU_DESCRIPTOR_HANDLE src = gh;
+        D3D12_GPU_DESCRIPTOR_HANDLE dst = gh; dst.ptr += static_cast<UINT64>(1 + m) * giSrvSize_;
+        cmdList_->SetComputeRootDescriptorTable(0, src);
+        cmdList_->SetComputeRootDescriptorTable(1, dst);
+        const u32 srcMip[4] = {m - 1, 0, 0, 0};
+        cmdList_->SetComputeRoot32BitConstants(2, 4, srcMip, 0);
+        const u32 d = (res >> m) > 0 ? (res >> m) : 1u;
+        const u32 g = (d + 3) / 4;
+        cmdList_->Dispatch(g, g, g);
+        cmdList_->ResourceBarrier(1, &uavB);
+    }
+}
+
 void D3D12Device::beginFrame() {
     if (!hasSwapchain_) return;
     // Render into whichever backbuffer is current now; wait for its previous frame to finish on
@@ -756,6 +1146,14 @@ void D3D12Device::beginFrame() {
     // Scene renders into the MSAA color + depth targets; endFrame resolves to backbuffer.
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = msaaRtvHeap_->GetCPUDescriptorHandleForHeapStart();
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = dsvHeap_->GetCPUDescriptorHandleForHeapStart();
+    // Voxi runs BEFORE the lit pass so the volume is ready to cone-trace. It replays the previous
+    // frame's draws (see voxelDrawsPrev_) and owns its own viewport/targets, so it must happen
+    // before the scene RTV is bound below.
+    std::memcpy(frameCBPtr_[frameIndex_], &frameCB_, sizeof(PerFrameCB));
+    voxelDrawsPrev_.swap(voxelDraws_);
+    voxelDraws_.clear();
+    voxelizePass();
+
     cmdList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
     // Always clear the FULL surface: once the scene is scissored to a sub-rect the sky no longer
     // covers every pixel, and anything outside would keep stale content from an earlier frame.
@@ -773,10 +1171,26 @@ void D3D12Device::beginFrame() {
     cmdList_->RSSetViewports(1, &vp);
     cmdList_->RSSetScissorRects(1, &sc);
 
-    std::memcpy(frameCBPtr_[frameIndex_], &frameCB_, sizeof(PerFrameCB));
     cmdList_->SetGraphicsRootSignature(rootSig_.Get());
     cmdList_->SetGraphicsRootConstantBufferView(0, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
+    if (giHeap_) { // bind the volume so the lit pass can cone-trace it (t0)
+        ID3D12DescriptorHeap* heaps[] = {giHeap_.Get()};
+        cmdList_->SetDescriptorHeaps(1, heaps);
+        D3D12_GPU_DESCRIPTOR_HANDLE gh = giHeap_->GetGPUDescriptorHandleForHeapStart();
+        cmdList_->SetGraphicsRootDescriptorTable(2, gh);
+        D3D12_GPU_DESCRIPTOR_HANDLE uav0 = gh; uav0.ptr += giSrvSize_;
+        cmdList_->SetGraphicsRootDescriptorTable(3, uav0);
+    }
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    // Debug view replaces the whole scene with a raymarch of the volume.
+    if (giReady_ && gi_.enabled && gi_.debugView) {
+        cmdList_->SetPipelineState(voxelDebugPso_.Get());
+        cmdList_->IASetVertexBuffers(0, 0, nullptr);
+        cmdList_->DrawInstanced(3, 1, 0, 0);
+        cmdList_->SetPipelineState(pso_.Get());
+        return;
+    }
 
     // Procedural sky first (fullscreen, no depth), then meshes draw over it.
     if (skyEnabled_) {
@@ -789,6 +1203,17 @@ void D3D12Device::beginFrame() {
 
 void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) {
     if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
+    // Remember the draw so Voxi can replay it into the volume at the start of the next frame.
+    if (gi_.enabled && voxelDraws_.size() < 4096) {
+        VoxelDraw vd; vd.mesh = mesh;
+        std::memcpy(vd.world, world, 16 * sizeof(f32));
+        std::memcpy(vd.color, color, 4 * sizeof(f32));
+        vd.metallic = metallic; vd.roughness = roughness;
+        voxelDraws_.push_back(vd);
+    }
+    // The GI debug view replaces the scene with a raymarch of the volume, so skip the lit draw --
+    // but only AFTER capturing above, or the volume would never be filled.
+    if (gi_.enabled && gi_.debugView) return;
     const GpuMesh& m = meshes_[mesh - 1];
     cmdList_->SetPipelineState(wireframe_ ? wirePso_.Get() : pso_.Get());
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -821,6 +1246,7 @@ LineHandle D3D12Device::createLineMesh(const LineVertex* verts, u32 count) {
 
 void D3D12Device::drawLines(LineHandle mesh, const f32 world[16]) {
     if (!hasSwapchain_ || mesh == 0 || mesh > lineMeshes_.size()) return;
+    if (gi_.enabled && gi_.debugView) return; // grid/gizmo would overlay the volume raymarch
     const GpuLineMesh& m = lineMeshes_[mesh - 1];
     cmdList_->SetPipelineState(lineDepth_ ? linePso_.Get() : lineOverlayPso_.Get());
     cmdList_->SetGraphicsRoot32BitConstants(1, 16, world, 0); // gWorld only

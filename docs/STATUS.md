@@ -119,8 +119,12 @@ Owns the project-wide render quality settings and reports, per feature, whether 
 
 - **MSAA — implemented**: Off/2x/4x/8x applied at runtime via `IDevice::setSampleCount`
   (rebuilds scene targets + all PSOs; 1x uses `CopyResource` since resolve is illegal there).
-- **Global Illumination / Ray Tracing / Path Tracing — declared, not implemented.** The editor
-  greys them out; the setters refuse them. Only `Renderer::status()` changes when they land.
+- **Global Illumination — implemented (voxel cone tracing).** Voxelise+inject into a 3D
+  radiance volume (GS dominant-axis projection, conservative raster, UAV-only pass) -> compute
+  mip filter -> 6-cone diffuse gather + AO in the lit pass. Volume is one frame old (draws are
+  replayed next frame). Debug raymarch via the viewport Lit dropdown. ~59 FPS at 128^3.
+- **Ray Tracing / Path Tracing — declared, not implemented.** The editor greys them out and the
+  setters refuse them. Only `Renderer::status()` changes when they land.
 - Exposed in the editor under **Edit > Project Settings > Rendering** (project-wide, so NOT in
   the per-actor Details panel).
 - Depends on **Aver.Core only** — the host pushes `DeviceInfo` in, so no RHI leaks into the DLL.

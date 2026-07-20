@@ -120,6 +120,20 @@ public:
     virtual LineHandle createLineMesh(const LineVertex* verts, u32 count) { (void)verts; (void)count; return 0; }
     virtual void drawLines(LineHandle mesh, const f32 world[16]) { (void)mesh; (void)world; }
 
+    // ----- Voxel-cone-traced global illumination (Voxi) -----
+    // The scene is voxelised into a radiance volume each frame and cone-traced in the lit pass.
+    // `center`/`extent` place the cubic volume in world space (centimetres).
+    struct GiSettings {
+        bool enabled = false;
+        bool debugView = false;   // raymarch the volume to screen instead of shading (debug aid)
+        u32 resolution = 128;     // voxel grid edge
+        f32 intensity = 1.0f;
+        f32 maxDistance = 4000.0f;
+        f32 center[3] = {0, 0, 0};
+        f32 extent = 2000.0f;     // half-size of the cubic volume
+    };
+    virtual void setGi(const GiSettings& gi) { (void)gi; }
+
     // Render subsequent meshes as wireframe until toggled off.
     virtual void setWireframe(bool on) { (void)on; }
 

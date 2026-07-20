@@ -42,10 +42,10 @@ Status Renderer::status(Feature f) const {
         case Feature::Msaa:
             return device_.maxMsaaSamples > 1 ? Status::Ready : Status::Unsupported;
         case Feature::GlobalIllumination:
-            // Voxel cone tracing needs compute + a writable 3D volume. The passes are not built
-            // yet, so report NotImplemented rather than pretending the toggle does something.
+            // Voxel cone tracing: voxelise + inject, filter mips, cone-trace. Needs compute and a
+            // writable 3D volume; conservative raster only improves coverage, so it is not required.
             if (!device_.computeShaders) return Status::Unsupported;
-            return Status::NotImplemented;
+            return Status::Ready;
         case Feature::RayTracing:
             if (device_.rayTracingTier == 0) return Status::Unsupported;
             return Status::NotImplemented;
