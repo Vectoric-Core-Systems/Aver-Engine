@@ -217,6 +217,10 @@ bool Window::create(const WindowDesc& desc) {
     return true;
 }
 
+void Window::setTitle(const std::string& title) {
+    if (nativeHandle_) SetWindowTextW(static_cast<HWND>(nativeHandle_), utf8ToWide(title).c_str());
+}
+
 void Window::pumpEvents() {
     MSG msg;
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {

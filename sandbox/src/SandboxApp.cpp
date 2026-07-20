@@ -4,7 +4,12 @@
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
+#include "aver/core/Version.hpp"
 #include "aver/formats/OcBeam.hpp"
+#include "aver/formats/OcProject.hpp"
+
+#include "ProjectBrowser.hpp"
+#include "ProjectScaffold.hpp"
 
 #if AVER_MODULE_VOXI
 #include "aver/voxi/Voxi.hpp"          // optional render-feature module (AA / GI / RT / PT settings)
@@ -225,6 +230,19 @@ public:
 
     void onInit(Engine& e) override {
         AVER_INFO("[Sandbox] backend={} adapter='{}'", rhi::backendName(e.device()->backend()), e.device()->adapterName());
+
+        // Always read the recent list, even when the start screen will not be shown: opening a
+        // project records it, and recording into a list that was never loaded would truncate the
+        // user's history to the one project the command line named.
+        browser_.init();
+
+        // A project named on the command line is loaded straight away and the start screen is
+        // skipped — see armBrowser() for why automation must never reach the browser.
+        if (!projectPath_.empty()) {
+            std::string err;
+            if (browser_.open(projectPath_, &err)) applyProject(e);
+            else AVER_WARN("[Sandbox] '{}' not loaded: {}", projectPath_, err);
+        }
 #if AVER_WITH_IMGUI
         if (e.device()->uiActive()) {
             applyDpi(e.window() ? e.window()->dpiScale() : 1.0f);
@@ -320,13 +338,16 @@ public:
             // Dragging the window to a monitor with a different scale changes the size the glyphs
             // should have been rasterised at, so re-bake them. Safe here: onUpdate runs before
             // uiNewFrame(), i.e. outside the ImGui frame, and the atlas may not be touched inside
-            // one. Win32Window latches the new scale from WM_DPICHANGED.
+            // one. Win32Window latches the new scale from WM_DPICHANGED. Runs for the start screen
+            // too — it is drawn with the same atlas.
             const f32 dpi = e.window() ? e.window()->dpiScale() : dpi_;
             if (std::fabs(dpi - dpi_) > 0.01f) {
                 AVER_INFO("[Sandbox] DPI changed {:.2f} -> {:.2f}, re-rasterising the UI font", dpi_, dpi);
                 applyDpi(dpi);
             }
-
+        }
+        // The camera must not fly and the viewport must not be dollied while the start screen is up.
+        if (e.device()->uiActive() && !browserActive_) {
             const ImGuiIO& io = ImGui::GetIO();
             // The central dock node is a transparent hole, so WantCaptureMouse is false over it
             // AND over any empty dockspace gap — require the cursor to be inside the viewport too.
@@ -442,13 +463,27 @@ public:
         AVER_INFO("[Sandbox] shutdown");
     }
     void setFocusVoxi(bool b) { focusVoxi_ = b ? 4 : 0; } // --project-settings screenshot aid
+    void setFocusScript(bool b) { focusScript_ = b ? 4 : 0; } // --new-script screenshot aid
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
     void setGiOverride(int q, bool dbg) { giOverride_ = q; giDebugView_ = dbg; } // --gi / --gi-debug
     void setRtOverride(int q) { rtOverride_ = q; }                              // --rt
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
+    void setProjectPath(std::string p) { projectPath_ = std::move(p); }          // <path>.ocproject
+    // Arm the start screen. Only ever true for an interactive launch with no project: the
+    // verification harness drives the editor with --frames and reads one probe pixel, so a screen
+    // in front of the viewport would take out all 13 oracle gates at once.
+    void armBrowser(bool on) { browserActive_ = on; }
 
 private:
+    // Adopt a project the browser (or the command line) loaded: the title bar and the status bar
+    // are the two places the editor claims to have one, so both must actually change.
+    void applyProject(Engine& e) {
+        project_ = browser_.project();
+        if (e.window())
+            e.window()->setTitle("Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + project_.name);
+    }
+
     // Aspect comes from the viewport rect (the dockspace's central node), not the whole window.
     f32 viewAspect() const { return vpH_ > 0.5f ? vpW_ / vpH_ : 1.777f; }
     bool inViewport(f32 mx, f32 my) const { return mx >= vpX_ && mx < vpX_+vpW_ && my >= vpY_ && my < vpY_+vpH_; }
@@ -566,7 +601,7 @@ private:
 
     void handleManip(Engine& e) {
 #if AVER_WITH_IMGUI
-        if (!e.device()->uiActive()) return;
+        if (!e.device()->uiActive() || browserActive_) return; // no scene interaction behind the start screen
         const ImGuiIO& io = ImGui::GetIO();
 
         if (!io.WantCaptureKeyboard) {
@@ -693,6 +728,17 @@ private:
 #if AVER_WITH_IMGUI
         if (!e.device()->uiActive()) return;
 
+        // The start screen replaces the editor chrome entirely while it is up.
+        if (browserActive_) {
+            switch (browser_.draw(dpi_, fontMedium_)) {
+                case editor::BrowserAction::Open: applyProject(e); browserActive_ = false; break;
+                case editor::BrowserAction::Skip: browserActive_ = false; break;
+                case editor::BrowserAction::Quit: e.requestExit(); break;
+                case editor::BrowserAction::Stay: break;
+            }
+            return;
+        }
+
         // ---------------- menu bar ----------------
         if (ImGui::BeginMainMenuBar()) {
             // Medium weight on the menu bar, matching Unreal's; 0.0f keeps the size already in use.
@@ -706,6 +752,19 @@ private:
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Window")){ ImGui::MenuItem("World Outliner"); ImGui::MenuItem("Details"); ImGui::MenuItem("Content Browser"); ImGui::MenuItem("Output Log"); ImGui::Separator(); if (ImGui::MenuItem("Reset Layout")) dockBuilt_=false; ImGui::EndMenu(); }
+            // Tools sits between Window and Build, where Unreal puts it.
+            if (ImGui::BeginMenu("Tools")){
+                const bool haveProject = project_.valid();
+                if (ImGui::MenuItem("New C# Script...", nullptr, false, haveProject)) {
+                    scriptName_[0] = '\0'; scriptError_.clear(); scriptResult_.clear();
+                    openScriptModal_ = true;
+                }
+                // A disabled item with no explanation reads as a bug. Scripts are written into the
+                // project's Content\Scripts, so with no project there is nowhere to put one.
+                if (!haveProject && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Open or create a project first - scripts live in the\nproject's Content\\Scripts folder.");
+                ImGui::EndMenu();
+            }
             if (ImGui::BeginMenu("Build")){ ImGui::MenuItem("Build Lighting"); ImGui::MenuItem("Build Geometry"); ImGui::EndMenu(); }
             if (ImGui::BeginMenu("Select")){ if(ImGui::MenuItem("Select All")) {} if(ImGui::MenuItem("Select None")) sel_=-1; ImGui::EndMenu(); }
             if (ImGui::BeginMenu("Help")){ ImGui::MenuItem("About Aver Engine"); ImGui::EndMenu(); }
@@ -797,6 +856,7 @@ private:
         buildPanels(e);
         buildViewportOverlay();
         buildProjectSettings();
+        buildNewScriptModal();
 
         // ---------------- status bar ----------------
         ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH));
@@ -806,7 +866,8 @@ private:
         ImGui::Begin("##statusbar", nullptr, kChromeFlags);
         const f32 dt = e.time().dt;
         ImGui::SetCursorPosY((statusH - ImGui::GetTextLineHeight()) * 0.5f);
-        ImGui::Text("%s  |  %s  |  DPI %.0f%%  |  %.0f FPS (%.2f ms)  |  %zu actors  |  %s",
+        ImGui::Text("%s  |  %s  |  %s  |  DPI %.0f%%  |  %.0f FPS (%.2f ms)  |  %zu actors  |  %s",
+                    project_.valid() ? project_.name.c_str() : "No project",
                     rhi::backendName(e.device()->backend()), e.device()->adapterName(), dpi_*100.f,
                     dt>1e-6f?1.f/dt:0.f, dt*1000.f, objects_.size(),
                     movableSelected() ? objects_[sel_].name.c_str() : "nothing selected");
@@ -855,7 +916,17 @@ private:
         ImGui::End();
 
         ImGui::Begin("Content Browser");
-        ImGui::TextDisabled("No content mounted.");
+        // Where the mount points, even though nothing enumerates it yet: "no content" and "no
+        // project" are different states and the panel used to show one message for both.
+        if (project_.valid()) {
+            ImGui::Text("%s", project_.name.c_str());
+            ImGui::TextDisabled("Mounted at %s", project_.contentDir().c_str());
+            if (!project_.startMap.empty()) ImGui::TextDisabled("Start map: %s", project_.startMap.c_str());
+            ImGui::Separator();
+        } else {
+            ImGui::TextDisabled("No project loaded - nothing is mounted.");
+            ImGui::Separator();
+        }
         ImGui::TextDisabled("Static meshes (.ocmesh), materials and textures will appear here");
         ImGui::TextDisabled("once the asset pipeline lands (see docs/STATUS.md \xC2\xA7""9).");
         ImGui::End();
@@ -866,6 +937,60 @@ private:
         ImGui::Text("[INFO] Editor DPI scale %.2f", dpi_);
         ImGui::TextDisabled("(log capture wiring is a TODO - this mirrors the console for now)");
         ImGui::End();
+    }
+
+    // Tools > New C# Script. Writes one file into the project's Content\Scripts and, the first
+    // time, the .csproj that makes the folder open as a real project in an IDE.
+    void buildNewScriptModal() {
+        // --new-script (screenshot aid, like --project-settings). Deliberately gated on the SAME
+        // predicate as the menu item, so a run with no project proves the item really is disabled
+        // rather than merely looking it — headless capture cannot open a menu and click.
+        if (focusScript_ > 0) { if (project_.valid()) openScriptModal_ = true; --focusScript_; }
+        if (openScriptModal_) { ImGui::OpenPopup("New C# Script"); openScriptModal_ = false; }
+
+        const ImGuiViewport* mv = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(mv->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(600.0f*dpi_, 0), ImGuiCond_Always);
+        if (!ImGui::BeginPopupModal("New C# Script", nullptr, ImGuiWindowFlags_NoResize)) return;
+
+        ImGui::TextUnformatted("Script name");
+        ImGui::PushItemWidth(-1);
+        const bool submitted = ImGui::InputText("##scriptname", scriptName_, sizeof scriptName_,
+                                                ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::PopItemWidth();
+        ImGui::TextDisabled("Becomes a C# class, so: letters, digits and underscores only.");
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Writes to %s", project_.scriptsDir().c_str());
+
+        // Said here as well as in the generated file's header: a script that silently never runs
+        // is the kind of thing someone discovers an hour later, by watching nothing happen.
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+            "This script will NOT run. The engine cannot host the CLR in-process yet "
+            "(docs/STATUS.md \xC2\xA7""4d), so nothing loads or calls it. It compiles and is editable "
+            "against the real Aver.Scripting API; execution is not wired up.");
+        ImGui::PopTextWrapPos();
+        ImGui::Separator();
+
+        if (!scriptError_.empty())  ImGui::TextColored(ImVec4(0.93f,0.42f,0.38f,1), "%s", scriptError_.c_str());
+        if (!scriptResult_.empty()) ImGui::TextColored(ImVec4(0.45f,0.85f,0.45f,1), "%s", scriptResult_.c_str());
+
+        ImGui::Spacing();
+        const bool create = ImGui::Button("Create Script", ImVec2(150.0f*dpi_, 0));
+        if (create || submitted) {
+            scriptError_.clear(); scriptResult_.clear();
+            std::string path; bool madeCsproj = false;
+            if (editor::createScript(project_, scriptName_, &path, &madeCsproj, &scriptError_)) {
+                scriptResult_ = "Created " + path + (madeCsproj ? "  (+ Scripts.csproj)" : "");
+                scriptName_[0] = '\0';
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close", ImVec2(110.0f*dpi_, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
     }
 
     // Project Settings — a floating, categorised window like Unreal's, opened from
@@ -897,8 +1022,24 @@ private:
         if (settingsPage_ == 0) {
             ImGui::TextUnformatted("Description");
             ImGui::Separator();
-            ImGui::TextDisabled("Project name, version and packaging settings will live here");
-            ImGui::TextDisabled("once the .ocproject manifest is wired up.");
+            if (project_.valid()) {
+                ImGui::Text("Name        %s", project_.name.c_str());
+                ImGui::Text("Author      %s", project_.author.empty() ? "(unset)" : project_.author.c_str());
+                ImGui::Text("Engine      %s %s (this build: %.*s)",
+                            project_.engineName.empty() ? "(unset)" : project_.engineName.c_str(),
+                            project_.engineMinVersion.empty() ? "" : project_.engineMinVersion.c_str(),
+                            (int)kEngineVersion.size(), kEngineVersion.data());
+                ImGui::Text("Content     %s", project_.contentRoot.c_str());
+                ImGui::Text("Start map   %s", project_.startMap.empty() ? "(unset)" : project_.startMap.c_str());
+                ImGui::Separator();
+                ImGui::TextDisabled("%s", project_.manifestPath.c_str());
+                ImGui::Spacing();
+                ImGui::TextDisabled("These are read-only: the editor loads .ocproject but does not");
+                ImGui::TextDisabled("write it back yet.");
+            } else {
+                ImGui::TextDisabled("No project loaded. The editor runs fine without one; open or");
+                ImGui::TextDisabled("create a project from the start screen to populate this page.");
+            }
         } else {
 #if AVER_MODULE_VOXI
             buildRenderingSettings();
@@ -1186,11 +1327,21 @@ private:
     bool showProjectSettings_=false; // Edit > Project Settings window
     int  settingsPage_=1;            // 0 = Description, 1 = Rendering
     int  focusVoxi_=0;               // --project-settings: frames left to force the window open
+    int  focusScript_=0;             // --new-script: ditto for the New C# Script modal
     int  msaaOverride_=0;            // --msaa N: apply a sample count at startup
     int  giOverride_=0;              // --gi: GI quality to apply at startup
     int  rtOverride_=0;              // --rt: ray tracing quality at startup
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
+    // Project browser + the project it produced. `browserActive_` is false for every automated
+    // run, so the oracle never sees the start screen.
+    editor::ProjectBrowser browser_;
+    fmt::ProjectDesc project_;
+    std::string projectPath_;        // <path>.ocproject given on the command line
+    bool browserActive_=false;
+    bool openScriptModal_=false;     // Tools > New C# Script
+    char scriptName_[96]={};
+    std::string scriptError_, scriptResult_;
     bool worldSpace_=true;   // gizmo coordinate space toggle (display only for now)
     // Voxi GI volume placement: a cube around the default scene (floor is +/-40, cube at origin).
     bool giDebugView_=false; Vec3 giCenter_{0,0,8}; f32 giExtent_=44.0f;
@@ -1203,11 +1354,27 @@ private:
     Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };
 
+// True for "<something>.ocproject", so a positional argument can be either a project manifest or
+// the .ocbeam the sandbox has always accepted, without a new flag for it.
+static bool isOcproject(const char* p) {
+    const usize n = std::strlen(p);
+    if (n < 11) return false;
+    const char* ext = p + n - 10;
+    static const char* kExt = ".ocproject";
+    for (int i = 0; i < 10; ++i) {
+        char a = ext[i], b = kExt[i];
+        if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+        if (a != b) return false;
+    }
+    return true;
+}
+
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false; std::string beam, shot; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false; std::string beam, shot, project; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
+        else if (!std::strcmp(argv[i],"--new-script")) focusScript=true;
         else if (!std::strcmp(argv[i],"--msaa") && i+1<argc) msaa=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--gi")) gi=3;
         else if (!std::strcmp(argv[i],"--gi-debug")) { gi=3; giDbg=true; }
@@ -1221,10 +1388,17 @@ Application* createApplication(int argc, char** argv) {
             tool = !std::strcmp(t,"move")?Tool::Move : !std::strcmp(t,"rotate")?Tool::Rotate :
                    !std::strcmp(t,"scale")?Tool::Scale : Tool::Select;
         }
-        else if (argv[i][0]!='-') beam=argv[i];
+        else if (argv[i][0]!='-') { if (isOcproject(argv[i])) project=argv[i]; else beam=argv[i]; }
     }
     auto* app = new SandboxApp(frames, headless, beam, shot, tool);
+    app->setProjectPath(project);
+    // The start screen is for a human opening the editor with nothing to open. It must never
+    // appear in automation: every gate in the verification harness passes --frames and reads a
+    // probe pixel out of the viewport, which a full-screen chooser would cover. `--frames`
+    // present, a project already named, or headless => straight to the editor.
+    app->armBrowser(!headless && frames == 0 && project.empty());
     app->setFocusVoxi(focusVoxi);
+    app->setFocusScript(focusScript);
     app->setMsaaOverride(msaa);
     app->setGiOverride(gi, giDbg);
     app->setRtOverride(rt);

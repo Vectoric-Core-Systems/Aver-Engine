@@ -26,6 +26,10 @@ public:
     void destroy();
     void pumpEvents();
 
+    // Retitle a live window. The project browser picks a project AFTER the window exists, so the
+    // title cannot come from WindowDesc alone.
+    void setTitle(const std::string& title);
+
     bool shouldClose() const { return shouldClose_; }
     void requestClose() { shouldClose_ = true; }
 

@@ -1,4 +1,8 @@
-add_executable(Sandbox src/SandboxApp.cpp Sandbox.rc)
+add_executable(Sandbox
+  src/SandboxApp.cpp
+  src/ProjectBrowser.cpp
+  src/ProjectScaffold.cpp
+  Sandbox.rc)
 target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
 if(TARGET Aver.Render.Voxi)
   # Settings DLL (brings AVER_MODULE_VOXI=1) + the static render feature that drives the RHI.
