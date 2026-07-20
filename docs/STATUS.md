@@ -257,6 +257,41 @@ Keep counting TDRs around any automated render-test loop regardless:
 `Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1001}` filtered for `LiveKernelEvent`
 and `141`, before and after the batch.
 
+### RESOLVED 2026-07-20: `--rt` sun shadows stopped occluding — the TLAS went to the wrong heap
+
+`--rt --probe 1413 1042` read `0.43,0.46,0.52` (fully lit) where the shadow-mapped path read
+`0.25,0.31,0.40`. Every other oracle value, `--rt` included, was correct, so it was not a pipeline
+failure — only the ray missed.
+
+**Cause.** `08cf5be` — a commit whose message says "docs" but which carries 256 lines of code —
+moved `bindGiTables()` from the backend's `giHeap_` onto the registered feature's binding set. That
+is the binding-set half of step 7, and it landed WITHOUT step 9. `buildRtScene()` kept writing the
+TLAS SRV into `giHeap_` slot 2, which nothing has bound for graphics since. The shader therefore
+read Voxi's t2, which `nullFill()` had written as an acceleration structure at address zero and
+which nothing ever overwrote — `setSrvTlas` is implemented but has no caller anywhere in the tree.
+**RayQuery against a null AS reports "no hit"**, i.e. `sunVis == 1.0`, i.e. fully lit.
+
+**Fix.** `buildRtScene()` now calls `publishTlasSrv()`, which writes the AS SRV into the set
+`bindGiTables()` actually binds, checking `srvKinds[2]` rather than assuming the slot's dimension,
+and skipping the write unless the set or the address moved (a shader-visible descriptor must not be
+rewritten under an in-flight frame). The dead `giHeap_` slot-2 write is gone.
+
+**This is NOT the `e461425` latent-UB class**, despite looking like it. It is a plain regression
+with a clean bisect: correct at `937cece`, wrong from `08cf5be`. The reboot and the ~30 preceding
+TDRs were red herrings — the value is deterministic, not memory-dependent. The real lesson is the
+process one: **a commit labelled `docs:` contained the regression**, so the message was no guide to
+where to look.
+
+**Diagnostic that settled it in one build:** force `rtShadow()` to `return 0.0`. The probe went to
+`0.25,0.31,0.40` on both `--rt` and `--ms --rt`, which proves the RayQuery pipeline *is* the one
+drawing that pixel and the ray *is* being traced — so the fault had to be the AS or its binding,
+not pipeline selection. Note the centre probe cannot see any of this: it lands on the cube's unlit
+left face where `ndl` is ~0 and the sun term drops out entirely.
+
+**Verification.** All 13 oracle gates pass; `0x141` `LiveKernelEvent` count 65 -> 65 across the
+batch, zero new TDRs. The red-channel wobble below still reproduces (`--gi` 5 runs: 3x `0.38`,
+1x `0.37`, 1x `0.36`), unchanged by this fix, confirming it really is a separate defect.
+
 ### Step 7-8 was attempted and REVERTED — read before retrying
 Patch of the attempt: `scratchpad/step78-attempt.patch` (299 lines, does not apply cleanly as-is).
 
@@ -266,6 +301,9 @@ What it got right, and would be needed again:
   binds Voxi's binding set, its RayQuery reads Voxi's t2, which is null until 9 moves the TLAS.
   Confirmed empirically: `--rt` cast-shadow went `0.25,0.31,0.40` -> `0.43,0.46,0.52`, i.e. fully
   lit, because the null TLAS reports no occlusion.
+  **The t2 half of this is now closed** (see 4c-3): `08cf5be` shipped the binding-set half of step 7
+  without step 9, and `buildRtScene` now publishes the TLAS into the feature's set, so the backend
+  may own the TLAS indefinitely. Step 9 is a tidiness move, no longer a correctness prerequisite.
 - Do NOT route GI settings through `IDevice::setGi` to the feature — that puts feature vocabulary
   back into the generic interface. The app owns the `VoxiRenderer` instance; configure it directly.
 - `D3D12ResourceFactory` needs `friend class D3D12Device` so the frame path can bind a feature's

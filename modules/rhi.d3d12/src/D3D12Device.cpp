@@ -608,6 +608,7 @@ void setDebugName(ID3D12Object* obj, const char* name) {
 class D3D12Device;
 class D3D12ResourceFactory;
 class D3D12RenderContext;
+struct RhiBindingSet;
 
 class D3D12Swapchain final : public ISwapchain {
 public:
@@ -723,6 +724,8 @@ private:
     void dispatchMesh(const GpuMesh& m);
     void buildBlas(u32 meshIndex);
     void buildRtScene();
+    void publishTlasSrv();                      // write the TLAS into the table the lit pass binds
+    RhiBindingSet* sceneBindings();             // the registered feature's set, or null
     void bindGiTables();                        // bind heap + both descriptor tables (Tier 1 safety)
     void bindGraphicsRoot(ID3D12RootSignature* rs); // switch root signature + rebind shared params
     void voxelBarrier(u32 sub, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to);
@@ -814,6 +817,11 @@ private:
     std::vector<ComPtr<ID3D12Resource>> asScratch_;   // BLAS scratch, kept alive
     u64 tlasBytes_ = 0, tlasScratchBytes_ = 0, instanceBufBytes_ = 0;
     bool rtSupported_ = false, rtEnabled_ = false, rtActive_ = false;
+    // What publishTlasSrv() last wrote into the feature's t2. A shader-visible descriptor must not
+    // be rewritten while an in-flight frame may still read it, so the write is skipped unless the
+    // set or the address has actually moved -- which only happens when the TLAS is reallocated.
+    RhiBindingSet* tlasSrvSet_ = nullptr;
+    D3D12_GPU_VIRTUAL_ADDRESS tlasSrvAddr_ = 0;
 
     // ---- Voxi voxel-cone-traced GI ----
     GiSettings gi_{};
@@ -1742,15 +1750,6 @@ void D3D12Device::buildRtScene() {
         tlas_ = makeAsBuffer(device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
         tlasBytes_ = info.ResultDataMaxSizeInBytes;
         tlasScratch_.Reset();
-        // t2 = the TLAS. A raytracing-AS SRV takes a NULL resource; the address lives in the desc.
-        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-        sv.Format = DXGI_FORMAT_UNKNOWN;
-        sv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
-        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sv.RaytracingAccelerationStructure.Location = tlas_->GetGPUVirtualAddress();
-        D3D12_CPU_DESCRIPTOR_HANDLE h = giHeap_->GetCPUDescriptorHandleForHeapStart();
-        h.ptr += 2ull * giSrvSize_;
-        device_->CreateShaderResourceView(nullptr, &sv, h);
     }
     if (!tlasScratch_ || tlasScratchBytes_ < info.ScratchDataSizeInBytes) {
         tlasScratch_ = makeAsBuffer(device_.Get(), info.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1765,8 +1764,42 @@ void D3D12Device::buildRtScene() {
     cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
     D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; b.UAV.pResource = tlas_.Get();
     cmdList_->ResourceBarrier(1, &b);
+    publishTlasSrv();
     if (!rtActive_) AVER_INFO("[RHI.D3D12] RayQuery active ({} instances)", inst.size());
     rtActive_ = true;
+}
+
+// The scene's t0/t1/t2/u0 come from the registered feature's binding set, so the TLAS the backend
+// still builds has to be published INTO that set. Writing it to the backend's own giHeap_ -- which
+// nothing has bound for graphics since bindGiTables() moved -- left the shader reading the null
+// acceleration structure nullFill() puts in the slot, and RayQuery answers a null AS as "no hit":
+// every surface fully lit, shadow-map values elsewhere still correct, and nothing for the debug
+// layer to report, because a null descriptor is legal API use rather than API misuse.
+void D3D12Device::publishTlasSrv() {
+    RhiBindingSet* s = sceneBindings();
+    // Slot 2 by the shader's `register(t2)`. The declared kind is checked rather than assumed: a
+    // set that never declared an acceleration structure was null-filled to some other dimension,
+    // and overwriting it would break whatever does read that slot.
+    if (!s || s->srvCount <= 2 || s->srvKinds[2] != SlotKind::AccelerationStructure) return;
+    const D3D12_GPU_VIRTUAL_ADDRESS va = tlas_->GetGPUVirtualAddress();
+    if (tlasSrvSet_ == s && tlasSrvAddr_ == va) return;
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = DXGI_FORMAT_UNKNOWN;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.RaytracingAccelerationStructure.Location = va;   // an AS SRV takes a NULL resource
+    device_->CreateShaderResourceView(nullptr, &sv, rhiFactory_->cpuSlot(s->heapBase + 2));
+    tlasSrvSet_ = s;
+    tlasSrvAddr_ = va;
+}
+
+// The set the scene draws actually read. bindGiTables() resolves the same one, so anything the
+// backend still owns but the scene shader reads through t0..t2 must be written here.
+RhiBindingSet* D3D12Device::sceneBindings() {
+    if (!rhiFactory_) return nullptr;
+    for (IRenderFeature* f : features_)
+        if (const BindingSetHandle h = f->sceneBindingSet()) return rhiFactory_->bindingSet(h);
+    return nullptr;
 }
 
 // ---------------------------------------------------------------- shared GI/shadow binding
@@ -1792,11 +1825,7 @@ void D3D12Device::bindGraphicsRoot(ID3D12RootSignature* rs) {
 // shadow map of its own to make views of. Resource Binding Tier 1 requires every declared table to
 // be bound on EVERY pass, so this runs for the sky and line draws too, which read none of it.
 void D3D12Device::bindGiTables() {
-    if (!rhiFactory_) return;
-    RhiBindingSet* s = nullptr;
-    for (IRenderFeature* f : features_) {
-        if (const BindingSetHandle h = f->sceneBindingSet()) { s = rhiFactory_->bindingSet(h); break; }
-    }
+    RhiBindingSet* s = sceneBindings();
     if (!s) return;
     ID3D12DescriptorHeap* heaps[] = {rhiFactory_->heap_.Get()};
     cmdList_->SetDescriptorHeaps(1, heaps);
