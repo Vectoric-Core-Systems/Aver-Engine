@@ -11,7 +11,24 @@
 // Scope: this abstracts the operations feature modules actually perform, not the whole of D3D12.
 // It is expected to grow when a second feature module needs something — that is cheaper and more
 // honest than speculatively designing a universal RHI.
+//
+// BINDING MODEL: explicit descriptor tables, NOT bindless. This keeps Resource Binding Tier 1
+// hardware working (Kepler / Maxwell gen 1 / Haswell), which SM 6.6 dynamic resources would drop.
+// See docs/MINIMUM_SPECS.md before changing this.
 namespace aver::rhi {
+
+// ---------------------------------------------------------------- handles
+// All 0 = invalid. Distinct names, identical underlying type — so they can NEVER be distinguished
+// by overload resolution. Every API below that takes one says which kind it wants in its name.
+using MeshHandle       = u32;
+using LineHandle       = u32;
+using TextureHandle    = u32;
+using BufferHandle     = u32;
+using ShaderHandle     = u32;
+using PipelineHandle   = u32;
+using BindingSetHandle = u32;
+using BlasHandle       = u32;
+using TlasHandle       = u32;
 
 // ---------------------------------------------------------------- formats & resources
 
@@ -26,8 +43,6 @@ enum class Format : u8 {
 
 enum class TextureDim : u8 { Tex2D, Tex3D };
 
-// Bitmask: how a resource may be bound. Drives the underlying resource flags and which views the
-// backend creates.
 enum class ResourceBind : u32 {
     None            = 0,
     ShaderResource  = 1u << 0,
@@ -35,117 +50,13 @@ enum class ResourceBind : u32 {
     RenderTarget    = 1u << 2,
     DepthStencil    = 1u << 3,
 };
-inline ResourceBind  operator|(ResourceBind a, ResourceBind b) { return static_cast<ResourceBind>(static_cast<u32>(a) | static_cast<u32>(b)); }
-inline bool          any(ResourceBind v, ResourceBind bit)     { return (static_cast<u32>(v) & static_cast<u32>(bit)) != 0; }
+inline ResourceBind operator|(ResourceBind a, ResourceBind b) { return static_cast<ResourceBind>(static_cast<u32>(a) | static_cast<u32>(b)); }
+inline bool         any(ResourceBind v, ResourceBind bit)     { return (static_cast<u32>(v) & static_cast<u32>(bit)) != 0; }
 
-struct TextureDesc {
-    TextureDim   dim    = TextureDim::Tex2D;
-    u32          width  = 1;
-    u32          height = 1;
-    u32          depth  = 1;    // Tex3D only
-    u32          mips   = 1;    // 0 = full chain
-    Format       format = Format::RGBA8Unorm;
-    ResourceBind bind   = ResourceBind::ShaderResource;
-    const char*  debugName = nullptr;
-};
-
-// Where the buffer lives and what it is for. AccelStructure exists because acceleration structures
-// have their own required resource state; the RHI does not interpret their contents.
-enum class BufferKind : u8 {
-    Default,         // GPU-local
-    Upload,          // CPU-writable, GPU-readable (staging, instance descriptions)
-    AccelStructure,  // GPU-local, created in the acceleration-structure state
-};
-
-struct BufferDesc {
-    u64         bytes = 0;
-    BufferKind  kind  = BufferKind::Default;
-    bool        allowUnorderedAccess = false;   // e.g. scratch for acceleration-structure builds
-    const char* debugName = nullptr;
-};
-
-using TextureHandle  = u32;  // 0 = invalid
-using BufferHandle   = u32;
-using ShaderHandle   = u32;
-using PipelineHandle = u32;
-using BlasHandle     = u32;
-using TlasHandle     = u32;
-
-// ---------------------------------------------------------------- shaders & pipelines
-
-enum class ShaderStage : u8 { Vertex, Pixel, Geometry, Compute, Mesh };
-
-struct ShaderDesc {
-    const char* source = nullptr;   // HLSL text; the feature module owns its own shader source
-    const char* entry  = nullptr;
-    ShaderStage stage  = ShaderStage::Vertex;
-    // Minimum shader model required, as major*10+minor (60 = SM 6.0, 65 = SM 6.5). The backend
-    // may compile higher. A module asking for more than the device reports gets an invalid handle.
-    u32         minShaderModel = 60;
-    // Semicolon-separated preprocessor defines, e.g. "AVER_MS=1;AVER_RT=1".
-    const char* defines = nullptr;
-};
-
-enum class CullMode : u8 { None, Back, Front };
-enum class FillMode : u8 { Solid, Wireframe };
-enum class CompareOp : u8 { Never, Less, LessEqual, Always };
-
-struct DepthState {
-    bool      test  = false;
-    bool      write = false;
-    CompareOp op    = CompareOp::Less;
-};
-
-struct GraphicsPipelineDesc {
-    // Either (vs[,gs]) or ms must be set — a mesh pipeline has no input assembler, and the backend
-    // picks the matching root-signature flavour automatically.
-    ShaderHandle vs = 0, gs = 0, ms = 0, ps = 0;
-
-    FillMode fill = FillMode::Solid;
-    CullMode cull = CullMode::None;
-    bool     depthClip = true;
-    // Widens rasterisation so thin geometry still covers a pixel. Silently ignored where the
-    // device does not support it — query DeviceCaps::conservativeRaster first if it matters.
-    bool     conservativeRaster = false;
-
-    DepthState depth{};
-
-    // Zero render targets is legal and meaningful: a pass whose only output is a UAV write.
-    u32    renderTargetCount = 0;
-    Format renderTargets[4]  = {};
-    Format depthFormat       = Format::Unknown;
-    u32    sampleCount       = 1;
-
-    // Vertex layout is implicit: position+normal interleaved (rhi::MeshVertex) when vs is set.
-    bool usesMeshVertexLayout = true;
-};
-
-struct ComputePipelineDesc {
-    ShaderHandle cs = 0;
-};
-
-// ---------------------------------------------------------------- binding model
-//
-// Explicit descriptor tables, NOT bindless. This keeps Resource Binding Tier 1 hardware working
-// (Kepler / Maxwell gen 1 / Haswell), which SM 6.6 dynamic resources would drop. See
-// docs/MINIMUM_SPECS.md before changing this.
-
-// A binding set is a contiguous run of shader-resource slots plus a contiguous run of
-// unordered-access slots, allocated once and rebound cheaply. Tier 1 requires every declared slot
-// to hold a valid descriptor, so the backend null-fills any the module leaves unset.
-using BindingSetHandle = u32;
-
-struct BindingSetDesc {
-    u32 srvCount = 0;   // t0..t(n-1)
-    u32 uavCount = 0;   // u0..u(n-1)
-};
-
-// What a slot points at. A texture binding may target one mip or the whole chain; targeting a
-// single mip is what makes read-one-level-while-writing-the-next legal on one resource.
-constexpr u32 kAllMips = 0xFFFFFFFFu;
-
-// ---------------------------------------------------------------- barriers
-
+// THE MODULE OWNS RESOURCE STATE. No IRenderContext method transitions implicitly: setRenderTargets
+// and clearDepth require the caller to have already placed the target. The backend performs no
+// promotion or decay on module-created resources. A resource is exactly in the state its desc or
+// its last barrier named, and that state CARRIES ACROSS FRAMES.
 enum class ResourceState : u8 {
     Common,
     ShaderResource,          // readable by the pixel stage
@@ -155,59 +66,323 @@ enum class ResourceState : u8 {
     DepthWrite,
     CopySource,
     CopyDest,
+    // TERMINAL: set at creation, never a valid barrier argument in either direction. The underlying
+    // API rejects transitioning into or out of it; acceleration structures live here for life.
+    AccelerationStructure,
 };
 
+struct TextureDesc {
+    TextureDim   dim    = TextureDim::Tex2D;
+    u32          width  = 1;
+    u32          height = 1;
+    u32          depth  = 1;    // Tex3D only
+    u32          mips   = 1;    // 0 = full chain; query the resolved count with textureInfo()
+    Format       format = Format::RGBA8Unorm;
+    ResourceBind bind   = ResourceBind::ShaderResource;
+    // The state the resource is created in. Pick the state the first barrier of frame 0 will
+    // transition FROM, or that first barrier is a lie and the debug layer will say so.
+    ResourceState initialState = ResourceState::Common;
+    // A depth/render target created without a clear value that matches the value actually cleared
+    // to loses fast clear and warns every frame.
+    bool        hasClearValue = false;
+    f32         clearDepth    = 1.0f;
+    f32         clearColor[4] = {};
+    const char* debugName = nullptr;
+};
+
+enum class BufferKind : u8 {
+    Default,         // GPU-local
+    Upload,          // CPU-writable, GPU-readable
+    AccelStructure,  // GPU-local, created in the terminal AccelerationStructure state
+};
+
+struct BufferDesc {
+    u64           bytes = 0;
+    BufferKind    kind  = BufferKind::Default;
+    bool          allowUnorderedAccess = false;
+    ResourceState initialState = ResourceState::Common;
+    const char*   debugName = nullptr;
+};
+
+// ---------------------------------------------------------------- samplers
+// Static samplers declared on the pipeline, NOT as binding-set slots — the Tier-1-friendly choice.
+
+enum class Filter : u8 {
+    Point,
+    Linear,
+    // Depth comparison sampling (SampleCmpLevelZero). Substituting Linear here compiles, runs, and
+    // returns raw depth per tap — it reads as "shadows too weak", never as an error.
+    ComparisonLinear,
+};
+enum class AddressMode : u8 { Clamp, Wrap };
+enum class CompareOp : u8 { Never, Less, LessEqual, Always };
+
+struct SamplerDesc {
+    Filter      filter  = Filter::Linear;
+    AddressMode address = AddressMode::Clamp;
+    CompareOp   compare = CompareOp::Never;   // ComparisonLinear only
+    // Leave unclamped for anything that samples a mip chain at a fractional level: clamping this
+    // makes every level past the clamp unreachable.
+    f32         maxLod  = 3.402823466e+38f;
+};
+
+// ---------------------------------------------------------------- shaders & pipelines
+
+enum class ShaderStage : u8 { Vertex, Pixel, Geometry, Compute, Mesh };
+
+struct ShaderDesc {
+    const char* source = nullptr;   // HLSL text; the feature module owns its own shader source
+    // Prepended verbatim before `source`. Use sharedShaderPrelude() so the shared cbuffer layouts
+    // and helpers have exactly ONE owner — duplicating them across modules is a silent cross-module
+    // ABI where reordering a field corrupts the other side with no compile error anywhere.
+    const char* prelude = nullptr;
+    const char* entry   = nullptr;
+    ShaderStage stage   = ShaderStage::Vertex;
+    // Minimum shader model as major*10+minor (60 = SM 6.0, 65 = SM 6.5). Asking for more than the
+    // device reports yields an invalid handle rather than a hard failure.
+    u32         minShaderModel = 60;
+    const char* defines = nullptr;  // semicolon-separated, e.g. "AVER_MS=1;AVER_RT=1"
+};
+
+enum class CullMode : u8 { None, Back, Front };
+enum class FillMode : u8 { Solid, Wireframe };
+
+struct DepthState {
+    bool      test  = false;
+    bool      write = false;
+    CompareOp op    = CompareOp::Less;
+};
+
+// Every pipeline DECLARES its binding layout. The backend caches root signatures keyed by that
+// layout, so pipelines declaring identical shapes share one and switching between them does not
+// invalidate bindings — which is what lets a feature's binding set stay live across draws the
+// backend records itself (mandatory at Tier 1, where every declared table must be bound).
+struct PipelineLayout {
+    u32 srvCount = 0;             // t0..t(n-1)
+    u32 uavCount = 0;             // u0..u(n-1)
+    u32 constantDwords[4] = {};   // logical constant slot -> 32-bit word count (0 = absent)
+    SamplerDesc samplers[4] = {};
+    u32 samplerCount = 0;         // s0..s(n-1)
+};
+
+struct GraphicsPipelineDesc {
+    // Either (vs[,gs]) or ms must be set. A mesh pipeline has no input assembler; the backend picks
+    // the matching root-signature flavour automatically.
+    ShaderHandle vs = 0, gs = 0, ms = 0, ps = 0;
+
+    PipelineLayout layout{};
+
+    FillMode fill = FillMode::Solid;
+    CullMode cull = CullMode::None;
+    bool     depthClip = true;
+    // Widens rasterisation so thin geometry still covers a pixel. Silently ignored where
+    // unsupported — check DeviceCaps::conservativeRaster if it matters.
+    bool     conservativeRaster = false;
+    // Depth bias is per-triangle and slope-dependent; a shader-side bias cannot substitute for it.
+    // Constant bias is meaningless against a float depth buffer, so slope-scaled carries the load.
+    f32      depthBias = 0.0f;
+    f32      slopeScaledDepthBias = 0.0f;
+
+    DepthState depth{};
+
+    // Zero render targets is legal and meaningful: a pass whose only output is a UAV write.
+    // Blending is always off and all colour channels are written.
+    u32    renderTargetCount = 0;
+    Format renderTargets[4]  = {};
+    Format depthFormat       = Format::Unknown;
+    u32    sampleCount       = 1;
+};
+
+struct ComputePipelineDesc {
+    ShaderHandle   cs = 0;
+    PipelineLayout layout{};
+};
+
+// ---------------------------------------------------------------- binding sets
+//
+// A binding set is a contiguous run of shader-resource slots plus a contiguous run of
+// unordered-access slots. Tier 1 requires every declared slot to hold a valid descriptor, so the
+// backend null-fills any left unset with a view OF THE CORRECT DIMENSION. All sets suballocate from
+// one device-owned shader-visible heap, so binding one never costs a heap switch.
+struct BindingSetDesc {
+    u32 srvCount = 0;
+    u32 uavCount = 0;
+};
+
+// Bind every mip of a texture as one view. Invalid for a UAV, which always targets one level.
+constexpr u32 kAllMips = 0xFFFFFFFFu;
+
+// A whole-resource transition requires EVERY subresource to already be in `from`. Mixing whole and
+// per-subresource transitions without first reconciling every subresource is invalid; the backend
+// validates `from` against its own tracking in debug builds and reports through the engine log.
+// For the single-slice Tex2D/Tex3D this interface supports, `subresource` is the mip index.
 constexpr u32 kAllSubresources = 0xFFFFFFFFu;
+
+// Triangles per mesh-shader thread group. One owner, because the group count at every dispatch site
+// is ceil(triangleCount / this) and the shader's own [numthreads] must agree.
+constexpr u32 kMeshShaderTrisPerGroup = 64;
+
+// ---------------------------------------------------------------- acceleration structures
+//
+// Inline RayQuery (DXR 1.1) still needs built acceleration structures. The backend owns sizing,
+// scratch lifetime and instance packing: result/scratch sizes come from a driver-dependent prebuild
+// query, scratch must outlive the command list that consumed it, and the instance descriptor is a
+// backend-specific bit layout that Vulkan packs differently.
+struct TlasInstance {
+    f32         world[16];   // ENGINE convention: row-major/row-vector, cm, +Z up. The backend does
+                             // any transpose the underlying API needs — do not pre-transpose.
+    u32         mask = 0xFF;
+    BlasHandle  blas = 0;
+};
+
+// ---------------------------------------------------------------- resource factory
+//
+// Creation and destruction. Reached with IDevice::resources(), which returns nullptr on backends
+// without GPU support so a feature module can decline to initialise instead of failing the engine.
+class IResourceFactory {
+public:
+    virtual ~IResourceFactory() = default;
+
+    virtual TextureHandle    createTexture(const TextureDesc& d) = 0;
+    virtual BufferHandle     createBuffer(const BufferDesc& d) = 0;
+    virtual ShaderHandle     createShader(const ShaderDesc& d) = 0;
+    virtual PipelineHandle   createGraphicsPipeline(const GraphicsPipelineDesc& d) = 0;
+    virtual PipelineHandle   createComputePipeline(const ComputePipelineDesc& d) = 0;
+    virtual BindingSetHandle createBindingSet(const BindingSetDesc& d) = 0;
+    virtual BlasHandle       createBlas(MeshHandle mesh) = 0;
+    virtual TlasHandle       createTlas(u32 maxInstances) = 0;
+
+    // Destruction is DEFERRED BY CONTRACT: the backend retires the resource once the GPU has passed
+    // every frame that could still reference it. Safe to call mid-frame.
+    virtual void destroyTexture(TextureHandle h) = 0;
+    virtual void destroyBuffer(BufferHandle h) = 0;
+    virtual void destroyShader(ShaderHandle h) = 0;
+    virtual void destroyPipeline(PipelineHandle h) = 0;
+    virtual void destroyBindingSet(BindingSetHandle h) = 0;
+
+    // Populate a binding set. Slots left unset are null-filled.
+    virtual void setSrv(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip = kAllMips) = 0;
+    virtual void setUav(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip) = 0;
+    // Distinct name, not an overload: every handle type is the same underlying integer.
+    virtual void setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle tlas) = 0;
+
+    // Resolved description, with `mips` filled in when the desc asked for a full chain. The module
+    // must not recompute the mip count: it drives the descriptor loop, the per-mip barrier sequence
+    // and the dispatch loop, and an off-by-one makes the closing whole-resource transition illegal.
+    virtual bool textureInfo(TextureHandle h, TextureDesc& out) const = 0;
+
+    // Block until the GPU is idle. Required before destroying and recreating a resource that
+    // binding sets still point at.
+    virtual void waitIdle() = 0;
+};
 
 // ---------------------------------------------------------------- command recording
 //
 // A feature module records into the frame's command stream through this interface rather than
-// touching a backend command list. It is handed one by the engine at a defined point in the frame
-// (see IRenderFeature below), so modules never own submission, allocators or fences.
+// touching a backend command list. It is handed one at defined points in the frame (see
+// IRenderFeature), so modules never own submission, allocators or fences.
 class IRenderContext {
 public:
     virtual ~IRenderContext() = default;
 
-    // ---- state ----
+    // setPipeline must precede setConstants / setBindingSet: it selects the pipeline's declared
+    // layout AND whether the graphics or compute binding point is used. Those are wholly
+    // independent state, and getting it backwards is silent corruption, not an error.
     virtual void setPipeline(PipelineHandle p) = 0;
+
     virtual void setViewport(u32 x, u32 y, u32 w, u32 h) = 0;
-    // Bind render targets by handle. count == 0 with no depth is a UAV-only pass.
+    // The scissor is mandatory and is NOT derived from the viewport. A pass that binds zero render
+    // targets has no extent to fall back on, so it must set this or inherit whatever rectangle was
+    // last used — which silently clips the pass.
+    virtual void setScissor(u32 x, u32 y, u32 w, u32 h) = 0;
+
+    // The caller must already have transitioned these into RenderTarget / DepthWrite.
     virtual void setRenderTargets(const TextureHandle* colors, u32 count, TextureHandle depth) = 0;
     virtual void clearDepth(TextureHandle depth, f32 value) = 0;
 
-    // ---- bindings ----
     virtual void setBindingSet(BindingSetHandle set) = 0;
-    // Root constants, in 32-bit words. The per-object slot the raster pipelines share.
-    virtual void setConstants(const void* data, u32 dwords) = 0;
-    // Root descriptors: a buffer bound straight by address, no descriptor heap slot needed.
-    // This is how a mesh shader reads vertex/index data.
-    virtual void setBufferSRV(u32 rootSlot, BufferHandle b) = 0;
+    // Root constants at a logical slot. Always overwrites the whole declared block, so a partial
+    // write can never inherit the previous pass's values.
+    virtual void setConstants(u32 slot, const void* data, u32 dwords) = 0;
+    // Transient per-frame constants: suballocated from the frame's upload ring and bound as a root
+    // CBV. Backend-owned memory, fresh every call — a module cannot get the N-buffering wrong, and
+    // republishing mid-frame (once a pass has computed its own matrices) is free.
+    virtual void setConstantBuffer(u32 slot, const void* data, u32 bytes) = 0;
 
-    // ---- draws ----
-    virtual void drawIndexed(BufferHandle vb, BufferHandle ib, u32 indexCount) = 0;
+    // Draws. Geometry is addressed by MeshHandle: the backend resolves vertex/index buffers, index
+    // count, triangle count, mesh-shader group count and root SRVs internally.
+    virtual void drawMesh(MeshHandle mesh) = 0;
+    virtual void dispatchMeshFor(MeshHandle mesh) = 0;
     virtual void dispatch(u32 gx, u32 gy, u32 gz) = 0;
-    virtual void dispatchMesh(u32 groups) = 0;
-    virtual void drawFullscreen() = 0;   // 3-vertex fullscreen triangle, no vertex buffer
+    // 3-vertex fullscreen triangle. The pipeline supplies its OWN vertex shader generating the
+    // triangle from SV_VertexID — no backend vertex shader is implied.
+    virtual void drawFullscreen() = 0;
 
-    // ---- synchronisation ----
-    virtual void barrier(TextureHandle t, ResourceState from, ResourceState to,
-                         u32 subresource = kAllSubresources) = 0;
-    virtual void uavBarrier(TextureHandle t) = 0;
+    // Acceleration-structure builds.
+    virtual void buildBlas(BlasHandle blas) = 0;
+    virtual void buildTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) = 0;
+
+    // Synchronisation. Textures and buffers have distinct names because the handle types are
+    // indistinguishable to the compiler.
+    virtual void textureBarrier(TextureHandle t, ResourceState from, ResourceState to,
+                                u32 subresource = kAllSubresources) = 0;
+    virtual void bufferBarrier(BufferHandle b, ResourceState from, ResourceState to) = 0;
+    virtual void uavBarrierTexture(TextureHandle t) = 0;
+    // The only synchronisation between an acceleration-structure write and the RayQuery reads that
+    // consume it later in the same command list.
+    virtual void uavBarrierBuffer(BufferHandle b) = 0;
+
+    // Debug markers. Without these a feature's whole pass chain is attributed to the backend in
+    // PIX / RenderDoc. No correctness impact; annoying to retrofit.
+    virtual void pushMarker(const char* label) { (void)label; }
+    virtual void popMarker() {}
 };
 
 // ---------------------------------------------------------------- feature modules
 //
-// The hook a render-feature module implements. The backend calls these at fixed points in the
-// frame; it does not know what the feature does, only when to give it the context.
+// The hook a render-feature module implements. The backend calls these at fixed points; it does not
+// know what the feature does, only when to call it. Registration is NON-owning.
 class IRenderFeature {
 public:
     virtual ~IRenderFeature() = default;
     virtual const char* name() const = 0;
-    // Before the scene's render targets are bound — for passes that own their own targets
-    // (shadow maps, volume rasterisation, acceleration-structure builds).
+
+    // Scene submission, forwarded by the backend so a feature can replay geometry into its own
+    // passes (shadow maps, volume rasterisation, acceleration structures).
+    virtual void beginScene() {}
+    virtual void submitDraw(MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
+                            f32 metallic, f32 roughness) {
+        (void)mesh; (void)world; (void)baseColor; (void)metallic; (void)roughness;
+    }
+
+    // Before the scene's render targets are bound — for passes that own their own targets.
     virtual void prePass(IRenderContext& ctx) { (void)ctx; }
-    // Whether the feature currently wants the scene drawn with its own pipelines.
-    virtual bool overridesScenePipeline() const { return false; }
+
+    // Whether the scene must be drawn with this feature's pipelines. wireframe is passed because it
+    // has no mesh-shader variant, and a feature may fall back when a variant failed to build.
+    virtual bool           overridesScenePipeline() const { return false; }
+    virtual PipelineHandle scenePipeline(bool meshShaders, bool wireframe) const {
+        (void)meshShaders; (void)wireframe; return 0;
+    }
+    // Bindings and constants the feature's scene shaders need, applied by the BACKEND to every
+    // scene draw it records — including draws that read none of them, which Tier 1 requires anyway.
+    virtual BindingSetHandle sceneBindingSet() const { return 0; }
+    virtual bool sceneConstants(const void** data, u32* bytes) const { (void)data; (void)bytes; return false; }
+
+    // Replace the scene entirely, after the colour target is bound (e.g. a debug visualisation).
+    // Suppression must cover line/overlay draws too, or they float over the replacement.
+    virtual bool suppressesScene() const { return false; }
+    virtual void scenePass(IRenderContext& ctx) { (void)ctx; }
+
+    // Pipelines that bake sample count or target formats must be rebuilt when those change.
+    // setSampleCount can only rebuild the ones the backend owns.
+    virtual void onRenderTargetsChanged(u32 sampleCount, Format color, Format depth) {
+        (void)sampleCount; (void)color; (void)depth;
+    }
 };
+
+// The shared HLSL prelude: cbuffer layouts, vertex structures and helpers used by BOTH the
+// backend's own shaders and feature modules. One owner, so the two can never drift.
+const char* sharedShaderPrelude();
 
 } // namespace aver::rhi

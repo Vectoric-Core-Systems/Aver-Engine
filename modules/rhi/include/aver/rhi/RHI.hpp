@@ -1,5 +1,6 @@
 #pragma once
 #include "aver/core/Types.hpp"
+#include "aver/rhi/RHIResources.hpp"
 
 #include <vector>
 
@@ -34,14 +35,14 @@ struct MeshVertex {
     f32 nx, ny, nz;
 };
 
-using MeshHandle = u32; // 0 = invalid
+// MeshHandle / LineHandle are declared in RHIResources.hpp so feature modules can name geometry
+// without pulling in the whole device interface.
 
 // Line vertex: position + colour (unlit), for grids/gizmos/debug.
 struct LineVertex {
     f32 px, py, pz;
     f32 r, g, b;
 };
-using LineHandle = u32; // 0 = invalid
 
 struct DeviceDesc {
     // Preference order; createDevice() returns the first compiled-in backend that
@@ -72,6 +73,19 @@ public:
     virtual Backend backend() const = 0;
     virtual const char* adapterName() const = 0;
     virtual DeviceCaps caps() const { return {}; }
+
+    // Generic resource creation for render-feature modules. Returns nullptr on backends without
+    // GPU support (Null / the D3D11 + Vulkan stubs), which is how a feature declines to initialise
+    // instead of failing the engine.
+    virtual IResourceFactory* resources() { return nullptr; }
+
+    // Render-feature registration. NON-owning: the caller keeps the feature alive.
+    virtual void addRenderFeature(IRenderFeature* f) { (void)f; }
+    virtual void removeRenderFeature(IRenderFeature* f) { (void)f; }
+
+    // Target formats a feature must match when building pipelines that draw into the scene.
+    virtual Format backbufferFormat() const { return Format::Unknown; }
+    virtual Format depthFormat() const { return Format::Unknown; }
 
     // Anti-aliasing sample count. Changing it rebuilds the scene targets and every PSO, so it
     // is a real (if heavyweight) runtime setting. Returns false if the count is unsupported.
