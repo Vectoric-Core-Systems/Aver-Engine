@@ -243,13 +243,15 @@ public:
             di.msaaMask = c.msaaMask; di.maxMsaaSamples = c.maxMsaaSamples;
             di.rayTracingTier = c.rayTracingTier; di.computeShaders = c.computeShaders;
             di.typedUavLoads = c.typedUavLoads; di.conservativeRaster = c.conservativeRaster;
+            di.shaderModel = c.shaderModel; di.meshShaderTier = c.meshShaderTier;
+            di.dxcAvailable = c.dxcAvailable;
             voxi::Renderer::get().setDeviceInfo(di);
             voxi::Settings s = voxi::Renderer::get().settings();
             s.msaa = static_cast<voxi::Msaa>(e.device()->sampleCount()); // adopt the live value
             if (msaaOverride_) s.msaa = static_cast<voxi::Msaa>(msaaOverride_);
             if (giOverride_) s.globalIllumination = static_cast<voxi::Quality>(giOverride_);
             voxi::Renderer::get().setSettings(s);
-            AVER_INFO("[Voxi] attached: max MSAA {}x, raytracing tier {}", c.maxMsaaSamples, c.rayTracingTier);
+            AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", c.maxMsaaSamples, c.rayTracingTier, c.shaderModel, c.meshShaderTier);
         }
 #endif
         tool_ = initialTool_;
@@ -889,12 +891,28 @@ private:
         qualityRow(Feature::RayTracing,  s.rayTracing);
         qualityRow(Feature::PathTracing, s.pathTracing);
 
+        // Geometry submission path: mesh shaders vs the classic vertex/geometry pipeline.
+        ImGui::Separator();
+        {
+            const Status st = vx.status(Feature::MeshShaders);
+            ImGui::TextUnformatted(Renderer::featureName(Feature::MeshShaders));
+            ImGui::SameLine();
+            const ImVec4 col = st==Status::Ready ? ImVec4(0.45f,0.85f,0.45f,1)
+                             : st==Status::NotImplemented ? ImVec4(0.95f,0.72f,0.25f,1)
+                                                          : ImVec4(0.75f,0.35f,0.35f,1);
+            ImGui::TextColored(col, "[%s]", vx.statusText(Feature::MeshShaders));
+            ImGui::BeginDisabled(st != Status::Ready);
+            if (ImGui::Checkbox("Use mesh shaders", &s.meshShaders)) changed = true;
+            ImGui::EndDisabled();
+        }
+
         ImGui::PopItemWidth();
         ImGui::Separator();
         ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextDisabled("GPU: max MSAA %ux, raytracing tier %u, compute %s",
+        ImGui::TextDisabled("GPU: MSAA %ux, RT tier %u, shader model %u, mesh-shader tier %u, DXC %s",
                             vx.deviceInfo().maxMsaaSamples, vx.deviceInfo().rayTracingTier,
-                            vx.deviceInfo().computeShaders ? "yes" : "no");
+                            vx.deviceInfo().shaderModel, vx.deviceInfo().meshShaderTier,
+                            vx.deviceInfo().dxcAvailable ? "yes" : "no");
         ImGui::TextDisabled("Scriptable from C# via aver_voxi_* (Aver.Scripting)");
         ImGui::PopTextWrapPos();
 

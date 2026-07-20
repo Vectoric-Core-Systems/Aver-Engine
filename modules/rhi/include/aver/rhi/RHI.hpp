@@ -61,6 +61,9 @@ struct DeviceCaps {
     bool computeShaders = false;
     bool typedUavLoads = false;      // needed for voxel radiance read-modify-write
     bool conservativeRaster = false; // needed for watertight voxelization
+    u32 shaderModel = 50;            // 51 = SM 5.1, 60 = SM 6.0, 65 = SM 6.5, ...
+    u32 meshShaderTier = 0;          // 0 = none, 1 = Tier 1 (D3D12 Ultimate)
+    bool dxcAvailable = false;       // DXIL compiler present (needed for SM 6.x)
 };
 
 class IDevice {

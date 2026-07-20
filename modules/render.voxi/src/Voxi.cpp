@@ -28,6 +28,7 @@ void Renderer::setSettings(const Settings& s) {
     if (status(Feature::GlobalIllumination) != Status::Ready) n.globalIllumination = Quality::Off;
     if (status(Feature::RayTracing)         != Status::Ready) n.rayTracing         = Quality::Off;
     if (status(Feature::PathTracing)        != Status::Ready) n.pathTracing        = Quality::Off;
+    if (status(Feature::MeshShaders)        != Status::Ready) n.meshShaders        = false;
 
     n.voxelResolution = std::clamp(n.voxelResolution, 32u, 512u);
     n.giIntensity     = std::clamp(n.giIntensity, 0.0f, 8.0f);
@@ -52,6 +53,11 @@ Status Renderer::status(Feature f) const {
         case Feature::PathTracing:
             if (device_.rayTracingTier == 0) return Status::Unsupported;
             return Status::NotImplemented;
+        case Feature::MeshShaders:
+            // Needs mesh-shader Tier 1 AND shader model 6.5, i.e. a DXIL compiler.
+            if (device_.meshShaderTier == 0 || device_.shaderModel < 65 || !device_.dxcAvailable)
+                return Status::Unsupported;
+            return Status::NotImplemented;   // capability present; the MS geometry path is next
         default: return Status::Unsupported;
     }
 }
@@ -64,6 +70,7 @@ const char* Renderer::statusText(Feature f) const {
             switch (f) {
                 case Feature::Msaa:               return "Device reports no MSAA";
                 case Feature::GlobalIllumination: return "Device has no compute support";
+                case Feature::MeshShaders:        return "Needs mesh-shader Tier 1 + SM 6.5 (D3D12 Ultimate)";
                 default:                          return "Device has no ray tracing support";
             }
         default: return "Unknown";
@@ -76,6 +83,7 @@ const char* Renderer::featureName(Feature f) {
         case Feature::GlobalIllumination: return "Global Illumination";
         case Feature::RayTracing:         return "Ray Tracing";
         case Feature::PathTracing:        return "Path Tracing";
+        case Feature::MeshShaders:        return "Mesh Shaders";
         default: return "?";
     }
 }
@@ -179,5 +187,13 @@ int32_t aver_voxi_set_gi_max_distance(float cm) {
 
 int32_t aver_voxi_ray_tracing_tier(void) { return static_cast<int32_t>(Renderer::get().deviceInfo().rayTracingTier); }
 int32_t aver_voxi_max_msaa(void)         { return static_cast<int32_t>(Renderer::get().deviceInfo().maxMsaaSamples); }
+int32_t aver_voxi_mesh_shader_tier(void) { return static_cast<int32_t>(Renderer::get().deviceInfo().meshShaderTier); }
+int32_t aver_voxi_shader_model(void)     { return static_cast<int32_t>(Renderer::get().deviceInfo().shaderModel); }
+int32_t aver_voxi_get_mesh_shaders(void) { return Renderer::get().settings().meshShaders ? 1 : 0; }
+int32_t aver_voxi_set_mesh_shaders(int32_t on) {
+    Settings s = Renderer::get().settings(); s.meshShaders = on != 0;
+    Renderer::get().setSettings(s);
+    return Renderer::get().settings().meshShaders == (on != 0) ? 1 : 0;
+}
 
 } // extern "C"

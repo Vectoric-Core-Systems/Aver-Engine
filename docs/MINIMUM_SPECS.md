@@ -35,6 +35,8 @@ The engine **runs** on the Minimum tier. Features the hardware cannot do are rep
 | Voxel GI (Voxi) | Compute + `RWTexture3D` stores | core FL 11_0 | — (runs everywhere) |
 | └ watertight voxelisation | Conservative raster tier ≥ 1 | `OPTIONS.ConservativeRasterizationTier` | Standard raster; thin geometry may miss voxels |
 | **Ray tracing** | **DXR 1.1 + Shader Model 6.5** | `OPTIONS5.RaytracingTier` | Reported `Unsupported`; setting refuses |
+| **Mesh shaders** | Mesh Shader Tier 1 + SM 6.5 | `OPTIONS7.MeshShaderTier` | Reported `Unsupported`; classic VS/GS path used |
+| SM 6.x shaders (DXIL) | Shader Model 6.0 + `dxcompiler.dll` | `FEATURE_SHADER_MODEL` | Falls back to FXC/SM 5.1 |
 | Path tracing | DXR 1.1 (same as above) | `OPTIONS5.RaytracingTier` | Reported `Unsupported` |
 
 ---
@@ -141,6 +143,23 @@ Concrete degradation path:
 | No D3D12 at all | Engine will not start (no D3D11/Vulkan backend yet) |
 
 ---
+
+## 5b. Shader compilation and redistributables
+
+Shaders compile at runtime through **DXC** (DXIL, shader model 6.x). DXC is required for mesh
+shaders and for DXR's `RayQuery` — FXC tops out at SM 5.1 and cannot express either.
+
+**`dxcompiler.dll` and `dxil.dll` must ship next to the executable.** They come from the Windows
+SDK, are *not* part of Windows, and `dxil.dll` is the signing library — without it drivers reject
+the compiled DXIL. The build copies both into `bin/` automatically.
+
+If they are missing at runtime the engine logs a warning and **falls back to FXC/SM 5.1**: the
+renderer still works, it just loses the SM6-only features. That fallback is deliberate so a
+packaging mistake degrades instead of bricking the product.
+
+Baseline is **SM 6.0**, which is broadly supported across D3D12 hardware with current drivers.
+Mesh shaders and RayQuery compile at **SM 6.5** and only when the device reports the capability —
+so moving to DXC did not raise the engine's hardware floor.
 
 ## 6. OS and runtime requirements
 

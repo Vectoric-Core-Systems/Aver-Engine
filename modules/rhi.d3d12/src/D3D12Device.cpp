@@ -9,6 +9,8 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
+#include <dxcapi.h>      // DXC: shader model 6.x (mesh shaders, DXR RayQuery)
+#include <string>
 #include <wrl/client.h>
 
 #include <cstring>
@@ -32,6 +34,79 @@ constexpr u32 kFrameCount = 2;
 constexpr u32 kDefaultSampleCount = 4; // MSAA default; runtime-adjustable via setSampleCount
 constexpr DXGI_FORMAT kBackbufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
+
+// ---------------------------------------------------------------- shader compilation
+// DXC (DXIL, shader model 6.x) is required for mesh shaders and for DXR's RayQuery; FXC tops out
+// at SM 5.1. dxcompiler.dll is NOT part of Windows, so it is redistributed next to the exe (see
+// this module's CMakeLists). If it is missing we fall back to FXC and lose only the SM6-only
+// features - the engine still runs, which is why the fallback exists at all.
+class ShaderCompiler {
+public:
+    void init() {
+        if (tried_) return;
+        tried_ = true;
+        dll_ = LoadLibraryW(L"dxcompiler.dll");
+        if (!dll_) { AVER_WARN("[RHI.D3D12] dxcompiler.dll not found - falling back to FXC (SM 5.1)"); return; }
+        auto create = reinterpret_cast<DxcCreateInstanceProc>(reinterpret_cast<void*>(GetProcAddress(dll_, "DxcCreateInstance")));
+        if (!create) { AVER_WARN("[RHI.D3D12] DxcCreateInstance missing - falling back to FXC"); return; }
+        if (FAILED(create(CLSID_DxcUtils, IID_PPV_ARGS(&utils_))) ||
+            FAILED(create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler_)))) {
+            utils_.Reset(); compiler_.Reset();
+            AVER_WARN("[RHI.D3D12] DXC init failed - falling back to FXC");
+            return;
+        }
+        AVER_INFO("[RHI.D3D12] shader compiler: DXC (shader model 6.x)");
+    }
+    bool usingDxc() const { return compiler_ != nullptr; }
+
+    // `target51` is the FXC target, e.g. "vs_5_1"; the SM6 equivalent is derived from it.
+    HRESULT compile(const char* src, const char* entry, const char* target51, ID3DBlob** out) {
+        init();
+        if (!usingDxc()) {
+            ComPtr<ID3DBlob> err;
+            const UINT flags = D3DCOMPILE_PACK_MATRIX_ROW_MAJOR | D3DCOMPILE_ENABLE_STRICTNESS;
+            HRESULT hr = D3DCompile(src, std::strlen(src), "aver.hlsl", nullptr, nullptr, entry, target51, flags, 0, out, &err);
+            if (FAILED(hr) && err) AVER_ERROR("[RHI.D3D12] {} ({}): {}", entry, target51, static_cast<const char*>(err->GetBufferPointer()));
+            return hr;
+        }
+        // "vs_5_1" -> "vs_6_0". Stages that need a higher model pass it in explicitly.
+        std::string t6(target51);
+        const size_t us = t6.rfind("_5_1");
+        if (us != std::string::npos) t6 = t6.substr(0, us) + "_6_0";
+        const std::wstring wEntry(entry, entry + std::strlen(entry));
+        const std::wstring wTarget(t6.begin(), t6.end());
+
+        DxcBuffer buf{src, std::strlen(src), DXC_CP_UTF8};
+        LPCWSTR args[] = {
+            L"-E", wEntry.c_str(),
+            L"-T", wTarget.c_str(),
+            L"-Zpr",           // pack matrices row-major: the engine's convention
+            L"-HV", L"2021",
+        };
+        ComPtr<IDxcResult> result;
+        HRESULT hr = compiler_->Compile(&buf, args, _countof(args), nullptr, IID_PPV_ARGS(&result));
+        if (SUCCEEDED(hr)) result->GetStatus(&hr);
+        if (FAILED(hr)) {
+            ComPtr<IDxcBlobUtf8> errs;
+            if (SUCCEEDED(result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errs), nullptr)) && errs && errs->GetStringLength())
+                AVER_ERROR("[RHI.D3D12] {} ({}): {}", entry, t6, errs->GetStringPointer());
+            return hr;
+        }
+        ComPtr<IDxcBlob> obj;
+        if (FAILED(result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&obj), nullptr)) || !obj) return E_FAIL;
+        // Repackage as ID3DBlob so every PSO call site stays unchanged.
+        if (FAILED(D3DCreateBlob(obj->GetBufferSize(), out))) return E_FAIL;
+        std::memcpy((*out)->GetBufferPointer(), obj->GetBufferPointer(), obj->GetBufferSize());
+        return S_OK;
+    }
+private:
+    bool tried_ = false;
+    HMODULE dll_ = nullptr;
+    ComPtr<IDxcUtils> utils_;
+    ComPtr<IDxcCompiler3> compiler_;
+};
+
+ShaderCompiler& shaderCompiler() { static ShaderCompiler c; return c; }
 
 bool hrOk(HRESULT hr, const char* what) {
     if (FAILED(hr)) { AVER_ERROR("[RHI.D3D12] {} failed (hr=0x{:08X})", what, static_cast<u32>(hr)); return false; }
@@ -658,13 +733,31 @@ void D3D12Device::queryCaps() {
         caps_.typedUavLoads = o.TypedUAVLoadAdditionalFormats != FALSE;
         caps_.conservativeRaster = o.ConservativeRasterizationTier != D3D12_CONSERVATIVE_RASTERIZATION_TIER_NOT_SUPPORTED;
     }
+    // Highest shader model the driver accepts. DXC emits DXIL, which needs SM 6.0+; mesh
+    // shaders need SM 6.5 and RayQuery needs SM 6.5, so this gates both.
+    for (D3D_SHADER_MODEL sm : {D3D_SHADER_MODEL_6_6, D3D_SHADER_MODEL_6_5, D3D_SHADER_MODEL_6_1, D3D_SHADER_MODEL_6_0}) {
+        D3D12_FEATURE_DATA_SHADER_MODEL q{sm};
+        if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &q, sizeof(q)))) {
+            caps_.shaderModel = 60 + (static_cast<u32>(q.HighestShaderModel) & 0x0F);
+            break;
+        }
+    }
+    if (caps_.shaderModel < 60) caps_.shaderModel = 51;
+    shaderCompiler().init();
+    caps_.dxcAvailable = shaderCompiler().usingDxc();
+
+    D3D12_FEATURE_DATA_D3D12_OPTIONS7 o7{};
+    if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &o7, sizeof(o7))))
+        caps_.meshShaderTier = (o7.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1) ? 1u : 0u;
+
     D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5{};
     if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof(o5)))) {
         if (o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1)      caps_.rayTracingTier = 11;
         else if (o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0) caps_.rayTracingTier = 10;
     }
-    AVER_INFO("[RHI.D3D12] caps: MSAA up to {}x, raytracing tier {}, typed-UAV-load {}, conservative-raster {}",
-              caps_.maxMsaaSamples, caps_.rayTracingTier, caps_.typedUavLoads, caps_.conservativeRaster);
+    AVER_INFO("[RHI.D3D12] caps: MSAA {}x, RT tier {}, SM {}, mesh-shader tier {}, DXC {}, cons-raster {}",
+              caps_.maxMsaaSamples, caps_.rayTracingTier, caps_.shaderModel,
+              caps_.meshShaderTier, caps_.dxcAvailable, caps_.conservativeRaster);
 }
 
 // Rebuild everything that bakes the sample count: the MSAA colour/depth targets and every PSO.
@@ -735,15 +828,11 @@ bool D3D12Device::createPipeline() {
     ComPtr<ID3DBlob> rsBlob, rsErr;
     if (!hrOk(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &rsBlob, &rsErr), "SerializeRootSignature")) return false;
     if (!hrOk(device_->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(&rootSig_)), "CreateRootSignature")) return false;
-
-    UINT compileFlags = D3DCOMPILE_PACK_MATRIX_ROW_MAJOR | D3DCOMPILE_ENABLE_STRICTNESS;
     ComPtr<ID3DBlob> vs, ps, err;
-    if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, "VSMain", "vs_5_1", compileFlags, 0, &vs, &err))) {
-        AVER_ERROR("[RHI.D3D12] VS compile: {}", err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+    if (FAILED(shaderCompiler().compile(kShaderHLSL, "VSMain", "vs_5_1", &vs))) {
         return false;
     }
-    if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, "PSMain", "ps_5_1", compileFlags, 0, &ps, &err))) {
-        AVER_ERROR("[RHI.D3D12] PS compile: {}", err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+    if (FAILED(shaderCompiler().compile(kShaderHLSL, "PSMain", "ps_5_1", &ps))) {
         return false;
     }
 
@@ -775,11 +864,9 @@ bool D3D12Device::createPipeline() {
 
     // Sky pipeline: fullscreen triangle, no input layout, no depth.
     ComPtr<ID3DBlob> vsky, psky;
-    if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, "VSky", "vs_5_1", compileFlags, 0, &vsky, &err))) {
-        AVER_ERROR("[RHI.D3D12] VSky compile: {}", err ? static_cast<const char*>(err->GetBufferPointer()) : "?"); return false;
+    if (FAILED(shaderCompiler().compile(kShaderHLSL, "VSky", "vs_5_1", &vsky))) { return false;
     }
-    if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, "PSky", "ps_5_1", compileFlags, 0, &psky, &err))) {
-        AVER_ERROR("[RHI.D3D12] PSky compile: {}", err ? static_cast<const char*>(err->GetBufferPointer()) : "?"); return false;
+    if (FAILED(shaderCompiler().compile(kShaderHLSL, "PSky", "ps_5_1", &psky))) { return false;
     }
     D3D12_GRAPHICS_PIPELINE_STATE_DESC sp{};
     sp.pRootSignature = rootSig_.Get();
@@ -806,11 +893,9 @@ bool D3D12Device::createPipeline() {
 
     // Line PSO (grid / gizmo): pos+colour, line list, depth-tested, no depth write.
     ComPtr<ID3DBlob> vln, pln;
-    if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, "VSLine", "vs_5_1", compileFlags, 0, &vln, &err))) {
-        AVER_ERROR("[RHI.D3D12] VSLine compile: {}", err ? static_cast<const char*>(err->GetBufferPointer()) : "?"); return false;
+    if (FAILED(shaderCompiler().compile(kShaderHLSL, "VSLine", "vs_5_1", &vln))) { return false;
     }
-    if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, "PSLine", "ps_5_1", compileFlags, 0, &pln, &err))) {
-        AVER_ERROR("[RHI.D3D12] PSLine compile: {}", err ? static_cast<const char*>(err->GetBufferPointer()) : "?"); return false;
+    if (FAILED(shaderCompiler().compile(kShaderHLSL, "PSLine", "ps_5_1", &pln))) { return false;
     }
     D3D12_INPUT_ELEMENT_DESC lineLayout[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -935,11 +1020,8 @@ bool D3D12Device::createShadowResources() {
     D3D12_CPU_DESCRIPTOR_HANDLE sh = giHeap_->GetCPUDescriptorHandleForHeapStart();
     sh.ptr += giSrvSize_; // slot 1 = t1
     device_->CreateShaderResourceView(shadowTex_.Get(), &sv, sh);
-
-    UINT compileFlags = D3DCOMPILE_PACK_MATRIX_ROW_MAJOR | D3DCOMPILE_ENABLE_STRICTNESS;
     ComPtr<ID3DBlob> vs, err;
-    if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, "VSShadow", "vs_5_1", compileFlags, 0, &vs, &err))) {
-        AVER_ERROR("[RHI.D3D12] VSShadow compile: {}", err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+    if (FAILED(shaderCompiler().compile(kShaderHLSL, "VSShadow", "vs_5_1", &vs))) {
         return false;
     }
     D3D12_INPUT_ELEMENT_DESC layout[] = {
@@ -1096,11 +1178,9 @@ bool D3D12Device::createVoxelVolume(u32 res) {
 }
 
 bool D3D12Device::createGiPipelines() {
-    UINT flags = D3DCOMPILE_PACK_MATRIX_ROW_MAJOR | D3DCOMPILE_ENABLE_STRICTNESS;
-    ComPtr<ID3DBlob> vs, gs, ps, err;
+    ComPtr<ID3DBlob> vs, gs, ps;
     auto compile = [&](const char* entry, const char* target, ComPtr<ID3DBlob>& out) {
-        if (FAILED(D3DCompile(kShaderHLSL, std::strlen(kShaderHLSL), "aver.hlsl", nullptr, nullptr, entry, target, flags, 0, &out, &err))) {
-            AVER_ERROR("[RHI.D3D12] {} compile: {}", entry, err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+        if (FAILED(shaderCompiler().compile(kShaderHLSL, entry, target, &out))) {
             return false;
         }
         return true;

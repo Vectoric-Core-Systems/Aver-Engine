@@ -9,6 +9,8 @@ public enum VoxiFeature
     GlobalIllumination = 1,
     RayTracing = 2,
     PathTracing = 3,
+    /// <summary>Mesh-shader geometry path (needs D3D12 Ultimate).</summary>
+    MeshShaders = 4,
 }
 
 /// <summary>Whether a feature can actually be used on this machine right now.</summary>
@@ -52,6 +54,10 @@ public static class Voxi
     [DllImport(Lib)] private static extern int aver_voxi_set_gi_max_distance(float cm);
     [DllImport(Lib)] private static extern int aver_voxi_ray_tracing_tier();
     [DllImport(Lib)] private static extern int aver_voxi_max_msaa();
+    [DllImport(Lib)] private static extern int aver_voxi_mesh_shader_tier();
+    [DllImport(Lib)] private static extern int aver_voxi_shader_model();
+    [DllImport(Lib)] private static extern int aver_voxi_get_mesh_shaders();
+    [DllImport(Lib)] private static extern int aver_voxi_set_mesh_shaders(int on);
 
     private static string Str(IntPtr p) => Marshal.PtrToStringAnsi(p) ?? "?";
 
@@ -132,4 +138,14 @@ public static class Voxi
     public static int RayTracingTier => aver_voxi_ray_tracing_tier();
     /// <summary>Highest MSAA sample count the GPU supports.</summary>
     public static int MaxMsaa => aver_voxi_max_msaa();
+    /// <summary>0 = none, 1 = Mesh Shader Tier 1 (D3D12 Ultimate).</summary>
+    public static int MeshShaderTier => aver_voxi_mesh_shader_tier();
+    /// <summary>Highest shader model, e.g. 60 = SM 6.0, 65 = SM 6.5.</summary>
+    public static int ShaderModel => aver_voxi_shader_model();
+    /// <summary>Submit geometry through mesh shaders instead of the classic VS/GS path.</summary>
+    public static bool MeshShaders
+    {
+        get => aver_voxi_get_mesh_shaders() != 0;
+        set => aver_voxi_set_mesh_shaders(value ? 1 : 0);
+    }
 }

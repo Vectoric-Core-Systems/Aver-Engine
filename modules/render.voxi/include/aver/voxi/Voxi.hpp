@@ -27,7 +27,7 @@ enum class Msaa : u32 { Off = 1, X2 = 2, X4 = 4, X8 = 8 };
 // Shared quality ladder for the trace-based features. Off means "don't run this pass".
 enum class Quality : u32 { Off = 0, Low = 1, Medium = 2, High = 3, Epic = 4 };
 
-enum class Feature : u32 { Msaa = 0, GlobalIllumination, RayTracing, PathTracing, Count };
+enum class Feature : u32 { Msaa = 0, GlobalIllumination, RayTracing, PathTracing, MeshShaders, Count };
 
 // Why a feature can or cannot be used right now. Reported honestly so the editor never
 // advertises something that will silently do nothing.
@@ -46,6 +46,9 @@ struct DeviceInfo {
     bool computeShaders = false;
     bool typedUavLoads = false;
     bool conservativeRaster = false;
+    u32 shaderModel = 50;      // 60 = SM 6.0, 65 = SM 6.5 (mesh shaders / RayQuery)
+    u32 meshShaderTier = 0;    // 0 = none, 1 = Tier 1 (D3D12 Ultimate)
+    bool dxcAvailable = false; // DXIL compiler present
 };
 
 struct Settings {
@@ -53,6 +56,8 @@ struct Settings {
     Quality globalIllumination = Quality::Off;
     Quality rayTracing         = Quality::Off;
     Quality pathTracing        = Quality::Off;
+    // Geometry submission path: mesh shaders when available, else the classic VS/GS path.
+    bool    meshShaders        = false;
 
     // Voxel-cone-traced GI tunables (used when globalIllumination != Off).
     u32 voxelResolution = 128;      // cubic voxel grid edge (64/128/256)

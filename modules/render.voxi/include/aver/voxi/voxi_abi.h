@@ -32,7 +32,8 @@ extern "C" {
 #define AVER_VOXI_FEATURE_GLOBAL_ILLUMINATION 1
 #define AVER_VOXI_FEATURE_RAY_TRACING         2
 #define AVER_VOXI_FEATURE_PATH_TRACING        3
-#define AVER_VOXI_FEATURE_COUNT               4
+#define AVER_VOXI_FEATURE_MESH_SHADERS        4
+#define AVER_VOXI_FEATURE_COUNT               5
 
 /* Status ids — must match aver::voxi::Status */
 #define AVER_VOXI_STATUS_READY           0
@@ -72,6 +73,12 @@ AVER_VOXI_ABI int32_t aver_voxi_set_gi_max_distance(float cm);
 /* ---- device capabilities (read-only mirror of what the GPU reports) ---- */
 AVER_VOXI_ABI int32_t aver_voxi_ray_tracing_tier(void);  /* 0 none, 10 DXR 1.0, 11 DXR 1.1 */
 AVER_VOXI_ABI int32_t aver_voxi_max_msaa(void);
+AVER_VOXI_ABI int32_t aver_voxi_mesh_shader_tier(void); /* 0 none, 1 Tier 1 */
+AVER_VOXI_ABI int32_t aver_voxi_shader_model(void);     /* 60 = SM 6.0, 65 = SM 6.5 */
+
+/* ---- geometry submission path ---- */
+AVER_VOXI_ABI int32_t aver_voxi_get_mesh_shaders(void);
+AVER_VOXI_ABI int32_t aver_voxi_set_mesh_shaders(int32_t on);
 
 #ifdef __cplusplus
 } /* extern "C" */
