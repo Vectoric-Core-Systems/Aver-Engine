@@ -38,9 +38,14 @@ public:
     // The engine replays the scene here. Voxi consumes it for the shadow map, the voxel volume and
     // the acceleration structure; it deliberately runs a frame behind so the app's submission
     // order does not have to change.
-    void beginScene();
+    void beginScene() override;
     void submit(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                 f32 metallic, f32 roughness);
+    // The hook the backend actually calls is submitDraw; submit() is the name this module uses.
+    void submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
+                    f32 metallic, f32 roughness) override {
+        submit(mesh, world, baseColor, metallic, roughness);
+    }
 
     // ---- rhi::IRenderFeature ----
     const char* name() const override { return "Voxi"; }
@@ -53,8 +58,11 @@ public:
     bool overridesScenePipeline() const override;
 
     // The pipeline the scene should use this frame. Valid only when overridesScenePipeline().
-    // `meshShaders` selects the mesh-shader geometry variant.
-    rhi::PipelineHandle scenePipeline(bool meshShaders) const;
+    // `wireframe` is passed because there is no mesh-shader wireframe variant, so it beats
+    // meshShaders. Returning 0 declines a combination and the backend uses its own pipeline.
+    // The signature must match the base exactly: a near-miss HIDES rather than overrides, and the
+    // backend would then call the base's `return 0` and silently fall back with no diagnostic.
+    rhi::PipelineHandle scenePipeline(bool meshShaders, bool wireframe) const override;
 
     // Status for the settings UI / C# bindings, derived from the device caps captured at init.
     bool giReady() const { return giReady_; }
@@ -70,6 +78,9 @@ private:
     void filterMips(rhi::IRenderContext& ctx);
 
     rhi::IDevice* dev_ = nullptr;
+    // Cached at init: a null factory is how a backend without GPU support declines the feature, so
+    // the check happens once rather than at every call site.
+    rhi::IResourceFactory* res_ = nullptr;
     rhi::DeviceCaps caps_{};
     Settings settings_{};
 
@@ -82,7 +93,15 @@ private:
     // distance N.
     rhi::TextureHandle  voxelTex_ = 0;
     rhi::PipelineHandle voxelPso_ = 0, voxelMsPso_ = 0, mipPso_ = 0, clearPso_ = 0, debugPso_ = 0;
+    // The lit/voxelise table: t0 volume (whole chain), t1 shadow, t2 TLAS, u0 volume mip 0.
     rhi::BindingSetHandle bindings_ = 0;
+    // Deliberately its OWN set, declaring the UAV alone: while the clear runs, every mip of the
+    // volume sits in UnorderedAccess, and an SRV descriptor over it would be a live view of a
+    // resource in the wrong state.
+    rhi::BindingSetHandle clearBindings_ = 0;
+    // One per mip filter step: set m reads mip m-1 and writes mip m. A single-mip SRV is what makes
+    // reading and writing the same resource in one dispatch legal.
+    std::vector<rhi::BindingSetHandle> mipBindings_;
 
     // Scene lit-pass variants Voxi owns (see overridesScenePipeline).
     rhi::PipelineHandle scenePso_ = 0, sceneMsPso_ = 0, sceneRtPso_ = 0, sceneMsRtPso_ = 0;

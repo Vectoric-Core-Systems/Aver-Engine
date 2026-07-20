@@ -1,0 +1,267 @@
+#pragma once
+
+// Voxi's own HLSL. Compiled as the TAIL of rhi::sharedShaderPrelude(): the cbuffer layouts, VSIn /
+// VSOut / SkyOut, the BRDF helpers, shadeSurface, VSMain, VSky and MSMain all live in the prelude
+// and must not be repeated here — duplicating them would make reordering one copy corrupt the other
+// with no diagnostic anywhere.
+//
+// Declaration order below is load-bearing: HLSL has no forward declarations, so every helper is
+// defined before the entry point that calls it.
+namespace aver::voxi {
+
+inline constexpr const char* kVoxiHLSL = R"(
+// Feature-owned frame constants, at the register RHIResources.hpp reserves for exactly this. Split
+// out of b0 so the engine block carries nothing a render feature introduced, and so a pass that
+// recomputes only these (the shadow matrix is not known until the shadow pass runs) re-uploads 112
+// bytes instead of the whole engine block.
+cbuffer VoxiFrame : register(b4) {
+    float4   gVoxelOrigin; // xyz = volume min corner, w = 1/volumeWorldSize
+    float4   gVoxelParams; // x = resolution, y = intensity, z = maxDistance, w = enabled|debug<<1
+    float4x4 gLightViewProj;
+    float4   gShadowParams; // x = 1/shadowMapSize, y = enabled
+};
+
+// ---- Voxi: voxel cone traced GI ----
+RWTexture3D<float4> gVoxelUAV : register(u0);
+Texture3D<float4>   gVoxelTex : register(t0);
+SamplerState        gVoxelSamp : register(s0);
+
+// Directional shadow map. Core feature-level 11_0 (no optional caps), so it works on every
+// DX12 GPU - which is why shadowed light injection uses this rather than ray-traced shadows.
+Texture2D<float>          gShadowTex  : register(t1);
+SamplerComparisonState    gShadowSamp : register(s1);
+
+#if AVER_RT
+// DXR 1.1 inline ray tracing. Traced from the pixel shader itself - no state objects, no shader
+// binding tables, no DispatchRays - so it drops into the existing raster pipeline.
+RaytracingAccelerationStructure gScene : register(t2);
+
+// Exact hard shadow: one occlusion ray toward the sun. ACCEPT_FIRST_HIT_AND_END_SEARCH makes it a
+// pure any-hit visibility query, which is much cheaper than finding the closest hit.
+float rtShadow(float3 wpos, float3 N, float3 L) {
+    RayDesc r;
+    r.Origin    = wpos + N * 0.02;   // offset along the normal so we do not hit ourselves
+    r.Direction = L;
+    r.TMin      = 0.001;
+    r.TMax      = 100000.0;
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, r);
+    q.Proceed();
+    return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
+}
+#endif
+
+// 3x3 PCF. Returns 1 = fully lit, 0 = fully shadowed.
+float shadowFactor(float3 wpos, float ndl) {
+    if (gShadowParams.y < 0.5) return 1.0;
+    float4 lp = mul(float4(wpos, 1.0), gLightViewProj);
+    float3 p = lp.xyz / lp.w;
+    float2 uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+    if (any(uv < 0.0) || any(uv > 1.0) || p.z > 1.0) return 1.0;  // outside the map = lit
+    float bias = max(0.0015 * (1.0 - ndl), 0.0003);               // depth bias, light-space units
+    float s = 0.0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x)
+        s += gShadowTex.SampleCmpLevelZero(gShadowSamp, uv + float2(x, y) * gShadowParams.x, p.z - bias);
+    return s / 9.0;
+}
+
+// Mip level being read by CSMip (b3: b0/b1 are taken by the graphics root signature).
+cbuffer MipCB : register(b3) { uint gSrcMip; uint3 _mipPad; };
+
+// world -> [0,1] volume coords
+float3 voxelUVW(float3 wp) { return (wp - gVoxelOrigin.xyz) * gVoxelOrigin.w; }
+bool insideVolume(float3 uvw) { return all(uvw >= 0.0) && all(uvw <= 1.0); }
+
+// ---- cone tracing (defined before its callers: HLSL needs definition before use) ----
+// March a cone through the volume, widening with distance and reading a coarser mip each step so
+// one sample covers the cone's footprint. Front-to-back alpha compositing.
+float4 traceCone(float3 originWS, float3 dir, float aperture) {
+    float voxelWorld = 1.0 / (gVoxelOrigin.w * gVoxelParams.x); // one voxel, world units
+    float dist = voxelWorld * 2.0;                              // start off-surface to avoid self-hit
+    float4 acc = 0;
+    [loop] for (int step = 0; step < 24; ++step) {
+        if (acc.a >= 0.95 || dist > gVoxelParams.z) break;
+        float diameter = max(voxelWorld, 2.0 * aperture * dist);
+        float mip = log2(diameter / voxelWorld);
+        float3 uvw = voxelUVW(originWS + dir * dist);
+        if (!insideVolume(uvw)) break;
+        float4 s = gVoxelTex.SampleLevel(gVoxelSamp, uvw, mip);
+        acc += (1.0 - acc.a) * s;
+        dist += diameter * 0.5;
+    }
+    return acc;
+}
+
+// Six cones over the hemisphere: one along the normal, five in a ring. Enough for smooth bounce
+// lighting without the cost of a full irradiance gather.
+float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
+    float3 up = abs(N.z) < 0.9 ? float3(0,0,1) : float3(1,0,0);
+    float3 T = normalize(cross(up, N)), B = cross(N, T);
+    const float aperture = 0.577;              // ~60 degree cone
+    float4 sum = traceCone(wpos, N, aperture);
+    float occ = sum.a;
+    [unroll] for (int k = 0; k < 5; ++k) {
+        float ang = 1.2566 * k;                // 2*pi/5
+        float3 d = normalize(N * 0.5 + (T * cos(ang) + B * sin(ang)) * 0.866);
+        float4 c = traceCone(wpos, d, aperture);
+        sum += c; occ += c.a;
+    }
+    sum /= 6.0; occ /= 6.0;
+    ao = saturate(1.0 - occ);
+    return sum.rgb * gVoxelParams.y;
+}
+
+// The Voxi scene variant: sun visibility from the shadow map (or a ray, under AVER_RT) plus the
+// cone-traced bounce. The radiance handed over is raw - shadeSurface owns the diffuse response.
+float4 PSMainVoxi(VSOut i) : SV_TARGET {
+    float3 N = normalize(i.nrmWS);
+    float3 L = normalize(gLightDir.xyz);
+    float ndl = saturate(dot(N, L));
+#if AVER_RT
+    const float sunVis = rtShadow(i.wpos, N, L);          // exact ray-traced occlusion
+#else
+    const float sunVis = shadowFactor(i.wpos, ndl);       // shadow map + PCF
+#endif
+    // Voxi indirect bounce: cone-traced diffuse GI + the ambient occlusion that falls out of it.
+    float ao = 1.0;
+    float3 ind = 0;
+    if (gVoxelParams.w > 0.5) ind = coneTracedIndirect(i.wpos, N, ao);
+    return shadeSurface(i, sunVis, ind, ao);
+}
+
+// Depth-only pass from the sun's point of view (VSIn comes from the prelude).
+float4 VSShadow(VSIn i) : SV_POSITION {
+    return mul(mul(float4(i.pos, 1.0), gWorld), gLightViewProj);
+}
+
+// ================= Voxi: voxelisation =================
+// The scene is rasterised once per frame with no render target; the pixel shader computes direct
+// lighting and writes radiance straight into the 3D volume. Merging "voxelise" and "inject light"
+// into one pass avoids a second full scene traversal.
+struct VoxOut { float4 pos : SV_POSITION; float3 wpos : TEXCOORD0; float3 nrm : NORMAL; };
+
+VoxOut VSVoxel(VSIn i) {
+    VoxOut o;
+    float4 wp = mul(float4(i.pos, 1.0), gWorld);
+    o.wpos = wp.xyz;
+    o.nrm  = mul(float4(i.nrm, 0.0), gWorld).xyz;
+    o.pos  = wp;                     // world space; the GS picks a projection axis
+    return o;
+}
+
+// Project each triangle along its dominant axis so it covers the most pixels (and therefore the
+// most voxels). The voxel index is recomputed from world position in the PS, so the choice of
+// axis does not affect correctness - only coverage.
+[maxvertexcount(3)]
+void GSVoxel(triangle VoxOut inp[3], inout TriangleStream<VoxOut> os) {
+    float3 n = abs(cross(inp[1].wpos - inp[0].wpos, inp[2].wpos - inp[0].wpos));
+    int axis = (n.x > n.y && n.x > n.z) ? 0 : ((n.y > n.z) ? 1 : 2);
+    [unroll] for (int k = 0; k < 3; ++k) {
+        VoxOut o = inp[k];
+        float3 v = voxelUVW(o.wpos);
+        float2 p = (axis == 0) ? v.yz : ((axis == 1) ? v.xz : v.xy);
+        o.pos = float4(p * 2.0 - 1.0, 0.5, 1.0);
+        os.Append(o);
+    }
+}
+
+#if AVER_MS
+// Voxelisation without a geometry shader. The dominant-axis choice GSVoxel made per primitive is
+// made here instead - the mesh shader is already per-primitive, so the GS stage disappears. That
+// matters because GS is emulated on every AMD GCN part and is markedly slower there.
+// MeshVtx / gVerts / gIndices / msTriCount / AVER_MS_TRIS all come from the PRELUDE, at the
+// registers the backend binds geometry to.
+[numthreads(AVER_MS_TRIS, 1, 1)]
+[outputtopology("triangle")]
+void MSVoxel(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
+             out vertices VoxOut verts[AVER_MS_TRIS * 3],
+             out indices uint3 tris[AVER_MS_TRIS]) {
+    uint count = msTriCount(gid);
+    SetMeshOutputCounts(count * 3, count);
+    if (gtid >= count) return;
+
+    uint3 idx = gIndices.Load3((gid * AVER_MS_TRIS + gtid) * 12);
+    float3 wp[3], nr[3];
+    [unroll] for (uint k = 0; k < 3; ++k) {
+        MeshVtx v = gVerts[idx[k]];
+        wp[k] = mul(float4(v.pos, 1.0), gWorld).xyz;
+        nr[k] = mul(float4(v.nrm, 0.0), gWorld).xyz;
+    }
+    float3 n = abs(cross(wp[1] - wp[0], wp[2] - wp[0]));
+    int axis = (n.x > n.y && n.x > n.z) ? 0 : ((n.y > n.z) ? 1 : 2);
+    uint o = gtid * 3;
+    [unroll] for (uint k = 0; k < 3; ++k) {
+        float3 v = voxelUVW(wp[k]);
+        float2 p = (axis == 0) ? v.yz : ((axis == 1) ? v.xz : v.xy);
+        VoxOut ov;
+        ov.wpos = wp[k];
+        ov.nrm  = nr[k];
+        ov.pos  = float4(p * 2.0 - 1.0, 0.5, 1.0);
+        verts[o + k] = ov;
+    }
+    tris[gtid] = uint3(o, o + 1, o + 2);
+}
+#endif // AVER_MS
+
+void PSVoxel(VoxOut i) {
+    float3 uvw = voxelUVW(i.wpos);
+    if (!insideVolume(uvw)) return;
+    float3 N = normalize(i.nrm);
+    float3 L = normalize(gLightDir.xyz);
+    float3 albedo = srgbToLin(gBaseColor.rgb);
+    // SHADOWED injection: a surface in shadow must not emit sun radiance into the volume, or the
+    // bounce lighting leaks through walls and shadowed areas glow.
+    float ndl = saturate(dot(N, L));
+    float3 radiance = albedo * (srgbToLin(gLightColor.rgb) * ndl * shadowFactor(i.wpos, ndl)
+                                + skyColor(N) * gAmbient.r);
+    int3 c = int3(uvw * gVoxelParams.x);
+    gVoxelUAV[c] = float4(radiance, 1.0);   // alpha = occupancy
+}
+
+// Clear mip 0 before injection. PSVoxel only writes the voxels its triangles cover, so without a
+// clear a voxel lit on one frame stays lit forever and moving geometry drags a radiance trail
+// behind it. Only mip 0 needs this - CSMip fully overwrites every coarser level.
+[numthreads(4,4,4)]
+void CSClear(uint3 id : SV_DispatchThreadID) { gVoxelUAV[id] = 0.0; }
+
+// ================= Voxi: mip filtering =================
+// Box-filter one mip into the next. Averaging radiance AND occupancy is what lets a wide cone step
+// read a single blurry sample instead of marching every voxel. The mip binding set puts a
+// SINGLE-MIP view of the source level at t0 and the destination level at u0, so gSrcMip indexes
+// within that view and the two levels can be read and written at once.
+[numthreads(4,4,4)]
+void CSMip(uint3 id : SV_DispatchThreadID) {
+    int3 s = int3(id) * 2;
+    float4 a = 0;
+    [unroll] for (int x=0;x<2;++x)
+    [unroll] for (int y=0;y<2;++y)
+    [unroll] for (int z=0;z<2;++z)
+        a += gVoxelTex.Load(int4(s + int3(x,y,z), gSrcMip));
+    gVoxelUAV[id] = a * 0.125;
+}
+
+// Debug: raymarch the volume straight to screen so voxelisation can be inspected on its own.
+// Shares the prelude's fullscreen-triangle vertex shader (VSky) and its SkyOut.
+float4 PSVoxelDebug(SkyOut i) : SV_TARGET {
+    float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
+    float3 ray = normalize(far.xyz / far.w - gCamPos.xyz);
+    float voxelWorld = 1.0 / (gVoxelOrigin.w * gVoxelParams.x);
+    float4 acc = 0;
+    float t = 0;
+    [loop] for (int s = 0; s < 256; ++s) {
+        if (acc.a >= 0.98) break;
+        float3 uvw = voxelUVW(gCamPos.xyz + ray * t);
+        t += voxelWorld;
+        if (t > gVoxelParams.z * 2.0) break;
+        if (!insideVolume(uvw)) continue;
+        float4 v = gVoxelTex.SampleLevel(gVoxelSamp, uvw, 0);
+        acc += (1.0 - acc.a) * v;
+    }
+    float3 bg = skyColor(ray);
+    float3 col = acc.rgb + bg * (1.0 - acc.a);
+    return float4(toGamma(acesTonemap(col)), 1.0);
+}
+)";
+
+} // namespace aver::voxi

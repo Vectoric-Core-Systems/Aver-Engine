@@ -1,7 +1,8 @@
 add_executable(Sandbox src/SandboxApp.cpp Sandbox.rc)
 target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
 if(TARGET Aver.Render.Voxi)
-  target_link_libraries(Sandbox PRIVATE Aver.Render.Voxi)  # brings AVER_MODULE_VOXI=1
+  # Settings DLL (brings AVER_MODULE_VOXI=1) + the static render feature that drives the RHI.
+  target_link_libraries(Sandbox PRIVATE Aver.Render.Voxi Aver.Render.Voxi.Renderer)
 endif()
 target_include_directories(Sandbox PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
 set_target_properties(Sandbox PROPERTIES

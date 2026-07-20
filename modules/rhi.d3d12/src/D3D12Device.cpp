@@ -886,6 +886,11 @@ struct RhiShader {
     ShaderStage stage = ShaderStage::Vertex;
 };
 
+// The slotParam tables below spell out one -1 per slot. Growing the slot count without widening
+// them would leave the new entry at 0, which is a VALID root parameter index — so the mistake would
+// bind to the wrong parameter rather than being caught.
+static_assert(kMaxConstantSlots == 5, "slotParam's -1 initialisers are written out per slot");
+
 // Where each declared binding landed in the root signature. -1 means the layout never declared it,
 // so binding it is a module bug worth reporting rather than a silent no-op.
 struct RhiPipeline {
@@ -894,8 +899,8 @@ struct RhiPipeline {
     bool compute = false;
     bool mesh = false;
     i32  srvParam = -1, uavParam = -1;
-    i32  slotParam[4] = {-1, -1, -1, -1};
-    u32  slotDwords[4] = {};                  // 0 = the slot is a root CBV rather than root constants
+    i32  slotParam[kMaxConstantSlots] = {-1, -1, -1, -1, -1};
+    u32  slotDwords[kMaxConstantSlots] = {};  // 0 = the slot is a root CBV rather than root constants
     i32  msVertexParam = -1, msIndexParam = -1, msCountParam = -1;
 };
 
@@ -945,7 +950,7 @@ struct RootSigEntry {
     bool mesh = false;
     ComPtr<ID3D12RootSignature> sig;
     i32 srvParam = -1, uavParam = -1;
-    i32 slotParam[4] = {-1, -1, -1, -1};
+    i32 slotParam[kMaxConstantSlots] = {-1, -1, -1, -1, -1};
     i32 msVertexParam = -1, msIndexParam = -1, msCountParam = -1;
 };
 
@@ -962,7 +967,7 @@ bool sameSampler(const SamplerDesc& a, const SamplerDesc& b) {
 }
 bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
     if (a.srvCount != b.srvCount || a.uavCount != b.uavCount || a.samplerCount != b.samplerCount) return false;
-    for (u32 i = 0; i < 4; ++i) if (a.constantDwords[i] != b.constantDwords[i]) return false;
+    for (u32 i = 0; i < kMaxConstantSlots; ++i) if (a.constantDwords[i] != b.constantDwords[i]) return false;
     for (u32 i = 0; i < a.samplerCount && i < 4; ++i) if (!sameSampler(a.samplers[i], b.samplers[i])) return false;
     return true;
 }
@@ -2969,7 +2974,7 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
     e.mesh = mesh;
 
     D3D12_DESCRIPTOR_RANGE ranges[2] = {};
-    D3D12_ROOT_PARAMETER params[9] = {};
+    D3D12_ROOT_PARAMETER params[2 + kMaxConstantSlots + 3] = {};
     u32 n = 0;
     if (layout.srvCount) {
         ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -2994,7 +2999,7 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
     // written with setConstants; zero makes it a root CBV written with setConstantBuffer, which is
     // what the upload ring binds into. Both forms are declared up front, so a slot changing hands
     // never rebuilds a PSO — and a slot is never both, which is what the context enforces.
-    for (u32 s = 0; s < 4; ++s) {
+    for (u32 s = 0; s < kMaxConstantSlots; ++s) {
         if (layout.constantDwords[s]) {
             params[n].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
             params[n].Constants.ShaderRegister = s;
@@ -3268,7 +3273,7 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
     p.msVertexParam = rs->msVertexParam;
     p.msIndexParam = rs->msIndexParam;
     p.msCountParam = rs->msCountParam;
-    for (u32 i = 0; i < 4; ++i) { p.slotParam[i] = rs->slotParam[i]; p.slotDwords[i] = d.layout.constantDwords[i]; }
+    for (u32 i = 0; i < kMaxConstantSlots; ++i) { p.slotParam[i] = rs->slotParam[i]; p.slotDwords[i] = d.layout.constantDwords[i]; }
 
     D3D12_RASTERIZER_DESC raster{};
     raster.FillMode = (d.fill == FillMode::Wireframe) ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
@@ -3356,7 +3361,7 @@ PipelineHandle D3D12ResourceFactory::createComputePipeline(const ComputePipeline
     p.rootSig = rs->sig.Get();
     p.srvParam = rs->srvParam;
     p.uavParam = rs->uavParam;
-    for (u32 i = 0; i < 4; ++i) { p.slotParam[i] = rs->slotParam[i]; p.slotDwords[i] = d.layout.constantDwords[i]; }
+    for (u32 i = 0; i < kMaxConstantSlots; ++i) { p.slotParam[i] = rs->slotParam[i]; p.slotDwords[i] = d.layout.constantDwords[i]; }
 
     D3D12_COMPUTE_PIPELINE_STATE_DESC cp{};
     cp.pRootSignature = rs->sig.Get();
@@ -3749,7 +3754,7 @@ void D3D12RenderContext::setBindingSet(BindingSetHandle set) {
 }
 
 void D3D12RenderContext::setConstants(u32 slot, const void* data, u32 dwords) {
-    if (!pipe_ || slot >= 4 || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] setConstants without a pipeline"); return; }
+    if (!pipe_ || slot >= kMaxConstantSlots || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] setConstants without a pipeline"); return; }
     const i32 param = pipe_->slotParam[slot];
     const u32 declared = pipe_->slotDwords[slot];
     if (param < 0 || declared == 0) {
@@ -3768,7 +3773,7 @@ void D3D12RenderContext::setConstants(u32 slot, const void* data, u32 dwords) {
 }
 
 void D3D12RenderContext::setConstantBuffer(u32 slot, const void* data, u32 bytes) {
-    if (!pipe_ || slot >= 4 || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] setConstantBuffer without a pipeline"); return; }
+    if (!pipe_ || slot >= kMaxConstantSlots || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] setConstantBuffer without a pipeline"); return; }
     const i32 param = pipe_->slotParam[slot];
     if (param < 0 || pipe_->slotDwords[slot] != 0) {
         AVER_ERROR("[RHI.D3D12] setConstantBuffer: slot {} declares {} root constants, not a CBV — use setConstants",

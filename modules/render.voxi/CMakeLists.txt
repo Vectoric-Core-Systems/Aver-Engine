@@ -18,3 +18,17 @@ target_compile_definitions(Aver.Render.Voxi PUBLIC AVER_MODULE_VOXI=1)
 set_target_properties(Aver.Render.Voxi PROPERTIES
   FOLDER "modules"
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)   # DLL next to the exe
+
+# Aver.Render.Voxi.Renderer — the GPU half of the feature, deliberately a SECOND target.
+# Static, because it is linked straight into the host executable, and separate because it needs the
+# RHI: giving the DLL above that dependency would put render-hardware types on the P/Invoke boundary.
+add_library(Aver.Render.Voxi.Renderer STATIC
+  src/VoxiRenderer.cpp)
+
+target_include_directories(Aver.Render.Voxi.Renderer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(Aver.Render.Voxi.Renderer PUBLIC cxx_std_20)
+# Aver.RHI is the GENERIC interface. Never Aver.RHI.D3D12: no backend type may cross this boundary,
+# and a link line is the only place that rule can actually be enforced.
+target_link_libraries(Aver.Render.Voxi.Renderer PUBLIC Aver.Core Aver.RHI Aver.Render.Voxi)
+
+set_target_properties(Aver.Render.Voxi.Renderer PROPERTIES FOLDER "modules")

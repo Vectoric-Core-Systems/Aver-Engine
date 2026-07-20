@@ -6,7 +6,8 @@
 #include "aver/formats/OcBeam.hpp"
 
 #if AVER_MODULE_VOXI
-#include "aver/voxi/Voxi.hpp"   // optional render-feature module (AA / GI / RT / PT settings)
+#include "aver/voxi/Voxi.hpp"          // optional render-feature module (AA / GI / RT / PT settings)
+#include "aver/voxi/VoxiRenderer.hpp"  // ...and its GPU side, registered as an rhi::IRenderFeature
 #endif
 
 #if AVER_WITH_IMGUI
@@ -254,6 +255,14 @@ public:
             if (msOverride_) s.meshShaders = true;
             voxi::Renderer::get().setSettings(s);
             AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", c.maxMsaaSamples, c.rayTracingTier, c.shaderModel, c.meshShaderTier);
+
+            // The render feature owns Voxi's GPU resources. Registration is non-owning, so the
+            // member must outlive the device — it is torn down in onShutdown below.
+            voxiRenderer_.setSettings(s);
+            if (voxiRenderer_.init(*e.device())) {
+                e.device()->addRenderFeature(&voxiRenderer_);
+                voxiAttached_ = true;
+            }
         }
 #endif
         tool_ = initialTool_;
@@ -365,7 +374,16 @@ public:
         captureCheck(e);
     }
 
-    void onShutdown(Engine&) override { AVER_INFO("[Sandbox] shutdown"); }
+    void onShutdown(Engine& e) override {
+#if AVER_MODULE_VOXI
+        // Deregister before releasing: the device holds a bare pointer to the feature.
+        if (voxiAttached_) { e.device()->removeRenderFeature(&voxiRenderer_); voxiAttached_ = false; }
+        voxiRenderer_.shutdown();
+#else
+        (void)e;
+#endif
+        AVER_INFO("[Sandbox] shutdown");
+    }
     void setFocusVoxi(bool b) { focusVoxi_ = b ? 4 : 0; } // --project-settings screenshot aid
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
     void setGiOverride(int q, bool dbg) { giOverride_ = q; giDebugView_ = dbg; } // --gi / --gi-debug
@@ -1109,6 +1127,11 @@ private:
     bool worldSpace_=true;   // gizmo coordinate space toggle (display only for now)
     // Voxi GI volume placement: a cube around the default scene (floor is +/-40, cube at origin).
     bool giDebugView_=false; Vec3 giCenter_{0,0,8}; f32 giExtent_=44.0f;
+#if AVER_MODULE_VOXI
+    // Voxi's GPU side. Inert for now: it creates its resources and leaves them idle.
+    voxi::VoxiRenderer voxiRenderer_;
+    bool voxiAttached_=false;
+#endif
     rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;
     Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };

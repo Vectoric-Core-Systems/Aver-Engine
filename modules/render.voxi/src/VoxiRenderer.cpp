@@ -1,0 +1,450 @@
+#include "aver/voxi/VoxiRenderer.hpp"
+#include "aver/core/Log.hpp"
+
+#include "VoxiShaders.hpp"
+
+#include <cfloat>
+#include <cstring>
+
+// Voxi's GPU resources, expressed only in terms of the generic RHI. Nothing here names a backend
+// type; everything is a handle from IResourceFactory.
+//
+// This step CREATES the resources and stops. prePass() returns immediately and the feature does not
+// override the scene pipeline, so the backend keeps producing exactly the image it produced before.
+// The evidence that the interface is sufficient is the "[Voxi] init:" line: every object Voxi needs
+// has a non-zero handle, or the first one that does not is named.
+namespace aver::voxi {
+
+namespace {
+
+// Core feature-level 11_0 sizing, so shadowed light injection works on every DX12 GPU rather than
+// only where ray tracing does.
+constexpr u32 kShadowSize = 2048;
+
+// s0 samples the radiance volume, s1 is the shadow map's comparison sampler. Both are static
+// samplers on the pipeline (the Tier-1-friendly choice), so every pipeline that declares the
+// three-SRV table has to carry them.
+void giSamplers(rhi::PipelineLayout& l) {
+    l.samplers[0].filter  = rhi::Filter::Linear;
+    l.samplers[0].address = rhi::AddressMode::Clamp;
+    // Left unclamped on purpose: traceCone reads a fractional mip that grows with cone distance,
+    // and any clamp here makes the tail of the chain unreachable — which reads as "GI fades out
+    // too early", never as an error.
+    l.samplers[0].maxLod  = FLT_MAX;
+    l.samplers[1].filter  = rhi::Filter::ComparisonLinear;
+    l.samplers[1].address = rhi::AddressMode::Clamp;
+    l.samplers[1].compare = rhi::CompareOp::LessEqual;
+    l.samplerCount = 2;
+}
+
+// The layout every Voxi raster pipeline declares. Identical shapes share one cached root signature,
+// which is what lets the binding set stay live while the backend switches between them.
+rhi::PipelineLayout giLayout() {
+    rhi::PipelineLayout l{};
+    l.srvCount = 3;              // t0 volume, t1 shadow map, t2 acceleration structure
+    l.uavCount = 1;              // u0 volume mip 0
+    l.constantDwords[1] = 24;    // b1: world (16) + base colour (4) + material (4)
+    giSamplers(l);
+    return l;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------- lifecycle
+
+bool VoxiRenderer::init(rhi::IDevice& device) {
+    dev_ = &device;
+    // A backend with no GPU support returns nullptr here. Declining is the contract: the engine
+    // then runs without the feature instead of failing outright.
+    res_ = device.resources();
+    if (!res_) {
+        AVER_WARN("[Voxi] init declined: backend exposes no resource factory (no GPU support)");
+        return false;
+    }
+    caps_ = device.caps();
+
+    createShadowResources();
+    createVoxelVolume(settings_.voxelResolution);
+    createPipelines();
+
+    // The mesh-shader and ray-tracing variants are optional by design, so they are reported but
+    // never required. Everything else is a hard requirement for the passes that follow.
+    const char* missing = nullptr;
+    if (!shadowTex_)             missing = "shadow texture";
+    else if (!voxelTex_)         missing = "voxel volume";
+    else if (!bindings_)         missing = "main binding set";
+    else if (!clearBindings_)    missing = "clear binding set";
+    else if (mipBindings_.size() + 1 != voxelMips_) missing = "mip binding sets (count)";
+    else if (!shadowPso_)        missing = "shadow pipeline";
+    else if (!voxelPso_)         missing = "voxelise pipeline";
+    else if (!clearPso_)         missing = "volume clear pipeline";
+    else if (!mipPso_)           missing = "mip filter pipeline";
+    else if (!debugPso_)         missing = "voxel debug pipeline";
+    else if (!scenePso_)         missing = "scene pipeline";
+    for (usize m = 0; !missing && m < mipBindings_.size(); ++m)
+        if (!mipBindings_[m]) missing = "mip binding set";
+
+    // One readable line naming every handle, so a primitive the interface cannot express shows up
+    // as a zero here rather than as a black screen three steps from now.
+    AVER_INFO("[Voxi] init: shadow tex={} volume={} ({}^3, {} mips) bindings={}/{}/+{} "
+              "pipelines shadow={} voxel={} voxelMs={} clear={} mip={} debug={} scene={}/{}/{}/{}",
+              shadowTex_, voxelTex_, voxelResBuilt_, voxelMips_,
+              bindings_, clearBindings_, static_cast<u32>(mipBindings_.size()),
+              shadowPso_, voxelPso_, voxelMsPso_, clearPso_, mipPso_, debugPso_,
+              scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_);
+
+    if (missing) {
+        AVER_ERROR("[Voxi] init FAILED: {} has a zero handle", missing);
+        shutdown();
+        return false;
+    }
+
+    giReady_    = true;
+    rtSupported_ = sceneRtPso_ != 0;
+    AVER_INFO("[Voxi] ready: conservative raster {}, mesh-shader variants {}, ray-tracing variants {}",
+              caps_.conservativeRaster ? "on" : "off",
+              (voxelMsPso_ && sceneMsPso_) ? "built" : "absent",
+              rtSupported_ ? "built" : "absent");
+    return true;
+}
+
+void VoxiRenderer::shutdown() {
+    if (!res_) { dev_ = nullptr; return; }
+    // Binding sets point at the textures, so they go first; destruction is deferred behind the
+    // GPU fence by contract, which is why no explicit wait is needed here.
+    for (rhi::BindingSetHandle s : mipBindings_) if (s) res_->destroyBindingSet(s);
+    mipBindings_.clear();
+    if (clearBindings_) res_->destroyBindingSet(clearBindings_);
+    if (bindings_)      res_->destroyBindingSet(bindings_);
+    clearBindings_ = bindings_ = 0;
+
+    const rhi::PipelineHandle psos[] = {shadowPso_, voxelPso_, voxelMsPso_, mipPso_, clearPso_,
+                                        debugPso_, scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_};
+    for (rhi::PipelineHandle p : psos) if (p) res_->destroyPipeline(p);
+    shadowPso_ = voxelPso_ = voxelMsPso_ = mipPso_ = clearPso_ = debugPso_ = 0;
+    scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
+
+    if (voxelTex_)  res_->destroyTexture(voxelTex_);
+    if (shadowTex_) res_->destroyTexture(shadowTex_);
+    voxelTex_ = shadowTex_ = 0;
+
+    voxelMips_ = voxelResBuilt_ = 0;
+    giReady_ = rtSupported_ = rtActive_ = false;
+    draws_.clear();
+    drawsPrev_.clear();
+    res_ = nullptr;
+    dev_ = nullptr;
+}
+
+// ---------------------------------------------------------------- configuration
+
+void VoxiRenderer::setSettings(const Settings& s) { settings_ = s; }
+
+void VoxiRenderer::setVolume(const f32 center[3], f32 extent) {
+    center_[0] = center[0]; center_[1] = center[1]; center_[2] = center[2];
+    extent_ = extent;
+}
+
+void VoxiRenderer::setSun(const f32 dirToLight[3], const f32 color[3], f32 ambient) {
+    sunDir_[0] = dirToLight[0]; sunDir_[1] = dirToLight[1]; sunDir_[2] = dirToLight[2];
+    sunColor_[0] = color[0]; sunColor_[1] = color[1]; sunColor_[2] = color[2];
+    ambient_ = ambient;
+}
+
+void VoxiRenderer::setDebugView(bool on) { debugView_ = on; }
+
+// ---------------------------------------------------------------- scene submission
+
+// Voxi runs a frame behind: the passes replay the PREVIOUS frame's draw list, so the app does not
+// have to submit geometry before the feature's own passes run.
+void VoxiRenderer::beginScene() {
+    drawsPrev_.swap(draws_);
+    draws_.clear();
+}
+
+void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
+                          f32 metallic, f32 roughness) {
+    if (mesh == 0 || draws_.size() >= 4096) return;
+    Draw d;
+    d.mesh = mesh;
+    std::memcpy(d.world, world, 16 * sizeof(f32));
+    std::memcpy(d.color, baseColor, 4 * sizeof(f32));
+    d.metallic = metallic;
+    d.roughness = roughness;
+    draws_.push_back(d);
+}
+
+// ---------------------------------------------------------------- feature hooks
+//
+// Deliberately inert at this step: the resources above exist and are idle, and the backend keeps
+// doing all the real work, so the rendered image is byte-for-byte what it was before.
+
+void VoxiRenderer::prePass(rhi::IRenderContext& ctx) { (void)ctx; }
+
+bool VoxiRenderer::overridesScenePipeline() const { return false; }
+
+rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool wireframe) const {
+    // Wireframe has no mesh-shader variant and Voxi builds no wireframe pipeline at all, so decline
+    // and let the backend draw it: a wireframe view wants geometry, not shading.
+    if (wireframe) return 0;
+    // MS + RayQuery falls back to the IA RayQuery pipeline when that variant failed to build, which
+    // is explicitly non-fatal.
+    if (rtActive_) return meshShaders && sceneMsRtPso_ ? sceneMsRtPso_ : sceneRtPso_;
+    return meshShaders && sceneMsPso_ ? sceneMsPso_ : scenePso_;
+}
+
+// ---------------------------------------------------------------- resources
+
+bool VoxiRenderer::createShadowResources() {
+    rhi::TextureDesc d;
+    d.dim    = rhi::TextureDim::Tex2D;
+    d.width  = kShadowSize;
+    d.height = kShadowSize;
+    // Typeless so the DSV can see D32Float while the SRV sees R32Float — one resource, two views.
+    d.format = rhi::Format::R32Typeless;
+    d.bind   = rhi::ResourceBind::ShaderResource | rhi::ResourceBind::DepthStencil;
+    // Created readable, which is what makes frame 0's opening ShaderResource -> DepthWrite barrier
+    // honest AND leaves a legally readable SRV on any frame whose shadow pass early-outs.
+    d.initialState  = rhi::ResourceState::ShaderResource;
+    // Without a matching clear value the target loses fast clear and warns every frame.
+    d.hasClearValue = true;
+    d.clearDepth    = 1.0f;
+    d.debugName     = "Voxi shadow map";
+    shadowTex_ = res_->createTexture(d);
+    if (!shadowTex_) AVER_ERROR("[Voxi] shadow map {}^2 could not be created", kShadowSize);
+    return shadowTex_ != 0;
+}
+
+bool VoxiRenderer::createVoxelVolume(u32 resolution) {
+    rhi::TextureDesc d;
+    d.dim    = rhi::TextureDim::Tex3D;
+    d.width  = resolution;
+    d.height = resolution;
+    d.depth  = resolution;
+    d.mips   = 0;                       // full chain: mip N is the cone footprint at distance N
+    d.format = rhi::Format::RGBA16F;
+    d.bind   = rhi::ResourceBind::ShaderResource | rhi::ResourceBind::UnorderedAccess;
+    d.initialState = rhi::ResourceState::ShaderResource;   // where the chain rests between frames
+    d.debugName    = "Voxi radiance volume";
+    voxelTex_ = res_->createTexture(d);
+    if (!voxelTex_) { AVER_ERROR("[Voxi] radiance volume {}^3 could not be created", resolution); return false; }
+
+    // The RESOLVED mip count, never a recomputed log2: it drives the descriptor loop, the
+    // per-subresource barrier sequence and the dispatch loop, and an off-by-one there makes the
+    // closing whole-resource transition illegal.
+    rhi::TextureDesc got{};
+    if (!res_->textureInfo(voxelTex_, got)) { AVER_ERROR("[Voxi] textureInfo failed for the radiance volume"); return false; }
+    voxelMips_     = got.mips;
+    voxelResBuilt_ = resolution;
+
+    // Main table: everything the lit pass, the voxelisation pass and the shadow pass read. Each
+    // slot declares its KIND because Tier 1 hardware null-fills by dimension, and a null descriptor
+    // whose dimension disagrees with the shader is undefined behaviour on hardware nobody here owns.
+    rhi::BindingSetDesc bd;
+    bd.srvCount = 3;
+    bd.uavCount = 1;
+    bd.srvKinds[0] = rhi::SlotKind::Texture3D;              // t0 volume, whole chain
+    bd.srvKinds[1] = rhi::SlotKind::Texture2D;              // t1 shadow map
+    bd.srvKinds[2] = rhi::SlotKind::AccelerationStructure;  // t2 TLAS, filled once one exists
+    bd.uavKinds[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
+    bindings_ = res_->createBindingSet(bd);
+    if (!bindings_) { AVER_ERROR("[Voxi] main binding set could not be created"); return false; }
+    res_->setSrv(bindings_, 0, voxelTex_, rhi::kAllMips);
+    if (shadowTex_) res_->setSrv(bindings_, 1, shadowTex_);
+    res_->setUav(bindings_, 0, voxelTex_, 0);
+
+    // The clear gets its own UAV-only set and its own pipeline layout. While it runs, every mip of
+    // the volume is in UnorderedAccess, so no SRV descriptor over the volume may be live.
+    rhi::BindingSetDesc cd;
+    cd.uavCount = 1;
+    cd.uavKinds[0] = rhi::SlotKind::Texture3D;
+    clearBindings_ = res_->createBindingSet(cd);
+    if (!clearBindings_) { AVER_ERROR("[Voxi] clear binding set could not be created"); return false; }
+    res_->setUav(clearBindings_, 0, voxelTex_, 0);
+
+    // One set per filter step. A SINGLE-MIP source view is what makes reading level m-1 while
+    // writing level m legal: a whole-chain SRV would demand every level be readable at once.
+    mipBindings_.reserve(voxelMips_ ? voxelMips_ - 1 : 0);
+    for (u32 m = 1; m < voxelMips_; ++m) {
+        rhi::BindingSetDesc md;
+        md.srvCount = 1;
+        md.uavCount = 1;
+        md.srvKinds[0] = rhi::SlotKind::Texture3D;
+        md.uavKinds[0] = rhi::SlotKind::Texture3D;
+        const rhi::BindingSetHandle s = res_->createBindingSet(md);
+        if (!s) { AVER_ERROR("[Voxi] mip binding set {} could not be created", m); return false; }
+        res_->setSrv(s, 0, voxelTex_, m - 1);
+        res_->setUav(s, 0, voxelTex_, m);
+        mipBindings_.push_back(s);
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- pipelines
+
+bool VoxiRenderer::createPipelines() {
+    // Optional geometry / tracing paths, gated exactly as the backend gates its own: mesh shaders
+    // and RayQuery share the same D3D12 Ultimate floor.
+    const bool msOk = caps_.meshShaderTier > 0 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
+    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
+
+    // Shader blobs are CPU-side only, consumed at pipeline creation; released together at the end.
+    std::vector<rhi::ShaderHandle> owned;
+    auto compile = [&](const char* entry, rhi::ShaderStage stage, u32 sm, const char* defines) {
+        rhi::ShaderDesc sd;
+        sd.source  = kVoxiHLSL;
+        // ONE owner for the shared cbuffer layouts, vertex structures and shading. Copying them
+        // here would create a cross-module ABI with no compiler behind it.
+        sd.prelude = rhi::sharedShaderPrelude();
+        sd.entry   = entry;
+        sd.stage   = stage;
+        sd.minShaderModel = sm;
+        sd.defines = defines;
+        const rhi::ShaderHandle h = res_->createShader(sd);
+        if (h) owned.push_back(h);
+        return h;
+    };
+
+    const rhi::PipelineLayout gi = giLayout();
+
+    // --- 1. shadow map: depth only, from the sun ---
+    if (const rhi::ShaderHandle vs = compile("VSShadow", rhi::ShaderStage::Vertex, 60, nullptr)) {
+        rhi::GraphicsPipelineDesc p;
+        p.vs = vs;                                   // no pixel shader: depth is the only output
+        p.layout = gi;
+        p.cull = rhi::CullMode::None;
+        p.depth = {true, true, rhi::CompareOp::Less};
+        p.renderTargetCount = 0;
+        p.depthFormat = rhi::Format::D32Float;
+        p.sampleCount = 1;                           // the shadow map is never multisampled
+        // Constant bias is meaningless against a float depth buffer, so the slope-scaled term
+        // carries the whole job of separating a surface from its own shadow.
+        p.slopeScaledDepthBias = 1.5f;
+        shadowPso_ = res_->createGraphicsPipeline(p);
+    }
+    if (!shadowPso_) AVER_ERROR("[Voxi] shadow pipeline unavailable");
+
+    // --- 2/3. voxelisation + light injection: rasterise with NO render target ---
+    const rhi::ShaderHandle psVoxel = compile("PSVoxel", rhi::ShaderStage::Pixel, 60, nullptr);
+    rhi::GraphicsPipelineDesc vox;
+    vox.layout = gi;
+    vox.cull = rhi::CullMode::None;
+    vox.depthClip = false;                           // a triangle outside the slab still voxelises
+    // Widens rasterisation so thin geometry still covers a voxel. Silently dropped where the
+    // hardware cannot do it, so the cap is checked rather than assumed.
+    vox.conservativeRaster = caps_.conservativeRaster;
+    vox.renderTargetCount = 0;                       // the pixel shader's only output is the UAV
+    vox.depthFormat = rhi::Format::Unknown;
+    vox.sampleCount = 1;
+
+    const rhi::ShaderHandle vsVoxel = compile("VSVoxel", rhi::ShaderStage::Vertex, 60, nullptr);
+    const rhi::ShaderHandle gsVoxel = compile("GSVoxel", rhi::ShaderStage::Geometry, 60, nullptr);
+    if (vsVoxel && gsVoxel && psVoxel) {
+        rhi::GraphicsPipelineDesc p = vox;
+        p.vs = vsVoxel; p.gs = gsVoxel; p.ps = psVoxel;
+        voxelPso_ = res_->createGraphicsPipeline(p);
+    }
+    if (!voxelPso_) AVER_ERROR("[Voxi] voxelise pipeline unavailable");
+
+    if (msOk && psVoxel) {
+        // The mesh-shader variant exists to delete the geometry shader, which is emulated (and
+        // slow) on every AMD GCN part.
+        if (const rhi::ShaderHandle ms = compile("MSVoxel", rhi::ShaderStage::Mesh, 65, "AVER_MS=1")) {
+            rhi::GraphicsPipelineDesc p = vox;
+            p.ms = ms; p.ps = psVoxel;
+            voxelMsPso_ = res_->createGraphicsPipeline(p);
+        }
+        if (!voxelMsPso_) AVER_WARN("[Voxi] mesh-shader voxelise variant unavailable; the GS path stands in");
+    }
+
+    // --- 4. clear mip 0. UAV-only layout, matching the UAV-only binding set. ---
+    if (const rhi::ShaderHandle cs = compile("CSClear", rhi::ShaderStage::Compute, 60, nullptr)) {
+        rhi::ComputePipelineDesc p;
+        p.cs = cs;
+        p.layout.uavCount = 1;
+        clearPso_ = res_->createComputePipeline(p);
+    }
+    if (!clearPso_) AVER_ERROR("[Voxi] volume clear pipeline unavailable");
+
+    // --- 5. mip filter: one source mip in, one destination mip out. ---
+    if (const rhi::ShaderHandle cs = compile("CSMip", rhi::ShaderStage::Compute, 60, nullptr)) {
+        rhi::ComputePipelineDesc p;
+        p.cs = cs;
+        p.layout.srvCount = 1;
+        p.layout.uavCount = 1;
+        p.layout.constantDwords[3] = 4;   // b3: source mip index (b0/b1 belong to the raster path)
+        mipPso_ = res_->createComputePipeline(p);
+    }
+    if (!mipPso_) AVER_ERROR("[Voxi] mip filter pipeline unavailable");
+
+    // Pipelines that draw into the scene must match the targets the device is using right now.
+    const u32 samples = dev_->sampleCount();
+    const rhi::Format colorFmt = dev_->backbufferFormat();
+    const rhi::Format depthFmt = dev_->depthFormat();
+
+    // --- 6. debug: raymarch the volume to screen (shares the prelude's fullscreen triangle). ---
+    const rhi::ShaderHandle vsky = compile("VSky", rhi::ShaderStage::Vertex, 60, nullptr);
+    if (const rhi::ShaderHandle ps = compile("PSVoxelDebug", rhi::ShaderStage::Pixel, 60, nullptr); ps && vsky) {
+        rhi::GraphicsPipelineDesc p;
+        p.vs = vsky; p.ps = ps;
+        p.layout = gi;
+        p.cull = rhi::CullMode::None;
+        p.renderTargetCount = 1;
+        p.renderTargets[0] = colorFmt;
+        p.sampleCount = samples;
+        debugPso_ = res_->createGraphicsPipeline(p);
+    }
+    if (!debugPso_) AVER_ERROR("[Voxi] voxel debug pipeline unavailable");
+
+    // --- 7-10. scene lit variants. The cone trace and RayQuery live inside the pixel shader, so
+    // these are whole pipelines rather than an extra pass. ---
+    rhi::GraphicsPipelineDesc scene;
+    scene.layout = gi;
+    scene.cull = rhi::CullMode::None;
+    scene.depth = {true, true, rhi::CompareOp::Less};
+    scene.renderTargetCount = 1;
+    scene.renderTargets[0] = colorFmt;
+    scene.depthFormat = depthFmt;
+    scene.sampleCount = samples;
+
+    const rhi::ShaderHandle vsMain = compile("VSMain", rhi::ShaderStage::Vertex, 60, nullptr);
+    const rhi::ShaderHandle psVoxi = compile("PSMainVoxi", rhi::ShaderStage::Pixel, 60, nullptr);
+    if (vsMain && psVoxi) {
+        rhi::GraphicsPipelineDesc p = scene;
+        p.vs = vsMain; p.ps = psVoxi;
+        scenePso_ = res_->createGraphicsPipeline(p);
+    }
+    if (!scenePso_) AVER_ERROR("[Voxi] scene pipeline unavailable");
+
+    // MSMain comes from the prelude and needs AVER_MS to exist at all.
+    const rhi::ShaderHandle msMain = msOk ? compile("MSMain", rhi::ShaderStage::Mesh, 65, "AVER_MS=1") : 0;
+    if (msMain && psVoxi) {
+        rhi::GraphicsPipelineDesc p = scene;
+        p.ms = msMain; p.ps = psVoxi;
+        sceneMsPso_ = res_->createGraphicsPipeline(p);
+    }
+    if (msOk && !sceneMsPso_) AVER_WARN("[Voxi] mesh-shader scene variant unavailable");
+
+    // RayQuery replaces the shadow-map lookup with an exact occlusion ray; it is a second PS
+    // compiled at SM 6.5, so a device without DXR still gets the shadow-mapped variant.
+    const rhi::ShaderHandle psRt = rtOk ? compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65, "AVER_RT=1") : 0;
+    if (vsMain && psRt) {
+        rhi::GraphicsPipelineDesc p = scene;
+        p.vs = vsMain; p.ps = psRt;
+        sceneRtPso_ = res_->createGraphicsPipeline(p);
+    }
+    if (rtOk && !sceneRtPso_) AVER_WARN("[Voxi] ray-tracing scene variant unavailable");
+
+    if (msMain && psRt) {
+        rhi::GraphicsPipelineDesc p = scene;
+        p.ms = msMain; p.ps = psRt;
+        sceneMsRtPso_ = res_->createGraphicsPipeline(p);
+    }
+    if (msOk && rtOk && !sceneMsRtPso_) AVER_WARN("[Voxi] mesh-shader + ray-tracing scene variant unavailable");
+
+    for (rhi::ShaderHandle h : owned) res_->destroyShader(h);
+
+    return shadowPso_ && voxelPso_ && clearPso_ && mipPso_ && debugPso_ && scenePso_;
+}
+
+} // namespace aver::voxi

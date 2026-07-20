@@ -153,6 +153,12 @@ struct DepthState {
     CompareOp op    = CompareOp::Less;
 };
 
+// Logical constant slots, mapping one-to-one onto b0..b(n-1). The count reaches
+// kFeatureFrameConstantRegister INCLUSIVE: a feature declares its frame constants at that reserved
+// register, and a layout that could not describe it would leave every pipeline reading that cbuffer
+// impossible to create — the shader names a register the root signature never declared.
+constexpr u32 kMaxConstantSlots = 5;
+
 // Every pipeline DECLARES its binding layout. The backend caches root signatures keyed by that
 // layout, so pipelines declaring identical shapes share one and switching between them does not
 // invalidate bindings — which is what lets a feature's binding set stay live across draws the
@@ -163,7 +169,7 @@ struct PipelineLayout {
     // Logical constant slot k maps to register b(k). A non-zero word count makes it ROOT CONSTANTS,
     // written with setConstants; zero makes it a ROOT CBV, written with setConstantBuffer. A slot
     // cannot be both, and setConstants on a CBV slot (or the reverse) is a binding error.
-    u32 constantDwords[4] = {};
+    u32 constantDwords[kMaxConstantSlots] = {};
     SamplerDesc samplers[4] = {};
     u32 samplerCount = 0;         // s0..s(n-1)
 };
@@ -250,10 +256,14 @@ constexpr u32 kMeshShaderTrisPerGroup = 64;
 //   - vertices: t(srvCount), indices: t(srvCount + 1)  — placed after the declared SRVs so they can
 //     never collide with a layout however many SRVs it declares.
 //   - triangle count: 4 root constants at b(kMeshGeometryConstantRegister).
-// Logical constant slots 0..3 map to b0..b3, and b4 is reserved for a feature's own frame constants,
-// so the mesh geometry block sits above both.
+// Logical constant slots 0..4 map to b0..b4, the top one being a feature's own frame constants, so
+// the mesh geometry block sits above both.
 constexpr u32 kMeshGeometryConstantRegister = 5;
 constexpr u32 kFeatureFrameConstantRegister = 4;
+static_assert(kFeatureFrameConstantRegister < kMaxConstantSlots,
+              "a feature must be able to DECLARE the register it is told to put frame constants at");
+static_assert(kMeshGeometryConstantRegister >= kMaxConstantSlots,
+              "the backend's mesh geometry constants must sit above every declarable slot");
 
 // ---------------------------------------------------------------- acceleration structures
 //
