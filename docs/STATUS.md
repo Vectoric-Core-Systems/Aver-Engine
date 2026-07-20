@@ -174,11 +174,11 @@ Debug views that paid for themselves: **Voxel Radiance** (viewport `Lit` dropdow
 separates "voxelisation broken" from "cone tracing broken"; the centre-pixel readout in the log is
 a cheap A/B oracle (e.g. GI on/off showed red 0.70→0.73 with G/B fixed = orange bounce).
 
-## 4c-2. Voxi/HAL decoupling refactor — IN PROGRESS, steps 0-8 landed of 12
+## 4c-2. Voxi/HAL decoupling refactor — IN PROGRESS, steps 0-9 landed of 12
 
 Moving Voxi's GI/shadow/RayQuery code out of the D3D12 backend into `modules/render.voxi`,
-against a new generic backend-agnostic RHI. Twelve-step plan; **steps 0-8 are in and green**,
-steps 9-12 remain.
+against a new generic backend-agnostic RHI. Twelve-step plan; **steps 0-9 are in and green**,
+steps 10-12 remain.
 
 **Steps 7 and 8 landed by accident and the record needs reading carefully.** They were written,
 then reverted, and the reverted work was subsequently swept back into `08cf5be` by a `git add -A`
@@ -190,8 +190,9 @@ line was wrong for several commits, and it cost two separate debugging sessions:
   null AS and reported no hit, silently disabling ray-traced shadows (fixed in `d01a50f`);
 - it shipped `AVER_DIAG` debugging scaffolding and a per-init `[DIAG]` error line to main
   (removed in `93a23e3`).
-Voxi's `prePass` now genuinely owns the shadow map, the volume clear, injection and the mip filter,
-and the backend's own `shadowPass()`/`voxelizePass()` are dead but still declared, pending step 11.
+Voxi's `prePass` now genuinely owns the acceleration structures, the shadow map, the volume clear,
+injection and the mip filter, and the backend's own `shadowPass()`/`voxelizePass()` are dead but
+still declared, pending step 11.
 
 | # | Step | Commit |
 |---|------|--------|
@@ -203,6 +204,7 @@ and the backend's own `shadowPass()`/`voxelizePass()` are dead but still declare
 | 5 | Shared shader prelude + `shadeSurface()` | `20439ac` |
 | 6 | `VoxiRenderer` registered but inert | `937cece` |
 | 7+8 | Shadow map + volume move into the feature | `08cf5be` (mislabelled `docs:`) |
+| 9 | BLAS/TLAS move into the feature | `7b069ac` |
 | — | Root CBVs always bound (GI hang fix) | `e461425` |
 | — | TLAS published into the bound table (RT shadow fix) | `d01a50f` |
 | — | Debugging scaffolding removed | `93a23e3` |
@@ -214,6 +216,31 @@ cube's unlit left face where ndl~=0, so every shadow/ray-tracing check must use 
 All 13 gates are now bit-stable run to run: measured 20 runs each, every one identical at the raw
 8-bit code, and a further 100 runs of the three GI gates on top. The probe line prints those raw
 codes next to the rounded floats, because a one-code move hides completely inside `%.2f`.
+
+### Step 9: who decides whether a ray may be traced
+
+The backend used to answer this (`rtActive_`, recomputed inside `buildRtScene`). It cannot any
+more: it no longer knows whether this frame's build produced any instances, and the RayQuery
+pipeline can legitimately be selected on a frame that has no structure, because the feature's
+replay list runs one frame behind. The FEATURE therefore publishes the answer as `gShadowParams.z`
+in its own `b4` block, and the lit shader picks `shadowFactor()` over `rtShadow()` when it is clear.
+Tracing an unbuilt or empty acceleration structure is not an error anyone can see — RayQuery
+reports no hit for every pixel, i.e. a fully lit scene, and the debug layer has nothing to say —
+so the guard belongs where the fact is known.
+
+The backend's remaining `rtActive_` is now only "should I record the RayQuery pipeline at all".
+
+**The `--rt --probe 1413 1042` gate does NOT distinguish the two paths.** That pixel is fully
+shadowed either way, so the ray-traced and shadow-mapped answers agree to the bit; it proves the
+pixel is shadowed, not which mechanism shadowed it. `--probe 1413 1150` is a penumbra pixel where
+they genuinely disagree — `0.23,0.28,0.37` raw(59,72,94) ray-traced against `0.25,0.31,0.39`
+raw(65,78,99) from the 3x3 PCF — and is the cheapest positive proof that RayQuery is live. It was
+measured identical on the pre-step-9 binary, on both the IA and mesh-shader paths.
+
+**Acceleration structures cannot be destroyed through the generic RHI.** `IResourceFactory` has
+`createBlas`/`createTlas` but no matching `destroyBlas`/`destroyTlas`, so they are released only
+when the factory is. Harmless while the scene's meshes are static and Voxi is shut down with the
+device; it needs an answer before geometry becomes dynamic.
 
 The two GI figures MOVED with the injection-determinism fix (`--gi` `0.38`→`0.39`, `--gi-debug`
 `0.19,0.15,0.17`→`0.26,0.17,0.18`). That is expected: a voxel covered by several surfaces used to
