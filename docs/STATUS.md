@@ -1,7 +1,7 @@
 # Aver Engine — Status & Handoff
 
 Living record of where the engine stands and what's next. Updated 2026-07-20.
-**HEAD: `9182cff`+** · 27 commits · 139 tracked files.
+**HEAD: `0bba4c2`** · 52 commits · 147 tracked files.
 
 Read this first after a context compaction, then `docs/ARCHITECTURE.md` (module DAG),
 `docs/MINIMUM_SPECS.md` (hardware requirements / launcher spec),
@@ -48,9 +48,13 @@ modules/
   platform/  Aver.Platform  Win32 Window (+icon, message hook), Splash (layered win + stb_image), FileSystem (+executableDir)
   assets/    Aver.Assets    ObjectId (fnv1a64), AssetType
   formats/   Aver.Formats   .ocbeam + .ocmap loaders (+ detail/TextScan.hpp)
-  rhi/       Aver.RHI        IDevice/ISwapchain interface + Null backend + uiWndProc registry
-  rhi.d3d12/ Aver.RHI.D3D12  THE renderer (device, swapchain, MSAA, PBR, sky, lines, ImGui host, capture)
+  rhi/       Aver.RHI        IDevice/ISwapchain + the generic render-feature surface
+                             (RHIResources.hpp) + shared shader prelude + Null backend + uiWndProc
+  rhi.d3d12/ Aver.RHI.D3D12  THE backend (device, swapchain, MSAA, PBR, sky, lines, mesh-shader
+                             path, ImGui host, capture, the generic factory/context)
   rhi.d3d11/ rhi.vulkan/     stubs
+  render.voxi/               Aver.Render.Voxi (SHARED: settings + C ABI, Core only) and
+                             Aver.Render.Voxi.Renderer (STATIC: GI/shadow/RayQuery, drives Aver.RHI)
   runtime/   Aver.Runtime    Engine loop, Application, EntryPoint (splash + ImGui hooks)
   (skeleton, not yet wired: render, render.gi, scene, physics, softbody, aero, gpudeform,
    fracture, vehicle, net, netvehicle, match, audio, world, abi — each has a README)
@@ -76,14 +80,22 @@ Content lives OUTSIDE the engine: example project at
   zenith/horizon gradient + sun disk/glow; distance fog in the mesh PS.
 - **Lines**: unlit `createLineMesh`/`drawLines` (grid, gizmo), line PSO.
 - **Wireframe**: second FillMode=WIREFRAME mesh PSO via `setWireframe`.
-- Shaders: compiled at runtime by **DXC → DXIL, SM 6.0** baseline; SM 6.5 variants for RayQuery.
-  Falls back to FXC/SM 5.1 if `dxcompiler.dll` is absent. `dxcompiler.dll`+`dxil.dll` are
-  copied into `bin/` by CMake and MUST ship with the product (see `docs/MINIMUM_SPECS.md` §5b).
-- **Directional shadow map** (2048², 3x3 PCF) used by the lit pass AND by GI light injection.
-- **Voxel cone traced GI** and **DXR 1.1 RayQuery shadows** — see §4b.
+- **Mesh shader geometry path** (`IDevice::setMeshShaders`, dev flag `--ms`): `MSMain` replaces the
+  input assembler for every draw. A generic capability, not an effect, which is why it lives here.
+- Shaders: compiled at runtime by **DXC → DXIL, SM 6.0** baseline; SM 6.5 for the mesh-shader and
+  RayQuery variants. Falls back to FXC/SM 5.1 if `dxcompiler.dll` is absent. `dxcompiler.dll`+
+  `dxil.dll` are copied into `bin/` by CMake and MUST ship with the product (`docs/MINIMUM_SPECS.md` §5b).
+- **The backend's own scene shading is `PSMainPlain`: unshadowed, no GI.** The shadow map, the
+  radiance volume and the RayQuery occlusion ray belong to the Voxi render feature (§4b, §4c-2).
+  A build with no feature registered renders that plain image by design, not by accident.
+- **Generic render-feature surface**: `resources()` hands out an `IResourceFactory` (textures,
+  buffers, shaders, pipelines, binding sets, BLAS/TLAS) and `addRenderFeature` registers a hook set
+  driven per frame. Declared in `modules/rhi/include/aver/rhi/RHIResources.hpp`, with no vocabulary
+  from any one feature in it.
 - RHI API: `createDevice/createSwapchain/beginFrame/endFrame`, `setClearColor/setCamera
   (viewProj,invViewProj,camPos)/setLight/setSky`, `createMesh/drawMesh(mesh,world,color,
-  metallic,roughness)/createLineMesh/drawLines/setWireframe/setLineDepth`, `uiInit/uiNewFrame/uiShutdown/
+  metallic,roughness)/createLineMesh/drawLines/setWireframe/setLineDepth/setMeshShaders`,
+  `resources/addRenderFeature/removeRenderFeature`, `uiInit/uiNewFrame/uiShutdown/
   uiWantsMouse/uiActive`, `requestCapture/getCapture/getFrameImage` (PNG via stb).
 - Verified ~60 FPS on **AMD Radeon RX 7800 XT**.
 
@@ -125,23 +137,31 @@ Owns the project-wide render quality settings and reports, per feature, whether 
 
 - **MSAA — implemented**: Off/2x/4x/8x applied at runtime via `IDevice::setSampleCount`
   (rebuilds scene targets + all PSOs; 1x uses `CopyResource` since resolve is illegal there).
-- **Global Illumination — implemented (voxel cone tracing).** Voxelise+inject into a 3D
-  radiance volume (GS dominant-axis projection, conservative raster, UAV-only pass) -> compute
-  mip filter -> 6-cone diffuse gather + AO in the lit pass. Volume is one frame old (draws are
-  replayed next frame). Debug raymarch via the viewport Lit dropdown. ~59 FPS at 128^3.
-- **Ray Tracing / Path Tracing — declared, not implemented.** The editor greys them out and the
-  setters refuse them. Only `Renderer::status()` changes when they land.
+- **Global Illumination — implemented (voxel cone tracing).** Voxelise+inject into an atomic
+  accumulator (dominant-axis projection by GS or mesh shader, conservative raster, UAV-only pass)
+  -> compute resolve into the radiance volume -> compute mip filter -> 6-cone diffuse gather + AO
+  inside the lit pixel shader. Volume is one frame old (draws are replayed next frame). Debug
+  raymarch via the viewport Lit dropdown. ~59 FPS at 128^3.
+- **Ray Tracing — implemented (DXR 1.1 inline `RayQuery`).** Exact hard sun shadows traced from the
+  pixel shader; per-mesh BLAS and a per-frame TLAS over the replayed draw list. Falls back to the
+  shadow map when the structure was not built. **Path Tracing — declared, not implemented.**
+- **Directional shadow map** (2048², 3x3 PCF), used by the lit pass AND by light injection — a
+  shadowed surface must not emit sun radiance into the volume or bounce light leaks through walls.
 - Exposed in the editor under **Edit > Project Settings > Rendering** (project-wide, so NOT in
   the per-actor Details panel).
-- Depends on **Aver.Core only** — the host pushes `DeviceInfo` in, so no RHI leaks into the DLL.
+- **Two targets.** `Aver.Render.Voxi` (the settings DLL) depends on **Aver.Core only** — the host
+  pushes `DeviceInfo` in, so no RHI type reaches the P/Invoke boundary. `Aver.Render.Voxi.Renderer`
+  (the GPU half) links **`Aver.RHI` and never `Aver.RHI.D3D12`**, and owns every GPU resource the
+  effects need. See §4c-2 for why the split is a link line rather than a convention.
 - Built **SHARED** for C# P/Invoke; C ABI in `include/aver/voxi/voxi_abi.h` (`aver_voxi_*`),
   bound by `scripting/csharp/Aver.Scripting`. Verify with
   `dotnet run --project scripting/csharp/Aver.Scripting.Sample`.
   **Caveat**: a separate C# process gets its own copy of the DLL (own settings, empty caps);
   scripting the live editor needs in-process CLR hosting, which does not exist yet.
-- Dev flags: `--msaa N` (exercise the runtime switch), `--project-settings` (open the window).
-- This machine reports: MSAA to 8x, **DXR tier 1.1**, typed UAV loads, conservative raster —
-  i.e. everything the voxel GI will need.
+- Dev flags: `--msaa N` (exercise the runtime switch), `--project-settings` (open the window),
+  `--gi`, `--gi-debug`, `--rt`, `--ms`.
+- This machine reports: MSAA to 8x, **DXR tier 1.1**, typed UAV loads, conservative raster,
+  mesh-shader tier 1, SM 6.6 — i.e. everything Voxi uses.
 
 ## 4c. Session log — what was built, in order
 
@@ -161,6 +181,7 @@ Everything below is committed and verified. Listed so a reader knows what NOT to
 | `c90b1cc` | `docs/MINIMUM_SPECS.md` + the DXR 1.1 decision |
 | `a08a126` | DXC migration (SM 6.x) + mesh-shader setting |
 | `1be5bf7` | DXR 1.1 inline RayQuery ray-traced sun shadows |
+| `14284b4`..`0bba4c2` | The Voxi/HAL decoupling refactor, 12 steps — see §4c-2 for the per-step table |
 
 ### Verification tooling (reuse this — it works)
 Headless capture reads the **backbuffer**, so it does NOT prove the window is visible or
@@ -168,31 +189,53 @@ responsive. For anything interaction- or hang-related, drive the real window wit
 input and watch a per-frame heartbeat instead.
 
 Dev flags on `Sandbox.exe`: `--frames N`, `--screenshot out.png`, `--tool <select|move|rotate|scale>`,
-`--project-settings`, `--msaa N`, `--gi`, `--gi-debug`, `--rt`.
+`--project-settings`, `--msaa N`, `--gi`, `--gi-debug`, `--rt`, `--ms`, `--probe X Y`.
+
+`--probe X Y` is the oracle: it prints the pixel as floats AND as raw 8-bit codes, because a
+one-code move hides completely inside `%.2f`. Compare the raw codes, never the floats. Count
+`0x141` TDRs around any render batch:
+`Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1001}` filtered for `LiveKernelEvent`.
 
 Debug views that paid for themselves: **Voxel Radiance** (viewport `Lit` dropdown or `--gi-debug`)
 separates "voxelisation broken" from "cone tracing broken"; the centre-pixel readout in the log is
 a cheap A/B oracle (e.g. GI on/off showed red 0.70→0.73 with G/B fixed = orange bounce).
 
-## 4c-2. Voxi/HAL decoupling refactor — IN PROGRESS, steps 0-9 landed of 12
+## 4c-2. Voxi/HAL decoupling refactor — COMPLETE, all 12 steps landed
 
-Moving Voxi's GI/shadow/RayQuery code out of the D3D12 backend into `modules/render.voxi`,
-against a new generic backend-agnostic RHI. Twelve-step plan; **steps 0-9 are in and green**,
-steps 10-12 remain.
+Voxi's GI, shadow map and DXR 1.1 RayQuery code has moved out of the D3D12 backend into
+`modules/render.voxi`, talking only to a generic backend-agnostic RHI. The backend no longer knows
+what a voxel, a shadow map or an occlusion ray is.
 
-**Steps 7 and 8 landed by accident and the record needs reading carefully.** They were written,
-then reverted, and the reverted work was subsequently swept back into `08cf5be` by a `git add -A`
-that picked up a stopped agent's in-progress edits — a commit whose subject says `docs:` but which
-carries 256 lines across four source files. That is why the "paused at step 6" claim above this
-line was wrong for several commits, and it cost two separate debugging sessions:
-- it landed the binding-set half of step 7 WITHOUT step 9, so `buildRtScene` kept writing the
-  acceleration-structure SRV into a heap nothing bound any more. RayQuery then traced against a
-  null AS and reported no hit, silently disabling ray-traced shadows (fixed in `d01a50f`);
-- it shipped `AVER_DIAG` debugging scaffolding and a per-init `[DIAG]` error line to main
-  (removed in `93a23e3`).
-Voxi's `prePass` now genuinely owns the acceleration structures, the shadow map, the volume clear,
-injection and the mip filter, and the backend's own `shadowPass()`/`voxelizePass()` are dead but
-still declared, pending step 11.
+### Final architecture
+
+Three pieces, and the boundary between them is a link line, not a convention:
+
+- **`Aver.RHI`** — the generic interface. `RHIResources.hpp` declares `IResourceFactory` (textures,
+  buffers, shaders, graphics/compute pipelines, binding sets, BLAS/TLAS), `IRenderContext` (the
+  recording surface) and `IRenderFeature` (the per-frame hook set: `beginScene`, `submitDraw`,
+  `prePass`, `scenePipeline`, `sceneBindingSet`, `sceneConstants`, `scenePass`, `suppressesScene`,
+  `onRenderTargetsChanged`). No vocabulary from any one feature appears in it. `RHIShaders.cpp`
+  holds `sharedShaderPrelude()`: the cbuffer layouts, `VSIn`/`VSOut`/`SkyOut`, the BRDF helpers,
+  `shadeSurface`, `VSMain`, `VSky` and `MSMain` — one owner for a cross-module ABI that has no
+  compiler behind it.
+- **`Aver.RHI.D3D12`** — device, swapchain, MSAA, sky, lines, wireframe, the ImGui host, capture,
+  the mesh-shader geometry path, and `PSMainPlain`. That is the whole of the shading it owns:
+  `shadeSurface` takes sun visibility and indirect radiance as ARGUMENTS, so a backend with no
+  feature registered passes `(1, 0, 1)` and gets the unshadowed, GI-free image. It also implements
+  the generic factory and context, including acceleration-structure creation and builds.
+- **`Aver.Render.Voxi.Renderer`** — the feature. Owns the shadow map, the radiance volume, the
+  injection accumulator, every binding set, the BLAS/TLAS, and eleven pipelines: shadow, voxelise
+  (+MS variant), clear, resolve, mip filter, debug raymarch and the four scene lit variants
+  (IA/MS x shadow-map/RayQuery). `PSMainVoxi` is a whole pixel shader rather than an extra pass,
+  because the terms it contributes live INSIDE the shading, which no arrangement of passes can
+  express.
+
+`Aver.Render.Voxi` (the settings DLL, SHARED for C# P/Invoke) still depends on **Aver.Core only** —
+no RHI type reaches the P/Invoke boundary. `Aver.Render.Voxi.Renderer` is a deliberately SEPARATE
+static target that links **`Aver.RHI`, never `Aver.RHI.D3D12`**: the link line is the only place
+that rule can actually be enforced.
+
+### What moved, step by step
 
 | # | Step | Commit |
 |---|------|--------|
@@ -205,47 +248,139 @@ still declared, pending step 11.
 | 6 | `VoxiRenderer` registered but inert | `937cece` |
 | 7+8 | Shadow map + volume move into the feature | `08cf5be` (mislabelled `docs:`) |
 | 9 | BLAS/TLAS move into the feature | `7b069ac` |
+| 10 | Scene lit pipelines + debug view move into the feature | `194760a` |
+| 11 | The backend's dead copy deleted, boundary tightened | `808f591` |
+| 12 | Geometry path made reachable without the module | `0bba4c2` |
 | — | Root CBVs always bound (GI hang fix) | `e461425` |
 | — | TLAS published into the bound table (RT shadow fix) | `d01a50f` |
 | — | Debugging scaffolding removed | `93a23e3` |
+| — | Atomic injection accumulator (GI probe wobble fix) | `e34e413` |
 
-**Oracle** (`sandbox --frames 40`): lit `0.34,0.36,0.42` · GI `0.39,0.35,0.40` ·
-`--gi-debug` `0.26,0.17,0.18` · cast-shadow `--probe 1413 1042` `0.25,0.31,0.40`
-(`0.26,0.31,0.38` under `--gi`). **The centre probe is BLIND to the sun term** — it lands on the
-cube's unlit left face where ndl~=0, so every shadow/ray-tracing check must use `--probe`.
-All 13 gates are now bit-stable run to run: measured 20 runs each, every one identical at the raw
-8-bit code, and a further 100 runs of the three GI gates on top. The probe line prints those raw
-codes next to the rounded floats, because a one-code move hides completely inside `%.2f`.
+**Steps 7 and 8 landed by accident and the record needs reading carefully.** They were written,
+then reverted, and the reverted work was swept back into `08cf5be` by a `git add -A` that picked up
+a stopped agent's in-progress edits — a commit whose subject says `docs:` but which carries 256
+lines across four source files. It cost two separate debugging sessions: it landed the binding-set
+half of step 7 without step 9, so `buildRtScene` kept writing the acceleration-structure SRV into a
+heap nothing bound any more (RayQuery then traced a null AS and silently reported no hit, fixed in
+`d01a50f`), and it shipped `AVER_DIAG` scaffolding to main (removed in `93a23e3`). This is why
+`git status` before staging is a hard rule, not a preference.
+
+### What step 11 deleted
+
+The whole Voxi half of `kShaderHLSL` — `VSShadow`, `VSVoxel`/`GSVoxel`/`MSVoxel`, a second
+`PSVoxel`, `PSMainVoxi`, `PSVoxelDebug`, `CSClear`, `CSMip`, the `b4` block and
+`rtShadow`/`shadowFactor`/`traceCone`/`coneTracedIndirect` — plus `createShadowResources`,
+`shadowPass`, `createVoxelVolume`, `createGiPipelines`, `voxelizePass`, `voxelBarrier`,
+`bindGiTables`, `sceneBindings`, the replayed draw list and every member behind them. Roughly 1000
+lines. Every one was verified unreachable by grepping for callers first: `shadowPass` and
+`voxelizePass` had already had none since step 8.
+
+The RayQuery PSO went too. It had carried `PSMainPlain` since step 10, so `rtActive_` was choosing
+between two pipelines that drew the same image. What DXR still needs is the
+`ID3D12Device5`/`ID3D12GraphicsCommandList4` pair the generic factory builds acceleration
+structures through, so `initRayTracing` shrank to acquiring those under the same DXR 1.1 gate the
+feature applies to itself.
+
+With no feature resources left to bind, both backend root signatures lost their descriptor tables,
+their two static samplers and the `b4` root CBV. `rootSig_` is now `b0` + 24 root constants;
+`msRootSig_` adds the three geometry parameters the prelude pins to `t3`/`t4`/`b5`. Root parameter
+indices became named constants, because the recording side passes them as bare integers where a
+stale number binds the WRONG parameter rather than failing.
+
+`IDevice` lost `setGi`, `GiSettings`, `setRayTracing` and `rayTracingActive`. `setMeshShaders` and
+`meshShadersActive` stay: the geometry path decides how every draw reaches the rasteriser, which is
+a device property, not an effect. The C# bindings were checked first — they talk to the Voxi C ABI
+(`aver_voxi_*`), never to `IDevice`, so nothing there moved.
+
+**One mesh-vertex input layout site remains**, shared by the backend's scene pipeline and the
+generic factory. There were five. The planned PBR vertex format (§4d) is now a single edit.
+
+### `AVER_MODULE_VOXI=OFF` — a real behavioural change, with a recorded baseline
+
+Before the refactor the backend shaded the scene itself, so building without the module still gave
+shadows and GI. It cannot any more, and that is the point: the feature owns them. A build with
+`-DAVER_MODULE_VOXI=OFF` configures, compiles, links and renders — **unshadowed, with no GI, by
+design**. Treat these as the expected values for that configuration, not as a regression:
+
+| Probe | OFF build | ON build, for comparison |
+|---|---|---|
+| centre `(1375,814)` | `0.34,0.36,0.42` raw(87,92,107) | identical |
+| cast shadow `(1413,1042)` | `0.43,0.46,0.52` raw(109,117,132) | `0.25,0.31,0.40` raw(64,78,101) |
+| penumbra `(1413,1150)` | `0.41,0.44,0.49` raw(105,112,126) | `0.25,0.31,0.39` raw(65,78,99) |
+
+`--ms` gives the same raw codes as the IA path. `--gi`, `--gi-debug` and `--rt` are inert: there is
+no feature to drive them. The **centre probe is identical between the two builds** because it lands
+on the cube's unlit left face where `ndl` is ~0 — which is exactly why every shadow or ray-tracing
+check must use `--probe`, never the default.
+
+Step 12 also moved `setMeshShaders` outside `#if AVER_MODULE_VOXI`. It had been inside, so the OFF
+build could never select the mesh-shader path — and with the module ON the feature overrides the
+scene pipeline, so the backend's own mesh-shader draw was unreachable in BOTH configurations. The
+OFF build now renders identically on the IA and mesh-shader paths, which is what proves the
+backend's `dispatchMesh` binds the right root parameters.
+
+### The feature-absent path
+
+`IDevice::resources()` returns `nullptr` by default, and no stub backend overrides it. D3D11 and
+Vulkan never construct a device at all — their factories return `nullptr` and `createDevice` falls
+through to Null. `VoxiRenderer::init` checks the factory first, logs
+`[Voxi] init declined: backend exposes no resource factory (no GPU support)` and returns `false`;
+`shutdown()` is safe after a declined init and safe called twice. Verified by driving a Null device
+directly, not only by reading the code.
 
 ### Step 9: who decides whether a ray may be traced
 
-The backend used to answer this (`rtActive_`, recomputed inside `buildRtScene`). It cannot any
-more: it no longer knows whether this frame's build produced any instances, and the RayQuery
-pipeline can legitimately be selected on a frame that has no structure, because the feature's
-replay list runs one frame behind. The FEATURE therefore publishes the answer as `gShadowParams.z`
-in its own `b4` block, and the lit shader picks `shadowFactor()` over `rtShadow()` when it is clear.
-Tracing an unbuilt or empty acceleration structure is not an error anyone can see — RayQuery
-reports no hit for every pixel, i.e. a fully lit scene, and the debug layer has nothing to say —
-so the guard belongs where the fact is known.
-
-The backend's remaining `rtActive_` is now only "should I record the RayQuery pipeline at all".
+The backend used to answer this (`rtActive_`, recomputed inside `buildRtScene`). It cannot: it does
+not know whether this frame's build produced any instances, and the RayQuery pipeline can
+legitimately be selected on a frame that has no structure, because the feature's replay list runs
+one frame behind. The FEATURE publishes the answer as `gShadowParams.z` in its own `b4` block, and
+`PSMainVoxi` picks `shadowFactor()` over `rtShadow()` when it is clear. Tracing an unbuilt or empty
+acceleration structure is not an error anyone can see — RayQuery reports no hit for every pixel,
+i.e. a fully lit scene, and the debug layer has nothing to say — so the guard belongs where the
+fact is known.
 
 **The `--rt --probe 1413 1042` gate does NOT distinguish the two paths.** That pixel is fully
-shadowed either way, so the ray-traced and shadow-mapped answers agree to the bit; it proves the
-pixel is shadowed, not which mechanism shadowed it. `--probe 1413 1150` is a penumbra pixel where
-they genuinely disagree — `0.23,0.28,0.37` raw(59,72,94) ray-traced against `0.25,0.31,0.39`
-raw(65,78,99) from the 3x3 PCF — and is the cheapest positive proof that RayQuery is live. It was
-measured identical on the pre-step-9 binary, on both the IA and mesh-shader paths.
+shadowed either way. `--probe 1413 1150` is a penumbra pixel where they genuinely disagree —
+`0.23,0.28,0.37` raw(59,72,94) ray-traced against `0.25,0.31,0.39` raw(65,78,99) from the 3x3 PCF —
+and is the cheapest positive proof that RayQuery is live. Re-measured identical after step 11, on
+both the IA and mesh-shader paths.
 
 **Acceleration structures cannot be destroyed through the generic RHI.** `IResourceFactory` has
-`createBlas`/`createTlas` but no matching `destroyBlas`/`destroyTlas`, so they are released only
-when the factory is. Harmless while the scene's meshes are static and Voxi is shut down with the
-device; it needs an answer before geometry becomes dynamic.
+`createBlas`/`createTlas` but no matching destroy, so they are released only when the factory is.
+Harmless while the scene's meshes are static and Voxi is shut down with the device; it needs an
+answer before geometry becomes dynamic. Listed in §4d.
 
-The two GI figures MOVED with the injection-determinism fix (`--gi` `0.38`→`0.39`, `--gi-debug`
-`0.19,0.15,0.17`→`0.26,0.17,0.18`). That is expected: a voxel covered by several surfaces used to
-take one of them at random and now takes their mean. Every non-GI gate is unchanged to the bit,
-which is the evidence that nothing outside the injection path moved.
+### Oracle — all 13 gates, bit-exact
+
+```
+--frames 40                             -> (0.34,0.36,0.42) raw(87,92,107)
+--frames 40 --ms                        -> (0.34,0.36,0.42) raw(87,92,107)
+--frames 40 --rt                        -> (0.34,0.36,0.42) raw(87,92,107)
+--frames 40 --ms --rt                   -> (0.34,0.36,0.42) raw(87,92,107)
+--frames 40 --gi                        -> (0.39,0.35,0.40) raw(99,90,103)
+--frames 40 --ms --gi                   -> (0.39,0.35,0.40) raw(99,90,103)
+--frames 40 --ms --rt --gi              -> (0.39,0.35,0.40) raw(99,90,103)
+--frames 40 --gi-debug                  -> (0.26,0.17,0.18) raw(67,44,45)
+--frames 40 --ms --gi-debug             -> (0.26,0.17,0.18) raw(67,44,45)
+--frames 40 --probe 1413 1042           -> (0.25,0.31,0.40) raw(64,78,101)
+--frames 40 --rt --probe 1413 1042      -> (0.25,0.31,0.40) raw(64,78,101)
+--frames 40 --ms --rt --probe 1413 1042 -> (0.25,0.31,0.40) raw(64,78,101)
+--frames 40 --gi --probe 1413 1042      -> (0.26,0.31,0.38) raw(67,78,96)
+```
+
+Compare the RAW CODES: a one-code move hides completely inside `%.2f`, which is why the probe line
+prints both. All 13 were re-run after step 11 and again after step 12 with the **D3D12 debug layer
+enabled**: zero CORRUPTION, zero ERROR. The only messages are two pre-existing benign warnings,
+`#820 CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE` and `#1328 CREATERESOURCE_STATE_IGNORED`. Zero
+new TDRs across the whole exercise.
+
+### Barrier note from step 11
+
+Voxi's radiance volume now leaves `ShaderResource` immediately before the resolve rather than at the
+top of `voxelizePass`. Nothing earlier writes it — `CSClear` zeroes the accumulator and `PSVoxel`
+only adds to it — so taking it early left the injection pass's own whole-chain SRV pointing at a
+resource in `UnorderedAccess`. Legal only because that descriptor is never read, which is not a
+property worth relying on.
 
 ### RESOLVED 2026-07-20: the GI probe wobble was a last-writer-wins race in voxel injection
 
@@ -383,37 +518,12 @@ left face where `ndl` is ~0 and the sun term drops out entirely.
 batch, zero new TDRs. The red-channel wobble below still reproduces (`--gi` 5 runs: 3x `0.38`,
 1x `0.37`, 1x `0.36`), unchanged by this fix, confirming it really is a separate defect.
 
-### Step 7-8 was attempted and REVERTED — read before retrying
-Patch of the attempt: `scratchpad/step78-attempt.patch` (299 lines, does not apply cleanly as-is).
-
-What it got right, and would be needed again:
-- Steps 7, 8 and **9 must land together**. Step 7 alone requires deleting the backend's `giHeap_`,
-  but the backend's `voxelizePass` still needs it until 8 moves the volume — AND once the backend
-  binds Voxi's binding set, its RayQuery reads Voxi's t2, which is null until 9 moves the TLAS.
-  Confirmed empirically: `--rt` cast-shadow went `0.25,0.31,0.40` -> `0.43,0.46,0.52`, i.e. fully
-  lit, because the null TLAS reports no occlusion.
-  **The t2 half of this is now closed** (see 4c-3): `08cf5be` shipped the binding-set half of step 7
-  without step 9, and `buildRtScene` now publishes the TLAS into the feature's set, so the backend
-  may own the TLAS indefinitely. Step 9 is a tidiness move, no longer a correctness prerequisite.
-- Do NOT route GI settings through `IDevice::setGi` to the feature — that puts feature vocabulary
-  back into the generic interface. The app owns the `VoxiRenderer` instance; configure it directly.
-- `D3D12ResourceFactory` needs `friend class D3D12Device` so the frame path can bind a feature's
-  descriptor table for the scene draws the backend itself records (Tier 1 requires every declared
-  table bound on every pass).
-- The backend must copy the feature's `sceneConstants()` into its b4 upload buffer AFTER `prePass`,
-  because the light matrix is not known until the shadow pass has run.
-
-**The failure below is now FIXED — it was the unbound `b0` described above, not the migration code
-and not a barrier bug.** Both symptoms were exactly this: `--gi` and `--gi-debug` completing 40-60
-frames, exiting 0, with no validation error and no probe line (the GPU had been reset), while
-`--ms --gi` produced a wrong value (`0.31,0.34,0.40` vs `0.38,0.35,0.40`) because the mesh path read
-`b0` as zeros instead of faulting. The apparent IA-vs-MS divergence was the same missing bind
-manifesting differently on the two pipelines. Step 7-8 can now be retried against a working GI path;
-re-verify the gates below against the oracle rather than trusting the old majority-vote numbers.
-
 ## 4d. NOT DONE — open work, roughly in value order
 
 **Closed since this list was written**
+- **The Voxi/HAL decoupling refactor, all 12 steps** (`14284b4`..`0bba4c2`). The backend no longer
+  contains any GI, shadow or ray-tracing code. Full write-up, final architecture and the
+  `AVER_MODULE_VOXI=OFF` baseline in §4c-2.
 - **The GI GPU hang, and the near-empty mesh-path volume.** One cause: the engine `PerFrame` block at
   `b0` was never bound for feature pipelines, so every Voxi draw ran against an unset root CBV. The
   backend now binds every declared root CBV in `setPipeline`. Full write-up in section 4c-2; 20 GI
@@ -438,35 +548,56 @@ re-verify the gates below against the oracle rather than trusting the old majori
   where `ndl` is ~0, so any shadow A/B must probe a sunlit or cast-shadow pixel instead.
 
 **Renderer**
-1. **RT ambient occlusion / reflections.** The TLAS already exists, so this is mostly shader work.
-2. **Path tracing.** Declared only; would reuse the same acceleration structure.
-3. ~~**GI centre probe varies in the red channel, `0.36`-`0.38`.**~~ FIXED — see the section below.
-4. **No temporal accumulation** on GI. With the volume cleared each frame this is the other main
-   source of GI instability.
+1. **Textured PBR — the agreed next vertex format is 32 bytes: position (12) + normal (12) + UV0 (8).**
+   The tangent frame is derived in the PIXEL shader from `ddx`/`ddy` of the world position and the
+   UV, not carried per-vertex. That is a decision, not a shortcut, and the reasons are worth keeping:
+   - **Nothing authored has tangents.** `.ocbeam`/`.ocmap` carry none, and the procedural meshes the
+     sandbox builds carry none, so a tangent field could only ever be filled with zeros today.
+   - **MikkTSpace splits vertices.** Generating tangents properly reindexes the mesh (a vertex on a
+     UV seam becomes two), so it belongs in an importer that does not exist yet. Bolting it onto
+     runtime mesh creation would put a topology-changing step behind `createMesh`.
+   - **A zero tangent through `normalize()` is NaN**, and on the cone-trace path a NaN world
+     position makes `traceCone` march forever — which on this hardware is the documented `0x141`
+     TDR failure mode (§4c-2). An unfilled field would not read as "flat normal mapping"; it would
+     hang the GPU.
+   Adding the field is now a single edit: `kMeshInputLayout` in `D3D12Device.cpp` is the only place
+   `MeshVertex` is described to D3D12, and `MeshVtx` in `sharedShaderPrelude()` is the only place
+   the mesh-shader path reads it. Both must move together — the prelude is a cross-module ABI with
+   no compiler behind it.
+2. **RT ambient occlusion / reflections.** The TLAS already exists, so this is mostly shader work.
+3. **Path tracing.** Declared only; would reuse the same acceleration structure.
+4. **No temporal accumulation** on GI. With the volume rebuilt each frame this is the main remaining
+   source of GI instability now that the injection race is fixed.
 5. GI is a **single volume**, not cascaded — large scenes will not fit at useful resolution.
 6. Shadow map is **one cascade** at 2048²; no CSM, so large scenes get coarse shadows.
 7. Specular GI is not cone traced (diffuse + AO only).
+8. **Acceleration structures cannot be destroyed through the generic RHI.** `IResourceFactory` has
+   `createBlas`/`createTlas` and no matching destroy, so they are released only with the factory.
+   Harmless while meshes are static; it needs an answer before geometry becomes dynamic.
 
 **Portability (asked for explicitly: all AMD + NVIDIA DX12 GPUs)**
-8. **Only ever run on one GPU (RX 7800 XT).** The DXR/GI/mesh paths are capability-gated and fall
+9. **Only ever run on one GPU (RX 7800 XT).** The DXR/GI/mesh paths are capability-gated and fall
     back, but have NOT been exercised on NVIDIA or Intel, nor on Resource-Binding-Tier-1 hardware.
-    Test before shipping.
-9. D3D11 and Vulkan backends are still **stubs** — D3D12 is the only working backend, so
-    "supports DirectX 12" is a hard requirement.
+    Test before shipping. The Tier 1 rules the code follows (every declared table bound on every
+    pass, every heap slot null-filled by declared kind, every declared root CBV given an address)
+    are therefore reasoned, not measured.
+10. D3D11 and Vulkan backends are still **stubs** — D3D12 is the only working backend, so
+    "supports DirectX 12" is a hard requirement. Both decline cleanly: `createDevice` falls through
+    to Null, `resources()` is null, and `VoxiRenderer::init` logs and returns false.
 
 **Scripting**
-10. **C# cannot drive the live editor.** A standalone C# process P/Invokes its own copy of
+11. **C# cannot drive the live editor.** A standalone C# process P/Invokes its own copy of
     `Aver.Render.Voxi.dll`, so it gets its own settings and empty device caps. Needs in-process
     CLR hosting (hostfxr/CoreCLR). The C ABI is already shaped for it.
-11. Same caveat blocks the **launcher hardware probe** in `docs/MINIMUM_SPECS.md` §7.
+12. Same caveat blocks the **launcher hardware probe** in `docs/MINIMUM_SPECS.md` §7.
 
 **Editor / engine**
-12. Dock layout does **not persist** (`io.IniFilename` is null) — rebuilt from DockBuilder each run.
-13. Output Log does not capture the real log; Content Browser is a placeholder.
-14. Toolbar Save / Play / Pause / Stop are **non-functional stubs**.
-15. No scene save/load, no `.ocmesh`, no asset import — the general-purpose roadmap in §9 is
+13. Dock layout does **not persist** (`io.IniFilename` is null) — rebuilt from DockBuilder each run.
+14. Output Log does not capture the real log; Content Browser is a placeholder.
+15. Toolbar Save / Play / Pause / Stop are **non-functional stubs**.
+16. No scene save/load, no `.ocmesh`, no asset import — the general-purpose roadmap in §9 is
     otherwise untouched.
-16. `modules/abi` is still an empty skeleton (the C ABI lives in the Voxi module instead).
+17. `modules/abi` is still an empty skeleton (the C ABI lives in the Voxi module instead).
 
 **Decisions taken (do not re-litigate without reason)**
 - Ray tracing targets **DXR 1.1 inline RayQuery only**; DXR 1.0 would add only GPUs that emulate
@@ -512,6 +643,9 @@ now an `OUTPUT`/`DEPENDS` rule, and `Sandbox.rc` declares `OBJECT_DEPENDS` on th
 it actually re-runs the resource compiler.
 
 ## 7. Commit history
+
+The first twelve, for the origin story only — this list stopped being maintained at `541d888` and
+`git log --oneline` is the authority. §4c and §4c-2 carry the commits that matter.
 
 ```
 541d888 Editor: Unreal-style free-fly camera (no auto-orbit)
@@ -588,6 +722,20 @@ ab2264a Aver Engine foundation: modular core + .oc* format loaders
   ring ever feels reversed, that one factor is the knob.
 - `.rc` needs `enable_language(RC)`; RC path is relative to the .rc file.
 - Line endings: Git warns LF→CRLF (harmless).
+- **No feature vocabulary in the generic RHI headers, and no backend type in a feature.** The second
+  half is enforced by the link line (`Aver.Render.Voxi.Renderer` links `Aver.RHI`, never
+  `Aver.RHI.D3D12`); the first half is not enforced by anything but review. Do NOT reintroduce a
+  `setGi`-shaped call on `IDevice` — the app owns the feature instance and configures it directly.
+- **`rhi::MeshVertex` is described to D3D12 in exactly two places**: `kMeshInputLayout` in
+  `D3D12Device.cpp` (the input assembler) and `MeshVtx` in `sharedShaderPrelude()` (the
+  mesh-shader path). They must change together; the prelude is a cross-module ABI with no compiler
+  behind it, so a mismatch is silent.
+- **Backend root parameter indices are named constants** (`kSceneFrameParam`, `kMeshVertexParam`,
+  …). `SetGraphicsRoot*` takes a bare integer, so a stale number binds the WRONG parameter rather
+  than failing. Never inline them again.
+- **A pixel probe is not a screenshot.** `--probe` reads one pixel and misses overlays entirely; the
+  centre probe in particular is blind to the sun term (see §4c-2). Shadow and ray-tracing checks
+  must use `--probe 1413 1042` (cast shadow) or `--probe 1413 1150` (penumbra).
 
 ## 9. Next steps — including the general-purpose direction
 

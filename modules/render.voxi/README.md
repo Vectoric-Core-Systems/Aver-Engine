@@ -11,6 +11,7 @@ device capabilities which of them can actually be used:
 | **Anti-Aliasing (MSAA)** | **Implemented.** Off / 2x / 4x / 8x, applied at runtime — rebuilds the scene targets and every PSO. |
 | **Global Illumination** | **Implemented.** Voxel cone tracing: voxelise+inject -> mip filter -> 6-cone diffuse gather + AO. |
 | **Ray Tracing** | **Implemented.** DXR 1.1 inline `RayQuery` sun shadows (exact, hard-edged). Needs DXR 1.1 + SM 6.5. |
+| **Mesh shaders** | **Implemented.** Replaces the input assembler, and removes the geometry shader from voxelisation. Needs mesh-shader tier 1 + SM 6.5. The DEVICE owns the toggle; Voxi only reports and stores it. |
 | **Path Tracing** | Declared. Reference tracer; not built yet. |
 
 ## Honest status reporting
@@ -20,11 +21,30 @@ values it cannot honour. The editor greys out anything that is not `Ready`, so a
 shown as available when it would silently do nothing. When the GI/RT/PT passes land, only
 `Renderer::status()` changes — the UI and the C# bindings pick it up for free.
 
-## Layering
+## Layering — two targets, and the split is load-bearing
 
-Voxi depends on **Aver.Core only**. It deliberately knows nothing about the RHI: the host pushes
-`DeviceInfo` in (mirroring `rhi::DeviceCaps`) and reads `Settings` back out to drive the device.
-That keeps the module a DAG leaf and lets it ship as a shared library.
+| Target | Kind | Links | Holds |
+|---|---|---|---|
+| `Aver.Render.Voxi` | SHARED | **Aver.Core only** | the settings, the status reporting, the C ABI |
+| `Aver.Render.Voxi.Renderer` | STATIC | Core, **`Aver.RHI`** (never `Aver.RHI.D3D12`) | every GPU resource and pass |
+
+The DLL knows nothing about the RHI: the host pushes `DeviceInfo` in (mirroring `rhi::DeviceCaps`)
+and reads `Settings` back out. That is what keeps render-hardware types off the P/Invoke boundary
+and lets it ship as a shared library.
+
+The renderer is a second target rather than a second file so the "no backend type crosses this
+boundary" rule lives on a link line, where the linker enforces it, instead of in a comment. It
+implements `rhi::IRenderFeature` and talks only to `IResourceFactory` / `IRenderContext` from
+`modules/rhi/include/aver/rhi/RHIResources.hpp`. Nothing in it names a D3D12 type.
+
+`VoxiRenderer::init` declines cleanly when the backend has no GPU support: `IDevice::resources()`
+returns `nullptr` (the Null backend, and D3D11/Vulkan which never construct a device at all), so it
+logs and returns `false`, and the engine runs without the feature.
+
+Building with `-DAVER_MODULE_VOXI=OFF` still configures, compiles, links and renders — but the
+image is **unshadowed with no GI**, because those are Voxi's and the backend has no copy. That is a
+deliberate consequence of the decoupling, not a regression; `docs/STATUS.md` §4c-2 records the
+expected probe values for that configuration.
 
 ## C# scripting
 
@@ -50,16 +70,40 @@ CLR hosted in-process — the ABI is already shaped for it, that host just doesn
 
 ## How the GI works
 
-1. **Voxelise + inject (one pass).** The scene is rasterised with no render target; a geometry
-   shader projects each triangle along its dominant axis and the pixel shader computes direct
-   sun + sky lighting and writes radiance straight into a `RWTexture3D`. Merging voxelisation
-   with light injection avoids a second full scene traversal. Conservative rasterisation is used
-   when the device reports it, so thin geometry still lights a voxel.
-2. **Mip filter (compute).** `CSMip` box-filters each level into the next. Mip N is the cone
+1. **Voxelise + inject (one pass).** The scene is rasterised with no render target; the dominant
+   axis is chosen per triangle by `GSVoxel` or, on the mesh-shader path, by `MSVoxel` — and the
+   pixel shader computes direct sun + sky lighting and *adds* it into an accumulator. Merging
+   voxelisation with light injection avoids a second full scene traversal. Conservative
+   rasterisation is used when the device reports it, so thin geometry still lights a voxel.
+2. **Resolve (compute).** `CSResolve` divides the accumulated sums by the fragment count and writes
+   the filterable `RGBA16F` volume. See *Order-independent injection* below for why the
+   accumulator exists at all.
+3. **Mip filter (compute).** `CSMip` box-filters each level into the next. Mip N is the cone
    footprint at distance N, which is what lets one sample stand in for a whole cone step.
-3. **Cone trace (lit pass).** Six cones over the hemisphere - one along the normal, five in a
-   ring - march the volume, widening with distance and reading a coarser mip each step, composited
-   front-to-back. The alpha that accumulates doubles as ambient occlusion.
+4. **Cone trace (INSIDE the lit pixel shader).** Six cones over the hemisphere - one along the
+   normal, five in a ring - march the volume, widening with distance and reading a coarser mip each
+   step, composited front-to-back. The alpha that accumulates doubles as ambient occlusion.
+
+Step 4 is a whole pixel shader (`PSMainVoxi`), not an extra pass: sun visibility and indirect
+radiance are *arguments* to the shared `shadeSurface`, and a term inside the shading is not
+something any arrangement of passes can express. Voxi therefore owns four scene lit pipelines —
+IA/mesh-shader crossed with shadow-map/RayQuery — and hands the right one to the backend through
+`IRenderFeature::scenePipeline`.
+
+## Order-independent injection
+
+Several triangles legitimately cover one voxel: the cube's bottom face is coplanar with the ground
+quad, and every box edge puts two differently-lit faces in the same cell. A plain
+`gVoxelUAV[c] = radiance` store resolves that contest by whichever fragment retires last, which the
+GPU does not promise to keep stable — so the volume was rebuilt to a *different* answer on most
+frames and the GI probe visibly wobbled.
+
+Injection sums into a fixed-point atomic accumulator instead (`R32_UINT`, the only typed format
+D3D12 guarantees atomics on, four channels interleaved along x with the fourth a fragment count),
+and `CSResolve` divides by that count. The result depends only on WHICH fragments covered a voxel,
+never on their order, because integer addition is associative where last-writer-wins is not. A
+contested voxel now holds the mean of the surfaces covering it, which is also a better answer than
+an arbitrary winner.
 
 Draws are replayed into the volume at the start of the *next* frame, so the volume is one frame
 old. That is imperceptible and avoids restructuring the app's submission order.
@@ -90,36 +134,58 @@ Baseline is feature level 11_0. Optional features are queried and gated, never a
 | `IDXGIFactory6` | `QueryInterface` | Falls back to `EnumAdapters1` (Win10 pre-1803) |
 
 Deliberate correctness choices for cross-vendor behaviour:
-- **All descriptor-heap slots are null-filled.** Resource Binding Tier 1 hardware (NVIDIA Kepler /
-  Maxwell gen 1, Intel Haswell/Broadwell) requires every descriptor in a bound table to be valid
-  even when the shader ignores it - and the voxel slots are empty whenever GI is off.
-- **Every pass binds both descriptor tables**, for the same Tier 1 reason.
+- **All descriptor-heap slots are null-filled, by declared KIND.** Resource Binding Tier 1 hardware
+  (NVIDIA Kepler / Maxwell gen 1, Intel Haswell/Broadwell) requires every descriptor in a bound
+  table to be valid even when the shader ignores it — and a null descriptor whose dimension
+  disagrees with what the shader declared is undefined too. That is why `BindingSetDesc` carries a
+  `SlotKind` per slot rather than a count alone: counts cannot supply the dimension.
+- **Every pass binds every declared table**, for the same Tier 1 reason, read or not.
+- **All declared root CBVs are given an address** by the backend at `setPipeline`. Leaving one
+  unset is undefined behaviour the debug layer cannot see — it validates API use, and this is not
+  API misuse. It hung this RDNA part outright (`0x141` TDR) on the IA+GS voxelise pipeline while
+  the mesh pipeline merely read zeros. Same defect, two symptoms.
 - **The radiance volume uses per-mip resource transitions.** The mip filter reads level m-1 through
   a single-mip SRV while writing level m as a UAV; a whole-chain SRV would demand every mip be in
   the read state at once. Getting this wrong is undefined behaviour that renders correctly on one
   vendor and corrupts on another.
 
-Known cost: voxelisation uses a geometry shader for dominant-axis projection. GS is core 11_0 and
+Voxelisation has a **GS-free variant**: `MSVoxel` makes the dominant-axis choice per primitive in a
+mesh shader, so the geometry stage disappears entirely. That matters because GS is core 11_0 and
 runs everywhere, but is emulated through an off-chip ring buffer on all AMD GCN parts and is
-markedly slower there. A GS-free variant (three instanced passes) is the fix if that bites.
+markedly slower there. The GS path remains for hardware below mesh-shader tier 1, and the two are
+pixel-identical.
 
 ## Ray tracing (DXR 1.1 inline)
 
 Ray-traced sun shadows via `RayQuery` traced straight from the pixel shader - no state objects,
 no shader binding tables, no `DispatchRays`, so it drops into the existing raster pipeline.
 
-- One BLAS per mesh, built lazily on first use (meshes are static).
-- TLAS rebuilt each frame from the same replayed draw list the shadow and voxel passes use.
+- One BLAS per mesh, built lazily on first use (meshes are static). A mesh that cannot produce one
+  is remembered as a zero, so a failure is not retried and re-logged every frame.
+- TLAS rebuilt each frame from the same replayed draw list the shadow and voxel passes use. It is
+  CREATED up front, sized for the draw-list cap, so its descriptor can be written into `t2` before
+  any frame is recorded — a shader-visible descriptor an in-flight frame may be reading must not be
+  rewritten.
 - A second pixel-shader variant is compiled at `ps_6_5` with `-D AVER_RT=1`; the SM 6.0
   variant remains the default, so a device without DXR still gets a working renderer and
   falls back to the shadow map.
 - Occlusion rays use `ACCEPT_FIRST_HIT_AND_END_SEARCH` - a visibility query, not a
   closest-hit search, which is substantially cheaper.
+- **The FEATURE decides whether a ray may be traced**, publishing it as `gShadowParams.z`. Tracing
+  an unbuilt or empty structure is not an error anyone can see: RayQuery reports no hit for every
+  pixel, i.e. a fully lit scene, with nothing for the debug layer to say. The guard belongs where
+  the fact is known, not in a pipeline choice a backend would have to keep in step.
 
 Engine matrices are row-vector (`v*M`); DXR instance transforms are 3x4 column-vector, so the
-upper 3x3 is transposed on the way in. Getting that wrong silently misplaces every instance.
+upper 3x3 is transposed on the way in — **by the backend**, from the engine-convention matrix Voxi
+hands over untouched. Getting that wrong leaves the raster image perfectly correct and puts every
+ray somewhere else, which only a cast-shadow probe can see.
 
-**Target when it lands: DXR 1.1 inline ray tracing (`RayQuery`) only.** AMD has never shipped a
+Also note: `IResourceFactory` has `createBlas`/`createTlas` but no matching destroy, so
+acceleration structures are released only when the factory is. Harmless while meshes are static;
+it needs an answer before geometry becomes dynamic.
+
+**DXR 1.1 inline ray tracing (`RayQuery`) only.** AMD has never shipped a
 Tier-1.0-only GPU (it entered at 1.1 with RDNA 2), Intel entered at 1.1 with Arc, and every
 Turing-or-later NVIDIA part reports 1.1 - so supporting DXR 1.0 as well would add only NVIDIA
 Pascal/Volta and GTX 16-series, which expose DXR through driver emulation with no RT cores and run
@@ -137,5 +203,6 @@ Full hardware matrix and launcher-ready spec text: `docs/MINIMUM_SPECS.md`.
 
 ## Next
 
-DXC migration then inline RayQuery; temporal accumulation to soften flicker; clearing stale voxels
-so moving objects do not leave trails; a cascaded volume for large scenes.
+Temporal accumulation to soften flicker; a cascaded volume for large scenes; cone-traced specular
+(diffuse + AO only today); RT ambient occlusion and reflections, which mostly reuse the TLAS that
+already exists. Open items are tracked in `docs/STATUS.md` §4d.

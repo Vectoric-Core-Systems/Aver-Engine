@@ -42,6 +42,7 @@ Arrows point to dependencies (A ──▶ B means "A depends on B"). Nothing bel
    ▼                   ▼         ▼            ▼            ▼                      ▼
  ── TIER 5: FEATURE / BRIDGE MODULES ────────────────────────────────────────────────
  (Aver.World)   (Aver.GpuDeform)[opt] (Aver.NetVehicle)[opt] (Aver.Render.GI)[opt]
+ (Aver.Render.Voxi.Renderer)[opt,ON] ── a RENDER FEATURE: drives Aver.RHI, never a backend
    │  │  │            │  │  │              │   │   │
    │  │  │            │  │  │              │   │   │
  ── TIER 4: SUBSYSTEMS ──────────────────────────────────────────────────────────────
@@ -87,11 +88,22 @@ GpuDeform     -> RHI, Render, SoftBody
 World         -> Scene, Render, Physics, Assets, Formats   (+ softly: Aero/SoftBody/Vehicle when enabled)
 NetVehicle    -> Net, Vehicle, SoftBody
 Render.GI     -> Render
+Render.Voxi          -> Core                      (SHARED: settings + C ABI, no RHI on the P/Invoke boundary)
+Render.Voxi.Renderer -> Core, RHI, Render.Voxi    (NEVER RHI.D3D12 — see below)
 Runtime       -> (all enabled modules)
 ABI           -> Runtime (wraps public APIs)
 ```
 
 No target appears in its own transitive closure → the graph is a DAG. `Core` is a sink.
+
+**Render features and P7.** `Aver.Render.Voxi.Renderer` is the first module built against the
+generic render-feature surface (`modules/rhi/include/aver/rhi/RHIResources.hpp`:
+`IResourceFactory`, `IRenderContext`, `IRenderFeature`). It owns real GPU resources — a shadow map,
+a radiance volume, acceleration structures, a dozen pipelines — and names no backend type anywhere.
+The rule is enforced by the LINK LINE rather than by review: it links `Aver.RHI` and never
+`Aver.RHI.D3D12`. Correspondingly, no feature's vocabulary appears in the RHI headers; the backend
+does not know what a voxel or a shadow map is. `docs/STATUS.md` §4c-2 records how the code got
+there and what it cost.
 
 ---
 
@@ -111,6 +123,8 @@ Core-tier = compiled by default in a game client; only **Core** and **Platform**
 | **Aver.Formats** | C++ | Assets, Core | Core | Runtime *loaders*: fast binary readers for native `.oc*c` compiled assets **and** tolerant text parsers for legacy `.ocbeam/.ocaero/.ocmap/.scene/.octrack` (dev/loose-file fallback). Exact lexing rules from recon (comment `#`, trailing `;`, comma fields, section modes). | Asset I/O (all carried-over text formats) |
 | **Aver.Render** | C++ | RHI, Assets, Core | Core | Render graph/frame graph, render-scene (renderables/lights/views/decals), clustered deferred + forward+ hybrid, PBR metallic-roughness material system (runtime graph, no editor recompile), virtualized shadows, TAA/temporal upscale (FSR), HDR/tonemap/post. Owns `RestPositions`/vertex-stream contracts. | Rendering stack; material/texture pipeline; `VehicleDeform` parity host |
 | **Aver.Render.GI** | C++ | Render | `[opt]` | Global illumination plugin: surfel/probe GI + screen-space GI, optional DXR ray-traced reflections/GI — the "UE5 Lumen / Source 2" tier, behind a feature gate. | Rendering quality (UE5/Source2 parity) |
+| **Aver.Render.Voxi** | C++ | Core | `[opt, default ON]` | Project-wide render quality settings (MSAA / GI / ray tracing / mesh shaders / path tracing) with honest per-feature `Ready`/`NotImplemented`/`Unsupported` reporting from the real device caps. SHARED, plus a plain-C ABI (`aver_voxi_*`) for C# P/Invoke. | Implemented — the first optional module |
+| **Aver.Render.Voxi.Renderer** | C++ | Core, RHI, Render.Voxi | `[opt, default ON]` | The GPU half: voxel cone traced GI, a 2048² directional shadow map, DXR 1.1 inline RayQuery sun shadows, and the scene lit pipelines that combine them. A `rhi::IRenderFeature`, so it drives the generic RHI and links no backend. | Implemented |
 | **Aver.Scene** | C++ | Core, Assets | Core | Minimal data-oriented entity/component world (EnTT-style): transforms, hierarchy, component storage, system scheduler. Render/physics-agnostic (P2). | world/scene (entity layer) |
 | **Aver.Physics** | C++ | Core | Core | Rigid-body dynamics + collision (Jolt Physics, MIT) wrapped behind an `AvPhysics` facade: bodies, shapes, broadphase, raycasts (ground probe for aero ride height), contact callbacks feeding impact seams. | Rigid chassis integrator; collision layer for `OnHit`/`ReportImpact` |
 | **Aver.SoftBody** | C++ | Core | `[opt]` | The OpenConstructor cage solver, extracted UE-free: `AvVehicleMaterial/Node/Beam/Panel/Part`, `AvSolveConfig/Result`, `InitSolver`, `SolveStep` (Verlet + Gauss-Seidel PBD, plasticity, break/tear), impact injection (`OCCrushCurve`, tear radius), part detach/repair, active-set + async worker (`std::thread`/`condition_variable`/`atomic`). Exposes C ABI. | **soft-body solver** (whole `VehicleDamage` core) |
@@ -228,6 +242,7 @@ option(AVER_NET         "Networking"                   ON)
 option(AVER_MATCH       "Matchmaking"                  ON)
 option(AVER_AUDIO       "Procedural audio"             ON)
 option(AVER_RENDER_GI   "Global illumination"          ON)
+option(AVER_MODULE_VOXI "Voxi render module"           ON)  # implemented; OFF builds + runs, unshadowed and GI-free
 option(AVER_SCRIPTING   ".NET scripting host"          ON)
 
 add_subdirectory(modules/core)          # always
