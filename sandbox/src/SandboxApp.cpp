@@ -251,6 +251,7 @@ public:
             if (msaaOverride_) s.msaa = static_cast<voxi::Msaa>(msaaOverride_);
             if (giOverride_) s.globalIllumination = static_cast<voxi::Quality>(giOverride_);
             if (rtOverride_) s.rayTracing = static_cast<voxi::Quality>(rtOverride_);
+            if (msOverride_) s.meshShaders = true;
             voxi::Renderer::get().setSettings(s);
             AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", c.maxMsaaSamples, c.rayTracingTier, c.shaderModel, c.meshShaderTier);
         }
@@ -323,6 +324,7 @@ public:
             g.extent    = giExtent_;
             e.device()->setGi(g);
             e.device()->setRayTracing(vs.rayTracing != voxi::Quality::Off);
+            e.device()->setMeshShaders(vs.meshShaders);
         }
 #endif
         // Confine the scene to the dockspace's central node (latched by buildUI last frame).
@@ -368,6 +370,7 @@ public:
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
     void setGiOverride(int q, bool dbg) { giOverride_ = q; giDebugView_ = dbg; } // --gi / --gi-debug
     void setRtOverride(int q) { rtOverride_ = q; }                              // --rt
+    void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
 
 private:
     // Aspect comes from the viewport rect (the dockspace's central node), not the whole window.
@@ -1094,6 +1097,7 @@ private:
     int  msaaOverride_=0;            // --msaa N: apply a sample count at startup
     int  giOverride_=0;              // --gi: GI quality to apply at startup
     int  rtOverride_=0;              // --rt: ray tracing quality at startup
+    bool msOverride_=false;          // --ms: force the mesh shader geometry path
     bool worldSpace_=true;   // gizmo coordinate space toggle (display only for now)
     // Voxi GI volume placement: a cube around the default scene (floor is +/-40, cube at origin).
     bool giDebugView_=false; Vec3 giCenter_{0,0,8}; f32 giExtent_=44.0f;
@@ -1102,7 +1106,7 @@ private:
 };
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false; std::string beam, shot; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false;
+    u64 frames=0; bool headless=false, focusVoxi=false; std::string beam, shot; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -1110,6 +1114,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--gi")) gi=3;
         else if (!std::strcmp(argv[i],"--gi-debug")) { gi=3; giDbg=true; }
         else if (!std::strcmp(argv[i],"--rt")) rt=3;
+        else if (!std::strcmp(argv[i],"--ms")) ms=true;
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
         else if (!std::strcmp(argv[i],"--tool") && i+1<argc) {
@@ -1124,6 +1129,7 @@ Application* createApplication(int argc, char** argv) {
     app->setMsaaOverride(msaa);
     app->setGiOverride(gi, giDbg);
     app->setRtOverride(rt);
+    app->setMsOverride(ms);
     return app;
 }
 

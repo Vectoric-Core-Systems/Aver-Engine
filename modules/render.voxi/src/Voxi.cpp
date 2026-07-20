@@ -60,7 +60,7 @@ Status Renderer::status(Feature f) const {
             // Needs mesh-shader Tier 1 AND shader model 6.5, i.e. a DXIL compiler.
             if (device_.meshShaderTier == 0 || device_.shaderModel < 65 || !device_.dxcAvailable)
                 return Status::Unsupported;
-            return Status::NotImplemented;   // capability present; the MS geometry path is next
+            return Status::Ready;
         default: return Status::Unsupported;
     }
 }

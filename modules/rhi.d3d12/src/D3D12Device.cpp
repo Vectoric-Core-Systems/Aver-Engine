@@ -158,6 +158,10 @@ D3D12_RESOURCE_DESC bufferDesc(u64 bytes) {
     return d;
 }
 
+// Triangles per mesh-shader thread group. Must stay in step with AVER_MS_TRIS in the HLSL below;
+// 64 tris = 192 verts / 64 prims, inside the 256/256 per-group output limit.
+constexpr u32 kMsTrisPerGroup = 64;
+
 const char* kShaderHLSL = R"(
 cbuffer PerFrame : register(b0) {
     float4x4 gViewProj;
@@ -415,6 +419,83 @@ void GSVoxel(triangle VoxOut inp[3], inout TriangleStream<VoxOut> os) {
     }
 }
 
+#if AVER_MS
+// ================= Mesh shader geometry path =================
+// A mesh shader has no input assembler, so it reads the vertex and index buffers itself. Both are
+// bound as ROOT SRVs (raw/structured buffers are allowed there), which keeps the per-mesh cost at
+// two GPU virtual addresses and needs no descriptor heap slots at all.
+//
+// One thread group per 64 triangles, expanded unindexed: 192 vertices / 64 primitives, inside the
+// 256/256 per-group limit. Skipping vertex reuse costs a little duplicate transform work and buys
+// a much simpler shader; meshlet building belongs with the asset pipeline, not here.
+struct MeshVtx { float3 pos; float3 nrm; };
+StructuredBuffer<MeshVtx> gVerts   : register(t3);
+ByteAddressBuffer         gIndices : register(t4);
+cbuffer MeshCB : register(b2) { uint gTriCount; uint3 _msPad; };
+
+#define AVER_MS_TRIS 64
+
+// Triangles this group owns, and where its slice of the output arrays starts.
+uint msTriCount(uint gid) { return min(AVER_MS_TRIS, gTriCount - gid * AVER_MS_TRIS); }
+
+[numthreads(AVER_MS_TRIS, 1, 1)]
+[outputtopology("triangle")]
+void MSMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
+            out vertices VSOut verts[AVER_MS_TRIS * 3],
+            out indices uint3 tris[AVER_MS_TRIS]) {
+    uint count = msTriCount(gid);
+    SetMeshOutputCounts(count * 3, count);   // must run for the whole group, before any output
+    if (gtid >= count) return;
+
+    uint3 idx = gIndices.Load3((gid * AVER_MS_TRIS + gtid) * 12);
+    uint o = gtid * 3;
+    [unroll] for (uint k = 0; k < 3; ++k) {
+        MeshVtx v = gVerts[idx[k]];
+        float4 wp = mul(float4(v.pos, 1.0), gWorld);
+        VSOut ov;
+        ov.wpos  = wp.xyz;
+        ov.pos   = mul(wp, gViewProj);
+        ov.nrmWS = mul(float4(v.nrm, 0.0), gWorld).xyz;
+        verts[o + k] = ov;
+    }
+    tris[gtid] = uint3(o, o + 1, o + 2);
+}
+
+// Voxelisation without a geometry shader. The dominant-axis choice GSVoxel made per primitive is
+// made here instead - the mesh shader is already per-primitive, so the GS stage disappears. That
+// matters because GS is emulated on every AMD GCN part and is markedly slower there.
+[numthreads(AVER_MS_TRIS, 1, 1)]
+[outputtopology("triangle")]
+void MSVoxel(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
+             out vertices VoxOut verts[AVER_MS_TRIS * 3],
+             out indices uint3 tris[AVER_MS_TRIS]) {
+    uint count = msTriCount(gid);
+    SetMeshOutputCounts(count * 3, count);
+    if (gtid >= count) return;
+
+    uint3 idx = gIndices.Load3((gid * AVER_MS_TRIS + gtid) * 12);
+    float3 wp[3], nr[3];
+    [unroll] for (uint k = 0; k < 3; ++k) {
+        MeshVtx v = gVerts[idx[k]];
+        wp[k] = mul(float4(v.pos, 1.0), gWorld).xyz;
+        nr[k] = mul(float4(v.nrm, 0.0), gWorld).xyz;
+    }
+    float3 n = abs(cross(wp[1] - wp[0], wp[2] - wp[0]));
+    int axis = (n.x > n.y && n.x > n.z) ? 0 : ((n.y > n.z) ? 1 : 2);
+    uint o = gtid * 3;
+    [unroll] for (uint k = 0; k < 3; ++k) {
+        float3 v = voxelUVW(wp[k]);
+        float2 p = (axis == 0) ? v.yz : ((axis == 1) ? v.xz : v.xy);
+        VoxOut ov;
+        ov.wpos = wp[k];
+        ov.nrm  = nr[k];
+        ov.pos  = float4(p * 2.0 - 1.0, 0.5, 1.0);
+        verts[o + k] = ov;
+    }
+    tris[gtid] = uint3(o, o + 1, o + 2);
+}
+#endif // AVER_MS
+
 void PSVoxel(VoxOut i) {
     float3 uvw = voxelUVW(i.wpos);
     if (!insideVolume(uvw)) return;
@@ -575,6 +656,12 @@ public:
     void setGi(const GiSettings& gi) override;
     void setRayTracing(bool enabled) override { rtEnabled_ = enabled && rtSupported_; }
     bool rayTracingActive() const override { return rtActive_; }
+    void setMeshShaders(bool enabled) override {
+        const bool want = enabled && msSupported_;
+        if (want != msActive_) AVER_INFO("[RHI.D3D12] geometry path: {}", want ? "mesh shaders" : "input assembler");
+        msEnabled_ = msActive_ = want;
+    }
+    bool meshShadersActive() const override { return msActive_; }
 
     void requestCapture(u32 x, u32 y) override { capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
     bool getCapture(f32 out[4]) override {
@@ -600,9 +687,12 @@ public:
 private:
     void queryCaps();
     bool initRayTracing();
+    bool initMeshShaders();
+    void dispatchMesh(const GpuMesh& m);
     void buildBlas(u32 meshIndex);
     void buildRtScene();
     void bindGiTables();                        // bind heap + both descriptor tables (Tier 1 safety)
+    void bindGraphicsRoot(ID3D12RootSignature* rs); // switch root signature + rebind shared params
     void voxelBarrier(u32 sub, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to);
     bool createShadowResources();
     void shadowPass();
@@ -674,6 +764,15 @@ private:
     ComPtr<ID3D12Device5> device5_;
     ComPtr<ID3D12GraphicsCommandList4> cmdList4_;
     ComPtr<ID3D12PipelineState> rtPso_;
+
+    // ---- Mesh shader geometry path (D3D12 Ultimate) ----
+    // A separate root signature: a mesh-shader PSO may not use one declaring an input-assembler
+    // layout, and the MS path adds two root SRVs (vertices, indices) plus a triangle count.
+    ComPtr<ID3D12GraphicsCommandList6> cmdList6_;
+    ComPtr<ID3D12RootSignature> msRootSig_;
+    ComPtr<ID3D12PipelineState> msPso_, msVoxelPso_;
+    bool msSupported_ = false, msEnabled_ = false, msActive_ = false;
+    ID3D12RootSignature* boundRootSig_ = nullptr;   // raw: cache only, ownership stays in the ComPtrs
     ComPtr<ID3D12Resource> tlas_, tlasScratch_, instanceBuf_;
     std::vector<ComPtr<ID3D12Resource>> asScratch_;   // BLAS scratch, kept alive
     u64 tlasBytes_ = 0, tlasScratchBytes_ = 0, instanceBufBytes_ = 0;
@@ -825,6 +924,7 @@ bool D3D12Device::setSampleCount(u32 samples) {
     sampleCount_ = samples;
     if (!createPipeline()) { sampleCount_ = prev; createPipeline(); return false; } // PSOs carry SampleDesc
     if (rtSupported_) initRayTracing();   // the RayQuery PSO bakes SampleDesc too
+    if (msSupported_) initMeshShaders();  // so does the mesh-shader PSO
     if (hasSwapchain_) {
         depthBuffer_.Reset();
         msaaColor_.Reset();
@@ -1052,6 +1152,131 @@ bool D3D12Device::initRayTracing() {
     return true;
 }
 
+namespace {
+// A mesh-shader PSO cannot be described by D3D12_GRAPHICS_PIPELINE_STATE_DESC; it needs the
+// subobject-stream form. Rather than pull in d3dx12.h for two pipelines, this is the same
+// alignas(void*) {type, value} pairing the header generates.
+template <typename T, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Type>
+struct alignas(void*) Subobject {
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type = Type;
+    T value{};
+    Subobject& operator=(const T& v) { value = v; return *this; }
+};
+
+struct MeshPsoStream {
+    Subobject<ID3D12RootSignature*,     D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE>    rootSig;
+    Subobject<D3D12_SHADER_BYTECODE,    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS>                ms;
+    Subobject<D3D12_SHADER_BYTECODE,    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS>                ps;
+    Subobject<D3D12_RASTERIZER_DESC,    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER>        raster;
+    Subobject<D3D12_DEPTH_STENCIL_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL>     depth;
+    Subobject<D3D12_BLEND_DESC,         D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND>             blend;
+    Subobject<UINT,                     D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK>       sampleMask;
+    Subobject<D3D12_RT_FORMAT_ARRAY,    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS> rtvs;
+    Subobject<DXGI_FORMAT,              D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT>  dsv;
+    Subobject<DXGI_SAMPLE_DESC,         D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC>       sample;
+};
+} // namespace
+
+// Mesh shader path. Needs Tier 1 + SM 6.5 + DXC, i.e. the same D3D12 Ultimate floor as RayQuery.
+bool D3D12Device::initMeshShaders() {
+    msSupported_ = false;
+    if (caps_.meshShaderTier == 0 || caps_.shaderModel < 65 || !caps_.dxcAvailable) return false;
+    ComPtr<ID3D12Device2> device2;
+    if (FAILED(device_.As(&device2))) return false;
+    if (!cmdList6_) return false;   // DispatchMesh lives on ID3D12GraphicsCommandList6
+
+    // Root signature WITHOUT the input-assembler flag (illegal with a mesh shader), plus two root
+    // SRVs for the buffers the MS reads directly and a root constant for the triangle count.
+    if (!msRootSig_) {
+        D3D12_DESCRIPTOR_RANGE srvRange{}; srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; srvRange.NumDescriptors = 3; srvRange.BaseShaderRegister = 0;
+        D3D12_DESCRIPTOR_RANGE uavRange{}; uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; uavRange.NumDescriptors = 1; uavRange.BaseShaderRegister = 0;
+        D3D12_ROOT_PARAMETER p[7] = {};
+        p[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; p[0].Descriptor.ShaderRegister = 0;
+        p[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; p[1].Constants.ShaderRegister = 1; p[1].Constants.Num32BitValues = 24;
+        p[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; p[2].DescriptorTable.NumDescriptorRanges = 1; p[2].DescriptorTable.pDescriptorRanges = &srvRange;
+        p[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; p[3].DescriptorTable.NumDescriptorRanges = 1; p[3].DescriptorTable.pDescriptorRanges = &uavRange;
+        p[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; p[4].Descriptor.ShaderRegister = 3;  // vertices
+        p[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; p[5].Descriptor.ShaderRegister = 4;  // indices
+        p[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; p[6].Constants.ShaderRegister = 2; p[6].Constants.Num32BitValues = 4;
+        for (auto& rp : p) rp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+        D3D12_STATIC_SAMPLER_DESC samp{};
+        samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samp.MaxLOD = D3D12_FLOAT32_MAX; samp.ShaderRegister = 0; samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        D3D12_STATIC_SAMPLER_DESC shadowSamp{};
+        shadowSamp.Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+        shadowSamp.AddressU = shadowSamp.AddressV = shadowSamp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        shadowSamp.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        shadowSamp.MaxLOD = D3D12_FLOAT32_MAX; shadowSamp.ShaderRegister = 1; shadowSamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        const D3D12_STATIC_SAMPLER_DESC samplers[2] = {samp, shadowSamp};
+
+        D3D12_ROOT_SIGNATURE_DESC rsd{};
+        rsd.NumParameters = 7; rsd.pParameters = p;
+        rsd.NumStaticSamplers = 2; rsd.pStaticSamplers = samplers;
+        rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+        ComPtr<ID3DBlob> b, e;
+        if (!hrOk(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &b, &e), "ms root sig")) return false;
+        if (!hrOk(device_->CreateRootSignature(0, b->GetBufferPointer(), b->GetBufferSize(), IID_PPV_ARGS(&msRootSig_)), "ms root sig create")) return false;
+    }
+
+    // AVER_MS gates the mesh-shader entry points: their syntax is only legal from SM 6.5, so the
+    // SM 5.1 compiles of this same source must not see them.
+    ComPtr<ID3DBlob> ms, msVox, ps, psVox;
+    auto ok = [&](const char* entry, const char* fxcTarget, const char* target, ComPtr<ID3DBlob>& out) {
+        return SUCCEEDED(shaderCompiler().compile(kShaderHLSL, entry, fxcTarget, &out, target, "AVER_MS=1"));
+    };
+    if (!ok("MSMain",  "vs_5_1", "ms_6_5", ms)    ||
+        !ok("MSVoxel", "vs_5_1", "ms_6_5", msVox) ||
+        !ok("PSMain",  "ps_5_1", "ps_6_5", ps)    ||
+        !ok("PSVoxel", "ps_5_1", "ps_6_5", psVox)) {
+        AVER_WARN("[RHI.D3D12] mesh shaders failed to compile; the IA path stays in use");
+        return false;
+    }
+
+    MeshPsoStream s{};
+    s.rootSig = msRootSig_.Get();
+    s.ms = D3D12_SHADER_BYTECODE{ms->GetBufferPointer(), ms->GetBufferSize()};
+    s.ps = D3D12_SHADER_BYTECODE{ps->GetBufferPointer(), ps->GetBufferSize()};
+    s.raster.value.FillMode = D3D12_FILL_MODE_SOLID;
+    s.raster.value.CullMode = D3D12_CULL_MODE_NONE;
+    s.raster.value.DepthClipEnable = TRUE;
+    s.raster.value.MultisampleEnable = TRUE;
+    s.depth.value.DepthEnable = TRUE;
+    s.depth.value.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    s.depth.value.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    s.blend.value.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    s.sampleMask = UINT_MAX;
+    s.rtvs.value.NumRenderTargets = 1;
+    s.rtvs.value.RTFormats[0] = kBackbufferFormat;
+    s.dsv = kDepthFormat;
+    s.sample.value.Count = sampleCount_;
+    D3D12_PIPELINE_STATE_STREAM_DESC sd{sizeof(s), &s};
+    if (!hrOk(device2->CreatePipelineState(&sd, IID_PPV_ARGS(&msPso_)), "mesh pso")) return false;
+
+    // Voxelisation variant: no render target, no depth — the PS writes only the UAV.
+    MeshPsoStream v{};
+    v.rootSig = msRootSig_.Get();
+    v.ms = D3D12_SHADER_BYTECODE{msVox->GetBufferPointer(), msVox->GetBufferSize()};
+    v.ps = D3D12_SHADER_BYTECODE{psVox->GetBufferPointer(), psVox->GetBufferSize()};
+    v.raster.value.FillMode = D3D12_FILL_MODE_SOLID;
+    v.raster.value.CullMode = D3D12_CULL_MODE_NONE;
+    v.raster.value.DepthClipEnable = FALSE;
+    v.raster.value.ConservativeRaster = caps_.conservativeRaster
+        ? D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON : D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+    v.depth.value.DepthEnable = FALSE;
+    v.sampleMask = UINT_MAX;
+    v.rtvs.value.NumRenderTargets = 0;
+    v.dsv = DXGI_FORMAT_UNKNOWN;
+    v.sample.value.Count = 1;
+    D3D12_PIPELINE_STATE_STREAM_DESC vd{sizeof(v), &v};
+    if (!hrOk(device2->CreatePipelineState(&vd, IID_PPV_ARGS(&msVoxelPso_)), "mesh voxel pso")) return false;
+
+    msSupported_ = true;
+    AVER_INFO("[RHI.D3D12] mesh shader path ready (ms_6_5, GS-free voxelisation)");
+    return true;
+}
+
 // One BLAS per mesh, built once (meshes are static). Must run on a command list, so it happens
 // at the top of a frame rather than in createMesh.
 void D3D12Device::buildBlas(u32 meshIndex) {
@@ -1173,6 +1398,18 @@ void D3D12Device::buildRtScene() {
 // Both descriptor tables are bound for every graphics pass. At Resource Binding Tier 1 (NVIDIA
 // Kepler / Maxwell gen 1, Intel Haswell/Broadwell) every descriptor in every table a root
 // signature declares must be valid even if the shader never reads it, so this is not optional.
+// The mesh-shader path needs its own root signature, so the graphics root signature now changes
+// mid-frame: meshes may use msRootSig_ while lines and the sky stay on rootSig_. Switching one
+// resets every root binding, hence the re-bind here. Cached so a run of same-signature draws pays
+// nothing.
+void D3D12Device::bindGraphicsRoot(ID3D12RootSignature* rs) {
+    if (boundRootSig_ == rs) return;
+    boundRootSig_ = rs;
+    cmdList_->SetGraphicsRootSignature(rs);
+    cmdList_->SetGraphicsRootConstantBufferView(0, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
+    bindGiTables();
+}
+
 void D3D12Device::bindGiTables() {
     if (!giHeap_) return;
     ID3D12DescriptorHeap* heaps[] = {giHeap_.Get()};
@@ -1316,11 +1553,11 @@ void D3D12Device::shadowPass() {
     D3D12_RECT sc{0, 0, static_cast<LONG>(kShadowSize), static_cast<LONG>(kShadowSize)};
     cmdList_->RSSetViewports(1, &vp);
     cmdList_->RSSetScissorRects(1, &sc);
-    cmdList_->SetGraphicsRootSignature(rootSig_.Get());
-    cmdList_->SetGraphicsRootConstantBufferView(0, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
     // Resource Binding Tier 1 requires EVERY table the root signature declares to be bound, even
     // when the shader ignores them - otherwise this is UB on Kepler/Maxwell-gen1/Haswell.
-    bindGiTables();
+    // (bindGraphicsRoot binds them all.) The shadow pass stays on the IA path: it is depth-only,
+    // so a mesh-shader variant would buy nothing.
+    bindGraphicsRoot(rootSig_.Get());
     cmdList_->SetPipelineState(shadowPso_.Get());
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     for (const VoxelDraw& d : voxelDrawsPrev_) {
@@ -1555,8 +1792,10 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
     }
     if (!hrOk(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocators_[0].Get(), nullptr, IID_PPV_ARGS(&cmdList_)), "CreateCommandList")) return false;
     cmdList_.As(&cmdList4_);   // optional: only needed for acceleration-structure builds
+    cmdList_.As(&cmdList6_);   // optional: only needed for DispatchMesh
     cmdList_->Close();
     if (cmdList4_) initRayTracing();
+    if (cmdList6_) initMeshShaders();
 
     // Capture readback buffer sized to the backbuffer footprint.
     D3D12_RESOURCE_DESC bbDesc = renderTargets_[0]->GetDesc();
@@ -1668,9 +1907,10 @@ void D3D12Device::voxelizePass() {
         cmdList_->ResourceBarrier(1, &uav0);   // injection must see the cleared volume
     }
 
-    cmdList_->SetGraphicsRootSignature(rootSig_.Get());
-    cmdList_->SetGraphicsRootConstantBufferView(0, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
-    bindGiTables();
+    // Mesh shaders remove the geometry shader from voxelisation entirely - the reason this path
+    // exists, since GS is emulated on every AMD GCN part.
+    const bool useMs = msActive_ && msVoxelPso_;
+    bindGraphicsRoot(useMs ? msRootSig_.Get() : rootSig_.Get());
     D3D12_GPU_DESCRIPTOR_HANDLE gh = giHeap_->GetGPUDescriptorHandleForHeapStart();
 
     // No RTV/DSV: the pixel shader writes only the UAV. Viewport defines the raster resolution.
@@ -1679,8 +1919,8 @@ void D3D12Device::voxelizePass() {
     D3D12_RECT sc{0, 0, static_cast<LONG>(res), static_cast<LONG>(res)};
     cmdList_->RSSetViewports(1, &vp);
     cmdList_->RSSetScissorRects(1, &sc);
-    cmdList_->SetPipelineState(voxelPso_.Get());
-    cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmdList_->SetPipelineState(useMs ? msVoxelPso_.Get() : voxelPso_.Get());
+    if (!useMs) cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     for (const VoxelDraw& d : voxelDrawsPrev_) {
         if (d.mesh == 0 || d.mesh > meshes_.size()) continue;
@@ -1690,6 +1930,7 @@ void D3D12Device::voxelizePass() {
         std::memcpy(consts + 16, d.color, 4 * sizeof(f32));
         consts[20] = d.metallic; consts[21] = d.roughness; consts[22] = 0.0f; consts[23] = 0.0f;
         cmdList_->SetGraphicsRoot32BitConstants(1, 24, consts, 0);
+        if (useMs) { dispatchMesh(m); continue; }
         cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
         cmdList_->IASetIndexBuffer(&m.ibv);
         cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
@@ -1734,6 +1975,7 @@ void D3D12Device::beginFrame() {
     }
     allocators_[frameIndex_]->Reset();
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
+    boundRootSig_ = nullptr;   // a command-list reset drops every root binding
 
     // Scene renders into the MSAA color + depth targets; endFrame resolves to backbuffer.
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = msaaRtvHeap_->GetCPUDescriptorHandleForHeapStart();
@@ -1765,9 +2007,7 @@ void D3D12Device::beginFrame() {
     cmdList_->RSSetViewports(1, &vp);
     cmdList_->RSSetScissorRects(1, &sc);
 
-    cmdList_->SetGraphicsRootSignature(rootSig_.Get());
-    cmdList_->SetGraphicsRootConstantBufferView(0, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
-    bindGiTables(); // volume (t0) + shadow map (t1) for the lit pass
+    bindGraphicsRoot(rootSig_.Get()); // volume (t0) + shadow map (t1) for the lit pass
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     // Debug view replaces the whole scene with a raymarch of the volume.
@@ -1803,16 +2043,33 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     // but only AFTER capturing above, or the volume would never be filled.
     if (gi_.enabled && gi_.debugView) return;
     const GpuMesh& m = meshes_[mesh - 1];
-    cmdList_->SetPipelineState(wireframe_ ? wirePso_.Get() : ((rtActive_ && rtPso_) ? rtPso_.Get() : pso_.Get()));
-    cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // Wireframe and RayQuery only exist on the IA path, so they win over the mesh-shader toggle.
+    const bool useMs = msActive_ && msPso_ && !wireframe_ && !(rtActive_ && rtPso_);
+    bindGraphicsRoot(useMs ? msRootSig_.Get() : rootSig_.Get());
+    cmdList_->SetPipelineState(useMs ? msPso_.Get()
+                                     : (wireframe_ ? wirePso_.Get() : ((rtActive_ && rtPso_) ? rtPso_.Get() : pso_.Get())));
     f32 consts[24];
     std::memcpy(consts, world, 16 * sizeof(f32));
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
     consts[20] = metallic; consts[21] = roughness; consts[22] = 0.0f; consts[23] = 0.0f;
     cmdList_->SetGraphicsRoot32BitConstants(1, 24, consts, 0);
+    if (useMs) { dispatchMesh(m); return; }
+    cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
     cmdList_->IASetIndexBuffer(&m.ibv);
     cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+}
+
+// Mesh-shader draw: no input assembler, so the buffers go in as root SRVs and the group count is
+// derived from the triangle count. Must match AVER_MS_TRIS in the shader.
+void D3D12Device::dispatchMesh(const GpuMesh& m) {
+    const u32 tris = m.indexCount / 3;
+    if (!tris) return;
+    cmdList_->SetGraphicsRootShaderResourceView(4, m.vb->GetGPUVirtualAddress());
+    cmdList_->SetGraphicsRootShaderResourceView(5, m.ib->GetGPUVirtualAddress());
+    const u32 tc[4] = {tris, 0, 0, 0};
+    cmdList_->SetGraphicsRoot32BitConstants(6, 4, tc, 0);
+    cmdList6_->DispatchMesh((tris + kMsTrisPerGroup - 1) / kMsTrisPerGroup, 1, 1);
 }
 
 LineHandle D3D12Device::createLineMesh(const LineVertex* verts, u32 count) {
@@ -1836,6 +2093,7 @@ void D3D12Device::drawLines(LineHandle mesh, const f32 world[16]) {
     if (!hasSwapchain_ || mesh == 0 || mesh > lineMeshes_.size()) return;
     if (gi_.enabled && gi_.debugView) return; // grid/gizmo would overlay the volume raymarch
     const GpuLineMesh& m = lineMeshes_[mesh - 1];
+    bindGraphicsRoot(rootSig_.Get()); // lines have no mesh-shader variant; a mesh draw may have switched
     cmdList_->SetPipelineState(lineDepth_ ? linePso_.Get() : lineOverlayPso_.Get());
     cmdList_->SetGraphicsRoot32BitConstants(1, 16, world, 0); // gWorld only
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);

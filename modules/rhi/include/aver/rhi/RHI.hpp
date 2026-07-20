@@ -142,6 +142,12 @@ public:
     virtual void setRayTracing(bool enabled) { (void)enabled; }
     virtual bool rayTracingActive() const { return false; }
 
+    // Mesh shader geometry path (D3D12 Ultimate: mesh-shader Tier 1 + SM 6.5). Replaces the
+    // input-assembler vertex path, and removes the geometry shader from voxelisation — which is
+    // the real win, since GS is emulated on every AMD GCN part. Ignored when unavailable.
+    virtual void setMeshShaders(bool enabled) { (void)enabled; }
+    virtual bool meshShadersActive() const { return false; }
+
     // Render subsequent meshes as wireframe until toggled off.
     virtual void setWireframe(bool on) { (void)on; }
 
