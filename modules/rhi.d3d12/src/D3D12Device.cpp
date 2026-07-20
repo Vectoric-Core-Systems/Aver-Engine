@@ -695,7 +695,7 @@ public:
     }
     bool meshShadersActive() const override { return msActive_; }
 
-    void requestCapture(u32 x, u32 y) override { capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
+    void requestCapture(u32 x, u32 y) override { AVER_ERROR("[DIAG] requestCapture {} {} hasSwap={} buf={}", x, y, (int)hasSwapchain_, (void*)captureBuf_.Get()); capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
     bool getCapture(f32 out[4]) override {
         if (!captureReady_) return false;
         for (int i = 0; i < 4; ++i) out[i] = captured_[i];
@@ -740,6 +740,8 @@ private:
 
     ComPtr<IDXGIFactory4> factory_;   // 6 is optional (see init); 4 is the baseline
     ComPtr<ID3D12Device> device_;
+    ComPtr<ID3D12InfoQueue> infoQueue_;   // TEMP DIAGNOSTIC
+    void drainInfoQueue(const char* where);
     ComPtr<ID3D12CommandQueue> queue_;
     ComPtr<IDXGISwapChain3> swapChain_;
     ComPtr<ID3D12DescriptorHeap> rtvHeap_;
@@ -1053,6 +1055,9 @@ private:
     std::vector<RetiredRange>  freeRanges_;      // reusable now
 
     friend class D3D12RenderContext;
+    // The frame path binds a feature's descriptor table for the scene draws IT records, so it needs
+    // the same internals the context does. Both live in this translation unit.
+    friend class D3D12Device;
 };
 
 class D3D12RenderContext final : public IRenderContext {
@@ -1137,6 +1142,14 @@ bool D3D12Device::init(const DeviceDesc& desc) {
         adapter.Reset();
     }
     if (!device_) { AVER_WARN("[RHI.D3D12] no compatible hardware adapter"); return false; }
+
+    // TEMP DIAGNOSTIC
+    if (SUCCEEDED(device_.As(&infoQueue_))) {
+        AVER_ERROR("[DIAG] InfoQueue acquired, debug layer IS live");
+        infoQueue_->SetMuteDebugOutput(FALSE);
+    } else {
+        AVER_ERROR("[DIAG] InfoQueue NOT available - debug layer is NOT active");
+    }
 
     D3D12_COMMAND_QUEUE_DESC qd{};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -1771,14 +1784,20 @@ void D3D12Device::bindGraphicsRoot(ID3D12RootSignature* rs) {
     bindGiTables();
 }
 
+// t0/t1/t2/u0 belong to the registered render feature now -- the backend has no volume and no
+// shadow map of its own to make views of. Resource Binding Tier 1 requires every declared table to
+// be bound on EVERY pass, so this runs for the sky and line draws too, which read none of it.
 void D3D12Device::bindGiTables() {
-    if (!giHeap_) return;
-    ID3D12DescriptorHeap* heaps[] = {giHeap_.Get()};
+    if (!rhiFactory_) return;
+    RhiBindingSet* s = nullptr;
+    for (IRenderFeature* f : features_) {
+        if (const BindingSetHandle h = f->sceneBindingSet()) { s = rhiFactory_->bindingSet(h); break; }
+    }
+    if (!s) return;
+    ID3D12DescriptorHeap* heaps[] = {rhiFactory_->heap_.Get()};
     cmdList_->SetDescriptorHeaps(1, heaps);
-    D3D12_GPU_DESCRIPTOR_HANDLE gh = giHeap_->GetGPUDescriptorHandleForHeapStart();
-    cmdList_->SetGraphicsRootDescriptorTable(2, gh);                       // t0 voxel, t1 shadow
-    D3D12_GPU_DESCRIPTOR_HANDLE uav0 = gh; uav0.ptr += 3ull * giSrvSize_;  // u0 = mip 0
-    cmdList_->SetGraphicsRootDescriptorTable(3, uav0);
+    cmdList_->SetGraphicsRootDescriptorTable(2, rhiFactory_->gpuSlot(s->heapBase));                 // t0,t1,t2
+    cmdList_->SetGraphicsRootDescriptorTable(3, rhiFactory_->gpuSlot(s->heapBase + s->srvCount));   // u0
 }
 
 // Per-subresource (per-mip) transition of the radiance volume.
@@ -1937,6 +1956,9 @@ void D3D12Device::shadowPass() {
 
 // ---------------------------------------------------------------- Voxi GI
 void D3D12Device::setGi(const GiSettings& gi) {
+    // The feature owns the volume and is configured directly by the app; gi_ survives only for the
+    // backend's remaining debug-view gate, which moves out in a later step. Routing the settings
+    // through here instead would put GI vocabulary back into the generic device interface.
     gi_ = gi;
     if (gi_.enabled && gi_.resolution != voxelResBuilt_) {
         waitForGpu();
@@ -2352,14 +2374,23 @@ void D3D12Device::beginFrame() {
     // the PREVIOUS frame's geometry while submitDraw fills the next one.
     for (IRenderFeature* f : features_) f->beginScene();
     buildRtScene();   // BLAS/TLAS for RayQuery, from the same replayed draw list
-    shadowPass();     // must precede voxelisation: injection samples the shadow map
-    voxelizePass();
 
-    // Registered render features get the same slot: their own targets, before the scene's are bound.
+    // The shadow map and the radiance volume belong to the registered feature now; the backend's own
+    // shadowPass/voxelizePass are dead and get deleted in a later step. Features own their targets,
+    // so this runs before the scene's are bound.
     if (!features_.empty() && rhiContext_) {
         for (IRenderFeature* f : features_) f->prePass(*rhiContext_);
-        // A feature pass leaves its own root signature and targets bound.
-        boundRootSig_ = nullptr;
+        boundRootSig_ = nullptr;   // a feature pass leaves its own root signature and targets bound
+
+        // b4 is authored by the feature (the light matrix is not known until its shadow pass has
+        // run), but the backend still records the scene draws that read it.
+        for (IRenderFeature* f : features_) {
+            const void* d = nullptr; u32 n = 0;
+            if (f->sceneConstants(&d, &n) && d && n <= sizeof(VoxiFrameCB)) {
+                std::memcpy(voxiCBPtr_[frameIndex_], d, n);
+                break;
+            }
+        }
     }
 
     cmdList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
@@ -2563,9 +2594,28 @@ void D3D12Device::endFrame() {
     queue_->ExecuteCommandLists(1, lists);
 }
 
+// TEMP DIAGNOSTIC
+void D3D12Device::drainInfoQueue(const char* where) {
+    if (!infoQueue_) return;
+    const UINT64 n = infoQueue_->GetNumStoredMessages();
+    for (UINT64 i = 0; i < n; ++i) {
+        SIZE_T len = 0;
+        infoQueue_->GetMessage(i, nullptr, &len);
+        std::vector<char> buf(len);
+        auto* m = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+        if (SUCCEEDED(infoQueue_->GetMessage(i, m, &len)))
+            AVER_ERROR("[DIAG {}] sev={} id={} : {}", where, (int)m->Severity, (int)m->ID, m->pDescription);
+    }
+    infoQueue_->ClearStoredMessages();
+}
+
 void D3D12Device::present() {
     if (!hasSwapchain_) return;
-    swapChain_->Present(1, 0);
+    drainInfoQueue("pre-present");
+    const HRESULT pr = swapChain_->Present(1, 0);
+    if (FAILED(pr))
+        AVER_ERROR("[DIAG] Present failed 0x{:08X} removed=0x{:08X}", (u32)pr, (u32)device_->GetDeviceRemovedReason());
+    drainInfoQueue("post-present");
 
     // Mark this frame on the timeline and record it for the backbuffer we just rendered, so the
     // next beginFrame that recycles this buffer waits for exactly this frame to retire.
@@ -2573,6 +2623,7 @@ void D3D12Device::present() {
     fenceValues_[frameIndex_] = nextFence_;
 
     if (captureReq_ && captureBuf_) {
+        AVER_ERROR("[DIAG] capture path entered, removed=0x{:08X}", (u32)device_->GetDeviceRemovedReason());
         waitForGpu(); // ensure the copy completed
         void* mapped = nullptr;
         // nullptr read-range = "may read whole resource" (avoids E_INVALIDARG when
@@ -2594,6 +2645,8 @@ void D3D12Device::present() {
             }
             captureBuf_->Unmap(0, nullptr);
             captureReady_ = true;
+        } else {
+            AVER_ERROR("[DIAG] capture Map FAILED");
         }
         captureReq_ = false;
     }

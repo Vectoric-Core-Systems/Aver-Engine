@@ -1,9 +1,11 @@
 #include "aver/voxi/VoxiRenderer.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/core/Math.hpp"   // light-frustum fit: Vec3 / Mat4::lookAtLH
 
 #include "VoxiShaders.hpp"
 
 #include <cfloat>
+#include <cmath>
 #include <cstring>
 
 // Voxi's GPU resources, expressed only in terms of the generic RHI. Nothing here names a backend
@@ -174,12 +176,154 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
     draws_.push_back(d);
 }
 
-// ---------------------------------------------------------------- feature hooks
-//
-// Deliberately inert at this step: the resources above exist and are idle, and the backend keeps
-// doing all the real work, so the rendered image is byte-for-byte what it was before.
+// TEMP DIAGNOSTIC: AVER_DIAG is a comma-list of switches to isolate the hang.
+static bool diag(const char* what) {
+    const char* e = std::getenv("AVER_DIAG");
+    return e && std::strstr(e, what) != nullptr;
+}
 
-void VoxiRenderer::prePass(rhi::IRenderContext& ctx) { (void)ctx; }
+// ---------------------------------------------------------------- feature hooks
+
+void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
+    if (!giReady_) return;
+    // Volume placement is needed by the injection AND by the lit pass's cone trace, so it is
+    // refreshed every frame regardless of which passes below actually run.
+    const f32 size = extent_ * 2.0f;
+    cb_.voxelOrigin[0] = center_[0] - extent_;
+    cb_.voxelOrigin[1] = center_[1] - extent_;
+    cb_.voxelOrigin[2] = center_[2] - extent_;
+    cb_.voxelOrigin[3] = size > 0.0f ? 1.0f / size : 0.0f;   // the shader multiplies by this
+    cb_.voxelParams[0] = static_cast<f32>(voxelResBuilt_);
+    cb_.voxelParams[1] = settings_.giIntensity;
+    cb_.voxelParams[2] = settings_.giMaxDistance;
+    cb_.voxelParams[3] = (giEnabled() && !debugView_) ? 1.0f : 0.0f;   // gates the cone trace
+
+    if (!diag("noshadow")) shadowPass(ctx);
+    if (giEnabled()) {
+        if (!diag("novox")) voxelizePass(ctx);
+        if (!diag("nomip")) filterMips(ctx);
+    }
+}
+
+// Fit an orthographic light frustum around the volume, so the map's resolution is spent exactly
+// where the GI samples it.
+void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
+    // No geometry means no shadow map: flag it disabled so the lit pass does not sample a stale one.
+    if (!shadowPso_ || drawsPrev_.empty()) { cb_.shadowParams[1] = 0.0f; return; }
+
+    const Vec3 centre{center_[0], center_[1], center_[2]};
+    const f32 r = extent_ > 1.0f ? extent_ : 1.0f;
+    Vec3 dir = Vec3{sunDir_[0], sunDir_[1], sunDir_[2]}.getSafeNormal();
+    if (dir.sizeSquared() < 0.5f) dir = Vec3{0.3f, 0.4f, 0.85f}.getSafeNormal();
+    const Vec3 eye = centre + dir * (r * 2.0f);              // sunDir_ points TOWARD the light
+    const Vec3 up = std::fabs(dir.z) > 0.95f ? Vec3{1, 0, 0} : Vec3{0, 0, 1};
+    const Mat4 view = Mat4::lookAtLH(eye, centre, up);
+    Mat4 proj;                                                // orthographic, row-vector convention
+    proj.m[0][0] = 1.0f / r; proj.m[1][1] = 1.0f / r;
+    proj.m[2][2] = 1.0f / (r * 4.0f); proj.m[3][2] = 0.0f; proj.m[3][3] = 1.0f;
+    const Mat4 lvp = view * proj;
+    std::memcpy(cb_.lightViewProj, &lvp.m[0][0], sizeof(cb_.lightViewProj));
+    cb_.shadowParams[0] = 1.0f / static_cast<f32>(kShadowSize);
+    cb_.shadowParams[1] = 1.0f;
+
+    ctx.pushMarker("Voxi shadow");
+    ctx.textureBarrier(shadowTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::DepthWrite);
+    ctx.setPipeline(shadowPso_);
+    ctx.setBindingSet(bindings_);       // Tier 1: bind every declared table, read or not
+    ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+    ctx.setRenderTargets(nullptr, 0, shadowTex_);
+    ctx.clearDepth(shadowTex_, 1.0f);
+    // Both, and not just the viewport: the scissor is independent, and the editor leaves one set to
+    // its dock rect, which would silently clip the map.
+    ctx.setViewport(0, 0, kShadowSize, kShadowSize);
+    ctx.setScissor(0, 0, kShadowSize, kShadowSize);
+    for (const Draw& d : drawsPrev_) {
+        f32 consts[24]{};
+        std::memcpy(consts, d.world, 16 * sizeof(f32));   // depth-only: colour/material unused
+        ctx.setConstants(1, consts, 24);
+        ctx.drawMesh(d.mesh);
+    }
+    ctx.textureBarrier(shadowTex_, rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderResource);
+    ctx.popMarker();
+}
+
+// Clear mip 0, then rasterise the scene into the volume with direct lighting already applied.
+void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
+    const u32 res = voxelResBuilt_;
+    ctx.pushMarker("Voxi voxelise");
+    // The chain rests in ShaderResource between frames; take the whole thing back for writing.
+    ctx.textureBarrier(voxelTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
+
+    // Injection only writes the voxels its triangles cover, so without a clear a voxel lit once
+    // stays lit and moving geometry drags a radiance trail behind it. Only mip 0: the filter below
+    // fully overwrites every coarser level.
+    if (!diag("noclear")) {
+    ctx.setPipeline(clearPso_);
+    ctx.setBindingSet(clearBindings_);
+    const u32 cg = (res + 3) / 4;
+    ctx.dispatch(cg, cg, cg);
+    ctx.uavBarrierTexture(voxelTex_);   // injection must see the cleared volume
+    }
+
+    // Mesh shaders remove the geometry shader from voxelisation entirely, which is the point of the
+    // variant: GS is emulated on every AMD GCN part.
+    const bool useMs = (settings_.meshShaders || diag("forcems")) && voxelMsPso_;
+    ctx.setPipeline(useMs ? voxelMsPso_ : voxelPso_);
+    ctx.setBindingSet(bindings_);
+    ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+    ctx.setRenderTargets(nullptr, 0, 0);   // no targets at all: the pixel shader writes only the UAV
+    ctx.setViewport(0, 0, res, res);
+    ctx.setScissor(0, 0, res, res);
+    // Deliberately NOT skipped when the list is empty: a scene emptied of geometry must end up with
+    // a cleared volume rather than keeping the last frame's radiance for ever.
+    for (const Draw& d : drawsPrev_) {
+        if (diag("nodraw")) break;
+        f32 consts[24];
+        std::memcpy(consts, d.world, 16 * sizeof(f32));
+        std::memcpy(consts + 16, d.color, 4 * sizeof(f32));
+        consts[20] = d.metallic; consts[21] = d.roughness; consts[22] = 0.0f; consts[23] = 0.0f;
+        ctx.setConstants(1, consts, 24);
+        if (useMs) ctx.dispatchMeshFor(d.mesh);
+        else       ctx.drawMesh(d.mesh);
+    }
+    ctx.popMarker();
+}
+
+// Box-filter each level into the next. Averaging radiance AND occupancy is what lets one wide cone
+// step read a single blurry sample instead of marching every voxel.
+void VoxiRenderer::filterMips(rhi::IRenderContext& ctx) {
+    ctx.pushMarker("Voxi mip filter");
+    ctx.uavBarrierTexture(voxelTex_);
+    ctx.setPipeline(mipPso_);
+    const u32 res = voxelResBuilt_;
+    for (u32 m = 1; m < voxelMips_; ++m) {
+        // Level m-1 becomes readable while level m stays writable. Per-SUBRESOURCE transitions are
+        // what make reading and writing one resource in a single dispatch legal.
+        ctx.textureBarrier(voxelTex_, rhi::ResourceState::UnorderedAccess,
+                           rhi::ResourceState::NonPixelShaderResource, m - 1);
+        ctx.setBindingSet(mipBindings_[m - 1]);
+        const u32 srcMip[4] = {0, 0, 0, 0};   // the single-mip SRV already rebased the Load
+        ctx.setConstants(3, srcMip, 4);
+        const u32 d = (res >> m) > 0 ? (res >> m) : 1u;
+        const u32 g = (d + 3) / 4;
+        ctx.dispatch(g, g, g);
+        ctx.uavBarrierTexture(voxelTex_);
+    }
+    // The coarsest level is never a source, so the loop never demoted it. Reconciling it here is
+    // what makes the whole-resource transition below legal -- and this is still correct when the
+    // chain has one mip and the loop body never ran.
+    ctx.textureBarrier(voxelTex_, rhi::ResourceState::UnorderedAccess,
+                       rhi::ResourceState::NonPixelShaderResource, voxelMips_ - 1);
+    ctx.textureBarrier(voxelTex_, rhi::ResourceState::NonPixelShaderResource,
+                       rhi::ResourceState::ShaderResource);
+    ctx.popMarker();
+}
+
+bool VoxiRenderer::sceneConstants(const void** data, u32* bytes) const {
+    if (!giReady_) return false;
+    *data = &cb_; *bytes = sizeof(cb_);
+    return true;
+}
 
 bool VoxiRenderer::overridesScenePipeline() const { return false; }
 

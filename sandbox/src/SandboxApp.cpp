@@ -334,6 +334,16 @@ public:
             e.device()->setGi(g);
             e.device()->setRayTracing(vs.rayTracing != voxi::Quality::Off);
             e.device()->setMeshShaders(vs.meshShaders);
+            // The feature is configured directly rather than through the device: routing GI
+            // settings via IDevice would put feature vocabulary back into the generic interface.
+            if (voxiAttached_) {
+                const f32 c[3] = {giCenter_.x, giCenter_.y, giCenter_.z};
+                voxiRenderer_.setSettings(vs);
+                voxiRenderer_.setVolume(c, giExtent_);
+                voxiRenderer_.setDebugView(giDebugView_);
+                const Vec3 sd = Vec3{sunAz_, sunAlt_, sunUp_}.getSafeNormal();
+                voxiRenderer_.setSun(&sd.x, sunColor_, sunAmbient_);
+            }
         }
 #endif
         // Confine the scene to the dockspace's central node (latched by buildUI last frame).

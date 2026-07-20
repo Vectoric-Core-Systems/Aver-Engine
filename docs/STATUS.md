@@ -193,8 +193,47 @@ green**, steps 7-12 remain.
 `--gi-debug` `0.19,0.15,0.17` · cast-shadow `--probe 1413 1042` `0.25,0.31,0.40`
 (`0.26,0.31,0.38` under `--gi`). **The centre probe is BLIND to the sun term** — it lands on the
 cube's unlit left face where ndl~=0, so every shadow/ray-tracing check must use `--probe`.
-GI-enabled combinations have a pre-existing intermittent red-channel blip (~1 run in 5-10 reads
-0.36/0.37); verify them by majority over 6-8 runs, not a single exact match.
+**GI-enabled combinations intermittently TRIP A GPU TDR — see the warning below.** The
+"~1 run in 5-10 reads 0.36/0.37" behaviour is NOT temporal noise; do not paper over it with a
+majority vote (an earlier revision of this document told you to, and that was wrong).
+
+
+### WARNING: the GI path hangs the GPU (0x141 TDR) — fix this BEFORE finishing the refactor
+
+Confirmed 2026-07-20 on the dev RX 7800 XT, and it reproduces on committed `main` with the BACKEND
+doing all GI work, so it predates this refactor entirely.
+
+Windows logs it as `LiveKernelEvent`, bugcheck `0x141` (VIDEO_ENGINE_TIMEOUT_DETECTED),
+`LKD_0x141_Tdr:C_AppFault_IMAGE_amdkmdag.sys`. Attributed to the APPLICATION: the GPU stopped
+responding and the driver reset it.
+
+It is easy to misdiagnose, so read the symptoms carefully:
+- the process exits 0;
+- the D3D12 debug layer reports NOTHING (a hang is not API misuse — there is nothing to validate);
+- the headless probe prints NO line at all, because the capture's command list died in the reset;
+- under lighter load it degrades instead to a wrong probe value (GI 0.36 rather than 0.38).
+
+Measured, holding everything else constant: 8 runs of `--gi` at MSAA 8x produced zero output and 4
+new TDRs; 2 runs at MSAA 1x also produced zero output and 2 more TDRs; a non-GI run at MSAA 8x
+rendered correctly with none. So it is the GI workload specifically, NOT pixel/MSAA load.
+
+Consequences to be honest about:
+- Every GI-combination gate in the step table below was verified by majority vote on a machine that
+  was intermittently resetting its GPU. Those gates are weaker than they look. The NON-GI values
+  never varied across hundreds of runs and are trustworthy.
+- Repeated TDRs degrade the driver until a reboot: after ~30 in one session GI went from
+  mostly-working to failing 10/10 while non-GI kept rendering. REBOOT before concluding anything
+  from a run of failures.
+- Watch for it during any automated render-test loop:
+  `Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1001}` filtered for `LiveKernelEvent`
+  and `141`, counted before and after the batch.
+
+Prime suspects, cheapest first: the geometry-shader voxelisation path (GS is emulated and
+pathologically slow on AMD GCN/RDNA — the very reason the mesh-shader variant exists); the 6-cone x
+24-step cone trace at the 3532x1987 backbuffer; the per-mip barrier walk in the mip filter.
+
+TDR history in the event log: 3 on 2026-04-20, 4 on 2026-06-09, 3 on 2026-07-12, then 20+ on
+2026-07-20 from this session's test loops. Longstanding and latent, not newly introduced.
 
 ### Step 7-8 was attempted and REVERTED — read before retrying
 Patch of the attempt: `scratchpad/step78-attempt.patch` (299 lines, does not apply cleanly as-is).
@@ -213,7 +252,9 @@ What it got right, and would be needed again:
 - The backend must copy the feature's `sceneConstants()` into its b4 upload buffer AFTER `prePass`,
   because the light matrix is not known until the shadow pass has run.
 
-**Unresolved failure, this is where to start:** with the feature's `prePass` doing the shadow and
+**The failure below is now EXPLAINED — it was the TDR above, not the migration code.** Kept for
+the detail, but do not go hunting for a barrier bug: with the step-7 changes reverted, `--gi` fails
+identically. Original note: with the feature's `prePass` doing the shadow and
 voxelise work, `--gi` and `--gi-debug` completed 40-60 frames and exited 0 with NO validation error
 and NO probe line at all — the backbuffer capture never became ready. `--ms --gi` DID produce a
 value, but a wrong one (`0.31,0.34,0.40` vs `0.38,0.35,0.40`). The `--ms` path uses

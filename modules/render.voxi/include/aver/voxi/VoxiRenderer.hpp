@@ -56,6 +56,11 @@ public:
     // True when GI or ray tracing is on: the scene must then be drawn with Voxi's pipeline
     // variants, because the cone trace and RayQuery live inside the lit pixel shader.
     bool overridesScenePipeline() const override;
+    // Voxi's binding set is handed out unconditionally, even while the backend still owns the scene
+    // pipelines: t0/t1/t2/u0 are Voxi's descriptors now, and Tier 1 requires every declared table to
+    // be bound on every pass.
+    rhi::BindingSetHandle sceneBindingSet() const override { return bindings_; }
+    bool sceneConstants(const void** data, u32* bytes) const override;
 
     // The pipeline the scene should use this frame. Valid only when overridesScenePipeline().
     // `wireframe` is passed because there is no mesh-shader wireframe variant, so it beats
@@ -118,6 +123,16 @@ private:
 
     f32 center_[3] = {0, 0, 0};
     f32 extent_ = 2000.0f;
+
+    // Mirrors `cbuffer VoxiFrame : register(b4)` field for field. A mismatch is silent and shows as
+    // misplaced GI or a uniformly lit scene, never as an error.
+    struct FrameConstants {
+        f32 voxelOrigin[4] = {};
+        f32 voxelParams[4] = {};
+        f32 lightViewProj[16] = {};
+        f32 shadowParams[4] = {};
+    } cb_;
+    bool giEnabled() const { return settings_.globalIllumination != Quality::Off; }
     f32 sunDir_[3] = {0, 0, 1};
     f32 sunColor_[3] = {1, 1, 1};
     f32 ambient_ = 0.2f;
