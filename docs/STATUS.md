@@ -360,12 +360,12 @@ answer before geometry becomes dynamic. Listed in §4d.
 --frames 40 --gi                        -> (0.39,0.35,0.40) raw(99,90,103)
 --frames 40 --ms --gi                   -> (0.39,0.35,0.40) raw(99,90,103)
 --frames 40 --ms --rt --gi              -> (0.39,0.35,0.40) raw(99,90,103)
---frames 40 --gi-debug                  -> (0.26,0.17,0.18) raw(67,44,45)
---frames 40 --ms --gi-debug             -> (0.26,0.17,0.18) raw(67,44,45)
+--frames 40 --gi-debug                  -> (0.26,0.17,0.18) raw(66,44,45)
+--frames 40 --ms --gi-debug             -> (0.26,0.17,0.18) raw(66,44,45)
 --frames 40 --probe 1413 1042           -> (0.25,0.31,0.40) raw(64,78,101)
 --frames 40 --rt --probe 1413 1042      -> (0.25,0.31,0.40) raw(64,78,101)
 --frames 40 --ms --rt --probe 1413 1042 -> (0.25,0.31,0.40) raw(64,78,101)
---frames 40 --gi --probe 1413 1042      -> (0.26,0.31,0.38) raw(67,78,96)
+--frames 40 --gi --probe 1413 1042      -> (0.26,0.31,0.38) raw(67,78,97)
 ```
 
 Compare the RAW CODES: a one-code move hides completely inside `%.2f`, which is why the probe line
