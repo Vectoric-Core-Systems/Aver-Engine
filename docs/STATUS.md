@@ -1,7 +1,7 @@
 # Aver Engine — Status & Handoff
 
-Living record of where the engine stands and what's next. Written 2026-07-19.
-**HEAD: `541d888`** · 12 commits · 128 tracked files · working tree clean.
+Living record of where the engine stands and what's next. Updated 2026-07-20.
+**HEAD: `1be5bf7`** · 25 commits · 139 tracked files · working tree clean.
 
 Read this first after a context compaction, then `docs/ARCHITECTURE.md` (module DAG),
 `docs/MINIMUM_SPECS.md` (hardware requirements / launcher spec),
@@ -66,8 +66,8 @@ Content lives OUTSIDE the engine: example project at
 ## 3. Renderer (Aver.RHI.D3D12) — implemented
 
 - D3D12 device, DXGI FLIP_DISCARD swapchain (2 buffers), fences, resize.
-- **4x MSAA**: scene → multisampled color+depth (`kSampleCount=4`), `ResolveSubresource`
-  to backbuffer each frame; ImGui composits on the resolved (1x) backbuffer.
+- **MSAA is a runtime setting** (Off/2x/4x/8x) via `IDevice::setSampleCount`: rebuilds the scene
+  targets and every PSO. 1x uses `CopyResource` (resolve is illegal at one sample).
 - **PBR**: Cook-Torrance GGX, per-object metallic/roughness (root constants, 24 DWORDs),
   sky-hemisphere ambient + sky env reflection, sRGB→linear in, ACES tonemap + gamma out.
   `gMaterial.z>0.5` = unlit path.
@@ -75,7 +75,11 @@ Content lives OUTSIDE the engine: example project at
   zenith/horizon gradient + sun disk/glow; distance fog in the mesh PS.
 - **Lines**: unlit `createLineMesh`/`drawLines` (grid, gizmo), line PSO.
 - **Wireframe**: second FillMode=WIREFRAME mesh PSO via `setWireframe`.
-- Shaders: HLSL compiled at runtime with **D3DCompile → SM5.1 DXBC** (DXC/SM6 later).
+- Shaders: compiled at runtime by **DXC → DXIL, SM 6.0** baseline; SM 6.5 variants for RayQuery.
+  Falls back to FXC/SM 5.1 if `dxcompiler.dll` is absent. `dxcompiler.dll`+`dxil.dll` are
+  copied into `bin/` by CMake and MUST ship with the product (see `docs/MINIMUM_SPECS.md` §5b).
+- **Directional shadow map** (2048², 3x3 PCF) used by the lit pass AND by GI light injection.
+- **Voxel cone traced GI** and **DXR 1.1 RayQuery shadows** — see §4b.
 - RHI API: `createDevice/createSwapchain/beginFrame/endFrame`, `setClearColor/setCamera
   (viewProj,invViewProj,camPos)/setLight/setSky`, `createMesh/drawMesh(mesh,world,color,
   metallic,roughness)/createLineMesh/drawLines/setWireframe/setLineDepth`, `uiInit/uiNewFrame/uiShutdown/
@@ -137,6 +141,83 @@ Owns the project-wide render quality settings and reports, per feature, whether 
 - Dev flags: `--msaa N` (exercise the runtime switch), `--project-settings` (open the window).
 - This machine reports: MSAA to 8x, **DXR tier 1.1**, typed UAV loads, conservative raster —
   i.e. everything the voxel GI will need.
+
+## 4c. Session log — what was built, in order
+
+Everything below is committed and verified. Listed so a reader knows what NOT to redo.
+
+| Commit | What |
+|---|---|
+| `81b8675` | Per-mode Unreal gizmos, icon toolbar + snapping, DPI-correct viewport |
+| `cf49f18` | First window-freeze fix: render during modal move/size loops |
+| `7dedfdf` | Easier gizmo grabbing (thin 1px lines at hi-DPI); rotate direction flipped |
+| `e08c51a` | **Root-cause** freeze fix: wait-before-reuse fence (ResizeBuffers desynced the old parity-based scheme) |
+| `54f6365` | Window chrome dead: a `break` in WndProc swallowed `WM_NCLBUTTONDOWN` |
+| `164f80a` | Unreal-style docked layout; scene scissored into the dockspace central node |
+| `5868ea8` | Voxi module + render settings + C ABI + C# bindings |
+| `7001958` | Voxel cone traced GI (voxelise+inject → mip filter → 6-cone gather) |
+| `bb06de0` | Shadowed injection + 4 cross-vendor portability fixes |
+| `c90b1cc` | `docs/MINIMUM_SPECS.md` + the DXR 1.1 decision |
+| `a08a126` | DXC migration (SM 6.x) + mesh-shader setting |
+| `1be5bf7` | DXR 1.1 inline RayQuery ray-traced sun shadows |
+
+### Verification tooling (reuse this — it works)
+Headless capture reads the **backbuffer**, so it does NOT prove the window is visible or
+responsive. For anything interaction- or hang-related, drive the real window with synthetic
+input and watch a per-frame heartbeat instead.
+
+Dev flags on `Sandbox.exe`: `--frames N`, `--screenshot out.png`, `--tool <select|move|rotate|scale>`,
+`--project-settings`, `--msaa N`, `--gi`, `--gi-debug`, `--rt`.
+
+Debug views that paid for themselves: **Voxel Radiance** (viewport `Lit` dropdown or `--gi-debug`)
+separates "voxelisation broken" from "cone tracing broken"; the centre-pixel readout in the log is
+a cheap A/B oracle (e.g. GI on/off showed red 0.70→0.73 with G/B fixed = orange bounce).
+
+## 4d. NOT DONE — open work, roughly in value order
+
+**Renderer**
+1. **Mesh shader geometry path.** Capability is detected and the setting exists, but the MS path
+   is not written, so `Feature::MeshShaders` reports `NotImplemented`. Also the fix for (2).
+2. **GS-free voxelisation.** Voxelisation uses a geometry shader for dominant-axis projection;
+   GS is emulated on ALL AMD GCN parts and is markedly slower there. Three instanced passes or
+   VS-side axis selection would remove it.
+3. **RT ambient occlusion / reflections.** The TLAS already exists, so this is mostly shader work.
+4. **Path tracing.** Declared only; would reuse the same acceleration structure.
+5. **Stale voxels are never cleared** — the volume is overwritten, not cleared, so moving objects
+   leave radiance trails. Static scenes look fine. Needs a clear or a decay.
+6. **No temporal accumulation** on GI, so it can flicker as geometry moves.
+7. GI is a **single volume**, not cascaded — large scenes will not fit at useful resolution.
+8. Shadow map is **one cascade** at 2048²; no CSM, so large scenes get coarse shadows.
+9. Specular GI is not cone traced (diffuse + AO only).
+
+**Portability (asked for explicitly: all AMD + NVIDIA DX12 GPUs)**
+10. **Only ever run on one GPU (RX 7800 XT).** The DXR/GI/mesh paths are capability-gated and fall
+    back, but have NOT been exercised on NVIDIA or Intel, nor on Resource-Binding-Tier-1 hardware.
+    Test before shipping.
+11. D3D11 and Vulkan backends are still **stubs** — D3D12 is the only working backend, so
+    "supports DirectX 12" is a hard requirement.
+
+**Scripting**
+12. **C# cannot drive the live editor.** A standalone C# process P/Invokes its own copy of
+    `Aver.Render.Voxi.dll`, so it gets its own settings and empty device caps. Needs in-process
+    CLR hosting (hostfxr/CoreCLR). The C ABI is already shaped for it.
+13. Same caveat blocks the **launcher hardware probe** in `docs/MINIMUM_SPECS.md` §7.
+
+**Editor / engine**
+14. Dock layout does **not persist** (`io.IniFilename` is null) — rebuilt from DockBuilder each run.
+15. Output Log does not capture the real log; Content Browser is a placeholder.
+16. Toolbar Save / Play / Pause / Stop are **non-functional stubs**.
+17. No scene save/load, no `.ocmesh`, no asset import — the general-purpose roadmap in §9 is
+    otherwise untouched.
+18. `modules/abi` is still an empty skeleton (the C ABI lives in the Voxi module instead).
+
+**Decisions taken (do not re-litigate without reason)**
+- Ray tracing targets **DXR 1.1 inline RayQuery only**; DXR 1.0 would add only GPUs that emulate
+  it without RT cores. Gate on `RaytracingTier >= 1.1`, NOT on feature level 12_2.
+- Engine floor stays **FL 11_0**; "D3D12 Ultimate only" is a spec/marketing decision in
+  `docs/MINIMUM_SPECS.md`, not something baked into the renderer.
+- Transform tools live in the **viewport overlay bar** (as in Unreal), not the window toolbar.
+- Render settings are **project-wide** → Edit ▸ Project Settings ▸ Rendering, not the Details panel.
 
 ## 5. Formats — implemented loaders
 
