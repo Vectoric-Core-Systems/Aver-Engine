@@ -7,6 +7,7 @@
 
 #if AVER_WITH_IMGUI
 #include "imgui.h"
+#include "imgui_internal.h" // DockBuilder* (docking layout is built in code: IniFilename is null)
 #endif
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -122,6 +123,14 @@ static std::vector<rhi::LineVertex> buildScaleAxis(int a, const Vec3& c) {
 enum class Tool { Select, Move, Rotate, Scale };
 static const char* kToolNames[4] = {"Select", "Move", "Rotate", "Scale"};
 
+#if AVER_WITH_IMGUI
+// Fixed editor chrome (toolbar / status bar / dock host): no decoration, never steals focus.
+static constexpr ImGuiWindowFlags kChromeFlags =
+    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+    ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+#endif
+
 struct MeshObj {
     std::string name;
     rhi::MeshHandle mesh = 0;
@@ -188,6 +197,7 @@ public:
         floor.metallic=0.0f; floor.roughness=0.9f;
         floor.aabbMin=Vec3{-40,-40,-0.05f}; floor.aabbMax=Vec3{40,40,0.05f};
         objects_.push_back(floor);
+        cubeMesh_ = cube; cubeTris_ = (u32)ci.size()/3; // reused by the toolbar's Add > Cube
         MeshObj c; c.name="Cube"; c.mesh=cube; c.tris=(u32)ci.size()/3; c.pos=Vec3{0,0,1};
         c.color[0]=0.85f; c.color[1]=0.36f; c.color[2]=0.22f;
         c.metallic=0.1f; c.roughness=0.35f;
@@ -233,7 +243,9 @@ public:
 #if AVER_WITH_IMGUI
         if (e.device()->uiActive()) {
             const ImGuiIO& io = ImGui::GetIO();
-            const bool overUI = io.WantCaptureMouse;
+            // The central dock node is a transparent hole, so WantCaptureMouse is false over it
+            // AND over any empty dockspace gap — require the cursor to be inside the viewport too.
+            const bool overUI = io.WantCaptureMouse || !inViewport(io.MousePos.x, io.MousePos.y);
 
             // Right mouse enters fly mode (look + WASD/QE), like Unreal's viewport.
             if (ImGui::IsMouseClicked(1) && !overUI) flying_ = true;
@@ -269,8 +281,11 @@ public:
                 camPos_ = objects_[sel_].pos - fwd * 6.0f; // focus selection
         }
 #endif
+        // Confine the scene to the dockspace's central node (latched by buildUI last frame).
+        e.device()->setViewportRect((u32)vpX_, (u32)vpY_, (u32)std::fmax(1.0f, vpW_), (u32)std::fmax(1.0f, vpH_));
+
         const Vec3 fwd = camForward();
-        const f32 aspect = viewAspect(e);
+        const f32 aspect = viewAspect();
         const Mat4 view = Mat4::lookAtLH(camPos_, camPos_ + fwd, Vec3{0,0,1});
         const Mat4 proj = Mat4::perspectiveLH(radians(60.0f), aspect, 0.05f, 5000.0f);
         const Mat4 viewProj = view * proj;
@@ -281,7 +296,8 @@ public:
         const Vec3 ld = Vec3{sunAz_, sunAlt_, sunUp_}.getSafeNormal();
         e.device()->setLight(&ld.x, sunColor_, sunAmbient_);
         e.device()->setSky(true, skyZenith_, skyHorizon_, fogColor_, fogDensity_);
-        e.device()->setClearColor(skyHorizon_[0], skyHorizon_[1], skyHorizon_[2], 1);
+        // Outside the viewport rect is editor chrome, not sky — clear to the dark panel colour.
+        e.device()->setClearColor(0.055f, 0.055f, 0.062f, 1);
     }
 
     void onRender(Engine& e) override {
@@ -306,11 +322,25 @@ public:
     void onShutdown(Engine&) override { AVER_INFO("[Sandbox] shutdown"); }
 
 private:
-    static f32 viewAspect(Engine& e){ return (e.window()&&e.window()->height())?(f32)e.window()->width()/e.window()->height():1.777f; }
+    // Aspect comes from the viewport rect (the dockspace's central node), not the whole window.
+    f32 viewAspect() const { return vpH_ > 0.5f ? vpW_ / vpH_ : 1.777f; }
+    bool inViewport(f32 mx, f32 my) const { return mx >= vpX_ && mx < vpX_+vpW_ && my >= vpY_ && my < vpY_+vpH_; }
     Vec3 camForward() const {
         return Vec3{ std::cos(pitch_)*std::cos(yaw_), std::cos(pitch_)*std::sin(yaw_), std::sin(pitch_) };
     }
     bool movableSelected() const { return sel_ >= 0 && sel_ < (int)objects_.size(); }
+
+    // Spawn a cube in front of the camera and select it (toolbar Add > Cube).
+    void spawnCube(Engine&) {
+        if (!cubeMesh_) return;
+        MeshObj c; c.mesh = cubeMesh_; c.tris = cubeTris_;
+        c.name = "Cube " + std::to_string(++spawnCount_);
+        c.pos = camPos_ + camForward() * 8.0f;
+        if (snapMove_) for (int k=0;k<3;++k) (&c.pos.x)[k] = snapf((&c.pos.x)[k], moveSnap_);
+        c.color[0]=0.72f; c.color[1]=0.72f; c.color[2]=0.74f; c.metallic=0.0f; c.roughness=0.6f;
+        objects_.push_back(c);
+        sel_ = (int)objects_.size() - 1;
+    }
     f32 gizmoLen(const Vec3& origin) const { f32 L = dist(eye_, origin) * 0.17f; return L < 0.5f ? 0.5f : L; }
 
     // Project a world point to screen pixels (row-vector clip = p * viewProj).
@@ -320,8 +350,8 @@ private:
         const f32 y = wp.x*m.m[0][1]+wp.y*m.m[1][1]+wp.z*m.m[2][1]+m.m[3][1];
         const f32 w = wp.x*m.m[0][3]+wp.y*m.m[1][3]+wp.z*m.m[2][3]+m.m[3][3];
         if (w <= 1e-4f) return false;
-        sx = (x / w * 0.5f + 0.5f) * W_;
-        sy = (1.0f - (y / w * 0.5f + 0.5f)) * H_;
+        sx = vpX_ + (x / w * 0.5f + 0.5f) * vpW_;          // NDC -> viewport rect, not the window
+        sy = vpY_ + (1.0f - (y / w * 0.5f + 0.5f)) * vpH_;
         return true;
     }
     static f32 distToSeg(f32 px, f32 py, f32 ax, f32 ay, f32 bx, f32 by) {
@@ -370,7 +400,7 @@ private:
             const Vec3 fwd = camForward();
             const Vec3 s = cross(Vec3{0,0,1}, fwd).getSafeNormal();
             const Vec3 u = cross(fwd, s);
-            const f32 wpp = 2.0f * std::tan(radians(30.0f)) * dist(eye_, o.pos) / (H_ > 1 ? H_ : 900.0f);
+            const f32 wpp = 2.0f * std::tan(radians(30.0f)) * dist(eye_, o.pos) / (vpH_ > 1 ? vpH_ : 900.0f);
             o.pos += s * (dx * wpp) + u * (-dy * wpp);
         } else {
             const Vec3 A = kAxisDir[activeAxis_];
@@ -411,8 +441,6 @@ private:
 #if AVER_WITH_IMGUI
         if (!e.device()->uiActive()) return;
         const ImGuiIO& io = ImGui::GetIO();
-        W_ = e.window()?(f32)e.window()->width():1600.f;
-        H_ = e.window()?(f32)e.window()->height():900.f;
 
         if (!io.WantCaptureKeyboard) {
             if (ImGui::IsKeyPressed(ImGuiKey_1)) tool_=Tool::Select;
@@ -421,13 +449,16 @@ private:
             if (ImGui::IsKeyPressed(ImGuiKey_4)) tool_=Tool::Scale;
         }
         const f32 mx=io.MousePos.x, my=io.MousePos.y;
+        // Only the viewport rect drives the gizmo: the central dock node is a transparent hole,
+        // so WantCaptureMouse alone would also let clicks in empty dockspace gaps through.
+        const bool overScene = !io.WantCaptureMouse && inViewport(mx, my);
 
         // Hover highlight when idle over a handle.
         hoverAxis_ = -1;
-        if (tool_!=Tool::Select && movableSelected() && !dragging_ && !io.WantCaptureMouse)
+        if (tool_!=Tool::Select && movableSelected() && !dragging_ && overScene)
             hoverAxis_ = pickAxis(objects_[sel_].pos, gizmoLen(objects_[sel_].pos), mx, my);
 
-        if (ImGui::IsMouseClicked(0) && !io.WantCaptureMouse) {
+        if (ImGui::IsMouseClicked(0) && overScene) {
             int ax = -1;
             if (tool_!=Tool::Select && movableSelected())
                 ax = pickAxis(objects_[sel_].pos, gizmoLen(objects_[sel_].pos), mx, my);
@@ -466,10 +497,9 @@ private:
 
 #if AVER_WITH_IMGUI
     void pick(Engine& e, const ImGuiIO& io) {
-        const f32 W = e.window()?(f32)e.window()->width():1600.f;
-        const f32 H = e.window()?(f32)e.window()->height():900.f;
-        const f32 nx = io.MousePos.x / W * 2.f - 1.f;
-        const f32 ny = 1.f - io.MousePos.y / H * 2.f;
+        (void)e;
+        const f32 nx = (io.MousePos.x - vpX_) / vpW_ * 2.f - 1.f; // NDC within the viewport rect
+        const f32 ny = 1.f - (io.MousePos.y - vpY_) / vpH_ * 2.f;
         const Mat4& iv = invVP_;
         const f32 rx = nx*iv.m[0][0]+ny*iv.m[1][0]+iv.m[2][0]+iv.m[3][0];
         const f32 ry = nx*iv.m[0][1]+ny*iv.m[1][1]+iv.m[2][1]+iv.m[3][1];
@@ -486,6 +516,19 @@ private:
             f32 t; if (rayAabb(lo,ld,o.aabbMin,o.aabbMax,t) && t<bestT){ bestT=t; best=i; }
         }
         sel_ = best;
+    }
+
+    // A button with a drop-down triangle. The triangle is DRAWN, not typed: the default font
+    // only rasterises Latin-1, so glyphs like U+25BE render as '?'.
+    bool dropButton(const char* label) {
+        const f32 extra = 16.0f*dpi_;
+        const ImVec2 ts = ImGui::CalcTextSize(label);
+        const bool clicked = ImGui::Button(label, ImVec2(ts.x + ImGui::GetStyle().FramePadding.x*2 + extra, 0));
+        const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+        const f32 cx = mx.x - extra*0.5f - 2.0f*dpi_, cy = (mn.y+mx.y)*0.5f, s = 3.0f*dpi_;
+        ImGui::GetWindowDrawList()->AddTriangleFilled(
+            ImVec2(cx-s,cy-s*0.55f), ImVec2(cx+s,cy-s*0.55f), ImVec2(cx,cy+s*0.8f), ImGui::GetColorU32(ImGuiCol_Text));
+        return clicked;
     }
 
     // A compact vector icon (kind: 0 Select, 1 Move, 2 Rotate, 3 Scale) drawn into a cell.
@@ -522,36 +565,225 @@ private:
     void buildUI(Engine& e) {
 #if AVER_WITH_IMGUI
         if (!e.device()->uiActive()) return;
-        const f32 W = e.window()?(f32)e.window()->width():1600.f;
-        const f32 H = e.window()?(f32)e.window()->height():900.f;
 
+        // ---------------- menu bar ----------------
         if (ImGui::BeginMainMenuBar()) {
-            ImGui::TextColored(ImVec4(0.95f,0.42f,0.13f,1),"AE"); ImGui::TextUnformatted("Aver Engine");
-            ImGui::Separator();
-            if (ImGui::BeginMenu("File")){ if(ImGui::MenuItem("New Level")) {} if(ImGui::MenuItem("Exit")) e.requestExit(); ImGui::EndMenu(); }
-            if (ImGui::BeginMenu("Edit")){ ImGui::MenuItem("Undo"); ImGui::MenuItem("Redo"); ImGui::EndMenu(); }
-            if (ImGui::BeginMenu("View")){ ImGui::MenuItem("Grid",nullptr,&showGrid_); ImGui::MenuItem("Wireframe",nullptr,&wireframe_); ImGui::EndMenu(); }
+            ImGui::TextColored(ImVec4(0.95f,0.42f,0.13f,1),"AE");
+            if (ImGui::BeginMenu("File")){ ImGui::MenuItem("New Level"); ImGui::MenuItem("Open Level..."); ImGui::MenuItem("Save Level"); ImGui::Separator(); if(ImGui::MenuItem("Exit")) e.requestExit(); ImGui::EndMenu(); }
+            if (ImGui::BeginMenu("Edit")){ ImGui::MenuItem("Undo","Ctrl+Z"); ImGui::MenuItem("Redo","Ctrl+Y"); ImGui::Separator(); ImGui::MenuItem("Editor Preferences"); ImGui::EndMenu(); }
+            if (ImGui::BeginMenu("Window")){ ImGui::MenuItem("World Outliner"); ImGui::MenuItem("Details"); ImGui::MenuItem("Content Browser"); ImGui::MenuItem("Output Log"); ImGui::Separator(); if (ImGui::MenuItem("Reset Layout")) dockBuilt_=false; ImGui::EndMenu(); }
+            if (ImGui::BeginMenu("Build")){ ImGui::MenuItem("Build Lighting"); ImGui::MenuItem("Build Geometry"); ImGui::EndMenu(); }
+            if (ImGui::BeginMenu("Select")){ if(ImGui::MenuItem("Select All")) {} if(ImGui::MenuItem("Select None")) sel_=-1; ImGui::EndMenu(); }
+            if (ImGui::BeginMenu("Help")){ ImGui::MenuItem("About Aver Engine"); ImGui::EndMenu(); }
             ImGui::EndMainMenuBar();
         }
 
-        const f32 menuH = ImGui::GetFrameHeight();
-        const f32 icon = 30.0f*dpi_;
-        const f32 toolbarH = icon + 14.0f*dpi_;
-        const f32 gap = 8.0f*dpi_, tiny = 2.0f*dpi_, caretW = 15.0f*dpi_;
+        const ImGuiViewport* mv = ImGui::GetMainViewport();
+        const ImVec2 wpos = mv->WorkPos, wsize = mv->WorkSize; // already excludes the menu bar
+        const f32 toolbarH = 42.0f*dpi_, statusH = 26.0f*dpi_;
 
-        // Transform toolbar: icon tools tucked in the top-middle, just above the viewport.
-        ImGui::SetNextWindowPos(ImVec2(0, menuH)); ImGui::SetNextWindowSize(ImVec2(W, toolbarH));
-        ImGui::Begin("##toolbar", nullptr, ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|
-                     ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoBringToFrontOnFocus|ImGuiWindowFlags_NoNavFocus);
+        // ---------------- main toolbar ----------------
+        ImGui::SetNextWindowPos(wpos);
+        ImGui::SetNextWindowSize(ImVec2(wsize.x, toolbarH));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::Begin("##maintoolbar", nullptr, kChromeFlags);
+        ImGui::SetCursorPosY((toolbarH - ImGui::GetFrameHeight()) * 0.5f);
+        ImGui::Button("Save"); ImGui::SameLine();
+        if (dropButton("Add")) ImGui::OpenPopup("addActor");
+        if (ImGui::BeginPopup("addActor")) {
+            ImGui::TextDisabled("Place Actor"); ImGui::Separator();
+            if (ImGui::Selectable("Cube"))     spawnCube(e);
+            ImGui::Selectable("Sphere",  false, ImGuiSelectableFlags_Disabled);
+            ImGui::Selectable("Plane",   false, ImGuiSelectableFlags_Disabled);
+            ImGui::Selectable("Point Light", false, ImGuiSelectableFlags_Disabled);
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
+        // Play controls, centred like Unreal's.
+        {
+            const f32 grpW = 200.0f*dpi_;
+            ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), (wsize.x - grpW)*0.5f));
+            ImGui::Button("Play"); ImGui::SameLine();
+            ImGui::Button("Pause"); ImGui::SameLine();
+            ImGui::Button("Stop");
+        }
+        ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 130.0f*dpi_));
+        if (dropButton("Settings")) ImGui::OpenPopup("settingsMenu");
+        if (ImGui::BeginPopup("settingsMenu")) {
+            ImGui::Checkbox("Show Grid", &showGrid_);
+            ImGui::Checkbox("Wireframe", &wireframe_);
+            ImGui::EndPopup();
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+
+        // ---------------- dockspace host ----------------
+        ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + toolbarH));
+        ImGui::SetNextWindowSize(ImVec2(wsize.x, wsize.y - toolbarH - statusH));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0,0));
+        ImGui::Begin("##dockhost", nullptr, kChromeFlags | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBackground);
+        ImGui::PopStyleVar(3);
+
+        const ImGuiID dockId = ImGui::GetID("AverDockspace");
+        // Size of the dock region. Must be captured from the host geometry: GetContentRegionAvail()
+        // reads 0 after DockSpace() has consumed the region, and DockBuilderSetNodeSize asserts on 0.
+        const ImVec2 dockSize(wsize.x, wsize.y - toolbarH - statusH);
+        // PassthruCentralNode = the centre is a transparent hole; the 3D scene is scissored into
+        // exactly that rect, and mouse input passes through it to the camera/gizmos.
+        ImGui::DockSpace(dockId, ImVec2(0,0), ImGuiDockNodeFlags_PassthruCentralNode);
+
+        // Default layout must be built in code: the backend sets io.IniFilename = nullptr, so
+        // nothing is ever persisted and panels would otherwise float loose on every launch.
+        if (!dockBuilt_ && dockSize.x > 1.0f && dockSize.y > 1.0f) {
+            dockBuilt_ = true;
+            ImGui::DockBuilderRemoveNode(dockId);
+            ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace); // private flag, required here
+            ImGui::DockBuilderSetNodeSize(dockId, dockSize); // must precede the splits
+            ImGuiID centre = dockId, right = 0, rightTop = 0, rightBottom = 0, bottom = 0;
+            ImGui::DockBuilderSplitNode(centre, ImGuiDir_Right, 0.22f, &right,  &centre);
+            ImGui::DockBuilderSplitNode(right,  ImGuiDir_Down,  0.60f, &rightBottom, &rightTop);
+            ImGui::DockBuilderSplitNode(centre, ImGuiDir_Down,  0.26f, &bottom, &centre);
+            ImGui::DockBuilderDockWindow("World Outliner",  rightTop);
+            ImGui::DockBuilderDockWindow("Details",         rightBottom);
+            ImGui::DockBuilderDockWindow("Content Browser", bottom);
+            ImGui::DockBuilderDockWindow("Output Log",      bottom);
+            ImGui::DockBuilderFinish(dockId);
+        }
+        // Latch the central node -> that's the 3D viewport rect (ImGui coords are 1:1 with
+        // backbuffer pixels here: DisplaySize is the physical client size, DPI is done via style).
+        if (ImGuiDockNode* cn = ImGui::DockBuilderGetCentralNode(dockId)) {
+            vpX_ = cn->Pos.x; vpY_ = cn->Pos.y; vpW_ = cn->Size.x; vpH_ = cn->Size.y;
+        }
+        ImGui::End(); // ##dockhost  (panels are separate windows, so Begin them after this)
+
+        buildPanels(e);
+        buildViewportOverlay();
+
+        // ---------------- status bar ----------------
+        ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH));
+        ImGui::SetNextWindowSize(ImVec2(wsize.x, statusH));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::Begin("##statusbar", nullptr, kChromeFlags);
+        const f32 dt = e.time().dt;
+        ImGui::SetCursorPosY((statusH - ImGui::GetTextLineHeight()) * 0.5f);
+        ImGui::Text("%s  |  %s  |  DPI %.0f%%  |  %.0f FPS (%.2f ms)  |  %zu actors  |  %s",
+                    rhi::backendName(e.device()->backend()), e.device()->adapterName(), dpi_*100.f,
+                    dt>1e-6f?1.f/dt:0.f, dt*1000.f, objects_.size(),
+                    movableSelected() ? objects_[sel_].name.c_str() : "nothing selected");
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+#else
+        (void)e;
+#endif
+    }
+
+#if AVER_WITH_IMGUI
+    // Docked panels. These are plain windows — the dock builder placed them, and the user can
+    // re-dock, tab or float them freely from here on.
+    void buildPanels(Engine& e) {
+        ImGui::Begin("World Outliner");
+        for (int i=0;i<(int)objects_.size();++i)
+            if (ImGui::Selectable((std::string("  ")+objects_[i].name).c_str(), sel_==i)) sel_=i;
+        ImGui::Separator();
+        if (ImGui::Selectable("  Directional Light (Sun)", sel_==-2)) sel_=-2;
+        if (ImGui::Selectable("  Sky + Atmosphere", sel_==-3)) sel_=-3;
+        ImGui::End();
+
+        ImGui::Begin("Details");
+        if (sel_>=0 && sel_<(int)objects_.size()){
+            MeshObj& o=objects_[sel_]; ImGui::TextUnformatted(o.name.c_str()); ImGui::Separator();
+            if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::DragFloat3("Location", &o.pos.x, 0.05f);
+                ImGui::DragFloat3("Rotation", &o.rotDeg.x, 1.0f);
+                ImGui::DragFloat3("Scale", &o.scale.x, 0.01f, 0.02f, 100.f);
+            }
+            if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::ColorEdit3("Base Color", o.color);
+                ImGui::SliderFloat("Metallic", &o.metallic, 0.0f, 1.0f);
+                ImGui::SliderFloat("Roughness", &o.roughness, 0.02f, 1.0f);
+            }
+            ImGui::Checkbox("Visible", &o.visible);
+        } else if (sel_==-2){
+            ImGui::TextUnformatted("Directional Light"); ImGui::Separator();
+            ImGui::SliderFloat("Azimuth", &sunAz_, -1, 1); ImGui::SliderFloat("Altitude", &sunAlt_, -1, 1); ImGui::SliderFloat("Up", &sunUp_, 0.05f, 2);
+            ImGui::ColorEdit3("Color", sunColor_); ImGui::SliderFloat("Ambient", &sunAmbient_, 0, 1);
+        } else if (sel_==-3){
+            ImGui::TextUnformatted("Sky + Atmosphere"); ImGui::Separator();
+            ImGui::ColorEdit3("Zenith", skyZenith_); ImGui::ColorEdit3("Horizon", skyHorizon_);
+            ImGui::ColorEdit3("Fog", fogColor_); ImGui::SliderFloat("Fog density", &fogDensity_, 0, 0.06f, "%.4f");
+        } else ImGui::TextDisabled("Select an actor in the World Outliner");
+        ImGui::End();
+
+        ImGui::Begin("Content Browser");
+        ImGui::TextDisabled("No content mounted.");
+        ImGui::TextDisabled("Static meshes (.ocmesh), materials and textures will appear here");
+        ImGui::TextDisabled("once the asset pipeline lands (see docs/STATUS.md \xC2\xA7""9).");
+        ImGui::End();
+
+        ImGui::Begin("Output Log");
+        ImGui::TextUnformatted("[INFO] Aver Engine 0.1 started");
+        ImGui::Text("[INFO] Backend %s on %s", rhi::backendName(e.device()->backend()), e.device()->adapterName());
+        ImGui::Text("[INFO] Editor DPI scale %.2f", dpi_);
+        ImGui::TextDisabled("(log capture wiring is a TODO - this mirrors the console for now)");
+        ImGui::End();
+    }
+
+    // Unreal puts the transform tools and snapping in the VIEWPORT's own overlay bar, not the
+    // window toolbar: left group = view options, right group = tools + snapping + camera speed.
+    void buildViewportOverlay() {
+        if (vpW_ < 80.0f || vpH_ < 60.0f) return;
+        const f32 pad = 8.0f*dpi_;
+        const ImGuiWindowFlags f = ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|
+                                   ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_AlwaysAutoResize|
+                                   ImGuiWindowFlags_NoDocking|ImGuiWindowFlags_NoSavedSettings|
+                                   ImGuiWindowFlags_NoFocusOnAppearing|ImGuiWindowFlags_NoNavFocus;
+
+        // --- left group: view type / view mode / show flags ---
+        ImGui::SetNextWindowPos(ImVec2(vpX_+pad, vpY_+pad), ImGuiCond_Always, ImVec2(0,0));
+        ImGui::SetNextWindowBgAlpha(0.62f);
+        ImGui::Begin("##vpbar_left", nullptr, f);
+        if (dropButton("Perspective")) ImGui::OpenPopup("viewType");
+        if (ImGui::BeginPopup("viewType")) {
+            ImGui::Selectable("Perspective", true);
+            const char* orthos[] = {"Top","Bottom","Left","Right","Front","Back"};
+            for (const char* o : orthos) ImGui::Selectable(o, false, ImGuiSelectableFlags_Disabled);
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
+        if (dropButton(wireframe_ ? "Wireframe" : "Lit")) ImGui::OpenPopup("viewMode");
+        if (ImGui::BeginPopup("viewMode")) {
+            if (ImGui::Selectable("Lit", !wireframe_)) wireframe_=false;
+            if (ImGui::Selectable("Wireframe", wireframe_)) wireframe_=true;
+            ImGui::Selectable("Unlit", false, ImGuiSelectableFlags_Disabled);
+            ImGui::Selectable("Detail Lighting", false, ImGuiSelectableFlags_Disabled);
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
+        if (dropButton("Show")) ImGui::OpenPopup("showFlags");
+        if (ImGui::BeginPopup("showFlags")) {
+            ImGui::Checkbox("Grid", &showGrid_);
+            bool t=true; ImGui::Checkbox("Static Meshes", &t);
+            ImGui::Checkbox("Atmosphere", &t);
+            ImGui::EndPopup();
+        }
+        ImGui::End();
+
+        // --- right group: transform tools + snapping + camera speed ---
+        const f32 icon = 26.0f*dpi_, caretW = 14.0f*dpi_, tiny = 2.0f*dpi_, gap = 6.0f*dpi_;
+        ImGui::SetNextWindowPos(ImVec2(vpX_+vpW_-pad, vpY_+pad), ImGuiCond_Always, ImVec2(1,0)); // right-aligned
+        ImGui::SetNextWindowBgAlpha(0.62f);
+        ImGui::Begin("##vpbar_right", nullptr, f);
         ImDrawList* dl = ImGui::GetWindowDrawList();
-
         auto toolBtn = [&](const char* id, int kind, bool active)->bool {
             const ImVec2 p = ImGui::GetCursorScreenPos();
             ImGui::InvisibleButton(id, ImVec2(icon, icon));
             const bool hov = ImGui::IsItemHovered(), clk = ImGui::IsItemClicked();
-            const ImU32 bg = active ? IM_COL32(232,110,35,235) : (hov ? IM_COL32(74,76,82,255) : IM_COL32(48,49,54,255));
-            dl->AddRectFilled(p, ImVec2(p.x+icon,p.y+icon), bg, 5.0f);
-            dl->AddRect(p, ImVec2(p.x+icon,p.y+icon), IM_COL32(0,0,0,120), 5.0f);
+            const ImU32 bg = active ? IM_COL32(232,110,35,235) : (hov ? IM_COL32(74,76,82,255) : IM_COL32(48,49,54,220));
+            dl->AddRectFilled(p, ImVec2(p.x+icon,p.y+icon), bg, 4.0f);
             drawToolGlyph(dl, p, icon, kind, IM_COL32(236,237,240,255));
             return clk;
         };
@@ -559,17 +791,12 @@ private:
             const ImVec2 p = ImGui::GetCursorScreenPos();
             ImGui::InvisibleButton(id, ImVec2(caretW, icon));
             const bool hov = ImGui::IsItemHovered(), clk = ImGui::IsItemClicked();
-            if (hov) dl->AddRectFilled(p, ImVec2(p.x+caretW,p.y+icon), IM_COL32(74,76,82,255), 4.0f);
+            if (hov) dl->AddRectFilled(p, ImVec2(p.x+caretW,p.y+icon), IM_COL32(74,76,82,255), 3.0f);
             const ImVec2 c(p.x+caretW*0.5f, p.y+icon*0.5f); const f32 s=3.0f*dpi_;
             const ImU32 col = on ? IM_COL32(232,150,60,255) : IM_COL32(190,191,195,255);
             dl->AddTriangleFilled(ImVec2(c.x-s,c.y-s*0.6f), ImVec2(c.x+s,c.y-s*0.6f), ImVec2(c.x,c.y+s*0.8f), col);
             return clk;
         };
-
-        const f32 groupW = icon + 3.0f*(gap + icon + tiny + caretW);
-        f32 startX = (W - groupW) * 0.5f; if (startX < 8.0f*dpi_) startX = 8.0f*dpi_;
-        ImGui::SetCursorPosY((toolbarH - icon) * 0.5f);
-        ImGui::SetCursorPosX(startX);
 
         if (toolBtn("##tSel", 0, tool_==Tool::Select)) tool_=Tool::Select;
         ImGui::SameLine(0, gap);
@@ -581,93 +808,48 @@ private:
         ImGui::SameLine(0, gap);
         if (toolBtn("##tScl", 3, tool_==Tool::Scale)) tool_=Tool::Scale;
         ImGui::SameLine(0, tiny); if (caretBtn("##cScl", snapScale_)) ImGui::OpenPopup("snapScale");
+        ImGui::SameLine(0, gap*2);
+        if (ImGui::Button(worldSpace_ ? "World" : "Local")) worldSpace_ = !worldSpace_; // coord space, like UE's globe/cube
+        ImGui::SameLine(0, gap);
+        char camLbl[32]; std::snprintf(camLbl, sizeof camLbl, "Cam %.0f", flySpeed_);
+        if (dropButton(camLbl)) ImGui::OpenPopup("camSpeed");
+        if (ImGui::BeginPopup("camSpeed")) { ImGui::SliderFloat("Speed", &flySpeed_, 1.0f, 200.0f, "%.0f"); ImGui::EndPopup(); }
 
         if (ImGui::BeginPopup("snapMove")) {
             ImGui::Checkbox("Grid snap (position)", &snapMove_); ImGui::Separator();
             const f32 opts[] = {0.1f,0.25f,0.5f,1,2,5,10,50,100};
-            for (f32 f : opts){ char b[24]; std::snprintf(b,sizeof b,"%g units", f); if (ImGui::Selectable(b, moveSnap_==f)){ moveSnap_=f; snapMove_=true; } }
+            for (f32 v : opts){ char b[24]; std::snprintf(b,sizeof b,"%g units", v); if (ImGui::Selectable(b, moveSnap_==v)){ moveSnap_=v; snapMove_=true; } }
             ImGui::EndPopup();
         }
         if (ImGui::BeginPopup("snapRot")) {
             ImGui::Checkbox("Angle snap (rotation)", &snapRot_); ImGui::Separator();
             const f32 opts[] = {1,5,10,15,30,45,90};
-            for (f32 f : opts){ char b[24]; std::snprintf(b,sizeof b,"%g\xC2\xB0", f); if (ImGui::Selectable(b, rotSnap_==f)){ rotSnap_=f; snapRot_=true; } }
+            for (f32 v : opts){ char b[24]; std::snprintf(b,sizeof b,"%g\xC2\xB0", v); if (ImGui::Selectable(b, rotSnap_==v)){ rotSnap_=v; snapRot_=true; } }
             ImGui::EndPopup();
         }
         if (ImGui::BeginPopup("snapScale")) {
             ImGui::Checkbox("Scale snap", &snapScale_); ImGui::Separator();
             const f32 opts[] = {0.05f,0.1f,0.25f,0.5f,1};
-            for (f32 f : opts){ char b[24]; std::snprintf(b,sizeof b,"%g", f); if (ImGui::Selectable(b, scaleSnap_==f)){ scaleSnap_=f; snapScale_=true; } }
+            for (f32 v : opts){ char b[24]; std::snprintf(b,sizeof b,"%g", v); if (ImGui::Selectable(b, scaleSnap_==v)){ scaleSnap_=v; snapScale_=true; } }
             ImGui::EndPopup();
         }
-
-        // Grid / Wireframe toggles, right-aligned in the same strip (only if they clear the
-        // centred tool group; otherwise they stay reachable from the View menu).
-        if (startX + groupW < W - 240.0f*dpi_) {
-            ImGui::SetCursorPosX(W - 220.0f*dpi_);
-            ImGui::SetCursorPosY((toolbarH - ImGui::GetFrameHeight()) * 0.5f);
-            ImGui::Checkbox("Grid", &showGrid_); ImGui::SameLine(); ImGui::Checkbox("Wireframe", &wireframe_);
-        }
         ImGui::End();
 
-        const f32 y0 = menuH + toolbarH, rightW = 320.0f*dpi_, bottomH = 150.0f*dpi_;
-        // World Outliner (top-right)
-        ImGui::SetNextWindowPos(ImVec2(W-rightW, y0)); ImGui::SetNextWindowSize(ImVec2(rightW,(H-y0-bottomH)*0.5f));
-        ImGui::Begin("World Outliner");
-        for (int i=0;i<(int)objects_.size();++i)
-            if (ImGui::Selectable((std::string("  ")+objects_[i].name).c_str(), sel_==i)) sel_=i;
-        ImGui::Separator();
-        if (ImGui::Selectable("  Directional Light (Sun)", sel_==-2)) sel_=-2;
-        if (ImGui::Selectable("  Sky + Atmosphere", sel_==-3)) sel_=-3;
+        // Bottom-left hint, anchored to the viewport like Unreal's transform readout.
+        ImGui::SetNextWindowPos(ImVec2(vpX_+pad, vpY_+vpH_-pad), ImGuiCond_Always, ImVec2(0,1));
+        ImGui::SetNextWindowBgAlpha(0.35f);
+        ImGui::Begin("##vphint", nullptr, f | ImGuiWindowFlags_NoInputs);
+        ImGui::Text("%s  |  RMB fly (WASD/QE)  wheel speed  MMB pan  F focus  |  1-4 tools", kToolNames[(int)tool_]);
         ImGui::End();
-
-        // Details (bottom-right)
-        ImGui::SetNextWindowPos(ImVec2(W-rightW, y0+(H-y0-bottomH)*0.5f)); ImGui::SetNextWindowSize(ImVec2(rightW,(H-y0-bottomH)*0.5f));
-        ImGui::Begin("Details");
-        if (sel_>=0 && sel_<(int)objects_.size()){
-            MeshObj& o=objects_[sel_]; ImGui::TextUnformatted(o.name.c_str()); ImGui::Separator();
-            ImGui::DragFloat3("Location", &o.pos.x, 0.05f);
-            ImGui::DragFloat3("Rotation", &o.rotDeg.x, 1.0f);
-            ImGui::DragFloat3("Scale", &o.scale.x, 0.01f, 0.02f, 100.f);
-            ImGui::ColorEdit3("Color", o.color);
-            ImGui::SliderFloat("Metallic", &o.metallic, 0.0f, 1.0f);
-            ImGui::SliderFloat("Roughness", &o.roughness, 0.02f, 1.0f);
-            ImGui::Checkbox("Visible", &o.visible);
-        } else if (sel_==-2){
-            ImGui::TextUnformatted("Directional Light"); ImGui::Separator();
-            ImGui::SliderFloat("Azimuth", &sunAz_, -1, 1); ImGui::SliderFloat("Altitude", &sunAlt_, -1, 1); ImGui::SliderFloat("Up", &sunUp_, 0.05f, 2);
-            ImGui::ColorEdit3("Color", sunColor_); ImGui::SliderFloat("Ambient", &sunAmbient_, 0, 1);
-        } else if (sel_==-3){
-            ImGui::TextUnformatted("Sky + Atmosphere"); ImGui::Separator();
-            ImGui::ColorEdit3("Zenith", skyZenith_); ImGui::ColorEdit3("Horizon", skyHorizon_);
-            ImGui::ColorEdit3("Fog", fogColor_); ImGui::SliderFloat("Fog density", &fogDensity_, 0, 0.06f, "%.4f");
-        } else ImGui::TextDisabled("Select something in the Outliner");
-        ImGui::End();
-
-        // Output Log (bottom strip)
-        ImGui::SetNextWindowPos(ImVec2(0, H-bottomH)); ImGui::SetNextWindowSize(ImVec2(W, bottomH));
-        ImGui::Begin("Output Log");
-        const f32 dt=e.time().dt;
-        ImGui::Text("Aver Engine 0.1  |  %s  |  %s  |  DPI %.0f%%", rhi::backendName(e.device()->backend()), e.device()->adapterName(), dpi_*100.f);
-        ImGui::Text("FPS %.0f (%.2f ms)   objects %zu   tool %s   frame %llu",
-                    dt>1e-6f?1.f/dt:0.f, dt*1000.f, objects_.size(), kToolNames[(int)tool_], (unsigned long long)e.time().frame);
-        ImGui::End();
-
-        // Viewport HUD (bottom-left overlay)
-        ImGui::SetNextWindowPos(ImVec2(10, H-bottomH-30*dpi_)); ImGui::SetNextWindowBgAlpha(0.35f);
-        ImGui::Begin("##hud", nullptr, ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoInputs);
-        ImGui::Text("Perspective | Lit | %s   \xE2\x80\x94   RMB fly (WASD/QE)  wheel speed  MMB pan  F focus   1-4 tools", kToolNames[(int)tool_]);
-        ImGui::End();
-#else
-        (void)e;
-#endif
     }
+#endif
 
     void captureCheck(Engine& e) {
-        const u64 f = e.time().frame; u32 ww=1600,wh=900;
-        if (e.window()){ ww=e.window()->width(); wh=e.window()->height(); }
+        const u64 f = e.time().frame;
         const u64 sf = maxFrames_>8?maxFrames_-3:4;
-        if (f==sf) e.device()->requestCapture(ww/2, wh/2);
+        // Sample the centre of the 3D viewport, not the window: with panels docked the window
+        // centre can land on UI, which would silently stop verifying that the scene rasterises.
+        if (f==sf) e.device()->requestCapture((u32)(vpX_ + vpW_*0.5f), (u32)(vpY_ + vpH_*0.5f));
         if (f>sf && !capDone_){
             f32 px[4]; if (e.device()->getCapture(px)) AVER_INFO("[Sandbox] centre px ({:.2f},{:.2f},{:.2f})", px[0],px[1],px[2]);
             if (!shot_.empty()){ std::vector<u8> img; u32 iw=0,ih=0;
@@ -705,7 +887,13 @@ private:
     bool snapMove_=false, snapRot_=false, snapScale_=false;
     f32 moveSnap_=1.0f, rotSnap_=15.0f, scaleSnap_=0.25f;
     // frame state
-    f32 dpi_=1.0f, W_=1600, H_=900;
+    f32 dpi_=1.0f;
+    // 3D viewport rect = the dockspace's central node, in backbuffer pixels. Latched by buildUI
+    // and consumed next frame by the camera aspect, the scene scissor, picking and the gizmo.
+    f32 vpX_=0, vpY_=0, vpW_=1600, vpH_=900;
+    bool dockBuilt_=false;   // one-shot DockBuilder layout (nothing is persisted to an ini)
+    bool worldSpace_=true;   // gizmo coordinate space toggle (display only for now)
+    rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;
     Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };
 

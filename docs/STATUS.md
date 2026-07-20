@@ -88,9 +88,14 @@ Dear ImGui (docking) hosted inside the D3D12 backend; dark Unreal-style theme.
   DPI-scaled logical size clamped to the monitor work area, and ImGui is scaled by
   `Window::dpiScale()` (`ScaleAllSizes` + `FontGlobalScale`). Fixes the soft/sluggish
   bitmap-upscaled viewport on hi-DPI displays (dev machine reports 300%).
-- **Icon toolbar** tucked top-centre just under the menu bar: vector-drawn Unreal-style
-  icons (Select ▸ Move ▸ Rotate ▸ Scale), each transform tool with a **snap dropdown caret**
-  (grid/angle/scale increments, toggleable). Keys 1-4. Grid/Wireframe right-aligned.
+- **Unreal-style docked shell** (ImGui DockSpace, `ImGuiDockNodeFlags_PassthruCentralNode`):
+  menu bar → main toolbar (Save / Add▾ / Play·Pause·Stop / Settings▾) → dockspace → status bar.
+  Default layout: **World Outliner** + **Details** stacked right (~22%), **Content Browser** and
+  **Output Log** tabbed at the bottom (~26%), 3D viewport in the transparent central node.
+  Panels are fully dockable/tabbable/floatable; *Window ▸ Reset Layout* rebuilds the default.
+- **Viewport overlay bars** (transform tools live in the VIEWPORT, as in Unreal — not the window
+  toolbar): left = Perspective▾ / Lit▾ / Show▾; right = Select·Move·Rotate·Scale icons with
+  **snap dropdown carets**, World/Local space toggle, and camera speed. Keys 1-4 still work.
 - **Per-mode 3D gizmos** at the selection, drawn as an always-on-top overlay
   (`setLineDepth(false)`): Move = axis arrows, Rotate = 3 rings, Scale = axis + end-boxes.
   Only the active tool's gizmo shows; hovered/active axis highlights amber.
@@ -184,6 +189,17 @@ ab2264a Aver Engine foundation: modular core + .oc* format loaders
 - Gizmo manipulation is drag-anywhere-on-handle (screen-projection), not full 3D handle
   raycast. Rotate increments a world-axis Euler component (exact only when other Euler
   components are 0) — acceptable for now; revisit with quaternion objects.
+- **Dockspace/viewport coupling**: the 3D scene is scissored into the dockspace's *central node*
+  via `IDevice::setViewportRect` (D3D12 sets viewport+scissor from it). Consequences that MUST
+  hold together: camera aspect, `project()`, `pick()` NDC and `applyMove`'s world-per-pixel all
+  use the viewport rect (not the window); the colour clear is unconditional and full-surface
+  (a scissored sky no longer covers every pixel); input is gated on `inViewport()` as well as
+  `WantCaptureMouse` (the central node is a transparent hole, so capture is false over it).
+- The dock layout is built once with DockBuilder because `io.IniFilename` is null (nothing
+  persists). `DockBuilderSetNodeSize` asserts on a zero size — take the size from the host
+  geometry, NOT `GetContentRegionAvail()` after `DockSpace()` (which reads 0).
+- The default ImGui font only rasterises Latin-1: glyphs like ▾ (U+25BE) render as `?`. Use the
+  `dropButton()` helper (draws a real triangle) rather than typing them.
 - Gizmos draw as 1px lines (D3D12 has no wide lines); at hi-DPI they're thin, so `pickAxis`
   uses a generous grab tolerance (16px logical for axes/rings, 13px for the centre handle,
   scaled by dpi). A future thick-gizmo pass would build them from triangles.

@@ -249,6 +249,13 @@ public:
 
     void setClearColor(f32 r, f32 g, f32 b, f32 a) override { clear_[0] = r; clear_[1] = g; clear_[2] = b; clear_[3] = a; }
 
+    void setViewportRect(u32 x, u32 y, u32 w, u32 h) override {
+        if (w == 0 || h == 0 || x >= width_ || y >= height_) { vpX_ = vpY_ = vpW_ = vpH_ = 0; return; }
+        vpX_ = x; vpY_ = y;
+        vpW_ = (x + w > width_) ? width_ - x : w;   // clamp: an out-of-bounds scissor is a debug-layer error
+        vpH_ = (y + h > height_) ? height_ - y : h;
+    }
+
     void setCamera(const f32 viewProj[16], const f32 invViewProj[16], const f32 camPos[3]) override {
         std::memcpy(frameCB_.viewProj, viewProj, sizeof(frameCB_.viewProj));
         std::memcpy(frameCB_.invViewProj, invViewProj, sizeof(frameCB_.invViewProj));
@@ -352,6 +359,7 @@ private:
     std::vector<GpuMesh> meshes_;
     PerFrameCB frameCB_{};
     u32 width_ = 0, height_ = 0;
+    u32 vpX_ = 0, vpY_ = 0, vpW_ = 0, vpH_ = 0; // scene sub-rect; w/h == 0 means full backbuffer
     bool hasSwapchain_ = false;
     f32 clear_[4] = {0.10f, 0.12f, 0.16f, 1.0f};
     std::string adapterName_ = "D3D12 Device";
@@ -692,11 +700,19 @@ void D3D12Device::beginFrame() {
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = msaaRtvHeap_->GetCPUDescriptorHandleForHeapStart();
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = dsvHeap_->GetCPUDescriptorHandleForHeapStart();
     cmdList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
-    if (!skyEnabled_) cmdList_->ClearRenderTargetView(rtv, clear_, 0, nullptr); // sky covers all pixels
+    // Always clear the FULL surface: once the scene is scissored to a sub-rect the sky no longer
+    // covers every pixel, and anything outside would keep stale content from an earlier frame.
+    cmdList_->ClearRenderTargetView(rtv, clear_, 0, nullptr);
     cmdList_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-    D3D12_VIEWPORT vp{0, 0, static_cast<f32>(width_), static_cast<f32>(height_), 0.0f, 1.0f};
-    D3D12_RECT sc{0, 0, static_cast<LONG>(width_), static_cast<LONG>(height_)};
+    // Scene renders into the requested sub-rect (the editor's central dock node), or the whole
+    // backbuffer when none was set. Sky, meshes, grid and gizmos all share this one command list.
+    const f32 rx = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
+    const f32 ry = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
+    const f32 rw = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(width_);
+    const f32 rh = vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(height_);
+    D3D12_VIEWPORT vp{rx, ry, rw, rh, 0.0f, 1.0f};
+    D3D12_RECT sc{static_cast<LONG>(rx), static_cast<LONG>(ry), static_cast<LONG>(rx + rw), static_cast<LONG>(ry + rh)};
     cmdList_->RSSetViewports(1, &vp);
     cmdList_->RSSetScissorRects(1, &sc);
 
@@ -845,6 +861,7 @@ void D3D12Device::resize(u32 w, u32 h) {
     msaaColor_.Reset();
     if (!hrOk(swapChain_->ResizeBuffers(kFrameCount, w, h, kBackbufferFormat, 0), "ResizeBuffers")) return;
     width_ = w; height_ = h;
+    vpX_ = vpY_ = vpW_ = vpH_ = 0; // drop the stale rect; the app re-pushes it next frame
     // GPU is idle, so no backbuffer has pending work; clear per-buffer fences (beginFrame reacquires
     // the current index and will not wrongly wait). No back-buffer-parity assumptions to break.
     for (u32 n = 0; n < kFrameCount; ++n) fenceValues_[n] = 0;

@@ -63,6 +63,11 @@ public:
     // Frame clear colour (linear RGBA, 0..1). Default no-op for backends without a target.
     virtual void setClearColor(f32 r, f32 g, f32 b, f32 a) { (void)r; (void)g; (void)b; (void)a; }
 
+    // Confine scene rendering to a sub-rectangle of the backbuffer, in physical pixels with a
+    // top-left origin. Used by the editor so the 3D view fills only the dockspace's central
+    // node instead of the whole window. (0,0,0,0) = full backbuffer.
+    virtual void setViewportRect(u32 x, u32 y, u32 w, u32 h) { (void)x; (void)y; (void)w; (void)h; }
+
     // GPU self-test: clear a tiny offscreen target to `in` and read the pixel back into
     // `outRGBA`. Returns true if the read-back matches (proves the GPU path works). A
     // backend without real GPU support returns false.
