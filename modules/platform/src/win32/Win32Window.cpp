@@ -98,7 +98,10 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // render live during a move but must NOT present during a resize (DWM deadlock).
             const bool resize = (wParam >= HTLEFT && wParam <= HTBOTTOMRIGHT) || wParam == HTGROWBOX;
             self->setResizeGrab(resize);
-            break; // let DefWindowProc run the modal loop
+            // MUST hand this to DefWindowProc: every caption/border/caption-button interaction
+            // (move, resize, minimise, maximise, close) is driven from here. Swallowing it makes
+            // the window completely uninteractive.
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
         case WM_ENTERSIZEMOVE:
             self->setModalSize(true);
@@ -106,7 +109,9 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         case WM_EXITSIZEMOVE:
             self->setModalSize(false); self->setResizeGrab(false); KillTimer(hwnd, 1); return 0;
-        case WM_TIMER: if (wParam == 1) { self->onRenderTick(); return 0; } break;
+        case WM_TIMER:
+            if (wParam == 1) { self->onRenderTick(); return 0; }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         case WM_DPICHANGED: {
             // Monitor changed / DPI changed: adopt the OS-suggested window rect and record
             // the new scale so the UI rescales. A WM_SIZE follows and resizes the swapchain.
@@ -135,8 +140,11 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             PostQuitMessage(0);
             return 0;
         default:
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            break;
     }
+    // Anything not fully handled above falls through to the OS. Note `break` inside the switch
+    // lands HERE, not on `default:` — a case that breaks without this would swallow the message.
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 void Window::dispatch(const Event& e) {

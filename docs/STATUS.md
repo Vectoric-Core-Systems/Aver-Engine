@@ -167,6 +167,10 @@ ab2264a Aver Engine foundation: modular core + .oc* format loaders
     grab from the `WM_NCLBUTTONDOWN` hit-test (`Window::isResizeGrab()`) and start the render
     timer only for moves. A resize freezes-but-recovers (updates on release); a move renders live.
   - **Skip `ResizeBuffers` while `inModalSize()`**; resize once the drag ends.
+  - **`break` inside the WndProc switch does NOT reach `default:`** — it exits the switch. A case
+    that `break`s must still end at `DefWindowProcW` (there's now a trailing call after the
+    switch). Swallowing `WM_NCLBUTTONDOWN` this way killed move/resize/maximise/**close**,
+    because every caption/border interaction is driven by DefWindowProc from that message.
 - **D3D12 frame sync = wait-before-reuse** (D3D12Device): one monotonic `nextFence_`, signalled
   after each Present; `fenceValues_[backbuffer]` records that frame's value; `beginFrame`
   reacquires `GetCurrentBackBufferIndex()` and waits for that buffer's fence. The old
