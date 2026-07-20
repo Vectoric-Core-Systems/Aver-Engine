@@ -4,6 +4,7 @@ Living record of where the engine stands and what's next. Written 2026-07-19.
 **HEAD: `541d888`** · 12 commits · 128 tracked files · working tree clean.
 
 Read this first after a context compaction, then `docs/ARCHITECTURE.md` (module DAG),
+`docs/MINIMUM_SPECS.md` (hardware requirements / launcher spec),
 `docs/formats/DECISIONS.md` (formats), and `docs/PROJECTS.md` (engine⟂project).
 
 ---

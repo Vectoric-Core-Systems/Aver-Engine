@@ -109,10 +109,21 @@ DXR cannot be expressed in shader model 5.1. Inline ray tracing (`RayQuery`) nee
 full RT pipeline needs `lib_6_3`; this backend compiles HLSL with `D3DCompile` (FXC, SM 5.1), so
 DXR needs the shader pipeline moved to **DXC** first, plus BLAS/TLAS acceleration structures.
 
-Note also that "works on all DX12 GPUs" is impossible for ray tracing by construction: no AMD GCN
-or RDNA 1 part (RX 500, Vega, RX 5000), no pre-Turing NVIDIA, and no pre-Arc Intel has RT hardware.
-The correct behaviour there is exactly what Voxi already does - report `Unsupported` and refuse the
-setting - rather than silently doing nothing.
+**Target when it lands: DXR 1.1 inline ray tracing (`RayQuery`) only.** AMD has never shipped a
+Tier-1.0-only GPU (it entered at 1.1 with RDNA 2), Intel entered at 1.1 with Arc, and every
+Turing-or-later NVIDIA part reports 1.1 - so supporting DXR 1.0 as well would add only NVIDIA
+Pascal/Volta and GTX 16-series, which expose DXR through driver emulation with no RT cores and run
+about an order of magnitude slower. Inline RayQuery also needs no state objects, shader binding
+tables or `DispatchRays`, so it composes with the existing raster pipeline.
+
+Gate on the capability (`RaytracingTier >= 1.1`), not on feature level 12_2: D3D12 Ultimate also
+demands mesh shaders and sampler feedback this renderer does not use.
+
+Note "works on all DX12 GPUs" is impossible for ray tracing by construction - no AMD GCN or RDNA 1
+part, no pre-Turing NVIDIA and no pre-Arc Intel has RT hardware. The correct behaviour there is what
+Voxi already does: report `Unsupported` and refuse the setting.
+
+Full hardware matrix and launcher-ready spec text: `docs/MINIMUM_SPECS.md`.
 
 ## Next
 
