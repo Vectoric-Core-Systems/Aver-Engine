@@ -371,6 +371,7 @@ public:
     void setGiOverride(int q, bool dbg) { giOverride_ = q; giDebugView_ = dbg; } // --gi / --gi-debug
     void setRtOverride(int q) { rtOverride_ = q; }                              // --rt
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
+    void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
 
 private:
     // Aspect comes from the viewport rect (the dockspace's central node), not the whole window.
@@ -1048,9 +1049,15 @@ private:
         const u64 sf = maxFrames_>8?maxFrames_-3:4;
         // Sample the centre of the 3D viewport, not the window: with panels docked the window
         // centre can land on UI, which would silently stop verifying that the scene rasterises.
-        if (f==sf) e.device()->requestCapture((u32)(vpX_ + vpW_*0.5f), (u32)(vpY_ + vpH_*0.5f));
+        // `--probe X Y` overrides it with absolute backbuffer pixels. Needed because the centre
+        // lands on the cube's UNLIT left face, where ndl is ~0 and the sun term drops out entirely
+        // -- so any shadow/ray-tracing A/B must probe a sunlit or cast-shadow pixel instead.
+        const u32 px_ = probeX_ ? probeX_ : (u32)(vpX_ + vpW_*0.5f);
+        const u32 py_ = probeY_ ? probeY_ : (u32)(vpY_ + vpH_*0.5f);
+        if (f==sf) e.device()->requestCapture(px_, py_);
         if (f>sf && !capDone_){
-            f32 px[4]; if (e.device()->getCapture(px)) AVER_INFO("[Sandbox] centre px ({:.2f},{:.2f},{:.2f})", px[0],px[1],px[2]);
+            f32 px[4]; if (e.device()->getCapture(px))
+                AVER_INFO("[Sandbox] probe ({},{}) px ({:.2f},{:.2f},{:.2f})", px_, py_, px[0],px[1],px[2]);
             if (!shot_.empty()){ std::vector<u8> img; u32 iw=0,ih=0;
                 if (e.device()->getFrameImage(img,iw,ih)&&iw&&ih && stbi_write_png(shot_.c_str(),(int)iw,(int)ih,4,img.data(),(int)iw*4))
                     AVER_INFO("[Sandbox] screenshot: {} ({}x{})", shot_, iw, ih); }
@@ -1098,6 +1105,7 @@ private:
     int  giOverride_=0;              // --gi: GI quality to apply at startup
     int  rtOverride_=0;              // --rt: ray tracing quality at startup
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
+    u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
     bool worldSpace_=true;   // gizmo coordinate space toggle (display only for now)
     // Voxi GI volume placement: a cube around the default scene (floor is +/-40, cube at origin).
     bool giDebugView_=false; Vec3 giCenter_{0,0,8}; f32 giExtent_=44.0f;
@@ -1106,7 +1114,7 @@ private:
 };
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false; std::string beam, shot; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false;
+    u64 frames=0; bool headless=false, focusVoxi=false; std::string beam, shot; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -1115,6 +1123,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--gi-debug")) { gi=3; giDbg=true; }
         else if (!std::strcmp(argv[i],"--rt")) rt=3;
         else if (!std::strcmp(argv[i],"--ms")) ms=true;
+        else if (!std::strcmp(argv[i],"--probe") && i+2<argc) { probeX=(u32)std::atoi(argv[++i]); probeY=(u32)std::atoi(argv[++i]); }
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
         else if (!std::strcmp(argv[i],"--tool") && i+1<argc) {
@@ -1130,6 +1139,7 @@ Application* createApplication(int argc, char** argv) {
     app->setGiOverride(gi, giDbg);
     app->setRtOverride(rt);
     app->setMsOverride(ms);
+    app->setProbe(probeX, probeY);
     return app;
 }
 
