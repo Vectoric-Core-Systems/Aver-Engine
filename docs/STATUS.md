@@ -174,11 +174,24 @@ Debug views that paid for themselves: **Voxel Radiance** (viewport `Lit` dropdow
 separates "voxelisation broken" from "cone tracing broken"; the centre-pixel readout in the log is
 a cheap A/B oracle (e.g. GI on/off showed red 0.70→0.73 with G/B fixed = orange bounce).
 
-## 4c-2. Voxi/HAL decoupling refactor — IN PROGRESS, paused at step 6 of 12
+## 4c-2. Voxi/HAL decoupling refactor — IN PROGRESS, steps 0-8 landed of 12
 
 Moving Voxi's GI/shadow/RayQuery code out of the D3D12 backend into `modules/render.voxi`,
-against a new generic backend-agnostic RHI. Twelve-step plan; **steps 0-6 are committed and
-green**, steps 7-12 remain.
+against a new generic backend-agnostic RHI. Twelve-step plan; **steps 0-8 are in and green**,
+steps 9-12 remain.
+
+**Steps 7 and 8 landed by accident and the record needs reading carefully.** They were written,
+then reverted, and the reverted work was subsequently swept back into `08cf5be` by a `git add -A`
+that picked up a stopped agent's in-progress edits — a commit whose subject says `docs:` but which
+carries 256 lines across four source files. That is why the "paused at step 6" claim above this
+line was wrong for several commits, and it cost two separate debugging sessions:
+- it landed the binding-set half of step 7 WITHOUT step 9, so `buildRtScene` kept writing the
+  acceleration-structure SRV into a heap nothing bound any more. RayQuery then traced against a
+  null AS and reported no hit, silently disabling ray-traced shadows (fixed in `d01a50f`);
+- it shipped `AVER_DIAG` debugging scaffolding and a per-init `[DIAG]` error line to main
+  (removed in `93a23e3`).
+Voxi's `prePass` now genuinely owns the shadow map, the volume clear, injection and the mip filter,
+and the backend's own `shadowPass()`/`voxelizePass()` are dead but still declared, pending step 11.
 
 | # | Step | Commit |
 |---|------|--------|
@@ -189,6 +202,10 @@ green**, steps 7-12 remain.
 | 4 | Per-frame constants split b0/b4 | `57e1e34` |
 | 5 | Shared shader prelude + `shadeSurface()` | `20439ac` |
 | 6 | `VoxiRenderer` registered but inert | `937cece` |
+| 7+8 | Shadow map + volume move into the feature | `08cf5be` (mislabelled `docs:`) |
+| — | Root CBVs always bound (GI hang fix) | `e461425` |
+| — | TLAS published into the bound table (RT shadow fix) | `d01a50f` |
+| — | Debugging scaffolding removed | `93a23e3` |
 
 **Oracle** (`sandbox --frames 40`): lit `0.34,0.36,0.42` · GI `0.38,0.35,0.40` ·
 `--gi-debug` `0.19,0.15,0.17` · cast-shadow `--probe 1413 1042` `0.25,0.31,0.40`
