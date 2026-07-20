@@ -160,7 +160,10 @@ struct DepthState {
 struct PipelineLayout {
     u32 srvCount = 0;             // t0..t(n-1)
     u32 uavCount = 0;             // u0..u(n-1)
-    u32 constantDwords[4] = {};   // logical constant slot -> 32-bit word count (0 = absent)
+    // Logical constant slot k maps to register b(k). A non-zero word count makes it ROOT CONSTANTS,
+    // written with setConstants; zero makes it a ROOT CBV, written with setConstantBuffer. A slot
+    // cannot be both, and setConstants on a CBV slot (or the reverse) is a binding error.
+    u32 constantDwords[4] = {};
     SamplerDesc samplers[4] = {};
     u32 samplerCount = 0;         // s0..s(n-1)
 };
@@ -204,9 +207,25 @@ struct ComputePipelineDesc {
 // unordered-access slots. Tier 1 requires every declared slot to hold a valid descriptor, so the
 // backend null-fills any left unset with a view OF THE CORRECT DIMENSION. All sets suballocate from
 // one device-owned shader-visible heap, so binding one never costs a heap switch.
+// The KIND of view a slot holds. Null-filling needs this: a Tier 1 device reading a null descriptor
+// whose dimension does not match what the shader declared is undefined behaviour, not a warning —
+// and it cannot be reproduced on hardware that binds by descriptor heap. Counts alone are not
+// enough information for the backend to fill a slot correctly.
+enum class SlotKind : u8 {
+    Texture2D,
+    Texture3D,
+    AccelerationStructure,   // SRV slots only; bound with a null resource and an address
+};
+
+// Slots per range. Counts above this cannot declare a kind, so the backend could only guess exactly
+// the thing SlotKind exists to stop it guessing — the limit is therefore enforced, not advisory.
+constexpr u32 kMaxBindingSlots = 8;
+
 struct BindingSetDesc {
-    u32 srvCount = 0;
-    u32 uavCount = 0;
+    u32 srvCount = 0;            // must be <= kMaxBindingSlots
+    u32 uavCount = 0;            // must be <= kMaxBindingSlots
+    SlotKind srvKinds[kMaxBindingSlots] = {};   // default-initialises to Texture2D
+    SlotKind uavKinds[kMaxBindingSlots] = {};
 };
 
 // Bind every mip of a texture as one view. Invalid for a UAV, which always targets one level.
@@ -221,6 +240,20 @@ constexpr u32 kAllSubresources = 0xFFFFFFFFu;
 // Triangles per mesh-shader thread group. One owner, because the group count at every dispatch site
 // is ceil(triangleCount / this) and the shader's own [numthreads] must agree.
 constexpr u32 kMeshShaderTrisPerGroup = 64;
+
+// ---------------------------------------------------------------- reserved registers
+//
+// dispatchMeshFor() binds geometry the mesh shader pulls itself. These registers are RESERVED by the
+// backend; a feature module must not declare anything at them. The declarations that match live in
+// sharedShaderPrelude(), so both sides are anchored to one owner rather than to a convention nobody
+// enforces.
+//   - vertices: t(srvCount), indices: t(srvCount + 1)  — placed after the declared SRVs so they can
+//     never collide with a layout however many SRVs it declares.
+//   - triangle count: 4 root constants at b(kMeshGeometryConstantRegister).
+// Logical constant slots 0..3 map to b0..b3, and b4 is reserved for a feature's own frame constants,
+// so the mesh geometry block sits above both.
+constexpr u32 kMeshGeometryConstantRegister = 5;
+constexpr u32 kFeatureFrameConstantRegister = 4;
 
 // ---------------------------------------------------------------- acceleration structures
 //
