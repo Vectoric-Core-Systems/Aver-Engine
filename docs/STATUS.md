@@ -173,6 +173,54 @@ Debug views that paid for themselves: **Voxel Radiance** (viewport `Lit` dropdow
 separates "voxelisation broken" from "cone tracing broken"; the centre-pixel readout in the log is
 a cheap A/B oracle (e.g. GI on/off showed red 0.70→0.73 with G/B fixed = orange bounce).
 
+## 4c-2. Voxi/HAL decoupling refactor — IN PROGRESS, paused at step 6 of 12
+
+Moving Voxi's GI/shadow/RayQuery code out of the D3D12 backend into `modules/render.voxi`,
+against a new generic backend-agnostic RHI. Twelve-step plan; **steps 0-6 are committed and
+green**, steps 7-12 remain.
+
+| # | Step | Commit |
+|---|------|--------|
+| 0 | Golden baseline + `--probe X Y` | `14284b4` |
+| 1 | Generic interface (`RHIResources.hpp`) | `f846b3d` |
+| 2 | D3D12 factory + command context | `6c46f2d` |
+| 3 | Feature hooks wired, list empty | `53c6c37` |
+| 4 | Per-frame constants split b0/b4 | `57e1e34` |
+| 5 | Shared shader prelude + `shadeSurface()` | `20439ac` |
+| 6 | `VoxiRenderer` registered but inert | `937cece` |
+
+**Oracle** (`sandbox --frames 40`): lit `0.34,0.36,0.42` · GI `0.38,0.35,0.40` ·
+`--gi-debug` `0.19,0.15,0.17` · cast-shadow `--probe 1413 1042` `0.25,0.31,0.40`
+(`0.26,0.31,0.38` under `--gi`). **The centre probe is BLIND to the sun term** — it lands on the
+cube's unlit left face where ndl~=0, so every shadow/ray-tracing check must use `--probe`.
+GI-enabled combinations have a pre-existing intermittent red-channel blip (~1 run in 5-10 reads
+0.36/0.37); verify them by majority over 6-8 runs, not a single exact match.
+
+### Step 7-8 was attempted and REVERTED — read before retrying
+Patch of the attempt: `scratchpad/step78-attempt.patch` (299 lines, does not apply cleanly as-is).
+
+What it got right, and would be needed again:
+- Steps 7, 8 and **9 must land together**. Step 7 alone requires deleting the backend's `giHeap_`,
+  but the backend's `voxelizePass` still needs it until 8 moves the volume — AND once the backend
+  binds Voxi's binding set, its RayQuery reads Voxi's t2, which is null until 9 moves the TLAS.
+  Confirmed empirically: `--rt` cast-shadow went `0.25,0.31,0.40` -> `0.43,0.46,0.52`, i.e. fully
+  lit, because the null TLAS reports no occlusion.
+- Do NOT route GI settings through `IDevice::setGi` to the feature — that puts feature vocabulary
+  back into the generic interface. The app owns the `VoxiRenderer` instance; configure it directly.
+- `D3D12ResourceFactory` needs `friend class D3D12Device` so the frame path can bind a feature's
+  descriptor table for the scene draws the backend itself records (Tier 1 requires every declared
+  table bound on every pass).
+- The backend must copy the feature's `sceneConstants()` into its b4 upload buffer AFTER `prePass`,
+  because the light matrix is not known until the shadow pass has run.
+
+**Unresolved failure, this is where to start:** with the feature's `prePass` doing the shadow and
+voxelise work, `--gi` and `--gi-debug` completed 40-60 frames and exited 0 with NO validation error
+and NO probe line at all — the backbuffer capture never became ready. `--ms --gi` DID produce a
+value, but a wrong one (`0.31,0.34,0.40` vs `0.38,0.35,0.40`). The `--ms` path uses
+`dispatchMeshFor` and the non-`--ms` path uses `ctx.drawMesh`, so the divergence is somewhere in
+the IA voxelisation path or in a barrier the debug layer did not flag. Diagnose that FIRST, with
+the D3D12 debug layer and `AVER_RHI_TRACK_STATE` on, before writing more of the migration.
+
 ## 4d. NOT DONE — open work, roughly in value order
 
 **Closed since this list was written**
