@@ -194,47 +194,68 @@ green**, steps 7-12 remain.
 `--gi-debug` `0.19,0.15,0.17` · cast-shadow `--probe 1413 1042` `0.25,0.31,0.40`
 (`0.26,0.31,0.38` under `--gi`). **The centre probe is BLIND to the sun term** — it lands on the
 cube's unlit left face where ndl~=0, so every shadow/ray-tracing check must use `--probe`.
-**GI-enabled combinations intermittently TRIP A GPU TDR — see the warning below.** The
-"~1 run in 5-10 reads 0.36/0.37" behaviour is NOT temporal noise; do not paper over it with a
-majority vote (an earlier revision of this document told you to, and that was wrong).
+The GI centre probe still wobbles in the RED channel only, `0.36`-`0.38`, and that residue is real —
+see open-work item 3. Every other oracle value, including both `--gi-debug` figures and both
+cast-shadow figures, is bit-stable run to run.
 
+### RESOLVED 2026-07-20: the GI "TDR" was an unbound root CBV, not a slow geometry shader
 
-### WARNING: the GI path hangs the GPU (0x141 TDR) — fix this BEFORE finishing the refactor
+Both GI defects — `--gi` hanging the GPU, and `--ms --gi` injecting almost nothing — were one bug
+with two faces. Fixed in `D3D12RenderContext::setPipeline`.
 
-Confirmed 2026-07-20 on the dev RX 7800 XT, and it reproduces on committed `main` with the BACKEND
-doing all GI work, so it predates this refactor entirely.
+**What was actually wrong.** `SetGraphicsRootSignature`/`SetComputeRootSignature` discard every root
+argument. The root-signature cache declares all `kMaxConstantSlots` as root parameters whether or not
+the bound shader reads them, and slot 0 (register `b0`, the engine `PerFrame` block: `gViewProj`,
+`gCamPos`, `gLightDir`, `gLightColor`, `gAmbient`, `gSky*`) is a root CBV that no feature owns or
+could supply. The backend's own draw path bound it in `bindGraphicsRoot`; the generic context path
+never did. `VoxiRenderer` sets only `b1` and `b4`, so every feature pipeline drew with `b0` pointing
+nowhere — undefined behaviour the debug layer cannot see, because it is not API misuse.
 
-Windows logs it as `LiveKernelEvent`, bugcheck `0x141` (VIDEO_ENGINE_TIMEOUT_DETECTED),
-`LKD_0x141_Tdr:C_AppFault_IMAGE_amdkmdag.sys`. Attributed to the APPLICATION: the GPU stopped
-responding and the driver reset it.
+The two paths then diverged under the same UB:
+- **IA + GS voxelise** faulted on it outright. `DXGI_ERROR_DEVICE_HUNG` (`0x887A0006`) ->
+  `LiveKernelEvent` `0x141`, `amdkmdag.sys`. The process still exits 0 and the probe prints nothing,
+  because the capture's command list died in the reset.
+- **Mesh-shader voxelise** survived it and merely read zeros. `PSVoxel` then wrote
+  `float4(0,0,0,1)` into every voxel it covered: full occupancy, zero radiance. So the volume was not
+  EMPTY, it was fully OPAQUE AND BLACK — which is why `--gi-debug` read `0.03,0.05,0.07` (the
+  raymarch's alpha saturates and the sky is occluded) rather than showing sky.
 
-It is easy to misdiagnose, so read the symptoms carefully:
-- the process exits 0;
-- the D3D12 debug layer reports NOTHING (a hang is not API misuse — there is nothing to validate);
-- the headless probe prints NO line at all, because the capture's command list died in the reset;
-- under lighter load it degrades instead to a wrong probe value (GI 0.36 rather than 0.38).
+Why one pipeline faults and the other tolerates it is not established; the mesh root signature has
+three extra parameters, so the stale root-argument layout differs. It does not need to be, because
+the unbound CBV is the defect either way.
 
-Measured, holding everything else constant: 8 runs of `--gi` at MSAA 8x produced zero output and 4
-new TDRs; 2 runs at MSAA 1x also produced zero output and 2 more TDRs; a non-GI run at MSAA 8x
-rendered correctly with none. So it is the GI workload specifically, NOT pixel/MSAA load.
+**The fix.** `setPipeline` now gives EVERY root CBV the pipeline declares a valid address before the
+feature records anything: slot 0 gets the frame constant buffer, the rest get a shared zero-filled
+256-byte buffer that `setConstants`/`setConstantBuffer` overwrite as normal. It is done backend-side
+precisely so no feature can forget it. The invariant is stated on `PipelineLayout::constantDwords`
+and `kEngineFrameConstantRegister` in `RHIResources.hpp`.
 
-Consequences to be honest about:
-- Every GI-combination gate in the step table below was verified by majority vote on a machine that
-  was intermittently resetting its GPU. Those gates are weaker than they look. The NON-GI values
-  never varied across hundreds of runs and are trustworthy.
-- Repeated TDRs degrade the driver until a reboot: after ~30 in one session GI went from
-  mostly-working to failing 10/10 while non-GI kept rendering. REBOOT before concluding anything
-  from a run of failures.
-- Watch for it during any automated render-test loop:
-  `Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1001}` filtered for `LiveKernelEvent`
-  and `141`, counted before and after the batch.
+An earlier revision of this fix instead LOGGED unwritten root CBVs at draw time. That was discarded:
+because the cache declares all five slots unconditionally, it fired on every pipeline that does not
+use all of them (the mip-filter compute reports `b1`,`b2`,`b4` every dispatch). Pure noise. Binding a
+safe default makes the condition impossible instead of reporting it.
 
-Prime suspects, cheapest first: the geometry-shader voxelisation path (GS is emulated and
-pathologically slow on AMD GCN/RDNA — the very reason the mesh-shader variant exists); the 6-cone x
-24-step cone trace at the 3532x1987 backbuffer; the per-mip barrier walk in the mip filter.
+**The geometry-shader path is KEPT.** The prior diagnosis in this document — that GS emulation on
+GCN/RDNA was too slow and blew the TDR window — was measurably WRONG, and it sent two debugging
+attempts down the wrong path. It was disproved directly: dropping the volume to 32³ (16x fewer raster
+targets) still hung, and 512³ on the mesh path completed in 2.0 s. The hang threshold did not move
+with workload, so it was a fault, not a timeout. With `b0` bound the GS path runs clean and returns
+the exact oracle.
 
-TDR history in the event log: 3 on 2026-04-20, 4 on 2026-06-09, 3 on 2026-07-12, then 20+ on
-2026-07-20 from this session's test loops. Longstanding and latent, not newly introduced.
+**Verification (2026-07-20, RX 7800 XT, driver 32.0.23027.2005).** 20 consecutive GI runs
+(`--gi`, `--ms --gi`, `--gi-debug`, `--ms --gi-debug` x5) with the `0x141` `LiveKernelEvent` count
+read before and after: **65 -> 65, zero new TDRs.** Every oracle value restored on both paths,
+including `--gi-debug` `0.19,0.15,0.17` and the cast-shadow probe `0.26,0.31,0.38` under `--gi`.
+
+**Not the cause, so do not re-investigate:** `shadowFactor` over-occluding, a broken light matrix, an
+inverted depth compare, or an uninitialised shadow depth texture. `VSShadow` reads only `b1` and
+`b4`, both of which were always bound; the shadow pass was correct throughout. Also ruled out:
+conservative rasterisation, the voxel clear/barrier sequence, `drawsPrev_` being empty on the probe
+frame, and driver/adapter/reboot state.
+
+Keep counting TDRs around any automated render-test loop regardless:
+`Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1001}` filtered for `LiveKernelEvent`
+and `141`, before and after the batch.
 
 ### Step 7-8 was attempted and REVERTED — read before retrying
 Patch of the attempt: `scratchpad/step78-attempt.patch` (299 lines, does not apply cleanly as-is).
@@ -253,19 +274,21 @@ What it got right, and would be needed again:
 - The backend must copy the feature's `sceneConstants()` into its b4 upload buffer AFTER `prePass`,
   because the light matrix is not known until the shadow pass has run.
 
-**The failure below is now EXPLAINED — it was the TDR above, not the migration code.** Kept for
-the detail, but do not go hunting for a barrier bug: with the step-7 changes reverted, `--gi` fails
-identically. Original note: with the feature's `prePass` doing the shadow and
-voxelise work, `--gi` and `--gi-debug` completed 40-60 frames and exited 0 with NO validation error
-and NO probe line at all — the backbuffer capture never became ready. `--ms --gi` DID produce a
-value, but a wrong one (`0.31,0.34,0.40` vs `0.38,0.35,0.40`). The `--ms` path uses
-`dispatchMeshFor` and the non-`--ms` path uses `ctx.drawMesh`, so the divergence is somewhere in
-the IA voxelisation path or in a barrier the debug layer did not flag. Diagnose that FIRST, with
-the D3D12 debug layer and `AVER_RHI_TRACK_STATE` on, before writing more of the migration.
+**The failure below is now FIXED — it was the unbound `b0` described above, not the migration code
+and not a barrier bug.** Both symptoms were exactly this: `--gi` and `--gi-debug` completing 40-60
+frames, exiting 0, with no validation error and no probe line (the GPU had been reset), while
+`--ms --gi` produced a wrong value (`0.31,0.34,0.40` vs `0.38,0.35,0.40`) because the mesh path read
+`b0` as zeros instead of faulting. The apparent IA-vs-MS divergence was the same missing bind
+manifesting differently on the two pipelines. Step 7-8 can now be retried against a working GI path;
+re-verify the gates below against the oracle rather than trusting the old majority-vote numbers.
 
 ## 4d. NOT DONE — open work, roughly in value order
 
 **Closed since this list was written**
+- **The GI GPU hang, and the near-empty mesh-path volume.** One cause: the engine `PerFrame` block at
+  `b0` was never bound for feature pipelines, so every Voxi draw ran against an unset root CBV. The
+  backend now binds every declared root CBV in `setPipeline`. Full write-up in section 4c-2; 20 GI
+  runs, zero new TDRs, all oracle values restored on both the GS and mesh paths.
 - **Stale voxels** (`98d7406`). `CSClear` zeroes mip 0 before injection each frame; coarser mips
   are fully overwritten by `CSMip` so they need nothing. Verified by A/B on a moving cube under
   `--gi-debug`: with the clear off the cube's radiance stays frozen where it started
@@ -288,34 +311,43 @@ the D3D12 debug layer and `AVER_RHI_TRACK_STATE` on, before writing more of the 
 **Renderer**
 1. **RT ambient occlusion / reflections.** The TLAS already exists, so this is mostly shader work.
 2. **Path tracing.** Declared only; would reuse the same acceleration structure.
-3. **No temporal accumulation** on GI. With the volume now cleared each frame this is the main
-   remaining source of GI instability; there is also an occasional one-frame blip in the shaded
-   result (~1 run in 10 reads `0.36` instead of `0.38`) present on BOTH the IA and MS paths, so it
-   predates the mesh-shader work — most likely the one-frame-delayed volume replay.
-4. GI is a **single volume**, not cascaded — large scenes will not fit at useful resolution.
-5. Shadow map is **one cascade** at 2048²; no CSM, so large scenes get coarse shadows.
-6. Specular GI is not cone traced (diffuse + AO only).
+3. **GI centre probe varies in the red channel, `0.36`-`0.38`.** This SURVIVED the root-CBV fix, so
+   it is a separate, genuine defect and not a symptom of the TDR. Measured on the fixed binary, 15
+   runs each: `--gi` 8x `0.38` / 6x `0.36` / 1x `0.37`; `--ms --gi` 14x `0.38` / 1x `0.37`. Green and
+   blue never move, and `--gi-debug` is bit-stable on both paths, so the volume's CONTENT is stable
+   and the wobble is in what the cone trace gathers from it.
+   Most likely cause, grounded but NOT yet proven: voxel injection is a plain last-writer-wins store
+   (`gVoxelUAV[c] = float4(radiance, 1.0)` in `VoxiShaders.hpp`, no atomic, no ordering guarantee),
+   so fragments landing in the same voxel race. The GS and MS paths present triangles to the
+   rasteriser in different orders, which fits the GS path wobbling ~10x more often. Next step is to
+   make injection order-independent (an atomic max, or accumulate-and-average) and re-measure; do
+   NOT paper over it with a majority vote.
+4. **No temporal accumulation** on GI. With the volume cleared each frame this is the other main
+   source of GI instability.
+5. GI is a **single volume**, not cascaded — large scenes will not fit at useful resolution.
+6. Shadow map is **one cascade** at 2048²; no CSM, so large scenes get coarse shadows.
+7. Specular GI is not cone traced (diffuse + AO only).
 
 **Portability (asked for explicitly: all AMD + NVIDIA DX12 GPUs)**
-7. **Only ever run on one GPU (RX 7800 XT).** The DXR/GI/mesh paths are capability-gated and fall
+8. **Only ever run on one GPU (RX 7800 XT).** The DXR/GI/mesh paths are capability-gated and fall
     back, but have NOT been exercised on NVIDIA or Intel, nor on Resource-Binding-Tier-1 hardware.
     Test before shipping.
-8. D3D11 and Vulkan backends are still **stubs** — D3D12 is the only working backend, so
+9. D3D11 and Vulkan backends are still **stubs** — D3D12 is the only working backend, so
     "supports DirectX 12" is a hard requirement.
 
 **Scripting**
-9. **C# cannot drive the live editor.** A standalone C# process P/Invokes its own copy of
+10. **C# cannot drive the live editor.** A standalone C# process P/Invokes its own copy of
     `Aver.Render.Voxi.dll`, so it gets its own settings and empty device caps. Needs in-process
     CLR hosting (hostfxr/CoreCLR). The C ABI is already shaped for it.
-10. Same caveat blocks the **launcher hardware probe** in `docs/MINIMUM_SPECS.md` §7.
+11. Same caveat blocks the **launcher hardware probe** in `docs/MINIMUM_SPECS.md` §7.
 
 **Editor / engine**
-11. Dock layout does **not persist** (`io.IniFilename` is null) — rebuilt from DockBuilder each run.
-12. Output Log does not capture the real log; Content Browser is a placeholder.
-13. Toolbar Save / Play / Pause / Stop are **non-functional stubs**.
-14. No scene save/load, no `.ocmesh`, no asset import — the general-purpose roadmap in §9 is
+12. Dock layout does **not persist** (`io.IniFilename` is null) — rebuilt from DockBuilder each run.
+13. Output Log does not capture the real log; Content Browser is a placeholder.
+14. Toolbar Save / Play / Pause / Stop are **non-functional stubs**.
+15. No scene save/load, no `.ocmesh`, no asset import — the general-purpose roadmap in §9 is
     otherwise untouched.
-15. `modules/abi` is still an empty skeleton (the C ABI lives in the Voxi module instead).
+16. `modules/abi` is still an empty skeleton (the C ABI lives in the Voxi module instead).
 
 **Decisions taken (do not re-litigate without reason)**
 - Ray tracing targets **DXR 1.1 inline RayQuery only**; DXR 1.0 would add only GPUs that emulate
