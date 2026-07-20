@@ -358,8 +358,6 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
 void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     const u32 res = voxelResBuilt_;
     ctx.pushMarker("Voxi voxelise");
-    // The chain rests in ShaderResource between frames; take the whole thing back for writing.
-    ctx.textureBarrier(voxelTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
 
     // Injection only touches the voxels its triangles cover, so without a clear a voxel lit once
     // stays lit and moving geometry drags a radiance trail behind it. Only the accumulator needs
@@ -397,6 +395,12 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     // covered a voxel and not on the order the GPU happened to retire them in -- which is the whole
     // reason the accumulator exists.
     ctx.uavBarrierTexture(voxelAccumTex_);
+    // The volume leaves ShaderResource HERE and not a line earlier. Nothing above writes it: the
+    // clear zeroes the accumulator and injection only adds to it, so the resolve is the first pass
+    // that needs it writable. Taking it early left the whole-chain SRV in the injection pass's own
+    // binding set pointing at a resource in UnorderedAccess -- legal only because that descriptor
+    // is never read, which is not a property worth relying on.
+    ctx.textureBarrier(voxelTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
     ctx.setPipeline(resolvePso_);
     ctx.setBindingSet(resolveBindings_);
     ctx.dispatch(cg, cg, cg);

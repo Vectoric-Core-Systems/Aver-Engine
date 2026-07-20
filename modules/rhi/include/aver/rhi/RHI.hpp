@@ -137,28 +137,14 @@ public:
     virtual LineHandle createLineMesh(const LineVertex* verts, u32 count) { (void)verts; (void)count; return 0; }
     virtual void drawLines(LineHandle mesh, const f32 world[16]) { (void)mesh; (void)world; }
 
-    // ----- Voxel-cone-traced global illumination (Voxi) -----
-    // The scene is voxelised into a radiance volume each frame and cone-traced in the lit pass.
-    // `center`/`extent` place the cubic volume in world space (centimetres).
-    struct GiSettings {
-        bool enabled = false;
-        bool debugView = false;   // raymarch the volume to screen instead of shading (debug aid)
-        u32 resolution = 128;     // voxel grid edge
-        f32 intensity = 1.0f;
-        f32 maxDistance = 4000.0f;
-        f32 center[3] = {0, 0, 0};
-        f32 extent = 2000.0f;     // half-size of the cubic volume
-    };
-    virtual void setGi(const GiSettings& gi) { (void)gi; }
-
-    // DXR 1.1 inline ray tracing (RayQuery) for exact sun shadows. Requires raytracing
-    // tier 1.1 + shader model 6.5; silently ignored when unavailable.
-    virtual void setRayTracing(bool enabled) { (void)enabled; }
-    virtual bool rayTracingActive() const { return false; }
-
     // Mesh shader geometry path (D3D12 Ultimate: mesh-shader Tier 1 + SM 6.5). Replaces the
-    // input-assembler vertex path, and removes the geometry shader from voxelisation — which is
-    // the real win, since GS is emulated on every AMD GCN part. Ignored when unavailable.
+    // input-assembler vertex path for every draw, which is why it lives here and not in a render
+    // feature: it is a property of how geometry reaches the rasteriser, not of any one effect.
+    // Ignored when unavailable.
+    //
+    // Global illumination, shadows and ray tracing used to be declared alongside this. They are a
+    // render feature's business now (see IRenderFeature in RHIResources.hpp) and the app configures
+    // that feature directly, so no vocabulary they introduced survives in this interface.
     virtual void setMeshShaders(bool enabled) { (void)enabled; }
     virtual bool meshShadersActive() const { return false; }
 

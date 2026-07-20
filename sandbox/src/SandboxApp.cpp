@@ -320,22 +320,14 @@ public:
         if (voxi::Renderer::get().consumeMsaaDirty())
             e.device()->setSampleCount(static_cast<u32>(voxi::Renderer::get().settings().msaa));
 
-        // ...and the GI settings, including where the voxel volume sits in the world.
+        // The mesh-shader toggle is the only render setting the DEVICE still owns: it selects the
+        // geometry path for every draw, not the behaviour of any one effect.
         {
             const voxi::Settings& vs = voxi::Renderer::get().settings();
-            rhi::IDevice::GiSettings g;
-            g.enabled     = vs.globalIllumination != voxi::Quality::Off;
-            g.debugView   = giDebugView_;
-            g.resolution  = vs.voxelResolution;
-            g.intensity   = vs.giIntensity;
-            g.maxDistance = vs.giMaxDistance;
-            g.center[0] = giCenter_.x; g.center[1] = giCenter_.y; g.center[2] = giCenter_.z;
-            g.extent    = giExtent_;
-            e.device()->setGi(g);
-            e.device()->setRayTracing(vs.rayTracing != voxi::Quality::Off);
             e.device()->setMeshShaders(vs.meshShaders);
-            // The feature is configured directly rather than through the device: routing GI
-            // settings via IDevice would put feature vocabulary back into the generic interface.
+            // Everything else — GI, the volume's placement in the world, shadows, ray tracing —
+            // goes to the feature directly. Routing it through IDevice would put feature vocabulary
+            // back into the generic interface, which is the whole point of the refactor.
             if (voxiAttached_) {
                 const f32 c[3] = {giCenter_.x, giCenter_.y, giCenter_.z};
                 voxiRenderer_.setSettings(vs);

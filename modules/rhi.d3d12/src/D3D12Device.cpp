@@ -4,7 +4,6 @@
 // D3D12 structs (no d3dx12.h). Falls back to nullptr if D3D12 is unavailable.
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
-#include "aver/core/Math.hpp"   // light-space matrices for the shadow map
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -170,137 +169,12 @@ D3D12_RESOURCE_DESC bufferDesc(u64 bytes) {
 }
 
 const char* kShaderHLSL = R"(
-// Feature-owned frame constants, at the register RHIResources.hpp reserves for exactly this. Split
-// out of b0 so the engine block carries nothing a render feature introduced, and so a pass that
-// recomputes only these (the shadow matrix is not known until the shadow pass runs) re-uploads 112
-// bytes instead of the whole engine block.
-cbuffer VoxiFrame : register(b4) {
-    float4   gVoxelOrigin; // xyz = volume min corner, w = 1/volumeWorldSize
-    float4   gVoxelParams; // x = resolution, y = intensity, z = maxDistance, w = enabled|debug<<1
-    float4x4 gLightViewProj;
-    float4   gShadowParams; // x = 1/shadowMapSize, y = enabled, z = acceleration structure built
-};
-
-// ---- Voxi: voxel cone traced GI ----
-RWTexture3D<float4> gVoxelUAV : register(u0);
-Texture3D<float4>   gVoxelTex : register(t0);
-SamplerState        gVoxelSamp : register(s0);
-
-// Directional shadow map. Core feature-level 11_0 (no optional caps), so it works on every
-// DX12 GPU - which is why shadowed light injection uses this rather than ray-traced shadows.
-Texture2D<float>          gShadowTex  : register(t1);
-SamplerComparisonState    gShadowSamp : register(s1);
-
-#if AVER_RT
-// DXR 1.1 inline ray tracing. Traced from the pixel shader itself - no state objects, no shader
-// binding tables, no DispatchRays - so it drops into the existing raster pipeline.
-RaytracingAccelerationStructure gScene : register(t2);
-
-// Exact hard shadow: one occlusion ray toward the sun. ACCEPT_FIRST_HIT_AND_END_SEARCH makes it a
-// pure any-hit visibility query, which is much cheaper than finding the closest hit.
-float rtShadow(float3 wpos, float3 N, float3 L) {
-    RayDesc r;
-    r.Origin    = wpos + N * 0.02;   // offset along the normal so we do not hit ourselves
-    r.Direction = L;
-    r.TMin      = 0.001;
-    r.TMax      = 100000.0;
-    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, r);
-    q.Proceed();
-    return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
-}
-#endif
-
-// 3x3 PCF. Returns 1 = fully lit, 0 = fully shadowed.
-float shadowFactor(float3 wpos, float ndl) {
-    if (gShadowParams.y < 0.5) return 1.0;
-    float4 lp = mul(float4(wpos, 1.0), gLightViewProj);
-    float3 p = lp.xyz / lp.w;
-    float2 uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
-    if (any(uv < 0.0) || any(uv > 1.0) || p.z > 1.0) return 1.0;  // outside the map = lit
-    float bias = max(0.0015 * (1.0 - ndl), 0.0003);               // depth bias, light-space units
-    float s = 0.0;
-    [unroll] for (int y = -1; y <= 1; ++y)
-    [unroll] for (int x = -1; x <= 1; ++x)
-        s += gShadowTex.SampleCmpLevelZero(gShadowSamp, uv + float2(x, y) * gShadowParams.x, p.z - bias);
-    return s / 9.0;
-}
-
-// Mip level being read by CSMip (b3: b0/b1 are taken by the graphics root signature).
-cbuffer MipCB : register(b3) { uint gSrcMip; uint3 _mipPad; };
-
-// world -> [0,1] volume coords
-float3 voxelUVW(float3 wp) { return (wp - gVoxelOrigin.xyz) * gVoxelOrigin.w; }
-bool insideVolume(float3 uvw) { return all(uvw >= 0.0) && all(uvw <= 1.0); }
-
-// ---- cone tracing (defined before its callers: HLSL needs definition before use) ----
-// March a cone through the volume, widening with distance and reading a coarser mip each step so
-// one sample covers the cone's footprint. Front-to-back alpha compositing.
-float4 traceCone(float3 originWS, float3 dir, float aperture) {
-    float voxelWorld = 1.0 / (gVoxelOrigin.w * gVoxelParams.x); // one voxel, world units
-    float dist = voxelWorld * 2.0;                              // start off-surface to avoid self-hit
-    float4 acc = 0;
-    [loop] for (int step = 0; step < 24; ++step) {
-        if (acc.a >= 0.95 || dist > gVoxelParams.z) break;
-        float diameter = max(voxelWorld, 2.0 * aperture * dist);
-        float mip = log2(diameter / voxelWorld);
-        float3 uvw = voxelUVW(originWS + dir * dist);
-        if (!insideVolume(uvw)) break;
-        float4 s = gVoxelTex.SampleLevel(gVoxelSamp, uvw, mip);
-        acc += (1.0 - acc.a) * s;
-        dist += diameter * 0.5;
-    }
-    return acc;
-}
-
-// Six cones over the hemisphere: one along the normal, five in a ring. Enough for smooth bounce
-// lighting without the cost of a full irradiance gather.
-float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
-    float3 up = abs(N.z) < 0.9 ? float3(0,0,1) : float3(1,0,0);
-    float3 T = normalize(cross(up, N)), B = cross(N, T);
-    const float aperture = 0.577;              // ~60 degree cone
-    float4 sum = traceCone(wpos, N, aperture);
-    float occ = sum.a;
-    [unroll] for (int k = 0; k < 5; ++k) {
-        float ang = 1.2566 * k;                // 2*pi/5
-        float3 d = normalize(N * 0.5 + (T * cos(ang) + B * sin(ang)) * 0.866);
-        float4 c = traceCone(wpos, d, aperture);
-        sum += c; occ += c.a;
-    }
-    sum /= 6.0; occ /= 6.0;
-    ao = saturate(1.0 - occ);
-    return sum.rgb * gVoxelParams.y;
-}
-
-// ---- scene pixel shaders: which terms shadeSurface is fed, and nothing else ----
-// No shadowing and no bounce: the surface shading the prelude offers on its own.
+// ---- scene pixel shader ----
+// PSMainPlain, and only PSMainPlain: unshadowed, with no bounce. That is the whole of the shading
+// this backend owns, because sun visibility and indirect radiance are arguments shadeSurface takes
+// rather than terms it computes. A render feature that wants either supplies its own pixel shader
+// and its own pipeline; the backend keeping a second copy is what step 11 of the refactor removed.
 float4 PSMainPlain(VSOut i) : SV_TARGET { return shadeSurface(i, 1.0, float3(0,0,0), 1.0); }
-
-// The Voxi variant: sun visibility from the shadow map (or a ray, under AVER_RT) plus the
-// cone-traced bounce. The radiance handed over is raw - shadeSurface owns the diffuse response.
-float4 PSMainVoxi(VSOut i) : SV_TARGET {
-    float3 N = normalize(i.nrmWS);
-    float3 L = normalize(gLightDir.xyz);
-    float ndl = saturate(dot(N, L));
-#if AVER_RT
-    // gShadowParams.z is the feature's "I built the acceleration structure for THIS frame" flag.
-    // The RayQuery pipeline can be selected before the first build (the replay list runs a frame
-    // behind) or while no draw yielded a usable BLAS, and tracing a structure nothing filled
-    // reports no hit everywhere: a fully lit scene, with nothing for the debug layer to say.
-    // The fallback therefore lives here, where the fact is known, rather than in a pipeline choice
-    // the backend would have to keep in step.
-    float sunVis;
-    if (gShadowParams.z > 0.5) sunVis = rtShadow(i.wpos, N, L);   // exact ray-traced occlusion
-    else                       sunVis = shadowFactor(i.wpos, ndl); // shadow map + PCF
-#else
-    const float sunVis = shadowFactor(i.wpos, ndl);       // shadow map + PCF
-#endif
-    // Voxi indirect bounce: cone-traced diffuse GI + the ambient occlusion that falls out of it.
-    float ao = 1.0;
-    float3 ind = 0;
-    if (gVoxelParams.w > 0.5) ind = coneTracedIndirect(i.wpos, N, ao);
-    return shadeSurface(i, sunVis, ind, ao);
-}
 
 // ---- procedural sky (fullscreen triangle via SV_VertexID) ----
 float4 PSky(SkyOut i) : SV_TARGET {
@@ -325,135 +199,6 @@ LVSOut VSLine(LVSIn i) {
     return o;
 }
 float4 PSLine(LVSOut i) : SV_TARGET { return float4(i.col, 1.0); }
-
-// Depth-only pass from the sun's point of view (VSIn is declared above).
-float4 VSShadow(VSIn i) : SV_POSITION {
-    return mul(mul(float4(i.pos, 1.0), gWorld), gLightViewProj);
-}
-
-// ================= Voxi: voxelisation =================
-// The scene is rasterised once per frame with no render target; the pixel shader computes direct
-// lighting and writes radiance straight into the 3D volume. Merging "voxelise" and "inject light"
-// into one pass avoids a second full scene traversal.
-struct VoxOut { float4 pos : SV_POSITION; float3 wpos : TEXCOORD0; float3 nrm : NORMAL; };
-
-VoxOut VSVoxel(VSIn i) {
-    VoxOut o;
-    float4 wp = mul(float4(i.pos, 1.0), gWorld);
-    o.wpos = wp.xyz;
-    o.nrm  = mul(float4(i.nrm, 0.0), gWorld).xyz;
-    o.pos  = wp;                     // world space; the GS picks a projection axis
-    return o;
-}
-
-// Project each triangle along its dominant axis so it covers the most pixels (and therefore the
-// most voxels). The voxel index is recomputed from world position in the PS, so the choice of
-// axis does not affect correctness - only coverage.
-[maxvertexcount(3)]
-void GSVoxel(triangle VoxOut inp[3], inout TriangleStream<VoxOut> os) {
-    float3 n = abs(cross(inp[1].wpos - inp[0].wpos, inp[2].wpos - inp[0].wpos));
-    int axis = (n.x > n.y && n.x > n.z) ? 0 : ((n.y > n.z) ? 1 : 2);
-    [unroll] for (int k = 0; k < 3; ++k) {
-        VoxOut o = inp[k];
-        float3 v = voxelUVW(o.wpos);
-        float2 p = (axis == 0) ? v.yz : ((axis == 1) ? v.xz : v.xy);
-        o.pos = float4(p * 2.0 - 1.0, 0.5, 1.0);
-        os.Append(o);
-    }
-}
-
-#if AVER_MS
-// Voxelisation without a geometry shader. The dominant-axis choice GSVoxel made per primitive is
-// made here instead - the mesh shader is already per-primitive, so the GS stage disappears. That
-// matters because GS is emulated on every AMD GCN part and is markedly slower there.
-[numthreads(AVER_MS_TRIS, 1, 1)]
-[outputtopology("triangle")]
-void MSVoxel(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
-             out vertices VoxOut verts[AVER_MS_TRIS * 3],
-             out indices uint3 tris[AVER_MS_TRIS]) {
-    uint count = msTriCount(gid);
-    SetMeshOutputCounts(count * 3, count);
-    if (gtid >= count) return;
-
-    uint3 idx = gIndices.Load3((gid * AVER_MS_TRIS + gtid) * 12);
-    float3 wp[3], nr[3];
-    [unroll] for (uint k = 0; k < 3; ++k) {
-        MeshVtx v = gVerts[idx[k]];
-        wp[k] = mul(float4(v.pos, 1.0), gWorld).xyz;
-        nr[k] = mul(float4(v.nrm, 0.0), gWorld).xyz;
-    }
-    float3 n = abs(cross(wp[1] - wp[0], wp[2] - wp[0]));
-    int axis = (n.x > n.y && n.x > n.z) ? 0 : ((n.y > n.z) ? 1 : 2);
-    uint o = gtid * 3;
-    [unroll] for (uint k = 0; k < 3; ++k) {
-        float3 v = voxelUVW(wp[k]);
-        float2 p = (axis == 0) ? v.yz : ((axis == 1) ? v.xz : v.xy);
-        VoxOut ov;
-        ov.wpos = wp[k];
-        ov.nrm  = nr[k];
-        ov.pos  = float4(p * 2.0 - 1.0, 0.5, 1.0);
-        verts[o + k] = ov;
-    }
-    tris[gtid] = uint3(o, o + 1, o + 2);
-}
-#endif // AVER_MS
-
-void PSVoxel(VoxOut i) {
-    float3 uvw = voxelUVW(i.wpos);
-    if (!insideVolume(uvw)) return;
-    float3 N = normalize(i.nrm);
-    float3 L = normalize(gLightDir.xyz);
-    float3 albedo = srgbToLin(gBaseColor.rgb);
-    // SHADOWED injection: a surface in shadow must not emit sun radiance into the volume, or the
-    // bounce lighting leaks through walls and shadowed areas glow.
-    float ndl = saturate(dot(N, L));
-    float3 radiance = albedo * (srgbToLin(gLightColor.rgb) * ndl * shadowFactor(i.wpos, ndl)
-                                + skyColor(N) * gAmbient.r);
-    int3 c = int3(uvw * gVoxelParams.x);
-    gVoxelUAV[c] = float4(radiance, 1.0);   // alpha = occupancy
-}
-
-// Clear mip 0 before injection. PSVoxel only writes the voxels its triangles cover, so without a
-// clear a voxel lit on one frame stays lit forever and moving geometry drags a radiance trail
-// behind it. Only mip 0 needs this - CSMip fully overwrites every coarser level.
-[numthreads(4,4,4)]
-void CSClear(uint3 id : SV_DispatchThreadID) { gVoxelUAV[id] = 0.0; }
-
-// ================= Voxi: mip filtering =================
-// Box-filter one mip into the next. Averaging radiance AND occupancy is what lets a wide cone
-// step read a single blurry sample instead of marching every voxel. Reuses the volume bindings
-// (t0 = whole chain, u0 = the destination mip) so no extra registers are needed.
-[numthreads(4,4,4)]
-void CSMip(uint3 id : SV_DispatchThreadID) {
-    int3 s = int3(id) * 2;
-    float4 a = 0;
-    [unroll] for (int x=0;x<2;++x)
-    [unroll] for (int y=0;y<2;++y)
-    [unroll] for (int z=0;z<2;++z)
-        a += gVoxelTex.Load(int4(s + int3(x,y,z), gSrcMip));
-    gVoxelUAV[id] = a * 0.125;
-}
-
-// Debug: raymarch the volume straight to screen so voxelisation can be inspected on its own.
-float4 PSVoxelDebug(SkyOut i) : SV_TARGET {
-    float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
-    float3 ray = normalize(far.xyz / far.w - gCamPos.xyz);
-    float voxelWorld = 1.0 / (gVoxelOrigin.w * gVoxelParams.x);
-    float4 acc = 0;
-    float t = 0;
-    [loop] for (int s = 0; s < 256; ++s) {
-        if (acc.a >= 0.98) break;
-        float3 uvw = voxelUVW(gCamPos.xyz + ray * t);
-        t += voxelWorld;
-        if (t > gVoxelParams.z * 2.0) break;
-        if (!insideVolume(uvw)) continue;
-        float4 v = gVoxelTex.SampleLevel(gVoxelSamp, uvw, 0);
-        acc += (1.0 - acc.a) * v;
-    }
-    float3 bg = skyColor(ray);
-    float3 col = acc.rgb + bg * (1.0 - acc.a);
-    return float4(toGamma(acesTonemap(col)), 1.0);
-}
 )";
 
 // The shared prelude and this backend's own shaders form ONE translation unit; every entry point
@@ -476,15 +221,26 @@ struct PerFrameCB {
     f32 fogColor[4];    // a = density
 };
 
-// Mirrors `cbuffer VoxiFrame : register(b4)`. Field order and padding must match it exactly -- a
-// mismatch here is silent, and shows up as misplaced GI or a uniformly lit scene rather than as any
-// kind of error.
-struct VoxiFrameCB {
-    f32 voxelOrigin[4];  // xyz = volume min corner, w = 1/volumeWorldSize
-    f32 voxelParams[4];  // x = resolution, y = intensity, z = maxDistance, w = enabled
-    f32 lightViewProj[16];
-    f32 shadowParams[4]; // x = 1/shadowMapSize, y = enabled, z = acceleration structure built
+// The ONE description of rhi::MeshVertex to D3D12. Every pipeline that reads geometry through the
+// input assembler shares it -- the backend's scene pipelines and the generic factory's alike -- so
+// adding a field to MeshVertex is a single edit here rather than a hunt through five PSO builders
+// where a missed one fails at draw time with nothing naming the cause.
+constexpr D3D12_INPUT_ELEMENT_DESC kMeshInputLayout[] = {
+    {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
 };
+constexpr UINT kMeshInputLayoutCount = sizeof(kMeshInputLayout) / sizeof(kMeshInputLayout[0]);
+
+// Root parameter indices for the backend's own two signatures. Named because the recording side
+// passes them as bare integers to SetGraphicsRoot*, where a stale number binds the wrong parameter
+// instead of failing -- the failure mode that cost this project a debugging session already.
+constexpr UINT kSceneFrameParam  = 0;   // b0, the engine per-frame block
+constexpr UINT kSceneObjectParam = 1;   // b1, 24 root constants: world + colour + material
+// The mesh-shader signature repeats those two and appends the geometry the input assembler would
+// otherwise have fetched. The REGISTERS are fixed by sharedShaderPrelude(); only the indices live here.
+constexpr UINT kMeshVertexParam = 2;    // t3
+constexpr UINT kMeshIndexParam  = 3;    // t4
+constexpr UINT kMeshCountParam  = 4;    // b5, triangle count
 
 struct GpuMesh {
     ComPtr<ID3D12Resource> vb;
@@ -695,13 +451,10 @@ public:
     void drawLines(LineHandle mesh, const f32 world[16]) override;
     void setWireframe(bool on) override { wireframe_ = on; }
     void setLineDepth(bool testDepth) override { lineDepth_ = testDepth; }
-    void setGi(const GiSettings& gi) override;
-    void setRayTracing(bool enabled) override { rtEnabled_ = enabled && rtSupported_; }
-    bool rayTracingActive() const override { return rtActive_; }
     void setMeshShaders(bool enabled) override {
         const bool want = enabled && msSupported_;
         if (want != msActive_) AVER_INFO("[RHI.D3D12] geometry path: {}", want ? "mesh shaders" : "input assembler");
-        msEnabled_ = msActive_ = want;
+        msActive_ = want;
     }
     bool meshShadersActive() const override { return msActive_; }
 
@@ -728,18 +481,10 @@ public:
 
 private:
     void queryCaps();
-    bool initRayTracing();
+    bool initAccelerationStructures();
     bool initMeshShaders();
     void dispatchMesh(const GpuMesh& m);
-    RhiBindingSet* sceneBindings();             // the registered feature's set, or null
-    void bindGiTables();                        // bind heap + both descriptor tables (Tier 1 safety)
     void bindGraphicsRoot(ID3D12RootSignature* rs); // switch root signature + rebind shared params
-    void voxelBarrier(u32 sub, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to);
-    bool createShadowResources();
-    void shadowPass();
-    bool createGiPipelines();
-    bool createVoxelVolume(u32 res);
-    void voxelizePass();
     bool createPipeline();
     bool createSwapchainResources(const SwapchainDesc& d);
     void createRenderTargetViews();
@@ -782,9 +527,6 @@ private:
     std::vector<GpuLineMesh> lineMeshes_;
     ComPtr<ID3D12Resource> frameCBs_[kFrameCount];
     u8* frameCBPtr_[kFrameCount] = {nullptr, nullptr};
-    VoxiFrameCB voxiCB_{};
-    ComPtr<ID3D12Resource> voxiCBs_[kFrameCount];
-    u8* voxiCBPtr_[kFrameCount] = {nullptr, nullptr};
 
     ComPtr<ID3D12Resource> captureBuf_;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT captureFp_{};
@@ -804,43 +546,24 @@ private:
     u32 sampleCount_ = kDefaultSampleCount;     // live MSAA sample count (1 = off)
     DeviceCaps caps_{};
 
-    // ---- DXR 1.1 inline ray tracing ----
+    // ---- DXR 1.1 ----
+    // No pipeline of its own: nothing this backend draws traces a ray. These two interfaces exist
+    // only so the generic factory can build acceleration structures for a render feature that does,
+    // which is why they are acquired behind the same DXR-1.1 gate the feature checks for itself.
     ComPtr<ID3D12Device5> device5_;
     ComPtr<ID3D12GraphicsCommandList4> cmdList4_;
-    ComPtr<ID3D12PipelineState> rtPso_;
 
     // ---- Mesh shader geometry path (D3D12 Ultimate) ----
-    // A separate root signature: a mesh-shader PSO may not use one declaring an input-assembler
-    // layout, and the MS path adds two root SRVs (vertices, indices) plus a triangle count.
+    // A GENERIC geometry path, not a feature: it replaces the input assembler for any draw. A
+    // separate root signature, because a mesh-shader PSO may not use one declaring an
+    // input-assembler layout, and the MS path adds two root SRVs (vertices, indices) plus a
+    // triangle count.
     ComPtr<ID3D12GraphicsCommandList6> cmdList6_;
     ComPtr<ID3D12RootSignature> msRootSig_;
-    ComPtr<ID3D12PipelineState> msPso_, msVoxelPso_, msRtPso_;
-    bool msSupported_ = false, msEnabled_ = false, msActive_ = false;
+    ComPtr<ID3D12PipelineState> msPso_;
+    bool msSupported_ = false, msActive_ = false;
     ID3D12RootSignature* boundRootSig_ = nullptr;   // raw: cache only, ownership stays in the ComPtrs
-    // The acceleration structures themselves belong to the registered feature now; the backend only
-    // decides whether to record the RayQuery pipeline. Whether that pipeline actually traces is the
-    // feature's call, published in its own frame constants (gShadowParams.z) — the backend cannot
-    // know whether this frame's build produced any instances.
-    bool rtSupported_ = false, rtEnabled_ = false, rtActive_ = false;
 
-    // ---- Voxi voxel-cone-traced GI ----
-    GiSettings gi_{};
-    ComPtr<ID3D12Resource> voxelTex_;             // R16G16B16A16_FLOAT Texture3D, mipped
-    // Shader-visible heap: [0]=voxel SRV (t0), [1]=shadow SRV (t1), [2+m]=voxel mip m UAV (u0).
-    ComPtr<ID3D12DescriptorHeap> giHeap_;
-    // Directional shadow map: core FL11_0, so shadowed injection works on every DX12 GPU.
-    ComPtr<ID3D12Resource> shadowTex_;
-    ComPtr<ID3D12DescriptorHeap> shadowDsvHeap_;
-    ComPtr<ID3D12PipelineState> shadowPso_;
-    bool shadowReady_ = false;
-    ComPtr<ID3D12PipelineState> voxelPso_, voxelDebugPso_, mipPso_, clearPso_;
-    ComPtr<ID3D12RootSignature> mipRootSig_, clearRootSig_;
-    u32 giSrvSize_ = 0, voxelMips_ = 0, voxelResBuilt_ = 0;
-    bool giReady_ = false;
-    // Draws are replayed into the voxel volume at the start of the NEXT frame; a one-frame-old
-    // volume is imperceptible and avoids restructuring the app's submission order.
-    struct VoxelDraw { MeshHandle mesh; f32 world[16]; f32 color[4]; f32 metallic, roughness; };
-    std::vector<VoxelDraw> voxelDraws_, voxelDrawsPrev_;
     bool hasSwapchain_ = false;
     f32 clear_[4] = {0.10f, 0.12f, 0.16f, 1.0f};
     std::string adapterName_ = "D3D12 Device";
@@ -1171,8 +894,6 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     setLight(d, c, 0.15f);
 
     if (!createPipeline()) return false;
-    if (!createShadowResources()) AVER_WARN("[RHI.D3D12] shadow map unavailable; lighting will be unshadowed");
-    if (!createGiPipelines()) AVER_WARN("[RHI.D3D12] Voxi GI pipelines unavailable; GI disabled");
 
     // Generic RHI surface. Its failure is not fatal: a feature module that cannot get a factory
     // declines to initialise, which is exactly what the Null backend already does.
@@ -1268,8 +989,7 @@ bool D3D12Device::setSampleCount(u32 samples) {
     const u32 prev = sampleCount_;
     sampleCount_ = samples;
     if (!createPipeline()) { sampleCount_ = prev; createPipeline(); return false; } // PSOs carry SampleDesc
-    if (rtSupported_) initRayTracing();   // the RayQuery PSO bakes SampleDesc too
-    if (msSupported_) initMeshShaders();  // so does the mesh-shader PSO
+    if (msSupported_) initMeshShaders();  // the mesh-shader PSO bakes SampleDesc too
     if (hasSwapchain_) {
         depthBuffer_.Reset();
         msaaColor_.Reset();
@@ -1289,52 +1009,21 @@ void D3D12Device::notifyRenderTargetsChanged() {
 }
 
 bool D3D12Device::createPipeline() {
-    // Root signature: b0 = per-frame CBV, b1 = 20 root constants (world + colour).
-    // b0 per-frame CBV, b1 root constants, t0 voxel volume (lit pass), u0 voxel volume (voxelise).
-    D3D12_DESCRIPTOR_RANGE srvRange{}; srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; srvRange.NumDescriptors = 3; srvRange.BaseShaderRegister = 0; // t0 voxel, t1 shadow, t2 TLAS
-    D3D12_DESCRIPTOR_RANGE uavRange{}; uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; uavRange.NumDescriptors = 1; uavRange.BaseShaderRegister = 0;
-
-    D3D12_ROOT_PARAMETER params[5] = {};
-    params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   // b4: feature frame constants
-    params[4].Descriptor.ShaderRegister = kFeatureFrameConstantRegister;
-    params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[0].Descriptor.ShaderRegister = 0;
-    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[1].Constants.ShaderRegister = 1;
-    params[1].Constants.Num32BitValues = 24;
-    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[2].DescriptorTable.NumDescriptorRanges = 1;
-    params[2].DescriptorTable.pDescriptorRanges = &srvRange;
-    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[3].DescriptorTable.NumDescriptorRanges = 1;
-    params[3].DescriptorTable.pDescriptorRanges = &uavRange;
-    params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    D3D12_STATIC_SAMPLER_DESC samp{};
-    samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    samp.MaxLOD = D3D12_FLOAT32_MAX;
-    samp.ShaderRegister = 0;
-    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    D3D12_STATIC_SAMPLER_DESC shadowSamp{};
-    shadowSamp.Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT; // hardware PCF
-    shadowSamp.AddressU = shadowSamp.AddressV = shadowSamp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    shadowSamp.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-    shadowSamp.MaxLOD = D3D12_FLOAT32_MAX;
-    shadowSamp.ShaderRegister = 1;
-    shadowSamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    const D3D12_STATIC_SAMPLER_DESC samplers[2] = {samp, shadowSamp};
+    // b0 = the engine per-frame block, b1 = 24 root constants (world + colour + material). That is
+    // the whole signature: no descriptor tables, no samplers, no feature constant block. A render
+    // feature brings its own root signature through the generic factory, so nothing declared here
+    // has to anticipate what one of them might read.
+    D3D12_ROOT_PARAMETER params[2] = {};
+    params[kSceneFrameParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    params[kSceneFrameParam].Descriptor.ShaderRegister = kEngineFrameConstantRegister;
+    params[kSceneObjectParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[kSceneObjectParam].Constants.ShaderRegister = 1;
+    params[kSceneObjectParam].Constants.Num32BitValues = 24;
+    for (auto& rp : params) rp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC rsd{};
-    rsd.NumParameters = 5;
+    rsd.NumParameters = 2;
     rsd.pParameters = params;
-    rsd.NumStaticSamplers = 2;
-    rsd.pStaticSamplers = samplers;
     rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     ComPtr<ID3DBlob> rsBlob, rsErr;
@@ -1344,24 +1033,17 @@ bool D3D12Device::createPipeline() {
     if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "VSMain", "vs_5_1", &vs))) {
         return false;
     }
-    // PSMainPlain, and only PSMainPlain: the shadow lookup and the cone trace are terms inside the
-    // FEATURE's pixel shader now. This pipeline is what a scene with no Voxi registered gets, and
-    // it is unshadowed with no GI by design — the alternative is the backend keeping a second copy
-    // of shading it no longer owns.
+    // This pipeline is what a scene with no render feature registered gets. Unshadowed, with no
+    // indirect light, by design — see PSMainPlain.
     if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "PSMainPlain", "ps_5_1", &ps))) {
         return false;
     }
-
-    D3D12_INPUT_ELEMENT_DESC layout[] = {
-        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-    };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
     pso.pRootSignature = rootSig_.Get();
     pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
     pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
-    pso.InputLayout = {layout, 2};
+    pso.InputLayout = {kMeshInputLayout, kMeshInputLayoutCount};
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     pso.RasterizerState.DepthClipEnable = TRUE;
@@ -1445,18 +1127,15 @@ bool D3D12Device::createPipeline() {
     // Per-frame constant buffers (one per frame in flight), persistently mapped.
     auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
     auto cbd = bufferDesc(256);   // PerFrameCB is 144 bytes; CBs bind on 256-byte alignment
-    auto vcbd = bufferDesc(256);  // VoxiFrameCB is 112
     for (u32 i = 0; i < kFrameCount; ++i) {
         if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &cbd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&frameCBs_[i])), "create per-frame CB")) return false;
         D3D12_RANGE none{0, 0};
         frameCBs_[i]->Map(0, &none, reinterpret_cast<void**>(&frameCBPtr_[i]));
-        if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &vcbd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&voxiCBs_[i])), "create feature frame CB")) return false;
-        voxiCBs_[i]->Map(0, &none, reinterpret_cast<void**>(&voxiCBPtr_[i]));
     }
     return true;
 }
 
-// ---------------------------------------------------------------- DXR 1.1 (inline ray tracing)
+// ---------------------------------------------------------------- DXR 1.1 acceleration structures
 namespace {
 // Committed default-heap buffer sized for an acceleration structure or its scratch space.
 ComPtr<ID3D12Resource> makeAsBuffer(ID3D12Device* dev, u64 bytes, D3D12_RESOURCE_STATES state) {
@@ -1474,47 +1153,14 @@ ComPtr<ID3D12Resource> makeAsBuffer(ID3D12Device* dev, u64 bytes, D3D12_RESOURCE
 }
 } // namespace
 
-bool D3D12Device::initRayTracing() {
+// The device can build acceleration structures for a render feature that traces rays. This backend
+// draws nothing that traces, so there is no pipeline here any more -- only the two interfaces the
+// generic factory needs, behind the same DXR 1.1 gate the feature applies to itself. Acquiring them
+// unconditionally would let createBlas succeed on hardware where the build later fails.
+bool D3D12Device::initAccelerationStructures() {
     if (caps_.rayTracingTier < 11 || caps_.shaderModel < 65 || !caps_.dxcAvailable) return false;
     if (FAILED(device_.As(&device5_))) return false;
-
-    // Kept as a PIPELINE only. The RayQuery sun shadow moved into the feature's own scene variants,
-    // so this one carries PSMainPlain like every other backend scene pipeline; what it still proves
-    // is that the device can create an SM 6.5 graphics pipeline at all, which is what rtSupported_
-    // reports to the caps line and the --rt toggle.
-    ComPtr<ID3DBlob> vs, ps;
-    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "VSMain", "vs_5_1", &vs))) return false;
-    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "PSMainPlain", "ps_5_1", &ps, "ps_6_5", nullptr))) {
-        AVER_WARN("[RHI.D3D12] SM 6.5 scene shader failed to compile; ray tracing stays off");
-        return false;
-    }
-    D3D12_INPUT_ELEMENT_DESC layout[] = {
-        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-    };
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};
-    p.pRootSignature = rootSig_.Get();
-    p.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
-    p.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
-    p.InputLayout = {layout, 2};
-    p.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    p.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    p.RasterizerState.DepthClipEnable = TRUE;
-    p.RasterizerState.MultisampleEnable = TRUE;
-    p.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    p.DepthStencilState.DepthEnable = TRUE;
-    p.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    p.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-    p.SampleMask = UINT_MAX;
-    p.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    p.NumRenderTargets = 1;
-    p.RTVFormats[0] = kBackbufferFormat;
-    p.DSVFormat = kDepthFormat;
-    p.SampleDesc.Count = sampleCount_;
-    if (!hrOk(device_->CreateGraphicsPipelineState(&p, IID_PPV_ARGS(&rtPso_)), "RayQuery pso")) return false;
-
-    rtSupported_ = true;
-    AVER_INFO("[RHI.D3D12] DXR 1.1 inline ray tracing ready (RayQuery, ps_6_5)");
+    AVER_INFO("[RHI.D3D12] DXR 1.1 acceleration structures available");
     return true;
 }
 
@@ -1543,7 +1189,7 @@ struct MeshPsoStream {
 };
 } // namespace
 
-// Mesh shader path. Needs Tier 1 + SM 6.5 + DXC, i.e. the same D3D12 Ultimate floor as RayQuery.
+// Mesh shader path. Needs Tier 1 + SM 6.5 + DXC, i.e. the same D3D12 Ultimate floor as DXR 1.1.
 bool D3D12Device::initMeshShaders() {
     msSupported_ = false;
     if (caps_.meshShaderTier == 0 || caps_.shaderModel < 65 || !caps_.dxcAvailable) return false;
@@ -1554,33 +1200,21 @@ bool D3D12Device::initMeshShaders() {
     // Root signature WITHOUT the input-assembler flag (illegal with a mesh shader), plus two root
     // SRVs for the buffers the MS reads directly and a root constant for the triangle count.
     if (!msRootSig_) {
-        D3D12_DESCRIPTOR_RANGE srvRange{}; srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; srvRange.NumDescriptors = 3; srvRange.BaseShaderRegister = 0;
-        D3D12_DESCRIPTOR_RANGE uavRange{}; uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; uavRange.NumDescriptors = 1; uavRange.BaseShaderRegister = 0;
-        D3D12_ROOT_PARAMETER p[8] = {};
-        p[7].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; p[7].Descriptor.ShaderRegister = kFeatureFrameConstantRegister;
-        p[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; p[0].Descriptor.ShaderRegister = 0;
-        p[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; p[1].Constants.ShaderRegister = 1; p[1].Constants.Num32BitValues = 24;
-        p[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; p[2].DescriptorTable.NumDescriptorRanges = 1; p[2].DescriptorTable.pDescriptorRanges = &srvRange;
-        p[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; p[3].DescriptorTable.NumDescriptorRanges = 1; p[3].DescriptorTable.pDescriptorRanges = &uavRange;
-        p[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; p[4].Descriptor.ShaderRegister = 3;  // vertices
-        p[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; p[5].Descriptor.ShaderRegister = 4;  // indices
-        p[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; p[6].Constants.ShaderRegister = kMeshGeometryConstantRegister; p[6].Constants.Num32BitValues = 4;
+        D3D12_ROOT_PARAMETER p[5] = {};
+        p[kSceneFrameParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        p[kSceneFrameParam].Descriptor.ShaderRegister = kEngineFrameConstantRegister;
+        p[kSceneObjectParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        p[kSceneObjectParam].Constants.ShaderRegister = 1;
+        p[kSceneObjectParam].Constants.Num32BitValues = 24;
+        p[kMeshVertexParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; p[kMeshVertexParam].Descriptor.ShaderRegister = 3;
+        p[kMeshIndexParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; p[kMeshIndexParam].Descriptor.ShaderRegister = 4;
+        p[kMeshCountParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        p[kMeshCountParam].Constants.ShaderRegister = kMeshGeometryConstantRegister;
+        p[kMeshCountParam].Constants.Num32BitValues = 4;
         for (auto& rp : p) rp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-        D3D12_STATIC_SAMPLER_DESC samp{};
-        samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        samp.MaxLOD = D3D12_FLOAT32_MAX; samp.ShaderRegister = 0; samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        D3D12_STATIC_SAMPLER_DESC shadowSamp{};
-        shadowSamp.Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
-        shadowSamp.AddressU = shadowSamp.AddressV = shadowSamp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        shadowSamp.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-        shadowSamp.MaxLOD = D3D12_FLOAT32_MAX; shadowSamp.ShaderRegister = 1; shadowSamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        const D3D12_STATIC_SAMPLER_DESC samplers[2] = {samp, shadowSamp};
-
         D3D12_ROOT_SIGNATURE_DESC rsd{};
-        rsd.NumParameters = 8; rsd.pParameters = p;
-        rsd.NumStaticSamplers = 2; rsd.pStaticSamplers = samplers;
+        rsd.NumParameters = 5; rsd.pParameters = p;
         rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
         ComPtr<ID3DBlob> b, e;
         if (!hrOk(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &b, &e), "ms root sig")) return false;
@@ -1589,15 +1223,13 @@ bool D3D12Device::initMeshShaders() {
 
     // AVER_MS gates the mesh-shader entry points: their syntax is only legal from SM 6.5, so the
     // SM 5.1 compiles of this same source must not see them.
-    ComPtr<ID3DBlob> ms, msVox, ps, psVox, psRt;
+    ComPtr<ID3DBlob> ms, ps;
     auto ok = [&](const char* entry, const char* fxcTarget, const char* target, ComPtr<ID3DBlob>& out,
                   const char* defs = "AVER_MS=1") {
         return SUCCEEDED(shaderCompiler().compile(sceneShaderSource().c_str(), entry, fxcTarget, &out, target, defs));
     };
-    if (!ok("MSMain",      "vs_5_1", "ms_6_5", ms)    ||
-        !ok("MSVoxel",     "vs_5_1", "ms_6_5", msVox) ||
-        !ok("PSMainPlain", "ps_5_1", "ps_6_5", ps)    ||
-        !ok("PSVoxel",     "ps_5_1", "ps_6_5", psVox)) {
+    if (!ok("MSMain",      "vs_5_1", "ms_6_5", ms) ||
+        !ok("PSMainPlain", "ps_5_1", "ps_6_5", ps)) {
         AVER_WARN("[RHI.D3D12] mesh shaders failed to compile; the IA path stays in use");
         return false;
     }
@@ -1622,410 +1254,22 @@ bool D3D12Device::initMeshShaders() {
     D3D12_PIPELINE_STATE_STREAM_DESC sd{sizeof(s), &s};
     if (!hrOk(device2->CreatePipelineState(&sd, IID_PPV_ARGS(&msPso_)), "mesh pso")) return false;
 
-    // Mesh shaders + RayQuery in one pipeline. The combination now matters to the FEATURE's scene
-    // variants; the backend keeps its own so the msActive_ && rtActive_ selection below still has
-    // something to bind when no feature is registered.
-    msRtPso_.Reset();
-    if (rtSupported_ && ok("PSMainPlain", "ps_5_1", "ps_6_5", psRt)) {
-        MeshPsoStream r = s;
-        r.ps = D3D12_SHADER_BYTECODE{psRt->GetBufferPointer(), psRt->GetBufferSize()};
-        D3D12_PIPELINE_STATE_STREAM_DESC rd{sizeof(r), &r};
-        if (!hrOk(device2->CreatePipelineState(&rd, IID_PPV_ARGS(&msRtPso_)), "mesh+RayQuery pso"))
-            msRtPso_.Reset();   // non-fatal: the lit pass falls back to the IA RayQuery pipeline
-    }
-
-    // Voxelisation variant: no render target, no depth — the PS writes only the UAV.
-    MeshPsoStream v{};
-    v.rootSig = msRootSig_.Get();
-    v.ms = D3D12_SHADER_BYTECODE{msVox->GetBufferPointer(), msVox->GetBufferSize()};
-    v.ps = D3D12_SHADER_BYTECODE{psVox->GetBufferPointer(), psVox->GetBufferSize()};
-    v.raster.value.FillMode = D3D12_FILL_MODE_SOLID;
-    v.raster.value.CullMode = D3D12_CULL_MODE_NONE;
-    v.raster.value.DepthClipEnable = FALSE;
-    v.raster.value.ConservativeRaster = caps_.conservativeRaster
-        ? D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON : D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
-    v.depth.value.DepthEnable = FALSE;
-    v.sampleMask = UINT_MAX;
-    v.rtvs.value.NumRenderTargets = 0;
-    v.dsv = DXGI_FORMAT_UNKNOWN;
-    v.sample.value.Count = 1;
-    D3D12_PIPELINE_STATE_STREAM_DESC vd{sizeof(v), &v};
-    if (!hrOk(device2->CreatePipelineState(&vd, IID_PPV_ARGS(&msVoxelPso_)), "mesh voxel pso")) return false;
-
     msSupported_ = true;
-    AVER_INFO("[RHI.D3D12] mesh shader path ready (ms_6_5, GS-free voxelisation, RayQuery variant {})",
-              msRtPso_ ? "yes" : "no");
+    AVER_INFO("[RHI.D3D12] mesh shader path ready (ms_6_5)");
     return true;
 }
 
-// The set the scene draws actually read. bindGiTables() resolves the same one, so anything the
-// backend still owns but the scene shader reads through t0..t2 must be written here.
-RhiBindingSet* D3D12Device::sceneBindings() {
-    if (!rhiFactory_) return nullptr;
-    for (IRenderFeature* f : features_)
-        if (const BindingSetHandle h = f->sceneBindingSet()) return rhiFactory_->bindingSet(h);
-    return nullptr;
-}
-
-// ---------------------------------------------------------------- shared GI/shadow binding
-// Both descriptor tables are bound for every graphics pass. At Resource Binding Tier 1 (NVIDIA
-// Kepler / Maxwell gen 1, Intel Haswell/Broadwell) every descriptor in every table a root
-// signature declares must be valid even if the shader never reads it, so this is not optional.
-// The mesh-shader path needs its own root signature, so the graphics root signature now changes
+// ---------------------------------------------------------------- shared root binding
+// The mesh-shader path needs its own root signature, so the graphics root signature changes
 // mid-frame: meshes may use msRootSig_ while lines and the sky stay on rootSig_. Switching one
 // resets every root binding, hence the re-bind here. Cached so a run of same-signature draws pays
-// nothing.
+// nothing. Both signatures declare the engine block at the same index, which is all this has to
+// restore now that neither carries a descriptor table.
 void D3D12Device::bindGraphicsRoot(ID3D12RootSignature* rs) {
     if (boundRootSig_ == rs) return;
     boundRootSig_ = rs;
     cmdList_->SetGraphicsRootSignature(rs);
-    cmdList_->SetGraphicsRootConstantBufferView(0, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
-    // b4 lives at the last parameter of both signatures; they differ only in what precedes it.
-    const u32 voxiParam = (rs == msRootSig_.Get()) ? 7u : 4u;
-    cmdList_->SetGraphicsRootConstantBufferView(voxiParam, voxiCBs_[frameIndex_]->GetGPUVirtualAddress());
-    bindGiTables();
-}
-
-// t0/t1/t2/u0 belong to the registered render feature now -- the backend has no volume and no
-// shadow map of its own to make views of. Resource Binding Tier 1 requires every declared table to
-// be bound on EVERY pass, so this runs for the sky and line draws too, which read none of it.
-void D3D12Device::bindGiTables() {
-    RhiBindingSet* s = sceneBindings();
-    if (!s) return;
-    ID3D12DescriptorHeap* heaps[] = {rhiFactory_->heap_.Get()};
-    cmdList_->SetDescriptorHeaps(1, heaps);
-    cmdList_->SetGraphicsRootDescriptorTable(2, rhiFactory_->gpuSlot(s->heapBase));                 // t0,t1,t2
-    cmdList_->SetGraphicsRootDescriptorTable(3, rhiFactory_->gpuSlot(s->heapBase + s->srvCount));   // u0
-}
-
-// Per-subresource (per-mip) transition of the radiance volume.
-void D3D12Device::voxelBarrier(u32 sub, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
-    if (!voxelTex_) return;
-    D3D12_RESOURCE_BARRIER b{};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    b.Transition.pResource = voxelTex_.Get();
-    b.Transition.StateBefore = from;
-    b.Transition.StateAfter = to;
-    b.Transition.Subresource = sub;
-    cmdList_->ResourceBarrier(1, &b);
-}
-
-// ---------------------------------------------------------------- shadow map
-constexpr u32 kShadowSize = 2048;
-
-bool D3D12Device::createShadowResources() {
-    // Descriptor heap is shared with the GI volume so both live in one shader-visible table.
-    if (!giHeap_) {
-        D3D12_DESCRIPTOR_HEAP_DESC hd{};
-        hd.NumDescriptors = 3 + 16 + 16;   // t0 voxel, t1 shadow, t2 TLAS, per-mip UAVs, per-mip SRVs
-        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        if (!hrOk(device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&giHeap_)), "GI/shadow descriptor heap")) return false;
-        giSrvSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-        // Populate EVERY slot with a null view. Resource Binding Tier 1 hardware requires all
-        // descriptors in a bound table to be valid even when the shader never reads them, and the
-        // voxel slots stay empty whenever GI is switched off.
-        D3D12_CPU_DESCRIPTOR_HANDLE h = giHeap_->GetCPUDescriptorHandleForHeapStart();
-        D3D12_SHADER_RESOURCE_VIEW_DESC ns{};
-        ns.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        ns.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-        ns.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        ns.Texture3D.MipLevels = 1;
-        D3D12_UNORDERED_ACCESS_VIEW_DESC nu{};
-        nu.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        nu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
-        nu.Texture3D.WSize = 1;
-        for (u32 i = 0; i < 3u + 16u + 16u; ++i) {
-            D3D12_CPU_DESCRIPTOR_HANDLE d = h; d.ptr += static_cast<SIZE_T>(i) * giSrvSize_;
-            if (i >= 3 && i < 19) device_->CreateUnorderedAccessView(nullptr, nullptr, &nu, d);
-            else                  device_->CreateShaderResourceView(nullptr, &ns, d);
-        }
-    }
-    D3D12_RESOURCE_DESC td{};
-    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    td.Width = kShadowSize; td.Height = kShadowSize;
-    td.DepthOrArraySize = 1; td.MipLevels = 1;
-    td.Format = DXGI_FORMAT_R32_TYPELESS;      // typeless: DSV writes D32, SRV reads R32
-    td.SampleDesc.Count = 1;
-    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-    D3D12_CLEAR_VALUE cv{}; cv.Format = DXGI_FORMAT_D32_FLOAT; cv.DepthStencil.Depth = 1.0f;
-    auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
-    if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td,
-              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv, IID_PPV_ARGS(&shadowTex_)), "shadow map")) return false;
-
-    D3D12_DESCRIPTOR_HEAP_DESC dh{}; dh.NumDescriptors = 1; dh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-    if (!hrOk(device_->CreateDescriptorHeap(&dh, IID_PPV_ARGS(&shadowDsvHeap_)), "shadow DSV heap")) return false;
-    D3D12_DEPTH_STENCIL_VIEW_DESC dv{}; dv.Format = DXGI_FORMAT_D32_FLOAT; dv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-    device_->CreateDepthStencilView(shadowTex_.Get(), &dv, shadowDsvHeap_->GetCPUDescriptorHandleForHeapStart());
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-    sv.Format = DXGI_FORMAT_R32_FLOAT;
-    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    sv.Texture2D.MipLevels = 1;
-    D3D12_CPU_DESCRIPTOR_HANDLE sh = giHeap_->GetCPUDescriptorHandleForHeapStart();
-    sh.ptr += giSrvSize_; // slot 1 = t1
-    device_->CreateShaderResourceView(shadowTex_.Get(), &sv, sh);
-    ComPtr<ID3DBlob> vs, err;
-    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "VSShadow", "vs_5_1", &vs))) {
-        return false;
-    }
-    D3D12_INPUT_ELEMENT_DESC layout[] = {
-        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-    };
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC sp{};
-    sp.pRootSignature = rootSig_.Get();
-    sp.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};   // depth-only: no pixel shader
-    sp.InputLayout = {layout, 2};
-    sp.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    sp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    sp.RasterizerState.DepthClipEnable = TRUE;
-    sp.RasterizerState.DepthBias = 0;                 // float depth: rely on slope-scale + shader bias
-    sp.RasterizerState.SlopeScaledDepthBias = 1.5f;
-    sp.DepthStencilState.DepthEnable = TRUE;
-    sp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    sp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-    sp.SampleMask = UINT_MAX;
-    sp.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    sp.NumRenderTargets = 0;
-    sp.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-    sp.SampleDesc.Count = 1;
-    if (!hrOk(device_->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&shadowPso_)), "shadow pso")) return false;
-
-    shadowReady_ = true;
-    AVER_INFO("[RHI.D3D12] shadow map {}^2 ready", kShadowSize);
-    return true;
-}
-
-// Render the scene depth from the sun, covering the GI volume's bounds.
-void D3D12Device::shadowPass() {
-    if (!shadowReady_ || voxelDrawsPrev_.empty()) { voxiCB_.shadowParams[1] = 0.0f; return; }
-
-    // Fit an orthographic light frustum around the volume so the map's resolution is spent where
-    // the GI actually samples it.
-    const Vec3 centre{gi_.center[0], gi_.center[1], gi_.center[2]};
-    const f32 r = gi_.extent > 1.0f ? gi_.extent : 1.0f;
-    Vec3 dir{frameCB_.lightDir[0], frameCB_.lightDir[1], frameCB_.lightDir[2]};
-    dir = dir.getSafeNormal();
-    if (dir.sizeSquared() < 0.5f) dir = Vec3{0.3f, 0.4f, 0.85f}.getSafeNormal();
-    const Vec3 eye = centre + dir * (r * 2.0f);              // gLightDir points TOWARD the light
-    const Vec3 up = std::fabs(dir.z) > 0.95f ? Vec3{1,0,0} : Vec3{0,0,1};
-    const Mat4 view = Mat4::lookAtLH(eye, centre, up);
-    Mat4 proj;                                                // orthographic, row-vector convention
-    proj.m[0][0] = 1.0f / r; proj.m[1][1] = 1.0f / r;
-    proj.m[2][2] = 1.0f / (r * 4.0f); proj.m[3][2] = 0.0f; proj.m[3][3] = 1.0f;
-    const Mat4 lvp = view * proj;
-    std::memcpy(voxiCB_.lightViewProj, &lvp.m[0][0], sizeof(voxiCB_.lightViewProj));
-    voxiCB_.shadowParams[0] = 1.0f / static_cast<f32>(kShadowSize);
-    voxiCB_.shadowParams[1] = 1.0f;
-    std::memcpy(voxiCBPtr_[frameIndex_], &voxiCB_, sizeof(VoxiFrameCB)); // re-upload with the matrix
-
-    auto toDepth = transition(shadowTex_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-    cmdList_->ResourceBarrier(1, &toDepth);
-    D3D12_CPU_DESCRIPTOR_HANDLE dsv = shadowDsvHeap_->GetCPUDescriptorHandleForHeapStart();
-    cmdList_->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
-    cmdList_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-    D3D12_VIEWPORT vp{0, 0, static_cast<f32>(kShadowSize), static_cast<f32>(kShadowSize), 0.0f, 1.0f};
-    D3D12_RECT sc{0, 0, static_cast<LONG>(kShadowSize), static_cast<LONG>(kShadowSize)};
-    cmdList_->RSSetViewports(1, &vp);
-    cmdList_->RSSetScissorRects(1, &sc);
-    // Resource Binding Tier 1 requires EVERY table the root signature declares to be bound, even
-    // when the shader ignores them - otherwise this is UB on Kepler/Maxwell-gen1/Haswell.
-    // (bindGraphicsRoot binds them all.) The shadow pass stays on the IA path: it is depth-only,
-    // so a mesh-shader variant would buy nothing.
-    bindGraphicsRoot(rootSig_.Get());
-    cmdList_->SetPipelineState(shadowPso_.Get());
-    cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    for (const VoxelDraw& d : voxelDrawsPrev_) {
-        if (d.mesh == 0 || d.mesh > meshes_.size()) continue;
-        const GpuMesh& m = meshes_[d.mesh - 1];
-        f32 consts[24]{};
-        std::memcpy(consts, d.world, 16 * sizeof(f32));
-        cmdList_->SetGraphicsRoot32BitConstants(1, 24, consts, 0);
-        cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
-        cmdList_->IASetIndexBuffer(&m.ibv);
-        cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
-    }
-    auto toRead = transition(shadowTex_.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    cmdList_->ResourceBarrier(1, &toRead);
-}
-
-// ---------------------------------------------------------------- Voxi GI
-void D3D12Device::setGi(const GiSettings& gi) {
-    // The feature owns the volume and is configured directly by the app; gi_ survives only for the
-    // backend's remaining debug-view gate, which moves out in a later step. Routing the settings
-    // through here instead would put GI vocabulary back into the generic device interface.
-    gi_ = gi;
-    if (gi_.enabled && gi_.resolution != voxelResBuilt_) {
-        waitForGpu();
-        if (!createVoxelVolume(gi_.resolution)) { gi_.enabled = false; giReady_ = false; }
-    }
-    // Push volume placement into the per-frame CB the shaders read. Done even when GI is off:
-    // the shadow map fits its frustum to these same bounds.
-    const f32 size = gi_.extent * 2.0f;
-    voxiCB_.voxelOrigin[0] = gi_.center[0] - gi_.extent;
-    voxiCB_.voxelOrigin[1] = gi_.center[1] - gi_.extent;
-    voxiCB_.voxelOrigin[2] = gi_.center[2] - gi_.extent;
-    voxiCB_.voxelOrigin[3] = 1.0f / size;                    // shader multiplies, so store the reciprocal
-    voxiCB_.voxelParams[0] = static_cast<f32>(voxelResBuilt_);
-    voxiCB_.voxelParams[1] = gi_.intensity;
-    voxiCB_.voxelParams[2] = gi_.maxDistance;
-    voxiCB_.voxelParams[3] = (giReady_ && !gi_.debugView) ? 1.0f : 0.0f; // gate the cone trace
-}
-
-// Cubic radiance volume with a full mip chain: mip N is the cone footprint at distance N.
-bool D3D12Device::createVoxelVolume(u32 res) {
-    giReady_ = false;
-    voxelTex_.Reset();
-    voxelMips_ = 1;
-    for (u32 r = res; r > 1; r >>= 1) ++voxelMips_;
-
-    D3D12_RESOURCE_DESC td{};
-    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-    td.Width = res; td.Height = res; td.DepthOrArraySize = static_cast<UINT16>(res);
-    td.MipLevels = static_cast<UINT16>(voxelMips_);
-    td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    td.SampleDesc.Count = 1;
-    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
-    if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td,
-              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&voxelTex_)), "voxel volume")) return false;
-
-    // Heap slots: [0] SRV over the whole chain, [1] shadow map SRV, [2 + m] UAV for mip m.
-    if (!giHeap_) { AVER_ERROR("[RHI.D3D12] GI heap missing"); return false; }
-    D3D12_CPU_DESCRIPTOR_HANDLE h = giHeap_->GetCPUDescriptorHandleForHeapStart();
-    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-    sv.Format = td.Format;
-    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    sv.Texture3D.MipLevels = voxelMips_;
-    device_->CreateShaderResourceView(voxelTex_.Get(), &sv, h);
-    for (u32 m = 0; m < voxelMips_ && m < 16; ++m) {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
-        uv.Format = td.Format;
-        uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
-        uv.Texture3D.MipSlice = m;
-        uv.Texture3D.WSize = res >> m;
-        D3D12_CPU_DESCRIPTOR_HANDLE mh = h; mh.ptr += static_cast<SIZE_T>(3 + m) * giSrvSize_;
-        device_->CreateUnorderedAccessView(voxelTex_.Get(), nullptr, &uv, mh);
-        // Single-mip SRV so the mip filter can read level m while writing level m+1: a
-        // whole-chain SRV would require every mip in the read state at once.
-        D3D12_SHADER_RESOURCE_VIEW_DESC ms{};
-        ms.Format = td.Format;
-        ms.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-        ms.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        ms.Texture3D.MostDetailedMip = m;
-        ms.Texture3D.MipLevels = 1;
-        D3D12_CPU_DESCRIPTOR_HANDLE sh2 = h; sh2.ptr += static_cast<SIZE_T>(19 + m) * giSrvSize_;
-        device_->CreateShaderResourceView(voxelTex_.Get(), &ms, sh2);
-    }
-    voxelResBuilt_ = res;
-    giReady_ = voxelPso_ && mipPso_ && clearPso_;
-    AVER_INFO("[RHI.D3D12] Voxi volume {}^3, {} mips", res, voxelMips_);
-    return true;
-}
-
-bool D3D12Device::createGiPipelines() {
-    ComPtr<ID3DBlob> vs, gs, ps;
-    auto compile = [&](const char* entry, const char* target, ComPtr<ID3DBlob>& out) {
-        if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), entry, target, &out))) {
-            return false;
-        }
-        return true;
-    };
-    if (!compile("VSVoxel", "vs_5_1", vs) || !compile("GSVoxel", "gs_5_1", gs) || !compile("PSVoxel", "ps_5_1", ps)) return false;
-
-    D3D12_INPUT_ELEMENT_DESC layout[] = {
-        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-    };
-    // Rasterise with NO render target and no depth: the pixel shader's only output is the UAV.
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC vp{};
-    vp.pRootSignature = rootSig_.Get();
-    vp.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
-    vp.GS = {gs->GetBufferPointer(), gs->GetBufferSize()};
-    vp.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
-    vp.InputLayout = {layout, 2};
-    vp.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    vp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    vp.RasterizerState.DepthClipEnable = FALSE;
-    // Conservative raster makes thin/edge geometry still light up a voxel (tier checked in caps).
-    vp.RasterizerState.ConservativeRaster = caps_.conservativeRaster
-        ? D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON : D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
-    vp.DepthStencilState.DepthEnable = FALSE;
-    vp.SampleMask = UINT_MAX;
-    vp.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    vp.NumRenderTargets = 0;
-    vp.DSVFormat = DXGI_FORMAT_UNKNOWN;
-    vp.SampleDesc.Count = 1;
-    if (!hrOk(device_->CreateGraphicsPipelineState(&vp, IID_PPV_ARGS(&voxelPso_)), "voxel pso")) return false;
-
-    // Debug: fullscreen raymarch of the volume (shares the sky's fullscreen VS).
-    ComPtr<ID3DBlob> vsky, dbg;
-    if (!compile("VSky", "vs_5_1", vsky) || !compile("PSVoxelDebug", "ps_5_1", dbg)) return false;
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC dp{};
-    dp.pRootSignature = rootSig_.Get();
-    dp.VS = {vsky->GetBufferPointer(), vsky->GetBufferSize()};
-    dp.PS = {dbg->GetBufferPointer(), dbg->GetBufferSize()};
-    dp.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    dp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    dp.RasterizerState.MultisampleEnable = TRUE;
-    dp.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    dp.DepthStencilState.DepthEnable = FALSE;
-    dp.SampleMask = UINT_MAX;
-    dp.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    dp.NumRenderTargets = 1;
-    dp.RTVFormats[0] = kBackbufferFormat;
-    dp.DSVFormat = kDepthFormat;
-    dp.SampleDesc.Count = sampleCount_;
-    if (!hrOk(device_->CreateGraphicsPipelineState(&dp, IID_PPV_ARGS(&voxelDebugPso_)), "voxel debug pso")) return false;
-
-    // Compute root signature for mip filtering: t0 (src mip) + u0 (dst mip).
-    if (!mipRootSig_) {
-        D3D12_DESCRIPTOR_RANGE sr{}; sr.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; sr.NumDescriptors = 1; sr.BaseShaderRegister = 0;
-        D3D12_DESCRIPTOR_RANGE ur{}; ur.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; ur.NumDescriptors = 1; ur.BaseShaderRegister = 0;
-        D3D12_ROOT_PARAMETER mp[3] = {};
-        mp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        mp[0].DescriptorTable.NumDescriptorRanges = 1; mp[0].DescriptorTable.pDescriptorRanges = &sr;
-        mp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        mp[1].DescriptorTable.NumDescriptorRanges = 1; mp[1].DescriptorTable.pDescriptorRanges = &ur;
-        mp[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; // b3 = source mip level
-        mp[2].Constants.ShaderRegister = 3; mp[2].Constants.Num32BitValues = 4;
-        D3D12_ROOT_SIGNATURE_DESC md{}; md.NumParameters = 3; md.pParameters = mp;
-        ComPtr<ID3DBlob> b, e2;
-        if (!hrOk(D3D12SerializeRootSignature(&md, D3D_ROOT_SIGNATURE_VERSION_1, &b, &e2), "mip root sig")) return false;
-        if (!hrOk(device_->CreateRootSignature(0, b->GetBufferPointer(), b->GetBufferSize(), IID_PPV_ARGS(&mipRootSig_)), "mip root sig create")) return false;
-    }
-    ComPtr<ID3DBlob> cs;
-    if (!compile("CSMip", "cs_5_1", cs)) return false;
-    D3D12_COMPUTE_PIPELINE_STATE_DESC cp{};
-    cp.pRootSignature = mipRootSig_.Get();
-    cp.CS = {cs->GetBufferPointer(), cs->GetBufferSize()};
-    if (!hrOk(device_->CreateComputePipelineState(&cp, IID_PPV_ARGS(&mipPso_)), "mip pso")) return false;
-
-    // Clear needs only u0. Its own root signature keeps the unused SRV table off the binding, so
-    // nothing has to be bound to a descriptor pointing at a resource in the wrong state.
-    if (!clearRootSig_) {
-        D3D12_DESCRIPTOR_RANGE ur{}; ur.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; ur.NumDescriptors = 1; ur.BaseShaderRegister = 0;
-        D3D12_ROOT_PARAMETER cpm{};
-        cpm.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        cpm.DescriptorTable.NumDescriptorRanges = 1; cpm.DescriptorTable.pDescriptorRanges = &ur;
-        D3D12_ROOT_SIGNATURE_DESC cd{}; cd.NumParameters = 1; cd.pParameters = &cpm;
-        ComPtr<ID3DBlob> b, e3;
-        if (!hrOk(D3D12SerializeRootSignature(&cd, D3D_ROOT_SIGNATURE_VERSION_1, &b, &e3), "clear root sig")) return false;
-        if (!hrOk(device_->CreateRootSignature(0, b->GetBufferPointer(), b->GetBufferSize(), IID_PPV_ARGS(&clearRootSig_)), "clear root sig create")) return false;
-    }
-    ComPtr<ID3DBlob> csc;
-    if (!compile("CSClear", "cs_5_1", csc)) return false;
-    D3D12_COMPUTE_PIPELINE_STATE_DESC clp{};
-    clp.pRootSignature = clearRootSig_.Get();
-    clp.CS = {csc->GetBufferPointer(), csc->GetBufferSize()};
-    if (!hrOk(device_->CreateComputePipelineState(&clp, IID_PPV_ARGS(&clearPso_)), "voxel clear pso")) return false;
-
-    AVER_INFO("[RHI.D3D12] Voxi pipelines ready (conservative raster {})", caps_.conservativeRaster ? "on" : "off");
-    return true;
+    cmdList_->SetGraphicsRootConstantBufferView(kSceneFrameParam, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
 }
 
 bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
@@ -2075,7 +1319,7 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
     cmdList_.As(&cmdList4_);   // optional: only needed for acceleration-structure builds
     cmdList_.As(&cmdList6_);   // optional: only needed for DispatchMesh
     cmdList_->Close();
-    if (cmdList4_) initRayTracing();
+    if (cmdList4_) initAccelerationStructures();
     if (cmdList6_) initMeshShaders();
 
     // Capture readback buffer sized to the backbuffer footprint.
@@ -2161,87 +1405,6 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
     return static_cast<MeshHandle>(meshes_.size()); // handle = index + 1
 }
 
-// Rasterise last frame's draws into the radiance volume, then build the mip chain.
-void D3D12Device::voxelizePass() {
-    // Note: an empty draw list still runs, so that a scene emptied of geometry clears rather than
-    // keeping the last frame's radiance forever.
-    if (!giReady_ || !gi_.enabled) return;
-    const u32 res = voxelResBuilt_;
-
-    // The chain rests in PIXEL_SHADER_RESOURCE between frames; take it back for writing.
-    voxelBarrier(D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-    D3D12_RESOURCE_BARRIER uav0{}; uav0.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; uav0.UAV.pResource = voxelTex_.Get();
-
-    // Zero mip 0 first: injection writes only the voxels it covers, so stale radiance would
-    // otherwise accumulate and moving objects would leave trails.
-    {
-        ID3D12DescriptorHeap* heaps[] = {giHeap_.Get()};
-        cmdList_->SetDescriptorHeaps(1, heaps);   // this runs before bindGiTables()
-        D3D12_GPU_DESCRIPTOR_HANDLE mip0 = giHeap_->GetGPUDescriptorHandleForHeapStart();
-        mip0.ptr += static_cast<UINT64>(3) * giSrvSize_;
-        cmdList_->SetComputeRootSignature(clearRootSig_.Get());
-        cmdList_->SetPipelineState(clearPso_.Get());
-        cmdList_->SetComputeRootDescriptorTable(0, mip0);
-        const u32 g = (res + 3) / 4;
-        cmdList_->Dispatch(g, g, g);
-        cmdList_->ResourceBarrier(1, &uav0);   // injection must see the cleared volume
-    }
-
-    // Mesh shaders remove the geometry shader from voxelisation entirely - the reason this path
-    // exists, since GS is emulated on every AMD GCN part.
-    const bool useMs = msActive_ && msVoxelPso_;
-    bindGraphicsRoot(useMs ? msRootSig_.Get() : rootSig_.Get());
-    D3D12_GPU_DESCRIPTOR_HANDLE gh = giHeap_->GetGPUDescriptorHandleForHeapStart();
-
-    // No RTV/DSV: the pixel shader writes only the UAV. Viewport defines the raster resolution.
-    cmdList_->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
-    D3D12_VIEWPORT vp{0, 0, static_cast<f32>(res), static_cast<f32>(res), 0.0f, 1.0f};
-    D3D12_RECT sc{0, 0, static_cast<LONG>(res), static_cast<LONG>(res)};
-    cmdList_->RSSetViewports(1, &vp);
-    cmdList_->RSSetScissorRects(1, &sc);
-    cmdList_->SetPipelineState(useMs ? msVoxelPso_.Get() : voxelPso_.Get());
-    if (!useMs) cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-    for (const VoxelDraw& d : voxelDrawsPrev_) {
-        if (d.mesh == 0 || d.mesh > meshes_.size()) continue;
-        const GpuMesh& m = meshes_[d.mesh - 1];
-        f32 consts[24];
-        std::memcpy(consts, d.world, 16 * sizeof(f32));
-        std::memcpy(consts + 16, d.color, 4 * sizeof(f32));
-        consts[20] = d.metallic; consts[21] = d.roughness; consts[22] = 0.0f; consts[23] = 0.0f;
-        cmdList_->SetGraphicsRoot32BitConstants(1, 24, consts, 0);
-        if (useMs) { dispatchMesh(m); continue; }
-        cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
-        cmdList_->IASetIndexBuffer(&m.ibv);
-        cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
-    }
-
-    // Build the mip chain: each level box-filters the one above it.
-    D3D12_RESOURCE_BARRIER uavB{}; uavB.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; uavB.UAV.pResource = voxelTex_.Get();
-    cmdList_->ResourceBarrier(1, &uavB);
-    cmdList_->SetComputeRootSignature(mipRootSig_.Get());
-    cmdList_->SetPipelineState(mipPso_.Get());
-    for (u32 m = 1; m < voxelMips_; ++m) {
-        // Level m-1 becomes readable; level m stays writable. Per-subresource transitions are
-        // what make read-while-write on one resource legal.
-        voxelBarrier(m - 1, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        D3D12_GPU_DESCRIPTOR_HANDLE src = gh; src.ptr += static_cast<UINT64>(19 + (m - 1)) * giSrvSize_;
-        D3D12_GPU_DESCRIPTOR_HANDLE dst = gh; dst.ptr += static_cast<UINT64>(3 + m) * giSrvSize_;
-        cmdList_->SetComputeRootDescriptorTable(0, src);
-        cmdList_->SetComputeRootDescriptorTable(1, dst);
-        const u32 srcMip[4] = {0, 0, 0, 0};   // the view already starts at the source mip
-        cmdList_->SetComputeRoot32BitConstants(2, 4, srcMip, 0);
-        const u32 d = (res >> m) > 0 ? (res >> m) : 1u;
-        const u32 g = (d + 3) / 4;
-        cmdList_->Dispatch(g, g, g);
-        cmdList_->ResourceBarrier(1, &uavB);
-    }
-    // Hand the whole chain to the lit pass as a shader resource.
-    voxelBarrier(voxelMips_ - 1, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    voxelBarrier(D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-}
-
 void D3D12Device::beginFrame() {
     if (!hasSwapchain_) return;
     // Render into whichever backbuffer is current now; wait for its previous frame to finish on
@@ -2261,37 +1424,15 @@ void D3D12Device::beginFrame() {
     // Scene renders into the MSAA color + depth targets; endFrame resolves to backbuffer.
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = msaaRtvHeap_->GetCPUDescriptorHandleForHeapStart();
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = dsvHeap_->GetCPUDescriptorHandleForHeapStart();
-    // Voxi runs BEFORE the lit pass so the volume is ready to cone-trace. It replays the previous
-    // frame's draws (see voxelDrawsPrev_) and owns its own viewport/targets, so it must happen
-    // before the scene RTV is bound below.
     std::memcpy(frameCBPtr_[frameIndex_], &frameCB_, sizeof(PerFrameCB));
-    std::memcpy(voxiCBPtr_[frameIndex_], &voxiCB_, sizeof(VoxiFrameCB));
-    voxelDrawsPrev_.swap(voxelDraws_);
-    voxelDraws_.clear();
-    // Same point as the swap above: a feature rotates its own draw list here, so prePass replays
-    // the PREVIOUS frame's geometry while submitDraw fills the next one.
+    // A feature rotates its own draw list here, so prePass replays the PREVIOUS frame's geometry
+    // while submitDraw fills the next one.
     for (IRenderFeature* f : features_) f->beginScene();
-    // The acceleration structures belong to the feature's prePass now. All that is left here is
-    // whether to RECORD the RayQuery pipeline at all: recomputed per frame, and deliberately false
-    // on frame 0, where nothing has been replayed yet and there is nothing to trace.
-    rtActive_ = rtSupported_ && rtEnabled_ && !voxelDrawsPrev_.empty();
 
-    // The shadow map and the radiance volume belong to the registered feature now; the backend's own
-    // shadowPass/voxelizePass are dead and get deleted in a later step. Features own their targets,
-    // so this runs before the scene's are bound.
-    if (!features_.empty() && rhiContext_) {
+    // Feature passes own their own targets and viewport, so they run before the scene's are bound.
+    if (rhiContext_) {
         for (IRenderFeature* f : features_) f->prePass(*rhiContext_);
-        boundRootSig_ = nullptr;   // a feature pass leaves its own root signature and targets bound
-
-        // b4 is authored by the feature (the light matrix is not known until its shadow pass has
-        // run), but the backend still records the scene draws that read it.
-        for (IRenderFeature* f : features_) {
-            const void* d = nullptr; u32 n = 0;
-            if (f->sceneConstants(&d, &n) && d && n <= sizeof(VoxiFrameCB)) {
-                std::memcpy(voxiCBPtr_[frameIndex_], d, n);
-                break;
-            }
-        }
+        if (!features_.empty()) boundRootSig_ = nullptr;   // a feature pass left its own root signature bound
     }
 
     cmdList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
@@ -2311,7 +1452,7 @@ void D3D12Device::beginFrame() {
     cmdList_->RSSetViewports(1, &vp);
     cmdList_->RSSetScissorRects(1, &sc);
 
-    bindGraphicsRoot(rootSig_.Get()); // volume (t0) + shadow map (t1) for the lit pass
+    bindGraphicsRoot(rootSig_.Get());
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     // A feature may replace the scene entirely (e.g. a debug visualisation), after the colour
@@ -2322,9 +1463,6 @@ void D3D12Device::beginFrame() {
         cmdList_->SetPipelineState(pso_.Get());
         return;
     }
-
-    // The GI debug view belongs to the feature's scenePass/suppressesScene above. The backend's own
-    // raymarch is gone: two owners of "replace the scene" would race on which one returns first.
 
     // Procedural sky first (fullscreen, no depth), then meshes draw over it.
     if (skyEnabled_) {
@@ -2340,17 +1478,8 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     // Features see EVERY draw, before any early return below. A feature that replays geometry into
     // its own passes needs the full list; capturing after a return leaves it permanently empty.
     for (IRenderFeature* f : features_) f->submitDraw(mesh, world, color, metallic, roughness);
-    // Remember the draw so the shadow and voxel passes can replay it next frame. Captured
-    // unconditionally: the shadow map needs it even when GI is switched off.
-    if (voxelDraws_.size() < 4096) {
-        VoxelDraw vd; vd.mesh = mesh;
-        std::memcpy(vd.world, world, 16 * sizeof(f32));
-        std::memcpy(vd.color, color, 4 * sizeof(f32));
-        vd.metallic = metallic; vd.roughness = roughness;
-        voxelDraws_.push_back(vd);
-    }
-    // A feature replacing the scene (the GI debug view) means no lit draw -- but only AFTER
-    // capturing above, or the volume the raymarch reads would never be filled.
+    // A feature replacing the scene (the GI debug view) means no lit draw -- but only AFTER the
+    // submission above, or the volume its raymarch reads would never be filled.
     for (IRenderFeature* f : features_) if (f->suppressesScene()) return;
 
     // A feature may own the scene's lit pipeline: shading it contributes can live INSIDE the pixel
@@ -2377,18 +1506,15 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     }
 
     const GpuMesh& m = meshes_[mesh - 1];
-    // Wireframe exists only on the IA path, so it wins over the mesh-shader toggle. RayQuery has
-    // a mesh-shader variant; if it failed to build, fall back to the IA RayQuery pipeline.
-    const bool rt = rtActive_ && rtPso_;
-    const bool useMs = msActive_ && msPso_ && !wireframe_ && (!rt || msRtPso_);
+    // Wireframe exists only on the IA path, so it wins over the mesh-shader toggle.
+    const bool useMs = msActive_ && msPso_ && !wireframe_;
     bindGraphicsRoot(useMs ? msRootSig_.Get() : rootSig_.Get());
-    cmdList_->SetPipelineState(useMs ? (rt ? msRtPso_.Get() : msPso_.Get())
-                                     : (wireframe_ ? wirePso_.Get() : (rt ? rtPso_.Get() : pso_.Get())));
+    cmdList_->SetPipelineState(useMs ? msPso_.Get() : (wireframe_ ? wirePso_.Get() : pso_.Get()));
     f32 consts[24];
     std::memcpy(consts, world, 16 * sizeof(f32));
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
     consts[20] = metallic; consts[21] = roughness; consts[22] = 0.0f; consts[23] = 0.0f;
-    cmdList_->SetGraphicsRoot32BitConstants(1, 24, consts, 0);
+    cmdList_->SetGraphicsRoot32BitConstants(kSceneObjectParam, 24, consts, 0);
     if (useMs) { dispatchMesh(m); return; }
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
@@ -2401,10 +1527,10 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
 void D3D12Device::dispatchMesh(const GpuMesh& m) {
     const u32 tris = m.indexCount / 3;
     if (!tris) return;
-    cmdList_->SetGraphicsRootShaderResourceView(4, m.vb->GetGPUVirtualAddress());
-    cmdList_->SetGraphicsRootShaderResourceView(5, m.ib->GetGPUVirtualAddress());
+    cmdList_->SetGraphicsRootShaderResourceView(kMeshVertexParam, m.vb->GetGPUVirtualAddress());
+    cmdList_->SetGraphicsRootShaderResourceView(kMeshIndexParam, m.ib->GetGPUVirtualAddress());
     const u32 tc[4] = {tris, 0, 0, 0};
-    cmdList_->SetGraphicsRoot32BitConstants(6, 4, tc, 0);
+    cmdList_->SetGraphicsRoot32BitConstants(kMeshCountParam, 4, tc, 0);
     cmdList6_->DispatchMesh((tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
 }
 
@@ -2433,7 +1559,7 @@ void D3D12Device::drawLines(LineHandle mesh, const f32 world[16]) {
     const GpuLineMesh& m = lineMeshes_[mesh - 1];
     bindGraphicsRoot(rootSig_.Get()); // lines have no mesh-shader variant; a mesh draw may have switched
     cmdList_->SetPipelineState(lineDepth_ ? linePso_.Get() : lineOverlayPso_.Get());
-    cmdList_->SetGraphicsRoot32BitConstants(1, 16, world, 0); // gWorld only
+    cmdList_->SetGraphicsRoot32BitConstants(kSceneObjectParam, 16, world, 0); // gWorld only
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
     cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
     cmdList_->DrawInstanced(m.count, 1, 0, 0);
@@ -2786,7 +1912,7 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12ResourceFactory::gpuSlot(u32 index) const {
 // only source of that dimension: counts alone cannot supply it, and neither can guessing.
 //
 // The format is a best effort (a null view reads no memory, so only the dimension is load-bearing):
-// RGBA8 for 2D surfaces, RGBA16F for the radiance volumes 3D slots exist for.
+// RGBA8 for 2D surfaces, RGBA16F for 3D ones, which are typically HDR.
 void D3D12ResourceFactory::nullFill(const RhiBindingSet& s) {
     for (u32 i = 0; i < s.srvCount; ++i) {
         const SlotKind kind = s.srvKinds[i];   // createBindingSet rejected counts past the limit
@@ -3251,16 +2377,12 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
     } else {
         // Geometry is only ever addressed by MeshHandle, so the one vertex layout a draw can
         // present is the engine's MeshVertex. drawFullscreen binds no vertex buffer and ignores it.
-        const D3D12_INPUT_ELEMENT_DESC layout[] = {
-            {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-            {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        };
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
         pd.pRootSignature = rs->sig.Get();
         pd.VS = {vs->blob->GetBufferPointer(), vs->blob->GetBufferSize()};
         if (gs) pd.GS = {gs->blob->GetBufferPointer(), gs->blob->GetBufferSize()};
         if (ps) pd.PS = {ps->blob->GetBufferPointer(), ps->blob->GetBufferSize()};
-        pd.InputLayout = {layout, 2};
+        pd.InputLayout = {kMeshInputLayout, kMeshInputLayoutCount};
         pd.RasterizerState = raster;
         pd.DepthStencilState = depth;
         pd.BlendState = blend;
