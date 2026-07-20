@@ -24,6 +24,11 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+// Declarations only -- STB_IMAGE_IMPLEMENTATION is owned by Aver.Platform's Win32Splash.cpp, which
+// Sandbox already links. A second implementation here would be a duplicate-symbol link error, and
+// the decoder has no per-TU state that would justify one.
+#include "stb_image.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -226,6 +231,48 @@ public:
         io.FontDefault = body;
         if (fileExists(medium)) fontMedium_ = io.Fonts->AddFontFromFileTTF(medium.c_str(), px);
     }
+
+    // Upload branding/logo.png (staged next to the exe) for the start screen.
+    //
+    // Called ONLY when the start screen is armed. Automation never shows it, and a decode plus a
+    // megabyte of GPU upload is not a cost every --frames run should carry for a decoration.
+    //
+    // A missing or corrupt file is a warning, never a failure: the editor must still come up, and
+    // the browser falls back to its drawn badge when the handle stays zero.
+    void loadLogo(Engine& e) {
+        rhi::IResourceFactory* res = e.device()->resources();
+        if (!res) return;
+
+        const std::string path = executableDir() + "\\logo.png";
+        int w = 0, h = 0, comp = 0;
+        stbi_uc* px = stbi_load(path.c_str(), &w, &h, &comp, 4);
+        if (!px) {
+            const char* why = stbi_failure_reason();
+            AVER_WARN("[Sandbox] '{}' not loaded ({}) -- the start screen falls back to a drawn badge",
+                      path, why ? why : "unknown");
+            return;
+        }
+
+        rhi::TextureDesc td;
+        td.width = static_cast<u32>(w);
+        td.height = static_cast<u32>(h);
+        td.format = rhi::Format::RGBA8Unorm;
+        td.bind = rhi::ResourceBind::ShaderResource;
+        td.initialState = rhi::ResourceState::ShaderResource;
+        td.debugName = "EditorLogo";
+        const void* levels[1] = {px};
+        td.initialData = levels;
+        td.initialDataCount = 1;
+        td.initialRowPitch = static_cast<u32>(w) * 4;   // stb hands back tightly packed RGBA
+        logoTexture_ = res->createTexture(td);
+        stbi_image_free(px);
+
+        if (!logoTexture_) { AVER_WARN("[Sandbox] the start-screen mark could not be uploaded"); return; }
+        logoUiId_ = e.device()->uiTextureId(logoTexture_);
+        if (!logoUiId_) { AVER_WARN("[Sandbox] the start-screen mark is not reachable from the UI"); return; }
+        logoAspect_ = h > 0 ? static_cast<f32>(w) / static_cast<f32>(h) : 1.0f;
+        AVER_INFO("[Sandbox] start-screen mark decoded from {} ({}x{})", path, w, h);
+    }
 #endif
 
     void onInit(Engine& e) override {
@@ -247,6 +294,7 @@ public:
         if (e.device()->uiActive()) {
             applyDpi(e.window() ? e.window()->dpiScale() : 1.0f);
             AVER_INFO("[Sandbox] DPI scale {:.2f}, UI font rasterised at {:.0f}px", dpi_, 16.0f * dpi_);
+            if (browserActive_) loadLogo(e);
         }
 #endif
         // --- default "blank .ocmap": ground floor + cube + sun + sky + atmosphere ---
@@ -453,6 +501,17 @@ public:
     }
 
     void onShutdown(Engine& e) override {
+#if AVER_WITH_IMGUI
+        // The UI descriptor the mark holds is released with the texture, and that pool has no fence
+        // of its own -- so the GPU has to be past every frame that drew it first.
+        if (logoTexture_) {
+            if (rhi::IResourceFactory* res = e.device()->resources()) {
+                res->waitIdle();
+                res->destroyTexture(logoTexture_);
+            }
+            logoTexture_ = 0; logoUiId_ = 0;
+        }
+#endif
 #if AVER_MODULE_VOXI
         // Deregister before releasing: the device holds a bare pointer to the feature.
         if (voxiAttached_) { e.device()->removeRenderFeature(&voxiRenderer_); voxiAttached_ = false; }
@@ -730,7 +789,7 @@ private:
 
         // The start screen replaces the editor chrome entirely while it is up.
         if (browserActive_) {
-            switch (browser_.draw(dpi_, fontMedium_)) {
+            switch (browser_.draw(dpi_, fontMedium_, logoUiId_, logoAspect_)) {
                 case editor::BrowserAction::Open: applyProject(e); browserActive_ = false; break;
                 case editor::BrowserAction::Skip: browserActive_ = false; break;
                 case editor::BrowserAction::Quit: e.requestExit(); break;
@@ -1339,6 +1398,11 @@ private:
     fmt::ProjectDesc project_;
     std::string projectPath_;        // <path>.ocproject given on the command line
     bool browserActive_=false;
+    // The start screen's mark. Zero when the screen was never armed, or when logo.png was missing
+    // or undecodable -- in which case the browser draws its fallback badge instead.
+    rhi::TextureHandle logoTexture_=0;
+    u64 logoUiId_=0;
+    f32 logoAspect_=1.0f;
     bool openScriptModal_=false;     // Tools > New C# Script
     char scriptName_[96]={};
     std::string scriptError_, scriptResult_;
@@ -1370,11 +1434,12 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false; std::string beam, shot, project; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, startScreen=false; std::string beam, shot, project; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
         else if (!std::strcmp(argv[i],"--new-script")) focusScript=true;
+        else if (!std::strcmp(argv[i],"--start-screen")) startScreen=true;
         else if (!std::strcmp(argv[i],"--msaa") && i+1<argc) msaa=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--gi")) gi=3;
         else if (!std::strcmp(argv[i],"--gi-debug")) { gi=3; giDbg=true; }
@@ -1396,7 +1461,12 @@ Application* createApplication(int argc, char** argv) {
     // appear in automation: every gate in the verification harness passes --frames and reads a
     // probe pixel out of the viewport, which a full-screen chooser would cover. `--frames`
     // present, a project already named, or headless => straight to the editor.
-    app->armBrowser(!headless && frames == 0 && project.empty());
+    //
+    // `--start-screen` forces it back on, and is a screenshot aid in the same family as
+    // --project-settings and --new-script: the start screen is otherwise unreachable together with
+    // --frames/--screenshot, so it could not be captured through the engine's own backbuffer path
+    // at all. Opt-in, so no gate can reach it by accident.
+    app->armBrowser(startScreen || (!headless && frames == 0 && project.empty()));
     app->setFocusVoxi(focusVoxi);
     app->setFocusScript(focusScript);
     app->setMsaaOverride(msaa);

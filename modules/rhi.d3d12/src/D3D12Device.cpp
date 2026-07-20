@@ -337,6 +337,22 @@ Format fromDxgiFormat(DXGI_FORMAT f) {
 
 bool isDepthFormat(Format f) { return f == Format::D32Float || f == Format::R32Typeless; }
 
+// Bytes per texel, for interpreting the CALLER's rows only. The destination pitch is never computed
+// from this — GetCopyableFootprints is the only authority on that, and assuming the two match is the
+// classic texture-upload bug.
+u32 texelBytes(Format f) {
+    switch (f) {
+        case Format::RGBA16F:     return 8;
+        case Format::RGBA8Unorm:
+        case Format::R32Float:
+        case Format::R32Uint:
+        case Format::D32Float:
+        case Format::R32Typeless: return 4;
+        case Format::Unknown:     break;
+    }
+    return 0;
+}
+
 // AccelerationStructure maps here for completeness (a buffer is CREATED in it), but it is terminal:
 // the barrier entry points reject it before they ever get this far.
 D3D12_RESOURCE_STATES toResourceStates(ResourceState s) {
@@ -437,6 +453,7 @@ public:
     bool uiActive() const override { return uiActive_; }
     bool uiWantsMouse() const override;
     bool uiWantsKeyboard() const override;
+    u64 uiTextureId(TextureHandle t) override;
 
     Backend backend() const override { return Backend::D3D12; }
     const char* adapterName() const override { return adapterName_.c_str(); }
@@ -639,6 +656,11 @@ struct RhiTexture {
     // index IS a mip index and no array/plane arithmetic is needed.
     std::vector<ResourceState> states;
 #endif
+#if AVER_WITH_IMGUI
+    // The descriptor uiTextureId() handed to the UI, cached so drawing the same image every frame
+    // costs nothing and cannot drain the small UI pool. Zero until the UI first asks.
+    u64 uiSrvCpu = 0, uiSrvGpu = 0;
+#endif
 };
 
 struct RhiBuffer {
@@ -783,7 +805,15 @@ public:
     bool textureInfo(TextureHandle h, TextureDesc& out) const override;
     void waitIdle() override;
 
+    // Backs IDevice::uiTextureId — see there. Lives on the factory because the handle table does.
+    u64 uiDescriptor(TextureHandle h);
+
 private:
+    // Fill a freshly created texture from TextureDesc::initialData. The resource must already be in
+    // COPY_DEST; on success it has been transitioned to `d.initialState` and the GPU has finished.
+    bool uploadInitialData(ID3D12Resource* res, const D3D12_RESOURCE_DESC& td, const TextureDesc& d,
+                           u32 mips);
+
     // Table lookups. Every one returns nullptr for an out-of-range or freed handle; callers log.
     RhiTexture*    texture(TextureHandle h);
     const RhiTexture* texture(TextureHandle h) const;
@@ -1815,6 +1845,18 @@ bool D3D12Device::uiWantsKeyboard() const {
 #endif
 }
 
+// Defined after the factory (below) so the call can be spelled; declared with the other ui* members
+// because that is where the UI vocabulary lives.
+u64 D3D12Device::uiTextureId(TextureHandle t) {
+#if AVER_WITH_IMGUI
+    if (!uiActive_ || !rhiFactory_) return 0;
+    return rhiFactory_->uiDescriptor(t);
+#else
+    (void)t;
+    return 0;
+#endif
+}
+
 bool D3D12Device::selfTest(const f32 in[4], f32 out[4]) {
     constexpr UINT kW = 8, kH = 8;
     D3D12_RESOURCE_DESC td{};
@@ -2165,6 +2207,108 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
 }
 
 // ---- creation
+//
+// Textures created with initial data are filled here, on a one-shot command list of their own.
+// createTexture is an INIT-TIME call — it runs before beginFrame, so there is no open list to
+// record into — and blocking until the copy retires is the honest cost of an asset load.
+bool D3D12ResourceFactory::uploadInitialData(ID3D12Resource* res, const D3D12_RESOURCE_DESC& td,
+                                             const TextureDesc& d, u32 mips) {
+    ID3D12Device* dev = dev_->device_.Get();
+    const u32 texel = texelBytes(d.format);
+    if (texel == 0) {
+        AVER_ERROR("[RHI.D3D12] createTexture: initial data for a format with no CPU texel size");
+        return false;
+    }
+    const u32 count = d.initialDataCount < mips ? d.initialDataCount : mips;
+
+    // The driver, not arithmetic, decides where each subresource sits in an upload buffer and how
+    // wide its rows are. Every offset below comes from here.
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fp(count);
+    std::vector<UINT>   rows(count);
+    std::vector<UINT64> rowBytes(count);
+    UINT64 total = 0;
+    dev->GetCopyableFootprints(&td, 0, count, 0, fp.data(), rows.data(), rowBytes.data(), &total);
+
+    auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+    auto ud = bufferDesc(total);
+    ComPtr<ID3D12Resource> staging;
+    if (!hrOk(dev->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &ud,
+              D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging)),
+              "rhi texture staging")) return false;
+    setDebugName(staging.Get(), "rhi texture staging");
+
+    u8* mapped = nullptr;
+    D3D12_RANGE none{0, 0};
+    if (!hrOk(staging->Map(0, &none, reinterpret_cast<void**>(&mapped)), "rhi staging Map")) return false;
+
+    for (u32 s = 0; s < count; ++s) {
+        const auto* src = static_cast<const u8*>(d.initialData[s]);
+        if (!src) continue;
+        // Only subresource 0 may name a source pitch; the rest are tightly packed for their own mip
+        // extent, which is what a decoder or a mip generator hands over.
+        const u64 srcPitch = (s == 0 && d.initialRowPitch) ? d.initialRowPitch
+                                                           : u64(fp[s].Footprint.Width) * texel;
+        const u64 dstPitch = fp[s].Footprint.RowPitch;
+        const u64 bytes    = rowBytes[s] < srcPitch ? rowBytes[s] : srcPitch;
+        u8* dst = mapped + fp[s].Offset;
+        // ROW BY ROW: the destination pitch is aligned to 256 bytes and the source's is not, so one
+        // flat memcpy of the whole surface skews the image by a few pixels per scanline.
+        for (u32 z = 0; z < fp[s].Footprint.Depth; ++z) {
+            for (u32 y = 0; y < rows[s]; ++y) {
+                const u64 row = u64(z) * rows[s] + y;
+                std::memcpy(dst + row * dstPitch, src + row * srcPitch, static_cast<size_t>(bytes));
+            }
+        }
+    }
+    staging->Unmap(0, nullptr);
+
+    ComPtr<ID3D12CommandAllocator> alloc;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    if (!hrOk(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc)),
+              "rhi upload alloc")) return false;
+    if (!hrOk(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr,
+              IID_PPV_ARGS(&list)), "rhi upload list")) return false;
+
+    for (u32 s = 0; s < count; ++s) {
+        if (!d.initialData[s]) continue;
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = staging.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = fp[s];
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = res;
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = s;
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+
+    // Hand the resource over in exactly the state the desc named, so the tracker's seed is true and
+    // the module's first barrier is checked against something real.
+    const D3D12_RESOURCE_STATES want = toResourceStates(d.initialState);
+    if (want != D3D12_RESOURCE_STATE_COPY_DEST) {
+        auto b = transition(res, D3D12_RESOURCE_STATE_COPY_DEST, want);
+        list->ResourceBarrier(1, &b);
+    }
+    list->Close();
+    ID3D12CommandList* lists[] = {list.Get()};
+    dev_->queue_->ExecuteCommandLists(1, lists);
+
+    // A fence of its own rather than the frame fence: this runs outside the frame loop and must not
+    // move a counter beginFrame reasons about.
+    ComPtr<ID3D12Fence> f;
+    if (!hrOk(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "rhi upload fence")) return false;
+    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    dev_->queue_->Signal(f.Get(), 1);
+    if (f->GetCompletedValue() < 1 && ev) { f->SetEventOnCompletion(1, ev); WaitForSingleObject(ev, INFINITE); }
+    if (ev) CloseHandle(ev);
+
+    // Through the normal gate even though the copy has already retired: the staging buffer is not
+    // special, and one release path is one place for the lifetime rule to live.
+    retire(staging);
+    collect();
+    return true;
+}
+
 TextureHandle D3D12ResourceFactory::createTexture(const TextureDesc& d) {
     collect();
     if (d.width == 0 || d.height == 0) { AVER_ERROR("[RHI.D3D12] createTexture with a zero extent"); return 0; }
@@ -2207,12 +2351,20 @@ TextureHandle D3D12ResourceFactory::createTexture(const TextureDesc& d) {
         }
     }
 
+    // With initial data the resource is BORN in COPY_DEST and only reaches d.initialState once the
+    // upload has landed. The caller never sees that: uploadInitialData does the transition, and the
+    // state tracking below is still seeded from d.initialState.
+    const bool seeded = d.initialData && d.initialDataCount > 0;
+
     RhiTexture t;
     auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
     if (!hrOk(dev_->device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td,
-              toResourceStates(d.initialState), d.hasClearValue ? &cv : nullptr,
+              seeded ? D3D12_RESOURCE_STATE_COPY_DEST : toResourceStates(d.initialState),
+              d.hasClearValue ? &cv : nullptr,
               IID_PPV_ARGS(&t.res)), "rhi texture")) return 0;
     setDebugName(t.res.Get(), d.debugName);
+
+    if (seeded && !uploadInitialData(t.res.Get(), td, d, mips)) return 0;
 
     if (any(d.bind, ResourceBind::RenderTarget)) {
         D3D12_DESCRIPTOR_HEAP_DESC hd{}; hd.NumDescriptors = 1; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -2584,6 +2736,16 @@ TlasHandle D3D12ResourceFactory::createTlas(u32 maxInstances) {
 void D3D12ResourceFactory::destroyTexture(TextureHandle h) {
     RhiTexture* t = texture(h);
     if (!t) return;
+#if AVER_WITH_IMGUI
+    // The UI descriptor pool has no fence gate of its own — freeing a slot makes it immediately
+    // reusable by the next font-atlas rebuild. Destroying a texture the UI drew therefore has the
+    // same precondition as recreating one a binding set points at: waitIdle() first.
+    if (t->uiSrvCpu) {
+        D3D12_CPU_DESCRIPTOR_HANDLE cpu{static_cast<SIZE_T>(t->uiSrvCpu)};
+        uiSrvFree(nullptr, cpu, D3D12_GPU_DESCRIPTOR_HANDLE{});
+        t->uiSrvCpu = t->uiSrvGpu = 0;
+    }
+#endif
     retire(t->res);
     retire(t->rtvHeap);
     retire(t->dsvHeap);
@@ -2693,6 +2855,39 @@ bool D3D12ResourceFactory::textureInfo(TextureHandle h, TextureDesc& out) const 
 void D3D12ResourceFactory::waitIdle() {
     dev_->waitForGpu();
     collect();
+}
+
+// The SRV goes in the UI's own shader-visible heap, not the factory's: that heap is the one bound
+// when the UI's draw data is recorded, and a descriptor in any other heap is unreachable from there.
+u64 D3D12ResourceFactory::uiDescriptor(TextureHandle h) {
+#if AVER_WITH_IMGUI
+    RhiTexture* t = texture(h);
+    if (!t || !t->res) return 0;
+    if (t->uiSrvGpu) return t->uiSrvGpu;
+    if (!any(t->desc.bind, ResourceBind::ShaderResource)) {
+        AVER_ERROR("[RHI.D3D12] uiTextureId on a texture not created as a shader resource");
+        return 0;
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu{};
+    uiSrvAlloc(nullptr, &cpu, &gpu);
+    if (!gpu.ptr) return 0;   // pool exhausted; uiSrvAlloc has already said so
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = toDxgiSrvFormat(t->desc.format);
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2D.MipLevels = t->desc.mips;
+    dev_->device_->CreateShaderResourceView(t->res.Get(), &sv, cpu);
+
+    t->uiSrvCpu = cpu.ptr;
+    t->uiSrvGpu = gpu.ptr;
+    return t->uiSrvGpu;
+#else
+    (void)h;
+    return 0;
+#endif
 }
 
 // Temporary: proves the factory works end to end before anything depends on it. Deleted once a

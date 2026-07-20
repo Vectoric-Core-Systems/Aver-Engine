@@ -28,6 +28,19 @@ add_custom_target(Sandbox.Splash DEPENDS ${CMAKE_BINARY_DIR}/bin/splash.png)
 add_dependencies(Sandbox Sandbox.Splash)
 set_target_properties(Sandbox.Splash PROPERTIES FOLDER "sandbox")
 
+# Ship the project browser's mark next to the executable. Same OUTPUT/DEPENDS rule as the splash
+# above, for the same reason.
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/bin/logo.png
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/branding/logo.png ${CMAKE_BINARY_DIR}/bin/logo.png
+  DEPENDS ${CMAKE_SOURCE_DIR}/branding/logo.png
+  COMMENT "Staging logo.png"
+  VERBATIM)
+add_custom_target(Sandbox.Logo DEPENDS ${CMAKE_BINARY_DIR}/bin/logo.png)
+add_dependencies(Sandbox Sandbox.Logo)
+set_target_properties(Sandbox.Logo PROPERTIES FOLDER "sandbox")
+
 # Ship the editor UI typeface next to the executable. Same OUTPUT/DEPENDS rule as the splash, and
 # for the same reason -- POST_BUILD would not re-copy a font that changed without the exe relinking.
 set(AVER_UI_FONTS Roboto-Regular.ttf Roboto-Medium.ttf)

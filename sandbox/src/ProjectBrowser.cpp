@@ -86,9 +86,9 @@ bool ProjectBrowser::open(const std::string& manifestPath, std::string* err) {
     return true;
 }
 
-BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium) {
+BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 logoAspect) {
 #if !AVER_WITH_IMGUI
-    (void)dpi; (void)medium;
+    (void)dpi; (void)medium; (void)logoTex; (void)logoAspect;
     return BrowserAction::Skip;
 #else
     BrowserAction action = BrowserAction::Stay;
@@ -109,18 +109,28 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium) {
                  ImGuiWindowFlags_NoBringToFrontOnFocus);
 
     // ---- branding ----
-    // Drawn, not blitted: branding/logo.png is a raster and the RHI has no texture-upload path to
-    // ImGui, so the mark is vector-drawn here rather than adding a texture API for one image.
+    // The real artwork, blitted. branding/logo.png is the project owner's own mark; approximating
+    // its isocube with draw-list primitives would put a redrawn, AI-authored logo in front of every
+    // user, which is exactly what branding/ASSETS.md exists to prevent. The vector badge below is
+    // only what is left when the file is missing -- a decoration must never stop the editor.
     {
         const f32 badge = 46.0f * dpi;
-        const ImVec2 p = ImGui::GetCursorScreenPos();
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(p, ImVec2(p.x + badge, p.y + badge), ImGui::GetColorU32(accent), 8.0f * dpi);
-        const char* mark = "AE";
-        const ImVec2 ts = ImGui::CalcTextSize(mark);
-        dl->AddText(ImVec2(p.x + (badge - ts.x) * 0.5f, p.y + (badge - ts.y) * 0.5f),
-                    IM_COL32(20, 18, 16, 255), mark);
-        ImGui::Dummy(ImVec2(badge, badge));
+        if (logoTex) {
+            // Fitted inside the badge square rather than stretched to it, so artwork that is not
+            // 1:1 keeps its proportions and the text beside it stays put.
+            const f32 w = logoAspect >= 1.0f ? badge : badge * logoAspect;
+            const f32 h = logoAspect >= 1.0f ? badge / logoAspect : badge;
+            ImGui::Image(static_cast<ImTextureID>(logoTex), ImVec2(w, h));
+        } else {
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(p, ImVec2(p.x + badge, p.y + badge), ImGui::GetColorU32(accent), 8.0f * dpi);
+            const char* mark = "AE";
+            const ImVec2 ts = ImGui::CalcTextSize(mark);
+            dl->AddText(ImVec2(p.x + (badge - ts.x) * 0.5f, p.y + (badge - ts.y) * 0.5f),
+                        IM_COL32(20, 18, 16, 255), mark);
+            ImGui::Dummy(ImVec2(badge, badge));
+        }
         ImGui::SameLine(0, 14.0f * dpi);
         ImGui::BeginGroup();
         if (medium) ImGui::PushFont(medium, 0.0f);

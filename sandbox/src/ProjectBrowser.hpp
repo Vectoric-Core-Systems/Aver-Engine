@@ -30,7 +30,12 @@ public:
     void init();  // read the recent list from disk
 
     // One frame of the start screen. `medium` may be null when only the fallback font loaded.
-    BrowserAction draw(f32 dpi, ImFont* medium);
+    //
+    // `logoTex` is the UI texture identifier of the engine mark (rhi::IDevice::uiTextureId), or 0
+    // when the caller could not load it. The image is passed in rather than loaded here so this
+    // stays a UI screen: the app owns asset paths, the device and the lifetime, and knows whether
+    // the screen is armed at all -- automation must not pay to upload a mark it never shows.
+    BrowserAction draw(f32 dpi, ImFont* medium, u64 logoTex, f32 logoAspect);
 
     const fmt::ProjectDesc& project() const { return project_; }
 

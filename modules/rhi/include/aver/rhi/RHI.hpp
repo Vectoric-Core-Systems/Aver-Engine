@@ -172,6 +172,14 @@ public:
     virtual bool uiActive() const { return false; }
     virtual bool uiWantsMouse() const { return false; }    // true when the cursor is over UI
     virtual bool uiWantsKeyboard() const { return false; }
+
+    // Make a texture drawable by the UI, returning the identifier the UI layer expects. It is a
+    // plain integer here on purpose: the UI's own texture-handle type must not cross into the RHI
+    // headers, or every consumer of this header acquires a dependency on the UI library.
+    //
+    // The descriptor is allocated once and cached on the texture, so calling this every frame is
+    // free. Returns 0 where the backend hosts no UI, which the caller treats as "no image".
+    virtual u64 uiTextureId(TextureHandle t) { (void)t; return 0; }
 };
 
 IDevice* createDevice(const DeviceDesc& desc = {});

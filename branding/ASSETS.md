@@ -20,7 +20,7 @@ changes; do not hand-edit the derived files, they will be overwritten.
 |------|------|-------------|
 | `splash.png` | 1200×520 RGB | Startup splash. `sandbox/CMakeLists.txt` copies it next to the exe; `modules/runtime/src/Engine.cpp` shows it as a layered window **at native size**, so changing the dimensions changes its on-screen size. |
 | `icon.ico` | 16/24/32/48/64/128/256 | Window + exe icon, via `sandbox/Sandbox.rc`. The full size ladder is supplied deliberately: left to rescale 256→16 itself, the shell turns the mark to mush in the taskbar. |
-| `logo.png` | 512×512 RGBA | Not referenced by code. General-purpose mark. |
+| `logo.png` | 512×512 RGBA | The editor's start screen. `sandbox/CMakeLists.txt` copies it next to the exe; `SandboxApp` decodes it and uploads it through the RHI, and `ProjectBrowser` blits it in the header. Shown at 46dp, so the transparent margin is part of the composition — do not crop it tighter. |
 | `icon512.png` | 512×512 RGBA | Not referenced by code. |
 | `logo256.png` | 256×256 RGBA | Not referenced by code. |
 
@@ -55,6 +55,10 @@ human. Recorded here because "no AI-generated assets" would otherwise be mislead
 - The default editor layout (panel arrangement and dock split ratios).
 - The viewport gizmo geometry and its axis colour convention (X red / Y green / Z blue).
 - The procedural sky and its default zenith/horizon/fog colours.
+- The start screen's **fallback** badge — a rounded orange square lettered "AE", drawn with ImGui
+  primitives in `sandbox/src/ProjectBrowser.cpp`. It is not the mark and is not an approximation of
+  it: it appears only when `logo.png` is missing or will not decode, because a decoration must never
+  stop the editor coming up. When the file is there, the human artwork above is what ships.
 
 ## Regenerating
 

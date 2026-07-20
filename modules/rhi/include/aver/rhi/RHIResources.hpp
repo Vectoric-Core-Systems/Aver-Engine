@@ -89,6 +89,24 @@ struct TextureDesc {
     f32         clearDepth    = 1.0f;
     f32         clearColor[4] = {};
     const char* debugName = nullptr;
+
+    // ---- initial contents ----
+    // One CPU pointer per subresource (== per mip, since this interface exposes only single-slice
+    // textures). Supplying it does NOT change the contract above: the backend creates the resource
+    // in whatever copy state it needs, uploads, transitions to `initialState`, and seeds its state
+    // tracking from `initialState`. So a module never sees, names, or has to reason about a copy
+    // state, and the first barrier it writes is still checked against `initialState`.
+    //
+    // Carried on the desc rather than offered as a separate updateTexture() precisely to keep that
+    // invariant: a post-creation upload would have to move the resource out of `initialState` and
+    // back, which is a window in which the tracker and the resource disagree.
+    const void* const* initialData = nullptr;
+    u32                initialDataCount = 0;   // subresources supplied; the rest are left undefined
+    // Source bytes per row of subresource 0. Zero means tightly packed (width * texel size). The
+    // DESTINATION pitch is the hardware's and is generally larger, so the backend copies row by row.
+    // Subresources past the first are always taken as tightly packed for their own mip extent —
+    // which is what every decoder and mip generator produces.
+    u32                initialRowPitch = 0;
 };
 
 enum class BufferKind : u8 {
