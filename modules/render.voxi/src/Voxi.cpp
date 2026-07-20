@@ -48,8 +48,11 @@ Status Renderer::status(Feature f) const {
             if (!device_.computeShaders) return Status::Unsupported;
             return Status::Ready;
         case Feature::RayTracing:
-            if (device_.rayTracingTier == 0) return Status::Unsupported;
-            return Status::NotImplemented;
+            // Inline RayQuery: needs DXR 1.1 (AMD RDNA2+, NVIDIA Turing+, Intel Arc+) and SM 6.5,
+            // which in turn needs the DXIL compiler.
+            if (device_.rayTracingTier < 11 || device_.shaderModel < 65 || !device_.dxcAvailable)
+                return Status::Unsupported;
+            return Status::Ready;
         case Feature::PathTracing:
             if (device_.rayTracingTier == 0) return Status::Unsupported;
             return Status::NotImplemented;
@@ -71,7 +74,7 @@ const char* Renderer::statusText(Feature f) const {
                 case Feature::Msaa:               return "Device reports no MSAA";
                 case Feature::GlobalIllumination: return "Device has no compute support";
                 case Feature::MeshShaders:        return "Needs mesh-shader Tier 1 + SM 6.5 (D3D12 Ultimate)";
-                default:                          return "Device has no ray tracing support";
+                default:                          return "Needs DXR 1.1 + SM 6.5 (D3D12 Ultimate)";
             }
         default: return "Unknown";
     }

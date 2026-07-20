@@ -10,7 +10,7 @@ device capabilities which of them can actually be used:
 |---|---|
 | **Anti-Aliasing (MSAA)** | **Implemented.** Off / 2x / 4x / 8x, applied at runtime — rebuilds the scene targets and every PSO. |
 | **Global Illumination** | **Implemented.** Voxel cone tracing: voxelise+inject -> mip filter -> 6-cone diffuse gather + AO. |
-| **Ray Tracing** | Declared. Blocked on DXC/SM6.x (see below); most DX12 GPUs have no RT hardware at all. |
+| **Ray Tracing** | **Implemented.** DXR 1.1 inline `RayQuery` sun shadows (exact, hard-edged). Needs DXR 1.1 + SM 6.5. |
 | **Path Tracing** | Declared. Reference tracer; not built yet. |
 
 ## Honest status reporting
@@ -103,11 +103,21 @@ Known cost: voxelisation uses a geometry shader for dominant-axis projection. GS
 runs everywhere, but is emulated through an off-chip ring buffer on all AMD GCN parts and is
 markedly slower there. A GS-free variant (three instanced passes) is the fix if that bites.
 
-## Ray tracing - why it is not done yet
+## Ray tracing (DXR 1.1 inline)
 
-DXR cannot be expressed in shader model 5.1. Inline ray tracing (`RayQuery`) needs SM 6.5 and a
-full RT pipeline needs `lib_6_3`; this backend compiles HLSL with `D3DCompile` (FXC, SM 5.1), so
-DXR needs the shader pipeline moved to **DXC** first, plus BLAS/TLAS acceleration structures.
+Ray-traced sun shadows via `RayQuery` traced straight from the pixel shader - no state objects,
+no shader binding tables, no `DispatchRays`, so it drops into the existing raster pipeline.
+
+- One BLAS per mesh, built lazily on first use (meshes are static).
+- TLAS rebuilt each frame from the same replayed draw list the shadow and voxel passes use.
+- A second pixel-shader variant is compiled at `ps_6_5` with `-D AVER_RT=1`; the SM 6.0
+  variant remains the default, so a device without DXR still gets a working renderer and
+  falls back to the shadow map.
+- Occlusion rays use `ACCEPT_FIRST_HIT_AND_END_SEARCH` - a visibility query, not a
+  closest-hit search, which is substantially cheaper.
+
+Engine matrices are row-vector (`v*M`); DXR instance transforms are 3x4 column-vector, so the
+upper 3x3 is transposed on the way in. Getting that wrong silently misplaces every instance.
 
 **Target when it lands: DXR 1.1 inline ray tracing (`RayQuery`) only.** AMD has never shipped a
 Tier-1.0-only GPU (it entered at 1.1 with RDNA 2), Intel entered at 1.1 with Arc, and every

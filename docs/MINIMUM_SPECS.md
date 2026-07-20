@@ -19,7 +19,7 @@ engine cannot drift apart silently. The launcher can query the same values — s
 | **GPU (AMD)** | HD 7000 / R7 260 (GCN 1.0) | RX 580 (GCN 4) | RX 6600 (RDNA 2) or newer |
 | **GPU (Intel)** | HD 4400 (Haswell) | Arc A380 | Arc A750 or newer |
 | **OS** | Windows 10 1803 | Windows 10 20H2 | Windows 10 2004 (May 2020) |
-| **What you get** | Editor + PBR + shadows | + voxel GI at 128³ | + hardware ray tracing |
+| **What you get** | Editor + PBR + shadow maps | + voxel GI at 128³ | + ray-traced shadows |
 
 The engine **runs** on the Minimum tier. Features the hardware cannot do are reported
 `Unsupported` and their settings refuse to enable — never silently no-op. See §5.

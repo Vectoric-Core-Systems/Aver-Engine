@@ -137,6 +137,11 @@ public:
     };
     virtual void setGi(const GiSettings& gi) { (void)gi; }
 
+    // DXR 1.1 inline ray tracing (RayQuery) for exact sun shadows. Requires raytracing
+    // tier 1.1 + shader model 6.5; silently ignored when unavailable.
+    virtual void setRayTracing(bool enabled) { (void)enabled; }
+    virtual bool rayTracingActive() const { return false; }
+
     // Render subsequent meshes as wireframe until toggled off.
     virtual void setWireframe(bool on) { (void)on; }
 

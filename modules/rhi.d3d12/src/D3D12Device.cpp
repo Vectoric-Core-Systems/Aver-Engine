@@ -60,9 +60,13 @@ public:
     bool usingDxc() const { return compiler_ != nullptr; }
 
     // `target51` is the FXC target, e.g. "vs_5_1"; the SM6 equivalent is derived from it.
-    HRESULT compile(const char* src, const char* entry, const char* target51, ID3DBlob** out) {
+    // `sm6` overrides that (e.g. "ps_6_5" for RayQuery), and `define` adds one -D. Both require
+    // DXC, so a caller using them must have checked the device caps first.
+    HRESULT compile(const char* src, const char* entry, const char* target51, ID3DBlob** out,
+                    const char* sm6 = nullptr, const char* define = nullptr) {
         init();
         if (!usingDxc()) {
+            if (sm6 || define) return E_NOTIMPL;   // SM6-only path; caller must fall back
             ComPtr<ID3DBlob> err;
             const UINT flags = D3DCOMPILE_PACK_MATRIX_ROW_MAJOR | D3DCOMPILE_ENABLE_STRICTNESS;
             HRESULT hr = D3DCompile(src, std::strlen(src), "aver.hlsl", nullptr, nullptr, entry, target51, flags, 0, out, &err);
@@ -73,18 +77,22 @@ public:
         std::string t6(target51);
         const size_t us = t6.rfind("_5_1");
         if (us != std::string::npos) t6 = t6.substr(0, us) + "_6_0";
+        if (sm6) t6 = sm6;
         const std::wstring wEntry(entry, entry + std::strlen(entry));
         const std::wstring wTarget(t6.begin(), t6.end());
+        std::wstring wDefine;
+        if (define) wDefine.assign(define, define + std::strlen(define));
 
         DxcBuffer buf{src, std::strlen(src), DXC_CP_UTF8};
-        LPCWSTR args[] = {
+        std::vector<LPCWSTR> args = {
             L"-E", wEntry.c_str(),
             L"-T", wTarget.c_str(),
             L"-Zpr",           // pack matrices row-major: the engine's convention
             L"-HV", L"2021",
         };
+        if (define) { args.push_back(L"-D"); args.push_back(wDefine.c_str()); }
         ComPtr<IDxcResult> result;
-        HRESULT hr = compiler_->Compile(&buf, args, _countof(args), nullptr, IID_PPV_ARGS(&result));
+        HRESULT hr = compiler_->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), nullptr, IID_PPV_ARGS(&result));
         if (SUCCEEDED(hr)) result->GetStatus(&hr);
         if (FAILED(hr)) {
             ComPtr<IDxcBlobUtf8> errs;
@@ -181,6 +189,26 @@ SamplerState        gVoxelSamp : register(s0);
 // DX12 GPU - which is why shadowed light injection uses this rather than ray-traced shadows.
 Texture2D<float>          gShadowTex  : register(t1);
 SamplerComparisonState    gShadowSamp : register(s1);
+
+#if AVER_RT
+// DXR 1.1 inline ray tracing. Traced from the pixel shader itself - no state objects, no shader
+// binding tables, no DispatchRays - so it drops into the existing raster pipeline.
+RaytracingAccelerationStructure gScene : register(t2);
+
+// Exact hard shadow: one occlusion ray toward the sun. ACCEPT_FIRST_HIT_AND_END_SEARCH makes it a
+// pure any-hit visibility query, which is much cheaper than finding the closest hit.
+float rtShadow(float3 wpos, float3 N, float3 L) {
+    RayDesc r;
+    r.Origin    = wpos + N * 0.02;   // offset along the normal so we do not hit ourselves
+    r.Direction = L;
+    r.TMin      = 0.001;
+    r.TMax      = 100000.0;
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, r);
+    q.Proceed();
+    return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
+}
+#endif
 
 // 3x3 PCF. Returns 1 = fully lit, 0 = fully shadowed.
 float shadowFactor(float3 wpos, float ndl) {
@@ -290,7 +318,12 @@ float4 PSMain(VSOut i) : SV_TARGET {
     float3 F = fresnelSchlick(saturate(dot(H, V)), F0);
     float3 spec = (D * G * F) / (4.0 * ndv * ndl + 1e-4);
     float3 kd = (1.0 - F) * (1.0 - metallic);
-    float3 direct = (kd * albedo / PI + spec) * lightC * ndl * shadowFactor(i.wpos, ndl);
+#if AVER_RT
+    const float sunVis = rtShadow(i.wpos, N, L);          // exact ray-traced occlusion
+#else
+    const float sunVis = shadowFactor(i.wpos, ndl);       // shadow map + PCF
+#endif
+    float3 direct = (kd * albedo / PI + spec) * lightC * ndl * sunVis;
 
     // ambient: sky hemisphere irradiance (linear) + crude spec reflection of the sky
     float3 ambient = kd * albedo * skyColor(N) * gAmbient.r;
@@ -453,6 +486,7 @@ struct PerFrameCB {
 struct GpuMesh {
     ComPtr<ID3D12Resource> vb;
     ComPtr<ID3D12Resource> ib;
+    ComPtr<ID3D12Resource> blas;   // DXR bottom-level AS, built lazily
     D3D12_VERTEX_BUFFER_VIEW vbv{};
     D3D12_INDEX_BUFFER_VIEW ibv{};
     u32 indexCount = 0;
@@ -533,6 +567,8 @@ public:
     void setWireframe(bool on) override { wireframe_ = on; }
     void setLineDepth(bool testDepth) override { lineDepth_ = testDepth; }
     void setGi(const GiSettings& gi) override;
+    void setRayTracing(bool enabled) override { rtEnabled_ = enabled && rtSupported_; }
+    bool rayTracingActive() const override { return rtActive_; }
 
     void requestCapture(u32 x, u32 y) override { capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
     bool getCapture(f32 out[4]) override {
@@ -557,6 +593,9 @@ public:
 
 private:
     void queryCaps();
+    bool initRayTracing();
+    void buildBlas(u32 meshIndex);
+    void buildRtScene();
     void bindGiTables();                        // bind heap + both descriptor tables (Tier 1 safety)
     void voxelBarrier(u32 sub, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to);
     bool createShadowResources();
@@ -624,6 +663,15 @@ private:
     u32 vpX_ = 0, vpY_ = 0, vpW_ = 0, vpH_ = 0; // scene sub-rect; w/h == 0 means full backbuffer
     u32 sampleCount_ = kDefaultSampleCount;     // live MSAA sample count (1 = off)
     DeviceCaps caps_{};
+
+    // ---- DXR 1.1 inline ray tracing ----
+    ComPtr<ID3D12Device5> device5_;
+    ComPtr<ID3D12GraphicsCommandList4> cmdList4_;
+    ComPtr<ID3D12PipelineState> rtPso_;
+    ComPtr<ID3D12Resource> tlas_, tlasScratch_, instanceBuf_;
+    std::vector<ComPtr<ID3D12Resource>> asScratch_;   // BLAS scratch, kept alive
+    u64 tlasBytes_ = 0, tlasScratchBytes_ = 0, instanceBufBytes_ = 0;
+    bool rtSupported_ = false, rtEnabled_ = false, rtActive_ = false;
 
     // ---- Voxi voxel-cone-traced GI ----
     GiSettings gi_{};
@@ -770,6 +818,7 @@ bool D3D12Device::setSampleCount(u32 samples) {
     const u32 prev = sampleCount_;
     sampleCount_ = samples;
     if (!createPipeline()) { sampleCount_ = prev; createPipeline(); return false; } // PSOs carry SampleDesc
+    if (rtSupported_) initRayTracing();   // the RayQuery PSO bakes SampleDesc too
     if (hasSwapchain_) {
         depthBuffer_.Reset();
         msaaColor_.Reset();
@@ -782,7 +831,7 @@ bool D3D12Device::setSampleCount(u32 samples) {
 bool D3D12Device::createPipeline() {
     // Root signature: b0 = per-frame CBV, b1 = 20 root constants (world + colour).
     // b0 per-frame CBV, b1 root constants, t0 voxel volume (lit pass), u0 voxel volume (voxelise).
-    D3D12_DESCRIPTOR_RANGE srvRange{}; srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; srvRange.NumDescriptors = 2; srvRange.BaseShaderRegister = 0; // t0 voxel, t1 shadow
+    D3D12_DESCRIPTOR_RANGE srvRange{}; srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; srvRange.NumDescriptors = 3; srvRange.BaseShaderRegister = 0; // t0 voxel, t1 shadow, t2 TLAS
     D3D12_DESCRIPTOR_RANGE uavRange{}; uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; uavRange.NumDescriptors = 1; uavRange.BaseShaderRegister = 0;
 
     D3D12_ROOT_PARAMETER params[4] = {};
@@ -937,6 +986,183 @@ bool D3D12Device::createPipeline() {
     return true;
 }
 
+// ---------------------------------------------------------------- DXR 1.1 (inline ray tracing)
+namespace {
+// Committed default-heap buffer sized for an acceleration structure or its scratch space.
+ComPtr<ID3D12Resource> makeAsBuffer(ID3D12Device* dev, u64 bytes, D3D12_RESOURCE_STATES state) {
+    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT; hp.CreationNodeMask = 1; hp.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = bytes ? bytes : 1;
+    d.Height = 1; d.DepthOrArraySize = 1; d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    ComPtr<ID3D12Resource> r;
+    dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, state, nullptr, IID_PPV_ARGS(&r));
+    return r;
+}
+} // namespace
+
+bool D3D12Device::initRayTracing() {
+    if (caps_.rayTracingTier < 11 || caps_.shaderModel < 65 || !caps_.dxcAvailable) return false;
+    if (FAILED(device_.As(&device5_))) return false;
+
+    // Second PS variant compiled at SM 6.5 with AVER_RT so RayQuery is available. The SM 6.0
+    // variant stays the default, so a device without DXR still gets a working renderer.
+    ComPtr<ID3DBlob> vs, ps;
+    if (FAILED(shaderCompiler().compile(kShaderHLSL, "VSMain", "vs_5_1", &vs))) return false;
+    if (FAILED(shaderCompiler().compile(kShaderHLSL, "PSMain", "ps_5_1", &ps, "ps_6_5", "AVER_RT=1"))) {
+        AVER_WARN("[RHI.D3D12] RayQuery shader failed to compile; ray tracing stays off");
+        return false;
+    }
+    D3D12_INPUT_ELEMENT_DESC layout[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};
+    p.pRootSignature = rootSig_.Get();
+    p.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    p.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+    p.InputLayout = {layout, 2};
+    p.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    p.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    p.RasterizerState.DepthClipEnable = TRUE;
+    p.RasterizerState.MultisampleEnable = TRUE;
+    p.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    p.DepthStencilState.DepthEnable = TRUE;
+    p.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    p.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    p.SampleMask = UINT_MAX;
+    p.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    p.NumRenderTargets = 1;
+    p.RTVFormats[0] = kBackbufferFormat;
+    p.DSVFormat = kDepthFormat;
+    p.SampleDesc.Count = sampleCount_;
+    if (!hrOk(device_->CreateGraphicsPipelineState(&p, IID_PPV_ARGS(&rtPso_)), "RayQuery pso")) return false;
+
+    rtSupported_ = true;
+    AVER_INFO("[RHI.D3D12] DXR 1.1 inline ray tracing ready (RayQuery, ps_6_5)");
+    return true;
+}
+
+// One BLAS per mesh, built once (meshes are static). Must run on a command list, so it happens
+// at the top of a frame rather than in createMesh.
+void D3D12Device::buildBlas(u32 meshIndex) {
+    GpuMesh& m = meshes_[meshIndex];
+    if (m.blas || m.indexCount == 0) return;
+
+    D3D12_RAYTRACING_GEOMETRY_DESC geo{};
+    geo.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+    geo.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+    geo.Triangles.VertexBuffer.StartAddress = m.vb->GetGPUVirtualAddress();
+    geo.Triangles.VertexBuffer.StrideInBytes = sizeof(MeshVertex);
+    geo.Triangles.VertexCount = m.vbv.SizeInBytes / sizeof(MeshVertex);
+    geo.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+    geo.Triangles.IndexBuffer = m.ib->GetGPUVirtualAddress();
+    geo.Triangles.IndexCount = m.indexCount;
+    geo.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
+    in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+    in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    in.NumDescs = 1;
+    in.pGeometryDescs = &geo;
+
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
+    device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
+    m.blas = makeAsBuffer(device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+    ComPtr<ID3D12Resource> scratch = makeAsBuffer(device_.Get(), info.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (!m.blas || !scratch) { m.blas.Reset(); return; }
+    asScratch_.push_back(scratch);   // keep alive until the GPU has consumed it
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
+    bd.Inputs = in;
+    bd.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
+    bd.DestAccelerationStructureData = m.blas->GetGPUVirtualAddress();
+    cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+    D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; b.UAV.pResource = m.blas.Get();
+    cmdList_->ResourceBarrier(1, &b);
+}
+
+// TLAS is rebuilt every frame from the same draw list the shadow and voxel passes replay.
+void D3D12Device::buildRtScene() {
+    if (!rtSupported_ || !rtEnabled_ || voxelDrawsPrev_.empty()) { rtActive_ = false; return; }
+
+    for (const VoxelDraw& d : voxelDrawsPrev_)
+        if (d.mesh > 0 && d.mesh <= meshes_.size()) buildBlas(d.mesh - 1);
+
+    std::vector<D3D12_RAYTRACING_INSTANCE_DESC> inst;
+    inst.reserve(voxelDrawsPrev_.size());
+    for (const VoxelDraw& d : voxelDrawsPrev_) {
+        if (d.mesh == 0 || d.mesh > meshes_.size()) continue;
+        const GpuMesh& m = meshes_[d.mesh - 1];
+        if (!m.blas) continue;
+        D3D12_RAYTRACING_INSTANCE_DESC id{};
+        // Engine matrices are row-vector (v*M); DXR wants a 3x4 column-vector [R|T], i.e. the
+        // transpose of the upper 3x3 with translation in the last column.
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) id.Transform[r][c] = d.world[c * 4 + r];
+            id.Transform[r][3] = d.world[12 + r];
+        }
+        id.InstanceMask = 0xFF;
+        id.AccelerationStructure = m.blas->GetGPUVirtualAddress();
+        inst.push_back(id);
+    }
+    if (inst.empty()) { rtActive_ = false; return; }
+
+    const u64 bytes = inst.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+    if (!instanceBuf_ || instanceBufBytes_ < bytes) {
+        auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+        auto bd2 = bufferDesc(bytes);
+        if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd2, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&instanceBuf_)), "TLAS instances")) { rtActive_ = false; return; }
+        instanceBufBytes_ = bytes;
+    }
+    void* p = nullptr; D3D12_RANGE none{0, 0};
+    instanceBuf_->Map(0, &none, &p);
+    std::memcpy(p, inst.data(), bytes);
+    instanceBuf_->Unmap(0, nullptr);
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
+    in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    in.NumDescs = static_cast<UINT>(inst.size());
+    in.InstanceDescs = instanceBuf_->GetGPUVirtualAddress();
+
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
+    device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
+    if (!tlas_ || tlasBytes_ < info.ResultDataMaxSizeInBytes) {
+        tlas_ = makeAsBuffer(device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+        tlasBytes_ = info.ResultDataMaxSizeInBytes;
+        tlasScratch_.Reset();
+        // t2 = the TLAS. A raytracing-AS SRV takes a NULL resource; the address lives in the desc.
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format = DXGI_FORMAT_UNKNOWN;
+        sv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.RaytracingAccelerationStructure.Location = tlas_->GetGPUVirtualAddress();
+        D3D12_CPU_DESCRIPTOR_HANDLE h = giHeap_->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += 2ull * giSrvSize_;
+        device_->CreateShaderResourceView(nullptr, &sv, h);
+    }
+    if (!tlasScratch_ || tlasScratchBytes_ < info.ScratchDataSizeInBytes) {
+        tlasScratch_ = makeAsBuffer(device_.Get(), info.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        tlasScratchBytes_ = info.ScratchDataSizeInBytes;
+    }
+    if (!tlas_ || !tlasScratch_) { rtActive_ = false; return; }
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
+    bd.Inputs = in;
+    bd.ScratchAccelerationStructureData = tlasScratch_->GetGPUVirtualAddress();
+    bd.DestAccelerationStructureData = tlas_->GetGPUVirtualAddress();
+    cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+    D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; b.UAV.pResource = tlas_.Get();
+    cmdList_->ResourceBarrier(1, &b);
+    rtActive_ = true;
+}
+
 // ---------------------------------------------------------------- shared GI/shadow binding
 // Both descriptor tables are bound for every graphics pass. At Resource Binding Tier 1 (NVIDIA
 // Kepler / Maxwell gen 1, Intel Haswell/Broadwell) every descriptor in every table a root
@@ -947,7 +1173,7 @@ void D3D12Device::bindGiTables() {
     cmdList_->SetDescriptorHeaps(1, heaps);
     D3D12_GPU_DESCRIPTOR_HANDLE gh = giHeap_->GetGPUDescriptorHandleForHeapStart();
     cmdList_->SetGraphicsRootDescriptorTable(2, gh);                       // t0 voxel, t1 shadow
-    D3D12_GPU_DESCRIPTOR_HANDLE uav0 = gh; uav0.ptr += 2ull * giSrvSize_;  // u0 = mip 0
+    D3D12_GPU_DESCRIPTOR_HANDLE uav0 = gh; uav0.ptr += 3ull * giSrvSize_;  // u0 = mip 0
     cmdList_->SetGraphicsRootDescriptorTable(3, uav0);
 }
 
@@ -970,7 +1196,7 @@ bool D3D12Device::createShadowResources() {
     // Descriptor heap is shared with the GI volume so both live in one shader-visible table.
     if (!giHeap_) {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
-        hd.NumDescriptors = 2 + 16 + 16;   // t0, t1, per-mip UAVs, per-mip source SRVs
+        hd.NumDescriptors = 3 + 16 + 16;   // t0 voxel, t1 shadow, t2 TLAS, per-mip UAVs, per-mip SRVs
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (!hrOk(device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&giHeap_)), "GI/shadow descriptor heap")) return false;
@@ -989,9 +1215,9 @@ bool D3D12Device::createShadowResources() {
         nu.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         nu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
         nu.Texture3D.WSize = 1;
-        for (u32 i = 0; i < 2u + 16u + 16u; ++i) {
+        for (u32 i = 0; i < 3u + 16u + 16u; ++i) {
             D3D12_CPU_DESCRIPTOR_HANDLE d = h; d.ptr += static_cast<SIZE_T>(i) * giSrvSize_;
-            if (i >= 2 && i < 18) device_->CreateUnorderedAccessView(nullptr, nullptr, &nu, d);
+            if (i >= 3 && i < 19) device_->CreateUnorderedAccessView(nullptr, nullptr, &nu, d);
             else                  device_->CreateShaderResourceView(nullptr, &ns, d);
         }
     }
@@ -1158,7 +1384,7 @@ bool D3D12Device::createVoxelVolume(u32 res) {
         uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
         uv.Texture3D.MipSlice = m;
         uv.Texture3D.WSize = res >> m;
-        D3D12_CPU_DESCRIPTOR_HANDLE mh = h; mh.ptr += static_cast<SIZE_T>(2 + m) * giSrvSize_;
+        D3D12_CPU_DESCRIPTOR_HANDLE mh = h; mh.ptr += static_cast<SIZE_T>(3 + m) * giSrvSize_;
         device_->CreateUnorderedAccessView(voxelTex_.Get(), nullptr, &uv, mh);
         // Single-mip SRV so the mip filter can read level m while writing level m+1: a
         // whole-chain SRV would require every mip in the read state at once.
@@ -1168,7 +1394,7 @@ bool D3D12Device::createVoxelVolume(u32 res) {
         ms.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         ms.Texture3D.MostDetailedMip = m;
         ms.Texture3D.MipLevels = 1;
-        D3D12_CPU_DESCRIPTOR_HANDLE sh2 = h; sh2.ptr += static_cast<SIZE_T>(18 + m) * giSrvSize_;
+        D3D12_CPU_DESCRIPTOR_HANDLE sh2 = h; sh2.ptr += static_cast<SIZE_T>(19 + m) * giSrvSize_;
         device_->CreateShaderResourceView(voxelTex_.Get(), &ms, sh2);
     }
     voxelResBuilt_ = res;
@@ -1303,7 +1529,9 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
         if (!hrOk(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocators_[i])), "CreateCommandAllocator")) return false;
     }
     if (!hrOk(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocators_[0].Get(), nullptr, IID_PPV_ARGS(&cmdList_)), "CreateCommandList")) return false;
+    cmdList_.As(&cmdList4_);   // optional: only needed for acceleration-structure builds
     cmdList_->Close();
+    if (cmdList4_) initRayTracing();
 
     // Capture readback buffer sized to the backbuffer footprint.
     D3D12_RESOURCE_DESC bbDesc = renderTargets_[0]->GetDesc();
@@ -1432,8 +1660,8 @@ void D3D12Device::voxelizePass() {
         // Level m-1 becomes readable; level m stays writable. Per-subresource transitions are
         // what make read-while-write on one resource legal.
         voxelBarrier(m - 1, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        D3D12_GPU_DESCRIPTOR_HANDLE src = gh; src.ptr += static_cast<UINT64>(18 + (m - 1)) * giSrvSize_;
-        D3D12_GPU_DESCRIPTOR_HANDLE dst = gh; dst.ptr += static_cast<UINT64>(2 + m) * giSrvSize_;
+        D3D12_GPU_DESCRIPTOR_HANDLE src = gh; src.ptr += static_cast<UINT64>(19 + (m - 1)) * giSrvSize_;
+        D3D12_GPU_DESCRIPTOR_HANDLE dst = gh; dst.ptr += static_cast<UINT64>(3 + m) * giSrvSize_;
         cmdList_->SetComputeRootDescriptorTable(0, src);
         cmdList_->SetComputeRootDescriptorTable(1, dst);
         const u32 srcMip[4] = {0, 0, 0, 0};   // the view already starts at the source mip
@@ -1472,6 +1700,7 @@ void D3D12Device::beginFrame() {
     std::memcpy(frameCBPtr_[frameIndex_], &frameCB_, sizeof(PerFrameCB));
     voxelDrawsPrev_.swap(voxelDraws_);
     voxelDraws_.clear();
+    buildRtScene();   // BLAS/TLAS for RayQuery, from the same replayed draw list
     shadowPass();     // must precede voxelisation: injection samples the shadow map
     voxelizePass();
 
@@ -1530,7 +1759,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     // but only AFTER capturing above, or the volume would never be filled.
     if (gi_.enabled && gi_.debugView) return;
     const GpuMesh& m = meshes_[mesh - 1];
-    cmdList_->SetPipelineState(wireframe_ ? wirePso_.Get() : pso_.Get());
+    cmdList_->SetPipelineState(wireframe_ ? wirePso_.Get() : ((rtActive_ && rtPso_) ? rtPso_.Get() : pso_.Get()));
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     f32 consts[24];
     std::memcpy(consts, world, 16 * sizeof(f32));
