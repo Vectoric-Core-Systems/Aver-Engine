@@ -184,6 +184,12 @@ cbuffer PerFrame : register(b0) {
     float4   gSkyZenith;   // rgb
     float4   gSkyHorizon;  // rgb
     float4   gFogColor;    // rgb, a = density
+};
+// Feature-owned frame constants, at the register RHIResources.hpp reserves for exactly this. Split
+// out of b0 so the engine block carries nothing a render feature introduced, and so a pass that
+// recomputes only these (the shadow matrix is not known until the shadow pass runs) re-uploads 112
+// bytes instead of the whole engine block.
+cbuffer VoxiFrame : register(b4) {
     float4   gVoxelOrigin; // xyz = volume min corner, w = 1/volumeWorldSize
     float4   gVoxelParams; // x = resolution, y = intensity, z = maxDistance, w = enabled|debug<<1
     float4x4 gLightViewProj;
@@ -575,6 +581,12 @@ struct PerFrameCB {
     f32 skyZenith[4];
     f32 skyHorizon[4];
     f32 fogColor[4];    // a = density
+};
+
+// Mirrors `cbuffer VoxiFrame : register(b4)`. Field order and padding must match it exactly -- a
+// mismatch here is silent, and shows up as misplaced GI or a uniformly lit scene rather than as any
+// kind of error.
+struct VoxiFrameCB {
     f32 voxelOrigin[4];  // xyz = volume min corner, w = 1/volumeWorldSize
     f32 voxelParams[4];  // x = resolution, y = intensity, z = maxDistance, w = enabled
     f32 lightViewProj[16];
@@ -876,6 +888,9 @@ private:
     std::vector<GpuLineMesh> lineMeshes_;
     ComPtr<ID3D12Resource> frameCBs_[kFrameCount];
     u8* frameCBPtr_[kFrameCount] = {nullptr, nullptr};
+    VoxiFrameCB voxiCB_{};
+    ComPtr<ID3D12Resource> voxiCBs_[kFrameCount];
+    u8* voxiCBPtr_[kFrameCount] = {nullptr, nullptr};
 
     ComPtr<ID3D12Resource> captureBuf_;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT captureFp_{};
@@ -1372,7 +1387,10 @@ bool D3D12Device::createPipeline() {
     D3D12_DESCRIPTOR_RANGE srvRange{}; srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; srvRange.NumDescriptors = 3; srvRange.BaseShaderRegister = 0; // t0 voxel, t1 shadow, t2 TLAS
     D3D12_DESCRIPTOR_RANGE uavRange{}; uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; uavRange.NumDescriptors = 1; uavRange.BaseShaderRegister = 0;
 
-    D3D12_ROOT_PARAMETER params[4] = {};
+    D3D12_ROOT_PARAMETER params[5] = {};
+    params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   // b4: feature frame constants
+    params[4].Descriptor.ShaderRegister = kFeatureFrameConstantRegister;
+    params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -1406,7 +1424,7 @@ bool D3D12Device::createPipeline() {
     const D3D12_STATIC_SAMPLER_DESC samplers[2] = {samp, shadowSamp};
 
     D3D12_ROOT_SIGNATURE_DESC rsd{};
-    rsd.NumParameters = 4;
+    rsd.NumParameters = 5;
     rsd.pParameters = params;
     rsd.NumStaticSamplers = 2;
     rsd.pStaticSamplers = samplers;
@@ -1515,11 +1533,14 @@ bool D3D12Device::createPipeline() {
 
     // Per-frame constant buffers (one per frame in flight), persistently mapped.
     auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
-    auto cbd = bufferDesc(512); // PerFrameCB grew past 256 with the voxel fields
+    auto cbd = bufferDesc(256);   // PerFrameCB is 144 bytes; CBs bind on 256-byte alignment
+    auto vcbd = bufferDesc(256);  // VoxiFrameCB is 112
     for (u32 i = 0; i < kFrameCount; ++i) {
         if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &cbd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&frameCBs_[i])), "create per-frame CB")) return false;
         D3D12_RANGE none{0, 0};
         frameCBs_[i]->Map(0, &none, reinterpret_cast<void**>(&frameCBPtr_[i]));
+        if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &vcbd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&voxiCBs_[i])), "create feature frame CB")) return false;
+        voxiCBs_[i]->Map(0, &none, reinterpret_cast<void**>(&voxiCBPtr_[i]));
     }
     return true;
 }
@@ -1622,7 +1643,8 @@ bool D3D12Device::initMeshShaders() {
     if (!msRootSig_) {
         D3D12_DESCRIPTOR_RANGE srvRange{}; srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; srvRange.NumDescriptors = 3; srvRange.BaseShaderRegister = 0;
         D3D12_DESCRIPTOR_RANGE uavRange{}; uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; uavRange.NumDescriptors = 1; uavRange.BaseShaderRegister = 0;
-        D3D12_ROOT_PARAMETER p[7] = {};
+        D3D12_ROOT_PARAMETER p[8] = {};
+        p[7].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; p[7].Descriptor.ShaderRegister = kFeatureFrameConstantRegister;
         p[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; p[0].Descriptor.ShaderRegister = 0;
         p[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; p[1].Constants.ShaderRegister = 1; p[1].Constants.Num32BitValues = 24;
         p[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; p[2].DescriptorTable.NumDescriptorRanges = 1; p[2].DescriptorTable.pDescriptorRanges = &srvRange;
@@ -1644,7 +1666,7 @@ bool D3D12Device::initMeshShaders() {
         const D3D12_STATIC_SAMPLER_DESC samplers[2] = {samp, shadowSamp};
 
         D3D12_ROOT_SIGNATURE_DESC rsd{};
-        rsd.NumParameters = 7; rsd.pParameters = p;
+        rsd.NumParameters = 8; rsd.pParameters = p;
         rsd.NumStaticSamplers = 2; rsd.pStaticSamplers = samplers;
         rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
         ComPtr<ID3DBlob> b, e;
@@ -1853,6 +1875,9 @@ void D3D12Device::bindGraphicsRoot(ID3D12RootSignature* rs) {
     boundRootSig_ = rs;
     cmdList_->SetGraphicsRootSignature(rs);
     cmdList_->SetGraphicsRootConstantBufferView(0, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
+    // b4 lives at the last parameter of both signatures; they differ only in what precedes it.
+    const u32 voxiParam = (rs == msRootSig_.Get()) ? 7u : 4u;
+    cmdList_->SetGraphicsRootConstantBufferView(voxiParam, voxiCBs_[frameIndex_]->GetGPUVirtualAddress());
     bindGiTables();
 }
 
@@ -1969,7 +1994,7 @@ bool D3D12Device::createShadowResources() {
 
 // Render the scene depth from the sun, covering the GI volume's bounds.
 void D3D12Device::shadowPass() {
-    if (!shadowReady_ || voxelDrawsPrev_.empty()) { frameCB_.shadowParams[1] = 0.0f; return; }
+    if (!shadowReady_ || voxelDrawsPrev_.empty()) { voxiCB_.shadowParams[1] = 0.0f; return; }
 
     // Fit an orthographic light frustum around the volume so the map's resolution is spent where
     // the GI actually samples it.
@@ -1985,10 +2010,10 @@ void D3D12Device::shadowPass() {
     proj.m[0][0] = 1.0f / r; proj.m[1][1] = 1.0f / r;
     proj.m[2][2] = 1.0f / (r * 4.0f); proj.m[3][2] = 0.0f; proj.m[3][3] = 1.0f;
     const Mat4 lvp = view * proj;
-    std::memcpy(frameCB_.lightViewProj, &lvp.m[0][0], sizeof(frameCB_.lightViewProj));
-    frameCB_.shadowParams[0] = 1.0f / static_cast<f32>(kShadowSize);
-    frameCB_.shadowParams[1] = 1.0f;
-    std::memcpy(frameCBPtr_[frameIndex_], &frameCB_, sizeof(PerFrameCB)); // re-upload with the matrix
+    std::memcpy(voxiCB_.lightViewProj, &lvp.m[0][0], sizeof(voxiCB_.lightViewProj));
+    voxiCB_.shadowParams[0] = 1.0f / static_cast<f32>(kShadowSize);
+    voxiCB_.shadowParams[1] = 1.0f;
+    std::memcpy(voxiCBPtr_[frameIndex_], &voxiCB_, sizeof(VoxiFrameCB)); // re-upload with the matrix
 
     auto toDepth = transition(shadowTex_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     cmdList_->ResourceBarrier(1, &toDepth);
@@ -2030,14 +2055,14 @@ void D3D12Device::setGi(const GiSettings& gi) {
     // Push volume placement into the per-frame CB the shaders read. Done even when GI is off:
     // the shadow map fits its frustum to these same bounds.
     const f32 size = gi_.extent * 2.0f;
-    frameCB_.voxelOrigin[0] = gi_.center[0] - gi_.extent;
-    frameCB_.voxelOrigin[1] = gi_.center[1] - gi_.extent;
-    frameCB_.voxelOrigin[2] = gi_.center[2] - gi_.extent;
-    frameCB_.voxelOrigin[3] = 1.0f / size;                    // shader multiplies, so store the reciprocal
-    frameCB_.voxelParams[0] = static_cast<f32>(voxelResBuilt_);
-    frameCB_.voxelParams[1] = gi_.intensity;
-    frameCB_.voxelParams[2] = gi_.maxDistance;
-    frameCB_.voxelParams[3] = (giReady_ && !gi_.debugView) ? 1.0f : 0.0f; // gate the cone trace
+    voxiCB_.voxelOrigin[0] = gi_.center[0] - gi_.extent;
+    voxiCB_.voxelOrigin[1] = gi_.center[1] - gi_.extent;
+    voxiCB_.voxelOrigin[2] = gi_.center[2] - gi_.extent;
+    voxiCB_.voxelOrigin[3] = 1.0f / size;                    // shader multiplies, so store the reciprocal
+    voxiCB_.voxelParams[0] = static_cast<f32>(voxelResBuilt_);
+    voxiCB_.voxelParams[1] = gi_.intensity;
+    voxiCB_.voxelParams[2] = gi_.maxDistance;
+    voxiCB_.voxelParams[3] = (giReady_ && !gi_.debugView) ? 1.0f : 0.0f; // gate the cone trace
 }
 
 // Cubic radiance volume with a full mip chain: mip N is the cone footprint at distance N.
@@ -2430,6 +2455,7 @@ void D3D12Device::beginFrame() {
     // frame's draws (see voxelDrawsPrev_) and owns its own viewport/targets, so it must happen
     // before the scene RTV is bound below.
     std::memcpy(frameCBPtr_[frameIndex_], &frameCB_, sizeof(PerFrameCB));
+    std::memcpy(voxiCBPtr_[frameIndex_], &voxiCB_, sizeof(VoxiFrameCB));
     voxelDrawsPrev_.swap(voxelDraws_);
     voxelDraws_.clear();
     // Same point as the swap above: a feature rotates its own draw list here, so prePass replays
