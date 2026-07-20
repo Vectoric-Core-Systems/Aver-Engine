@@ -744,10 +744,10 @@ public:
     Format backbufferFormat() const override { return fromDxgiFormat(kBackbufferFormat); }
     Format depthFormat() const override { return fromDxgiFormat(kDepthFormat); }
     IResourceFactory* resources() override;
-    // NON-owning, and deliberately not called anywhere yet: hooking features into the frame is
-    // the next step. Registering the same feature twice would double every hook, so it is ignored.
+    // NON-owning. Registering the same feature twice would double every hook, so it is ignored.
     void addRenderFeature(IRenderFeature* f) override;
     void removeRenderFeature(IRenderFeature* f) override;
+    void notifyRenderTargetsChanged();
     u32 sampleCount() const override { return sampleCount_; }
     bool setSampleCount(u32 samples) override;
 
@@ -1353,8 +1353,17 @@ bool D3D12Device::setSampleCount(u32 samples) {
         msaaColor_.Reset();
         if (!createDepthBuffer() || !createMsaaColor()) { AVER_ERROR("[RHI.D3D12] MSAA {}x target creation failed", samples); return false; }
     }
+    // Features own pipelines that bake the sample count too, and this call can only rebuild the
+    // ones the backend owns. A stale feature PSO is a draw-time target incompatibility, not a
+    // creation-time error, so it surfaces far from its cause.
+    notifyRenderTargetsChanged();
     AVER_INFO("[RHI.D3D12] MSAA set to {}x", samples);
     return true;
+}
+
+void D3D12Device::notifyRenderTargetsChanged() {
+    for (IRenderFeature* f : features_)
+        f->onRenderTargetsChanged(sampleCount_, backbufferFormat(), depthFormat());
 }
 
 bool D3D12Device::createPipeline() {
@@ -2423,9 +2432,19 @@ void D3D12Device::beginFrame() {
     std::memcpy(frameCBPtr_[frameIndex_], &frameCB_, sizeof(PerFrameCB));
     voxelDrawsPrev_.swap(voxelDraws_);
     voxelDraws_.clear();
+    // Same point as the swap above: a feature rotates its own draw list here, so prePass replays
+    // the PREVIOUS frame's geometry while submitDraw fills the next one.
+    for (IRenderFeature* f : features_) f->beginScene();
     buildRtScene();   // BLAS/TLAS for RayQuery, from the same replayed draw list
     shadowPass();     // must precede voxelisation: injection samples the shadow map
     voxelizePass();
+
+    // Registered render features get the same slot: their own targets, before the scene's are bound.
+    if (!features_.empty() && rhiContext_) {
+        for (IRenderFeature* f : features_) f->prePass(*rhiContext_);
+        // A feature pass leaves its own root signature and targets bound.
+        boundRootSig_ = nullptr;
+    }
 
     cmdList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
     // Always clear the FULL surface: once the scene is scissored to a sub-rect the sky no longer
@@ -2447,6 +2466,15 @@ void D3D12Device::beginFrame() {
     bindGraphicsRoot(rootSig_.Get()); // volume (t0) + shadow map (t1) for the lit pass
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
+    // A feature may replace the scene entirely (e.g. a debug visualisation), after the colour
+    // target is bound. drawMesh and drawLines honour the same flag, or overlays float over it.
+    for (IRenderFeature* f : features_) {
+        if (!f->suppressesScene()) continue;
+        if (rhiContext_) f->scenePass(*rhiContext_);
+        cmdList_->SetPipelineState(pso_.Get());
+        return;
+    }
+
     // Debug view replaces the whole scene with a raymarch of the volume.
     if (giReady_ && gi_.enabled && gi_.debugView) {
         cmdList_->SetPipelineState(voxelDebugPso_.Get());
@@ -2467,6 +2495,9 @@ void D3D12Device::beginFrame() {
 
 void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) {
     if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
+    // Features see EVERY draw, before any early return below. A feature that replays geometry into
+    // its own passes needs the full list; capturing after a return leaves it permanently empty.
+    for (IRenderFeature* f : features_) f->submitDraw(mesh, world, color, metallic, roughness);
     // Remember the draw so the shadow and voxel passes can replay it next frame. Captured
     // unconditionally: the shadow map needs it even when GI is switched off.
     if (voxelDraws_.size() < 4096) {
@@ -2479,6 +2510,31 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     // The GI debug view replaces the scene with a raymarch of the volume, so skip the lit draw --
     // but only AFTER capturing above, or the volume would never be filled.
     if (gi_.enabled && gi_.debugView) return;
+    for (IRenderFeature* f : features_) if (f->suppressesScene()) return;
+
+    // A feature may own the scene's lit pipeline: shading it contributes can live INSIDE the pixel
+    // shader rather than in a separate pass, which no amount of extra passes can express. It then
+    // supplies the bindings and frame constants that pipeline reads, too.
+    for (IRenderFeature* f : features_) {
+        if (!f->overridesScenePipeline() || !rhiContext_) continue;
+        const PipelineHandle fp = f->scenePipeline(msActive_ && msPso_, wireframe_);
+        if (!fp) break;   // the feature declined this combination; use the backend's own pipeline
+        rhiContext_->setPipeline(fp);
+        if (const BindingSetHandle bs = f->sceneBindingSet()) rhiContext_->setBindingSet(bs);
+        const void* cb = nullptr; u32 cbBytes = 0;
+        if (f->sceneConstants(&cb, &cbBytes) && cb && cbBytes)
+            rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
+        f32 fc[24];
+        std::memcpy(fc, world, 16 * sizeof(f32));
+        std::memcpy(fc + 16, color, 4 * sizeof(f32));
+        fc[20] = metallic; fc[21] = roughness; fc[22] = 0.0f; fc[23] = 0.0f;
+        rhiContext_->setConstants(1, fc, 24);
+        if (msActive_ && msPso_ && !wireframe_) rhiContext_->dispatchMeshFor(mesh);
+        else                                    rhiContext_->drawMesh(mesh);
+        boundRootSig_ = nullptr;   // the context bound the feature's root signature, not ours
+        return;
+    }
+
     const GpuMesh& m = meshes_[mesh - 1];
     // Wireframe exists only on the IA path, so it wins over the mesh-shader toggle. RayQuery has
     // a mesh-shader variant; if it failed to build, fall back to the IA RayQuery pipeline.
@@ -2531,6 +2587,7 @@ LineHandle D3D12Device::createLineMesh(const LineVertex* verts, u32 count) {
 void D3D12Device::drawLines(LineHandle mesh, const f32 world[16]) {
     if (!hasSwapchain_ || mesh == 0 || mesh > lineMeshes_.size()) return;
     if (gi_.enabled && gi_.debugView) return; // grid/gizmo would overlay the volume raymarch
+    for (IRenderFeature* f : features_) if (f->suppressesScene()) return;   // same, for a feature's
     const GpuLineMesh& m = lineMeshes_[mesh - 1];
     bindGraphicsRoot(rootSig_.Get()); // lines have no mesh-shader variant; a mesh draw may have switched
     cmdList_->SetPipelineState(lineDepth_ ? linePso_.Get() : lineOverlayPso_.Get());
@@ -2647,6 +2704,7 @@ void D3D12Device::resize(u32 w, u32 h) {
     auto rbHeap = heapProps(D3D12_HEAP_TYPE_READBACK);
     auto rbDesc = bufferDesc(total);
     device_->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &rbDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&captureBuf_));
+    notifyRenderTargetsChanged();   // after the device's own targets are rebuilt, never before
     AVER_TRACE("[RHI.D3D12] resized to {}x{}", w, h);
 }
 
