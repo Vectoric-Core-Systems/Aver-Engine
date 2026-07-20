@@ -3,6 +3,7 @@
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/voxi/Voxi.hpp"
 
+#include <unordered_map>
 #include <vector>
 
 // Voxi — the render feature: voxel cone traced global illumination, a directional shadow map for
@@ -49,7 +50,7 @@ public:
 
     // ---- rhi::IRenderFeature ----
     const char* name() const override { return "Voxi"; }
-    // Shadow map -> acceleration structure -> clear volume -> voxelise+inject -> filter mips.
+    // Acceleration structures -> shadow map -> clear volume -> voxelise+inject -> filter mips.
     // Runs before the scene's targets are bound, because every one of those passes owns its own
     // render targets and viewport.
     void prePass(rhi::IRenderContext& ctx) override;
@@ -121,7 +122,15 @@ private:
     // Scene lit-pass variants Voxi owns (see overridesScenePipeline).
     rhi::PipelineHandle scenePso_ = 0, sceneMsPso_ = 0, sceneRtPso_ = 0, sceneMsRtPso_ = 0;
 
+    // Top-level structure, rebuilt every frame from the replayed draw list because instance
+    // transforms are not static. Sized once for the draw-list cap so a rebuild never reallocates.
     rhi::TlasHandle tlas_ = 0;
+    // One bottom-level structure per referenced mesh, created and built the first frame that mesh
+    // appears and then kept for the run — meshes are static, so a built BLAS never goes stale.
+    // Keyed by MeshHandle because the draw list names geometry that way and one mesh is usually
+    // drawn many times per frame.
+    std::unordered_map<rhi::MeshHandle, rhi::BlasHandle> blas_;
+    bool rtLogged_ = false;   // "RayQuery active" is worth saying once, not sixty times a second
 
     struct Draw {
         rhi::MeshHandle mesh;
@@ -140,6 +149,7 @@ private:
         f32 voxelOrigin[4] = {};
         f32 voxelParams[4] = {};
         f32 lightViewProj[16] = {};
+        // x = 1/shadowMapSize, y = shadow map usable, z = acceleration structure built this frame
         f32 shadowParams[4] = {};
     } cb_;
     bool giEnabled() const { return settings_.globalIllumination != Quality::Off; }

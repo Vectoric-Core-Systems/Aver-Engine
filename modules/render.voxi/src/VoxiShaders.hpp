@@ -18,7 +18,7 @@ cbuffer VoxiFrame : register(b4) {
     float4   gVoxelOrigin; // xyz = volume min corner, w = 1/volumeWorldSize
     float4   gVoxelParams; // x = resolution, y = intensity, z = maxDistance, w = enabled|debug<<1
     float4x4 gLightViewProj;
-    float4   gShadowParams; // x = 1/shadowMapSize, y = enabled
+    float4   gShadowParams; // x = 1/shadowMapSize, y = enabled, z = acceleration structure built
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -138,7 +138,15 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     float3 L = normalize(gLightDir.xyz);
     float ndl = saturate(dot(N, L));
 #if AVER_RT
-    const float sunVis = rtShadow(i.wpos, N, L);          // exact ray-traced occlusion
+    // gShadowParams.z is the feature's "I built the acceleration structure for THIS frame" flag.
+    // The RayQuery pipeline can be selected before the first build (the replay list runs a frame
+    // behind) or while no draw yielded a usable BLAS, and tracing a structure nothing filled
+    // reports no hit everywhere: a fully lit scene, with nothing for the debug layer to say.
+    // The fallback therefore lives here, where the fact is known, rather than in a pipeline choice
+    // the backend would have to keep in step.
+    float sunVis;
+    if (gShadowParams.z > 0.5) sunVis = rtShadow(i.wpos, N, L);   // exact ray-traced occlusion
+    else                       sunVis = shadowFactor(i.wpos, ndl); // shadow map + PCF
 #else
     const float sunVis = shadowFactor(i.wpos, ndl);       // shadow map + PCF
 #endif

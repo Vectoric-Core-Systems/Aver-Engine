@@ -23,6 +23,10 @@ namespace {
 // only where ray tracing does.
 constexpr u32 kShadowSize = 2048;
 
+// The draw-list cap, and therefore the instance count the TLAS is sized for. One owner: a TLAS
+// sized for fewer instances than submit() will accept silently drops the overflow at build time.
+constexpr u32 kMaxDraws = 4096;
+
 // s0 samples the radiance volume, s1 is the shadow map's comparison sampler. Both are static
 // samplers on the pipeline (the Tier-1-friendly choice), so every pipeline that declares the
 // three-SRV table has to carry them.
@@ -106,6 +110,22 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
 
     giReady_    = true;
     rtSupported_ = sceneRtPso_ != 0;
+
+    // The TLAS is created HERE rather than on the frame it is first needed, so its descriptor can
+    // be written into t2 before a single frame has been recorded. A shader-visible descriptor that
+    // an in-flight frame may still be reading must not be rewritten, and creating it up front is
+    // the only way to guarantee that without tracking the fence by hand. It is sized for the
+    // draw-list cap, so a per-frame rebuild never reallocates and the address never moves.
+    if (rtSupported_) {
+        tlas_ = res_->createTlas(kMaxDraws);
+        if (tlas_) res_->setSrvTlas(bindings_, 2, tlas_);   // t2, per the shader's register(t2)
+        else {
+            // Non-fatal: everything else Voxi does works without ray tracing.
+            AVER_WARN("[Voxi] TLAS could not be created; ray-traced sun shadows stay off");
+            rtSupported_ = false;
+        }
+    }
+
     AVER_INFO("[Voxi] ready: conservative raster {}, mesh-shader variants {}, ray-tracing variants {}",
               caps_.conservativeRaster ? "on" : "off",
               (voxelMsPso_ && sceneMsPso_) ? "built" : "absent",
@@ -136,8 +156,13 @@ void VoxiRenderer::shutdown() {
     if (shadowTex_) res_->destroyTexture(shadowTex_);
     voxelAccumTex_ = voxelTex_ = shadowTex_ = 0;
 
+    // IResourceFactory exposes no destroyBlas/destroyTlas: acceleration structures are released
+    // with the factory itself, so only the handles are dropped here.
+    blas_.clear();
+    tlas_ = 0;
+
     voxelMips_ = voxelResBuilt_ = 0;
-    giReady_ = rtSupported_ = rtActive_ = false;
+    giReady_ = rtSupported_ = rtActive_ = rtLogged_ = false;
     draws_.clear();
     drawsPrev_.clear();
     res_ = nullptr;
@@ -172,7 +197,7 @@ void VoxiRenderer::beginScene() {
 
 void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                           f32 metallic, f32 roughness) {
-    if (mesh == 0 || draws_.size() >= 4096) return;
+    if (mesh == 0 || draws_.size() >= kMaxDraws) return;
     Draw d;
     d.mesh = mesh;
     std::memcpy(d.world, world, 16 * sizeof(f32));
@@ -198,11 +223,64 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     cb_.voxelParams[2] = settings_.giMaxDistance;
     cb_.voxelParams[3] = (giEnabled() && !debugView_) ? 1.0f : 0.0f;   // gates the cone trace
 
+    // First, because everything after it records draws and barriers: an acceleration-structure
+    // build wants a clean command stream, and the flag it publishes into b4 must be settled before
+    // the backend copies these constants after prePass returns.
+    buildAccelerationStructures(ctx);
     shadowPass(ctx);
     if (giEnabled()) {
         voxelizePass(ctx);
         filterMips(ctx);
     }
+}
+
+// Bottom-level structures for every referenced mesh, then one top-level structure over the
+// replayed draw list. Recomputed from scratch every frame — a scene that loses its geometry, or
+// whose meshes have no buildable BLAS, must fall back to the shadow map rather than trace a
+// structure nothing filled.
+void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
+    rtActive_ = false;
+    cb_.shadowParams[2] = 0.0f;   // the lit pass reads this as "may I trace?"
+    if (!rtSupported_ || settings_.rayTracing == Quality::Off || drawsPrev_.empty()) return;
+
+    ctx.pushMarker("Voxi acceleration structures");
+    std::vector<rhi::TlasInstance> inst;
+    inst.reserve(drawsPrev_.size());
+    for (const Draw& d : drawsPrev_) {
+        auto it = blas_.find(d.mesh);
+        if (it == blas_.end()) {
+            const rhi::BlasHandle nb = res_->createBlas(d.mesh);
+            // The build must run on a command list, which is why it happens here rather than in
+            // createBlas. The backend records the UAV barrier that publishes it.
+            if (nb) ctx.buildBlas(nb);
+            // A zero is recorded too: a mesh that cannot produce a BLAS (no indices, allocation
+            // failure) must be remembered as such, or every frame retries it and re-logs the error.
+            it = blas_.emplace(d.mesh, nb).first;
+        }
+        const rhi::BlasHandle b = it->second;
+        if (!b) continue;
+        rhi::TlasInstance i;
+        // ENGINE convention, handed over untouched: the BACKEND owns the 3x4 column-vector
+        // transpose DXR wants. Pre-transposing here leaves the raster image perfectly correct and
+        // puts every ray somewhere else — a defect only a cast-shadow probe can see.
+        std::memcpy(i.world, d.world, sizeof(i.world));
+        i.mask = 0xFF;
+        i.blas = b;
+        inst.push_back(i);
+    }
+    if (inst.empty()) { ctx.popMarker(); return; }
+
+    // buildTlas records the UAV barrier after the build. That barrier is the ONLY synchronisation
+    // between this write and the RayQuery reads later in the same command list.
+    ctx.buildTlas(tlas_, inst.data(), static_cast<u32>(inst.size()));
+    rtActive_ = true;
+    cb_.shadowParams[2] = 1.0f;
+    if (!rtLogged_) {
+        AVER_INFO("[Voxi] RayQuery active ({} instances, {} bottom-level structures)",
+                  static_cast<u32>(inst.size()), static_cast<u32>(blas_.size()));
+        rtLogged_ = true;
+    }
+    ctx.popMarker();
 }
 
 // Fit an orthographic light frustum around the volume, so the map's resolution is spent exactly

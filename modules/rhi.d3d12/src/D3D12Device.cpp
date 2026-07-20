@@ -178,7 +178,7 @@ cbuffer VoxiFrame : register(b4) {
     float4   gVoxelOrigin; // xyz = volume min corner, w = 1/volumeWorldSize
     float4   gVoxelParams; // x = resolution, y = intensity, z = maxDistance, w = enabled|debug<<1
     float4x4 gLightViewProj;
-    float4   gShadowParams; // x = 1/shadowMapSize, y = enabled
+    float4   gShadowParams; // x = 1/shadowMapSize, y = enabled, z = acceleration structure built
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -283,7 +283,15 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     float3 L = normalize(gLightDir.xyz);
     float ndl = saturate(dot(N, L));
 #if AVER_RT
-    const float sunVis = rtShadow(i.wpos, N, L);          // exact ray-traced occlusion
+    // gShadowParams.z is the feature's "I built the acceleration structure for THIS frame" flag.
+    // The RayQuery pipeline can be selected before the first build (the replay list runs a frame
+    // behind) or while no draw yielded a usable BLAS, and tracing a structure nothing filled
+    // reports no hit everywhere: a fully lit scene, with nothing for the debug layer to say.
+    // The fallback therefore lives here, where the fact is known, rather than in a pipeline choice
+    // the backend would have to keep in step.
+    float sunVis;
+    if (gShadowParams.z > 0.5) sunVis = rtShadow(i.wpos, N, L);   // exact ray-traced occlusion
+    else                       sunVis = shadowFactor(i.wpos, ndl); // shadow map + PCF
 #else
     const float sunVis = shadowFactor(i.wpos, ndl);       // shadow map + PCF
 #endif
@@ -475,13 +483,12 @@ struct VoxiFrameCB {
     f32 voxelOrigin[4];  // xyz = volume min corner, w = 1/volumeWorldSize
     f32 voxelParams[4];  // x = resolution, y = intensity, z = maxDistance, w = enabled
     f32 lightViewProj[16];
-    f32 shadowParams[4]; // x = 1/shadowMapSize, y = enabled
+    f32 shadowParams[4]; // x = 1/shadowMapSize, y = enabled, z = acceleration structure built
 };
 
 struct GpuMesh {
     ComPtr<ID3D12Resource> vb;
     ComPtr<ID3D12Resource> ib;
-    ComPtr<ID3D12Resource> blas;   // DXR bottom-level AS, built lazily
     D3D12_VERTEX_BUFFER_VIEW vbv{};
     D3D12_INDEX_BUFFER_VIEW ibv{};
     u32 indexCount = 0;
@@ -724,9 +731,6 @@ private:
     bool initRayTracing();
     bool initMeshShaders();
     void dispatchMesh(const GpuMesh& m);
-    void buildBlas(u32 meshIndex);
-    void buildRtScene();
-    void publishTlasSrv();                      // write the TLAS into the table the lit pass binds
     RhiBindingSet* sceneBindings();             // the registered feature's set, or null
     void bindGiTables();                        // bind heap + both descriptor tables (Tier 1 safety)
     void bindGraphicsRoot(ID3D12RootSignature* rs); // switch root signature + rebind shared params
@@ -813,15 +817,11 @@ private:
     ComPtr<ID3D12PipelineState> msPso_, msVoxelPso_, msRtPso_;
     bool msSupported_ = false, msEnabled_ = false, msActive_ = false;
     ID3D12RootSignature* boundRootSig_ = nullptr;   // raw: cache only, ownership stays in the ComPtrs
-    ComPtr<ID3D12Resource> tlas_, tlasScratch_, instanceBuf_;
-    std::vector<ComPtr<ID3D12Resource>> asScratch_;   // BLAS scratch, kept alive
-    u64 tlasBytes_ = 0, tlasScratchBytes_ = 0, instanceBufBytes_ = 0;
+    // The acceleration structures themselves belong to the registered feature now; the backend only
+    // decides whether to record the RayQuery pipeline. Whether that pipeline actually traces is the
+    // feature's call, published in its own frame constants (gShadowParams.z) — the backend cannot
+    // know whether this frame's build produced any instances.
     bool rtSupported_ = false, rtEnabled_ = false, rtActive_ = false;
-    // What publishTlasSrv() last wrote into the feature's t2. A shader-visible descriptor must not
-    // be rewritten while an in-flight frame may still read it, so the write is skipped unless the
-    // set or the address has actually moved -- which only happens when the TLAS is reallocated.
-    RhiBindingSet* tlasSrvSet_ = nullptr;
-    D3D12_GPU_VIRTUAL_ADDRESS tlasSrvAddr_ = 0;
 
     // ---- Voxi voxel-cone-traced GI ----
     GiSettings gi_{};
@@ -1651,140 +1651,6 @@ bool D3D12Device::initMeshShaders() {
     return true;
 }
 
-// One BLAS per mesh, built once (meshes are static). Must run on a command list, so it happens
-// at the top of a frame rather than in createMesh.
-void D3D12Device::buildBlas(u32 meshIndex) {
-    GpuMesh& m = meshes_[meshIndex];
-    if (m.blas || m.indexCount == 0) return;
-
-    D3D12_RAYTRACING_GEOMETRY_DESC geo{};
-    geo.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-    geo.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
-    geo.Triangles.VertexBuffer.StartAddress = m.vb->GetGPUVirtualAddress();
-    geo.Triangles.VertexBuffer.StrideInBytes = sizeof(MeshVertex);
-    geo.Triangles.VertexCount = m.vbv.SizeInBytes / sizeof(MeshVertex);
-    geo.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-    geo.Triangles.IndexBuffer = m.ib->GetGPUVirtualAddress();
-    geo.Triangles.IndexCount = m.indexCount;
-    geo.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
-
-    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
-    in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-    in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-    in.NumDescs = 1;
-    in.pGeometryDescs = &geo;
-
-    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
-    device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
-    m.blas = makeAsBuffer(device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-    ComPtr<ID3D12Resource> scratch = makeAsBuffer(device_.Get(), info.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    if (!m.blas || !scratch) { m.blas.Reset(); return; }
-    asScratch_.push_back(scratch);   // keep alive until the GPU has consumed it
-
-    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
-    bd.Inputs = in;
-    bd.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
-    bd.DestAccelerationStructureData = m.blas->GetGPUVirtualAddress();
-    cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
-    D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; b.UAV.pResource = m.blas.Get();
-    cmdList_->ResourceBarrier(1, &b);
-}
-
-// TLAS is rebuilt every frame from the same draw list the shadow and voxel passes replay.
-void D3D12Device::buildRtScene() {
-    if (!rtSupported_ || !rtEnabled_ || voxelDrawsPrev_.empty()) { rtActive_ = false; return; }
-
-    for (const VoxelDraw& d : voxelDrawsPrev_)
-        if (d.mesh > 0 && d.mesh <= meshes_.size()) buildBlas(d.mesh - 1);
-
-    std::vector<D3D12_RAYTRACING_INSTANCE_DESC> inst;
-    inst.reserve(voxelDrawsPrev_.size());
-    for (const VoxelDraw& d : voxelDrawsPrev_) {
-        if (d.mesh == 0 || d.mesh > meshes_.size()) continue;
-        const GpuMesh& m = meshes_[d.mesh - 1];
-        if (!m.blas) continue;
-        D3D12_RAYTRACING_INSTANCE_DESC id{};
-        // Engine matrices are row-vector (v*M); DXR wants a 3x4 column-vector [R|T], i.e. the
-        // transpose of the upper 3x3 with translation in the last column.
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) id.Transform[r][c] = d.world[c * 4 + r];
-            id.Transform[r][3] = d.world[12 + r];
-        }
-        id.InstanceMask = 0xFF;
-        id.AccelerationStructure = m.blas->GetGPUVirtualAddress();
-        inst.push_back(id);
-    }
-    if (inst.empty()) { rtActive_ = false; return; }
-
-    const u64 bytes = inst.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
-    if (!instanceBuf_ || instanceBufBytes_ < bytes) {
-        auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
-        auto bd2 = bufferDesc(bytes);
-        if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd2, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&instanceBuf_)), "TLAS instances")) { rtActive_ = false; return; }
-        instanceBufBytes_ = bytes;
-    }
-    void* p = nullptr; D3D12_RANGE none{0, 0};
-    instanceBuf_->Map(0, &none, &p);
-    std::memcpy(p, inst.data(), bytes);
-    instanceBuf_->Unmap(0, nullptr);
-
-    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
-    in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-    in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-    in.NumDescs = static_cast<UINT>(inst.size());
-    in.InstanceDescs = instanceBuf_->GetGPUVirtualAddress();
-
-    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
-    device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
-    if (!tlas_ || tlasBytes_ < info.ResultDataMaxSizeInBytes) {
-        tlas_ = makeAsBuffer(device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-        tlasBytes_ = info.ResultDataMaxSizeInBytes;
-        tlasScratch_.Reset();
-    }
-    if (!tlasScratch_ || tlasScratchBytes_ < info.ScratchDataSizeInBytes) {
-        tlasScratch_ = makeAsBuffer(device_.Get(), info.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        tlasScratchBytes_ = info.ScratchDataSizeInBytes;
-    }
-    if (!tlas_ || !tlasScratch_) { rtActive_ = false; return; }
-
-    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
-    bd.Inputs = in;
-    bd.ScratchAccelerationStructureData = tlasScratch_->GetGPUVirtualAddress();
-    bd.DestAccelerationStructureData = tlas_->GetGPUVirtualAddress();
-    cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
-    D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; b.UAV.pResource = tlas_.Get();
-    cmdList_->ResourceBarrier(1, &b);
-    publishTlasSrv();
-    if (!rtActive_) AVER_INFO("[RHI.D3D12] RayQuery active ({} instances)", inst.size());
-    rtActive_ = true;
-}
-
-// The scene's t0/t1/t2/u0 come from the registered feature's binding set, so the TLAS the backend
-// still builds has to be published INTO that set. Writing it to the backend's own giHeap_ -- which
-// nothing has bound for graphics since bindGiTables() moved -- left the shader reading the null
-// acceleration structure nullFill() puts in the slot, and RayQuery answers a null AS as "no hit":
-// every surface fully lit, shadow-map values elsewhere still correct, and nothing for the debug
-// layer to report, because a null descriptor is legal API use rather than API misuse.
-void D3D12Device::publishTlasSrv() {
-    RhiBindingSet* s = sceneBindings();
-    // Slot 2 by the shader's `register(t2)`. The declared kind is checked rather than assumed: a
-    // set that never declared an acceleration structure was null-filled to some other dimension,
-    // and overwriting it would break whatever does read that slot.
-    if (!s || s->srvCount <= 2 || s->srvKinds[2] != SlotKind::AccelerationStructure) return;
-    const D3D12_GPU_VIRTUAL_ADDRESS va = tlas_->GetGPUVirtualAddress();
-    if (tlasSrvSet_ == s && tlasSrvAddr_ == va) return;
-    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-    sv.Format = DXGI_FORMAT_UNKNOWN;
-    sv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
-    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    sv.RaytracingAccelerationStructure.Location = va;   // an AS SRV takes a NULL resource
-    device_->CreateShaderResourceView(nullptr, &sv, rhiFactory_->cpuSlot(s->heapBase + 2));
-    tlasSrvSet_ = s;
-    tlasSrvAddr_ = va;
-}
-
 // The set the scene draws actually read. bindGiTables() resolves the same one, so anything the
 // backend still owns but the scene shader reads through t0..t2 must be written here.
 RhiBindingSet* D3D12Device::sceneBindings() {
@@ -2398,7 +2264,10 @@ void D3D12Device::beginFrame() {
     // Same point as the swap above: a feature rotates its own draw list here, so prePass replays
     // the PREVIOUS frame's geometry while submitDraw fills the next one.
     for (IRenderFeature* f : features_) f->beginScene();
-    buildRtScene();   // BLAS/TLAS for RayQuery, from the same replayed draw list
+    // The acceleration structures belong to the feature's prePass now. All that is left here is
+    // whether to RECORD the RayQuery pipeline at all: recomputed per frame, and deliberately false
+    // on frame 0, where nothing has been replayed yet and there is nothing to trace.
+    rtActive_ = rtSupported_ && rtEnabled_ && !voxelDrawsPrev_.empty();
 
     // The shadow map and the radiance volume belong to the registered feature now; the backend's own
     // shadowPass/voxelizePass are dead and get deleted in a later step. Features own their targets,
