@@ -338,10 +338,26 @@ the D3D12 debug layer and `AVER_RHI_TRACK_STATE` on, before writing more of the 
 
 ## 6. Branding
 
-Isocube AE mark (A on left face, E on right face, both following the isometric slant;
-geometric-sans "Aver Engine" wordmark). Exported via headless Chrome + Pillow.
-`branding/icon.ico` = window/exe icon (Sandbox.rc); `branding/splash.png` = startup splash
-(no tagline). "royalty-free" phrasing removed project-wide → "permissively-licensed".
+**The shipped marks are human-authored.** `branding/master-lockup.png` (1920x1080) is the project
+owner's artwork and the single source of truth; every shipped slot is a crop or rescale of it, and
+nothing is redrawn. Regenerate with `python scripts/brand.py` after changing the master; do not
+hand-edit the derived files.
+
+Shipped: `splash.png` (1200x520, startup splash, shown at native size) and `icon.ico` (full
+16-256 size ladder, window/exe icon via `Sandbox.rc`), plus `logo.png` / `logo256.png` /
+`icon512.png` as transparent marks. Transparency is keyed by flood-filling from the corners, not by
+a global colour replace -- the cube's outline is near-black and close enough to the #262626 banner
+that a global replace punches holes through it.
+
+Claude's earlier vector concepts now live in `branding/ai-generated/` and are referenced by nothing.
+They are kept only because the master is raster-only, so they are the sole vector sources. See
+`branding/ASSETS.md` for the full provenance table, including front-facing visual work that is
+AI-authored but is not a file (the editor theme, default dock layout, gizmo colours, procedural sky).
+
+Fixed alongside: staging the splash was a `POST_BUILD` command, so it only ran when the exe
+relinked -- editing the artwork alone shipped the old splash with the build reporting success. It is
+now an `OUTPUT`/`DEPENDS` rule, and `Sandbox.rc` declares `OBJECT_DEPENDS` on the icon so replacing
+it actually re-runs the resource compiler.
 
 ## 7. Commit history
 

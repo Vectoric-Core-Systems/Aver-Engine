@@ -9,7 +9,22 @@ set_target_properties(Sandbox PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # Ship the splash next to the executable so the engine can show it at startup.
-add_custom_command(TARGET Sandbox POST_BUILD
+#
+# Driven by an OUTPUT rule rather than POST_BUILD: a POST_BUILD command only runs when the target
+# actually relinks, so editing the artwork alone left the old splash shipped next to the exe with a
+# clean build reporting success.
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/bin/splash.png
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          ${CMAKE_SOURCE_DIR}/branding/splash.png $<TARGET_FILE_DIR:Sandbox>/splash.png
+          ${CMAKE_SOURCE_DIR}/branding/splash.png ${CMAKE_BINARY_DIR}/bin/splash.png
+  DEPENDS ${CMAKE_SOURCE_DIR}/branding/splash.png
+  COMMENT "Staging splash.png"
   VERBATIM)
+add_custom_target(Sandbox.Splash DEPENDS ${CMAKE_BINARY_DIR}/bin/splash.png)
+add_dependencies(Sandbox Sandbox.Splash)
+set_target_properties(Sandbox.Splash PROPERTIES FOLDER "sandbox")
+
+# The resource script embeds the icon, but nothing tells the generator that it reads the .ico -- so
+# replacing the icon would not re-run the resource compiler and the exe would keep the old one.
+set_property(SOURCE Sandbox.rc APPEND PROPERTY
+  OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/branding/icon.ico)
