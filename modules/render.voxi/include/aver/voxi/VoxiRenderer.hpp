@@ -97,13 +97,23 @@ private:
     // Radiance volume: RGBA16F Tex3D with a full mip chain. Mip N is the cone footprint at
     // distance N.
     rhi::TextureHandle  voxelTex_ = 0;
+    // Injection accumulator: R32_UINT Tex3D, (res*4)^1 x res x res, channels interleaved along x.
+    // Exists so injection can sum atomically instead of racing to store, which is what makes the
+    // volume identical from frame to frame. Never mipped, never read as an SRV, and it stays in
+    // UnorderedAccess for its whole life -- no barrier sequence to get wrong.
+    rhi::TextureHandle  voxelAccumTex_ = 0;
     rhi::PipelineHandle voxelPso_ = 0, voxelMsPso_ = 0, mipPso_ = 0, clearPso_ = 0, debugPso_ = 0;
-    // The lit/voxelise table: t0 volume (whole chain), t1 shadow, t2 TLAS, u0 volume mip 0.
+    rhi::PipelineHandle resolvePso_ = 0;
+    // The lit/voxelise table: t0 volume (whole chain), t1 shadow, t2 TLAS, u0 volume mip 0,
+    // u1 injection accumulator.
     rhi::BindingSetHandle bindings_ = 0;
-    // Deliberately its OWN set, declaring the UAV alone: while the clear runs, every mip of the
+    // Deliberately its OWN set, declaring the UAVs alone: while the clear runs, every mip of the
     // volume sits in UnorderedAccess, and an SRV descriptor over it would be a live view of a
     // resource in the wrong state.
     rhi::BindingSetHandle clearBindings_ = 0;
+    // The accumulator-to-volume reduction. Same shape as the clear set, and separate for the same
+    // reason: it runs while the volume is in UnorderedAccess.
+    rhi::BindingSetHandle resolveBindings_ = 0;
     // One per mip filter step: set m reads mip m-1 and writes mip m. A single-mip SRV is what makes
     // reading and writing the same resource in one dispatch legal.
     std::vector<rhi::BindingSetHandle> mipBindings_;

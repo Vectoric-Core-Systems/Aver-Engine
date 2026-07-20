@@ -502,6 +502,7 @@ DXGI_FORMAT toDxgiFormat(Format f) {
         case Format::RGBA8Unorm:  return DXGI_FORMAT_R8G8B8A8_UNORM;
         case Format::RGBA16F:     return DXGI_FORMAT_R16G16B16A16_FLOAT;
         case Format::R32Float:    return DXGI_FORMAT_R32_FLOAT;
+        case Format::R32Uint:     return DXGI_FORMAT_R32_UINT;
         case Format::D32Float:    return DXGI_FORMAT_D32_FLOAT;
         case Format::R32Typeless: return DXGI_FORMAT_R32_TYPELESS;
         case Format::Unknown:     break;
@@ -524,6 +525,7 @@ Format fromDxgiFormat(DXGI_FORMAT f) {
         case DXGI_FORMAT_R8G8B8A8_UNORM:     return Format::RGBA8Unorm;
         case DXGI_FORMAT_R16G16B16A16_FLOAT: return Format::RGBA16F;
         case DXGI_FORMAT_R32_FLOAT:          return Format::R32Float;
+        case DXGI_FORMAT_R32_UINT:           return Format::R32Uint;
         case DXGI_FORMAT_D32_FLOAT:          return Format::D32Float;
         case DXGI_FORMAT_R32_TYPELESS:       return Format::R32Typeless;
         default:                             return Format::Unknown;

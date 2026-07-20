@@ -1084,8 +1084,12 @@ private:
         const u32 py_ = probeY_ ? probeY_ : (u32)(vpY_ + vpH_*0.5f);
         if (f==sf) e.device()->requestCapture(px_, py_);
         if (f>sf && !capDone_){
+            // The raw 8-bit codes as well as the rounded floats: at two decimal places a whole code
+            // of movement can hide inside one printed digit, which is exactly how a one-code-wide
+            // wobble in the GI path went unnoticed while a three-code one did not.
             f32 px[4]; if (e.device()->getCapture(px))
-                AVER_INFO("[Sandbox] probe ({},{}) px ({:.2f},{:.2f},{:.2f})", px_, py_, px[0],px[1],px[2]);
+                AVER_INFO("[Sandbox] probe ({},{}) px ({:.2f},{:.2f},{:.2f}) raw ({},{},{})", px_, py_, px[0],px[1],px[2],
+                          (int)(px[0]*255.0f+0.5f), (int)(px[1]*255.0f+0.5f), (int)(px[2]*255.0f+0.5f));
             if (!shot_.empty()){ std::vector<u8> img; u32 iw=0,ih=0;
                 if (e.device()->getFrameImage(img,iw,ih)&&iw&&ih && stbi_write_png(shot_.c_str(),(int)iw,(int)ih,4,img.data(),(int)iw*4))
                     AVER_INFO("[Sandbox] screenshot: {} ({}x{})", shot_, iw, ih); }

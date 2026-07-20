@@ -26,6 +26,25 @@ RWTexture3D<float4> gVoxelUAV : register(u0);
 Texture3D<float4>   gVoxelTex : register(t0);
 SamplerState        gVoxelSamp : register(s0);
 
+// Injection accumulator. Several triangles legitimately cover one voxel -- the cube's bottom face
+// is coplanar with the ground quad, and every box edge puts two differently-lit faces in the same
+// cell -- and a plain `gVoxelUAV[c] = radiance` store resolves that contest by whichever fragment
+// retires last, which the GPU does not promise to keep stable from frame to frame. Summing in
+// fixed-point integers instead makes the result depend only on the SET of covering fragments, never
+// on their order, because integer addition is associative and commutative where float addition and
+// last-writer-wins are not.
+//
+// R32_UINT is the only typed format D3D12 guarantees atomics on, so the four accumulators are
+// interleaved along x: channel k of voxel c lives at (c.x * 4 + k, c.y, c.z), with k == 3 the
+// fragment count that CSResolve divides by.
+RWTexture3D<uint> gVoxelAccum : register(u1);
+
+// Radiance is scaled by this before being added, and divided out again in CSResolve. 1/16384 is two
+// orders of magnitude finer than the 8-bit backbuffer can express, while leaving headroom for ~16k
+// fragments per voxel before a 32-bit accumulator could wrap.
+#define AVER_VOX_FIXED 16384.0
+#define AVER_VOX_MAXRAD 16.0
+
 // Directional shadow map. Core feature-level 11_0 (no optional caps), so it works on every
 // DX12 GPU - which is why shadowed light injection uses this rather than ray-traced shadows.
 Texture2D<float>          gShadowTex  : register(t1);
@@ -215,15 +234,41 @@ void PSVoxel(VoxOut i) {
     float ndl = saturate(dot(N, L));
     float3 radiance = albedo * (srgbToLin(gLightColor.rgb) * ndl * shadowFactor(i.wpos, ndl)
                                 + skyColor(N) * gAmbient.r);
-    int3 c = int3(uvw * gVoxelParams.x);
-    gVoxelUAV[c] = float4(radiance, 1.0);   // alpha = occupancy
+    // Bounded before it is quantised so a pathological light colour cannot overflow the 32-bit
+    // accumulator; nothing in a physically sane scene comes close to this.
+    radiance = clamp(radiance, 0.0, AVER_VOX_MAXRAD);
+
+    uint3 c = uint3(uvw * gVoxelParams.x);
+    uint3 a = uint3(c.x * 4, c.y, c.z);
+    uint prev;
+    InterlockedAdd(gVoxelAccum[a],                (uint)(radiance.r * AVER_VOX_FIXED), prev);
+    InterlockedAdd(gVoxelAccum[a + uint3(1,0,0)], (uint)(radiance.g * AVER_VOX_FIXED), prev);
+    InterlockedAdd(gVoxelAccum[a + uint3(2,0,0)], (uint)(radiance.b * AVER_VOX_FIXED), prev);
+    InterlockedAdd(gVoxelAccum[a + uint3(3,0,0)], 1u, prev);   // fragments covering this voxel
 }
 
-// Clear mip 0 before injection. PSVoxel only writes the voxels its triangles cover, so without a
-// clear a voxel lit on one frame stays lit forever and moving geometry drags a radiance trail
-// behind it. Only mip 0 needs this - CSMip fully overwrites every coarser level.
+// Zero the accumulator before injection. Without it a voxel covered on one frame keeps its sum for
+// ever and moving geometry drags a radiance trail behind it. Mip 0 of the volume itself needs no
+// clear any more: CSResolve writes every cell unconditionally, and CSMip overwrites every coarser
+// level.
 [numthreads(4,4,4)]
-void CSClear(uint3 id : SV_DispatchThreadID) { gVoxelUAV[id] = 0.0; }
+void CSClear(uint3 id : SV_DispatchThreadID) {
+    uint3 a = uint3(id.x * 4, id.y, id.z);
+    [unroll] for (uint k = 0; k < 4; ++k) gVoxelAccum[a + uint3(k,0,0)] = 0;
+}
+
+// Turn the fixed-point sums into the filterable RGBA16F volume the cone trace samples. Dividing by
+// the fragment count makes a contested voxel hold the mean radiance of the surfaces covering it,
+// which is both order-independent and a better answer than an arbitrary winner: a voxel straddling
+// the floor and the cube now reads as a blend rather than flickering between the two.
+[numthreads(4,4,4)]
+void CSResolve(uint3 id : SV_DispatchThreadID) {
+    uint3 a = uint3(id.x * 4, id.y, id.z);
+    uint n = gVoxelAccum[a + uint3(3,0,0)];
+    if (n == 0) { gVoxelUAV[id] = 0.0; return; }
+    float3 s = float3(gVoxelAccum[a], gVoxelAccum[a + uint3(1,0,0)], gVoxelAccum[a + uint3(2,0,0)]);
+    gVoxelUAV[id] = float4(s / (AVER_VOX_FIXED * (float)n), 1.0);   // alpha = occupancy
+}
 
 // ================= Voxi: mip filtering =================
 // Box-filter one mip into the next. Averaging radiance AND occupancy is what lets a wide cone step

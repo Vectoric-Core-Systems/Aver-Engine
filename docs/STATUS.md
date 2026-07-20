@@ -207,13 +207,60 @@ and the backend's own `shadowPass()`/`voxelizePass()` are dead but still declare
 | — | TLAS published into the bound table (RT shadow fix) | `d01a50f` |
 | — | Debugging scaffolding removed | `93a23e3` |
 
-**Oracle** (`sandbox --frames 40`): lit `0.34,0.36,0.42` · GI `0.38,0.35,0.40` ·
-`--gi-debug` `0.19,0.15,0.17` · cast-shadow `--probe 1413 1042` `0.25,0.31,0.40`
+**Oracle** (`sandbox --frames 40`): lit `0.34,0.36,0.42` · GI `0.39,0.35,0.40` ·
+`--gi-debug` `0.26,0.17,0.18` · cast-shadow `--probe 1413 1042` `0.25,0.31,0.40`
 (`0.26,0.31,0.38` under `--gi`). **The centre probe is BLIND to the sun term** — it lands on the
 cube's unlit left face where ndl~=0, so every shadow/ray-tracing check must use `--probe`.
-The GI centre probe still wobbles in the RED channel only, `0.36`-`0.38`, and that residue is real —
-see open-work item 3. Every other oracle value, including both `--gi-debug` figures and both
-cast-shadow figures, is bit-stable run to run.
+All 13 gates are now bit-stable run to run: measured 20 runs each, every one identical at the raw
+8-bit code, and a further 100 runs of the three GI gates on top. The probe line prints those raw
+codes next to the rounded floats, because a one-code move hides completely inside `%.2f`.
+
+The two GI figures MOVED with the injection-determinism fix (`--gi` `0.38`→`0.39`, `--gi-debug`
+`0.19,0.15,0.17`→`0.26,0.17,0.18`). That is expected: a voxel covered by several surfaces used to
+take one of them at random and now takes their mean. Every non-GI gate is unchanged to the bit,
+which is the evidence that nothing outside the injection path moved.
+
+### RESOLVED 2026-07-20: the GI probe wobble was a last-writer-wins race in voxel injection
+
+`PSVoxel` ended with `gVoxelUAV[c] = float4(radiance, 1.0)` — a plain unordered UAV store. Several
+fragments legitimately cover one voxel, and D3D12 promises nothing about which of them retires last,
+so the volume was rebuilt to a *different* answer on most frames. Injection now sums into an atomic
+fixed-point accumulator and a `CSResolve` pass divides by the fragment count, which depends only on
+WHICH fragments covered a voxel and not on their order.
+
+**How it was localised.** Four experiments, each per-frame rather than per-run (the value changes
+every few frames *inside* one process, so sampling once per run at frame 37 only ever showed a
+lottery, which is what made this look like a between-run problem):
+
+| Experiment | Result | Conclusion |
+|---|---|---|
+| Inject for 8 frames, then freeze the volume and keep cone tracing | 108/108 frames bit-identical | the cone trace is **not** the cause |
+| Freeze mip 0, re-run the mip filter every frame | 108/108 bit-identical | `CSMip` is **not** the cause |
+| Skip `CSClear` entirely | still wobbles, same amplitude | the clear/inject barrier is **not** the cause |
+| Inject the ground quad only | 108/108 bit-identical | a single flat mesh never contests |
+| Inject the cube only | 98x `95`, 10x `98` (8-bit red) | the cube contests **with itself** |
+| Full scene, conservative raster off | still wobbles | not a conservative-raster artefact |
+| Full scene, `CullMode::Back` | 108/108 bit-identical | it is front-vs-back-face fragments racing |
+
+The cube contests on two counts: its bottom face is exactly coplanar with the ground quad at `z=0`
+(both truncate to the same voxel layer), and because voxelisation runs with `CullMode::None` and no
+depth test, differently-lit faces meeting at every box edge land in the same cell. Back-face culling
+made it deterministic but is NOT a fix — `GSVoxel` projects each triangle along its own dominant
+axis, so culling silently discards half the geometry.
+
+**"Red channel only" was a measurement artefact and should not be reasoned from again.** The probe
+reads an 8-bit UNORM backbuffer and printed `%.2f`. Green moved too — 1 code, `90`↔`89`, in exact
+lockstep with red's deepest excursions — and it was invisible at two decimals. Blue's excursion
+never crossed half a code. Red simply had ~3x the amplitude because the only bounce source in the
+scene is an orange cube. The probe line now prints the raw codes for exactly this reason.
+
+**Verification.** All 13 oracle gates, 20 runs each (260 runs), every gate identical at the raw
+8-bit code; plus 100 further runs of the three GI gates and 108 consecutive frames sampled inside
+single runs of `--gi`, `--ms --rt --gi` and `--gi-debug`. `0x141` `LiveKernelEvent` count unchanged
+across all 360 runs of the fixed binary.
+
+**Cost.** One extra `res*4 x res x res` R32_UINT volume (32 MB at 128³) and one extra compute
+dispatch per frame. Two oracle values moved, both in the GI path — see the Oracle block above.
 
 ### RESOLVED 2026-07-20: the GI "TDR" was an unbound root CBV, not a slow geometry shader
 
@@ -366,17 +413,7 @@ re-verify the gates below against the oracle rather than trusting the old majori
 **Renderer**
 1. **RT ambient occlusion / reflections.** The TLAS already exists, so this is mostly shader work.
 2. **Path tracing.** Declared only; would reuse the same acceleration structure.
-3. **GI centre probe varies in the red channel, `0.36`-`0.38`.** This SURVIVED the root-CBV fix, so
-   it is a separate, genuine defect and not a symptom of the TDR. Measured on the fixed binary, 15
-   runs each: `--gi` 8x `0.38` / 6x `0.36` / 1x `0.37`; `--ms --gi` 14x `0.38` / 1x `0.37`. Green and
-   blue never move, and `--gi-debug` is bit-stable on both paths, so the volume's CONTENT is stable
-   and the wobble is in what the cone trace gathers from it.
-   Most likely cause, grounded but NOT yet proven: voxel injection is a plain last-writer-wins store
-   (`gVoxelUAV[c] = float4(radiance, 1.0)` in `VoxiShaders.hpp`, no atomic, no ordering guarantee),
-   so fragments landing in the same voxel race. The GS and MS paths present triangles to the
-   rasteriser in different orders, which fits the GS path wobbling ~10x more often. Next step is to
-   make injection order-independent (an atomic max, or accumulate-and-average) and re-measure; do
-   NOT paper over it with a majority vote.
+3. ~~**GI centre probe varies in the red channel, `0.36`-`0.38`.**~~ FIXED — see the section below.
 4. **No temporal accumulation** on GI. With the volume cleared each frame this is the other main
    source of GI instability.
 5. GI is a **single volume**, not cascaded — large scenes will not fit at useful resolution.

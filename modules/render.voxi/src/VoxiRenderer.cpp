@@ -44,7 +44,7 @@ void giSamplers(rhi::PipelineLayout& l) {
 rhi::PipelineLayout giLayout() {
     rhi::PipelineLayout l{};
     l.srvCount = 3;              // t0 volume, t1 shadow map, t2 acceleration structure
-    l.uavCount = 1;              // u0 volume mip 0
+    l.uavCount = 2;              // u0 volume mip 0, u1 injection accumulator
     l.constantDwords[1] = 24;    // b1: world (16) + base colour (4) + material (4)
     giSamplers(l);
     return l;
@@ -74,12 +74,15 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
     const char* missing = nullptr;
     if (!shadowTex_)             missing = "shadow texture";
     else if (!voxelTex_)         missing = "voxel volume";
+    else if (!voxelAccumTex_)    missing = "injection accumulator";
     else if (!bindings_)         missing = "main binding set";
     else if (!clearBindings_)    missing = "clear binding set";
+    else if (!resolveBindings_)  missing = "resolve binding set";
     else if (mipBindings_.size() + 1 != voxelMips_) missing = "mip binding sets (count)";
     else if (!shadowPso_)        missing = "shadow pipeline";
     else if (!voxelPso_)         missing = "voxelise pipeline";
     else if (!clearPso_)         missing = "volume clear pipeline";
+    else if (!resolvePso_)       missing = "injection resolve pipeline";
     else if (!mipPso_)           missing = "mip filter pipeline";
     else if (!debugPso_)         missing = "voxel debug pipeline";
     else if (!scenePso_)         missing = "scene pipeline";
@@ -88,11 +91,11 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
 
     // One readable line naming every handle, so a primitive the interface cannot express shows up
     // as a zero here rather than as a black screen three steps from now.
-    AVER_INFO("[Voxi] init: shadow tex={} volume={} ({}^3, {} mips) bindings={}/{}/+{} "
-              "pipelines shadow={} voxel={} voxelMs={} clear={} mip={} debug={} scene={}/{}/{}/{}",
-              shadowTex_, voxelTex_, voxelResBuilt_, voxelMips_,
-              bindings_, clearBindings_, static_cast<u32>(mipBindings_.size()),
-              shadowPso_, voxelPso_, voxelMsPso_, clearPso_, mipPso_, debugPso_,
+    AVER_INFO("[Voxi] init: shadow tex={} volume={} accum={} ({}^3, {} mips) bindings={}/{}/{}/+{} "
+              "pipelines shadow={} voxel={} voxelMs={} clear={} resolve={} mip={} debug={} scene={}/{}/{}/{}",
+              shadowTex_, voxelTex_, voxelAccumTex_, voxelResBuilt_, voxelMips_,
+              bindings_, clearBindings_, resolveBindings_, static_cast<u32>(mipBindings_.size()),
+              shadowPso_, voxelPso_, voxelMsPso_, clearPso_, resolvePso_, mipPso_, debugPso_,
               scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_);
 
     if (missing) {
@@ -116,19 +119,22 @@ void VoxiRenderer::shutdown() {
     // GPU fence by contract, which is why no explicit wait is needed here.
     for (rhi::BindingSetHandle s : mipBindings_) if (s) res_->destroyBindingSet(s);
     mipBindings_.clear();
+    if (resolveBindings_) res_->destroyBindingSet(resolveBindings_);
     if (clearBindings_) res_->destroyBindingSet(clearBindings_);
     if (bindings_)      res_->destroyBindingSet(bindings_);
-    clearBindings_ = bindings_ = 0;
+    resolveBindings_ = clearBindings_ = bindings_ = 0;
 
     const rhi::PipelineHandle psos[] = {shadowPso_, voxelPso_, voxelMsPso_, mipPso_, clearPso_,
-                                        debugPso_, scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_};
+                                        resolvePso_, debugPso_, scenePso_, sceneMsPso_, sceneRtPso_,
+                                        sceneMsRtPso_};
     for (rhi::PipelineHandle p : psos) if (p) res_->destroyPipeline(p);
-    shadowPso_ = voxelPso_ = voxelMsPso_ = mipPso_ = clearPso_ = debugPso_ = 0;
+    shadowPso_ = voxelPso_ = voxelMsPso_ = mipPso_ = clearPso_ = resolvePso_ = debugPso_ = 0;
     scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
 
+    if (voxelAccumTex_) res_->destroyTexture(voxelAccumTex_);
     if (voxelTex_)  res_->destroyTexture(voxelTex_);
     if (shadowTex_) res_->destroyTexture(shadowTex_);
-    voxelTex_ = shadowTex_ = 0;
+    voxelAccumTex_ = voxelTex_ = shadowTex_ = 0;
 
     voxelMips_ = voxelResBuilt_ = 0;
     giReady_ = rtSupported_ = rtActive_ = false;
@@ -248,14 +254,15 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     // The chain rests in ShaderResource between frames; take the whole thing back for writing.
     ctx.textureBarrier(voxelTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
 
-    // Injection only writes the voxels its triangles cover, so without a clear a voxel lit once
-    // stays lit and moving geometry drags a radiance trail behind it. Only mip 0: the filter below
-    // fully overwrites every coarser level.
+    // Injection only touches the voxels its triangles cover, so without a clear a voxel lit once
+    // stays lit and moving geometry drags a radiance trail behind it. Only the accumulator needs
+    // it: CSResolve below writes every cell of mip 0 unconditionally, and CSMip fully overwrites
+    // every coarser level.
     ctx.setPipeline(clearPso_);
     ctx.setBindingSet(clearBindings_);
     const u32 cg = (res + 3) / 4;
     ctx.dispatch(cg, cg, cg);
-    ctx.uavBarrierTexture(voxelTex_);   // injection must see the cleared volume
+    ctx.uavBarrierTexture(voxelAccumTex_);   // injection must see the cleared accumulator
 
     // Mesh shaders remove the geometry shader from voxelisation entirely, which is the point of the
     // variant: GS is emulated on every AMD GCN part.
@@ -277,6 +284,15 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
         if (useMs) ctx.dispatchMeshFor(d.mesh);
         else       ctx.drawMesh(d.mesh);
     }
+
+    // Reduce the atomic sums into the filterable RGBA16F volume. Every fragment's contribution is
+    // already in the accumulator by the time this runs, so the result depends on WHICH fragments
+    // covered a voxel and not on the order the GPU happened to retire them in -- which is the whole
+    // reason the accumulator exists.
+    ctx.uavBarrierTexture(voxelAccumTex_);
+    ctx.setPipeline(resolvePso_);
+    ctx.setBindingSet(resolveBindings_);
+    ctx.dispatch(cg, cg, cg);
     ctx.popMarker();
 }
 
@@ -364,6 +380,22 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     voxelTex_ = res_->createTexture(d);
     if (!voxelTex_) { AVER_ERROR("[Voxi] radiance volume {}^3 could not be created", resolution); return false; }
 
+    // The injection accumulator. Four uints per voxel (r, g, b, fragment count) interleaved along x,
+    // because R32_UINT is the only typed format D3D12 guarantees UAV atomics on and a Tex3D cannot
+    // carry four of them in one texel.
+    rhi::TextureDesc ad;
+    ad.dim    = rhi::TextureDim::Tex3D;
+    ad.width  = resolution * 4;
+    ad.height = resolution;
+    ad.depth  = resolution;
+    ad.mips   = 1;
+    ad.format = rhi::Format::R32Uint;
+    ad.bind   = rhi::ResourceBind::UnorderedAccess;
+    ad.initialState = rhi::ResourceState::UnorderedAccess;   // where it stays: nothing ever reads it as an SRV
+    ad.debugName    = "Voxi injection accumulator";
+    voxelAccumTex_ = res_->createTexture(ad);
+    if (!voxelAccumTex_) { AVER_ERROR("[Voxi] injection accumulator {}^3 could not be created", resolution); return false; }
+
     // The RESOLVED mip count, never a recomputed log2: it drives the descriptor loop, the
     // per-subresource barrier sequence and the dispatch loop, and an off-by-one there makes the
     // closing whole-resource transition illegal.
@@ -377,25 +409,35 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     // whose dimension disagrees with the shader is undefined behaviour on hardware nobody here owns.
     rhi::BindingSetDesc bd;
     bd.srvCount = 3;
-    bd.uavCount = 1;
+    bd.uavCount = 2;
     bd.srvKinds[0] = rhi::SlotKind::Texture3D;              // t0 volume, whole chain
     bd.srvKinds[1] = rhi::SlotKind::Texture2D;              // t1 shadow map
     bd.srvKinds[2] = rhi::SlotKind::AccelerationStructure;  // t2 TLAS, filled once one exists
     bd.uavKinds[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
+    bd.uavKinds[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
     bindings_ = res_->createBindingSet(bd);
     if (!bindings_) { AVER_ERROR("[Voxi] main binding set could not be created"); return false; }
     res_->setSrv(bindings_, 0, voxelTex_, rhi::kAllMips);
     if (shadowTex_) res_->setSrv(bindings_, 1, shadowTex_);
     res_->setUav(bindings_, 0, voxelTex_, 0);
+    res_->setUav(bindings_, 1, voxelAccumTex_, 0);
 
-    // The clear gets its own UAV-only set and its own pipeline layout. While it runs, every mip of
-    // the volume is in UnorderedAccess, so no SRV descriptor over the volume may be live.
+    // The clear and the resolve get their own UAV-only sets and their own pipeline layout. While
+    // they run, every mip of the volume is in UnorderedAccess, so no SRV descriptor over the volume
+    // may be live.
     rhi::BindingSetDesc cd;
-    cd.uavCount = 1;
+    cd.uavCount = 2;
     cd.uavKinds[0] = rhi::SlotKind::Texture3D;
+    cd.uavKinds[1] = rhi::SlotKind::Texture3D;
     clearBindings_ = res_->createBindingSet(cd);
     if (!clearBindings_) { AVER_ERROR("[Voxi] clear binding set could not be created"); return false; }
     res_->setUav(clearBindings_, 0, voxelTex_, 0);
+    res_->setUav(clearBindings_, 1, voxelAccumTex_, 0);
+
+    resolveBindings_ = res_->createBindingSet(cd);
+    if (!resolveBindings_) { AVER_ERROR("[Voxi] resolve binding set could not be created"); return false; }
+    res_->setUav(resolveBindings_, 0, voxelTex_, 0);
+    res_->setUav(resolveBindings_, 1, voxelAccumTex_, 0);
 
     // One set per filter step. A SINGLE-MIP source view is what makes reading level m-1 while
     // writing level m legal: a whole-chain SRV would demand every level be readable at once.
@@ -492,14 +534,23 @@ bool VoxiRenderer::createPipelines() {
         if (!voxelMsPso_) AVER_WARN("[Voxi] mesh-shader voxelise variant unavailable; the GS path stands in");
     }
 
-    // --- 4. clear mip 0. UAV-only layout, matching the UAV-only binding set. ---
+    // --- 4. clear the accumulator, and reduce it into mip 0. UAV-only layouts, matching the
+    //        UAV-only binding sets. ---
     if (const rhi::ShaderHandle cs = compile("CSClear", rhi::ShaderStage::Compute, 60, nullptr)) {
         rhi::ComputePipelineDesc p;
         p.cs = cs;
-        p.layout.uavCount = 1;
+        p.layout.uavCount = 2;
         clearPso_ = res_->createComputePipeline(p);
     }
     if (!clearPso_) AVER_ERROR("[Voxi] volume clear pipeline unavailable");
+
+    if (const rhi::ShaderHandle cs = compile("CSResolve", rhi::ShaderStage::Compute, 60, nullptr)) {
+        rhi::ComputePipelineDesc p;
+        p.cs = cs;
+        p.layout.uavCount = 2;
+        resolvePso_ = res_->createComputePipeline(p);
+    }
+    if (!resolvePso_) AVER_ERROR("[Voxi] injection resolve pipeline unavailable");
 
     // --- 5. mip filter: one source mip in, one destination mip out. ---
     if (const rhi::ShaderHandle cs = compile("CSMip", rhi::ShaderStage::Compute, 60, nullptr)) {

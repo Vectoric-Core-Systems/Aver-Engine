@@ -37,6 +37,7 @@ enum class Format : u8 {
     RGBA8Unorm,
     RGBA16F,      // radiance volumes, HDR targets
     R32Float,
+    R32Uint,      // the only typed format D3D12 guarantees UAV atomics on
     D32Float,     // depth-stencil view format
     R32Typeless,  // aliased depth: DSV sees D32Float, SRV sees R32Float
 };
