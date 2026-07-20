@@ -430,6 +430,12 @@ void PSVoxel(VoxOut i) {
     gVoxelUAV[c] = float4(radiance, 1.0);   // alpha = occupancy
 }
 
+// Clear mip 0 before injection. PSVoxel only writes the voxels its triangles cover, so without a
+// clear a voxel lit on one frame stays lit forever and moving geometry drags a radiance trail
+// behind it. Only mip 0 needs this - CSMip fully overwrites every coarser level.
+[numthreads(4,4,4)]
+void CSClear(uint3 id : SV_DispatchThreadID) { gVoxelUAV[id] = 0.0; }
+
 // ================= Voxi: mip filtering =================
 // Box-filter one mip into the next. Averaging radiance AND occupancy is what lets a wide cone
 // step read a single blurry sample instead of marching every voxel. Reuses the volume bindings
@@ -683,8 +689,8 @@ private:
     ComPtr<ID3D12DescriptorHeap> shadowDsvHeap_;
     ComPtr<ID3D12PipelineState> shadowPso_;
     bool shadowReady_ = false;
-    ComPtr<ID3D12PipelineState> voxelPso_, voxelDebugPso_, mipPso_;
-    ComPtr<ID3D12RootSignature> mipRootSig_;
+    ComPtr<ID3D12PipelineState> voxelPso_, voxelDebugPso_, mipPso_, clearPso_;
+    ComPtr<ID3D12RootSignature> mipRootSig_, clearRootSig_;
     u32 giSrvSize_ = 0, voxelMips_ = 0, voxelResBuilt_ = 0;
     bool giReady_ = false;
     // Draws are replayed into the voxel volume at the start of the NEXT frame; a one-frame-old
@@ -1398,7 +1404,7 @@ bool D3D12Device::createVoxelVolume(u32 res) {
         device_->CreateShaderResourceView(voxelTex_.Get(), &ms, sh2);
     }
     voxelResBuilt_ = res;
-    giReady_ = voxelPso_ && mipPso_;
+    giReady_ = voxelPso_ && mipPso_ && clearPso_;
     AVER_INFO("[RHI.D3D12] Voxi volume {}^3, {} mips", res, voxelMips_);
     return true;
 }
@@ -1480,6 +1486,25 @@ bool D3D12Device::createGiPipelines() {
     cp.pRootSignature = mipRootSig_.Get();
     cp.CS = {cs->GetBufferPointer(), cs->GetBufferSize()};
     if (!hrOk(device_->CreateComputePipelineState(&cp, IID_PPV_ARGS(&mipPso_)), "mip pso")) return false;
+
+    // Clear needs only u0. Its own root signature keeps the unused SRV table off the binding, so
+    // nothing has to be bound to a descriptor pointing at a resource in the wrong state.
+    if (!clearRootSig_) {
+        D3D12_DESCRIPTOR_RANGE ur{}; ur.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; ur.NumDescriptors = 1; ur.BaseShaderRegister = 0;
+        D3D12_ROOT_PARAMETER cpm{};
+        cpm.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        cpm.DescriptorTable.NumDescriptorRanges = 1; cpm.DescriptorTable.pDescriptorRanges = &ur;
+        D3D12_ROOT_SIGNATURE_DESC cd{}; cd.NumParameters = 1; cd.pParameters = &cpm;
+        ComPtr<ID3DBlob> b, e3;
+        if (!hrOk(D3D12SerializeRootSignature(&cd, D3D_ROOT_SIGNATURE_VERSION_1, &b, &e3), "clear root sig")) return false;
+        if (!hrOk(device_->CreateRootSignature(0, b->GetBufferPointer(), b->GetBufferSize(), IID_PPV_ARGS(&clearRootSig_)), "clear root sig create")) return false;
+    }
+    ComPtr<ID3DBlob> csc;
+    if (!compile("CSClear", "cs_5_1", csc)) return false;
+    D3D12_COMPUTE_PIPELINE_STATE_DESC clp{};
+    clp.pRootSignature = clearRootSig_.Get();
+    clp.CS = {csc->GetBufferPointer(), csc->GetBufferSize()};
+    if (!hrOk(device_->CreateComputePipelineState(&clp, IID_PPV_ARGS(&clearPso_)), "voxel clear pso")) return false;
 
     AVER_INFO("[RHI.D3D12] Voxi pipelines ready (conservative raster {})", caps_.conservativeRaster ? "on" : "off");
     return true;
@@ -1618,11 +1643,30 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
 
 // Rasterise last frame's draws into the radiance volume, then build the mip chain.
 void D3D12Device::voxelizePass() {
-    if (!giReady_ || !gi_.enabled || voxelDrawsPrev_.empty()) return;
+    // Note: an empty draw list still runs, so that a scene emptied of geometry clears rather than
+    // keeping the last frame's radiance forever.
+    if (!giReady_ || !gi_.enabled) return;
     const u32 res = voxelResBuilt_;
 
     // The chain rests in PIXEL_SHADER_RESOURCE between frames; take it back for writing.
     voxelBarrier(D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    D3D12_RESOURCE_BARRIER uav0{}; uav0.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; uav0.UAV.pResource = voxelTex_.Get();
+
+    // Zero mip 0 first: injection writes only the voxels it covers, so stale radiance would
+    // otherwise accumulate and moving objects would leave trails.
+    {
+        ID3D12DescriptorHeap* heaps[] = {giHeap_.Get()};
+        cmdList_->SetDescriptorHeaps(1, heaps);   // this runs before bindGiTables()
+        D3D12_GPU_DESCRIPTOR_HANDLE mip0 = giHeap_->GetGPUDescriptorHandleForHeapStart();
+        mip0.ptr += static_cast<UINT64>(3) * giSrvSize_;
+        cmdList_->SetComputeRootSignature(clearRootSig_.Get());
+        cmdList_->SetPipelineState(clearPso_.Get());
+        cmdList_->SetComputeRootDescriptorTable(0, mip0);
+        const u32 g = (res + 3) / 4;
+        cmdList_->Dispatch(g, g, g);
+        cmdList_->ResourceBarrier(1, &uav0);   // injection must see the cleared volume
+    }
 
     cmdList_->SetGraphicsRootSignature(rootSig_.Get());
     cmdList_->SetGraphicsRootConstantBufferView(0, frameCBs_[frameIndex_]->GetGPUVirtualAddress());

@@ -183,9 +183,13 @@ a cheap A/B oracle (e.g. GI on/off showed red 0.70→0.73 with G/B fixed = orang
    VS-side axis selection would remove it.
 3. **RT ambient occlusion / reflections.** The TLAS already exists, so this is mostly shader work.
 4. **Path tracing.** Declared only; would reuse the same acceleration structure.
-5. **Stale voxels are never cleared** — the volume is overwritten, not cleared, so moving objects
-   leave radiance trails. Static scenes look fine. Needs a clear or a decay.
-6. **No temporal accumulation** on GI, so it can flicker as geometry moves.
+5. ~~Stale voxels are never cleared~~ — **DONE.** `CSClear` zeroes mip 0 before injection each
+   frame (coarser mips are fully overwritten by `CSMip`, so they need nothing). Verified by A/B on
+   a moving cube under `--gi-debug`: clear off leaves the cube's radiance frozen at its original
+   position (`0.19,0.15,0.17`, identical to the static scene); clear on, the ray passes through to
+   the background (`0.27,0.28,0.33`). Static-scene GI is unchanged (`0.38,0.35,0.40`).
+6. **No temporal accumulation** on GI, so it can flicker as geometry moves. Now that the volume is
+   cleared each frame this is the remaining source of GI instability.
 7. GI is a **single volume**, not cascaded — large scenes will not fit at useful resolution.
 8. Shadow map is **one cascade** at 2048²; no CSM, so large scenes get coarse shadows.
 9. Specular GI is not cone traced (diffuse + AO only).
