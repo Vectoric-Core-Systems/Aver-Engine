@@ -1,7 +1,7 @@
 #pragma once
 
 // Voxi's own HLSL. Compiled as the TAIL of rhi::sharedShaderPrelude(): the cbuffer layouts, VSIn /
-// VSOut / SkyOut, the BRDF helpers, shadeSurface, VSMain, VSky and MSMain all live in the prelude
+// VSOut / SkyOut, the BRDF helpers, the Aver* material contract, VSMain, VSky and MSMain all live in the prelude
 // and must not be repeated here — duplicating them would make reordering one copy corrupt the other
 // with no diagnostic anywhere.
 //
@@ -131,8 +131,12 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     return sum.rgb * gVoxelParams.y;
 }
 
-// The Voxi scene variant: sun visibility from the shadow map (or a ray, under AVER_RT) plus the
-// cone-traced bounce. The radiance handed over is raw - shadeSurface owns the diffuse response.
+// The Voxi scene variant. Everything below is LIGHT TRANSPORT, which is the renderer's half of the
+// bargain: which direction the sun is, how much of it reaches this point, how much sky the point
+// sees, and what bounced onto it. The material is asked to shade that; Voxi never reads a field of
+// AverSurface and never writes a BRDF term.
+//
+// Every radiance handed over is raw - the material owns the diffuse response.
 float4 PSMainVoxi(VSOut i) : SV_TARGET {
     float3 N = normalize(i.nrmWS);
     float3 L = normalize(gLightDir.xyz);
@@ -154,7 +158,32 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     float ao = 1.0;
     float3 ind = 0;
     if (gVoxelParams.w > 0.5) ind = coneTracedIndirect(i.wpos, N, ao);
-    return shadeSurface(i, sunVis, ind, ao);
+
+    AverVertex vtx = averVertexOf(i);
+    AverLight sun;
+    sun.direction  = L;
+    sun.radiance   = srgbToLin(gLightColor.rgb) * 3.0;   // sun radiance
+    sun.visibility = sunVis;
+
+    AverSurface s = averEvalMaterial(vtx, sun);
+    float4 display;
+    if (averDisplayColour(s, display)) return display;   // authored colour, bypasses camera post
+
+    // The sky hemisphere is light transport too, so Voxi supplies it rather than leaving the BRDF
+    // to reach into the engine constants for it. With GI off this IS the whole indirect term.
+    float3 V = normalize(gCamPos.xyz - i.wpos);
+    AverIndirect ind4;
+    ind4.ambient      = skyColor(N);
+    ind4.ambientScale = gAmbient.r;
+    ind4.diffuse      = ind;
+    ind4.occlusion    = ao;
+    ind4.specular     = skyColor(reflect(-V, N));
+
+    float3 radiance = 0.0;
+    radiance = averShadeDirect(radiance, s, sun);
+    radiance = averShadeIndirect(radiance, s, ind4);
+    radiance = averApplyFog(radiance, i.wpos);
+    return float4(toGamma(acesTonemap(radiance)), averOpacity(s));
 }
 
 // Depth-only pass from the sun's point of view (VSIn comes from the prelude).
@@ -167,6 +196,18 @@ float4 VSShadow(VSIn i) : SV_POSITION {
 // lighting and writes radiance straight into the 3D volume. Merging "voxelise" and "inject light"
 // into one pass avoids a second full scene traversal.
 struct VoxOut { float4 pos : SV_POSITION; float3 wpos : TEXCOORD0; float3 nrm : NORMAL; };
+
+// The voxelisation adapter. V is EXACTLY zero because there is no camera here: the voxelise
+// vertex/mesh shaders write a dominant-axis projection, so any fabricated view vector would inject
+// view-dependent specular into a volume the cone trace reads from every direction. Materials read
+// it through averDiffuseAlbedo, which is contractually view-independent.
+AverVertex averVertexOf(VoxOut i) {
+    AverVertex v;
+    v.wpos = i.wpos;
+    v.N    = normalize(i.nrm);
+    v.V    = float3(0, 0, 0);
+    return v;
+}
 
 VoxOut VSVoxel(VSIn i) {
     VoxOut o;

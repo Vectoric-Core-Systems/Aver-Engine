@@ -211,10 +211,36 @@ D3D12_RESOURCE_DESC bufferDesc(u64 bytes) {
 const char* kShaderHLSL = R"(
 // ---- scene pixel shader ----
 // PSMainPlain, and only PSMainPlain: unshadowed, with no bounce. That is the whole of the shading
-// this backend owns, because sun visibility and indirect radiance are arguments shadeSurface takes
-// rather than terms it computes. A render feature that wants either supplies its own pixel shader
-// and its own pipeline; the backend keeping a second copy is what step 11 of the refactor removed.
-float4 PSMainPlain(VSOut i) : SV_TARGET { return shadeSurface(i, 1.0, float3(0,0,0), 1.0); }
+// this backend owns, because sun visibility and indirect radiance are things the material contract
+// asks a RENDERER for rather than terms a material computes. A render feature that wants either
+// supplies its own pixel shader and its own pipeline; the backend keeping a second copy is what
+// step 11 of the refactor removed.
+//
+// The backend is a degenerate renderer here: one fully visible light, sky ambient, no bounce.
+float4 PSMainPlain(VSOut i) : SV_TARGET {
+    AverVertex v = averVertexOf(i);
+    AverLight sun;
+    sun.direction  = normalize(gLightDir.xyz);
+    sun.radiance   = srgbToLin(gLightColor.rgb) * 3.0;
+    sun.visibility = 1.0;
+
+    AverSurface s = averEvalMaterial(v, sun);
+    float4 display;
+    if (averDisplayColour(s, display)) return display;
+
+    AverIndirect ind;
+    ind.ambient      = skyColor(v.N);
+    ind.ambientScale = gAmbient.r;
+    ind.diffuse      = float3(0, 0, 0);
+    ind.occlusion    = 1.0;
+    ind.specular     = skyColor(reflect(-v.V, v.N));
+
+    float3 radiance = 0.0;
+    radiance = averShadeDirect(radiance, s, sun);
+    radiance = averShadeIndirect(radiance, s, ind);
+    radiance = averApplyFog(radiance, i.wpos);
+    return float4(toGamma(acesTonemap(radiance)), averOpacity(s));
+}
 
 // ---- procedural sky (fullscreen triangle via SV_VertexID) ----
 float4 PSky(SkyOut i) : SV_TARGET {

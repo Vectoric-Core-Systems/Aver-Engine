@@ -54,56 +54,147 @@ VSOut VSMain(VSIn i) {
     return o;
 }
 
-// Surface shading, with everything a render feature can influence arriving as an argument: sun
-// visibility, the incoming indirect radiance and its ambient occlusion. A caller with no such
-// feature passes (1, 0, 1) and gets the unshadowed, GI-free image.
+// ================= the Aver material contract =================
+// The split that makes "PBR is a material system, the renderer is the thing that renders it" a
+// compilable statement rather than a slogan. The material owns the BRDF; the renderer owns light
+// transport (which lights reach this surface, how much sky it sees, what bounced onto it) and the
+// camera (fog, tonemap, gamma).
 //
-// `indirectRadiance` is RAW radiance. The diffuse response (kd * albedo) is applied here, so a
-// caller cannot premultiply it - doing so would square the albedo, which reads as "GI is a bit
-// dark and oversaturated" rather than as a bug.
-float4 shadeSurface(VSOut i, float sunVis, float3 indirectRadiance, float ao) {
-    float3 N = normalize(i.nrmWS);
-    float3 V = normalize(gCamPos.xyz - i.wpos);
-    float3 L = normalize(gLightDir.xyz);
-    float3 H = normalize(V + L);
-    float metallic = saturate(gMaterial.x);
-    float rough = clamp(gMaterial.y, 0.045, 1.0);
+// AverSurface is OPAQUE to the renderer. No renderer may read a field of it: everything a renderer
+// legitimately needs is a function below, so that the day a shading model gains state there is
+// nothing outside the material system to update.
 
-    if (gMaterial.z > 0.5) { // unlit (gizmo/grid): authored display colour, no lighting
-        return float4(gBaseColor.rgb, gBaseColor.a);
-    }
+// What the renderer knows about the point being shaded, and all it has to supply.
+struct AverVertex {
+    float3 wpos;
+    float3 N;    // unit surface normal, world space
+    float3 V;    // unit vector towards the camera; EXACTLY zero where there is no camera
+};
 
-    float3 albedo = srgbToLin(gBaseColor.rgb);
-    float3 lightC = srgbToLin(gLightColor.rgb) * 3.0; // sun radiance
-    float ndv = saturate(dot(N, V));
-    float ndl = saturate(dot(N, L));
-    float3 F0 = lerp(0.04.xxx, albedo, metallic);
+// One light's contribution as the renderer resolved it. `visibility` is the renderer's shadowing
+// answer - shadow map, ray query, nothing at all - because which of those applies is a property of
+// the renderer, not of the material.
+struct AverLight {
+    float3 direction;   // unit vector TO the light
+    float3 radiance;    // linear radiance arriving along `direction`
+    float  visibility;  // 0 = fully occluded, 1 = fully lit
+};
 
-    // direct (Cook-Torrance GGX)
-    float a = rough * rough;
-    float k = (rough + 1.0); k = k * k / 8.0;
-    float D = distGGX(saturate(dot(N, H)), a);
-    float G = geomSchlick(ndv, k) * geomSchlick(ndl, k);
-    float3 F = fresnelSchlick(saturate(dot(H, V)), F0);
-    float3 spec = (D * G * F) / (4.0 * ndv * ndl + 1e-4);
-    float3 kd = (1.0 - F) * (1.0 - metallic);
-    float3 direct = (kd * albedo / PI + spec) * lightC * ndl * sunVis;
+// Everything reaching the surface that did not come straight from a light. All of it is RAW
+// radiance: the diffuse response is applied by the material, so a renderer that premultiplied it
+// would square the albedo - which reads as "GI is a bit dark and oversaturated", never as a bug.
+//
+// `ambientScale` is a separate field rather than folded into `ambient` on purpose. Float
+// multiplication is not associative, and (kd*albedo*ambient)*scale is not bit-identical to
+// kd*albedo*(ambient*scale); folding it would silently move an image that has an exact oracle
+// behind it.
+struct AverIndirect {
+    float3 ambient;      // sky-hemisphere irradiance the renderer sampled for this surface
+    float  ambientScale; // weight for `ambient`, applied after the diffuse response
+    float3 diffuse;      // bounced radiance (zero when the renderer traces none)
+    float  occlusion;    // ambient occlusion; weights `ambient` only, never `diffuse`
+    float3 specular;     // environment radiance along the reflection vector
+};
 
-    // ambient: sky hemisphere irradiance (linear) + crude spec reflection of the sky
-    float3 ambient = kd * albedo * skyColor(N) * gAmbient.r;
-    float3 R = reflect(-V, N);
-    float3 envSpec = skyColor(R) * fresnelSchlick(ndv, F0) * (1.0 - rough);
+// Adapter for the geometry the shared vertex/mesh shaders produce. It is the renderer's job to say
+// where the camera is, so this lives with the vertex structure rather than with the material.
+AverVertex averVertexOf(VSOut i) {
+    AverVertex v;
+    v.wpos = i.wpos;
+    v.N    = normalize(i.nrmWS);
+    v.V    = normalize(gCamPos.xyz - i.wpos);
+    return v;
+}
 
-    float3 indirect = kd * albedo * indirectRadiance;
-    ambient *= ao;   // whatever produced the indirect term already knows what is occluded
-    float3 color = direct + ambient + indirect + envSpec * 0.35;
+// The evaluated material at one point. Every field is the material system's business; see the
+// note on AverSurface being opaque above.
+struct AverSurface {
+    float3 N, V, H;
+    float3 albedo;       // linear base colour
+    float3 F0;
+    float3 F;            // Fresnel against the dominant light
+    float3 kdAlbedo;     // the diffuse response, (1-F)(1-metallic) * albedo
+    float  metallic, rough, ndv;
+    float  alpha;
+    bool   display;      // authored colour, bypassing lighting and camera post
+    float4 displayColor;
+};
 
-    // distance fog (linear space)
-    float dist = length(i.wpos - gCamPos.xyz);
+// Evaluate the material. The light is an argument because this shading model's diffuse response is
+// Fresnel-weighted against the dominant light and is then SHARED by the direct, ambient and bounce
+// terms. Resolving it once here is what keeps those three terms bit-identical to the single
+// expression they used to be; giving each term its own Fresnel would be a different (arguably
+// better) image with no oracle behind it.
+AverSurface averEvalMaterial(AverVertex v, AverLight l) {
+    AverSurface s;
+    s.N = v.N;
+    s.V = v.V;
+    s.H = normalize(v.V + l.direction);
+    s.metallic = saturate(gMaterial.x);
+    s.rough = clamp(gMaterial.y, 0.045, 1.0);
+    s.alpha = gBaseColor.a;
+    s.display = gMaterial.z > 0.5;          // unlit (gizmo/grid)
+    s.displayColor = float4(gBaseColor.rgb, gBaseColor.a);
+    s.albedo = srgbToLin(gBaseColor.rgb);
+    s.ndv = saturate(dot(v.N, v.V));
+    s.F0 = lerp(0.04.xxx, s.albedo, s.metallic);
+    s.F = fresnelSchlick(saturate(dot(s.H, v.V)), s.F0);
+    s.kdAlbedo = ((1.0 - s.F) * (1.0 - s.metallic)) * s.albedo;
+    return s;
+}
+
+// True when the shading model produces an authored display colour that must reach the backbuffer
+// untouched - no lighting, no fog, no tonemap. A renderer MUST honour this before shading:
+// averShadeDirect / averShadeIndirect do not re-test it, because for every lit pixel that test is
+// dead work in the inner loop.
+bool averDisplayColour(AverSurface s, out float4 rgba) {
+    rgba = s.displayColor;
+    return s.display;
+}
+
+// The material's opacity, so a renderer never has to reach into the material constants for it.
+float averOpacity(AverSurface s) { return s.alpha; }
+
+// The view-INDEPENDENT diffuse albedo. Contractual: anything that has no camera (voxelisation, a
+// light-map bake, an irradiance probe) shades with this, and it must never read s.V.
+float3 averDiffuseAlbedo(AverSurface s) { return s.albedo; }
+
+// Radiance ACCUMULATES rather than being summed by the caller. That is not stylistic: the terms
+// below are added in one left-associated chain, and float addition is not associative, so letting
+// the renderer combine partial sums would change the image by a last bit or two - exactly the kind
+// of drift this decomposition exists to prove it does not cause.
+
+// Direct lighting: Cook-Torrance GGX. NdotL and the light's visibility are applied here, so a
+// renderer never multiplies radiance by a cosine it does not own the convention for.
+float3 averShadeDirect(float3 radiance, AverSurface s, AverLight l) {
+    float a = s.rough * s.rough;
+    float k = (s.rough + 1.0); k = k * k / 8.0;
+    float ndl = saturate(dot(s.N, l.direction));
+    float D = distGGX(saturate(dot(s.N, s.H)), a);
+    float G = geomSchlick(s.ndv, k) * geomSchlick(ndl, k);
+    float3 spec = (D * G * s.F) / (4.0 * s.ndv * ndl + 1e-4);
+    return radiance + (s.kdAlbedo / PI + spec) * l.radiance * ndl * l.visibility;
+}
+
+// Ambient, bounce and environment specular, in that order.
+float3 averShadeIndirect(float3 radiance, AverSurface s, AverIndirect ind) {
+    float3 ambient = s.kdAlbedo * ind.ambient * ind.ambientScale;
+    float3 envSpec = ind.specular * fresnelSchlick(s.ndv, s.F0) * (1.0 - s.rough);
+    float3 indirect = s.kdAlbedo * ind.diffuse;
+    ambient *= ind.occlusion;   // whatever produced the bounce already knows what is occluded
+    radiance += ambient;
+    radiance += indirect;
+    radiance += envSpec * 0.35;
+    return radiance;
+}
+
+// ---- camera / post. Deliberately NOT the material's: fog, tonemap and gamma are properties of
+// the camera looking at the scene, and a material system that owned them would make every shading
+// model reimplement them identically. ----
+float3 averApplyFog(float3 color, float3 wpos) {
+    float dist = length(wpos - gCamPos.xyz);
     float fog = 1.0 - exp(-dist * gFogColor.a);
-    color = lerp(color, srgbToLin(gFogColor.rgb), saturate(fog));
-
-    return float4(toGamma(acesTonemap(color)), gBaseColor.a);
+    return lerp(color, srgbToLin(gFogColor.rgb), saturate(fog));
 }
 
 // ---- procedural sky (fullscreen triangle via SV_VertexID) ----
