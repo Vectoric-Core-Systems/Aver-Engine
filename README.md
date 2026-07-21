@@ -22,11 +22,12 @@ Requires Visual Studio 18 (C++ workload), which supplies CMake + Ninja + the Win
 ```powershell
 # from the repo root
 ./scripts/build.ps1                     # configure + build (Debug)
+./scripts/build.ps1 -Release            # ...or Release, into a separate tree
 ./scripts/run.ps1 --frames 5            # build then run the sandbox for 5 frames
 ./scripts/run.ps1 --headless --frames 5 # run without opening a window
 ```
 
-Output goes to `build/bin/`. Vulkan stays compiled out (`-DAVER_RHI_VULKAN=ON` to enable once the SDK is installed).
+Output goes to `build/bin/` (`build-release/bin/` for `-Release`; the two coexist). Vulkan stays compiled out (`-DAVER_RHI_VULKAN=ON` to enable once the SDK is installed).
 
 ## Layout
 

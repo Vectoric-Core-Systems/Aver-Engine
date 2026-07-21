@@ -31,13 +31,18 @@ Requires Visual Studio 18 (C++ workload) — supplies CMake + Ninja + Windows SD
 ```powershell
 cd "C:\Users\User\Documents\Aver Engine"
 ./scripts/build.ps1                 # configure + build (Debug) via vcvars->cmake->ninja
+./scripts/build.ps1 -Release        # the SAME, in Release, into a SEPARATE tree (§4i)
 ./scripts/run.ps1                   # build then launch the editor (Sandbox.exe)
 ./scripts/run.ps1 --frames 30 --screenshot out.png   # headless-ish capture for verification
 ./scripts/run.ps1 <path.ocbeam>     # also load a cage into the scene
 ./scripts/gates.ps1                 # the oracle: 9 device configurations x 17 gates (§4h)
 ./scripts/gates.ps1 -Config baseline # just the primary path, ~30 s
+./scripts/gates.ps1 -Release        # the Release binary against its OWN baseline (§4i)
 ```
-Output: `build/bin/Sandbox.exe`. `scripts/build.bat` is the real build (PowerShell wraps it);
+Output: `build/bin/Sandbox.exe`, and `build-release/bin/Sandbox.exe` for `-Release`. **The two trees
+coexist and neither clobbers the other**, because `scripts/gates.baseline.txt` is a Debug measurement
+and `scripts/gates.baseline.release.txt` is the Release one, so both binaries have to exist at once
+for either baseline to mean anything. `scripts/build.bat` is the real build (PowerShell wraps it);
 run `.bat` via the PowerShell tool, not Git Bash (`cmd //c` mangling). Add `/Zc:__cplusplus`
 already set. Vulkan: `-DAVER_RHI_VULKAN=ON` once the LunarG SDK is installed.
 
@@ -46,7 +51,8 @@ already set. Vulkan: `-DAVER_RHI_VULKAN=ON` once the LunarG SDK is installed.
 ```
 CMakeLists.txt              top-level (LANGUAGES C CXX RC; options AVER_RHI_*, AVER_ENABLE_UI)
 cmake/AvModule.cmake        aver_add_module() helper
-scripts/                    build.bat / build.ps1 / run.ps1 / gates.ps1 + gates.baseline.txt
+scripts/                    build.bat / build.ps1 / run.ps1 / gates.ps1
+                            + gates.baseline.txt (Debug) and gates.baseline.release.txt (Release)
 modules/
   core/      Aver.Core      types, Math (Vec/Mat/Quat/Transform/AABB + Mat4::inverse), Log, Time, Hash(fnv1a64)
   platform/  Aver.Platform  Win32 Window (+icon, message hook), Splash (layered win + stb_image), FileSystem (+executableDir)
@@ -241,7 +247,11 @@ input and watch a per-frame heartbeat instead.
 Dev flags on `Sandbox.exe`: `--frames N`, `--screenshot out.png`, `--tool <select|move|rotate|scale>`,
 `--project-settings`, `--new-script`, `--tools-menu`, `--compile-scripts`, `--reload-scripts [N]`,
 `--start-screen`, `--msaa N`, `--gi`, `--gi-debug`, `--rt`, `--ms`, `--probe X Y`, `--scripts <dir>`,
-`--force-caps <list>`, `--warp` (§4g).
+`--force-caps <list>`, `--warp` (§4g), `--debug-layer` (§4i).
+
+`--debug-layer` turns the D3D12 debug layer on. It is OFF by default in every build type, because it
+validates every API call; `scripts/gates.ps1` passes it so the per-gate corruption/error/warning
+counters still exist.
 
 `--scripts <dir>` points the CLR host at a directory of user script assemblies (relative to the
 executable unless absolute) and **overrides everything else**. Without it the host reads
@@ -483,7 +493,9 @@ Compare the RAW CODES: a one-code move hides completely inside `%.2f`, which is 
 prints both. All 13 were re-run after step 11 and again after step 12 with the **D3D12 debug layer
 enabled**: zero CORRUPTION, zero ERROR. The only messages are two pre-existing benign warnings,
 `#820 CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE` and `#1328 CREATERESOURCE_STATE_IGNORED`. Zero
-new TDRs across the whole exercise.
+new TDRs across the whole exercise. **Both warnings are fixed as of §4i** — the totals now read
+`0 corruption, 0 error, 0 warning` — and the layer itself is opt-in behind `--debug-layer`, which the
+gate runner passes. This paragraph is left as the historical record of what those runs reported.
 
 ### Barrier note from step 11
 
@@ -1089,6 +1101,129 @@ item 9 says the code follows are **still** reasoned rather than measured — a c
 branch reads cannot exercise them, and the D3D12 runtime validates against the *real* device tier,
 which is 3 on both adapters available here. Recorded as §4d item 20 rather than papered over.
 
+## 4i. Build configurations, the debug layer, and the two per-frame warnings
+
+Three interlocking items, done together because each one was hiding the next.
+
+### Release is reachable, and it has its own baseline
+
+`scripts/build.bat` hardcoded `-DCMAKE_BUILD_TYPE=Debug`, so `msvc-ninja-release` in
+`CMakePresets.json` could not be reached through the normal script and **every measurement this
+project had ever taken was a Debug measurement**.
+
+Configuration and build tree now come from two environment variables (`AVER_BUILD_CONFIG`,
+`AVER_BUILD_DIR`) rather than from the command line, so everything after the script name is still
+forwarded verbatim to CMake configure and `./scripts/build.ps1 -DAVER_MODULE_VOXI=OFF` keeps working.
+`build.ps1` gained `-Release` (and `-Config` / `-BuildDir` for anything else), sets those two, and
+**restores them afterwards** — leaving them set would have made the next `scripts/run.ps1` in the
+same shell build the Release tree while launching the Debug binary.
+
+Trees are separate by default (`build/`, `build-release/`) because the two baselines are separate.
+
+### The Release oracle: 152 gates, BIT-IDENTICAL to Debug
+
+Small LSB-scale differences were expected and none appeared. `scripts/gates.baseline.release.txt`
+therefore holds the same numbers as `scripts/gates.baseline.txt`, and that is a result rather than a
+shortcut: **nothing in this renderer's shading happens on the host CPU.** The probe reads an 8-bit
+backbuffer written by HLSL that the GPU's own compiler produces from source strings at run time —
+identical bytes in both builds — and the C++ in front of it only assembles matrices and constants.
+Host optimisation had nothing to move. A change to shading that DID move under `/O2` would have to
+have come through those constants, which is worth knowing.
+
+**No `/fp:fast` anywhere.** Both configurations compile at MSVC's default `/fp:precise`
+(`CMAKE_CXX_FLAGS_RELEASE` is exactly `/O2 /Ob2 /DNDEBUG`; the project adds no `/fp:` flag at all).
+That is the right default for a renderer whose verification is bit-exactness, and it is now recorded
+rather than inherited silently — if anyone ever adds `/fp:fast`, the Release baseline is what will
+notice.
+
+One gate, `no-rt/gi-debug`, missed twice inside the Release sweep and then measured correct **8 times
+out of 8** in isolation and correct again through the runner. That is §4d item 22 — the unexplained
+plausible-wrong-pixel flake — not a Release difference. It is recorded here because it is the second
+time item 22 has cost a sweep, and because two consecutive misses defeat the runner's single retry.
+
+### Timing: 400 frames, and why the number is not about the engine
+
+| build | 40 frames | 400 frames | derived per-frame | derived FPS |
+|---|---|---|---|---|
+| Debug | 2.010 s | 8.024 s | **16.71 ms** | 59.9 |
+| Release | 1.996 s | 8.008 s | **16.70 ms** | 59.9 |
+
+Medians of three runs; per-frame is `(t400 - t40) / 360`, which cancels the fixed startup cost (the
+splash is held 1100 ms and the shaders compile at run time).
+
+**Both numbers are the display's refresh rate, not the engine's.** `present()` calls
+`swapChain_->Present(1, 0)` — sync interval 1 — so every frame blocks on vblank at 60 Hz and both
+builds have idle time to spare. **The brief's premise that "nothing about performance is currently
+knowable" survives this phase**, for a reason we can now name precisely: it was never the missing
+Release build, it is the vsync-locked present. An unthrottled present or a CPU/GPU timer per frame
+is the next thing needed, and neither belongs in this phase — see §4d item 23.
+
+Where the frame is genuinely not vsync-bound the difference is measurable and small. On WARP, whose
+frames run ~100 ms, Debug is **102.3 ms/frame** against Release's **101.5 ms** (`(t100 - t20) / 80`,
+two runs each) — **0.8 %**. That is what "the host code is not the cost" looks like from the other
+side.
+
+### 1b. The D3D12 debug layer is opt-in
+
+`Engine.cpp` set `dd.enableDebug = true` unconditionally. It is now `cfg.enableDebugLayer`, fed by
+`--debug-layer` on `Sandbox.exe` and **off in every build type**. A Debug-build default was
+considered and rejected: a plain `Sandbox.exe` would then still pay for whole-API validation, and
+Debug is the configuration every gate and every timing in this document was measured in.
+
+`drainDebugMessages()` ran at the end of `endFrame()` on every frame. The test moved to the call
+site — `if (infoQueue_) drainDebugMessages();` — so a run without the layer makes no call at all.
+
+`scripts/gates.ps1` passes `--debug-layer` on every launch, so the per-gate C/E/W counters it
+reports are unchanged. The capability moved to the runner rather than being dropped: a gate that
+reported no corruption because nothing was watching would be worse than no gate.
+
+**The layer's own cost is NOT claimed here, because it was not measurable.** On hardware it hides
+inside vsync; on WARP the A/B is 101.5 ms/frame off against 102.2 ms on, which is inside the run-to-
+run spread for a scene of a few dozen draws. The change is correct on its own terms — an
+unconditional validation tax and an unconditional per-frame drain are both gone — and that is all it
+is claimed to be.
+
+### 1c. Both per-frame warnings are fixed; the totals are now `0 corruption, 0 error, 0 warning`
+
+A 40-frame `--debug-layer` run reported **41 warnings** before this phase and reports **0** after.
+
+**#820 CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE — 40 of the 41, one per frame.** The MSAA scene
+colour target was created with a hardcoded optimised clear value of `(0.10, 0.12, 0.16, 1)` while the
+editor pushes `(0.055, 0.055, 0.062, 1)` through `setClearColor`, and the debug layer states outright
+that the clear is slower as a result.
+
+Hardcoding the editor's colour at creation would have been a fix for one caller. The two values are
+reconciled instead: `createMsaaColor()` uses whatever `clear_` currently holds and remembers it in
+`msaaClear_`, and `beginFrame()` calls `reconcileClearValue()`, which rebuilds the target when — and
+only when — the two have actually diverged. The reconciliation is deliberately NOT in `setClearColor`:
+a setter that recreated a render target would stall the GPU from inside the app's update, and the app
+pushes the same colour every frame. In practice it rebuilds exactly once, on the frame after the
+editor first sets its colour, and the log says so at TRACE. If the rebuild ever fails the previous
+clear value is restored and the target rebuilt with that, because a device with no scene colour
+target cannot draw at all.
+
+**#1328 CREATERESOURCE_STATE_IGNORED — the remaining 1, at startup.** The DXR acceleration-structure
+**scratch** buffers were created in `UNORDERED_ACCESS`. D3D12 ignores it: every buffer is created in
+`COMMON` whatever is asked for. (It fires in the baseline configuration and not only under `--rt`
+because Voxi builds the structures every frame regardless — the flag chooses which shading path
+consumes them, not whether they exist.)
+
+This was not silenced, because the state that is ignored is exactly the state something else is
+tracking. Scratch is now created `COMMON` and relies on the implicit promotion a buffer gets from
+`COMMON` on its first GPU use, which is what puts it in `UNORDERED_ACCESS` for the build. The
+result buffer keeps `RAYTRACING_ACCELERATION_STRUCTURE`, which is the one buffer state D3D12 does
+honour and does require.
+
+**`BufferDesc::initialState` is GONE from `RHIResources.hpp`,** and that is the part that touches the
+module-owns-resource-state contract. A buffer has no initial state to give: D3D12 creates it in
+`COMMON`, it is implicitly promoted out of `COMMON` by its first use and **decays back to `COMMON` at
+the end of every command list**, so `COMMON` is not merely where a buffer starts — it is where it is
+at the top of every frame. Keeping the field would have meant a field the backend must ignore and a
+tracker seeded from a state the resource was never in. `createBuffer` now creates every non-upload,
+non-AS buffer in `COMMON` and seeds `RhiBuffer::state` to `Common`, so the tracker and the resource
+agree and a module's first barrier is checked against something true. Nothing set the field, so no
+caller changed. `TextureDesc::initialState` stays — an image layout is real.
+
 ## 4d. Known gaps and defects
 
 Every numbered item below is referenced elsewhere in this document as `§4d item N`. The numbering is
@@ -1096,6 +1231,17 @@ stable: items are struck off into the closed list rather than renumbered, which 
 numbers have gaps in them.
 
 **Closed since this list was written**
+- **A Release build could not be reached through the normal script**, so every gate and every timing
+  ever recorded was a Debug measurement. `./scripts/build.ps1 -Release` builds into its own tree and
+  `./scripts/gates.ps1 -Release` runs against its own baseline. All 152 Release gates are
+  bit-identical to Debug; no `/fp:fast` anywhere. §4i.
+- **The D3D12 debug layer was on for every run** (`Engine.cpp:40`, unconditional), and
+  `drainDebugMessages()` ran every frame. Both are opt-in behind `--debug-layer` now, which
+  `scripts/gates.ps1` passes so the per-gate counters survive. §4i.
+- **Two debug-layer warnings fired on every frame** — #820 (the clear value the scene colour target
+  was created with never matched the one the editor clears to) and #1328 (acceleration-structure
+  scratch created in a buffer state D3D12 ignores). A 40-frame run went from **41 warnings to 0**;
+  `BufferDesc::initialState` was removed rather than worked around, because a buffer has none. §4i.
 - **The FXC / SM 5.1 fallback did not decline cleanly, and its image was wrong** (was item 19). It
   does not decline at all any more — it renders the reference image. Two causes, both found only
   because the SM 5.1 path was finally executable: every Voxi shader asked for SM 6.0 when none of
@@ -1194,6 +1340,19 @@ numbers have gaps in them.
     sky on two WARP GI gates). Plausibly the same event seen before the rect settles, but that is a
     hypothesis. **Start at `Win32Window`'s startup sizing, not at the renderer.** Full write-up and
     the reason not to assume either answer in §4h.
+    **It has now cost two more sweeps** (§4i): `warp/gi-debug` flaked once in Debug with a visibly
+    different rect (`3058x1348` against `2750x1242`, i.e. the launch race), and `no-rt/gi-debug`
+    missed TWICE in a row in Release with the correct rect and then measured right 8/8 in isolation.
+    Two consecutive misses defeat the runner's single retry, so this defect can still turn a clean
+    sweep red. That is an argument for fixing it, not for retrying harder.
+23. **Frame timing measures the display, not the engine.** `present()` calls
+    `swapChain_->Present(1, 0)`, so every frame blocks on vblank: Debug and Release both come out at
+    16.7 ms/frame = 59.9 FPS on a 60 Hz panel, with idle time to spare in both (§4i). Nothing about
+    how long a frame actually TAKES is knowable until there is either an unthrottled present or a
+    per-frame CPU/GPU timer, and the engine has neither. This is the real reason the project has no
+    performance data — it was never the missing Release build. Whoever picks this up should add the
+    timer rather than only flipping the sync interval: a `--no-vsync` run measures a frame rate,
+    a timer measures a frame, and the second is what a renderer needs. **New, deliberately open.**
 10. D3D11 and Vulkan backends are still **stubs** — D3D12 is the only working backend, so
     "supports DirectX 12" is a hard requirement. Both decline cleanly: `createDevice` falls through
     to Null, `resources()` is null, and `VoxiRenderer::init` logs and returns false.
