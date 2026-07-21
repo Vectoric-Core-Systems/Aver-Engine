@@ -796,9 +796,11 @@ bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
 }
 
 // Descriptors every binding set suballocates from. One heap for the whole device so binding a set
-// never costs a heap switch; 1024 slots is roughly a hundred sets of the size features actually
-// declare, and overflow is reported rather than silently wrapping onto live descriptors.
-constexpr u32 kRhiHeapSize = 1024;
+// never costs a heap switch. 64k descriptors -- about 2 MB, against the million a shader-visible
+// heap may hold -- because the old 1024 capped the scene near a hundred and twenty materials, and
+// overflow returns 0 from createBindingSet: the material then draws with whatever table was bound
+// last, which reads on screen as ONE object having someone else's texture rather than as an error.
+constexpr u32 kRhiHeapSize = 65536;
 // Transient constants per frame in flight. Large enough that a feature republishing its constants
 // at every pass never runs dry within a frame.
 constexpr u64 kRhiRingBytes = 1u << 20;

@@ -250,7 +250,9 @@ enum class SlotKind : u8 {
 
 // Slots per range. Counts above this cannot declare a kind, so the backend could only guess exactly
 // the thing SlotKind exists to stop it guessing — the limit is therefore enforced, not advisory.
-constexpr u32 kMaxBindingSlots = 8;
+// 16, not 8: a material set is roughly seven textures before anything exotic, and Resource Binding
+// Tier 1 permits 128 SRVs in a table, so the headroom is free.
+constexpr u32 kMaxBindingSlots = 16;
 
 struct BindingSetDesc {
     u32 srvCount = 0;            // must be <= kMaxBindingSlots
