@@ -1,12 +1,14 @@
 #include "aver/voxi/VoxiRenderer.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"   // light-frustum fit: Vec3 / Mat4::lookAtLH
+#include "aver/pbr/PbrShaders.hpp"
 
 #include "VoxiShaders.hpp"
 
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <string>
 
 // Voxi's GPU resources, expressed only in terms of the generic RHI. Nothing here names a backend
 // type; everything is a handle from IResourceFactory.
@@ -54,6 +56,20 @@ rhi::PipelineLayout giLayout() {
     return l;
 }
 
+// Everything Voxi's HLSL is compiled on top of: the RHI's shared declarations, then the material
+// system's BRDF and Aver* contract. That order is the architecture -- the material text uses the
+// constant-buffer layouts and vertex structures the shared prelude declares, and Voxi's own source
+// then calls the material.
+//
+// Joined ONCE into a static string because ShaderDesc::prelude is a BORROWED pointer read at
+// pipeline creation, and onRenderTargetsChanged rebuilds every pipeline on each MSAA change. A
+// temporary would dangle and, being freed heap that nothing has reused yet, would usually still
+// compile - the worst kind of bug to go looking for.
+const char* voxiShaderPrelude() {
+    static const std::string s = std::string(rhi::sharedShaderPrelude()) + pbr::materialShaderPrelude();
+    return s.c_str();
+}
+
 // Shader blobs are CPU-side only: a pipeline copies what it needs at creation. Collecting them
 // means the whole batch is released on every exit path, including the early returns a failed
 // rebuild takes.
@@ -67,9 +83,9 @@ struct ShaderScope {
                                  const char* defines) {
         rhi::ShaderDesc sd;
         sd.source  = kVoxiHLSL;
-        // ONE owner for the shared cbuffer layouts, vertex structures and shading. Copying them
-        // here would create a cross-module ABI with no compiler behind it.
-        sd.prelude = rhi::sharedShaderPrelude();
+        // ONE owner for the shared cbuffer layouts and vertex structures, and ONE owner for the
+        // BRDF. Copying either here would create a cross-module ABI with no compiler behind it.
+        sd.prelude = voxiShaderPrelude();
         sd.entry   = entry;
         sd.stage   = stage;
         sd.minShaderModel = sm;

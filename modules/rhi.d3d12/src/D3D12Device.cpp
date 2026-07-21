@@ -216,31 +216,11 @@ const char* kShaderHLSL = R"(
 // supplies its own pixel shader and its own pipeline; the backend keeping a second copy is what
 // step 11 of the refactor removed.
 //
-// The backend is a degenerate renderer here: one fully visible light, sky ambient, no bounce.
-float4 PSMainPlain(VSOut i) : SV_TARGET {
-    AverVertex v = averVertexOf(i);
-    AverLight sun;
-    sun.direction  = normalize(gLightDir.xyz);
-    sun.radiance   = srgbToLin(gLightColor.rgb) * 3.0;
-    sun.visibility = 1.0;
-
-    AverSurface s = averEvalMaterial(v, sun);
-    float4 display;
-    if (averDisplayColour(s, display)) return display;
-
-    AverIndirect ind;
-    ind.ambient      = skyColor(v.N);
-    ind.ambientScale = gAmbient.r;
-    ind.diffuse      = float3(0, 0, 0);
-    ind.occlusion    = 1.0;
-    ind.specular     = skyColor(reflect(-v.V, v.N));
-
-    float3 radiance = 0.0;
-    radiance = averShadeDirect(radiance, s, sun);
-    radiance = averShadeIndirect(radiance, s, ind);
-    radiance = averApplyFog(radiance, i.wpos);
-    return float4(toGamma(acesTonemap(radiance)), averOpacity(s));
-}
+// It shades through plainShadeSurface, the prelude's FROZEN copy, and not through the Aver material
+// contract: linking Aver.Render.PBR.Materials from a backend would invert the layering, and this
+// path is unreachable in any build that has a render feature, so a substitute written here would
+// diverge with nothing to catch it.
+float4 PSMainPlain(VSOut i) : SV_TARGET { return plainShadeSurface(i, 1.0, float3(0,0,0), 1.0); }
 
 // ---- procedural sky (fullscreen triangle via SV_VertexID) ----
 float4 PSky(SkyOut i) : SV_TARGET {

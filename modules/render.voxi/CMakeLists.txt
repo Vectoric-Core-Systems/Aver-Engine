@@ -29,6 +29,12 @@ target_include_directories(Aver.Render.Voxi.Renderer PUBLIC ${CMAKE_CURRENT_SOUR
 target_compile_features(Aver.Render.Voxi.Renderer PUBLIC cxx_std_20)
 # Aver.RHI is the GENERIC interface. Never Aver.RHI.D3D12: no backend type may cross this boundary,
 # and a link line is the only place that rule can actually be enforced.
-target_link_libraries(Aver.Render.Voxi.Renderer PUBLIC Aver.Core Aver.RHI Aver.Render.Voxi)
+#
+# Aver.Render.PBR.Materials is the architecture on a link line: PBR is a material system, and Voxi
+# is the thing that renders it. Voxi supplies visibility and irradiance and calls the shading model;
+# the material owns the BRDF. The dependency runs THIS way and never the other -- the material
+# system knows nothing about voxel cones.
+target_link_libraries(Aver.Render.Voxi.Renderer PUBLIC Aver.Core Aver.RHI Aver.Render.Voxi
+                                                       Aver.Render.PBR.Materials)
 
 set_target_properties(Aver.Render.Voxi.Renderer PROPERTIES FOLDER "modules")

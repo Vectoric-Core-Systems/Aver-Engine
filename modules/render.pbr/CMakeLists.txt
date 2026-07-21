@@ -28,7 +28,8 @@ set_target_properties(Aver.Render.PBR PROPERTIES
 # Aver.RHI is the GENERIC interface. NEVER Aver.RHI.D3D12: no backend type may cross this boundary,
 # and a link line is the only place that rule can actually be enforced.
 add_library(Aver.Render.PBR.Materials STATIC
-  src/MaterialGpu.cpp)
+  src/MaterialGpu.cpp
+  src/PbrShaders.cpp)
 
 target_include_directories(Aver.Render.PBR.Materials PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Render.PBR.Materials PUBLIC cxx_std_20)

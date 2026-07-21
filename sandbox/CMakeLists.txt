@@ -8,6 +8,12 @@ if(TARGET Aver.Render.Voxi)
   # Settings DLL (brings AVER_MODULE_VOXI=1) + the static render feature that drives the RHI.
   target_link_libraries(Sandbox PRIVATE Aver.Render.Voxi Aver.Render.Voxi.Renderer)
 endif()
+if(TARGET Aver.Render.PBR)
+  # The material DLL (brings AVER_MODULE_PBR=1). Named explicitly rather than left to arrive
+  # transitively through Voxi's renderer: the executable is what the C# layer P/Invokes into, so it
+  # is the executable that must depend on the material system whether or not a render feature does.
+  target_link_libraries(Sandbox PRIVATE Aver.Render.PBR)
+endif()
 target_include_directories(Sandbox PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
 set_target_properties(Sandbox PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
