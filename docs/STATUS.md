@@ -375,20 +375,45 @@ answer before geometry becomes dynamic. Listed in §4d.
 ### Oracle — all 13 gates, bit-exact
 
 ```
---frames 40                             -> (0.34,0.36,0.42) raw(87,92,107)
---frames 40 --ms                        -> (0.34,0.36,0.42) raw(87,92,107)
---frames 40 --rt                        -> (0.34,0.36,0.42) raw(87,92,107)
---frames 40 --ms --rt                   -> (0.34,0.36,0.42) raw(87,92,107)
---frames 40 --gi                        -> (0.39,0.35,0.40) raw(99,90,103)
---frames 40 --ms --gi                   -> (0.39,0.35,0.40) raw(99,90,103)
---frames 40 --ms --rt --gi              -> (0.39,0.35,0.40) raw(99,90,103)
+--frames 40                             -> (0.35,0.36,0.42) raw(90,93,108)
+--frames 40 --ms                        -> (0.35,0.36,0.42) raw(90,93,108)
+--frames 40 --rt                        -> (0.35,0.36,0.42) raw(90,93,108)
+--frames 40 --ms --rt                   -> (0.35,0.36,0.42) raw(90,93,108)
+--frames 40 --gi                        -> (0.41,0.36,0.41) raw(104,91,104)
+--frames 40 --ms --gi                   -> (0.41,0.36,0.41) raw(104,91,104)
+--frames 40 --ms --rt --gi              -> (0.41,0.36,0.41) raw(104,91,104)
 --frames 40 --gi-debug                  -> (0.26,0.17,0.18) raw(66,44,45)
 --frames 40 --ms --gi-debug             -> (0.26,0.17,0.18) raw(66,44,45)
---frames 40 --probe 1413 1042           -> (0.25,0.31,0.40) raw(64,78,101)
---frames 40 --rt --probe 1413 1042      -> (0.25,0.31,0.40) raw(64,78,101)
---frames 40 --ms --rt --probe 1413 1042 -> (0.25,0.31,0.40) raw(64,78,101)
---frames 40 --gi --probe 1413 1042      -> (0.26,0.31,0.38) raw(67,78,97)
+--frames 40 --probe 1413 1042           -> (0.25,0.31,0.40) raw(64,79,102)
+--frames 40 --rt --probe 1413 1042      -> (0.25,0.31,0.40) raw(64,79,102)
+--frames 40 --ms --rt --probe 1413 1042 -> (0.25,0.31,0.40) raw(64,79,102)
+--frames 40 --gi --probe 1413 1042      -> (0.26,0.31,0.38) raw(67,79,97)
 ```
+
+**Re-baselined 2026-07-21 by PBR step 17(c), the diffuse-Fresnel correction, and by nothing else.**
+The change was approved in advance and announced before the work. `kd` was
+`(1 - F) * (1 - metallic)`, weighting the diffuse response by the SPECULAR Fresnel at HdotV; that
+one `kd` is reused by the direct diffuse, the sky ambient and the GI bounce, so a single
+over-darkening was applied three times per surface. Removing it lifts every gate and darkens none,
+which is the signature the correction predicts:
+
+| gate | before | after | delta |
+|---|---|---|---|
+| centre, no GI | raw(87,92,107) | raw(90,93,108) | +3,+1,+1 |
+| centre, `--gi` | raw(99,90,103) | raw(104,91,104) | +5,+1,+1 |
+| cast shadow | raw(64,78,101) | raw(64,79,102) | +0,+1,+1 |
+| cast shadow, `--gi` | raw(67,78,97) | raw(67,79,97) | +0,+1,+0 |
+| `--gi-debug` (both) | raw(66,44,45) | raw(66,44,45) | unchanged |
+
+The two `--gi-debug` gates holding EXACTLY is the load-bearing part of this baseline, not a
+convenience. The debug view raymarches the radiance volume, and the voxelisation pass injects
+`averDiffuseAlbedo()` — which is `s.albedo`, never `s.kdAlbedo`. A `kd` change that had moved those
+two would have meant it reached somewhere it has no business reaching. Equally, the cast-shadow
+gates moving by only a green/blue code is what a shadowed pixel should do: it receives ambient and
+bounce but no direct sun, so it sees the smallest share of the correction.
+
+PBR steps 16, 17(a) and 17(b) were each announced as oracle-moving and each measured NEUTRAL at all
+13 gates; see §PBR for why, and for the sunlit diagnostic probe that covers what these 13 cannot.
 
 Compare the RAW CODES: a one-code move hides completely inside `%.2f`, which is why the probe line
 prints both. All 13 were re-run after step 11 and again after step 12 with the **D3D12 debug layer

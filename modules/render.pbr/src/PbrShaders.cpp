@@ -234,11 +234,11 @@ float3 averPerturbNormal(float3 N, float3 wpos, float2 uv, float3 nTS) {
     return normalize(T * (nTS.x * invmax) + B * (nTS.y * invmax) + N * nTS.z);
 }
 
-// Evaluate the material. The light is an argument because this shading model's diffuse response is
-// Fresnel-weighted against the dominant light and is then SHARED by the direct, ambient and bounce
-// terms. Resolving it once here is what keeps those three terms bit-identical to the single
-// expression they used to be; giving each term its own Fresnel would be a different (arguably
-// better) image with no oracle behind it.
+// Evaluate the material. The light is still an argument, but only for the half vector the specular
+// lobe needs: the diffuse response no longer depends on it at all, which is the point of the change
+// below. That makes averDiffuseAlbedo() and everything derived from kdAlbedo genuinely
+// view-independent rather than view-independent by convention, so the voxelisation pass -- which
+// hands this a zero view vector and a fabricated light -- gets the same answer the lit pass does.
 AverSurface averEvalMaterial(AverVertex v, AverLight l) {
     AverMaps map = averSampleMaps(v.uv);
 
@@ -282,7 +282,17 @@ AverSurface averEvalMaterial(AverVertex v, AverLight l) {
     // A metal has no dielectric base at all, which is why this lerps to the albedo.
     s.F0 = lerp(gMatReflectance.xxx, s.albedo, s.metallic);
     s.F = fresnelSchlick(saturate(dot(s.H, v.V)), s.F0, s.f90);
-    s.kdAlbedo = ((1.0 - s.F) * (1.0 - s.metallic)) * s.albedo;
+    // The diffuse response is the NON-METAL FRACTION and nothing else. It used to be
+    // (1 - F) * (1 - metallic), which weighted diffuse by the SPECULAR Fresnel evaluated at HdotV
+    // -- a hand-wave at energy conservation, and a directional one: H depends on the dominant
+    // light, so it says nothing at all about how much energy the sky or a bounce delivered. The
+    // error compounded rather than cancelling, because this one kd is reused by averShadeDirect's
+    // diffuse, by the sky ambient and by the GI term, so a single over-darkening was applied THREE
+    // times to every surface, worst at grazing angles where (1 - F) falls away fastest.
+    //
+    // Energy is conserved by the specular lobe being normalised (D and the height-correlated V
+    // integrate to the reflected fraction on their own), not by subtracting it from diffuse twice.
+    s.kdAlbedo = (1.0 - s.metallic) * s.albedo;
     return s;
 }
 
