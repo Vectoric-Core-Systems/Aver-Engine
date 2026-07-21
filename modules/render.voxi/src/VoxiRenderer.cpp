@@ -647,7 +647,12 @@ bool VoxiRenderer::createPipelines() {
     if (msOk && psVoxel) {
         // The mesh-shader variant exists to delete the geometry shader, which is emulated (and
         // slow) on every AMD GCN part.
-        if (const rhi::ShaderHandle ms = compile("MSVoxel", rhi::ShaderStage::Mesh, 65, "AVER_MS=1")) {
+        // The geometry registers are the LAYOUT's, not a constant: the backend puts them just past
+        // whatever SRV table this pipeline declared, so they must be derived from the same layout
+        // the pipeline is created with, or the mesh shader reads the wrong descriptor with nothing
+        // to say so.
+        const std::string msDefs = "AVER_MS=1;" + rhi::meshGeometryDefines(vox.layout);
+        if (const rhi::ShaderHandle ms = compile("MSVoxel", rhi::ShaderStage::Mesh, 65, msDefs.c_str())) {
             rhi::GraphicsPipelineDesc p = vox;
             p.ms = ms; p.ps = psVoxel;
             voxelMsPso_ = res_->createGraphicsPipeline(p);
@@ -747,8 +752,10 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     }
     if (!scenePso_) AVER_ERROR("[Voxi] scene pipeline unavailable");
 
-    // MSMain comes from the prelude and needs AVER_MS to exist at all.
-    const rhi::ShaderHandle msMain = msOk ? compile("MSMain", rhi::ShaderStage::Mesh, 65, "AVER_MS=1") : 0;
+    // MSMain comes from the prelude and needs AVER_MS to exist at all, plus the geometry registers
+    // for the layout these pipelines declare — see the MSVoxel site for why they cannot be literals.
+    const std::string msDefs = "AVER_MS=1;" + rhi::meshGeometryDefines(scene.layout);
+    const rhi::ShaderHandle msMain = msOk ? compile("MSMain", rhi::ShaderStage::Mesh, 65, msDefs.c_str()) : 0;
     if (msMain && psVoxi) {
         rhi::GraphicsPipelineDesc p = scene;
         p.ms = msMain; p.ps = psVoxi;

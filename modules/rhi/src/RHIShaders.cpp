@@ -128,9 +128,25 @@ SkyOut VSky(uint id : SV_VertexID) {
 //
 // These three registers are the ones RHIResources.hpp reserves for geometry the backend binds
 // itself. A feature module declaring anything at them collides silently.
+//
+// The two SRV registers sit just PAST whatever SRV table the pipeline declared, so they depend on
+// layout.srvCount and cannot be written here as literals: a literal agrees with the root signature
+// only while that count happens to match, and the day a layout grows an SRV the shader keeps asking
+// for a register the root signature has moved something else into. That failure is invisible — at
+// best CreateRootSignature rejects the overlap, at worst the mesh shader reads a texture as a
+// vertex buffer, with no compile error and nothing for the debug layer to say. Hence -D macros,
+// computed by the backend from the same field, and a hard error rather than a default if a caller
+// forgets them.
+#if !defined(AVER_MS_VTX_REG) || !defined(AVER_MS_IDX_REG)
+#error "AVER_MS needs AVER_MS_VTX_REG / AVER_MS_IDX_REG from rhi::meshGeometryDefines"
+#endif
+// Two-step so the argument is expanded before it is pasted; one step pastes the macro NAME.
+#define AVER_REG_JOIN2(a, b) a##b
+#define AVER_REG_JOIN(a, b) AVER_REG_JOIN2(a, b)
+
 struct MeshVtx { float3 pos; float3 nrm; };
-StructuredBuffer<MeshVtx> gVerts   : register(t3);
-ByteAddressBuffer         gIndices : register(t4);
+StructuredBuffer<MeshVtx> gVerts   : register(AVER_REG_JOIN(t, AVER_MS_VTX_REG));
+ByteAddressBuffer         gIndices : register(AVER_REG_JOIN(t, AVER_MS_IDX_REG));
 cbuffer MeshCB : register(b5) { uint gTriCount; uint3 _msPad; };
 
 #define AVER_MS_TRIS 64
@@ -162,6 +178,14 @@ void MSMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
 }
 #endif // AVER_MS
 )";
+}
+
+// One owner for both halves of the reserved-register contract: the prelude above consumes these
+// macros, the root-signature builder places the matching root SRVs at the same two indices, and
+// both read layout.srvCount rather than a number written down twice.
+std::string meshGeometryDefines(const PipelineLayout& layout) {
+    return "AVER_MS_VTX_REG=" + std::to_string(layout.srvCount) +
+           ";AVER_MS_IDX_REG=" + std::to_string(layout.srvCount + 1);
 }
 
 } // namespace aver::rhi

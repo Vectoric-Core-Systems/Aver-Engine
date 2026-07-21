@@ -277,10 +277,15 @@ constexpr UINT kMeshInputLayoutCount = sizeof(kMeshInputLayout) / sizeof(kMeshIn
 constexpr UINT kSceneFrameParam  = 0;   // b0, the engine per-frame block
 constexpr UINT kSceneObjectParam = 1;   // b1, 24 root constants: world + colour + material
 // The mesh-shader signature repeats those two and appends the geometry the input assembler would
-// otherwise have fetched. The REGISTERS are fixed by sharedShaderPrelude(); only the indices live here.
-constexpr UINT kMeshVertexParam = 2;    // t3
-constexpr UINT kMeshIndexParam  = 3;    // t4
+// otherwise have fetched. Only the PARAMETER indices live here; the registers come from the base
+// below, which is also what the prelude is told through -D, so the two cannot drift apart.
+constexpr UINT kMeshVertexParam = 2;
+constexpr UINT kMeshIndexParam  = 3;
 constexpr UINT kMeshCountParam  = 4;    // b5, triangle count
+// This signature declares no SRV table at all, so any base is legal; it keeps its historical 3 so
+// the change that introduced the -D macros moved no bytecode. Vertices at t(base), indices at
+// t(base+1) — the same shape rootSignature() derives from layout.srvCount for feature pipelines.
+constexpr UINT kSceneMeshSrvBase = 3;
 
 struct GpuMesh {
     ComPtr<ID3D12Resource> vb;
@@ -1276,8 +1281,8 @@ bool D3D12Device::initMeshShaders() {
         p[kSceneObjectParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         p[kSceneObjectParam].Constants.ShaderRegister = 1;
         p[kSceneObjectParam].Constants.Num32BitValues = 24;
-        p[kMeshVertexParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; p[kMeshVertexParam].Descriptor.ShaderRegister = 3;
-        p[kMeshIndexParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; p[kMeshIndexParam].Descriptor.ShaderRegister = 4;
+        p[kMeshVertexParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; p[kMeshVertexParam].Descriptor.ShaderRegister = kSceneMeshSrvBase;
+        p[kMeshIndexParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; p[kMeshIndexParam].Descriptor.ShaderRegister = kSceneMeshSrvBase + 1;
         p[kMeshCountParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         p[kMeshCountParam].Constants.ShaderRegister = kMeshGeometryConstantRegister;
         p[kMeshCountParam].Constants.Num32BitValues = 4;
@@ -1292,14 +1297,18 @@ bool D3D12Device::initMeshShaders() {
     }
 
     // AVER_MS gates the mesh-shader entry points: their syntax is only legal from SM 6.5, so the
-    // SM 5.1 compiles of this same source must not see them.
+    // SM 5.1 compiles of this same source must not see them. The geometry registers travel with it,
+    // built from the same base the root signature above used — the prelude refuses to compile
+    // without them rather than fall back to a literal that could disagree.
+    const std::string msDefs = "AVER_MS=1;AVER_MS_VTX_REG=" + std::to_string(kSceneMeshSrvBase) +
+                               ";AVER_MS_IDX_REG=" + std::to_string(kSceneMeshSrvBase + 1);
     ComPtr<ID3DBlob> ms, ps;
     auto ok = [&](const char* entry, const char* fxcTarget, const char* target, ComPtr<ID3DBlob>& out,
-                  const char* defs = "AVER_MS=1") {
+                  const char* defs) {
         return SUCCEEDED(shaderCompiler().compile(sceneShaderSource().c_str(), entry, fxcTarget, &out, target, defs));
     };
-    if (!ok("MSMain",      "vs_5_1", "ms_6_5", ms) ||
-        !ok("PSMainPlain", "ps_5_1", "ps_6_5", ps)) {
+    if (!ok("MSMain",      "vs_5_1", "ms_6_5", ms, msDefs.c_str()) ||
+        !ok("PSMainPlain", "ps_5_1", "ps_6_5", ps, msDefs.c_str())) {
         AVER_WARN("[RHI.D3D12] mesh shaders failed to compile; the IA path stays in use");
         return false;
     }

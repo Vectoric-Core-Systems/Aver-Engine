@@ -1,6 +1,7 @@
 #pragma once
 #include "aver/core/Types.hpp"
 
+#include <string>
 // Generic GPU primitives — the foundation layer that render-feature modules build on.
 //
 // This header is deliberately free of render-feature vocabulary. It knows about textures, buffers,
@@ -278,7 +279,9 @@ constexpr u32 kMeshShaderTrisPerGroup = 64;
 // sharedShaderPrelude(), so both sides are anchored to one owner rather than to a convention nobody
 // enforces.
 //   - vertices: t(srvCount), indices: t(srvCount + 1)  — placed after the declared SRVs so they can
-//     never collide with a layout however many SRVs it declares.
+//     never collide with a layout however many SRVs it declares. Because those two DEPEND on the
+//     layout, the prelude cannot write them as literals: it takes them as -D macros, which
+//     meshGeometryDefines() below computes from the very same field the root signature uses.
 //   - triangle count: 4 root constants at b(kMeshGeometryConstantRegister).
 // Logical constant slots 0..4 map to b0..b4, the top one being a feature's own frame constants, so
 // the mesh geometry block sits above both.
@@ -454,5 +457,16 @@ public:
 // The shared HLSL prelude: cbuffer layouts, vertex structures and helpers used by BOTH the
 // backend's own shaders and feature modules. One owner, so the two can never drift.
 const char* sharedShaderPrelude();
+
+// The -D list pinning the prelude's reserved mesh-geometry registers to a layout's own SRV count,
+// e.g. "AVER_MS_VTX_REG=3;AVER_MS_IDX_REG=4" for a layout declaring three SRVs. Semicolon-separated,
+// so it appends straight onto ShaderDesc::defines.
+//
+// EVERY mesh-shader compile must pass this, and must pass it for the SAME layout the pipeline
+// declares. The prelude #errors without it rather than guessing, because the failure it prevents is
+// invisible: the shader would ask for a register the root signature has since moved a material SRV
+// into, which at best CreateRootSignature rejects and at worst reads a texture as a vertex buffer —
+// no compile error, no debug-layer message, and only on the mesh-shader path.
+std::string meshGeometryDefines(const PipelineLayout& layout);
 
 } // namespace aver::rhi
