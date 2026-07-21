@@ -30,9 +30,14 @@ constexpr u32 kShadowSize = 2048;
 // sized for fewer instances than submit() will accept silently drops the overflow at build time.
 constexpr u32 kMaxDraws = 4096;
 
-// s0 samples the radiance volume, s1 is the shadow map's comparison sampler. Both are static
-// samplers on the pipeline (the Tier-1-friendly choice), so every pipeline that declares the
-// three-SRV table has to carry them.
+// Where the material system's sampler lands in the layout. ONE owner: giSamplers() fills this slot
+// and materialShaderDefines() is told the same number, so the register the shader names and the
+// register the root signature declares cannot drift apart.
+constexpr u32 kMaterialSamplerSlot = 2;
+
+// s0 samples the radiance volume, s1 is the shadow map's comparison sampler, s2 is the material
+// system's surface sampler. All three are static samplers on the pipeline (the Tier-1-friendly
+// choice), so every pipeline that declares the three-SRV table has to carry them.
 void giSamplers(rhi::PipelineLayout& l) {
     l.samplers[0].filter  = rhi::Filter::Linear;
     l.samplers[0].address = rhi::AddressMode::Clamp;
@@ -43,7 +48,18 @@ void giSamplers(rhi::PipelineLayout& l) {
     l.samplers[1].filter  = rhi::Filter::ComparisonLinear;
     l.samplers[1].address = rhi::AddressMode::Clamp;
     l.samplers[1].compare = rhi::CompareOp::LessEqual;
-    l.samplerCount = 2;
+    // s2 belongs to the material system, not to Voxi: it is the sampler pbr::materialShaderPrelude()
+    // reads its five maps through. It lives here because a static sampler is a property of the
+    // PIPELINE LAYOUT, and this module owns that — the material system declares the registers, this
+    // declares the hardware behind them. WRAP because a surface map tiles and a clamped one would
+    // smear its edge row across everything past uv 1; anisotropic because the ground plane is read
+    // at a grazing angle over most of the screen, where trilinear alone goes to mush.
+    //
+    // The array is capped at four, so this leaves exactly one spare.
+    l.samplers[kMaterialSamplerSlot].filter        = rhi::Filter::Anisotropic;
+    l.samplers[kMaterialSamplerSlot].address       = rhi::AddressMode::Wrap;
+    l.samplers[kMaterialSamplerSlot].maxAnisotropy = 8;
+    l.samplerCount = kMaterialSamplerSlot + 1;
 }
 
 // The layout every Voxi raster pipeline declares. Identical shapes share one cached root signature,
@@ -676,7 +692,7 @@ bool VoxiRenderer::createPipelines() {
     // told which registers it landed at. The COMPUTE ones must not be told: they declare no second
     // table, and the material prelude then omits the declarations entirely rather than naming
     // registers their root signatures never declared.
-    const std::string matDefs = pbr::materialShaderDefines(gi.srvCount);
+    const std::string matDefs = pbr::materialShaderDefines(gi.srvCount, kMaterialSamplerSlot);
     auto rasterDefs = [&](const char* extra) { return extra ? matDefs + ";" + extra : matDefs; };
 
     // --- 1. shadow map: depth only, from the sun ---
@@ -791,7 +807,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     const rhi::PipelineLayout gi = giLayout();
     // See createPipelines: every pipeline built here is a raster one and declares the material
     // table, so every shader here is told the registers it landed at.
-    const std::string matDefs = pbr::materialShaderDefines(gi.srvCount);
+    const std::string matDefs = pbr::materialShaderDefines(gi.srvCount, kMaterialSamplerSlot);
     auto rasterDefs = [&](const char* extra) { return extra ? matDefs + ";" + extra : matDefs; };
 
     // --- 6. debug: raymarch the volume to screen (shares the prelude's fullscreen triangle). ---

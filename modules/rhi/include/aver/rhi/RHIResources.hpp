@@ -153,6 +153,8 @@ enum class Filter : u8 {
     // Depth comparison sampling (SampleCmpLevelZero). Substituting Linear here compiles, runs, and
     // returns raw depth per tap — it reads as "shadows too weak", never as an error.
     ComparisonLinear,
+    // Trilinear plus anisotropy, for surface maps read at a grazing angle. Reads maxAnisotropy.
+    Anisotropic,
 };
 enum class AddressMode : u8 { Clamp, Wrap };
 enum class CompareOp : u8 { Never, Less, LessEqual, Always };
@@ -164,6 +166,9 @@ struct SamplerDesc {
     // Leave unclamped for anything that samples a mip chain at a fractional level: clamping this
     // makes every level past the clamp unreachable.
     f32         maxLod  = 3.402823466e+38f;
+    // Filter::Anisotropic only. Defaulted to 1 rather than 0 because D3D12 rejects a zero here, and
+    // a zeroed SamplerDesc must be a legal sampler whatever filter is later chosen.
+    u8          maxAnisotropy = 1;
 };
 
 // ---------------------------------------------------------------- shaders & pipelines

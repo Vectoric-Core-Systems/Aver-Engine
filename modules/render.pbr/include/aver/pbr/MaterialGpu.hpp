@@ -29,7 +29,11 @@ enum MaterialFlag : u32 {
 // cross-module ABI with no compiler behind it, so it gets the same one-owner treatment as
 // rhi::sharedShaderPrelude()'s cbuffer layouts.
 struct MaterialConstants {
-    f32 baseColorFactor[4];   // rgba, as authored (sRGB-encoded rgb, matching gBaseColor)
+    // rgb LINEAR, decoded from the authored sRGB by packMaterial(); a is authored coverage and is
+    // not a colour, so it is not decoded. The decode happens here rather than in the shader so that
+    // everything the shading model touches is linear with no exceptions -- a shader that decoded
+    // some of its inputs and not others is one edit away from decoding the wrong one.
+    f32 baseColorFactor[4];
     f32 emissiveFactor[3];    // rgb radiance
     f32 metallicFactor;
     f32 roughnessFactor;

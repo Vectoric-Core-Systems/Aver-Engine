@@ -206,6 +206,7 @@ AverVertex averVertexOf(VoxOut i) {
     v.wpos = i.wpos;
     v.N    = normalize(i.nrm);
     v.V    = float3(0, 0, 0);
+    v.uv   = i.uv;
     return v;
 }
 

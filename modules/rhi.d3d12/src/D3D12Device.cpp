@@ -462,6 +462,7 @@ D3D12_FILTER toFilter(Filter f) {
         // Hardware PCF. Mip-point rather than mip-linear because a comparison sampler reads one
         // level of a shadow map, and mip-linear would silently blend two of them.
         case Filter::ComparisonLinear: return D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+        case Filter::Anisotropic: return D3D12_FILTER_ANISOTROPIC;
     }
     return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
 }
@@ -2344,6 +2345,9 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
         samplers[i].AddressU = samplers[i].AddressV = samplers[i].AddressW = toAddress(layout.samplers[i].address);
         samplers[i].ComparisonFunc = toComparison(layout.samplers[i].compare);
         samplers[i].MaxLOD = layout.samplers[i].maxLod;
+        // Read for D3D12_FILTER_ANISOTROPIC only, but always in range: zero is rejected outright,
+        // and a rejected static sampler fails the whole root signature rather than one sampler.
+        samplers[i].MaxAnisotropy = layout.samplers[i].maxAnisotropy ? layout.samplers[i].maxAnisotropy : 1;
         samplers[i].ShaderRegister = i;
         samplers[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     }
