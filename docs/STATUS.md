@@ -162,7 +162,8 @@ Dear ImGui (docking) hosted inside the D3D12 backend; dark Unreal-style theme.
   | ENGINE — C++ | New C++ Class… | `.hpp`/`.cpp` in a picked `modules/<m>/` | **yes** |
   | — | Compile Scripts | `dotnet build -o <project>/Binaries/Scripts`, transcript in a modal | — |
   | — | Reload Scripts | the same build, then unload + reload in the running editor | — |
-  | — | Open Project Folder / Open in Visual Studio | shell-out | — |
+  | — | Open Project Folder | shell-out to Explorer | — |
+  | — | Open Scripts In ▸ | whichever IDEs are installed; shell association always last | — |
 
   `.ocproject` carries no build integration, so **game C++ has nowhere project-side to live** and
   a new module goes into the ENGINE. The item labels, the group headers and the modals all say so.
@@ -172,6 +173,20 @@ Dear ImGui (docking) hosted inside the D3D12 backend; dark Unreal-style theme.
   item is **disabled with an explaining tooltip** rather than hidden. The C# modals and the
   generated file headers now say that **the script DOES run**, and say what it can and cannot
   reach — the log and the render modules' live settings, never the scene. See §4f.
+
+  **Compile errors are clickable.** `sandbox/src/IdeIntegration.*` locates the code editors that
+  are actually on the machine — Visual Studio through `vswhere.exe`, VS Code and Rider through
+  their install locations — and parses MSBuild's diagnostics out of the build transcript into
+  file/line/column. Clicking one in the Compile Scripts modal opens that position: `code --goto
+  <file>:<line>:<col>`, or `devenv /edit <file> /command "Edit.GoTo <line>"`. Detection runs once
+  on a worker thread and is cached, so nothing in the frame loop ever waits on a process launch.
+  A line the parser did not understand is still printed verbatim, and a machine where nothing is
+  detected still gets the shell association it always had.
+
+  Measured caveat on the Visual Studio jump: against an instance that is **already running** the
+  caret lands exactly on the requested line. Against a **cold** devenv the file opens but the
+  caret does not move, because `/command` runs before the document has loaded and devenv offers
+  no command-line synchronisation to wait on.
 
   **Neither CMakeLists is auto-edited.** The top-level one is not, because wiring a module into
   the build is a deliberate act and every existing skeleton under `modules/` is deliberately

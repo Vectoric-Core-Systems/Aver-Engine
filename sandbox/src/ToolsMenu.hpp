@@ -11,6 +11,7 @@
 #include "aver/core/Types.hpp"
 
 #include "EngineScaffold.hpp"
+#include "IdeIntegration.hpp"
 #include "ProjectScaffold.hpp"
 
 #include <atomic>
@@ -82,6 +83,7 @@ private:
     int  armCompile_ = 0;           // --compile-scripts: frames left to fire the build once
     int  armReload_ = 0;            // --reload-scripts: frames left before the reload fires
     ReloadFn reload_;               // empty in a build with no scripting host
+    bool idesLogged_ = false;       // the detected-IDE list is logged once, when the scan lands
 
     char name_[96] = {};            // shared by all four New ... modals; one at a time is open
     char purpose_[256] = {};        // New C++ Module only
@@ -97,6 +99,12 @@ private:
     struct Compile {
         std::atomic<bool> done{false};
         std::string output;
+        // The same transcript, one entry per line, with the diagnostics among them parsed into a
+        // file/line/column that can be clicked. Built on the BUILD thread beside `output` and
+        // published by the same `done` store — parsing a few hundred lines is cheap, but doing it
+        // in the draw call would redo it every frame the modal is open.
+        std::vector<BuildLine> lines;
+        int errors = 0, warnings = 0;
         int exitCode = -1;
         std::string csproj;
         std::string outDir;         // -o passed to dotnet; also where the host is pointed

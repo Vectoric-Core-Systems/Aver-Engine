@@ -25,6 +25,11 @@ opens as a real project in an IDE.
 |---|---|
 | **Compile Scripts** | `dotnet build` into `Binaries/Scripts`. The editor keeps running whatever it already loaded. |
 | **Reload Scripts** | Rebuild, then unload and reload in place. Running behaviours get `OnShutdown`, the new ones get `OnStart`. No editor restart. |
+| **Open Scripts In ▸** | Opens `Content/Scripts` in a detected IDE — Visual Studio, VS Code or Rider — falling back to whatever the shell has registered for `.csproj`. |
+
+A failed build lists its diagnostics as **clickable rows**: clicking one opens that file at that
+line and column in the detected IDE. Lines the parser did not recognise are still shown verbatim,
+so nothing the compiler said is hidden.
 
 Reload works because user assemblies are loaded into a **collectible `AssemblyLoadContext`** from a
 memory stream — the DLL is never locked, and the old context is genuinely unloadable. **No state
