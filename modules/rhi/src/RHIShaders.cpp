@@ -14,6 +14,9 @@ namespace aver::rhi {
 // The HLSL below hardcodes these; the C++ side reads the constants. Neither can move alone.
 static_assert(kMeshShaderTrisPerGroup == 64, "AVER_MS_TRIS in the prelude is written out as 64");
 static_assert(kMeshGeometryConstantRegister == 5, "MeshCB in the prelude is written out as b5");
+static_assert(kObjectConstantRegister == 1, "PerObject in the prelude is written out as b1");
+static_assert(kObjectConstantDwords == 32,
+              "PerObject below is 32 dwords: world 16, base colour 4, material 4, model 4, emissive 4");
 
 const char* sharedShaderPrelude() {
     return R"(
@@ -28,10 +31,22 @@ cbuffer PerFrame : register(b0) {
     float4   gSkyHorizon;  // rgb
     float4   gFogColor;    // rgb, a = density
 };
+// Per draw. The shading model is an ID rather than a shader permutation: a uniform branch costs one
+// scalar compare per wave, where a permutation would multiply the pipeline count of every renderer
+// that draws scene geometry -- Voxi already builds eleven and rebuilds four of them on every MSAA
+// change.
 cbuffer PerObject : register(b1) {
     float4x4 gWorld;
     float4   gBaseColor;
-    float4   gMaterial;   // x=metallic, y=roughness, z=unlit(0/1)
+    // z is the unlit flag the FROZEN no-material path below still reads. The material system reads
+    // gShadingModel instead; the two are not kept in step, because the frozen path exists precisely
+    // so that it never has to be.
+    float4   gMaterial;      // x=metallic, y=roughness, z=unlit(0/1) for plainShadeSurface only
+    uint     gShadingModel;  // which shading model evaluates this draw
+    float    gReflectance;   // normal-incidence reflectance of the dielectric base
+    float    gF90;           // grazing-angle reflectance
+    float    _objPad;
+    float4   gEmissive;      // rgb, radiance this surface emits on its own
 };
 
 static const float PI = 3.14159265;

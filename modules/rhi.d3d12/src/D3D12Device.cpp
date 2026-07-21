@@ -196,6 +196,22 @@ static void uiSrvFree(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE cpu,
 }
 #endif
 
+// The tail of the per-draw b1 block: shading model, then its parameters. drawMesh has no material
+// to hand over yet, so both paths write the same defaults, and they write them from ONE place --
+// two copies that disagreed would shade the feature-overridden path differently from the backend's
+// own with nothing to report it.
+//
+// The defaults are the values the shading maths used to hardcode: 0.04 dielectric reflectance,
+// f90 = 1, no emission.
+void writeShadingConstants(f32* block) {
+    const u32 model = 0;   // AVER_MODEL_STANDARD in the material prelude
+    std::memcpy(block + 24, &model, sizeof(model));   // a uint in the block, not a converted float
+    block[25] = 0.04f;
+    block[26] = 1.0f;
+    block[27] = 0.0f;
+    block[28] = block[29] = block[30] = block[31] = 0.0f;   // emissive
+}
+
 D3D12_RESOURCE_DESC bufferDesc(u64 bytes) {
     D3D12_RESOURCE_DESC d{};
     d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -281,7 +297,7 @@ constexpr UINT kMeshInputLayoutCount = sizeof(kMeshInputLayout) / sizeof(kMeshIn
 // passes them as bare integers to SetGraphicsRoot*, where a stale number binds the wrong parameter
 // instead of failing -- the failure mode that cost this project a debugging session already.
 constexpr UINT kSceneFrameParam  = 0;   // b0, the engine per-frame block
-constexpr UINT kSceneObjectParam = 1;   // b1, 24 root constants: world + colour + material
+constexpr UINT kSceneObjectParam = 1;   // b1, kObjectConstantDwords root constants
 // The mesh-shader signature repeats those two and appends the geometry the input assembler would
 // otherwise have fetched. Only the PARAMETER indices live here; the registers come from the base
 // below, which is also what the prelude is told through -D, so the two cannot drift apart.
@@ -1099,7 +1115,7 @@ bool D3D12Device::createPipeline() {
     params[kSceneFrameParam].Descriptor.ShaderRegister = kEngineFrameConstantRegister;
     params[kSceneObjectParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[kSceneObjectParam].Constants.ShaderRegister = 1;
-    params[kSceneObjectParam].Constants.Num32BitValues = 24;
+    params[kSceneObjectParam].Constants.Num32BitValues = kObjectConstantDwords;
     for (auto& rp : params) rp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC rsd{};
@@ -1286,7 +1302,7 @@ bool D3D12Device::initMeshShaders() {
         p[kSceneFrameParam].Descriptor.ShaderRegister = kEngineFrameConstantRegister;
         p[kSceneObjectParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         p[kSceneObjectParam].Constants.ShaderRegister = 1;
-        p[kSceneObjectParam].Constants.Num32BitValues = 24;
+        p[kSceneObjectParam].Constants.Num32BitValues = kObjectConstantDwords;
         p[kMeshVertexParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; p[kMeshVertexParam].Descriptor.ShaderRegister = kSceneMeshSrvBase;
         p[kMeshIndexParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; p[kMeshIndexParam].Descriptor.ShaderRegister = kSceneMeshSrvBase + 1;
         p[kMeshCountParam].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -1579,11 +1595,12 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         const void* cb = nullptr; u32 cbBytes = 0;
         if (f->sceneConstants(&cb, &cbBytes) && cb && cbBytes)
             rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
-        f32 fc[24];
+        f32 fc[kObjectConstantDwords];
         std::memcpy(fc, world, 16 * sizeof(f32));
         std::memcpy(fc + 16, color, 4 * sizeof(f32));
         fc[20] = metallic; fc[21] = roughness; fc[22] = 0.0f; fc[23] = 0.0f;
-        rhiContext_->setConstants(1, fc, 24);
+        writeShadingConstants(fc);
+        rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         if (msActive_ && msPso_ && !wireframe_) rhiContext_->dispatchMeshFor(mesh);
         else                                    rhiContext_->drawMesh(mesh);
         boundRootSig_ = nullptr;   // the context bound the feature's root signature, not ours
@@ -1595,11 +1612,12 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     const bool useMs = msActive_ && msPso_ && !wireframe_;
     bindGraphicsRoot(useMs ? msRootSig_.Get() : rootSig_.Get());
     cmdList_->SetPipelineState(useMs ? msPso_.Get() : (wireframe_ ? wirePso_.Get() : pso_.Get()));
-    f32 consts[24];
+    f32 consts[kObjectConstantDwords];
     std::memcpy(consts, world, 16 * sizeof(f32));
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
     consts[20] = metallic; consts[21] = roughness; consts[22] = 0.0f; consts[23] = 0.0f;
-    cmdList_->SetGraphicsRoot32BitConstants(kSceneObjectParam, 24, consts, 0);
+    writeShadingConstants(consts);
+    cmdList_->SetGraphicsRoot32BitConstants(kSceneObjectParam, kObjectConstantDwords, consts, 0);
     if (useMs) { dispatchMesh(m); return; }
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList_->IASetVertexBuffers(0, 1, &m.vbv);

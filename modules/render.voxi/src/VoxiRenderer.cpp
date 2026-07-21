@@ -51,7 +51,9 @@ rhi::PipelineLayout giLayout() {
     rhi::PipelineLayout l{};
     l.srvCount = 3;              // t0 volume, t1 shadow map, t2 acceleration structure
     l.uavCount = 2;              // u0 volume mip 0, u1 injection accumulator
-    l.constantDwords[1] = 24;    // b1: world (16) + base colour (4) + material (4)
+    // b1: the per-draw block the shared prelude declares. Never a literal -- the root signature
+    // and the cbuffer must agree, and rhi::kObjectConstantDwords is the one place that says so.
+    l.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
     giSamplers(l);
     return l;
 }
@@ -68,6 +70,22 @@ rhi::PipelineLayout giLayout() {
 const char* voxiShaderPrelude() {
     static const std::string s = std::string(rhi::sharedShaderPrelude()) + pbr::materialShaderPrelude();
     return s.c_str();
+}
+
+// The tail of the per-draw block: shading model, then its parameters. Split out because the draw
+// list carries no material yet, so both of Voxi's own passes would otherwise repeat the defaults --
+// and a pass that repeated them WRONG would light the volume differently from the screen with every
+// gate still green.
+//
+// The defaults are the values the shading maths used to hardcode: 0.04 dielectric reflectance,
+// f90 = 1, no emission.
+void writeShadingConstants(f32* block) {
+    const u32 model = 0;   // AVER_MODEL_STANDARD
+    std::memcpy(block + 24, &model, sizeof(model));   // a uint in the block, not a converted float
+    block[25] = 0.04f;
+    block[26] = 1.0f;
+    block[27] = 0.0f;
+    block[28] = block[29] = block[30] = block[31] = 0.0f;   // emissive
 }
 
 // Shader blobs are CPU-side only: a pipeline copies what it needs at creation. Collecting them
@@ -361,9 +379,9 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
     ctx.setViewport(0, 0, kShadowSize, kShadowSize);
     ctx.setScissor(0, 0, kShadowSize, kShadowSize);
     for (const Draw& d : drawsPrev_) {
-        f32 consts[24]{};
-        std::memcpy(consts, d.world, 16 * sizeof(f32));   // depth-only: colour/material unused
-        ctx.setConstants(1, consts, 24);
+        f32 consts[rhi::kObjectConstantDwords]{};
+        std::memcpy(consts, d.world, 16 * sizeof(f32));   // depth-only: nothing else is read
+        ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
         ctx.drawMesh(d.mesh);
     }
     ctx.textureBarrier(shadowTex_, rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderResource);
@@ -397,11 +415,12 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     // Deliberately NOT skipped when the list is empty: a scene emptied of geometry must end up with
     // a cleared volume rather than keeping the last frame's radiance for ever.
     for (const Draw& d : drawsPrev_) {
-        f32 consts[24];
+        f32 consts[rhi::kObjectConstantDwords];
         std::memcpy(consts, d.world, 16 * sizeof(f32));
         std::memcpy(consts + 16, d.color, 4 * sizeof(f32));
         consts[20] = d.metallic; consts[21] = d.roughness; consts[22] = 0.0f; consts[23] = 0.0f;
-        ctx.setConstants(1, consts, 24);
+        writeShadingConstants(consts);
+        ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
         if (useMs) ctx.dispatchMeshFor(d.mesh);
         else       ctx.drawMesh(d.mesh);
     }

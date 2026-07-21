@@ -287,6 +287,13 @@ constexpr u32 kMeshShaderTrisPerGroup = 64;
 // the mesh geometry block sits above both.
 constexpr u32 kMeshGeometryConstantRegister = 5;
 constexpr u32 kFeatureFrameConstantRegister = 4;
+// b1 is the per-draw block the shared prelude declares: the transform, then the shading constants
+// each draw carries. ONE owner for the size, because a root signature and a shader that disagree
+// about it is not a validation error — it is a GPU-side read of whatever the last draw left behind,
+// which looks like a plausible image with the wrong parameters. Every pipeline that draws geometry
+// declares exactly this many dwords at slot 1, and every draw writes exactly this many.
+constexpr u32 kObjectConstantRegister = 1;
+constexpr u32 kObjectConstantDwords = 32;
 // b0 is the engine's PerFrame block (gViewProj, gCamPos, gLightDir, gLightColor, gAmbient, gSky*).
 // Owned and bound by the backend on every pipeline bind — see PipelineLayout::constantDwords.
 constexpr u32 kEngineFrameConstantRegister = 0;

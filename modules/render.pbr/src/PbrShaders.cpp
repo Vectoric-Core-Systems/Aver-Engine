@@ -15,8 +15,15 @@ namespace aver::pbr {
 
 const char* materialShaderPrelude() {
     return R"(
+// ---- shading models. The id arrives per draw in gShadingModel and is dispatched by a UNIFORM
+// switch, not by a pipeline permutation: the branch is scalar and free, while a permutation would
+// multiply every scene pipeline a renderer builds by the number of models. ----
+#define AVER_MODEL_STANDARD 0u   // metallic / roughness, Cook-Torrance GGX
+#define AVER_MODEL_UNLIT    1u   // authored colour, no lighting and no camera post
+
 // ---- BRDF terms. Private to the material system: the renderer has no business calling these. ----
-float3 fresnelSchlick(float ct, float3 F0){ return F0 + (1.0-F0)*pow(saturate(1.0-ct),5.0); }
+// f90 is the grazing-angle reflectance. At 1.0 this is the textbook Schlick term.
+float3 fresnelSchlick(float ct, float3 F0, float f90){ return F0 + (f90-F0)*pow(saturate(1.0-ct),5.0); }
 float distGGX(float ndh, float a){ float a2=a*a; float d=ndh*ndh*(a2-1.0)+1.0; return a2/(PI*d*d+1e-6); }
 float geomSchlick(float nd, float k){ return nd/(nd*(1.0-k)+k); }
 
@@ -80,8 +87,10 @@ struct AverSurface {
     float3 F0;
     float3 F;            // Fresnel against the dominant light
     float3 kdAlbedo;     // the diffuse response, (1-F)(1-metallic) * albedo
-    float  metallic, rough, ndv;
+    float3 emissive;     // self-emitted radiance
+    float  metallic, rough, ndv, f90;
     float  alpha;
+    uint   model;        // AVER_MODEL_*
     bool   display;      // authored colour, bypassing lighting and camera post
     float4 displayColor;
 };
@@ -99,20 +108,25 @@ AverSurface averEvalMaterial(AverVertex v, AverLight l) {
     s.metallic = saturate(gMaterial.x);
     s.rough = clamp(gMaterial.y, 0.045, 1.0);
     s.alpha = gBaseColor.a;
-    s.display = gMaterial.z > 0.5;          // unlit (gizmo/grid)
+    s.model = gShadingModel;
+    s.emissive = gEmissive.rgb;
+    s.f90 = gF90;
+    s.display = gShadingModel == AVER_MODEL_UNLIT;
     s.displayColor = float4(gBaseColor.rgb, gBaseColor.a);
     s.albedo = srgbToLin(gBaseColor.rgb);
     s.ndv = saturate(dot(v.N, v.V));
-    s.F0 = lerp(0.04.xxx, s.albedo, s.metallic);
-    s.F = fresnelSchlick(saturate(dot(s.H, v.V)), s.F0);
+    // The dielectric base reflectance is authored rather than the usual hardcoded 0.04, because
+    // 0.04 is right for common dielectrics and wrong for water, gemstones and coated surfaces.
+    s.F0 = lerp(gReflectance.xxx, s.albedo, s.metallic);
+    s.F = fresnelSchlick(saturate(dot(s.H, v.V)), s.F0, s.f90);
     s.kdAlbedo = ((1.0 - s.F) * (1.0 - s.metallic)) * s.albedo;
     return s;
 }
 
 // True when the shading model produces an authored display colour that must reach the backbuffer
-// untouched - no lighting, no fog, no tonemap. A renderer MUST honour this before shading:
-// averShadeDirect / averShadeIndirect do not re-test it, because for every lit pixel that test is
-// dead work in the inner loop.
+// untouched - no lighting, no fog, no tonemap. A renderer MUST honour this before shading; the
+// shade calls below then contribute nothing for that model, so forgetting it costs the image
+// rather than corrupting it.
 bool averDisplayColour(AverSurface s, out float4 rgba) {
     rgba = s.displayColor;
     return s.display;
@@ -133,25 +147,40 @@ float3 averDiffuseAlbedo(AverSurface s) { return s.albedo; }
 // Direct lighting: Cook-Torrance GGX. NdotL and the light's visibility are applied here, so a
 // renderer never multiplies radiance by a cosine it does not own the convention for.
 float3 averShadeDirect(float3 radiance, AverSurface s, AverLight l) {
-    float a = s.rough * s.rough;
-    float k = (s.rough + 1.0); k = k * k / 8.0;
-    float ndl = saturate(dot(s.N, l.direction));
-    float D = distGGX(saturate(dot(s.N, s.H)), a);
-    float G = geomSchlick(s.ndv, k) * geomSchlick(ndl, k);
-    float3 spec = (D * G * s.F) / (4.0 * s.ndv * ndl + 1e-4);
-    return radiance + (s.kdAlbedo / PI + spec) * l.radiance * ndl * l.visibility;
+    switch (s.model) {
+    case AVER_MODEL_UNLIT:
+        return radiance;   // an unlit surface receives nothing; it only emits, in averShadeIndirect
+    default: {
+        float a = s.rough * s.rough;
+        float k = (s.rough + 1.0); k = k * k / 8.0;
+        float ndl = saturate(dot(s.N, l.direction));
+        float D = distGGX(saturate(dot(s.N, s.H)), a);
+        float G = geomSchlick(s.ndv, k) * geomSchlick(ndl, k);
+        float3 spec = (D * G * s.F) / (4.0 * s.ndv * ndl + 1e-4);
+        return radiance + (s.kdAlbedo / PI + spec) * l.radiance * ndl * l.visibility;
+    }
+    }
 }
 
-// Ambient, bounce and environment specular, in that order.
+// Ambient, bounce and environment specular, in that order, then self-emission. Emissive rides with
+// the view-independent terms because it is neither direct nor bounced, and a third entry point for
+// one addition would put the ordering of the sum back into the renderer's hands.
 float3 averShadeIndirect(float3 radiance, AverSurface s, AverIndirect ind) {
-    float3 ambient = s.kdAlbedo * ind.ambient * ind.ambientScale;
-    float3 envSpec = ind.specular * fresnelSchlick(s.ndv, s.F0) * (1.0 - s.rough);
-    float3 indirect = s.kdAlbedo * ind.diffuse;
-    ambient *= ind.occlusion;   // whatever produced the bounce already knows what is occluded
-    radiance += ambient;
-    radiance += indirect;
-    radiance += envSpec * 0.35;
-    return radiance;
+    switch (s.model) {
+    case AVER_MODEL_UNLIT:
+        return radiance + s.emissive;
+    default: {
+        float3 ambient = s.kdAlbedo * ind.ambient * ind.ambientScale;
+        float3 envSpec = ind.specular * fresnelSchlick(s.ndv, s.F0, s.f90) * (1.0 - s.rough);
+        float3 indirect = s.kdAlbedo * ind.diffuse;
+        ambient *= ind.occlusion;   // whatever produced the bounce already knows what is occluded
+        radiance += ambient;
+        radiance += indirect;
+        radiance += envSpec * 0.35;
+        radiance += s.emissive;
+        return radiance;
+    }
+    }
 }
 )";
 }
