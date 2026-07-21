@@ -277,11 +277,25 @@ void PSVoxel(VoxOut i) {
     if (!insideVolume(uvw)) return;
     float3 N = normalize(i.nrm);
     float3 L = normalize(gLightDir.xyz);
-    float3 albedo = srgbToLin(gBaseColor.rgb);
     // SHADOWED injection: a surface in shadow must not emit sun radiance into the volume, or the
     // bounce lighting leaks through walls and shadowed areas glow.
     float ndl = saturate(dot(N, L));
-    float3 radiance = albedo * (srgbToLin(gLightColor.rgb) * ndl * shadowFactor(i.wpos, ndl)
+
+    // The albedo injected here is the SAME albedo the lit pass shades with, because it is asked for
+    // rather than recomputed: two copies of srgbToLin(gBaseColor.rgb) agreed only for as long as
+    // nobody touched one of them, and the day a material gains a base-colour map the copy that was
+    // not updated would light the scene with the wrong bounce colour and no gate would say so.
+    //
+    // averDiffuseAlbedo is contractually view-independent, which is what makes this legal: there is
+    // no camera in a voxelisation pass, so the vertex adapter hands the material a zero view vector
+    // and any view-dependent term would be meaningless here.
+    AverLight sun;
+    sun.direction  = L;
+    sun.radiance   = srgbToLin(gLightColor.rgb);
+    sun.visibility = shadowFactor(i.wpos, ndl);
+    AverSurface s = averEvalMaterial(averVertexOf(i), sun);
+    float3 albedo = averDiffuseAlbedo(s);
+    float3 radiance = albedo * (sun.radiance * ndl * sun.visibility
                                 + skyColor(N) * gAmbient.r);
     // Bounded before it is quantised so a pathological light colour cannot overflow the 32-bit
     // accumulator; nothing in a physically sane scene comes close to this.
