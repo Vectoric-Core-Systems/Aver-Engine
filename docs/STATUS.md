@@ -238,6 +238,26 @@ one-code move hides completely inside `%.2f`. Compare the raw codes, never the f
 `0x141` TDRs around any render batch:
 `Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1001}` filtered for `LiveKernelEvent`.
 
+**The probe is self-validating.** The line now carries the 3D viewport rect and a tag:
+
+```
+[Sandbox] probe (1375,819) px (0.35,0.36,0.42) raw (90,93,108) viewport (0,198 2750x1242) in-viewport
+[Sandbox] probe (100,50)   px (0.10,0.10,0.11) raw (26,26,28)  viewport (0,198 2750x1242) OUTSIDE-VIEWPORT
+[ERROR] [Sandbox] PROBE INVALID: (100,50) is outside the 3D viewport (...) -- the value above is
+        editor chrome, not a shading result
+```
+
+A pixel outside the rect samples editor chrome — the dock clear colour reads `raw(14,14,16)` and had
+already been mistaken once for a shading regression, because nothing in the line said where the
+sample came from. The tag is on the SAME line as the raw codes, so the grep that reads the value
+cannot miss it, and the value is still printed: suppressing it is just a different way to be misread.
+Three states: `in-viewport`, `OUTSIDE-VIEWPORT` (ERROR), and `VIEWPORT-MOVED` (WARN) for a resize
+between the capture request and the read, where the latched rect no longer describes what was drawn.
+The rect is latched **at the request frame**, not at the report frame, since that is the state that
+produced the value. The default probe was already the viewport centre expressed off the rect rather
+than an absolute pixel, so it follows the layout; `--probe X Y` stays absolute for the cast-shadow
+gate, which is exactly the case that needs the containment check.
+
 Debug views that paid for themselves: **Voxel Radiance** (viewport `Lit` dropdown or `--gi-debug`)
 separates "voxelisation broken" from "cone tracing broken"; the centre-pixel readout in the log is
 a cheap A/B oracle (e.g. GI on/off showed red 0.70→0.73 with G/B fixed = orange bounce).

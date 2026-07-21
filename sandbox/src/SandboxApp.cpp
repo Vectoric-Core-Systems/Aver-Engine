@@ -1374,14 +1374,44 @@ private:
         // -- so any shadow/ray-tracing A/B must probe a sunlit or cast-shadow pixel instead.
         const u32 px_ = probeX_ ? probeX_ : (u32)(vpX_ + vpW_*0.5f);
         const u32 py_ = probeY_ ? probeY_ : (u32)(vpY_ + vpH_*0.5f);
-        if (f==sf) e.device()->requestCapture(px_, py_);
+        if (f==sf) {
+            e.device()->requestCapture(px_, py_);
+            // Latch the rect the request was made against. The rect is written by buildUI and can
+            // change under a resize between the request and the read, and it is the rect AT REQUEST
+            // TIME that decides what the captured pixel actually shows.
+            capX_=px_; capY_=py_; capVpX_=vpX_; capVpY_=vpY_; capVpW_=vpW_; capVpH_=vpH_;
+        }
         if (f>sf && !capDone_){
+            // A pixel outside the 3D viewport samples editor chrome -- the dock clear colour reads
+            // as raw(14,14,16) and looks exactly like a shading result to anything grepping for a
+            // raw code. That has already been misread as a rendering regression once, so the probe
+            // line states the rect it was taken against and tags the sample IN/OUTSIDE it. The
+            // value is still printed: a suppressed number is a different way to be misread.
+            const bool insideReq = (f32)capX_ >= capVpX_ && (f32)capX_ < capVpX_+capVpW_ &&
+                                   (f32)capY_ >= capVpY_ && (f32)capY_ < capVpY_+capVpH_;
+            // Compared against the CURRENT rect too, because a resize between request and read
+            // means the latched rect no longer describes what was drawn.
+            const bool rectStable = capVpX_==vpX_ && capVpY_==vpY_ && capVpW_==vpW_ && capVpH_==vpH_;
+            const char* tag = !insideReq ? "OUTSIDE-VIEWPORT"
+                            : !rectStable ? "VIEWPORT-MOVED"
+                                          : "in-viewport";
             // The raw 8-bit codes as well as the rounded floats: at two decimal places a whole code
             // of movement can hide inside one printed digit, which is exactly how a one-code-wide
             // wobble in the GI path went unnoticed while a three-code one did not.
-            f32 px[4]; if (e.device()->getCapture(px))
-                AVER_INFO("[Sandbox] probe ({},{}) px ({:.2f},{:.2f},{:.2f}) raw ({},{},{})", px_, py_, px[0],px[1],px[2],
-                          (int)(px[0]*255.0f+0.5f), (int)(px[1]*255.0f+0.5f), (int)(px[2]*255.0f+0.5f));
+            f32 px[4]; if (e.device()->getCapture(px)) {
+                AVER_INFO("[Sandbox] probe ({},{}) px ({:.2f},{:.2f},{:.2f}) raw ({},{},{}) viewport ({},{} {}x{}) {}",
+                          capX_, capY_, px[0],px[1],px[2],
+                          (int)(px[0]*255.0f+0.5f), (int)(px[1]*255.0f+0.5f), (int)(px[2]*255.0f+0.5f),
+                          (int)capVpX_, (int)capVpY_, (int)capVpW_, (int)capVpH_, tag);
+                if (!insideReq)
+                    AVER_ERROR("[Sandbox] PROBE INVALID: ({},{}) is outside the 3D viewport ({},{} {}x{}) "
+                               "-- the value above is editor chrome, not a shading result",
+                               capX_, capY_, (int)capVpX_, (int)capVpY_, (int)capVpW_, (int)capVpH_);
+                else if (!rectStable)
+                    AVER_WARN("[Sandbox] PROBE SUSPECT: the viewport moved to ({},{} {}x{}) after the "
+                              "capture was requested -- re-run before trusting the value above",
+                              (int)vpX_, (int)vpY_, (int)vpW_, (int)vpH_);
+            }
             if (!shot_.empty()){ std::vector<u8> img; u32 iw=0,ih=0;
                 if (e.device()->getFrameImage(img,iw,ih)&&iw&&ih && stbi_write_png(shot_.c_str(),(int)iw,(int)ih,4,img.data(),(int)iw*4))
                     AVER_INFO("[Sandbox] screenshot: {} ({}x{})", shot_, iw, ih); }
@@ -1404,6 +1434,10 @@ private:
     f32 skyZenith_[3]={0.19f,0.42f,0.78f}, skyHorizon_[3]={0.72f,0.80f,0.90f};
     f32 fogColor_[3]={0.70f,0.78f,0.88f}, fogDensity_=0.014f;
     bool capDone_=false;
+    // The pixel actually requested and the viewport rect it was requested against, latched at the
+    // request frame so the report a few frames later describes the state that produced the value.
+    u32 capX_=0, capY_=0;
+    f32 capVpX_=0, capVpY_=0, capVpW_=0, capVpH_=0;
     // editor viewport aids
     rhi::LineHandle gridMesh_=0;
     rhi::LineHandle gzMove_[3]={0,0,0}, gzMoveHi_[3]={0,0,0};
