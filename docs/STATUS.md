@@ -2,7 +2,7 @@
 
 Living record of where the engine stands and what's next. Updated 2026-07-21.
 `git log --oneline | wc -l` and `git rev-parse HEAD` are the authority; the last phase recorded here
-is the in-process CLR host and its hot reload (§4f).
+is degraded-device testing — the capability clamp, WARP, and the three defects they found (§4g).
 
 Read this first after a context compaction, then `docs/ARCHITECTURE.md` (module DAG),
 `docs/MINIMUM_SPECS.md` (hardware requirements / launcher spec),
@@ -237,7 +237,8 @@ input and watch a per-frame heartbeat instead.
 
 Dev flags on `Sandbox.exe`: `--frames N`, `--screenshot out.png`, `--tool <select|move|rotate|scale>`,
 `--project-settings`, `--new-script`, `--tools-menu`, `--compile-scripts`, `--reload-scripts [N]`,
-`--start-screen`, `--msaa N`, `--gi`, `--gi-debug`, `--rt`, `--ms`, `--probe X Y`, `--scripts <dir>`.
+`--start-screen`, `--msaa N`, `--gi`, `--gi-debug`, `--rt`, `--ms`, `--probe X Y`, `--scripts <dir>`,
+`--force-caps <list>`, `--warp` (§4g).
 
 `--scripts <dir>` points the CLR host at a directory of user script assemblies (relative to the
 executable unless absolute) and **overrides everything else**. Without it the host reads
@@ -956,7 +957,121 @@ configured and built again for this phase, and `--frames 40` / `--gi` / `--probe
 `--scripts SampleScripts` passed alongside returned `raw(90,93,108)` / `raw(104,91,104)` /
 `raw(64,79,102)`, i.e. the flag is accepted and ignored exactly as before.
 
-## 4d. NOT DONE — open work, roughly in value order
+## 4g. Degraded-device testing — the fallbacks are now EXECUTABLE, and three are broken
+
+The engine has only ever run on an RX 7800 XT, so every capability gate in it was a reasoned claim.
+This phase built the two things that make those paths runnable here and then **catalogued** what they
+produce. It deliberately fixes nothing: diagnosis and repair are separate so the diagnosis stays
+honest. The three defects found are listed in §4d as items 18–20.
+
+### The two switches
+
+- **`--force-caps <list>`** — a clamp on what `DeviceCaps` reports. Tokens, comma-separated:
+  `no-rt`, `no-ms`, `no-cons-raster`, `no-typed-uav`, `no-dxc`, `sm=<51|60|61|65|66>`,
+  `msaa=<1|2|4|8>`, `tier1`. An unrecognised token is an ERROR and the **whole** override is
+  discarded (running half-clamped would test a device the command line did not name).
+- **`--warp`** — selects the D3D12 software rasteriser via `IDXGIFactory::EnumWarpAdapter`. If WARP
+  is unavailable the search falls through to hardware rather than failing, per the engine's
+  decline-and-carry-on rule.
+
+Two properties keep the clamp safe to leave in the product build. `clampCaps()` is **monotonically
+reducing** — it takes minimums and clears flags, and finishes by re-clamping every field against the
+hardware value it was handed, so no override can raise a capability. And it is applied **once, at the
+end of `D3D12Device::queryCaps()`**, so every consumer (the backend's own pipeline selection, Voxi's
+feature status, the settings UI) sees one reduced device and nothing anywhere branches on "was this
+overridden". The single exception is `no-dxc`, which must also stop `ShaderCompiler::init()` loading
+`dxcompiler.dll`: a device reporting no DXC while still compiling DXIL would exercise nothing.
+
+`clampCaps` also derives the implications rather than asking the caller to spell them out — no DXC
+means no DXIL means SM 5.1, and SM < 6.5 means no mesh shaders and no RayQuery. So each token
+describes a machine that could exist.
+
+### The debug layer now reaches the log
+
+`dd.enableDebug` was already true, but the debug layer writes to the Win32 debug output, which
+nothing outside a debugger reads — for an automated matrix that is the same as not having it. The
+D3D12 device now drains `ID3D12InfoQueue` after every `ExecuteCommandLists` and logs each **distinct
+message ID once** (the two known-benign warnings fire every frame and would bury the one that
+matters), with running totals printed at device destruction:
+
+```
+[RHI.D3D12] debug layer totals: 0 corruption, 0 error, 41 warning
+```
+
+Those 41 warnings are the two pre-existing benign ones, `#820
+CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE` and `#1328 CREATERESOURCE_STATE_IGNORED`, repeated per
+frame. **A missing totals line means the process died before shutdown** — that is how the WARP crash
+below was first seen.
+
+### Baselines — every configuration, all 13 gates, measured 2026-07-21
+
+Values differ where a feature is off; that is expected. What matters is that each configuration is
+correct, stable and silent to the debug layer. Every row below is `--frames 40`, spaced 800 ms.
+
+| gate | baseline | `no-rt` | `no-ms` | `sm=60` | `tier1,no-typed-uav` | `no-cons-raster` | ALL OFF¹ | `no-dxc` | WARP |
+|---|---|---|---|---|---|---|---|---|---|
+| (centre) | 90,93,108 | 90,93,108 | 90,93,108 | 90,93,108 | 90,93,108 | 90,93,108 | 90,93,108 | **65,77,92** | 90,93,108 |
+| `--ms` | 90,93,108 | = | = | = | = | = | = | **65,77,92** | 90,93,108 |
+| `--rt` | 90,93,108 | = | = | = | = | = | = | **65,77,92** | 90,93,108 |
+| `--ms --rt` | 90,93,108 | = | = | = | = | = | = | **65,77,92** | 90,93,108 |
+| `--gi` | 104,91,104 | = | = | = | = | **96,91,104** | **96,91,104** | **65,77,92** | 104,91,104 |
+| `--ms --gi` | 104,91,104 | = | = | = | = | **96,91,104** | **96,91,104** | **65,77,92** | **CRASH** |
+| `--ms --rt --gi` | 104,91,104 | = | = | = | = | **96,91,104** | **96,91,104** | **65,77,92** | **CRASH** |
+| `--gi-debug` | 66,44,45 | = | = | = | = | **132,76,65** | **132,76,65** | **65,77,92** | 66,44,45 |
+| `--ms --gi-debug` | 66,44,45 | = | = | = | = | **132,76,65** | **132,76,65** | **65,77,92** | **CRASH** |
+| `--probe 1413 1042` | 64,79,102 | = | = | = | = | = | = | **82,92,104** | 64,79,102 |
+| `--rt --probe …` | 64,79,102 | = | = | = | = | = | = | **82,92,104** | 64,79,102 |
+| `--ms --rt --probe …` | 64,79,102 | = | = | = | = | = | = | **82,92,104** | 64,79,102 |
+| `--gi --probe …` | 67,79,97 | = | = | = | = | **66,78,97** | **66,78,97** | **82,92,104** | 67,79,97 |
+
+¹ `no-rt,no-ms,no-cons-raster,no-typed-uav,tier1,msaa=1`. `=` means bit-identical to baseline.
+Debug-layer totals were `0 corruption, 0 error` in **every** completed run of every configuration.
+`0x141` `LiveKernelEvent` count **67 → 67 across the whole exercise, zero new TDRs.**
+
+### The positive proof that `no-rt` really turns the ray off
+
+Every one of the 13 gates is identical under `no-rt`, which proves nothing on its own — §4c-2 already
+records that `--probe 1413 1042` is fully shadowed on both paths. The penumbra pixel is the one that
+distinguishes them, and it does:
+
+| `--probe 1413 1150` | no flag | `--rt` | `--ms --rt` |
+|---|---|---|---|
+| baseline | 60,73,96 (PCF) | **59,72,95** (RayQuery) | **59,72,95** |
+| `--force-caps no-rt` | 60,73,96 | 60,73,96 | 60,73,96 |
+
+So under the clamp `--rt` demonstrably falls back to the 3×3 PCF shadow map. (§4c-2 quotes
+`59,72,94` / `65,78,99` for this pixel; those predate the PBR 17(c) re-baseline. The values above
+supersede them.) `no-ms` is confirmed the same way from the log rather than the image, since the mesh
+path is pixel-identical by design: `mesh shader path ready` is absent and Voxi reports `mesh-shader
+variants absent`.
+
+### `sm=60` is the good news
+
+**All 13 gates bit-identical to baseline with zero debug-layer errors.** A device with DXC, DXIL and
+SM 6.0 but no mesh shaders and no RayQuery renders the engine's reference image exactly. That is the
+single most valuable result here: the SM 6.0 baseline the renderer claims in §3 is real, and it
+covers every DX12 GPU that is not D3D12 Ultimate.
+
+### WARP — it works, and it found a crash
+
+WARP reports the **same** tiers as the RX 7800 XT (RT 1.1, mesh tier 1, SM 6.6, binding tier 3), so
+it is not the source of different capabilities the plan assumed it would be. It is ~19× slower
+(`--frames 40 --gi`: 2.0 s hardware, 38.0 s WARP) and it is bit-identical to hardware at every gate
+it completes — including under `no-cons-raster`, where it returns the same `96,91,104` /
+`132,76,65`. That is a strong independent check on the renderer: two completely different
+implementations of D3D12 agree to the raw 8-bit code.
+
+It also crashes, hard and deterministically, on **mesh-shader voxelisation with conservative raster**.
+See §4d item 18 — the crash is the finding, not a WARP caveat to be worked around.
+
+### What `tier1` and `no-typed-uav` actually do: nothing, and that is the finding
+
+Both clamp the reported value correctly and change no gate, because **nothing in the engine reads
+either**. `resourceBindingTier` was added to `DeviceCaps` by this phase and has no consumer at all;
+`typedUavLoads` is plumbed into Voxi's `DeviceInfo` and never read there. So the Tier-1 rules §4d
+item 9 says the code follows are **still** reasoned rather than measured — a clamp on a number no
+branch reads cannot exercise them, and the D3D12 runtime validates against the *real* device tier,
+which is 3 on both adapters available here. Recorded as §4d item 20 rather than papered over.
 
 **Closed since this list was written**
 - **C# could not drive the live editor** (was item 11). The CLR is now hosted in-process, so a
@@ -1027,6 +1142,52 @@ configured and built again for this phase, and `--frames 40` / `--gi` / `--probe
     Test before shipping. The Tier 1 rules the code follows (every declared table bound on every
     pass, every heap slot null-filled by declared kind, every declared root CBV given an address)
     are therefore reasoned, not measured.
+9b. **The fallbacks are now RUNNABLE here.** `--force-caps` and `--warp` (§4g) execute the no-RT,
+    no-mesh-shader, no-conservative-raster, SM-6.0 and FXC/SM-5.1 paths on this machine, and the
+    debug layer now reports into the log. Items 18–20 are what they found. Item 9 stays open for
+    everything a clamp cannot reach — real Tier 1 hardware, NVIDIA/Intel drivers, vendor-specific
+    behaviour.
+18. **WARP crashes on mesh-shader voxelisation with conservative raster.** `--warp --ms --gi`,
+    `--warp --ms --rt --gi` and `--warp --ms --gi-debug` die on **frame 2** — the first frame the
+    replayed draw list has content, so the first frame `MSVoxel` actually dispatches — with
+    `0xC0000005` inside `d3d10warp.dll`, at a constant fault offset (`0x132d9`, three runs
+    identical). WARP executes shaders on the CPU in the calling process, so a shader-side
+    out-of-bounds access surfaces as a real user-mode access violation instead of being absorbed by
+    a driver. The debug layer says nothing before the fault: only the two benign warnings.
+    **Both conditions are required**, which is a sharp diagnosis to start from:
+    `--warp --gi` (GS voxelise + conservative raster) is clean, `--warp --ms` (mesh shaders, no
+    voxelise) is clean, and `--warp --ms --gi --force-caps no-cons-raster` is clean **and returns
+    the correct `96,91,104`**. Only mesh shaders AND conservative raster together fault.
+    Whether this is a WARP defect or an engine defect that only WARP is strict enough to catch is
+    **not established** and should not be assumed either way — `MSVoxel` writing outside the
+    accumulator would look exactly like this on WARP and be invisible on RDNA3, which is precisely
+    the class of bug this exercise exists to find.
+19. **The FXC / SM 5.1 fallback does not decline cleanly, and the image it produces is wrong.**
+    `--force-caps no-dxc` runs and does not crash, but:
+    (a) `IResourceFactory::createShader` requires SM 6.0 for every feature shader, so **all eleven**
+    Voxi pipelines fail to build and `VoxiRenderer::init` reports `init FAILED: shadow pipeline has
+    a zero handle` after **seven ERROR lines** — not the one-line decline §4c-2 documents as the
+    contract. The `CSSelfTest` compute self-test fails the same way. The editor carries on, so the
+    outcome is right and only the manner is wrong; but a user on FXC hardware sees a wall of errors
+    that reads like a broken build.
+    (b) The resulting image is `raw(65,77,92)`, which §4e identifies as the value you get when the
+    material binding set is **not** applied — every surface at metallic 1 / roughness 1, the floor a
+    rough mirror. The sandbox pins `b1`'s metallic/roughness to the identity because the authored
+    values live in the material's `b2`, and `PSMainPlain` reads `b1`. So the no-feature path reached
+    at *runtime* is materially wrong, and differs from the no-feature path reached by
+    `-DAVER_MODULE_VOXI=OFF` at *build* time (`raw(87,92,107)`), which the CMake option also turns
+    PBR off for. Cast-shadow probe `raw(82,92,104)`, i.e. fully lit, as it must be with no shadow
+    map — the `110,117,132` in §4e is that other configuration, not this one.
+    (c) Voxi logs `binding set declares an acceleration-structure slot on a device without ray
+    tracing` as a WARN and proceeds. Correct, but it fires on any no-RT device.
+20. **`resourceBindingTier` and `typedUavLoads` have no consumer.** The first was added by §4g and
+    is only logged; the second reaches Voxi's `DeviceInfo` and is never read. `--force-caps tier1`
+    and `no-typed-uav` therefore change no gate and prove nothing. The Tier-1 discipline in item 9
+    remains unmeasured: the D3D12 runtime validates against the real device tier, which is 3 on both
+    adapters on this machine, so no software clamp can exercise it.
+21. **`--ms` on a device without mesh shaders is silently ignored.** No log line says the request
+    was refused; the geometry path just stays on the input assembler. Found while confirming
+    `--force-caps no-ms`. Cosmetic, but it is the kind of silence §4f already had to close once.
 10. D3D11 and Vulkan backends are still **stubs** — D3D12 is the only working backend, so
     "supports DirectX 12" is a hard requirement. Both decline cleanly: `createDevice` falls through
     to Null, `resources()` is null, and `VoxiRenderer::init` logs and returns false.
