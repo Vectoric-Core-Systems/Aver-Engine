@@ -107,6 +107,12 @@ AVER_PBR_ABI float   aver_pbr_get_normal_scale(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_normal_scale(aver_pbr_material m, float v);
 AVER_PBR_ABI float   aver_pbr_get_occlusion_strength(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_occlusion_strength(aver_pbr_material m, float v);
+/* Reflectance of the dielectric base (0.04 for most things, ~0.02 water, ~0.17 gemstone) and the
+   reflectance at grazing incidence. Both in [0,1]; see MaterialDesc for why a surface owns them. */
+AVER_PBR_ABI float   aver_pbr_get_reflectance(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_reflectance(aver_pbr_material m, float v);
+AVER_PBR_ABI float   aver_pbr_get_f90(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_f90(aver_pbr_material m, float v);
 
 /* ---- blending and sidedness ---- */
 AVER_PBR_ABI int32_t aver_pbr_get_alpha_mode(aver_pbr_material m);

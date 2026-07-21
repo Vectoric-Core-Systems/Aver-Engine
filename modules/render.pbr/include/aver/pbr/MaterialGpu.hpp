@@ -41,7 +41,11 @@ struct MaterialConstants {
     f32 occlusionStrength;
     f32 alphaCutoff;          // read only under MaterialFlag_AlphaMask
     u32 flags;                // MaterialFlag bits
-    u32 _pad[3];
+    // Spent out of what used to be pure padding, so the block stays 64 bytes and no consumer of it
+    // has to change size. See MaterialDesc for why a surface owns these rather than the shader.
+    f32 reflectance;          // F0 of the dielectric base
+    f32 f90;                  // reflectance at grazing incidence
+    u32 _pad;
 };
 
 static_assert(sizeof(MaterialConstants) == 64, "the HLSL cbuffer mirrors this byte for byte");

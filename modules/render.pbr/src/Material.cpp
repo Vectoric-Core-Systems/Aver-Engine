@@ -35,6 +35,12 @@ void sanitise(MaterialDesc& d) {
     d.roughnessFactor   = std::clamp(d.roughnessFactor, 0.045f, 1.0f);
     d.normalScale       = std::clamp(d.normalScale, 0.0f, 8.0f);
     d.occlusionStrength = std::clamp(d.occlusionStrength, 0.0f, 1.0f);
+    // Both are reflectances, so both are ratios in [0,1]. The upper bound matters more than it
+    // looks: F0 above 1 makes (f90 - F0) negative in the Schlick term, and the surface reflects
+    // NEGATIVE radiance at grazing angles, which the tonemap then clamps to black -- a dark rim on
+    // a bright material, with nothing in the image to suggest a reflectance was the cause.
+    d.reflectance       = std::clamp(d.reflectance, 0.0f, 1.0f);
+    d.f90               = std::clamp(d.f90, 0.0f, 1.0f);
     d.alphaCutoff       = std::clamp(d.alphaCutoff, 0.0f, 1.0f);
     if (static_cast<u32>(d.alphaMode) > static_cast<u32>(AlphaMode::Blend)) d.alphaMode = AlphaMode::Opaque;
 }
@@ -317,6 +323,18 @@ float aver_pbr_get_normal_scale(aver_pbr_material m) {
 }
 int32_t aver_pbr_set_normal_scale(aver_pbr_material m, float v) {
     MaterialDesc* d = edit(m); if (!d) return 0; d->normalScale = v; return commit(m);
+}
+float aver_pbr_get_reflectance(aver_pbr_material m) {
+    const MaterialDesc* d = read(m); return d ? d->reflectance : 0.0f;
+}
+int32_t aver_pbr_set_reflectance(aver_pbr_material m, float v) {
+    MaterialDesc* d = edit(m); if (!d) return 0; d->reflectance = v; return commit(m);
+}
+float aver_pbr_get_f90(aver_pbr_material m) {
+    const MaterialDesc* d = read(m); return d ? d->f90 : 0.0f;
+}
+int32_t aver_pbr_set_f90(aver_pbr_material m, float v) {
+    MaterialDesc* d = edit(m); if (!d) return 0; d->f90 = v; return commit(m);
 }
 float aver_pbr_get_occlusion_strength(aver_pbr_material m) {
     const MaterialDesc* d = read(m); return d ? d->occlusionStrength : 0.0f;

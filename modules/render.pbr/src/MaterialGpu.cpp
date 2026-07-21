@@ -35,6 +35,8 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     c.normalScale       = d.normalScale;
     c.occlusionStrength = d.occlusionStrength;
     c.alphaCutoff       = d.alphaCutoff;
+    c.reflectance       = d.reflectance;
+    c.f90               = d.f90;
 
     u32 flags = 0;
     for (u32 i = 0; i < kTextureSlotCount; ++i)

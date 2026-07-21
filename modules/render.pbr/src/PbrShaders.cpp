@@ -54,7 +54,9 @@ cbuffer AverMaterial : register(b2) {
     float  gOcclusionStrength;
     float  gAlphaCutoff;
     uint   gMaterialFlags;
-    uint3  _materialPad;
+    float  gMatReflectance;
+    float  gMatF90;
+    uint   _materialPad;
 };
 
 // gMaterialFlags bits, mirroring pbr::MaterialFlag.
@@ -264,7 +266,10 @@ AverSurface averEvalMaterial(AverVertex v, AverLight l) {
     s.emissive = gEmissive.rgb + gEmissiveFactor * map.emissive;
     // glTF's occlusion rule: strength 0 disables the map entirely rather than zeroing the surface.
     s.occlusion = lerp(1.0, map.occlusion, gOcclusionStrength);
-    s.f90 = gF90;
+    // The MATERIAL's, out of b2 -- not the renderer's b1 defaults, which is the whole point. A
+    // surface's reflectance is a property of what it is made of, and the b1 pair can only ever say
+    // what the renderer assumed on its behalf.
+    s.f90 = gMatF90;
     s.display = gShadingModel == AVER_MODEL_UNLIT;
     s.displayColor = float4(gBaseColor.rgb, gBaseColor.a);
     s.albedo = srgbToLin(gBaseColor.rgb) * base.rgb;
@@ -274,7 +279,8 @@ AverSurface averEvalMaterial(AverVertex v, AverLight l) {
     s.ndv = saturate(dot(s.N, v.V));
     // The dielectric base reflectance is authored rather than the usual hardcoded 0.04, because
     // 0.04 is right for common dielectrics and wrong for water, gemstones and coated surfaces.
-    s.F0 = lerp(gReflectance.xxx, s.albedo, s.metallic);
+    // A metal has no dielectric base at all, which is why this lerps to the albedo.
+    s.F0 = lerp(gMatReflectance.xxx, s.albedo, s.metallic);
     s.F = fresnelSchlick(saturate(dot(s.H, v.V)), s.F0, s.f90);
     s.kdAlbedo = ((1.0 - s.F) * (1.0 - s.metallic)) * s.albedo;
     return s;

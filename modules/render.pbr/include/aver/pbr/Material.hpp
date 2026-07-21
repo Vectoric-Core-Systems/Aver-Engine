@@ -77,6 +77,19 @@ struct MaterialDesc {
     f32 normalScale         = 1.0f;
     f32 occlusionStrength   = 1.0f;
 
+    // The dielectric base reflectance, and the reflectance at grazing incidence. Authored rather
+    // than hardcoded because 0.04 / 1.0 is one material, not a law: water is ~0.02, skin ~0.028,
+    // gemstones ~0.17, and none of them can be expressed while the shading model owns the number.
+    // This pair is the single clearest argument for the material system being a module at all --
+    // a renderer has no business knowing what a surface is made of.
+    //
+    // f90 below 1 is what stops a ROUGH dielectric growing a bright rim at grazing angles: Schlick
+    // drives every surface to full white reflectance at 90 degrees, which is true of a smooth one
+    // and visibly wrong on a rough one. glTF's defaults are kept so an import that says nothing
+    // lands where the exporter assumed.
+    f32 reflectance         = 0.04f;   // F0 of the dielectric base
+    f32 f90                 = 1.0f;    // F(90); 1.0 is the textbook Schlick term
+
     AlphaMode alphaMode   = AlphaMode::Opaque;
     f32       alphaCutoff = 0.5f;   // read only under AlphaMode::Mask
     bool      twoSided    = false;

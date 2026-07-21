@@ -43,8 +43,12 @@ cbuffer PerObject : register(b1) {
     // so that it never has to be.
     float4   gMaterial;      // x=metallic, y=roughness, z=unlit(0/1) for plainShadeSurface only
     uint     gShadingModel;  // which shading model evaluates this draw
-    float    gReflectance;   // normal-incidence reflectance of the dielectric base
-    float    gF90;           // grazing-angle reflectance
+    // DEAD as of the material system owning reflectance: the shading model reads gMatReflectance /
+    // gMatF90 out of b2, and the frozen path below hardcodes 0.04 with F(90) = 1. They are left
+    // declared, and still written, only because removing them moves kObjectConstantDwords and
+    // therefore every root signature that declares b1. Reclaim them together, not one at a time.
+    float    gReflectance;   // unread
+    float    gF90;           // unread
     float    _objPad;
     float4   gEmissive;      // rgb, radiance this surface emits on its own
 };
