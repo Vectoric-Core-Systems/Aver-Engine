@@ -147,6 +147,8 @@ MaterialHandle MaterialLibrary::at(u32 i) const {
 // exists to prevent — an editor would offer a texture slot that shades nothing.
 Status MaterialLibrary::status(Feature f) {
     switch (f) {
+        // All seven are authored here AND consumed: averEvalMaterial() reads the b2 block, samples
+        // the five maps through the material table, and clips on the mask itself.
         case Feature::Factors:
         case Feature::BaseColorMap:
         case Feature::MetalRoughMap:
@@ -154,6 +156,10 @@ Status MaterialLibrary::status(Feature f) {
         case Feature::OcclusionMap:
         case Feature::EmissiveMap:
         case Feature::AlphaMask:
+            return Status::Ready;
+        // Stored, and deliberately still not rendered. Alpha BLENDING is not a shading-model
+        // question: it needs a blend state on the pipeline and a back-to-front draw order, and both
+        // belong to the renderer. Reporting Ready here would promise a sort nothing performs.
         case Feature::AlphaBlend:
             return Status::NotImplemented;
         default:

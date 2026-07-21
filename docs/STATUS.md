@@ -565,6 +565,83 @@ left face where `ndl` is ~0 and the sun term drops out entirely.
 batch, zero new TDRs. The red-channel wobble below still reproduces (`--gi` 5 runs: 3x `0.38`,
 1x `0.37`, 1x `0.36`), unchanged by this fix, confirming it really is a separate defect.
 
+## 4e. Aver.Render.PBR — the material system, COMPLETE
+
+**"PBR is a material system. Voxi is the thing that renders it."** That sentence is a link line, not
+a slogan, and it is the whole design:
+
+| target | kind | links | owns |
+|---|---|---|---|
+| `Aver.Render.PBR` | **SHARED** | `Aver.Core` ONLY | `MaterialDesc`, `MaterialLibrary`, `pbr_abi.h` |
+| `Aver.Render.PBR.Materials` | STATIC | `Aver.Core`, `Aver.RHI` (**never** `Aver.RHI.D3D12`) | texture caches, fallback textures, per-material binding sets, the b2 block, `materialShaderPrelude()` |
+
+`Aver.Render.PBR` must never include `aver/rhi/*` or the C# P/Invoke boundary breaks — the DLL is
+what the scripting layer binds to, and a render-hardware type on that boundary cannot be marshalled.
+Verified at the link line and by grep: the only `aver/rhi` and `D3D12` matches under `modules/render.pbr/`
+are the comments forbidding them.
+
+**PBR is NOT an `rhi::IRenderFeature`, and will not become one.** A material is not a pass. Voxi
+stays the only registered feature; it gained a link edge to `Aver.Render.PBR.Materials` and composes
+its shader as `rhi::sharedShaderPrelude() + pbr::materialShaderPrelude() + kVoxiHLSL`. Voxi supplies
+visibility and irradiance and calls the shading model; the material owns the BRDF.
+
+### What the shading model does now
+Five maps sampled through one wrap + 8x-anisotropic sampler at `s2`, factors multiplying maps per
+glTF, occlusion and emissive honoured, alpha-mask clipped inside the material, and a tangent frame
+solved from `ddx`/`ddy`. **sRGB is done by the texture unit**: base colour and emissive get sRGB
+VIEW formats, normal/metal-rough/occlusion stay UNORM, and `packMaterial()` decodes the authored
+base-colour constant on the CPU. Decoding after `Sample()` would be wrong — filtering and mip
+averaging have already happened in encoded space, which reads as slightly dark, slightly desaturated
+midtones that worsen with distance and that nobody ever reports as a bug.
+
+### Register map in force
+`t0` volume, `t1` shadow, `t2` TLAS (table 0); `t3..t7` base colour / metal-rough / normal /
+occlusion / emissive (table 1); `t8`/`t9` mesh-shader vertices and indices. `b0` engine frame,
+`b1` object (32 dwords), `b2` material, `b4` Voxi frame, `b5` mesh triangle count. `s0` linear
+clamp, `s1` comparison, `s2` material. The sampler array caps at four, so one spare remains.
+
+### The per-material path is live, and that was proved rather than assumed
+Before step 18 nothing had ever called `MaterialLibrary::create()`, so `bindingSet()`, `constants()`,
+`entryFor()` and the dirty drain had never had a material to act on. The sandbox now creates one per
+actor and applies it immediately before each `drawMesh`. Step 18 is oracle-NEUTRAL, and the reason
+that is strong evidence rather than weak is the negative test: the actor's `metallic`/`roughness` are
+pinned to the identity `1` in `b1` and the authored values live only in the material's factors, so
+**disabling the `setDrawBinding` call collapses the image from `raw(90,93,108)` to `raw(65,77,92)`**
+(the floor renders as a rough mirror). Bit-identical output with the bind on is therefore proof that
+`b2` is being consumed, not proof that nothing happened.
+
+Base colour deliberately stays in `b1`. `rhi::IRenderFeature::submitDraw` carries no material, so
+Voxi's shadow and voxelisation loops bind the FALLBACK set; neutralising `b1`'s colour would inject
+white albedo into the radiance volume and turn every bounce white. Base colour moves the day
+`submitDraw` carries a material and not before.
+
+### `AVER_MODULE_PBR=OFF` baseline
+Voxi renders materials and cannot build without them, so `CMakeLists.txt` now forces
+`AVER_MODULE_VOXI=OFF` with a status message when PBR is off. Previously this combination failed
+with a `C1083` on a header four includes deep, which reads as a broken include path rather than as a
+module combination that was never valid. The resulting no-feature build renders through the frozen
+`PSMainPlain`:
+
+```
+--frames 40                   -> (0.34,0.36,0.42) raw(87,92,107)
+--frames 40 --ms              -> (0.34,0.36,0.42) raw(87,92,107)
+--frames 40 --probe 1413 1042 -> (0.43,0.46,0.52) raw(110,117,132)
+```
+
+`raw(87,92,107)` is the PRE-17(c) value, which is exactly right: the frozen path is untouched by
+every BRDF correction in this phase, which is what "FROZEN, do not evolve" is for. The cast-shadow
+pixel is fully lit because without Voxi there is no shadow map and no ray tracing at all. Both
+values were confirmed **bit-identical to the same configuration built at `192fd55`**, before any of
+this work, so the no-material path is provably unaffected. Note §4c-2 records `raw(109,117,132)` for
+this pixel; that figure is stale and predates this phase — it was `110` before these commits too.
+
+### Known gap
+`MaterialLibrary::status()` now reports `Ready` for the factors, all five maps and the alpha mask —
+but they only reach the LIT pass. The voxelisation pass shades with the fallback material, so an
+authored base-colour map does not yet colour the GI bounce. Closing that is the `submitDraw` change
+above. `AlphaBlend` stays `NotImplemented` on purpose: blending needs a pipeline blend state and a
+back-to-front sort, both of which are the renderer's, not the shading model's.
+
 ## 4d. NOT DONE — open work, roughly in value order
 
 **Closed since this list was written**
@@ -594,23 +671,21 @@ batch, zero new TDRs. The red-channel wobble below still reproduces (`--gi` 5 ru
   Note the viewport-centre probe CANNOT see the sun term — it lands on the cube's unlit left face
   where `ndl` is ~0, so any shadow A/B must probe a sunlit or cast-shadow pixel instead.
 
+- **Textured PBR, the material system, and the BRDF corrections** (`f13553c`..`274848a` and step 18).
+  Full write-up in §4e. The vertex format landed at 32 bytes and the tangent frame is derived in the
+  pixel shader from `ddx`/`ddy` of world position and UV, exactly as this list argued it should be:
+  nothing authored carries tangents, MikkTSpace reindexes the mesh so it belongs in an importer that
+  does not exist, and an unfilled tangent through `normalize()` is the NaN that makes `traceCone`
+  march forever — the documented `0x141` TDR mode. `averPerturbNormal()` falls back to the geometric
+  normal when the UV gradient is degenerate, which is the same hazard answered at the other end.
+
 **Renderer**
-1. **Textured PBR — the agreed next vertex format is 32 bytes: position (12) + normal (12) + UV0 (8).**
-   The tangent frame is derived in the PIXEL shader from `ddx`/`ddy` of the world position and the
-   UV, not carried per-vertex. That is a decision, not a shortcut, and the reasons are worth keeping:
-   - **Nothing authored has tangents.** `.ocbeam`/`.ocmap` carry none, and the procedural meshes the
-     sandbox builds carry none, so a tangent field could only ever be filled with zeros today.
-   - **MikkTSpace splits vertices.** Generating tangents properly reindexes the mesh (a vertex on a
-     UV seam becomes two), so it belongs in an importer that does not exist yet. Bolting it onto
-     runtime mesh creation would put a topology-changing step behind `createMesh`.
-   - **A zero tangent through `normalize()` is NaN**, and on the cone-trace path a NaN world
-     position makes `traceCone` march forever — which on this hardware is the documented `0x141`
-     TDR failure mode (§4c-2). An unfilled field would not read as "flat normal mapping"; it would
-     hang the GPU.
-   Adding the field is now a single edit: `kMeshInputLayout` in `D3D12Device.cpp` is the only place
-   `MeshVertex` is described to D3D12, and `MeshVtx` in `sharedShaderPrelude()` is the only place
-   the mesh-shader path reads it. Both must move together — the prelude is a cross-module ABI with
-   no compiler behind it.
+1. **No oracle gate covers the sun's SPECULAR term.** Found while landing PBR step 17(a): the
+   centre probe sits on the cube's unlit left face (`ndl` ~0) and `(1413,1042)` sits inside the cast
+   shadow (`visibility` ~0), so neither pixel receives direct specular at all. A change to the whole
+   masking-shadowing formulation left all 13 gates bit-identical. `(2200,1400)` is a sunlit floor
+   pixel that does see it — `raw(103,111,126)` at present — and something in that family should
+   become a 14th gate. Until it is, BRDF work has no automated cover.
 2. **RT ambient occlusion / reflections.** The TLAS already exists, so this is mostly shader work.
 3. **Path tracing.** Declared only; would reuse the same acceleration structure.
 4. **No temporal accumulation** on GI. With the volume rebuilt each frame this is the main remaining

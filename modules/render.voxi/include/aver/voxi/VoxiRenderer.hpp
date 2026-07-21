@@ -84,6 +84,15 @@ public:
     // to sampleCount 1 and target formats they own, so rebuilding them would be pure churn.
     void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth) override;
 
+    // The GPU residency of the material library, so the app can ask for the binding set and the
+    // constant block a draw needs. Exposed rather than duplicated: a second MaterialSystem would
+    // build a second set of fallback textures and a second binding set per material, and the two
+    // would disagree the moment either drained the dirty list first.
+    //
+    // This is NOT a way in to Voxi's own passes. It is the same object they use, and the register
+    // its table is based at is this module's pipeline layout, which is exactly why it lives here.
+    pbr::MaterialSystem& materials() { return materials_; }
+
     // Status for the settings UI / C# bindings, derived from the device caps captured at init.
     bool giReady() const { return giReady_; }
     bool rayTracingActive() const { return rtActive_; }

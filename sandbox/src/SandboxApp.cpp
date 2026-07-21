@@ -17,6 +17,11 @@
 #include "aver/voxi/VoxiRenderer.hpp"  // ...and its GPU side, registered as an rhi::IRenderFeature
 #endif
 
+#if AVER_MODULE_PBR
+#include "aver/pbr/Material.hpp"       // the authored surface, from the Core-only material DLL
+#include "aver/pbr/MaterialGpu.hpp"    // MaterialConstants: the block setDrawBinding carries
+#endif
+
 #if AVER_WITH_IMGUI
 #include "imgui.h"
 #include "imgui_internal.h" // DockBuilder* (docking layout is built in code: IniFilename is null)
@@ -156,6 +161,16 @@ struct MeshObj {
     Vec3 pos{0,0,0}, rotDeg{0,0,0}, scale{1,1,1};
     f32 color[4] = {0.8f,0.4f,0.25f,1};
     f32 metallic = 0.0f, roughness = 0.5f;
+#if AVER_MODULE_PBR
+    // The actor's material. 0 until onInit creates one, and 0 is the handle the material system
+    // answers with the fallback for, so an actor added before the library exists still draws.
+    //
+    // metallic/roughness above are NOT dead while this is set: they are what reaches b1, and under
+    // AVER_MODULE_PBR they are pinned to 1 so the material's factors carry the authored value
+    // through the shader's factor * map product. Without the module they stay the authored values
+    // and the frozen no-material path reads them directly. See onRender.
+    pbr::MaterialHandle material = 0;
+#endif
     bool visible = true;
     Vec3 aabbMin{-1,-1,-1}, aabbMax{1,1,1}; // local-space bounds (for picking)
 };
@@ -331,6 +346,12 @@ public:
             }
         }
 
+        // Every actor gets a material. Done here, after the actor list is built, rather than inside
+        // each construction: makeMaterialFor() reads the authored metallic/roughness off the actor
+        // and then PINS the actor's own pair to 1, so running it twice on one actor would be
+        // harmless but running it on half the list would not be obvious from the image.
+        for (MeshObj& o : objects_) makeMaterialFor(o);
+
         std::vector<rhi::LineVertex> gl; buildGrid(gl, 40.0f, 2.0f);
         gridMesh_ = e.device()->createLineMesh(gl.data(), (u32)gl.size());
 
@@ -482,6 +503,31 @@ public:
         e.device()->setClearColor(0.055f, 0.055f, 0.062f, 1);
     }
 
+    // Give one actor a material, and move the parameters the material now owns onto it.
+    //
+    // The shading model computes metallic as gMaterial.x * gMetallicFactor * map, so the authored
+    // value can live in EITHER the b1 per-draw block or the b2 material block, and putting it in
+    // both would square it. It goes in the material, and b1 is pinned to the identity 1 -- which is
+    // the whole point of the step: the Details panel edits a material from here on, not an actor.
+    //
+    // Base colour deliberately stays on the actor. The voxelisation pass shades with the material
+    // system's FALLBACK block, because rhi::IRenderFeature::submitDraw carries no material yet, so
+    // neutralising b1's colour would inject white albedo into the radiance volume and turn every
+    // bounce white. Base colour moves the day submitDraw carries a material and not before.
+    void makeMaterialFor(MeshObj& o) {
+#if AVER_MODULE_PBR
+        pbr::MaterialDesc d;
+        d.name            = o.name;
+        d.metallicFactor  = o.metallic;
+        d.roughnessFactor = o.roughness;
+        o.material = pbr::MaterialLibrary::get().create(d);
+        if (!o.material) { AVER_WARN("[Sandbox] no material for '{}'; it will draw with the fallback", o.name); return; }
+        o.metallic = o.roughness = 1.0f;   // identity in b1; the material carries the authored pair
+#else
+        (void)o;   // no material system: b1 keeps the authored pair and the frozen path reads it
+#endif
+    }
+
     void onRender(Engine& e) override {
         handleManip(e);
         e.device()->setWireframe(wireframe_);
@@ -492,6 +538,16 @@ public:
             Mat4 w = tr.toMatrix();
             f32 col[4]={o.color[0],o.color[1],o.color[2],1};
             if (i==sel_) for (int k=0;k<3;++k) col[k]=std::fmin(1.0f,col[k]*1.3f+0.10f);
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+            // The actor's material, applied immediately before the draw it belongs to.
+            // setDrawBinding is STICKY and is reset every beginFrame to whatever Voxi registered as
+            // the default, so an actor whose material failed to create inherits the fallback rather
+            // than the previous actor's -- which is why this is unconditional and not guarded on a
+            // non-zero handle.
+            if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready())
+                e.device()->setDrawBinding(ms.bindingSet(o.material), &ms.constants(o.material),
+                                           sizeof(pbr::MaterialConstants));
+#endif
             e.device()->drawMesh(o.mesh, &w.m[0][0], col, o.metallic, o.roughness);
         }
         e.device()->setWireframe(false); // lines are always solid
@@ -941,6 +997,54 @@ private:
 #if AVER_WITH_IMGUI
     // Docked panels. These are plain windows — the dock builder placed them, and the user can
     // re-dock, tab or float them freely from here on.
+    // The material half of the Details panel. Every control here edits a pbr::MaterialDesc
+    // through the library, NOT the actor: an actor references a material, and two actors
+    // sharing one would otherwise be edited independently and diverge with no way to tell from
+    // the outliner. touch() marks it dirty; the material system drains that in Voxi's prePass.
+    //
+    // Without the module this falls back to editing the actor, because the frozen no-material
+    // path reads b1 directly and there is nothing else for a slider to write to.
+    void materialPanel(MeshObj& o) {
+#if AVER_MODULE_PBR
+        pbr::MaterialDesc* d = pbr::MaterialLibrary::get().mutableDesc(o.material);
+        if (!d) { ImGui::TextDisabled("No material (drawing with the fallback)"); return; }
+        bool changed = false;
+        changed |= ImGui::SliderFloat("Metallic", &d->metallicFactor, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Roughness", &d->roughnessFactor, 0.045f, 1.0f);
+        changed |= ImGui::SliderFloat("Normal Scale", &d->normalScale, 0.0f, 4.0f);
+        changed |= ImGui::SliderFloat("Occlusion", &d->occlusionStrength, 0.0f, 1.0f);
+        // Reflectance and f90 are the two the material system exists to make authorable; the
+        // range covers water (~0.02) through gemstone (~0.17), which is why it stops at 0.2
+        // rather than at 1 where every useful value would sit in the first fifth of the slider.
+        changed |= ImGui::SliderFloat("Reflectance", &d->reflectance, 0.0f, 0.2f, "%.3f");
+        changed |= ImGui::SliderFloat("Grazing (f90)", &d->f90, 0.0f, 1.0f);
+        changed |= ImGui::DragFloat3("Emissive", d->emissiveFactor, 0.01f, 0.0f, 32.0f);
+
+        ImGui::Separator();
+        // One path field per slot. A path is all the material system wants: it holds the
+        // reference and never resolves it, because resolving needs the asset system a tier up.
+        // Typing a path that does not resolve leaves the slot on its identity fallback, so the
+        // surface stays complete rather than turning black.
+        for (u32 s = 0; s < pbr::kTextureSlotCount; ++s) {
+            char buf[260];
+            const std::string& p = d->textures[s].path;
+            std::snprintf(buf, sizeof(buf), "%s", p.c_str());
+            if (ImGui::InputText(pbr::MaterialLibrary::textureSlotName(static_cast<pbr::TextureSlot>(s)),
+                                 buf, sizeof(buf))) {
+                d->textures[s].path = buf;
+                changed = true;
+            }
+        }
+        // mutableDesc() hands out a raw pointer and does NOT mark anything, so an edit that
+        // forgot this would show in the panel and never reach the GPU -- the exact failure the
+        // library's comment warns about.
+        if (changed) pbr::MaterialLibrary::get().touch(o.material);
+#else
+        ImGui::SliderFloat("Metallic", &o.metallic, 0.0f, 1.0f);
+        ImGui::SliderFloat("Roughness", &o.roughness, 0.02f, 1.0f);
+#endif
+    }
+
     void buildPanels(Engine& e) {
         ImGui::Begin("World Outliner");
         for (int i=0;i<(int)objects_.size();++i)
@@ -960,8 +1064,7 @@ private:
             }
             if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::ColorEdit3("Base Color", o.color);
-                ImGui::SliderFloat("Metallic", &o.metallic, 0.0f, 1.0f);
-                ImGui::SliderFloat("Roughness", &o.roughness, 0.02f, 1.0f);
+                materialPanel(o);
             }
             ImGui::Checkbox("Visible", &o.visible);
         } else if (sel_==-2){

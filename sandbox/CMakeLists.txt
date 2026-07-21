@@ -12,7 +12,10 @@ if(TARGET Aver.Render.PBR)
   # The material DLL (brings AVER_MODULE_PBR=1). Named explicitly rather than left to arrive
   # transitively through Voxi's renderer: the executable is what the C# layer P/Invokes into, so it
   # is the executable that must depend on the material system whether or not a render feature does.
-  target_link_libraries(Sandbox PRIVATE Aver.Render.PBR)
+  # ...and the GPU half, which is what turns an authored material into a binding set and a b2 block.
+  # Both are named here for the same reason Voxi's two are: the executable is what the C# layer
+  # P/Invokes, so it must depend on the material system whether or not a render feature does.
+  target_link_libraries(Sandbox PRIVATE Aver.Render.PBR Aver.Render.PBR.Materials)
 endif()
 target_include_directories(Sandbox PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
 set_target_properties(Sandbox PROPERTIES

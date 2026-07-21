@@ -70,6 +70,15 @@ endif()
 if(AVER_MODULE_PBR)
   add_subdirectory(modules/render.pbr)    # optional: material system + C ABI for C#
 endif()
+# "PBR is a material system; Voxi is the thing that renders it" is a dependency, not a slogan:
+# Aver.Render.Voxi.Renderer links Aver.Render.PBR.Materials and its header includes MaterialSystem.
+# Said here rather than left to happen, because the failure without it is a C1083 on a header four
+# includes deep in an unrelated translation unit, which reads as a broken include path rather than
+# as a module combination that was never valid.
+if(AVER_MODULE_VOXI AND NOT AVER_MODULE_PBR)
+  message(STATUS "Aver: Voxi renders materials and cannot be built without them - forcing AVER_MODULE_VOXI=OFF")
+  set(AVER_MODULE_VOXI OFF)
+endif()
 if(AVER_MODULE_VOXI)
   add_subdirectory(modules/render.voxi)   # optional: render feature settings + C ABI for C#
 endif()
