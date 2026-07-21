@@ -195,7 +195,7 @@ float4 VSShadow(VSIn i) : SV_POSITION {
 // The scene is rasterised once per frame with no render target; the pixel shader computes direct
 // lighting and writes radiance straight into the 3D volume. Merging "voxelise" and "inject light"
 // into one pass avoids a second full scene traversal.
-struct VoxOut { float4 pos : SV_POSITION; float3 wpos : TEXCOORD0; float3 nrm : NORMAL; };
+struct VoxOut { float4 pos : SV_POSITION; float3 wpos : TEXCOORD0; float3 nrm : NORMAL; float2 uv : TEXCOORD1; };
 
 // The voxelisation adapter. V is EXACTLY zero because there is no camera here: the voxelise
 // vertex/mesh shaders write a dominant-axis projection, so any fabricated view vector would inject
@@ -214,6 +214,7 @@ VoxOut VSVoxel(VSIn i) {
     float4 wp = mul(float4(i.pos, 1.0), gWorld);
     o.wpos = wp.xyz;
     o.nrm  = mul(float4(i.nrm, 0.0), gWorld).xyz;
+    o.uv   = i.uv;
     o.pos  = wp;                     // world space; the GS picks a projection axis
     return o;
 }
@@ -251,10 +252,12 @@ void MSVoxel(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
 
     uint3 idx = gIndices.Load3((gid * AVER_MS_TRIS + gtid) * 12);
     float3 wp[3], nr[3];
+    float2 uv[3];
     [unroll] for (uint k = 0; k < 3; ++k) {
         MeshVtx v = gVerts[idx[k]];
         wp[k] = mul(float4(v.pos, 1.0), gWorld).xyz;
         nr[k] = mul(float4(v.nrm, 0.0), gWorld).xyz;
+        uv[k] = v.uv;
     }
     float3 n = abs(cross(wp[1] - wp[0], wp[2] - wp[0]));
     int axis = (n.x > n.y && n.x > n.z) ? 0 : ((n.y > n.z) ? 1 : 2);
@@ -265,6 +268,7 @@ void MSVoxel(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
         VoxOut ov;
         ov.wpos = wp[k];
         ov.nrm  = nr[k];
+        ov.uv   = uv[k];
         ov.pos  = float4(p * 2.0 - 1.0, 0.5, 1.0);
         verts[o + k] = ov;
     }

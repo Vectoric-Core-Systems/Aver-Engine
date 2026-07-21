@@ -50,15 +50,21 @@ static void appendBox(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, f3
     struct Face { f32 n[3]; int c[4]; };
     const Face faces[6] = {{{1,0,0},{1,2,6,5}},{{-1,0,0},{0,4,7,3}},{{0,1,0},{3,7,6,2}},
                            {{0,-1,0},{0,1,5,4}},{{0,0,1},{4,5,6,7}},{{0,0,-1},{0,3,2,1}}};
+    // A box is six planar quads, so its UVs are exact rather than projected: each face's four
+    // corners are emitted in ring order, which is the unit square's corners in ring order.
+    const f32 quadUV[4][2] = {{0,0},{1,0},{1,1},{0,1}};
     for (const Face& f : faces) {
         const u32 b = static_cast<u32>(v.size());
-        for (int k = 0; k < 4; ++k) { const f32* c = p[f.c[k]]; v.push_back({cx+c[0],cy+c[1],cz+c[2],f.n[0],f.n[1],f.n[2]}); }
+        for (int k = 0; k < 4; ++k) { const f32* c = p[f.c[k]]; v.push_back({cx+c[0],cy+c[1],cz+c[2],f.n[0],f.n[1],f.n[2],quadUV[k][0],quadUV[k][1]}); }
         idx.push_back(b); idx.push_back(b+1); idx.push_back(b+2); idx.push_back(b); idx.push_back(b+2); idx.push_back(b+3);
     }
 }
 static void appendGround(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, f32 s) {
     const u32 b = static_cast<u32>(v.size());
-    v.push_back({-s,-s,0,0,0,1}); v.push_back({s,-s,0,0,0,1}); v.push_back({s,s,0,0,0,1}); v.push_back({-s,s,0,0,0,1});
+    // Ground UV is world XY scaled by the quad's extent, so a tiling material keeps a constant
+    // texel density however large the ground is made.
+    v.push_back({-s,-s,0,0,0,1,-0.5f,-0.5f}); v.push_back({s,-s,0,0,0,1,0.5f,-0.5f});
+    v.push_back({s,s,0,0,0,1,0.5f,0.5f}); v.push_back({-s,s,0,0,0,1,-0.5f,0.5f});
     idx.push_back(b); idx.push_back(b+1); idx.push_back(b+2); idx.push_back(b); idx.push_back(b+2); idx.push_back(b+3);
 }
 static Quat quatFromEulerDeg(const Vec3& e) {

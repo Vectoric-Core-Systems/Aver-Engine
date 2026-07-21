@@ -2,6 +2,7 @@
 #include "aver/core/Types.hpp"
 #include "aver/rhi/RHIResources.hpp"
 
+#include <cstddef>
 #include <vector>
 
 // Aver RHI — the single render-hardware abstraction every GPU consumer targets.
@@ -28,12 +29,24 @@ public:
     virtual u32 height() const = 0;
 };
 
-// Interleaved mesh vertex: position + normal (engine space, cm). Enough for lit
-// solid rendering; UVs/tangents/skin come with the asset mesh pipeline later.
+// Interleaved mesh vertex: position + normal (engine space, cm) + UV0. Enough for lit, textured
+// solid rendering; tangents/skin come with the asset mesh pipeline later. There is deliberately NO
+// tangent field: nothing authored has one, and a zero tangent that normalize() turns into NaN is
+// the documented 0x141 TDR failure mode on this hardware. The material shading derives its tangent
+// frame from ddx/ddy of world position and UV instead.
 struct MeshVertex {
     f32 px, py, pz;
     f32 nx, ny, nz;
+    f32 u, v;
 };
+
+// Every consumer of this struct reads it through something that cannot be checked at compile time:
+// the D3D12 input layout names offsets as literals, the mesh-shader path binds the buffer as a RAW
+// root SRV whose element size comes solely from HLSL `struct MeshVtx`, and an input layout naming
+// fewer elements than the buffer holds is legal D3D12. One byte of drift is silent in all three.
+static_assert(sizeof(MeshVertex) == 32, "MeshVertex is the HLSL MeshVtx / kMeshInputLayout ABI");
+static_assert(offsetof(MeshVertex, px) == 0,
+              "position must stay first: the DXR BLAS description points at the vertex buffer base");
 
 // MeshHandle / LineHandle are declared in RHIResources.hpp so feature modules can name geometry
 // without pulling in the whole device interface.

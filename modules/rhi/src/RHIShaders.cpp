@@ -56,8 +56,8 @@ float3 srgbToLin(float3 c){ return pow(max(c,0.0), 2.2); }
 float3 skyColor(float3 dir){ float3 c = lerp(gSkyHorizon.rgb, gSkyZenith.rgb, pow(saturate(dir.z*0.5+0.5), 0.65)); return srgbToLin(c); }
 
 // ---- PBR mesh with sky ambient + distance fog ----
-struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; };
-struct VSOut { float4 pos : SV_POSITION; float3 nrmWS : NORMAL; float3 wpos : TEXCOORD0; };
+struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0; };
+struct VSOut { float4 pos : SV_POSITION; float3 nrmWS : NORMAL; float3 wpos : TEXCOORD0; float2 uv : TEXCOORD1; };
 
 VSOut VSMain(VSIn i) {
     VSOut o;
@@ -65,6 +65,7 @@ VSOut VSMain(VSIn i) {
     o.wpos = wp.xyz;
     o.pos = mul(wp, gViewProj);
     o.nrmWS = mul(float4(i.nrm, 0.0), gWorld).xyz;
+    o.uv = i.uv;
     return o;
 }
 
@@ -173,7 +174,10 @@ SkyOut VSky(uint id : SV_VertexID) {
 #define AVER_REG_JOIN2(a, b) a##b
 #define AVER_REG_JOIN(a, b) AVER_REG_JOIN2(a, b)
 
-struct MeshVtx { float3 pos; float3 nrm; };
+// The element size of this struct IS the vertex stride on the mesh-shader path: gVerts is bound as
+// a root SRV by raw GPU address, so nothing but this declaration tells the shader how far apart the
+// vertices are. It must match rhi::MeshVertex byte for byte.
+struct MeshVtx { float3 pos; float3 nrm; float2 uv; };
 StructuredBuffer<MeshVtx> gVerts   : register(AVER_REG_JOIN(t, AVER_MS_VTX_REG));
 ByteAddressBuffer         gIndices : register(AVER_REG_JOIN(t, AVER_MS_IDX_REG));
 cbuffer MeshCB : register(b5) { uint gTriCount; uint3 _msPad; };
@@ -201,6 +205,7 @@ void MSMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
         ov.wpos  = wp.xyz;
         ov.pos   = mul(wp, gViewProj);
         ov.nrmWS = mul(float4(v.nrm, 0.0), gWorld).xyz;
+        ov.uv    = v.uv;
         verts[o + k] = ov;
     }
     tris[gtid] = uint3(o, o + 1, o + 2);
