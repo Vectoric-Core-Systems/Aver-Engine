@@ -1,0 +1,172 @@
+﻿# The oracle's expected raw 8-bit probe codes for the RELEASE build, one line per
+# (configuration | gate | r,g,b). Read by scripts/gates.ps1 -Release.
+#
+# WHY THIS FILE EXISTS SEPARATELY FROM gates.baseline.txt: optimisation settings change
+# floating-point codegen -- contraction, vectorisation, reassociation -- so a Release probe code may
+# legitimately differ from the Debug one by a code or two. A shared baseline would have to either
+# tolerate that (and stop being bit-exact) or forbid it (and fail for a reason that is not a bug).
+#
+# MEASURED 2026-07-21 on an AMD Radeon RX 7800 XT (driver 32.0.23027.2005), /O2 /Ob2 /DNDEBUG,
+# /fp:precise (no /fp:fast anywhere in the build -- see docs/STATUS.md 4i).
+#
+# Every one of the 152 gates came out BIT-IDENTICAL to the Debug baseline, so this file is that
+# file's values. That is a result, not a shortcut: nothing in this renderer's shading happens on the
+# CPU. The probe reads an 8-bit backbuffer written by HLSL the GPU compiles itself, and the host code
+# in front of it only assembles matrices and constants. Host optimisation had nothing to move.
+#
+# One gate (no-rt/gi-debug) missed twice inside the sweep and then measured correct 8 times out of 8
+# in isolation and correct again through the runner: that is docs/STATUS.md 4d item 22, the
+# unexplained plausible-wrong-pixel flake, and it is NOT a Release difference.
+baseline | centre | 90,93,108
+baseline | ms | 90,93,108
+baseline | rt | 90,93,108
+baseline | ms-rt | 90,93,108
+baseline | gi | 104,91,104
+baseline | ms-gi | 104,91,104
+baseline | ms-rt-gi | 104,91,104
+baseline | gi-debug | 66,44,45
+baseline | ms-gi-debug | 66,44,45
+baseline | shadow | 64,79,102
+baseline | shadow-rt | 64,79,102
+baseline | shadow-ms-rt | 64,79,102
+baseline | shadow-gi | 67,79,97
+baseline | penumbra | 60,73,96
+baseline | penumbra-rt | 59,72,95
+baseline | sunlit | 103,111,126
+baseline | sunlit-gi | 105,111,123
+no-rt | centre | 90,93,108
+no-rt | ms | 90,93,108
+no-rt | rt | 90,93,108
+no-rt | ms-rt | 90,93,108
+no-rt | gi | 104,91,104
+no-rt | ms-gi | 104,91,104
+no-rt | ms-rt-gi | 104,91,104
+no-rt | gi-debug | 66,44,45
+no-rt | ms-gi-debug | 66,44,45
+no-rt | shadow | 64,79,102
+no-rt | shadow-rt | 64,79,102
+no-rt | shadow-ms-rt | 64,79,102
+no-rt | shadow-gi | 67,79,97
+no-rt | penumbra | 60,73,96
+no-rt | penumbra-rt | 60,73,96
+no-rt | sunlit | 103,111,126
+no-rt | sunlit-gi | 105,111,123
+no-ms | centre | 90,93,108
+no-ms | ms | 90,93,108
+no-ms | rt | 90,93,108
+no-ms | ms-rt | 90,93,108
+no-ms | gi | 104,91,104
+no-ms | ms-gi | 104,91,104
+no-ms | ms-rt-gi | 104,91,104
+no-ms | gi-debug | 66,44,45
+no-ms | ms-gi-debug | 66,44,45
+no-ms | shadow | 64,79,102
+no-ms | shadow-rt | 64,79,102
+no-ms | shadow-ms-rt | 64,79,102
+no-ms | shadow-gi | 67,79,97
+no-ms | penumbra | 60,73,96
+no-ms | penumbra-rt | 59,72,95
+no-ms | sunlit | 103,111,126
+no-ms | sunlit-gi | 105,111,123
+sm60 | centre | 90,93,108
+sm60 | ms | 90,93,108
+sm60 | rt | 90,93,108
+sm60 | ms-rt | 90,93,108
+sm60 | gi | 104,91,104
+sm60 | ms-gi | 104,91,104
+sm60 | ms-rt-gi | 104,91,104
+sm60 | gi-debug | 66,44,45
+sm60 | ms-gi-debug | 66,44,45
+sm60 | shadow | 64,79,102
+sm60 | shadow-rt | 64,79,102
+sm60 | shadow-ms-rt | 64,79,102
+sm60 | shadow-gi | 67,79,97
+sm60 | penumbra | 60,73,96
+sm60 | penumbra-rt | 60,73,96
+sm60 | sunlit | 103,111,126
+sm60 | sunlit-gi | 105,111,123
+tier1-no-typed-uav | centre | 90,93,108
+tier1-no-typed-uav | ms | 90,93,108
+tier1-no-typed-uav | rt | 90,93,108
+tier1-no-typed-uav | ms-rt | 90,93,108
+tier1-no-typed-uav | gi | 104,91,104
+tier1-no-typed-uav | ms-gi | 104,91,104
+tier1-no-typed-uav | ms-rt-gi | 104,91,104
+tier1-no-typed-uav | gi-debug | 66,44,45
+tier1-no-typed-uav | ms-gi-debug | 66,44,45
+tier1-no-typed-uav | shadow | 64,79,102
+tier1-no-typed-uav | shadow-rt | 64,79,102
+tier1-no-typed-uav | shadow-ms-rt | 64,79,102
+tier1-no-typed-uav | shadow-gi | 67,79,97
+tier1-no-typed-uav | penumbra | 60,73,96
+tier1-no-typed-uav | penumbra-rt | 59,72,95
+tier1-no-typed-uav | sunlit | 103,111,126
+tier1-no-typed-uav | sunlit-gi | 105,111,123
+no-cons-raster | centre | 90,93,108
+no-cons-raster | ms | 90,93,108
+no-cons-raster | rt | 90,93,108
+no-cons-raster | ms-rt | 90,93,108
+no-cons-raster | gi | 96,91,104
+no-cons-raster | ms-gi | 96,91,104
+no-cons-raster | ms-rt-gi | 96,91,104
+no-cons-raster | gi-debug | 132,76,65
+no-cons-raster | ms-gi-debug | 132,76,65
+no-cons-raster | shadow | 64,79,102
+no-cons-raster | shadow-rt | 64,79,102
+no-cons-raster | shadow-ms-rt | 64,79,102
+no-cons-raster | shadow-gi | 66,78,97
+no-cons-raster | penumbra | 60,73,96
+no-cons-raster | penumbra-rt | 59,72,95
+no-cons-raster | sunlit | 103,111,126
+no-cons-raster | sunlit-gi | 105,111,123
+all-off | centre | 90,93,108
+all-off | ms | 90,93,108
+all-off | rt | 90,93,108
+all-off | ms-rt | 90,93,108
+all-off | gi | 96,91,104
+all-off | ms-gi | 96,91,104
+all-off | ms-rt-gi | 96,91,104
+all-off | gi-debug | 132,76,65
+all-off | ms-gi-debug | 132,76,65
+all-off | shadow | 64,79,102
+all-off | shadow-rt | 64,79,102
+all-off | shadow-ms-rt | 64,79,102
+all-off | shadow-gi | 66,78,97
+all-off | penumbra | 60,73,96
+all-off | penumbra-rt | 60,73,96
+all-off | sunlit | 103,111,126
+all-off | sunlit-gi | 105,111,123
+no-dxc | centre | 90,93,108
+no-dxc | ms | 90,93,108
+no-dxc | rt | 90,93,108
+no-dxc | ms-rt | 90,93,108
+no-dxc | gi | 104,91,104
+no-dxc | ms-gi | 104,91,104
+no-dxc | ms-rt-gi | 104,91,104
+no-dxc | gi-debug | 66,44,45
+no-dxc | ms-gi-debug | 66,44,45
+no-dxc | shadow | 64,79,102
+no-dxc | shadow-rt | 64,79,102
+no-dxc | shadow-ms-rt | 64,79,102
+no-dxc | shadow-gi | 67,79,97
+no-dxc | penumbra | 60,73,96
+no-dxc | penumbra-rt | 60,73,96
+no-dxc | sunlit | 103,111,126
+no-dxc | sunlit-gi | 105,111,123
+warp | centre | 90,93,108
+warp | ms | 90,93,108
+warp | rt | 90,93,108
+warp | ms-rt | 90,93,108
+warp | gi | 104,91,104
+warp | ms-gi | 96,91,104
+warp | ms-rt-gi | 96,91,104
+warp | gi-debug | 66,44,45
+warp | ms-gi-debug | 132,76,65
+warp | shadow | 64,79,102
+warp | shadow-rt | 64,79,102
+warp | shadow-ms-rt | 64,79,102
+warp | shadow-gi | 67,79,97
+warp | penumbra | 60,73,96
+warp | penumbra-rt | 59,72,95
+warp | sunlit | 103,111,126
+warp | sunlit-gi | 105,111,123

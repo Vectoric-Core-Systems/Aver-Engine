@@ -136,11 +136,21 @@ enum class BufferKind : u8 {
     AccelStructure,  // GPU-local, created in the terminal AccelerationStructure state
 };
 
+// NOTE there is no `initialState` here, and TextureDesc's has no counterpart on purpose.
+//
+// A buffer has no choice of initial state to give. D3D12 creates every buffer in Common whatever
+// is asked for (its debug layer says so outright, #1328 CREATERESOURCE_STATE_IGNORED), and Vulkan
+// has no image-layout equivalent for buffers either. A buffer is then implicitly promoted out of
+// Common by its first use and decays back to Common at the end of the command list, so Common is
+// not merely where it starts — it is where it is at the top of every frame.
+//
+// So the contract for a buffer is: it is Common, and the first barrier a module writes against one
+// must claim Common as its `from`. A field offering anything else would be a field the backend has
+// to ignore, and the tracking would then be seeded from a state the resource was never in.
 struct BufferDesc {
     u64           bytes = 0;
     BufferKind    kind  = BufferKind::Default;
     bool          allowUnorderedAccess = false;
-    ResourceState initialState = ResourceState::Common;
     const char*   debugName = nullptr;
 };
 

@@ -37,7 +37,9 @@ int Engine::run(Application* app) {
 
     // --- RHI device (D3D12 -> D3D11 -> Vulkan -> Null, per stubs today -> Null) ---
     rhi::DeviceDesc dd;
-    dd.enableDebug = true;
+    // Opt-in (`--debug-layer`). It used to be unconditional, which meant every run — including
+    // every frame-rate measurement — paid for whole-API validation.
+    dd.enableDebug = cfg.enableDebugLayer;
     dd.useWarp = cfg.useWarp;
     device_ = rhi::createDevice(dd);
 

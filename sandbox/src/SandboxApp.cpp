@@ -209,9 +209,11 @@ public:
 
     BootConfig config() const override {
         BootConfig c; c.windowTitle="Aver Engine \xE2\x80\x94 Editor"; c.windowWidth=1600; c.windowHeight=900;
-        c.maxFrames=maxFrames_; c.headless=headless_; c.useWarp=useWarp_; return c;
+        c.maxFrames=maxFrames_; c.headless=headless_; c.useWarp=useWarp_;
+        c.enableDebugLayer=debugLayer_; return c;
     }
     void setUseWarp(bool w) { useWarp_ = w; }  // --warp
+    void setDebugLayer(bool d) { debugLayer_ = d; }  // --debug-layer
 
 #if AVER_WITH_IMGUI
     // Rebuild the style and the font atlas for `dpi`.
@@ -1562,6 +1564,7 @@ private:
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
     bool useWarp_=false;             // --warp: run on the D3D12 software rasteriser
+    bool debugLayer_=false;          // --debug-layer: validate every graphics call (a real per-call tax)
     std::string scriptsDir_;         // --scripts <dir>: where to look for user script assemblies
     // Project browser + the project it produced. `browserActive_` is false for every automated
     // run, so the oracle never sees the start screen.
@@ -1609,7 +1612,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; std::string beam, shot, project, scriptsDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false; const char* forceCaps=nullptr;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; std::string beam, shot, project, scriptsDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -1640,6 +1643,10 @@ Application* createApplication(int argc, char** argv) {
         // measured; see docs/STATUS.md §4g. Neither can raise a capability above the hardware's.
         else if (!std::strcmp(argv[i],"--force-caps") && i+1<argc) forceCaps=argv[++i];
         else if (!std::strcmp(argv[i],"--warp")) warp=true;
+        // The graphics debug layer, off unless asked for. It validates every API call, so it is a
+        // per-call cost a normal run must not pay; `scripts/gates.ps1` passes it because the
+        // per-gate corruption/error/warning counters are read out of it.
+        else if (!std::strcmp(argv[i],"--debug-layer")) debugLayer=true;
         // Where the scripting host looks for user assemblies. Relative to the executable unless
         // absolute; the default (<exe>\Scripts) does not exist in a clean build, so no gate loads
         // anything. `--scripts SampleScripts` picks up the staged sample behaviour.
@@ -1660,6 +1667,7 @@ Application* createApplication(int argc, char** argv) {
 
     auto* app = new SandboxApp(frames, headless, beam, shot, tool);
     app->setUseWarp(warp);
+    app->setDebugLayer(debugLayer);
     app->setProjectPath(project);
     // The start screen is for a human opening the editor with nothing to open. It must never
     // appear in automation: every gate in the verification harness passes --frames and reads a

@@ -1,5 +1,8 @@
 # --- Build outputs ---
 /build/
+/build-release/
+/build-relwithdebinfo/
+/build-minsizerel/
 /out/
 [Bb]in/
 [Oo]bj/

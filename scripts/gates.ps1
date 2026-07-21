@@ -17,13 +17,21 @@
 # oracle-moving and is understood, or something broke. Say which in the commit message, and say it in
 # docs/STATUS.md too.
 
+#   ./scripts/gates.ps1 -Release              # the Release build, against its OWN baseline
+#
+# RELEASE IS A SEPARATE BASELINE, not a second opinion on the Debug one. Optimisation settings
+# change floating-point codegen (contraction, vectorisation, reassociation), so a probe code may
+# legitimately differ by an LSB between the two. `-Release` therefore switches BOTH the executable
+# and the baseline file together, because comparing one build against the other's numbers is the
+# mistake this pairing exists to make impossible.
 [CmdletBinding()]
 param(
     [string[]] $Config = @(),
     [switch]   $Record,
+    [switch]   $Release,
     [int]      $Frames = 40,
-    [string]   $Exe = "$PSScriptRoot\..\build\bin\Sandbox.exe",
-    [string]   $BaselineFile = "$PSScriptRoot\gates.baseline.txt"
+    [string]   $Exe = $(if ($Release) { "$PSScriptRoot\..\build-release\bin\Sandbox.exe" } else { "$PSScriptRoot\..\build\bin\Sandbox.exe" }),
+    [string]   $BaselineFile = $(if ($Release) { "$PSScriptRoot\gates.baseline.release.txt" } else { "$PSScriptRoot\gates.baseline.txt" })
 )
 
 # Launches are spaced by this much. Back-to-back, a process occasionally comes up while the previous
@@ -116,7 +124,11 @@ function Read-Baseline([string] $path) {
 # log rather than assumed, INCLUDING the in-viewport tag: a probe that sampled editor chrome still
 # prints a plausible number, so a runner that only grepped the raw codes would happily record it.
 function Invoke-Gate($exe, [string[]] $gateArgs, [string[]] $extra, [int] $frames) {
-    $all = @('--frames', "$frames") + $gateArgs + $extra
+    # --debug-layer is passed by the RUNNER, not defaulted on in the engine. The layer validates
+    # every API call and is a per-call tax no ordinary run should pay, but the per-gate C/E/W counts
+    # below come out of it, and a gate that reported no corruption because nothing was watching
+    # would be worse than no gate at all.
+    $all = @('--frames', "$frames", '--debug-layer') + $gateArgs + $extra
     $out = & $exe @all 2>&1 | Out-String
     $exit = $LASTEXITCODE
     $r = [pscustomobject]@{ raw = 'NO-PROBE'; place = '?'; debug = 'NO-TOTALS'; exit = $exit; rect = '?' }
@@ -140,7 +152,8 @@ function Invoke-Gate($exe, [string[]] $gateArgs, [string[]] $extra, [int] $frame
 
 # ---------------------------------------------------------------- run
 
-if (-not (Test-Path $Exe)) { Write-Error "Sandbox.exe not found at $Exe - run ./scripts/build.ps1 first"; exit 1 }
+$buildHint = if ($Release) { './scripts/build.ps1 -Release' } else { './scripts/build.ps1' }
+if (-not (Test-Path $Exe)) { Write-Error "Sandbox.exe not found at $Exe - run $buildHint first"; exit 1 }
 $Exe = (Resolve-Path $Exe).Path
 
 $selected = if ($Config.Count -gt 0) { $Config } else { @($Configs.Keys) }

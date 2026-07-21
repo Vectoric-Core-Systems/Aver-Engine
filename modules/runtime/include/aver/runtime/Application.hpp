@@ -16,6 +16,12 @@ struct BootConfig {
     // switch for exercising fallback paths on hardware that does not need them; see
     // `rhi::DeviceDesc::useWarp`.
     bool useWarp = false;
+    // The graphics debug layer validates EVERY API call, so it is a per-call tax on a run that
+    // asked for no validation. Opt-in, and opt-in in every build type: a Debug-build default would
+    // make a plain `Sandbox.exe` pay for it, and Debug is the configuration every gate and every
+    // timing this project has ever recorded was measured in. The verification runner turns it on
+    // explicitly (`scripts/gates.ps1` reads the per-gate corruption/error/warning counters).
+    bool enableDebugLayer = false;
 };
 
 // Applications subclass this. The engine owns the loop and calls these hooks.

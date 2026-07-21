@@ -668,6 +668,7 @@ private:
     void createRenderTargetViews();
     bool createDepthBuffer();
     bool createMsaaColor();
+    void reconcileClearValue();
     void waitForGpu();
 
     ComPtr<IDXGIFactory4> factory_;   // 6 is optional (see init); 4 is the baseline
@@ -775,6 +776,12 @@ private:
 
     bool hasSwapchain_ = false;
     f32 clear_[4] = {0.10f, 0.12f, 0.16f, 1.0f};
+    // The value the CURRENT scene colour target was created with. A render target carries one
+    // optimised clear value, and clearing it to anything else costs the fast-clear path (debug
+    // layer #820). The app sets its clear colour AFTER the target exists — the editor pushes dark
+    // chrome on its first frame — so the two are reconciled in beginFrame rather than assumed
+    // equal at creation. Seeded to the same literal as clear_ so frame 0 needs no rebuild.
+    f32 msaaClear_[4] = {0.10f, 0.12f, 0.16f, 1.0f};
     std::string adapterName_ = "D3D12 Device";
     // True when the device is running on a software rasteriser (WARP). Kept as a device property
     // rather than a cap because it is not a capability the adapter reports being without — it is
@@ -1468,6 +1475,12 @@ bool D3D12Device::createPipeline() {
 // ---------------------------------------------------------------- DXR 1.1 acceleration structures
 namespace {
 // Committed default-heap buffer sized for an acceleration structure or its scratch space.
+//
+// `state` is honoured for exactly one value: RAYTRACING_ACCELERATION_STRUCTURE, which a result
+// buffer must be created in and never leaves. Every OTHER buffer state is IGNORED by D3D12 — a
+// buffer is created in COMMON whatever is asked for, and asking for something else earns debug
+// layer #1328 — so scratch is created COMMON and relies on the implicit promotion a buffer gets
+// from COMMON on first GPU use, which is what puts it in UNORDERED_ACCESS for the build.
 ComPtr<ID3D12Resource> makeAsBuffer(ID3D12Device* dev, u64 bytes, D3D12_RESOURCE_STATES state) {
     D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT; hp.CreationNodeMask = 1; hp.VisibleNodeMask = 1;
     D3D12_RESOURCE_DESC d{};
@@ -1702,12 +1715,47 @@ bool D3D12Device::createMsaaColor() {
     td.Format = kBackbufferFormat; td.SampleDesc.Count = sampleCount_;
     td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
+    // Created with the colour that will actually be cleared to, and the pair is remembered so
+    // beginFrame can tell when the app has moved one and not the other.
     D3D12_CLEAR_VALUE cv{}; cv.Format = kBackbufferFormat;
-    cv.Color[0] = 0.10f; cv.Color[1] = 0.12f; cv.Color[2] = 0.16f; cv.Color[3] = 1.0f;
+    for (int i = 0; i < 4; ++i) { cv.Color[i] = clear_[i]; msaaClear_[i] = clear_[i]; }
     auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
     if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&msaaColor_)), "msaa color")) return false;
     device_->CreateRenderTargetView(msaaColor_.Get(), nullptr, msaaRtvHeap_->GetCPUDescriptorHandleForHeapStart());
     return true;
+}
+
+// A colour target holds ONE optimised clear value, fixed at creation. `setClearColor` can move the
+// runtime clear at any time — the editor pushes its dark chrome colour on the first frame it
+// renders, long after the target was made — and clearing to a value the target was not created
+// with drops the fast-clear path and warns (#820) on every single clear.
+//
+// So the reconciliation is here rather than in setClearColor: a setter that recreated a render
+// target would stall the GPU from inside the app's update, and the app pushes the same colour every
+// frame. Rebuilding costs one drain and happens only when the value ACTUALLY moved — once, in
+// practice, on the frame after the editor first sets its colour.
+void D3D12Device::reconcileClearValue() {
+    bool same = true;
+    for (int i = 0; i < 4; ++i) if (clear_[i] != msaaClear_[i]) { same = false; break; }
+    if (same || !msaaColor_) return;
+
+    f32 prev[4];           // createMsaaColor() overwrites msaaClear_, so keep the good value here
+    for (int i = 0; i < 4; ++i) prev[i] = msaaClear_[i];
+
+    waitForGpu();          // the old target may still be referenced by an in-flight frame
+    msaaColor_.Reset();
+    if (!createMsaaColor()) {
+        // Nothing else can run without a scene colour target, and the new clear value is the one
+        // thing we know is bad, so put the previous one back and rebuild with that instead.
+        AVER_ERROR("[RHI.D3D12] scene colour target rebuild for clear ({:.3f},{:.3f},{:.3f},{:.3f}) failed; keeping the previous clear value",
+                   clear_[0], clear_[1], clear_[2], clear_[3]);
+        for (int i = 0; i < 4; ++i) clear_[i] = prev[i];
+        msaaColor_.Reset();
+        createMsaaColor();
+        return;
+    }
+    AVER_TRACE("[RHI.D3D12] scene colour target rebuilt for clear ({:.3f},{:.3f},{:.3f},{:.3f})",
+               clear_[0], clear_[1], clear_[2], clear_[3]);
 }
 
 MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) {
@@ -1741,6 +1789,7 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
 
 void D3D12Device::beginFrame() {
     if (!hasSwapchain_) return;
+    reconcileClearValue();
     // Render into whichever backbuffer is current now; wait for its previous frame to finish on
     // the GPU before recycling its allocator. This is the only fence wait in the frame and it
     // can never block on an unsignalled value (fenceValues_ only holds already-signalled ones).
@@ -1967,7 +2016,9 @@ void D3D12Device::endFrame() {
     cmdList_->Close();
     ID3D12CommandList* lists[] = {cmdList_.Get()};
     queue_->ExecuteCommandLists(1, lists);
-    drainDebugMessages();
+    // Tested at the call site, not inside the drain: with the layer off `infoQueue_` is null for the
+    // device's whole life, and a frame that asked for no validation should not carry even a call.
+    if (infoQueue_) drainDebugMessages();
 }
 
 void D3D12Device::present() {
@@ -2734,13 +2785,17 @@ BufferHandle D3D12ResourceFactory::createBuffer(const BufferDesc& d) {
     if (d.allowUnorderedAccess || d.kind == BufferKind::AccelStructure)
         rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
-    // An upload buffer is only ever legal in GENERIC_READ; an acceleration-structure buffer is born
-    // in the terminal AS state and never leaves it. Neither can honour the desc's initial state.
+    // Three states, and none of them is a choice the caller gets to make. An upload buffer is only
+    // ever legal in GENERIC_READ; an acceleration-structure buffer is born in the terminal AS state
+    // and never leaves it; and EVERY other buffer is created in COMMON because that is the only
+    // thing D3D12 honours for one — anything else is ignored with debug layer #1328, and a resource
+    // whose tracked state came from an ignored request is a tracker that reports fiction. See the
+    // note on BufferDesc in RHIResources.hpp.
     const bool upload = d.kind == BufferKind::Upload;
     const D3D12_RESOURCE_STATES state =
         upload ? D3D12_RESOURCE_STATE_GENERIC_READ
                : (d.kind == BufferKind::AccelStructure ? D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE
-                                                       : toResourceStates(d.initialState));
+                                                       : D3D12_RESOURCE_STATE_COMMON);
     RhiBuffer b;
     auto hp = heapProps(upload ? D3D12_HEAP_TYPE_UPLOAD : D3D12_HEAP_TYPE_DEFAULT);
     if (!hrOk(dev_->device_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr,
@@ -2754,10 +2809,10 @@ BufferHandle D3D12ResourceFactory::createBuffer(const BufferDesc& d) {
     b.desc.debugName = nullptr;
 #if AVER_RHI_TRACK_STATE
     if (d.debugName) b.debugName = d.debugName;
-    // Tracked as the state actually created in, not the one asked for, since the two kinds below
-    // override the desc.
-    b.state = upload ? ResourceState::Common
-                     : (d.kind == BufferKind::AccelStructure ? ResourceState::AccelerationStructure : d.initialState);
+    // Tracked as the state actually created in, which for everything but an acceleration structure
+    // is Common — and a plain buffer decays back to Common at the end of every command list, so it
+    // is the honest seed rather than merely the initial one.
+    b.state = d.kind == BufferKind::AccelStructure ? ResourceState::AccelerationStructure : ResourceState::Common;
     b.stateFixed = upload || d.kind == BufferKind::AccelStructure;
 #endif
     buffers_.push_back(std::move(b));
@@ -3039,7 +3094,7 @@ BlasHandle D3D12ResourceFactory::createBlas(MeshHandle mesh) {
     // Sized once and kept for the structure's life. A mesh is static, so the size never changes,
     // and reallocating scratch under a build the GPU has not run yet is exactly the hazard the
     // deferred-destroy queue exists to prevent.
-    b.scratch = makeAsBuffer(dev_->device_.Get(), info.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    b.scratch = makeAsBuffer(dev_->device_.Get(), info.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_COMMON);
     if (!b.as || !b.scratch) { AVER_ERROR("[RHI.D3D12] createBlas allocation failed"); return 0; }
     blases_.push_back(std::move(b));
     return static_cast<BlasHandle>(blases_.size());
@@ -3062,7 +3117,7 @@ TlasHandle D3D12ResourceFactory::createTlas(u32 maxInstances) {
     RhiTlas t;
     t.maxInstances = maxInstances;
     t.as = makeAsBuffer(dev_->device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-    t.scratch = makeAsBuffer(dev_->device_.Get(), info.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    t.scratch = makeAsBuffer(dev_->device_.Get(), info.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_COMMON);
     if (!t.as || !t.scratch) { AVER_ERROR("[RHI.D3D12] createTlas allocation failed"); return 0; }
 
     const u64 bytes = static_cast<u64>(maxInstances) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
