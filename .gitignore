@@ -37,3 +37,6 @@ Thumbs.db
 # C# scripting build output
 scripting/**/bin/
 scripting/**/obj/
+
+# Agent worktrees (transient, created by tooling)
+.claude/worktrees/
