@@ -204,8 +204,22 @@ constexpr u32 kMaxConstantSlots = 5;
 // invalidate bindings — which is what lets a feature's binding set stay live across draws the
 // backend records itself (mandatory at Tier 1, where every declared table must be bound).
 struct PipelineLayout {
-    u32 srvCount = 0;             // t0..t(n-1)
-    u32 uavCount = 0;             // u0..u(n-1)
+    u32 srvCount = 0;             // table 0: t0..t(srvCount-1)
+    u32 uavCount = 0;             // table 0: u0..u(uavCount-1)
+    // A SECOND declarable table, based immediately above the first: t(srvCount).. and u(uavCount)..
+    // Zero counts declare no second table at all, which is what every existing pipeline gets.
+    //
+    // Two tables rather than one wider one because the two have different LIFETIMES. Table 0 holds
+    // descriptors a feature owns and reallocates (the voxel volume is recreated on a resolution
+    // change); table 1 is swapped per draw. Folding them together would mean either rewriting every
+    // per-draw set whenever the feature's resources move — while a frame in flight may still be
+    // reading them — or rewriting the feature's descriptors per draw. Both are the hazard the TLAS
+    // creation comment in VoxiRenderer already documents.
+    //
+    // Deliberately named "table 1" and not after any consumer: the RHI must not learn the word
+    // "material" (see the header preamble).
+    u32 srvCount1 = 0;
+    u32 uavCount1 = 0;
     // Logical constant slot k maps to register b(k). A non-zero word count makes it ROOT CONSTANTS,
     // written with setConstants; zero makes it a ROOT CBV, written with setConstantBuffer. A slot
     // cannot be both, and setConstants on a CBV slot (or the reverse) is a binding error.
@@ -218,6 +232,16 @@ struct PipelineLayout {
     SamplerDesc samplers[4] = {};
     u32 samplerCount = 0;         // s0..s(n-1)
 };
+
+// How many declarable descriptor tables a layout has. Tables are addressed by index at
+// setBindingSet, so this is the bound on that argument.
+constexpr u32 kBindingTableCount = 2;
+
+// The register a layout's SRV/UAV declarations run out to, ACROSS BOTH TABLES. Anything the backend
+// reserves above a layout must be placed with these, never with srvCount alone — table 1 now
+// occupies exactly the registers a lone srvCount would have pointed at.
+inline u32 declaredSrvCount(const PipelineLayout& l) { return l.srvCount + l.srvCount1; }
+inline u32 declaredUavCount(const PipelineLayout& l) { return l.uavCount + l.uavCount1; }
 
 struct GraphicsPipelineDesc {
     // Either (vs[,gs]) or ms must be set. A mesh pipeline has no input assembler; the backend picks
@@ -279,6 +303,14 @@ struct BindingSetDesc {
     u32 uavCount = 0;            // must be <= kMaxBindingSlots
     SlotKind srvKinds[kMaxBindingSlots] = {};   // default-initialises to Texture2D
     SlotKind uavKinds[kMaxBindingSlots] = {};
+    // The first shader register this set is meant to cover. A set is a bare run of descriptors and
+    // carries no registers of its own, so these are NOT used to build anything — they are recorded
+    // so the backend can check, when the set is bound at a table index, that it was built for the
+    // run that table actually covers. Binding a table-1 set at table 0 is otherwise completely
+    // silent: the descriptors are valid, the count fits, and the shader simply reads the wrong
+    // textures.
+    u32 srvBaseRegister = 0;
+    u32 uavBaseRegister = 0;
 };
 
 // Bind every mip of a texture as one view. Invalid for a UAV, which always targets one level.
@@ -300,10 +332,11 @@ constexpr u32 kMeshShaderTrisPerGroup = 64;
 // backend; a feature module must not declare anything at them. The declarations that match live in
 // sharedShaderPrelude(), so both sides are anchored to one owner rather than to a convention nobody
 // enforces.
-//   - vertices: t(srvCount), indices: t(srvCount + 1)  — placed after the declared SRVs so they can
-//     never collide with a layout however many SRVs it declares. Because those two DEPEND on the
-//     layout, the prelude cannot write them as literals: it takes them as -D macros, which
-//     meshGeometryDefines() below computes from the very same field the root signature uses.
+//   - vertices: t(declaredSrvCount), indices: t(declaredSrvCount + 1)  — placed after the declared
+//     SRVs of BOTH tables so they can never collide with a layout however many SRVs it declares.
+//     Because those two DEPEND on the layout, the prelude cannot write them as literals: it takes
+//     them as -D macros, which meshGeometryDefines() below computes from the very same fields the
+//     root signature uses.
 //   - triangle count: 4 root constants at b(kMeshGeometryConstantRegister).
 // Logical constant slots 0..4 map to b0..b4, the top one being a feature's own frame constants, so
 // the mesh geometry block sits above both.
@@ -402,7 +435,10 @@ public:
     virtual void setRenderTargets(const TextureHandle* colors, u32 count, TextureHandle depth) = 0;
     virtual void clearDepth(TextureHandle depth, f32 value) = 0;
 
-    virtual void setBindingSet(BindingSetHandle set) = 0;
+    // Bind a set to one of the pipeline's declared tables. Tier 1 requires EVERY declared table to
+    // hold valid descriptors on every pass, so a pipeline declaring table 1 must have both bound
+    // before it draws — the backend cannot invent the second one.
+    virtual void setBindingSet(BindingSetHandle set, u32 table = 0) = 0;
     // Root constants at a logical slot. Always overwrites the whole declared block, so a partial
     // write can never inherit the previous pass's values.
     virtual void setConstants(u32 slot, const void* data, u32 dwords) = 0;

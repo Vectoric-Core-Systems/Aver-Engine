@@ -760,6 +760,9 @@ struct RhiShader {
 // them would leave the new entry at 0, which is a VALID root parameter index — so the mistake would
 // bind to the wrong parameter rather than being caught.
 static_assert(kMaxConstantSlots == 5, "slotParam's -1 initialisers are written out per slot");
+// Same trap, same reason: a third table would leave srvParam[2] at 0, which is a valid root
+// parameter index, so the table would bind over whatever parameter 0 happens to be.
+static_assert(kBindingTableCount == 2, "srvParam/uavParam's -1 initialisers are written out per table");
 
 // Where each declared binding landed in the root signature. -1 means the layout never declared it,
 // so binding it is a module bug worth reporting rather than a silent no-op.
@@ -768,7 +771,11 @@ struct RhiPipeline {
     ID3D12RootSignature* rootSig = nullptr;   // owned by the root-signature cache, not by this
     bool compute = false;
     bool mesh = false;
-    i32  srvParam = -1, uavParam = -1;
+    // One entry per declarable table; -1 where the layout declared nothing for it.
+    i32  srvParam[kBindingTableCount] = {-1, -1}, uavParam[kBindingTableCount] = {-1, -1};
+    // The first shader register each table covers, kept so a set bound at the wrong table index can
+    // be caught. Derived from the layout, never written down twice.
+    u32  srvBaseRegister[kBindingTableCount] = {};
     i32  slotParam[kMaxConstantSlots] = {-1, -1, -1, -1, -1};
     u32  slotDwords[kMaxConstantSlots] = {};  // 0 = the slot is a root CBV rather than root constants
     i32  msVertexParam = -1, msIndexParam = -1, msCountParam = -1;
@@ -779,6 +786,9 @@ struct RhiPipeline {
 
 struct RhiBindingSet {
     u32 srvCount = 0, uavCount = 0;
+    // Which run of shader registers the set was BUILT for. Carried only so binding it at the wrong
+    // table index is reportable; nothing here consumes it to build a descriptor.
+    u32 srvBaseRegister = 0, uavBaseRegister = 0;
     u32 heapBase = 0;   // SRVs occupy [heapBase, heapBase+srvCount), the UAVs follow immediately
     SlotKind srvKinds[kMaxBindingSlots] = {};
     SlotKind uavKinds[kMaxBindingSlots] = {};
@@ -819,7 +829,7 @@ struct RootSigEntry {
     PipelineLayout layout{};
     bool mesh = false;
     ComPtr<ID3D12RootSignature> sig;
-    i32 srvParam = -1, uavParam = -1;
+    i32 srvParam[kBindingTableCount] = {-1, -1}, uavParam[kBindingTableCount] = {-1, -1};
     i32 slotParam[kMaxConstantSlots] = {-1, -1, -1, -1, -1};
     i32 msVertexParam = -1, msIndexParam = -1, msCountParam = -1;
 };
@@ -837,6 +847,7 @@ bool sameSampler(const SamplerDesc& a, const SamplerDesc& b) {
 }
 bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
     if (a.srvCount != b.srvCount || a.uavCount != b.uavCount || a.samplerCount != b.samplerCount) return false;
+    if (a.srvCount1 != b.srvCount1 || a.uavCount1 != b.uavCount1) return false;
     for (u32 i = 0; i < kMaxConstantSlots; ++i) if (a.constantDwords[i] != b.constantDwords[i]) return false;
     for (u32 i = 0; i < a.samplerCount && i < 4; ++i) if (!sameSampler(a.samplers[i], b.samplers[i])) return false;
     return true;
@@ -947,7 +958,7 @@ public:
     void setScissor(u32 x, u32 y, u32 w, u32 h) override;
     void setRenderTargets(const TextureHandle* colors, u32 count, TextureHandle depth) override;
     void clearDepth(TextureHandle depth, f32 value) override;
-    void setBindingSet(BindingSetHandle set) override;
+    void setBindingSet(BindingSetHandle set, u32 table) override;
     void setConstants(u32 slot, const void* data, u32 dwords) override;
     void setConstantBuffer(u32 slot, const void* data, u32 bytes) override;
     void drawMesh(MeshHandle mesh) override;
@@ -1641,7 +1652,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         const PipelineHandle fp = f->scenePipeline(msActive_ && msPso_, wireframe_);
         if (!fp) break;   // the feature declined this combination; use the backend's own pipeline
         rhiContext_->setPipeline(fp);
-        if (const BindingSetHandle bs = f->sceneBindingSet()) rhiContext_->setBindingSet(bs);
+        if (const BindingSetHandle bs = f->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
         const void* cb = nullptr; u32 cbBytes = 0;
         if (f->sceneConstants(&cb, &cbBytes) && cb && cbBytes)
             rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
@@ -2200,26 +2211,41 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
     e.layout = layout;
     e.mesh = mesh;
 
-    D3D12_DESCRIPTOR_RANGE ranges[2] = {};
-    D3D12_ROOT_PARAMETER params[2 + kMaxConstantSlots + 3] = {};
+    // Four possible ranges: SRV and UAV for each of the two declarable tables. A range is a separate
+    // root parameter per table, NOT two ranges under one, because the two tables are bound
+    // independently — one root parameter would mean one GPU handle covering both, so swapping the
+    // per-draw half would have to rewrite the feature's half as well.
+    D3D12_DESCRIPTOR_RANGE ranges[2 * kBindingTableCount] = {};
+    D3D12_ROOT_PARAMETER params[2 * kBindingTableCount + kMaxConstantSlots + 3] = {};
     u32 n = 0;
-    if (layout.srvCount) {
-        ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        ranges[0].NumDescriptors = layout.srvCount;
-        ranges[0].BaseShaderRegister = 0;
-        params[n].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        params[n].DescriptorTable.NumDescriptorRanges = 1;
-        params[n].DescriptorTable.pDescriptorRanges = &ranges[0];
-        e.srvParam = static_cast<i32>(n++);
-    }
-    if (layout.uavCount) {
-        ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        ranges[1].NumDescriptors = layout.uavCount;
-        ranges[1].BaseShaderRegister = 0;
-        params[n].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        params[n].DescriptorTable.NumDescriptorRanges = 1;
-        params[n].DescriptorTable.pDescriptorRanges = &ranges[1];
-        e.uavParam = static_cast<i32>(n++);
+    // Table 1 is based immediately above table 0, so the two runs are contiguous in register space
+    // and a shader sees one flat t0..tN however the root signature happens to split them.
+    const u32 srvCounts[kBindingTableCount] = {layout.srvCount, layout.srvCount1};
+    const u32 uavCounts[kBindingTableCount] = {layout.uavCount, layout.uavCount1};
+    u32 srvBase = 0, uavBase = 0;
+    for (u32 t = 0; t < kBindingTableCount; ++t) {
+        if (srvCounts[t]) {
+            D3D12_DESCRIPTOR_RANGE& r = ranges[2 * t];
+            r.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            r.NumDescriptors = srvCounts[t];
+            r.BaseShaderRegister = srvBase;
+            params[n].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[n].DescriptorTable.NumDescriptorRanges = 1;
+            params[n].DescriptorTable.pDescriptorRanges = &r;
+            e.srvParam[t] = static_cast<i32>(n++);
+        }
+        if (uavCounts[t]) {
+            D3D12_DESCRIPTOR_RANGE& r = ranges[2 * t + 1];
+            r.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+            r.NumDescriptors = uavCounts[t];
+            r.BaseShaderRegister = uavBase;
+            params[n].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[n].DescriptorTable.NumDescriptorRanges = 1;
+            params[n].DescriptorTable.pDescriptorRanges = &r;
+            e.uavParam[t] = static_cast<i32>(n++);
+        }
+        srvBase += srvCounts[t];
+        uavBase += uavCounts[t];
     }
 
     // Logical constant slot k maps to register b(k). A non-zero word count makes it root constants
@@ -2241,14 +2267,15 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
     if (mesh) {
         // A mesh shader has no input assembler, so the backend hands it the geometry directly. The
         // registers are pinned by RHIResources.hpp and matched by sharedShaderPrelude(): SRVs just
-        // past the declared table (so no layout can collide with them) and the triangle count above
+        // past the declared tables -- BOTH of them, so no layout can collide with them however it
+        // splits its SRVs between the two -- and the triangle count above
         // b4, which is reserved for a feature's own frame constants. Root descriptors rather than
         // heap slots keep the per-draw cost at two virtual addresses.
         params[n].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-        params[n].Descriptor.ShaderRegister = layout.srvCount;
+        params[n].Descriptor.ShaderRegister = declaredSrvCount(layout);
         e.msVertexParam = static_cast<i32>(n++);
         params[n].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-        params[n].Descriptor.ShaderRegister = layout.srvCount + 1;
+        params[n].Descriptor.ShaderRegister = declaredSrvCount(layout) + 1;
         e.msIndexParam = static_cast<i32>(n++);
         params[n].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         params[n].Constants.ShaderRegister = kMeshGeometryConstantRegister;
@@ -2624,8 +2651,8 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
     RhiPipeline p;
     p.rootSig = rs->sig.Get();
     p.mesh = d.ms != 0;
-    p.srvParam = rs->srvParam;
-    p.uavParam = rs->uavParam;
+    for (u32 t = 0; t < kBindingTableCount; ++t) { p.srvParam[t] = rs->srvParam[t]; p.uavParam[t] = rs->uavParam[t]; }
+    p.srvBaseRegister[1] = d.layout.srvCount;   // table 1 is based immediately above table 0
     p.msVertexParam = rs->msVertexParam;
     p.msIndexParam = rs->msIndexParam;
     p.msCountParam = rs->msCountParam;
@@ -2711,8 +2738,8 @@ PipelineHandle D3D12ResourceFactory::createComputePipeline(const ComputePipeline
     RhiPipeline p;
     p.compute = true;
     p.rootSig = rs->sig.Get();
-    p.srvParam = rs->srvParam;
-    p.uavParam = rs->uavParam;
+    for (u32 t = 0; t < kBindingTableCount; ++t) { p.srvParam[t] = rs->srvParam[t]; p.uavParam[t] = rs->uavParam[t]; }
+    p.srvBaseRegister[1] = d.layout.srvCount;   // table 1 is based immediately above table 0
     for (u32 i = 0; i < kMaxConstantSlots; ++i) { p.slotParam[i] = rs->slotParam[i]; p.slotDwords[i] = d.layout.constantDwords[i]; }
 
     D3D12_COMPUTE_PIPELINE_STATE_DESC cp{};
@@ -2739,6 +2766,8 @@ BindingSetHandle D3D12ResourceFactory::createBindingSet(const BindingSetDesc& d)
     RhiBindingSet s;
     s.srvCount = d.srvCount;
     s.uavCount = d.uavCount;
+    s.srvBaseRegister = d.srvBaseRegister;
+    s.uavBaseRegister = d.uavBaseRegister;
     for (u32 i = 0; i < kMaxBindingSlots; ++i) { s.srvKinds[i] = d.srvKinds[i]; s.uavKinds[i] = d.uavKinds[i]; }
     if (!allocRange(count, s.heapBase)) return 0;
     s.alive = true;
@@ -3171,8 +3200,9 @@ void D3D12RenderContext::clearDepth(TextureHandle depth, f32 value) {
                                           D3D12_CLEAR_FLAG_DEPTH, value, 0, 0, nullptr);
 }
 
-void D3D12RenderContext::setBindingSet(BindingSetHandle set) {
+void D3D12RenderContext::setBindingSet(BindingSetHandle set, u32 table) {
     if (!pipe_) { AVER_ERROR("[RHI.D3D12] setBindingSet before setPipeline"); return; }
+    if (table >= kBindingTableCount) { AVER_ERROR("[RHI.D3D12] setBindingSet table {} past the {} declarable", table, kBindingTableCount); return; }
     RhiBindingSet* s = res_->bindingSet(set);
     if (!s || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] setBindingSet with an invalid handle"); return; }
 
@@ -3182,15 +3212,22 @@ void D3D12RenderContext::setBindingSet(BindingSetHandle set) {
     // signature, so its cache has to be dropped alongside.
     dev_->boundRootSig_ = nullptr;
 
-    if (s->srvCount && pipe_->srvParam >= 0) {
+    // A set built for a different base register still binds cleanly and reads the wrong resources,
+    // so this is checked rather than trusted. Warn, not refuse: leaving a declared table unbound is
+    // undefined at Tier 1, which is strictly worse than binding a suspect one.
+    if (s->srvCount && s->srvBaseRegister != pipe_->srvBaseRegister[table])
+        AVER_WARN("[RHI.D3D12] binding set was built for t{} but table {} covers t{}",
+                  s->srvBaseRegister, table, pipe_->srvBaseRegister[table]);
+
+    if (s->srvCount && pipe_->srvParam[table] >= 0) {
         const D3D12_GPU_DESCRIPTOR_HANDLE h = res_->gpuSlot(s->heapBase);
-        if (pipe_->compute) dev_->cmdList_->SetComputeRootDescriptorTable(static_cast<UINT>(pipe_->srvParam), h);
-        else                dev_->cmdList_->SetGraphicsRootDescriptorTable(static_cast<UINT>(pipe_->srvParam), h);
+        if (pipe_->compute) dev_->cmdList_->SetComputeRootDescriptorTable(static_cast<UINT>(pipe_->srvParam[table]), h);
+        else                dev_->cmdList_->SetGraphicsRootDescriptorTable(static_cast<UINT>(pipe_->srvParam[table]), h);
     }
-    if (s->uavCount && pipe_->uavParam >= 0) {
+    if (s->uavCount && pipe_->uavParam[table] >= 0) {
         const D3D12_GPU_DESCRIPTOR_HANDLE h = res_->gpuSlot(s->heapBase + s->srvCount);
-        if (pipe_->compute) dev_->cmdList_->SetComputeRootDescriptorTable(static_cast<UINT>(pipe_->uavParam), h);
-        else                dev_->cmdList_->SetGraphicsRootDescriptorTable(static_cast<UINT>(pipe_->uavParam), h);
+        if (pipe_->compute) dev_->cmdList_->SetComputeRootDescriptorTable(static_cast<UINT>(pipe_->uavParam[table]), h);
+        else                dev_->cmdList_->SetGraphicsRootDescriptorTable(static_cast<UINT>(pipe_->uavParam[table]), h);
     }
 }
 

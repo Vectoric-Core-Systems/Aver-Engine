@@ -216,10 +216,13 @@ void MSMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
 
 // One owner for both halves of the reserved-register contract: the prelude above consumes these
 // macros, the root-signature builder places the matching root SRVs at the same two indices, and
-// both read layout.srvCount rather than a number written down twice.
+// both read declaredSrvCount(layout) rather than a number written down twice. It is the count
+// across BOTH tables: table 1 is based at t(srvCount), so anything anchored to srvCount alone would
+// now land on top of it.
 std::string meshGeometryDefines(const PipelineLayout& layout) {
-    return "AVER_MS_VTX_REG=" + std::to_string(layout.srvCount) +
-           ";AVER_MS_IDX_REG=" + std::to_string(layout.srvCount + 1);
+    const u32 base = declaredSrvCount(layout);
+    return "AVER_MS_VTX_REG=" + std::to_string(base) +
+           ";AVER_MS_IDX_REG=" + std::to_string(base + 1);
 }
 
 } // namespace aver::rhi
