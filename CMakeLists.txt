@@ -36,6 +36,8 @@ option(AVER_ENABLE_UI "In-window editor UI (Dear ImGui)" ON)
 option(AVER_MODULE_VOXI "Voxi render module: AA / GI / ray tracing / path tracing settings" ON)
 option(AVER_MODULE_PBR  "PBR material system: material library, C ABI and the surface BRDF" ON)
 option(AVER_MODULE_SCRIPTING "In-process .NET scripting host (hostfxr/CoreCLR)" ON)
+option(AVER_MODULE_SCENE "Entity/component world: entities, transforms, hierarchy and the C ABI" ON)
+option(AVER_MODULE_FRAMEWORK "Gameplay framework: game instance, game mode, actors, pawns" ON)
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -87,6 +89,19 @@ endif()
 # nothing else, and in particular not the RHI. Added after them only because that is reading order.
 if(AVER_MODULE_SCRIPTING)
   add_subdirectory(modules/scripting)     # optional: in-process CLR host + the managed bridge
+endif()
+# The framework stands on the scene the way Voxi stands on PBR above, and is forced off for the same
+# reason: without this line the failure is an unresolved external for every scene entry point, which
+# reads as a broken build rather than as a module combination that was never valid.
+if(AVER_MODULE_FRAMEWORK AND NOT AVER_MODULE_SCENE)
+  message(STATUS "Aver: the framework stands on the scene and cannot be built without it - forcing AVER_MODULE_FRAMEWORK=OFF")
+  set(AVER_MODULE_FRAMEWORK OFF)
+endif()
+if(AVER_MODULE_SCENE)
+  add_subdirectory(modules/scene)         # optional: the entity/component world + C ABI for C#
+endif()
+if(AVER_MODULE_FRAMEWORK)
+  add_subdirectory(modules/framework)     # optional: gameplay vocabulary over the world
 endif()
 add_subdirectory(modules/runtime)
 

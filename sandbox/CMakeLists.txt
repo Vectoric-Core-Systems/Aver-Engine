@@ -19,6 +19,18 @@ if(TARGET Aver.Render.PBR)
   # P/Invokes, so it must depend on the material system whether or not a render feature does.
   target_link_libraries(Sandbox PRIVATE Aver.Render.PBR Aver.Render.PBR.Materials)
 endif()
+if(TARGET Aver.Scene)
+  # The world DLL (brings AVER_MODULE_SCENE=1). Named explicitly for the reason the material system
+  # is: the executable is what the C# layer P/Invokes into, so it must depend on the world whether
+  # or not anything else in the link already does.
+  target_link_libraries(Sandbox PRIVATE Aver.Scene)
+endif()
+if(TARGET Aver.Framework)
+  # Gameplay (brings AVER_MODULE_FRAMEWORK=1). It carries Aver.Scene transitively, but the scene is
+  # still named above on its own: the framework is optional and the world is not meant to become
+  # unreachable the day someone turns it off.
+  target_link_libraries(Sandbox PRIVATE Aver.Framework)
+endif()
 if(TARGET Aver.Scripting.Host)
   # The in-process CLR host (brings AVER_MODULE_SCRIPTING=1). The executable owns the instance and
   # ticks it, the same way it owns the Voxi feature -- a subsystem the app configures is not

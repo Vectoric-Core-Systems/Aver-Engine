@@ -75,7 +75,9 @@ RHI.D3D11     -> RHI
 RHI.Vulkan    -> RHI
 Formats       -> Assets, Core
 Render        -> RHI, Assets, Core
-Scene         -> Core, Assets
+Scene            -> Core, Assets                  (SHARED: entities + C ABI, no RHI on the P/Invoke boundary)
+Scene.Renderer   -> Core, RHI, Scene              (STATIC, NEVER RHI.D3D12 — same rule as Voxi's renderer)
+Framework        -> Core, Assets, Scene           (SHARED: gameplay vocabulary; closure holds no RHI)
 Physics       -> Core
 SoftBody      -> Core
 Aero          -> Core
@@ -95,6 +97,21 @@ ABI           -> Runtime (wraps public APIs)
 ```
 
 No target appears in its own transitive closure → the graph is a DAG. `Core` is a sink.
+
+**Scene and Framework, and the tree's first SHARED-links-SHARED edge.** `Aver.Framework` is a
+shared library that links another shared library, which nothing else here does. The rule that shape
+is measured against is the one `modules/render.pbr/CMakeLists.txt` states — no RHI type may sit
+behind a P/Invoke DLL — and the transitive closure `{Core, Assets, Scene}` satisfies it, so the
+separation is bought without giving up the property the rule protects. Collapsing the two into one
+DLL would satisfy a narrower reading of "a SHARED module depends on Core only" and destroy the thing
+the split exists for, which is that `scene_abi.h` can be read end to end without meeting the words
+*actor*, *pawn*, *spawn* or *possess*.
+
+The edge is verified rather than assumed, and the first attempt did **not** have it: the framework's
+only reference to the scene was a header constant, so the linker emitted no import and
+`dumpbin /dependents Aver.Framework.dll` listed no edge at all despite a green build and two DLLs on
+disk. It became real only once a function genuinely called across. `aver_fw_scene_abi_matches()` is
+that call and is documented to stay that way.
 
 **Render features and P7.** `Aver.Render.Voxi.Renderer` is the first module built against the
 generic render-feature surface (`modules/rhi/include/aver/rhi/RHIResources.hpp`:
