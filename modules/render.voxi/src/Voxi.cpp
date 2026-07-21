@@ -1,5 +1,6 @@
 #include "aver/voxi/Voxi.hpp"
 #include "aver/voxi/voxi_abi.h"
+#include "aver/core/Log.hpp"
 
 #include <algorithm>
 
@@ -12,11 +13,25 @@ Renderer& Renderer::get() {
 
 void Renderer::setDeviceInfo(const DeviceInfo& info) {
     device_ = info;
+    refusalLogged_ = 0;     // a new device gets to state its own refusals
     setSettings(settings_); // re-clamp: what was legal may not be on this device
 }
 
 void Renderer::setSettings(const Settings& s) {
     Settings n = s;
+
+    // A feature this device cannot run is turned off below whatever the caller asked for. That was
+    // silent, and silence is the wrong answer to a REQUEST: `--ms` on a device without mesh shaders
+    // simply stayed on the input assembler with nothing anywhere saying the flag had been refused,
+    // so a run that proved a fallback works looked identical to a run that ignored its own command
+    // line. Stated once per feature per device, naming the capability that is missing.
+    auto refuse = [&](Feature f) {
+        const u32 bit = 1u << static_cast<u32>(f);
+        if (refusalLogged_ & bit) return;
+        refusalLogged_ |= bit;
+        AVER_INFO("[Voxi] {} was requested but this device cannot run it ({}); it stays off",
+                  featureName(f), statusText(f));
+    };
 
     // MSAA: clamp to something this device actually advertises.
     u32 samples = static_cast<u32>(n.msaa);
@@ -24,11 +39,24 @@ void Renderer::setSettings(const Settings& s) {
     while (samples > 1 && !(device_.msaaMask & samples)) samples >>= 1;
     n.msaa = static_cast<Msaa>(samples);
 
-    // Features that are not implemented or not supported cannot be switched on.
-    if (status(Feature::GlobalIllumination) != Status::Ready) n.globalIllumination = Quality::Off;
-    if (status(Feature::RayTracing)         != Status::Ready) n.rayTracing         = Quality::Off;
-    if (status(Feature::PathTracing)        != Status::Ready) n.pathTracing        = Quality::Off;
-    if (status(Feature::MeshShaders)        != Status::Ready) n.meshShaders        = false;
+    // Features that are not implemented or not supported cannot be switched on. Only an ASKED-FOR
+    // feature is reported: a device that cannot ray trace and was never asked to has nothing to say.
+    if (status(Feature::GlobalIllumination) != Status::Ready) {
+        if (n.globalIllumination != Quality::Off) refuse(Feature::GlobalIllumination);
+        n.globalIllumination = Quality::Off;
+    }
+    if (status(Feature::RayTracing) != Status::Ready) {
+        if (n.rayTracing != Quality::Off) refuse(Feature::RayTracing);
+        n.rayTracing = Quality::Off;
+    }
+    if (status(Feature::PathTracing) != Status::Ready) {
+        if (n.pathTracing != Quality::Off) refuse(Feature::PathTracing);
+        n.pathTracing = Quality::Off;
+    }
+    if (status(Feature::MeshShaders) != Status::Ready) {
+        if (n.meshShaders) refuse(Feature::MeshShaders);
+        n.meshShaders = false;
+    }
 
     n.voxelResolution = std::clamp(n.voxelResolution, 32u, 512u);
     n.giIntensity     = std::clamp(n.giIntensity, 0.0f, 8.0f);

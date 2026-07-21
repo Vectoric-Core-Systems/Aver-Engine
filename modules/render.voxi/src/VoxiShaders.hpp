@@ -201,7 +201,12 @@ struct VoxOut { float4 pos : SV_POSITION; float3 wpos : TEXCOORD0; float3 nrm : 
 // vertex/mesh shaders write a dominant-axis projection, so any fabricated view vector would inject
 // view-dependent specular into a volume the cone trace reads from every direction. Materials read
 // it through averDiffuseAlbedo, which is contractually view-independent.
-AverVertex averVertexOf(VoxOut i) {
+// Deliberately NOT an overload of the material prelude's averVertexOf(VSOut). FXC resolves overloads
+// by implicit conversion between structurally compatible types, so a second averVertexOf makes EVERY
+// call ambiguous — `error X3067`, on every shader in the translation unit, including the ones that
+// never call it. DXC is stricter and accepted it, so the SM 5.1 path was the only thing that could
+// find this. A distinct name is the whole fix, and it costs nothing.
+AverVertex voxelVertexOf(VoxOut i) {
     AverVertex v;
     v.wpos = i.wpos;
     v.N    = normalize(i.nrm);
@@ -298,7 +303,7 @@ void PSVoxel(VoxOut i) {
     sun.direction  = L;
     sun.radiance   = srgbToLin(gLightColor.rgb);
     sun.visibility = shadowFactor(i.wpos, ndl);
-    AverSurface s = averEvalMaterial(averVertexOf(i), sun);
+    AverSurface s = averEvalMaterial(voxelVertexOf(i), sun);
     float3 albedo = averDiffuseAlbedo(s);
     float3 radiance = albedo * (sun.radiance * ndl * sun.visibility
                                 + skyColor(N) * gAmbient.r);
@@ -306,7 +311,14 @@ void PSVoxel(VoxOut i) {
     // accumulator; nothing in a physically sane scene comes close to this.
     radiance = clamp(radiance, 0.0, AVER_VOX_MAXRAD);
 
-    uint3 c = uint3(uvw * gVoxelParams.x);
+    // insideVolume() is INCLUSIVE of 1.0, so a fragment landing exactly on the far face of the
+    // volume truncates to index `res`, one past the last cell. Conservative rasterisation is what
+    // makes that reachable: it generates fragments for pixels the triangle only partly covers and
+    // extrapolates their attributes to the pixel CENTRE, so a mesh whose extent matches the volume's
+    // own bounds does produce uvw == 1.0 exactly. A typed-UAV write out of bounds is discarded by the
+    // hardware, which is why this was invisible on RDNA3. Clamp rather than reject: the fragment's
+    // radiance genuinely belongs to the last cell.
+    uint3 c = min(uint3(uvw * gVoxelParams.x), (uint)gVoxelParams.x - 1);
     uint3 a = uint3(c.x * 4, c.y, c.z);
     uint prev;
     InterlockedAdd(gVoxelAccum[a],                (uint)(radiance.r * AVER_VOX_FIXED), prev);

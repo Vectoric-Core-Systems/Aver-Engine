@@ -110,6 +110,17 @@ void writeShadingConstants(f32* block) {
     block[28] = block[29] = block[30] = block[31] = 0.0f;   // emissive
 }
 
+// The shader model every Voxi pipeline that is NOT a mesh shader or a RayQuery variant asks for.
+//
+// It is 51, not 60, and that is a REQUEST rather than a downgrade: where DXC is present the backend
+// derives the SM 6.0 target from it and compiles byte for byte what it compiled before, so no device
+// with a DXIL compiler sees any change. It only bites where DXC is absent, and there the honest
+// answer is that the shadow map, the voxelisation pass, the atomic accumulator and the cone-traced
+// lit pass use nothing SM 6.x introduced — asking for 6.0 was gating the whole feature on a
+// compiler, not on a capability. Mesh shaders and inline RayQuery genuinely need 6.5 and still say
+// so at their own call sites.
+constexpr u32 kBaseSm = 51;
+
 // Shader blobs are CPU-side only: a pipeline copies what it needs at creation. Collecting them
 // means the whole batch is released on every exit path, including the early returns a failed
 // rebuild takes.
@@ -696,7 +707,7 @@ bool VoxiRenderer::createPipelines() {
     auto rasterDefs = [&](const char* extra) { return extra ? matDefs + ";" + extra : matDefs; };
 
     // --- 1. shadow map: depth only, from the sun ---
-    if (const rhi::ShaderHandle vs = compile("VSShadow", rhi::ShaderStage::Vertex, 60, rasterDefs(nullptr).c_str())) {
+    if (const rhi::ShaderHandle vs = compile("VSShadow", rhi::ShaderStage::Vertex, kBaseSm, rasterDefs(nullptr).c_str())) {
         rhi::GraphicsPipelineDesc p;
         p.vs = vs;                                   // no pixel shader: depth is the only output
         p.layout = gi;
@@ -713,7 +724,7 @@ bool VoxiRenderer::createPipelines() {
     if (!shadowPso_) AVER_ERROR("[Voxi] shadow pipeline unavailable");
 
     // --- 2/3. voxelisation + light injection: rasterise with NO render target ---
-    const rhi::ShaderHandle psVoxel = compile("PSVoxel", rhi::ShaderStage::Pixel, 60, rasterDefs(nullptr).c_str());
+    const rhi::ShaderHandle psVoxel = compile("PSVoxel", rhi::ShaderStage::Pixel, kBaseSm, rasterDefs(nullptr).c_str());
     rhi::GraphicsPipelineDesc vox;
     vox.layout = gi;
     vox.cull = rhi::CullMode::None;
@@ -725,8 +736,8 @@ bool VoxiRenderer::createPipelines() {
     vox.depthFormat = rhi::Format::Unknown;
     vox.sampleCount = 1;
 
-    const rhi::ShaderHandle vsVoxel = compile("VSVoxel", rhi::ShaderStage::Vertex, 60, rasterDefs(nullptr).c_str());
-    const rhi::ShaderHandle gsVoxel = compile("GSVoxel", rhi::ShaderStage::Geometry, 60, rasterDefs(nullptr).c_str());
+    const rhi::ShaderHandle vsVoxel = compile("VSVoxel", rhi::ShaderStage::Vertex, kBaseSm, rasterDefs(nullptr).c_str());
+    const rhi::ShaderHandle gsVoxel = compile("GSVoxel", rhi::ShaderStage::Geometry, kBaseSm, rasterDefs(nullptr).c_str());
     if (vsVoxel && gsVoxel && psVoxel) {
         rhi::GraphicsPipelineDesc p = vox;
         p.vs = vsVoxel; p.gs = gsVoxel; p.ps = psVoxel;
@@ -752,7 +763,7 @@ bool VoxiRenderer::createPipelines() {
 
     // --- 4. clear the accumulator, and reduce it into mip 0. UAV-only layouts, matching the
     //        UAV-only binding sets. ---
-    if (const rhi::ShaderHandle cs = compile("CSClear", rhi::ShaderStage::Compute, 60, nullptr)) {
+    if (const rhi::ShaderHandle cs = compile("CSClear", rhi::ShaderStage::Compute, kBaseSm, nullptr)) {
         rhi::ComputePipelineDesc p;
         p.cs = cs;
         p.layout.uavCount = 2;
@@ -760,7 +771,7 @@ bool VoxiRenderer::createPipelines() {
     }
     if (!clearPso_) AVER_ERROR("[Voxi] volume clear pipeline unavailable");
 
-    if (const rhi::ShaderHandle cs = compile("CSResolve", rhi::ShaderStage::Compute, 60, nullptr)) {
+    if (const rhi::ShaderHandle cs = compile("CSResolve", rhi::ShaderStage::Compute, kBaseSm, nullptr)) {
         rhi::ComputePipelineDesc p;
         p.cs = cs;
         p.layout.uavCount = 2;
@@ -769,7 +780,7 @@ bool VoxiRenderer::createPipelines() {
     if (!resolvePso_) AVER_ERROR("[Voxi] injection resolve pipeline unavailable");
 
     // --- 5. mip filter: one source mip in, one destination mip out. ---
-    if (const rhi::ShaderHandle cs = compile("CSMip", rhi::ShaderStage::Compute, 60, nullptr)) {
+    if (const rhi::ShaderHandle cs = compile("CSMip", rhi::ShaderStage::Compute, kBaseSm, nullptr)) {
         rhi::ComputePipelineDesc p;
         p.cs = cs;
         p.layout.srvCount = 1;
@@ -811,8 +822,8 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     auto rasterDefs = [&](const char* extra) { return extra ? matDefs + ";" + extra : matDefs; };
 
     // --- 6. debug: raymarch the volume to screen (shares the prelude's fullscreen triangle). ---
-    const rhi::ShaderHandle vsky = compile("VSky", rhi::ShaderStage::Vertex, 60, rasterDefs(nullptr).c_str());
-    if (const rhi::ShaderHandle ps = compile("PSVoxelDebug", rhi::ShaderStage::Pixel, 60, rasterDefs(nullptr).c_str()); ps && vsky) {
+    const rhi::ShaderHandle vsky = compile("VSky", rhi::ShaderStage::Vertex, kBaseSm, rasterDefs(nullptr).c_str());
+    if (const rhi::ShaderHandle ps = compile("PSVoxelDebug", rhi::ShaderStage::Pixel, kBaseSm, rasterDefs(nullptr).c_str()); ps && vsky) {
         rhi::GraphicsPipelineDesc p;
         p.vs = vsky; p.ps = ps;
         p.layout = gi;
@@ -837,8 +848,8 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     scene.depthFormat = depth;
     scene.sampleCount = sampleCount;
 
-    const rhi::ShaderHandle vsMain = compile("VSMain", rhi::ShaderStage::Vertex, 60, rasterDefs(nullptr).c_str());
-    const rhi::ShaderHandle psVoxi = compile("PSMainVoxi", rhi::ShaderStage::Pixel, 60, rasterDefs(nullptr).c_str());
+    const rhi::ShaderHandle vsMain = compile("VSMain", rhi::ShaderStage::Vertex, kBaseSm, rasterDefs(nullptr).c_str());
+    const rhi::ShaderHandle psVoxi = compile("PSMainVoxi", rhi::ShaderStage::Pixel, kBaseSm, rasterDefs(nullptr).c_str());
     if (vsMain && psVoxi) {
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vsMain; p.ps = psVoxi;

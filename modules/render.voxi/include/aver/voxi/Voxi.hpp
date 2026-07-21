@@ -93,6 +93,11 @@ private:
     Settings settings_{};
     DeviceInfo device_{};
     bool msaaDirty_ = true;
+    // One bit per Feature: has this device's refusal of it already been stated? setSettings runs
+    // whenever anything touches the settings, so without this the same unchangeable fact would be
+    // repeated for the life of the process. Cleared by setDeviceInfo, because a different device is
+    // entitled to say it again.
+    u32 refusalLogged_ = 0;
 };
 
 } // namespace aver::voxi

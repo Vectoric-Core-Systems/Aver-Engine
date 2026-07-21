@@ -68,17 +68,43 @@ public:
     bool usingDxc() const { return compiler_ != nullptr; }
 
     // `target51` is the FXC target, e.g. "vs_5_1"; the SM6 equivalent is derived from it.
-    // `sm6` overrides that (e.g. "ps_6_5" for RayQuery), and `define` is a semicolon-separated
-    // list of -D macros ("AVER_MS=1;AVER_RT=1"). Both require DXC, so a caller using them must
-    // have checked the device caps first.
+    // `sm6` overrides that (e.g. "ps_6_5" for RayQuery) and requires DXC, so a caller using it must
+    // have checked the device caps first. `define` is a semicolon-separated list of -D macros
+    // ("AVER_MS=1;AVER_RT=1") and does NOT: the material prelude tells every raster shader which
+    // registers its tables landed at, so a compiler that could not take macros could not build the
+    // scene at all. That is why FXC gets them too.
     HRESULT compile(const char* src, const char* entry, const char* target51, ID3DBlob** out,
                     const char* sm6 = nullptr, const char* define = nullptr) {
         init();
+        // "A=1;B=2" -> the two shapes the two compilers want. Split once, here, so the macro list
+        // cannot drift between them.
+        std::vector<std::string> defs;
+        if (define) {
+            const std::string all(define);
+            for (size_t b = 0; b <= all.size();) {
+                const size_t e = std::min(all.find(';', b), all.size());
+                if (e > b) defs.emplace_back(all, b, e - b);
+                b = e + 1;
+            }
+        }
         if (!usingDxc()) {
-            if (sm6 || define) return E_NOTIMPL;   // SM6-only path; caller must fall back
+            if (sm6) return E_NOTIMPL;   // SM6-only path; caller must fall back
+            // D3D_SHADER_MACRO wants name and value as separate pointers, so each "A=1" is split
+            // in place and both halves have to outlive the D3DCompile call.
+            std::vector<std::string> names, values;
+            names.reserve(defs.size()); values.reserve(defs.size());
+            for (const std::string& d : defs) {
+                const size_t eq = d.find('=');
+                names.push_back(eq == std::string::npos ? d : d.substr(0, eq));
+                values.push_back(eq == std::string::npos ? std::string("1") : d.substr(eq + 1));
+            }
+            std::vector<D3D_SHADER_MACRO> macros;
+            macros.reserve(names.size() + 1);
+            for (size_t i = 0; i < names.size(); ++i) macros.push_back({names[i].c_str(), values[i].c_str()});
+            macros.push_back({nullptr, nullptr});
             ComPtr<ID3DBlob> err;
             const UINT flags = D3DCOMPILE_PACK_MATRIX_ROW_MAJOR | D3DCOMPILE_ENABLE_STRICTNESS;
-            HRESULT hr = D3DCompile(src, std::strlen(src), "aver.hlsl", nullptr, nullptr, entry, target51, flags, 0, out, &err);
+            HRESULT hr = D3DCompile(src, std::strlen(src), "aver.hlsl", macros.data(), nullptr, entry, target51, flags, 0, out, &err);
             if (FAILED(hr) && err) AVER_ERROR("[RHI.D3D12] {} ({}): {}", entry, target51, static_cast<const char*>(err->GetBufferPointer()));
             return hr;
         }
@@ -89,16 +115,9 @@ public:
         if (sm6) t6 = sm6;
         const std::wstring wEntry(entry, entry + std::strlen(entry));
         const std::wstring wTarget(t6.begin(), t6.end());
-        // Split on ';' and keep each macro alive for the duration of the Compile call.
+        // Keep each macro alive for the duration of the Compile call.
         std::vector<std::wstring> wDefines;
-        if (define) {
-            const std::string all(define);
-            for (size_t b = 0; b <= all.size();) {
-                const size_t e = std::min(all.find(';', b), all.size());
-                if (e > b) wDefines.emplace_back(all.begin() + b, all.begin() + e);
-                b = e + 1;
-            }
-        }
+        for (const std::string& d : defs) wDefines.emplace_back(d.begin(), d.end());
 
         DxcBuffer buf{src, std::strlen(src), DXC_CP_UTF8};
         std::vector<LPCWSTR> args = {
@@ -600,6 +619,19 @@ public:
     void setMeshShaders(bool enabled) override {
         const bool want = enabled && msSupported_;
         if (want != msActive_) AVER_INFO("[RHI.D3D12] geometry path: {}", want ? "mesh shaders" : "input assembler");
+        // A refused request used to be indistinguishable from one that was never made: the path
+        // simply stayed on the input assembler and nothing said why. Named once, with the capability
+        // that is actually missing, because "mesh shaders are off" and "this GPU cannot" are
+        // different facts and only the second is the user's to act on.
+        if (enabled && !msSupported_ && !msRefusalLogged_) {
+            msRefusalLogged_ = true;
+            const char* why = caps_.meshShaderTier == 0 ? "mesh-shader tier 0"
+                            : caps_.shaderModel < 65    ? "shader model below 6.5"
+                            : !caps_.dxcAvailable       ? "no DXC (DXIL) compiler"
+                                                        : "the mesh-shader path failed to initialise";
+            AVER_INFO("[RHI.D3D12] mesh-shader geometry path requested but unavailable ({}); "
+                      "staying on the input assembler", why);
+        }
         msActive_ = want;
     }
     bool meshShadersActive() const override { return msActive_; }
@@ -738,12 +770,18 @@ private:
     ComPtr<ID3D12GraphicsCommandList6> cmdList6_;
     ComPtr<ID3D12RootSignature> msRootSig_;
     ComPtr<ID3D12PipelineState> msPso_;
-    bool msSupported_ = false, msActive_ = false;
+    bool msSupported_ = false, msActive_ = false, msRefusalLogged_ = false;
     ID3D12RootSignature* boundRootSig_ = nullptr;   // raw: cache only, ownership stays in the ComPtrs
 
     bool hasSwapchain_ = false;
     f32 clear_[4] = {0.10f, 0.12f, 0.16f, 1.0f};
     std::string adapterName_ = "D3D12 Device";
+    // True when the device is running on a software rasteriser (WARP). Kept as a device property
+    // rather than a cap because it is not a capability the adapter reports being without — it is
+    // which IMPLEMENTATION of D3D12 is executing, and one pipeline-state combination below is
+    // unsafe on that implementation alone.
+    bool softwareAdapter_ = false;
+    bool warpConsRasterLogged_ = false;
 
     // ---- generic RHI (render-feature modules) ----
     // Raw pointers, deleted in the destructor: both types are incomplete here, and holding them
@@ -942,6 +980,10 @@ public:
     u64 uiDescriptor(TextureHandle h);
 
 private:
+    // Said once per device: the substitution below is the normal state of affairs on a GPU without
+    // ray tracing, and repeating it per binding set buried the messages that mean something.
+    bool asSlotLogged_ = false;
+
     // Fill a freshly created texture from TextureDesc::initialData. The resource must already be in
     // COPY_DEST; on success it has been transitioned to `d.initialState` and the GPU has finished.
     bool uploadInitialData(ID3D12Resource* res, const D3D12_RESOURCE_DESC& td, const TextureDesc& d,
@@ -1085,6 +1127,7 @@ bool D3D12Device::init(const DeviceDesc& desc) {
             std::wcstombs(name, ad.Description, sizeof(name) - 1);
             name[sizeof(name) - 1] = '\0';
             adapterName_ = name;
+            softwareAdapter_ = true;
             AVER_WARN("[RHI.D3D12] using the WARP software rasteriser ('{}') - expect single-digit frame rates", adapterName_);
         } else {
             AVER_WARN("[RHI.D3D12] WARP requested but unavailable - falling back to hardware");
@@ -2252,7 +2295,14 @@ void D3D12ResourceFactory::nullFill(const RhiBindingSet& s) {
             // A null acceleration structure is an address of zero; the view takes no resource at
             // all. Declaring one on a device without DXR would be rejected, so fall back there.
             if (dev_->caps_.rayTracingTier == 0) {
-                AVER_WARN("[RHI.D3D12] binding set declares an acceleration-structure slot on a device without ray tracing");
+                // Expected on every device without DXR, and every binding set with the slot hits it,
+                // so it is stated once and as information. A WARN per set read as a fault on exactly
+                // the hardware the fallback exists for.
+                if (!asSlotLogged_) {
+                    asSlotLogged_ = true;
+                    AVER_INFO("[RHI.D3D12] no ray tracing on this device: acceleration-structure slots "
+                              "are filled with a null 2D view and the shaders that would trace decline");
+                }
                 sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
                 sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
                 sv.Texture2D.MipLevels = 1;
@@ -2751,8 +2801,9 @@ ShaderHandle D3D12ResourceFactory::createShader(const ShaderDesc& d) {
         AVER_WARN("[RHI.D3D12] createShader '{}' wants SM {} but the device reports {}", d.entry, model, dev_->caps_.shaderModel);
         return 0;
     }
-    // FXC tops out at SM 5.1 and understands neither the DXC-only stages nor -D lists.
-    const bool needsDxc = model > 60 || d.stage == ShaderStage::Mesh || d.defines != nullptr;
+    // FXC tops out at SM 5.1 and has no mesh-shader target at all. It DOES take -D macros, so a
+    // shader that only needs them is not a reason to demand DXC.
+    const bool needsDxc = model > 60 || d.stage == ShaderStage::Mesh;
     if (needsDxc && !dev_->caps_.dxcAvailable) {
         AVER_WARN("[RHI.D3D12] createShader '{}' needs DXC, which is unavailable", d.entry);
         return 0;
@@ -2817,8 +2868,22 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
     raster.MultisampleEnable = (d.sampleCount > 1) ? TRUE : FALSE;
     raster.DepthBias = static_cast<INT>(d.depthBias);
     raster.SlopeScaledDepthBias = d.slopeScaledDepthBias;
+    // Conservatively rasterising MESH-SHADER output faults WARP: `--warp --ms --gi` dies on the
+    // first frame that dispatches MSVoxel with 0xC0000005 inside d3d10warp.dll, at a constant fault
+    // offset. It is not the engine's geometry — replacing every emitted triangle with one fixed,
+    // tiny, well-inside-NDC triangle reproduces it exactly, and removing either the mesh shader or
+    // the conservative flag makes it go away. WARP runs shaders on the CPU in this process, so its
+    // faults are ours to survive rather than a driver's to absorb. Dropping the flag for this one
+    // combination costs a little voxelisation coverage on the software rasteriser and nothing at
+    // all on hardware, where nothing here changes.
+    const bool warpMeshConservative = d.conservativeRaster && d.ms != 0 && dev_->softwareAdapter_;
+    if (warpMeshConservative && !dev_->warpConsRasterLogged_) {
+        dev_->warpConsRasterLogged_ = true;
+        AVER_WARN("[RHI.D3D12] conservative rasterisation disabled for mesh-shader pipelines on the "
+                  "WARP software rasteriser (it faults); voxel coverage is thinner on this adapter");
+    }
     // Silently dropped where unsupported, exactly as the desc promises.
-    raster.ConservativeRaster = (d.conservativeRaster && dev_->caps_.conservativeRaster)
+    raster.ConservativeRaster = (d.conservativeRaster && dev_->caps_.conservativeRaster && !warpMeshConservative)
         ? D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON : D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
 
     D3D12_DEPTH_STENCIL_DESC depth{};
@@ -3209,6 +3274,10 @@ void D3D12ResourceFactory::selfTest() {
     sd.source = kSelfTestCS;
     sd.entry = "CSSelfTest";
     sd.stage = ShaderStage::Compute;
+    // 5.1, so the self-test proves the factory on an FXC-only device too. It is four lines of HLSL
+    // that use nothing SM 6.x introduced, and the default of 6.0 made the one path most in need of
+    // an end-to-end check the one path that skipped it.
+    sd.minShaderModel = 51;
     const ShaderHandle cs = createShader(sd);
     ComputePipelineDesc cd{};
     cd.cs = cs;

@@ -14,12 +14,20 @@ device capabilities which of them can actually be used:
 | **Mesh shaders** | **Implemented.** Replaces the input assembler, and removes the geometry shader from voxelisation. Needs mesh-shader tier 1 + SM 6.5. The DEVICE owns the toggle; Voxi only reports and stores it. |
 | **Path Tracing** | Declared. Reference tracer; not built yet. |
 
+**MSAA, GI and the shadow map ask for shader model 5.1**, so they compile under FXC and work on a
+machine with no `dxcompiler.dll` at all — measured bit-identical to the SM 6.6 hardware path at every
+oracle gate. Only ray tracing and mesh shaders need SM 6.5, and they say so at their own call sites.
+
 ## Honest status reporting
 
 Every feature reports one of `Ready` / `NotImplemented` / `Unsupported`, and the setter refuses
 values it cannot honour. The editor greys out anything that is not `Ready`, so a toggle is never
 shown as available when it would silently do nothing. When the GI/RT/PT passes land, only
 `Renderer::status()` changes — the UI and the C# bindings pick it up for free.
+
+A refusal is also **logged**, once per feature per device, naming the capability that is missing —
+because a request refused in silence (`--ms` on a device without mesh shaders) is indistinguishable
+from a request never made. Only a feature that was actually asked for is reported.
 
 ## Layering — two targets, and the split is load-bearing
 
@@ -166,9 +174,9 @@ no shader binding tables, no `DispatchRays`, so it drops into the existing raste
   CREATED up front, sized for the draw-list cap, so its descriptor can be written into `t2` before
   any frame is recorded — a shader-visible descriptor an in-flight frame may be reading must not be
   rewritten.
-- A second pixel-shader variant is compiled at `ps_6_5` with `-D AVER_RT=1`; the SM 6.0
-  variant remains the default, so a device without DXR still gets a working renderer and
-  falls back to the shadow map.
+- A second pixel-shader variant is compiled at `ps_6_5` with `-D AVER_RT=1`; the default variant
+  asks only for **SM 5.1**, so a device without DXR — or without a DXIL compiler at all — still gets
+  a working renderer and falls back to the shadow map.
 - Occlusion rays use `ACCEPT_FIRST_HIT_AND_END_SEARCH` - a visibility query, not a
   closest-hit search, which is substantially cheaper.
 - **The FEATURE decides whether a ray may be traced**, publishing it as `gShadowParams.z`. Tracing
