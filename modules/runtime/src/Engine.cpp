@@ -38,6 +38,7 @@ int Engine::run(Application* app) {
     // --- RHI device (D3D12 -> D3D11 -> Vulkan -> Null, per stubs today -> Null) ---
     rhi::DeviceDesc dd;
     dd.enableDebug = true;
+    dd.useWarp = cfg.useWarp;
     device_ = rhi::createDevice(dd);
 
     if (window_) {

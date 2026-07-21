@@ -12,6 +12,10 @@ struct BootConfig {
     u32 windowHeight = 720;
     u64 maxFrames = 0;     // 0 = run until the window is closed
     bool headless = false; // skip window creation entirely
+    // Ask the RHI for the software rasteriser instead of a hardware adapter. A development
+    // switch for exercising fallback paths on hardware that does not need them; see
+    // `rhi::DeviceDesc::useWarp`.
+    bool useWarp = false;
 };
 
 // Applications subclass this. The engine owns the loop and calls these hooks.

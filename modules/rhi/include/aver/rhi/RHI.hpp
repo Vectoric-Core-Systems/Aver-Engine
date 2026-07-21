@@ -63,6 +63,10 @@ struct DeviceDesc {
     Backend preferred[4] = {Backend::D3D12, Backend::D3D11, Backend::Vulkan, Backend::Null};
     u32 preferredCount = 4;
     bool enableDebug = false;
+    // Prefer the software rasteriser (D3D12: WARP) over any hardware adapter. A development
+    // switch: WARP reports genuinely different tiers from the installed GPU, so it exercises
+    // fallback paths that a capability clamp cannot reach. It is slow — use few frames.
+    bool useWarp = false;
 };
 
 // What the physical device can actually do. Queried once at init; consumers (e.g. the Voxi
@@ -78,7 +82,44 @@ struct DeviceCaps {
     u32 shaderModel = 50;            // 51 = SM 5.1, 60 = SM 6.0, 65 = SM 6.5, ...
     u32 meshShaderTier = 0;          // 0 = none, 1 = Tier 1 (D3D12 Ultimate)
     bool dxcAvailable = false;       // DXIL compiler present (needed for SM 6.x)
+    u32 resourceBindingTier = 0;     // 0 = unknown, 1/2/3 = D3D12_RESOURCE_BINDING_TIER_N
 };
+
+// ----- Capability clamp (development only) -------------------------------------------------
+//
+// The engine has only ever run on one GPU, so every capability-gated fallback in it is a
+// reasoned claim rather than a measured one. This clamps what the device REPORTS so those
+// paths can be executed on the hardware that is actually here.
+//
+// Two properties make it safe to leave in the product build. Every field can only ever REDUCE
+// a capability — `clampCaps` takes minimums and clears flags, never sets them — so no override
+// can make the engine attempt something the hardware cannot do. And the clamp is applied once,
+// where the backend finishes querying the hardware, so every consumer (the backend's own
+// pipeline selection included) sees a single reduced device and nothing anywhere branches on
+// "was this overridden".
+struct CapsOverride {
+    bool active = false;
+    bool noRayTracing = false;
+    bool noMeshShaders = false;
+    bool noConservativeRaster = false;
+    bool noTypedUavLoads = false;
+    // Suppresses DXC entirely, so shaders go through FXC at SM 5.1. This one has to reach the
+    // shader compiler as well as the caps, because `dxcAvailable` describes a DLL that is either
+    // loaded or not — reporting false while still compiling DXIL would test nothing.
+    bool noDxc = false;
+    u32  maxShaderModel = 0;       // 0 = no ceiling; 51/60/65/66 pin the reported model
+    u32  maxMsaaSamples = 0;       // 0 = no ceiling
+    u32  maxResourceBindingTier = 0; // 0 = no clamp; 1 = report Tier 1
+};
+
+// Parses a comma-separated list: no-rt, no-ms, no-cons-raster, no-typed-uav, no-dxc,
+// sm=<51|60|65|66>, msaa=<1|2|4|8>, tier1. Returns false (and logs) on an unrecognised token,
+// so a typo in a test switch fails loudly instead of quietly testing the full-fat device.
+bool setCapsOverride(const char* commaSeparatedList);
+const CapsOverride& capsOverride();
+
+// Applied by each backend at the end of its own capability query. Monotonically reducing.
+void clampCaps(DeviceCaps& caps);
 
 class IDevice {
 public:

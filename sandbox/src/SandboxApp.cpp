@@ -209,8 +209,9 @@ public:
 
     BootConfig config() const override {
         BootConfig c; c.windowTitle="Aver Engine \xE2\x80\x94 Editor"; c.windowWidth=1600; c.windowHeight=900;
-        c.maxFrames=maxFrames_; c.headless=headless_; return c;
+        c.maxFrames=maxFrames_; c.headless=headless_; c.useWarp=useWarp_; return c;
     }
+    void setUseWarp(bool w) { useWarp_ = w; }  // --warp
 
 #if AVER_WITH_IMGUI
     // Rebuild the style and the font atlas for `dpi`.
@@ -1560,6 +1561,7 @@ private:
     int  rtOverride_=0;              // --rt: ray tracing quality at startup
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
+    bool useWarp_=false;             // --warp: run on the D3D12 software rasteriser
     std::string scriptsDir_;         // --scripts <dir>: where to look for user script assemblies
     // Project browser + the project it produced. `browserActive_` is false for every automated
     // run, so the oracle never sees the start screen.
@@ -1607,7 +1609,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; std::string beam, shot, project, scriptsDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; std::string beam, shot, project, scriptsDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false; const char* forceCaps=nullptr;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -1632,6 +1634,12 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--rt")) rt=3;
         else if (!std::strcmp(argv[i],"--ms")) ms=true;
         else if (!std::strcmp(argv[i],"--probe") && i+2<argc) { probeX=(u32)std::atoi(argv[++i]); probeY=(u32)std::atoi(argv[++i]); }
+        // Fallback-path testing. `--force-caps` clamps what the device reports it can do and
+        // `--warp` swaps the adapter for the software rasteriser. Both exist because the engine
+        // has only ever run on one GPU, so every capability gate in it is reasoned rather than
+        // measured; see docs/STATUS.md §4g. Neither can raise a capability above the hardware's.
+        else if (!std::strcmp(argv[i],"--force-caps") && i+1<argc) forceCaps=argv[++i];
+        else if (!std::strcmp(argv[i],"--warp")) warp=true;
         // Where the scripting host looks for user assemblies. Relative to the executable unless
         // absolute; the default (<exe>\Scripts) does not exist in a clean build, so no gate loads
         // anything. `--scripts SampleScripts` picks up the staged sample behaviour.
@@ -1645,7 +1653,13 @@ Application* createApplication(int argc, char** argv) {
         }
         else if (argv[i][0]!='-') { if (isOcproject(argv[i])) project=argv[i]; else beam=argv[i]; }
     }
+    // Set before the engine creates a device: the clamp has to be in place by the time the
+    // backend queries the hardware, which happens inside Engine::run.
+    if (forceCaps && !rhi::setCapsOverride(forceCaps))
+        AVER_ERROR("[Sandbox] --force-caps '{}' was rejected; running on the UNCLAMPED device", forceCaps);
+
     auto* app = new SandboxApp(frames, headless, beam, shot, tool);
+    app->setUseWarp(warp);
     app->setProjectPath(project);
     // The start screen is for a human opening the editor with nothing to open. It must never
     // appear in automation: every gate in the verification harness passes --frames and reads a

@@ -46,6 +46,13 @@ public:
     void init() {
         if (tried_) return;
         tried_ = true;
+        // `--force-caps no-dxc` has to be honoured HERE, not only in the reported caps: a device
+        // that claims no DXC while still compiling DXIL exercises nothing. This is the one place
+        // the override does more than subtract from a number, and it is still only a removal.
+        if (capsOverride().active && capsOverride().noDxc) {
+            AVER_INFO("[RHI.D3D12] shader compiler: FXC (SM 5.1) - DXC suppressed by --force-caps no-dxc");
+            return;
+        }
         dll_ = LoadLibraryW(L"dxcompiler.dll");
         if (!dll_) { AVER_WARN("[RHI.D3D12] dxcompiler.dll not found - falling back to FXC (SM 5.1)"); return; }
         auto create = reinterpret_cast<DxcCreateInstanceProc>(reinterpret_cast<void*>(GetProcAddress(dll_, "DxcCreateInstance")));
@@ -705,6 +712,17 @@ private:
     u32 sampleCount_ = kDefaultSampleCount;     // live MSAA sample count (1 = off)
     DeviceCaps caps_{};
 
+    // ---- Debug layer message drain ----
+    // The debug layer writes to the Win32 debug output, which nothing outside a debugger reads.
+    // For an automated fallback matrix that is the same as not having it: a Tier-1 violation or
+    // an unbound descriptor would be reported to nobody. Draining the info queue into the
+    // engine's own log puts it in the run's captured output, so "zero validation errors" becomes
+    // a measurement instead of an assumption.
+    ComPtr<ID3D12InfoQueue> infoQueue_;
+    std::vector<u32> seenMessageIds_;   // first occurrence only; the totals carry the rest
+    u32 dbgCorruption_ = 0, dbgError_ = 0, dbgWarning_ = 0;
+    void drainDebugMessages();
+
     // ---- DXR 1.1 ----
     // No pipeline of its own: nothing this backend draws traces a ray. These two interfaces exist
     // only so the generic factory can build acceleration structures for a render feature that does,
@@ -1052,7 +1070,28 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     ComPtr<IDXGIFactory6> factory6;
     const bool haveGpuPref = SUCCEEDED(factory_.As(&factory6));
     ComPtr<IDXGIAdapter1> adapter;
-    for (UINT i = 0; ; ++i) {
+
+    // WARP first, when asked for. It is the only "different GPU" available without buying one:
+    // the software rasteriser reports its own tiers, so it exercises decisions a capability
+    // clamp cannot reach. If it is unavailable we fall through to the hardware search rather
+    // than failing -- the same decline-and-carry-on rule the rest of the engine follows.
+    if (desc.useWarp) {
+        ComPtr<IDXGIAdapter1> warp;
+        if (SUCCEEDED(factory_->EnumWarpAdapter(IID_PPV_ARGS(&warp))) &&
+            SUCCEEDED(D3D12CreateDevice(warp.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_)))) {
+            DXGI_ADAPTER_DESC1 ad{};
+            warp->GetDesc1(&ad);
+            char name[128];
+            std::wcstombs(name, ad.Description, sizeof(name) - 1);
+            name[sizeof(name) - 1] = '\0';
+            adapterName_ = name;
+            AVER_WARN("[RHI.D3D12] using the WARP software rasteriser ('{}') - expect single-digit frame rates", adapterName_);
+        } else {
+            AVER_WARN("[RHI.D3D12] WARP requested but unavailable - falling back to hardware");
+        }
+    }
+
+    for (UINT i = 0; !device_; ++i) {
         if (haveGpuPref) {
             if (factory6->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)) == DXGI_ERROR_NOT_FOUND) break;
         } else {
@@ -1071,6 +1110,9 @@ bool D3D12Device::init(const DeviceDesc& desc) {
         adapter.Reset();
     }
     if (!device_) { AVER_WARN("[RHI.D3D12] no compatible hardware adapter"); return false; }
+
+    if (desc.enableDebug && SUCCEEDED(device_.As(&infoQueue_)))
+        AVER_INFO("[RHI.D3D12] debug layer messages will be logged");
 
     D3D12_COMMAND_QUEUE_DESC qd{};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -1100,9 +1142,48 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     return true;
 }
 
+// Each distinct message ID is logged ONCE. The two benign warnings this engine already emits
+// (#820 CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE, #1328 CREATERESOURCE_STATE_IGNORED) fire
+// every frame, and a per-frame repeat would bury the one message that matters. The running
+// totals still count every occurrence, so nothing is hidden — only repeated.
+void D3D12Device::drainDebugMessages() {
+    if (!infoQueue_) return;
+    const UINT64 n = infoQueue_->GetNumStoredMessages();
+    for (UINT64 i = 0; i < n; ++i) {
+        SIZE_T len = 0;
+        if (FAILED(infoQueue_->GetMessage(i, nullptr, &len)) || len == 0) continue;
+        std::vector<u8> buf(len);
+        auto* m = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+        if (FAILED(infoQueue_->GetMessage(i, m, &len))) continue;
+
+        switch (m->Severity) {
+            case D3D12_MESSAGE_SEVERITY_CORRUPTION: ++dbgCorruption_; break;
+            case D3D12_MESSAGE_SEVERITY_ERROR:      ++dbgError_;      break;
+            case D3D12_MESSAGE_SEVERITY_WARNING:    ++dbgWarning_;    break;
+            default: continue;  // INFO and MESSAGE are chatter; the totals do not need them
+        }
+        const u32 id = static_cast<u32>(m->ID);
+        bool seen = false;
+        for (u32 s : seenMessageIds_) if (s == id) { seen = true; break; }
+        if (seen) continue;
+        seenMessageIds_.push_back(id);
+        const std::string text(m->pDescription, m->DescriptionByteLength ? m->DescriptionByteLength - 1 : 0);
+        if (m->Severity == D3D12_MESSAGE_SEVERITY_WARNING)
+            AVER_WARN("[RHI.D3D12] debug layer #{}: {}", id, text);
+        else
+            AVER_ERROR("[RHI.D3D12] debug layer #{}: {}", id, text);
+    }
+    infoQueue_->ClearStoredMessages();
+}
+
 // The factory holds GPU resources, so it must go before the fence event it retires them against.
 D3D12Device::~D3D12Device() {
     waitForGpu();
+    if (infoQueue_) {
+        drainDebugMessages();
+        AVER_INFO("[RHI.D3D12] debug layer totals: {} corruption, {} error, {} warning",
+                  dbgCorruption_, dbgError_, dbgWarning_);
+    }
     delete rhiContext_;
     delete rhiFactory_;
     uiShutdown();
@@ -1145,6 +1226,7 @@ void D3D12Device::queryCaps() {
     if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &o, sizeof(o)))) {
         caps_.typedUavLoads = o.TypedUAVLoadAdditionalFormats != FALSE;
         caps_.conservativeRaster = o.ConservativeRasterizationTier != D3D12_CONSERVATIVE_RASTERIZATION_TIER_NOT_SUPPORTED;
+        caps_.resourceBindingTier = static_cast<u32>(o.ResourceBindingTier);
     }
     // Highest shader model the driver accepts. DXC emits DXIL, which needs SM 6.0+; mesh
     // shaders need SM 6.5 and RayQuery needs SM 6.5, so this gates both.
@@ -1168,9 +1250,20 @@ void D3D12Device::queryCaps() {
         if (o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1)      caps_.rayTracingTier = 11;
         else if (o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0) caps_.rayTracingTier = 10;
     }
-    AVER_INFO("[RHI.D3D12] caps: MSAA {}x, RT tier {}, SM {}, mesh-shader tier {}, DXC {}, cons-raster {}",
+    // The clamp is applied HERE, once, at the end of the hardware query. Every consumer -- this
+    // backend's own pipeline selection, Voxi's feature status, the editor's settings UI -- reads
+    // `caps_` afterwards, so a forced-down device is indistinguishable from a real one and no
+    // code path anywhere has to know an override exists.
+    const DeviceCaps hw = caps_;
+    clampCaps(caps_);
+    AVER_INFO("[RHI.D3D12] caps: MSAA {}x, RT tier {}, SM {}, mesh-shader tier {}, DXC {}, cons-raster {}, binding tier {}",
               caps_.maxMsaaSamples, caps_.rayTracingTier, caps_.shaderModel,
-              caps_.meshShaderTier, caps_.dxcAvailable, caps_.conservativeRaster);
+              caps_.meshShaderTier, caps_.dxcAvailable, caps_.conservativeRaster,
+              caps_.resourceBindingTier);
+    if (capsOverride().active)
+        AVER_WARN("[RHI.D3D12] caps CLAMPED by --force-caps; the hardware reports MSAA {}x, RT tier {}, SM {}, mesh-shader tier {}, DXC {}, cons-raster {}, binding tier {}",
+                  hw.maxMsaaSamples, hw.rayTracingTier, hw.shaderModel, hw.meshShaderTier,
+                  hw.dxcAvailable, hw.conservativeRaster, hw.resourceBindingTier);
 }
 
 // Rebuild everything that bakes the sample count: the MSAA colour/depth targets and every PSO.
@@ -1831,6 +1924,7 @@ void D3D12Device::endFrame() {
     cmdList_->Close();
     ID3D12CommandList* lists[] = {cmdList_.Get()};
     queue_->ExecuteCommandLists(1, lists);
+    drainDebugMessages();
 }
 
 void D3D12Device::present() {
