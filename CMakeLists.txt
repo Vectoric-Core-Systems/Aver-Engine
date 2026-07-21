@@ -34,6 +34,7 @@ option(AVER_ENABLE_UI "In-window editor UI (Dear ImGui)" ON)
 
 # --- Optional feature modules (the engine builds and runs with these OFF) ---
 option(AVER_MODULE_VOXI "Voxi render module: AA / GI / ray tracing / path tracing settings" ON)
+option(AVER_MODULE_PBR  "PBR material system: material library, C ABI and the surface BRDF" ON)
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -65,6 +66,9 @@ if(AVER_RHI_D3D11)
 endif()
 if(AVER_RHI_VULKAN)
   add_subdirectory(modules/rhi.vulkan)
+endif()
+if(AVER_MODULE_PBR)
+  add_subdirectory(modules/render.pbr)    # optional: material system + C ABI for C#
 endif()
 if(AVER_MODULE_VOXI)
   add_subdirectory(modules/render.voxi)   # optional: render feature settings + C ABI for C#
