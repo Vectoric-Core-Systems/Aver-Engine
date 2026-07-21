@@ -19,7 +19,7 @@ namespace Aver.Scripting.Bridge;
 public static class HostBridge
 {
     // Must match AVER_SCRIPTING_CONTRACT_VERSION in modules/scripting/include/aver/scripting/scripting_abi.h.
-    private const int ContractVersion = 1;
+    private const int ContractVersion = 2;
 
     // Must match the AVER_SCRIPT_* codes in the same header.
     private const int Ok = 0;
@@ -111,6 +111,86 @@ public static class HostBridge
         }
     }
 
+    /// <summary>
+    /// Drains every live behaviour and unloads the collectible load context. The drain half of
+    /// hot reload; the host rebuilds and calls <see cref="LoadScripts"/> again afterwards.
+    /// </summary>
+    /// <returns>
+    /// 1 when the old context was fully collected, 0 when it is still finalising. Both are
+    /// success — see the note on UnloadScripts in scripting_abi.h.
+    /// </returns>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int UnloadScripts()
+    {
+        try
+        {
+            WeakReference? old = DrainAndUnload();
+            if (old is null)
+                return 1; // nothing was loaded; there is no context to wait for
+
+            // Bounded, and NOT a spin until it succeeds. A behaviour that parked a reference to
+            // one of its own types somewhere the engine still holds — a thread, a timer, a static
+            // in another context — keeps the old context alive forever, and blocking the editor's
+            // main thread on that would turn a leak into a hang. Two cycles is what a context with
+            // no stray references needs; anything more is a real reference and is reported.
+            for (int i = 0; i < 2 && old.IsAlive; ++i)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+
+            if (old.IsAlive)
+            {
+                Emit((int)Log.Level.Warn,
+                     "[Scripting] the previous script context is still finalising - its assemblies stay "
+                     + "in memory until every reference to them is dropped. The new ones are live regardless.");
+                return 0;
+            }
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error, $"[Scripting] unload failed: {Describe(ex)}");
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// Calls OnShutdown on everything live, drops the behaviour list and unloads the context.
+    /// </summary>
+    /// <remarks>
+    /// Its own <b>non-inlined</b> method, and that is load-bearing rather than tidy. The context
+    /// can only be collected once no stack frame holds a reference to it, and a JIT that inlined
+    /// this into the caller would leave the local alive for the whole of the calling frame — so
+    /// the collect below would report a leak that only the inlining had created. Returning a
+    /// WeakReference is the only thing that crosses back out.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference? DrainAndUnload()
+    {
+        foreach (Live b in s_live)
+        {
+            if (b.Disabled) continue;
+            try
+            {
+                b.Instance.OnShutdown();
+            }
+            catch (Exception ex)
+            {
+                Emit((int)Log.Level.Error, $"[Scripting] {b.Name}.OnShutdown threw: {Describe(ex)}");
+            }
+        }
+        s_live.Clear();
+
+        ScriptLoadContext? ctx = s_context;
+        s_context = null;
+        if (ctx is null) return null;
+
+        var weak = new WeakReference(ctx, trackResurrection: true);
+        ctx.Unload();
+        return weak;
+    }
+
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void Update(float dt)
     {
@@ -136,26 +216,10 @@ public static class HostBridge
     {
         try
         {
-            foreach (Live b in s_live)
-            {
-                if (b.Disabled) continue;
-                try
-                {
-                    b.Instance.OnShutdown();
-                }
-                catch (Exception ex)
-                {
-                    Emit((int)Log.Level.Error, $"[Scripting] {b.Name}.OnShutdown threw: {Describe(ex)}");
-                }
-            }
-            s_live.Clear();
-
-            // Unloading is a request, not a command: the context goes away once nothing references
-            // anything in it, which is the collection after this returns. Nothing here waits for
-            // it — a host shutting down has no reason to, and blocking on a GC would be worse.
-            s_context?.Unload();
-            s_context = null;
-
+            // The same drain the reload path uses. Nothing here waits for the collection: a host
+            // shutting down has no reason to care whether the context went away a millisecond
+            // before the process did, and blocking on a GC would be strictly worse.
+            DrainAndUnload();
             Log.SetSink(null);
         }
         catch
@@ -211,12 +275,40 @@ public static class HostBridge
             }
 
             Emit((int)Log.Level.Info, $"[Scripting] loaded {file}: {found} behaviour(s)");
+            if (found == 0) WarnAboutNearMisses(asm, file);
         }
         catch (Exception ex)
         {
             // A DLL in the scripts folder that is not a managed assembly at all lands here, as does
             // one built for a different architecture. Neither is worth stopping the editor for.
             Emit((int)Log.Level.Warn, $"[Scripting] {file} could not be loaded: {Describe(ex)}");
+        }
+    }
+
+    /// <summary>
+    /// Names types that look like a behaviour but are not one, when an assembly yielded none.
+    /// </summary>
+    /// <remarks>
+    /// Discovery is <c>IsAssignableFrom(AverBehaviour)</c>, so a class that merely declares
+    /// <c>OnStart</c> and <c>OnUpdate</c> without deriving from the base compiles cleanly and is
+    /// skipped in silence — which is the one failure mode this whole layer is meant not to have,
+    /// and is exactly what the editor's own script template produced before hosting existed. Only
+    /// runs when the assembly produced nothing at all: an assembly with behaviours in it may
+    /// legitimately also hold helper classes with a method of the same name.
+    /// </remarks>
+    private static void WarnAboutNearMisses(Assembly asm, string file)
+    {
+        foreach (Type type in asm.GetTypes())
+        {
+            if (type.IsAbstract || !type.IsClass) continue;
+            if (type.GetMethod("OnStart", Type.EmptyTypes) is null &&
+                type.GetMethod("OnUpdate", new[] { typeof(float) }) is null)
+                continue;
+
+            Emit((int)Log.Level.Warn,
+                 $"[Scripting] {file}: {type.FullName} has lifecycle-shaped methods but does not derive "
+                 + "from AverBehaviour, so nothing will call them. Add ': AverBehaviour' and mark the "
+                 + "hooks 'override'.");
         }
     }
 

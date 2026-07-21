@@ -33,12 +33,12 @@ bool writeNewFile(const std::string& path, const std::string& text, std::string*
 bool scaffoldProject(const std::string& location, const std::string& name,
                      fmt::ProjectDesc& out, std::string* err);
 
-// What a generated `.cs` is FOR. Both land in the same folder and compile the same way; the
-// difference is only whether the file pretends to have a lifecycle. It matters because the
-// engine cannot call a lifecycle hook yet, so offering only the hooked template implies a
-// runtime that is not there.
+// What a generated `.cs` is FOR. Both land in the same folder and compile into the same assembly;
+// the difference is only whether the type has a lifecycle the engine drives. Kept as two items
+// rather than one template with the hooks commented out, because a behaviour must derive from
+// `AverBehaviour` to be discovered at all and that is not something to leave to a comment.
 enum class CsKind {
-    Behaviour,  // OnStart/OnUpdate hooks, in the shape an eventual CLR host would call
+    Behaviour,  // : AverBehaviour, with the OnStart/OnUpdate/OnShutdown hooks the engine calls
     PlainClass, // no hooks — data, helpers, anything that is just C#
 };
 
@@ -51,5 +51,17 @@ bool createScript(const fmt::ProjectDesc& proj, const std::string& name, CsKind 
 // Absolute path of the `.csproj` Tools > New C# Script generates, whether or not it exists yet.
 // Compile Scripts and Open in Visual Studio both need to name it before it is there.
 std::string scriptsCsprojPath(const fmt::ProjectDesc& proj);
+
+// `<project>\Binaries\Scripts` — the ONE directory a project's script assemblies live in.
+//
+// It is a function rather than a `.csproj` property because both ends have to agree and only one
+// of them is ours to edit: Tools > Compile Scripts passes it to `dotnet build -o`, and the
+// scripting host is pointed at the same string. Putting it in the generated `.csproj` instead
+// would leave every project scaffolded before this change building somewhere the host does not
+// look, with nothing anywhere saying why the scripts did not load.
+//
+// OUTSIDE `Content\`, deliberately: `Content` is the asset mount root a shipped game reads, and
+// build output is neither content nor something anyone should ship.
+std::string scriptsBinaryDir(const fmt::ProjectDesc& proj);
 
 } // namespace aver::editor

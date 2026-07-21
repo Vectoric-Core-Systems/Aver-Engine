@@ -40,7 +40,7 @@ not by reading the code:
 | `nethost.dll` replaced with an unrelated DLL | `init declined: nethost.dll exports no get_hostfxr_path` |
 | bridge assembly not staged | `init declined: the managed bridge was not staged next to the executable …` |
 | runtimeconfig demanding a framework nobody has | `init declined: hostfxr_initialize_for_runtime_config failed (0x80008096) — the framework the bridge targets is not installed` |
-| bridge built to a different host contract | `init declined: the staged Aver.Scripting.Bridge.dll speaks a different host contract than this build (host v1) — rebuild the managed side` |
+| bridge built to a different host contract | `init declined: the staged Aver.Scripting.Bridge.dll speaks a different host contract than this build (host v2) — rebuild the managed side` |
 
 All thirteen oracle gates return their exact raw codes in every one of those runs. Scripting does
 not touch rendering, and the gates are how that is kept true.
@@ -51,8 +51,8 @@ not touch rendering, and the gates are how that is kept true.
 2. `LoadLibraryW(<that path>)` → `hostfxr_initialize_for_runtime_config()` against
    `Aver.Scripting.Bridge.runtimeconfig.json`.
 3. `hostfxr_get_runtime_delegate(hdt_load_assembly_and_get_function_pointer)`.
-4. Bind four `[UnmanagedCallersOnly]` entry points on `Aver.Scripting.Bridge.HostBridge` —
-   `Bootstrap`, `LoadScripts`, `Update`, `Shutdown` — and call `Bootstrap`.
+4. Bind five `[UnmanagedCallersOnly]` entry points on `Aver.Scripting.Bridge.HostBridge` —
+   `Bootstrap`, `LoadScripts`, `UnloadScripts`, `Update`, `Shutdown` — and call `Bootstrap`.
 
 The hostfxr declarations live in `src/ScriptHost.cpp` rather than coming from `nethost.h` /
 `hostfxr.h`. Those headers ship in the .NET **host pack**, which only exists on a machine with the
@@ -71,9 +71,9 @@ assembly shipped with the engine to whichever host happens to embed it.
 
 User assemblies go into a collectible `AssemblyLoadContext`. An assembly in a non-collectible
 context can **never** be unloaded — .NET offers no way back — so hot reload is not something that
-can be layered on later. It is decided at the first load or not at all, and it is decided here even
-though reload itself lands in the next phase. Assemblies are also loaded from a memory stream, so
-the DLL on disk is not locked and a rebuild while the editor is open succeeds.
+can be layered on later. It is decided at the first load or not at all. Assemblies are also loaded
+from a memory stream, so the DLL on disk is not locked and a rebuild while the editor is open
+succeeds.
 
 `ScriptLoadContext.Load` delegates to **the bridge's own load context**, not to the default one.
 `load_assembly_and_get_function_pointer` loads a hosted component into an isolated context driven by
@@ -139,6 +139,74 @@ silently, because a scripts folder legitimately holds support libraries.
         - the assembly was rejected. Rebuild it against this engine.
 ```
 
+## Hot reload
+
+**Tools ▸ Reload Scripts** rebuilds the open project's `Scripts.csproj` and swaps the result into
+the running editor. The sequence is three steps and each one belongs where it is:
+
+```
+UnloadScripts()   managed  OnShutdown on everything live, drop the list, unload the ALC
+dotnet build      native   off-thread, into <project>\Binaries\Scripts
+LoadScripts(dir)  managed  fresh collectible context, discover, construct, OnStart
+```
+
+The **rebuild is native** because the host already owns the `dotnet build` shell-out, and a managed
+side spawning compilers would be doing a job it has no business knowing about. The **swap is on the
+main thread**: `OnShutdown` and `OnStart` are behaviour hooks, and behaviours are a main-thread
+thing, so the build thread only ever sets a flag that the frame loop reaps.
+
+**A failed build does not unload.** Unloading first would leave the editor with no scripts at all
+because of a typo — strictly worse than carrying on with the ones already running. The compiler's
+whole transcript goes into the modal; the exit code alone never says which line it objected to.
+
+**Unloading is a request, not a command.** A collectible context is only gone once every reference
+to anything in it is dropped and a GC has run, so `UnloadScripts` returns 1 for "collected" and 0
+for "still finalising" — **both are success**. Nothing waits: the collect loop is bounded at two
+cycles, because a behaviour that parked a reference somewhere the engine still holds would keep the
+old context alive forever and blocking the editor's main thread on that turns a leak into a hang.
+A 0 is reported as a warning naming what it costs (memory), and the new scripts are live regardless.
+
+`DrainAndUnload` is deliberately `[MethodImpl(MethodImplOptions.NoInlining)]`. The context can only
+be collected once no stack frame holds a reference to it, and a JIT that inlined it into the caller
+would keep the local alive for the whole calling frame — so the collect would report a leak that
+only the inlining had created.
+
+**No state is carried across.** A behaviour's fields start again from their initialisers. Carrying
+them needs a serialisation contract, and inventing one before the scene layer exists would fix the
+shape of something that has no owner yet.
+
+Verified by measurement, in one process, with the `.cs` edited on disk between the two:
+
+```
+[INFO ] [Heartbeat] VERSION A - started
+[INFO ] [Scripting] loaded Scripts.dll: 1 behaviour(s)
+[INFO ] [Heartbeat] VERSION A - update 400
+[INFO ] [Editor] Reload Scripts: ...\SkyForge\Content\Scripts\Scripts.csproj built cleanly
+[INFO ] [Heartbeat] VERSION A - shutting down after 564 update(s)
+[INFO ] [Heartbeat] VERSION B - started, and this class did not exist when the editor launched
+[INFO ] [Scripting] loaded Scripts.dll: 1 behaviour(s)
+[INFO ] [Editor] Reload Scripts: 1 behaviour(s) live from ...\SkyForge\Binaries\Scripts
+[INFO ] [Heartbeat] VERSION B - update 600
+```
+
+## Where the host looks for scripts
+
+In priority order:
+
+| | Directory |
+|---|---|
+| `--scripts <dir>` | absolute, or relative to the executable |
+| a project is open | `<project>\Binaries\Scripts` |
+| otherwise | `<exe>\Scripts`, which a clean build does not create |
+
+`<project>\Binaries\Scripts` is a function in the editor (`scriptsBinaryDir`) and is passed to
+`dotnet build -o`, rather than being an `OutputPath` in the generated `.csproj`. Both ends have to
+agree and only one of them is ours to edit: a project scaffolded before this existed would
+otherwise build somewhere the host does not look, with nothing anywhere saying why.
+
+The override wins so the staged sample stays reachable with a project open — and so **no oracle
+gate can be made to load a project's scripts** by opening one.
+
 ## Staging
 
 The bridge, its `.runtimeconfig.json`, `Aver.Scripting.dll` and `nethost.dll` are staged next to the
@@ -161,20 +229,37 @@ build\bin\Sandbox.exe --scripts SampleScripts
 not run unasked in the product:
 
 ```
-[INFO ] [Scripting] managed bridge online (contract v1, 10.0.10, API v1.0.0.0)
+[INFO ] [Scripting] managed bridge online (contract v2, 10.0.10, API v1.0.0.0)
+[INFO ] [GiSwitch] global illumination is Off at startup (status: Ready)
 [INFO ] [HelloBehaviour] OnStart from managed code - hosted in-process on 10.0.10
-[INFO ] [Scripting] loaded Aver.Scripting.SampleBehaviour.dll: 1 behaviour(s)
-[INFO ] [HelloBehaviour] OnUpdate has run 10 times (0.185s of frame time)
+[INFO ] [Scripting] loaded Aver.Scripting.SampleBehaviour.dll: 2 behaviour(s)
+[INFO ] [GiSwitch] set global illumination to High from managed code at update 5 - the viewport changes on the next frame
+[INFO ] [HelloBehaviour] OnUpdate has run 10 times (0.191s of frame time)
+[INFO ] [Sandbox] probe (1375,819) px (0.41,0.36,0.41) raw (104,91,104) ... in-viewport
+[INFO ] [GiSwitch] leaving global illumination at High
 [INFO ] [HelloBehaviour] OnShutdown after 40 update(s)
 ```
 
 Every one of those lines originates in managed code and reaches the console through the engine's own
-log, which is what makes it proof rather than a claim.
+log, which is what makes it proof rather than a claim. **The probe in the middle is the strongest
+line there.** A default run of that scene reads `raw(90,93,108)`; `raw(104,91,104)` is the engine's
+own `--gi` oracle value, bit for bit — so managed code did not merely log, it changed what the GPU
+drew, and the change is verifiable at the raw 8-bit code rather than by eye.
+
+## What a script can and cannot reach
+
+**Can:** `Log`, and the render modules' live settings and this machine's real device capabilities
+through `Voxi` and `Pbr`. Because the CLR is in-process those P/Invokes resolve to the modules the
+editor has already loaded — same settings singleton, same frame.
+
+**Cannot:** the scene. There are no actor, transform, component, input or asset APIs. That waits on
+the generic scene layer (`docs/STATUS.md` §9.1) and is deliberately not stubbed: an interim object
+model invented here would be exactly the throwaway ABI that design exists to avoid, and every
+script written against it would have to be rewritten.
 
 ## Next
 
-Hot reload — the collectible context exists for it, and what is still missing is a file watcher, a
-drain/rebuild/reload step and a way to carry a behaviour's state across the swap. After that:
-exposing scene and actor handles to `AverBehaviour` (the C ABIs are shaped for it), and wiring
-Tools ▸ Compile Scripts' output directory to the host's scripts directory so a project's scripts
-load without a flag. Open items are tracked in `docs/STATUS.md` §4d.
+Exposing scene and actor handles to `AverBehaviour`, once §9.1 lands and there is something real to
+expose. Smaller, and independent: a file watcher so an edit reloads without the menu item, and a
+serialisation contract if state should survive a swap. Open items are tracked in
+`docs/STATUS.md` §4d.

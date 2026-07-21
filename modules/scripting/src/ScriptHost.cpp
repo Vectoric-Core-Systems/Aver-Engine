@@ -52,12 +52,13 @@ const char_t* const kUnmanagedCallersOnly = reinterpret_cast<const char_t*>(-1);
 // failure HRESULT, which is negative when read as int32_t.
 constexpr bool hostfxrOk(int32_t rc) { return rc >= 0 && rc <= 2; }
 
-// The bridge's entry points. All four are [UnmanagedCallersOnly] on the managed side, so these
+// The bridge's entry points. All five are [UnmanagedCallersOnly] on the managed side, so these
 // are raw function pointers with no delegate marshalling in the way.
-using bootstrap_fn  = int32_t(__cdecl*)(const AverScriptHostApi* api);
-using loadScripts_fn = int32_t(__cdecl*)(const char* utf8Dir);
-using update_fn     = void(__cdecl*)(float dt);
-using shutdown_fn   = void(__cdecl*)(void);
+using bootstrap_fn     = int32_t(__cdecl*)(const AverScriptHostApi* api);
+using loadScripts_fn   = int32_t(__cdecl*)(const char* utf8Dir);
+using unloadScripts_fn = int32_t(__cdecl*)(void);
+using update_fn        = void(__cdecl*)(float dt);
+using shutdown_fn      = void(__cdecl*)(void);
 
 std::wstring widen(const std::string& s) {
     if (s.empty()) return {};
@@ -91,6 +92,8 @@ struct ScriptHost::Impl {
     HMODULE hostfxr = nullptr;
     hostfxr_handle ctx = nullptr;
     hostfxr_close_fn close = nullptr;
+    loadScripts_fn load = nullptr;
+    unloadScripts_fn unload = nullptr;
     update_fn update = nullptr;
     shutdown_fn shutdown = nullptr;
 };
@@ -179,11 +182,13 @@ bool ScriptHost::init(const HostDesc& desc) {
     };
 
     bootstrap_fn bootstrap = nullptr;
-    loadScripts_fn loadScripts = nullptr;
     if (!bind(L"Bootstrap", reinterpret_cast<void**>(&bootstrap)) ||
-        !bind(L"LoadScripts", reinterpret_cast<void**>(&loadScripts)) ||
+        !bind(L"LoadScripts", reinterpret_cast<void**>(&impl_->load)) ||
+        !bind(L"UnloadScripts", reinterpret_cast<void**>(&impl_->unload)) ||
         !bind(L"Update", reinterpret_cast<void**>(&impl_->update)) ||
         !bind(L"Shutdown", reinterpret_cast<void**>(&impl_->shutdown))) {
+        impl_->load = nullptr;
+        impl_->unload = nullptr;
         impl_->update = nullptr;
         impl_->shutdown = nullptr;
         return decline("the staged Aver.Scripting.Bridge.dll does not export the expected entry "
@@ -197,6 +202,8 @@ bool ScriptHost::init(const HostDesc& desc) {
 
     const int32_t brc = bootstrap(&api);
     if (brc != AVER_SCRIPT_OK) {
+        impl_->load = nullptr;
+        impl_->unload = nullptr;
         impl_->update = nullptr;
         impl_->shutdown = nullptr;
         if (brc == AVER_SCRIPT_ERR_CONTRACT)
@@ -212,11 +219,25 @@ bool ScriptHost::init(const HostDesc& desc) {
     // Loading user scripts is deliberately NOT a condition of readiness: a host with no scripts
     // is the normal case for the editor, and a script that fails to load disables itself rather
     // than taking the runtime down with it.
-    behaviours_ = desc.scriptsDir.empty() ? 0 : loadScripts(desc.scriptsDir.c_str());
+    behaviours_ = desc.scriptsDir.empty() ? 0 : impl_->load(desc.scriptsDir.c_str());
     if (behaviours_ < 0) behaviours_ = 0;
 
     AVER_INFO("[Scripting] .NET runtime hosted in-process; {} behaviour(s) live", behaviours_);
     return true;
+}
+
+i32 ScriptHost::loadScripts(const std::string& dir) {
+    if (!ready_ || !impl_ || !impl_->load) return -1;
+    const int32_t n = impl_->load(dir.c_str());
+    behaviours_ = n < 0 ? 0 : n;
+    return behaviours_;
+}
+
+bool ScriptHost::unloadScripts() {
+    if (!ready_ || !impl_ || !impl_->unload) return false;
+    const int32_t collected = impl_->unload();
+    behaviours_ = 0;
+    return collected != 0;
 }
 
 void ScriptHost::update(f32 dt) {
@@ -229,6 +250,8 @@ void ScriptHost::shutdown() {
     if (ready_ && impl_->shutdown) impl_->shutdown();
     ready_ = false;
     behaviours_ = 0;
+    impl_->load = nullptr;
+    impl_->unload = nullptr;
     impl_->update = nullptr;
     impl_->shutdown = nullptr;
     if (impl_->ctx && impl_->close) impl_->close(impl_->ctx);
@@ -253,6 +276,8 @@ bool ScriptHost::init(const HostDesc&) {
     AVER_WARN("[Scripting] init declined: {}", declineReason_);
     return false;
 }
+i32 ScriptHost::loadScripts(const std::string&) { return -1; }
+bool ScriptHost::unloadScripts() { return false; }
 void ScriptHost::update(f32) {}
 void ScriptHost::shutdown() {}
 

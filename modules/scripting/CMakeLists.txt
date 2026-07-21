@@ -75,6 +75,7 @@ add_custom_command(
           -o ${CMAKE_BINARY_DIR}/bin/SampleScripts
   DEPENDS ${AVER_SAMPLE_PROJ}
           ${AVER_CSHARP_DIR}/Aver.Scripting.SampleBehaviour/HelloBehaviour.cs
+          ${AVER_CSHARP_DIR}/Aver.Scripting.SampleBehaviour/GiSwitchBehaviour.cs
           ${AVER_BRIDGE_OUTPUTS}
   COMMENT "Building the sample script assembly"
   VERBATIM)

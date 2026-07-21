@@ -126,16 +126,25 @@ void tip(const char* text) {
         ImGui::SetTooltip("%s", text);
 }
 
-// The wrapped amber "this does not run yet" paragraph, identical wherever a generated C# file is
-// promised. Said in the modal AND in the file header: a script that silently never runs is the
-// kind of thing someone otherwise discovers an hour later, by watching nothing happen.
-void warnNoClr() {
+// What a generated C# file will and will not be able to do, said in the modal AND in the file
+// header. It used to say "this will not run"; it now says what runs and what a script still
+// cannot reach, which is the same job — the thing someone must not discover an hour later.
+void explainScriptReach(bool behaviour) {
     ImGui::PushTextWrapPos(0.0f);
+    if (behaviour) {
+        ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1),
+            "This WILL run. Tools > Reload Scripts builds it into <project>\\Binaries\\Scripts and "
+            "loads it into the running editor - no restart. The hooks are called on the main "
+            "thread from the frame loop.");
+    } else {
+        ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1),
+            "This compiles into the same assembly as the project's behaviours and is loaded with "
+            "them. It has no hooks, so the engine never calls it by itself.");
+    }
     ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1),
-        "This will NOT run. The engine cannot host the CLR in-process yet "
-        "(docs/STATUS.md \xC2\xA7""4d), so nothing loads or calls it. It compiles - Tools > Compile "
-        "Scripts is real - and it is editable against the real Aver.Scripting API; execution is "
-        "not wired up.");
+        "A script can reach the log and the render modules' live settings and GPU capabilities "
+        "(Voxi, Pbr). It CANNOT reach the scene: there are no actor, transform, input or asset "
+        "APIs yet, because the generic scene layer is unbuilt (docs/STATUS.md \xC2\xA7""9.1).");
     ImGui::PopTextWrapPos();
 }
 
@@ -200,7 +209,7 @@ void ToolsMenu::drawMenu(const fmt::ProjectDesc& project) {
     // surprise someone arriving from Unreal — where game C++ lives in the project.
     ImGui::SeparatorText("PROJECT - C#  (no engine rebuild)");
     if (ImGui::MenuItem("New C# Script...", nullptr, false, haveProject)) open(Modal::CsScript);
-    tip(haveProject ? "A behaviour with lifecycle hooks, in Content\\Scripts.\nIt compiles; nothing executes it yet." : kNoProject);
+    tip(haveProject ? "An AverBehaviour with lifecycle hooks, in Content\\Scripts.\nReload Scripts builds it and runs it." : kNoProject);
     if (ImGui::MenuItem("New C# Class...", nullptr, false, haveProject)) open(Modal::CsClass);
     tip(haveProject ? "A plain class, no lifecycle hooks, in Content\\Scripts." : kNoProject);
 
@@ -218,18 +227,33 @@ void ToolsMenu::drawMenu(const fmt::ProjectDesc& project) {
 
     ImGui::Separator();
     const std::string csproj = haveProject ? scriptsCsprojPath(project) : std::string();
+    const std::string binDir = haveProject ? scriptsBinaryDir(project) : std::string();
     const bool haveCsproj = !csproj.empty() && fileExists(csproj);
     const bool dotnetOk = haveDotnet();
     const bool canCompile = haveProject && haveCsproj && dotnetOk && !compileThread_.joinable();
     if (ImGui::MenuItem("Compile Scripts", nullptr, false, canCompile)) {
         open(Modal::Compile);
-        startCompile(csproj);
+        startCompile(csproj, binDir, false);
     }
     tip(!haveProject  ? kNoProject
         : !dotnetOk   ? "dotnet was not found on PATH, so there is nothing to build with.\nInstall the .NET SDK and restart the editor."
         : !haveCsproj ? "This project has no Content\\Scripts\\Scripts.csproj yet.\nUse New C# Script or New C# Class to generate one."
         : compileThread_.joinable() ? "A build is already running."
-        : "dotnet build on Content\\Scripts\\Scripts.csproj.\nCompiling is all this does - the engine still cannot run scripts.");
+        : "dotnet build into Binaries\\Scripts.\nThe editor keeps running whatever it loaded - use Reload Scripts to swap it in.");
+
+    // Reload is a SEPARATE item and not a checkbox on Compile: they fail differently and a user
+    // reaches for them at different moments. Compile answers "does it build"; Reload answers
+    // "does it do what I meant", and it swaps live behaviours out from under a running editor.
+    if (ImGui::MenuItem("Reload Scripts", nullptr, false, canCompile && reload_ != nullptr)) {
+        open(Modal::Reload);
+        startCompile(csproj, binDir, true);
+    }
+    tip(!haveProject  ? kNoProject
+        : !reload_    ? "This build has no scripting host, so there is nothing to reload into.\n(-DAVER_MODULE_SCRIPTING=OFF, or the host declined at startup.)"
+        : !dotnetOk   ? "dotnet was not found on PATH, so there is nothing to build with.\nInstall the .NET SDK and restart the editor."
+        : !haveCsproj ? "This project has no Content\\Scripts\\Scripts.csproj yet.\nUse New C# Script or New C# Class to generate one."
+        : compileThread_.joinable() ? "A build is already running."
+        : "Rebuild, then unload and reload the project's scripts in place.\nRunning behaviours get OnShutdown, the new ones get OnStart.\nNo editor restart, and no state is carried across.");
 
     ImGui::Separator();
     if (ImGui::MenuItem("Open Project Folder", nullptr, false, haveProject)) {
@@ -254,6 +278,10 @@ void ToolsMenu::drawMenu(const fmt::ProjectDesc& project) {
 // ---------------------------------------------------------------------------------------------
 
 void ToolsMenu::drawModals(const fmt::ProjectDesc& project, f32 dpi) {
+    // Outside the UI guard, and first: a finished build has a thread to join and possibly an
+    // assembly swap to perform, neither of which is a drawing concern. This is the one call that
+    // runs every frame whatever is open, so it is where the reap belongs.
+    reapCompile();
 #if !AVER_WITH_IMGUI
     (void)project; (void)dpi;
 #else
@@ -262,18 +290,22 @@ void ToolsMenu::drawModals(const fmt::ProjectDesc& project, f32 dpi) {
     // menu and click.
     if (armScript_ > 0) { if (project.valid() && pending_ == Modal::None) open(Modal::CsScript); --armScript_; }
 
-    // --compile-scripts, same family and the same reasoning: gated on exactly what enables the
-    // menu item, so a run that produces no modal has demonstrated a real disabled state.
-    if (armCompile_ > 0) {
+    // --compile-scripts and --reload-scripts, same family and the same reasoning: gated on exactly
+    // what enables the menu item, so a run that produces no modal has demonstrated a real disabled
+    // state. Reload additionally needs a host, which is the one thing a screenshot cannot assert.
+    const auto fireBuild = [&](int& arm, bool reload) {
+        if (arm <= 0) return;
         const std::string csproj = project.valid() ? scriptsCsprojPath(project) : std::string();
-        if (!csproj.empty() && fileExists(csproj) && haveDotnet() && !compileThread_.joinable()) {
-            open(Modal::Compile);
-            startCompile(csproj);
-            armCompile_ = 0;
-        } else {
-            --armCompile_;
+        const bool ready = !csproj.empty() && fileExists(csproj) && haveDotnet() &&
+                           !compileThread_.joinable() && (!reload || reload_ != nullptr);
+        if (ready && arm == 1) {
+            open(reload ? Modal::Reload : Modal::Compile);
+            startCompile(csproj, scriptsBinaryDir(project), reload);
         }
-    }
+        --arm;
+    };
+    fireBuild(armCompile_, false);
+    fireBuild(armReload_, true);
 
     switch (pending_) {
         case Modal::CsScript:  ImGui::OpenPopup("New C# Script"); break;
@@ -281,6 +313,7 @@ void ToolsMenu::drawModals(const fmt::ProjectDesc& project, f32 dpi) {
         case Modal::CppModule: ImGui::OpenPopup("New C++ Module"); break;
         case Modal::CppClass:  ImGui::OpenPopup("New C++ Class"); break;
         case Modal::Compile:   ImGui::OpenPopup("Compile Scripts"); break;
+        case Modal::Reload:    ImGui::OpenPopup("Reload Scripts"); break;
         case Modal::None:      break;
     }
     pending_ = Modal::None;
@@ -289,7 +322,8 @@ void ToolsMenu::drawModals(const fmt::ProjectDesc& project, f32 dpi) {
     drawCsModal(project, dpi, CsKind::PlainClass);
     drawCppModuleModal(dpi);
     drawCppClassModal(dpi);
-    drawCompileModal(dpi);
+    drawCompileModal(dpi, false);
+    drawCompileModal(dpi, true);
 #endif
 }
 
@@ -323,7 +357,7 @@ void ToolsMenu::drawCsModal(const fmt::ProjectDesc& project, f32 dpi, CsKind kin
 
     ImGui::Spacing();
     ImGui::Separator();
-    warnNoClr();
+    explainScriptReach(behaviour);
     ImGui::Separator();
 
     showError(error_);
@@ -493,22 +527,19 @@ void ToolsMenu::drawCppClassModal(f32 dpi) {
     ImGui::EndPopup();
 }
 
-void ToolsMenu::drawCompileModal(f32 dpi) {
-    // Reaped here rather than in the menu: this is the one place that runs every frame regardless
-    // of what is open, so a finished build is logged once and the thread is never left dangling.
-    if (compile_ && compile_->done.load() && compileThread_.joinable()) {
-        compileThread_.join();
-        if (compile_->exitCode == 0) AVER_INFO("[Editor] Compile Scripts: {} built cleanly", compile_->csproj);
-        else AVER_ERROR("[Editor] Compile Scripts: dotnet build exited {}", compile_->exitCode);
-    }
-
+void ToolsMenu::drawCompileModal(f32 dpi, bool reload) {
     const ImGuiViewport* mv = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(mv->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(860.0f * dpi, 520.0f * dpi), ImGuiCond_Always);
-    if (!ImGui::BeginPopupModal("Compile Scripts", nullptr, ImGuiWindowFlags_NoResize)) return;
+    if (!ImGui::BeginPopupModal(reload ? "Reload Scripts" : "Compile Scripts", nullptr,
+                                ImGuiWindowFlags_NoResize))
+        return;
 
     const bool running = compile_ && !compile_->done.load();
-    if (compile_) ImGui::TextDisabled("dotnet build %s", compile_->csproj.c_str());
+    if (compile_) {
+        ImGui::TextDisabled("dotnet build %s", compile_->csproj.c_str());
+        ImGui::TextDisabled("        -> %s", compile_->outDir.c_str());
+    }
 
     if (running) {
         ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1), "Building...");
@@ -517,6 +548,17 @@ void ToolsMenu::drawCompileModal(f32 dpi) {
             ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1), "Build succeeded (exit 0).");
         else
             ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1), "Build FAILED (exit %d).", compile_->exitCode);
+
+        // The reload line is separate from the build line because they are separate outcomes: a
+        // build can succeed and the swap still find nothing to load, and reporting one number for
+        // both is how "it said it worked" becomes a bug report.
+        if (compile_->reload && compile_->reloaded) {
+            ImGui::TextColored(compile_->reloadOk ? ImVec4(0.45f, 0.85f, 0.45f, 1)
+                                                  : ImVec4(0.93f, 0.42f, 0.38f, 1),
+                               "%s", compile_->reloadStatus.c_str());
+        } else if (compile_->reload) {
+            ImGui::TextDisabled("Not reloaded - the build has to succeed first.");
+        }
     }
 
     ImGui::Separator();
@@ -533,35 +575,67 @@ void ToolsMenu::drawCompileModal(f32 dpi) {
     ImGui::EndChild();
 
     ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextDisabled("Compiling is all this does: the engine still has no in-process CLR host, "
-                        "so nothing here will be executed (docs/STATUS.md \xC2\xA7""4d).");
+    if (reload)
+        ImGui::TextDisabled("Every behaviour that was live got OnShutdown, and the newly-loaded ones "
+                            "got OnStart. Nothing is carried across the swap - a behaviour's fields "
+                            "start again from their initialisers.");
+    else
+        ImGui::TextDisabled("Compiling is all this does: the editor keeps running whatever it loaded "
+                            "at startup. Use Tools > Reload Scripts to swap the new build in.");
     ImGui::PopTextWrapPos();
     if (ImGui::Button("Close", ImVec2(110.0f * dpi, 0))) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
 #endif // AVER_WITH_IMGUI
 
-void ToolsMenu::startCompile(const std::string& csproj) {
+// Outside the ImGui guard: joining the build thread and swapping the assemblies are neither of
+// them UI, and a build must be reaped in a build with no editor chrome just the same.
+void ToolsMenu::reapCompile() {
+    if (!compile_ || !compile_->done.load() || !compileThread_.joinable()) return;
+    compileThread_.join();
+
+    const char* what = compile_->reload ? "Reload Scripts" : "Compile Scripts";
+    if (compile_->exitCode == 0) AVER_INFO("[Editor] {}: {} built cleanly", what, compile_->csproj);
+    else AVER_ERROR("[Editor] {}: dotnet build exited {}", what, compile_->exitCode);
+
+    // A failed build must NOT unload: the editor would be left with no scripts at all because of a
+    // typo, which is a far worse outcome than carrying on with the previous ones.
+    if (!compile_->reload || compile_->exitCode != 0 || compile_->reloaded) return;
+
+    compile_->reloaded = true;
+    std::string status;
+    compile_->reloadOk = reload_ && reload_(compile_->outDir, &status);
+    compile_->reloadStatus = status.empty() ? std::string("No scripting host to reload into.") : status;
+    if (compile_->reloadOk) AVER_INFO("[Editor] Reload Scripts: {}", compile_->reloadStatus);
+    else AVER_ERROR("[Editor] Reload Scripts: {}", compile_->reloadStatus);
+}
+
+void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDir, bool reload) {
     if (compileThread_.joinable()) return; // the menu item is disabled meanwhile; belt and braces
 
     auto job = std::make_shared<Compile>();
     job->csproj = csproj;
+    job->outDir = outDir;
+    job->reload = reload;
     compile_ = job;
 
     // The working directory is the Scripts folder so relative paths in MSBuild's diagnostics read
     // the way they do in a terminal opened there.
     const std::string dir = std::filesystem::path(csproj).parent_path().string();
-    compileThread_ = std::thread([job, csproj, dir] {
+    compileThread_ = std::thread([job, csproj, dir, outDir] {
         std::string out;
         int code = -1;
 #if defined(_WIN32)
-        const std::wstring cmd = L"dotnet build \"" + widen(csproj) + L"\" --nologo";
+        // `-o` and not the .csproj's own OutputPath: the editor has to know this directory too,
+        // and a project scaffolded before that was true would otherwise build where nothing looks.
+        const std::wstring cmd = L"dotnet build \"" + widen(csproj) + L"\" --nologo -o \"" +
+                                 widen(outDir) + L"\"";
         if (!runCaptured(cmd, widen(dir), out, code)) {
             out = "Could not start dotnet.";
             code = -1;
         }
 #else
-        (void)csproj; (void)dir;
+        (void)csproj; (void)dir; (void)outDir;
         out = "Compile Scripts is implemented for Windows only.";
 #endif
         job->output = std::move(out);

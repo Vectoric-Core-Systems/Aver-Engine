@@ -14,6 +14,7 @@
 #include "ProjectScaffold.hpp"
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -24,6 +25,18 @@ namespace aver::editor {
 class ToolsMenu {
 public:
     ~ToolsMenu();
+
+    // How the editor swaps a freshly-built script assembly in: unload the old load context, load
+    // `binDir`, and put a human-readable outcome in `status`. Returns false when the reload could
+    // not happen at all (no host).
+    //
+    // A CALLBACK rather than a ScriptHost reference on purpose. This file already knows about the
+    // project scaffold and two shell-outs; giving it the scripting module as well would mean an
+    // `#if AVER_MODULE_SCRIPTING` in the menu, and a build with scripting off would need the menu
+    // edited to compile. The app owns the host and installs this; with nothing installed the two
+    // reload paths are disabled and say why.
+    using ReloadFn = std::function<bool(const std::string& binDir, std::string* status)>;
+    void setReloader(ReloadFn fn) { reload_ = std::move(fn); }
 
     // The Tools dropdown. Called from inside BeginMainMenuBar, and owns its own BeginMenu so the
     // `--tools-menu` screenshot aid can force the popup open with the menu bar as parent window.
@@ -37,26 +50,38 @@ public:
     void armNewScript(bool on) { armScript_ = on ? 4 : 0; }
     void armToolsMenu(bool on) { armMenu_ = on; }
     void armCompile(bool on) { armCompile_ = on ? 4 : 0; }
+    // --reload-scripts [N]: fire Reload Scripts once, N frames in. A COUNTDOWN rather than an
+    // immediate shot, because the whole point of a reload is that it happens to a running editor
+    // that already loaded something — firing it on frame 0 would prove nothing that init does not.
+    void armReload(int frames) { armReload_ = frames > 0 ? frames : 20; }
 
 private:
-    enum class Modal { None, CsScript, CsClass, CppModule, CppClass, Compile };
+    enum class Modal { None, CsScript, CsClass, CppModule, CppClass, Compile, Reload };
 
     void open(Modal m);
     void drawCsModal(const fmt::ProjectDesc& project, f32 dpi, CsKind kind);
     void drawCppModuleModal(f32 dpi);
     void drawCppClassModal(f32 dpi);
-    void drawCompileModal(f32 dpi);
+    // One body, two popups: Compile Scripts and Reload Scripts differ by one step after the build
+    // and by every line of explanation around it, and nothing else.
+    void drawCompileModal(f32 dpi, bool reload);
+    // Reap a finished build: log it, and run the reload if this was one. Called every frame from
+    // drawModals so the swap happens on the MAIN thread — behaviours are constructed and their
+    // hooks called there, and the build ran on another.
+    void reapCompile();
 
     // `dotnet` on PATH, resolved once. Absent means Compile Scripts is disabled and says why,
     // rather than spawning nothing and reporting a meaningless exit code.
     bool haveDotnet();
 
-    void startCompile(const std::string& csproj);
+    void startCompile(const std::string& csproj, const std::string& outDir, bool reload);
 
     Modal pending_ = Modal::None;   // opened by the menu, consumed by drawModals
     int  armScript_ = 0;            // --new-script: frames left to force the modal open
     bool armMenu_ = false;          // --tools-menu: hold the dropdown open
     int  armCompile_ = 0;           // --compile-scripts: frames left to fire the build once
+    int  armReload_ = 0;            // --reload-scripts: frames left before the reload fires
+    ReloadFn reload_;               // empty in a build with no scripting host
 
     char name_[96] = {};            // shared by all four New ... modals; one at a time is open
     char purpose_[256] = {};        // New C++ Module only
@@ -74,6 +99,11 @@ private:
         std::string output;
         int exitCode = -1;
         std::string csproj;
+        std::string outDir;         // -o passed to dotnet; also where the host is pointed
+        bool reload = false;        // swap the result in once the build succeeds
+        bool reloaded = false;      // the swap has been attempted (once, on the main thread)
+        std::string reloadStatus;   // what the host said about it, shown in the modal
+        bool reloadOk = false;
     };
     std::shared_ptr<Compile> compile_;
     std::thread compileThread_;

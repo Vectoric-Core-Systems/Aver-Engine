@@ -2,7 +2,7 @@
 
 Living record of where the engine stands and what's next. Updated 2026-07-21.
 `git log --oneline | wc -l` and `git rev-parse HEAD` are the authority; the last phase recorded here
-is the in-process CLR host (§4f).
+is the in-process CLR host and its hot reload (§4f).
 
 Read this first after a context compaction, then `docs/ARCHITECTURE.md` (module DAG),
 `docs/MINIMUM_SPECS.md` (hardware requirements / launcher spec),
@@ -147,11 +147,12 @@ Dear ImGui (docking) hosted inside the D3D12 backend; dark Unreal-style theme.
 
   | Group | Item | Writes to | Rebuild? |
   |---|---|---|---|
-  | PROJECT — C# | New C# Script… | `<project>/Content/Scripts/<Name>.cs`, behaviour + hooks | no |
+  | PROJECT — C# | New C# Script… | `<project>/Content/Scripts/<Name>.cs`, `: AverBehaviour` + hooks | no |
   | PROJECT — C# | New C# Class… | same folder, plain class, no hooks | no |
   | ENGINE — C++ | New C++ Module… | `modules/<name>/` (CMakeLists, README, include, src) | **yes** |
   | ENGINE — C++ | New C++ Class… | `.hpp`/`.cpp` in a picked `modules/<m>/` | **yes** |
-  | — | Compile Scripts | `dotnet build` on `Scripts.csproj`, transcript in a modal | — |
+  | — | Compile Scripts | `dotnet build -o <project>/Binaries/Scripts`, transcript in a modal | — |
+  | — | Reload Scripts | the same build, then unload + reload in the running editor | — |
   | — | Open Project Folder / Open in Visual Studio | shell-out | — |
 
   `.ocproject` carries no build integration, so **game C++ has nowhere project-side to live** and
@@ -159,16 +160,18 @@ Dear ImGui (docking) hosted inside the D3D12 backend; dark Unreal-style theme.
   The first C# file in a project also emits `Scripts.csproj`, referencing the engine's
   `Aver.Scripting.csproj` so the folder opens as a buildable project rather than a loose `.cs`.
   Nothing overwrites an existing file; names are validated as identifiers; every project-dependent
-  item is **disabled with an explaining tooltip** rather than hidden. Both the C# modals and the
-  generated file headers state plainly that **the script will not run** — see §4d.
+  item is **disabled with an explaining tooltip** rather than hidden. The C# modals and the
+  generated file headers now say that **the script DOES run**, and say what it can and cannot
+  reach — the log and the render modules' live settings, never the scene. See §4f.
 
   **Neither CMakeLists is auto-edited.** The top-level one is not, because wiring a module into
   the build is a deliberate act and every existing skeleton under `modules/` is deliberately
   unwired; a module's own is not, because `aver_add_module` takes an explicit `SOURCES` list and
   never globs. Both modals show the exact line to add and why it is manual.
 - Dev/testing args: `--tool <select|move|rotate|scale>` opens straight into a tool; `--new-script`
-  forces the New C# Script modal open, `--tools-menu` holds the Tools dropdown open, and
-  `--compile-scripts` fires one build — all three for screenshot verification, since headless
+  forces the New C# Script modal open, `--tools-menu` holds the Tools dropdown open,
+  `--compile-scripts` fires one build, and `--reload-scripts [N]` fires one Reload Scripts N frames
+  in (default 20) — all for screenshot verification, since headless
   capture can't inject mouse input. Each is gated on the same predicate as the menu item it
   stands in for, so a run that produces nothing has demonstrated a real disabled state rather
   than merely asserting one. None changes the menu BAR's height, and no oracle gate passes them.
@@ -233,12 +236,14 @@ responsive. For anything interaction- or hang-related, drive the real window wit
 input and watch a per-frame heartbeat instead.
 
 Dev flags on `Sandbox.exe`: `--frames N`, `--screenshot out.png`, `--tool <select|move|rotate|scale>`,
-`--project-settings`, `--new-script`, `--tools-menu`, `--compile-scripts`, `--start-screen`,
-`--msaa N`, `--gi`, `--gi-debug`, `--rt`, `--ms`, `--probe X Y`, `--scripts <dir>`.
+`--project-settings`, `--new-script`, `--tools-menu`, `--compile-scripts`, `--reload-scripts [N]`,
+`--start-screen`, `--msaa N`, `--gi`, `--gi-debug`, `--rt`, `--ms`, `--probe X Y`, `--scripts <dir>`.
 
 `--scripts <dir>` points the CLR host at a directory of user script assemblies (relative to the
-executable unless absolute). The default is `<exe>\Scripts`, which a clean build does not create, so
-**no oracle gate loads a script**. `--scripts SampleScripts` picks up the staged sample behaviour.
+executable unless absolute) and **overrides everything else**. Without it the host reads
+`<project>\Binaries\Scripts` when a project is open, and `<exe>\Scripts` otherwise — which a clean
+build does not create, so **no oracle gate loads a script** (no gate opens a project either).
+`--scripts SampleScripts` picks up the staged sample behaviours.
 
 `--probe X Y` is the oracle: it prints the pixel as floats AND as raw 8-bit codes, because a
 one-code move hides completely inside `%.2f`. Compare the raw codes, never the floats. Count
@@ -710,7 +715,7 @@ feature modules that own them, so the host was built to match what is actually t
 | Target | Kind | Links | Holds |
 |---|---|---|---|
 | `Aver.Scripting.Host` | STATIC | `Aver.Core`, `Aver.Platform` | `ScriptHost`, the hostfxr sequence, `scripting_abi.h` |
-| `Aver.Scripting.Bridge` | C# | `Aver.Scripting` | the four entry points, the collectible ALC, the exception boundary |
+| `Aver.Scripting.Bridge` | C# | `Aver.Scripting` | the five entry points, the collectible ALC, the exception boundary |
 | `Aver.Scripting` | C# | — | `AverBehaviour`, `Log`, the Voxi/PBR bindings — what a *user's* scripts reference |
 
 **Never the RHI.** Scripting is not a rendering concern, and a link edge to `Aver.RHI` here would be
@@ -735,10 +740,123 @@ editor runs exactly as it does today. Each branch was made to fail and the resul
 | `nethost.dll` replaced with an unrelated DLL | `nethost.dll exports no get_hostfxr_path` |
 | bridge assembly not staged | `the managed bridge was not staged next to the executable …` |
 | runtimeconfig demanding framework 99.0.0 | `hostfxr_initialize_for_runtime_config failed (0x80008096) — the framework the bridge targets is not installed` |
-| bridge rebuilt at contract v2 | `the staged Aver.Scripting.Bridge.dll speaks a different host contract than this build (host v1)` |
+| bridge rebuilt at a different contract | `the staged Aver.Scripting.Bridge.dll speaks a different host contract than this build (host v1)` |
+
+That last line was measured when the host was at v1; the host is now at **v2** and the message
+carries whatever `AVER_SCRIPTING_CONTRACT_VERSION` says. The other four are unaffected by the bump
+and were not re-driven for this phase — they fail before the contract is ever compared.
 
 Note `DOTNET_ROOT` pointing at nothing does **not** trigger a decline — nethost still finds the
 global install. Use one of the five above to test this path, not that.
+
+### Hot reload, project scripts, and a script that changes the image — DONE
+
+Three things landed together because each is useless without the others: a script nobody compiles
+into the right place cannot be loaded, a script that cannot be reloaded cannot be iterated on, and
+neither is worth doing for a script that can only write to the log.
+
+**1. A project's scripts load with no flag.** `Tools ▸ Compile Scripts` now passes
+`-o <project>\Binaries\Scripts` and the host is pointed at that same string, resolved by
+`editor::scriptsBinaryDir`. The directory is a FUNCTION rather than an `OutputPath` in the generated
+`.csproj`, because both ends have to agree and only one of them is ours to edit — every project
+scaffolded before this change would otherwise build somewhere the host does not look, with nothing
+anywhere saying why. It sits outside `Content\`, which is the asset mount root a shipped game reads;
+build output is neither content nor something to ship. Measured:
+
+```
+build\bin\Sandbox.exe "...\SkyForge\SkyForge.ocproject" --frames 60
+[INFO ] [Heartbeat] VERSION A - started
+[INFO ] [Scripting] loaded Scripts.dll: 1 behaviour(s)
+[INFO ] [Sandbox] probe (1375,819) ... raw (90,93,108) ... in-viewport
+```
+
+Priority is `--scripts <dir>` > `<project>\Binaries\Scripts` > `<exe>\Scripts`. The override wins so
+the staged sample stays reachable with a project open, and so **no gate can be made to load a
+project's scripts** — no oracle gate opens a project in the first place.
+
+**2. `Tools ▸ Reload Scripts`.** Rebuild, unload, reload, re-instantiate. Three steps, each where it
+belongs: the rebuild is NATIVE (the host already owns the `dotnet build` shell-out; a managed side
+spawning compilers would be doing a job it has no business knowing about), and the swap runs on the
+MAIN thread, because `OnShutdown`/`OnStart` are behaviour hooks and behaviours are a main-thread
+thing. The build thread only sets a flag the frame loop reaps.
+
+- **A failed build does not unload.** Unloading first would leave the editor with no scripts at all
+  because of a typo — worse than carrying on with the ones already running. Verified by breaking
+  `Heartbeat.cs`: `[ERROR] [Editor] Reload Scripts: dotnet build exited 1`, and the running
+  behaviour kept logging to frame 700 and got its normal `OnShutdown` at exit.
+- **Unloading is asynchronous and is treated as such.** A collectible ALC is gone only once every
+  reference is dropped and a GC has run, so `UnloadScripts` returns 1 for "collected" and 0 for
+  "still finalising" and **both are success**. The collect loop is bounded at two cycles: a
+  behaviour that parked a reference somewhere the engine still holds keeps the old context alive
+  forever, and blocking the main thread on that turns a leak into a hang. A 0 is a WARN naming what
+  it costs (memory) and the new scripts are live regardless. Nothing on disk is locked either way —
+  assemblies are loaded from memory streams — so the rebuild never has to wait for the answer.
+- `DrainAndUnload` is `[MethodImpl(MethodImplOptions.NoInlining)]`, and that is load-bearing: the
+  context cannot be collected while a stack frame holds it, so inlining it into the caller would
+  report a leak that only the inlining had created.
+- **No state is carried across.** A behaviour's fields start again from their initialisers.
+  Carrying them needs a serialisation contract, and fixing that shape before the scene layer exists
+  would be designing for an owner that does not exist yet.
+
+Reload is a SEPARATE menu item, not a checkbox on Compile: they fail differently, and a user reaches
+for them at different moments — Compile answers "does it build", Reload answers "does it do what I
+meant" and swaps live behaviours out from under a running editor.
+
+The contract goes to **v2** (`UnloadScripts` is a new entry point). A v1 bridge next to a v2 host
+would bind everything it does have and then simply not reload, which is the failure the constant
+exists to turn into a message.
+
+Measured in ONE process, with the `.cs` overwritten on disk between the load and the swap
+(`--reload-scripts 500`, a background job editing the file at t+4s):
+
+```
+[INFO ] [Heartbeat] VERSION A - started
+[INFO ] [Heartbeat] VERSION A - update 400
+[INFO ] [Editor] Reload Scripts: ...\SkyForge\Content\Scripts\Scripts.csproj built cleanly
+[INFO ] [Heartbeat] VERSION A - shutting down after 564 update(s)
+[INFO ] [Heartbeat] VERSION B - started, and this class did not exist when the editor launched
+[INFO ] [Scripting] loaded Scripts.dll: 1 behaviour(s)
+[INFO ] [Editor] Reload Scripts: 1 behaviour(s) live from ...\SkyForge\Binaries\Scripts
+[INFO ] [Heartbeat] VERSION B - update 600
+```
+
+No editor restart, no "still finalising" warning (the old context was collected), and version B's
+counter starts from 1 — which is the no-state-carried rule being visible rather than asserted.
+
+**Reproducing it.** The scratch behaviour and the `Binaries\` it built into were removed from
+`Aver Projects\SkyForge` afterwards, because engine work must not leave debris in someone's project.
+To redo it: Tools ▸ New C# Script (any name) in a project, run
+`Sandbox.exe <proj>.ocproject --frames 200 --compile-scripts` once to build it, then
+`Sandbox.exe <proj>.ocproject --frames 1200 --reload-scripts 500` while another process overwrites
+the `.cs` a few seconds in. `--reload-scripts` takes a frame count precisely so there is room to
+edit the file between the initial load and the swap.
+
+**3. A script that changes what the GPU draws.** `GiSwitchBehaviour`, staged alongside
+`HelloBehaviour` in `bin/SampleScripts/`, turns global illumination on at update 5 through the same
+`aver_voxi_*` C ABI the editor's own Project Settings panel drives. Because the CLR is in-process
+the P/Invoke resolves to the `Aver.Render.Voxi.dll` the editor has already loaded — same settings
+singleton, same frame — and `SandboxApp::onUpdate` ticks scripts BEFORE it composes the frame's
+render state, so the change lands on the next frame.
+
+```
+build\bin\Sandbox.exe --frames 40 --scripts SampleScripts
+[INFO ] [GiSwitch] global illumination is Off at startup (status: Ready)
+[INFO ] [Scripting] loaded Aver.Scripting.SampleBehaviour.dll: 2 behaviour(s)
+[INFO ] [GiSwitch] set global illumination to High from managed code at update 5
+[INFO ] [Sandbox] probe (1375,819) px (0.41,0.36,0.41) raw (104,91,104) ... in-viewport
+```
+
+**`raw(104,91,104)` is the engine's own `--gi` oracle value, bit for bit**, on a run that passes no
+`--gi`. That is the whole proof of this phase in one line: managed code did not merely log, it
+changed what the GPU drew, and it is verifiable at the raw 8-bit code rather than by eye. The same
+run previously read `raw(90,93,108)`, the no-GI value. **This changes what `--scripts SampleScripts`
+reports and nothing else — no oracle gate passes `--scripts`.**
+
+**The scene stays out of scope, deliberately.** No actor, transform, component, input or asset API
+was invented here. `Aver.Scene` is separately designed and unbuilt (§9.1), and an interim object
+model would be exactly the throwaway ABI that design exists to avoid — every script written against
+it would have to be rewritten. The generated templates, both C# modals and `modules/scripting/README.md`
+all say so in those terms.
 
 ### Collectible load context — the decision that could not be deferred
 
@@ -813,23 +931,30 @@ and the host declines at run time.
 unasked in the product. `build\bin\Sandbox.exe --frames 40 --scripts SampleScripts`:
 
 ```
-[INFO ] [Scripting] managed bridge online (contract v1, 10.0.10, API v1.0.0.0)
+[INFO ] [Scripting] managed bridge online (contract v2, 10.0.10, API v1.0.0.0)
+[INFO ] [GiSwitch] global illumination is Off at startup (status: Ready)
 [INFO ] [HelloBehaviour] OnStart from managed code - hosted in-process on 10.0.10
-[INFO ] [Scripting] loaded Aver.Scripting.SampleBehaviour.dll: 1 behaviour(s)
-[INFO ] [Scripting] .NET runtime hosted in-process; 1 behaviour(s) live
-[INFO ] [HelloBehaviour] OnUpdate has run 10 times (0.185s of frame time)
-[INFO ] [Sandbox] probe (1375,819) ... raw (90,93,108) ... in-viewport
+[INFO ] [Scripting] loaded Aver.Scripting.SampleBehaviour.dll: 2 behaviour(s)
+[INFO ] [Scripting] .NET runtime hosted in-process; 2 behaviour(s) live
+[INFO ] [GiSwitch] set global illumination to High from managed code at update 5
+[INFO ] [HelloBehaviour] OnUpdate has run 10 times (0.191s of frame time)
+[INFO ] [Sandbox] probe (1375,819) ... raw (104,91,104) ... in-viewport
+[INFO ] [GiSwitch] leaving global illumination at High
 [INFO ] [HelloBehaviour] OnShutdown after 40 update(s)
 ```
 
-Every `[HelloBehaviour]` line originates in managed code and reaches the console through the
-engine's own log. The probe in the middle is the unchanged gate value.
+Every one of those lines originates in managed code and reaches the console through the engine's own
+log. The probe read `raw(90,93,108)` before `GiSwitchBehaviour` existed and reads the `--gi` oracle
+value now — see the hot-reload section above for why that is the strongest line in the block.
 
 ### Verification
 
 All 13 oracle gates re-run on the final binary, bit-exact at the raw 8-bit codes, spaced 800 ms
 apart, 0/13 harness misfires. `0x141` `LiveKernelEvent` count **67 → 67, zero new TDRs**. The gates
-also hold under every decline branch above and under `-DAVER_MODULE_SCRIPTING=OFF`.
+also hold under every decline branch above and under `-DAVER_MODULE_SCRIPTING=OFF` — that build was
+configured and built again for this phase, and `--frames 40` / `--gi` / `--probe 1413 1042` with
+`--scripts SampleScripts` passed alongside returned `raw(90,93,108)` / `raw(104,91,104)` /
+`raw(64,79,102)`, i.e. the flag is accepted and ignored exactly as before.
 
 ## 4d. NOT DONE — open work, roughly in value order
 
@@ -837,6 +962,13 @@ also hold under every decline branch above and under `-DAVER_MODULE_SCRIPTING=OF
 - **C# could not drive the live editor** (was item 11). The CLR is now hosted in-process, so a
   P/Invoke from a script resolves to the module the editor has already loaded. Full write-up,
   the five verified decline branches and the managed-code proof in §4f.
+- **Hot reload was not implemented** (was item 11). `Tools ▸ Reload Scripts` rebuilds, unloads the
+  collectible context, reloads and re-instantiates, in a running editor. Demonstrated in one
+  process with the `.cs` edited on disk between the load and the swap; a failed build deliberately
+  does not unload. §4f.
+- **A project's scripts did not load without a flag** (was item 11b). `Tools ▸ Compile Scripts`
+  builds into `<project>\Binaries\Scripts` and the host reads exactly that directory when a project
+  is open. §4f.
 - **The Voxi/HAL decoupling refactor, all 12 steps** (`14284b4`..`0bba4c2`). The backend no longer
   contains any GI, shadow or ray-tracing code. Full write-up, final architecture and the
   `AVER_MODULE_VOXI=OFF` baseline in §4c-2.
@@ -900,19 +1032,24 @@ also hold under every decline branch above and under `-DAVER_MODULE_SCRIPTING=OF
     to Null, `resources()` is null, and `VoxiRenderer::init` logs and returns false.
 
 **Scripting**
-11. **Hot reload is not implemented.** The collectible `AssemblyLoadContext` that makes it possible
-    is in place (§4f) — what is missing is a file watcher, a drain/unload/reload step, and an answer
-    for carrying a behaviour's state across the swap.
-11b. **A project's scripts do not load without a flag.** The host reads `<exe>\Scripts` by default
-    or `--scripts <dir>`, while **Tools ▸ Compile Scripts** builds `<project>\Content\Scripts` into
-    its own `bin/`. Nothing joins those two up yet, so **Tools ▸ New C# Script still produces a file
-    that a plain editor launch will not run** — the modals and the generated file headers still say
-    so, and they are still right until this is wired. The pieces on both sides are now real; this is
-    one path being handed to `ScriptHost::init`.
-11c. **`AverBehaviour` can log and nothing else.** The lifecycle, the load context, the exception
-    boundary and both version contracts are done, but no scene or actor handle is exposed to script
-    yet — that waits on the generic scene layer (§9.1). The Voxi/PBR C ABIs are reachable by
-    P/Invoke today and now resolve to the editor's own instance, which is the part that was broken.
+11c. **`AverBehaviour` cannot reach the SCENE.** The lifecycle, the load context, the exception
+    boundary, both version contracts, hot reload and the project script path are all done, and a
+    script can drive the render modules' live settings — `GiSwitchBehaviour` turning GI on is
+    measurable at the oracle's own raw codes (§4f). What is still missing is any actor, transform,
+    component, input or asset handle. That waits on the generic scene layer (§9.1) and is
+    deliberately not stubbed: an interim object model would be the throwaway ABI that design exists
+    to avoid, and every script written against it would have to be rewritten.
+11d. **Reload is manual and stateless.** There is no file watcher — `Tools ▸ Reload Scripts` is the
+    trigger — and nothing carries a behaviour's fields across a swap. The watcher is small; the
+    state carry-over needs a serialisation contract, and fixing that shape before §9.1 exists would
+    be designing for an owner that does not exist yet.
+11e. **A `.cs` generated before this phase still does not run** — but it now SAYS so. The old
+    template produced a plain class with `OnStart`/`OnUpdate` and no base type, and discovery is
+    `IsAssignableFrom(AverBehaviour)`, so those files compile and are skipped. The template is
+    fixed and existing files are the user's, so they are not rewritten; what closed the sharp edge
+    is that an assembly which yields NO behaviours is now re-scanned for lifecycle-shaped types and
+    each one is named in a WARN telling the author to add `: AverBehaviour`. Silence was the actual
+    defect, not the skip.
 12. The **launcher hardware probe** in `docs/MINIMUM_SPECS.md` §7 is now unblocked (it was waiting
     on in-process hosting) but is not written.
 
@@ -1080,6 +1217,18 @@ ab2264a Aver Engine foundation: modular core + .oc* format loaders
 - **A managed exception must not escape an `[UnmanagedCallersOnly]` method** — it terminates the
   process rather than becoming a C++ exception. Every bridge entry point is wrapped whole, and each
   behaviour hook is wrapped individually inside the loop.
+- **`HostBridge.DrainAndUnload` must stay `[MethodImpl(MethodImplOptions.NoInlining)]`.** A
+  collectible `AssemblyLoadContext` is only collected once no stack frame holds a reference to it,
+  so inlining it into the caller keeps the local alive for the whole calling frame and the collect
+  that follows reports a leak the inlining alone created. The method returns a `WeakReference` for
+  the same reason: nothing strong may cross back out.
+- **Never unload scripts before the rebuild succeeds.** `Tools ▸ Reload Scripts` builds first and
+  drains only on exit code 0. Draining first leaves the editor with no scripts at all because of a
+  typo, which is worse than carrying on with the ones already running.
+- **`ScriptHost::loadScripts` is ADDITIVE.** Calling it twice without an `unloadScripts()` between
+  gives every behaviour in the directory two live instances, both ticking. This is why
+  `applyProject` is guarded on `scripts_.ready()` — the command-line project path already loaded
+  through `resolveScriptsDir()` before the host existed.
 - **A pixel probe is not a screenshot.** `--probe` reads one pixel and misses overlays entirely; the
   centre probe in particular is blind to the sun term (see §4c-2). Shadow and ray-tracing checks
   must use `--probe 1413 1042` (cast shadow) or `--probe 1413 1150` (penumbra).

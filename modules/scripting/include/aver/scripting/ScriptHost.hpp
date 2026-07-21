@@ -36,6 +36,23 @@ public:
     // Returns false having logged exactly one line when scripting is unavailable.
     bool init(const HostDesc& desc);
 
+    // Loads (or re-loads) a directory of script assemblies into the collectible context and
+    // returns the number of live behaviours. Additive: it does NOT replace what is already
+    // loaded, so a caller swapping one set of scripts for another must unloadScripts() first.
+    // Returns -1 when the host is not ready, which is different from a directory with nothing
+    // in it — the editor surfaces the two differently.
+    i32 loadScripts(const std::string& dir);
+
+    // Drains OnShutdown on every live behaviour and unloads the collectible context, leaving the
+    // runtime up and the bridge bootstrapped. This is the drain half of hot reload; the caller
+    // rebuilds and calls loadScripts() again.
+    //
+    // Returns true when the old context was fully collected. FALSE IS NOT A FAILURE: unloading in
+    // .NET is a request satisfied only once every reference is dropped and a GC has run, so a
+    // false means the old assemblies are still resident, not that anything went wrong. Reloading
+    // works either way — assemblies are loaded from memory streams, so nothing on disk is locked.
+    bool unloadScripts();
+
     // Drives OnUpdate on every live behaviour. Safe (and free) after a declined init.
     void update(f32 dt);
 

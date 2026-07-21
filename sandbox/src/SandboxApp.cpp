@@ -409,13 +409,17 @@ public:
         {
             scripting::HostDesc hd;
             hd.bridgeDir = executableDir();
-            // Default: <exe>/Scripts, which a clean build does not create. `--scripts <dir>`
-            // overrides it, and a relative path is taken against the executable so the sample
-            // is reachable as `--scripts SampleScripts` from anywhere.
-            std::string sd = scriptsDir_.empty() ? std::string("Scripts") : scriptsDir_;
-            const bool absolute = sd.size() > 1 && (sd[1] == ':' || sd[0] == '\\' || sd[0] == '/');
-            hd.scriptsDir = absolute ? sd : executableDir() + "\\" + sd;
+            hd.scriptsDir = resolveScriptsDir();
             scripts_.init(hd);
+
+            // How Tools > Reload Scripts reaches the host. A callback rather than a reference so
+            // ToolsMenu never includes the scripting module — see ToolsMenu::ReloadFn. Installed
+            // even when init declined: the host answers honestly either way, and a menu item that
+            // reports "the scripting host is not running" is better than one that is greyed out
+            // for a reason nobody can see.
+            tools_.setReloader([this](const std::string& binDir, std::string* status) {
+                return reloadScripts(binDir, status);
+            });
         }
 #endif
         tool_ = initialTool_;
@@ -617,6 +621,7 @@ public:
     void setFocusScript(bool b) { tools_.armNewScript(b); }  // --new-script screenshot aid
     void setFocusTools(bool b) { tools_.armToolsMenu(b); }   // --tools-menu screenshot aid
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts screenshot aid
+    void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
     void setGiOverride(int q, bool dbg) { giOverride_ = q; giDebugView_ = dbg; } // --gi / --gi-debug
     void setRtOverride(int q) { rtOverride_ = q; }                              // --rt
@@ -636,7 +641,59 @@ private:
         project_ = browser_.project();
         if (e.window())
             e.window()->setTitle("Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + project_.name);
+#if AVER_MODULE_SCRIPTING
+        // A project opened from the start screen arrives AFTER the host started, so its scripts
+        // have to be picked up here. Guarded on ready(): the command-line path runs this before
+        // scripting exists, and resolveScriptsDir() already covers that case — without the guard
+        // a project named on the command line would be loaded twice, giving every behaviour in it
+        // two instances.
+        if (scripts_.ready() && scriptsDir_.empty() && project_.valid()) {
+            const std::string bin = editor::scriptsBinaryDir(project_);
+            const i32 n = scripts_.loadScripts(bin);
+            if (n > 0) AVER_INFO("[Scripting] {} project behaviour(s) live from {}", n, bin);
+            else AVER_INFO("[Scripting] no built scripts in {} - use Tools > Reload Scripts", bin);
+        }
+#endif
     }
+
+#if AVER_MODULE_SCRIPTING
+    // Where the CLR host looks for user assemblies, in priority order:
+    //   --scripts <dir>       an explicit override, absolute or relative to the executable
+    //   <project>\Binaries\Scripts   whatever Tools > Compile Scripts last built
+    //   <exe>\Scripts         the engine's own default, which a clean build does not create
+    //
+    // The override wins so the staged sample stays reachable (`--scripts SampleScripts`) with a
+    // project open, and so no oracle gate can ever be made to load a project's scripts by accident.
+    std::string resolveScriptsDir() const {
+        if (scriptsDir_.empty())
+            return project_.valid() ? editor::scriptsBinaryDir(project_) : executableDir() + "\\Scripts";
+        const std::string& sd = scriptsDir_;
+        const bool absolute = sd.size() > 1 && (sd[1] == ':' || sd[0] == '\\' || sd[0] == '/');
+        return absolute ? sd : executableDir() + "\\" + sd;
+    }
+
+    // Tools > Reload Scripts, after its `dotnet build` has already succeeded. Runs on the main
+    // thread: OnShutdown and OnStart are called from here, and behaviours are a main-thread thing.
+    bool reloadScripts(const std::string& binDir, std::string* status) {
+        if (!scripts_.ready()) {
+            if (status) *status = "The scripting host is not running: " + scripts_.declineReason();
+            return false;
+        }
+        // Unload FIRST. loadScripts is additive, so reloading without a drain would leave the old
+        // behaviours live alongside the new ones, both ticking, and the log full of doubles.
+        const bool collected = scripts_.unloadScripts();
+        const i32 n = scripts_.loadScripts(binDir);
+        if (n < 0) {
+            if (status) *status = "The scripting host refused the load.";
+            return false;
+        }
+        if (status) {
+            *status = std::to_string(n) + " behaviour(s) live from " + binDir +
+                      (collected ? "" : " (the previous load context is still finalising)");
+        }
+        return true;
+    }
+#endif
 
     // Aspect comes from the viewport rect (the dockspace's central node), not the whole window.
     f32 viewAspect() const { return vpH_ > 0.5f ? vpW_ / vpH_ : 1.777f; }
@@ -1550,7 +1607,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; std::string beam, shot, project, scriptsDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; std::string beam, shot, project, scriptsDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -1560,6 +1617,14 @@ Application* createApplication(int argc, char** argv) {
         // gate passes it and none can reach it by accident.
         else if (!std::strcmp(argv[i],"--tools-menu")) focusTools=true;
         else if (!std::strcmp(argv[i],"--compile-scripts")) focusCompile=true;
+        // --reload-scripts [N] fires Tools > Reload Scripts once, N frames in (default 20). Same
+        // family as the three above, and the only way to prove a reload without a mouse: the point
+        // of the feature is that it happens to an editor that is ALREADY running something, so the
+        // delay is the test rather than a convenience — it leaves room to edit the .cs on disk
+        // between the initial load and the swap.
+        else if (!std::strcmp(argv[i],"--reload-scripts")) {
+            reloadAt = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 20;
+        }
         else if (!std::strcmp(argv[i],"--start-screen")) startScreen=true;
         else if (!std::strcmp(argv[i],"--msaa") && i+1<argc) msaa=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--gi")) gi=3;
@@ -1596,6 +1661,7 @@ Application* createApplication(int argc, char** argv) {
     app->setFocusScript(focusScript);
     app->setFocusTools(focusTools);
     app->setFocusCompile(focusCompile);
+    app->setFocusReload(reloadAt);
     app->setMsaaOverride(msaa);
     app->setGiOverride(gi, giDbg);
     app->setRtOverride(rt);

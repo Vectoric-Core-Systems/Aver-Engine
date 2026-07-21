@@ -27,8 +27,12 @@ extern "C" {
  * a newer executable is reported rather than crashed through.
  *
  * This is NOT the version a user script is checked against — that one is the assembly version of
- * Aver.Scripting, checked by the bridge per loaded assembly. Two boundaries, two checks. */
-#define AVER_SCRIPTING_CONTRACT_VERSION 1
+ * Aver.Scripting, checked by the bridge per loaded assembly. Two boundaries, two checks.
+ *
+ * v2 adds `UnloadScripts`, the drain half of hot reload. A v1 bridge next to a v2 host would bind
+ * every entry point it does have and then simply not reload, which is the failure this constant
+ * exists to turn into a message. */
+#define AVER_SCRIPTING_CONTRACT_VERSION 2
 
 /* Log levels — must match aver::LogLevel. */
 #define AVER_SCRIPT_LOG_TRACE 0
@@ -45,6 +49,24 @@ typedef struct AverScriptHostApi {
     int32_t contractVersion;  /* AVER_SCRIPTING_CONTRACT_VERSION as the host was built with */
     aver_script_log_fn log;
 } AverScriptHostApi;
+
+/* The bridge's [UnmanagedCallersOnly] entry points, in the order the host binds them:
+ *
+ *   int32_t Bootstrap(const AverScriptHostApi*)  install the host API, check the contract
+ *   int32_t LoadScripts(const char* utf8Dir)     load a directory of assemblies; live count back
+ *   int32_t UnloadScripts(void)                  drain OnShutdown and unload the collectible ALC
+ *   void    Update(float dt)                     drive OnUpdate on every live behaviour
+ *   void    Shutdown(void)                       drain, unload, drop the host API
+ *
+ * Hot reload is UnloadScripts -> (the host rebuilds the assemblies) -> LoadScripts. The rebuild
+ * step is deliberately native: the host already owns the `dotnet build` shell-out, and a managed
+ * side that spawned compilers would be doing a job it has no business knowing about.
+ *
+ * UnloadScripts returns 1 when the old load context was fully collected and 0 when it is still
+ * finalising. Both are success — unloading in .NET is a REQUEST, satisfied only once every
+ * reference is dropped and a GC has run, so a 0 means "the old context is still costing memory",
+ * never "the reload failed". Assemblies are loaded from memory streams, so nothing on disk is
+ * locked either way and the rebuild does not have to wait for the answer. */
 
 /* Return codes from the bridge's Bootstrap entry point. Negative is failure, and the host maps
  * each to a message naming what is stale, because "scripting failed" sends nobody anywhere. */
