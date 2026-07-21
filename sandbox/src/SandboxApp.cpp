@@ -9,7 +9,7 @@
 #include "aver/formats/OcProject.hpp"
 
 #include "ProjectBrowser.hpp"
-#include "ProjectScaffold.hpp"
+#include "ToolsMenu.hpp"
 
 #if AVER_MODULE_VOXI
 #include "aver/voxi/Voxi.hpp"          // optional render-feature module (AA / GI / RT / PT settings)
@@ -522,7 +522,9 @@ public:
         AVER_INFO("[Sandbox] shutdown");
     }
     void setFocusVoxi(bool b) { focusVoxi_ = b ? 4 : 0; } // --project-settings screenshot aid
-    void setFocusScript(bool b) { focusScript_ = b ? 4 : 0; } // --new-script screenshot aid
+    void setFocusScript(bool b) { tools_.armNewScript(b); }  // --new-script screenshot aid
+    void setFocusTools(bool b) { tools_.armToolsMenu(b); }   // --tools-menu screenshot aid
+    void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts screenshot aid
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
     void setGiOverride(int q, bool dbg) { giOverride_ = q; giDebugView_ = dbg; } // --gi / --gi-debug
     void setRtOverride(int q) { rtOverride_ = q; }                              // --rt
@@ -811,19 +813,9 @@ private:
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Window")){ ImGui::MenuItem("World Outliner"); ImGui::MenuItem("Details"); ImGui::MenuItem("Content Browser"); ImGui::MenuItem("Output Log"); ImGui::Separator(); if (ImGui::MenuItem("Reset Layout")) dockBuilt_=false; ImGui::EndMenu(); }
-            // Tools sits between Window and Build, where Unreal puts it.
-            if (ImGui::BeginMenu("Tools")){
-                const bool haveProject = project_.valid();
-                if (ImGui::MenuItem("New C# Script...", nullptr, false, haveProject)) {
-                    scriptName_[0] = '\0'; scriptError_.clear(); scriptResult_.clear();
-                    openScriptModal_ = true;
-                }
-                // A disabled item with no explanation reads as a bug. Scripts are written into the
-                // project's Content\Scripts, so with no project there is nowhere to put one.
-                if (!haveProject && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("Open or create a project first - scripts live in the\nproject's Content\\Scripts folder.");
-                ImGui::EndMenu();
-            }
+            // Tools sits between Window and Build, where Unreal puts it. It owns its own
+            // BeginMenu (see ToolsMenu.cpp) — this file is the frame loop, not a scaffolder.
+            tools_.drawMenu(project_);
             if (ImGui::BeginMenu("Build")){ ImGui::MenuItem("Build Lighting"); ImGui::MenuItem("Build Geometry"); ImGui::EndMenu(); }
             if (ImGui::BeginMenu("Select")){ if(ImGui::MenuItem("Select All")) {} if(ImGui::MenuItem("Select None")) sel_=-1; ImGui::EndMenu(); }
             if (ImGui::BeginMenu("Help")){ ImGui::MenuItem("About Aver Engine"); ImGui::EndMenu(); }
@@ -915,7 +907,7 @@ private:
         buildPanels(e);
         buildViewportOverlay();
         buildProjectSettings();
-        buildNewScriptModal();
+        tools_.drawModals(project_, dpi_);
 
         // ---------------- status bar ----------------
         ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH));
@@ -996,60 +988,6 @@ private:
         ImGui::Text("[INFO] Editor DPI scale %.2f", dpi_);
         ImGui::TextDisabled("(log capture wiring is a TODO - this mirrors the console for now)");
         ImGui::End();
-    }
-
-    // Tools > New C# Script. Writes one file into the project's Content\Scripts and, the first
-    // time, the .csproj that makes the folder open as a real project in an IDE.
-    void buildNewScriptModal() {
-        // --new-script (screenshot aid, like --project-settings). Deliberately gated on the SAME
-        // predicate as the menu item, so a run with no project proves the item really is disabled
-        // rather than merely looking it — headless capture cannot open a menu and click.
-        if (focusScript_ > 0) { if (project_.valid()) openScriptModal_ = true; --focusScript_; }
-        if (openScriptModal_) { ImGui::OpenPopup("New C# Script"); openScriptModal_ = false; }
-
-        const ImGuiViewport* mv = ImGui::GetMainViewport();
-        ImGui::SetNextWindowPos(mv->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-        ImGui::SetNextWindowSize(ImVec2(600.0f*dpi_, 0), ImGuiCond_Always);
-        if (!ImGui::BeginPopupModal("New C# Script", nullptr, ImGuiWindowFlags_NoResize)) return;
-
-        ImGui::TextUnformatted("Script name");
-        ImGui::PushItemWidth(-1);
-        const bool submitted = ImGui::InputText("##scriptname", scriptName_, sizeof scriptName_,
-                                                ImGuiInputTextFlags_EnterReturnsTrue);
-        ImGui::PopItemWidth();
-        ImGui::TextDisabled("Becomes a C# class, so: letters, digits and underscores only.");
-
-        ImGui::Spacing();
-        ImGui::TextDisabled("Writes to %s", project_.scriptsDir().c_str());
-
-        // Said here as well as in the generated file's header: a script that silently never runs
-        // is the kind of thing someone discovers an hour later, by watching nothing happen.
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
-            "This script will NOT run. The engine cannot host the CLR in-process yet "
-            "(docs/STATUS.md \xC2\xA7""4d), so nothing loads or calls it. It compiles and is editable "
-            "against the real Aver.Scripting API; execution is not wired up.");
-        ImGui::PopTextWrapPos();
-        ImGui::Separator();
-
-        if (!scriptError_.empty())  ImGui::TextColored(ImVec4(0.93f,0.42f,0.38f,1), "%s", scriptError_.c_str());
-        if (!scriptResult_.empty()) ImGui::TextColored(ImVec4(0.45f,0.85f,0.45f,1), "%s", scriptResult_.c_str());
-
-        ImGui::Spacing();
-        const bool create = ImGui::Button("Create Script", ImVec2(150.0f*dpi_, 0));
-        if (create || submitted) {
-            scriptError_.clear(); scriptResult_.clear();
-            std::string path; bool madeCsproj = false;
-            if (editor::createScript(project_, scriptName_, &path, &madeCsproj, &scriptError_)) {
-                scriptResult_ = "Created " + path + (madeCsproj ? "  (+ Scripts.csproj)" : "");
-                scriptName_[0] = '\0';
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Close", ImVec2(110.0f*dpi_, 0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
     }
 
     // Project Settings — a floating, categorised window like Unreal's, opened from
@@ -1386,7 +1324,6 @@ private:
     bool showProjectSettings_=false; // Edit > Project Settings window
     int  settingsPage_=1;            // 0 = Description, 1 = Rendering
     int  focusVoxi_=0;               // --project-settings: frames left to force the window open
-    int  focusScript_=0;             // --new-script: ditto for the New C# Script modal
     int  msaaOverride_=0;            // --msaa N: apply a sample count at startup
     int  giOverride_=0;              // --gi: GI quality to apply at startup
     int  rtOverride_=0;              // --rt: ray tracing quality at startup
@@ -1403,9 +1340,8 @@ private:
     rhi::TextureHandle logoTexture_=0;
     u64 logoUiId_=0;
     f32 logoAspect_=1.0f;
-    bool openScriptModal_=false;     // Tools > New C# Script
-    char scriptName_[96]={};
-    std::string scriptError_, scriptResult_;
+    // The Tools menu owns its own dropdown, its modals and its scaffolding (ToolsMenu.cpp).
+    editor::ToolsMenu tools_;
     bool worldSpace_=true;   // gizmo coordinate space toggle (display only for now)
     // Voxi GI volume placement: a cube around the default scene (floor is +/-40, cube at origin).
     bool giDebugView_=false; Vec3 giCenter_{0,0,8}; f32 giExtent_=44.0f;
@@ -1434,11 +1370,16 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, startScreen=false; std::string beam, shot, project; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; std::string beam, shot, project; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
         else if (!std::strcmp(argv[i],"--new-script")) focusScript=true;
+        // Holds the Tools dropdown open so it can be photographed. Opt-in, like the two above:
+        // it changes only what hangs BELOW the menu bar, never the bar's height, but no oracle
+        // gate passes it and none can reach it by accident.
+        else if (!std::strcmp(argv[i],"--tools-menu")) focusTools=true;
+        else if (!std::strcmp(argv[i],"--compile-scripts")) focusCompile=true;
         else if (!std::strcmp(argv[i],"--start-screen")) startScreen=true;
         else if (!std::strcmp(argv[i],"--msaa") && i+1<argc) msaa=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--gi")) gi=3;
@@ -1469,6 +1410,8 @@ Application* createApplication(int argc, char** argv) {
     app->armBrowser(startScreen || (!headless && frames == 0 && project.empty()));
     app->setFocusVoxi(focusVoxi);
     app->setFocusScript(focusScript);
+    app->setFocusTools(focusTools);
+    app->setFocusCompile(focusCompile);
     app->setMsaaOverride(msaa);
     app->setGiOverride(gi, giDbg);
     app->setRtOverride(rt);
