@@ -48,6 +48,29 @@ Once loaded, the project's name appears in the window title and the status bar, 
 Browser reports where the mount points, and Edit ▸ Project Settings ▸ Description shows the
 manifest. The editor **reads** `.ocproject`; it does not write one back yet.
 
+## Where code goes — C# is project-side, C++ is engine-side
+
+This is the one place Aver deliberately differs from Unreal, and the editor's **Tools** menu is
+built around making it visible rather than something a user infers from a missing file.
+
+| | Lives in | Authored by | Engine rebuild |
+|---|---|---|---|
+| **C# scripts and classes** | `<project>/Content/Scripts/` | Tools ▸ New C# Script / New C# Class | no |
+| **C++ modules and classes** | the ENGINE's `modules/` | Tools ▸ New C++ Module / New C++ Class | **yes** |
+
+`.ocproject` declares content, not a build: there is no compiler invocation, no source list and no
+target in the manifest, so a project has nowhere to put C++. Until that changes, new C++ authors
+the engine — the Tools items are labelled `(engine)` and their modals say it outright.
+
+C# is the reverse: `Content/Scripts/` is plain content, `Scripts.csproj` is generated beside it,
+and **Tools ▸ Compile Scripts** runs `dotnet build` on it without the engine being touched. Note
+that compiling is all it does — nothing executes those scripts yet (`docs/STATUS.md` §4d).
+
+Neither CMakeLists is edited automatically. Wiring a module into the top-level build is a
+deliberate act — every skeleton under `modules/` is deliberately unwired — and `aver_add_module`
+takes an explicit `SOURCES` list rather than globbing, so a new `.cpp` needs a human to add the
+line. Both modals show exactly which line, in which file.
+
 ## `.ocproject` manifest — implemented
 
 Text, OC-dialect (`#` comments, `KEY value`), read by `Aver.Formats` (`loadOcproject`) with the
