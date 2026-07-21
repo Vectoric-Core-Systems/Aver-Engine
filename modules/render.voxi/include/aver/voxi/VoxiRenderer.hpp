@@ -1,6 +1,7 @@
 #pragma once
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/RHIResources.hpp"
+#include "aver/pbr/MaterialSystem.hpp"
 #include "aver/voxi/Voxi.hpp"
 
 #include <unordered_map>
@@ -99,6 +100,11 @@ private:
     void buildAccelerationStructures(rhi::IRenderContext& ctx);
     void voxelizePass(rhi::IRenderContext& ctx);
     void filterMips(rhi::IRenderContext& ctx);
+
+    // The GPU residency of the material library. It lives with the RENDERER because the register
+    // its table is based at is a property of this module's pipeline layout, and because Voxi is the
+    // thing that renders materials. The materials themselves are the library's, process-wide.
+    pbr::MaterialSystem materials_;
 
     rhi::IDevice* dev_ = nullptr;
     // Cached at init: a null factory is how a backend without GPU support declines the feature, so

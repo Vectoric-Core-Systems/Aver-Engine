@@ -1,6 +1,7 @@
 #include "aver/voxi/VoxiRenderer.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"   // light-frustum fit: Vec3 / Mat4::lookAtLH
+#include "aver/pbr/MaterialSystem.hpp"
 #include "aver/pbr/PbrShaders.hpp"
 
 #include "VoxiShaders.hpp"
@@ -51,6 +52,11 @@ rhi::PipelineLayout giLayout() {
     rhi::PipelineLayout l{};
     l.srvCount = 3;              // t0 volume, t1 shadow map, t2 acceleration structure
     l.uavCount = 2;              // u0 volume mip 0, u1 injection accumulator
+    // Table 1: the material's textures, based at t3 and swapped per draw. Declared on EVERY raster
+    // pipeline here -- the shadow and voxelise passes included -- because Tier 1 populates whole
+    // tables whether the shader reads them or not, so a pipeline that declared it only where it is
+    // sampled would be a table left unbound on the passes that do not.
+    l.srvCount1 = pbr::kMaterialSrvCount;
     // b1: the per-draw block the shared prelude declares. Never a literal -- the root signature
     // and the cbuffer must agree, and rhi::kObjectConstantDwords is the one place that says so.
     l.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
@@ -132,6 +138,12 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
     }
     caps_ = device.caps();
 
+    // Before any pipeline: the fallback textures must exist before a material set can be built, and
+    // the scene's own draws reach the backend through setDefaultDrawBinding below rather than
+    // through anything Voxi records.
+    if (!materials_.init(device, giLayout().srvCount))
+        AVER_WARN("[Voxi] the material system declined to initialise; draws fall back to an unbound table 1");
+
     createShadowResources();
     createVoxelVolume(settings_.voxelResolution);
     createPipelines();
@@ -189,6 +201,12 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
         }
     }
 
+    // What a draw naming no material gets. Reset by the backend at every beginFrame, so a draw that
+    // sets nothing renders as an untextured surface rather than wearing the previous draw's.
+    if (materials_.ready())
+        device.setDefaultDrawBinding(materials_.fallbackBindingSet(), &materials_.fallbackConstants(),
+                                     sizeof(pbr::MaterialConstants));
+
     AVER_INFO("[Voxi] ready: conservative raster {}, mesh-shader variants {}, ray-tracing variants {}",
               caps_.conservativeRaster ? "on" : "off",
               (voxelMsPso_ && sceneMsPso_) ? "built" : "absent",
@@ -197,6 +215,7 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
 }
 
 void VoxiRenderer::shutdown() {
+    materials_.shutdown();
     if (!res_) { dev_ = nullptr; return; }
     // Binding sets point at the textures, so they go first; destruction is deferred behind the
     // GPU fence by contract, which is why no explicit wait is needed here.
@@ -274,6 +293,10 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
 
 void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     if (!giReady_) return;
+    // Before any pass records a draw. A material set rewritten mid-frame is a shader-visible
+    // descriptor an in-flight frame may still be reading -- the hazard the TLAS comment in init()
+    // documents, and the reason the drain has exactly one site.
+    materials_.update();
     // Volume placement is needed by the injection AND by the lit pass's cone trace, so it is
     // refreshed every frame regardless of which passes below actually run.
     const f32 size = extent_ * 2.0f;
@@ -382,6 +405,10 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
         f32 consts[rhi::kObjectConstantDwords]{};
         std::memcpy(consts, d.world, 16 * sizeof(f32));   // depth-only: nothing else is read
         ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
+        // The fallback, unconditionally: the replayed draw list carries no material yet, and this
+        // pipeline declares table 1, which Tier 1 requires bound whether the shader reads it or not.
+        ctx.setDrawBinding(materials_.fallbackBindingSet(), &materials_.fallbackConstants(),
+                           sizeof(pbr::MaterialConstants));
         ctx.drawMesh(d.mesh);
     }
     ctx.textureBarrier(shadowTex_, rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderResource);
@@ -421,6 +448,9 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
         consts[20] = d.metallic; consts[21] = d.roughness; consts[22] = 0.0f; consts[23] = 0.0f;
         writeShadingConstants(consts);
         ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
+        // As in the shadow pass: the fallback until the replayed draw list carries a material.
+        ctx.setDrawBinding(materials_.fallbackBindingSet(), &materials_.fallbackConstants(),
+                           sizeof(pbr::MaterialConstants));
         if (useMs) ctx.dispatchMeshFor(d.mesh);
         else       ctx.drawMesh(d.mesh);
     }
@@ -495,6 +525,9 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
     ctx.pushMarker("Voxi debug view");
     ctx.setPipeline(debugPso_);
     ctx.setBindingSet(bindings_);
+    // drawFullscreen consumes no per-draw state, so table 1 is bound outright here. It has to be:
+    // this pipeline declares it, and Tier 1 populates whole tables regardless of what is sampled.
+    ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
     ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
     ctx.drawFullscreen();
     ctx.popMarker();
@@ -639,9 +672,15 @@ bool VoxiRenderer::createPipelines() {
     ShaderScope compile(*res_);
 
     const rhi::PipelineLayout gi = giLayout();
+    // Every RASTER pipeline below declares the material table, so every raster shader has to be
+    // told which registers it landed at. The COMPUTE ones must not be told: they declare no second
+    // table, and the material prelude then omits the declarations entirely rather than naming
+    // registers their root signatures never declared.
+    const std::string matDefs = pbr::materialShaderDefines(gi.srvCount);
+    auto rasterDefs = [&](const char* extra) { return extra ? matDefs + ";" + extra : matDefs; };
 
     // --- 1. shadow map: depth only, from the sun ---
-    if (const rhi::ShaderHandle vs = compile("VSShadow", rhi::ShaderStage::Vertex, 60, nullptr)) {
+    if (const rhi::ShaderHandle vs = compile("VSShadow", rhi::ShaderStage::Vertex, 60, rasterDefs(nullptr).c_str())) {
         rhi::GraphicsPipelineDesc p;
         p.vs = vs;                                   // no pixel shader: depth is the only output
         p.layout = gi;
@@ -658,7 +697,7 @@ bool VoxiRenderer::createPipelines() {
     if (!shadowPso_) AVER_ERROR("[Voxi] shadow pipeline unavailable");
 
     // --- 2/3. voxelisation + light injection: rasterise with NO render target ---
-    const rhi::ShaderHandle psVoxel = compile("PSVoxel", rhi::ShaderStage::Pixel, 60, nullptr);
+    const rhi::ShaderHandle psVoxel = compile("PSVoxel", rhi::ShaderStage::Pixel, 60, rasterDefs(nullptr).c_str());
     rhi::GraphicsPipelineDesc vox;
     vox.layout = gi;
     vox.cull = rhi::CullMode::None;
@@ -670,8 +709,8 @@ bool VoxiRenderer::createPipelines() {
     vox.depthFormat = rhi::Format::Unknown;
     vox.sampleCount = 1;
 
-    const rhi::ShaderHandle vsVoxel = compile("VSVoxel", rhi::ShaderStage::Vertex, 60, nullptr);
-    const rhi::ShaderHandle gsVoxel = compile("GSVoxel", rhi::ShaderStage::Geometry, 60, nullptr);
+    const rhi::ShaderHandle vsVoxel = compile("VSVoxel", rhi::ShaderStage::Vertex, 60, rasterDefs(nullptr).c_str());
+    const rhi::ShaderHandle gsVoxel = compile("GSVoxel", rhi::ShaderStage::Geometry, 60, rasterDefs(nullptr).c_str());
     if (vsVoxel && gsVoxel && psVoxel) {
         rhi::GraphicsPipelineDesc p = vox;
         p.vs = vsVoxel; p.gs = gsVoxel; p.ps = psVoxel;
@@ -686,7 +725,7 @@ bool VoxiRenderer::createPipelines() {
         // whatever SRV table this pipeline declared, so they must be derived from the same layout
         // the pipeline is created with, or the mesh shader reads the wrong descriptor with nothing
         // to say so.
-        const std::string msDefs = "AVER_MS=1;" + rhi::meshGeometryDefines(vox.layout);
+        const std::string msDefs = rasterDefs("AVER_MS=1") + ";" + rhi::meshGeometryDefines(vox.layout);
         if (const rhi::ShaderHandle ms = compile("MSVoxel", rhi::ShaderStage::Mesh, 65, msDefs.c_str())) {
             rhi::GraphicsPipelineDesc p = vox;
             p.ms = ms; p.ps = psVoxel;
@@ -750,10 +789,14 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
 
     ShaderScope compile(*res_);
     const rhi::PipelineLayout gi = giLayout();
+    // See createPipelines: every pipeline built here is a raster one and declares the material
+    // table, so every shader here is told the registers it landed at.
+    const std::string matDefs = pbr::materialShaderDefines(gi.srvCount);
+    auto rasterDefs = [&](const char* extra) { return extra ? matDefs + ";" + extra : matDefs; };
 
     // --- 6. debug: raymarch the volume to screen (shares the prelude's fullscreen triangle). ---
-    const rhi::ShaderHandle vsky = compile("VSky", rhi::ShaderStage::Vertex, 60, nullptr);
-    if (const rhi::ShaderHandle ps = compile("PSVoxelDebug", rhi::ShaderStage::Pixel, 60, nullptr); ps && vsky) {
+    const rhi::ShaderHandle vsky = compile("VSky", rhi::ShaderStage::Vertex, 60, rasterDefs(nullptr).c_str());
+    if (const rhi::ShaderHandle ps = compile("PSVoxelDebug", rhi::ShaderStage::Pixel, 60, rasterDefs(nullptr).c_str()); ps && vsky) {
         rhi::GraphicsPipelineDesc p;
         p.vs = vsky; p.ps = ps;
         p.layout = gi;
@@ -778,8 +821,8 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     scene.depthFormat = depth;
     scene.sampleCount = sampleCount;
 
-    const rhi::ShaderHandle vsMain = compile("VSMain", rhi::ShaderStage::Vertex, 60, nullptr);
-    const rhi::ShaderHandle psVoxi = compile("PSMainVoxi", rhi::ShaderStage::Pixel, 60, nullptr);
+    const rhi::ShaderHandle vsMain = compile("VSMain", rhi::ShaderStage::Vertex, 60, rasterDefs(nullptr).c_str());
+    const rhi::ShaderHandle psVoxi = compile("PSMainVoxi", rhi::ShaderStage::Pixel, 60, rasterDefs(nullptr).c_str());
     if (vsMain && psVoxi) {
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vsMain; p.ps = psVoxi;
@@ -789,7 +832,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
 
     // MSMain comes from the prelude and needs AVER_MS to exist at all, plus the geometry registers
     // for the layout these pipelines declare — see the MSVoxel site for why they cannot be literals.
-    const std::string msDefs = "AVER_MS=1;" + rhi::meshGeometryDefines(scene.layout);
+    const std::string msDefs = rasterDefs("AVER_MS=1") + ";" + rhi::meshGeometryDefines(scene.layout);
     const rhi::ShaderHandle msMain = msOk ? compile("MSMain", rhi::ShaderStage::Mesh, 65, msDefs.c_str()) : 0;
     if (msMain && psVoxi) {
         rhi::GraphicsPipelineDesc p = scene;
@@ -800,7 +843,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
 
     // RayQuery replaces the shadow-map lookup with an exact occlusion ray; it is a second PS
     // compiled at SM 6.5, so a device without DXR still gets the shadow-mapped variant.
-    const rhi::ShaderHandle psRt = rtOk ? compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65, "AVER_RT=1") : 0;
+    const rhi::ShaderHandle psRt = rtOk ? compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65, rasterDefs("AVER_RT=1").c_str()) : 0;
     if (vsMain && psRt) {
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vsMain; p.ps = psRt;
