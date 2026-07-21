@@ -23,6 +23,9 @@ AssetType assetTypeFromPath(std::string_view path) {
     if (e == "ocmap")  return AssetType::Map;
     if (e == "ocmesh") return AssetType::Mesh;
     if (e == "octex")  return AssetType::Texture;
+    // Source images are textures too. Until an asset cooker exists to bake .octex, a material's
+    // maps ARE .png/.tga files, and the loader has to be able to say so.
+    if (e == "png" || e == "jpg" || e == "jpeg" || e == "tga" || e == "bmp") return AssetType::Texture;
     if (e == "ocmat")  return AssetType::Material;
     if (e == "ocskel") return AssetType::Skeletal;
     if (e == "ocanim") return AssetType::Anim;

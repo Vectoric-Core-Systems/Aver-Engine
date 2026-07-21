@@ -1,6 +1,7 @@
 aver_add_module(Aver.Platform
   SOURCES
     src/FileSystem.cpp
+    src/Image.cpp
     src/win32/Win32Window.cpp
     src/win32/Win32Splash.cpp
   DEPS

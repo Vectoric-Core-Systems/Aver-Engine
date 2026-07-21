@@ -1,6 +1,7 @@
 #include "aver/runtime/EntryPoint.hpp"
 #include "aver/platform/Window.hpp"
 #include "aver/platform/FileSystem.hpp"
+#include "aver/platform/Image.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
@@ -23,11 +24,6 @@
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
-
-// Declarations only -- STB_IMAGE_IMPLEMENTATION is owned by Aver.Platform's Win32Splash.cpp, which
-// Sandbox already links. A second implementation here would be a duplicate-symbol link error, and
-// the decoder has no per-TU state that would justify one.
-#include "stb_image.h"
 
 #include <algorithm>
 #include <cmath>
@@ -250,28 +246,27 @@ public:
         if (!res) return;
 
         const std::string path = executableDir() + "\\logo.png";
-        int w = 0, h = 0, comp = 0;
-        stbi_uc* px = stbi_load(path.c_str(), &w, &h, &comp, 4);
-        if (!px) {
-            const char* why = stbi_failure_reason();
+        ImageData img;
+        std::string why;
+        if (!decodeImage(path, img, &why)) {
             AVER_WARN("[Sandbox] '{}' not loaded ({}) -- the start screen falls back to a drawn badge",
-                      path, why ? why : "unknown");
+                      path, why);
             return;
         }
+        const int w = static_cast<int>(img.width), h = static_cast<int>(img.height);
 
         rhi::TextureDesc td;
-        td.width = static_cast<u32>(w);
-        td.height = static_cast<u32>(h);
+        td.width = img.width;
+        td.height = img.height;
         td.format = rhi::Format::RGBA8Unorm;
         td.bind = rhi::ResourceBind::ShaderResource;
         td.initialState = rhi::ResourceState::ShaderResource;
         td.debugName = "EditorLogo";
-        const void* levels[1] = {px};
+        const void* levels[1] = {img.pixels.data()};
         td.initialData = levels;
         td.initialDataCount = 1;
-        td.initialRowPitch = static_cast<u32>(w) * 4;   // stb hands back tightly packed RGBA
+        td.initialRowPitch = img.rowPitch();   // ImageData is tightly packed RGBA
         logoTexture_ = res->createTexture(td);
-        stbi_image_free(px);
 
         if (!logoTexture_) { AVER_WARN("[Sandbox] the start-screen mark could not be uploaded"); return; }
         logoUiId_ = e.device()->uiTextureId(logoTexture_);

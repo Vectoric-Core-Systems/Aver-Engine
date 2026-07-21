@@ -1,10 +1,8 @@
 #include "aver/platform/Splash.hpp"
+#include "aver/platform/Image.hpp"
 #include "aver/core/Log.hpp"
 
 #include <Windows.h>
-
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
 
 namespace aver {
 
@@ -13,9 +11,10 @@ static const wchar_t* kSplashClass = L"AverSplashWindow";
 Splash::~Splash() { close(0); }
 
 bool Splash::show(const std::string& pngPath) {
-    int w = 0, h = 0, n = 0;
-    unsigned char* px = stbi_load(pngPath.c_str(), &w, &h, &n, 4);
-    if (!px) { AVER_TRACE("[Splash] no splash image at {}", pngPath); return false; }
+    ImageData img;
+    if (!decodeImage(pngPath, img)) { AVER_TRACE("[Splash] no splash image at {}", pngPath); return false; }
+    const int w = static_cast<int>(img.width), h = static_cast<int>(img.height);
+    const unsigned char* px = img.pixels.data();
 
     HINSTANCE inst = GetModuleHandleW(nullptr);
     WNDCLASSEXW wc = {};
@@ -28,7 +27,7 @@ bool Splash::show(const std::string& pngPath) {
     const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
     HWND hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kSplashClass, L"",
                                 WS_POPUP, (sw - w) / 2, (sh - h) / 2, w, h, nullptr, nullptr, inst, nullptr);
-    if (!hwnd) { stbi_image_free(px); return false; }
+    if (!hwnd) return false;
 
     // 32-bit top-down DIB; copy RGBA -> BGRA (opaque).
     BITMAPINFO bi = {};
@@ -51,7 +50,6 @@ bool Splash::show(const std::string& pngPath) {
             d[i * 4 + 3] = 255;           // A (opaque)
         }
     }
-    stbi_image_free(px);
     HGDIOBJ old = SelectObject(mem, bmp);
 
     POINT ptDst = {(sw - w) / 2, (sh - h) / 2}, ptSrc = {0, 0};

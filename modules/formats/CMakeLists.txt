@@ -3,6 +3,7 @@ aver_add_module(Aver.Formats
     src/OcBeam.cpp
     src/OcMap.cpp
     src/OcProject.cpp
+    src/Texture.cpp
   DEPS
     Aver.Core
     Aver.Platform
