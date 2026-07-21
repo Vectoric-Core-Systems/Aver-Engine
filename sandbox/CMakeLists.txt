@@ -19,6 +19,12 @@ if(TARGET Aver.Render.PBR)
   # P/Invokes, so it must depend on the material system whether or not a render feature does.
   target_link_libraries(Sandbox PRIVATE Aver.Render.PBR Aver.Render.PBR.Materials)
 endif()
+if(TARGET Aver.Scripting.Host)
+  # The in-process CLR host (brings AVER_MODULE_SCRIPTING=1). The executable owns the instance and
+  # ticks it, the same way it owns the Voxi feature -- a subsystem the app configures is not
+  # something the composition root should be reaching into.
+  target_link_libraries(Sandbox PRIVATE Aver.Scripting.Host)
+endif()
 target_include_directories(Sandbox PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
 set_target_properties(Sandbox PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

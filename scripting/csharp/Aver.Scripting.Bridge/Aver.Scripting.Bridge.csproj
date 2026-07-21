@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Aver.Scripting.Bridge — the managed end of the engine's in-process CLR host.
+       Loaded by hostfxr from next to the executable; never referenced by user scripts, which
+       reference Aver.Scripting instead. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Scripting.Bridge</AssemblyName>
+    <RootNamespace>Aver.Scripting.Bridge</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+
+    <!-- EnableDynamicLoading is what makes this a hostable component rather than a plain library:
+         it emits the .runtimeconfig.json hostfxr_initialize_for_runtime_config needs, and copies
+         references next to the output so the host directory is self-contained. -->
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+
+    <!-- The engine ships one bridge and cannot know which patch of .NET 10 a user machine has.
+         Without roll-forward the host declines on a machine that has 10.0.x for any other x, which
+         would read as "scripting is broken" rather than as a version pin nobody asked for. -->
+    <RollForward>LatestMinor</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Aver.Scripting\Aver.Scripting.csproj" />
+  </ItemGroup>
+
+</Project>

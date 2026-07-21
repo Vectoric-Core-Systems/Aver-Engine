@@ -35,6 +35,7 @@ option(AVER_ENABLE_UI "In-window editor UI (Dear ImGui)" ON)
 # --- Optional feature modules (the engine builds and runs with these OFF) ---
 option(AVER_MODULE_VOXI "Voxi render module: AA / GI / ray tracing / path tracing settings" ON)
 option(AVER_MODULE_PBR  "PBR material system: material library, C ABI and the surface BRDF" ON)
+option(AVER_MODULE_SCRIPTING "In-process .NET scripting host (hostfxr/CoreCLR)" ON)
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -81,6 +82,11 @@ if(AVER_MODULE_VOXI AND NOT AVER_MODULE_PBR)
 endif()
 if(AVER_MODULE_VOXI)
   add_subdirectory(modules/render.voxi)   # optional: render feature settings + C ABI for C#
+endif()
+# Scripting sits beside the render modules rather than under them: it needs Core and Platform and
+# nothing else, and in particular not the RHI. Added after them only because that is reading order.
+if(AVER_MODULE_SCRIPTING)
+  add_subdirectory(modules/scripting)     # optional: in-process CLR host + the managed bridge
 endif()
 add_subdirectory(modules/runtime)
 

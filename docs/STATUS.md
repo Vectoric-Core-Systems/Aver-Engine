@@ -1,7 +1,8 @@
 # Aver Engine — Status & Handoff
 
-Living record of where the engine stands and what's next. Updated 2026-07-20.
-**HEAD: `0bba4c2`** · 52 commits · 147 tracked files.
+Living record of where the engine stands and what's next. Updated 2026-07-21.
+`git log --oneline | wc -l` and `git rev-parse HEAD` are the authority; the last phase recorded here
+is the in-process CLR host (§4f).
 
 Read this first after a context compaction, then `docs/ARCHITECTURE.md` (module DAG),
 `docs/MINIMUM_SPECS.md` (hardware requirements / launcher spec),
@@ -55,6 +56,8 @@ modules/
   rhi.d3d11/ rhi.vulkan/     stubs
   render.voxi/               Aver.Render.Voxi (SHARED: settings + C ABI, Core only) and
                              Aver.Render.Voxi.Renderer (STATIC: GI/shadow/RayQuery, drives Aver.RHI)
+  scripting/ Aver.Scripting.Host (STATIC: in-process CLR host via nethost/hostfxr, Core+Platform,
+                             never the RHI) + the managed bridge under scripting/csharp/
   runtime/   Aver.Runtime    Engine loop, Application, EntryPoint (splash + ImGui hooks)
   (skeleton, not yet wired: render, render.gi, scene, physics, softbody, aero, gpudeform,
    fracture, vehicle, net, netvehicle, match, audio, world, abi — each has a README)
@@ -197,8 +200,8 @@ Owns the project-wide render quality settings and reports, per feature, whether 
 - Built **SHARED** for C# P/Invoke; C ABI in `include/aver/voxi/voxi_abi.h` (`aver_voxi_*`),
   bound by `scripting/csharp/Aver.Scripting`. Verify with
   `dotnet run --project scripting/csharp/Aver.Scripting.Sample`.
-  **Caveat**: a separate C# process gets its own copy of the DLL (own settings, empty caps);
-  scripting the live editor needs in-process CLR hosting, which does not exist yet.
+  A separate C# process gets its own copy of the DLL (own settings, empty caps), which is why
+  scripting the live editor needs the CLR hosted in-process — that host now exists, see §4f.
 - Dev flags: `--msaa N` (exercise the runtime switch), `--project-settings` (open the window),
   `--gi`, `--gi-debug`, `--rt`, `--ms`.
 - This machine reports: MSAA to 8x, **DXR tier 1.1**, typed UAV loads, conservative raster,
@@ -231,7 +234,11 @@ input and watch a per-frame heartbeat instead.
 
 Dev flags on `Sandbox.exe`: `--frames N`, `--screenshot out.png`, `--tool <select|move|rotate|scale>`,
 `--project-settings`, `--new-script`, `--tools-menu`, `--compile-scripts`, `--start-screen`,
-`--msaa N`, `--gi`, `--gi-debug`, `--rt`, `--ms`, `--probe X Y`.
+`--msaa N`, `--gi`, `--gi-debug`, `--rt`, `--ms`, `--probe X Y`, `--scripts <dir>`.
+
+`--scripts <dir>` points the CLR host at a directory of user script assemblies (relative to the
+executable unless absolute). The default is `<exe>\Scripts`, which a clean build does not create, so
+**no oracle gate loads a script**. `--scripts SampleScripts` picks up the staged sample behaviour.
 
 `--probe X Y` is the oracle: it prints the pixel as floats AND as raw 8-bit codes, because a
 one-code move hides completely inside `%.2f`. Compare the raw codes, never the floats. Count
@@ -682,9 +689,154 @@ authored base-colour map does not yet colour the GI bounce. Closing that is the 
 above. `AlphaBlend` stays `NotImplemented` on purpose: blending needs a pipeline blend state and a
 back-to-front sort, both of which are the renderer's, not the shading model's.
 
+## 4f. Aver.Scripting.Host — the in-process CLR, WORKING
+
+C# can now drive the live editor. The CLR is hosted **inside the engine process**, so a P/Invoke
+from a hosted assembly resolves to the module the editor has already loaded — the same
+`Aver.Render.Voxi.dll`, the same settings singleton, the same real device caps. That was the whole
+of the defect recorded as §4d item 11: a standalone C# process gets its own copy of everything.
+
+Gated by `-DAVER_MODULE_SCRIPTING=OFF`; that build configures, compiles, links and runs, `--scripts`
+is accepted and ignored, and the gates are unchanged (measured, see below). Full write-up:
+`modules/scripting/README.md`.
+
+**Naming diverges from `docs/ARCHITECTURE.md` §142/§246 on purpose.** That document plans
+`Aver.Scripting.NET` behind `AVER_SCRIPTING`, reaching the engine through a central `Aver.ABI`. The
+central ABI module is still an empty skeleton (§4d item 17) and the C ABIs that exist live in the
+feature modules that own them, so the host was built to match what is actually there: option
+`AVER_MODULE_SCRIPTING` and target `Aver.Scripting.Host`, consistent with `AVER_MODULE_VOXI` /
+`AVER_MODULE_PBR`. ARCHITECTURE.md is the design intent and has not been rewritten.
+
+| Target | Kind | Links | Holds |
+|---|---|---|---|
+| `Aver.Scripting.Host` | STATIC | `Aver.Core`, `Aver.Platform` | `ScriptHost`, the hostfxr sequence, `scripting_abi.h` |
+| `Aver.Scripting.Bridge` | C# | `Aver.Scripting` | the four entry points, the collectible ALC, the exception boundary |
+| `Aver.Scripting` | C# | — | `AverBehaviour`, `Log`, the Voxi/PBR bindings — what a *user's* scripts reference |
+
+**Never the RHI.** Scripting is not a rendering concern, and a link edge to `Aver.RHI` here would be
+the same mistake §4c-2 spent twelve steps undoing. **Nothing links nethost or hostfxr either** —
+both are `LoadLibraryW`'d at run time, because a missing import in the executable's table fails the
+*process* at load time, before any code could decline. That is the one outcome this module may not
+produce.
+
+The hostfxr declarations are written out in `src/ScriptHost.cpp` rather than included from
+`nethost.h`/`hostfxr.h`: those ship in the .NET host pack, which only exists on a machine with the
+SDK, so including them would make the engine unbuildable without .NET.
+
+### Declining, verified per branch
+
+`ScriptHost::init` mirrors `VoxiRenderer::init` — one log line, a recorded reason, `false`, and the
+editor runs exactly as it does today. Each branch was made to fail and the resulting line recorded;
+**all thirteen gates returned their exact raw codes in every one of these runs**:
+
+| Made to fail | Line |
+|---|---|
+| `nethost.dll` removed from `bin/` | `nethost.dll could not be loaded — the .NET runtime is unavailable` |
+| `nethost.dll` replaced with an unrelated DLL | `nethost.dll exports no get_hostfxr_path` |
+| bridge assembly not staged | `the managed bridge was not staged next to the executable …` |
+| runtimeconfig demanding framework 99.0.0 | `hostfxr_initialize_for_runtime_config failed (0x80008096) — the framework the bridge targets is not installed` |
+| bridge rebuilt at contract v2 | `the staged Aver.Scripting.Bridge.dll speaks a different host contract than this build (host v1)` |
+
+Note `DOTNET_ROOT` pointing at nothing does **not** trigger a decline — nethost still finds the
+global install. Use one of the five above to test this path, not that.
+
+### Collectible load context — the decision that could not be deferred
+
+User assemblies go into a collectible `AssemblyLoadContext`, loaded from a memory stream so the DLL
+on disk is not locked. An assembly in a non-collectible context can **never** be unloaded, so hot
+reload is not something that can be layered on later; it is decided at the first load or not at all.
+Done now even though reload lands next phase.
+
+`ScriptLoadContext.Load` delegates to **the bridge's own context, not Default**.
+`load_assembly_and_get_function_pointer` loads a hosted component into an isolated context driven by
+its `deps.json`, so `Aver.Scripting` is not in Default at all — the obvious "return null and fall
+through" implementation produced `Could not load file or assembly 'Aver.Scripting'` with the
+assembly loaded and sitting next to the executable. This cost one build to find and is the single
+least obvious thing in the module.
+
+### Lifecycle — `AverBehaviour`, a base class (decision recorded)
+
+`OnStart()` / `OnUpdate(float dt)` / `OnShutdown()`, discovered by reflection, constructed through a
+public parameterless constructor, called on the main thread from the frame loop. A base class rather
+than an attribute because the compiler then **checks the hooks**: an attribute design lets a
+misspelt `OnUpate` compile cleanly and never run, which is a failure with no error message anywhere.
+Cost is single inheritance, acceptable for a leaf type.
+
+### A managed exception never crosses back into C++
+
+An exception escaping an `[UnmanagedCallersOnly]` method does not become a C++ exception the engine
+could catch — it **terminates the process**. Every entry point is wrapped whole, and each hook call
+is wrapped individually *inside* the loop so one throwing behaviour does not stop the ones after it.
+A behaviour that throws is logged and disabled for the session. Measured with a deliberately
+throwing assembly:
+
+```
+[ERROR] [Scripting] ThrowsOnStart.OnStart threw: InvalidOperationException: deliberate OnStart failure - the behaviour has been disabled
+[INFO ] [ThrowsOnUpdate] update 1
+[INFO ] [ThrowsOnUpdate] update 2
+[ERROR] [Scripting] ThrowsOnUpdate.OnUpdate threw: InvalidOperationException: deliberate OnUpdate failure - the behaviour has been disabled
+[INFO ] [Survivor] still running at update 20
+```
+
+### Two versioned contracts, each checked at its own boundary
+
+- **host ↔ bridge**: `AVER_SCRIPTING_CONTRACT_VERSION` in `scripting_abi.h`, plus `sizeof` the
+  struct. Checked by the bridge in `Bootstrap`.
+- **bridge ↔ user assembly**: the assembly version of `Aver.Scripting`, read out of the user
+  assembly's own **reference table** rather than from an attribute the author must remember to
+  apply. An assembly that does not reference `Aver.Scripting` cannot hold a behaviour and is skipped
+  silently — a scripts folder legitimately holds support libraries. Measured by building the test
+  assembly against a temporarily-bumped `Aver.Scripting` 2.0.0:
+
+```
+[ERROR] [Scripting] BadScripts.dll was built against Aver.Scripting 2.0.0.0 but this engine provides 1.0.0.0
+        - the assembly was rejected. Rebuild it against this engine.
+```
+
+### Ownership and staging
+
+The **app** owns the `ScriptHost` and ticks it from `SandboxApp::onUpdate`, exactly as it owns the
+Voxi feature. `Aver.Runtime` is deliberately untouched: routing scripting through the composition
+root would make it non-optional there, and §8 already records that the app configures its
+subsystems directly.
+
+`Aver.Scripting.Bridge.dll`, its `.runtimeconfig.json`, `Aver.Scripting.dll` and `nethost.dll` are
+staged next to the exe by `OUTPUT`/`DEPENDS` custom commands, never `POST_BUILD` — a `POST_BUILD`
+rule only fires on relink, and shipping a stale asset from a clean build was a real bug here (§6).
+All of it is optional: with no `dotnet` on `PATH`, CMake says so at configure time, skips the rules,
+and the host declines at run time.
+
+### Proof it runs — from managed code
+
+`scripting/csharp/Aver.Scripting.SampleBehaviour` is staged to `bin/SampleScripts/`, deliberately
+**not** `bin/Scripts/` (the default), so a normal editor run loads nothing and no demo script runs
+unasked in the product. `build\bin\Sandbox.exe --frames 40 --scripts SampleScripts`:
+
+```
+[INFO ] [Scripting] managed bridge online (contract v1, 10.0.10, API v1.0.0.0)
+[INFO ] [HelloBehaviour] OnStart from managed code - hosted in-process on 10.0.10
+[INFO ] [Scripting] loaded Aver.Scripting.SampleBehaviour.dll: 1 behaviour(s)
+[INFO ] [Scripting] .NET runtime hosted in-process; 1 behaviour(s) live
+[INFO ] [HelloBehaviour] OnUpdate has run 10 times (0.185s of frame time)
+[INFO ] [Sandbox] probe (1375,819) ... raw (90,93,108) ... in-viewport
+[INFO ] [HelloBehaviour] OnShutdown after 40 update(s)
+```
+
+Every `[HelloBehaviour]` line originates in managed code and reaches the console through the
+engine's own log. The probe in the middle is the unchanged gate value.
+
+### Verification
+
+All 13 oracle gates re-run on the final binary, bit-exact at the raw 8-bit codes, spaced 800 ms
+apart, 0/13 harness misfires. `0x141` `LiveKernelEvent` count **67 → 67, zero new TDRs**. The gates
+also hold under every decline branch above and under `-DAVER_MODULE_SCRIPTING=OFF`.
+
 ## 4d. NOT DONE — open work, roughly in value order
 
 **Closed since this list was written**
+- **C# could not drive the live editor** (was item 11). The CLR is now hosted in-process, so a
+  P/Invoke from a script resolves to the module the editor has already loaded. Full write-up,
+  the five verified decline branches and the managed-code proof in §4f.
 - **The Voxi/HAL decoupling refactor, all 12 steps** (`14284b4`..`0bba4c2`). The backend no longer
   contains any GI, shadow or ray-tracing code. Full write-up, final architecture and the
   `AVER_MODULE_VOXI=OFF` baseline in §4c-2.
@@ -748,15 +900,21 @@ back-to-front sort, both of which are the renderer's, not the shading model's.
     to Null, `resources()` is null, and `VoxiRenderer::init` logs and returns false.
 
 **Scripting**
-11. **C# cannot drive the live editor.** A standalone C# process P/Invokes its own copy of
-    `Aver.Render.Voxi.dll`, so it gets its own settings and empty device caps. Needs in-process
-    CLR hosting (hostfxr/CoreCLR). The C ABI is already shaped for it.
-    This is also why **Tools ▸ New C# Script / New C# Class produce files that never execute**.
-    The editor says so in the modals and in the generated file headers rather than letting someone
-    find out by watching a script do nothing. **Tools ▸ Compile Scripts** genuinely builds them —
-    `dotnet build` on the generated `Scripts.csproj`, with the full transcript surfaced in a
-    scrollable modal — so the compile half is real and only execution is missing.
-12. Same caveat blocks the **launcher hardware probe** in `docs/MINIMUM_SPECS.md` §7.
+11. **Hot reload is not implemented.** The collectible `AssemblyLoadContext` that makes it possible
+    is in place (§4f) — what is missing is a file watcher, a drain/unload/reload step, and an answer
+    for carrying a behaviour's state across the swap.
+11b. **A project's scripts do not load without a flag.** The host reads `<exe>\Scripts` by default
+    or `--scripts <dir>`, while **Tools ▸ Compile Scripts** builds `<project>\Content\Scripts` into
+    its own `bin/`. Nothing joins those two up yet, so **Tools ▸ New C# Script still produces a file
+    that a plain editor launch will not run** — the modals and the generated file headers still say
+    so, and they are still right until this is wired. The pieces on both sides are now real; this is
+    one path being handed to `ScriptHost::init`.
+11c. **`AverBehaviour` can log and nothing else.** The lifecycle, the load context, the exception
+    boundary and both version contracts are done, but no scene or actor handle is exposed to script
+    yet — that waits on the generic scene layer (§9.1). The Voxi/PBR C ABIs are reachable by
+    P/Invoke today and now resolve to the editor's own instance, which is the part that was broken.
+12. The **launcher hardware probe** in `docs/MINIMUM_SPECS.md` §7 is now unblocked (it was waiting
+    on in-process hosting) but is not written.
 
 **Editor / engine**
 13. Dock layout does **not persist** (`io.IniFilename` is null) — rebuilt from DockBuilder each run.
@@ -910,6 +1068,18 @@ ab2264a Aver Engine foundation: modular core + .oc* format loaders
 - **Backend root parameter indices are named constants** (`kSceneFrameParam`, `kMeshVertexParam`,
   …). `SetGraphicsRoot*` takes a bare integer, so a stale number binds the WRONG parameter rather
   than failing. Never inline them again.
+- **A hosted component is NOT in the default `AssemblyLoadContext`.**
+  `load_assembly_and_get_function_pointer` gives the bridge its own isolated context, driven by its
+  `deps.json`. A collectible child context whose `Load` returns null therefore falls through to
+  Default and does **not** find `Aver.Scripting` — the error reads as a missing file. Delegate to
+  `AssemblyLoadContext.GetLoadContext(typeof(HostBridge).Assembly)` instead, which also keeps
+  `AverBehaviour` to one runtime identity. Do not "simplify" that back to `return null`.
+- **Nothing in the engine may link nethost or hostfxr.** Both are `LoadLibraryW`'d at run time. An
+  import in the executable's table fails the PROCESS at load time on a machine with no .NET, which
+  is precisely the case `ScriptHost::init` exists to decline for.
+- **A managed exception must not escape an `[UnmanagedCallersOnly]` method** — it terminates the
+  process rather than becoming a C++ exception. Every bridge entry point is wrapped whole, and each
+  behaviour hook is wrapped individually inside the loop.
 - **A pixel probe is not a screenshot.** `--probe` reads one pixel and misses overlays entirely; the
   centre probe in particular is blind to the sun term (see §4c-2). Shadow and ray-tracing checks
   must use `--probe 1413 1042` (cast shadow) or `--probe 1413 1150` (penumbra).

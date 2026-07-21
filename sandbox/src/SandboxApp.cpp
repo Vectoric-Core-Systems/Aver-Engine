@@ -22,6 +22,10 @@
 #include "aver/pbr/MaterialGpu.hpp"    // MaterialConstants: the block setDrawBinding carries
 #endif
 
+#if AVER_MODULE_SCRIPTING
+#include "aver/scripting/ScriptHost.hpp" // in-process CLR host; declines when .NET is absent
+#endif
+
 #if AVER_WITH_IMGUI
 #include "imgui.h"
 #include "imgui_internal.h" // DockBuilder* (docking layout is built in code: IniFilename is null)
@@ -394,6 +398,26 @@ public:
             }
         }
 #endif
+#if AVER_MODULE_SCRIPTING
+        // Scripting is started LAST, after every rendering subsystem is up. It touches none of
+        // them, so ordering is free -- and putting the one subsystem that may take a second to
+        // start behind the ones the first frame actually needs keeps startup honest.
+        //
+        // A declined init is not an error path: no .NET runtime, no staged bridge, or a stale
+        // bridge all end here with the editor running exactly as it does today. ScriptHost has
+        // already logged the reason.
+        {
+            scripting::HostDesc hd;
+            hd.bridgeDir = executableDir();
+            // Default: <exe>/Scripts, which a clean build does not create. `--scripts <dir>`
+            // overrides it, and a relative path is taken against the executable so the sample
+            // is reachable as `--scripts SampleScripts` from anywhere.
+            std::string sd = scriptsDir_.empty() ? std::string("Scripts") : scriptsDir_;
+            const bool absolute = sd.size() > 1 && (sd[1] == ':' || sd[0] == '\\' || sd[0] == '/');
+            hd.scriptsDir = absolute ? sd : executableDir() + "\\" + sd;
+            scripts_.init(hd);
+        }
+#endif
         tool_ = initialTool_;
         sel_ = 1; // the Cube
         camPos_ = Vec3{7.0f, 7.0f, 4.5f};
@@ -456,6 +480,12 @@ public:
             if (!io.WantCaptureKeyboard && ImGui::IsKeyPressed(ImGuiKey_F) && sel_ >= 0 && sel_ < (int)objects_.size())
                 camPos_ = objects_[sel_].pos - fwd * 6.0f; // focus selection
         }
+#endif
+#if AVER_MODULE_SCRIPTING
+        // Gameplay runs before the frame's render state is composed, so anything a behaviour
+        // changes this frame is what gets drawn this frame rather than next. Free and silent when
+        // the host declined or when no scripts were found.
+        scripts_.update(t.dt);
 #endif
         // The geometry path is a DEVICE setting, not a feature's: it decides how every draw reaches
         // the rasteriser. Pushed OUTSIDE the module guard, or a build without Voxi could never
@@ -576,6 +606,11 @@ public:
 #else
         (void)e;
 #endif
+#if AVER_MODULE_SCRIPTING
+        // Before the device goes away, so OnShutdown can still touch anything a behaviour was
+        // given. Safe after a declined init and safe called twice; ~ScriptHost calls it again.
+        scripts_.shutdown();
+#endif
         AVER_INFO("[Sandbox] shutdown");
     }
     void setFocusVoxi(bool b) { focusVoxi_ = b ? 4 : 0; } // --project-settings screenshot aid
@@ -587,6 +622,7 @@ public:
     void setRtOverride(int q) { rtOverride_ = q; }                              // --rt
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
+    void setScriptsDir(std::string d) { scriptsDir_ = std::move(d); }            // --scripts <dir>
     void setProjectPath(std::string p) { projectPath_ = std::move(p); }          // <path>.ocproject
     // Arm the start screen. Only ever true for an interactive launch with no project: the
     // verification harness drives the editor with --frames and reads one probe pixel, so a screen
@@ -1467,6 +1503,7 @@ private:
     int  rtOverride_=0;              // --rt: ray tracing quality at startup
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
+    std::string scriptsDir_;         // --scripts <dir>: where to look for user script assemblies
     // Project browser + the project it produced. `browserActive_` is false for every automated
     // run, so the oracle never sees the start screen.
     editor::ProjectBrowser browser_;
@@ -1488,6 +1525,11 @@ private:
     voxi::VoxiRenderer voxiRenderer_;
     bool voxiAttached_=false;
 #endif
+#if AVER_MODULE_SCRIPTING
+    // The in-process CLR. Owned by the app, like the Voxi feature, because the app is what
+    // configures it -- the composition root has no business knowing scripting exists.
+    scripting::ScriptHost scripts_;
+#endif
     rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;
     Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };
@@ -1508,7 +1550,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; std::string beam, shot, project; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; std::string beam, shot, project, scriptsDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -1525,6 +1567,10 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--rt")) rt=3;
         else if (!std::strcmp(argv[i],"--ms")) ms=true;
         else if (!std::strcmp(argv[i],"--probe") && i+2<argc) { probeX=(u32)std::atoi(argv[++i]); probeY=(u32)std::atoi(argv[++i]); }
+        // Where the scripting host looks for user assemblies. Relative to the executable unless
+        // absolute; the default (<exe>\Scripts) does not exist in a clean build, so no gate loads
+        // anything. `--scripts SampleScripts` picks up the staged sample behaviour.
+        else if (!std::strcmp(argv[i],"--scripts") && i+1<argc) scriptsDir=argv[++i];
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
         else if (!std::strcmp(argv[i],"--tool") && i+1<argc) {
@@ -1555,6 +1601,7 @@ Application* createApplication(int argc, char** argv) {
     app->setRtOverride(rt);
     app->setMsOverride(ms);
     app->setProbe(probeX, probeY);
+    app->setScriptsDir(scriptsDir);
     return app;
 }
 
