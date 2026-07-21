@@ -138,18 +138,37 @@ Dear ImGui (docking) hosted inside the D3D12 backend; dark Unreal-style theme.
   no project, i.e. suppressed by `--frames`, by a `<path>.ocproject` argument, or by `--headless`.
   That is deliberate and load-bearing — the oracle reads a probe pixel out of the viewport, and a
   full-screen chooser in front of it would break all 13 gates at once.
-- **Tools menu** (between Window and Build, where Unreal puts it) ▸ **New C# Script…**: writes
-  `<project>/Content/Scripts/<Name>.cs` from a template against the real `Aver.Scripting` API,
-  and on the first script also emits a `Scripts.csproj` referencing the engine's
+- **Tools menu** (between Window and Build, where Unreal puts it), in `sandbox/src/ToolsMenu.cpp`.
+  It is split into two labelled groups because **C# and C++ are not symmetric here**, and that is
+  the thing most likely to surprise someone arriving from Unreal:
+
+  | Group | Item | Writes to | Rebuild? |
+  |---|---|---|---|
+  | PROJECT — C# | New C# Script… | `<project>/Content/Scripts/<Name>.cs`, behaviour + hooks | no |
+  | PROJECT — C# | New C# Class… | same folder, plain class, no hooks | no |
+  | ENGINE — C++ | New C++ Module… | `modules/<name>/` (CMakeLists, README, include, src) | **yes** |
+  | ENGINE — C++ | New C++ Class… | `.hpp`/`.cpp` in a picked `modules/<m>/` | **yes** |
+  | — | Compile Scripts | `dotnet build` on `Scripts.csproj`, transcript in a modal | — |
+  | — | Open Project Folder / Open in Visual Studio | shell-out | — |
+
+  `.ocproject` carries no build integration, so **game C++ has nowhere project-side to live** and
+  a new module goes into the ENGINE. The item labels, the group headers and the modals all say so.
+  The first C# file in a project also emits `Scripts.csproj`, referencing the engine's
   `Aver.Scripting.csproj` so the folder opens as a buildable project rather than a loose `.cs`.
-  Refuses to overwrite; validates the name as a C# identifier. Disabled with an explaining
-  tooltip when no project is loaded. Both the modal and the generated file's header state
-  plainly that **the script will not run** — see §4d, in-process CLR hosting does not exist.
-- Dev/testing args: `--tool <select|move|rotate|scale>` opens straight into a tool, and
-  `--new-script` forces the New C# Script modal open (used for screenshot verification since
-  headless capture can't inject mouse input). `--new-script` is gated on the same
-  "is a project loaded" predicate as the menu item, so a run without one demonstrates the
-  disabled state rather than merely asserting it.
+  Nothing overwrites an existing file; names are validated as identifiers; every project-dependent
+  item is **disabled with an explaining tooltip** rather than hidden. Both the C# modals and the
+  generated file headers state plainly that **the script will not run** — see §4d.
+
+  **Neither CMakeLists is auto-edited.** The top-level one is not, because wiring a module into
+  the build is a deliberate act and every existing skeleton under `modules/` is deliberately
+  unwired; a module's own is not, because `aver_add_module` takes an explicit `SOURCES` list and
+  never globs. Both modals show the exact line to add and why it is manual.
+- Dev/testing args: `--tool <select|move|rotate|scale>` opens straight into a tool; `--new-script`
+  forces the New C# Script modal open, `--tools-menu` holds the Tools dropdown open, and
+  `--compile-scripts` fires one build — all three for screenshot verification, since headless
+  capture can't inject mouse input. Each is gated on the same predicate as the menu item it
+  stands in for, so a run that produces nothing has demonstrated a real disabled state rather
+  than merely asserting one. None changes the menu BAR's height, and no oracle gate passes them.
 
 ## 4b. Voxi — first optional module (`modules/render.voxi`)
 
@@ -211,7 +230,8 @@ responsive. For anything interaction- or hang-related, drive the real window wit
 input and watch a per-frame heartbeat instead.
 
 Dev flags on `Sandbox.exe`: `--frames N`, `--screenshot out.png`, `--tool <select|move|rotate|scale>`,
-`--project-settings`, `--msaa N`, `--gi`, `--gi-debug`, `--rt`, `--ms`, `--probe X Y`.
+`--project-settings`, `--new-script`, `--tools-menu`, `--compile-scripts`, `--start-screen`,
+`--msaa N`, `--gi`, `--gi-debug`, `--rt`, `--ms`, `--probe X Y`.
 
 `--probe X Y` is the oracle: it prints the pixel as floats AND as raw 8-bit codes, because a
 one-code move hides completely inside `%.2f`. Compare the raw codes, never the floats. Count
@@ -611,10 +631,11 @@ batch, zero new TDRs. The red-channel wobble below still reproduces (`--gi` 5 ru
 11. **C# cannot drive the live editor.** A standalone C# process P/Invokes its own copy of
     `Aver.Render.Voxi.dll`, so it gets its own settings and empty device caps. Needs in-process
     CLR hosting (hostfxr/CoreCLR). The C ABI is already shaped for it.
-    This is also why **Tools ▸ New C# Script produces a file that never executes**. The editor
-    says so in the modal and in the generated file's header comment rather than letting someone
-    find out by watching a script do nothing. The generated `Scripts.csproj` does compile against
-    `Aver.Scripting` (verified with `dotnet build`: 0 errors) — only execution is missing.
+    This is also why **Tools ▸ New C# Script / New C# Class produce files that never execute**.
+    The editor says so in the modals and in the generated file headers rather than letting someone
+    find out by watching a script do nothing. **Tools ▸ Compile Scripts** genuinely builds them —
+    `dotnet build` on the generated `Scripts.csproj`, with the full transcript surfaced in a
+    scrollable modal — so the compile half is real and only execution is missing.
 12. Same caveat blocks the **launcher hardware probe** in `docs/MINIMUM_SPECS.md` §7.
 
 **Editor / engine**
