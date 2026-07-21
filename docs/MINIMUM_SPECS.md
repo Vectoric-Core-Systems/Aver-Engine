@@ -109,7 +109,9 @@ reason. Advertise "DirectX 12 Ultimate class"; *check* the capability.
 
 > ⚠️ **All GCN parts** (through RX 500 / Vega) take a significant hit in voxel GI: the
 > voxelisation pass uses a geometry shader, which GCN emulates through an off-chip ring buffer.
-> GI is playable but noticeably more expensive there. A GS-free variant is planned.
+> GI is playable but noticeably more expensive there. The GS-free variant exists (`MSVoxel`, verified
+> pixel-identical) but needs mesh shaders, which no GCN part has — so on this hardware the geometry
+> shader is the only path, and that cost is real rather than avoidable.
 
 ### Intel
 
@@ -138,9 +140,17 @@ Concrete degradation path:
 | Situation | Result |
 |---|---|
 | No DXR | Ray tracing / path tracing unavailable; **voxel GI still works** and remains the GI solution |
+| No mesh shaders | Geometry goes through the input assembler; voxelisation uses the geometry shader. Pixel-identical |
 | No conservative raster | GI still works; thin geometry may drop out of the volume |
+| No DXC (`dxcompiler.dll` missing) | Everything above still works, compiled by FXC at SM 5.1 — see §5b |
 | No 8× MSAA | Clamps to 4×/2×/Off |
 | No D3D12 at all | Engine will not start (no D3D11/Vulkan backend yet) |
+
+Every row of that table has now been **executed and measured on this machine**, not merely reasoned
+about — see §10 for exactly what that does and does not prove. A refused request is also stated in
+the log, once, naming the capability that is missing: asking for `--ms` on a device without mesh
+shaders used to leave the input-assembler path running with nothing anywhere saying the flag had been
+turned down.
 
 ---
 
@@ -160,6 +170,14 @@ packaging mistake degrades instead of bricking the product.
 Baseline is **SM 6.0**, which is broadly supported across D3D12 hardware with current drivers.
 Mesh shaders and RayQuery compile at **SM 6.5** and only when the device reports the capability —
 so moving to DXC did not raise the engine's hardware floor.
+
+**The FXC path is a full renderer, not a stripped one.** Everything except mesh shaders and inline
+RayQuery — the shadow map, voxel cone traced GI, the whole material system and its five maps — asks
+for **SM 5.1** and gets compiled by FXC when DXC is absent. Measured: with `--force-caps no-dxc` all
+seventeen oracle gates are **bit-identical** to the SM 6.6 hardware path. Nothing in those passes uses
+anything SM 6.x introduced, and requiring 6.0 for them was gating the feature on a *compiler* rather
+than on a capability. Ship `dxcompiler.dll` anyway — it is faster and it is the only way to get mesh
+shaders or ray tracing — but a packaging mistake now costs those two features and nothing else.
 
 ## 6. OS and runtime requirements
 
@@ -225,9 +243,48 @@ Native equivalent: `aver_voxi_ray_tracing_tier()` / `aver_voxi_max_msaa()` from
 
 ## 9. Maintenance
 
-When a renderer feature gains or loses a hardware requirement, update **both**:
+When a renderer feature gains or loses a hardware requirement, update **all three**:
 
 1. `D3D12Device::queryCaps` — the runtime check
 2. This document — §2 matrix and §4 tables
+3. `scripts/gates.baseline.txt` — the measured behaviour, via `./scripts/gates.ps1 -Record`
 
 If they disagree, the runtime check is correct by definition; fix the doc.
+
+---
+
+## 10. What has actually been tested, and what has not
+
+This section exists because "supports X" and "has been observed doing X" are different claims, and
+only the second one is worth anything to a user. Be exact about which is which.
+
+**Tested, on real hardware:** one GPU. An **AMD Radeon RX 7800 XT** (RDNA 3, driver
+32.0.23027.2005), reporting MSAA to 8×, DXR tier 1.1, mesh-shader tier 1, SM 6.6, conservative
+raster, typed UAV loads and resource-binding tier 3 — i.e. every capability the engine uses.
+
+**Tested, by reducing what the device reports** (`--force-caps`, see `docs/STATUS.md` §4g): the
+no-ray-tracing, no-mesh-shader, no-conservative-raster, SM 6.0 and FXC/SM 5.1 paths, plus a
+resource-binding-tier-1 and no-typed-UAV report, each across the full gate set with the D3D12 debug
+layer draining into the log. `./scripts/gates.ps1` re-runs all of it.
+
+**Tested, on a second implementation of D3D12:** **WARP**, the software rasteriser. It is not
+different *hardware* — it reports the same tiers as the RX 7800 XT — but it is an entirely
+independent implementation, it agrees with the hardware to the raw 8-bit code at every gate, and it
+found a fault the hardware path absorbs silently.
+
+**NOT tested, and no clamp can substitute for it:**
+
+- **NVIDIA and Intel silicon, and their drivers.** Nothing here has run on either. Vendor-specific
+  behaviour — shader compilation quirks, DXR tier reporting across driver revisions, mesh-shader
+  scheduling — is exactly what a clamp on our own AMD driver cannot reach.
+- **Real resource-binding Tier 1 hardware.** The clamp makes the engine *report* Tier 1, but the
+  D3D12 runtime validates against the **real** device tier, which is 3 on both adapters available
+  here. The Tier 1 discipline the code follows (every declared table bound on every pass, every heap
+  slot null-filled by declared kind, every declared root CBV given an address) is therefore
+  reasoned and unmeasured. Haswell/Broadwell Intel is the hardware that would settle it.
+- **Old GCN parts**, where the geometry shader used by voxelisation is emulated. The mesh-shader
+  variant that avoids it exists and is verified pixel-identical, but no GCN part has run either.
+- **Anything at scale.** One editor scene, one cube, one ground plane.
+
+A clamped capability is a weaker claim than a different GPU, and this document will keep saying so
+until a second vendor's part has actually run the gates.

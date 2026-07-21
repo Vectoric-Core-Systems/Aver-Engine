@@ -2,7 +2,8 @@
 
 Living record of where the engine stands and what's next. Updated 2026-07-21.
 `git log --oneline | wc -l` and `git rev-parse HEAD` are the authority; the last phase recorded here
-is degraded-device testing — the capability clamp, WARP, and the three defects they found (§4g).
+repaired everything degraded-device testing found and turned those configurations into standing
+verification — `./scripts/gates.ps1` (§4h).
 
 Read this first after a context compaction, then `docs/ARCHITECTURE.md` (module DAG),
 `docs/MINIMUM_SPECS.md` (hardware requirements / launcher spec),
@@ -33,6 +34,8 @@ cd "C:\Users\User\Documents\Aver Engine"
 ./scripts/run.ps1                   # build then launch the editor (Sandbox.exe)
 ./scripts/run.ps1 --frames 30 --screenshot out.png   # headless-ish capture for verification
 ./scripts/run.ps1 <path.ocbeam>     # also load a cage into the scene
+./scripts/gates.ps1                 # the oracle: 9 device configurations x 17 gates (§4h)
+./scripts/gates.ps1 -Config baseline # just the primary path, ~30 s
 ```
 Output: `build/bin/Sandbox.exe`. `scripts/build.bat` is the real build (PowerShell wraps it);
 run `.bat` via the PowerShell tool, not Git Bash (`cmd //c` mangling). Add `/Zc:__cplusplus`
@@ -43,7 +46,7 @@ already set. Vulkan: `-DAVER_RHI_VULKAN=ON` once the LunarG SDK is installed.
 ```
 CMakeLists.txt              top-level (LANGUAGES C CXX RC; options AVER_RHI_*, AVER_ENABLE_UI)
 cmake/AvModule.cmake        aver_add_module() helper
-scripts/                    build.bat / build.ps1 / run.ps1
+scripts/                    build.bat / build.ps1 / run.ps1 / gates.ps1 + gates.baseline.txt
 modules/
   core/      Aver.Core      types, Math (Vec/Mat/Quat/Transform/AABB + Mat4::inverse), Log, Time, Hash(fnv1a64)
   platform/  Aver.Platform  Win32 Window (+icon, message hook), Splash (layered win + stb_image), FileSystem (+executableDir)
@@ -246,6 +249,10 @@ executable unless absolute) and **overrides everything else**. Without it the ho
 build does not create, so **no oracle gate loads a script** (no gate opens a project either).
 `--scripts SampleScripts` picks up the staged sample behaviours.
 
+**`./scripts/gates.ps1` runs the whole oracle** — 9 device configurations × 17 gates against
+`scripts/gates.baseline.txt`, TDRs counted, launches spaced. `-Config baseline` is the 30-second
+version. See §4h. Everything below describes the machinery it drives.
+
 `--probe X Y` is the oracle: it prints the pixel as floats AND as raw 8-bit codes, because a
 one-code move hides completely inside `%.2f`. Compare the raw codes, never the floats. Count
 `0x141` TDRs around any render batch:
@@ -426,6 +433,10 @@ Harmless while the scene's meshes are static and Voxi is shut down with the devi
 answer before geometry becomes dynamic. Listed in §4d.
 
 ### Oracle — all 13 gates, bit-exact
+
+> These thirteen are still exactly right and still the primary path. They are now gates 1–13 of
+> `scripts/gates.ps1`, which adds four more (penumbra ×2, sunlit ×2) and runs the set against nine
+> device configurations. `scripts/gates.baseline.txt` is the machine-readable copy. See §4h.
 
 ```
 --frames 40                             -> (0.35,0.36,0.42) raw(90,93,108)
@@ -957,7 +968,12 @@ configured and built again for this phase, and `--frames 40` / `--gi` / `--probe
 `--scripts SampleScripts` passed alongside returned `raw(90,93,108)` / `raw(104,91,104)` /
 `raw(64,79,102)`, i.e. the flag is accepted and ignored exactly as before.
 
-## 4g. Degraded-device testing — the fallbacks are now EXECUTABLE, and three are broken
+## 4g. Degraded-device testing — the fallbacks became EXECUTABLE, and three were broken
+
+> **Historical.** This section records the phase that made the lesser paths runnable and catalogued
+> what they do; its "three defects" are fixed and its baseline table is superseded by §4h and by
+> `scripts/gates.baseline.txt`. The description of `--force-caps`, `--warp` and the debug-layer drain
+> below is still current and still the place to read about them.
 
 The engine has only ever run on an RX 7800 XT, so every capability gate in it was a reasoned claim.
 This phase built the two things that make those paths runnable here and then **catalogued** what they
@@ -1073,7 +1089,29 @@ item 9 says the code follows are **still** reasoned rather than measured — a c
 branch reads cannot exercise them, and the D3D12 runtime validates against the *real* device tier,
 which is 3 on both adapters available here. Recorded as §4d item 20 rather than papered over.
 
+## 4d. Known gaps and defects
+
+Every numbered item below is referenced elsewhere in this document as `§4d item N`. The numbering is
+stable: items are struck off into the closed list rather than renumbered, which is why the surviving
+numbers have gaps in them.
+
 **Closed since this list was written**
+- **The FXC / SM 5.1 fallback did not decline cleanly, and its image was wrong** (was item 19). It
+  does not decline at all any more — it renders the reference image. Two causes, both found only
+  because the SM 5.1 path was finally executable: every Voxi shader asked for SM 6.0 when none of
+  them needs it, and Voxi's `averVertexOf(VoxOut)` overload made **every** call ambiguous under FXC's
+  looser overload resolution (`X3067`) while DXC accepted it. §4h.
+- **WARP crashed on mesh-shader voxelisation with conservative raster** (was item 18). Established
+  as data-independent — one fixed, tiny, in-range triangle faults identically — and worked around at
+  the pipeline-state level for software adapters only, with the reason logged once. §4h.
+- **`--ms` on a device without mesh shaders was silently ignored** (was item 21), and so was every
+  other refused render setting. `Renderer::setSettings` now says so once per feature per device,
+  naming the missing capability, and only for a feature that was actually asked for. §4h.
+- **No oracle gate covered the sun's SPECULAR term** (was Renderer item 1). `--probe 2200 1400` is a
+  sunlit floor pixel that does receive direct specular, and it is gates 16–17 of `scripts/gates.ps1`.
+  The centre probe sits on the cube's unlit left face (`ndl` ~0) and `(1413,1042)` sits inside the
+  cast shadow (`visibility` ~0), so a change to the whole masking-shadowing formulation once left all
+  13 gates bit-identical. BRDF work has automated cover now. §4h.
 - **C# could not drive the live editor** (was item 11). The CLR is now hosted in-process, so a
   P/Invoke from a script resolves to the module the editor has already loaded. Full write-up,
   the five verified decline branches and the managed-code proof in §4f.
@@ -1119,12 +1157,6 @@ which is 3 on both adapters available here. Recorded as §4d item 20 rather than
   normal when the UV gradient is degenerate, which is the same hazard answered at the other end.
 
 **Renderer**
-1. **No oracle gate covers the sun's SPECULAR term.** Found while landing PBR step 17(a): the
-   centre probe sits on the cube's unlit left face (`ndl` ~0) and `(1413,1042)` sits inside the cast
-   shadow (`visibility` ~0), so neither pixel receives direct specular at all. A change to the whole
-   masking-shadowing formulation left all 13 gates bit-identical. `(2200,1400)` is a sunlit floor
-   pixel that does see it — `raw(103,111,126)` at present — and something in that family should
-   become a 14th gate. Until it is, BRDF work has no automated cover.
 2. **RT ambient occlusion / reflections.** The TLAS already exists, so this is mostly shader work.
 3. **Path tracing.** Declared only; would reuse the same acceleration structure.
 4. **No temporal accumulation** on GI. With the volume rebuilt each frame this is the main remaining
@@ -1142,52 +1174,26 @@ which is 3 on both adapters available here. Recorded as §4d item 20 rather than
     Test before shipping. The Tier 1 rules the code follows (every declared table bound on every
     pass, every heap slot null-filled by declared kind, every declared root CBV given an address)
     are therefore reasoned, not measured.
-9b. **The fallbacks are now RUNNABLE here.** `--force-caps` and `--warp` (§4g) execute the no-RT,
-    no-mesh-shader, no-conservative-raster, SM-6.0 and FXC/SM-5.1 paths on this machine, and the
-    debug layer now reports into the log. Items 18–20 are what they found. Item 9 stays open for
-    everything a clamp cannot reach — real Tier 1 hardware, NVIDIA/Intel drivers, vendor-specific
-    behaviour.
-18. **WARP crashes on mesh-shader voxelisation with conservative raster.** `--warp --ms --gi`,
-    `--warp --ms --rt --gi` and `--warp --ms --gi-debug` die on **frame 2** — the first frame the
-    replayed draw list has content, so the first frame `MSVoxel` actually dispatches — with
-    `0xC0000005` inside `d3d10warp.dll`, at a constant fault offset (`0x132d9`, three runs
-    identical). WARP executes shaders on the CPU in the calling process, so a shader-side
-    out-of-bounds access surfaces as a real user-mode access violation instead of being absorbed by
-    a driver. The debug layer says nothing before the fault: only the two benign warnings.
-    **Both conditions are required**, which is a sharp diagnosis to start from:
-    `--warp --gi` (GS voxelise + conservative raster) is clean, `--warp --ms` (mesh shaders, no
-    voxelise) is clean, and `--warp --ms --gi --force-caps no-cons-raster` is clean **and returns
-    the correct `96,91,104`**. Only mesh shaders AND conservative raster together fault.
-    Whether this is a WARP defect or an engine defect that only WARP is strict enough to catch is
-    **not established** and should not be assumed either way — `MSVoxel` writing outside the
-    accumulator would look exactly like this on WARP and be invisible on RDNA3, which is precisely
-    the class of bug this exercise exists to find.
-19. **The FXC / SM 5.1 fallback does not decline cleanly, and the image it produces is wrong.**
-    `--force-caps no-dxc` runs and does not crash, but:
-    (a) `IResourceFactory::createShader` requires SM 6.0 for every feature shader, so **all eleven**
-    Voxi pipelines fail to build and `VoxiRenderer::init` reports `init FAILED: shadow pipeline has
-    a zero handle` after **seven ERROR lines** — not the one-line decline §4c-2 documents as the
-    contract. The `CSSelfTest` compute self-test fails the same way. The editor carries on, so the
-    outcome is right and only the manner is wrong; but a user on FXC hardware sees a wall of errors
-    that reads like a broken build.
-    (b) The resulting image is `raw(65,77,92)`, which §4e identifies as the value you get when the
-    material binding set is **not** applied — every surface at metallic 1 / roughness 1, the floor a
-    rough mirror. The sandbox pins `b1`'s metallic/roughness to the identity because the authored
-    values live in the material's `b2`, and `PSMainPlain` reads `b1`. So the no-feature path reached
-    at *runtime* is materially wrong, and differs from the no-feature path reached by
-    `-DAVER_MODULE_VOXI=OFF` at *build* time (`raw(87,92,107)`), which the CMake option also turns
-    PBR off for. Cast-shadow probe `raw(82,92,104)`, i.e. fully lit, as it must be with no shadow
-    map — the `110,117,132` in §4e is that other configuration, not this one.
-    (c) Voxi logs `binding set declares an acceleration-structure slot on a device without ray
-    tracing` as a WARN and proceeds. Correct, but it fires on any no-RT device.
+9b. **The fallbacks are RUNNABLE here, and now VERIFIED here.** `--force-caps` and `--warp` (§4g)
+    execute the no-RT, no-mesh-shader, no-conservative-raster, SM-6.0 and FXC/SM-5.1 paths on this
+    machine; §4h turned all nine configurations into a standing gate set that any change has to pass.
+    Items 18, 19 and 21 are fixed. Item 9 stays open for everything a clamp cannot reach — real
+    Tier 1 hardware, NVIDIA/Intel drivers, vendor-specific behaviour.
 20. **`resourceBindingTier` and `typedUavLoads` have no consumer.** The first was added by §4g and
     is only logged; the second reaches Voxi's `DeviceInfo` and is never read. `--force-caps tier1`
     and `no-typed-uav` therefore change no gate and prove nothing. The Tier-1 discipline in item 9
     remains unmeasured: the D3D12 runtime validates against the real device tier, which is 3 on both
-    adapters on this machine, so no software clamp can exercise it.
-21. **`--ms` on a device without mesh shaders is silently ignored.** No log line says the request
-    was refused; the geometry path just stays on the input assembler. Found while confirming
-    `--force-caps no-ms`. Cosmetic, but it is the kind of silence §4f already had to close once.
+    adapters on this machine, so no software clamp can exercise it. **Deliberately still open** —
+    inventing a branch on the tier purely so the clamp has something to move would test the branch,
+    not the hardware.
+22. **The editor window intermittently starts at 45x45, and some runs return a plausible wrong
+    pixel.** The first half is measured: `viewport (0,198 45x45) OUTSIDE-VIEWPORT` twice inside ten
+    otherwise identical runs of one gate, 1.2 s apart. The probe catches that case by design. The
+    second half is not explained — three runs across this phase returned a wrong pixel with a
+    full-size, correct-looking rect and a silent debug layer (`65,83,117` on `baseline/shadow-ms-rt`;
+    sky on two WARP GI gates). Plausibly the same event seen before the rect settles, but that is a
+    hypothesis. **Start at `Win32Window`'s startup sizing, not at the renderer.** Full write-up and
+    the reason not to assume either answer in §4h.
 10. D3D11 and Vulkan backends are still **stubs** — D3D12 is the only working backend, so
     "supports DirectX 12" is a hard requirement. Both decline cleanly: `createDevice` falls through
     to Null, `resources()` is null, and `VoxiRenderer::init` logs and returns false.
@@ -1234,6 +1240,210 @@ which is 3 on both adapters available here. Recorded as §4d item 20 rather than
   `docs/MINIMUM_SPECS.md`, not something baked into the renderer.
 - Transform tools live in the **viewport overlay bar** (as in Unreal), not the window toolbar.
 - Render settings are **project-wide** → Edit ▸ Project Settings ▸ Rendering, not the Details panel.
+
+## 4h. The degraded paths are FIXED, and they are now standing verification
+
+§4g catalogued what the lesser paths do and deliberately fixed nothing. This section is the repair,
+and the answer to two of the three defects turned out to be that the gate was wrong rather than that
+the fallback was: a feature was being withheld from hardware perfectly capable of running it.
+
+### `./scripts/gates.ps1` — the oracle as a runner
+
+The single most useful thing here. Nine device configurations × seventeen gates, compared against
+`scripts/gates.baseline.txt`, TDRs counted before and after, launches spaced 800 ms, exit code = the
+number of failures.
+
+```powershell
+./scripts/gates.ps1                        # everything (allow ~25 min; WARP is ~19x slower)
+./scripts/gates.ps1 -Config baseline       # just the primary path (~30 s)
+./scripts/gates.ps1 -Config baseline,warp
+./scripts/gates.ps1 -Record                # re-record, ONLY with a stated reason
+```
+
+A gate fails on a moved raw code, a non-zero exit, a probe that landed outside the viewport, a
+debug-layer corruption or error, a **missing** debug-layer totals line (the process died before
+shutdown — how the WARP fault was first seen) or a new `0x141` `LiveKernelEvent`. Recording rewrites
+only the configurations actually run, so re-recording one cannot quietly erase another.
+
+**WARP flakes, twice, and it is NOT explained — see §4d item 22.** The runner therefore re-runs a
+missed gate once and prints BOTH results with BOTH viewport rects, reporting `FLAKY` rather than
+either failing or hiding it. A gate that misses twice still fails. This is not a retry that buries a
+defect: a flake is printed, counted and called out in the summary line, which is strictly more
+information than the single wrong number a plain re-run would have produced.
+
+**Four gates are new**, and each closes a hole the thirteen had:
+
+| gate | probe | what only it can see |
+|---|---|---|
+| `penumbra` / `penumbra-rt` | `1413,1150` | RayQuery vs the 3×3 PCF shadow map. `(1413,1042)` is fully shadowed on both paths, so without these `no-rt` returns thirteen identical numbers and proves nothing about the fallback it exists to test |
+| `sunlit` / `sunlit-gi` | `2200,1400` | direct SPECULAR. The centre probe is on the cube's unlit left face (`ndl` ~0) and the shadow probe has `visibility` ~0, so neither receives any. This was §4d Renderer item 1 |
+
+### Baselines — 9 configurations × 17 gates, measured 2026-07-21
+
+The authoritative copy is `scripts/gates.baseline.txt`; this is the shape of it. `=` means
+bit-identical to baseline.
+
+| gate | baseline | `no-rt` | `no-ms` | `sm=60` | `tier1,no-typed-uav` | `no-cons-raster` | ALL OFF¹ | `no-dxc` | WARP |
+|---|---|---|---|---|---|---|---|---|---|
+| (centre), `--ms`, `--rt`, `--ms --rt` | 90,93,108 | = | = | = | = | = | = | = | = |
+| `--gi` | 104,91,104 | = | = | = | = | **96,91,104** | **96,91,104** | = | = |
+| `--ms --gi`, `--ms --rt --gi` | 104,91,104 | = | = | = | = | **96,91,104** | **96,91,104** | = | **96,91,104**² |
+| `--gi-debug` | 66,44,45 | = | = | = | = | **132,76,65** | **132,76,65** | = | = |
+| `--ms --gi-debug` | 66,44,45 | = | = | = | = | **132,76,65** | **132,76,65** | = | **132,76,65**² |
+| shadow ×3 (`1413,1042`) | 64,79,102 | = | = | = | = | = | = | = | = |
+| shadow `--gi` | 67,79,97 | = | = | = | = | **66,78,97** | **66,78,97** | = | = |
+| penumbra (`1413,1150`) | 60,73,96 | = | = | = | = | = | = | = | = |
+| penumbra `--rt` | **59,72,95** | 60,73,96 | = | 60,73,96 | = | = | 60,73,96 | 60,73,96 | = |
+| sunlit (`2200,1400`) | 103,111,126 | = | = | = | = | = | = | = | = |
+| sunlit `--gi` | 105,111,123 | = | = | = | = | = | = | = | = |
+
+¹ `no-rt,no-ms,no-cons-raster,no-typed-uav,tier1,msaa=1`.
+² WARP's mesh-shader voxelisation runs without conservative raster — see the fix below.
+Debug-layer totals were `0 corruption, 0 error` in **every** run of every configuration, no run
+crashed, and the `0x141` `LiveKernelEvent` count was **67 → 67 across the whole exercise**.
+
+**`no-dxc` is now bit-identical to baseline at all 17 gates**, which is the headline result of this
+phase and is explained next.
+
+### Fixed: the FXC / SM 5.1 path renders the reference image (was §4d item 19)
+
+The brief was to ungate what a working fallback can carry, and this is the case where the gate was
+simply wrong. Two independent causes, and the second could only ever have been found by running FXC:
+
+1. **Every Voxi shader asked for SM 6.0, and none of them needs it.** The shadow map, the
+   voxelisation pass, the atomic accumulator, the mip filter and the cone-traced lit pass use nothing
+   shader model 6 introduced. `createShader` refused all eleven pipelines, `VoxiRenderer::init`
+   reported `init FAILED: shadow pipeline has a zero handle` after seven ERROR lines, and the editor
+   fell back to `PSMainPlain`, which reads `b1` — where the sandbox pins metallic/roughness to the
+   identity because the authored values live in the material's `b2`. Hence `raw(65,77,92)`: every
+   surface at metallic 1 / roughness 1, the floor a rough mirror. **The wrong image was a symptom of
+   the wrong gate, not a separate defect.** Voxi now asks for `kBaseSm = 51`, which changes nothing
+   at all where DXC is present (the backend derives the SM 6.0 target from it and compiles the same
+   bytes) and is the whole feature where it is not. Mesh shaders and RayQuery still ask for 65 at
+   their own call sites, because they genuinely need it.
+2. **`averVertexOf` was overloaded, and FXC could not resolve it.** Voxi declared
+   `AverVertex averVertexOf(VoxOut)` alongside the material prelude's `averVertexOf(VSOut)`. FXC
+   resolves overloads through implicit conversion between structurally compatible structs, so the
+   second declaration made **every** call ambiguous — `error X3067`, in every shader in the
+   translation unit including the ones that never call it. DXC is stricter and accepted it. Renamed
+   to `voxelVertexOf`; that is the entire fix.
+
+Two supporting changes: `ShaderCompiler::compile` now passes `-D` macros to FXC as well
+(`D3D_SHADER_MACRO`), because the material prelude tells every raster shader which registers its
+tables landed at and a compiler that could not take macros could not build the scene at all; and the
+factory's `CSSelfTest` asks for 5.1 too, so the one path most in need of an end-to-end check stops
+being the one path that skipped it.
+
+`--force-caps no-dxc` now logs no ERROR at all. `19(c)` went with it: the
+acceleration-structure-slot substitution is stated **once per device, as INFO**, since it is the
+normal state of affairs on every GPU without DXR and a WARN per binding set read as a fault on
+exactly the hardware the fallback exists for.
+
+### Fixed: WARP no longer faults on conservative mesh-shader rasterisation (was §4d item 18)
+
+§4g left open whether this was WARP's defect or ours and said not to assume. It is **not the
+engine's geometry**, and that was established rather than argued, by narrowing inside the shader:
+
+| experiment | result |
+|---|---|
+| `PSVoxel` body replaced with `return` | still faults → not the pixel shader |
+| `MSVoxel` emits nothing (`SetMeshOutputCounts(0,0)`) | clean → the fault is in rasterising what it emits |
+| every emitted vertex forced to one fixed, tiny, well-inside-NDC triangle | still faults → **data-independent** |
+| that, reduced to ONE primitive per group | still faults |
+
+A single fixed triangle from a mesh shader into a conservative-raster pipeline faults
+`d3d10warp.dll` at `0xC0000005`, offset `0x132d9`, every time. WARP executes shaders on the CPU in
+this process, so its faults are ours to survive whatever their origin.
+
+The fix is at the pipeline state and is as narrow as the fact: `D3D12Device` records whether it is on
+a **software adapter**, and `createGraphicsPipeline` drops `ConservativeRaster` for pipelines that
+use a **mesh shader** on such an adapter, logging once with the reason. Hardware is untouched — this
+cannot fire on a real GPU. It costs WARP a little voxel coverage on that one path, which is why its
+`--ms --gi` gates read the no-conservative-raster values while its GS gates stay bit-identical to
+hardware. Keeping the GS path conservative was the point: two completely independent implementations
+of D3D12 agreeing to the raw 8-bit code is the strongest check this project has, and blanket-dropping
+the flag on WARP would have thrown it away to fix a combination it does not affect.
+
+**`softwareAdapter_` is a device property, not a `DeviceCaps` field**, deliberately. It is not a
+capability the adapter reports being without; it is which *implementation* of D3D12 is executing.
+Putting it in `DeviceCaps` would have let `--force-caps` clamp it, which would mean nothing.
+
+### Also fixed: an out-of-bounds voxel write hardware was silently discarding
+
+`insideVolume()` is inclusive of 1.0, so a fragment landing exactly on the far face of the volume
+truncated to index `res` — one past the last cell — and `PSVoxel` did four `InterlockedAdd`s there.
+Conservative rasterisation is what makes it reachable: it generates fragments for partly-covered
+pixels and extrapolates their attributes to the pixel centre, and the ground quad's extent matches
+the volume's own bounds. A typed-UAV write out of bounds is discarded by the hardware, so this was
+invisible on RDNA3 and moved no gate when fixed. Found while investigating the WARP fault; it is
+**not** its cause (the fault survives `PSVoxel` being emptied entirely) and is recorded separately so
+nobody later reads the two as one.
+
+### Also fixed: a refused render setting says so
+
+`Renderer::setSettings` silently turned off anything the device cannot run, so `--ms` on a device
+without mesh shaders left the input assembler running with nothing anywhere saying the flag had been
+refused — a run that proved a fallback works looked identical to a run that ignored its own command
+line. It now logs once per feature per device, naming the missing capability, and **only for a
+feature that was actually asked for**: a device that cannot ray trace and was never asked to has
+nothing to say. `IDevice::setMeshShaders` says the same thing at its own level, for a build with no
+Voxi at all.
+
+```
+[INFO ] [Voxi] Mesh Shaders was requested but this device cannot run it
+        (Needs mesh-shader Tier 1 + SM 6.5 (D3D12 Ultimate)); it stays off
+```
+
+### Found while doing this, and left OPEN: the editor window sometimes starts at 45x45
+
+Recorded as §4d item 22, and it is the one thing in this section that is not finished.
+
+The "known harness flaw" this project has been carrying — *"launching the gates back-to-back
+occasionally yields `raw(14,14,16)`, the editor clear colour, because the window came up at a
+different size"* — has now been **measured** rather than inferred. The rect is in the log, and the
+runner records it:
+
+```
+run 2 : raw (64,79,102) viewport (0,198 2750x1242) in-viewport
+run 3 : raw (14,14,16)  viewport (0,198 45x45)     OUTSIDE-VIEWPORT
+run 4 : raw (14,14,16)  viewport (0,198 45x45)     OUTSIDE-VIEWPORT
+run 5 : raw (64,79,102) viewport (0,198 2750x1242) in-viewport
+```
+
+Ten consecutive runs of one gate, no arguments changed. The window comes up **45x45** — not merely
+"a different size" — twice in a row, then recovers. Spacing does not prevent it: these were 1.2 s
+apart, and the WARP configuration reproduced its own variant at 4 s. In this state the probe's own
+self-validation works exactly as designed: it reports `OUTSIDE-VIEWPORT` and an ERROR, and the runner
+treats it as a miss rather than a pixel.
+
+**The unexplained part is the other shape it takes**: three times across this phase a gate returned a
+plausible but WRONG pixel with a full-size, correct-looking rect — `baseline/shadow-ms-rt`
+`raw(65,83,117)` for `64,79,102` (twice in a row, then twelve clean runs), and on WARP
+`warp/ms-gi-debug` `raw(64,144,213)` and `warp/gi` `raw(54,138,213)`, both the SKY where geometry or
+voxel radiance belongs. Every one exited 0 with `0 corruption, 0 error` and `in-viewport`.
+
+The obvious unified explanation is that the window is still growing when the frame is composed, so
+the image is real but framed differently — which the latched rect cannot see, because it is latched
+at the request frame and by then already reads full size. That is a **hypothesis**, not a diagnosis.
+The alternative is a genuine non-determinism in the render path, and §4c-2 already contains one
+worked example of a "wobble" in this exact pass that turned out to be a real last-writer-wins race.
+
+Whoever picks this up: start at the window, not at the shader. `Win32Window`'s DPI-aware,
+work-area-clamped sizing is the code that can produce a 45x45 client area, and it runs before the
+swapchain exists. Establish whether the small window and the wrong-pixel runs are the same event
+before touching anything in the renderer.
+
+Until then the runner repeats a missed gate once and reports `FLAKY` with both values and both
+rects, which is loud, does not hide anything, and gives the next occurrence somewhere to be seen.
+
+### What was NOT done, and why
+
+- **Resource-binding Tier 1 is still unmeasured** (§4d item 20). Nothing in the engine branches on
+  the tier and the D3D12 runtime validates against the *real* device tier, which is 3 on both
+  adapters here. Adding a branch purely so the clamp has something to move would test the branch, not
+  the hardware. Left open and honest rather than closed and hollow.
+- **The WARP fault is worked around, not diagnosed to a root cause.** Nothing here can see inside
+  `d3d10warp.dll`. What is established is that the engine's input is not the variable.
 
 ## 5. Formats — implemented loaders
 
@@ -1392,7 +1602,25 @@ ab2264a Aver Engine foundation: modular core + .oc* format loaders
   through `resolveScriptsDir()` before the host existed.
 - **A pixel probe is not a screenshot.** `--probe` reads one pixel and misses overlays entirely; the
   centre probe in particular is blind to the sun term (see §4c-2). Shadow and ray-tracing checks
-  must use `--probe 1413 1042` (cast shadow) or `--probe 1413 1150` (penumbra).
+  must use `--probe 1413 1042` (cast shadow) or `--probe 1413 1150` (penumbra), and BRDF work must
+  use `--probe 2200 1400` (sunlit floor, the only gate that receives direct specular).
+- **Run `./scripts/gates.ps1` before calling a renderer change safe**, not just the primary
+  configuration. Nine device configurations pass through code the primary path never reaches — the
+  FXC/SM 5.1 compiler, the geometry-shader voxelise path, the shadow-map fallback for `--rt` — and
+  all three of those were broken at some point while every hardware gate stayed green.
+- **A shader that does not need shader model 6 must not ask for it.** `ShaderDesc::minShaderModel`
+  is a floor, not a preference: where DXC is present the backend derives the SM 6.0 target from
+  whatever is asked, so requesting 51 costs nothing there and is the difference between a working
+  renderer and no renderer at all where DXC is absent. Only mesh shaders and inline RayQuery
+  genuinely need 6.5.
+- **Do not overload a function the material or RHI prelude already declares.** FXC resolves overloads
+  through implicit conversion between structurally compatible structs, so a second
+  `averVertexOf` made every call in the translation unit ambiguous (`X3067`) while DXC accepted it
+  silently. Preludes are a shared namespace with two compilers behind them; give new helpers new
+  names.
+- **`insideVolume()` is inclusive of 1.0.** Anything turning volume UVW into an integer voxel index
+  must clamp to `res - 1`. Hardware discards an out-of-bounds typed-UAV write, so getting this wrong
+  is invisible on a GPU and an access violation on WARP.
 
 ## 9. Next steps — including the general-purpose direction
 
