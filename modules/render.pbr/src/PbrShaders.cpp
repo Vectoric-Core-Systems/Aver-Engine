@@ -11,10 +11,57 @@
 // a name defined once but differently is a silent divergence.
 #include "aver/pbr/PbrShaders.hpp"
 
+#include "aver/pbr/Material.hpp"   // kTextureSlotCount: one define per slot, and only that many
+
 namespace aver::pbr {
 
+// ---- the C++ counterpart of `cbuffer AverMaterial` below is pbr::MaterialConstants, in
+// MaterialGpu.hpp. Field order, field count and total size must match it byte for byte: nothing
+// checks this at compile time, and a mismatch shades plausibly with the wrong parameters rather
+// than failing. Change one and change the other. ----
+//
+// The texture declarations are gated because they name registers that only exist in a layout
+// declaring a second binding table. Every pipeline compiled without that table -- Voxi's volume
+// clear, its mip filter, its resolve -- shares this same string, and a shader naming a register its
+// root signature never declared is a pipeline-creation failure, not a warning. AVER_MATERIAL_SRV
+// therefore comes from materialShaderDefines(), off the very layout the root signature is built
+// from, exactly as the mesh-geometry registers do.
 const char* materialShaderPrelude() {
     return R"(
+#ifdef AVER_MATERIAL_SRV
+#define AVER_MAT_JOIN2(a, b) a##b
+#define AVER_MAT_JOIN(a, b) AVER_MAT_JOIN2(a, b)
+// Slot order is pbr::TextureSlot's, so a slot index IS its register offset.
+Texture2D gBaseColorMap  : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV));
+Texture2D gMetalRoughMap : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_1));
+Texture2D gNormalMap     : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_2));
+Texture2D gOcclusionMap  : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_3));
+Texture2D gEmissiveMap   : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_4));
+#endif
+
+// MIRRORS pbr::MaterialConstants (aver/pbr/MaterialGpu.hpp) FIELD FOR FIELD.
+cbuffer AverMaterial : register(b2) {
+    float4 gBaseColorFactor;
+    float3 gEmissiveFactor;
+    float  gMetallicFactor;
+    float  gRoughnessFactor;
+    float  gNormalScale;
+    float  gOcclusionStrength;
+    float  gAlphaCutoff;
+    uint   gMaterialFlags;
+    uint3  _materialPad;
+};
+
+// gMaterialFlags bits, mirroring pbr::MaterialFlag.
+#define AVER_MAT_BASECOLOR_MAP  (1u << 0)
+#define AVER_MAT_METALROUGH_MAP (1u << 1)
+#define AVER_MAT_NORMAL_MAP     (1u << 2)
+#define AVER_MAT_OCCLUSION_MAP  (1u << 3)
+#define AVER_MAT_EMISSIVE_MAP   (1u << 4)
+#define AVER_MAT_ALPHA_MASK     (1u << 5)
+#define AVER_MAT_ALPHA_BLEND    (1u << 6)
+#define AVER_MAT_TWO_SIDED      (1u << 7)
+
 // ---- shading models. The id arrives per draw in gShadingModel and is dispatched by a UNIFORM
 // switch, not by a pipeline permutation: the branch is scalar and free, while a permutation would
 // multiply every scene pipeline a renderer builds by the number of models. ----
@@ -183,6 +230,15 @@ float3 averShadeIndirect(float3 radiance, AverSurface s, AverIndirect ind) {
     }
 }
 )";
+}
+
+// One define per slot rather than one base plus arithmetic: the HLSL preprocessor pastes tokens but
+// cannot evaluate `t##(base+1)`, so the addition has to happen here.
+std::string materialShaderDefines(u32 tableBaseRegister) {
+    std::string s = "AVER_MATERIAL_SRV=" + std::to_string(tableBaseRegister);
+    for (u32 i = 1; i < kTextureSlotCount; ++i)
+        s += ";AVER_MATERIAL_SRV_" + std::to_string(i) + "=" + std::to_string(tableBaseRegister + i);
+    return s;
 }
 
 } // namespace aver::pbr
