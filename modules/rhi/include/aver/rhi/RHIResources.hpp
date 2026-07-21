@@ -349,6 +349,15 @@ constexpr u32 kFeatureFrameConstantRegister = 4;
 // declares exactly this many dwords at slot 1, and every draw writes exactly this many.
 constexpr u32 kObjectConstantRegister = 1;
 constexpr u32 kObjectConstantDwords = 32;
+// b2 is the constant block that travels WITH binding table 1, written as a root CBV rather than
+// root constants: the two are set together by setDrawBinding and are meaningless apart, and a root
+// CBV lets the block grow without every layout having to restate its size. Kept a reserved register
+// of its own so a feature declaring its own constants cannot land on it by accident.
+constexpr u32 kDrawConstantRegister = 2;
+// Largest b2 block setDrawBinding will carry. The sticky state is COPIED, so this bounds a fixed
+// buffer rather than a heap allocation on a per-draw path; a longer block is rejected and reported
+// rather than truncated, because a truncated constant block reads as plausible wrong shading.
+constexpr u32 kMaxDrawConstantBytes = 256;
 // b0 is the engine's PerFrame block (gViewProj, gCamPos, gLightDir, gLightColor, gAmbient, gSky*).
 // Owned and bound by the backend on every pipeline bind — see PipelineLayout::constantDwords.
 constexpr u32 kEngineFrameConstantRegister = 0;
@@ -446,6 +455,18 @@ public:
     // CBV. Backend-owned memory, fresh every call — a module cannot get the N-buffering wrong, and
     // republishing mid-frame (once a pass has computed its own matrices) is free.
     virtual void setConstantBuffer(u32 slot, const void* data, u32 bytes) = 0;
+
+    // Binding table 1 plus its b2 constant block, as ONE piece of sticky state consumed by every
+    // subsequent drawMesh / dispatchMeshFor. Sticky rather than an argument to drawMesh because the
+    // draw entry points are also what IRenderFeature::submitDraw mirrors, and widening those would
+    // change every feature that replays geometry — setWireframe / setLineDepth / setViewportRect are
+    // the established idiom for exactly this.
+    //
+    // Silently ignored by a pipeline whose layout declares neither, which is what lets a pass that
+    // has no use for per-draw resources leave the state alone instead of clearing it.
+    virtual void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) {
+        (void)set; (void)constants; (void)bytes;
+    }
 
     // Draws. Geometry is addressed by MeshHandle: the backend resolves vertex/index buffers, index
     // count, triangle count, mesh-shader group count and root SRVs internally.

@@ -146,6 +146,23 @@ public:
         (void)mesh; (void)world; (void)baseColor; (void)metallic; (void)roughness;
     }
 
+    // Per-draw binding table 1 and its b2 constant block, sticky until changed and consumed by
+    // every subsequent drawMesh. Sticky rather than two more drawMesh arguments: drawMesh is
+    // mirrored by IRenderFeature::submitDraw, so widening it changes every feature that replays
+    // geometry, and the engine already states per-draw modes this way (setWireframe, setLineDepth).
+    //
+    // `constants` is COPIED; the caller may reuse its buffer immediately.
+    virtual void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) {
+        (void)set; (void)constants; (void)bytes;
+    }
+    // What beginFrame RESETS the above to. Without this, a draw issued without one would inherit
+    // whatever the previous frame's last draw left bound — which reads on screen as one object
+    // wearing another's surface, and only for the draws that forgot, so it looks like a content bug.
+    // Set once by whoever owns table 1's contents; the identity/fallback set belongs here.
+    virtual void setDefaultDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) {
+        (void)set; (void)constants; (void)bytes;
+    }
+
     // Unlit line geometry (grid, gizmos): per-vertex colour, drawn as a line list.
     virtual LineHandle createLineMesh(const LineVertex* verts, u32 count) { (void)verts; (void)count; return 0; }
     virtual void drawLines(LineHandle mesh, const f32 world[16]) { (void)mesh; (void)world; }

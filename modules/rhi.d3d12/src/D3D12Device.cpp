@@ -582,6 +582,12 @@ public:
     LineHandle createLineMesh(const LineVertex* verts, u32 count) override;
     void drawLines(LineHandle mesh, const f32 world[16]) override;
     void setWireframe(bool on) override { wireframe_ = on; }
+    void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override {
+        storeDrawBinding(drawBinding_, set, constants, bytes);
+    }
+    void setDefaultDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override {
+        storeDrawBinding(defaultDrawBinding_, set, constants, bytes);
+    }
     void setLineDepth(bool testDepth) override { lineDepth_ = testDepth; }
     void setMeshShaders(bool enabled) override {
         const bool want = enabled && msSupported_;
@@ -653,6 +659,26 @@ private:
     ComPtr<ID3D12PipelineState> wirePso_;
     ComPtr<ID3D12PipelineState> linePso_;
     ComPtr<ID3D12PipelineState> lineOverlayPso_; // no depth test: editor gizmos on top
+    // Per-draw binding table 1 plus its b2 block (setDrawBinding). Copied, because callers build
+    // the block on the stack per draw. `defaultDrawBinding_` is what beginFrame resets to, so a
+    // draw that names no per-draw resources gets the identity set rather than the previous draw's.
+    struct DrawBinding {
+        BindingSetHandle set = 0;
+        u8  constants[kMaxDrawConstantBytes] = {};
+        u32 bytes = 0;
+    };
+    static void storeDrawBinding(DrawBinding& d, BindingSetHandle set, const void* constants, u32 bytes) {
+        if (bytes > kMaxDrawConstantBytes) {
+            AVER_ERROR("[RHI.D3D12] setDrawBinding constant block is {} bytes, over the {} limit", bytes, kMaxDrawConstantBytes);
+            return;
+        }
+        d.set = set;
+        d.bytes = (constants && bytes) ? bytes : 0;
+        if (d.bytes) std::memcpy(d.constants, constants, d.bytes);
+    }
+    DrawBinding drawBinding_{}, defaultDrawBinding_{};
+    bool drawBindingIgnored_ = false;   // the "backend's own pipeline drops it" warning, said once
+
     bool skyEnabled_ = false;
     bool wireframe_ = false;
     bool lineDepth_ = true;
@@ -961,6 +987,7 @@ public:
     void setBindingSet(BindingSetHandle set, u32 table) override;
     void setConstants(u32 slot, const void* data, u32 dwords) override;
     void setConstantBuffer(u32 slot, const void* data, u32 bytes) override;
+    void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override;
     void drawMesh(MeshHandle mesh) override;
     void dispatchMeshFor(MeshHandle mesh) override;
     void dispatch(u32 gx, u32 gy, u32 gz) override;
@@ -979,6 +1006,8 @@ private:
     D3D12_GPU_VIRTUAL_ADDRESS ringAlloc(const void* data, u32 bytes);
     // Give every root CBV the pipeline declares a valid address, so no draw can read an unset one.
     void bindDeclaredRootCbvs(const RhiPipeline* p);
+    // Bind the sticky per-draw state, if the current pipeline declared anywhere to put it.
+    void applyDrawBinding();
     D3D12_GPU_VIRTUAL_ADDRESS zeroCbv();
 
     D3D12Device* dev_;
@@ -992,6 +1021,12 @@ private:
     // The ring resets itself when the device's monotonic fence counter moves on, because the frame
     // loop does not yet call into this context and so has nowhere to reset it from.
     u64 ringEpoch_ = ~0ull;
+
+    // Sticky per-draw state (setDrawBinding). Copied rather than referenced: the caller's block is
+    // usually a stack temporary rebuilt each draw, and the binding is consumed later.
+    BindingSetHandle drawSet_ = 0;
+    u8  drawConstants_[kMaxDrawConstantBytes] = {};
+    u32 drawConstantBytes_ = 0;
 };
 
 void D3D12Swapchain::present() { dev_->present(); }
@@ -1582,6 +1617,10 @@ void D3D12Device::beginFrame() {
     allocators_[frameIndex_]->Reset();
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
     boundRootSig_ = nullptr;   // a command-list reset drops every root binding
+    // The per-draw binding is sticky WITHIN a frame only. Carrying it across would mean a draw that
+    // sets none inherits the last draw of the previous frame -- wrong for exactly the draws that
+    // forgot, which reads as a content bug rather than as a renderer one.
+    drawBinding_ = defaultDrawBinding_;
 
     // Scene renders into the MSAA color + depth targets; endFrame resolves to backbuffer.
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = msaaRtvHeap_->GetCPUDescriptorHandleForHeapStart();
@@ -1653,6 +1692,9 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         if (!fp) break;   // the feature declined this combination; use the backend's own pipeline
         rhiContext_->setPipeline(fp);
         if (const BindingSetHandle bs = f->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
+        // Table 1 and b2 travel with the draw, not with the feature. The context applies them at
+        // the draw itself and ignores them when the feature's pipeline declared neither.
+        rhiContext_->setDrawBinding(drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
         const void* cb = nullptr; u32 cbBytes = 0;
         if (f->sceneConstants(&cb, &cbBytes) && cb && cbBytes)
             rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
@@ -1666,6 +1708,17 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         else                                    rhiContext_->drawMesh(mesh);
         boundRootSig_ = nullptr;   // the context bound the feature's root signature, not ours
         return;
+    }
+
+    // The backend's OWN scene signatures declare no descriptor table at all, so there is nowhere to
+    // put table 1 or b2. Declaring one here would oblige EVERY draw on this path -- sky, lines,
+    // gizmos -- to bind it as well (Tier 1 populates whole tables, referenced or not), and would
+    // push kSceneMeshSrvBase off the value it is frozen at. This path exists for the case where no
+    // feature owns the lit pass, so it is the one that can afford to be plain. Said once, because a
+    // per-draw binding quietly evaporating is otherwise indistinguishable from one never set.
+    if (drawBinding_.set && !drawBindingIgnored_) {
+        AVER_WARN("[RHI.D3D12] a per-draw binding is set but the scene uses the backend's own pipeline, which declares no table 1; it is ignored");
+        drawBindingIgnored_ = true;
     }
 
     const GpuMesh& m = meshes_[mesh - 1];
@@ -3264,6 +3317,30 @@ void D3D12RenderContext::setConstantBuffer(u32 slot, const void* data, u32 bytes
     else                dev_->cmdList_->SetGraphicsRootConstantBufferView(static_cast<UINT>(param), va);
 }
 
+// Sticky per-draw state. Recorded here and applied at the draw, not at the call, so a feature may
+// set it before the pipeline it will draw with is even chosen.
+void D3D12RenderContext::setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) {
+    if (bytes > kMaxDrawConstantBytes) {
+        // Refused rather than clipped: a short block leaves the tail reading whatever the ring held,
+        // which shades plausibly and wrongly instead of failing.
+        AVER_ERROR("[RHI.D3D12] setDrawBinding constant block is {} bytes, over the {} limit", bytes, kMaxDrawConstantBytes);
+        return;
+    }
+    drawSet_ = set;
+    drawConstantBytes_ = (constants && bytes) ? bytes : 0;
+    if (drawConstantBytes_) std::memcpy(drawConstants_, constants, drawConstantBytes_);
+}
+
+// A pipeline that declared neither table 1 nor a b2 CBV gets nothing, silently: passes with no use
+// for per-draw resources (the volume clear, the mip filter) must not have to clear the state.
+void D3D12RenderContext::applyDrawBinding() {
+    if (!pipe_) return;
+    if (drawSet_ && pipe_->srvParam[1] >= 0) setBindingSet(drawSet_, 1);
+    if (drawConstantBytes_ && pipe_->slotParam[kDrawConstantRegister] >= 0 &&
+        pipe_->slotDwords[kDrawConstantRegister] == 0)
+        setConstantBuffer(kDrawConstantRegister, drawConstants_, drawConstantBytes_);
+}
+
 D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderContext::ringAlloc(const void* data, u32 bytes) {
     if (!data || bytes == 0) return 0;
     const u32 f = dev_->frameIndex_ < kFrameCount ? dev_->frameIndex_ : 0;
@@ -3294,6 +3371,7 @@ void D3D12RenderContext::drawMesh(MeshHandle mesh) {
     if (!dev_->cmdList_) return;
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.D3D12] drawMesh with an invalid mesh handle"); return; }
     const GpuMesh& m = dev_->meshes_[mesh - 1];
+    applyDrawBinding();
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     dev_->cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
     dev_->cmdList_->IASetIndexBuffer(&m.ibv);
@@ -3307,6 +3385,7 @@ void D3D12RenderContext::dispatchMeshFor(MeshHandle mesh) {
     const GpuMesh& m = dev_->meshes_[mesh - 1];
     const u32 tris = m.indexCount / 3;
     if (!tris) return;
+    applyDrawBinding();
     dev_->cmdList_->SetGraphicsRootShaderResourceView(static_cast<UINT>(pipe_->msVertexParam), m.vb->GetGPUVirtualAddress());
     dev_->cmdList_->SetGraphicsRootShaderResourceView(static_cast<UINT>(pipe_->msIndexParam), m.ib->GetGPUVirtualAddress());
     const u32 tc[4] = {tris, 0, 0, 0};
