@@ -55,7 +55,8 @@ scripts/                    build.bat / build.ps1 / run.ps1 / gates.ps1
                             + gates.baseline.txt (Debug) and gates.baseline.release.txt (Release)
 modules/
   core/      Aver.Core      types, Math (Vec/Mat/Quat/Transform/AABB + Mat4::inverse), Log, Time, Hash(fnv1a64)
-  platform/  Aver.Platform  Win32 Window (+icon, message hook), Splash (layered win + stb_image), FileSystem (+executableDir)
+  platform/  Aver.Platform  Win32 Window (+icon, message hook), Splash (layered win + stb_image), FileSystem (+executableDir),
+                            DirectoryWatcher (ReadDirectoryChangesW, debounced — modules/platform/README.md)
   assets/    Aver.Assets    ObjectId (fnv1a64), AssetType
   formats/   Aver.Formats   .ocbeam + .ocmap loaders (+ detail/TextScan.hpp)
   rhi/       Aver.RHI        IDevice/ISwapchain + the generic render-feature surface
@@ -1365,10 +1366,11 @@ numbers have gaps in them.
     component, input or asset handle. That waits on the generic scene layer (§9.1) and is
     deliberately not stubbed: an interim object model would be the throwaway ABI that design exists
     to avoid, and every script written against it would have to be rewritten.
-11d. **Reload is manual and stateless.** There is no file watcher — `Tools ▸ Reload Scripts` is the
-    trigger — and nothing carries a behaviour's fields across a swap. The watcher is small; the
-    state carry-over needs a serialisation contract, and fixing that shape before §9.1 exists would
-    be designing for an owner that does not exist yet.
+11d. **Reload is manual and stateless.** `Aver.Platform` now HAS a `DirectoryWatcher`, but nothing
+    calls it yet, so `Tools ▸ Reload Scripts` is still the only trigger. Nothing carries a
+    behaviour's fields across a swap either: the state carry-over needs a serialisation contract,
+    and fixing that shape before §9.1 exists would be designing for an owner that does not exist
+    yet.
 11e. **A `.cs` generated before this phase still does not run** — but it now SAYS so. The old
     template produced a plain class with `OnStart`/`OnUpdate` and no base type, and discovery is
     `IsAssignableFrom(AverBehaviour)`, so those files compile and are skipped. The template is

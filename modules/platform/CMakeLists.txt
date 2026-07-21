@@ -1,9 +1,11 @@
 aver_add_module(Aver.Platform
   SOURCES
+    src/DirectoryWatcher.cpp
     src/FileSystem.cpp
     src/Image.cpp
     src/win32/Win32Window.cpp
     src/win32/Win32Splash.cpp
+    src/win32/Win32DirectoryWatcher.cpp
   DEPS
     Aver.Core
 )
