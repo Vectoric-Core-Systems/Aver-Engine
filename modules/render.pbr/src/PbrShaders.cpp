@@ -77,7 +77,29 @@ cbuffer AverMaterial : register(b2) {
 // f90 is the grazing-angle reflectance. At 1.0 this is the textbook Schlick term.
 float3 fresnelSchlick(float ct, float3 F0, float f90){ return F0 + (f90-F0)*pow(saturate(1.0-ct),5.0); }
 float distGGX(float ndh, float a){ float a2=a*a; float d=ndh*ndh*(a2-1.0)+1.0; return a2/(PI*d*d+1e-6); }
-float geomSchlick(float nd, float k){ return nd/(nd*(1.0-k)+k); }
+
+// Height-correlated Smith VISIBILITY, not a masking-shadowing term: the 4*NdotV*NdotL denominator
+// of the Cook-Torrance specular is folded in here, so the caller multiplies D * V * F and divides
+// by nothing. That is the point of the change. The separable pair this replaces had to be divided
+// by (4*ndv*ndl + 1e-4), and that epsilon was not cosmetic -- it is an additive bias on every
+// pixel, largest exactly where the denominator is smallest, so it darkened grazing angles across
+// the whole image.
+//
+// CONVENTION, and it is easy to get wrong: this takes ALPHA (rough*rough), the same parameter
+// distGGX takes. The Schlick pair it replaces took k remapped from PERCEPTUAL roughness, so
+// handing it s.rough would compile, run, and shift the whole roughness response by a squaring --
+// which reads as "the material authoring feels off" rather than as a bug.
+float visSmithCorrelated(float ndv, float ndl, float a) {
+    float a2 = a * a;
+    float lv = ndl * sqrt(ndv * ndv * (1.0 - a2) + a2);
+    float ll = ndv * sqrt(ndl * ndl * (1.0 - a2) + a2);
+    // max(), NOT an added epsilon. The sum is zero only where ndv and ndl are BOTH exactly zero,
+    // and there the caller's ndl factor already makes the term vanish -- so this floor exists purely
+    // to stop 0.5/0 producing the inf that 0 * inf turns into a NaN pixel. Everywhere else it is
+    // orders of magnitude below the real value and biases nothing, which is precisely what the
+    // additive guard could not say for itself.
+    return 0.5 / max(lv + ll, 1e-7);
+}
 
 // ================= the Aver material contract =================
 // The split that makes "PBR is a material system, the renderer is the thing that renders it" a
@@ -287,11 +309,12 @@ float3 averShadeDirect(float3 radiance, AverSurface s, AverLight l) {
         return radiance;   // an unlit surface receives nothing; it only emits, in averShadeIndirect
     default: {
         float a = s.rough * s.rough;
-        float k = (s.rough + 1.0); k = k * k / 8.0;
         float ndl = saturate(dot(s.N, l.direction));
         float D = distGGX(saturate(dot(s.N, s.H)), a);
-        float G = geomSchlick(s.ndv, k) * geomSchlick(ndl, k);
-        float3 spec = (D * G * s.F) / (4.0 * s.ndv * ndl + 1e-4);
+        // V already carries the 1/(4*ndv*ndl), so there is no division here and no epsilon to bias
+        // it. Both D and V take the same alpha, which is the whole reason `a` is computed once.
+        float V = visSmithCorrelated(s.ndv, ndl, a);
+        float3 spec = D * V * s.F;
         return radiance + (s.kdAlbedo / PI + spec) * l.radiance * ndl * l.visibility;
     }
     }
