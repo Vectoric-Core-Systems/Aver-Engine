@@ -330,13 +330,23 @@ struct GpuLineMesh {
 
 DXGI_FORMAT toDxgiFormat(Format f) {
     switch (f) {
-        case Format::RGBA8Unorm:  return DXGI_FORMAT_R8G8B8A8_UNORM;
-        case Format::RGBA16F:     return DXGI_FORMAT_R16G16B16A16_FLOAT;
-        case Format::R32Float:    return DXGI_FORMAT_R32_FLOAT;
-        case Format::R32Uint:     return DXGI_FORMAT_R32_UINT;
-        case Format::D32Float:    return DXGI_FORMAT_D32_FLOAT;
-        case Format::R32Typeless: return DXGI_FORMAT_R32_TYPELESS;
-        case Format::Unknown:     break;
+        case Format::RGBA8Unorm:     return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case Format::RGBA8UnormSrgb: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        case Format::RG8Unorm:       return DXGI_FORMAT_R8G8_UNORM;
+        case Format::R8Unorm:        return DXGI_FORMAT_R8_UNORM;
+        case Format::RGBA16F:        return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case Format::R32Float:       return DXGI_FORMAT_R32_FLOAT;
+        case Format::R32Uint:        return DXGI_FORMAT_R32_UINT;
+        case Format::D32Float:       return DXGI_FORMAT_D32_FLOAT;
+        case Format::R32Typeless:    return DXGI_FORMAT_R32_TYPELESS;
+        case Format::BC1Unorm:       return DXGI_FORMAT_BC1_UNORM;
+        case Format::BC1UnormSrgb:   return DXGI_FORMAT_BC1_UNORM_SRGB;
+        case Format::BC3Unorm:       return DXGI_FORMAT_BC3_UNORM;
+        case Format::BC3UnormSrgb:   return DXGI_FORMAT_BC3_UNORM_SRGB;
+        case Format::BC5Unorm:       return DXGI_FORMAT_BC5_UNORM;
+        case Format::BC7Unorm:       return DXGI_FORMAT_BC7_UNORM;
+        case Format::BC7UnormSrgb:   return DXGI_FORMAT_BC7_UNORM_SRGB;
+        case Format::Unknown:        break;
     }
     return DXGI_FORMAT_UNKNOWN;
 }
@@ -353,13 +363,23 @@ DXGI_FORMAT toDxgiDsvFormat(Format f) {
 
 Format fromDxgiFormat(DXGI_FORMAT f) {
     switch (f) {
-        case DXGI_FORMAT_R8G8B8A8_UNORM:     return Format::RGBA8Unorm;
-        case DXGI_FORMAT_R16G16B16A16_FLOAT: return Format::RGBA16F;
-        case DXGI_FORMAT_R32_FLOAT:          return Format::R32Float;
-        case DXGI_FORMAT_R32_UINT:           return Format::R32Uint;
-        case DXGI_FORMAT_D32_FLOAT:          return Format::D32Float;
-        case DXGI_FORMAT_R32_TYPELESS:       return Format::R32Typeless;
-        default:                             return Format::Unknown;
+        case DXGI_FORMAT_R8G8B8A8_UNORM:      return Format::RGBA8Unorm;
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return Format::RGBA8UnormSrgb;
+        case DXGI_FORMAT_R8G8_UNORM:          return Format::RG8Unorm;
+        case DXGI_FORMAT_R8_UNORM:            return Format::R8Unorm;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:  return Format::RGBA16F;
+        case DXGI_FORMAT_R32_FLOAT:           return Format::R32Float;
+        case DXGI_FORMAT_R32_UINT:            return Format::R32Uint;
+        case DXGI_FORMAT_D32_FLOAT:           return Format::D32Float;
+        case DXGI_FORMAT_R32_TYPELESS:        return Format::R32Typeless;
+        case DXGI_FORMAT_BC1_UNORM:           return Format::BC1Unorm;
+        case DXGI_FORMAT_BC1_UNORM_SRGB:      return Format::BC1UnormSrgb;
+        case DXGI_FORMAT_BC3_UNORM:           return Format::BC3Unorm;
+        case DXGI_FORMAT_BC3_UNORM_SRGB:      return Format::BC3UnormSrgb;
+        case DXGI_FORMAT_BC5_UNORM:           return Format::BC5Unorm;
+        case DXGI_FORMAT_BC7_UNORM:           return Format::BC7Unorm;
+        case DXGI_FORMAT_BC7_UNORM_SRGB:      return Format::BC7UnormSrgb;
+        default:                              return Format::Unknown;
     }
 }
 
@@ -370,15 +390,42 @@ bool isDepthFormat(Format f) { return f == Format::D32Float || f == Format::R32T
 // classic texture-upload bug.
 u32 texelBytes(Format f) {
     switch (f) {
-        case Format::RGBA16F:     return 8;
+        case Format::RGBA16F:        return 8;
         case Format::RGBA8Unorm:
+        case Format::RGBA8UnormSrgb:
         case Format::R32Float:
         case Format::R32Uint:
         case Format::D32Float:
-        case Format::R32Typeless: return 4;
-        case Format::Unknown:     break;
+        case Format::R32Typeless:    return 4;
+        case Format::RG8Unorm:       return 2;
+        case Format::R8Unorm:        return 1;
+        default:                     break;   // block formats have no texel size, by construction
     }
     return 0;
+}
+
+// Bytes per 4x4 block. Zero for anything that is not block-compressed.
+u32 blockBytes(Format f) {
+    switch (f) {
+        case Format::BC1Unorm:
+        case Format::BC1UnormSrgb: return 8;
+        case Format::BC3Unorm:
+        case Format::BC3UnormSrgb:
+        case Format::BC5Unorm:
+        case Format::BC7Unorm:
+        case Format::BC7UnormSrgb: return 16;
+        default:                   break;
+    }
+    return 0;
+}
+
+// Tightly packed bytes in one source row of a surface this wide — which for a block format is one
+// row of BLOCKS covering four texel rows. The upload loop copies fp.Footprint row units, and those
+// units are block rows for a block format, so the source stride must be counted the same way or
+// every mip after the first is read from the wrong offset.
+u64 packedRowPitch(Format f, u32 widthTexels) {
+    if (const u32 bb = blockBytes(f)) return u64((widthTexels + 3) / 4) * bb;
+    return u64(widthTexels) * texelBytes(f);
 }
 
 // AccelerationStructure maps here for completeness (a buffer is CREATED in it), but it is terminal:
@@ -2250,9 +2297,8 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
 bool D3D12ResourceFactory::uploadInitialData(ID3D12Resource* res, const D3D12_RESOURCE_DESC& td,
                                              const TextureDesc& d, u32 mips) {
     ID3D12Device* dev = dev_->device_.Get();
-    const u32 texel = texelBytes(d.format);
-    if (texel == 0) {
-        AVER_ERROR("[RHI.D3D12] createTexture: initial data for a format with no CPU texel size");
+    if (packedRowPitch(d.format, 1) == 0) {
+        AVER_ERROR("[RHI.D3D12] createTexture: initial data for a format with no CPU footprint");
         return false;
     }
     const u32 count = d.initialDataCount < mips ? d.initialDataCount : mips;
@@ -2283,7 +2329,7 @@ bool D3D12ResourceFactory::uploadInitialData(ID3D12Resource* res, const D3D12_RE
         // Only subresource 0 may name a source pitch; the rest are tightly packed for their own mip
         // extent, which is what a decoder or a mip generator hands over.
         const u64 srcPitch = (s == 0 && d.initialRowPitch) ? d.initialRowPitch
-                                                           : u64(fp[s].Footprint.Width) * texel;
+                                                           : packedRowPitch(d.format, fp[s].Footprint.Width);
         const u64 dstPitch = fp[s].Footprint.RowPitch;
         const u64 bytes    = rowBytes[s] < srcPitch ? rowBytes[s] : srcPitch;
         u8* dst = mapped + fp[s].Offset;
@@ -2350,6 +2396,26 @@ TextureHandle D3D12ResourceFactory::createTexture(const TextureDesc& d) {
     if (d.width == 0 || d.height == 0) { AVER_ERROR("[RHI.D3D12] createTexture with a zero extent"); return 0; }
     const DXGI_FORMAT fmt = toDxgiFormat(d.format);
     if (fmt == DXGI_FORMAT_UNKNOWN) { AVER_ERROR("[RHI.D3D12] createTexture with an unknown format"); return 0; }
+
+    // A block format can only ever be sampled. Asking for anything else, or for extents that do not
+    // tile 4x4, fails inside CreateCommittedResource with a bare E_INVALIDARG that names neither the
+    // texture nor the reason, so it is refused here where the message can say which.
+    if (isBlockFormat(d.format)) {
+        if (any(d.bind, ResourceBind::UnorderedAccess) || any(d.bind, ResourceBind::RenderTarget) ||
+            any(d.bind, ResourceBind::DepthStencil)) {
+            AVER_ERROR("[RHI.D3D12] createTexture: a block-compressed format is sample-only");
+            return 0;
+        }
+        if ((d.width & 3u) || (d.height & 3u)) {
+            AVER_ERROR("[RHI.D3D12] createTexture: block-compressed extents must be multiples of 4 ({}x{})",
+                       d.width, d.height);
+            return 0;
+        }
+        if (d.dim == TextureDim::Tex3D) {
+            AVER_ERROR("[RHI.D3D12] createTexture: block-compressed volumes are not supported");
+            return 0;
+        }
+    }
 
     const u32 depth = (d.dim == TextureDim::Tex3D && d.depth) ? d.depth : 1;
     u32 mips = d.mips;

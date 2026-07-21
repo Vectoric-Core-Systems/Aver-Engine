@@ -36,12 +36,32 @@ using TlasHandle       = u32;
 enum class Format : u8 {
     Unknown,
     RGBA8Unorm,
+    RGBA8UnormSrgb,  // the hardware does the sRGB decode on every tap; base colour wants this
+    RG8Unorm,
+    R8Unorm,
     RGBA16F,      // radiance volumes, HDR targets
     R32Float,
     R32Uint,      // the only typed format D3D12 guarantees UAV atomics on
     D32Float,     // depth-stencil view format
     R32Typeless,  // aliased depth: DSV sees D32Float, SRV sees R32Float
+    // Block-compressed, 4x4 texel blocks. Nothing emits these yet, but they are cheap to add now and
+    // expensive to retrofit once a material file carries a baked format field. BC5 is the correct
+    // tangent-space normal format (two channels, no sRGB variant); BC7 is universal on FL11_0.
+    BC1Unorm,
+    BC1UnormSrgb,
+    BC3Unorm,
+    BC3UnormSrgb,
+    BC5Unorm,
+    BC7Unorm,
+    BC7UnormSrgb,
 };
+
+// A block format's extents are counted in 4x4 blocks, not texels, everywhere a pitch is computed —
+// which is why this is a question of its own rather than a zero returned from a bytes-per-texel
+// helper that a caller could multiply by anyway.
+inline bool isBlockFormat(Format f) {
+    return f >= Format::BC1Unorm && f <= Format::BC7UnormSrgb;
+}
 
 enum class TextureDim : u8 { Tex2D, Tex3D };
 
