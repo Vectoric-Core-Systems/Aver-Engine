@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A sample user game script assembly — exactly the shape a real project's Scripts.csproj has: a plain
+       library referencing Aver.Framework and nothing else. Aver.Framework transitively brings the maths
+       types, Log and the scene ids.
+
+       Private="false" asks MSBuild not to copy Aver.Framework.dll (or its references) next to this one:
+       the engine has them loaded already, and a second copy in the scripts folder would be a second
+       runtime identity for AverActor, which the IsAssignableFrom discovery test would then match nothing
+       against — the same belt-and-braces the sample behaviour project documents. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Sample.Game</AssemblyName>
+    <RootNamespace>Sample.Game</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Aver.Framework\Aver.Framework.csproj" Private="false" />
+  </ItemGroup>
+
+</Project>

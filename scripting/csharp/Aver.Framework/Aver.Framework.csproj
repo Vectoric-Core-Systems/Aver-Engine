@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The gameplay authoring layer a project's Scripts.csproj references. It sits beside Aver.Scripting
+       (which owns AverBehaviour + Log) and Aver.Scene (which owns the storage binding, the maths types
+       and asset identity). This assembly adds the familiar names — Actor, Pawn, PlayerController,
+       GameMode, GameInstance — each a THIN wrapper over an entity handle plus a class attachment.
+
+       It is a versioned contract assembly, like Aver.Scripting: a user script binds to a specific
+       major, so a doc file is generated and the version is pinned. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Framework</AssemblyName>
+    <RootNamespace>Aver.Framework</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Log lives in Aver.Scripting; Vec3/Quat/Rot, SceneIds and Assets live in Aver.Scene. Both are
+         loaded by the engine already, so a normal reference is correct here (the engine host owns the
+         one runtime identity). User game scripts, by contrast, reference THIS assembly with
+         Private="false" — see Sample.Game.csproj. -->
+    <ProjectReference Include="..\Aver.Scripting\Aver.Scripting.csproj" />
+    <ProjectReference Include="..\Aver.Scene\Aver.Scene.csproj" />
+  </ItemGroup>
+
+</Project>
