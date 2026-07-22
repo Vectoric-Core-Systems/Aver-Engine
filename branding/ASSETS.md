@@ -23,6 +23,7 @@ changes; do not hand-edit the derived files, they will be overwritten.
 | `logo.png` | 512×512 RGBA | The editor's start screen. `sandbox/CMakeLists.txt` copies it next to the exe; `SandboxApp` decodes it and uploads it through the RHI, and `ProjectBrowser` blits it in the header. Shown at 46dp, so the transparent margin is part of the composition — do not crop it tighter. |
 | `icon512.png` | 512×512 RGBA | Not referenced by code. |
 | `logo256.png` | 256×256 RGBA | Not referenced by code. |
+| `compile-status.png` | 480×160 RGBA, 3 tiles | The Compile C# toolbar button's status icon. **Human-made** (user-provided source, sliced — not AI-generated): the three states — built (green tick), failed (red no-entry), stale/compiling (yellow `?`) — auto-cropped from the user's single graphic, background flood-keyed to transparent, assembled left-to-right. `sandbox/CMakeLists.txt` stages it next to the exe; `SandboxApp::loadCompileIcon` uploads it and `ToolsMenu::drawCompileButton` blits tile 0/1/2 by UV onto the button face. To re-slice from a new source, see `scratchpad/slice_compile_icons.py`. |
 
 The transparent marks are keyed by flood-filling from the corners, **not** by replacing the
 background colour globally: the cube's own outline is near-black and close enough to the #262626

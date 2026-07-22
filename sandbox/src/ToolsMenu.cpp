@@ -917,7 +917,8 @@ void ToolsMenu::refreshScriptStatus(const fmt::ProjectDesc& project) {
     scriptStatus_ = (anyDll && newestDll >= newestCs) ? ScriptStatus::UpToDate : ScriptStatus::Stale;
 }
 
-void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi) {
+void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 iconTex) {
+    (void)dpi;
     refreshScriptStatus(project);
 
     const bool building = scriptStatus_ == ScriptStatus::Building;
@@ -925,111 +926,62 @@ void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi) {
     const bool canCompile = !building && project.valid() && haveDotnet() &&
                             !csproj.empty() && fileExists(csproj);
 
+    // Which sprite tile the state shows. The sheet is three tiles: 0 built, 1 failed, 2 stale. There
+    // is NO spinner: while a build runs it stays on the stale (?) tile, per the request, and so does
+    // "no project" (nothing is known-built).
+    int tile = 2;
+    if      (scriptStatus_ == ScriptStatus::UpToDate) tile = 0;
+    else if (scriptStatus_ == ScriptStatus::Failed)   tile = 1;
+    const char* tip =
+          scriptStatus_ == ScriptStatus::UpToDate ? "C# is built and live."
+        : scriptStatus_ == ScriptStatus::Failed   ? "The last C# build failed - click to see the errors."
+        : scriptStatus_ == ScriptStatus::Building ? "Compiling C#..."
+        : scriptStatus_ == ScriptStatus::NoProject ? "Open a project to compile its C# scripts."
+        : !haveDotnet()                            ? "dotnet was not found on PATH. Install the .NET SDK."
+        :                                            "C# changed since the last build - click Compile C#.";
+
+    // One button carrying the icon AND the label, so the status icon is PART of the button rather
+    // than a pip beside it. Sized to fit the icon, an inner gap, and "Compile C#".
+    ImGuiStyle& st = ImGui::GetStyle();
+    const float ih = ImGui::GetFrameHeight() - st.FramePadding.y * 2.0f;   // icon square, inside padding
+    const char* label = "Compile C#";
+    const ImVec2 tsz = ImGui::CalcTextSize(label);
+    const float gap = st.ItemInnerSpacing.x;
+    const ImVec2 btnSize(st.FramePadding.x * 2.0f + ih + gap + tsz.x, 0.0f);
+
     ImGui::BeginDisabled(!canCompile);
-    if (ImGui::Button(building ? "Compiling C#..." : "Compile C#")) triggerToolbarCompile(project);
+    const bool clicked = ImGui::Button("##compilecs", btnSize);   // empty label: the face is drawn below
     ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("%s", !project.valid() ? "Open a project to compile its C# scripts."
-                              : !haveDotnet()     ? "dotnet was not found on PATH. Install the .NET SDK."
-                              : csproj.empty() || !fileExists(csproj)
-                                                  ? "No Content\\Scripts\\Scripts.csproj yet. Use Tools > New C# Script."
-                              : "Rebuild the project's C# and swap it in live - no editor restart.\n"
-                                "If it fails, the errors open so you can click straight to the line.");
+    if (clicked) triggerToolbarCompile(project);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", tip);
 
-    ImGui::SameLine();
+    // Draw the icon and label onto the button's own rectangle.
+    const ImVec2 rmin = ImGui::GetItemRectMin();
+    const ImVec2 rmax = ImGui::GetItemRectMax();
+    const float  cy   = (rmin.y + rmax.y) * 0.5f;
+    const float  ix   = rmin.x + st.FramePadding.x;
+    const bool   dim  = !canCompile;   // disabled: dim the icon and the text together
+    ImDrawList*  dl   = ImGui::GetWindowDrawList();
 
-    // The light. A filled disc plus a glyph drawn from primitives, so it needs no icon font and
-    // reads at any DPI: green tick = built (or nothing to build), yellow ? = unbuilt changes, red
-    // bar = the last build failed and has not been fixed, spinner = building.
-    ImU32 col; const char* tip;
-    switch (scriptStatus_) {
-        case ScriptStatus::UpToDate: col = IM_COL32( 70,180, 80,255); tip = "C# is built and live."; break;
-        case ScriptStatus::Stale:    col = IM_COL32(225,195, 45,255); tip = "C# changed since the last build - click Compile C#."; break;
-        case ScriptStatus::Failed:   col = IM_COL32(205, 55, 50,255); tip = "The last C# build failed - click Compile C# to see the errors."; break;
-        case ScriptStatus::Building: col = IM_COL32( 80,140,205,255); tip = "Compiling C#..."; break;
-        case ScriptStatus::NoProject:
-        default:                     col = IM_COL32(110,110,110,255); tip = "No project open."; break;
+    if (iconTex) {
+        // Slice the three-tile sheet by U: tile t spans [t/3, (t+1)/3].
+        const ImVec2 uv0((float)tile / 3.0f, 0.0f), uv1((float)(tile + 1) / 3.0f, 1.0f);
+        const ImU32 tint = dim ? IM_COL32(255, 255, 255, 120) : IM_COL32(255, 255, 255, 255);
+        dl->AddImage(static_cast<ImTextureID>(iconTex),
+                     ImVec2(ix, cy - ih * 0.5f), ImVec2(ix + ih, cy + ih * 0.5f), uv0, uv1, tint);
+    } else {
+        // No texture staged: a small state-coloured dot so there is still a signal.
+        const ImU32 dot = tile == 0 ? IM_COL32(70,180,80,255)
+                        : tile == 1 ? IM_COL32(205,55,50,255)
+                                    : IM_COL32(225,195,45,255);
+        dl->AddCircleFilled(ImVec2(ix + ih * 0.5f, cy), ih * 0.42f, dot);
     }
-
-    // UE-style compile icon: a grid of blocks — NEAT when the code is compiled, SCATTERED when it
-    // is not — with the status badge in the corner. This is Unreal's compile-button metaphor rather
-    // than a bare glyph: an organised grid reads as "built", a loose one as "needs a compile".
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float h   = ImGui::GetFrameHeight();
-    const float box = 0.72f * h;                       // the icon's square extent
-    const float pad = (h - box) * 0.5f;
-    const ImVec2 org = ImGui::GetCursorScreenPos();
-    const ImVec2 tl(org.x, org.y + pad);               // top-left of the block grid
-    const ImU32 fg = IM_COL32(255, 255, 255, 255);
-    const float th = 2.0f * dpi;
-
-    const bool dim = scriptStatus_ == ScriptStatus::NoProject;
-    const ImU32 blockCol = dim ? IM_COL32(95, 95, 95, 255) : IM_COL32(188, 188, 188, 255);
-    // Neat when there is nothing known-stale (built, building, or no project); scattered otherwise.
-    // The scatter is a FIXED table in fractions of a cell, so the blocks never jitter frame to frame.
-    const bool neat = scriptStatus_ == ScriptStatus::UpToDate
-                   || scriptStatus_ == ScriptStatus::Building
-                   || scriptStatus_ == ScriptStatus::NoProject;
-    static const float kScatterX[16] = {
-        -0.38f, -0.16f,  0.10f, -0.04f,
-        -0.22f,  0.06f, -0.12f,  0.00f,
-         0.10f, -0.24f,  0.00f,  0.00f,
-        -0.14f,  0.04f,  0.00f,  0.00f,
-    };
-    static const float kScatterY[16] = {
-        -0.30f, -0.46f, -0.22f,  0.00f,
-        -0.10f, -0.32f,  0.05f,  0.00f,
-         0.12f, -0.06f,  0.00f,  0.00f,
-         0.05f,  0.00f,  0.00f,  0.00f,
-    };
-    const float step = box * 0.25f;
-    const float cell = box * 0.19f;
-    for (int rr = 0; rr < 4; ++rr) {
-        for (int cc = 0; cc < 4; ++cc) {
-            const int i = rr * 4 + cc;
-            const float ox = neat ? 0.0f : kScatterX[i] * step;
-            const float oy = neat ? 0.0f : kScatterY[i] * step;
-            const ImVec2 p(tl.x + cc * step + ox, tl.y + rr * step + oy);
-            dl->AddRectFilled(p, ImVec2(p.x + cell, p.y + cell), blockCol, 1.0f * dpi);
-        }
-    }
-
-    // Corner badge, overlapping the grid's bottom-right the way Unreal's status pip sits.
-    const float br = box * 0.30f;
-    const ImVec2 bc(tl.x + box - br * 0.5f, tl.y + box - br * 0.5f);
-    dl->AddCircleFilled(bc, br, col);
-    if (scriptStatus_ == ScriptStatus::Building) {
-        // A rotating three-quarter arc, built AFTER the disc so the fill does not clear the path.
-        const float t = (float)ImGui::GetTime();
-        const float pi = 3.14159265358979f;
-        dl->PathClear();
-        const int seg = 16;
-        for (int k = 0; k <= seg; ++k) {
-            const float a = t * 4.0f + (float)k / seg * (pi * 1.5f);
-            dl->PathLineTo(ImVec2(bc.x + std::cos(a) * br * 0.60f, bc.y + std::sin(a) * br * 0.60f));
-        }
-        dl->PathStroke(fg, 0, th);
-    } else if (scriptStatus_ == ScriptStatus::UpToDate) {
-        dl->AddLine(ImVec2(bc.x - br*0.42f, bc.y + br*0.02f), ImVec2(bc.x - br*0.06f, bc.y + br*0.40f), fg, th);
-        dl->AddLine(ImVec2(bc.x - br*0.06f, bc.y + br*0.40f), ImVec2(bc.x + br*0.48f, bc.y - br*0.42f), fg, th);
-    } else if (scriptStatus_ == ScriptStatus::Failed) {
-        dl->AddRectFilled(ImVec2(bc.x - br*0.52f, bc.y - br*0.17f), ImVec2(bc.x + br*0.52f, bc.y + br*0.17f), fg, 1.5f * dpi);
-    } else if (scriptStatus_ == ScriptStatus::Stale) {
-        // "?" sized to the badge, not the 48px UI font: the AddText size overload plus CalcTextSizeA
-        // at that size centre it in the pip.
-        const char* q = "?";
-        const float fs = br * 1.7f;
-        const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, 1000.0f, 0.0f, q);
-        dl->AddText(ImGui::GetFont(), fs, ImVec2(bc.x - ts.x * 0.5f, bc.y - ts.y * 0.5f), IM_COL32(30, 30, 30, 255), q);
-    } // NoProject: a bare grey pip
-
-    // Reserve the icon's box (grid + badge overhang) so later items lay out clear, and hang the tooltip.
-    ImGui::Dummy(ImVec2(box * 1.2f, h));
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+    dl->AddText(ImVec2(ix + ih + gap, cy - tsz.y * 0.5f),
+                ImGui::GetColorU32(dim ? ImGuiCol_TextDisabled : ImGuiCol_Text), label);
 }
 #else
 void ToolsMenu::refreshScriptStatus(const fmt::ProjectDesc&) {}
-void ToolsMenu::drawCompileButton(const fmt::ProjectDesc&, f32) {}
+void ToolsMenu::drawCompileButton(const fmt::ProjectDesc&, f32, u64) {}
 #endif // AVER_WITH_IMGUI
 
 } // namespace aver::editor

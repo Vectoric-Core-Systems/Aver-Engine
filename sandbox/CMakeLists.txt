@@ -71,6 +71,19 @@ add_custom_target(Sandbox.Logo DEPENDS ${CMAKE_BINARY_DIR}/bin/logo.png)
 add_dependencies(Sandbox Sandbox.Logo)
 set_target_properties(Sandbox.Logo PROPERTIES FOLDER "sandbox")
 
+# Ship the Compile C# status sprite sheet (three tiles: built / failed / stale). Same OUTPUT/DEPENDS
+# rule as the splash and logo above, so editing the artwork alone re-stages it without a relink.
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/bin/compile-status.png
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/branding/compile-status.png ${CMAKE_BINARY_DIR}/bin/compile-status.png
+  DEPENDS ${CMAKE_SOURCE_DIR}/branding/compile-status.png
+  COMMENT "Staging compile-status.png"
+  VERBATIM)
+add_custom_target(Sandbox.CompileIcon DEPENDS ${CMAKE_BINARY_DIR}/bin/compile-status.png)
+add_dependencies(Sandbox Sandbox.CompileIcon)
+set_target_properties(Sandbox.CompileIcon PROPERTIES FOLDER "sandbox")
+
 # Ship the editor UI typeface next to the executable. Same OUTPUT/DEPENDS rule as the splash, and
 # for the same reason -- POST_BUILD would not re-copy a font that changed without the exe relinking.
 set(AVER_UI_FONTS Roboto-Regular.ttf Roboto-Medium.ttf)

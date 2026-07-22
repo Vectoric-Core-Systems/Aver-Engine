@@ -296,6 +296,40 @@ public:
         logoAspect_ = h > 0 ? static_cast<f32>(w) / static_cast<f32>(h) : 1.0f;
         AVER_INFO("[Sandbox] start-screen mark decoded from {} ({}x{})", path, w, h);
     }
+
+    // The Compile C# button's status icon: the compile-status sprite sheet (three tiles - built,
+    // failed, stale) staged next to the exe. Loaded ALWAYS, unlike the logo, because the toolbar is
+    // always up. A miss is a warning; the button falls back to a drawn dot.
+    void loadCompileIcon(Engine& e) {
+        rhi::IResourceFactory* res = e.device()->resources();
+        if (!res) return;
+
+        const std::string path = executableDir() + "\\compile-status.png";
+        ImageData img;
+        std::string why;
+        if (!decodeImage(path, img, &why)) {
+            AVER_WARN("[Sandbox] '{}' not loaded ({}) -- the Compile C# button falls back to a drawn dot",
+                      path, why);
+            return;
+        }
+
+        rhi::TextureDesc td;
+        td.width = img.width;
+        td.height = img.height;
+        td.format = rhi::Format::RGBA8Unorm;
+        td.bind = rhi::ResourceBind::ShaderResource;
+        td.initialState = rhi::ResourceState::ShaderResource;
+        td.debugName = "CompileStatusIcons";
+        const void* levels[1] = {img.pixels.data()};
+        td.initialData = levels;
+        td.initialDataCount = 1;
+        td.initialRowPitch = img.rowPitch();
+        compileIconTexture_ = res->createTexture(td);
+        if (!compileIconTexture_) { AVER_WARN("[Sandbox] the Compile C# icon could not be uploaded"); return; }
+        compileIconUiId_ = e.device()->uiTextureId(compileIconTexture_);
+        if (!compileIconUiId_) { AVER_WARN("[Sandbox] the Compile C# icon is not reachable from the UI"); return; }
+        AVER_INFO("[Sandbox] Compile C# status icons decoded from {} ({}x{})", path, img.width, img.height);
+    }
 #endif
 
     void onInit(Engine& e) override {
@@ -318,6 +352,7 @@ public:
             applyDpi(e.window() ? e.window()->dpiScale() : 1.0f);
             AVER_INFO("[Sandbox] DPI scale {:.2f}, UI font rasterised at {:.0f}px", dpi_, 16.0f * dpi_);
             if (browserActive_) loadLogo(e);
+            loadCompileIcon(e);
         }
 #endif
         // --- default "blank .ocmap": ground floor + cube + sun + sky + atmosphere ---
@@ -598,12 +633,14 @@ public:
 #if AVER_WITH_IMGUI
         // The UI descriptor the mark holds is released with the texture, and that pool has no fence
         // of its own -- so the GPU has to be past every frame that drew it first.
-        if (logoTexture_) {
+        if (logoTexture_ || compileIconTexture_) {
             if (rhi::IResourceFactory* res = e.device()->resources()) {
                 res->waitIdle();
-                res->destroyTexture(logoTexture_);
+                if (logoTexture_) res->destroyTexture(logoTexture_);
+                if (compileIconTexture_) res->destroyTexture(compileIconTexture_);
             }
             logoTexture_ = 0; logoUiId_ = 0;
+            compileIconTexture_ = 0; compileIconUiId_ = 0;
         }
 #endif
 #if AVER_MODULE_VOXI
@@ -998,6 +1035,11 @@ private:
             ImGui::EndPopup();
         }
         ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
+        // Compile C#, to the LEFT of the play controls the way UEFN puts Build Verse on the bar: one
+        // click rebuilds and hot-swaps the project's scripts, and the icon ON the button says whether
+        // disk is built. The play group centres on an absolute position, so this does not shift it.
+        tools_.drawCompileButton(project_, dpi_, compileIconUiId_);
+        ImGui::SameLine();
         // Play controls, centred like Unreal's.
         {
             const f32 grpW = 200.0f*dpi_;
@@ -1006,10 +1048,6 @@ private:
             ImGui::Button("Pause"); ImGui::SameLine();
             ImGui::Button("Stop");
         }
-        // Compile C#, beside the play controls the way UEFN puts Build Verse: one click rebuilds and
-        // hot-swaps the project's scripts, and the light beside it says whether disk has been built.
-        ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
-        tools_.drawCompileButton(project_, dpi_);
         ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 130.0f*dpi_));
         if (dropButton("Settings")) ImGui::OpenPopup("settingsMenu");
         if (ImGui::BeginPopup("settingsMenu")) {
@@ -1579,6 +1617,8 @@ private:
     // The start screen's mark. Zero when the screen was never armed, or when logo.png was missing
     // or undecodable -- in which case the browser draws its fallback badge instead.
     rhi::TextureHandle logoTexture_=0;
+    rhi::TextureHandle compileIconTexture_=0;   // the Compile C# status sprite sheet (3 tiles)
+    u64 compileIconUiId_=0;
     u64 logoUiId_=0;
     f32 logoAspect_=1.0f;
     // The Tools menu owns its own dropdown, its modals and its scaffolding (ToolsMenu.cpp).

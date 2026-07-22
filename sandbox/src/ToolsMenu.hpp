@@ -47,12 +47,12 @@ public:
     // Every modal the menu opens. Called once per frame, outside the menu bar.
     void drawModals(const fmt::ProjectDesc& project, f32 dpi);
 
-    // The toolbar's "Compile C#" button and its status light, in the spirit of UEFN's Build Verse:
-    // one click rebuilds the project's scripts and hot-swaps them in with no editor restart, and the
-    // light says whether what is on disk has actually been built. Drawn from the main toolbar rather
-    // than the menu, and silent on success — the Compile Scripts modal only pops if the build fails,
-    // which is the whole point of a one-click compile. Call inside the menu-bar row.
-    void drawCompileButton(const fmt::ProjectDesc& project, f32 dpi);
+    // The toolbar's "Compile C#" button, in the spirit of UEFN's Build Verse: one click rebuilds the
+    // project's scripts and hot-swaps them in with no editor restart, and the status ICON on the
+    // button's own face says whether what is on disk has been built. Silent on success — the Compile
+    // Scripts modal only pops if the build fails. `iconTex` is the UI id of the compile-status sprite
+    // sheet (three tiles: built / failed / stale); 0 falls back to a drawn dot. Call in the menu-bar.
+    void drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 iconTex);
 
     // Screenshot aids, in the family of --project-settings/--start-screen. Opt-in flags only:
     // no oracle gate passes them, and none of them changes the menu BAR, only what hangs off it.
