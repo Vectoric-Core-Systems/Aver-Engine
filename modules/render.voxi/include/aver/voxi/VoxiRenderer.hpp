@@ -42,11 +42,13 @@ public:
     // order does not have to change.
     void beginScene() override;
     void submit(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
-                f32 metallic, f32 roughness);
+                f32 metallic, f32 roughness, rhi::BindingSetHandle drawBinding,
+                const void* drawConstants, u32 drawConstantBytes);
     // The hook the backend actually calls is submitDraw; submit() is the name this module uses.
     void submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
-                    f32 metallic, f32 roughness) override {
-        submit(mesh, world, baseColor, metallic, roughness);
+                    f32 metallic, f32 roughness, rhi::BindingSetHandle drawBinding,
+                    const void* drawConstants, u32 drawConstantBytes) override {
+        submit(mesh, world, baseColor, metallic, roughness, drawBinding, drawConstants, drawConstantBytes);
     }
 
     // ---- rhi::IRenderFeature ----
@@ -169,6 +171,15 @@ private:
         f32 world[16];
         f32 color[4];
         f32 metallic, roughness;
+        // The authored material captured at submit time, so the voxelisation pass injects the GI
+        // bounce from the SAME surface the lit pass shades rather than from the identity fallback --
+        // the whole of what "Voxi consumes the material in the GI path" means. The set is the
+        // material system's and outlives the one-frame replay delay; the b2 block is COPIED because
+        // submitDraw hands over a borrowed pointer good only for that call. A zero set (only before a
+        // default binding is registered) falls back.
+        rhi::BindingSetHandle matSet = 0;
+        u32 matBytes = 0;
+        u8  mat[sizeof(pbr::MaterialConstants)] = {};
     };
     std::vector<Draw> draws_, drawsPrev_;
 

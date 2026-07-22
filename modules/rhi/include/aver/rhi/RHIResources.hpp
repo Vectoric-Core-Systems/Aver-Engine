@@ -473,9 +473,10 @@ public:
 
     // Binding table 1 plus its b2 constant block, as ONE piece of sticky state consumed by every
     // subsequent drawMesh / dispatchMeshFor. Sticky rather than an argument to drawMesh because the
-    // draw entry points are also what IRenderFeature::submitDraw mirrors, and widening those would
-    // change every feature that replays geometry — setWireframe / setLineDepth / setViewportRect are
-    // the established idiom for exactly this.
+    // draw entry points stay narrow — setWireframe / setLineDepth / setViewportRect are the
+    // established idiom for exactly this per-draw mode. The value of this sticky binding IS forwarded
+    // to a feature, but through IRenderFeature::submitDraw rather than by widening drawMesh, so a
+    // feature can replay geometry into its own passes shaded from the same surface the lit draw uses.
     //
     // Silently ignored by a pipeline whose layout declares neither, which is what lets a pass that
     // has no use for per-draw resources leave the state alone instead of clearing it.
@@ -524,9 +525,21 @@ public:
     // Scene submission, forwarded by the backend so a feature can replay geometry into its own
     // passes (shadow maps, volume rasterisation, acceleration structures).
     virtual void beginScene() {}
+    // The WHOLE per-draw shading state, forwarded together. baseColor/metallic/roughness are the b1
+    // block a draw carries; `drawBinding` and `drawConstants` are the sticky table-1 set and its b2
+    // block that the equivalent drawMesh consumes through setDrawBinding. A feature that replays
+    // geometry needs all of it, not just b1: a shadow or volume pass shading from baseColor alone
+    // lights its pass from a DIFFERENT surface than the lit pass, and the two disagree with no gate
+    // to say so — exactly the split this parameter closes. `drawConstants` is a BORROWED pointer,
+    // valid only for the duration of this call: a feature replaying a frame later must copy the
+    // bytes, never keep the pointer. Deliberately kept in the RHI's own vocabulary — a table and a
+    // constant block — because this header does not learn the word "material" (see the preamble);
+    // what a surface IS stays the feature's and the material system's business.
     virtual void submitDraw(MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
-                            f32 metallic, f32 roughness) {
+                            f32 metallic, f32 roughness, BindingSetHandle drawBinding,
+                            const void* drawConstants, u32 drawConstantBytes) {
         (void)mesh; (void)world; (void)baseColor; (void)metallic; (void)roughness;
+        (void)drawBinding; (void)drawConstants; (void)drawConstantBytes;
     }
 
     // Before the scene's render targets are bound — for passes that own their own targets.

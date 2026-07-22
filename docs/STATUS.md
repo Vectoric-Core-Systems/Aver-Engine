@@ -702,10 +702,14 @@ pinned to the identity `1` in `b1` and the authored values live only in the mate
 (the floor renders as a rough mirror). Bit-identical output with the bind on is therefore proof that
 `b2` is being consumed, not proof that nothing happened.
 
-Base colour deliberately stays in `b1`. `rhi::IRenderFeature::submitDraw` carries no material, so
-Voxi's shadow and voxelisation loops bind the FALLBACK set; neutralising `b1`'s colour would inject
-white albedo into the radiance volume and turn every bounce white. Base colour moves the day
-`submitDraw` carries a material and not before.
+Base colour still rides in `b1` in the sandbox's current scene — but no longer because it has to.
+`rhi::IRenderFeature::submitDraw` now forwards the sticky per-draw binding (table 1 + the b2 block)
+alongside the b1 data, so Voxi's shadow and voxelisation loops bind the SAME authored material set the
+lit pass does rather than the fallback (see "Voxi consumes the material in the GI path" below). An
+authored `baseColorFactor` or base-colour map therefore reaches the radiance volume through
+`averDiffuseAlbedo` (view-independent by contract) and injects the surface's own colour. The sandbox
+keeps base colour in `b1` only because it has not moved that authoring onto the material's factor —
+a sandbox choice now, not a Voxi limitation.
 
 ### `AVER_MODULE_PBR=OFF` baseline
 Voxi renders materials and cannot build without them, so `CMakeLists.txt` now forces
@@ -727,12 +731,29 @@ values were confirmed **bit-identical to the same configuration built at `192fd5
 this work, so the no-material path is provably unaffected. Note §4c-2 records `raw(109,117,132)` for
 this pixel; that figure is stale and predates this phase — it was `110` before these commits too.
 
-### Known gap
-`MaterialLibrary::status()` now reports `Ready` for the factors, all five maps and the alpha mask —
-but they only reach the LIT pass. The voxelisation pass shades with the fallback material, so an
-authored base-colour map does not yet colour the GI bounce. Closing that is the `submitDraw` change
-above. `AlphaBlend` stays `NotImplemented` on purpose: blending needs a pipeline blend state and a
-back-to-front sort, both of which are the renderer's, not the shading model's.
+### Voxi consumes the material in the GI path — the `submitDraw` gap is closed
+`MaterialLibrary::status()` reports `Ready` for the factors, all five maps and the alpha mask, and
+they now reach BOTH the lit pass AND the voxelisation pass. `rhi::IRenderFeature::submitDraw` was
+widened to forward the sticky per-draw binding (binding table 1 + the b2 block) alongside the b1
+block; the backend hands it its current `drawBinding_`, Voxi COPIES the b2 bytes per replayed draw
+(the pointer is per-draw scratch, and the replay runs a frame behind), and the injection loop binds
+that authored material instead of the fallback. So an authored `baseColorFactor`/base-colour map now
+colours the GI bounce, shaded from the SAME b2 the lit pass uses — `averDiffuseAlbedo` is
+view-independent by contract, so the zero view vector the voxelisation pass hands the material is
+legal and the two passes agree exactly. The RHI stays feature-agnostic: `submitDraw` forwards a
+binding table and a constant block by their RHI names and still never learns the word "material".
+
+**Verified oracle-NEUTRAL across all nine device configurations** (`scripts/gates.ps1`, Debug, D3D12
+debug layer on): every one of the 153 gates bit-identical to `scripts/gates.baseline.txt`,
+`0 corruption / 0 error / 0 warning` throughout, `0x141` LiveKernelEvent count `67 → 67`. The current
+sandbox scene authors no base-colour map or non-default `baseColorFactor` and keeps base colour in
+`b1`, so the injected albedo is byte-identical either way — the neutrality is expected, and the gap
+closes for the day a material authors base colour into its own factor. The mechanism is verified by
+construction (the voxelisation pass now binds the identical b2 the lit pass binds, whose consumption
+`§4e`'s negative test already proves); there is no gate that positively authors a non-default
+base colour into a material because the sandbox authors it into `b1`. `AlphaBlend` stays
+`NotImplemented` on purpose: blending needs a pipeline blend state and a back-to-front sort, both of
+which are the renderer's, not the shading model's.
 
 ## 4f. Aver.Scripting.Host — the in-process CLR, WORKING
 

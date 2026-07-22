@@ -1864,7 +1864,12 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
     // Features see EVERY draw, before any early return below. A feature that replays geometry into
     // its own passes needs the full list; capturing after a return leaves it permanently empty.
-    for (IRenderFeature* f : features_) f->submitDraw(mesh, world, color, metallic, roughness);
+    // The current sticky draw binding (table 1 + its b2 block) travels with the draw too, so a
+    // feature's replayed passes shade from the same surface this draw's lit pass will — the block is
+    // this frame's scratch, so submitDraw's contract is that the feature copies what it needs.
+    for (IRenderFeature* f : features_)
+        f->submitDraw(mesh, world, color, metallic, roughness,
+                      drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
     // A feature replacing the scene (the GI debug view) means no lit draw -- but only AFTER the
     // submission above, or the volume its raymarch reads would never be filled.
     for (IRenderFeature* f : features_) if (f->suppressesScene()) return;

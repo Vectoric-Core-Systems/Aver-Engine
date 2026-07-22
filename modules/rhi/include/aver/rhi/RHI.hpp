@@ -188,9 +188,10 @@ public:
     }
 
     // Per-draw binding table 1 and its b2 constant block, sticky until changed and consumed by
-    // every subsequent drawMesh. Sticky rather than two more drawMesh arguments: drawMesh is
-    // mirrored by IRenderFeature::submitDraw, so widening it changes every feature that replays
-    // geometry, and the engine already states per-draw modes this way (setWireframe, setLineDepth).
+    // every subsequent drawMesh. Sticky rather than two more drawMesh arguments so drawMesh stays
+    // narrow, the way the engine already states per-draw modes (setWireframe, setLineDepth). The
+    // sticky value is still forwarded to a feature — through IRenderFeature::submitDraw, which the
+    // backend hands it alongside the b1 block — so a replayed pass shades from the same surface.
     //
     // `constants` is COPIED; the caller may reuse its buffer immediately.
     virtual void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) {

@@ -305,7 +305,8 @@ void VoxiRenderer::beginScene() {
 }
 
 void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
-                          f32 metallic, f32 roughness) {
+                          f32 metallic, f32 roughness, rhi::BindingSetHandle drawBinding,
+                          const void* drawConstants, u32 drawConstantBytes) {
     if (mesh == 0 || draws_.size() >= kMaxDraws) return;
     Draw d;
     d.mesh = mesh;
@@ -313,6 +314,14 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
     std::memcpy(d.color, baseColor, 4 * sizeof(f32));
     d.metallic = metallic;
     d.roughness = roughness;
+    // Capture the material the lit pass will shade this draw with. The block is COPIED, not
+    // referenced: submitDraw's pointer is the backend's per-draw scratch, overwritten many times
+    // over before this frame's list is replayed a frame later. The set handle is stable across that
+    // delay because the material system owns it for the material's lifetime. A larger block than a
+    // MaterialConstants cannot occur on this path, but clamp rather than overrun if one ever does.
+    d.matSet = drawBinding;
+    d.matBytes = drawConstantBytes < sizeof(d.mat) ? drawConstantBytes : static_cast<u32>(sizeof(d.mat));
+    if (drawConstants && d.matBytes) std::memcpy(d.mat, drawConstants, d.matBytes);
     draws_.push_back(d);
 }
 
@@ -432,10 +441,13 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
         f32 consts[rhi::kObjectConstantDwords]{};
         std::memcpy(consts, d.world, 16 * sizeof(f32));   // depth-only: nothing else is read
         ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
-        // The fallback, unconditionally: the replayed draw list carries no material yet, and this
-        // pipeline declares table 1, which Tier 1 requires bound whether the shader reads it or not.
-        ctx.setDrawBinding(materials_.fallbackBindingSet(), &materials_.fallbackConstants(),
-                           sizeof(pbr::MaterialConstants));
+        // The same per-draw material the voxelise and lit passes use. This pass is depth-only -- it
+        // has no pixel shader and reads no b2 -- so the binding changes nothing it outputs today; it
+        // is bound uniformly with the other passes because Tier 1 requires table 1 populated and
+        // because an alpha-masked shadow, when it lands, will clip on exactly this block.
+        if (d.matSet) ctx.setDrawBinding(d.matSet, d.mat, d.matBytes);
+        else          ctx.setDrawBinding(materials_.fallbackBindingSet(),
+                                         &materials_.fallbackConstants(), sizeof(pbr::MaterialConstants));
         ctx.drawMesh(d.mesh);
     }
     ctx.textureBarrier(shadowTex_, rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderResource);
@@ -475,9 +487,15 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
         consts[20] = d.metallic; consts[21] = d.roughness; consts[22] = 0.0f; consts[23] = 0.0f;
         writeShadingConstants(consts);
         ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
-        // As in the shadow pass: the fallback until the replayed draw list carries a material.
-        ctx.setDrawBinding(materials_.fallbackBindingSet(), &materials_.fallbackConstants(),
-                           sizeof(pbr::MaterialConstants));
+        // The material captured at submit time, so the injected radiance is shaded from the SAME
+        // surface the lit pass uses -- an authored base colour, factor or map now colours the GI
+        // bounce instead of the identity white the fallback injected. averDiffuseAlbedo is
+        // view-independent by contract, so the zero view vector this pass hands the material is
+        // legal and the two passes agree exactly. A draw with no binding (only before init registers
+        // the default) still gets a complete surface from the fallback.
+        if (d.matSet) ctx.setDrawBinding(d.matSet, d.mat, d.matBytes);
+        else          ctx.setDrawBinding(materials_.fallbackBindingSet(),
+                                         &materials_.fallbackConstants(), sizeof(pbr::MaterialConstants));
         if (useMs) ctx.dispatchMeshFor(d.mesh);
         else       ctx.drawMesh(d.mesh);
     }
