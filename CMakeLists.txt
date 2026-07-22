@@ -111,4 +111,7 @@ endif()
 
 if(AVER_BUILD_TESTS)
   add_subdirectory(tests/formats)
+  if(AVER_MODULE_SCENE)
+    add_subdirectory(tests/scene)
+  endif()
 endif()

@@ -10,6 +10,10 @@
 #
 # aver_add_module() is STATIC-only, so a plain add_library is used here.
 add_library(Aver.Scene SHARED
+  src/World.cpp
+  src/ComponentPool.cpp
+  src/Fields.cpp
+  src/Builtins.cpp
   src/SceneAbi.cpp)
 
 target_include_directories(Aver.Scene PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

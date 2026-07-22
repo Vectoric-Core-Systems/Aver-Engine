@@ -9,10 +9,60 @@ and physics-agnostic, and **no UObject** — there is no base class every game o
 because the storage this module exists to provide is dense arrays of plain data and an inheritance
 tree is the shape that makes them impossible.
 
-> **Status: skeleton.** Only `aver_scene_abi_version()` exists so far. The module is wired into the
-> build and its DLL topology is proven (see below), but the world itself is not implemented.
-> The full design is [docs/SCENE_FRAMEWORK.md](../../docs/SCENE_FRAMEWORK.md); the module DAG is
+> **Status: the world runs; the C ABI does not exist yet.** Entities, component pools, the field
+> tables and transform/hierarchy propagation are implemented and exercised by `SceneTest.exe`
+> (`tests/scene`). `scene_abi.h` still declares only `aver_scene_abi_version()`, so nothing outside
+> C++ can reach any of it. The full design is
+> [docs/SCENE_FRAMEWORK.md](../../docs/SCENE_FRAMEWORK.md); the module DAG is
 > [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md).
+
+## What is here
+
+| Header | What it owns |
+| --- | --- |
+| `Entity.hpp` | The handle: 24 bits of index, 7 of generation, bit 31 always clear |
+| `ComponentPool.hpp` | One sparse set per component type |
+| `Fields.hpp` | Field kinds and the `ComponentBuilder` that declares a table |
+| `Components.hpp` | The eight built-in components and their fixed dense ids |
+| `World.hpp` | Lifetime, the registry, the hierarchy and the propagation pass |
+
+**Index 0 is never handed out and a live generation starts at 1**, so no legal handle can encode to
+0 and a default-constructed `Entity` is invalid. Bit 31 stays clear so the same value crosses the C
+ABI as a positive `int32_t` and can never be confused with an error return. Seven generation bits is
+few, so a slot whose generation would wrap past 127 is **retired** rather than recycled — an aliased
+handle that silently addresses the wrong entity is the failure the whole packing exists to prevent,
+and `World::retiredSlotCount()` exists so a world churning hard enough to retire slots in bulk is
+visible rather than merely slow.
+
+`ComponentPool`'s sparse array stores **dense slot + 1**, so 0 means "absent" inside the storage too
+rather than only at the handle.
+
+Destruction is **deferred to `flush()`** and takes the whole subtree with it: an entity destroyed
+inside a tick must stay valid for the rest of that tick, because the layer above sweeps its own
+instance lists with `valid()` instead of taking a callback downward.
+
+## Transforms
+
+Centimetres, +Z up, +X forward, +Y right, **left-handed, row-major with row vectors**. Composition is
+therefore left to right and **translation lives in the last row**:
+
+```cpp
+world = local.toMatrix() * parentWorld;   // v * (L * P)
+```
+
+`CLocal` is authored data; `CWorld` is derived data exactly one pass writes. Staleness is a revision
+compare rather than a dirty bit, because a child's staleness is a question about its *parent's* last
+change and a bit that one reader has already consumed cannot answer it. The topological order is
+rebuilt only when a parent link moves. `World::worldMatrix()` composes on demand so a caller reading
+mid-frame gets exactly what the next `flush()` would have written.
+
+## Field tables
+
+Every component registers a hand-written table of `(name, kind, offsetof)` next to its struct,
+terminated by `.verify(sizeof(T))`. One table serves the generic get/set ABI, save/load and the
+editor's Details panel, so there is no second place to update and therefore no second place to
+forget. `verify()` refuses a table that leaves an interior gap, an overlap, or more trailing bytes
+than the struct's own alignment — a missing member — and names the component when it does.
 
 ## What is deliberately NOT here
 
