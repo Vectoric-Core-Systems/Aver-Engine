@@ -1,5 +1,7 @@
 #include "aver/framework/framework_abi.h"
+#include "aver/framework/framework_hooks.h"
 
+#include "aver/core/Log.hpp"
 #include "aver/scene/scene_abi.h"
 
 // The C ABI's translation unit. Every EXPORT here is `extern "C"` and holds no C++ in its signature,
@@ -17,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace aver;
@@ -216,6 +219,18 @@ void forgetClass(Entity e) {
     if (idx < v.size() && v[idx].owner == e) v[idx] = {kInvalidEntity, 0};
 }
 
+// The set of entities whose aver_fw_destroy is currently on the stack. A managed OnEndPlay is free to
+// call Destroy(Self) on its own entity, but destroy fires endPlay BEFORE forgetClass and world().destroy
+// is deferred to the next flush — so a naive re-entrant call would still read MANAGED + valid(e) and fire
+// endPlay a SECOND time, and Destroy(Self) in every OnEndPlay would recurse to a stack overflow. Membership
+// here means "already tearing this one down"; the re-entrant call sees it and refuses, blocking the
+// double-fire while leaving the outer call to finish its single teardown. (spawn's beginPlay-last ordering
+// is re-entrancy-safe for free; destroy fires endPlay early and needs this guard to match.)
+std::unordered_set<Entity>& destroyInFlight() {
+    static std::unordered_set<Entity> s;
+    return s;
+}
+
 // ---- possession maps (read straight from the world; never a source of truth about liveness) ------
 std::unordered_map<Entity, Entity>& pawnByController() {
     static std::unordered_map<Entity, Entity> m;
@@ -232,6 +247,19 @@ bool classHasFlags(Entity e, int32_t flag) {
     const ClassRecord* r = rec(c);
     return r && (r->flags & flag) == flag;
 }
+
+// ---- managed dispatch (step 10) -----------------------------------------------------------------
+// The framework calls UP into managed gameplay code through ONE table, installed by value from
+// outside (the executable, right after the script host bootstraps) so no CLR-owned pointer is ever
+// held past an ALC unload — see the dangle argument on AvManagedDispatch. The framework links
+// Core/Assets/Scene only and never learns a CLR exists: this table is the whole of the seam.
+//
+// Stored BY VALUE, plus a separate `installed` flag rather than sniffing a member for null: the flag
+// is what the second-install refusal tests, and it lets a legitimately all-null table (were one ever
+// installed) still count as "live". Clear zeroes both, which is the NULL store the call-site guards
+// already handle — a tick after a clear ticks nothing rather than faulting.
+AvManagedDispatch& managedDispatch() { static AvManagedDispatch d{}; return d; }
+bool& managedInstalled()             { static bool b = false; return b; }
 
 // Seal helper: flatten the parent chain root-first into `out.resolved`. Returns false on a cycle or a
 // named-but-undeclared parent, writing nothing. Default inheritance is FIELD-LEVEL: each resolved
@@ -538,12 +566,57 @@ int32_t aver_fw_spawn(int32_t c, const char* name,
     }
 
     recordClass(e, c);
+
+    // A managed actor's birth is dispatched UP into managed code here — the first instant the entity
+    // exists, is fully built, and class_of(e) already resolves. Gate on the MANAGED flag so a native
+    // or plain class fires nothing, and on an installed dispatch so a headless / no-CLR build spawns
+    // exactly the same, just without the hook. Reason is SPAWN: a brand-new actor, distinct from the
+    // PLAY/RELOAD entries a later stage adds, so the script can tell a fresh spawn from a reload.
+    //
+    // SCOPE (step 10 wires the BEGIN EDGE only): beginPlay is dispatched here but bind() and
+    // build_models() are deliberately NOT — constructing the managed instance and its render models is
+    // a step-11 job (the bridge that owns the instance list does not exist yet). Once a real bridge
+    // fills the table, beginPlay must be preceded by bind(nameHash, e) (construct+bind, guarded on
+    // bind != null, checking its 1==instance-exists return) and build_models(e); firing beginPlay with
+    // no prior bind would call OnBeginPlay against an instance never constructed. Left as a comment, not
+    // code, per this stage's boundary — the counterpart to the unbind note in aver_fw_destroy.
+    if ((r->flags & AVER_FW_CLASS_MANAGED) && managedInstalled() && managedDispatch().beginPlay) {
+        managedDispatch().beginPlay(static_cast<aver_entity>(e), AVER_FW_BEGIN_SPAWN);
+    }
+
     return static_cast<int32_t>(e);
 }
 
 int32_t aver_fw_destroy(int32_t e) {
     const Entity ent = toEntity(e);
     if (!world().valid(ent)) return 0;
+
+    // Re-entrancy guard: refuse a destroy already in progress for this entity. A managed OnEndPlay can
+    // call Destroy(Self); because endPlay fires below BEFORE forgetClass and world().destroy is deferred,
+    // the re-entrant call would otherwise still read MANAGED + valid and fire endPlay a second time (and
+    // Destroy(Self) in every OnEndPlay would stack-overflow). See destroyInFlight for the full argument.
+    auto& inFlight = destroyInFlight();
+    if (inFlight.count(ent)) return 0;
+    inFlight.insert(ent);
+
+    // A managed actor's death is dispatched UP into managed code BEFORE anything is torn down, so the
+    // hook still sees a live entity (world().destroy below is deferred to the next flush, so `ent` is
+    // valid throughout this call regardless). Reason is DESTROY. Gate on the MANAGED flag and an
+    // installed dispatch, exactly as spawn does, so a native/plain actor or a no-CLR build fires
+    // nothing and still destroys cleanly. NOTE (follow-up): world().destroy takes the whole SUBTREE
+    // but aver_fw_destroy is only called for the single handle given, so a child destroyed via its
+    // parent gets no endPlay — closing that needs a hook on the World retire path, a Play/Stop-stage job.
+    //
+    // SCOPE (step 10 wires the END EDGE only): endPlay is dispatched here but unbind() is deliberately
+    // NOT — dropping the managed instance from the bridge's dense list is a step-11 job (the bridge that
+    // owns that list does not exist yet). Once a real bridge fills the table, endPlay firing with no
+    // matching unbind would leave the destroyed entity in the bridge's instance list (leak + still
+    // ticked by tick_all); wiring managedDispatch().unbind(e) here — guarded on unbind != null, after
+    // endPlay — is the step-11 counterpart. Left as a comment, not code, per this stage's boundary.
+    if ((classHasFlags(ent, AVER_FW_CLASS_MANAGED)) && managedInstalled() && managedDispatch().endPlay) {
+        managedDispatch().endPlay(static_cast<aver_entity>(e), AVER_FW_END_DESTROY);
+    }
+
     // Drop possession both ways and forget the class before the deferred scene destroy: the handle is
     // still valid this frame, but the framework's own maps should not outlive the request.
     if (const int32_t pawn = aver_fw_controlled_pawn(e)) {
@@ -559,7 +632,9 @@ int32_t aver_fw_destroy(int32_t e) {
     pawnByController().erase(ent);
     controllerByPawn().erase(ent);
     forgetClass(ent);
-    return world().destroy(ent) ? 1 : 0;
+    const int32_t destroyed = world().destroy(ent) ? 1 : 0;
+    inFlight.erase(ent);
+    return destroyed;
 }
 
 int32_t aver_fw_class_of(int32_t e) {
@@ -610,6 +685,57 @@ int32_t aver_fw_controller_of(int32_t pawn) {
     auto  it  = cOf.find(toEntity(pawn));
     if (it == cOf.end()) return 0;
     return world().valid(it->second) ? static_cast<int32_t>(it->second) : 0;
+}
+
+// ---- managed dispatch: install / clear / tick (step 10) ----------------------------------------
+
+int32_t aver_fw_install_managed_dispatch(const AvManagedDispatch* d) {
+    if (!d) return 0;
+    // Reject a stale or short table the way the scripting bootstrap does: a bridge built against a
+    // different table shape is REPORTED here, not crashed through on the first indirect call.
+    if (d->structBytes != static_cast<int32_t>(sizeof(AvManagedDispatch)) ||
+        d->contractVersion != AVER_FW_DISPATCH_VERSION) {
+        AVER_ERROR("aver_fw_install_managed_dispatch: rejected a dispatch table (structBytes={}, version={}; "
+                   "this framework expects {} / {})",
+                   d->structBytes, d->contractVersion,
+                   static_cast<int32_t>(sizeof(AvManagedDispatch)), AVER_FW_DISPATCH_VERSION);
+        return 0;
+    }
+    // Refuse a SECOND install while one is live. Only the executable may wire the bridge's entries into
+    // this module, once, right after Bootstrap; nothing in the build can enforce that, so the refusal
+    // is the enforcement. Log it so a second wirer is found rather than silently winning or losing.
+    if (managedInstalled()) {
+        AVER_ERROR("aver_fw_install_managed_dispatch: a managed dispatch is already installed; refusing a "
+                   "second install (clear the first before installing another)");
+        return 0;
+    }
+    managedDispatch() = *d;        // BY VALUE — no pointer into CLR-owned memory is retained
+    managedInstalled() = true;
+    return 1;
+}
+
+int32_t aver_fw_clear_managed_dispatch(void) {
+    // A NULL store, called BEFORE the ALC is unloaded. Every call site guards on managedInstalled()
+    // and the individual pointer, so after this a tick / spawn / destroy simply fires no hook.
+    managedDispatch() = AvManagedDispatch{};
+    managedInstalled() = false;
+    return 1;
+}
+
+int32_t aver_fw_managed_dispatch_installed(void) {
+    return managedInstalled() ? 1 : 0;
+}
+
+int32_t aver_fw_tick(int32_t tickGroup, float dt) {
+    // The single managed transition per tick group per frame. The bridge walks its own dense instance
+    // list behind tick_all; the framework does NOT loop per managed actor. Native per-class vtable
+    // ticking would also run here once that path exists (see AvActorVTable) — a documented follow-up,
+    // so today this drives the managed path only. After a clear this ticks nothing rather than faulting.
+    if (managedInstalled() && managedDispatch().tick_all) {
+        managedDispatch().tick_all(tickGroup, dt);
+        return 1;
+    }
+    return 0;
 }
 
 // ---- session singletons / play state — LATER STAGE (steps 10-11, 13), stubbed to 0 --------------

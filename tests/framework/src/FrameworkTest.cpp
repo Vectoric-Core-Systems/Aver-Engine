@@ -8,6 +8,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/framework/framework_abi.h"
+#include "aver/framework/framework_hooks.h"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/World.hpp"
 #include "aver/scene/scene_abi.h"
@@ -330,6 +331,207 @@ static void testPossession() {
           "unpossess returns 0 after a possessed-pawn destroy (no dangling forward entry left to release)");
 }
 
+// ---------------------------------------------------------------- managed-actor dispatch (step 10)
+
+// A STAND-IN for the C# bridge: plain C functions that record (entity, reason, group, dt) into globals.
+// Step 10 is the NATIVE dispatch mechanism only — no CLR, no bridge — so the table the framework routes
+// through is exactly this hand-written one, which lets the test assert the routing in isolation.
+struct DispatchLog {
+    int     beginCount = 0;
+    int32_t beginEntity = 0;
+    int32_t beginReason = -1;
+    int     tickCount = 0;
+    int32_t tickGroup = -1;
+    float   tickDt = -1.0f;
+    int     endCount = 0;
+    int32_t endEntity = 0;
+    int32_t endReason = -1;
+    bool    endSawLiveEntity = false;   // was the entity still valid at hook time?
+    int32_t endClass = -1;              // what class_of(e) resolved to when endPlay fired
+    int     bindCount = 0;              // times the framework called bind()   — step 10 wires none
+    int     unbindCount = 0;            // times the framework called unbind() — step 10 wires none
+    void reset() { *this = DispatchLog{}; }
+};
+static DispatchLog g_disp;
+
+static void AVER_FW_CALL standInBeginPlay(aver_entity e, int32_t reason) {
+    ++g_disp.beginCount;
+    g_disp.beginEntity = e;
+    g_disp.beginReason = reason;
+}
+static void AVER_FW_CALL standInTickAll(int32_t group, float dt) {
+    ++g_disp.tickCount;
+    g_disp.tickGroup = group;
+    g_disp.tickDt = dt;
+}
+static void AVER_FW_CALL standInEndPlay(aver_entity e, int32_t reason) {
+    ++g_disp.endCount;
+    g_disp.endEntity = e;
+    g_disp.endReason = reason;
+    // The entity is still valid at hook time (world().destroy is deferred to the next flush) — but that
+    // alone is a weak claim, since deferred destroy keeps valid(e) true regardless of internal ordering.
+    // The ordering that actually matters is that endPlay fires BEFORE forgetClass, so the hook can still
+    // resolve the actor's class: capture class_of here — it flips to 0 the instant endPlay is moved after
+    // forgetClass — and record the (trivially-true-under-deferred-destroy) valid() flag alongside it.
+    g_disp.endSawLiveEntity = World::instance().valid(static_cast<Entity>(static_cast<uint32_t>(e)));
+    g_disp.endClass = aver_fw_class_of(e);
+}
+static int32_t AVER_FW_CALL standInBind(int64_t /*classNameHash*/, aver_entity /*e*/) {
+    ++g_disp.bindCount;
+    return 1;   // 1 == a managed instance now exists (a real bridge constructs+binds it here)
+}
+static void AVER_FW_CALL standInUnbind(aver_entity /*e*/) {
+    ++g_disp.unbindCount;
+}
+
+// A SECOND stand-in whose endPlay calls Destroy(Self) — the re-entrant managed teardown of finding 1.
+// It guards its own re-entry so that, absent the framework's re-entrancy guard, the double-fire is a
+// clean, assertable endCount == 2 rather than unbounded recursion to a stack overflow.
+static int  g_reentrantEndCount = 0;
+static bool g_reentrantReentered = false;
+static void AVER_FW_CALL standInReentrantEndPlay(aver_entity e, int32_t /*reason*/) {
+    ++g_reentrantEndCount;
+    if (!g_reentrantReentered) {
+        g_reentrantReentered = true;
+        aver_fw_destroy(static_cast<int32_t>(e));   // a managed OnEndPlay doing Destroy(Self)
+    }
+}
+
+static void testManagedDispatch() {
+    AVER_INFO("=== managed actors route their lifecycle through the installed dispatch ===");
+
+    // A MANAGED class (flagged + ticks) and re-using the plain, non-managed Prop for the negative case.
+    const int32_t managedC = aver_fw_class_declare("ManagedActor", "");
+    aver_fw_class_set_flags(managedC, AVER_FW_CLASS_MANAGED | AVER_FW_CLASS_TICKS);
+    aver_fw_class_set_tick(managedC, AVER_FW_TICK_PHYSICS, 0);
+    check(aver_fw_class_seal(managedC) == 1, "the managed class seals");
+
+    // Build the stand-in table. structBytes + version make install accept it.
+    AvManagedDispatch table{};
+    table.structBytes     = static_cast<int32_t>(sizeof(AvManagedDispatch));
+    table.contractVersion = AVER_FW_DISPATCH_VERSION;
+    table.bind            = &standInBind;
+    table.unbind          = &standInUnbind;
+    table.beginPlay       = &standInBeginPlay;
+    table.tick_all        = &standInTickAll;
+    table.endPlay         = &standInEndPlay;
+
+    // ---- install, and the second-install refusal.
+    check(aver_fw_managed_dispatch_installed() == 0, "no dispatch is installed to begin with");
+    check(aver_fw_install_managed_dispatch(&table) == 1, "the first install is accepted");
+    check(aver_fw_managed_dispatch_installed() == 1, "the dispatch reports installed");
+    check(aver_fw_install_managed_dispatch(&table) == 0, "a SECOND install is refused (returns 0)");
+    // A short / wrong-version table is rejected even as the first install would be.
+    AvManagedDispatch bad{};
+    bad.structBytes = 4;   // not sizeof
+    bad.contractVersion = AVER_FW_DISPATCH_VERSION;
+    check(aver_fw_install_managed_dispatch(&bad) == 0, "a wrong-structBytes table is rejected");
+
+    // ---- a MANAGED spawn fires begin_play(entity, SPAWN) exactly once, with the right entity.
+    g_disp.reset();
+    const int32_t m = aver_fw_spawn(managedC, "managed-1", nullptr, nullptr, nullptr);
+    check(m != 0, "the managed actor spawns");
+    check(g_disp.beginCount == 1, "begin_play fired exactly once on a managed spawn");
+    check(g_disp.beginEntity == m, "begin_play got the spawned entity");
+    check(g_disp.beginReason == AVER_FW_BEGIN_SPAWN, "begin_play got reason SPAWN");
+    // Step 10 wires the BEGIN EDGE only: bind() (construct the managed instance) is a step-11 job, so
+    // spawn must NOT call it yet. Pin that here so wiring bind early — firing beginPlay against an
+    // instance never constructed — is caught rather than shipped silently.
+    check(g_disp.bindCount == 0, "step 10 does NOT call bind on spawn (bind is the step-11 counterpart)");
+
+    // ---- a NON-managed spawn fires NOTHING (Prop carries no MANAGED flag).
+    g_disp.reset();
+    const int32_t plain = aver_fw_spawn(g_actor, "plain-1", nullptr, nullptr, nullptr);
+    check(plain != 0, "the non-managed actor spawns");
+    check(g_disp.beginCount == 0, "a non-managed spawn fires no begin_play");
+
+    // ---- aver_fw_tick(group, dt) fires tick_all(group, dt) exactly once.
+    g_disp.reset();
+    check(aver_fw_tick(AVER_FW_TICK_PHYSICS, 0.25f) == 1, "aver_fw_tick reports a managed tick fired");
+    check(g_disp.tickCount == 1, "tick_all fired exactly once");
+    check(g_disp.tickGroup == AVER_FW_TICK_PHYSICS, "tick_all got the group it was called with");
+    check(g_disp.tickDt == 0.25f, "tick_all got the dt it was called with");
+    // Exactly ONE per invocation: a second call to a different group is a second single dispatch.
+    aver_fw_tick(AVER_FW_TICK_POST_PHYSICS, 0.5f);
+    check(g_disp.tickCount == 2 && g_disp.tickGroup == AVER_FW_TICK_POST_PHYSICS,
+          "each aver_fw_tick is exactly one tick_all for its group");
+
+    // ---- destroy a managed actor fires end_play(entity, DESTROY) while the entity is still live.
+    g_disp.reset();
+    check(aver_fw_destroy(m) == 1, "the managed actor is destroyed");
+    check(g_disp.endCount == 1, "end_play fired exactly once on a managed destroy");
+    check(g_disp.endEntity == m, "end_play got the destroyed entity");
+    check(g_disp.endReason == AVER_FW_END_DESTROY, "end_play got reason DESTROY");
+    check(g_disp.endSawLiveEntity, "end_play saw the entity still valid at hook time");
+    // The real before-teardown constraint: endPlay fires BEFORE forgetClass, so the hook can still
+    // resolve the actor's class. Deferred destroy leaves valid(e) true regardless of internal ordering,
+    // so endSawLiveEntity above cannot catch a mis-ordering; this class read flips to 0 the instant the
+    // dispatch is moved after forgetClass(), which is the ordering that actually matters.
+    check(g_disp.endClass == managedC, "end_play could still resolve the actor's class (fired before forgetClass)");
+    // Step 10 wires the END EDGE only: unbind() (drop the managed instance from the bridge list) is the
+    // step-11 counterpart, so destroy must NOT call it yet. Pin it, mirroring the bind check above.
+    check(g_disp.unbindCount == 0, "step 10 does NOT call unbind on destroy (unbind is the step-11 counterpart)");
+    World::instance().flush();
+
+    // A non-managed destroy fires nothing.
+    g_disp.reset();
+    check(aver_fw_destroy(plain) == 1, "the non-managed actor is destroyed");
+    check(g_disp.endCount == 0, "a non-managed destroy fires no end_play");
+    World::instance().flush();
+
+    // ---- after CLEAR, no hook fires, and spawn/destroy still work (a headless / no-CLR build).
+    check(aver_fw_clear_managed_dispatch() == 1, "clear returns 1");
+    check(aver_fw_managed_dispatch_installed() == 0, "the dispatch reports not-installed after clear");
+    g_disp.reset();
+    const int32_t m2 = aver_fw_spawn(managedC, "managed-after-clear", nullptr, nullptr, nullptr);
+    check(m2 != 0, "a managed spawn still succeeds after clear (no CLR required)");
+    check(g_disp.beginCount == 0, "no begin_play fires after clear");
+    check(aver_fw_tick(AVER_FW_TICK_PHYSICS, 0.1f) == 0, "aver_fw_tick fires nothing after clear (ticks nothing, no fault)");
+    check(g_disp.tickCount == 0, "no tick_all fires after clear");
+    check(aver_fw_destroy(m2) == 1, "a managed destroy still succeeds after clear");
+    check(g_disp.endCount == 0, "no end_play fires after clear");
+    World::instance().flush();
+
+    // Re-install is allowed once the table is clear again (the refusal is only against a LIVE second one).
+    check(aver_fw_install_managed_dispatch(&table) == 1, "install is accepted again after a clear");
+    check(aver_fw_clear_managed_dispatch() == 1, "and clears again");
+}
+
+// ------------------------------------------------------- re-entrant managed destroy (Destroy(Self))
+
+// Regression for the destroy re-entrancy hazard: aver_fw_destroy fires endPlay BEFORE forgetClass, and
+// world().destroy is deferred to flush, so a managed OnEndPlay that calls Destroy(Self) on its own entity
+// used to re-enter a destroy that still saw MANAGED + valid — firing endPlay a SECOND time (and, for a
+// script that does Destroy(Self) in EVERY OnEndPlay, recursing to a stack overflow). The re-entrancy guard
+// makes a destroy already in progress for an entity refuse a nested destroy of the same entity.
+static void testDestroyReentrancy() {
+    AVER_INFO("=== a managed OnEndPlay calling Destroy(Self) does not double-fire endPlay ===");
+
+    const int32_t managedC = aver_fw_class_declare("ReentrantActor", "");
+    aver_fw_class_set_flags(managedC, AVER_FW_CLASS_MANAGED);
+    check(aver_fw_class_seal(managedC) == 1, "the re-entrant managed class seals");
+
+    AvManagedDispatch table{};
+    table.structBytes     = static_cast<int32_t>(sizeof(AvManagedDispatch));
+    table.contractVersion = AVER_FW_DISPATCH_VERSION;
+    table.endPlay         = &standInReentrantEndPlay;   // this endPlay calls Destroy(Self)
+    check(aver_fw_install_managed_dispatch(&table) == 1, "the re-entrant stand-in installs");
+
+    g_reentrantEndCount  = 0;
+    g_reentrantReentered = false;
+    const int32_t r = aver_fw_spawn(managedC, "reentrant-1", nullptr, nullptr, nullptr);
+    check(r != 0, "the re-entrant managed actor spawns");
+
+    // The outer destroy fires endPlay, whose stand-in re-enters aver_fw_destroy(r). The guard makes that
+    // nested call a no-op (returns 0 without firing endPlay again), so endPlay fires EXACTLY once. Without
+    // the guard this is 2 (the double-fire), and Destroy(Self)-in-every-OnEndPlay would stack-overflow.
+    check(aver_fw_destroy(r) == 1, "the outer destroy is accepted");
+    check(g_reentrantEndCount == 1, "endPlay fired exactly once despite Destroy(Self) inside OnEndPlay");
+    World::instance().flush();
+
+    check(aver_fw_clear_managed_dispatch() == 1, "the re-entrant stand-in clears");
+}
+
 // --------------------------------------------------------------------------- later-stage stubs
 
 static void testStubs() {
@@ -351,6 +553,8 @@ int main() {
     testSpawnAndClassOf();
     testSubtreeDestroyClassOf();
     testPossession();
+    testManagedDispatch();
+    testDestroyReentrancy();
     testStubs();
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
