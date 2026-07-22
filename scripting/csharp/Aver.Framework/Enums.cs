@@ -1,8 +1,11 @@
 namespace Aver.Framework;
 
 // The reason enums cross to the hooks so a script can tell "born" from "reloaded" without inspecting
-// global state. Their numeric values are PINNED to the AVER_FW_BEGIN_*/END_* / tick-group #defines in
-// framework_abi.h — the C# names carry the meaning, the numbers carry the wire compatibility.
+// global state. BeginReason/EndReason/PlayState belong to the play lifecycle (a later step): they feed
+// managed virtual hooks, not any exported aver_fw_* signature, and framework_abi.h defines no
+// AVER_FW_BEGIN_*/END_*/PLAY_STATE_* macros yet — their native pinning lands when the lifecycle entry
+// points stop being stubs. TickGroup, in contrast, IS pinned today to the AVER_FW_TICK_* #defines in
+// framework_abi.h. The C# names carry the meaning; the numbers carry the wire compatibility.
 
 /// <summary>
 /// Why <see cref="AverActor.OnBeginPlay"/> is running. The distinction exists because a script must
