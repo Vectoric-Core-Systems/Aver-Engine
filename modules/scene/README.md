@@ -9,12 +9,14 @@ and physics-agnostic, and **no UObject** — there is no base class every game o
 because the storage this module exists to provide is dense arrays of plain data and an inheritance
 tree is the shape that makes them impossible.
 
-> **Status: the world runs; the C ABI does not exist yet.** Entities, component pools, the field
-> tables and transform/hierarchy propagation are implemented and exercised by `SceneTest.exe`
-> (`tests/scene`). `scene_abi.h` still declares only `aver_scene_abi_version()`, so nothing outside
-> C++ can reach any of it. The full design is
-> [docs/SCENE_FRAMEWORK.md](../../docs/SCENE_FRAMEWORK.md); the module DAG is
-> [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md).
+> **Status: the world runs and the C ABI is live.** Entities, component pools, the field tables,
+> transform/hierarchy propagation AND the full `scene_abi.h` surface (field resolution, typed
+> get/set, create/destroy/parent, name/objectId, material intern) are implemented and exercised by
+> `SceneTest.exe` (`tests/scene`) — so the C# layer can now reach the world. Internal bookkeeping
+> fields (name-blob cursors, `CWorld` derived data, hierarchy links) are read-only over the generic
+> ABI. What is still missing is the gameplay framework on top (steps 8–11): spawning, ticking,
+> possession. The full design is [docs/SCENE_FRAMEWORK.md](../../docs/SCENE_FRAMEWORK.md); the module
+> DAG is [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md).
 
 ## What is here
 
