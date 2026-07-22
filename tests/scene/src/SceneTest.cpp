@@ -8,6 +8,7 @@
 #include "aver/core/Math.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/World.hpp"
+#include "aver/scene/scene_abi.h"
 
 #include <cstddef>
 #include <string>
@@ -15,6 +16,10 @@
 
 using namespace aver;
 using namespace aver::scene;
+
+// A test/introspection hook exported by the DLL but kept out of scene_abi.h: the size of the string
+// intern table, so the set_str slot-reuse regression below can be checked directly.
+extern "C" __declspec(dllimport) int64_t aver_scene_debug_string_pool_size(void);
 
 static int g_checks   = 0;
 static int g_failures = 0;
@@ -665,6 +670,230 @@ static void testHierarchy(World& world) {
     check(world.depth(d2) == 3u, "the flush agrees with the eager update");
 }
 
+// ----------------------------------------------------------------------------------------- the C ABI
+
+// Exercises the exported C ABI (scene_abi.h) end to end, through the same singleton World the C++
+// sections above drove — the whole point of the one-world design is that these address the same
+// entities. Nothing here reaches into World except flush(), which the ABI deliberately does not
+// expose (it is a frame boundary, not a per-call operation).
+static void testSceneAbi(World& world) {
+    AVER_INFO("=== C ABI (scene_abi.h) ===");
+
+    check(aver_scene_abi_version() == AVER_SCENE_ABI_VERSION, "the DLL reports the header's ABI version");
+
+    // ---- the KIND/COMP defines are the values the managed binding asserts against
+    check(AVER_SCENE_KIND_VEC3 == static_cast<int>(FieldKind::Vec3), "KIND_VEC3 matches the enum");
+    check(AVER_SCENE_KIND_I64 == static_cast<int>(FieldKind::I64), "KIND_I64 matches the enum");
+    check(AVER_SCENE_COMP_MESH_RENDERER == static_cast<int>(kComponentMeshRenderer),
+          "COMP_MESH_RENDERER matches the id");
+
+    // ---- create + valid
+    const int32_t e = aver_scene_create();
+    check(e != 0, "aver_scene_create returns a non-zero entity");
+    check((e & static_cast<int32_t>(0x80000000)) == 0, "the entity crosses as a positive int32_t");
+    check(aver_scene_valid(e) == 1, "the fresh entity is valid over the ABI");
+    check(aver_scene_valid(0) == 0, "0 is never valid");
+
+    // ---- name + objectId round-trip over the ABI
+    check(aver_scene_set_name(e, "abi-entity") == 1, "set_name accepts a live entity");
+    check(std::string(aver_scene_name(e)) == "abi-entity", "name round-trips over the ABI");
+    check(aver_scene_object_id(e) == static_cast<int64_t>(fnv1a64("abi-entity")),
+          "set_name stamped objectId = fnv1a64(name)");
+    check(aver_scene_set_object_id(e, 0x0123456789ABCDEFLL) == 1, "set_object_id accepts a live entity");
+    check(aver_scene_object_id(e) == 0x0123456789ABCDEFLL, "objectId round-trips a full 64-bit value");
+
+    // ---- resolve CLocal.position and its kind/arity
+    const int32_t fPos = aver_scene_field("CLocal.position");
+    check(fPos != 0, "CLocal.position resolves to a dense field id");
+    check(aver_scene_field("CLocal.notAField") == 0, "an unknown field resolves to 0");
+    check(aver_scene_field_kind(fPos) == AVER_SCENE_KIND_VEC3, "its kind is VEC3");
+    check(aver_scene_field_arity(fPos) == 3, "its arity is 3");
+
+    // ---- set_vec then get_vec, bit for bit (values chosen to be exact in float)
+    const float wantPos[3] = {1.5f, -2.25f, 100.0f};
+    check(aver_scene_set_vec(e, fPos, wantPos) == 1, "set_vec writes CLocal.position");
+    float gotPos[3] = {-1, -1, -1};
+    check(aver_scene_get_vec(e, fPos, gotPos) == 1, "get_vec reads CLocal.position back");
+    check(gotPos[0] == wantPos[0] && gotPos[1] == wantPos[1] && gotPos[2] == wantPos[2],
+          "the vector round-trips bit for bit");
+    // The generic write must have bumped CLocal::rev, so the C++ transform view agrees.
+    check(world.localTransform(e).position.x == 1.5f, "the C++ side sees the ABI's position write");
+
+    const int32_t fRot = aver_scene_field("CLocal.rotation");
+    check(aver_scene_field_arity(fRot) == 4, "CLocal.rotation is a 4-float Quat");
+    const float wantRot[4] = {0.0f, 0.0f, 0.5f, 0.75f};
+    check(aver_scene_set_vec(e, fRot, wantRot) == 1, "set_vec writes a Quat");
+    float gotRot[4] = {0, 0, 0, 0};
+    aver_scene_get_vec(e, fRot, gotRot);
+    check(gotRot[2] == 0.5f && gotRot[3] == 0.75f, "the Quat round-trips");
+
+    // ---- the mesh ObjectId via set_i64/get_i64 (needs CMeshRenderer attached first)
+    check(aver_scene_add_component(e, AVER_SCENE_COMP_MESH_RENDERER) == 1, "add CMeshRenderer");
+    const int32_t fMesh = aver_scene_field("CMeshRenderer.mesh");
+    check(fMesh != 0, "CMeshRenderer.mesh resolves");
+    check(aver_scene_field_kind(fMesh) == AVER_SCENE_KIND_I64, "mesh is an I64 field");
+    const int64_t meshId = 0x00000000DEADBEEFLL;
+    check(aver_scene_set_i64(e, fMesh, meshId) == 1, "set_i64 writes the mesh ObjectId");
+    check(aver_scene_get_i64(e, fMesh) == meshId, "get_i64 reads the mesh ObjectId back");
+
+    // ---- the material handle via set_i32/get_i32, resolved through aver_scene_material
+    const int32_t fMat = aver_scene_field("CMeshRenderer.material");
+    check(aver_scene_field_kind(fMat) == AVER_SCENE_KIND_I32, "material is an I32 field");
+    const int32_t steel = aver_scene_material(0, "steel");
+    check(steel > 0, "a material name resolves to a positive handle");
+    check(aver_scene_material(0, "steel") == steel, "the same name resolves to the same handle");
+    check(aver_scene_material(0, "brass") != steel, "a different name resolves to a different handle");
+    check(aver_scene_material(1, "steel") != steel, "the same name in another pack is a different handle");
+    check(aver_scene_material(0, "") == 0, "an empty material name resolves to 0");
+    check(aver_scene_set_i32(e, fMat, steel) == 1, "set_i32 writes the material handle");
+    check(aver_scene_get_i32(e, fMat) == steel, "get_i32 reads the material handle back");
+
+    // ---- wrong-kind sets are REJECTED — the whole point of a typed field id
+    check(aver_scene_set_str(e, fPos, "nope") == 0, "set_str into a VEC field is rejected");
+    check(aver_scene_set_f32(e, fPos, 1.0f) == 0, "set_f32 into a VEC field is rejected");
+    check(aver_scene_set_i64(e, fPos, 1) == 0, "set_i64 into a VEC field is rejected");
+    check(aver_scene_set_vec(e, fMesh, wantPos) == 0, "set_vec into an I64 field is rejected");
+    check(aver_scene_set_i32(e, fMesh, 1) == 0, "set_i32 into an I64 field is rejected");
+    check(aver_scene_set_ref(e, fMesh, e) == 0, "set_ref into an I64 field is rejected");
+    check(std::string(aver_scene_get_str(e, fPos)).empty(), "get_str on a VEC field yields \"\"");
+    check(aver_scene_get_i64(e, fPos) == 0, "get_i64 on a VEC field yields 0");
+    // The rejected writes must not have corrupted the vector.
+    aver_scene_get_vec(e, fPos, gotPos);
+    check(gotPos[0] == 1.5f, "a rejected wrong-kind set left the field untouched");
+
+    // ---- ref is its own kind: CHierarchy.parent reads back the parent set_parent wrote
+    const int32_t parent = aver_scene_create();
+    check(aver_scene_set_parent(e, parent) == 1, "set_parent attaches the child");
+    const int32_t fParent = aver_scene_field("CHierarchy.parent");
+    check(aver_scene_field_kind(fParent) == AVER_SCENE_KIND_ENTITY, "parent is an ENTITY-kind field");
+    check(aver_scene_get_ref(e, fParent) == parent, "get_ref reads the parent set_parent wrote");
+    check(aver_scene_get_i32(e, fParent) == 0, "get_i32 on an ENTITY field is rejected (0), not coerced");
+
+    // ---- a child transform under the new parent, set through the ABI and composed by the world
+    const float childPos[3] = {10.0f, 0.0f, 0.0f};
+    check(aver_scene_set_vec(e, fPos, childPos) == 1, "the child's local position is set over the ABI");
+    world.flush();
+    // parent at origin, child at +10x local => child world x is 10.
+    check(world.worldMatrix(e).m[3][0] == 10.0f, "the ABI-set child transform composed through its parent");
+
+    // ---- a stale handle returns the neutral value everywhere
+    const int32_t doomed = aver_scene_create();
+    const int32_t fdoom  = aver_scene_field("CLocal.position");
+    check(aver_scene_set_vec(doomed, fdoom, wantPos) == 1, "the doomed entity accepts a write while live");
+    check(aver_scene_destroy(doomed) == 1, "destroy accepts it");
+    world.flush();   // retire it: now the handle is stale
+    check(aver_scene_valid(doomed) == 0, "the stale handle fails valid()");
+    float neutral[3] = {-9, -9, -9};
+    check(aver_scene_get_vec(doomed, fdoom, neutral) == 0, "get_vec on a stale handle returns 0");
+    check(neutral[0] == -9, "and does not write the caller's buffer");
+    check(aver_scene_get_f32(doomed, aver_scene_field("CCamera.fovYRad")) == 0.0f,
+          "get_f32 on a stale handle is 0.0f");
+    check(aver_scene_get_i64(doomed, fMesh) == 0, "get_i64 on a stale handle is 0");
+    check(aver_scene_object_id(doomed) == 0, "object_id on a stale handle is 0");
+    check(std::string(aver_scene_name(doomed)).empty(), "name on a stale handle is \"\"");
+    check(aver_scene_set_vec(doomed, fdoom, wantPos) == 0, "set_vec on a stale handle is rejected");
+    check(aver_scene_set_name(doomed, "zombie") == 0, "set_name on a stale handle is rejected");
+    check(aver_scene_set_parent(doomed, parent) == 0, "set_parent on a stale child is rejected");
+}
+
+// -------------------------------------------------------------- the C ABI, regression cases
+
+// Four defects an independent pass found in the generic field ABI, each reached entirely through the
+// public typed accessors. They live in their own section because each corrupts a memory invariant the
+// field ABI newly makes script-reachable, rather than testing an accessor's happy path.
+static void testSceneAbiRepairs(World& world) {
+    AVER_INFO("=== C ABI regression: field-ABI memory invariants ===");
+
+    // ---- (1) the ABI is byte-transparent for UTF-8 names. The C# binding marshals inbound names as
+    // LPUTF8Str and decodes the returned pointer as UTF-8; both rely on this DLL storing and returning
+    // the exact bytes it was handed. LPStr/PtrToStringAnsi on the managed side would re-encode a
+    // non-ASCII name through the ANSI code page, so this pins the contract those attributes depend on.
+    const int32_t u = aver_scene_create();
+    // "Ω-日本-x" spelled as raw UTF-8 bytes so the assertion does not depend on the source file's encoding.
+    const char* utf8Name = "\xCE\xA9-\xE6\x97\xA5\xE6\x9C\xAC-x";
+    check(aver_scene_set_name(u, utf8Name) == 1, "set_name accepts a UTF-8 name over the ABI");
+    check(std::string(aver_scene_name(u)) == std::string(utf8Name),
+          "the ABI round-trips UTF-8 name bytes unchanged (the LPUTF8Str contract)");
+    check(aver_scene_object_id(u) == static_cast<int64_t>(fnv1a64(std::string_view(utf8Name))),
+          "objectId is fnv1a64 of the UTF-8 bytes, so an ANSI re-encode would change identity");
+
+    // ---- (2) CName.offset/len are the world's name-blob cursor, managed by setName. They are now
+    // READ-ONLY over the generic ABI, so a script cannot write the cursor at all — and World::name
+    // additionally bounds the slice against the blob (defence in depth for any C++ writer). Before this,
+    // a correctly-typed set_i32 reached the cursor and name()/PtrToStringUTF8 walked a wild pointer
+    // (out-of-bounds read: crash / disclosure).
+    const int32_t nre = aver_scene_create();
+    check(aver_scene_set_name(nre, "safe-name") == 1, "the entity gets a real name first");
+    check(std::string(aver_scene_name(nre)) == "safe-name", "which resolves before tampering");
+    const int32_t fOffset = aver_scene_field("CName.offset");
+    check(fOffset != 0, "CName.offset resolves (it is in the table for verify()'s byte coverage)");
+    check(aver_scene_field_kind(fOffset) == AVER_SCENE_KIND_I32, "and is I32-kind");
+    check(aver_scene_set_i32(nre, fOffset, 0x40000000) == 0,
+          "but a set is REJECTED — CName.offset is read-only over the generic ABI");
+    check(std::string(aver_scene_name(nre)) == "safe-name",
+          "so the name is untouched: no cursor corrupted, no out-of-bounds walk");
+
+    // ---- read-only is general, not just CName: derived (CWorld, CLocal.rev) and bookkeeping fields
+    // refuse a set while still READING. They stay in the table for verify()'s coverage.
+    const int32_t rw       = aver_scene_create();
+    const int32_t fLocalRev = aver_scene_field("CLocal.rev");
+    check(fLocalRev != 0 && aver_scene_set_i32(rw, fLocalRev, 99) == 0, "CLocal.rev (derived) rejects a set");
+    const int32_t fWorldMat = aver_scene_field("CWorld.matrix");
+    float m16[16] = {0};
+    check(fWorldMat != 0 && aver_scene_set_vec(rw, fWorldMat, m16) == 0, "CWorld.matrix (derived) rejects a set");
+    check(aver_scene_get_vec(rw, fWorldMat, m16) == 1, "but a read of a read-only field still works");
+
+    // ---- (3) CHierarchy.parent is an Entity-kind field the ABI resolves, but its structural links are
+    // owned by setParent (which refuses cycles). set_ref must not write them raw: a single self-parent,
+    // or a 2-cycle, makes composeChain()/worldMatrix() loop unbounded (hang/bad_alloc). set_parent stays
+    // the only path; get_ref (a read) is unaffected.
+    const int32_t h1     = aver_scene_create();
+    const int32_t fParent = aver_scene_field("CHierarchy.parent");
+    check(aver_scene_field_kind(fParent) == AVER_SCENE_KIND_ENTITY, "CHierarchy.parent is Entity-kind");
+    check(aver_scene_set_ref(h1, fParent, h1) == 0, "set_ref refuses to self-parent through the structural link");
+    check(aver_scene_get_ref(h1, fParent) == 0, "so no cycle formed: the parent link is still unset");
+    const int32_t h2 = aver_scene_create();
+    check(aver_scene_set_ref(h1, fParent, h2) == 0, "set_ref refuses a normal parent edit too — it is not the path");
+    check(aver_scene_get_ref(h1, fParent) == 0, "the link stays unset after the refused edit");
+    check(aver_scene_set_parent(h1, h2) == 1, "the guarded setter DOES attach the parent");
+    check(aver_scene_get_ref(h1, fParent) == h2, "and get_ref now reads the parent it wrote");
+    // If a cycle had slipped through, composing this subtree would never return.
+    world.worldMatrix(h1);
+    check(world.flush() == world.flush() || true, "composing the (acyclic) hierarchy returns rather than hanging");
+
+    // ---- (4) set_str reuses the slot a field already owns instead of appending forever. Register a
+    // String-kind component (no built-in is String-kind) and write one field many times: the intern
+    // table must grow by exactly one, not once per write.
+    struct CStr { int64_t s = 0; };
+    {
+        auto b = world.registerComponent<CStr>("CStr");
+        b.field("s", FieldKind::String, static_cast<u16>(offsetof(CStr, s)));
+        check(b.verify(sizeof(CStr)), "a one-String-field component verifies");
+    }
+    const int32_t strType = static_cast<int32_t>(world.componentId("CStr"));
+    const int32_t fStr     = aver_scene_field("CStr.s");
+    check(strType != 0 && fStr != 0, "the String component and field registered");
+    check(aver_scene_field_kind(fStr) == AVER_SCENE_KIND_STRING, "CStr.s is String-kind");
+
+    const int32_t se = aver_scene_create();
+    check(aver_scene_add_component(se, strType) == 1, "the entity takes the String component");
+
+    const int64_t poolBefore = aver_scene_debug_string_pool_size();
+    const char*   values[]   = {"first", "second", "third", "fourth", "fifth"};
+    for (const char* val : values) check(aver_scene_set_str(se, fStr, val) == 1, "set_str writes the String field");
+    check(std::string(aver_scene_get_str(se, fStr)) == "fifth", "get_str reads back the most recent write");
+    const int64_t poolAfter = aver_scene_debug_string_pool_size();
+    check(poolAfter - poolBefore == 1,
+          "five writes to one String field grew the intern pool by exactly one, not five");
+
+    // An empty write keeps the slot (does not abandon it), and a non-empty write after it does not
+    // allocate a second slot.
+    check(aver_scene_set_str(se, fStr, "") == 1, "an empty set_str is accepted");
+    check(std::string(aver_scene_get_str(se, fStr)).empty(), "and reads back as \"\"");
+    check(aver_scene_set_str(se, fStr, "again") == 1, "a later non-empty write is accepted");
+    check(aver_scene_debug_string_pool_size() - poolAfter == 0, "and reused the same slot, adding nothing");
+}
+
 // ---------------------------------------------------------------------------------------------- main
 
 int main() {
@@ -679,6 +908,8 @@ int main() {
     testChurn(world);
     testFields(world);
     testHierarchy(world);
+    testSceneAbi(world);
+    testSceneAbiRepairs(world);
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;

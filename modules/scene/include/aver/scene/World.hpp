@@ -74,7 +74,7 @@ public:
 
     // The two calls ComponentBuilder is sugar over; the framework's script-declared components come
     // through here too. addField returns the dense field id, 0 on rejection.
-    u32  addField(u32 type, const char* name, FieldKind kind, u16 offset, u8 arity = 0);
+    u32  addField(u32 type, const char* name, FieldKind kind, u16 offset, u8 arity = 0, bool readOnly = false);
     bool verifyComponent(u32 type, usize structBytes);
 
     // ---- field lookup ----

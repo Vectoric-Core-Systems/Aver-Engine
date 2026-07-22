@@ -9,8 +9,8 @@ namespace aver::scene {
 // components — which arrive one field at a time across a C ABI and never see this class — go through
 // exactly the same code as a hand-written table.
 
-ComponentBuilder& ComponentBuilder::field(const char* name, FieldKind kind, u16 offset, u8 arity) {
-    if (world_) world_->addField(typeId_, name, kind, offset, arity);
+ComponentBuilder& ComponentBuilder::field(const char* name, FieldKind kind, u16 offset, u8 arity, bool readOnly) {
+    if (world_) world_->addField(typeId_, name, kind, offset, arity, readOnly);
     return *this;
 }
 

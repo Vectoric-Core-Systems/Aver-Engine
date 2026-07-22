@@ -36,34 +36,45 @@ void expect(bool ok, u32 id, u32 want, const char* what) {
 void registerBuiltinComponents(World& world) {
     {
         auto b = world.registerComponent<CLocal>("CLocal");
+        // position/rotation/scale are authored; rev is the transform's own revision, bumped by the
+        // write path, so it is read-only over the generic ABI.
         b.field("position", FieldKind::Vec3, kLocalPosition)
             .field("rotation", FieldKind::Quat, kLocalRotation)
             .field("scale", FieldKind::Vec3, kLocalScale)
-            .field("rev", FieldKind::I32, static_cast<u16>(offsetof(CLocal, rev)));
+            .field("rev", FieldKind::I32, static_cast<u16>(offsetof(CLocal, rev)), 0, /*readOnly*/ true);
         expect(b.verify(sizeof(CLocal)), b.typeId(), kComponentLocal, "CLocal");
     }
     {
         auto b = world.registerComponent<CWorld>("CWorld");
-        b.field("matrix", FieldKind::Mat4, static_cast<u16>(offsetof(CWorld, m)))
-            .field("composedLocalRev", FieldKind::I32, static_cast<u16>(offsetof(CWorld, composedLocalRev)))
-            .field("composedParentRev", FieldKind::I32, static_cast<u16>(offsetof(CWorld, composedParentRev)))
-            .field("rev", FieldKind::I32, static_cast<u16>(offsetof(CWorld, rev)));
+        // CWorld is entirely DERIVED — the propagation pass owns every byte of it — so all of it is
+        // read-only over the generic ABI. A written world matrix is overwritten on the next flush;
+        // a written revision desyncs the compare the pass runs.
+        b.field("matrix", FieldKind::Mat4, static_cast<u16>(offsetof(CWorld, m)), 0, /*readOnly*/ true)
+            .field("composedLocalRev", FieldKind::I32, static_cast<u16>(offsetof(CWorld, composedLocalRev)), 0, true)
+            .field("composedParentRev", FieldKind::I32, static_cast<u16>(offsetof(CWorld, composedParentRev)), 0, true)
+            .field("rev", FieldKind::I32, static_cast<u16>(offsetof(CWorld, rev)), 0, true);
         expect(b.verify(sizeof(CWorld)), b.typeId(), kComponentWorld, "CWorld");
     }
     {
         auto b = world.registerComponent<CHierarchy>("CHierarchy");
-        b.field("parent", FieldKind::Entity, static_cast<u16>(offsetof(CHierarchy, parent)))
-            .field("firstChild", FieldKind::Entity, static_cast<u16>(offsetof(CHierarchy, firstChild)))
-            .field("nextSibling", FieldKind::Entity, static_cast<u16>(offsetof(CHierarchy, nextSibling)))
-            .field("prevSibling", FieldKind::Entity, static_cast<u16>(offsetof(CHierarchy, prevSibling)))
-            .field("depth", FieldKind::I32, static_cast<u16>(offsetof(CHierarchy, depth)));
+        // The links and depth are managed by setParent (which keeps the sibling chain and the
+        // topological order consistent); writing one raw would desync them, so the whole component is
+        // read-only over the generic ABI. Reparenting goes through aver_scene_set_parent.
+        b.field("parent", FieldKind::Entity, static_cast<u16>(offsetof(CHierarchy, parent)), 0, /*readOnly*/ true)
+            .field("firstChild", FieldKind::Entity, static_cast<u16>(offsetof(CHierarchy, firstChild)), 0, true)
+            .field("nextSibling", FieldKind::Entity, static_cast<u16>(offsetof(CHierarchy, nextSibling)), 0, true)
+            .field("prevSibling", FieldKind::Entity, static_cast<u16>(offsetof(CHierarchy, prevSibling)), 0, true)
+            .field("depth", FieldKind::I32, static_cast<u16>(offsetof(CHierarchy, depth)), 0, true);
         expect(b.verify(sizeof(CHierarchy)), b.typeId(), kComponentHierarchy, "CHierarchy");
     }
     {
         auto b = world.registerComponent<CName>("CName");
+        // objectId is authored identity; offset/len are the cursor into the world name blob, managed
+        // by setName. They are read-only over the generic ABI: a written offset is a slice cursor
+        // pointing wherever the writer chose, which is exactly the out-of-bounds name read this closes.
         b.field("objectId", FieldKind::I64, static_cast<u16>(offsetof(CName, objectId)))
-            .field("offset", FieldKind::I32, static_cast<u16>(offsetof(CName, offset)))
-            .field("len", FieldKind::I32, static_cast<u16>(offsetof(CName, len)));
+            .field("offset", FieldKind::I32, static_cast<u16>(offsetof(CName, offset)), 0, /*readOnly*/ true)
+            .field("len", FieldKind::I32, static_cast<u16>(offsetof(CName, len)), 0, true);
         expect(b.verify(sizeof(CName)), b.typeId(), kComponentName, "CName");
     }
     {
@@ -78,7 +89,8 @@ void registerBuiltinComponents(World& world) {
             .field("aabbMax", FieldKind::Vec3, static_cast<u16>(offsetof(CMeshRenderer, aabbMax)))
             .field("material", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, material)))
             .field("flags", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, flags)))
-            .field("dirty", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, dirty)));
+            // dirty is upload bookkeeping the GPU path reads and clears, not authored state.
+            .field("dirty", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, dirty)), 0, /*readOnly*/ true);
         expect(b.verify(sizeof(CMeshRenderer)), b.typeId(), kComponentMeshRenderer, "CMeshRenderer");
     }
     {

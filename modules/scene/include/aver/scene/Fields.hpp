@@ -50,6 +50,12 @@ struct FieldDesc {
     FieldKind   kind      = FieldKind::F32;
     u16         offset    = 0;    // byte offset into the component struct
     u8          arity     = 0;
+    // Internal bookkeeping — a name-blob cursor, derived world data, a hierarchy link. It stays in
+    // the table so verify()'s byte-coverage check still sees it, and it READS through the generic
+    // ABI, but a generic SET is rejected: these are managed by dedicated paths (set_parent, set_name,
+    // the propagation pass), and letting a script write one raw desyncs an invariant — at worst a
+    // blob cursor pointed out of range. Authored fields (position, mesh, colour) are writable.
+    bool        readOnly  = false;
 };
 
 // Registration is hand-written next to the struct with offsetof — no codegen, so there is nothing to
@@ -63,8 +69,8 @@ public:
     ComponentBuilder(World* world, u32 typeId) : world_(world), typeId_(typeId) {}
 
     // `arity` is ignored for the non-float kinds; passing it is allowed so a registration reads the
-    // same whatever the kind is.
-    ComponentBuilder& field(const char* name, FieldKind kind, u16 offset, u8 arity = 0);
+    // same whatever the kind is. `readOnly` marks an internal bookkeeping field (see FieldDesc).
+    ComponentBuilder& field(const char* name, FieldKind kind, u16 offset, u8 arity = 0, bool readOnly = false);
 
     // False when the table does not account for the struct, having already logged which component
     // and which byte range is unexplained. It returns rather than asserting because the failure has

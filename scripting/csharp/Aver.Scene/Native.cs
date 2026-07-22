@@ -5,10 +5,17 @@ namespace Aver.Scene;
 /// <summary>
 /// The P/Invoke surface for the Aver.Scene C ABI. Same idiom as <c>Pbr</c>/<c>Voxi</c>: a private
 /// <see cref="Lib"/> const, exact export names, no <c>EntryPoint</c>/<c>CharSet</c>/<c>CallingConvention</c>
-/// (defaults to Winapi), blittable types only, strings in as <see cref="UnmanagedType.LPStr"/> and out
+/// (defaults to Winapi), blittable types only, strings in as <see cref="UnmanagedType.LPUTF8Str"/> and out
 /// as <see cref="System.IntPtr"/> decoded through <see cref="Str"/>.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>Strings cross as UTF-8.</b> The world's name blob stores the raw <c>const char*</c> bytes it is
+/// handed (see <c>World::setName</c>), and the engine's identity hash is fnv1a64 of those UTF-8 bytes.
+/// So inbound strings marshal as <see cref="UnmanagedType.LPUTF8Str"/> and outbound pointers decode
+/// through <see cref="Marshal.PtrToStringUTF8"/> — <see cref="UnmanagedType.LPStr"/> would re-encode a
+/// non-ASCII name in the process ANSI code page, corrupting the bytes and the objectId derived from them.
+/// </para>
 /// <para>
 /// <b>The 1/0 setter convention.</b> Every setter returns <c>int32_t</c>: 1 on success, 0 on a rejected
 /// request (stale handle, wrong field kind, out of range). The managed facade reads that as
@@ -26,7 +33,7 @@ internal static class Native
     private const string Lib = "Aver.Scene";
 
     // Field resolution — a dense id (component + offset + kind), 0 == unknown.
-    [DllImport(Lib)] internal static extern int aver_scene_field([MarshalAs(UnmanagedType.LPStr)] string qualifiedName);
+    [DllImport(Lib)] internal static extern int aver_scene_field([MarshalAs(UnmanagedType.LPUTF8Str)] string qualifiedName);
     [DllImport(Lib)] internal static extern int aver_scene_field_kind(int f);
     [DllImport(Lib)] internal static extern int aver_scene_field_arity(int f);
 
@@ -43,7 +50,7 @@ internal static class Native
     [DllImport(Lib)] internal static extern int aver_scene_get_ref(int e, int f);
     [DllImport(Lib)] internal static extern int aver_scene_set_ref(int e, int f, int v);
     [DllImport(Lib)] internal static extern System.IntPtr aver_scene_get_str(int e, int f);
-    [DllImport(Lib)] internal static extern int aver_scene_set_str(int e, int f, [MarshalAs(UnmanagedType.LPStr)] string v);
+    [DllImport(Lib)] internal static extern int aver_scene_set_str(int e, int f, [MarshalAs(UnmanagedType.LPUTF8Str)] string v);
 
     // Entity lifetime + hierarchy. A model placed inside an actor is a plain child entity: it carries a
     // mesh but NO class, so aver_fw_class_of(child) == 0 — it is data, not an actor.
@@ -57,14 +64,16 @@ internal static class Native
     [DllImport(Lib)] internal static extern long aver_scene_object_id(int e);
     [DllImport(Lib)] internal static extern int aver_scene_set_object_id(int e, long objectId);
     [DllImport(Lib)] internal static extern System.IntPtr aver_scene_name(int e);
-    [DllImport(Lib)] internal static extern int aver_scene_set_name(int e, [MarshalAs(UnmanagedType.LPStr)] string name);
+    [DllImport(Lib)] internal static extern int aver_scene_set_name(int e, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
     // Content resolution at bind time. CMeshRenderer.material is an i32 opaque handle (built), so a
     // material NAME resolves to that handle here — it is never stored as a string in the field.
-    [DllImport(Lib)] internal static extern int aver_scene_material(int name0, [MarshalAs(UnmanagedType.LPStr)] string name);
+    [DllImport(Lib)] internal static extern int aver_scene_material(int name0, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
-    /// <summary>Decode an ANSI string returned as a pointer; "?" if null. Duplicated from Pbr/Voxi on purpose.</summary>
-    internal static string Str(System.IntPtr p) => Marshal.PtrToStringAnsi(p) ?? "?";
+    /// <summary>Decode a UTF-8 string returned as a pointer; "?" if null. The ABI hands out raw name-blob
+    /// bytes, which are UTF-8, so this must decode as UTF-8 — <see cref="Marshal.PtrToStringAnsi"/> would
+    /// mangle any non-ASCII name.</summary>
+    internal static string Str(System.IntPtr p) => Marshal.PtrToStringUTF8(p) ?? "?";
 }
 
 /// <summary>

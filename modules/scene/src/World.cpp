@@ -395,7 +395,11 @@ u32    World::freeSlotCount() const        { return static_cast<u32>(impl_->free
 
 const char* World::name(Entity e) const {
     const CName* n = component<CName>(e, kComponentName);
-    return n ? impl_->nameBlob.c_str() + n->offset : "";
+    // offset is a slice cursor into the name blob, and the generic field ABI exposes CName.offset as a
+    // plain writable I32 (Builtins.cpp registers it). A script that writes an out-of-range offset must
+    // not turn this into a wild pointer walked by name()/PtrToStringUTF8 — bound the slice against the
+    // blob it indexes, so a desynced cursor reads as an empty name rather than out-of-bounds memory.
+    return (n && n->offset < impl_->nameBlob.size()) ? impl_->nameBlob.c_str() + n->offset : "";
 }
 
 bool World::setName(Entity e, std::string_view nm) {
@@ -501,7 +505,7 @@ const char* World::componentVerifyError(u32 type) const {
     return (type > 0 && type < impl_->types.size()) ? impl_->types[type].verifyError.c_str() : "";
 }
 
-u32 World::addField(u32 type, const char* fieldName, FieldKind kind, u16 offset, u8 arity) {
+u32 World::addField(u32 type, const char* fieldName, FieldKind kind, u16 offset, u8 arity, bool readOnly) {
     Impl& d = *impl_;
     if (type == 0 || type >= d.types.size() || !fieldName || !*fieldName) return 0;
 
@@ -522,6 +526,7 @@ u32 World::addField(u32 type, const char* fieldName, FieldKind kind, u16 offset,
         f.kind       = kind;
         f.offset     = offset;
         f.arity      = canonical;
+        f.readOnly   = readOnly;
         t.fields.push_back(it->second);
         return it->second;
     }
@@ -532,7 +537,7 @@ u32 World::addField(u32 type, const char* fieldName, FieldKind kind, u16 offset,
     const char* qualPtr = d.nameStore.back().c_str();
 
     const u32 id = static_cast<u32>(d.fields.size());
-    d.fields.push_back(FieldDesc{namePtr, qualPtr, type, kind, offset, canonical});
+    d.fields.push_back(FieldDesc{namePtr, qualPtr, type, kind, offset, canonical, readOnly});
     d.fieldByName.emplace(qualified, id);
     t.fields.push_back(id);
     return id;
