@@ -15,6 +15,7 @@
 #include "ProjectScaffold.hpp"
 
 #include <atomic>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -46,6 +47,13 @@ public:
     // Every modal the menu opens. Called once per frame, outside the menu bar.
     void drawModals(const fmt::ProjectDesc& project, f32 dpi);
 
+    // The toolbar's "Compile C#" button and its status light, in the spirit of UEFN's Build Verse:
+    // one click rebuilds the project's scripts and hot-swaps them in with no editor restart, and the
+    // light says whether what is on disk has actually been built. Drawn from the main toolbar rather
+    // than the menu, and silent on success — the Compile Scripts modal only pops if the build fails,
+    // which is the whole point of a one-click compile. Call inside the menu-bar row.
+    void drawCompileButton(const fmt::ProjectDesc& project, f32 dpi);
+
     // Screenshot aids, in the family of --project-settings/--start-screen. Opt-in flags only:
     // no oracle gate passes them, and none of them changes the menu BAR, only what hangs off it.
     void armNewScript(bool on) { armScript_ = on ? 4 : 0; }
@@ -76,6 +84,23 @@ private:
     bool haveDotnet();
 
     void startCompile(const std::string& csproj, const std::string& outDir, bool reload);
+
+    // Toolbar-initiated build+reload. Sets openModalOnFail_ so a clean build stays silent and a
+    // failed one opens the Compile modal on the errors; the menu items do neither.
+    void triggerToolbarCompile(const fmt::ProjectDesc& project);
+    // Throttled staleness check driving the toolbar light: newest .cs against the last build.
+    void refreshScriptStatus(const fmt::ProjectDesc& project);
+
+    // What the toolbar light reports. Building is transient; NoProject greys the button out. The
+    // three the user asked for map straight on: UpToDate -> green tick, Stale -> yellow question,
+    // Failed -> red no-entry.
+    enum class ScriptStatus { NoProject, UpToDate, Stale, Building, Failed };
+    ScriptStatus scriptStatus_ = ScriptStatus::NoProject;
+    bool  lastBuildFailed_ = false;   // set by reapCompile; what tells Failed (red) from Stale (yellow)
+    bool  openModalOnFail_ = false;   // the toolbar path sets it; reapCompile consumes it once
+    bool  haveBuiltStamp_ = false;    // a build has run this session, so builtStamp_ is meaningful
+    std::filesystem::file_time_type builtStamp_{}; // newest .cs mtime as of the last build we started
+    double scanClock_ = -1.0;         // ImGui::GetTime() of the last staleness walk; -1 forces one
 
     Modal pending_ = Modal::None;   // opened by the menu, consumed by drawModals
     int  armScript_ = 0;            // --new-script: frames left to force the modal open

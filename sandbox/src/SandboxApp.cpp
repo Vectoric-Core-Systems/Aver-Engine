@@ -1006,6 +1006,10 @@ private:
             ImGui::Button("Pause"); ImGui::SameLine();
             ImGui::Button("Stop");
         }
+        // Compile C#, beside the play controls the way UEFN puts Build Verse: one click rebuilds and
+        // hot-swaps the project's scripts, and the light beside it says whether disk has been built.
+        ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
+        tools_.drawCompileButton(project_, dpi_);
         ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 130.0f*dpi_));
         if (dropButton("Settings")) ImGui::OpenPopup("settingsMenu");
         if (ImGui::BeginPopup("settingsMenu")) {

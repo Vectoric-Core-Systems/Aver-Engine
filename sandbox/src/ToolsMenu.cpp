@@ -3,6 +3,8 @@
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Log.hpp"
 
+#include <cmath>
+
 #include <filesystem>
 
 #if AVER_WITH_IMGUI
@@ -688,6 +690,58 @@ void ToolsMenu::drawCompileModal(f32 dpi, bool reload) {
 }
 #endif // AVER_WITH_IMGUI
 
+namespace {
+
+// Newest write time among *.cs under `dir`, skipping obj/ and bin/. `dotnet build` drops generated
+// sources (AssemblyInfo, GlobalUsings) into obj\, and their mtime bumps on every build — counting
+// them would make the source look perpetually newer than itself. Returns false when the tree holds
+// no source at all, which the caller reads as "nothing to build".
+bool newestCsTime(const std::string& dir, std::filesystem::file_time_type& out) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
+    if (ec) return false;
+    bool any = false;
+    fs::file_time_type newest{};
+    for (; it != end; it.increment(ec)) {
+        if (ec) break;
+        if (it->is_directory(ec)) {
+            const std::string name = it->path().filename().string();
+            if (name == "obj" || name == "bin") it.disable_recursion_pending();
+            continue;
+        }
+        if (it->path().extension() != ".cs") continue;
+        const fs::file_time_type t = fs::last_write_time(it->path(), ec);
+        if (ec) continue;
+        if (!any || t > newest) { newest = t; any = true; }
+    }
+    out = newest;
+    return any;
+}
+
+// Newest *.dll under `dir` — the built assembly's timestamp. Used ONLY across editor restarts, when
+// this session has not built anything yet: within a session the in-memory record is authoritative
+// because it alone knows a build failed.
+bool newestDllTime(const std::string& dir, std::filesystem::file_time_type& out) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
+    if (ec) return false;
+    bool any = false;
+    fs::file_time_type newest{};
+    for (; it != end; it.increment(ec)) {
+        if (ec) break;
+        if (it->path().extension() != ".dll") continue;
+        const fs::file_time_type t = fs::last_write_time(it->path(), ec);
+        if (ec) continue;
+        if (!any || t > newest) { newest = t; any = true; }
+    }
+    out = newest;
+    return any;
+}
+
+} // namespace
+
 // Outside the ImGui guard: joining the build thread and swapping the assemblies are neither of
 // them UI, and a build must be reaped in a build with no editor chrome just the same.
 void ToolsMenu::reapCompile() {
@@ -697,6 +751,18 @@ void ToolsMenu::reapCompile() {
     const char* what = compile_->reload ? "Reload Scripts" : "Compile Scripts";
     if (compile_->exitCode == 0) AVER_INFO("[Editor] {}: {} built cleanly", what, compile_->csproj);
     else AVER_ERROR("[Editor] {}: dotnet build exited {}", what, compile_->exitCode);
+
+    // The toolbar's Compile C# light reads this: a build stays failed (red) until a later one
+    // succeeds, and the toolbar path pops the errors on failure — Build Verse, but it shows what
+    // broke. The menu items open their own modal up front, so they never set openModalOnFail_.
+    lastBuildFailed_ = compile_->exitCode != 0;
+    scanClock_ = -1.0;   // force the light to re-read now rather than up to a throttle-tick later
+    if (openModalOnFail_) {
+        openModalOnFail_ = false;
+        // Match the job's own modal so the title and footer read right; a failed reload never
+        // reloaded, so either variant shows only the build errors regardless.
+        if (lastBuildFailed_) open(compile_->reload ? Modal::Reload : Modal::Compile);
+    }
 
     // A failed build must NOT unload: the editor would be left with no scripts at all because of a
     // typo, which is a far worse outcome than carrying on with the previous ones.
@@ -712,6 +778,16 @@ void ToolsMenu::reapCompile() {
 
 void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDir, bool reload) {
     if (compileThread_.joinable()) return; // the menu item is disabled meanwhile; belt and braces
+
+    // Record the source state we are about to build. It is the only thing that lets the toolbar
+    // light tell "edited since this build" (Stale) from "this build failed and nothing changed"
+    // (Failed) — file mtimes cannot express a failure, since a failed build leaves the old .dll.
+    {
+        const std::string scriptsDir = std::filesystem::path(csproj).parent_path().string();
+        std::filesystem::file_time_type stamp{};
+        haveBuiltStamp_ = newestCsTime(scriptsDir, stamp);
+        builtStamp_ = stamp;
+    }
 
     auto job = std::make_shared<Compile>();
     job->csproj = csproj;
@@ -751,5 +827,128 @@ void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDi
         job->done.store(true); // last: the UI thread reads output/exitCode once this is set
     });
 }
+
+void ToolsMenu::triggerToolbarCompile(const fmt::ProjectDesc& project) {
+    if (compileThread_.joinable()) return;
+    const std::string csproj = scriptsCsprojPath(project);
+    if (csproj.empty() || !fileExists(csproj) || !haveDotnet()) return;
+    openModalOnFail_ = true;   // silent on success, the errors on failure — that is the whole button
+    // reload when a host is present: the button's promise is "make the new code live", which is the
+    // reload path. With no host it degrades to a plain compile and the light still tracks the result.
+    startCompile(csproj, scriptsBinaryDir(project), reload_ != nullptr);
+}
+
+#if AVER_WITH_IMGUI
+void ToolsMenu::refreshScriptStatus(const fmt::ProjectDesc& project) {
+    if (compileThread_.joinable()) { scriptStatus_ = ScriptStatus::Building;  return; }
+    if (!project.valid())          { scriptStatus_ = ScriptStatus::NoProject; return; }
+
+    const std::string csproj = scriptsCsprojPath(project);
+    if (csproj.empty() || !fileExists(csproj)) {
+        // No scripts project yet: genuinely nothing to build, which the user asked to read as green.
+        scriptStatus_ = ScriptStatus::UpToDate;
+        return;
+    }
+
+    // A directory walk every frame is waste; a script is not edited at 60 Hz. Keep the last verdict
+    // between scans, and let -1 force the first one.
+    const double now = ImGui::GetTime();
+    if (scanClock_ >= 0.0 && now - scanClock_ < 0.5) return;
+    scanClock_ = now;
+
+    const std::string scriptsDir = std::filesystem::path(csproj).parent_path().string();
+    std::filesystem::file_time_type newestCs{};
+    if (!newestCsTime(scriptsDir, newestCs)) { scriptStatus_ = ScriptStatus::UpToDate; return; }
+
+    if (haveBuiltStamp_) {
+        // Priority is the user's wording: unbuilt CHANGES win over a stale failure, so a fresh edit
+        // reads yellow even if the last build was red.
+        if (newestCs > builtStamp_)   scriptStatus_ = ScriptStatus::Stale;   // edited since we built
+        else if (lastBuildFailed_)    scriptStatus_ = ScriptStatus::Failed;  // known-broken, unchanged
+        else                          scriptStatus_ = ScriptStatus::UpToDate;
+        return;
+    }
+
+    // Nothing built this session: fall back to the assembly's own timestamp so the light is honest
+    // across restarts. Missing or older-than-source output means the changes are unbuilt.
+    std::filesystem::file_time_type newestDll{};
+    const bool anyDll = newestDllTime(scriptsBinaryDir(project), newestDll);
+    scriptStatus_ = (anyDll && newestDll >= newestCs) ? ScriptStatus::UpToDate : ScriptStatus::Stale;
+}
+
+void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi) {
+    refreshScriptStatus(project);
+
+    const bool building = scriptStatus_ == ScriptStatus::Building;
+    const std::string csproj = project.valid() ? scriptsCsprojPath(project) : std::string();
+    const bool canCompile = !building && project.valid() && haveDotnet() &&
+                            !csproj.empty() && fileExists(csproj);
+
+    ImGui::BeginDisabled(!canCompile);
+    if (ImGui::Button(building ? "Compiling C#..." : "Compile C#")) triggerToolbarCompile(project);
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", !project.valid() ? "Open a project to compile its C# scripts."
+                              : !haveDotnet()     ? "dotnet was not found on PATH. Install the .NET SDK."
+                              : csproj.empty() || !fileExists(csproj)
+                                                  ? "No Content\\Scripts\\Scripts.csproj yet. Use Tools > New C# Script."
+                              : "Rebuild the project's C# and swap it in live - no editor restart.\n"
+                                "If it fails, the errors open so you can click straight to the line.");
+
+    ImGui::SameLine();
+
+    // The light. A filled disc plus a glyph drawn from primitives, so it needs no icon font and
+    // reads at any DPI: green tick = built (or nothing to build), yellow ? = unbuilt changes, red
+    // bar = the last build failed and has not been fixed, spinner = building.
+    ImU32 col; const char* tip;
+    switch (scriptStatus_) {
+        case ScriptStatus::UpToDate: col = IM_COL32( 70,180, 80,255); tip = "C# is built and live."; break;
+        case ScriptStatus::Stale:    col = IM_COL32(225,195, 45,255); tip = "C# changed since the last build - click Compile C#."; break;
+        case ScriptStatus::Failed:   col = IM_COL32(205, 55, 50,255); tip = "The last C# build failed - click Compile C# to see the errors."; break;
+        case ScriptStatus::Building: col = IM_COL32( 80,140,205,255); tip = "Compiling C#..."; break;
+        case ScriptStatus::NoProject:
+        default:                     col = IM_COL32(110,110,110,255); tip = "No project open."; break;
+    }
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float r  = 8.0f * dpi;
+    const float h  = ImGui::GetFrameHeight();
+    const ImVec2 org = ImGui::GetCursorScreenPos();
+    const ImVec2 ctr(org.x + r, org.y + h * 0.5f);
+    const ImU32 fg = IM_COL32(255, 255, 255, 255);
+    const float th = 2.2f * dpi;
+
+    dl->AddCircleFilled(ctr, r, col);   // first: AddCircleFilled reuses the path buffer internally
+    if (scriptStatus_ == ScriptStatus::Building) {
+        // A rotating three-quarter arc, the universal "working" cue. Built AFTER the disc so the
+        // fill does not clear it.
+        const float t = (float)ImGui::GetTime();
+        const float pi = 3.14159265358979f;
+        dl->PathClear();
+        const int seg = 16;
+        for (int i = 0; i <= seg; ++i) {
+            const float a = t * 4.0f + (float)i / seg * (pi * 1.5f);
+            dl->PathLineTo(ImVec2(ctr.x + std::cos(a) * r * 0.72f, ctr.y + std::sin(a) * r * 0.72f));
+        }
+        dl->PathStroke(fg, 0, th);
+    } else if (scriptStatus_ == ScriptStatus::UpToDate) {
+        dl->AddLine(ImVec2(ctr.x - r*0.42f, ctr.y + r*0.02f), ImVec2(ctr.x - r*0.06f, ctr.y + r*0.38f), fg, th);
+        dl->AddLine(ImVec2(ctr.x - r*0.06f, ctr.y + r*0.38f), ImVec2(ctr.x + r*0.46f, ctr.y - r*0.40f), fg, th);
+    } else if (scriptStatus_ == ScriptStatus::Failed) {
+        dl->AddRectFilled(ImVec2(ctr.x - r*0.52f, ctr.y - r*0.16f), ImVec2(ctr.x + r*0.52f, ctr.y + r*0.16f), fg, 1.5f * dpi);
+    } else if (scriptStatus_ == ScriptStatus::Stale) {
+        const char* q = "?";
+        const ImVec2 ts = ImGui::CalcTextSize(q);
+        dl->AddText(ImVec2(ctr.x - ts.x * 0.5f, ctr.y - ts.y * 0.5f), IM_COL32(35, 35, 35, 255), q);
+    } // NoProject: a bare grey disc
+
+    // Reserve the badge's box so anything after it lays out clear of the disc, and hang the tooltip.
+    ImGui::Dummy(ImVec2(r * 2.0f, h));
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+}
+#else
+void ToolsMenu::refreshScriptStatus(const fmt::ProjectDesc&) {}
+void ToolsMenu::drawCompileButton(const fmt::ProjectDesc&, f32) {}
+#endif // AVER_WITH_IMGUI
 
 } // namespace aver::editor
