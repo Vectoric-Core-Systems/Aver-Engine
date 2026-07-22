@@ -69,6 +69,16 @@ public:
     // False when the table does not account for the struct, having already logged which component
     // and which byte range is unexplained. It returns rather than asserting because the failure has
     // to be observable from a test in the same process — an abort proves nothing to a caller.
+    //
+    // WHAT IT CANNOT CATCH, by construction: this is a byte-COVERAGE check — offsets sorted, no gap,
+    // no overlap, sizes summing to the struct — and the offsets ARE the registration, so it has no
+    // independent ground truth for which name belongs at which offset. Two same-type members listed
+    // in the wrong order, or a field given a wrong kind of the same width (I32/F32/Bool/Entity all
+    // 4 bytes; I64/String both 8), leave coverage intact and pass. The eight built-ins are immune
+    // because they pass offsetof(T, member) directly, so an offset cannot drift from its name; the
+    // exposure is a SCRIPT-declared component whose fields arrive over the ABI, where a swapped or
+    // mis-kinded same-width field is published silently. Closing that needs a name↔offset oracle a
+    // coverage check does not have, so it is a documented limit rather than a bug to fix here.
     bool verify(usize structBytes);
 
     u32 typeId() const { return typeId_; }

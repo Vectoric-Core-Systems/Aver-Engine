@@ -43,7 +43,12 @@ public:
     u32   typeId() const { return typeId_; }
 
     // Snapshot and restore are a memcpy in both directions because these three arrays are the
-    // entire state of a component type. There is no snapshot format and nothing to fix up.
+    // entire state of one component TYPE. There is no snapshot format and nothing to fix up.
+    //
+    // This is NOT a world snapshot. It does not carry the World's generation, liveSlot or the FIFO
+    // free list, so pools restored on their own would desync generations against live handles. The
+    // whole-world snapshot/restore that Play/Stop needs is World's job and is built in step 5; this
+    // primitive is one piece of it, not the thing itself.
     void snapshotTo(ComponentPool& dst) const;
 
 private:

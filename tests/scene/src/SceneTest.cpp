@@ -631,6 +631,38 @@ static void testHierarchy(World& world) {
           "the whole subtree went with it");
     check(world.count() == liveBefore - 4u, "the live count dropped by exactly four");
     check(world.topologicalCount() == world.count(), "the order was rebuilt over the survivors");
+
+    // ---- a pending-destroy parent must not become a reparent target.
+    // Regression: destroy is deferred, so a doomed parent still reads valid() this frame; without a
+    // guard, setParent onto it would let flush() collect a live child inside the doomed subtree.
+    const Entity doomed    = world.create("doomed-parent");
+    const Entity bystander = world.create("live-bystander");
+    world.flush();
+    check(world.destroy(doomed), "the parent is queued for destruction");
+    check(world.destroyPending(doomed), "it reads as pending while still valid this frame");
+    check(world.valid(doomed), "the deferred destroy leaves it valid until flush");
+    check(!world.setParent(bystander, doomed), "reparenting a live entity ONTO a doomed parent is refused");
+    check(world.parent(bystander) == kInvalidEntity, "so the bystander keeps its parent");
+    world.flush();
+    check(world.valid(bystander), "and survives the flush that collected the doomed parent");
+    check(!world.valid(doomed), "which did collect the doomed parent");
+
+    // ---- depth() stays honest for a reparented subtree BEFORE the next flush.
+    // Regression: linkToParent fixed only the moved node, leaving descendants at their old depth
+    // until an order rebuild, so a mid-frame depth() read the stale value.
+    const Entity d0     = world.create("depth-root");
+    const Entity d1     = world.create("depth-1", d0, Transform{});
+    const Entity d2     = world.create("depth-2", d1, Transform{});         // d0>d1>d2 => 0,1,2
+    const Entity shelf  = world.create("depth-shelf");
+    const Entity shelf1 = world.create("depth-shelf-1", shelf, Transform{}); // shelf>shelf1 => 0,1
+    world.flush();
+    check(world.depth(d2) == 2u, "the chain leaf starts at depth 2");
+    check(world.setParent(d1, shelf1), "reparent the middle of the chain under a depth-1 node");
+    // Deliberately NO flush: this is exactly the mid-frame window the fix closes.
+    check(world.depth(d1) == 2u, "the moved node's depth updates immediately");
+    check(world.depth(d2) == 3u, "and its descendant's does too, without waiting for flush");
+    world.flush();
+    check(world.depth(d2) == 3u, "the flush agrees with the eager update");
 }
 
 // ---------------------------------------------------------------------------------------------- main

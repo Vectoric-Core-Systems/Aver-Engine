@@ -105,6 +105,8 @@ struct World::Impl {
     std::vector<Entity> order;
     std::vector<Entity> stack;
     std::vector<Entity> chain;
+    std::vector<Entity> depthStack;   // scratch for refreshSubtreeDepth; kept off `stack` so a
+                                      // reparent's depth pass cannot alias an order rebuild
     bool                topoDirty = false;
 
     // ---- component shortcuts. The built-ins are the only types this file knows the shape of.
@@ -145,6 +147,29 @@ struct World::Impl {
         if (ph->firstChild != kInvalidEntity) hier(ph->firstChild)->prevSibling = e;
         ph->firstChild = e;
         h->depth       = ph->depth + 1;
+    }
+
+    // Rewrite depth over e and everything beneath it from e's current depth downward. linkToParent
+    // fixes only the node it moves, so without this a reparented subtree's descendants keep the
+    // depth they had under the old parent until the next rebuildOrder — and depth() would then hand
+    // a mid-frame reader a stale answer, the very thing worldMatrix() composes on demand to avoid.
+    // Bounded by the moved subtree, not the world, so a reparent stays cheap.
+    void refreshSubtreeDepth(Entity root) {
+        depthStack.clear();
+        depthStack.push_back(root);
+        while (!depthStack.empty()) {
+            const Entity e = depthStack.back();
+            depthStack.pop_back();
+            CHierarchy* h = hier(e);
+            if (!h) continue;
+            const u32 childDepth = h->depth + 1;
+            for (Entity c = h->firstChild; c != kInvalidEntity;) {
+                CHierarchy* ch = hier(c);
+                ch->depth      = childDepth;
+                depthStack.push_back(c);
+                c = ch->nextSibling;
+            }
+        }
     }
 
     // The one place world matrices are written. Dirt is a revision compare rather than a bitset walk,
@@ -630,6 +655,13 @@ bool World::setParent(Entity e, Entity newParent, bool keepWorld) {
     if (newParent != kInvalidEntity && !valid(newParent)) return false;
     if (newParent == e) return false;
 
+    // A parent already queued for destruction still reads valid() this frame, because destroy is
+    // deferred to flush(). Attaching a live child to it would make flush() collect the child inside
+    // the doomed parent's subtree — silent loss of an entity the caller never asked to destroy.
+    // Refusing is the only signal available; valid() cannot carry it without breaking the
+    // destroyed-entity-survives-the-tick contract the deferral exists for.
+    if (newParent != kInvalidEntity && destroyPending(newParent)) return false;
+
     // A cycle would make the topological sort skip a whole subtree forever, so it is refused here
     // rather than detected later where the symptom is a matrix that never updates.
     for (Entity a = newParent; a != kInvalidEntity; a = d.parentOf(a)) {
@@ -645,6 +677,10 @@ bool World::setParent(Entity e, Entity newParent, bool keepWorld) {
     } else if (CHierarchy* h = d.hier(e)) {
         h->depth = 0;
     }
+    // linkToParent set e's own depth; its descendants still carry the depth they had under the old
+    // parent until the next order rebuild, so refresh the subtree now to keep depth() honest for a
+    // reader between here and flush().
+    d.refreshSubtreeDepth(e);
 
     // Zeroing the composed local revision is what forces the recompose. Relying on the parent
     // revision alone would miss a move between two parents whose revisions happen to be equal.
