@@ -3,6 +3,7 @@ add_executable(Sandbox
   src/ProjectBrowser.cpp
   src/ProjectScaffold.cpp
   src/EngineScaffold.cpp
+  src/IdeIntegration.cpp
   src/ToolsMenu.cpp
   Sandbox.rc)
 target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
