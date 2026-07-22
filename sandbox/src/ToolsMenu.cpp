@@ -63,12 +63,20 @@ bool runCaptured(const std::wstring& cmdline, const std::wstring& cwd, std::stri
     // in the child and the drain loop below would never see EOF.
     SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
 
+    // STARTF_USESTDHANDLES means the child's stdin is whatever hStdInput says, and a null one is a
+    // handle it cannot read from. NUL gives an immediate EOF instead, which is the answer intended
+    // for a build nobody is sitting in front of — an MSBuild task that decided to read stdin would
+    // otherwise fail in whatever way its own error handling picked.
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                             OPEN_EXISTING, 0, nullptr);
+    if (nul == INVALID_HANDLE_VALUE) nul = nullptr;
+
     STARTUPINFOW si{};
     si.cb = sizeof si;
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = wr;
     si.hStdError = wr;
-    si.hStdInput = nullptr;
+    si.hStdInput = nul;
 
     PROCESS_INFORMATION pi{};
     std::wstring mutableCmd = cmdline; // CreateProcessW may write into its command line
@@ -76,6 +84,7 @@ bool runCaptured(const std::wstring& cmdline, const std::wstring& cwd, std::stri
                                    CREATE_NO_WINDOW, nullptr, cwd.empty() ? nullptr : cwd.c_str(),
                                    &si, &pi);
     CloseHandle(wr); // the parent's copy, or the child holds the pipe open forever
+    if (nul) CloseHandle(nul);
     if (!ok) { CloseHandle(rd); return false; }
 
     std::string raw;
@@ -607,7 +616,10 @@ void ToolsMenu::drawCompileModal(f32 dpi, bool reload) {
     // Which editor a click will actually reach. Asked once per frame rather than per line, and it
     // is also what starts detection: the first Tools frame kicks off the scan and gets the shell
     // fallback, so nothing here ever waits on vswhere.
-    const IdeInfo& ide = preferredIde();
+    //
+    // The GOTO preference, not the general one. Everything in this panel is a jump to a line, and
+    // the editor that opens a project best is not the one that lands a caret best.
+    const IdeInfo& ide = preferredGotoIde();
     if (compile_ && !running && (compile_->errors > 0 || compile_->warnings > 0)) {
         // Says which editor, and says plainly when that editor cannot be told a line — a click
         // that opens the file at the top is a different promise from one that lands on the error.
@@ -621,44 +633,45 @@ void ToolsMenu::drawCompileModal(f32 dpi, bool reload) {
     ImGui::Separator();
     // The whole transcript, scrollable: an exit code alone cannot tell anyone which line of which
     // file the compiler objected to, and that is the only thing a failed build is asked.
-    ImGui::BeginChild("##buildout", ImVec2(0, -46.0f * dpi), ImGuiChildFlags_Borders);
-    ImGui::PushTextWrapPos(0.0f);
+    //
+    // No text wrapping, and a horizontal scrollbar instead. The clipper below can only skip rows it
+    // can predict the height of, and a wrapped line is however many rows the current width makes it
+    // — one long path would then throw off every scroll position under it. A terminal would have
+    // scrolled that line sideways too.
+    ImGui::BeginChild("##buildout", ImVec2(0, -46.0f * dpi), ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_HorizontalScrollbar);
     if (compile_ && !compile_->lines.empty()) {
-        for (usize i = 0; i < compile_->lines.size(); ++i) {
-            const BuildLine& bl = compile_->lines[i];
-            // Anything without a position — MSBuild's banners, its summary counts, and any line
-            // this failed to understand — is printed exactly as it arrived. Output that was not
-            // parsed is still output somebody has to be able to read.
-            if (!bl.hasPosition()) { ImGui::TextUnformatted(bl.raw.c_str()); continue; }
+        // Clipped, because each line is now its own item — a Selectable with an ID, a style push
+        // and a hover test, where the transcript used to be a single TextUnformatted. A build that
+        // restores packages runs to hundreds of lines and the panel shows about thirty of them.
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(compile_->lines.size()));
+        while (clipper.Step()) {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                const BuildLine& bl = compile_->lines[static_cast<usize>(i)];
+                // Anything without a position — MSBuild's banners, its summary counts, and any line
+                // this failed to understand — is printed exactly as it arrived. Output that was not
+                // parsed is still output somebody has to be able to read.
+                if (!bl.hasPosition()) { ImGui::TextUnformatted(bl.raw.c_str()); continue; }
 
-            // The file's LEAF, not the absolute path MSBuild emitted. The path is what pushed the
-            // message off the right edge and forced the whole panel to wrap; with it in the
-            // tooltip instead, the error itself fits on one clickable row.
-            const std::string leaf = std::filesystem::path(bl.file).filename().string();
-            std::string label = leaf + "(" + std::to_string(bl.line);
-            if (bl.col > 0) label += "," + std::to_string(bl.col);
-            label += "): " + std::string(bl.isError ? "error" : "warning");
-            if (!bl.code.empty()) label += " " + bl.code;
-            label += ": " + bl.message;
-
-            ImGui::PushID(static_cast<int>(i));
-            ImGui::PushStyleColor(ImGuiCol_Text, bl.isError ? ImVec4(0.93f, 0.42f, 0.38f, 1)
-                                                            : ImVec4(0.95f, 0.72f, 0.25f, 1));
-            // Selectable rather than Text: it gives the row a hover highlight, so a clickable
-            // line looks clickable before anyone discovers it by accident.
-            const bool clicked = ImGui::Selectable(label.c_str());
-            ImGui::PopStyleColor();
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s\nline %d, column %d\n\nClick to open in %s.",
-                                  bl.file.c_str(), bl.line, bl.col, ide.name.c_str());
-            if (clicked && !openInIde(ide, bl.file, bl.line, bl.col))
-                AVER_WARN("[Editor] could not open {} in {}", bl.file, ide.name);
-            ImGui::PopID();
+                ImGui::PushID(i);
+                ImGui::PushStyleColor(ImGuiCol_Text, bl.isError ? ImVec4(0.93f, 0.42f, 0.38f, 1)
+                                                                : ImVec4(0.95f, 0.72f, 0.25f, 1));
+                // Selectable rather than Text: it gives the row a hover highlight, so a clickable
+                // line looks clickable before anyone discovers it by accident.
+                const bool clicked = ImGui::Selectable(bl.label.c_str());
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s\nline %d, column %d\n\nClick to open in %s.",
+                                      bl.file.c_str(), bl.line, bl.col, ide.name.c_str());
+                if (clicked && !openInIde(ide, bl.file, bl.line, bl.col))
+                    AVER_WARN("[Editor] could not open {} in {}", bl.file, ide.name);
+                ImGui::PopID();
+            }
         }
     } else if (running) {
         ImGui::TextDisabled("(waiting for dotnet)");
     }
-    ImGui::PopTextWrapPos();
     ImGui::EndChild();
 
     ImGui::PushTextWrapPos(0.0f);

@@ -41,7 +41,16 @@ const std::vector<IdeInfo>& detectedIdes();
 bool ideDetectionFinished();
 
 // The head of the list: the real IDE if there is one, the shell otherwise. Never null.
+//
+// This is the "open my project" answer, and it prefers Visual Studio. Where to send a DIAGNOSTIC is
+// a different question with a different answer — see preferredGotoIde.
 const IdeInfo& preferredIde();
+
+// Where a click on a diagnostic should go. Split from preferredIde because opening a `.csproj` and
+// landing a caret on a line are not the same capability: every entry with `canGoto` can be handed a
+// line, but only some of them reliably act on it, and the head of the preference list is not one of
+// them (see the Visual Studio case in openInIde). Never null.
+const IdeInfo& preferredGotoIde();
 
 // Open `file` at a 1-based `line`/`col`. `line <= 0` means "just open it", which is also what
 // happens when the IDE has no goto form. Returns false only when the process could not be started
@@ -66,6 +75,11 @@ struct BuildLine {
     bool isWarning = false;
     std::string code;      // "CS1061", "MSB3021"; empty when the diagnostic carried none
     std::string message;   // the text after the code, with the trailing "[project]" removed
+    // What a clickable row shows: the file's LEAF and the position, then the message. Built here
+    // because a modal is redrawn every frame it is open and a label rebuilt per line per frame is
+    // per-frame string work for a string that cannot have changed. Empty when there is no position,
+    // because such a line is shown as `raw` and has no row of its own to label.
+    std::string label;
 
     // Clickable exactly when there is somewhere to jump to.
     bool hasPosition() const { return !file.empty() && line > 0; }
@@ -76,8 +90,10 @@ struct BuildLine {
 // build ran in, and a relative path is useless to an IDE launched from elsewhere.
 //
 // Duplicates are dropped: MSBuild prints each diagnostic once where it happened and again in the
-// "Build FAILED." summary, and two clickable copies of one error is a list that lies about how
-// many things are wrong. Only exact repeats of a positioned diagnostic are removed.
+// "Build FAILED." summary, and two copies of one error is a list — and a header count — that lies
+// about how many things are wrong. This covers the position-less origins (`CSC :`, `MSBUILD :`)
+// too, which MSBuild repeats just the same; those are matched on their text, since they have no
+// position to match on. Only repeats of a DIAGNOSTIC are dropped, never ordinary output.
 std::vector<BuildLine> parseBuildOutput(const std::string& output, const std::string& baseDir);
 
 } // namespace aver::editor

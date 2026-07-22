@@ -2,10 +2,10 @@
 
 #include "aver/core/Log.hpp"
 
-#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <mutex>
 #include <thread>
@@ -61,9 +61,17 @@ bool existsW(const std::wstring& p) {
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+// How long the whole capture below may take. It bounds the READ, which is the part that can hang:
+// a child that never writes and never exits leaves a blocking ReadFile blocked, and the scan thread
+// is joined at shutdown, so an unbounded read here is an editor that never closes.
+constexpr DWORD kCaptureTimeoutMs = 10000;
+
 // Run a short-lived console tool and collect its stdout. Used for `vswhere` only, which is why
 // there is no stderr plumbing: vswhere's diagnostics are not something the editor can act on, and
 // an empty result already means "no Visual Studio" whatever the reason.
+//
+// Returns false on timeout as well as on failure to launch: a truncated `vswhere` answer is a
+// truncated path, and half a path is worse than no Visual Studio.
 bool captureStdout(const std::wstring& cmdline, std::string& out) {
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof sa;
@@ -73,9 +81,17 @@ bool captureStdout(const std::wstring& cmdline, std::string& out) {
     if (!CreatePipe(&rd, &wr, &sa, 0)) return false;
     SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0); // or the child keeps the read end alive
 
+    // STARTF_USESTDHANDLES makes the child's stdin whatever is in hStdInput, and a null one is a
+    // handle it cannot read from — a console tool that decides to prompt would fail in a way that
+    // depends on how it checks. NUL gives it an immediate EOF, which is the answer meant here.
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                             OPEN_EXISTING, 0, nullptr);
+    if (nul == INVALID_HANDLE_VALUE) nul = nullptr;
+
     STARTUPINFOW si{};
     si.cb = sizeof si;
     si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nul;
     si.hStdOutput = wr;
     si.hStdError = wr;
 
@@ -84,17 +100,34 @@ bool captureStdout(const std::wstring& cmdline, std::string& out) {
     const BOOL ok = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, TRUE,
                                    CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
     CloseHandle(wr);
+    if (nul) CloseHandle(nul);
     if (!ok) { CloseHandle(rd); return false; }
 
+    // Peek before every read so no read can block. An anonymous pipe cannot be opened for
+    // overlapped I/O, so a deadline over a poll is what is left; the alternative is a second thread
+    // per launch to make a blocking read cancellable, which is more machinery than one `vswhere`
+    // deserves. Peek failing means the write end is gone, which is the normal end of the output.
+    bool timedOut = false;
+    const ULONGLONG deadline = GetTickCount64() + kCaptureTimeoutMs;
     char buf[1024];
-    DWORD got = 0;
-    while (ReadFile(rd, buf, sizeof buf, &got, nullptr) && got > 0) out.append(buf, got);
+    for (;;) {
+        if (GetTickCount64() >= deadline) { timedOut = true; break; }
+        DWORD avail = 0;
+        if (!PeekNamedPipe(rd, nullptr, 0, nullptr, &avail, nullptr)) break;
+        if (avail == 0) { Sleep(5); continue; }
+        DWORD got = 0;
+        if (!ReadFile(rd, buf, sizeof buf, &got, nullptr) || got == 0) break;
+        out.append(buf, got);
+    }
     CloseHandle(rd);
 
-    WaitForSingleObject(pi.hProcess, 10000); // a hung vswhere must not hold the scan thread forever
+    // Killed rather than abandoned: a child that ignored its deadline would otherwise outlive the
+    // editor that started it, and the wait below would spend the timeout a second time.
+    if (timedOut) TerminateProcess(pi.hProcess, 1);
+    WaitForSingleObject(pi.hProcess, kCaptureTimeoutMs);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    return true;
+    return !timedOut;
 }
 
 // Start a GUI process and forget it. No wait anywhere: the caller is a click handler and the
@@ -119,7 +152,16 @@ bool shellOpen(const std::string& path) {
     return r > 32; // ShellExecute's documented success threshold
 }
 
-std::wstring quoteArg(const std::wstring& s) { return L"\"" + s + L"\""; }
+// Quote one argument for a command line the child will parse with the standard Windows rules.
+// Backslashes are only special in front of a quote, where each PAIR becomes one backslash — so a
+// path ending in one (`C:\`, the only shape that reaches this) would otherwise escape the closing
+// quote and swallow the rest of the line. Doubling the trailing run is what those rules ask for.
+// Embedded quotes are not handled because a Windows path cannot contain one.
+std::wstring quoteArg(const std::wstring& s) {
+    usize trailing = 0;
+    while (trailing < s.size() && s[s.size() - 1 - trailing] == L'\\') ++trailing;
+    return L"\"" + s + std::wstring(trailing, L'\\') + L"\"";
+}
 
 // ---------------------------------------------------------------------------------------------
 // detection
@@ -198,30 +240,75 @@ void findVsCode(std::vector<IdeInfo>& out) {
     out.push_back(std::move(ide));
 }
 
+bool nameMentionsRider(const std::wstring& leaf) {
+    std::wstring lower;
+    lower.reserve(leaf.size());
+    for (wchar_t c : leaf) lower.push_back(c >= L'A' && c <= L'Z' ? static_cast<wchar_t>(c + 32) : c);
+    return lower.find(L"rider") != std::wstring::npos;
+}
+
+// `<dir>\bin\rider64.exe`, or the same a level or two further down. The standalone installer puts
+// bin\ straight under the versioned folder; the Toolbox has historically kept a channel and a
+// version directory in between (`Rider\ch-0\<version>\bin`) and newer Toolbox layouts do not. Two
+// levels covers both without turning into a walk of the whole drive.
+//
+// `directory_iterator`'s error_code overload only covers CONSTRUCTION — the increment throws — so
+// the iterator is stepped by hand. An unreadable directory ends this branch of the scan and nothing
+// else; the caller has other roots to try.
+bool findRiderExe(const std::filesystem::path& dir, int depth, std::wstring& exeOut) {
+    const std::filesystem::path exe = dir / L"bin" / L"rider64.exe";
+    if (existsW(exe.wstring())) { exeOut = exe.wstring(); return true; }
+    if (depth <= 0) return false;
+
+    std::error_code ec;
+    std::filesystem::directory_iterator it(dir, ec);
+    const std::filesystem::directory_iterator end;
+    for (; !ec && it != end; it.increment(ec)) {
+        std::error_code entryEc;
+        if (!it->is_directory(entryEc) || entryEc) continue;
+        if (findRiderExe(it->path(), depth - 1, exeOut)) return true;
+    }
+    return false;
+}
+
 // Rider. Toolbox and the standalone installer disagree about the folder name and both version it,
 // so the directory is scanned rather than guessed — but nothing is reported unless `rider64.exe`
 // is actually on disk where the scan says. A name match alone would be a guess, and offering an
 // IDE that is not there is worse than not offering it.
+//
+// None of this has been exercised against a real install: no Rider is present on this machine, so
+// the roots below are what JetBrains documents and what the Toolbox is reported to use, not
+// something that has been seen to work. The failure mode is silence — Rider simply not offered.
 void findRider(std::vector<IdeInfo>& out) {
-    const std::wstring roots[] = {
-        envVar(L"LOCALAPPDATA") + L"\\Programs",
-        envVar(L"ProgramFiles") + L"\\JetBrains",
+    // Built from the environment rather than assumed, and a root is skipped when its variable is
+    // ABSENT: a 32-bit host has no %ProgramFiles(x86)%, and appending to an empty string would
+    // produce a relative path that the scan would then resolve against the editor's own directory.
+    std::vector<std::filesystem::path> roots;
+    const auto addRoot = [&roots](const std::wstring& base, const wchar_t* tail) {
+        if (!base.empty()) roots.emplace_back(base + tail);
     };
-    std::error_code ec;
-    for (const std::wstring& root : roots) {
-        if (root.size() <= 10) continue; // the environment variable was missing
-        for (const auto& e : std::filesystem::directory_iterator(root, ec)) {
-            if (ec) break;
-            if (!e.is_directory(ec)) continue;
-            const std::wstring leaf = e.path().filename().wstring();
-            if (leaf.find(L"Rider") == std::wstring::npos) continue;
-            const std::filesystem::path exe = e.path() / L"bin" / L"rider64.exe";
-            if (!existsW(exe.wstring())) continue;
+    const std::wstring localAppData = envVar(L"LOCALAPPDATA");
+    addRoot(localAppData, L"\\Programs");
+    addRoot(localAppData, L"\\JetBrains\\Toolbox\\apps"); // the Toolbox's own install root
+    addRoot(envVar(L"ProgramFiles"), L"\\JetBrains");
+    addRoot(envVar(L"ProgramFiles(x86)"), L"\\JetBrains");
+
+    for (const std::filesystem::path& root : roots) {
+        std::error_code ec;
+        std::filesystem::directory_iterator it(root, ec);
+        const std::filesystem::directory_iterator end;
+        for (; !ec && it != end; it.increment(ec)) {
+            std::error_code entryEc;
+            if (!it->is_directory(entryEc) || entryEc) continue;
+            if (!nameMentionsRider(it->path().filename().wstring())) continue;
+
+            std::wstring exe;
+            if (!findRiderExe(it->path(), 2, exe)) continue;
 
             IdeInfo ide;
             ide.kind = IdeKind::Rider;
             ide.name = "Rider";
-            ide.exePath = narrow(exe.wstring());
+            ide.exePath = narrow(exe);
             ide.canGoto = true;
             out.push_back(std::move(ide));
             return; // one is enough; a Toolbox machine can have three versions side by side
@@ -272,9 +359,19 @@ void startScan() {
     Registry& r = registry();
     r.worker = std::thread([&r] {
         std::vector<IdeInfo> list;
-        findVisualStudio(list);
-        findVsCode(list);
-        findRider(list);
+        // Nothing detection can hit is worth the editor for. This thread's exceptions have no one
+        // to catch them — an escaping one is std::terminate, so a filesystem error under someone's
+        // %LOCALAPPDATA% would take the whole process down while they were editing. Whatever was
+        // found before the throw is kept, and the shell entry below still makes the list usable.
+        try {
+            findVisualStudio(list);
+            findVsCode(list);
+            findRider(list);
+        } catch (const std::exception& e) {
+            AVER_WARN("[Editor] IDE detection stopped early: {}", e.what());
+        } catch (...) {
+            AVER_WARN("[Editor] IDE detection stopped early");
+        }
         list.push_back(shellEntry()); // always last, always present
         r.found = std::move(list);
         r.done.store(true, std::memory_order_release);
@@ -334,6 +431,23 @@ bool ideDetectionFinished() {
 }
 
 const IdeInfo& preferredIde() { return detectedIdes().front(); }
+
+const IdeInfo& preferredGotoIde() {
+    const std::vector<IdeInfo>& ides = detectedIdes();
+    // The two preferences differ on purpose. Opening a project is something Visual Studio does
+    // properly and is what someone with both installed usually means by "open my scripts", so that
+    // keeps the detection order. Landing a caret on a line is the opposite way round: VS Code's
+    // `--goto` is the only jump measured to work from cold on this machine, while devenv's
+    // /command runs before the document has loaded and leaves the caret where it was (see the
+    // Visual Studio case in openInIde). Sending every diagnostic click to the IDE whose jump is
+    // known not to arrive is the one outcome worth reordering for.
+    //
+    // Only VS Code is promoted. Rider's form is documented but untested here, so it is left where
+    // detection put it rather than moved up on a guess.
+    for (const IdeInfo& ide : ides)
+        if (ide.kind == IdeKind::VsCode) return ide;
+    return ides.front();
+}
 
 bool openInIde(const IdeInfo& ide, const std::string& file, int line, int col) {
     if (file.empty()) return false;
@@ -469,11 +583,32 @@ std::vector<BuildLine> parseBuildOutput(const std::string& output, const std::st
             bl.message = rest;
 
             // dotnet build prints each diagnostic where it happened and again under "Build
-            // FAILED.". Two clickable copies would make the list overstate how much is wrong.
+            // FAILED.", and the modal's header is these entries counted — so a surviving second
+            // copy is not merely a repeated row, it is a header that contradicts MSBuild's own
+            // "N Error(s)" line two rows below it.
+            //
+            // Two diagnostics are the same one when they point at the same place; one with NO
+            // position — the `CSC :` and `MSBUILD :` origins — has nothing but its text to be the
+            // same by, so that is what it is matched on. Restricted to diagnostics: ordinary
+            // output repeats itself legitimately and every line of it has to survive.
+            const std::string key =
+                bl.hasPosition()
+                    ? "pos|" + bl.file + "|" + std::to_string(bl.line) + "|" +
+                          std::to_string(bl.col) + "|" + bl.code + "|" + bl.message
+                    : "raw|" + trimmed(raw);
+            if (!seen.insert(key).second) continue;
+
+            // The file's LEAF, not the absolute path MSBuild emitted. The path is what pushed the
+            // message off the right edge of the panel; with it in the tooltip instead, the error
+            // itself fits on one clickable row.
             if (bl.hasPosition()) {
-                const std::string key = bl.file + "|" + std::to_string(bl.line) + "|" +
-                                        std::to_string(bl.col) + "|" + bl.code + "|" + bl.message;
-                if (!seen.insert(key).second) continue;
+                bl.label = std::filesystem::path(bl.file).filename().string();
+                bl.label += "(" + std::to_string(bl.line);
+                if (bl.col > 0) bl.label += "," + std::to_string(bl.col);
+                bl.label += "): ";
+                bl.label += bl.isError ? "error" : "warning";
+                if (!bl.code.empty()) bl.label += " " + bl.code;
+                bl.label += ": " + bl.message;
             }
         }
         out.push_back(std::move(bl));
