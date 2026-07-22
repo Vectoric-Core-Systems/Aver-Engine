@@ -464,8 +464,11 @@ void ToolsMenu::drawCsModal(const fmt::ProjectDesc& project, f32 dpi, CsKind kin
         error_.clear(); result_.clear();
         std::string path; bool madeCsproj = false;
         if (createScript(project, name_, effectiveKind, &path, &madeCsproj, &error_)) {
-            result_ = "Created " + path + (madeCsproj ? "  (+ Scripts.csproj)" : "");
+            // Close on success: the file is made, and createScript logs the path to the Output Log,
+            // so keeping the modal up would just be a dialog the user has to dismiss by hand. A
+            // FAILURE keeps it open, because the error only shows here.
             name_[0] = '\0';
+            ImGui::CloseCurrentPopup();
         }
     }
     ImGui::SameLine();
@@ -530,9 +533,12 @@ void ToolsMenu::drawCppModuleModal(f32 dpi) {
     if (ImGui::Button("Create Module", ImVec2(160.0f * dpi, 0))) {
         error_.clear(); result_.clear(); madeFiles_.clear(); cmakeHint_.clear();
         if (createCppModule(name_, purpose_, &madeFiles_, &error_)) {
-            result_ = "Created " + std::to_string(madeFiles_.size()) + " files:";
-            cmakeHint_ = "add_subdirectory(modules/" + std::string(name_) + ")";
+            // Log the CMake line before closing, so the one thing the user must still do by hand is
+            // in the Output Log rather than lost with the dialog.
+            AVER_INFO("[Editor] new C++ module '{}': {} files. Add to the top-level CMakeLists: add_subdirectory(modules/{})",
+                      name_, madeFiles_.size(), name_);
             name_[0] = '\0'; purpose_[0] = '\0';
+            ImGui::CloseCurrentPopup();
         }
     }
     ImGui::SameLine();
@@ -612,8 +618,14 @@ void ToolsMenu::drawCppClassModal(f32 dpi) {
     if ((ImGui::Button("Create Class", ImVec2(150.0f * dpi, 0)) || submitted) && mod) {
         error_.clear(); result_.clear(); madeFiles_.clear(); cmakeHint_.clear();
         if (createCppClass(*mod, name_, &madeFiles_, &cmakeHint_, &error_)) {
-            result_ = "Created in " + mod->dir + ":";
+            // Close on success; if the module's CMakeLists needs a line added, log it so it is not
+            // lost with the dialog.
+            if (!cmakeHint_.empty())
+                AVER_INFO("[Editor] new C++ class '{}' in {}. CMake: {}", name_, mod->dir, cmakeHint_);
+            else
+                AVER_INFO("[Editor] new C++ class '{}' in {}", name_, mod->dir);
             name_[0] = '\0';
+            ImGui::CloseCurrentPopup();
         }
     }
     ImGui::EndDisabled();
