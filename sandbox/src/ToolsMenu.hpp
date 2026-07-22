@@ -112,6 +112,7 @@ private:
 
     char name_[96] = {};            // shared by all four New ... modals; one at a time is open
     char purpose_[256] = {};        // New C++ Module only
+    int  scriptParent_ = 0;         // New C# Script: index into the parent-class picker (0 = AverBehaviour)
     std::string error_, result_;
     std::vector<std::string> madeFiles_;
     std::string cmakeHint_;         // the line the user must add by hand, if any

@@ -33,14 +33,34 @@ bool writeNewFile(const std::string& path, const std::string& text, std::string*
 bool scaffoldProject(const std::string& location, const std::string& name,
                      fmt::ProjectDesc& out, std::string* err);
 
-// What a generated `.cs` is FOR. Both land in the same folder and compile into the same assembly;
-// the difference is only whether the type has a lifecycle the engine drives. Kept as two items
-// rather than one template with the hooks commented out, because a behaviour must derive from
-// `AverBehaviour` to be discovered at all and that is not something to leave to a comment.
+// What a generated `.cs` is FOR — the base type it derives, which decides the hooks the engine
+// calls and (for the actor kinds) the gameplay flag its registry row gets. All of them compile into
+// the same assembly; the base class is how the COMPILER, not an attribute, decides which hooks a
+// script has, so a misspelt override is a build error rather than a method that silently never runs.
+//
+// Behaviour is the one that RUNS TODAY. The actor kinds compile against Aver.Framework but do not
+// tick yet — the framework's tick/discovery and its native ABI are steps 9-11 — so a scaffolded
+// Pawn builds green and then does nothing until that lands. The templates say so.
 enum class CsKind {
-    Behaviour,  // : AverBehaviour, with the OnStart/OnUpdate/OnShutdown hooks the engine calls
-    PlainClass, // no hooks — data, helpers, anything that is just C#
+    Behaviour,         // : AverBehaviour  — OnStart/OnUpdate/OnShutdown, runs today
+    Actor,             // : AverActor      — a thing in the world with a transform + lifecycle
+    Pawn,              // : AverPawn       — an Actor a controller can possess
+    PlayerController,  // : AverPlayerController — input + camera; possesses a pawn
+    GameMode,          // : AverGameMode   — per-world rules; names the default pawn/controller
+    GameInstance,      // : AverGameInstance — process-wide state that spans levels
+    PlainClass,        // no base, no hooks — data, helpers, anything that is just C#
 };
+
+// True for anything the engine drives by a lifecycle — Behaviour or any actor kind. A plain class
+// is the only kind that is not a "script".
+bool csKindIsScript(CsKind kind);
+
+// True for the framework actor kinds. These need the project to reference Aver.Framework, which is
+// why a project that scaffolds one gets that reference added to its `.csproj`.
+bool csKindIsActor(CsKind kind);
+
+// The human word for a kind, for menu labels and log lines ("Pawn", "GameMode", "script", "class").
+const char* csKindNoun(CsKind kind);
 
 // Write `<project>\Content\Scripts\<name>.cs`, plus the folder's `.csproj` if it is not there yet.
 // Never overwrites an existing `.cs`. `outPath` receives the file written; `outCsproj` is set when

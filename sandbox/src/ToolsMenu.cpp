@@ -403,15 +403,56 @@ void ToolsMenu::drawCsModal(const fmt::ProjectDesc& project, f32 dpi, CsKind kin
                                             ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::PopItemWidth();
     ImGui::TextDisabled("Becomes a C# class, so: letters, digits and underscores only.");
-    ImGui::TextDisabled(behaviour ? "OnStart / OnUpdate hooks included."
-                                  : "A plain class - no lifecycle hooks.");
+
+    // The parent-class picker, only on New C# Script. New C# Class is always a plain class, so it
+    // shows no picker. The order is deliberate: AverBehaviour first because it is the one that runs
+    // today, then the gameplay types top-down (Actor -> Pawn/Controller, then GameMode/Instance).
+    struct ParentOption { CsKind kind; const char* label; const char* blurb; };
+    static const ParentOption kParents[] = {
+        { CsKind::Behaviour,        "AverBehaviour",    "Raw hooks (OnStart/OnUpdate). The one that RUNS today." },
+        { CsKind::Actor,            "Actor",            "A thing in the world with a transform and a lifecycle." },
+        { CsKind::Pawn,             "Pawn",             "An Actor a controller can possess." },
+        { CsKind::PlayerController, "PlayerController", "Input + camera; possesses a Pawn." },
+        { CsKind::GameMode,         "GameMode",         "Per-world rules; names the default pawn + controller." },
+        { CsKind::GameInstance,     "GameInstance",     "Process-wide state; survives a level change." },
+    };
+    CsKind effectiveKind = CsKind::PlainClass;
+    if (behaviour) {
+        if (scriptParent_ < 0 || scriptParent_ >= (int)IM_ARRAYSIZE(kParents)) scriptParent_ = 0;
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Parent class");
+        ImGui::PushItemWidth(-1);
+        if (ImGui::BeginCombo("##parent", kParents[scriptParent_].label)) {
+            for (int i = 0; i < (int)IM_ARRAYSIZE(kParents); ++i) {
+                const bool sel = scriptParent_ == i;
+                if (ImGui::Selectable(kParents[i].label, sel)) scriptParent_ = i;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kParents[i].blurb);
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::PopItemWidth();
+        effectiveKind = kParents[scriptParent_].kind;
+        ImGui::TextDisabled("%s", kParents[scriptParent_].blurb);
+    } else {
+        ImGui::TextDisabled("A plain class - no lifecycle hooks.");
+    }
 
     ImGui::Spacing();
     ImGui::TextDisabled("Writes to %s", project.scriptsDir().c_str());
 
     ImGui::Spacing();
     ImGui::Separator();
-    explainScriptReach(behaviour);
+    if (csKindIsActor(effectiveKind)) {
+        // The one thing a scaffolded actor must not surprise anyone with: it compiles, but the
+        // runtime that would call its hooks is not built yet.
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.72f, 0.25f, 1));
+        ImGui::TextWrapped("This compiles, but does NOT tick yet - the actor runtime (per-frame tick, "
+                           "spawning, possession) is still being built. AverBehaviour scripts run today.");
+        ImGui::PopStyleColor();
+    } else {
+        explainScriptReach(behaviour);
+    }
     ImGui::Separator();
 
     showError(error_);
@@ -422,7 +463,7 @@ void ToolsMenu::drawCsModal(const fmt::ProjectDesc& project, f32 dpi, CsKind kin
     if (create || submitted) {
         error_.clear(); result_.clear();
         std::string path; bool madeCsproj = false;
-        if (createScript(project, name_, kind, &path, &madeCsproj, &error_)) {
+        if (createScript(project, name_, effectiveKind, &path, &madeCsproj, &error_)) {
             result_ = "Created " + path + (madeCsproj ? "  (+ Scripts.csproj)" : "");
             name_[0] = '\0';
         }
@@ -910,40 +951,80 @@ void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi) {
         default:                     col = IM_COL32(110,110,110,255); tip = "No project open."; break;
     }
 
+    // UE-style compile icon: a grid of blocks — NEAT when the code is compiled, SCATTERED when it
+    // is not — with the status badge in the corner. This is Unreal's compile-button metaphor rather
+    // than a bare glyph: an organised grid reads as "built", a loose one as "needs a compile".
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float r  = 8.0f * dpi;
-    const float h  = ImGui::GetFrameHeight();
+    const float h   = ImGui::GetFrameHeight();
+    const float box = 0.72f * h;                       // the icon's square extent
+    const float pad = (h - box) * 0.5f;
     const ImVec2 org = ImGui::GetCursorScreenPos();
-    const ImVec2 ctr(org.x + r, org.y + h * 0.5f);
+    const ImVec2 tl(org.x, org.y + pad);               // top-left of the block grid
     const ImU32 fg = IM_COL32(255, 255, 255, 255);
-    const float th = 2.2f * dpi;
+    const float th = 2.0f * dpi;
 
-    dl->AddCircleFilled(ctr, r, col);   // first: AddCircleFilled reuses the path buffer internally
+    const bool dim = scriptStatus_ == ScriptStatus::NoProject;
+    const ImU32 blockCol = dim ? IM_COL32(95, 95, 95, 255) : IM_COL32(188, 188, 188, 255);
+    // Neat when there is nothing known-stale (built, building, or no project); scattered otherwise.
+    // The scatter is a FIXED table in fractions of a cell, so the blocks never jitter frame to frame.
+    const bool neat = scriptStatus_ == ScriptStatus::UpToDate
+                   || scriptStatus_ == ScriptStatus::Building
+                   || scriptStatus_ == ScriptStatus::NoProject;
+    static const float kScatterX[16] = {
+        -0.38f, -0.16f,  0.10f, -0.04f,
+        -0.22f,  0.06f, -0.12f,  0.00f,
+         0.10f, -0.24f,  0.00f,  0.00f,
+        -0.14f,  0.04f,  0.00f,  0.00f,
+    };
+    static const float kScatterY[16] = {
+        -0.30f, -0.46f, -0.22f,  0.00f,
+        -0.10f, -0.32f,  0.05f,  0.00f,
+         0.12f, -0.06f,  0.00f,  0.00f,
+         0.05f,  0.00f,  0.00f,  0.00f,
+    };
+    const float step = box * 0.25f;
+    const float cell = box * 0.19f;
+    for (int rr = 0; rr < 4; ++rr) {
+        for (int cc = 0; cc < 4; ++cc) {
+            const int i = rr * 4 + cc;
+            const float ox = neat ? 0.0f : kScatterX[i] * step;
+            const float oy = neat ? 0.0f : kScatterY[i] * step;
+            const ImVec2 p(tl.x + cc * step + ox, tl.y + rr * step + oy);
+            dl->AddRectFilled(p, ImVec2(p.x + cell, p.y + cell), blockCol, 1.0f * dpi);
+        }
+    }
+
+    // Corner badge, overlapping the grid's bottom-right the way Unreal's status pip sits.
+    const float br = box * 0.30f;
+    const ImVec2 bc(tl.x + box - br * 0.5f, tl.y + box - br * 0.5f);
+    dl->AddCircleFilled(bc, br, col);
     if (scriptStatus_ == ScriptStatus::Building) {
-        // A rotating three-quarter arc, the universal "working" cue. Built AFTER the disc so the
-        // fill does not clear it.
+        // A rotating three-quarter arc, built AFTER the disc so the fill does not clear the path.
         const float t = (float)ImGui::GetTime();
         const float pi = 3.14159265358979f;
         dl->PathClear();
         const int seg = 16;
-        for (int i = 0; i <= seg; ++i) {
-            const float a = t * 4.0f + (float)i / seg * (pi * 1.5f);
-            dl->PathLineTo(ImVec2(ctr.x + std::cos(a) * r * 0.72f, ctr.y + std::sin(a) * r * 0.72f));
+        for (int k = 0; k <= seg; ++k) {
+            const float a = t * 4.0f + (float)k / seg * (pi * 1.5f);
+            dl->PathLineTo(ImVec2(bc.x + std::cos(a) * br * 0.60f, bc.y + std::sin(a) * br * 0.60f));
         }
         dl->PathStroke(fg, 0, th);
     } else if (scriptStatus_ == ScriptStatus::UpToDate) {
-        dl->AddLine(ImVec2(ctr.x - r*0.42f, ctr.y + r*0.02f), ImVec2(ctr.x - r*0.06f, ctr.y + r*0.38f), fg, th);
-        dl->AddLine(ImVec2(ctr.x - r*0.06f, ctr.y + r*0.38f), ImVec2(ctr.x + r*0.46f, ctr.y - r*0.40f), fg, th);
+        dl->AddLine(ImVec2(bc.x - br*0.42f, bc.y + br*0.02f), ImVec2(bc.x - br*0.06f, bc.y + br*0.40f), fg, th);
+        dl->AddLine(ImVec2(bc.x - br*0.06f, bc.y + br*0.40f), ImVec2(bc.x + br*0.48f, bc.y - br*0.42f), fg, th);
     } else if (scriptStatus_ == ScriptStatus::Failed) {
-        dl->AddRectFilled(ImVec2(ctr.x - r*0.52f, ctr.y - r*0.16f), ImVec2(ctr.x + r*0.52f, ctr.y + r*0.16f), fg, 1.5f * dpi);
+        dl->AddRectFilled(ImVec2(bc.x - br*0.52f, bc.y - br*0.17f), ImVec2(bc.x + br*0.52f, bc.y + br*0.17f), fg, 1.5f * dpi);
     } else if (scriptStatus_ == ScriptStatus::Stale) {
+        // "?" sized to the badge, not the 48px UI font: the AddText size overload plus CalcTextSizeA
+        // at that size centre it in the pip.
         const char* q = "?";
-        const ImVec2 ts = ImGui::CalcTextSize(q);
-        dl->AddText(ImVec2(ctr.x - ts.x * 0.5f, ctr.y - ts.y * 0.5f), IM_COL32(35, 35, 35, 255), q);
-    } // NoProject: a bare grey disc
+        const float fs = br * 1.7f;
+        const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, 1000.0f, 0.0f, q);
+        dl->AddText(ImGui::GetFont(), fs, ImVec2(bc.x - ts.x * 0.5f, bc.y - ts.y * 0.5f), IM_COL32(30, 30, 30, 255), q);
+    } // NoProject: a bare grey pip
 
-    // Reserve the badge's box so anything after it lays out clear of the disc, and hang the tooltip.
-    ImGui::Dummy(ImVec2(r * 2.0f, h));
+    // Reserve the icon's box (grid + badge overhang) so later items lay out clear, and hang the tooltip.
+    ImGui::Dummy(ImVec2(box * 1.2f, h));
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
 }
 #else

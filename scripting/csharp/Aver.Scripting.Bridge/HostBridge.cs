@@ -236,11 +236,12 @@ public static class HostBridge
         string file = Path.GetFileName(path);
         try
         {
-            // The bridge and the binding assembly live next to the executable, but a user's build
-            // output may well have copied them alongside their own DLL. Loading a second copy into
-            // the collectible context would give AverBehaviour two identities and match nothing.
+            // The engine's own assemblies, which a user's build output copies alongside their own
+            // DLL. Loading a second copy into the collectible context would give their types
+            // (AverBehaviour, AverActor, Entity) two identities and match nothing. Aver.Framework and
+            // Aver.Scene join the list now that scripts reference them for the actor types.
             string simple = Path.GetFileNameWithoutExtension(path);
-            if (simple is "Aver.Scripting" or "Aver.Scripting.Bridge")
+            if (simple is "Aver.Scripting" or "Aver.Scripting.Bridge" or "Aver.Framework" or "Aver.Scene")
                 return;
 
             Assembly asm = s_context!.LoadFromFileCopy(path);
@@ -302,7 +303,16 @@ public static class HostBridge
         {
             if (type.IsAbstract || !type.IsClass) continue;
             if (type.GetMethod("OnStart", Type.EmptyTypes) is null &&
-                type.GetMethod("OnUpdate", new[] { typeof(float) }) is null)
+                type.GetMethod("OnUpdate", new[] { typeof(float) }) is null &&
+                type.GetMethod("OnTick", new[] { typeof(float) }) is null)
+                continue;
+
+            // A gameplay class (Actor/Pawn/GameMode...) is an INTENTIONAL non-behaviour, not a
+            // near-miss, and it carries an Aver.Framework attribute. Checked by attribute NAME
+            // because the bridge does not, and must not, reference Aver.Framework — a name match
+            // over metadata needs no such reference and cannot pull the wrong assembly in.
+            if (type.GetCustomAttributesData().Any(a =>
+                    a.AttributeType.Name is "AverClassAttribute" or "AverGameModeAttribute"))
                 continue;
 
             Emit((int)Log.Level.Warn,
