@@ -96,12 +96,29 @@ internal static class SceneNative
     [DllImport(Lib)] internal static extern int aver_scene_create();
     [DllImport(Lib)] internal static extern int aver_scene_destroy(int e);
     [DllImport(Lib)] internal static extern int aver_scene_add_component(int e, int component);
+    [DllImport(Lib)] internal static extern int aver_scene_has_component(int e, int component);
     [DllImport(Lib)] internal static extern int aver_scene_set_parent(int child, int parent);
 
+    // hierarchy queries + enumeration (the gameplay API's Entity.Parent/Children and Game.ForEachActor).
+    [DllImport(Lib)] internal static extern int aver_scene_parent(int e);
+    [DllImport(Lib)] internal static extern int aver_scene_first_child(int e);
+    [DllImport(Lib)] internal static extern int aver_scene_next_sibling(int e);
+    [DllImport(Lib)] internal static extern int aver_scene_child_count(int e);
+    [DllImport(Lib)] internal static extern int aver_scene_count();
+    [DllImport(Lib)] internal static extern int aver_scene_at(int index);
+
+    // Typed field get/set over the whole component surface — the generic field accessors and the typed
+    // component conveniences (Visible, Tags, Light, SetMesh...) are all built on these.
+    [DllImport(Lib)] internal static extern float aver_scene_get_f32(int e, int f);
+    [DllImport(Lib)] internal static extern int aver_scene_set_f32(int e, int f, float v);
+    [DllImport(Lib)] internal static extern int aver_scene_get_i32(int e, int f);
+    [DllImport(Lib)] internal static extern int aver_scene_set_i32(int e, int f, int v);
+    [DllImport(Lib)] internal static extern long aver_scene_get_i64(int e, int f);
+    [DllImport(Lib)] internal static extern int aver_scene_set_i64(int e, int f, long v);
     [DllImport(Lib)] internal static extern int aver_scene_get_vec(int e, int f, float[] outv);
     [DllImport(Lib)] internal static extern int aver_scene_set_vec(int e, int f, float[] v);
-    [DllImport(Lib)] internal static extern int aver_scene_set_i32(int e, int f, int v);
-    [DllImport(Lib)] internal static extern int aver_scene_set_i64(int e, int f, long v);
+    [DllImport(Lib)] internal static extern IntPtr aver_scene_get_str(int e, int f);
+    [DllImport(Lib)] internal static extern int aver_scene_set_str(int e, int f, [MarshalAs(UnmanagedType.LPUTF8Str)] string v);
 
     [DllImport(Lib)] internal static extern int aver_scene_valid(int e);
     [DllImport(Lib)] internal static extern long aver_scene_object_id(int e);

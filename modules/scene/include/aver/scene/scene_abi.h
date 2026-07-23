@@ -165,6 +165,26 @@ AVER_SCENE_ABI int32_t aver_scene_find(const char* name);
  * relative to its parents. Returns 1, or 0 leaving out16 untouched for a dead handle or null out. */
 AVER_SCENE_ABI int32_t aver_scene_world_matrix(int32_t e, float* out16);
 
+/* 1 if `e` currently carries component `component` (a AVER_SCENE_COMP_* id), else 0. */
+AVER_SCENE_ABI int32_t aver_scene_has_component(int32_t e, int32_t component);
+
+/* ---- hierarchy queries (the setters live in "entity lifetime" above) ---- */
+/* Immediate parent of `e`, or 0 for a root or a stale handle. */
+AVER_SCENE_ABI int32_t aver_scene_parent(int32_t e);
+/* First child of `e`, or 0. Walk siblings with aver_scene_next_sibling to enumerate all children. */
+AVER_SCENE_ABI int32_t aver_scene_first_child(int32_t e);
+/* Next sibling under the same parent, or 0 when `e` is the last child. */
+AVER_SCENE_ABI int32_t aver_scene_next_sibling(int32_t e);
+/* Number of immediate children of `e`. */
+AVER_SCENE_ABI int32_t aver_scene_child_count(int32_t e);
+
+/* ---- enumeration ---- */
+/* Number of LIVE entities. Indices into aver_scene_at are dense over these and SHIFT on the next flush,
+ * so treat a (count, at) walk as valid only within the frame it is taken. */
+AVER_SCENE_ABI int32_t aver_scene_count(void);
+/* The live entity at dense `index` in [0, aver_scene_count()), or 0 out of range. */
+AVER_SCENE_ABI int32_t aver_scene_at(int32_t index);
+
 /* ---- content resolution at bind time ---- */
 /* Resolve a material NAME to a stable, positive i32 handle within this process; 0 for an empty name.
  * `name0` is the content-pack id (0 == default pack). Materials belong to Aver.Render.PBR, which this

@@ -27,10 +27,15 @@ public sealed class DemoGameMode : AverGameMode
     public override void OnBeginPlay(BeginReason reason)
     {
         Log.Info($"[DemoGameMode] OnBeginPlay reason={reason} entity={Self.Handle}");
-        // A GameMode that spawns gameplay content when play begins — the same shape as GM_Sandbox
-        // spawning its cars. This extra actor is NOT one of the session roots, so it is the case Stop
-        // must still tear down: on end_play it gets OnEndPlay and leaves the world like everything else.
-        Spawn<Sphere>(new Vec3(0f, -3f, 1f));
+        // A GameMode that spawns gameplay content when play begins — the same shape as GM_Sandbox spawning
+        // its cars. Exercises the spawn overloads: a rotated sphere, then a second sphere ATTACHED to it as
+        // a child. Both are NOT session roots, so they are exactly what Stop must still tear down.
+        Sphere? first = Spawn<Sphere>(new Vec3(0f, -3f, 1f), new Rot(45f, 0f, 0f));
+        if (first is not null)
+        {
+            Sphere? child = SpawnAttached<Sphere>(first.Self, new Vec3(0f, 0f, 2f));
+            Log.Info($"[DemoGameMode] spawned a rotated sphere + a child; first now has {first.Self.ChildCount} child(ren), child parent='{child?.Self.Parent.Name}'");
+        }
     }
 
     /// <summary>Fires once the player's controller has entered under this mode — the classic place to spawn
@@ -80,6 +85,15 @@ public sealed class DemoPawn : AverPawn
             DemoController? ctrl = ControllerAs<DemoController>();
             Log.Info($"[DemoPawn] play API: state={Game.State}, mode='{mode?.Self.Name}', " +
                      $"instance='{Game.Instance.Name}', controller='{ctrl?.Self.Name}', worldPos={Self.WorldPosition}");
+
+            // Object-model API: tag myself, query the world, and read a component field. Tags auto-add the
+            // component; ActorsOf<T> and WithTag scan the live world; Visible reads CMeshRenderer.flags.
+            const uint Team = 0x1;
+            Self.AddTag(Team);
+            int spheres = 0; foreach (var _ in Game.ActorsOf<Sphere>()) spheres++;
+            int tagged = 0; foreach (var _ in Game.WithTag(Team)) tagged++;
+            Log.Info($"[DemoPawn] object API: visible={Self.Visible}, tag set={Self.HasTag(Team)}, " +
+                     $"live Spheres={spheres}, entities tagged Team={tagged}");
         }
         if (++_ticks <= 3) Log.Info($"[DemoPawn] OnTick #{_ticks} dt={dt:F4}");
     }

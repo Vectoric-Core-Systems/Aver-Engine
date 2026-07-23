@@ -65,4 +65,38 @@ public static class Game
 
     /// <summary>The actor named <paramref name="name"/> as <typeparamref name="T"/>, or null.</summary>
     public static T? FindActor<T>(string name) where T : AverActor => Actors.Get<T>(Find(name));
+
+    // --- iteration / queries. Each is a linear scan over the live world taken THIS frame; do not spawn or
+    //     destroy while enumerating one (the dense order shifts on the next flush). ---
+
+    /// <summary>Every live actor in the world — the entities a gameplay class owns, plain scene entities
+    /// excluded.</summary>
+    public static IEnumerable<Entity> AllActors()
+    {
+        int n = SceneNative.aver_scene_count();
+        for (int i = 0; i < n; i++)
+        {
+            Entity e = new(SceneNative.aver_scene_at(i));
+            if (e.IsActor) yield return e;
+        }
+    }
+
+    /// <summary>Every live actor whose managed instance is a <typeparamref name="T"/> — e.g. all Enemies.</summary>
+    public static IEnumerable<T> ActorsOf<T>() where T : AverActor
+    {
+        foreach (Entity e in AllActors())
+            if (Actors.Get<T>(e) is { } actor)
+                yield return actor;
+    }
+
+    /// <summary>Every live entity carrying ALL of the tag bits in <paramref name="mask"/>.</summary>
+    public static IEnumerable<Entity> WithTag(uint mask)
+    {
+        int n = SceneNative.aver_scene_count();
+        for (int i = 0; i < n; i++)
+        {
+            Entity e = new(SceneNative.aver_scene_at(i));
+            if (e.IsValid && e.HasTag(mask)) yield return e;
+        }
+    }
 }

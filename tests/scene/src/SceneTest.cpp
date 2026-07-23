@@ -917,6 +917,35 @@ static void testSceneAbiQuery(World& world) {
           "an unrotated, unscaled root reads an identity basis and w");
     check(aver_scene_world_matrix(0, m) == 0, "world_matrix rejects an invalid handle");
     check(aver_scene_world_matrix(b, nullptr) == 0, "world_matrix rejects a null out buffer");
+
+    // hierarchy queries: parent / first_child / next_sibling / child_count.
+    const int32_t parent = aver_scene_create();
+    const int32_t ch1 = aver_scene_create();
+    const int32_t ch2 = aver_scene_create();
+    aver_scene_set_parent(ch1, parent);
+    aver_scene_set_parent(ch2, parent);
+    check(aver_scene_parent(ch1) == parent, "parent() reads the parent that was set");
+    check(aver_scene_parent(parent) == 0, "a root has no parent");
+    check(aver_scene_child_count(parent) == 2, "child_count counts both children");
+    int seen = 0; bool sawCh1 = false, sawCh2 = false;
+    for (int32_t c = aver_scene_first_child(parent); c != 0; c = aver_scene_next_sibling(c)) {
+        ++seen; if (c == ch1) sawCh1 = true; if (c == ch2) sawCh2 = true;
+    }
+    check(seen == 2 && sawCh1 && sawCh2, "first_child + next_sibling enumerate every child exactly once");
+
+    // has_component + the enumeration surface count/at.
+    const int32_t he = aver_scene_create();
+    check(aver_scene_has_component(he, AVER_SCENE_COMP_LOCAL) == 1, "a fresh entity has CLocal");
+    check(aver_scene_has_component(he, AVER_SCENE_COMP_MESH_RENDERER) == 0, "but not a mesh renderer yet");
+    check(aver_scene_add_component(he, AVER_SCENE_COMP_MESH_RENDERER) == 1, "add_component attaches one");
+    check(aver_scene_has_component(he, AVER_SCENE_COMP_MESH_RENDERER) == 1, "has_component now sees it");
+
+    const int32_t n = aver_scene_count();
+    check(n > 0, "count() is positive after creating entities");
+    check(aver_scene_at(-1) == 0 && aver_scene_at(n) == 0, "at() rejects out-of-range indices");
+    bool foundHe = false;
+    for (int32_t i = 0; i < n; ++i) if (aver_scene_at(i) == he) { foundHe = true; break; }
+    check(foundHe, "at() enumerates a live entity that was created");
 }
 
 // ---------------------------------------------------------------------------------------------- main

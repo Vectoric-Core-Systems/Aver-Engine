@@ -95,6 +95,39 @@ public abstract class AverActor
     protected static T? Spawn<T>(Vec3 at) where T : AverActor
         => Actors.Get<T>(Spawn(ActorClass.Find(ClassNames.Of(typeof(T))), at));
 
+    /// <summary>Spawn <paramref name="c"/> at a position and orientation.</summary>
+    protected static Entity Spawn(ActorClass c, Vec3 at, Rot rotation)
+    {
+        Quat q = rotation.ToQuat();
+        return new Entity(Fw.aver_fw_spawn(c.Handle, null,
+            new[] { at.X, at.Y, at.Z }, new[] { q.X, q.Y, q.Z, q.W }, null));
+    }
+
+    /// <summary>Spawn <paramref name="c"/> with a full transform (position, orientation, scale).</summary>
+    protected static Entity Spawn(ActorClass c, Vec3 at, Rot rotation, Vec3 scale)
+    {
+        Quat q = rotation.ToQuat();
+        return new Entity(Fw.aver_fw_spawn(c.Handle, null,
+            new[] { at.X, at.Y, at.Z }, new[] { q.X, q.Y, q.Z, q.W }, new[] { scale.X, scale.Y, scale.Z }));
+    }
+
+    /// <summary>Spawn <typeparamref name="T"/> at a position and orientation, returning the live instance.</summary>
+    protected static T? Spawn<T>(Vec3 at, Rot rotation) where T : AverActor
+        => Actors.Get<T>(Spawn(ActorClass.Find(ClassNames.Of(typeof(T))), at, rotation));
+
+    /// <summary>Spawn <typeparamref name="T"/> with a full transform, returning the live instance.</summary>
+    protected static T? Spawn<T>(Vec3 at, Rot rotation, Vec3 scale) where T : AverActor
+        => Actors.Get<T>(Spawn(ActorClass.Find(ClassNames.Of(typeof(T))), at, rotation, scale));
+
+    /// <summary>Spawn <typeparamref name="T"/> as a CHILD of <paramref name="parent"/> at a local position,
+    /// returning the live instance. Its transform is then relative to the parent.</summary>
+    protected static T? SpawnAttached<T>(Entity parent, Vec3 localPosition) where T : AverActor
+    {
+        Entity e = Spawn(ActorClass.Find(ClassNames.Of(typeof(T))), localPosition);
+        if (e.IsValid) e.SetParent(parent);
+        return Actors.Get<T>(e);
+    }
+
     /// <summary>Destroy THIS actor now: OnEndPlay -> unbind runs, and the world destroy is deferred to the
     /// next flush. Safe from any hook (a Destroy() inside OnEndPlay does not double-fire).</summary>
     protected void Destroy() => Fw.aver_fw_destroy(Self.Handle);

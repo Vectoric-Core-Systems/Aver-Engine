@@ -351,6 +351,35 @@ int32_t aver_scene_world_matrix(int32_t e, float* out16) {
     return 1;
 }
 
+int32_t aver_scene_has_component(int32_t e, int32_t component) {
+    return world().hasComponent(toEntity(e), static_cast<u32>(component)) ? 1 : 0;
+}
+
+int32_t aver_scene_parent(int32_t e) {
+    return static_cast<int32_t>(world().parent(toEntity(e)));
+}
+
+int32_t aver_scene_first_child(int32_t e) {
+    return static_cast<int32_t>(world().firstChild(toEntity(e)));
+}
+
+int32_t aver_scene_next_sibling(int32_t e) {
+    return static_cast<int32_t>(world().nextSibling(toEntity(e)));
+}
+
+int32_t aver_scene_child_count(int32_t e) {
+    return static_cast<int32_t>(world().childCount(toEntity(e)));
+}
+
+int32_t aver_scene_count(void) {
+    return static_cast<int32_t>(world().count());
+}
+
+int32_t aver_scene_at(int32_t index) {
+    if (index < 0 || static_cast<u32>(index) >= world().count()) return 0;
+    return static_cast<int32_t>(world().at(static_cast<u32>(index)));
+}
+
 // ---- content resolution ----------------------------------------------------------------------------
 
 int32_t aver_scene_material(int32_t name0, const char* name) {
