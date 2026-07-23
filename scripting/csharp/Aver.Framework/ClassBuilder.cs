@@ -30,6 +30,13 @@ public sealed class ClassBuilder
     private readonly int _c;
     internal ClassBuilder(int c) => _c = c;
 
+    // Captured for the bridge after it runs Configure: whether the class asked to tick, and in which
+    // group. The bridge buckets an actor's instances by tick group so tick_all(group) reaches only the
+    // actors in that group — and it reads the group off the builder it just handed to Configure rather
+    // than through a native getter for a value it wrote a moment ago.
+    internal bool WantsTick { get; private set; }
+    internal int TickGroupId { get; private set; }
+
     /// <summary>
     /// Give the class's own entity a mesh. <paramref name="meshPath"/> is hashed to the I64 ObjectId the
     /// field stores; <paramref name="material"/>, if given, is resolved to its I32 handle. An empty
@@ -70,5 +77,7 @@ public sealed class ClassBuilder
     {
         Fw.aver_fw_class_set_flags(_c, Fw.aver_fw_class_get_flags(_c) | ClassFlags.Ticks);
         Fw.aver_fw_class_set_tick(_c, (int)group, order);
+        WantsTick = true;
+        TickGroupId = (int)group;
     }
 }

@@ -26,6 +26,11 @@
 #include "aver/scripting/ScriptHost.hpp" // in-process CLR host; declines when .NET is absent
 #endif
 
+#if AVER_MODULE_FRAMEWORK
+#include "aver/framework/framework_abi.h"   // aver_fw_class_find / aver_fw_spawn (the --spawn-test path)
+#include "aver/framework/framework_hooks.h" // aver_fw_tick — drive the managed tick groups per frame
+#endif
+
 #if AVER_WITH_IMGUI
 #include "imgui.h"
 #include "imgui_internal.h" // DockBuilder* (docking layout is built in code: IniFilename is null)
@@ -446,7 +451,9 @@ public:
         // already logged the reason.
         {
             scripting::HostDesc hd;
-            hd.bridgeDir = executableDir();
+            // The managed bridge is staged in bin/Scripting (step 11), not bin/: its managed Aver.Framework
+            // /Aver.Scene copies share a file name with the native DLLs beside the exe and would collide.
+            hd.bridgeDir = executableDir() + "\\Scripting";
             hd.scriptsDir = resolveScriptsDir();
             scripts_.init(hd);
 
@@ -528,6 +535,18 @@ public:
         // changes this frame is what gets drawn this frame rather than next. Free and silent when
         // the host declined or when no scripts were found.
         scripts_.update(t.dt);
+#endif
+#if AVER_MODULE_FRAMEWORK
+        // Drive the managed ACTOR tick from the app frame loop, not from the scripting host. The tick
+        // GROUPS are a frame-structure concern (they bracket the physics step: PrePhysics -> Physics ->
+        // PostPhysics), which the app owns and the generic script host has no business knowing; and
+        // aver_fw_tick is a NATIVE framework export, distinct from the bridge's Update above. One call
+        // per group per frame, in order — the framework makes exactly one managed tick_all(group) per
+        // call, and the bridge walks its own dense list behind it. Harmless every frame with no actors
+        // spawned: with no managed dispatch installed, or empty tick buckets, this is a guarded no-op.
+        maybeSpawnTestActor();   // one-shot --spawn-test, after scripts have declared their classes
+        for (i32 g = 0; g < AVER_FW_TICK_COUNT; ++g)
+            aver_fw_tick(g, t.dt);
 #endif
         // The geometry path is a DEVICE setting, not a feature's: it decides how every draw reaches
         // the rasteriser. Pushed OUTSIDE the module guard, or a build without Voxi could never
@@ -668,6 +687,7 @@ public:
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
     void setScriptsDir(std::string d) { scriptsDir_ = std::move(d); }            // --scripts <dir>
+    void setSpawnTest(std::string cls) { spawnTestClass_ = std::move(cls); }      // --spawn-test <ClassName>
     void setProjectPath(std::string p) { projectPath_ = std::move(p); }          // <path>.ocproject
     // Arm the start screen. Only ever true for an interactive launch with no project: the
     // verification harness drives the editor with --frames and reads one probe pixel, so a screen
@@ -732,6 +752,44 @@ private:
                       (collected ? "" : " (the previous load context is still finalising)");
         }
         return true;
+    }
+#endif
+
+#if AVER_MODULE_FRAMEWORK
+    // ---- HEADLESS TEST TRIGGER (--spawn-test <ClassName>) ---------------------------------------
+    // There is no Play button yet, so this is the minimal, clearly-marked way to prove the C# actor
+    // loop fires: once, after scripts have loaded (so the bridge has declared the class), find the
+    // named class and spawn one. The native spawn dispatches bind -> build_models -> begin_play up
+    // into the bridge, and the per-group aver_fw_tick above then drives OnTick each frame. A few frames
+    // later it destroys the actor once, so end_play -> unbind runs through the bridge too — the whole
+    // lifecycle is observable in the log. NOT a shipping path: it is gated entirely behind a
+    // command-line flag the editor never sets itself.
+    void maybeSpawnTestActor() {
+        if (spawnTestClass_.empty()) return;
+
+        if (!spawnTestDone_) {
+            spawnTestDone_ = true;   // spawn is one shot regardless of outcome, so a bad name does not spam
+            const int32_t c = aver_fw_class_find(spawnTestClass_.c_str());
+            if (c == 0) {
+                AVER_WARN("[spawn-test] no class named '{}' is declared - is the script assembly loaded? "
+                          "(pass --scripts <dir> pointing at the built actor assembly)", spawnTestClass_);
+                return;
+            }
+            spawnTestEntity_ = aver_fw_spawn(c, "spawn-test-instance", nullptr, nullptr, nullptr);
+            if (spawnTestEntity_ == 0)
+                AVER_WARN("[spawn-test] class '{}' failed to spawn", spawnTestClass_);
+            else
+                AVER_INFO("[spawn-test] spawned '{}' as entity {} - watch for its OnBeginPlay/OnTick lines",
+                          spawnTestClass_, spawnTestEntity_);
+            return;
+        }
+
+        // Tick for a few frames, then destroy once so OnEndPlay is observable too.
+        if (spawnTestEntity_ != 0 && ++spawnTestFrames_ == 3) {
+            AVER_INFO("[spawn-test] destroying entity {} - watch for its OnEndPlay line", spawnTestEntity_);
+            aver_fw_destroy(spawnTestEntity_);
+            spawnTestEntity_ = 0;
+        }
     }
 #endif
 
@@ -1608,6 +1666,10 @@ private:
     bool useWarp_=false;             // --warp: run on the D3D12 software rasteriser
     bool debugLayer_=false;          // --debug-layer: validate every graphics call (a real per-call tax)
     std::string scriptsDir_;         // --scripts <dir>: where to look for user script assemblies
+    std::string spawnTestClass_;     // --spawn-test <ClassName>: headless actor-loop test trigger
+    bool spawnTestDone_=false;       // the spawn is one-shot, done on the first frame scripts are ready
+    int32_t spawnTestEntity_=0;      // the spawned test entity, destroyed a few frames later
+    int spawnTestFrames_=0;          // frames since the test spawn, so the destroy is one-shot too
     // Project browser + the project it produced. `browserActive_` is false for every automated
     // run, so the oracle never sees the start screen.
     editor::ProjectBrowser browser_;
@@ -1656,7 +1718,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; std::string beam, shot, project, scriptsDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; std::string beam, shot, project, scriptsDir, spawnTest; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -1695,6 +1757,7 @@ Application* createApplication(int argc, char** argv) {
         // absolute; the default (<exe>\Scripts) does not exist in a clean build, so no gate loads
         // anything. `--scripts SampleScripts` picks up the staged sample behaviour.
         else if (!std::strcmp(argv[i],"--scripts") && i+1<argc) scriptsDir=argv[++i];
+        else if (!std::strcmp(argv[i],"--spawn-test") && i+1<argc) spawnTest=argv[++i];
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
         else if (!std::strcmp(argv[i],"--tool") && i+1<argc) {
@@ -1734,6 +1797,7 @@ Application* createApplication(int argc, char** argv) {
     app->setMsOverride(ms);
     app->setProbe(probeX, probeY);
     app->setScriptsDir(scriptsDir);
+    app->setSpawnTest(spawnTest);
     return app;
 }
 

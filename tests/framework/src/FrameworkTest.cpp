@@ -348,16 +348,28 @@ struct DispatchLog {
     int32_t endReason = -1;
     bool    endSawLiveEntity = false;   // was the entity still valid at hook time?
     int32_t endClass = -1;              // what class_of(e) resolved to when endPlay fired
-    int     bindCount = 0;              // times the framework called bind()   — step 10 wires none
-    int     unbindCount = 0;            // times the framework called unbind() — step 10 wires none
+    int     bindCount = 0;              // times the framework called bind()         — step 11 wires it
+    int     unbindCount = 0;            // times the framework called unbind()       — step 11 wires it
+    int     buildCount = 0;             // times the framework called build_models() — step 11 wires it
+    int32_t bindOrder = 0;              // monotonic call order, to pin bind < build_models < beginPlay
+    int32_t buildOrder = 0;
+    int32_t beginOrder = 0;
+    int32_t endOrder = 0;               // and end_play < unbind on the destroy edge
+    int32_t unbindOrder = 0;
     void reset() { *this = DispatchLog{}; }
 };
 static DispatchLog g_disp;
+static int32_t g_dispSeq = 0;   // shared monotonic counter the stand-ins stamp their call order from
 
 static void AVER_FW_CALL standInBeginPlay(aver_entity e, int32_t reason) {
     ++g_disp.beginCount;
     g_disp.beginEntity = e;
     g_disp.beginReason = reason;
+    g_disp.beginOrder = ++g_dispSeq;
+}
+static void AVER_FW_CALL standInBuildModels(aver_entity /*e*/) {
+    ++g_disp.buildCount;
+    g_disp.buildOrder = ++g_dispSeq;
 }
 static void AVER_FW_CALL standInTickAll(int32_t group, float dt) {
     ++g_disp.tickCount;
@@ -375,13 +387,16 @@ static void AVER_FW_CALL standInEndPlay(aver_entity e, int32_t reason) {
     // forgetClass — and record the (trivially-true-under-deferred-destroy) valid() flag alongside it.
     g_disp.endSawLiveEntity = World::instance().valid(static_cast<Entity>(static_cast<uint32_t>(e)));
     g_disp.endClass = aver_fw_class_of(e);
+    g_disp.endOrder = ++g_dispSeq;
 }
 static int32_t AVER_FW_CALL standInBind(int64_t /*classNameHash*/, aver_entity /*e*/) {
     ++g_disp.bindCount;
+    g_disp.bindOrder = ++g_dispSeq;
     return 1;   // 1 == a managed instance now exists (a real bridge constructs+binds it here)
 }
 static void AVER_FW_CALL standInUnbind(aver_entity /*e*/) {
     ++g_disp.unbindCount;
+    g_disp.unbindOrder = ++g_dispSeq;
 }
 
 // A SECOND stand-in whose endPlay calls Destroy(Self) — the re-entrant managed teardown of finding 1.
@@ -415,6 +430,7 @@ static void testManagedDispatch() {
     table.beginPlay       = &standInBeginPlay;
     table.tick_all        = &standInTickAll;
     table.endPlay         = &standInEndPlay;
+    table.build_models    = &standInBuildModels;
 
     // ---- install, and the second-install refusal.
     check(aver_fw_managed_dispatch_installed() == 0, "no dispatch is installed to begin with");
@@ -427,17 +443,21 @@ static void testManagedDispatch() {
     bad.contractVersion = AVER_FW_DISPATCH_VERSION;
     check(aver_fw_install_managed_dispatch(&bad) == 0, "a wrong-structBytes table is rejected");
 
-    // ---- a MANAGED spawn fires begin_play(entity, SPAWN) exactly once, with the right entity.
+    // ---- a MANAGED spawn drives the full BEGIN edge bind -> build_models -> begin_play, once each.
     g_disp.reset();
+    g_dispSeq = 0;
     const int32_t m = aver_fw_spawn(managedC, "managed-1", nullptr, nullptr, nullptr);
     check(m != 0, "the managed actor spawns");
     check(g_disp.beginCount == 1, "begin_play fired exactly once on a managed spawn");
     check(g_disp.beginEntity == m, "begin_play got the spawned entity");
     check(g_disp.beginReason == AVER_FW_BEGIN_SPAWN, "begin_play got reason SPAWN");
-    // Step 10 wires the BEGIN EDGE only: bind() (construct the managed instance) is a step-11 job, so
-    // spawn must NOT call it yet. Pin that here so wiring bind early — firing beginPlay against an
-    // instance never constructed — is caught rather than shipped silently.
-    check(g_disp.bindCount == 0, "step 10 does NOT call bind on spawn (bind is the step-11 counterpart)");
+    // Step 11 wires the whole BEGIN edge: bind() constructs the managed instance and gates the rest, then
+    // build_models() runs, then begin_play(). All three fire exactly once, and in that order — bind must
+    // precede begin_play so OnBeginPlay never runs against an instance that was never constructed.
+    check(g_disp.bindCount == 1, "step 11 calls bind() once on a managed spawn");
+    check(g_disp.buildCount == 1, "step 11 calls build_models() once on a managed spawn");
+    check(g_disp.bindOrder < g_disp.buildOrder && g_disp.buildOrder < g_disp.beginOrder,
+          "the begin edge fires in order: bind -> build_models -> begin_play");
 
     // ---- a NON-managed spawn fires NOTHING (Prop carries no MANAGED flag).
     g_disp.reset();
@@ -468,9 +488,10 @@ static void testManagedDispatch() {
     // so endSawLiveEntity above cannot catch a mis-ordering; this class read flips to 0 the instant the
     // dispatch is moved after forgetClass(), which is the ordering that actually matters.
     check(g_disp.endClass == managedC, "end_play could still resolve the actor's class (fired before forgetClass)");
-    // Step 10 wires the END EDGE only: unbind() (drop the managed instance from the bridge list) is the
-    // step-11 counterpart, so destroy must NOT call it yet. Pin it, mirroring the bind check above.
-    check(g_disp.unbindCount == 0, "step 10 does NOT call unbind on destroy (unbind is the step-11 counterpart)");
+    // Step 11 wires the whole END edge: unbind() drops the managed instance from the bridge's list, and
+    // it fires AFTER end_play so OnEndPlay still runs against a bound instance. Pin the order too.
+    check(g_disp.unbindCount == 1, "step 11 calls unbind() once on a managed destroy");
+    check(g_disp.endOrder < g_disp.unbindOrder, "the end edge fires in order: end_play -> unbind");
     World::instance().flush();
 
     // A non-managed destroy fires nothing.

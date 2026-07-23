@@ -11,6 +11,10 @@
     <RootNamespace>Aver.Scripting.Bridge</RootNamespace>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
 
+    <!-- The managed dispatch thunks are [UnmanagedCallersOnly] statics whose addresses are taken as
+         function pointers (delegate* unmanaged[Cdecl]) to fill the native table — that needs unsafe. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
     <!-- EnableDynamicLoading is what makes this a hostable component rather than a plain library:
          it emits the .runtimeconfig.json hostfxr_initialize_for_runtime_config needs, and copies
          references next to the output so the host directory is self-contained. -->
@@ -24,6 +28,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Aver.Scripting\Aver.Scripting.csproj" />
+    <!-- Step 11: the bridge now owns the actor lifecycle, so it references the gameplay assembly to
+         declare classes and construct/bind actors. This is deliberate: the managed Aver.Framework.dll it
+         pulls in is what gives AverActor ONE runtime identity shared with user scripts (they resolve
+         their Aver.Framework reference out of this same context). Aver.Scene comes in transitively. The
+         managed copies land in the bridge's own output dir (bin/Scripting), NOT next to the executable,
+         so they never overwrite the native DLLs of the same name — see NativeResolver in each assembly. -->
+    <ProjectReference Include="..\Aver.Framework\Aver.Framework.csproj" />
   </ItemGroup>
 
 </Project>

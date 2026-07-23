@@ -29,4 +29,12 @@
     <ProjectReference Include="..\Aver.Scene\Aver.Scene.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The scripting bridge owns the managed dispatch table and the actor instance list, and drives the
+         actor lifecycle. It reaches this assembly's internals — ClassBuilder's ctor and captured tick
+         wiring, ClassFlags, Fw, ManagedDispatch, Entity's ctor, AverActor.Self and InvokeBuildModels — so
+         the bridge can declare classes and construct/bind actors without duplicating a P/Invoke surface. -->
+    <InternalsVisibleTo Include="Aver.Scripting.Bridge" />
+  </ItemGroup>
+
 </Project>

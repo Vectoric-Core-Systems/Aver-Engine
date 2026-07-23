@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A sample user ACTOR assembly, the actor counterpart of Aver.Scripting.SampleBehaviour. It is the
+       smallest thing that proves the C# actor lifecycle fires end to end, and it is staged to
+       bin/ActorScripts/ (not bin/Scripts/) so a normal editor run does not load it. Run the headless
+       spawn-test (see modules/scripting/CMakeLists.txt) and OnBeginPlay / OnTick lines from managed code
+       appear in the engine log.
+
+       Private="false" on the reference asks MSBuild NOT to copy Aver.Framework.dll (or its references)
+       next to this assembly: the engine has them loaded already, and a second copy would be a second
+       runtime identity for AverActor, which the IsAssignableFrom discovery test would then match nothing
+       against. Exactly the shape a real project's Scripts.csproj has. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Framework.SampleActor</AssemblyName>
+    <RootNamespace>Aver.Framework.SampleActor</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Aver.Framework\Aver.Framework.csproj" Private="false" />
+  </ItemGroup>
+
+</Project>

@@ -8,8 +8,11 @@ namespace aver::scripting {
 // Where the host looks for the two things it needs. Both are directories, not files, so a caller
 // never has to know the bridge assembly's name or the runtimeconfig's.
 struct HostDesc {
-    // Directory holding Aver.Scripting.Bridge.dll + .runtimeconfig.json + nethost.dll.
-    // Normally the executable's own directory.
+    // Directory holding Aver.Scripting.Bridge.dll + .runtimeconfig.json (and the managed contract
+    // assemblies it depends on). Step 11 stages these in <exe>/Scripting rather than the executable's
+    // own directory, because the managed Aver.Framework/Aver.Scene DLLs would otherwise collide by file
+    // name with the native DLLs beside the exe. nethost.dll is NOT here: it is loaded by bare name and
+    // so must sit next to the executable, which is where CMake stages it.
     std::string bridgeDir;
     // Directory scanned for user script assemblies. May be empty or may not exist: a host with
     // no scripts is the normal case for the editor and must not be an error.

@@ -573,15 +573,21 @@ int32_t aver_fw_spawn(int32_t c, const char* name,
     // exactly the same, just without the hook. Reason is SPAWN: a brand-new actor, distinct from the
     // PLAY/RELOAD entries a later stage adds, so the script can tell a fresh spawn from a reload.
     //
-    // SCOPE (step 10 wires the BEGIN EDGE only): beginPlay is dispatched here but bind() and
-    // build_models() are deliberately NOT — constructing the managed instance and its render models is
-    // a step-11 job (the bridge that owns the instance list does not exist yet). Once a real bridge
-    // fills the table, beginPlay must be preceded by bind(nameHash, e) (construct+bind, guarded on
-    // bind != null, checking its 1==instance-exists return) and build_models(e); firing beginPlay with
-    // no prior bind would call OnBeginPlay against an instance never constructed. Left as a comment, not
-    // code, per this stage's boundary — the counterpart to the unbind note in aver_fw_destroy.
-    if ((r->flags & AVER_FW_CLASS_MANAGED) && managedInstalled() && managedDispatch().beginPlay) {
-        managedDispatch().beginPlay(static_cast<aver_entity>(e), AVER_FW_BEGIN_SPAWN);
+    // STEP 11 wires the full BEGIN edge (the bridge that owns the instance list now exists): the order
+    // is bind(nameHash, e) -> build_models(e) -> beginPlay(e, SPAWN). bind() is the GATE — it constructs
+    // and binds the managed instance and returns 1 when one now exists, so build_models and beginPlay
+    // fire ONLY on that 1. Firing OnBeginPlay against an instance that was never constructed is therefore
+    // impossible by construction. classNameHash is this class's fnv1a64(name), which the bridge maps back
+    // to the C# type. Every pointer stays individually guarded so a table that installs only a subset
+    // (as the framework test's stand-in does) still behaves — a null bind simply spawns with no hook.
+    if ((r->flags & AVER_FW_CLASS_MANAGED) && managedInstalled()) {
+        AvManagedDispatch& d = managedDispatch();
+        const aver_entity  ae = static_cast<aver_entity>(e);
+        const bool bound = d.bind && d.bind(static_cast<int64_t>(r->nameHash), ae) == 1;
+        if (bound) {
+            if (d.build_models) d.build_models(ae);
+            if (d.beginPlay)    d.beginPlay(ae, AVER_FW_BEGIN_SPAWN);
+        }
     }
 
     return static_cast<int32_t>(e);
@@ -607,14 +613,16 @@ int32_t aver_fw_destroy(int32_t e) {
     // but aver_fw_destroy is only called for the single handle given, so a child destroyed via its
     // parent gets no endPlay — closing that needs a hook on the World retire path, a Play/Stop-stage job.
     //
-    // SCOPE (step 10 wires the END EDGE only): endPlay is dispatched here but unbind() is deliberately
-    // NOT — dropping the managed instance from the bridge's dense list is a step-11 job (the bridge that
-    // owns that list does not exist yet). Once a real bridge fills the table, endPlay firing with no
-    // matching unbind would leave the destroyed entity in the bridge's instance list (leak + still
-    // ticked by tick_all); wiring managedDispatch().unbind(e) here — guarded on unbind != null, after
-    // endPlay — is the step-11 counterpart. Left as a comment, not code, per this stage's boundary.
-    if ((classHasFlags(ent, AVER_FW_CLASS_MANAGED)) && managedInstalled() && managedDispatch().endPlay) {
-        managedDispatch().endPlay(static_cast<aver_entity>(e), AVER_FW_END_DESTROY);
+    // STEP 11 wires the full END edge: endPlay(e, DESTROY) runs OnEndPlay while the entity is still live
+    // (world().destroy below is deferred to the next flush), then unbind(e) drops the managed instance
+    // from the bridge's dense list so the destroyed entity is neither leaked nor ticked by tick_all after
+    // this frame. unbind fires AFTER endPlay and is guarded, mirroring the begin edge. Each pointer is
+    // guarded independently so a stand-in table with only endPlay (the re-entrancy test) still works.
+    if (classHasFlags(ent, AVER_FW_CLASS_MANAGED) && managedInstalled()) {
+        AvManagedDispatch& d = managedDispatch();
+        const aver_entity  ae = static_cast<aver_entity>(e);
+        if (d.endPlay) d.endPlay(ae, AVER_FW_END_DESTROY);
+        if (d.unbind)  d.unbind(ae);
     }
 
     // Drop possession both ways and forget the class before the deferred scene destroy: the handle is

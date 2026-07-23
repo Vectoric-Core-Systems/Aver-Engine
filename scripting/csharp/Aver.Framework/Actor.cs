@@ -69,6 +69,12 @@ public abstract class AverActor
     /// </summary>
     protected virtual void BuildModels(ActorBuilder builder) { }
 
+    // The host builds an actor's model tree by calling BuildModels once, after Self is bound and before
+    // OnBeginPlay. BuildModels is protected (only the editor's generated .Designer.cs overrides it), so
+    // the scripting bridge — a separate assembly — reaches it through this internal shim rather than by
+    // reflection. Kept next to BuildModels so the pairing is obvious.
+    internal void InvokeBuildModels(ActorBuilder builder) => BuildModels(builder);
+
     // --- Spawn sugar. Uses the per-thread scratch buffer rather than a fresh float[] per call, matching
     //     the [ThreadStatic] justification the design applies to transform writes (contradiction #8,
     //     resolved: Spawn is rarer than a transform write, but the same rule now covers both). ---

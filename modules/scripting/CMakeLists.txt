@@ -33,10 +33,19 @@ endif()
 set(AVER_CSHARP_DIR ${CMAKE_SOURCE_DIR}/scripting/csharp)
 set(AVER_BRIDGE_PROJ ${AVER_CSHARP_DIR}/Aver.Scripting.Bridge/Aver.Scripting.Bridge.csproj)
 
-# The bridge and the user-facing assembly it references, staged next to the executable. Driven by
-# an OUTPUT/DEPENDS rule and NOT by POST_BUILD: a POST_BUILD command only runs when the target
-# actually relinks, so editing a .cs alone would ship the previous bridge with a clean build
-# reporting success. That exact bug has already shipped a stale splash image here once.
+# STEP 11 stages the managed bridge into bin/Scripting/, NOT bin/. The bridge now references the gameplay
+# assembly Aver.Framework, whose managed DLL — and Aver.Scene's — share a FILE NAME with the NATIVE
+# gameplay/world DLLs that already live in bin/. Copying the managed copies into bin/ would overwrite the
+# native ones; a subdirectory keeps the two apart. ScriptHost is pointed here by SandboxApp (bridgeDir =
+# <exe>/Scripting), and each managed contract assembly redirects its own P/Invoke back to bin/ through a
+# DllImportResolver (see NativeResolver.cs). nethost.dll stays in bin/ (loaded by bare name from the exe).
+set(AVER_BRIDGE_DIR ${CMAKE_BINARY_DIR}/bin/Scripting)
+
+# The bridge and every source that compiles INTO it (it now pulls in Aver.Framework + Aver.Scene), so a
+# clean build after editing any one of them re-stages the bridge. Driven by an OUTPUT/DEPENDS rule and NOT
+# by POST_BUILD: a POST_BUILD command only runs when the target actually relinks, so editing a .cs alone
+# would ship the previous bridge with a clean build reporting success. That bug has shipped a stale splash
+# here once.
 set(AVER_BRIDGE_SOURCES
   ${AVER_BRIDGE_PROJ}
   ${AVER_CSHARP_DIR}/Aver.Scripting.Bridge/HostBridge.cs
@@ -45,19 +54,41 @@ set(AVER_BRIDGE_SOURCES
   ${AVER_CSHARP_DIR}/Aver.Scripting/Behaviour.cs
   ${AVER_CSHARP_DIR}/Aver.Scripting/Log.cs
   ${AVER_CSHARP_DIR}/Aver.Scripting/Voxi.cs
-  ${AVER_CSHARP_DIR}/Aver.Scripting/Pbr.cs)
+  ${AVER_CSHARP_DIR}/Aver.Scripting/Pbr.cs
+  # Aver.Framework (the gameplay layer the bridge drives) and its own dependency Aver.Scene.
+  ${AVER_CSHARP_DIR}/Aver.Framework/Aver.Framework.csproj
+  ${AVER_CSHARP_DIR}/Aver.Framework/Actor.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/Pawn.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/PlayerController.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/GameMode.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/Attributes.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/ActorClass.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/ActorBuilder.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/ClassBuilder.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/Enums.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/Entity.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/Native.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/ManagedDispatch.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/NativeResolver.cs
+  ${AVER_CSHARP_DIR}/Aver.Scene/Aver.Scene.csproj
+  ${AVER_CSHARP_DIR}/Aver.Scene/Math.cs
+  ${AVER_CSHARP_DIR}/Aver.Scene/Native.cs
+  ${AVER_CSHARP_DIR}/Aver.Scene/SceneIds.cs
+  ${AVER_CSHARP_DIR}/Aver.Scene/NativeResolver.cs)
 
 set(AVER_BRIDGE_OUTPUTS
-  ${CMAKE_BINARY_DIR}/bin/Aver.Scripting.Bridge.dll
-  ${CMAKE_BINARY_DIR}/bin/Aver.Scripting.Bridge.runtimeconfig.json
-  ${CMAKE_BINARY_DIR}/bin/Aver.Scripting.dll)
+  ${AVER_BRIDGE_DIR}/Aver.Scripting.Bridge.dll
+  ${AVER_BRIDGE_DIR}/Aver.Scripting.Bridge.runtimeconfig.json
+  ${AVER_BRIDGE_DIR}/Aver.Scripting.dll
+  ${AVER_BRIDGE_DIR}/Aver.Framework.dll
+  ${AVER_BRIDGE_DIR}/Aver.Scene.dll)
 
 add_custom_command(
   OUTPUT ${AVER_BRIDGE_OUTPUTS}
   COMMAND ${AVER_DOTNET_EXE} build ${AVER_BRIDGE_PROJ} -c Release --nologo -v quiet
-          -o ${CMAKE_BINARY_DIR}/bin
+          -o ${AVER_BRIDGE_DIR}
   DEPENDS ${AVER_BRIDGE_SOURCES}
-  COMMENT "Building the managed scripting bridge"
+  COMMENT "Building the managed scripting bridge (staged to bin/Scripting)"
   VERBATIM)
 add_custom_target(Aver.Scripting.Bridge DEPENDS ${AVER_BRIDGE_OUTPUTS})
 set_target_properties(Aver.Scripting.Bridge PROPERTIES FOLDER "modules")
@@ -82,6 +113,26 @@ add_custom_command(
 add_custom_target(Aver.Scripting.SampleBehaviour DEPENDS ${AVER_SAMPLE_OUT})
 set_target_properties(Aver.Scripting.SampleBehaviour PROPERTIES FOLDER "modules")
 add_dependencies(Aver.Scripting.Host Aver.Scripting.SampleBehaviour)
+
+# A sample ACTOR assembly, the counterpart of the behaviour sample above, staged to bin/ActorScripts/ so
+# it is NOT loaded by a default editor run. It exists to prove the step-11 actor loop end to end:
+#   Sandbox.exe --headless --frames 5 --scripts ActorScripts --spawn-test BP_TestActor
+# spawns a declared managed actor and ticks it, so OnBeginPlay / OnTick reach the engine log. Depends on
+# the bridge outputs so the run has a bridge that speaks the actor dispatch.
+set(AVER_ACTOR_PROJ ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/Aver.Framework.SampleActor.csproj)
+set(AVER_ACTOR_OUT ${CMAKE_BINARY_DIR}/bin/ActorScripts/Aver.Framework.SampleActor.dll)
+add_custom_command(
+  OUTPUT ${AVER_ACTOR_OUT}
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_ACTOR_PROJ} -c Release --nologo -v quiet
+          -o ${CMAKE_BINARY_DIR}/bin/ActorScripts
+  DEPENDS ${AVER_ACTOR_PROJ}
+          ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/TestActor.cs
+          ${AVER_BRIDGE_OUTPUTS}
+  COMMENT "Building the sample actor assembly"
+  VERBATIM)
+add_custom_target(Aver.Framework.SampleActor DEPENDS ${AVER_ACTOR_OUT})
+set_target_properties(Aver.Framework.SampleActor PROPERTIES FOLDER "modules")
+add_dependencies(Aver.Scripting.Host Aver.Framework.SampleActor)
 
 # nethost.dll, copied out of the .NET host pack. It is loaded by name at run time, so it has to sit
 # next to the executable; the natural-sorted last entry is the newest pack, and any nethost can
