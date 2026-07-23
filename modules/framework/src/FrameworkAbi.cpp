@@ -812,15 +812,30 @@ int32_t aver_fw_begin_play(int32_t gameInstanceClass, int32_t gameModeClass) {
 int32_t aver_fw_end_play(void) {
     if (playStateRef() == AVER_FW_PLAY_EDITOR) return 0;   // nothing to end
 
-    // Drop possession before teardown so no controller points at a half-destroyed pawn, then destroy in
-    // the reverse of spawn order with reason STOP (the actors' play life ends, not "they were deleted").
+    // Drop possession before teardown so no controller points at a half-destroyed pawn, then destroy the
+    // four session ROOTS in the reverse of spawn order with reason STOP (their play life ends, not "they
+    // were deleted"). Reverse order so OnEndPlay mirrors OnBeginPlay for the roots the caller named.
     if (playerCtrlRef()) aver_fw_unpossess(playerCtrlRef());
     if (playPawnRef())     destroyActor(playPawnRef(),     AVER_FW_END_STOP);
     if (playerCtrlRef())   destroyActor(playerCtrlRef(),   AVER_FW_END_STOP);
     if (gameModeRef())     destroyActor(gameModeRef(),     AVER_FW_END_STOP);
     if (gameInstanceRef()) destroyActor(gameInstanceRef(), AVER_FW_END_STOP);
-
     playPawnRef() = playerCtrlRef() = gameModeRef() = gameInstanceRef() = 0;
+
+    // Then sweep EVERY OTHER actor the session spawned. A GameMode or pawn can Spawn() more actors in a
+    // hook (GM_Sandbox spawns cars in OnBeginPlay); those are not among the four roots, so without this
+    // they would get OnBeginPlay but never OnEndPlay, linger live in the world across play/stop cycles,
+    // and keep rendering after Stop (the render walk has no play gate — it relies on the world being
+    // empty in EDITOR). Destroy is deferred to flush, so the dense walk does not shift under us, and the
+    // roots above are already destroyPending so the guard skips them.
+    World& w = world();
+    const u32 count = w.count();
+    for (u32 i = 0; i < count; ++i) {
+        const Entity e = w.at(i);
+        if (classOfEntity(e) != 0 && !w.destroyPending(e))
+            destroyActor(static_cast<int32_t>(e), AVER_FW_END_STOP);
+    }
+
     playStateRef() = AVER_FW_PLAY_EDITOR;
     return 1;
 }

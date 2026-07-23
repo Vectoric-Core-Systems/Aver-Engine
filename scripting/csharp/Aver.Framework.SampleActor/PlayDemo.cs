@@ -1,4 +1,5 @@
 using Aver.Framework;
+using Aver.Scene;      // Vec3
 using Aver.Scripting;  // Log
 
 namespace Aver.Framework.SampleActor;
@@ -23,7 +24,15 @@ public sealed class DemoGameInstance : AverGameInstance
 [AverGameMode("BP_GameMode", DefaultPawnClass = "BP_Pawn", PlayerControllerClass = "BP_Controller")]
 public sealed class DemoGameMode : AverGameMode
 {
-    public override void OnBeginPlay(BeginReason reason) => Log.Info($"[DemoGameMode] OnBeginPlay reason={reason} entity={Self.Handle}");
+    public override void OnBeginPlay(BeginReason reason)
+    {
+        Log.Info($"[DemoGameMode] OnBeginPlay reason={reason} entity={Self.Handle}");
+        // A GameMode that spawns gameplay content when play begins — the same shape as GM_Sandbox
+        // spawning its cars. This extra actor is NOT one of the session roots, so it is the case Stop
+        // must still tear down: on end_play it gets OnEndPlay and leaves the world like everything else.
+        Spawn<Sphere>(new Vec3(0f, -3f, 1f));
+    }
+
     public override void OnEndPlay(EndReason reason) => Log.Info($"[DemoGameMode] OnEndPlay reason={reason}");
 }
 

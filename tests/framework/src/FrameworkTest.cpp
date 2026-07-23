@@ -631,6 +631,18 @@ static void testPlayLifecycle() {
     check(aver_fw_set_paused(1) == 0, "set_paused is refused outside a session");
     World::instance().flush();   // retire the deferred destroys the ended session left
 
+    // A session that spawns EXTRA actors mid-play (a GameMode/pawn calling Spawn() in a hook) must clear
+    // them ALL on Stop, not just the four roots — otherwise they leak: OnBeginPlay with no OnEndPlay, and
+    // still live in the world after EDITOR returns. (forgetClass runs inside destroyActor, so class_of
+    // reads 0 the instant an actor is torn down, before the deferred world flush.)
+    check(aver_fw_begin_play(giC, gmC) == 1, "begin_play starts a session (extra-actor case)");
+    const int32_t extra = aver_fw_spawn(pawnC, "extra-play-actor", nullptr, nullptr, nullptr);
+    check(extra != 0 && aver_fw_class_of(extra) == pawnC, "an extra actor spawns mid-session");
+    check(aver_fw_end_play() == 1, "end_play ends the session with an extra actor still live");
+    check(aver_fw_class_of(extra) == 0, "end_play tore down the extra play-spawned actor, not just the roots");
+    check(aver_fw_game_mode() == 0, "and the session roots are cleared too");
+    World::instance().flush();
+
     // A session cannot start without a valid GameMode.
     check(aver_fw_begin_play(giC, 0) == 0, "begin_play with an invalid GameMode is refused");
     check(aver_fw_play_state() == AVER_FW_PLAY_EDITOR, "a refused begin_play leaves the state in EDITOR");
