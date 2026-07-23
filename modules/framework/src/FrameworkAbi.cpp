@@ -659,6 +659,26 @@ int32_t aver_fw_class_of(int32_t e) {
 
 // ---- possession --------------------------------------------------------------------------------
 
+// Dispatch a possession/session hook UP into managed code, guarded exactly like the spawn/destroy edges:
+// only a MANAGED class with an installed dispatch and a live pointer fires; a native or plain actor, or a
+// headless/no-CLR build, is a silent no-op. Each pointer is tested independently so a stand-in table that
+// installs only a subset (the framework test's) still behaves.
+void dispatchPossessed(Entity pawn, Entity controller) {
+    if (managedInstalled() && classHasFlags(pawn, AVER_FW_CLASS_MANAGED))
+        if (auto& d = managedDispatch(); d.possessed)
+            d.possessed(static_cast<aver_entity>(pawn), static_cast<aver_entity>(controller));
+}
+void dispatchUnpossessed(Entity pawn) {
+    if (managedInstalled() && classHasFlags(pawn, AVER_FW_CLASS_MANAGED))
+        if (auto& d = managedDispatch(); d.unpossessed)
+            d.unpossessed(static_cast<aver_entity>(pawn));
+}
+void dispatchPostLogin(Entity gameMode, Entity controller) {
+    if (managedInstalled() && classHasFlags(gameMode, AVER_FW_CLASS_MANAGED))
+        if (auto& d = managedDispatch(); d.post_login)
+            d.post_login(static_cast<aver_entity>(gameMode), static_cast<aver_entity>(controller));
+}
+
 int32_t aver_fw_possess(int32_t controller, int32_t pawn) {
     const Entity ctrl = toEntity(controller);
     const Entity pwn  = toEntity(pawn);
@@ -668,13 +688,19 @@ int32_t aver_fw_possess(int32_t controller, int32_t pawn) {
     if (!classHasFlags(pwn,  AVER_FW_CLASS_PAWN))       return 0;
 
     // Possession is exclusive on both ends: free this controller's previous pawn and this pawn's
-    // previous controller before binding the new pair, so the two maps stay mutual inverses.
+    // previous controller before binding the new pair, so the two maps stay mutual inverses. Capture the
+    // controller's OUTGOING pawn so it can be told it was released when a controller is moved to a new one.
     auto& pOf = pawnByController();
     auto& cOf = controllerByPawn();
-    if (auto it = pOf.find(ctrl); it != pOf.end()) cOf.erase(it->second);
+    Entity displaced = kInvalidEntity;
+    if (auto it = pOf.find(ctrl); it != pOf.end()) { displaced = it->second; cOf.erase(it->second); }
     if (auto it = cOf.find(pwn);  it != cOf.end()) pOf.erase(it->second);
     pOf[ctrl] = pwn;
     cOf[pwn]  = ctrl;
+
+    // Hooks: release the outgoing pawn first, then possess the new one, mirroring a real hand-off.
+    if (displaced != kInvalidEntity && displaced != pwn) dispatchUnpossessed(displaced);
+    dispatchPossessed(pwn, ctrl);
     return 1;
 }
 
@@ -683,8 +709,10 @@ int32_t aver_fw_unpossess(int32_t controller) {
     auto& pOf = pawnByController();
     auto  it  = pOf.find(ctrl);
     if (it == pOf.end()) return 0;   // nothing to release
+    const Entity released = it->second;
     controllerByPawn().erase(it->second);
     pOf.erase(it);
+    dispatchUnpossessed(released);   // fire AFTER the maps are clear, so a hook reads the settled state
     return 1;
 }
 
@@ -804,6 +832,9 @@ int32_t aver_fw_begin_play(int32_t gameInstanceClass, int32_t gameModeClass) {
     playerCtrlRef() = ctrl;
     playPawnRef()   = pawn;
     if (ctrl && pawn) aver_fw_possess(ctrl, pawn);
+    // The GameMode's post-login hook: a controller has entered the world and (if any) been given its pawn.
+    // Fired after possess so OnPostLogin can already see the controller's pawn.
+    if (ctrl) dispatchPostLogin(toEntity(gm), toEntity(ctrl));
 
     playStateRef() = AVER_FW_PLAY_PLAYING;
     return 1;

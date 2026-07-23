@@ -33,6 +33,11 @@ public sealed class DemoGameMode : AverGameMode
         Spawn<Sphere>(new Vec3(0f, -3f, 1f));
     }
 
+    /// <summary>Fires once the player's controller has entered under this mode — the classic place to spawn
+    /// and possess a pawn (here the framework already did, from the class's DefaultPawnClass wiring).</summary>
+    public override void OnPostLogin(Entity controller) =>
+        Log.Info($"[DemoGameMode] OnPostLogin: controller '{controller.Name}' entered, driving '{controller.As<DemoController>()?.Possessed.Name}'");
+
     public override void OnEndPlay(EndReason reason) => Log.Info($"[DemoGameMode] OnEndPlay reason={reason}");
 }
 
@@ -59,6 +64,10 @@ public sealed class DemoPawn : AverPawn
     }
 
     public override void OnBeginPlay(BeginReason reason) => Log.Info($"[DemoPawn] OnBeginPlay reason={reason} entity={Self.Handle}");
+
+    public override void OnPossessed(Entity controller) => Log.Info($"[DemoPawn] OnPossessed by '{controller.Name}'");
+
+    public override void OnUnpossessed() => Log.Info("[DemoPawn] OnUnpossessed");
 
     public override void OnTick(float dt)
     {

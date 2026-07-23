@@ -24,10 +24,11 @@ namespace Aver.Framework;
 internal static class ManagedDispatch
 {
     // Must match AVER_FW_DISPATCH_VERSION in modules/framework/include/aver/framework/framework_hooks.h.
-    internal const int ContractVersion = 1;
+    internal const int ContractVersion = 2;
 
-    // Mirror of AvManagedDispatch: int32 structBytes, int32 contractVersion, then seven function pointers
-    // in the exact order bind, unbind, beginPlay, tick_all, endPlay, rebound, build_models.
+    // Mirror of AvManagedDispatch: int32 structBytes, int32 contractVersion, then the function pointers in
+    // the exact header order — bind, unbind, beginPlay, tick_all, endPlay, rebound, build_models, then the
+    // v2 possession/session hooks possessed, unpossessed, post_login.
     [StructLayout(LayoutKind.Sequential)]
     private struct Table
     {
@@ -40,6 +41,9 @@ internal static class ManagedDispatch
         public IntPtr EndPlay;
         public IntPtr Rebound;
         public IntPtr BuildModels;
+        public IntPtr Possessed;
+        public IntPtr Unpossessed;
+        public IntPtr PostLogin;
     }
 
     [DllImport("Aver.Framework")]
@@ -51,7 +55,8 @@ internal static class ManagedDispatch
 
     /// <summary>Install the bridge's dispatch table. Returns false if the framework refused it.</summary>
     internal static bool Install(IntPtr bind, IntPtr unbind, IntPtr beginPlay, IntPtr tickAll,
-                                 IntPtr endPlay, IntPtr rebound, IntPtr buildModels)
+                                 IntPtr endPlay, IntPtr rebound, IntPtr buildModels,
+                                 IntPtr possessed, IntPtr unpossessed, IntPtr postLogin)
     {
         Table t = new()
         {
@@ -64,6 +69,9 @@ internal static class ManagedDispatch
             EndPlay = endPlay,
             Rebound = rebound,
             BuildModels = buildModels,
+            Possessed = possessed,
+            Unpossessed = unpossessed,
+            PostLogin = postLogin,
         };
         return aver_fw_install_managed_dispatch(in t) != 0;
     }

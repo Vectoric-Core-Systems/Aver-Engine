@@ -117,10 +117,15 @@ typedef struct AvActorVTable {
  * why clearing the table is simply a NULL store the call-site guards already handle.
  *
  * The six pointers below are §5.3's set; build_models is the seventh, the C# BuildModels hook the host
- * calls once after Self is bound and before beginPlay. All parameters and returns are C-safe
+ * calls once after Self is bound and before beginPlay. Three possession/session hooks follow (v2):
+ * possessed / unpossessed on a pawn and post_login on the GameMode. All parameters and returns are C-safe
  * (int32_t / int64_t / float / pointer) so no managed marshalling is ever implied.
+ *
+ * VERSION 2 added the three possession/session hooks by APPENDING them. Install validates structBytes
+ * AND contractVersion, so a bridge built against v1 is refused by a v2 framework and vice versa — the two
+ * are built together from this header, so they never disagree in practice.
  * ============================================================================================== */
-#define AVER_FW_DISPATCH_VERSION 1
+#define AVER_FW_DISPATCH_VERSION 2
 
 /* 1 == an instance of the named class now exists on the managed side and is bound to entity `e`. */
 typedef int32_t (AVER_FW_CALL* aver_fw_bind_fn)       (int64_t classNameHash, aver_entity e);
@@ -130,6 +135,11 @@ typedef void    (AVER_FW_CALL* aver_fw_tick_all_fn)   (int32_t tickGroup, float 
 typedef void    (AVER_FW_CALL* aver_fw_end_play_fn)   (aver_entity e, int32_t reason);
 typedef void    (AVER_FW_CALL* aver_fw_rebound_fn)    (aver_entity e);
 typedef void    (AVER_FW_CALL* aver_fw_build_models_fn)(aver_entity e);
+/* possessed: a pawn was possessed by `controller`. unpossessed: a pawn was released. post_login: a
+ * controller entered the world under `gameMode` (fired on the GameMode). All dispatched per actor. */
+typedef void    (AVER_FW_CALL* aver_fw_possessed_fn)  (aver_entity pawn, aver_entity controller);
+typedef void    (AVER_FW_CALL* aver_fw_unpossessed_fn)(aver_entity pawn);
+typedef void    (AVER_FW_CALL* aver_fw_post_login_fn) (aver_entity gameMode, aver_entity controller);
 
 typedef struct AvManagedDispatch {
     int32_t                  structBytes;      /* sizeof(AvManagedDispatch); install rejects a short table */
@@ -141,6 +151,9 @@ typedef struct AvManagedDispatch {
     aver_fw_end_play_fn      endPlay;          /* OnEndPlay(reason) for one actor, before its teardown     */
     aver_fw_rebound_fn       rebound;          /* OnRebound after a hot-reload rebind (in place of Begin)  */
     aver_fw_build_models_fn  build_models;     /* BuildModels once, after bind and before beginPlay        */
+    aver_fw_possessed_fn     possessed;        /* OnPossessed(controller) on a pawn, when possessed  (v2)  */
+    aver_fw_unpossessed_fn   unpossessed;      /* OnUnpossessed() on a pawn, when released            (v2)  */
+    aver_fw_post_login_fn    post_login;       /* OnPostLogin(controller) on the GameMode, post-possess(v2) */
 } AvManagedDispatch;
 
 /* ---- install / clear -------------------------------------------------------------------------------

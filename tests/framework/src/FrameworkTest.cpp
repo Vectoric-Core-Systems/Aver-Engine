@@ -356,6 +356,12 @@ struct DispatchLog {
     int32_t beginOrder = 0;
     int32_t endOrder = 0;               // and end_play < unbind on the destroy edge
     int32_t unbindOrder = 0;
+    int     possessCount = 0;           // v2 possession hooks
+    int32_t possessPawn = 0, possessController = 0;
+    int     unpossessCount = 0;
+    int32_t unpossessPawn = 0;
+    int     postLoginCount = 0;
+    int32_t postLoginMode = 0, postLoginController = 0;
     void reset() { *this = DispatchLog{}; }
 };
 static DispatchLog g_disp;
@@ -398,6 +404,15 @@ static void AVER_FW_CALL standInUnbind(aver_entity /*e*/) {
     ++g_disp.unbindCount;
     g_disp.unbindOrder = ++g_dispSeq;
 }
+static void AVER_FW_CALL standInPossessed(aver_entity pawn, aver_entity controller) {
+    ++g_disp.possessCount; g_disp.possessPawn = pawn; g_disp.possessController = controller;
+}
+static void AVER_FW_CALL standInUnpossessed(aver_entity pawn) {
+    ++g_disp.unpossessCount; g_disp.unpossessPawn = pawn;
+}
+static void AVER_FW_CALL standInPostLogin(aver_entity mode, aver_entity controller) {
+    ++g_disp.postLoginCount; g_disp.postLoginMode = mode; g_disp.postLoginController = controller;
+}
 
 // A SECOND stand-in whose endPlay calls Destroy(Self) — the re-entrant managed teardown of finding 1.
 // It guards its own re-entry so that, absent the framework's re-entrancy guard, the double-fire is a
@@ -431,6 +446,9 @@ static void testManagedDispatch() {
     table.tick_all        = &standInTickAll;
     table.endPlay         = &standInEndPlay;
     table.build_models    = &standInBuildModels;
+    table.possessed       = &standInPossessed;
+    table.unpossessed     = &standInUnpossessed;
+    table.post_login      = &standInPostLogin;
 
     // ---- install, and the second-install refusal.
     check(aver_fw_managed_dispatch_installed() == 0, "no dispatch is installed to begin with");
@@ -498,6 +516,39 @@ static void testManagedDispatch() {
     g_disp.reset();
     check(aver_fw_destroy(plain) == 1, "the non-managed actor is destroyed");
     check(g_disp.endCount == 0, "a non-managed destroy fires no end_play");
+    World::instance().flush();
+
+    // ---- v2 possession hooks route through the dispatch (MANAGED pawn + controller so the guard fires).
+    const int32_t hkPawnC = aver_fw_class_declare("HookPawn", "");
+    aver_fw_class_set_flags(hkPawnC, AVER_FW_CLASS_MANAGED | AVER_FW_CLASS_PAWN);
+    aver_fw_class_seal(hkPawnC);
+    const int32_t hkCtrlC = aver_fw_class_declare("HookCtrl", "");
+    aver_fw_class_set_flags(hkCtrlC, AVER_FW_CLASS_MANAGED | AVER_FW_CLASS_CONTROLLER);
+    aver_fw_class_seal(hkCtrlC);
+    const int32_t hkPawn = aver_fw_spawn(hkPawnC, "hook-pawn", nullptr, nullptr, nullptr);
+    const int32_t hkCtrl = aver_fw_spawn(hkCtrlC, "hook-ctrl", nullptr, nullptr, nullptr);
+
+    g_disp.reset();
+    check(aver_fw_possess(hkCtrl, hkPawn) == 1, "possess accepts the managed pair");
+    check(g_disp.possessCount == 1, "possess fired the possessed hook once");
+    check(g_disp.possessPawn == hkPawn && g_disp.possessController == hkCtrl,
+          "the possessed hook received (pawn, controller)");
+
+    g_disp.reset();
+    check(aver_fw_unpossess(hkCtrl) == 1, "unpossess releases the pair");
+    check(g_disp.unpossessCount == 1 && g_disp.unpossessPawn == hkPawn,
+          "unpossess fired the unpossessed hook for the released pawn");
+
+    // Moving the controller to a SECOND pawn displaces the first: the outgoing pawn is unpossessed and the
+    // new one possessed, in that order.
+    const int32_t hkPawn2 = aver_fw_spawn(hkPawnC, "hook-pawn-2", nullptr, nullptr, nullptr);
+    aver_fw_possess(hkCtrl, hkPawn);
+    g_disp.reset();
+    check(aver_fw_possess(hkCtrl, hkPawn2) == 1, "the controller moves to a second pawn");
+    check(g_disp.unpossessCount == 1 && g_disp.unpossessPawn == hkPawn, "the displaced first pawn was unpossessed");
+    check(g_disp.possessCount == 1 && g_disp.possessPawn == hkPawn2, "the second pawn was possessed");
+
+    aver_fw_destroy(hkPawn); aver_fw_destroy(hkPawn2); aver_fw_destroy(hkCtrl);
     World::instance().flush();
 
     // ---- after CLEAR, no hook fires, and spawn/destroy still work (a headless / no-CLR build).

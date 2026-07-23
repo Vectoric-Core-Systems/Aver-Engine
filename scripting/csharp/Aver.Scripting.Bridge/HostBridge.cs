@@ -13,7 +13,7 @@ namespace Aver.Scripting.Bridge;
 /// here, and nothing here may ever throw across that boundary.
 /// </summary>
 /// <remarks>
-/// The five host entry points (Bootstrap, LoadScripts, UnloadScripts, Update, Shutdown) plus the seven
+/// The five host entry points (Bootstrap, LoadScripts, UnloadScripts, Update, Shutdown) plus the ten
 /// managed-dispatch thunks near the bottom of this file all carry <see cref="UnmanagedCallersOnlyAttribute"/>,
 /// so the host binds the entry points with <c>load_assembly_and_get_function_pointer</c> and
 /// <c>UNMANAGEDCALLERSONLY_METHOD</c> and the framework calls the thunks through a raw function-pointer
@@ -510,7 +510,10 @@ public static class HostBridge
             (IntPtr)(delegate* unmanaged[Cdecl]<int, float, void>)&DispTickAll,
             (IntPtr)(delegate* unmanaged[Cdecl]<int, int, void>)&DispEndPlay,
             (IntPtr)(delegate* unmanaged[Cdecl]<int, void>)&DispRebound,
-            (IntPtr)(delegate* unmanaged[Cdecl]<int, void>)&DispBuildModels);
+            (IntPtr)(delegate* unmanaged[Cdecl]<int, void>)&DispBuildModels,
+            (IntPtr)(delegate* unmanaged[Cdecl]<int, int, void>)&DispPossessed,
+            (IntPtr)(delegate* unmanaged[Cdecl]<int, void>)&DispUnpossessed,
+            (IntPtr)(delegate* unmanaged[Cdecl]<int, int, void>)&DispPostLogin);
 
         if (ok)
             Emit((int)Log.Level.Info, "[Scripting] managed actor dispatch installed");
@@ -686,7 +689,7 @@ public static class HostBridge
 
     // ------------------------------------------------------------------ dispatch thunks
     //
-    // The seven entries of AvManagedDispatch. Each is a raw [UnmanagedCallersOnly] pointer the framework
+    // The ten entries of AvManagedDispatch. Each is a raw [UnmanagedCallersOnly] pointer the framework
     // calls; each wraps its whole body so a managed exception can NEVER cross back into native code — it
     // disables that one actor and returns, exactly as the AverBehaviour contract does for OnUpdate.
 
@@ -777,6 +780,36 @@ public static class HostBridge
         if (!s_actorsByEntity.TryGetValue(entity, out ActorLive? live) || live.Disabled) return;
         try { live.Instance.OnRebound(); }
         catch (Exception ex) { DisableActor(live, "OnRebound", ex); }
+    }
+
+    // v2 possession/session hooks. Each targets a specific base type — a non-pawn possessed, or a
+    // non-GameMode post-login, cannot happen (the framework only calls these for the right flag), but the
+    // type test keeps the cast total and simply no-ops if it ever did.
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void DispPossessed(int pawnEntity, int controllerEntity)
+    {
+        if (!s_actorsByEntity.TryGetValue(pawnEntity, out ActorLive? live) || live.Disabled) return;
+        if (live.Instance is not AverPawn pawn) return;
+        try { pawn.OnPossessed(new Entity(controllerEntity)); }
+        catch (Exception ex) { DisableActor(live, "OnPossessed", ex); }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void DispUnpossessed(int pawnEntity)
+    {
+        if (!s_actorsByEntity.TryGetValue(pawnEntity, out ActorLive? live) || live.Disabled) return;
+        if (live.Instance is not AverPawn pawn) return;
+        try { pawn.OnUnpossessed(); }
+        catch (Exception ex) { DisableActor(live, "OnUnpossessed", ex); }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void DispPostLogin(int gameModeEntity, int controllerEntity)
+    {
+        if (!s_actorsByEntity.TryGetValue(gameModeEntity, out ActorLive? live) || live.Disabled) return;
+        if (live.Instance is not AverGameMode mode) return;
+        try { mode.OnPostLogin(new Entity(controllerEntity)); }
+        catch (Exception ex) { DisableActor(live, "OnPostLogin", ex); }
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
