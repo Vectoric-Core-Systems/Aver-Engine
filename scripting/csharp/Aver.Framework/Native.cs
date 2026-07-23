@@ -109,6 +109,7 @@ internal static class SceneNative
 
     // Typed field get/set over the whole component surface — the generic field accessors and the typed
     // component conveniences (Visible, Tags, Light, SetMesh...) are all built on these.
+    [DllImport(Lib)] internal static extern int aver_scene_field_arity(int f);   // guards Vec3 accessors vs Quat/Mat4
     [DllImport(Lib)] internal static extern float aver_scene_get_f32(int e, int f);
     [DllImport(Lib)] internal static extern int aver_scene_set_f32(int e, int f, float v);
     [DllImport(Lib)] internal static extern int aver_scene_get_i32(int e, int f);

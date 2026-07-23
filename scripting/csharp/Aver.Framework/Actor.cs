@@ -120,11 +120,14 @@ public abstract class AverActor
         => Actors.Get<T>(Spawn(ActorClass.Find(ClassNames.Of(typeof(T))), at, rotation, scale));
 
     /// <summary>Spawn <typeparamref name="T"/> as a CHILD of <paramref name="parent"/> at a local position,
-    /// returning the live instance. Its transform is then relative to the parent.</summary>
+    /// returning the live instance. Its transform is then relative to the parent. Returns null if the spawn
+    /// failed OR the attach was rejected (a dead or destroy-pending parent, or a cycle) — in the latter case
+    /// the just-spawned child is destroyed rather than left stranded at a world-interpreted position.</summary>
     protected static T? SpawnAttached<T>(Entity parent, Vec3 localPosition) where T : AverActor
     {
         Entity e = Spawn(ActorClass.Find(ClassNames.Of(typeof(T))), localPosition);
-        if (e.IsValid) e.SetParent(parent);
+        if (!e.IsValid) return null;
+        if (!e.SetParent(parent)) { e.Destroy(); return null; }
         return Actors.Get<T>(e);
     }
 

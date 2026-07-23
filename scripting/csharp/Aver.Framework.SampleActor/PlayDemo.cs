@@ -50,7 +50,16 @@ public sealed class DemoGameMode : AverGameMode
 [AverClass("BP_Controller")]
 public sealed class DemoController : AverPlayerController
 {
-    public override void OnBeginPlay(BeginReason reason) => Log.Info($"[DemoController] OnBeginPlay reason={reason} entity={Self.Handle}");
+    public override void OnBeginPlay(BeginReason reason)
+    {
+        Log.Info($"[DemoController] OnBeginPlay reason={reason} entity={Self.Handle}");
+        // A controller carries no mesh from its class, so this exercises SetMesh on a BARE actor: the
+        // added renderer must come up visible (a Vec3 accessor on the rotation Quat must stay safe too).
+        Self.SetMesh("Meshes/sphere.ocmesh");
+        Vec3 rotAsVec = Self.GetVec3("CLocal.rotation");   // a Quat field: the arity guard returns Zero, not corruption
+        Log.Info($"[DemoController] SetMesh on a bare actor -> visible={Self.Visible}; GetVec3(rotation Quat)={rotAsVec}");
+    }
+
     public override void OnEndPlay(EndReason reason) => Log.Info($"[DemoController] OnEndPlay reason={reason}");
 }
 

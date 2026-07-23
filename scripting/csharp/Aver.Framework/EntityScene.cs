@@ -64,18 +64,24 @@ public readonly partial struct Entity
     /// <summary>Write a 64-bit field. False if unknown/absent.</summary>
     public bool SetInt64(string field, long value) => SceneNative.aver_scene_set_i64(Handle, SceneIds.Field(field), value) != 0;
 
-    /// <summary>Read a Vec3 field, or <see cref="Vec3.Zero"/> if absent.</summary>
+    /// <summary>Read a Vec3 field, or <see cref="Vec3.Zero"/> if absent or not a Vec3.</summary>
     public Vec3 GetVec3(string field)
     {
+        int id = SceneIds.Field(field);
+        // The native get_vec copies sizeof(float)*arity bytes; a Quat (4) or Mat4 (16) field would overrun
+        // the 3-float scratch. Only a Vec3 (arity 3) is safe here — reject anything else, don't corrupt.
+        if (SceneNative.aver_scene_field_arity(id) != 3) return Vec3.Zero;
         float[] o = Scratch3;
-        return SceneNative.aver_scene_get_vec(Handle, SceneIds.Field(field), o) != 0 ? new Vec3(o[0], o[1], o[2]) : Vec3.Zero;
+        return SceneNative.aver_scene_get_vec(Handle, id, o) != 0 ? new Vec3(o[0], o[1], o[2]) : Vec3.Zero;
     }
-    /// <summary>Write a Vec3 field. False if unknown/absent.</summary>
+    /// <summary>Write a Vec3 field. False if unknown, absent, or not a Vec3 (arity 3).</summary>
     public bool SetVec3(string field, Vec3 value)
     {
+        int id = SceneIds.Field(field);
+        if (SceneNative.aver_scene_field_arity(id) != 3) return false;   // see GetVec3: refuse Quat/Mat4
         float[] s = Scratch3;
         s[0] = value.X; s[1] = value.Y; s[2] = value.Z;
-        return SceneNative.aver_scene_set_vec(Handle, SceneIds.Field(field), s) != 0;
+        return SceneNative.aver_scene_set_vec(Handle, id, s) != 0;
     }
 
     /// <summary>Read a string field, or "" if absent.</summary>
@@ -87,6 +93,16 @@ public readonly partial struct Entity
 
     private const int MeshVisibleBit = 0x1;   // CMeshRenderer.flags bit 0 == kMeshRendererVisible
 
+    // Attach a mesh renderer if the entity has none, seeding the VISIBLE bit. aver_scene_add_component
+    // zero-fills the new component, but the real CMeshRenderer default is visible (the framework spawn
+    // path seeds it too) — so without this a SetMesh on a bare entity would set the mesh yet never draw it.
+    private void EnsureMeshRenderer()
+    {
+        if (HasComponent(Component.MeshRenderer)) return;
+        AddComponent(Component.MeshRenderer);
+        SetInt("CMeshRenderer.flags", MeshVisibleBit);
+    }
+
     /// <summary>Whether this entity's mesh is drawn (CMeshRenderer visible bit). False if it has no mesh.</summary>
     public bool Visible => (GetInt("CMeshRenderer.flags") & MeshVisibleBit) != 0;
 
@@ -94,22 +110,23 @@ public readonly partial struct Entity
     /// be made drawable; combine with <see cref="SetMesh"/>.</summary>
     public bool SetVisible(bool visible)
     {
-        AddComponent(Component.MeshRenderer);
+        EnsureMeshRenderer();
         int flags = GetInt("CMeshRenderer.flags");
         return SetInt("CMeshRenderer.flags", visible ? (flags | MeshVisibleBit) : (flags & ~MeshVisibleBit));
     }
 
-    /// <summary>Set the drawn mesh by asset path (hashed to its ObjectId). Adds a mesh renderer if absent.</summary>
+    /// <summary>Set the drawn mesh by asset path (hashed to its ObjectId). Adds a mesh renderer if absent
+    /// (drawn by default).</summary>
     public bool SetMesh(string meshPath)
     {
-        AddComponent(Component.MeshRenderer);
+        EnsureMeshRenderer();
         return SetInt64("CMeshRenderer.mesh", Assets.ObjectIdOf(meshPath));
     }
 
     /// <summary>Set the material by name (resolved to its opaque handle). Adds a mesh renderer if absent.</summary>
     public bool SetMaterial(string materialName)
     {
-        AddComponent(Component.MeshRenderer);
+        EnsureMeshRenderer();
         return SetInt("CMeshRenderer.material", SceneNative.aver_scene_material(0, materialName));
     }
 
