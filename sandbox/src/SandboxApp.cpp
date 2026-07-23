@@ -50,6 +50,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <filesystem>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -240,10 +243,26 @@ static void applyUnrealStyle() {
 }
 #endif
 
+// One captured log line for the Output Log panel.
+struct LogLine { LogLevel level; std::string text; };
+
 class SandboxApp final : public Application {
 public:
     SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::string shot, Tool initialTool)
-        : maxFrames_(maxFrames), headless_(headless), beamPath_(std::move(beamPath)), shot_(std::move(shot)), initialTool_(initialTool) {}
+        : maxFrames_(maxFrames), headless_(headless), beamPath_(std::move(beamPath)), shot_(std::move(shot)), initialTool_(initialTool) {
+        // Mirror every engine log line into the Output Log from the moment the app exists.
+        setLogSink(&SandboxApp::logSink, this);
+    }
+
+    // Called (under the core log mutex, possibly off the UI thread) for every log line. Appends to a
+    // bounded buffer the Output Log panel drains. Must not itself log — that would re-enter the held lock.
+    static void logSink(void* ctx, LogLevel level, std::string_view msg) {
+        auto* self = static_cast<SandboxApp*>(ctx);
+        std::lock_guard<std::mutex> lock(self->logMutex_);
+        self->logLines_.push_back({level, std::string(msg)});
+        if (self->logLines_.size() > kMaxLogLines) self->logLines_.pop_front();
+        self->logDirty_ = true;
+    }
 
     BootConfig config() const override {
         BootConfig c; c.windowTitle="Aver Engine \xE2\x80\x94 Editor"; c.windowWidth=1600; c.windowHeight=900;
@@ -755,6 +774,7 @@ public:
     }
 
     void onShutdown(Engine& e) override {
+        setLogSink(nullptr, nullptr);   // stop mirroring logs before this object goes away
 #if AVER_WITH_IMGUI
         // The UI descriptor the mark holds is released with the texture, and that pool has no fence
         // of its own -- so the GPU has to be past every frame that drew it first.
@@ -1423,6 +1443,140 @@ private:
     }
 
 #if AVER_WITH_IMGUI
+    // The Output Log body: a toolbar (clear / level filter / auto-scroll) over a scrolling, colour-coded
+    // view of the captured log. Reads the shared buffer under logMutex_ since logSink fills it off-thread.
+    void drawOutputLog() {
+        if (ImGui::SmallButton("Clear")) { std::lock_guard<std::mutex> lk(logMutex_); logLines_.clear(); }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(110.0f * dpi_);
+        ImGui::Combo("##loglevel", &logLevelFilter_, "All\0Info+\0Warn+\0");
+        ImGui::SameLine();
+        ImGui::Checkbox("Auto-scroll", &logAutoScroll_);
+        ImGui::Separator();
+
+        ImGui::BeginChild("##logscroll", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
+        {
+            std::lock_guard<std::mutex> lk(logMutex_);
+            const int minLevel = logLevelFilter_ == 2 ? (int)LogLevel::Warn
+                              : logLevelFilter_ == 1 ? (int)LogLevel::Info : (int)LogLevel::Trace;
+            for (const LogLine& ln : logLines_) {
+                if ((int)ln.level < minLevel) continue;
+                ImVec4 col;
+                switch (ln.level) {
+                    case LogLevel::Error: col = ImVec4(0.95f, 0.40f, 0.38f, 1.0f); break;
+                    case LogLevel::Warn:  col = ImVec4(0.95f, 0.78f, 0.35f, 1.0f); break;
+                    case LogLevel::Trace: col = ImVec4(0.55f, 0.57f, 0.62f, 1.0f); break;
+                    default:              col = ImVec4(0.82f, 0.84f, 0.88f, 1.0f); break;
+                }
+                ImGui::PushStyleColor(ImGuiCol_Text, col);
+                ImGui::TextUnformatted(ln.text.c_str());
+                ImGui::PopStyleColor();
+            }
+        }
+        // Follow the tail only when the user is already at the bottom, so scrolling up to read stays put.
+        if (logAutoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
+            ImGui::SetScrollHereY(1.0f);
+        logDirty_ = false;
+        ImGui::EndChild();
+    }
+
+    // The Content Browser body: an Add menu (the creation flows, shared with Tools), an Import button, and
+    // a folder tree + file list scanned LIVE from the project's Content directory.
+    void drawContentBrowser() {
+        if (!project_.valid()) {
+            ImGui::TextDisabled("No project loaded - nothing is mounted.");
+            ImGui::TextDisabled("Create or open a project (File menu) to browse its Content folder.");
+            return;
+        }
+        if (ImGui::Button("+ Add")) ImGui::OpenPopup("cbAddMenu");
+        if (ImGui::BeginPopup("cbAddMenu")) {
+            if (ImGui::MenuItem("New C# Script...")) tools_.openNewCsScript();
+            if (ImGui::MenuItem("New C# Class..."))  tools_.openNewCsClass();
+            ImGui::Separator();
+            if (ImGui::MenuItem("New C++ Module...")) tools_.openNewCppModule();
+            if (ImGui::MenuItem("New C++ Class..."))  tools_.openNewCppClass();
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Import...")) ImGui::OpenPopup("cbImport");
+        drawImportModal();
+        ImGui::Separator();
+
+        const std::string content = project_.contentDir();
+        ImGui::BeginChild("cbTree", ImVec2(220.0f * dpi_, 0), true);
+        ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
+        if (cbSelectedDir_.empty() || cbSelectedDir_ == content) rootFlags |= ImGuiTreeNodeFlags_Selected;
+        const bool rootOpen = ImGui::TreeNodeEx("Content", rootFlags);
+        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) cbSelectedDir_ = content;
+        if (rootOpen) { drawFolderTree(content); ImGui::TreePop(); }
+        ImGui::EndChild();
+
+        ImGui::SameLine();
+        ImGui::BeginChild("cbFiles", ImVec2(0, 0), true);
+        drawFolderFiles(cbSelectedDir_.empty() ? content : cbSelectedDir_);
+        ImGui::EndChild();
+    }
+
+    // Recurse the folder tree, scanning only the branches the user has opened (TreeNodeEx is lazy), so a
+    // deep project costs nothing until it is expanded. A click on a folder selects it for the file list.
+    void drawFolderTree(const std::string& dir) {
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (!entry.is_directory(ec)) continue;
+            const std::string full = entry.path().string();
+            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+            if (cbSelectedDir_ == full) flags |= ImGuiTreeNodeFlags_Selected;
+            const bool open = ImGui::TreeNodeEx(entry.path().filename().string().c_str(), flags);
+            if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) cbSelectedDir_ = full;
+            if (open) { drawFolderTree(full); ImGui::TreePop(); }
+        }
+    }
+
+    void drawFolderFiles(const std::string& dir) {
+        std::error_code ec;
+        ImGui::TextDisabled("%s", dir.c_str());
+        ImGui::Separator();
+        int files = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (entry.is_directory(ec)) continue;
+            ImGui::Selectable(entry.path().filename().string().c_str(), false, ImGuiSelectableFlags_AllowDoubleClick);
+            ++files;
+        }
+        if (files == 0) ImGui::TextDisabled("(no files in this folder)");
+    }
+
+    // The Import modal: type a source file, and Import COPIES it into the selected folder — a real, if
+    // minimal, importer (a converting pipeline, FBX/PNG -> engine formats, is a later stage). Logs the
+    // outcome to the Output Log.
+    void drawImportModal() {
+        if (!ImGui::BeginPopup("cbImport")) return;
+        ImGui::TextUnformatted("Import an asset by copying it into the selected folder.");
+        ImGui::SetNextItemWidth(420.0f * dpi_);
+        ImGui::InputText("Source file", importPath_, sizeof(importPath_));
+        const std::string dest = cbSelectedDir_.empty() ? project_.contentDir() : cbSelectedDir_;
+        ImGui::TextDisabled("Into: %s", dest.c_str());
+        ImGui::BeginDisabled(importPath_[0] == '\0');
+        if (ImGui::Button("Import")) {
+            importAsset(importPath_, dest);
+            importPath_[0] = '\0';
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    void importAsset(const std::string& src, const std::string& destDir) {
+        std::error_code ec;
+        if (!std::filesystem::exists(src, ec)) { AVER_WARN("[Import] source not found: {}", src); return; }
+        const std::string name = std::filesystem::path(src).filename().string();
+        const std::string dest = destDir + "\\" + name;
+        std::filesystem::copy_file(src, dest, std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) AVER_WARN("[Import] failed to copy '{}' -> '{}': {}", src, dest, ec.message());
+        else    AVER_INFO("[Import] imported '{}' into {}", name, destDir);
+    }
+
     // Docked panels. These are plain windows — the dock builder placed them, and the user can
     // re-dock, tab or float them freely from here on.
     // The material half of the Details panel. Every control here edits a pbr::MaterialDesc
@@ -1474,6 +1628,7 @@ private:
     }
 
     void buildPanels(Engine& e) {
+        (void)e;   // the panels read app/project state, not the device, since the Output Log/Content Browser landed
         ImGui::Begin("World Outliner");
         for (int i=0;i<(int)objects_.size();++i)
             if (ImGui::Selectable((std::string("  ")+objects_[i].name).c_str(), sel_==i)) sel_=i;
@@ -1507,26 +1662,11 @@ private:
         ImGui::End();
 
         ImGui::Begin("Content Browser");
-        // Where the mount points, even though nothing enumerates it yet: "no content" and "no
-        // project" are different states and the panel used to show one message for both.
-        if (project_.valid()) {
-            ImGui::Text("%s", project_.name.c_str());
-            ImGui::TextDisabled("Mounted at %s", project_.contentDir().c_str());
-            if (!project_.startMap.empty()) ImGui::TextDisabled("Start map: %s", project_.startMap.c_str());
-            ImGui::Separator();
-        } else {
-            ImGui::TextDisabled("No project loaded - nothing is mounted.");
-            ImGui::Separator();
-        }
-        ImGui::TextDisabled("Static meshes (.ocmesh), materials and textures will appear here");
-        ImGui::TextDisabled("once the asset pipeline lands (see docs/STATUS.md \xC2\xA7""9).");
+        drawContentBrowser();
         ImGui::End();
 
         ImGui::Begin("Output Log");
-        ImGui::TextUnformatted("[INFO] Aver Engine 0.1 started");
-        ImGui::Text("[INFO] Backend %s on %s", rhi::backendName(e.device()->backend()), e.device()->adapterName());
-        ImGui::Text("[INFO] Editor DPI scale %.2f", dpi_);
-        ImGui::TextDisabled("(log capture wiring is a TODO - this mirrors the console for now)");
+        drawOutputLog();
         ImGui::End();
     }
 
@@ -1943,6 +2083,17 @@ private:
     scripting::ScriptHost scripts_;
 #endif
     rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;
+    // Output Log capture. Written by logSink from any thread under logMutex_; read by the panel on the UI
+    // thread under the same lock. Bounded so a long session cannot grow it without limit.
+    static constexpr size_t kMaxLogLines = 4000;
+    std::mutex          logMutex_;
+    std::deque<LogLine> logLines_;
+    bool                logDirty_      = false;   // a new line arrived since the panel last drew
+    bool                logAutoScroll_ = true;
+    int                 logLevelFilter_ = 0;      // 0 = all, 1 = Info+, 2 = Warn+
+    // Content Browser: the folder whose files are listed, and the Import modal's source-path field.
+    std::string         cbSelectedDir_;           // empty -> the content root
+    char                importPath_[512] = {};
 #if AVER_MODULE_SCENE
     // ObjectId -> built-in primitive mesh, for the scene-render pass: a spawned actor names its mesh by
     // the fnv1a64 of a path, and this resolves it to a handle. Small and fixed for now (just the sphere).

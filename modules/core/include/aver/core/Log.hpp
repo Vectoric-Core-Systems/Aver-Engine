@@ -12,6 +12,12 @@ namespace detail {
 void logWrite(LogLevel level, std::string_view message);
 }
 
+// A sink the application can install to mirror EVERY log line into its own surface (the editor's Output
+// Log). It is called under the log mutex, from whatever thread logged, so it must be quick and must NOT
+// itself log (that would re-enter the held mutex and deadlock). Installing {nullptr, nullptr} removes it.
+using LogSinkFn = void (*)(void* ctx, LogLevel level, std::string_view message);
+void setLogSink(LogSinkFn fn, void* ctx);
+
 template <class... Args>
 void logMsg(LogLevel level, std::string_view fmt, Args&&... args) {
     detail::logWrite(level, std::vformat(fmt, std::make_format_args(args...)));

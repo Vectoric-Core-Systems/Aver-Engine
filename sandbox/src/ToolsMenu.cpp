@@ -211,31 +211,13 @@ void ToolsMenu::drawMenu(const fmt::ProjectDesc& project) {
     if (!ImGui::BeginMenu("Tools")) return;
 
     const bool haveProject = project.valid();
-    const bool haveEngine = !engineRoot().empty();
 
     const char* kNoProject = "Open or create a project first - C# lives in the\nproject's Content\\Scripts folder.";
-    const char* kNoEngine  = "The engine source tree is not beside this executable,\nso there is no modules\\ folder to write into.";
 
-    // Two groups, labelled, because the asymmetry between them is the thing most likely to
-    // surprise someone arriving from Unreal — where game C++ lives in the project.
-    ImGui::SeparatorText("PROJECT - C#  (no engine rebuild)");
-    if (ImGui::MenuItem("New C# Script...", nullptr, false, haveProject)) open(Modal::CsScript);
-    tip(haveProject ? "An AverBehaviour with lifecycle hooks, in Content\\Scripts.\nReload Scripts builds it and runs it." : kNoProject);
-    if (ImGui::MenuItem("New C# Class...", nullptr, false, haveProject)) open(Modal::CsClass);
-    tip(haveProject ? "A plain class, no lifecycle hooks, in Content\\Scripts." : kNoProject);
-
-    ImGui::SeparatorText("ENGINE - C++  (needs an engine rebuild)");
-    if (ImGui::MenuItem("New C++ Module... (engine)", nullptr, false, haveEngine)) open(Modal::CppModule);
-    tip(haveEngine ? "Scaffolds a new module in the ENGINE's modules\\ folder,\nnot in your project. .ocproject has no build integration."
-                   : kNoEngine);
-    if (ImGui::MenuItem("New C++ Class... (engine module)", nullptr, false, haveEngine)) {
-        open(Modal::CppClass);
-        modules_ = listModules();
-        moduleSel_ = modules_.empty() ? -1 : 0;
-    }
-    tip(haveEngine ? "Adds a .hpp/.cpp pair to an existing ENGINE module.\nGame C++ does not live in the project - see the modal."
-                   : kNoEngine);
-
+    // Creation (New C# Script/Class, New C++ Module/Class) now lives on the Content Browser's "+ Add"
+    // button — the same place UE keeps its Add menu — and opens the same modals drawn below. The Tools
+    // menu keeps the build/reload/open-project actions.
+    ImGui::TextDisabled("New scripts & classes: Content Browser  >  + Add");
     ImGui::Separator();
     const std::string csproj = haveProject ? scriptsCsprojPath(project) : std::string();
     const std::string binDir = haveProject ? scriptsBinaryDir(project) : std::string();

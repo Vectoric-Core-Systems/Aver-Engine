@@ -44,6 +44,14 @@ public:
     // `--tools-menu` screenshot aid can force the popup open with the menu bar as parent window.
     void drawMenu(const fmt::ProjectDesc& project);
 
+    // Open a creation modal from OUTSIDE the Tools menu — the Content Browser's "Add" button routes here,
+    // so the creation flows live in one place and the menu and the browser share them. The modal itself is
+    // drawn by drawModals as usual.
+    void openNewCsScript()  { open(Modal::CsScript); }
+    void openNewCsClass()   { open(Modal::CsClass); }
+    void openNewCppModule() { open(Modal::CppModule); }
+    void openNewCppClass()  { open(Modal::CppClass); modules_ = listModules(); moduleSel_ = modules_.empty() ? -1 : 0; }
+
     // Every modal the menu opens. Called once per frame, outside the menu bar.
     void drawModals(const fmt::ProjectDesc& project, f32 dpi);
 
