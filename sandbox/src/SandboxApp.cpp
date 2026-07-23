@@ -5,6 +5,7 @@
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
+#include "aver/core/Hash.hpp"          // fnv1a64: the mesh-path -> ObjectId hash the C# ClassBuilder uses
 #include "aver/core/Version.hpp"
 #include "aver/formats/OcBeam.hpp"
 #include "aver/formats/OcProject.hpp"
@@ -31,6 +32,11 @@
 #include "aver/framework/framework_hooks.h" // aver_fw_tick — drive the managed tick groups per frame
 #endif
 
+#if AVER_MODULE_SCENE
+#include "aver/scene/World.hpp"       // the one world a spawned actor lives in — walked by the render pass
+#include "aver/scene/Components.hpp"  // CMeshRenderer / CWorld layout, read directly through the pools
+#endif
+
 #if AVER_WITH_IMGUI
 #include "imgui.h"
 #include "imgui_internal.h" // DockBuilder* (docking layout is built in code: IniFilename is null)
@@ -45,6 +51,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace aver {
@@ -76,6 +84,31 @@ static void appendGround(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
     v.push_back({-s,-s,0,0,0,1,-0.5f,-0.5f}); v.push_back({s,-s,0,0,0,1,0.5f,-0.5f});
     v.push_back({s,s,0,0,0,1,0.5f,0.5f}); v.push_back({-s,s,0,0,0,1,-0.5f,0.5f});
     idx.push_back(b); idx.push_back(b+1); idx.push_back(b+2); idx.push_back(b); idx.push_back(b+2); idx.push_back(b+3);
+}
+// A UV sphere, +Z as the pole to match the engine's up axis. On a unit sphere the outward normal IS
+// the position, so nx/ny/nz reuse the vertex directly. Emitted as a grid of `rings` latitude bands by
+// `sectors` longitude columns; the seam column is duplicated so its U wraps 1.0 rather than back to 0.
+static void appendSphere(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, f32 r, u32 rings, u32 sectors) {
+    const u32 base = static_cast<u32>(v.size());
+    for (u32 ring = 0; ring <= rings; ++ring) {
+        const f32 phi = kPi * (static_cast<f32>(ring) / static_cast<f32>(rings)); // 0 at +Z pole -> pi at -Z
+        const f32 z = std::cos(phi), rad = std::sin(phi);
+        for (u32 sec = 0; sec <= sectors; ++sec) {
+            const f32 theta = 2.0f * kPi * (static_cast<f32>(sec) / static_cast<f32>(sectors));
+            const f32 nx = rad * std::cos(theta), ny = rad * std::sin(theta), nz = z;
+            v.push_back({nx * r, ny * r, nz * r, nx, ny, nz,
+                         static_cast<f32>(sec) / static_cast<f32>(sectors),
+                         static_cast<f32>(ring) / static_cast<f32>(rings)});
+        }
+    }
+    const u32 stride = sectors + 1;
+    for (u32 ring = 0; ring < rings; ++ring) {
+        for (u32 sec = 0; sec < sectors; ++sec) {
+            const u32 a = base + ring * stride + sec, b = a + stride;
+            idx.push_back(a); idx.push_back(b); idx.push_back(a + 1);
+            idx.push_back(a + 1); idx.push_back(b); idx.push_back(b + 1);
+        }
+    }
 }
 static Quat quatFromEulerDeg(const Vec3& e) {
     return (Quat::fromAxisAngle({0,0,1}, radians(e.z)) * Quat::fromAxisAngle({0,1,0}, radians(e.y)) *
@@ -367,6 +400,20 @@ public:
         appendBox(gi_v, ci, 0,0,0, 1.0f);
         rhi::MeshHandle cube = e.device()->createMesh(gi_v.data(), (u32)gi_v.size(), ci.data(), (u32)ci.size());
 
+#if AVER_MODULE_SCENE
+        // Register the built-in primitive meshes a SPAWNED actor's CMeshRenderer can name. A C# class
+        // authored with `ClassBuilder.Mesh("Meshes/sphere.ocmesh")` writes fnv1a64(path) into the
+        // component (Assets.ObjectIdOf); the scene-render pass in onRender resolves that same id back to
+        // the handle through this table. The sphere is procedural rather than a loaded .ocmesh for now:
+        // what step 7 needs is the id->handle RESOLUTION and the world walk, not an asset loader yet.
+        {
+            std::vector<rhi::MeshVertex> sv; std::vector<u32> si;
+            appendSphere(sv, si, 1.0f, 24, 48);
+            sceneMeshes_[fnv1a64(std::string_view("Meshes/sphere.ocmesh"))] =
+                e.device()->createMesh(sv.data(), (u32)sv.size(), si.data(), (u32)si.size());
+        }
+#endif
+
         MeshObj floor; floor.name="Floor"; floor.mesh=ground; floor.tris=(u32)gi.size()/3;
         floor.color[0]=0.34f; floor.color[1]=0.35f; floor.color[2]=0.37f;
         floor.metallic=0.0f; floor.roughness=0.9f;
@@ -548,6 +595,15 @@ public:
         for (i32 g = 0; g < AVER_FW_TICK_COUNT; ++g)
             aver_fw_tick(g, t.dt);
 #endif
+#if AVER_MODULE_SCENE
+        // Drive the world's frame flush exactly once, AFTER gameplay has spawned/destroyed/moved for the
+        // frame and BEFORE onRender walks it: this retires the frame's deferred destroys and propagates
+        // world matrices in one linear pass, so the render walk reads settled transforms. Nothing else
+        // drives it, and without it a deferred destroy would never reclaim its slot. Gate-neutral: the
+        // gate scene populates objects_, not the world, so at gate time the world is empty and flush is
+        // a no-op.
+        scene::World::instance().flush();
+#endif
         // The geometry path is a DEVICE setting, not a feature's: it decides how every draw reaches
         // the rasteriser. Pushed OUTSIDE the module guard, or a build without Voxi could never
         // select it -- and an unreachable path is an untested one.
@@ -641,6 +697,46 @@ public:
 #endif
             e.device()->drawMesh(o.mesh, &w.m[0][0], col, o.metallic, o.roughness);
         }
+#if AVER_MODULE_SCENE
+        // Scene-entity pass: draw every live entity carrying a CMeshRenderer. This is the bridge from a
+        // SPAWNED actor — which lives in the world, not in objects_ above — to the screen. It is additive
+        // and gate-neutral by construction: the editor's fixed scene is objects_, and the gate runs spawn
+        // no actors, so at gate time the world holds no CMeshRenderer and this loop draws nothing.
+        {
+            scene::World& w = scene::World::instance();
+            int drawn = 0;
+            const u32 n = w.count();
+            for (u32 i = 0; i < n; ++i) {
+                const scene::Entity ent = w.at(i);
+                if (w.destroyPending(ent)) continue;   // a deferred-destroyed actor stops drawing at once
+                const scene::CMeshRenderer* mr =
+                    w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
+                if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
+                const auto it = sceneMeshes_.find(mr->mesh);
+                if (it == sceneMeshes_.end()) continue; // an unresolved mesh id draws nothing, not garbage
+                const Mat4& wm = w.worldMatrix(ent);
+                const i32 mat = mr->material;
+                // material 0 == "no authored material": the fallback block carries no albedo/spec, so
+                // the authored pair rides b1 (a light dielectric, clearly visible). A real material pins
+                // b1 to identity and lets its own b2 govern, matching makeMaterialFor's rule for objects_.
+                f32 col[4] = {0.80f, 0.80f, 0.85f, 1.0f};
+                f32 metallic = 0.0f, roughness = 0.5f;
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+                if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready())
+                    e.device()->setDrawBinding(ms.bindingSet(mat), &ms.constants(mat),
+                                               sizeof(pbr::MaterialConstants));
+                if (mat != 0) { col[0]=col[1]=col[2]=1.0f; metallic = roughness = 1.0f; }
+#endif
+                e.device()->drawMesh(it->second, &wm.m[0][0], col, metallic, roughness);
+                ++drawn;
+            }
+            if (drawn != lastSceneDrawn_) {   // one log line when the count changes, never per frame
+                AVER_INFO("[Sandbox] scene-render: {} spawned CMeshRenderer entit{} drawn",
+                          drawn, drawn == 1 ? "y" : "ies");
+                lastSceneDrawn_ = drawn;
+            }
+        }
+#endif
         e.device()->setWireframe(false); // lines are always solid
         if (showGrid_) { Mat4 id = Mat4::identity(); e.device()->drawLines(gridMesh_, &id.m[0][0]); }
         drawGizmo(e);
@@ -1699,6 +1795,12 @@ private:
     scripting::ScriptHost scripts_;
 #endif
     rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;
+#if AVER_MODULE_SCENE
+    // ObjectId -> built-in primitive mesh, for the scene-render pass: a spawned actor names its mesh by
+    // the fnv1a64 of a path, and this resolves it to a handle. Small and fixed for now (just the sphere).
+    std::unordered_map<u64, rhi::MeshHandle> sceneMeshes_;
+    int lastSceneDrawn_=-1;           // last scene-entity draw count, so the log line fires only on change
+#endif
     Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };
 

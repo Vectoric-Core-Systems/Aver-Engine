@@ -127,6 +127,7 @@ add_custom_command(
           -o ${CMAKE_BINARY_DIR}/bin/ActorScripts
   DEPENDS ${AVER_ACTOR_PROJ}
           ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/TestActor.cs
+          ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/SphereActor.cs
           ${AVER_BRIDGE_OUTPUTS}
   COMMENT "Building the sample actor assembly"
   VERBATIM)
