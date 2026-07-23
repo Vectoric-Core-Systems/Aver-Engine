@@ -553,14 +553,89 @@ static void testDestroyReentrancy() {
     check(aver_fw_clear_managed_dispatch() == 1, "the re-entrant stand-in clears");
 }
 
-// --------------------------------------------------------------------------- later-stage stubs
+// --------------------------------------------------------------------------- play lifecycle (step 13)
 
-static void testStubs() {
-    AVER_INFO("=== session singletons are later-stage stubs (return 0) ===");
-    check(aver_fw_game_instance() == 0, "game_instance is stubbed to 0");
-    check(aver_fw_game_mode() == 0, "game_mode is stubbed to 0");
-    check(aver_fw_player_controller(0) == 0, "player_controller is stubbed to 0");
-    check(aver_fw_play_state() == 0, "play_state is stubbed to 0");
+static void testPlayLifecycle() {
+    AVER_INFO("=== play lifecycle: begin_play spawns the session, end_play tears it down ===");
+
+    // In EDITOR the state is EDITOR(0) and every session singleton is 0 — the former "stub" contract,
+    // now the genuine cleared-state contract.
+    check(aver_fw_play_state() == AVER_FW_PLAY_EDITOR, "play state starts in EDITOR");
+    check(aver_fw_game_instance() == 0, "no GameInstance before begin_play");
+    check(aver_fw_game_mode() == 0, "no GameMode before begin_play");
+    check(aver_fw_player_controller(0) == 0, "no player controller before begin_play");
+
+    // The pawn, controller and GameInstance the GameMode will draw on, then the GameMode that names the
+    // pawn/controller by string (resolved at seal), plus an ABSTRACT GameMode base declared FIRST.
+    const int32_t pawnC = aver_fw_class_declare("PlayPawn", "");
+    aver_fw_class_set_flags(pawnC, AVER_FW_CLASS_PAWN);
+    aver_fw_class_seal(pawnC);
+    const int32_t ctrlC = aver_fw_class_declare("PlayCtrl", "");
+    aver_fw_class_set_flags(ctrlC, AVER_FW_CLASS_CONTROLLER);
+    aver_fw_class_seal(ctrlC);
+    const int32_t giC = aver_fw_class_declare("PlayGI", "");
+    aver_fw_class_set_flags(giC, AVER_FW_CLASS_GAME_INSTANCE);
+    aver_fw_class_seal(giC);
+
+    const int32_t absGM = aver_fw_class_declare("PlayGMBase", "");
+    aver_fw_class_set_flags(absGM, AVER_FW_CLASS_GAME_MODE | AVER_FW_CLASS_ABSTRACT);
+    aver_fw_class_seal(absGM);
+
+    const int32_t gmC = aver_fw_class_declare("PlayGM", "");
+    aver_fw_class_set_flags(gmC, AVER_FW_CLASS_GAME_MODE);
+    aver_fw_class_set_default_pawn(gmC, "PlayPawn");
+    aver_fw_class_set_player_controller(gmC, "PlayCtrl");
+    aver_fw_class_seal(gmC);
+
+    // find_class_with_flags skips the ABSTRACT base (declared first) and lands on the concrete class.
+    check(aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE) == gmC,
+          "find_class_with_flags(GAME_MODE) skips the ABSTRACT base and returns the user class");
+    check(aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_INSTANCE) == giC,
+          "find_class_with_flags(GAME_INSTANCE) returns the GameInstance class");
+    check(aver_fw_find_class_with_flags(0) == 0, "find_class_with_flags(0) matches nothing");
+
+    // An abstract class is never spawnable — the spawn choke point rejects it.
+    check(aver_fw_spawn(absGM, "shouldNotSpawn", nullptr, nullptr, nullptr) == 0,
+          "aver_fw_spawn refuses an ABSTRACT class");
+
+    // begin_play spawns GameInstance -> GameMode -> Controller -> Pawn and possesses the pawn.
+    check(aver_fw_begin_play(giC, gmC) == 1, "begin_play starts a session");
+    check(aver_fw_play_state() == AVER_FW_PLAY_PLAYING, "play state is PLAYING after begin_play");
+    const int32_t gm = aver_fw_game_mode();
+    const int32_t gi = aver_fw_game_instance();
+    const int32_t ctrl = aver_fw_player_controller(0);
+    check(gm != 0 && aver_fw_class_of(gm) == gmC, "the GameMode singleton is a live instance of the GameMode class");
+    check(gi != 0 && aver_fw_class_of(gi) == giC, "the GameInstance singleton is a live instance of the GameInstance class");
+    check(ctrl != 0 && aver_fw_class_of(ctrl) == ctrlC, "the controller singleton is a live instance of the controller class");
+    const int32_t pawn = aver_fw_controlled_pawn(ctrl);
+    check(pawn != 0 && aver_fw_class_of(pawn) == pawnC, "the controller possesses a pawn of the pawn class");
+
+    // A second begin_play while a session runs is refused, leaving the running session intact.
+    check(aver_fw_begin_play(giC, gmC) == 0, "begin_play is refused while a session is already running");
+    check(aver_fw_game_mode() == gm, "the refused begin_play did not disturb the running session");
+
+    // Pause and resume flip the state without tearing anything down.
+    check(aver_fw_set_paused(1) == 1, "set_paused(1) is accepted while playing");
+    check(aver_fw_play_state() == AVER_FW_PLAY_PAUSED, "play state is PAUSED");
+    check(aver_fw_game_mode() == gm, "the GameMode singleton survives a pause");
+    check(aver_fw_set_paused(0) == 1, "set_paused(0) resumes");
+    check(aver_fw_play_state() == AVER_FW_PLAY_PLAYING, "play state is PLAYING again after resume");
+
+    // end_play tears the whole session down, back to EDITOR with every singleton cleared.
+    check(aver_fw_end_play() == 1, "end_play ends the session");
+    check(aver_fw_play_state() == AVER_FW_PLAY_EDITOR, "play state is EDITOR after end_play");
+    check(aver_fw_game_instance() == 0, "the GameInstance singleton is cleared");
+    check(aver_fw_game_mode() == 0, "the GameMode singleton is cleared");
+    check(aver_fw_player_controller(0) == 0, "the controller singleton is cleared");
+    check(aver_fw_end_play() == 0, "a second end_play with nothing running is refused");
+    check(aver_fw_set_paused(1) == 0, "set_paused is refused outside a session");
+    World::instance().flush();   // retire the deferred destroys the ended session left
+
+    // A session cannot start without a valid GameMode.
+    check(aver_fw_begin_play(giC, 0) == 0, "begin_play with an invalid GameMode is refused");
+    check(aver_fw_play_state() == AVER_FW_PLAY_EDITOR, "a refused begin_play leaves the state in EDITOR");
+    check(aver_fw_game_instance() == 0, "a refused begin_play leaves no GameInstance behind");
+    World::instance().flush();
 }
 
 int main() {
@@ -576,7 +651,7 @@ int main() {
     testPossession();
     testManagedDispatch();
     testDestroyReentrancy();
-    testStubs();
+    testPlayLifecycle();
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;

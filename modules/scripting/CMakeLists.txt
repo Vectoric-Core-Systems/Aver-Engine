@@ -128,6 +128,7 @@ add_custom_command(
   DEPENDS ${AVER_ACTOR_PROJ}
           ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/TestActor.cs
           ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/SphereActor.cs
+          ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/PlayDemo.cs
           ${AVER_BRIDGE_OUTPUTS}
   COMMENT "Building the sample actor assembly"
   VERBATIM)

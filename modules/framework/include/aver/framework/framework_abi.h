@@ -163,9 +163,32 @@ AVER_FW_ABI int32_t aver_fw_unpossess(int32_t controller);
 AVER_FW_ABI int32_t aver_fw_controlled_pawn(int32_t controller);   /* the pawn, or 0 */
 AVER_FW_ABI int32_t aver_fw_controller_of(int32_t pawn);           /* the controller, or 0 */
 
-/* ---- session singletons / play state — LATER STAGE (steps 10-11, 13) ----
- * These need the play lifecycle that step 8 does not build, so they are stubbed to return 0. The
- * class registry, defaults, spawn, class_of, destroy and possession above are fully implemented. */
+/* ---- play lifecycle + session singletons (step 13) ----
+ * The world has two lives: EDITOR authoring and PLAYING. aver_fw_begin_play spawns the session — an
+ * optional GameInstance, the GameMode, and the GameMode's controller+pawn (possessed) — and moves the
+ * play state to PLAYING; aver_fw_end_play tears that session down (OnEndPlay reason STOP) and returns to
+ * EDITOR. PAUSED freezes the tick without tearing anything down. The singletons below read back what
+ * begin_play spawned; each is 0 in EDITOR. */
+#define AVER_FW_PLAY_EDITOR  0
+#define AVER_FW_PLAY_PLAYING 1
+#define AVER_FW_PLAY_PAUSED  2
+
+/* Begin a play session. gameModeClass is mandatory (0 -> reject); gameInstanceClass is optional (pass 0
+ * for none). Returns 1 on a session that started, 0 if one was already running or the GameMode was
+ * invalid. The GameMode's pawn/controller (named on the class, resolved at seal) are spawned and
+ * possessed; a GameMode may legally have neither. */
+AVER_FW_ABI int32_t aver_fw_begin_play(int32_t gameInstanceClass, int32_t gameModeClass);
+/* End the running session: OnEndPlay(STOP) + destroy every actor begin_play spawned, back to EDITOR.
+ * Returns 0 if nothing was running. */
+AVER_FW_ABI int32_t aver_fw_end_play(void);
+/* Freeze (paused != 0) or resume (0) the tick without tearing the session down. 0 if not playing. */
+AVER_FW_ABI int32_t aver_fw_set_paused(int32_t paused);
+/* The first declared class carrying ALL of `flags` (AVER_FW_CLASS_*), or 0. The editor's Play button
+ * uses it to find the GameMode/GameInstance to start without a hard-coded class name. 0 flags -> 0. */
+AVER_FW_ABI int32_t aver_fw_find_class_with_flags(int32_t flags);
+
+/* The session singletons begin_play populated. Each is 0 in EDITOR. player_controller takes a 0-based
+ * index; only player 0 exists until split-screen does. */
 AVER_FW_ABI int32_t aver_fw_game_instance(void);
 AVER_FW_ABI int32_t aver_fw_game_mode(void);
 AVER_FW_ABI int32_t aver_fw_player_controller(int32_t playerIndex);

@@ -592,8 +592,14 @@ public:
         // call, and the bridge walks its own dense list behind it. Harmless every frame with no actors
         // spawned: with no managed dispatch installed, or empty tick buckets, this is a guarded no-op.
         maybeSpawnTestActor();   // one-shot --spawn-test, after scripts have declared their classes
-        for (i32 g = 0; g < AVER_FW_TICK_COUNT; ++g)
-            aver_fw_tick(g, t.dt);
+        maybePlayTest();         // one-shot --play-test: begin_play, tick a few frames, end_play
+        // Gate the actor tick on PLAYING: in EDITOR gameplay is frozen (like an unopened level), and a
+        // PAUSE freezes it without a teardown. The --spawn-test harness is exempt — it drives OnTick
+        // directly to prove the tick path without a GameMode. flush() below still runs every frame so an
+        // end_play teardown retires regardless of state.
+        if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING)
+            for (i32 g = 0; g < AVER_FW_TICK_COUNT; ++g)
+                aver_fw_tick(g, t.dt);
 #endif
 #if AVER_MODULE_SCENE
         // Drive the world's frame flush exactly once, AFTER gameplay has spawned/destroyed/moved for the
@@ -784,6 +790,7 @@ public:
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
     void setScriptsDir(std::string d) { scriptsDir_ = std::move(d); }            // --scripts <dir>
     void setSpawnTest(std::string cls) { spawnTestClass_ = std::move(cls); }      // --spawn-test <ClassName>
+    void setPlayTest() { playTest_ = true; }                                       // --play-test
     void setProjectPath(std::string p) { projectPath_ = std::move(p); }          // <path>.ocproject
     // Arm the start screen. Only ever true for an interactive launch with no project: the
     // verification harness drives the editor with --frames and reads one probe pixel, so a screen
@@ -885,6 +892,47 @@ private:
             AVER_INFO("[spawn-test] destroying entity {} - watch for its OnEndPlay line", spawnTestEntity_);
             aver_fw_destroy(spawnTestEntity_);
             spawnTestEntity_ = 0;
+        }
+    }
+
+    // Start a play session from the editor's Play button: find the single user GameMode (and optional
+    // GameInstance) by flag and begin_play them. A bare editor with no project scripts has no GameMode,
+    // which is why Play looks inert until a script assembly is loaded.
+    void startPlay() {
+        const int32_t gm = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE);
+        if (gm == 0) {
+            AVER_WARN("[Sandbox] Play: no GameMode class is loaded - open a project with scripts (--scripts <dir>)");
+            return;
+        }
+        const int32_t gi = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_INSTANCE);  // 0 == none, allowed
+        if (aver_fw_begin_play(gi, gm))
+            AVER_INFO("[Sandbox] Play: begin_play GameMode='{}'{}", aver_fw_class_name(gm),
+                      gi ? std::string(" GameInstance='") + aver_fw_class_name(gi) + "'" : std::string());
+        else
+            AVER_WARN("[Sandbox] Play: begin_play was rejected (already playing?)");
+    }
+
+    // ---- HEADLESS TEST TRIGGER (--play-test) ----------------------------------------------------
+    // The play-lifecycle counterpart of --spawn-test: once a GameMode class has been declared, begin a
+    // play session (spawning GameInstance/GameMode/Controller/Pawn), let it tick a few frames, then Stop.
+    // The whole GameMode->possessed-Pawn lifecycle is then observable in the log, headless. Flag-gated;
+    // the editor never sets it.
+    void maybePlayTest() {
+        if (!playTest_) return;
+        if (!playTestBegun_) {
+            if (aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE) == 0) {
+                if (++playTestWait_ > 10) { playTest_ = false;
+                    AVER_WARN("[play-test] no GameMode class after 10 frames - pass --scripts <dir> with a GameMode"); }
+                return;   // scripts may still be loading; try again next frame
+            }
+            playTestBegun_ = true;
+            AVER_INFO("[play-test] starting - watch for GameMode/Controller/Pawn OnBeginPlay + Pawn OnTick");
+            startPlay();
+            return;
+        }
+        if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING && ++playTestFrames_ == 4) {
+            AVER_INFO("[play-test] stopping - watch for OnEndPlay(reason=Stop) lines");
+            aver_fw_end_play();
         }
     }
 #endif
@@ -1198,9 +1246,28 @@ private:
         {
             const f32 grpW = 200.0f*dpi_;
             ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), (wsize.x - grpW)*0.5f));
+#if AVER_MODULE_FRAMEWORK
+            // Play spawns the GameMode session; Stop tears it down; Pause freezes the tick. Play is
+            // disabled while playing and Pause/Stop while not — the same shape as Unreal's PIE bar.
+            const int32_t ps = aver_fw_play_state();
+            const bool playing = ps != AVER_FW_PLAY_EDITOR;
+            ImGui::BeginDisabled(playing);
+            if (ImGui::Button("Play")) startPlay();
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!playing);
+            if (ImGui::Button(ps == AVER_FW_PLAY_PAUSED ? "Resume" : "Pause"))
+                aver_fw_set_paused(ps != AVER_FW_PLAY_PAUSED ? 1 : 0);
+            ImGui::SameLine();
+            if (ImGui::Button("Stop")) { aver_fw_end_play(); AVER_INFO("[Sandbox] Stop: play session ended"); }
+            ImGui::EndDisabled();
+#else
+            ImGui::BeginDisabled(true);
             ImGui::Button("Play"); ImGui::SameLine();
             ImGui::Button("Pause"); ImGui::SameLine();
             ImGui::Button("Stop");
+            ImGui::EndDisabled();
+#endif
         }
         ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 130.0f*dpi_));
         if (dropButton("Settings")) ImGui::OpenPopup("settingsMenu");
@@ -1766,6 +1833,10 @@ private:
     bool spawnTestDone_=false;       // the spawn is one-shot, done on the first frame scripts are ready
     int32_t spawnTestEntity_=0;      // the spawned test entity, destroyed a few frames later
     int spawnTestFrames_=0;          // frames since the test spawn, so the destroy is one-shot too
+    bool playTest_=false;            // --play-test: headless begin_play -> tick -> end_play trigger
+    bool playTestBegun_=false;       // begin_play has fired (one-shot, once a GameMode class is declared)
+    int  playTestWait_=0;            // frames spent waiting for a GameMode class before giving up
+    int  playTestFrames_=0;          // frames since begin_play, so the Stop is one-shot too
     // Project browser + the project it produced. `browserActive_` is false for every automated
     // run, so the oracle never sees the start screen.
     editor::ProjectBrowser browser_;
@@ -1820,7 +1891,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; std::string beam, shot, project, scriptsDir, spawnTest; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -1860,6 +1931,7 @@ Application* createApplication(int argc, char** argv) {
         // anything. `--scripts SampleScripts` picks up the staged sample behaviour.
         else if (!std::strcmp(argv[i],"--scripts") && i+1<argc) scriptsDir=argv[++i];
         else if (!std::strcmp(argv[i],"--spawn-test") && i+1<argc) spawnTest=argv[++i];
+        else if (!std::strcmp(argv[i],"--play-test")) playTest=true;
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
         else if (!std::strcmp(argv[i],"--tool") && i+1<argc) {
@@ -1900,6 +1972,7 @@ Application* createApplication(int argc, char** argv) {
     app->setProbe(probeX, probeY);
     app->setScriptsDir(scriptsDir);
     app->setSpawnTest(spawnTest);
+    if (playTest) app->setPlayTest();
     return app;
 }
 

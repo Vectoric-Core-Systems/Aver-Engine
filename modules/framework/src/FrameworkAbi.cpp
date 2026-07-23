@@ -536,6 +536,10 @@ int32_t aver_fw_spawn(int32_t c, const char* name,
                       const float* pos3, const float* quat4, const float* scale3) {
     ClassRecord* r = rec(c);
     if (!r) return 0;
+    // An ABSTRACT class is a lineage anchor (the Pawn/GameMode/... bases), never an instance. Rejecting
+    // it here enforces the "declarable, never spawnable" contract at the one choke point every spawn
+    // passes through, rather than trusting each caller to have filtered it (find_class_with_flags does).
+    if (r->flags & AVER_FW_CLASS_ABSTRACT) return 0;
     if (!r->sealed && !sealClass(c)) return 0;   // spawning auto-seals; a bad chain fails here
 
     const Entity e = world().create(name ? std::string_view(name) : std::string_view());
@@ -593,7 +597,9 @@ int32_t aver_fw_spawn(int32_t c, const char* name,
     return static_cast<int32_t>(e);
 }
 
-int32_t aver_fw_destroy(int32_t e) {
+// The teardown body, parameterised by the end reason it dispatches. aver_fw_destroy passes DESTROY; the
+// play-stop path passes STOP so a script's OnEndPlay can tell "the world stopped" from "I was destroyed".
+static int32_t destroyActor(int32_t e, int32_t endReason) {
     const Entity ent = toEntity(e);
     if (!world().valid(ent)) return 0;
 
@@ -621,7 +627,7 @@ int32_t aver_fw_destroy(int32_t e) {
     if (classHasFlags(ent, AVER_FW_CLASS_MANAGED) && managedInstalled()) {
         AvManagedDispatch& d = managedDispatch();
         const aver_entity  ae = static_cast<aver_entity>(e);
-        if (d.endPlay) d.endPlay(ae, AVER_FW_END_DESTROY);
+        if (d.endPlay) d.endPlay(ae, endReason);
         if (d.unbind)  d.unbind(ae);
     }
 
@@ -644,6 +650,8 @@ int32_t aver_fw_destroy(int32_t e) {
     inFlight.erase(ent);
     return destroyed;
 }
+
+int32_t aver_fw_destroy(int32_t e) { return destroyActor(e, AVER_FW_END_DESTROY); }
 
 int32_t aver_fw_class_of(int32_t e) {
     return classOfEntity(toEntity(e));
@@ -746,13 +754,87 @@ int32_t aver_fw_tick(int32_t tickGroup, float dt) {
     return 0;
 }
 
-// ---- session singletons / play state — LATER STAGE (steps 10-11, 13), stubbed to 0 --------------
-// These need the play lifecycle (a running GameInstance/GameMode singleton, a play-state machine)
-// that step 8 does not build. They return 0 deliberately; wiring them is a later stage, and every
-// registry/spawn/possession entry point above is fully implemented.
-int32_t aver_fw_game_instance(void)               { return 0; }
-int32_t aver_fw_game_mode(void)                    { return 0; }
-int32_t aver_fw_player_controller(int32_t /*i*/)   { return 0; }
-int32_t aver_fw_play_state(void)                   { return 0; }
+// ---- play lifecycle + session singletons (step 13) ---------------------------------------------
+// One process-global play state and the session it owns. File-local statics behind accessors, the same
+// pattern the class registry uses, so there is one instance and it initialises on first use. Handles are
+// int32_t (0 == none) to match the ABI they are read back through.
+int32_t& playStateRef()    { static int32_t s = AVER_FW_PLAY_EDITOR; return s; }
+int32_t& gameInstanceRef() { static int32_t e = 0; return e; }
+int32_t& gameModeRef()     { static int32_t e = 0; return e; }
+int32_t& playerCtrlRef()   { static int32_t e = 0; return e; }
+int32_t& playPawnRef()     { static int32_t e = 0; return e; }   // stored so end_play can tear it down
+
+int32_t aver_fw_find_class_with_flags(int32_t flags) {
+    if (flags == 0) return 0;   // 0 matches every class; a request for "no flags" gets nothing, not all
+    auto& cs = classes();
+    for (int32_t c = 1; c < static_cast<int32_t>(cs.size()); ++c) {
+        const int32_t f = cs[static_cast<usize>(c)].flags;
+        // Skip the abstract base classes (Pawn/GameMode/...): they carry the type flag but exist only as
+        // lineage anchors, so "find a GameMode to start" must land on a real user class, not the base.
+        if (f & AVER_FW_CLASS_ABSTRACT) continue;
+        if ((f & flags) == flags) return c;
+    }
+    return 0;
+}
+
+int32_t aver_fw_begin_play(int32_t gameInstanceClass, int32_t gameModeClass) {
+    if (playStateRef() != AVER_FW_PLAY_EDITOR) return 0;   // a session is already running
+    if (!validClass(gameModeClass))            return 0;   // the GameMode is mandatory; 0 == invalid
+
+    // The GameInstance is optional and spawned first, so it exists before the mode that may read it.
+    if (validClass(gameInstanceClass))
+        gameInstanceRef() = aver_fw_spawn(gameInstanceClass, "GameInstance", nullptr, nullptr, nullptr);
+
+    const int32_t gm = aver_fw_spawn(gameModeClass, "GameMode", nullptr, nullptr, nullptr);
+    if (gm == 0) {
+        // Unwind directly, NOT through end_play: the state is still EDITOR here (it flips to PLAYING only
+        // on success below), so end_play would early-return and leak the GameInstance that already spawned.
+        if (gameInstanceRef()) { destroyActor(gameInstanceRef(), AVER_FW_END_STOP); gameInstanceRef() = 0; }
+        return 0;
+    }
+    gameModeRef() = gm;
+
+    // The mode NAMES its controller and pawn; step 8 resolved those names to class handles at seal. A
+    // mode may legally have neither (a menu mode, say), so an unset side is skipped, not an error.
+    ClassRecord* r = rec(gameModeClass);
+    const int32_t ctrl = (r && validClass(r->playerController))
+                       ? aver_fw_spawn(r->playerController, "PlayerController", nullptr, nullptr, nullptr) : 0;
+    const int32_t pawn = (r && validClass(r->defaultPawn))
+                       ? aver_fw_spawn(r->defaultPawn, "Pawn", nullptr, nullptr, nullptr) : 0;
+    playerCtrlRef() = ctrl;
+    playPawnRef()   = pawn;
+    if (ctrl && pawn) aver_fw_possess(ctrl, pawn);
+
+    playStateRef() = AVER_FW_PLAY_PLAYING;
+    return 1;
+}
+
+int32_t aver_fw_end_play(void) {
+    if (playStateRef() == AVER_FW_PLAY_EDITOR) return 0;   // nothing to end
+
+    // Drop possession before teardown so no controller points at a half-destroyed pawn, then destroy in
+    // the reverse of spawn order with reason STOP (the actors' play life ends, not "they were deleted").
+    if (playerCtrlRef()) aver_fw_unpossess(playerCtrlRef());
+    if (playPawnRef())     destroyActor(playPawnRef(),     AVER_FW_END_STOP);
+    if (playerCtrlRef())   destroyActor(playerCtrlRef(),   AVER_FW_END_STOP);
+    if (gameModeRef())     destroyActor(gameModeRef(),     AVER_FW_END_STOP);
+    if (gameInstanceRef()) destroyActor(gameInstanceRef(), AVER_FW_END_STOP);
+
+    playPawnRef() = playerCtrlRef() = gameModeRef() = gameInstanceRef() = 0;
+    playStateRef() = AVER_FW_PLAY_EDITOR;
+    return 1;
+}
+
+int32_t aver_fw_set_paused(int32_t paused) {
+    int32_t& s = playStateRef();
+    if (s == AVER_FW_PLAY_EDITOR) return 0;   // pause is meaningless outside a running session
+    s = paused ? AVER_FW_PLAY_PAUSED : AVER_FW_PLAY_PLAYING;
+    return 1;
+}
+
+int32_t aver_fw_game_instance(void)             { return gameInstanceRef(); }
+int32_t aver_fw_game_mode(void)                 { return gameModeRef(); }
+int32_t aver_fw_player_controller(int32_t i)    { return i == 0 ? playerCtrlRef() : 0; }
+int32_t aver_fw_play_state(void)                { return playStateRef(); }
 
 }  // extern "C"

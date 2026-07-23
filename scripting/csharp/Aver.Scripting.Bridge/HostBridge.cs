@@ -522,11 +522,13 @@ public static class HostBridge
     // identifying flag but NOT MANAGED — they are never spawned, so nothing dispatches into them.
     private static void DeclareBaseClasses()
     {
-        DeclareBase("Actor", "", 0);
-        DeclareBase("Pawn", "Actor", ClassFlags.Pawn);
-        DeclareBase("PlayerController", "Actor", ClassFlags.Controller);
-        DeclareBase("GameMode", "Actor", ClassFlags.GameMode);
-        DeclareBase("GameInstance", "Actor", ClassFlags.GameInstance);
+        // Abstract: these are lineage anchors, never spawned themselves. The flag keeps them out of
+        // aver_fw_find_class_with_flags, so "find the GameMode to start" lands on a user class, not this.
+        DeclareBase("Actor", "", ClassFlags.Abstract);
+        DeclareBase("Pawn", "Actor", ClassFlags.Pawn | ClassFlags.Abstract);
+        DeclareBase("PlayerController", "Actor", ClassFlags.Controller | ClassFlags.Abstract);
+        DeclareBase("GameMode", "Actor", ClassFlags.GameMode | ClassFlags.Abstract);
+        DeclareBase("GameInstance", "Actor", ClassFlags.GameInstance | ClassFlags.Abstract);
     }
 
     private static void DeclareBase(string name, string parent, int flags)
