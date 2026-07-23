@@ -73,6 +73,16 @@ internal static class Fw
     [DllImport(Lib)] internal static extern int aver_fw_player_controller(int playerIndex);
     [DllImport(Lib)] internal static extern int aver_fw_play_state();
 
+    // Input: the app pushes new_frame/set_key/set_mouse; gameplay reads key/pressed/released/mouse.
+    [DllImport(Lib)] internal static extern void aver_fw_input_new_frame();
+    [DllImport(Lib)] internal static extern void aver_fw_input_set_key(int key, int down);
+    [DllImport(Lib)] internal static extern void aver_fw_input_set_mouse(float dx, float dy, float wheel);
+    [DllImport(Lib)] internal static extern int aver_fw_input_key(int key);
+    [DllImport(Lib)] internal static extern int aver_fw_input_key_pressed(int key);
+    [DllImport(Lib)] internal static extern int aver_fw_input_key_released(int key);
+    [DllImport(Lib)] internal static extern void aver_fw_input_mouse(float[] out3);
+    [DllImport(Lib)] internal static extern void aver_fw_set_view(int mode, float eyeHeight, float boomLength);
+
     /// <summary>Decode a UTF-8 string returned as a pointer; "?" if null. Duplicated per the tree idiom.</summary>
     internal static string Str(IntPtr p) => Marshal.PtrToStringUTF8(p) ?? "?";
 }

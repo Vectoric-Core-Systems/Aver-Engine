@@ -591,6 +591,7 @@ public:
         // per group per frame, in order — the framework makes exactly one managed tick_all(group) per
         // call, and the bridge walks its own dense list behind it. Harmless every frame with no actors
         // spawned: with no managed dispatch installed, or empty tick buckets, this is a guarded no-op.
+        pushInput(e.device()->uiActive());   // publish this frame's keyboard/mouse for gameplay before the tick
         maybeSpawnTestActor();   // one-shot --spawn-test, after scripts have declared their classes
         maybePlayTest();         // one-shot --play-test: begin_play, tick a few frames, end_play
         // Gate the actor tick on PLAYING: in EDITOR gameplay is frozen (like an unopened level), and a
@@ -609,6 +610,9 @@ public:
         // gate scene populates objects_, not the world, so at gate time the world is empty and flush is
         // a no-op.
         scene::World::instance().flush();
+#endif
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
+        drivePlayCamera();       // while playing, the view follows the possessed pawn (first/third person)
 #endif
         // The geometry path is a DEVICE setting, not a feature's: it decides how every draw reaches
         // the rasteriser. Pushed OUTSIDE the module guard, or a build without Voxi could never
@@ -930,10 +934,83 @@ private:
             startPlay();
             return;
         }
-        if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING && ++playTestFrames_ == 4) {
-            AVER_INFO("[play-test] stopping - watch for OnEndPlay(reason=Stop) lines");
-            aver_fw_end_play();
+        if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
+            aver_fw_input_set_key(AVER_FW_KEY_W, 1);   // synthetic: hold forward so the possessed character walks
+            if (++playTestFrames_ == 6) {
+                const int32_t pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+                if (pawn) {
+                    const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pawn));
+                    const Mat4& wm = scene::World::instance().worldMatrix(pe);
+                    AVER_INFO("[play-test] character walked to ({:.1f}, {:.1f}, {:.1f}) under synthetic W (spawned at origin)",
+                              wm.m[3][0], wm.m[3][1], wm.m[3][2]);
+                }
+                AVER_INFO("[play-test] stopping - watch for OnEndPlay(reason=Stop) lines");
+                aver_fw_end_play();
+            }
         }
+    }
+
+    // Publish this frame's keyboard/mouse into the framework so gameplay (the C# Input class) can read it.
+    // Called before the actor tick. `uiActive` gates the ImGui reads exactly as the fly-camera block does:
+    // headless/no-UI runs have no ImGui input frame, and touching it there hangs — a synthetic --play-test
+    // still works because it sets keys AFTER this. Keys/mouse are also suppressed while an editor text field
+    // has focus, so a WASD typed into a rename box never walks the character.
+    void pushInput(bool uiActive) {
+        aver_fw_input_new_frame();
+#if AVER_WITH_IMGUI
+        if (!uiActive) return;
+        ImGuiIO& io = ImGui::GetIO();
+        const bool kb = !io.WantCaptureKeyboard;
+        for (int i = 0; i < 26; ++i) aver_fw_input_set_key(AVER_FW_KEY_A + i, kb && ImGui::IsKeyDown((ImGuiKey)(ImGuiKey_A + i)));
+        for (int i = 0; i < 10; ++i) aver_fw_input_set_key(AVER_FW_KEY_0 + i, kb && ImGui::IsKeyDown((ImGuiKey)(ImGuiKey_0 + i)));
+        aver_fw_input_set_key(AVER_FW_KEY_SPACE,  kb && ImGui::IsKeyDown(ImGuiKey_Space));
+        aver_fw_input_set_key(AVER_FW_KEY_LSHIFT, kb && ImGui::IsKeyDown(ImGuiKey_LeftShift));
+        aver_fw_input_set_key(AVER_FW_KEY_LCTRL,  kb && ImGui::IsKeyDown(ImGuiKey_LeftCtrl));
+        aver_fw_input_set_key(AVER_FW_KEY_LALT,   kb && ImGui::IsKeyDown(ImGuiKey_LeftAlt));
+        aver_fw_input_set_key(AVER_FW_KEY_ENTER,  kb && ImGui::IsKeyDown(ImGuiKey_Enter));
+        aver_fw_input_set_key(AVER_FW_KEY_ESCAPE, kb && ImGui::IsKeyDown(ImGuiKey_Escape));
+        aver_fw_input_set_key(AVER_FW_KEY_TAB,    kb && ImGui::IsKeyDown(ImGuiKey_Tab));
+        aver_fw_input_set_key(AVER_FW_KEY_LEFT,   kb && ImGui::IsKeyDown(ImGuiKey_LeftArrow));
+        aver_fw_input_set_key(AVER_FW_KEY_RIGHT,  kb && ImGui::IsKeyDown(ImGuiKey_RightArrow));
+        aver_fw_input_set_key(AVER_FW_KEY_UP,     kb && ImGui::IsKeyDown(ImGuiKey_UpArrow));
+        aver_fw_input_set_key(AVER_FW_KEY_DOWN,   kb && ImGui::IsKeyDown(ImGuiKey_DownArrow));
+        const bool m = !io.WantCaptureMouse;
+        aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT,   m && ImGui::IsMouseDown(0));
+        aver_fw_input_set_key(AVER_FW_KEY_MOUSE_RIGHT,  m && ImGui::IsMouseDown(1));
+        aver_fw_input_set_key(AVER_FW_KEY_MOUSE_MIDDLE, m && ImGui::IsMouseDown(2));
+        aver_fw_input_set_mouse(m ? io.MouseDelta.x : 0.0f, m ? io.MouseDelta.y : 0.0f, m ? io.MouseWheel : 0.0f);
+#endif
+    }
+
+    // While playing, position the view camera from the possessed pawn's transform and the character's
+    // published view (first- or third-person), overriding the fly camera. Reads the pawn's world matrix:
+    // row 3 is the position, row 0 the forward (+X) axis.
+    void drivePlayCamera() {
+        if (aver_fw_play_state() != AVER_FW_PLAY_PLAYING) return;
+        const int32_t pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+        if (pawn == 0) return;
+        const scene::Entity e = static_cast<scene::Entity>(static_cast<uint32_t>(pawn));
+        scene::World& w = scene::World::instance();
+        if (!w.valid(e)) return;
+        const Mat4& wm = w.worldMatrix(e);
+        const Vec3 pawnPos{wm.m[3][0], wm.m[3][1], wm.m[3][2]};
+        const Vec3 fwd = Vec3{wm.m[0][0], wm.m[0][1], wm.m[0][2]}.getSafeNormal();
+        const Vec3 up{0, 0, 1};
+
+        int32_t mode = AVER_FW_VIEW_THIRD_PERSON; float eye = 160.0f, boom = 450.0f;
+        aver_fw_view(&mode, &eye, &boom);
+
+        Vec3 look;
+        if (mode == AVER_FW_VIEW_FIRST_PERSON) {
+            camPos_ = pawnPos + up * eye;
+            look    = fwd;
+        } else {
+            camPos_ = pawnPos - fwd * boom + up * (boom * 0.55f);
+            look    = (pawnPos + up * 90.0f - camPos_).getSafeNormal();
+        }
+        // camForward() composes {cosP cosY, cosP sinY, sinP}; invert the look direction to yaw/pitch.
+        yaw_   = std::atan2(look.y, look.x);
+        pitch_ = std::asin(std::fmax(-1.0f, std::fmin(1.0f, look.z)));
     }
 #endif
 

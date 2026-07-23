@@ -194,6 +194,49 @@ AVER_FW_ABI int32_t aver_fw_game_mode(void);
 AVER_FW_ABI int32_t aver_fw_player_controller(int32_t playerIndex);
 AVER_FW_ABI int32_t aver_fw_play_state(void);
 
+/* ---- input ------------------------------------------------------------------------------------
+ * The framework holds no window, so the APP owns raw input: each frame it calls aver_fw_input_new_frame
+ * (which rolls the current key state into the previous, giving edge detection), maps its platform/ImGui
+ * keys onto the stable codes below and calls set_key/set_mouse. Gameplay then reads key()/key_pressed()/
+ * key_released()/mouse() from C# (the Input class). Keeping the codes here — not in the app — is what lets
+ * a script name a key without depending on the editor. */
+enum {
+    AVER_FW_KEY_A = 0, AVER_FW_KEY_B, AVER_FW_KEY_C, AVER_FW_KEY_D, AVER_FW_KEY_E, AVER_FW_KEY_F,
+    AVER_FW_KEY_G, AVER_FW_KEY_H, AVER_FW_KEY_I, AVER_FW_KEY_J, AVER_FW_KEY_K, AVER_FW_KEY_L,
+    AVER_FW_KEY_M, AVER_FW_KEY_N, AVER_FW_KEY_O, AVER_FW_KEY_P, AVER_FW_KEY_Q, AVER_FW_KEY_R,
+    AVER_FW_KEY_S, AVER_FW_KEY_T, AVER_FW_KEY_U, AVER_FW_KEY_V, AVER_FW_KEY_W, AVER_FW_KEY_X,
+    AVER_FW_KEY_Y, AVER_FW_KEY_Z,                                   /* A..Z = 0..25 */
+    AVER_FW_KEY_0, AVER_FW_KEY_1, AVER_FW_KEY_2, AVER_FW_KEY_3, AVER_FW_KEY_4,
+    AVER_FW_KEY_5, AVER_FW_KEY_6, AVER_FW_KEY_7, AVER_FW_KEY_8, AVER_FW_KEY_9,   /* 0..9 = 26..35 */
+    AVER_FW_KEY_SPACE, AVER_FW_KEY_LSHIFT, AVER_FW_KEY_LCTRL, AVER_FW_KEY_LALT,
+    AVER_FW_KEY_ENTER, AVER_FW_KEY_ESCAPE, AVER_FW_KEY_TAB,
+    AVER_FW_KEY_LEFT, AVER_FW_KEY_RIGHT, AVER_FW_KEY_UP, AVER_FW_KEY_DOWN,
+    AVER_FW_KEY_MOUSE_LEFT, AVER_FW_KEY_MOUSE_RIGHT, AVER_FW_KEY_MOUSE_MIDDLE,
+    AVER_FW_KEY_COUNT
+};
+/* Roll current->previous. Call ONCE per frame, before the set_key calls, so pressed/released are edges. */
+AVER_FW_ABI void    aver_fw_input_new_frame(void);
+/* Set the held state of a key (0..AVER_FW_KEY_COUNT-1). Out-of-range keys are ignored. */
+AVER_FW_ABI void    aver_fw_input_set_key(int32_t key, int32_t down);
+/* Set this frame's mouse delta (dx, dy, in pixels) and wheel notches. */
+AVER_FW_ABI void    aver_fw_input_set_mouse(float dx, float dy, float wheel);
+/* Read: held now / went down this frame / went up this frame. 0 for an out-of-range key. */
+AVER_FW_ABI int32_t aver_fw_input_key(int32_t key);
+AVER_FW_ABI int32_t aver_fw_input_key_pressed(int32_t key);
+AVER_FW_ABI int32_t aver_fw_input_key_released(int32_t key);
+/* Write {dx, dy, wheel} into out3. */
+AVER_FW_ABI void    aver_fw_input_mouse(float* out3);
+
+/* ---- play view -------------------------------------------------------------------------------
+ * A possessed character PUBLISHES the camera it wants (first- vs third-person, and the eye/boom offsets)
+ * so the editor's play camera can follow it without the C++ side reaching into a C# field. The framework
+ * only stores the request; the editor reads it each frame and positions the view from the possessed pawn's
+ * transform. One request (one local player) until split-screen exists. */
+#define AVER_FW_VIEW_FIRST_PERSON 0
+#define AVER_FW_VIEW_THIRD_PERSON 1
+AVER_FW_ABI void aver_fw_set_view(int32_t mode, float eyeHeight, float boomLength);
+AVER_FW_ABI void aver_fw_view(int32_t* outMode, float* outEyeHeight, float* outBoomLength);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

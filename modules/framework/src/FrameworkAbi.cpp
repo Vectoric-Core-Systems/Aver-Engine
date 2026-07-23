@@ -920,4 +920,61 @@ int32_t aver_fw_game_mode(void)                 { return gameModeRef(); }
 int32_t aver_fw_player_controller(int32_t i)    { return i == 0 ? playerCtrlRef() : 0; }
 int32_t aver_fw_play_state(void)                { return playStateRef(); }
 
+// ---- input -------------------------------------------------------------------------------------
+// A tiny per-process input state the app pushes each frame and gameplay reads. cur/prev byte arrays give
+// edge detection; mouse is a 3-float delta. No locking: written and read on the one frame thread.
+struct InputState {
+    unsigned char cur[AVER_FW_KEY_COUNT]  = {};
+    unsigned char prev[AVER_FW_KEY_COUNT] = {};
+    float         mouse[3]                = {0, 0, 0};   // dx, dy, wheel
+};
+InputState& inputState() { static InputState s; return s; }
+
+void aver_fw_input_new_frame(void) {
+    InputState& s = inputState();
+    std::memcpy(s.prev, s.cur, sizeof(s.cur));
+    s.mouse[0] = s.mouse[1] = s.mouse[2] = 0.0f;   // deltas are per-frame; set_mouse re-fills them below
+}
+void aver_fw_input_set_key(int32_t key, int32_t down) {
+    if (key < 0 || key >= AVER_FW_KEY_COUNT) return;
+    inputState().cur[key] = down ? 1 : 0;
+}
+void aver_fw_input_set_mouse(float dx, float dy, float wheel) {
+    InputState& s = inputState();
+    s.mouse[0] = dx; s.mouse[1] = dy; s.mouse[2] = wheel;
+}
+int32_t aver_fw_input_key(int32_t key) {
+    return (key >= 0 && key < AVER_FW_KEY_COUNT) ? inputState().cur[key] : 0;
+}
+int32_t aver_fw_input_key_pressed(int32_t key) {
+    if (key < 0 || key >= AVER_FW_KEY_COUNT) return 0;
+    const InputState& s = inputState();
+    return (s.cur[key] && !s.prev[key]) ? 1 : 0;
+}
+int32_t aver_fw_input_key_released(int32_t key) {
+    if (key < 0 || key >= AVER_FW_KEY_COUNT) return 0;
+    const InputState& s = inputState();
+    return (!s.cur[key] && s.prev[key]) ? 1 : 0;
+}
+void aver_fw_input_mouse(float* out3) {
+    if (!out3) return;
+    const InputState& s = inputState();
+    out3[0] = s.mouse[0]; out3[1] = s.mouse[1]; out3[2] = s.mouse[2];
+}
+
+// ---- play view ---------------------------------------------------------------------------------
+struct ViewRequest { int32_t mode = AVER_FW_VIEW_THIRD_PERSON; float eye = 160.0f; float boom = 450.0f; };
+ViewRequest& viewRequest() { static ViewRequest v; return v; }
+
+void aver_fw_set_view(int32_t mode, float eyeHeight, float boomLength) {
+    ViewRequest& v = viewRequest();
+    v.mode = mode; v.eye = eyeHeight; v.boom = boomLength;
+}
+void aver_fw_view(int32_t* outMode, float* outEyeHeight, float* outBoomLength) {
+    const ViewRequest& v = viewRequest();
+    if (outMode)       *outMode       = v.mode;
+    if (outEyeHeight)  *outEyeHeight  = v.eye;
+    if (outBoomLength) *outBoomLength = v.boom;
+}
+
 }  // extern "C"

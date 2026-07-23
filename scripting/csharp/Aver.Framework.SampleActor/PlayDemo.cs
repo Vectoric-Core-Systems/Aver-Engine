@@ -63,10 +63,10 @@ public sealed class DemoController : AverPlayerController
     public override void OnEndPlay(EndReason reason) => Log.Info($"[DemoController] OnEndPlay reason={reason}");
 }
 
-/// <summary>The possessed pawn. Carries the built-in sphere and ticks, so a play session is visible and
-/// its per-frame hook is observable.</summary>
+/// <summary>The possessed pawn — a CHARACTER, so WASD walks it and the mouse turns it, with V toggling
+/// first/third person. Carries the built-in sphere, so a play session is visible and controllable.</summary>
 [AverClass("BP_Pawn")]
-public sealed class DemoPawn : AverPawn
+public sealed class DemoPawn : AverCharacter
 {
     private int _ticks;
 
@@ -85,6 +85,11 @@ public sealed class DemoPawn : AverPawn
 
     public override void OnTick(float dt)
     {
+        // Character control: WASD/arrows walk, the mouse turns, V flips between first- and third-person.
+        DriveWithInput(dt);
+        if (Input.GetKeyDown(Key.V))
+            CameraViewMode = CameraViewMode == CameraView.ThirdPerson ? CameraView.FirstPerson : CameraView.ThirdPerson;
+
         if (_ticks == 0)
         {
             // Exercise the gameplay API from a plain pawn, holding no cached references: the session facade

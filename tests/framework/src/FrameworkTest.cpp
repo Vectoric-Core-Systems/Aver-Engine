@@ -764,6 +764,45 @@ static void testPlayLifecycle() {
     World::instance().flush();
 }
 
+// ---------------------------------------------------------------------------------- input + play view
+static void testInput() {
+    AVER_INFO("=== input: keys with edge detection, mouse delta, and the play-view request ===");
+
+    aver_fw_input_new_frame();
+    aver_fw_input_set_key(AVER_FW_KEY_W, 1);
+    check(aver_fw_input_key(AVER_FW_KEY_W) == 1, "a set key reads held");
+    check(aver_fw_input_key_pressed(AVER_FW_KEY_W) == 1, "and pressed this frame (was up last frame)");
+    check(aver_fw_input_key_released(AVER_FW_KEY_W) == 0, "not released");
+    check(aver_fw_input_key(AVER_FW_KEY_A) == 0, "an unset key reads up");
+
+    aver_fw_input_new_frame();                 // W held across the frame boundary -> no longer a press edge
+    aver_fw_input_set_key(AVER_FW_KEY_W, 1);
+    check(aver_fw_input_key(AVER_FW_KEY_W) == 1, "still held next frame");
+    check(aver_fw_input_key_pressed(AVER_FW_KEY_W) == 0, "no longer a pressed edge");
+
+    aver_fw_input_new_frame();                 // release
+    aver_fw_input_set_key(AVER_FW_KEY_W, 0);
+    check(aver_fw_input_key(AVER_FW_KEY_W) == 0, "released reads up");
+    check(aver_fw_input_key_released(AVER_FW_KEY_W) == 1, "released this frame");
+
+    aver_fw_input_set_key(-1, 1);              // out of range: ignored, and reads 0
+    aver_fw_input_set_key(AVER_FW_KEY_COUNT, 1);
+    check(aver_fw_input_key(AVER_FW_KEY_COUNT) == 0, "an out-of-range key reads 0");
+
+    aver_fw_input_set_mouse(3.5f, -2.0f, 1.0f);
+    float m[3] = {0, 0, 0};
+    aver_fw_input_mouse(m);
+    check(m[0] == 3.5f && m[1] == -2.0f && m[2] == 1.0f, "mouse delta round-trips");
+    aver_fw_input_new_frame();
+    aver_fw_input_mouse(m);
+    check(m[0] == 0.0f && m[1] == 0.0f && m[2] == 0.0f, "new_frame clears the mouse delta");
+
+    aver_fw_set_view(AVER_FW_VIEW_FIRST_PERSON, 170.0f, 500.0f);
+    int32_t mode = -1; float eye = 0.0f, boom = 0.0f;
+    aver_fw_view(&mode, &eye, &boom);
+    check(mode == AVER_FW_VIEW_FIRST_PERSON && eye == 170.0f && boom == 500.0f, "the play-view request round-trips");
+}
+
 int main() {
     AVER_INFO("Aver.Framework test");
     check(aver_fw_scene_abi_matches() == 1, "the framework's scene ABI major matches the loaded scene DLL");
@@ -779,6 +818,7 @@ int main() {
     testDestroyReentrancy();
     testPossessReentrancy();
     testPlayLifecycle();
+    testInput();
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;
