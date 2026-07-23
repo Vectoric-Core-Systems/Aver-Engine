@@ -172,12 +172,24 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     // The sky hemisphere is light transport too, so Voxi supplies it rather than leaving the BRDF
     // to reach into the engine constants for it. With GI off this IS the whole indirect term.
     float3 V = normalize(gCamPos.xyz - i.wpos);
+    float3 R = reflect(-V, N);
     AverIndirect ind4;
     ind4.ambient      = skyColor(N);
     ind4.ambientScale = gAmbient.r;
     ind4.diffuse      = ind;
     ind4.occlusion    = ao;
-    ind4.specular     = skyColor(reflect(-V, N));
+    // Specular indirect: with GI on, a single cone along the reflection vector reads the SCENE's own
+    // bounced radiance out of the voxel volume — the floor mirrored in a metal, the cube reflected in the
+    // ground — instead of only the sky. The aperture opens with roughness (a mirror stays tight, a rough
+    // surface blurs), and where the cone leaves the volume (coverage < 1) it fades back to the sky so a
+    // reflection off the top of the world is sky, not black. With GI off it is the sky reflection, as before.
+    if (gVoxelParams.w > 0.5) {
+        float  specAperture = clamp(s.rough * 0.5 + 0.02, 0.02, 0.4);
+        float4 sceneSpec    = traceCone(i.wpos, R, specAperture);
+        ind4.specular       = lerp(skyColor(R), sceneSpec.rgb * gVoxelParams.y, sceneSpec.a);
+    } else {
+        ind4.specular       = skyColor(R);
+    }
 
     float3 radiance = 0.0;
     radiance = averShadeDirect(radiance, s, sun);
