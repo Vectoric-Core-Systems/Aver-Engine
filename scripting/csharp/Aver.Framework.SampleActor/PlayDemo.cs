@@ -36,7 +36,7 @@ public sealed class DemoGameMode : AverGameMode
     /// <summary>Fires once the player's controller has entered under this mode — the classic place to spawn
     /// and possess a pawn (here the framework already did, from the class's DefaultPawnClass wiring).</summary>
     public override void OnPostLogin(Entity controller) =>
-        Log.Info($"[DemoGameMode] OnPostLogin: controller '{controller.Name}' entered, driving '{controller.As<DemoController>()?.Possessed.Name}'");
+        Log.Info($"[DemoGameMode] OnPostLogin: controller '{controller.Name}' driving '{controller.As<DemoController>()?.Possessed.Name}', state={Game.State}");
 
     public override void OnEndPlay(EndReason reason) => Log.Info($"[DemoGameMode] OnEndPlay reason={reason}");
 }

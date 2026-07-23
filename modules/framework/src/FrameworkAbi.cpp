@@ -809,15 +809,21 @@ int32_t aver_fw_begin_play(int32_t gameInstanceClass, int32_t gameModeClass) {
     if (playStateRef() != AVER_FW_PLAY_EDITOR) return 0;   // a session is already running
     if (!validClass(gameModeClass))            return 0;   // the GameMode is mandatory; 0 == invalid
 
+    // Commit to the session NOW, before any spawn: every OnBeginPlay and OnPostLogin fired below then
+    // observes Game.State == Playing (the session is starting), not the EDITOR it is leaving. The one
+    // failure path (the GameMode itself failing to spawn) restores EDITOR before returning.
+    playStateRef() = AVER_FW_PLAY_PLAYING;
+
     // The GameInstance is optional and spawned first, so it exists before the mode that may read it.
     if (validClass(gameInstanceClass))
         gameInstanceRef() = aver_fw_spawn(gameInstanceClass, "GameInstance", nullptr, nullptr, nullptr);
 
     const int32_t gm = aver_fw_spawn(gameModeClass, "GameMode", nullptr, nullptr, nullptr);
     if (gm == 0) {
-        // Unwind directly, NOT through end_play: the state is still EDITOR here (it flips to PLAYING only
-        // on success below), so end_play would early-return and leak the GameInstance that already spawned.
+        // Unwind directly, NOT through end_play: end_play sweeps the world, but here the session never
+        // really formed, so just drop the GameInstance that spawned and fall back to EDITOR.
         if (gameInstanceRef()) { destroyActor(gameInstanceRef(), AVER_FW_END_STOP); gameInstanceRef() = 0; }
+        playStateRef() = AVER_FW_PLAY_EDITOR;
         return 0;
     }
     gameModeRef() = gm;
@@ -833,10 +839,10 @@ int32_t aver_fw_begin_play(int32_t gameInstanceClass, int32_t gameModeClass) {
     playPawnRef()   = pawn;
     if (ctrl && pawn) aver_fw_possess(ctrl, pawn);
     // The GameMode's post-login hook: a controller has entered the world and (if any) been given its pawn.
-    // Fired after possess so OnPostLogin can already see the controller's pawn.
+    // Fired after possess so OnPostLogin can already see the controller's pawn; the state is already
+    // PLAYING (set at the top), so a hook that gates on Game.IsPlaying behaves.
     if (ctrl) dispatchPostLogin(toEntity(gm), toEntity(ctrl));
 
-    playStateRef() = AVER_FW_PLAY_PLAYING;
     return 1;
 }
 
