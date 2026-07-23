@@ -414,6 +414,20 @@ static void AVER_FW_CALL standInPostLogin(aver_entity mode, aver_entity controll
     ++g_disp.postLoginCount; g_disp.postLoginMode = mode; g_disp.postLoginController = controller;
 }
 
+// A possessed stand-in that re-enters possession from inside OnPossessed — the possess-edge analogue of
+// the Destroy(Self) re-entrancy. It re-possesses the SAME controller onto a DIFFERENT pawn; absent the
+// framework's possessInFlight guard this recurses managed->native->managed to a stack overflow, so the
+// guard must refuse the nested call (return 0) and let the outer finish. It records the nested result and
+// its own depth so the test can assert both no-recursion and the refusal.
+static int32_t g_rpCtrl = 0, g_rpPawn2 = 0;
+static int     g_rpDepth = 0;
+static int32_t g_rpNestedResult = -1;
+static void AVER_FW_CALL standInReentrantPossessed(aver_entity /*pawn*/, aver_entity /*ctrl*/) {
+    ++g_rpDepth;
+    if (g_rpDepth == 1)
+        g_rpNestedResult = aver_fw_possess(g_rpCtrl, g_rpPawn2);   // must be refused, not recursed
+}
+
 // A SECOND stand-in whose endPlay calls Destroy(Self) — the re-entrant managed teardown of finding 1.
 // It guards its own re-entry so that, absent the framework's re-entrancy guard, the double-fire is a
 // clean, assertable endCount == 2 rather than unbounded recursion to a stack overflow.
@@ -548,7 +562,23 @@ static void testManagedDispatch() {
     check(g_disp.unpossessCount == 1 && g_disp.unpossessPawn == hkPawn, "the displaced first pawn was unpossessed");
     check(g_disp.possessCount == 1 && g_disp.possessPawn == hkPawn2, "the second pawn was possessed");
 
-    aver_fw_destroy(hkPawn); aver_fw_destroy(hkPawn2); aver_fw_destroy(hkCtrl);
+    // Stealing a pawn from ANOTHER controller: the pawn gets OnUnpossessed (from its old controller) then
+    // OnPossessed (by the new one) — a clean pair, not a second OnPossessed with no release.
+    const int32_t hkCtrl2 = aver_fw_spawn(hkCtrlC, "hook-ctrl-2", nullptr, nullptr, nullptr);
+    aver_fw_possess(hkCtrl, hkPawn);   // hkCtrl drives hkPawn again
+    g_disp.reset();
+    check(aver_fw_possess(hkCtrl2, hkPawn) == 1, "a second controller steals the pawn");
+    check(g_disp.unpossessCount == 1 && g_disp.unpossessPawn == hkPawn, "the stolen pawn is unpossessed from its old controller");
+    check(g_disp.possessCount == 1 && g_disp.possessController == hkCtrl2, "then possessed by the new controller");
+    check(aver_fw_controller_of(hkPawn) == hkCtrl2, "the pawn now reports the new controller");
+    check(aver_fw_controlled_pawn(hkCtrl) == 0, "and the old controller no longer drives it");
+
+    // Idempotent: re-possessing the pair a controller already drives is a no-op that fires no hooks.
+    g_disp.reset();
+    check(aver_fw_possess(hkCtrl2, hkPawn) == 1, "re-possessing the same pair returns 1");
+    check(g_disp.possessCount == 0 && g_disp.unpossessCount == 0, "and fires no hooks (idempotent)");
+
+    aver_fw_destroy(hkPawn); aver_fw_destroy(hkPawn2); aver_fw_destroy(hkCtrl); aver_fw_destroy(hkCtrl2);
     World::instance().flush();
 
     // ---- after CLEAR, no hook fires, and spawn/destroy still work (a headless / no-CLR build).
@@ -602,6 +632,39 @@ static void testDestroyReentrancy() {
     World::instance().flush();
 
     check(aver_fw_clear_managed_dispatch() == 1, "the re-entrant stand-in clears");
+}
+
+// ------------------------------------------------------- re-entrant possession (possess from OnPossessed)
+static void testPossessReentrancy() {
+    AVER_INFO("=== a possession hook re-entering possession is refused, not recursed to a crash ===");
+
+    AvManagedDispatch table{};
+    table.structBytes     = static_cast<int32_t>(sizeof(AvManagedDispatch));
+    table.contractVersion = AVER_FW_DISPATCH_VERSION;
+    table.possessed       = &standInReentrantPossessed;
+    check(aver_fw_install_managed_dispatch(&table) == 1, "install the re-entrant possessed stand-in");
+
+    const int32_t ctrlC = aver_fw_class_declare("RpCtrl", "");
+    aver_fw_class_set_flags(ctrlC, AVER_FW_CLASS_MANAGED | AVER_FW_CLASS_CONTROLLER);
+    aver_fw_class_seal(ctrlC);
+    const int32_t pawnC = aver_fw_class_declare("RpPawn", "");
+    aver_fw_class_set_flags(pawnC, AVER_FW_CLASS_MANAGED | AVER_FW_CLASS_PAWN);
+    aver_fw_class_seal(pawnC);
+    const int32_t ctrl  = aver_fw_spawn(ctrlC, "rp-ctrl", nullptr, nullptr, nullptr);
+    const int32_t pawn1 = aver_fw_spawn(pawnC, "rp-pawn-1", nullptr, nullptr, nullptr);
+    const int32_t pawn2 = aver_fw_spawn(pawnC, "rp-pawn-2", nullptr, nullptr, nullptr);
+    g_rpCtrl = ctrl; g_rpPawn2 = pawn2; g_rpDepth = 0; g_rpNestedResult = -1;
+
+    // The outer possess fires OnPossessed, which re-possesses the same controller onto pawn2. If the guard
+    // works the nested call is refused and control returns; if it did not, this line would never return.
+    check(aver_fw_possess(ctrl, pawn1) == 1, "the outer possess succeeds");
+    check(g_rpDepth == 1, "the possessed hook fired exactly once — no recursion");
+    check(g_rpNestedResult == 0, "the re-entrant possess was refused (returned 0)");
+    check(aver_fw_controlled_pawn(ctrl) == pawn1, "the controller still drives the outer pawn (nested was rejected)");
+
+    aver_fw_destroy(ctrl); aver_fw_destroy(pawn1); aver_fw_destroy(pawn2);
+    World::instance().flush();
+    check(aver_fw_clear_managed_dispatch() == 1, "clear the re-entrant possess table");
 }
 
 // --------------------------------------------------------------------------- play lifecycle (step 13)
@@ -714,6 +777,7 @@ int main() {
     testPossession();
     testManagedDispatch();
     testDestroyReentrancy();
+    testPossessReentrancy();
     testPlayLifecycle();
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);

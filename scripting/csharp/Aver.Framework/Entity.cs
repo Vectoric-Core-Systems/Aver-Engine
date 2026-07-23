@@ -21,7 +21,7 @@ namespace Aver.Framework;
 /// is handed to a synchronous P/Invoke and consumed before the call returns, so reuse is safe.
 /// </para>
 /// </remarks>
-public readonly struct Entity : IEquatable<Entity>
+public readonly partial struct Entity : IEquatable<Entity>
 {
     /// <summary>The raw ABI handle. 0 is invalid; a live entity is always positive (bit 31 stays clear).</summary>
     public int Handle { get; }
@@ -135,20 +135,23 @@ public readonly struct Entity : IEquatable<Entity>
 
     /// <summary>World-space forward (+X), composed through parents and normalised. Falls back to the local
     /// axis for a stale handle.</summary>
-    public Vec3 WorldForward => WorldAxis(0, Forward);
+    public Vec3 WorldForward => WorldAxis(0, Vec3.Forward);
     /// <summary>World-space right (+Y).</summary>
-    public Vec3 WorldRight => WorldAxis(1, Right);
+    public Vec3 WorldRight => WorldAxis(1, Vec3.Right);
     /// <summary>World-space up (+Z).</summary>
-    public Vec3 WorldUp => WorldAxis(2, Up);
+    public Vec3 WorldUp => WorldAxis(2, Vec3.Up);
 
-    private Vec3 WorldAxis(int row, Vec3 fallback)
+    // localAxis is the cheap Vec3 CONSTANT (Vec3.Forward etc.), not the rotated local axis: the fallback
+    // (a get_vec P/Invoke + a rotate) is computed ONLY on the stale/degenerate branch, never discarded on
+    // the common success path — this runs on the transform path the struct set out to keep allocation-free.
+    private Vec3 WorldAxis(int row, Vec3 localAxis)
     {
         float[] m = Scratch16;
-        if (SceneNative.aver_scene_world_matrix(Handle, m) == 0) return fallback;
+        if (SceneNative.aver_scene_world_matrix(Handle, m) == 0) return Rotate(LocalRotation, localAxis);
         int i = row * 4;
         var v = new Vec3(m[i], m[i + 1], m[i + 2]);
         float len = MathF.Sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z);
-        return len > 1e-6f ? v * (1f / len) : fallback;
+        return len > 1e-6f ? v * (1f / len) : Rotate(LocalRotation, localAxis);
     }
 
     /// <summary>The display name. Read-only here; <see cref="SetName"/> renames the <c>CName</c> slice.</summary>

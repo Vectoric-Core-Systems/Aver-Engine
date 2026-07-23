@@ -231,6 +231,16 @@ std::unordered_set<Entity>& destroyInFlight() {
     return s;
 }
 
+// The possession-edge analogue of destroyInFlight. A possession hook (OnPossessed/OnUnpossessed) can call
+// back into Possess/Unpossess on the frame thread; without a guard a hook that re-possesses the same
+// controller recurses managed->native->managed until a StackOverflow the managed firewall cannot catch
+// kills the whole process. Keyed on the CONTROLLER whose dispatch is in flight: a nested possess/unpossess
+// of THAT controller is refused, breaking the cycle, while a change to a different controller stays free.
+std::unordered_set<Entity>& possessInFlight() {
+    static std::unordered_set<Entity> s;
+    return s;
+}
+
 // ---- possession maps (read straight from the world; never a source of truth about liveness) ------
 std::unordered_map<Entity, Entity>& pawnByController() {
     static std::unordered_map<Entity, Entity> m;
@@ -687,32 +697,53 @@ int32_t aver_fw_possess(int32_t controller, int32_t pawn) {
     if (!classHasFlags(ctrl, AVER_FW_CLASS_CONTROLLER)) return 0;
     if (!classHasFlags(pwn,  AVER_FW_CLASS_PAWN))       return 0;
 
-    // Possession is exclusive on both ends: free this controller's previous pawn and this pawn's
-    // previous controller before binding the new pair, so the two maps stay mutual inverses. Capture the
-    // controller's OUTGOING pawn so it can be told it was released when a controller is moved to a new one.
     auto& pOf = pawnByController();
     auto& cOf = controllerByPawn();
-    Entity displaced = kInvalidEntity;
+
+    // Idempotent: possessing the pawn this controller already drives is a no-op — no map churn, no hooks.
+    // This also closes the tightest re-entrancy loop (an OnPossessed that re-possesses the same pair).
+    if (auto it = pOf.find(ctrl); it != pOf.end() && it->second == pwn) return 1;
+
+    // Refuse a possession re-entered from within THIS controller's own hook dispatch: it would fire hooks
+    // against half-rewritten maps and, for a self-re-possessing hook, recurse to a process-killing
+    // StackOverflow the managed firewall cannot catch. The caller sees 0 and can retry next frame.
+    auto& inFlight = possessInFlight();
+    if (inFlight.count(ctrl)) return 0;
+
+    // Possession is exclusive on both ends. Capture what is being displaced BEFORE rewriting the maps:
+    // the controller's OUTGOING pawn (moved off) and whether `pwn` is being STOLEN from another controller.
+    Entity     displaced = kInvalidEntity;
+    const bool stolen    = cOf.find(pwn) != cOf.end();
     if (auto it = pOf.find(ctrl); it != pOf.end()) { displaced = it->second; cOf.erase(it->second); }
     if (auto it = cOf.find(pwn);  it != cOf.end()) pOf.erase(it->second);
     pOf[ctrl] = pwn;
     cOf[pwn]  = ctrl;
 
-    // Hooks: release the outgoing pawn first, then possess the new one, mirroring a real hand-off.
+    // Hooks fire under the guard so a re-entrant possess/unpossess of this controller is refused. Order:
+    // release the controller's outgoing pawn, release the stolen pawn from its old controller, then
+    // possess the new pawn — so a pawn moving between controllers gets a clean OnUnpossessed/OnPossessed
+    // pair rather than a second OnPossessed with no release.
+    inFlight.insert(ctrl);
     if (displaced != kInvalidEntity && displaced != pwn) dispatchUnpossessed(displaced);
+    if (stolen) dispatchUnpossessed(pwn);
     dispatchPossessed(pwn, ctrl);
+    inFlight.erase(ctrl);
     return 1;
 }
 
 int32_t aver_fw_unpossess(int32_t controller) {
     const Entity ctrl = toEntity(controller);
+    auto& inFlight = possessInFlight();
+    if (inFlight.count(ctrl)) return 0;   // re-entered from this controller's own hook; refuse (see possess)
     auto& pOf = pawnByController();
     auto  it  = pOf.find(ctrl);
     if (it == pOf.end()) return 0;   // nothing to release
     const Entity released = it->second;
     controllerByPawn().erase(it->second);
     pOf.erase(it);
+    inFlight.insert(ctrl);
     dispatchUnpossessed(released);   // fire AFTER the maps are clear, so a hook reads the settled state
+    inFlight.erase(ctrl);
     return 1;
 }
 

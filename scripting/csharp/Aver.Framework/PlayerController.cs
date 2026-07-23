@@ -32,9 +32,12 @@ public class AverPlayerController : AverActor
     public bool HasPawn => Fw.aver_fw_controlled_pawn(Self.Handle) != 0;
 
     /// <summary>
-    /// Take control of <paramref name="pawn"/>. Returns false if the world rejected it — most often because
-    /// the target's class does not carry the <c>PAWN</c> flag, or it is already possessed. On success the
-    /// pawn's <see cref="AverPawn.OnPossessed"/> fires.
+    /// Take control of <paramref name="pawn"/>. Returns false only if the world rejected it — the target's
+    /// class does not carry the <c>PAWN</c> flag, this class is not a <c>CONTROLLER</c>, an entity is dead,
+    /// or the call was re-entered from inside a possession hook (retry next frame). A pawn already possessed
+    /// by ANOTHER controller is STOLEN (it gets <see cref="AverPawn.OnUnpossessed"/> then
+    /// <see cref="AverPawn.OnPossessed"/>); possessing the pawn this controller already drives is a no-op
+    /// that returns true.
     /// </summary>
     public bool Possess(Entity pawn) => Fw.aver_fw_possess(Self.Handle, pawn.Handle) != 0;
 
