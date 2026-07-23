@@ -655,9 +655,11 @@ public static class HostBridge
 
     // FNV-1a 64-bit over the UTF-8 bytes of the name — byte-for-byte the native aver::fnv1a64 (Hash.cpp),
     // so the hash the framework computes for bind() and the hash this bridge stores its classes under agree.
+    // The offset basis is the canonical 0xcbf29ce484222325; it once matched a native constant that had a
+    // dropped digit, and both were corrected together (Hash.hpp) so class dispatch keeps agreeing.
     private static ulong Fnv1a64(string s)
     {
-        const ulong offset = 1469598103934665603UL;
+        const ulong offset = 0xcbf29ce484222325UL;
         const ulong prime = 1099511628211UL;
         ulong h = offset;
         foreach (byte b in Encoding.UTF8.GetBytes(s))

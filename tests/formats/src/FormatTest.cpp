@@ -4,6 +4,7 @@
 #include "aver/formats/OcMap.hpp"
 #include "aver/assets/AssetId.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/core/Hash.hpp"   // fnv1a64 — re-computed below to guard the offset-basis constant
 
 #include <filesystem>
 #include <string>
@@ -68,16 +69,32 @@ static void testMap(const std::string& path) {
     AVER_INFO("   server-valid={}{}", serverValid, serverValid ? "" : (" (" + why + ")"));
 
     check(!m.placements.empty() || m.hasGround, "has a collision source");
-    // Cross-check our FNV-1a-64 against the known sample id.
+    // Cross-check the id parsed OUT of the file against the known sample identity. The hash FUNCTION
+    // itself is exercised unconditionally in main() (checkFnv), because a machine without demoworld.ocmap
+    // would otherwise never recompute it — which is exactly how a dropped digit in the offset basis went
+    // unnoticed while this parsed-value check kept passing.
     if (m.name == "demoworld") {
-        check(m.contentId == 0x376B85BC4D1A03BAull, "demoworld ID == 0x376B85BC4D1A03BA (fnv1a64 verified)");
+        check(m.contentId == 0x376B85BC4D1A03BAull, "demoworld ID == 0x376B85BC4D1A03BA (parsed from file)");
     }
 }
 
+// Exercise the hash function directly, independent of any test file. This is the check whose absence let
+// a corrupted offset basis pass CI: the .ocmap loader parses its content id out of the file, so nothing
+// re-derived fnv1a64 from bytes until here. The three vectors are the documented OpenConstructor identity
+// plus the two-way boundary the C# side must agree with (Aver.Scene ObjectIdOf / the scripting bridge).
+static void checkFnv() {
+    AVER_INFO("=== fnv1a64 self-check ===");
+    check(fnv1a64("demoworld") == 0x376B85BC4D1A03BAull, "fnv1a64(\"demoworld\") == 0x376B85BC4D1A03BA");
+    check(fnv1a64("") == 0xCBF29CE484222325ull, "fnv1a64(\"\") == the offset basis (empty input)");
+    check(fnv1a64("Meshes/sphere.ocmesh") == 672114764054563281ull,
+          "fnv1a64(\"Meshes/sphere.ocmesh\") agrees with the C# ObjectId");
+}
+
 int main(int argc, char** argv) {
+    checkFnv();
     if (argc < 2) {
         AVER_INFO("usage: FormatTest <file.ocbeam|file.ocmap> [more...]");
-        return 0;
+        return g_failures;
     }
     for (int i = 1; i < argc; ++i) {
         const std::string path = argv[i];
