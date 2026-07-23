@@ -336,6 +336,21 @@ int32_t aver_scene_set_name(int32_t e, const char* name) {
     return world().setName(toEntity(e), name ? std::string_view(name) : std::string_view{}) ? 1 : 0;
 }
 
+// ---- query -----------------------------------------------------------------------------------------
+
+int32_t aver_scene_find(const char* name) {
+    if (!name) return 0;
+    return static_cast<int32_t>(world().find(std::string_view(name)));
+}
+
+int32_t aver_scene_world_matrix(int32_t e, float* out16) {
+    const Entity ent = toEntity(e);
+    if (!out16 || !world().valid(ent)) return 0;
+    const Mat4& m = world().worldMatrix(ent);   // composes on demand; row-major, translation in row 3
+    std::memcpy(out16, &m.m[0][0], sizeof(float) * 16);
+    return 1;
+}
+
 // ---- content resolution ----------------------------------------------------------------------------
 
 int32_t aver_scene_material(int32_t name0, const char* name) {

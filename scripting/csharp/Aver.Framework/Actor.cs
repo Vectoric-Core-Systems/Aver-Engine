@@ -79,7 +79,9 @@ public abstract class AverActor
     //     the [ThreadStatic] justification the design applies to transform writes (contradiction #8,
     //     resolved: Spawn is rarer than a transform write, but the same rule now covers both). ---
 
-    /// <summary>Spawn an instance of class <paramref name="c"/> at <paramref name="at"/> (centimetres). Class default rotation/scale.</summary>
+    /// <summary>Spawn an instance of class <paramref name="c"/> at <paramref name="at"/> (centimetres),
+    /// returning its entity. The dynamic form, for a class chosen at runtime; prefer <see cref="Spawn{T}"/>
+    /// when the type is known. Class default rotation/scale.</summary>
     protected static Entity Spawn(ActorClass c, Vec3 at)
     {
         float[] p = Entity.Scratch3;
@@ -87,7 +89,19 @@ public abstract class AverActor
         return new Entity(Fw.aver_fw_spawn(c.Handle, null, p, null, null));
     }
 
-    /// <summary>Spawn <typeparamref name="T"/> at <paramref name="at"/> — the type carries its own class name.</summary>
-    protected static Entity Spawn<T>(Vec3 at) where T : AverActor
-        => Spawn(ActorClass.Find(ClassNames.Of(typeof(T))), at);
+    /// <summary>Spawn <typeparamref name="T"/> at <paramref name="at"/> and return the LIVE INSTANCE — the
+    /// C# object you can immediately call into — or null if the class is not declared or its script was
+    /// disabled. The type carries its own class name. Use <c>.Self</c> for the entity handle.</summary>
+    protected static T? Spawn<T>(Vec3 at) where T : AverActor
+        => Actors.Get<T>(Spawn(ActorClass.Find(ClassNames.Of(typeof(T))), at));
+
+    /// <summary>Destroy THIS actor now: OnEndPlay -> unbind runs, and the world destroy is deferred to the
+    /// next flush. Safe from any hook (a Destroy() inside OnEndPlay does not double-fire).</summary>
+    protected void Destroy() => Fw.aver_fw_destroy(Self.Handle);
+
+    /// <summary>Destroy another entity's actor (its full framework teardown), or nothing if it is invalid.</summary>
+    protected static void Destroy(Entity other) { if (other.IsValid) Fw.aver_fw_destroy(other.Handle); }
+
+    /// <summary>Destroy another actor, or nothing if it is null.</summary>
+    protected static void Destroy(AverActor? other) { if (other is not null) Fw.aver_fw_destroy(other.Self.Handle); }
 }

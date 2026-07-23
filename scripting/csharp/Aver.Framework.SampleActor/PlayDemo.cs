@@ -62,6 +62,16 @@ public sealed class DemoPawn : AverPawn
 
     public override void OnTick(float dt)
     {
+        if (_ticks == 0)
+        {
+            // Exercise the gameplay API from a plain pawn, holding no cached references: the session facade
+            // (Game), the typed singletons, possession (ControllerAs), and a world transform. By the first
+            // tick the controller has possessed this pawn, so the lookup resolves.
+            DemoGameMode? mode = Game.ModeAs<DemoGameMode>();
+            DemoController? ctrl = ControllerAs<DemoController>();
+            Log.Info($"[DemoPawn] play API: state={Game.State}, mode='{mode?.Self.Name}', " +
+                     $"instance='{Game.Instance.Name}', controller='{ctrl?.Self.Name}', worldPos={Self.WorldPosition}");
+        }
         if (++_ticks <= 3) Log.Info($"[DemoPawn] OnTick #{_ticks} dt={dt:F4}");
     }
 

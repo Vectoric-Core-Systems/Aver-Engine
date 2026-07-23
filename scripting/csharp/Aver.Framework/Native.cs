@@ -103,10 +103,17 @@ internal static class SceneNative
     [DllImport(Lib)] internal static extern int aver_scene_set_i32(int e, int f, int v);
     [DllImport(Lib)] internal static extern int aver_scene_set_i64(int e, int f, long v);
 
+    [DllImport(Lib)] internal static extern int aver_scene_valid(int e);
     [DllImport(Lib)] internal static extern long aver_scene_object_id(int e);
     [DllImport(Lib)] internal static extern int aver_scene_set_object_id(int e, long objectId);
     [DllImport(Lib)] internal static extern IntPtr aver_scene_name(int e);
     [DllImport(Lib)] internal static extern int aver_scene_set_name(int e, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+
+    // Query: resolve an entity by name (0 if none), and read the composed 4x4 world matrix into out16
+    // (row-major, translation in row 3). Both added for the gameplay-facing C# API (Game.Find, Entity
+    // world transforms).
+    [DllImport(Lib)] internal static extern int aver_scene_find([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport(Lib)] internal static extern int aver_scene_world_matrix(int e, float[] out16);
 
     // A material NAME resolves to CMeshRenderer.material's i32 opaque handle here — never stored as a
     // string in the field. name0 is the content-pack id (0 == the default/project pack).

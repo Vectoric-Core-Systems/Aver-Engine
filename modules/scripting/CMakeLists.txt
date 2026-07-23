@@ -58,6 +58,8 @@ set(AVER_BRIDGE_SOURCES
   # Aver.Framework (the gameplay layer the bridge drives) and its own dependency Aver.Scene.
   ${AVER_CSHARP_DIR}/Aver.Framework/Aver.Framework.csproj
   ${AVER_CSHARP_DIR}/Aver.Framework/Actor.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/Actors.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/Game.cs
   ${AVER_CSHARP_DIR}/Aver.Framework/Pawn.cs
   ${AVER_CSHARP_DIR}/Aver.Framework/PlayerController.cs
   ${AVER_CSHARP_DIR}/Aver.Framework/GameMode.cs

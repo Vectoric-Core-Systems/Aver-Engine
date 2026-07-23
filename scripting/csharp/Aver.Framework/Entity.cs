@@ -111,6 +111,46 @@ public readonly struct Entity : IEquatable<Entity>
     /// </summary>
     public Vec3 Forward => Rotate(LocalRotation, Vec3.Forward);
 
+    /// <summary>The entity's right axis (+Y), rotated by its local rotation.</summary>
+    public Vec3 Right => Rotate(LocalRotation, Vec3.Right);
+
+    /// <summary>The entity's up axis (+Z), rotated by its local rotation.</summary>
+    public Vec3 Up => Rotate(LocalRotation, Vec3.Up);
+
+    // --- World-space transform, composed through the parent chain. Position is the common case; the axes
+    //     are the world matrix's basis rows, normalised so a parent's scale does not skew a direction. ---
+    [ThreadStatic] private static float[]? s_scratch16;
+    private static float[] Scratch16 => s_scratch16 ??= new float[16];
+
+    /// <summary>World-space position in centimetres, composed through any parents. Zero for a stale handle.</summary>
+    public Vec3 WorldPosition
+    {
+        get
+        {
+            float[] m = Scratch16;
+            if (SceneNative.aver_scene_world_matrix(Handle, m) == 0) return Vec3.Zero;
+            return new Vec3(m[12], m[13], m[14]);   // translation is row 3 (row-vector convention)
+        }
+    }
+
+    /// <summary>World-space forward (+X), composed through parents and normalised. Falls back to the local
+    /// axis for a stale handle.</summary>
+    public Vec3 WorldForward => WorldAxis(0, Forward);
+    /// <summary>World-space right (+Y).</summary>
+    public Vec3 WorldRight => WorldAxis(1, Right);
+    /// <summary>World-space up (+Z).</summary>
+    public Vec3 WorldUp => WorldAxis(2, Up);
+
+    private Vec3 WorldAxis(int row, Vec3 fallback)
+    {
+        float[] m = Scratch16;
+        if (SceneNative.aver_scene_world_matrix(Handle, m) == 0) return fallback;
+        int i = row * 4;
+        var v = new Vec3(m[i], m[i + 1], m[i + 2]);
+        float len = MathF.Sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z);
+        return len > 1e-6f ? v * (1f / len) : fallback;
+    }
+
     /// <summary>The display name. Read-only here; <see cref="SetName"/> renames the <c>CName</c> slice.</summary>
     public string Name => Fw.Str(SceneNative.aver_scene_name(Handle));
 
@@ -123,6 +163,31 @@ public readonly struct Entity : IEquatable<Entity>
     /// model carries so a dragged gizmo can find its generated line (see <see cref="ActorBuilder.Place"/>).
     /// </summary>
     public ulong ObjectId => unchecked((ulong)SceneNative.aver_scene_object_id(Handle));
+
+    // --- Gameplay identity. An entity is an "actor" iff a framework class owns it (class_of != 0). ---
+
+    /// <summary>True while this handle still addresses a live entity (rejects a stale generation or freed slot).</summary>
+    public bool IsAlive => SceneNative.aver_scene_valid(Handle) != 0;
+
+    /// <summary>True if a gameplay class owns this entity — i.e. it is an actor, not a plain scene entity.</summary>
+    public bool IsActor => Fw.aver_fw_class_of(Handle) != 0;
+
+    /// <summary>The gameplay class this entity is an instance of; invalid (<c>Handle == 0</c>) for a plain entity.</summary>
+    public ActorClass Class => new ActorClass(Fw.aver_fw_class_of(Handle));
+
+    /// <summary>The live managed actor bound to this entity, or null (dead, not an actor, or script disabled).</summary>
+    public AverActor? Actor => Actors.Get(this);
+
+    /// <summary>The managed actor bound to this entity as <typeparamref name="T"/>, or null if absent or another type.</summary>
+    public T? As<T>() where T : AverActor => Actors.Get<T>(this);
+
+    /// <summary>Destroy this entity. An actor runs the full framework teardown (OnEndPlay -> unbind); a plain
+    /// entity is a scene destroy. Either takes the whole subtree and is deferred to the next world flush.</summary>
+    public void Destroy()
+    {
+        if (IsActor) Fw.aver_fw_destroy(Handle);
+        else SceneNative.aver_scene_destroy(Handle);
+    }
 
     /// <summary>Rotate <paramref name="v"/> by unit quaternion <paramref name="q"/> (v' = q v q*).</summary>
     private static Vec3 Rotate(Quat q, Vec3 v)

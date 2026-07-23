@@ -20,4 +20,14 @@ public abstract class AverPawn : AverActor
 
     /// <summary>Runs when this pawn's controller releases it.</summary>
     public virtual void OnUnpossessed() { }
+
+    /// <summary>The controller currently possessing this pawn, or <see cref="Entity.None"/>. Read straight
+    /// from the world each time, never cached, so it cannot disagree with the engine after a reload.</summary>
+    public Entity Controller => new Entity(Fw.aver_fw_controller_of(Self.Handle));
+
+    /// <summary>The possessing controller as <typeparamref name="T"/>, or null.</summary>
+    public T? ControllerAs<T>() where T : AverPlayerController => Actors.Get<T>(Controller);
+
+    /// <summary>True while some controller possesses this pawn.</summary>
+    public bool IsPossessed => Fw.aver_fw_controller_of(Self.Handle) != 0;
 }

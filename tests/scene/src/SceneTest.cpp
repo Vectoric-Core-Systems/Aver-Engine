@@ -894,6 +894,31 @@ static void testSceneAbiRepairs(World& world) {
     check(aver_scene_debug_string_pool_size() - poolAfter == 0, "and reused the same slot, adding nothing");
 }
 
+// The query additions the C# gameplay API is built on: resolve-by-name and the composed world matrix.
+static void testSceneAbiQuery(World& world) {
+    AVER_INFO("=== C ABI query: aver_scene_find + aver_scene_world_matrix ===");
+
+    const int32_t a = aver_scene_create();
+    aver_scene_set_name(a, "find-me");
+    check(aver_scene_find("find-me") == a, "find resolves a live entity by name");
+    check(aver_scene_find("no-such-name") == 0, "find returns 0 for an unknown name");
+    check(aver_scene_find(nullptr) == 0, "find tolerates a null name");
+
+    // world_matrix of a translated, unrotated root: identity basis, translation in row 3 (row-vector).
+    const int32_t b     = aver_scene_create();
+    const int32_t fPos  = aver_scene_field("CLocal.position");
+    float pos[3] = {10.0f, 20.0f, 30.0f};
+    aver_scene_set_vec(b, fPos, pos);
+    world.flush();
+    float m[16] = {0};
+    check(aver_scene_world_matrix(b, m) == 1, "world_matrix succeeds for a live entity");
+    check(m[12] == 10.0f && m[13] == 20.0f && m[14] == 30.0f, "world_matrix carries the translation in row 3");
+    check(m[0] == 1.0f && m[5] == 1.0f && m[10] == 1.0f && m[15] == 1.0f,
+          "an unrotated, unscaled root reads an identity basis and w");
+    check(aver_scene_world_matrix(0, m) == 0, "world_matrix rejects an invalid handle");
+    check(aver_scene_world_matrix(b, nullptr) == 0, "world_matrix rejects a null out buffer");
+}
+
 // ---------------------------------------------------------------------------------------------- main
 
 int main() {
@@ -910,6 +935,7 @@ int main() {
     testHierarchy(world);
     testSceneAbi(world);
     testSceneAbiRepairs(world);
+    testSceneAbiQuery(world);
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;

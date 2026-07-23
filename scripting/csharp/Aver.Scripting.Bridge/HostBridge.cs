@@ -476,6 +476,11 @@ public static class HostBridge
             if (!InstallManagedDispatch())
                 return;   // logged inside; actors are disabled, behaviours are not
             DeclareBaseClasses();
+            // Let any script resolve an Entity back to its live managed instance (Actors.Get / Entity.As<T>
+            // / Game.ModeAs<T> / Spawn<T>). The host owns the table; the framework holds only this delegate,
+            // keeping the dependency one-way. Disabled instances (a script that threw) resolve to null.
+            Actors.Resolver = handle =>
+                s_actorsByEntity.TryGetValue(handle, out ActorLive? live) && !live.Disabled ? live.Instance : null;
         }
         catch (Exception ex)
         {

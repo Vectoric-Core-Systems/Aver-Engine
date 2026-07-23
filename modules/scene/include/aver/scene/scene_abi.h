@@ -156,6 +156,15 @@ AVER_SCENE_ABI int32_t aver_scene_set_object_id(int32_t e, int64_t objectId);
 AVER_SCENE_ABI const char* aver_scene_name(int32_t e);               /* "" for a stale handle */
 AVER_SCENE_ABI int32_t     aver_scene_set_name(int32_t e, const char* name);
 
+/* ---- query ---- */
+/* The live entity whose name equals `name` (the first match), or 0. A linear scan over live entities —
+ * a convenience for tools and scripts resolving an actor by name, NOT a per-frame lookup. */
+AVER_SCENE_ABI int32_t aver_scene_find(const char* name);
+/* Write `e`'s 4x4 world matrix into out16 (row-major, row-vector: the basis is in rows 0-2 and the
+ * translation in row 3, per the engine's transform contract). Composes on demand if `e` is stale
+ * relative to its parents. Returns 1, or 0 leaving out16 untouched for a dead handle or null out. */
+AVER_SCENE_ABI int32_t aver_scene_world_matrix(int32_t e, float* out16);
+
 /* ---- content resolution at bind time ---- */
 /* Resolve a material NAME to a stable, positive i32 handle within this process; 0 for an empty name.
  * `name0` is the content-pack id (0 == default pack). Materials belong to Aver.Render.PBR, which this

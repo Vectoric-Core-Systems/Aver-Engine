@@ -37,7 +37,8 @@ public sealed class SphereSpawner : AverActor
     {
         // Placed three units to +Y (right) of the spawner and at the reference cube's height, so it lands
         // beside the cube in the sandbox's default view rather than on top of it or below the ground.
-        Entity s = Spawn<Sphere>(new Vec3(0f, 3f, 1f));
-        Log.Info($"[SphereSpawner] spawned a Sphere as entity {s.Handle}");
+        // Spawn<T> now returns the LIVE INSTANCE — the C# object — not just an entity handle.
+        Sphere? sphere = Spawn<Sphere>(new Vec3(0f, 3f, 1f));
+        Log.Info($"[SphereSpawner] spawned '{sphere?.Self.Name}' at world {sphere?.Self.WorldPosition}");
     }
 }
