@@ -46,12 +46,15 @@
 #include "stb_image_write.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -387,6 +390,33 @@ public:
         if (!compileIconUiId_) { AVER_WARN("[Sandbox] the Compile C# icon is not reachable from the UI"); return; }
         AVER_INFO("[Sandbox] Compile C# status icons decoded from {} ({}x{})", path, img.width, img.height);
     }
+
+    // The Content Browser's file-type icons: one sprite sheet of four tiles (C# Script / C# Class /
+    // C++ Class / C++ Module), loaded exactly like the compile icon. A failure leaves fileIconsUiId_ 0 and
+    // the browser falls back to plain text rows.
+    void loadFileIcons(Engine& e) {
+        rhi::IResourceFactory* res = e.device()->resources();
+        if (!res) return;
+        const std::string path = executableDir() + "\\file-icons.png";
+        ImageData img;
+        std::string why;
+        if (!decodeImage(path, img, &why)) {
+            AVER_WARN("[Sandbox] '{}' not loaded ({}) -- the Content Browser uses plain file rows", path, why);
+            return;
+        }
+        rhi::TextureDesc td;
+        td.width = img.width; td.height = img.height;
+        td.format = rhi::Format::RGBA8Unorm;
+        td.bind = rhi::ResourceBind::ShaderResource;
+        td.initialState = rhi::ResourceState::ShaderResource;
+        td.debugName = "FileTypeIcons";
+        const void* levels[1] = {img.pixels.data()};
+        td.initialData = levels; td.initialDataCount = 1; td.initialRowPitch = img.rowPitch();
+        fileIconsTexture_ = res->createTexture(td);
+        if (!fileIconsTexture_) { AVER_WARN("[Sandbox] the file-type icons could not be uploaded"); return; }
+        fileIconsUiId_ = e.device()->uiTextureId(fileIconsTexture_);
+        AVER_INFO("[Sandbox] file-type icons decoded from {} ({}x{})", path, img.width, img.height);
+    }
 #endif
 
     void onInit(Engine& e) override {
@@ -410,6 +440,7 @@ public:
             AVER_INFO("[Sandbox] DPI scale {:.2f}, UI font rasterised at {:.0f}px", dpi_, 16.0f * dpi_);
             if (browserActive_) loadLogo(e);
             loadCompileIcon(e);
+            loadFileIcons(e);
         }
 #endif
         // --- default "blank .ocmap": ground floor + cube + sun + sky + atmosphere ---
@@ -778,14 +809,16 @@ public:
 #if AVER_WITH_IMGUI
         // The UI descriptor the mark holds is released with the texture, and that pool has no fence
         // of its own -- so the GPU has to be past every frame that drew it first.
-        if (logoTexture_ || compileIconTexture_) {
+        if (logoTexture_ || compileIconTexture_ || fileIconsTexture_) {
             if (rhi::IResourceFactory* res = e.device()->resources()) {
                 res->waitIdle();
                 if (logoTexture_) res->destroyTexture(logoTexture_);
                 if (compileIconTexture_) res->destroyTexture(compileIconTexture_);
+                if (fileIconsTexture_) res->destroyTexture(fileIconsTexture_);
             }
             logoTexture_ = 0; logoUiId_ = 0;
             compileIconTexture_ = 0; compileIconUiId_ = 0;
+            fileIconsTexture_ = 0; fileIconsUiId_ = 0;
         }
 #endif
 #if AVER_MODULE_VOXI
@@ -1532,17 +1565,57 @@ private:
         }
     }
 
+    // Which sprite tile a file gets (0 C# Script, 1 C# Class, 2 C++ Class, 3 C++ Module), or -1 for none.
+    // A .cs is classified once — script (has a lifecycle base / [AverClass]) vs plain class — by peeking at
+    // its text and cached, since re-reading every file every frame would stall the browser.
+    int fileIconTile(const std::string& path, const std::string& name, const std::string& ext) {
+        if (name == "CMakeLists.txt") return 3;   // a module's marker
+        if (ext == ".cpp" || ext == ".cxx" || ext == ".cc" || ext == ".hpp" || ext == ".hxx" || ext == ".h")
+            return 2;   // C++ Class
+        if (ext != ".cs") return -1;
+        if (auto it = fileIconCache_.find(path); it != fileIconCache_.end()) return it->second;
+        int tile = 1;   // default: a plain C# Class
+        std::ifstream in(path, std::ios::binary);
+        const std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        static const char* kScriptMarkers[] = {
+            "AverBehaviour", "AverActor", "AverPawn", "AverCharacter", "AverPlayerController",
+            "AverGameMode", "AverGameInstance", "[AverClass", "[AverGameMode"};
+        for (const char* m : kScriptMarkers) if (body.find(m) != std::string::npos) { tile = 0; break; }
+        fileIconCache_[path] = tile;
+        return tile;
+    }
+
     void drawFolderFiles(const std::string& dir) {
         std::error_code ec;
         ImGui::TextDisabled("%s", dir.c_str());
         ImGui::Separator();
-        int files = 0;
+        int shown = 0;
+        // Subfolders first, double-click to enter (so the file view navigates like UE's grid, not only the tree).
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (!entry.is_directory(ec)) continue;
+            const std::string name = entry.path().filename().string();
+            if (ImGui::Selectable(("[+]  " + name).c_str(), false, ImGuiSelectableFlags_AllowDoubleClick)
+                && ImGui::IsMouseDoubleClicked(0))
+                cbSelectedDir_ = entry.path().string();
+            ++shown;
+        }
+        // Then files, each with its type icon.
         for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
             if (entry.is_directory(ec)) continue;
-            ImGui::Selectable(entry.path().filename().string().c_str(), false, ImGuiSelectableFlags_AllowDoubleClick);
-            ++files;
+            const std::string name = entry.path().filename().string();
+            std::string ext = entry.path().extension().string();
+            for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            const int tile = fileIconTile(entry.path().string(), name, ext);
+            if (tile >= 0 && fileIconsUiId_) {
+                const float h = ImGui::GetTextLineHeight() * 1.3f;
+                ImGui::Image(static_cast<ImTextureID>(fileIconsUiId_), ImVec2(h * 0.74f, h),
+                             ImVec2(tile / 4.0f, 0.0f), ImVec2((tile + 1) / 4.0f, 1.0f));
+                ImGui::SameLine();
+            }
+            ImGui::Selectable(name.c_str());
+            ++shown;
         }
-        if (files == 0) ImGui::TextDisabled("(no files in this folder)");
+        if (shown == 0) ImGui::TextDisabled("(this folder is empty)");
     }
 
     // The Import modal: type a source file, and Import COPIES it into the selected folder — a real, if
@@ -2063,6 +2136,9 @@ private:
     // The start screen's mark. Zero when the screen was never armed, or when logo.png was missing
     // or undecodable -- in which case the browser draws its fallback badge instead.
     rhi::TextureHandle logoTexture_=0;
+    rhi::TextureHandle fileIconsTexture_=0;     // the Content Browser file-type sprite sheet (4 tiles)
+    u64 fileIconsUiId_=0;
+    std::unordered_map<std::string, int> fileIconCache_;   // path -> tile index, so a .cs is classified once
     rhi::TextureHandle compileIconTexture_=0;   // the Compile C# status sprite sheet (3 tiles)
     u64 compileIconUiId_=0;
     u64 logoUiId_=0;

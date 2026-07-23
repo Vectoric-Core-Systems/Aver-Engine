@@ -84,6 +84,18 @@ add_custom_target(Sandbox.CompileIcon DEPENDS ${CMAKE_BINARY_DIR}/bin/compile-st
 add_dependencies(Sandbox Sandbox.CompileIcon)
 set_target_properties(Sandbox.CompileIcon PROPERTIES FOLDER "sandbox")
 
+# Ship the Content Browser file-type icon sheet (four tiles: C# Script / C# Class / C++ Class / C++ Module).
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/bin/file-icons.png
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/branding/file-icons.png ${CMAKE_BINARY_DIR}/bin/file-icons.png
+  DEPENDS ${CMAKE_SOURCE_DIR}/branding/file-icons.png
+  COMMENT "Staging file-icons.png"
+  VERBATIM)
+add_custom_target(Sandbox.FileIcons DEPENDS ${CMAKE_BINARY_DIR}/bin/file-icons.png)
+add_dependencies(Sandbox Sandbox.FileIcons)
+set_target_properties(Sandbox.FileIcons PROPERTIES FOLDER "sandbox")
+
 # Ship the editor UI typeface next to the executable. Same OUTPUT/DEPENDS rule as the splash, and
 # for the same reason -- POST_BUILD would not re-copy a font that changed without the exe relinking.
 set(AVER_UI_FONTS Roboto-Regular.ttf Roboto-Medium.ttf)
