@@ -249,6 +249,9 @@ static void applyUnrealStyle() {
 // One captured log line for the Output Log panel.
 struct LogLine { LogLevel level; std::string text; };
 
+// A throttled Content Browser directory listing (subfolders + files), refreshed on a frame stamp.
+struct DirListing { int stamp = -1000; std::vector<std::filesystem::path> dirs, files; };
+
 class SandboxApp final : public Application {
 public:
     SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::string shot, Tool initialTool)
@@ -264,7 +267,6 @@ public:
         std::lock_guard<std::mutex> lock(self->logMutex_);
         self->logLines_.push_back({level, std::string(msg)});
         if (self->logLines_.size() > kMaxLogLines) self->logLines_.pop_front();
-        self->logDirty_ = true;
     }
 
     BootConfig config() const override {
@@ -1027,7 +1029,9 @@ private:
         aver_fw_input_set_key(AVER_FW_KEY_RIGHT,  kb && ImGui::IsKeyDown(ImGuiKey_RightArrow));
         aver_fw_input_set_key(AVER_FW_KEY_UP,     kb && ImGui::IsKeyDown(ImGuiKey_UpArrow));
         aver_fw_input_set_key(AVER_FW_KEY_DOWN,   kb && ImGui::IsKeyDown(ImGuiKey_DownArrow));
-        const bool m = !io.WantCaptureMouse;
+        // Suppress mouse too while a text field has focus (WantCaptureKeyboard), not only when the cursor is
+        // over UI (WantCaptureMouse) — otherwise mouse-look would still turn the character while you type.
+        const bool m = !io.WantCaptureMouse && !io.WantCaptureKeyboard;
         aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT,   m && ImGui::IsMouseDown(0));
         aver_fw_input_set_key(AVER_FW_KEY_MOUSE_RIGHT,  m && ImGui::IsMouseDown(1));
         aver_fw_input_set_key(AVER_FW_KEY_MOUSE_MIDDLE, m && ImGui::IsMouseDown(2));
@@ -1310,6 +1314,7 @@ private:
     void buildUI(Engine& e) {
 #if AVER_WITH_IMGUI
         if (!e.device()->uiActive()) return;
+        ++frameNo_;   // the Content Browser's directory-cache freshness clock
 
         // The start screen replaces the editor chrome entirely while it is up.
         if (browserActive_) {
@@ -1509,7 +1514,6 @@ private:
         // Follow the tail only when the user is already at the bottom, so scrolling up to read stays put.
         if (logAutoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
             ImGui::SetScrollHereY(1.0f);
-        logDirty_ = false;
         ImGui::EndChild();
     }
 
@@ -1552,14 +1556,36 @@ private:
 
     // Recurse the folder tree, scanning only the branches the user has opened (TreeNodeEx is lazy), so a
     // deep project costs nothing until it is expanded. A click on a folder selects it for the file list.
-    void drawFolderTree(const std::string& dir) {
+    // Enumerate a directory SAFELY and THROTTLED. Safely: driven by the non-throwing increment(ec) — a
+    // filesystem_error escaping through the ImGui frame is std::terminate (the same hazard IdeIntegration
+    // guards). Throttled: cached for a short window so a large or network folder is not re-walked every
+    // frame. dirs/files come back sorted so the listing is stable frame to frame.
+    const DirListing& dirListing(const std::string& dir) {
+        DirListing& c = dirCache_[dir];
+        if (frameNo_ - c.stamp < 20) return c;   // fresh enough
+        c.stamp = frameNo_;
+        c.dirs.clear(); c.files.clear();
         std::error_code ec;
-        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-            if (!entry.is_directory(ec)) continue;
-            const std::string full = entry.path().string();
+        try {
+            for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+                std::error_code fec;
+                (it->is_directory(fec) ? c.dirs : c.files).push_back(it->path());
+            }
+        } catch (const std::exception&) { /* keep what we read; a mid-walk failure is not fatal to the UI */ }
+        std::sort(c.dirs.begin(), c.dirs.end());
+        std::sort(c.files.begin(), c.files.end());
+        return c;
+    }
+
+    void drawFolderTree(const std::string& dir) {
+        // Copy the paths out before drawing: a click below reassigns cbSelectedDir_, which the caller may
+        // have passed in by reference, so we must not be iterating a live directory view over it.
+        const std::vector<std::filesystem::path> dirs = dirListing(dir).dirs;
+        for (const auto& p : dirs) {
+            const std::string full = p.string();
             ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
             if (cbSelectedDir_ == full) flags |= ImGuiTreeNodeFlags_Selected;
-            const bool open = ImGui::TreeNodeEx(entry.path().filename().string().c_str(), flags);
+            const bool open = ImGui::TreeNodeEx(p.filename().string().c_str(), flags);
             if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) cbSelectedDir_ = full;
             if (open) { drawFolderTree(full); ImGui::TreePop(); }
         }
@@ -1567,7 +1593,8 @@ private:
 
     // Which sprite tile a file gets (0 C# Script, 1 C# Class, 2 C++ Class, 3 C++ Module), or -1 for none.
     // A .cs is classified once — script (has a lifecycle base / [AverClass]) vs plain class — by peeking at
-    // its text and cached, since re-reading every file every frame would stall the browser.
+    // the file HEAD (markers only appear near the top) and cached, so nothing re-reads a file per frame or
+    // slurps a huge one whole.
     int fileIconTile(const std::string& path, const std::string& name, const std::string& ext) {
         if (name == "CMakeLists.txt") return 3;   // a module's marker
         if (ext == ".cpp" || ext == ".cxx" || ext == ".cc" || ext == ".hpp" || ext == ".hxx" || ext == ".h")
@@ -1576,7 +1603,9 @@ private:
         if (auto it = fileIconCache_.find(path); it != fileIconCache_.end()) return it->second;
         int tile = 1;   // default: a plain C# Class
         std::ifstream in(path, std::ios::binary);
-        const std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        char head[8192];
+        in.read(head, sizeof(head));            // the head only — a marker past 8 KB is not a class declaration
+        const std::string body(head, static_cast<size_t>(in.gcount()));
         static const char* kScriptMarkers[] = {
             "AverBehaviour", "AverActor", "AverPawn", "AverCharacter", "AverPlayerController",
             "AverGameMode", "AverGameInstance", "[AverClass", "[AverGameMode"};
@@ -1585,27 +1614,26 @@ private:
         return tile;
     }
 
-    void drawFolderFiles(const std::string& dir) {
-        std::error_code ec;
+    void drawFolderFiles(std::string dir) {   // by value: a double-click below reassigns cbSelectedDir_
         ImGui::TextDisabled("%s", dir.c_str());
         ImGui::Separator();
+        const DirListing& listing = dirListing(dir);
+        const std::vector<std::filesystem::path> dirs = listing.dirs;   // copies, since a click mutates the cache key
+        const std::vector<std::filesystem::path> files = listing.files;
         int shown = 0;
         // Subfolders first, double-click to enter (so the file view navigates like UE's grid, not only the tree).
-        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-            if (!entry.is_directory(ec)) continue;
-            const std::string name = entry.path().filename().string();
-            if (ImGui::Selectable(("[+]  " + name).c_str(), false, ImGuiSelectableFlags_AllowDoubleClick)
+        for (const auto& p : dirs) {
+            if (ImGui::Selectable(("[+]  " + p.filename().string()).c_str(), false, ImGuiSelectableFlags_AllowDoubleClick)
                 && ImGui::IsMouseDoubleClicked(0))
-                cbSelectedDir_ = entry.path().string();
+                cbSelectedDir_ = p.string();
             ++shown;
         }
         // Then files, each with its type icon.
-        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-            if (entry.is_directory(ec)) continue;
-            const std::string name = entry.path().filename().string();
-            std::string ext = entry.path().extension().string();
+        for (const auto& p : files) {
+            const std::string name = p.filename().string();
+            std::string ext = p.extension().string();
             for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            const int tile = fileIconTile(entry.path().string(), name, ext);
+            const int tile = fileIconTile(p.string(), name, ext);
             if (tile >= 0 && fileIconsUiId_) {
                 const float h = ImGui::GetTextLineHeight() * 1.3f;
                 ImGui::Image(static_cast<ImTextureID>(fileIconsUiId_), ImVec2(h * 0.74f, h),
@@ -1645,7 +1673,13 @@ private:
         if (!std::filesystem::exists(src, ec)) { AVER_WARN("[Import] source not found: {}", src); return; }
         const std::string name = std::filesystem::path(src).filename().string();
         const std::string dest = destDir + "\\" + name;
-        std::filesystem::copy_file(src, dest, std::filesystem::copy_options::overwrite_existing, ec);
+        // Refuse rather than overwrite: silently destroying an existing same-named asset is data loss, and
+        // the only feedback would be a success line. The user renames the source or clears the target first.
+        if (std::filesystem::exists(dest, ec)) {
+            AVER_WARN("[Import] '{}' already exists in {} - not overwritten; rename the source or remove it first", name, destDir);
+            return;
+        }
+        std::filesystem::copy_file(src, dest, ec);
         if (ec) AVER_WARN("[Import] failed to copy '{}' -> '{}': {}", src, dest, ec.message());
         else    AVER_INFO("[Import] imported '{}' into {}", name, destDir);
     }
@@ -2139,6 +2173,9 @@ private:
     rhi::TextureHandle fileIconsTexture_=0;     // the Content Browser file-type sprite sheet (4 tiles)
     u64 fileIconsUiId_=0;
     std::unordered_map<std::string, int> fileIconCache_;   // path -> tile index, so a .cs is classified once
+    // Throttled directory listings for the Content Browser, so a folder is not re-walked every frame.
+    std::unordered_map<std::string, DirListing> dirCache_;
+    int frameNo_ = 0;                                      // bumped once per UI frame; the cache freshness clock
     rhi::TextureHandle compileIconTexture_=0;   // the Compile C# status sprite sheet (3 tiles)
     u64 compileIconUiId_=0;
     u64 logoUiId_=0;
@@ -2164,7 +2201,6 @@ private:
     static constexpr size_t kMaxLogLines = 4000;
     std::mutex          logMutex_;
     std::deque<LogLine> logLines_;
-    bool                logDirty_      = false;   // a new line arrived since the panel last drew
     bool                logAutoScroll_ = true;
     int                 logLevelFilter_ = 0;      // 0 = all, 1 = Info+, 2 = Warn+
     // Content Browser: the folder whose files are listed, and the Import modal's source-path field.
