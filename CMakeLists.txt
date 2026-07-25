@@ -54,6 +54,12 @@ message(STATUS "Aver Engine ${PROJECT_VERSION} | D3D12=${AVER_RHI_D3D12} D3D11=$
 if(AVER_ENABLE_UI)
   add_subdirectory(third_party/imgui)
 endif()
+# Jolt Physics (MIT). Optional so the engine still configures without it -- and so the cost of
+# compiling 153 translation units is opt-out for anyone who does not need physics.
+option(AVER_MODULE_PHYSICS "Build the physics module (Jolt Physics)" ON)
+if(AVER_MODULE_PHYSICS)
+  add_subdirectory(third_party/JoltPhysics)
+endif()
 
 # ---- Tier 0-6 implemented modules ----
 add_subdirectory(modules/core)
