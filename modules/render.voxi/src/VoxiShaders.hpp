@@ -118,15 +118,31 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     float3 up = abs(N.z) < 0.9 ? float3(0,0,1) : float3(1,0,0);
     float3 T = normalize(cross(up, N)), B = cross(N, T);
     const float aperture = 0.577;              // ~60 degree cone
-    float4 sum = traceCone(wpos, N, aperture);
+
+    // COSINE WEIGHTED, not a flat average.
+    //
+    // Diffuse irradiance is the integral of incoming radiance times cos(theta), so a cone sixty
+    // degrees off the normal delivers about HALF what the one along it does. Averaging the six
+    // equally -- which is what this did -- overstates everything arriving at a grazing angle, which
+    // is precisely the direction most bounce light comes from in a room. The result was indirect
+    // light that was too flat and too strong near walls, in a way that reads as a washed-out ambient
+    // term rather than as light that came from somewhere.
+    //
+    // The weights are the cosines themselves: 1 along the normal, and cos(60 deg) = 0.5 for the ring.
+    // Dividing by their SUM rather than by the count keeps the overall level unchanged for a surface
+    // seeing uniform radiance, so this redistributes energy without also brightening or darkening
+    // the whole image.
+    float4 sum = traceCone(wpos, N, aperture);   // weight 1.0, straight up the normal
     float occ = sum.a;
+    float wsum = 1.0;
     [unroll] for (int k = 0; k < 5; ++k) {
         float ang = 1.2566 * k;                // 2*pi/5
         float3 d = normalize(N * 0.5 + (T * cos(ang) + B * sin(ang)) * 0.866);
+        float w = saturate(dot(N, d));         // the cosine this cone actually subtends
         float4 c = traceCone(wpos, d, aperture);
-        sum += c; occ += c.a;
+        sum += c * w; occ += c.a * w; wsum += w;
     }
-    sum /= 6.0; occ /= 6.0;
+    sum /= wsum; occ /= wsum;
     ao = saturate(1.0 - occ);
     return sum.rgb * gVoxelParams.y;
 }
