@@ -39,6 +39,7 @@
 #endif
 
 #if AVER_MODULE_SCENE
+#include "aver/scene/scene_abi.h"     // aver_scene_material: interning the names the surface palette keys on
 #include "aver/scene/World.hpp"       // the one world a spawned actor lives in — walked by the render pass
 #include "aver/scene/Components.hpp"  // CMeshRenderer / CWorld layout, read directly through the pools
 #endif
@@ -526,6 +527,23 @@ public:
             // spawn actors but could not build anything to walk on or shoot at.
             sceneMeshes_[fnv1a64(std::string_view("Meshes/cube.ocmesh"))] = cube;
         }
+
+        // The named surfaces gameplay can ask for. Chosen to READ rather than to be pretty: a floor
+        // darker than its walls, warm crates against cool architecture, and one saturated accent kept
+        // for the things the player is meant to shoot. Value separation is what makes a blockout
+        // legible; hue on its own does not.
+        {
+            auto look = [this](const char* name, f32 r, f32 g, f32 b, f32 metal, f32 rough) {
+                surfaceLooks_[aver_scene_material(0, name)] = SurfaceLook{{r, g, b}, metal, rough};
+            };
+            look("M_Floor",  0.22f, 0.23f, 0.26f, 0.02f, 0.85f);   // dark, so everything reads against it
+            look("M_Wall",   0.48f, 0.50f, 0.55f, 0.03f, 0.72f);
+            look("M_Trim",   0.30f, 0.33f, 0.38f, 0.35f, 0.45f);   // edges and platforms
+            look("M_Crate",  0.62f, 0.44f, 0.22f, 0.02f, 0.78f);   // warm, against the cool room
+            look("M_Target", 0.86f, 0.20f, 0.16f, 0.05f, 0.40f);   // the one saturated thing
+            look("M_Metal",  0.55f, 0.57f, 0.60f, 0.85f, 0.28f);   // the gun
+            look("M_Accent", 0.95f, 0.66f, 0.15f, 0.30f, 0.35f);
+        }
 #endif
 
         MeshObj floor; floor.name="Floor"; floor.mesh=ground; floor.tris=(u32)gi.size()/3;
@@ -799,7 +817,17 @@ public:
 
         const Vec3 ld = Vec3{sunAz_, sunAlt_, sunUp_}.getSafeNormal();
         e.device()->setLight(&ld.x, sunColor_, sunAmbient_);
-        e.device()->setSky(true, skyZenith_, skyHorizon_, fogColor_, fogDensity_);
+        // Fog density is PER UNIT, and the editor's default is tuned for its own placeholder scene,
+        // which is authored at roughly a unit per metre. Gameplay is in CENTIMETRES, so the identical
+        // number saturates a few metres out: at the far wall of an 8m room, 1-exp(-0.014 * 1400) is
+        // indistinguishable from 1, which is why a correctly built arena rendered as flat white haze.
+        // This was the visual "scale mismatch" -- not the geometry, which was right all along.
+        //
+        // Scaled by the unit ratio while playing rather than changing the default, so the editor's
+        // scene keeps the look it was tuned for and the pixel-exact gates (which never enter play)
+        // are untouched.
+        const f32 fog = playSessionActive() ? fogDensity_ * 0.01f : fogDensity_;
+        e.device()->setSky(true, skyZenith_, skyHorizon_, fogColor_, fog);
         // Outside the viewport rect is editor chrome, not sky — clear to the dark panel colour.
         e.device()->setClearColor(0.055f, 0.055f, 0.062f, 1);
     }
@@ -832,9 +860,17 @@ public:
     void onRender(Engine& e) override {
         handleManip(e);
         e.device()->setWireframe(wireframe_);
+        // The editor's placeholder scene (the grey floor and the orange cube) is EDITOR furniture, not
+        // part of anyone's game. It is also authored at a different scale -- roughly a unit per metre,
+        // where gameplay is centimetres -- so during a play session it sits inside the level as an
+        // 80cm patch of floor with a cube on it, which reads as a bug in the game rather than as the
+        // editor's default scene. Hidden while playing; the game builds its own world.
+        //
+        // Gate-neutral: the oracle runs never enter play, so this is always false at gate time.
+        const bool hideEditorScene = playSessionActive();
         for (int i=0;i<(int)objects_.size();++i) {
             MeshObj& o = objects_[i];
-            if (!o.visible) continue;
+            if (!o.visible || hideEditorScene) continue;
             Transform tr; tr.position=o.pos; tr.rotation=quatFromEulerDeg(o.rotDeg); tr.scale=o.scale;
             Mat4 w = tr.toMatrix();
             f32 col[4]={o.color[0],o.color[1],o.color[2],1};
@@ -875,11 +911,24 @@ public:
                 // b1 to identity and lets its own b2 govern, matching makeMaterialFor's rule for objects_.
                 f32 col[4] = {0.80f, 0.80f, 0.85f, 1.0f};
                 f32 metallic = 0.0f, roughness = 0.5f;
+                // A NAMED SURFACE, if the actor asked for one. Until there is an .ocmat loader, a
+                // material name interns to a bare token with nothing behind it -- so every spawned
+                // actor drew in the same light grey and a whole level merged into one silhouette with
+                // no edges: floor, walls and crates were literally the same colour.
+                //
+                // This palette is the sandbox standing in for the material assets that do not exist
+                // yet. It is deliberately a lookup on the token rather than anything wired into the
+                // PBR system, so it disappears the day real materials load.
+                if (const auto look = surfaceLooks_.find(mat); look != surfaceLooks_.end()) {
+                    col[0] = look->second.col[0]; col[1] = look->second.col[1]; col[2] = look->second.col[2];
+                    metallic = look->second.metallic; roughness = look->second.roughness;
+                }
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
+                // Always the FALLBACK binding: the tokens above name no authored material, so binding
+                // `mat` would index a material system that has never heard of it.
                 if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready())
-                    e.device()->setDrawBinding(ms.bindingSet(mat), &ms.constants(mat),
+                    e.device()->setDrawBinding(ms.bindingSet(0), &ms.constants(0),
                                                sizeof(pbr::MaterialConstants));
-                if (mat != 0) { col[0]=col[1]=col[2]=1.0f; metallic = roughness = 1.0f; }
 #endif
                 e.device()->drawMesh(it->second, &wm.m[0][0], col, metallic, roughness);
                 ++drawn;
@@ -3174,6 +3223,19 @@ private:
     scripting::ScriptHost scripts_;
 #endif
     rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;
+    // Named surfaces a spawned actor can ask for by name, keyed by the token aver_scene_material
+    // interns. A stand-in for authored materials, so a level can read as a place rather than as one
+    // undifferentiated grey mass. See the scene-render pass for why it exists.
+    struct SurfaceLook { f32 col[3]; f32 metallic; f32 roughness; };
+    std::unordered_map<i32, SurfaceLook> surfaceLooks_;
+    // True while a game is playing, in a build with or without the framework.
+    bool playSessionActive() const {
+#if AVER_MODULE_FRAMEWORK
+        return aver_fw_play_state() != AVER_FW_PLAY_EDITOR;
+#else
+        return false;
+#endif
+    }
 #if AVER_MODULE_PHYSICS
     // The world's floor. Centimetres, per the physics ABI: a 100m square, 10cm thick, centred so its
     // TOP face sits exactly on z=0 -- so "the ground is at zero" is true for gameplay that assumes it.
