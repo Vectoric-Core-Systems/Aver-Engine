@@ -97,6 +97,34 @@ AVER_PHYS_API int32_t aver_phys_character_set_position(int32_t ch, float x, floa
 // 1 while standing on ground steep enough to hold. The thing a jump has to ask before it fires.
 AVER_PHYS_API int32_t aver_phys_character_grounded(int32_t ch);
 
+// ---- Arbitrary collision geometry ------------------------------------------------------------------
+// Box, sphere and capsule cover a blockout. These cover a level.
+//
+// Both take raw arrays in the engine's centimetres, laid out xyz,xyz,... -- deliberately NOT a mesh
+// handle: the engine has no .ocmesh loader yet, so a collider that could only be built from a loaded
+// asset would be a door to nowhere. Arrays can be filled from procedural geometry, from a level file,
+// or later from a loader, without this ABI changing.
+
+// A convex hull wrapped around `count` points. The usual choice for a dynamic prop: convex shapes
+// collide against anything, including each other, and are far cheaper than a mesh.
+AVER_PHYS_API int32_t aver_phys_add_convex_hull(const float* pointsXyz, int32_t count,
+                                                float cx, float cy, float cz,
+                                                int32_t dynamic, float massKg);
+
+// A triangle mesh: exact geometry, and STATIC ONLY -- that is Jolt's rule, not a shortcut here. A
+// mesh has no interior, so there is nothing to resolve a penetration against; level geometry is what
+// it is for. `indices` is 3 per triangle.
+AVER_PHYS_API int32_t aver_phys_add_mesh(const float* verticesXyz, int32_t vertexCount,
+                                         const int32_t* indices, int32_t indexCount,
+                                         float cx, float cy, float cz);
+
+// A heightfield: `samples` is a row-major sampleCount x sampleCount grid of heights in centimetres,
+// spaced `spacingCm` apart, with its corner at (cx, cy, cz). Static, like a mesh. sampleCount must be
+// a power of two plus nothing -- Jolt requires a multiple of its block size, so it is rounded down.
+AVER_PHYS_API int32_t aver_phys_add_heightfield(const float* samples, int32_t sampleCount,
+                                                float spacingCm,
+                                                float cx, float cy, float cz);
+
 // ---- Sensors (triggers) --------------------------------------------------------------------------
 // A sensor is a body that DETECTS overlap without pushing anything: a pickup volume, a level exit, a
 // damage zone. It is a real body in the broad phase, so it costs what a body costs, and it reports

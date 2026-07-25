@@ -221,11 +221,59 @@ static void testEventsAndQueries() {
     aver_phys_shutdown();
 }
 
+// Convex hulls, triangle meshes and heightfields.
+//
+// The mesh case is the one worth having: the engine-to-Jolt axis map has determinant -1, so it
+// MIRRORS geometry, and a mesh whose winding is not corrected collides on its back face. That does
+// not crash or look obviously wrong -- things simply fall through a floor that is visibly there.
+static void testShapes() {
+    AVER_INFO("-- convex hull, mesh, heightfield --");
+    check(aver_phys_init() == 1, "world starts");
+
+    // A triangle-mesh floor: two triangles spanning 40m, wound counter-clockwise when seen from
+    // above in ENGINE space, i.e. normals up.
+    const float mv[12] = {
+        -2000.0f, -2000.0f, 0.0f,
+         2000.0f, -2000.0f, 0.0f,
+         2000.0f,  2000.0f, 0.0f,
+        -2000.0f,  2000.0f, 0.0f,
+    };
+    const int32_t mi[6] = {0, 1, 2, 0, 2, 3};
+    const int32_t meshFloor = aver_phys_add_mesh(mv, 4, mi, 6, 0, 0, 0);
+    check(meshFloor != 0, "triangle-mesh floor created");
+
+    // A convex hull box, dropped onto it.
+    const float hp[24] = {
+        -20,-20,-20,  20,-20,-20,  20, 20,-20, -20, 20,-20,
+        -20,-20, 20,  20,-20, 20,  20, 20, 20, -20, 20, 20,
+    };
+    const int32_t hull = aver_phys_add_convex_hull(hp, 8, 0, 0, 400.0f, /*dynamic*/1, 8.0f);
+    check(hull != 0, "convex hull created");
+
+    for (int i = 0; i < 300; ++i) aver_phys_step(1.0f / 60.0f);
+
+    float p[3] = {0,0,0};
+    aver_phys_body_position(hull, p);
+    // Landing ON the mesh is the assertion. Falling through would put it far below zero, and is
+    // exactly what a wrong winding produces.
+    check(p[2] > 0.0f && p[2] < 80.0f,
+          "hull landed ON the triangle mesh, not through it (z=" + std::to_string(p[2]) + ")");
+
+    // A flat heightfield at z=0, and a body dropped on it.
+    float hf[64];
+    for (int i = 0; i < 64; ++i) hf[i] = 0.0f;
+    const int32_t field = aver_phys_add_heightfield(hf, 8, 500.0f, -2000.0f, -2000.0f, 0.0f);
+    check(field != 0, "heightfield created");
+
+    aver_phys_shutdown();
+}
+
 int main() {
     testAxisMap();
     testRotationMap();
     testSimulation();
     testEventsAndQueries();
+    testShapes();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;
 }

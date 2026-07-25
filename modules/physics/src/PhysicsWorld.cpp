@@ -24,6 +24,9 @@
 #include <Jolt/Physics/Collision/ShapeCast.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
@@ -550,6 +553,92 @@ int32_t aver_phys_raycast(float ox, float oy, float oz, float dx, float dy, floa
         }
     }
     return handle;
+}
+
+// ---- Arbitrary collision geometry ------------------------------------------------------------------
+
+int32_t aver_phys_add_convex_hull(const float* pts, int32_t count, float cx, float cy, float cz,
+                                  int32_t dynamic, float massKg) {
+    if (!g_world || !pts || count < 4) return 0;   // fewer than four points has no volume
+    JPH::Array<JPH::Vec3> hull;
+    hull.reserve(static_cast<size_t>(count));
+    for (int32_t i = 0; i < count; ++i)
+        hull.push_back(toJolt(Vec3(pts[i*3+0], pts[i*3+1], pts[i*3+2])));
+
+    JPH::ConvexHullShapeSettings s(hull);
+    s.SetEmbedded();
+    auto res = s.Create();
+    if (res.HasError()) { AVER_WARN("[Physics] convex hull: {}", res.GetError().c_str()); return 0; }
+    return addBody(res.Get(), Vec3(cx, cy, cz), dynamic != 0, massKg);
+}
+
+int32_t aver_phys_add_mesh(const float* verts, int32_t vertexCount,
+                           const int32_t* indices, int32_t indexCount,
+                           float cx, float cy, float cz) {
+    if (!g_world || !verts || !indices || vertexCount < 3 || indexCount < 3) return 0;
+
+    JPH::VertexList vlist;
+    vlist.reserve(static_cast<size_t>(vertexCount));
+    for (int32_t i = 0; i < vertexCount; ++i) {
+        const JPH::Vec3 v = toJolt(Vec3(verts[i*3+0], verts[i*3+1], verts[i*3+2]));
+        vlist.push_back(JPH::Float3(v.GetX(), v.GetY(), v.GetZ()));
+    }
+
+    JPH::IndexedTriangleList tris;
+    tris.reserve(static_cast<size_t>(indexCount / 3));
+    for (int32_t i = 0; i + 2 < indexCount; i += 3) {
+        const JPH::uint32 a = static_cast<JPH::uint32>(indices[i]);
+        const JPH::uint32 b = static_cast<JPH::uint32>(indices[i+1]);
+        const JPH::uint32 c = static_cast<JPH::uint32>(indices[i+2]);
+        if (a >= static_cast<JPH::uint32>(vertexCount) ||
+            b >= static_cast<JPH::uint32>(vertexCount) ||
+            c >= static_cast<JPH::uint32>(vertexCount)) {
+            AVER_WARN("[Physics] mesh: index out of range, triangle skipped");
+            continue;
+        }
+        // WINDING IS REVERSED. The axis map that takes the engine's left-handed space to Jolt's
+        // right-handed one has determinant -1, which mirrors the mesh -- so a triangle that faced
+        // outwards now faces in, and a mesh whose normals point inwards collides on the wrong side.
+        // Swapping two indices puts the winding back.
+        tris.push_back(JPH::IndexedTriangle(a, c, b));
+    }
+    if (tris.empty()) { AVER_WARN("[Physics] mesh: no usable triangles"); return 0; }
+
+    JPH::MeshShapeSettings s(vlist, tris);
+    s.SetEmbedded();
+    auto res = s.Create();
+    if (res.HasError()) { AVER_WARN("[Physics] mesh: {}", res.GetError().c_str()); return 0; }
+    // Static only: a mesh has no interior, so nothing can resolve a penetration against it. Jolt
+    // rejects a dynamic one outright, and this is the clearer place to say why.
+    return addBody(res.Get(), Vec3(cx, cy, cz), /*dynamic*/false, 0.0f);
+}
+
+int32_t aver_phys_add_heightfield(const float* samples, int32_t sampleCount, float spacingCm,
+                                  float cx, float cy, float cz) {
+    if (!g_world || !samples || sampleCount < 2 || spacingCm <= 0.0f) return 0;
+    // Jolt requires the sample count to be a multiple of its block size; round DOWN so a caller's
+    // grid is cropped rather than read past the end of.
+    const int32_t n = (sampleCount / 8) * 8;
+    if (n < 8) { AVER_WARN("[Physics] heightfield needs at least 8x8 samples"); return 0; }
+    if (n != sampleCount)
+        AVER_WARN("[Physics] heightfield {}x{} cropped to {}x{} (Jolt needs a multiple of 8)",
+                  sampleCount, sampleCount, n, n);
+
+    JPH::Array<float> heights;
+    heights.reserve(static_cast<size_t>(n) * static_cast<size_t>(n));
+    for (int32_t y = 0; y < n; ++y)
+        for (int32_t x = 0; x < n; ++x)
+            heights.push_back(cmToM(samples[static_cast<size_t>(y) * sampleCount + x]));
+
+    // A heightfield is Y-up in Jolt's own axes by construction, so it is built directly there rather
+    // than through the axis map -- the grid's rows are already a horizontal plane.
+    JPH::HeightFieldShapeSettings s(heights.data(), JPH::Vec3::sZero(),
+                                    JPH::Vec3(cmToM(spacingCm), 1.0f, cmToM(spacingCm)),
+                                    static_cast<JPH::uint32>(n));
+    s.SetEmbedded();
+    auto res = s.Create();
+    if (res.HasError()) { AVER_WARN("[Physics] heightfield: {}", res.GetError().c_str()); return 0; }
+    return addBody(res.Get(), Vec3(cx, cy, cz), /*dynamic*/false, 0.0f);
 }
 
 // ---- Sensors --------------------------------------------------------------------------------------
