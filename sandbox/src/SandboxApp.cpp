@@ -1010,7 +1010,24 @@ public:
         }
 #endif
         e.device()->setWireframe(false); // lines are always solid
-        if (showGrid_) { Mat4 id = Mat4::identity(); e.device()->drawLines(gridMesh_, &id.m[0][0]); }
+        if (showGrid_) {
+            // The grid mesh is built as a 40-unit extent with a 2-unit step, which is a 40cm grid of
+            // 2cm cells under the engine's centimetre contract -- authored back when the placeholder
+            // scene was the only thing in the world and effectively metre-scaled.
+            //
+            // Scaled up while a LEVEL is loaded, so the floor reference matches the world it is under:
+            // 100x gives a 40m grid in 2m cells, which is what makes a correctly-sized 16m room read
+            // as a 16m room instead of looking enormous next to a grid a hundred times too fine. This
+            // is why the arena looked mis-scaled -- the arena was right and the ruler was wrong.
+            //
+            // Conditioned on a level being loaded rather than changed outright: the gates draw this
+            // grid and compare pixels, and they load no level.
+            Mat4 g = Mat4::identity();
+#if AVER_MODULE_SCENE
+            if (!levelEntities_.empty()) { g.m[0][0] = g.m[1][1] = g.m[2][2] = 100.0f; }
+#endif
+            e.device()->drawLines(gridMesh_, &g.m[0][0]);
+        }
         drawGizmo(e);
         buildUI(e);
         captureCheck(e);
@@ -1257,6 +1274,12 @@ private:
         aver_fw_input_new_frame();
 #if AVER_WITH_IMGUI
         if (!uiActive) return;
+        // Shift+F1 does not merely show the cursor -- it hands control back to the EDITOR. Publishing
+        // nothing leaves every key and button released for the frame, so a character stops walking
+        // rather than continuing in whatever direction it was going when the mouse was freed, and
+        // clicking on a panel cannot also fire the weapon underneath it. new_frame() above has already
+        // cleared the state, so returning here IS "no input this frame".
+        if (releasedByUser_ && playSessionActive()) return;
         ImGuiIO& io = ImGui::GetIO();
         const bool kb = !io.WantCaptureKeyboard;
         // The editor's drawer chord wins over gameplay for the keys it uses. Without this the same
