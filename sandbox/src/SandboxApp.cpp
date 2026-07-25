@@ -9,6 +9,7 @@
 #include "aver/core/Version.hpp"
 #include "aver/formats/OcBeam.hpp"
 #include "aver/formats/OcProject.hpp"
+#include "aver/formats/OcWorld.hpp"      // .ocworld: the level format the editor loads and saves
 
 #include "ProjectBrowser.hpp"
 #include "ToolsMenu.hpp"
@@ -132,6 +133,27 @@ static void appendSphere(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
 static Quat quatFromEulerDeg(const Vec3& e) {
     return (Quat::fromAxisAngle({0,0,1}, radians(e.z)) * Quat::fromAxisAngle({0,1,0}, radians(e.y)) *
             Quat::fromAxisAngle({1,0,0}, radians(e.x))).normalized();
+}
+// The exact inverse of quatFromEulerDeg above, returning the same (roll, pitch, yaw) packing.
+//
+// It has to be the inverse of THAT composition specifically -- Rz(yaw) * Ry(pitch) * Rx(roll) -- and
+// not a generic euler extraction, or a level would not round-trip: save then load would rotate every
+// placement slightly, and the drift would compound with each save.
+static Vec3 eulerDegFromQuat(const Quat& q) {
+    const f32 sinP = 2.0f * (q.w * q.y - q.z * q.x);
+    const f32 pitch = std::asin(std::fmax(-1.0f, std::fmin(1.0f, sinP)));
+    f32 roll, yaw;
+    if (std::fabs(sinP) > 0.99999f) {
+        // Straight up or down: roll and yaw describe the same rotation, so pin roll and put all of it
+        // in yaw rather than letting the atan2s return an arbitrary split of it.
+        roll = 0.0f;
+        yaw  = std::atan2(-2.0f * (q.x * q.y - q.w * q.z), 1.0f - 2.0f * (q.y * q.y + q.z * q.z));
+    } else {
+        roll = std::atan2(2.0f * (q.w * q.x + q.y * q.z), 1.0f - 2.0f * (q.x * q.x + q.y * q.y));
+        yaw  = std::atan2(2.0f * (q.w * q.z + q.x * q.y), 1.0f - 2.0f * (q.y * q.y + q.z * q.z));
+    }
+    const f32 r2d = 180.0f / 3.14159265358979323846f;
+    return Vec3{roll * r2d, pitch * r2d, yaw * r2d};
 }
 static f32 snapf(f32 v, f32 step) { return step > 0.0f ? std::round(v / step) * step : v; }
 
@@ -484,6 +506,31 @@ public:
         // user's history to the one project the command line named.
         browser_.init();
 
+#if AVER_MODULE_PHYSICS
+        // Start the simulation BEFORE any project or level is opened.
+        //
+        // Ordering, not taste: loading a level builds a static body per colliding placement, and it
+        // can only do that if the world exists. With this after the project load the level rendered
+        // perfectly and had NO COLLISION -- shots passed through walls and the geometry was scenery.
+        // Nothing errored, because "no physics yet" and "this placement does not collide" are the
+        // same branch.
+        //
+        // Started here rather than under the UI branch: a headless --frames or --play-test run
+        // simulates exactly like an interactive one, which is what makes the play test evidence.
+        if (aver_phys_init()) {
+            // The floor is a static box on the z=0 plane, in the ABI's centimetres. Its extent is
+            // deliberately far larger than the visible grid: what matters for gameplay is that a
+            // character cannot walk off the edge of the world, and a plane the eye reads as infinite
+            // should behave that way.
+            groundBody_ = aver_phys_add_static_box(0.0f, 0.0f, -kGroundHalfThickCm,
+                                                   kGroundHalfExtentCm, kGroundHalfExtentCm,
+                                                   kGroundHalfThickCm);
+            AVER_INFO("[Sandbox] physics started, ground body={} (fixed step {:.4f}s)",
+                      groundBody_, aver_phys_fixed_step());
+        } else {
+            AVER_WARN("[Sandbox] physics failed to start - gameplay will not collide");
+        }
+#endif
         // A project named on the command line is loaded straight away and the start screen is
         // skipped — see armBrowser() for why automation must never reach the browser.
         if (!projectPath_.empty()) {
@@ -653,31 +700,22 @@ public:
             });
         }
 #endif
-#if AVER_MODULE_PHYSICS
-        // Start the simulation and give the world a floor.
-        //
-        // Started here rather than under the UI branch: a headless --frames or --play-test run
-        // simulates exactly like an interactive one, which is what makes the play test evidence.
-        if (aver_phys_init()) {
-            // The floor is a static box on the z=0 plane, in the ABI's centimetres. Its extent is
-            // deliberately far larger than the visible grid: what matters for gameplay is that a
-            // character cannot walk off the edge of the world, and a plane the eye reads as infinite
-            // should behave that way.
-            groundBody_ = aver_phys_add_static_box(0.0f, 0.0f, -kGroundHalfThickCm,
-                                                   kGroundHalfExtentCm, kGroundHalfExtentCm,
-                                                   kGroundHalfThickCm);
-            AVER_INFO("[Sandbox] physics started, ground body={} (fixed step {:.4f}s)",
-                      groundBody_, aver_phys_fixed_step());
-        } else {
-            AVER_WARN("[Sandbox] physics failed to start - gameplay will not collide");
-        }
-#endif
         tool_ = initialTool_;
         sel_ = 1; // the Cube
-        camPos_ = Vec3{7.0f, 7.0f, 4.5f};
-        const Vec3 d = (Vec3{0,0,1} - camPos_).getSafeNormal();
-        yaw_ = std::atan2(d.y, d.x);
-        pitch_ = std::asin(d.z);
+        // The default view frames the PLACEHOLDER scene. Skip it when a level was loaded above, which
+        // has already framed the camera on itself -- this runs after applyProject, so without the
+        // guard it silently puts the camera back inside a centimetre-scale level and the map looks
+        // like it never loaded.
+        bool framedByLevel = false;
+#if AVER_MODULE_SCENE
+        framedByLevel = !levelEntities_.empty();
+#endif
+        if (!framedByLevel) {
+            camPos_ = Vec3{7.0f, 7.0f, 4.5f};
+            const Vec3 d = (Vec3{0,0,1} - camPos_).getSafeNormal();
+            yaw_ = std::atan2(d.y, d.x);
+            pitch_ = std::asin(d.z);
+        }
     }
 
     void onUpdate(Engine& e, const Timestep& t) override {
@@ -851,7 +889,13 @@ public:
         // Scaled by the unit ratio while playing rather than changing the default, so the editor's
         // scene keeps the look it was tuned for and the pixel-exact gates (which never enter play)
         // are untouched.
-        const f32 fog = playSessionActive() ? fogDensity_ * 0.01f : fogDensity_;
+        // A loaded level's own FOG record wins outright: it is authored in the level's units and is
+        // the correct value whether or not a session is running. The play-scaled editor default is
+        // only the fallback for a world that has no level loaded.
+        f32 fog = playSessionActive() ? fogDensity_ * 0.01f : fogDensity_;
+#if AVER_MODULE_SCENE
+        if (hasLevelFog_) fog = levelFog_;
+#endif
         e.device()->setSky(true, skyZenith_, skyHorizon_, fogColor_, fog);
         // Outside the viewport rect is editor chrome, not sky — clear to the dark panel colour.
         e.device()->setClearColor(0.055f, 0.055f, 0.062f, 1);
@@ -1050,6 +1094,11 @@ private:
         project_ = browser_.project();
         if (e.window())
             e.window()->setTitle("Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + project_.name);
+#if AVER_MODULE_SCENE
+        // Open the project's start map, so the editor shows the LEVEL rather than an empty world that
+        // only fills in once someone presses Play.
+        loadStartMap();
+#endif
 #if AVER_MODULE_SCRIPTING
         // A project opened from the start screen arrives AFTER the host started, so its scripts
         // have to be picked up here. Guarded on ready(): the command-line path runs this before
@@ -1558,7 +1607,20 @@ private:
             // Medium weight on the menu bar, matching Unreal's; 0.0f keeps the size already in use.
             if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
             ImGui::TextColored(ImVec4(0.95f,0.42f,0.13f,1),"AE");
-            if (ImGui::BeginMenu("File")){ ImGui::MenuItem("New Level"); ImGui::MenuItem("Open Level..."); ImGui::MenuItem("Save Level"); ImGui::Separator(); if(ImGui::MenuItem("Exit")) e.requestExit(); ImGui::EndMenu(); }
+            if (ImGui::BeginMenu("File")){
+#if AVER_MODULE_SCENE
+                const bool haveProject = project_.valid();
+                ImGui::BeginDisabled(!haveProject);
+                if (ImGui::MenuItem("New Level")) { unloadLevel(); levelName_ = "untitled"; }
+                if (ImGui::MenuItem("Open Level")) loadStartMap();
+                if (ImGui::MenuItem("Save Level", "Ctrl+S") && !levelPath_.empty()) saveLevel(levelPath_);
+                ImGui::EndDisabled();
+                if (!haveProject && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Open or create a project first - a level belongs to one.");
+#else
+                ImGui::MenuItem("New Level"); ImGui::MenuItem("Open Level..."); ImGui::MenuItem("Save Level");
+#endif
+                ImGui::Separator(); if(ImGui::MenuItem("Exit")) e.requestExit(); ImGui::EndMenu(); }
             if (ImGui::BeginMenu("Edit")){
                 ImGui::MenuItem("Undo","Ctrl+Z"); ImGui::MenuItem("Redo","Ctrl+Y"); ImGui::Separator();
                 if (ImGui::MenuItem("Editor Preferences...")) showEditorPrefs_ = true;
@@ -3262,6 +3324,169 @@ private:
     // undifferentiated grey mass. See the scene-render pass for why it exists.
     struct SurfaceLook { f32 col[3]; f32 metallic; f32 roughness; };
     std::unordered_map<i32, SurfaceLook> surfaceLooks_;
+    // ---- levels (.ocworld) ---------------------------------------------------------------------
+#if AVER_MODULE_SCENE
+    // Load the project's start map into the world, as ordinary scene entities.
+    //
+    // These are NOT actors: they carry a transform, a mesh and a name, and nothing else. That is the
+    // point of a level being data -- it is visible and selectable in the editor without a play session
+    // existing, and gameplay does not have to run for the world to be there.
+    //
+    // Gate-neutral: the gates load no project, so there is no start map and this never runs.
+    void loadLevel(const std::string& path) {
+        unloadLevel();
+        fmt::OcWorldData w;
+        std::string why;
+        if (!fmt::loadOcworld(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
+
+        scene::World& world = scene::World::instance();
+        for (const fmt::OcWorldPlacement& p : w.placements) {
+            Transform xf;
+            xf.position = Vec3{static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)};
+            xf.rotation = quatFromEulerDeg(Vec3{static_cast<f32>(p.roll), static_cast<f32>(p.pitch),
+                                                static_cast<f32>(p.yaw)});
+            xf.scale = Vec3{static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz)};
+
+            const scene::Entity e = world.create(p.asset, scene::kInvalidEntity, xf);
+            if (e == scene::kInvalidEntity) continue;
+            auto* mr = static_cast<scene::CMeshRenderer*>(world.addComponent(e, scene::kComponentMeshRenderer));
+            if (mr) {
+                mr->mesh = p.objectId;
+                mr->material = p.material.empty() ? 0 : aver_scene_material(0, p.material.c_str());
+                mr->flags |= scene::kMeshRendererVisible;
+            }
+            levelEntities_.push_back(e);
+
+#if AVER_MODULE_PHYSICS
+            // A level's collision comes from the level, not from a script that happens to run later.
+            if (p.collide && aver_phys_ready())
+                levelBodies_.push_back(aver_phys_add_static_box(
+                    static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z),
+                    static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz)));
+#endif
+        }
+
+        // The level owns its own environment when it says so, which is how a centimetre-scale world
+        // stops inheriting fog tuned for the editor's placeholder scene.
+        if (w.hasFog) {
+            levelFog_ = static_cast<f32>(w.fogDensity);
+            fogColor_[0] = static_cast<f32>(w.fogColor[0]);
+            fogColor_[1] = static_cast<f32>(w.fogColor[1]);
+            fogColor_[2] = static_cast<f32>(w.fogColor[2]);
+            hasLevelFog_ = true;
+        }
+        levelPath_ = path;
+        levelName_ = w.name;
+
+        // Frame the camera on what was just loaded.
+        //
+        // Without this the level loads correctly and is invisible: the editor's default camera sits
+        // 7 units from the origin, which was framed for the placeholder scene at roughly a unit per
+        // metre, and a level authored in CENTIMETRES is a hundred times larger around it. Everything
+        // is drawn and the viewer is standing inside the floor slab, which reads as "the map did not
+        // load" -- the one conclusion that is wrong.
+        if (!w.placements.empty()) frameCameraOn(w);
+
+        AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
+    }
+
+    // Put the editor camera where the whole level is visible: back off along a diagonal by enough
+    // that the bounding sphere fits the vertical field of view, and look at its centre.
+    void frameCameraOn(const fmt::OcWorldData& w) {
+        Vec3 lo{1e9f, 1e9f, 1e9f}, hi{-1e9f, -1e9f, -1e9f};
+        for (const fmt::OcWorldPlacement& p : w.placements) {
+            const Vec3 c{static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)};
+            const Vec3 e{static_cast<f32>(std::fabs(p.sx)), static_cast<f32>(std::fabs(p.sy)),
+                         static_cast<f32>(std::fabs(p.sz))};
+            lo.x = std::fmin(lo.x, c.x - e.x); hi.x = std::fmax(hi.x, c.x + e.x);
+            lo.y = std::fmin(lo.y, c.y - e.y); hi.y = std::fmax(hi.y, c.y + e.y);
+            lo.z = std::fmin(lo.z, c.z - e.z); hi.z = std::fmax(hi.z, c.z + e.z);
+        }
+        const Vec3 centre{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+        const f32 radius = std::fmax(1.0f, 0.5f * std::sqrt((hi.x-lo.x)*(hi.x-lo.x) +
+                                                            (hi.y-lo.y)*(hi.y-lo.y) +
+                                                            (hi.z-lo.z)*(hi.z-lo.z)));
+        // 45 degrees up and behind, at 1.6 radii: far enough that the whole thing fits with margin,
+        // close enough that it fills the frame rather than sitting in the middle of an empty sky.
+        const f32 dist = radius * 1.6f;
+        camPos_ = Vec3{centre.x - dist * 0.65f, centre.y - dist * 0.65f, centre.z + dist * 0.55f};
+        const Vec3 look = (centre - camPos_).getSafeNormal();
+        yaw_   = std::atan2(look.y, look.x);
+        pitch_ = std::asin(std::fmax(-1.0f, std::fmin(1.0f, look.z)));
+        // The fly speed is per-frame centimetres here, so a level this size needs a bigger step than
+        // the placeholder scene's 12 or crossing the room takes half a minute.
+        flySpeed_ = std::fmax(flySpeed_, radius * 0.02f);
+    }
+
+    // The project's STARTMAP, resolved against its content directory. Missing is not an error: a new
+    // project has no level yet, and saying so once is more useful than a warning every launch.
+    void loadStartMap() {
+        if (!project_.valid() || project_.startMap.empty()) return;
+        const std::string path = project_.contentDir() + "\\" + project_.startMap;
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) {
+            AVER_INFO("[Level] start map '{}' does not exist yet - the world starts empty", project_.startMap);
+            levelName_ = std::filesystem::path(project_.startMap).stem().string();
+            levelPath_ = path;
+            return;
+        }
+        loadLevel(path);
+    }
+
+    void unloadLevel() {
+        scene::World& world = scene::World::instance();
+        for (const scene::Entity e : levelEntities_) if (world.valid(e)) world.destroy(e);
+        levelEntities_.clear();
+#if AVER_MODULE_PHYSICS
+        for (const int32_t b : levelBodies_) aver_phys_remove_body(b);
+        levelBodies_.clear();
+#endif
+        hasLevelFog_ = false;
+        levelPath_.clear();
+    }
+
+    // Write the level's entities back out. Only the entities THIS level owns are written: a play
+    // session's spawned actors share the same world, and saving them would bake a running game's
+    // transient state into the level file.
+    bool saveLevel(const std::string& path) {
+        scene::World& world = scene::World::instance();
+        fmt::OcWorldData w;
+        w.name = levelName_.empty() ? std::string("untitled") : levelName_;
+        w.hasFog = hasLevelFog_;
+        w.fogDensity = levelFog_;
+        w.fogColor[0] = fogColor_[0]; w.fogColor[1] = fogColor_[1]; w.fogColor[2] = fogColor_[2];
+
+        for (const scene::Entity e : levelEntities_) {
+            if (!world.valid(e)) continue;
+            const auto* loc = world.component<scene::CLocal>(e, scene::kComponentLocal);
+            const auto* mr  = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+            if (!loc) continue;
+            fmt::OcWorldPlacement p;
+            p.asset = world.name(e);
+            p.x = loc->xf.position.x; p.y = loc->xf.position.y; p.z = loc->xf.position.z;
+            const Vec3 euler = eulerDegFromQuat(loc->xf.rotation);
+            p.roll = euler.x; p.pitch = euler.y; p.yaw = euler.z;
+            p.sx = loc->xf.scale.x; p.sy = loc->xf.scale.y; p.sz = loc->xf.scale.z;
+            p.collide = true;
+            (void)mr;
+            w.placements.push_back(std::move(p));
+        }
+
+        std::string why;
+        if (!fmt::saveOcworld(path, w, &why)) { AVER_WARN("[Level] save failed: {}", why); return false; }
+        AVER_INFO("[Level] saved {} placement(s) to {}", w.placements.size(), path);
+        return true;
+    }
+
+    std::vector<scene::Entity> levelEntities_;
+    std::string levelPath_, levelName_;
+    bool hasLevelFog_ = false;
+    f32  levelFog_ = 0.0002f;
+#if AVER_MODULE_PHYSICS
+    std::vector<int32_t> levelBodies_;
+#endif
+#endif // AVER_MODULE_SCENE
+
     // ---- mouse capture -------------------------------------------------------------------------
     // While a game is playing the mouse belongs to the GAME: the cursor is hidden, confined to the
     // window, and re-centred every frame so mouse-look has no edge to run into. Shift+F1 hands it
