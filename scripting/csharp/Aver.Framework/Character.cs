@@ -57,11 +57,47 @@ public abstract class AverCharacter : AverPawn
     /// <summary>Upward speed a jump starts with, cm/s. Roughly 110cm of height at one g.</summary>
     public float JumpSpeed = 465f;
 
+    /// <summary>How far the view may look down / up, degrees. Stops the view going over the top.</summary>
+    public float PitchMin = -85f, PitchMax = 85f;
+
     private float _yaw;         // facing in degrees, turned by the mouse
+    private float _pitch;       // view pitch in degrees, also from the mouse
     private int   _capsule;     // physics character handle; 0 until created, or when unavailable
 
     /// <summary>The character's facing yaw, degrees. Turned by <see cref="DriveWithInput"/>.</summary>
     public float Yaw => _yaw;
+
+    /// <summary>The view pitch, degrees, clamped to <see cref="PitchMin"/>..<see cref="PitchMax"/>.</summary>
+    public float Pitch => _pitch;
+
+    /// <summary>Where the eyes are: the character's origin (its feet) plus <see cref="EyeHeight"/>.</summary>
+    public Vec3 EyePosition => Self.LocalPosition + Vec3.Up * EyeHeight;
+
+    /// <summary>
+    /// The unit direction the character is LOOKING — yaw and pitch. Distinct from the direction it
+    /// walks, which ignores pitch: looking at the sky should not launch you into it.
+    /// </summary>
+    public Vec3 LookDirection
+    {
+        get
+        {
+            float y = _yaw * (MathF.PI / 180f), p = _pitch * (MathF.PI / 180f);
+            float cp = MathF.Cos(p);
+            return new Vec3(MathF.Cos(y) * cp, MathF.Sin(y) * cp, MathF.Sin(p));
+        }
+    }
+
+    /// <summary>The ground-plane direction the character walks when moving forward.</summary>
+    public Vec3 WalkForward
+    {
+        get { float y = _yaw * (MathF.PI / 180f); return new Vec3(MathF.Cos(y), MathF.Sin(y), 0f); }
+    }
+
+    /// <summary>The ground-plane direction to the character's right.</summary>
+    public Vec3 WalkRight
+    {
+        get { float y = _yaw * (MathF.PI / 180f); return new Vec3(-MathF.Sin(y), MathF.Cos(y), 0f); }
+    }
 
     /// <summary>True when this character is backed by the physics world rather than translating directly.</summary>
     public bool IsSimulated => _capsule != 0;
@@ -112,13 +148,18 @@ public abstract class AverCharacter : AverPawn
         Fw.aver_fw_set_view((int)CameraViewMode, EyeHeight, BoomLength);
 
         _yaw += Input.MouseDeltaX * TurnSpeed;
-        Self.SetLocalRotation(new Rot(_yaw, 0f, 0f).ToQuat());   // yaw about +Z (up)
+        // Mouse DOWN is +Y on screen, so subtracting gives the conventional "push forward to look down".
+        _pitch -= Input.MouseDeltaY * TurnSpeed;
+        _pitch = MathF.Max(PitchMin, MathF.Min(PitchMax, _pitch));
+        ApplyLookRotation();
 
         EnsureCapsule();
 
+        // Walk on the YAW basis, never on the entity's forward axis: in first person the transform
+        // carries pitch so the camera can aim, and moving along a pitched forward would walk you into
+        // the ground or the sky depending on where you happened to be looking.
         Vec3 axis = Input.MoveAxis;                              // X = forward intent, Y = right intent
-        Vec3 wish = Self.Forward * axis.X + Self.Right * axis.Y;
-        wish.Z = 0f;                                             // walking is a ground-plane intent
+        Vec3 wish = WalkForward * axis.X + WalkRight * axis.Y;
         // Normalise so a diagonal is not faster than a straight line.
         wish = wish.Normalized * MoveSpeed;
 
@@ -142,7 +183,17 @@ public abstract class AverCharacter : AverPawn
     protected void SetYaw(float yawDegrees)
     {
         _yaw = yawDegrees;
-        Self.SetLocalRotation(new Rot(_yaw, 0f, 0f).ToQuat());
+        ApplyLookRotation();
+    }
+
+    // The transform carries pitch only in FIRST person, because the play camera derives its look
+    // direction from the pawn's forward axis -- so that is the only way to aim up or down. In third
+    // person the body stays upright instead, since there the camera looks AT the character and a
+    // pitched body would just be a character lying over at an angle.
+    private void ApplyLookRotation()
+    {
+        float pitch = CameraViewMode == CameraView.FirstPerson ? _pitch : 0f;
+        Self.SetLocalRotation(new Rot(_yaw, pitch, 0f).ToQuat());
     }
 
     /// <summary>Move the character, simulation included, rather than only its entity transform.</summary>

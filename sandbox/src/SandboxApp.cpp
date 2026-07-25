@@ -521,6 +521,10 @@ public:
             appendSphere(sv, si, 1.0f, 24, 48);
             sceneMeshes_[fnv1a64(std::string_view("Meshes/sphere.ocmesh"))] =
                 e.device()->createMesh(sv.data(), (u32)sv.size(), si.data(), (u32)si.size());
+            // The unit cube, on the same terms as the sphere. A level blockout is boxes -- floors,
+            // walls, platforms, crates -- so with only a sphere registered a gameplay script could
+            // spawn actors but could not build anything to walk on or shoot at.
+            sceneMeshes_[fnv1a64(std::string_view("Meshes/cube.ocmesh"))] = cube;
         }
 #endif
 
