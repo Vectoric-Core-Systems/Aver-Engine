@@ -97,6 +97,39 @@ AVER_PHYS_API int32_t aver_phys_character_set_position(int32_t ch, float x, floa
 // 1 while standing on ground steep enough to hold. The thing a jump has to ask before it fires.
 AVER_PHYS_API int32_t aver_phys_character_grounded(int32_t ch);
 
+// ---- Sensors (triggers) --------------------------------------------------------------------------
+// A sensor is a body that DETECTS overlap without pushing anything: a pickup volume, a level exit, a
+// damage zone. It is a real body in the broad phase, so it costs what a body costs, and it reports
+// through the overlap event queue below rather than by blocking movement.
+
+AVER_PHYS_API int32_t aver_phys_add_sensor_box(float cx, float cy, float cz,
+                                               float hx, float hy, float hz);
+AVER_PHYS_API int32_t aver_phys_add_sensor_sphere(float cx, float cy, float cz, float radius);
+
+// ---- Contact and overlap events ------------------------------------------------------------------
+// POLLED, not called back, and that is a deliberate design choice rather than a shortcut.
+//
+// Jolt invokes its contact listener from SEVERAL WORKER THREADS during the step, in an order it
+// explicitly documents as non-deterministic. Calling managed code from there would mean marshalling
+// into the CLR from threads it has never seen, mid-simulation, with gameplay then free to mutate the
+// very world being stepped. Recording events into a buffer and letting the game drain them after the
+// step keeps every gameplay reaction on the main thread, in a fixed order, at a point where the world
+// is safe to touch.
+//
+// Both queues are cleared at the START of each aver_phys_step, so what you read describes the step
+// that just ran. Drain them in a PostPhysics tick.
+
+// Contacts between two solid bodies that began touching this step.
+AVER_PHYS_API int32_t aver_phys_contact_count(void);
+// `outPoint` / `outNormal` are caller-owned float[3]. Returns 0 for an out-of-range index.
+AVER_PHYS_API int32_t aver_phys_contact_get(int32_t index, int32_t* outBodyA, int32_t* outBodyB,
+                                            float* outPoint, float* outNormal);
+
+// Sensor overlaps that STARTED or STOPPED this step. `outEntered` is 1 for an enter, 0 for an exit.
+AVER_PHYS_API int32_t aver_phys_overlap_count(void);
+AVER_PHYS_API int32_t aver_phys_overlap_get(int32_t index, int32_t* outSensor, int32_t* outBody,
+                                            int32_t* outEntered);
+
 // ---- Queries -------------------------------------------------------------------------------------
 
 // Cast a ray from `o` along `d` for `maxDistCm`. Returns the hit body handle, or 0 for a miss.
@@ -108,6 +141,23 @@ AVER_PHYS_API int32_t aver_phys_character_grounded(int32_t ch);
 AVER_PHYS_API int32_t aver_phys_raycast(float ox, float oy, float oz,
                                         float dx, float dy, float dz,
                                         float maxDistCm, float* outPoint, float* outNormal);
+
+// Every body whose shape overlaps a sphere. Writes up to `maxBodies` handles into `outBodies` and
+// returns how many were WRITTEN -- so a result equal to maxBodies means the list was truncated and
+// the caller should ask again with a bigger buffer rather than assume it saw everything.
+//
+// The natural query for "what is within blast radius" or "what is standing on this plate".
+AVER_PHYS_API int32_t aver_phys_overlap_sphere(float x, float y, float z, float radius,
+                                               int32_t* outBodies, int32_t maxBodies);
+
+// Sweep a sphere along a direction and report the first thing it touches. Unlike a ray, this has
+// THICKNESS: it is what a projectile, a camera boom or a step-up probe actually needs, because a ray
+// slips through gaps a moving object could never fit through.
+// Returns the hit body handle, or 0 for a clear sweep.
+AVER_PHYS_API int32_t aver_phys_sphere_cast(float ox, float oy, float oz,
+                                            float dx, float dy, float dz,
+                                            float maxDistCm, float radius,
+                                            float* outPoint, float* outNormal);
 
 #ifdef __cplusplus
 }

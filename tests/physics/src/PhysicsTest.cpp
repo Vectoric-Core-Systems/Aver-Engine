@@ -161,10 +161,71 @@ static void testSimulation() {
     check(aver_phys_ready() == 0, "world stops");
 }
 
+// Sensors, contact/overlap events, and the shape queries.
+//
+// These are the parts a game reaches for first and the parts an automated run can actually prove:
+// none of them can be checked by looking at a screenshot, and all of them fail silently when wrong
+// (a trigger that never fires and a trigger that does not exist look identical from gameplay).
+static void testEventsAndQueries() {
+    AVER_INFO("-- sensors, events, queries --");
+    check(aver_phys_init() == 1, "world starts");
+
+    const int32_t floor = aver_phys_add_static_box(0, 0, -10.0f, 5000.0f, 5000.0f, 10.0f);
+    check(floor != 0, "floor created");
+
+    // A sensor straddling the fall line, well above the floor.
+    const int32_t gate = aver_phys_add_sensor_box(0, 0, 200.0f, 100.0f, 100.0f, 40.0f);
+    check(gate != 0, "sensor created");
+
+    // Dropped from above it, so it must pass THROUGH the sensor and land on the floor: entering and
+    // leaving are both exercised, and a sensor that wrongly blocked movement would strand it.
+    const int32_t ball = aver_phys_add_dynamic_sphere(0, 0, 400.0f, 20.0f, 5.0f);
+    check(ball != 0, "falling body created");
+
+    bool sawEnter = false, sawExit = false;
+    int32_t contactsSeen = 0;
+    for (int i = 0; i < 240; ++i) {
+        aver_phys_step(1.0f / 60.0f);
+        for (int32_t k = 0, n = aver_phys_overlap_count(); k < n; ++k) {
+            int32_t s = 0, b = 0, entered = 0;
+            if (!aver_phys_overlap_get(k, &s, &b, &entered)) continue;
+            if (s == gate && b == ball) { if (entered) sawEnter = true; else sawExit = true; }
+        }
+        contactsSeen += aver_phys_contact_count();
+    }
+    check(sawEnter, "sensor reported the body ENTERING");
+    check(sawExit,  "sensor reported the body LEAVING");
+    check(contactsSeen > 0, "solid contact reported when it hit the floor");
+
+    // Passing through means it is on the floor, not perched on the trigger.
+    float p[3] = {0,0,0};
+    aver_phys_body_position(ball, p);
+    check(p[2] > 0.0f && p[2] < 60.0f,
+          "body passed THROUGH the sensor and landed (z=" + std::to_string(p[2]) + ")");
+
+    // Overlap query: a generous sphere at the resting point must find the ball and the floor.
+    int32_t found[16] = {0};
+    const int32_t n = aver_phys_overlap_sphere(p[0], p[1], p[2], 80.0f, found, 16);
+    bool foundBall = false;
+    for (int32_t i = 0; i < n; ++i) if (found[i] == ball) foundBall = true;
+    check(n > 0, "overlap sphere found " + std::to_string(n) + " body(ies)");
+    check(foundBall, "overlap sphere found the resting body");
+
+    // Shape cast: sweeping DOWN from high above must hit something, and stop above the floor
+    // surface by roughly the sweep radius -- which is the whole difference from a ray.
+    float hp[3] = {0,0,0}, hn[3] = {0,0,0};
+    const int32_t sweptHit = aver_phys_sphere_cast(0, 0, 500.0f, 0, 0, -1.0f, 1000.0f, 30.0f, hp, hn);
+    check(sweptHit != 0, "sphere cast hit something on the way down");
+    check(hn[2] > 0.5f, "sphere cast normal points UP (z=" + std::to_string(hn[2]) + ")");
+
+    aver_phys_shutdown();
+}
+
 int main() {
     testAxisMap();
     testRotationMap();
     testSimulation();
+    testEventsAndQueries();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;
 }

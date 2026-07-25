@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Aver.Scene;
 
@@ -35,6 +36,52 @@ internal static class Phys
     [DllImport(Lib)] internal static extern int aver_phys_raycast(float ox, float oy, float oz,
                                                                  float dx, float dy, float dz,
                                                                  float maxDistCm, float[] outPoint, float[] outNormal);
+
+    [DllImport(Lib)] internal static extern int aver_phys_add_sensor_box(float cx, float cy, float cz, float hx, float hy, float hz);
+    [DllImport(Lib)] internal static extern int aver_phys_add_sensor_sphere(float cx, float cy, float cz, float radius);
+
+    [DllImport(Lib)] internal static extern int aver_phys_contact_count();
+    [DllImport(Lib)] internal static extern int aver_phys_contact_get(int index, out int outA, out int outB, float[] outPoint, float[] outNormal);
+    [DllImport(Lib)] internal static extern int aver_phys_overlap_count();
+    [DllImport(Lib)] internal static extern int aver_phys_overlap_get(int index, out int outSensor, out int outBody, out int outEntered);
+
+    [DllImport(Lib)] internal static extern int aver_phys_overlap_sphere(float x, float y, float z, float radius, int[] outBodies, int maxBodies);
+    [DllImport(Lib)] internal static extern int aver_phys_sphere_cast(float ox, float oy, float oz,
+                                                                     float dx, float dy, float dz,
+                                                                     float maxDistCm, float radius,
+                                                                     float[] outPoint, float[] outNormal);
+}
+
+/// <summary>Two solid bodies that began touching during the last step.</summary>
+public readonly struct ContactEvent
+{
+    /// <summary>The two bodies involved. Which is which carries no meaning — a contact is symmetric.</summary>
+    public Body A { get; }
+    public Body B { get; }
+    /// <summary>Where they touched, centimetres.</summary>
+    public Vec3 Point { get; }
+    /// <summary>The contact normal, unit length.</summary>
+    public Vec3 Normal { get; }
+
+    internal ContactEvent(int a, int b, Vec3 point, Vec3 normal)
+    { A = new Body(a); B = new Body(b); Point = point; Normal = normal; }
+
+    /// <summary>The other body in this contact, given one of them; invalid if <paramref name="one"/> is neither.</summary>
+    public Body Other(Body one) => one.Handle == A.Handle ? B : one.Handle == B.Handle ? A : Body.None;
+}
+
+/// <summary>Something entering or leaving a sensor volume during the last step.</summary>
+public readonly struct OverlapEvent
+{
+    /// <summary>The sensor whose volume it is.</summary>
+    public Body Sensor { get; }
+    /// <summary>What entered or left.</summary>
+    public Body Other { get; }
+    /// <summary>True on entering, false on leaving.</summary>
+    public bool Entered { get; }
+
+    internal OverlapEvent(int sensor, int other, bool entered)
+    { Sensor = new Body(sensor); Other = new Body(other); Entered = entered; }
 }
 
 /// <summary>What a <see cref="Physics.Raycast(Vec3, Vec3, float)"/> found.</summary>
@@ -190,4 +237,88 @@ public static class Physics
     /// <summary>True if anything lies within <paramref name="maxDistanceCm"/> along the ray.</summary>
     public static bool RaycastAny(Vec3 origin, Vec3 direction, float maxDistanceCm) =>
         Raycast(origin, direction, maxDistanceCm).Hit;
+
+    /// <summary>
+    /// A trigger volume: it notices what enters and leaves, and pushes nothing. Report through
+    /// <see cref="Overlaps"/>.
+    /// </summary>
+    public static Body AddSensorBox(Vec3 centre, Vec3 halfExtents) =>
+        new(Phys.aver_phys_add_sensor_box(centre.X, centre.Y, centre.Z, halfExtents.X, halfExtents.Y, halfExtents.Z));
+
+    /// <summary>A spherical trigger volume.</summary>
+    public static Body AddSensorSphere(Vec3 centre, float radius) =>
+        new(Phys.aver_phys_add_sensor_sphere(centre.X, centre.Y, centre.Z, radius));
+
+    /// <summary>
+    /// Contacts that began during the last step. Read them from a <c>PostPhysics</c> tick.
+    /// </summary>
+    /// <remarks>
+    /// Polled rather than delivered by callback: the backend finds contacts on several worker threads
+    /// at once, in an order it does not guarantee, so a callback would arrive off the main thread in
+    /// the middle of a simulation step. Draining a queue afterwards keeps every reaction on one
+    /// thread, in a fixed order, at a moment when changing the world is safe.
+    ///
+    /// <para>The queue is emptied at the start of each step, so a tick that does not read it misses
+    /// those contacts — which is the right trade for gameplay, where a stale contact is worse than a
+    /// dropped one.</para>
+    /// </remarks>
+    public static IReadOnlyList<ContactEvent> Contacts
+    {
+        get
+        {
+            int n = Phys.aver_phys_contact_count();
+            var list = new List<ContactEvent>(n);
+            float[] p = new float[3], nrm = new float[3];
+            for (int i = 0; i < n; i++)
+                if (Phys.aver_phys_contact_get(i, out int a, out int b, p, nrm) != 0)
+                    list.Add(new ContactEvent(a, b, new Vec3(p[0], p[1], p[2]), new Vec3(nrm[0], nrm[1], nrm[2])));
+            return list;
+        }
+    }
+
+    /// <summary>Sensor volumes entered or left during the last step. Same polling rules as <see cref="Contacts"/>.</summary>
+    public static IReadOnlyList<OverlapEvent> Overlaps
+    {
+        get
+        {
+            int n = Phys.aver_phys_overlap_count();
+            var list = new List<OverlapEvent>(n);
+            for (int i = 0; i < n; i++)
+                if (Phys.aver_phys_overlap_get(i, out int s, out int b, out int entered) != 0)
+                    list.Add(new OverlapEvent(s, b, entered != 0));
+            return list;
+        }
+    }
+
+    /// <summary>
+    /// Every body overlapping a sphere — "what is within blast radius", "what is on the pressure plate".
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="maxResults"/> bounds the answer. If the count comes back EQUAL to it the list
+    /// was truncated and there may be more; ask again with a larger bound rather than assume you saw
+    /// everything.
+    /// </remarks>
+    public static Body[] OverlapSphere(Vec3 centre, float radius, int maxResults = 64)
+    {
+        if (maxResults <= 0) return Array.Empty<Body>();
+        int[] raw = new int[maxResults];
+        int n = Phys.aver_phys_overlap_sphere(centre.X, centre.Y, centre.Z, radius, raw, maxResults);
+        var outv = new Body[n];
+        for (int i = 0; i < n; i++) outv[i] = new Body(raw[i]);
+        return outv;
+    }
+
+    /// <summary>
+    /// Sweep a sphere and report the first thing it touches. Unlike a ray this has THICKNESS, so it
+    /// is what a projectile, a camera boom or a step-up probe wants — a ray slips through gaps a
+    /// moving object could never fit through.
+    /// </summary>
+    public static RaycastHit SphereCast(Vec3 origin, Vec3 direction, float maxDistanceCm, float radius)
+    {
+        float[] p = new float[3], n = new float[3];
+        int body = Phys.aver_phys_sphere_cast(origin.X, origin.Y, origin.Z,
+                                              direction.X, direction.Y, direction.Z,
+                                              maxDistanceCm, radius, p, n);
+        return body == 0 ? default : new RaycastHit(body, new Vec3(p[0], p[1], p[2]), new Vec3(n[0], n[1], n[2]));
+    }
 }

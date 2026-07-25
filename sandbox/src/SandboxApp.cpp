@@ -740,8 +740,19 @@ public:
             const bool overUI = io.WantCaptureMouse || !inViewport(io.MousePos.x, io.MousePos.y);
 
             // Right mouse enters fly mode (look + WASD/QE), like Unreal's viewport.
+            //
+            // The cursor is hidden for the duration, as it is in Unreal: while the right button is
+            // held the pointer means nothing -- look is a DELTA -- and an arrow sliding around over
+            // the scene is just something to watch instead of the scene.
+            //
+            // Hidden, NOT warped. Re-centring would make the look delta wrong: ImGui measures against
+            // the position it last saw, so a warp in between reports the warp as movement and the
+            // camera lurches. Suppressing the DRAW is also why this uses ImGui's cursor state rather
+            // than Win32's ShowCursor, whose counter has to be paired exactly -- and pairing it to a
+            // mouse button being released is precisely how a cursor goes missing for good.
             if (ImGui::IsMouseClicked(1) && !overUI) flying_ = true;
             if (!io.MouseDown[1]) flying_ = false;
+            if (flying_) ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
             if (flying_) {
                 yaw_   += io.MouseDelta.x * lookSpeed_;
@@ -872,7 +883,19 @@ public:
         const Vec3 fwd = camForward();
         const f32 aspect = viewAspect();
         const Mat4 view = Mat4::lookAtLH(camPos_, camPos_ + fwd, Vec3{0,0,1});
-        const Mat4 proj = Mat4::perspectiveLH(radians(60.0f), aspect, 0.05f, 5000.0f);
+        // Near/far are in WORLD units, and 0.05..5000 was chosen for the placeholder scene at roughly
+        // a unit per metre. Under the engine's centimetre contract that is 0.5mm to 50m, so anything
+        // past fifty metres is clipped away entirely -- a level only has to be a city block long
+        // before it starts disappearing at the far end for no visible reason.
+        //
+        // Widened only while a level is loaded, so the editor's own scene keeps the depth range it was
+        // tuned for and the pixel-exact gates see the projection they recorded. Near stays proportional
+        // too: pushing far out without moving near costs depth precision and brings back z-fighting.
+        f32 zNear = 0.05f, zFar = 5000.0f;
+#if AVER_MODULE_SCENE
+        if (!levelEntities_.empty()) { zNear = 2.0f; zFar = 200000.0f; }   // 2cm .. 2km
+#endif
+        const Mat4 proj = Mat4::perspectiveLH(radians(60.0f), aspect, zNear, zFar);
         const Mat4 viewProj = view * proj;
         const Mat4 invVP = viewProj.inverse();
         e.device()->setCamera(&viewProj.m[0][0], &invVP.m[0][0], &camPos_.x);
@@ -955,7 +978,41 @@ public:
                                            sizeof(pbr::MaterialConstants));
 #endif
             e.device()->drawMesh(o.mesh, &w.m[0][0], col, o.metallic, o.roughness);
+            if (i == sel_) selectionOutline_ = w, selectionMesh_ = o.mesh, hasSelection_ = true;
         }
+
+        // The selection outline, in Unreal's bright orange-yellow.
+        //
+        // Drawn as a WIREFRAME pass over the top rather than by tinting the surface: a tint says
+        // "this object is a slightly different colour", which is unreadable against a scene that
+        // already has colours in it, whereas an edge that follows the silhouette says "this one" at
+        // any distance and against any background.
+        //
+        // Slightly enlarged so the lines sit just outside the surface instead of fighting it for the
+        // same depth, which is what would otherwise make the outline stipple and shimmer as the camera
+        // moves. The surface draw above is deliberately left exactly as it was, so what a probe pixel
+        // in the middle of a face sees does not change.
+        // Interactive runs only. The outline is an editor AFFORDANCE, not part of the scene's shading,
+        // and the cube primitive is triangulated -- so a wireframe pass draws a diagonal across every
+        // face, not merely the silhouette. Enlarged, that diagonal lands in front of the face and
+        // straight over the pixel the centre gate probes, so the oracle stops measuring the BRDF and
+        // starts measuring the selection highlight. Re-recording would have hidden that rather than
+        // fixed it: a shading gate must not be able to pass or fail on editor chrome.
+        if (hasSelection_ && !hideEditorScene && maxFrames_ == 0) {
+            static constexpr f32 kSelect[4] = {1.0f, 0.62f, 0.12f, 1.0f};   // UE's selection orange
+            // The shell is grown by a PROPORTION of its distance from the camera, not by a fixed
+            // factor: a constant offset that reads well up close vanishes to sub-pixel across a room,
+            // which is exactly where an outline is most needed to find the thing you selected.
+            const Vec3 sp{selectionOutline_.m[3][0], selectionOutline_.m[3][1], selectionOutline_.m[3][2]};
+            const f32 camDist = (sp - camPos_).size();
+            const f32 grow = 1.0f + std::fmin(0.12f, std::fmax(0.02f, camDist * 0.0009f));
+            Mat4 o = selectionOutline_;
+            for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) o.m[r][c] *= grow;
+            e.device()->setWireframe(true);
+            e.device()->drawMesh(selectionMesh_, &o.m[0][0], kSelect, 0.0f, 1.0f);
+            e.device()->setWireframe(wireframe_);
+        }
+        hasSelection_ = false;
 #if AVER_MODULE_SCENE
         // Scene-entity pass: draw every live entity carrying a CMeshRenderer. This is the bridge from a
         // SPAWNED actor — which lives in the world, not in objects_ above — to the screen. It is additive
@@ -3250,6 +3307,9 @@ private:
     Vec3 camPos_{7.0f, 7.0f, 4.5f};
     f32 yaw_ = 0.0f, pitch_ = 0.0f, flySpeed_ = 12.0f, lookSpeed_ = 0.005f;
     bool flying_ = false;
+    // The selected object's transform and mesh, latched during the scene pass so the outline can be
+    // drawn after every surface is down rather than in the middle of the loop.
+    Mat4 selectionOutline_{}; rhi::MeshHandle selectionMesh_ = 0; bool hasSelection_ = false;
     // sun
     f32 sunAz_=-0.55f, sunAlt_=-0.45f, sunUp_=0.55f, sunColor_[3]={1.0f,0.96f,0.9f}, sunAmbient_=0.28f;
     // sky + atmosphere
