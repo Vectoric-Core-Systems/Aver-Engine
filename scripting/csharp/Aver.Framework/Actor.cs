@@ -62,6 +62,19 @@ public abstract class AverActor
     public virtual void OnRebound() { }
 
     /// <summary>
+    /// Release any NATIVE resource this actor owns. Called by the host when the instance is unbound,
+    /// after OnEndPlay, whatever the reason — including a hot reload or a script that threw.
+    /// </summary>
+    /// <remarks>
+    /// Internal and separate from <see cref="OnEndPlay"/> on purpose. A base type that owns something
+    /// native (a physics capsule, say) cannot rely on OnEndPlay to free it: OnEndPlay is public and
+    /// virtual, so a subclass that overrides it and forgets <c>base.OnEndPlay(reason)</c> leaks — which
+    /// is not a hypothetical, the first sample character in this repo did exactly that. This hook is
+    /// driven by the host, so no amount of subclass forgetfulness can skip it.
+    /// </remarks>
+    internal virtual void OnUnbound() { }
+
+    /// <summary>
     /// Builds the model tree carried inside this actor. The default is empty; the EDITOR overrides it in
     /// the actor's <c>.Designer.cs</c> partial, and only there. The host calls it once, after
     /// <see cref="Self"/> is bound and before <see cref="OnBeginPlay"/>. Hand code never calls or writes

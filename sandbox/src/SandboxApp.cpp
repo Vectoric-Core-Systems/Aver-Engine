@@ -31,6 +31,9 @@
 #endif
 
 #if AVER_MODULE_FRAMEWORK
+#if AVER_MODULE_PHYSICS
+#include "aver/physics/physics_abi.h"       // the simulation the frame loop steps between tick groups
+#endif
 #include "aver/framework/framework_abi.h"   // aver_fw_class_find / aver_fw_spawn (the --spawn-test path)
 #include "aver/framework/framework_hooks.h" // aver_fw_tick — drive the managed tick groups per frame
 #endif
@@ -488,6 +491,7 @@ public:
             loadCompileIcon(e);
             loadIconSheet(e, "file-icons.png",   4, "FileTypeIcons", fileIconsTexture_,   fileIconsUiId_,   fileIconAspect_);
             loadIconSheet(e, "folder-icons.png", 2, "FolderIcons",   folderIconsTexture_, folderIconsUiId_, folderIconAspect_);
+            // (physics is started below, outside the UI branch -- a headless run simulates too)
             // The engine's C# classes, mounted as the Content Browser's second root. Absent from a
             // shipped build, where there is no source tree to point at.
             if (const std::string er = editor::engineRoot(); !er.empty()) {
@@ -620,6 +624,25 @@ public:
             });
         }
 #endif
+#if AVER_MODULE_PHYSICS
+        // Start the simulation and give the world a floor.
+        //
+        // Started here rather than under the UI branch: a headless --frames or --play-test run
+        // simulates exactly like an interactive one, which is what makes the play test evidence.
+        if (aver_phys_init()) {
+            // The floor is a static box on the z=0 plane, in the ABI's centimetres. Its extent is
+            // deliberately far larger than the visible grid: what matters for gameplay is that a
+            // character cannot walk off the edge of the world, and a plane the eye reads as infinite
+            // should behave that way.
+            groundBody_ = aver_phys_add_static_box(0.0f, 0.0f, -kGroundHalfThickCm,
+                                                   kGroundHalfExtentCm, kGroundHalfExtentCm,
+                                                   kGroundHalfThickCm);
+            AVER_INFO("[Sandbox] physics started, ground body={} (fixed step {:.4f}s)",
+                      groundBody_, aver_phys_fixed_step());
+        } else {
+            AVER_WARN("[Sandbox] physics failed to start - gameplay will not collide");
+        }
+#endif
         tool_ = initialTool_;
         sel_ = 1; // the Cube
         camPos_ = Vec3{7.0f, 7.0f, 4.5f};
@@ -704,9 +727,20 @@ public:
         // PAUSE freezes it without a teardown. The --spawn-test harness is exempt — it drives OnTick
         // directly to prove the tick path without a GameMode. flush() below still runs every frame so an
         // end_play teardown retires regardless of state.
-        if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING)
-            for (i32 g = 0; g < AVER_FW_TICK_COUNT; ++g)
-                aver_fw_tick(g, t.dt);
+        if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
+            // The groups BRACKET the step, which is the whole reason they exist as three and not one:
+            // PrePhysics is where gameplay says what it wants to happen (a character sets its desired
+            // velocity), the step is where the world decides what actually happens, and PostPhysics is
+            // where gameplay reads the settled result (where the character ended up, what it hit).
+            aver_fw_tick(AVER_FW_TICK_PRE_PHYSICS, t.dt);
+#if AVER_MODULE_PHYSICS
+            // Stepped with real frame time; the module carries the leftover and runs whole fixed steps
+            // internally, so this does NOT make the simulation a function of frame rate.
+            aver_phys_step(t.dt);
+#endif
+            aver_fw_tick(AVER_FW_TICK_PHYSICS, t.dt);
+            aver_fw_tick(AVER_FW_TICK_POST_PHYSICS, t.dt);
+        }
 #endif
 #if AVER_MODULE_SCENE
         // Drive the world's frame flush exactly once, AFTER gameplay has spawned/destroyed/moved for the
@@ -862,6 +896,12 @@ public:
 
     void onShutdown(Engine& e) override {
         setLogSink(nullptr, nullptr);   // stop mirroring logs before this object goes away
+#if AVER_MODULE_PHYSICS
+        // Before the rest of teardown: the simulation owns worker threads, and they must be joined
+        // while the objects their jobs touch are still alive.
+        aver_phys_shutdown();
+        groundBody_ = 0;
+#endif
 #if AVER_WITH_IMGUI
         // The UI descriptor the mark holds is released with the texture, and that pool has no fence
         // of its own -- so the GPU has to be past every frame that drew it first.
@@ -1057,7 +1097,9 @@ private:
         }
         if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
             aver_fw_input_set_key(AVER_FW_KEY_W, 1);   // synthetic: hold forward so the possessed character walks
-            if (++playTestFrames_ == 6) {
+            // Long enough for the character to fall and settle: it is dropped from 3m, which is about
+            // 0.8s of falling, and six frames only ever proved that the tick path fires.
+            if (++playTestFrames_ == 150) {
                 const int32_t pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
                 if (pawn) {
                     const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pawn));
@@ -3041,6 +3083,13 @@ private:
     scripting::ScriptHost scripts_;
 #endif
     rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;
+#if AVER_MODULE_PHYSICS
+    // The world's floor. Centimetres, per the physics ABI: a 100m square, 10cm thick, centred so its
+    // TOP face sits exactly on z=0 -- so "the ground is at zero" is true for gameplay that assumes it.
+    static constexpr f32 kGroundHalfExtentCm = 5000.0f;
+    static constexpr f32 kGroundHalfThickCm  = 5.0f;
+    int32_t groundBody_ = 0;
+#endif
     // Output Log capture. Written by logSink from any thread under logMutex_; read by the panel on the UI
     // thread under the same lock. Bounded so a long session cannot grow it without limit.
     static constexpr size_t kMaxLogLines = 4000;

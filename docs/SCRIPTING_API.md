@@ -174,8 +174,18 @@ A first/third-person walking character.
 | `public float EyeHeight` | First-person eye height, cm (default 160). |
 | `public float BoomLength` | Third-person camera distance behind, cm (default 450). |
 | `public float Yaw { get; }` | The character's facing yaw, degrees (read-only; turned by `DriveWithInput`, set by `SetYaw`). |
-| `protected void DriveWithInput(float dt)` | One frame of WASD-walk + mouse-turn control; call from `OnTick` while possessed. Kinematic (no physics yet). |
+| `public float Height` / `public float Radius` | Capsule size, cm (default 180 / 34). Set before the first tick. |
+| `public float JumpSpeed` | Upward speed a jump starts with, cm/s (default 465 — about 110 cm of height). |
+| `public bool IsSimulated` | True when backed by the physics world rather than translating directly. |
+| `public bool IsGrounded` | True while standing on ground shallow enough to hold. |
+| `public Vec3 Velocity` | Current velocity, cm/s. The vertical component is the simulation's. |
+| `public bool Jump()` | Jump if grounded; returns false when airborne rather than swallowing it. |
+| `public void Teleport(Vec3 feet)` | Move the character *and* its capsule. Setting the transform alone leaves the capsule behind. |
+| `protected void DriveWithInput(float dt)` | One frame of WASD-walk + mouse-turn control; call from `OnTick` while possessed. Reads the settled result of the last step, then writes this frame's intent. |
 | `protected void SetYaw(float degrees)` | Snap the facing yaw without the mouse having moved it. |
+
+The character's origin is its **feet**, not the capsule centre — which is what `EyeHeight` already
+assumed, and what makes "put it on the ground" mean setting `z` to the ground height.
 
 ### `AverPlayerController : AverActor`
 
@@ -396,6 +406,38 @@ Configure(ClassBuilder b)`:
 
 ---
 
+## 13a. `Physics`
+
+Static, in `Aver.Framework`. Everything is in the engine's contract — centimetres, +X forward,
++Y right, +Z up, left-handed. The backend (Jolt, MIT) is right-handed, +Y up and metric; that
+translation happens once behind the native ABI, so no Jolt convention ever reaches a script.
+
+The world is stepped by the frame loop **between the PrePhysics and PostPhysics tick groups**, at a
+**fixed step** regardless of frame rate. So set what you want in a `PrePhysics` tick and read what
+happened in a `PostPhysics` one.
+
+| Member | Description |
+|---|---|
+| `bool Ready` | True when the simulation is running (false if physics was compiled out). |
+| `float FixedStep` | The fixed step in seconds — 1/60 unless the host changed it. |
+| `void SetGravity(Vec3)` | cm/s². Default `(0, 0, -980)`: one g, straight down. |
+| `int BodyCount` | How many bodies exist. |
+| `Body AddStaticBox(Vec3 centre, Vec3 halfExtents)` | A box that never moves. |
+| `Body AddDynamicBox(Vec3 centre, Vec3 halfExtents, float massKg = 0)` | Falls and collides; `massKg <= 0` derives mass from volume. |
+| `Body AddDynamicSphere(Vec3 centre, float radius, float massKg = 0)` | Likewise. |
+| `RaycastHit Raycast(Vec3 origin, Vec3 direction, float maxDistanceCm)` | Direction need not be unit length. |
+| `bool RaycastAny(...)` | Just whether anything is in the way. |
+
+**`Body`** — a handle (`0` invalid): `Handle`, `IsValid`, `Position`, `Rotation`, `Velocity`,
+`SetPosition`, `SetVelocity`, `Destroy()`.
+**`RaycastHit`** — `Hit`, `Body`, `Point`, `Normal`.
+
+> The backend documents **broadphase queries as non-deterministic** (the broad phase is modified from
+> several threads), and callback ordering likewise. Rely on *whether* something was hit and *where* —
+> never on which of several equidistant bodies comes back.
+
+---
+
 ## 14. Maths — `Vec3`, `Quat`, `Rot`
 
 In `Aver.Scene` (centimetres; +X forward, +Y right, +Z up; left-handed).
@@ -476,7 +518,6 @@ public sealed class Coin : AverActor
 The gameplay object model above is complete. These are **separate subsystems** that do not exist yet — a
 script cannot use them, and a character does not (for example) collide or fall:
 
-- **Physics / collision** — movement is kinematic; there is no gravity, collision or stepping.
 - **Input bindings** — input is raw polling (`Input.GetKey`), not a remappable action/axis map.
 - **Audio**, **timers / coroutines**, **UI (in-game)**, **networking**.
 - **Hot-reload state migration** beyond `[Editable]` fields.

@@ -77,7 +77,16 @@ public sealed class DemoPawn : AverCharacter
         b.Ticks(TickGroup.PrePhysics);
     }
 
-    public override void OnBeginPlay(BeginReason reason) => Log.Info($"[DemoPawn] OnBeginPlay reason={reason} entity={Self.Handle}");
+    public override void OnBeginPlay(BeginReason reason)
+    {
+        Log.Info($"[DemoPawn] OnBeginPlay reason={reason} entity={Self.Handle}");
+        // Start well above the floor, so the play test can SEE gravity and landing rather than
+        // inferring them. Spawned at the origin the character already rests on the ground, and a
+        // resting character is indistinguishable from one that is not simulated at all.
+        Teleport(new Vec3(0f, 0f, 300f));
+        Log.Info($"[DemoPawn] physics: ready={Physics.Ready}, simulated={IsSimulated}, " +
+                 $"fixedStep={Physics.FixedStep:F4}s, bodies={Physics.BodyCount}, dropped from z=300");
+    }
 
     public override void OnPossessed(Entity controller) => Log.Info($"[DemoPawn] OnPossessed by '{controller.Name}'");
 
@@ -109,7 +118,12 @@ public sealed class DemoPawn : AverCharacter
             Log.Info($"[DemoPawn] object API: visible={Self.Visible}, tag set={Self.HasTag(Team)}, " +
                      $"live Spheres={spheres}, entities tagged Team={tagged}");
         }
-        if (++_ticks <= 3) Log.Info($"[DemoPawn] OnTick #{_ticks} dt={dt:F4}");
+        // Trace the descent: height and grounded state, so a reader can see the fall decelerate to a
+        // stop on the floor instead of taking "it ended up at zero" on trust.
+        ++_ticks;
+        if (_ticks <= 3 || _ticks % 15 == 0)
+            Log.Info($"[DemoPawn] tick #{_ticks} dt={dt:F4} z={Self.LocalPosition.Z:F1} " +
+                     $"vz={Velocity.Z:F1} grounded={IsGrounded}");
     }
 
     public override void OnEndPlay(EndReason reason) => Log.Info($"[DemoPawn] OnEndPlay reason={reason} after {_ticks} tick(s)");

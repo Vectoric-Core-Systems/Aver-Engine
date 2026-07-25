@@ -27,6 +27,12 @@ if(TARGET Aver.Scene)
   # or not anything else in the link already does.
   target_link_libraries(Sandbox PRIVATE Aver.Scene)
 endif()
+if(TARGET Aver.Physics)
+  # The simulation (brings AVER_MODULE_PHYSICS=1). Named on the executable for the same reason the
+  # scene and material systems are: the app owns the frame loop, and the frame loop is what decides
+  # when the world is stepped.
+  target_link_libraries(Sandbox PRIVATE Aver.Physics)
+endif()
 if(TARGET Aver.Framework)
   # Gameplay (brings AVER_MODULE_FRAMEWORK=1). It carries Aver.Scene transitively, but the scene is
   # still named above on its own: the framework is optional and the world is not meant to become

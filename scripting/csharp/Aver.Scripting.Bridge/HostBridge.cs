@@ -815,11 +815,20 @@ public static class HostBridge
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispUnbind(int entity)
     {
-        // Drop the instance from both the entity map and its tick bucket. Bare of a hook call, so bare of
-        // a try/catch: a dictionary remove does not run user code and cannot throw across the boundary.
+        // Drop the instance from both the entity map and its tick bucket.
         if (!s_actorsByEntity.Remove(entity, out ActorLive? live)) return;
         if (live.Ticks && live.TickGroup >= 0 && live.TickGroup < TickGroupCount)
             s_tickBuckets[live.TickGroup].Remove(live);
+
+        // Then let the actor release anything NATIVE it owns. This is the framework's own hook, not a
+        // user one, and it runs however the actor left -- ended, destroyed, reloaded, or disabled after
+        // throwing -- which is exactly why a base type's native handle is freed here rather than in the
+        // public OnEndPlay a subclass can override and forget to chain.
+        //
+        // Guarded even so: a base type is still managed code, and an exception crossing back into the
+        // native unbind would take the process with it.
+        try { live.Instance.OnUnbound(); }
+        catch (Exception ex) { Emit(3, $"[bridge] OnUnbound threw for entity {entity}: {ex.Message}"); }
     }
 
     // ------------------------------------------------------------------ log marshalling
