@@ -1101,6 +1101,11 @@ private:
         }
         if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
             aver_fw_input_set_key(AVER_FW_KEY_W, 1);   // synthetic: hold forward so the possessed character walks
+            // Also pull the trigger, and jump once, after the character has had time to land. Holding W
+            // only ever proved that movement works; a weapon and a jump that nothing presses are code
+            // this harness cannot say anything about, which is the same as untested.
+            if (playTestFrames_ > 60) aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT, 1);
+            if (playTestFrames_ == 100) aver_fw_input_set_key(AVER_FW_KEY_SPACE, 1);
             // Long enough for the character to fall and settle: it is dropped from 3m, which is about
             // 0.8s of falling, and six frames only ever proved that the tick path fires.
             if (++playTestFrames_ == 150) {

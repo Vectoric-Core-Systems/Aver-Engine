@@ -40,16 +40,24 @@ internal static class Phys
 /// <summary>What a <see cref="Physics.Raycast(Vec3, Vec3, float)"/> found.</summary>
 public readonly struct RaycastHit
 {
-    /// <summary>The body that was hit; 0 when the ray hit nothing.</summary>
-    public int Body { get; }
+    /// <summary>
+    /// The body that was hit; <see cref="Framework.Body.None"/> when the ray hit nothing.
+    /// </summary>
+    /// <remarks>
+    /// A <see cref="Framework.Body"/> rather than a raw handle, so what comes out of a query is the
+    /// same thing the rest of the API takes in. Handing back an int forced callers to reconstruct a
+    /// Body from it, which they cannot do — the constructor is the framework's.
+    /// </remarks>
+    public Body Body { get; }
     /// <summary>Where the ray met the surface, in centimetres.</summary>
     public Vec3 Point { get; }
     /// <summary>The surface normal at that point, unit length.</summary>
     public Vec3 Normal { get; }
     /// <summary>True when the ray hit something. Check this before reading the rest.</summary>
-    public bool Hit => Body != 0;
+    public bool Hit => Body.IsValid;
 
-    internal RaycastHit(int body, Vec3 point, Vec3 normal) { Body = body; Point = point; Normal = normal; }
+    internal RaycastHit(int body, Vec3 point, Vec3 normal)
+    { Body = new Body(body); Point = point; Normal = normal; }
 }
 
 /// <summary>
@@ -101,6 +109,17 @@ public readonly struct Body : IEquatable<Body>
     public bool SetPosition(Vec3 p) => Phys.aver_phys_body_set_position(Handle, p.X, p.Y, p.Z) != 0;
     /// <summary>Set linear velocity, cm/s.</summary>
     public bool SetVelocity(Vec3 v) => Phys.aver_phys_body_set_velocity(Handle, v.X, v.Y, v.Z) != 0;
+
+    /// <summary>
+    /// Add to the body's velocity — a nudge rather than a teleport, which is what a bullet, an
+    /// explosion or a bump wants.
+    /// </summary>
+    /// <remarks>
+    /// A velocity change, not a true impulse: it ignores mass, so a heavy body moves as readily as a
+    /// light one. Real impulse handling needs mass out of the ABI; until then this is honest about
+    /// being a kick rather than pretending to be Newtonian.
+    /// </remarks>
+    public bool AddVelocity(Vec3 delta) => SetVelocity(Velocity + delta);
     /// <summary>Remove the body from the world. The handle is dead afterwards.</summary>
     public bool Destroy() => Phys.aver_phys_remove_body(Handle) != 0;
 

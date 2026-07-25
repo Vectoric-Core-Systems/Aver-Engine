@@ -41,46 +41,29 @@ set(AVER_BRIDGE_PROJ ${AVER_CSHARP_DIR}/Aver.Scripting.Bridge/Aver.Scripting.Bri
 # DllImportResolver (see NativeResolver.cs). nethost.dll stays in bin/ (loaded by bare name from the exe).
 set(AVER_BRIDGE_DIR ${CMAKE_BINARY_DIR}/bin/Scripting)
 
-# The bridge and every source that compiles INTO it (it now pulls in Aver.Framework + Aver.Scene), so a
+# The bridge and every source that compiles INTO it (it pulls in Aver.Framework + Aver.Scene), so a
 # clean build after editing any one of them re-stages the bridge. Driven by an OUTPUT/DEPENDS rule and NOT
 # by POST_BUILD: a POST_BUILD command only runs when the target actually relinks, so editing a .cs alone
 # would ship the previous bridge with a clean build reporting success. That bug has shipped a stale splash
 # here once.
-set(AVER_BRIDGE_SOURCES
-  ${AVER_BRIDGE_PROJ}
-  ${AVER_CSHARP_DIR}/Aver.Scripting.Bridge/HostBridge.cs
-  ${AVER_CSHARP_DIR}/Aver.Scripting.Bridge/ScriptLoadContext.cs
-  ${AVER_CSHARP_DIR}/Aver.Scripting/Aver.Scripting.csproj
-  ${AVER_CSHARP_DIR}/Aver.Scripting/Behaviour.cs
-  ${AVER_CSHARP_DIR}/Aver.Scripting/Log.cs
-  ${AVER_CSHARP_DIR}/Aver.Scripting/Voxi.cs
-  ${AVER_CSHARP_DIR}/Aver.Scripting/Pbr.cs
+#
+# GLOBBED, not enumerated. The list used to be written out by hand, and a hand-written list of sources is
+# only correct until the next file is added: a new .cs is then invisible to the dependency scan, the
+# bridge is never re-staged, and the HOST goes on loading the previous assembly while the project's
+# scripts compile happily against the new one. The failure surfaces far from its cause, as a runtime
+# MissingMethodException for a member that plainly exists in the source -- which is exactly how adding
+# Physics.cs and EnhancedInput.cs broke this. CONFIGURE_DEPENDS makes CMake re-glob when the directories
+# change, so adding a file cannot silently fall out of the build again.
+file(GLOB AVER_BRIDGE_SOURCES CONFIGURE_DEPENDS
+  ${AVER_CSHARP_DIR}/Aver.Scripting.Bridge/*.cs
+  ${AVER_CSHARP_DIR}/Aver.Scripting.Bridge/*.csproj
+  ${AVER_CSHARP_DIR}/Aver.Scripting/*.cs
+  ${AVER_CSHARP_DIR}/Aver.Scripting/*.csproj
   # Aver.Framework (the gameplay layer the bridge drives) and its own dependency Aver.Scene.
-  ${AVER_CSHARP_DIR}/Aver.Framework/Aver.Framework.csproj
-  ${AVER_CSHARP_DIR}/Aver.Framework/Actor.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/Actors.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/Character.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/Component.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/Game.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/EntityScene.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/Input.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/Pawn.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/PlayerController.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/GameMode.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/Attributes.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/ActorClass.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/ActorBuilder.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/ClassBuilder.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/Enums.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/Entity.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/Native.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/ManagedDispatch.cs
-  ${AVER_CSHARP_DIR}/Aver.Framework/NativeResolver.cs
-  ${AVER_CSHARP_DIR}/Aver.Scene/Aver.Scene.csproj
-  ${AVER_CSHARP_DIR}/Aver.Scene/Math.cs
-  ${AVER_CSHARP_DIR}/Aver.Scene/Native.cs
-  ${AVER_CSHARP_DIR}/Aver.Scene/SceneIds.cs
-  ${AVER_CSHARP_DIR}/Aver.Scene/NativeResolver.cs)
+  ${AVER_CSHARP_DIR}/Aver.Framework/*.cs
+  ${AVER_CSHARP_DIR}/Aver.Framework/*.csproj
+  ${AVER_CSHARP_DIR}/Aver.Scene/*.cs
+  ${AVER_CSHARP_DIR}/Aver.Scene/*.csproj)
 
 set(AVER_BRIDGE_OUTPUTS
   ${AVER_BRIDGE_DIR}/Aver.Scripting.Bridge.dll

@@ -744,6 +744,17 @@ public static class HostBridge
     private static void DispTickAll(int group, float dt)
     {
         if (group < 0 || group >= TickGroupCount) return;
+
+        // Resolve the frame's input ONCE, before the first tick group, rather than letting each actor
+        // poll the device as it ticks. Two pawns polling separately can disagree about whether a key
+        // went down this frame purely because of the order they tick in, and a "was pressed" edge read
+        // twice in one frame is read wrongly at least once. Evaluating up front makes the frame's input
+        // a single fact that every actor in it shares.
+        if (group == 0)
+        {
+            try { EnhancedInput.Update(); }
+            catch (Exception ex) { Emit(3, $"[bridge] input update threw: {ex.Message}"); }
+        }
         // No try/catch around the whole loop on purpose — one actor throwing must not stop the ones after
         // it in the group, so the guard is per actor, inside (the same rule Update uses for behaviours).
         //

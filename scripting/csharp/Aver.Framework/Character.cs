@@ -142,15 +142,24 @@ public abstract class AverCharacter : AverPawn
     /// asked to go — the two differ every time something is in the way, which is the whole point of having
     /// a simulation.
     /// </remarks>
-    protected void DriveWithInput(float dt)
+    protected void DriveWithInput(float dt) =>
+        Drive(dt, Input.MoveAxis, Input.MouseDeltaX * TurnSpeed, -Input.MouseDeltaY * TurnSpeed);
+
+    /// <summary>
+    /// The same frame of character control, but driven by values you supply rather than by polling the
+    /// device — so a game using an action-mapping layer (or a replay, or an AI) can drive a character
+    /// without the character knowing where the numbers came from.
+    /// </summary>
+    /// <param name="moveAxis">X = forward intent, Y = right intent, each -1..1.</param>
+    /// <param name="yawDeltaDeg">Degrees to turn this frame.</param>
+    /// <param name="pitchDeltaDeg">Degrees to pitch this frame; positive looks up.</param>
+    protected void Drive(float dt, Vec3 moveAxis, float yawDeltaDeg, float pitchDeltaDeg)
     {
         // Publish the camera this character wants, so the editor's play view can follow it.
         Fw.aver_fw_set_view((int)CameraViewMode, EyeHeight, BoomLength);
 
-        _yaw += Input.MouseDeltaX * TurnSpeed;
-        // Mouse DOWN is +Y on screen, so subtracting gives the conventional "push forward to look down".
-        _pitch -= Input.MouseDeltaY * TurnSpeed;
-        _pitch = MathF.Max(PitchMin, MathF.Min(PitchMax, _pitch));
+        _yaw += yawDeltaDeg;
+        _pitch = MathF.Max(PitchMin, MathF.Min(PitchMax, _pitch + pitchDeltaDeg));
         ApplyLookRotation();
 
         EnsureCapsule();
@@ -158,8 +167,7 @@ public abstract class AverCharacter : AverPawn
         // Walk on the YAW basis, never on the entity's forward axis: in first person the transform
         // carries pitch so the camera can aim, and moving along a pitched forward would walk you into
         // the ground or the sky depending on where you happened to be looking.
-        Vec3 axis = Input.MoveAxis;                              // X = forward intent, Y = right intent
-        Vec3 wish = WalkForward * axis.X + WalkRight * axis.Y;
+        Vec3 wish = WalkForward * moveAxis.X + WalkRight * moveAxis.Y;
         // Normalise so a diagonal is not faster than a straight line.
         wish = wish.Normalized * MoveSpeed;
 
