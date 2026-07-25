@@ -12,6 +12,7 @@
 
 #include "ProjectBrowser.hpp"
 #include "ToolsMenu.hpp"
+#include "EngineScaffold.hpp"   // engineRoot(): where the Content Browser's "Engine" root is mounted from
 
 #if AVER_MODULE_VOXI
 #include "aver/voxi/Voxi.hpp"          // optional render-feature module (AA / GI / RT / PT settings)
@@ -194,12 +195,29 @@ static std::vector<rhi::LineVertex> buildScaleAxis(int a, const Vec3& c) {
 enum class Tool { Select, Move, Rotate, Scale };
 static const char* kToolNames[4] = {"Select", "Move", "Rotate", "Scale"};
 
+// Which bottom drawer is up. Only one at a time: they share the same strip of screen, and a drawer
+// that can be half-covered by its sibling is a layout, not a drawer.
+enum class Drawer { None, Content, Log };
+
 #if AVER_WITH_IMGUI
 // Fixed editor chrome (toolbar / status bar / dock host): no decoration, never steals focus.
 static constexpr ImGuiWindowFlags kChromeFlags =
     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+
+// The drawer differs from the chrome above in the one way that matters: it MAY come to the front,
+// because it overlays the viewport and has to sit above the dock host.
+//
+// It must NOT scroll. Its bodies scroll inside their own children, so the outer window has nothing to
+// scroll -- but its header is submitted before the body is size-gated, so mid-slide the content
+// briefly exceeds the window and ImGui would flash a scrollbar on every close. Worse, the resize grip
+// is positioned at content y=0, which is scroll-relative: one wheel tick would carry it above the top
+// edge and out of reach.
+static constexpr ImGuiWindowFlags kDrawerFlags =
+    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+    ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings;
 #endif
 
 struct MeshObj {
@@ -249,8 +267,21 @@ static void applyUnrealStyle() {
 // One captured log line for the Output Log panel.
 struct LogLine { LogLevel level; std::string text; };
 
-// A throttled Content Browser directory listing (subfolders + files), refreshed on a frame stamp.
-struct DirListing { int stamp = -1000; std::vector<std::filesystem::path> dirs, files; };
+// One entry in a Content Browser listing, with everything the views need already derived. The
+// per-entry work (two wide->narrow path conversions, the extension fold, and the .cs classification's
+// 8 KB read) used to run per entry PER FRAME; deriving it once per refresh is what keeps a folder of a
+// few thousand files from costing more than the scene it sits under.
+struct DirEntry {
+    std::filesystem::path path;
+    std::string full, name;
+    bool isDir  = false;
+    int  tile   = -1;      // file-type sprite tile, or -1 for "no icon for this type"
+    bool module = false;   // a folder that is engine content or a C++ module -> the Module folder icon
+};
+
+// A throttled Content Browser directory listing, refreshed on a frame stamp. Folders sort first and
+// are counted, so a view can split them without re-partitioning.
+struct DirListing { int stamp = -1000; std::vector<DirEntry> entries; usize dirCount = 0; };
 
 class SandboxApp final : public Application {
 public:
@@ -393,31 +424,42 @@ public:
         AVER_INFO("[Sandbox] Compile C# status icons decoded from {} ({}x{})", path, img.width, img.height);
     }
 
-    // The Content Browser's file-type icons: one sprite sheet of four tiles (C# Script / C# Class /
-    // C++ Class / C++ Module), loaded exactly like the compile icon. A failure leaves fileIconsUiId_ 0 and
-    // the browser falls back to plain text rows.
-    void loadFileIcons(Engine& e) {
+    // Load one N-tile sprite sheet staged next to the exe. Shared by the Content Browser's file-type
+    // and folder sheets: they differ only in the file and the tile count.
+    //
+    // The tile ASPECT is measured from the decoded image rather than assumed. Hard-coding it means a
+    // sheet re-cut at another shape silently renders every icon stretched, which is the kind of fault
+    // that survives review because each icon still looks like itself.
+    bool loadIconSheet(Engine& e, const char* file, int tiles, const char* debugName,
+                       rhi::TextureHandle& outTex, u64& outId, f32& outAspect) {
         rhi::IResourceFactory* res = e.device()->resources();
-        if (!res) return;
-        const std::string path = executableDir() + "\\file-icons.png";
+        if (!res) return false;
+        const std::string path = executableDir() + "\\" + file;
         ImageData img;
         std::string why;
         if (!decodeImage(path, img, &why)) {
-            AVER_WARN("[Sandbox] '{}' not loaded ({}) -- the Content Browser uses plain file rows", path, why);
-            return;
+            AVER_WARN("[Sandbox] '{}' not loaded ({}) -- the Content Browser falls back to drawn glyphs",
+                      path, why);
+            return false;
         }
         rhi::TextureDesc td;
         td.width = img.width; td.height = img.height;
         td.format = rhi::Format::RGBA8Unorm;
         td.bind = rhi::ResourceBind::ShaderResource;
         td.initialState = rhi::ResourceState::ShaderResource;
-        td.debugName = "FileTypeIcons";
+        td.debugName = debugName;
         const void* levels[1] = {img.pixels.data()};
         td.initialData = levels; td.initialDataCount = 1; td.initialRowPitch = img.rowPitch();
-        fileIconsTexture_ = res->createTexture(td);
-        if (!fileIconsTexture_) { AVER_WARN("[Sandbox] the file-type icons could not be uploaded"); return; }
-        fileIconsUiId_ = e.device()->uiTextureId(fileIconsTexture_);
-        AVER_INFO("[Sandbox] file-type icons decoded from {} ({}x{})", path, img.width, img.height);
+        outTex = res->createTexture(td);
+        if (!outTex) { AVER_WARN("[Sandbox] '{}' could not be uploaded", path); return false; }
+        outId = e.device()->uiTextureId(outTex);
+        if (!outId) { AVER_WARN("[Sandbox] '{}' is not reachable from the UI", path); return false; }
+        outAspect = (img.height > 0 && tiles > 0)
+                  ? static_cast<f32>(img.width) / static_cast<f32>(tiles) / static_cast<f32>(img.height)
+                  : 1.0f;
+        AVER_INFO("[Sandbox] {} decoded from {} ({}x{}, {} tiles, aspect {:.3f})",
+                  debugName, path, img.width, img.height, tiles, outAspect);
+        return true;
     }
 #endif
 
@@ -442,7 +484,17 @@ public:
             AVER_INFO("[Sandbox] DPI scale {:.2f}, UI font rasterised at {:.0f}px", dpi_, 16.0f * dpi_);
             if (browserActive_) loadLogo(e);
             loadCompileIcon(e);
-            loadFileIcons(e);
+            loadIconSheet(e, "file-icons.png",   4, "FileTypeIcons", fileIconsTexture_,   fileIconsUiId_,   fileIconAspect_);
+            loadIconSheet(e, "folder-icons.png", 2, "FolderIcons",   folderIconsTexture_, folderIconsUiId_, folderIconAspect_);
+            // The engine's C# classes, mounted as the Content Browser's second root. Absent from a
+            // shipped build, where there is no source tree to point at.
+            if (const std::string er = editor::engineRoot(); !er.empty()) {
+                std::error_code ec;
+                const std::filesystem::path cs = std::filesystem::path(er) / "scripting" / "csharp";
+                if (std::filesystem::is_directory(cs, ec)) cbEngineRoot_ = cs.string();
+            }
+            AVER_INFO("[Sandbox] Content Browser engine root: {}",
+                      cbEngineRoot_.empty() ? "(none - shipped build)" : cbEngineRoot_.c_str());
         }
 #endif
         // --- default "blank .ocmap": ground floor + cube + sun + sky + atmosphere ---
@@ -811,16 +863,18 @@ public:
 #if AVER_WITH_IMGUI
         // The UI descriptor the mark holds is released with the texture, and that pool has no fence
         // of its own -- so the GPU has to be past every frame that drew it first.
-        if (logoTexture_ || compileIconTexture_ || fileIconsTexture_) {
+        if (logoTexture_ || compileIconTexture_ || fileIconsTexture_ || folderIconsTexture_) {
             if (rhi::IResourceFactory* res = e.device()->resources()) {
                 res->waitIdle();
                 if (logoTexture_) res->destroyTexture(logoTexture_);
                 if (compileIconTexture_) res->destroyTexture(compileIconTexture_);
                 if (fileIconsTexture_) res->destroyTexture(fileIconsTexture_);
+                if (folderIconsTexture_) res->destroyTexture(folderIconsTexture_);
             }
             logoTexture_ = 0; logoUiId_ = 0;
             compileIconTexture_ = 0; compileIconUiId_ = 0;
             fileIconsTexture_ = 0; fileIconsUiId_ = 0;
+            folderIconsTexture_ = 0; folderIconsUiId_ = 0;
         }
 #endif
 #if AVER_MODULE_VOXI
@@ -838,6 +892,16 @@ public:
         AVER_INFO("[Sandbox] shutdown");
     }
     void setFocusVoxi(bool b) { focusVoxi_ = b ? 4 : 0; } // --project-settings screenshot aid
+    // --drawer screenshot aid: open a drawer from the command line, since a capture run cannot press
+    // Ctrl+Space. The slide is snapped past so a short --frames run shows the drawer, not its
+    // animation, and `content:<sub>` starts the browser inside a Content subfolder, since a capture
+    // run cannot double-click its way there either.
+    void setDrawerOpen(int which, std::string sub) {
+        if (!which) return;
+        drawer_ = drawerShown_ = which == 2 ? Drawer::Log : Drawer::Content;
+        drawerAnim_ = 1.0f;
+        drawerStartSub_ = std::move(sub);
+    }
     void setFocusScript(bool b) { tools_.armNewScript(b); }  // --new-script screenshot aid
     void setFocusTools(bool b) { tools_.armToolsMenu(b); }   // --tools-menu screenshot aid
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts screenshot aid
@@ -1016,14 +1080,21 @@ private:
         if (!uiActive) return;
         ImGuiIO& io = ImGui::GetIO();
         const bool kb = !io.WantCaptureKeyboard;
+        // The editor's drawer chord wins over gameplay for the keys it uses. Without this the same
+        // press does both: Ctrl+Space peeks at the Content Browser AND makes the character jump, and
+        // Escape closes the drawer AND opens the game's pause menu. This runs BEFORE buildUI polls the
+        // chord, so drawer_ still holds last frame's value -- which is what we want, since it is the
+        // press that closes an OPEN drawer that must be swallowed.
+        const bool chordSpace = io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Space, false);
+        const bool chordEsc   = drawer_ != Drawer::None && ImGui::IsKeyPressed(ImGuiKey_Escape, false);
         for (int i = 0; i < 26; ++i) aver_fw_input_set_key(AVER_FW_KEY_A + i, kb && ImGui::IsKeyDown((ImGuiKey)(ImGuiKey_A + i)));
         for (int i = 0; i < 10; ++i) aver_fw_input_set_key(AVER_FW_KEY_0 + i, kb && ImGui::IsKeyDown((ImGuiKey)(ImGuiKey_0 + i)));
-        aver_fw_input_set_key(AVER_FW_KEY_SPACE,  kb && ImGui::IsKeyDown(ImGuiKey_Space));
+        aver_fw_input_set_key(AVER_FW_KEY_SPACE,  kb && !chordSpace && ImGui::IsKeyDown(ImGuiKey_Space));
         aver_fw_input_set_key(AVER_FW_KEY_LSHIFT, kb && ImGui::IsKeyDown(ImGuiKey_LeftShift));
-        aver_fw_input_set_key(AVER_FW_KEY_LCTRL,  kb && ImGui::IsKeyDown(ImGuiKey_LeftCtrl));
+        aver_fw_input_set_key(AVER_FW_KEY_LCTRL,  kb && !chordSpace && ImGui::IsKeyDown(ImGuiKey_LeftCtrl));
         aver_fw_input_set_key(AVER_FW_KEY_LALT,   kb && ImGui::IsKeyDown(ImGuiKey_LeftAlt));
         aver_fw_input_set_key(AVER_FW_KEY_ENTER,  kb && ImGui::IsKeyDown(ImGuiKey_Enter));
-        aver_fw_input_set_key(AVER_FW_KEY_ESCAPE, kb && ImGui::IsKeyDown(ImGuiKey_Escape));
+        aver_fw_input_set_key(AVER_FW_KEY_ESCAPE, kb && !chordEsc && ImGui::IsKeyDown(ImGuiKey_Escape));
         aver_fw_input_set_key(AVER_FW_KEY_TAB,    kb && ImGui::IsKeyDown(ImGuiKey_Tab));
         aver_fw_input_set_key(AVER_FW_KEY_LEFT,   kb && ImGui::IsKeyDown(ImGuiKey_LeftArrow));
         aver_fw_input_set_key(AVER_FW_KEY_RIGHT,  kb && ImGui::IsKeyDown(ImGuiKey_RightArrow));
@@ -1327,6 +1398,25 @@ private:
             return;
         }
 
+        // Drawer shortcuts.
+        //
+        // Gated on WantCaptureKeyboard, not merely WantTextInput: a modal dialog or a widget being
+        // dragged sets the former and not the latter, so a text-only gate lets Ctrl+Space toggle the
+        // drawer underneath an open dialog, and lets Escape close the whole drawer mid-drag of its own
+        // resize grip. Every other raw key poll in this file already uses the capture flag.
+        {
+            const ImGuiIO& io = ImGui::GetIO();
+            if (!io.WantTextInput && !io.WantCaptureKeyboard) {
+                if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Space, false)) toggleDrawer(Drawer::Content);
+                // Escape closes the drawer, but only when one is up and nothing is stacked on top of
+                // it: Escape over the + Add or Import popup should dismiss that popup, not pull the
+                // whole browser out from under it.
+                if (drawer_ != Drawer::None && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
+                    ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+                    drawer_ = Drawer::None;
+            }
+        }
+
         // ---------------- menu bar ----------------
         if (ImGui::BeginMainMenuBar()) {
             // Medium weight on the menu bar, matching Unreal's; 0.0f keeps the size already in use.
@@ -1335,11 +1425,17 @@ private:
             if (ImGui::BeginMenu("File")){ ImGui::MenuItem("New Level"); ImGui::MenuItem("Open Level..."); ImGui::MenuItem("Save Level"); ImGui::Separator(); if(ImGui::MenuItem("Exit")) e.requestExit(); ImGui::EndMenu(); }
             if (ImGui::BeginMenu("Edit")){
                 ImGui::MenuItem("Undo","Ctrl+Z"); ImGui::MenuItem("Redo","Ctrl+Y"); ImGui::Separator();
-                ImGui::MenuItem("Editor Preferences");
+                if (ImGui::MenuItem("Editor Preferences...")) showEditorPrefs_ = true;
                 if (ImGui::MenuItem("Project Settings...")) showProjectSettings_ = true;
                 ImGui::EndMenu();
             }
-            if (ImGui::BeginMenu("Window")){ ImGui::MenuItem("World Outliner"); ImGui::MenuItem("Details"); ImGui::MenuItem("Content Browser"); ImGui::MenuItem("Output Log"); ImGui::Separator(); if (ImGui::MenuItem("Reset Layout")) dockBuilt_=false; ImGui::EndMenu(); }
+            if (ImGui::BeginMenu("Window")){
+                ImGui::MenuItem("World Outliner"); ImGui::MenuItem("Details");
+                // Checked against the drawer state, so the menu reports what is actually up.
+                if (ImGui::MenuItem("Content Browser", "Ctrl+Space", drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
+                if (ImGui::MenuItem("Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
+                ImGui::Separator(); if (ImGui::MenuItem("Reset Layout")) dockBuilt_=false; ImGui::EndMenu();
+            }
             // Tools sits between Window and Build, where Unreal puts it. It owns its own
             // BeginMenu (see ToolsMenu.cpp) — this file is the frame loop, not a scaffolder.
             tools_.drawMenu(project_);
@@ -1438,14 +1534,14 @@ private:
             ImGui::DockBuilderRemoveNode(dockId);
             ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace); // private flag, required here
             ImGui::DockBuilderSetNodeSize(dockId, dockSize); // must precede the splits
-            ImGuiID centre = dockId, right = 0, rightTop = 0, rightBottom = 0, bottom = 0;
+            ImGuiID centre = dockId, right = 0, rightTop = 0, rightBottom = 0;
             ImGui::DockBuilderSplitNode(centre, ImGuiDir_Right, 0.22f, &right,  &centre);
             ImGui::DockBuilderSplitNode(right,  ImGuiDir_Down,  0.60f, &rightBottom, &rightTop);
-            ImGui::DockBuilderSplitNode(centre, ImGuiDir_Down,  0.26f, &bottom, &centre);
             ImGui::DockBuilderDockWindow("World Outliner",  rightTop);
             ImGui::DockBuilderDockWindow("Details",         rightBottom);
-            ImGui::DockBuilderDockWindow("Content Browser", bottom);
-            ImGui::DockBuilderDockWindow("Output Log",      bottom);
+            // No bottom split: the Content Browser and Output Log are DRAWERS (drawDrawer), closed on
+            // launch and raised over the viewport on demand. They took a quarter of the height
+            // permanently before, which is a poor trade for panels you consult in bursts.
             ImGui::DockBuilderFinish(dockId);
         }
         // Latch the central node -> that's the 3D viewport rect (ImGui coords are 1:1 with
@@ -1457,6 +1553,8 @@ private:
 
         buildPanels(e);
         buildViewportOverlay();
+        drawDrawer(e);   // over the viewport, so after the overlay it would otherwise sit behind
+        buildEditorPrefs();
         buildProjectSettings();
         tools_.drawModals(project_, dpi_);
 
@@ -1473,6 +1571,20 @@ private:
                     rhi::backendName(e.device()->backend()), e.device()->adapterName(), dpi_*100.f,
                     dt>1e-6f?1.f/dt:0.f, dt*1000.f, objects_.size(),
                     movableSelected() ? objects_[sel_].name.c_str() : "nothing selected");
+
+        // The drawer handles live at the right of the status bar, where Unreal keeps them: the bar is
+        // the edge the panels come out of, so it is the edge that should open them.
+        auto drawerButton = [&](const char* label, Drawer d, const char* tip) {
+            const bool on = drawer_ == d;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            if (ImGui::SmallButton(label)) toggleDrawer(d);
+            if (on) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+        };
+        ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 250.0f*dpi_));
+        drawerButton("Content Browser", Drawer::Content, "Show the Content Browser  (Ctrl+Space)");
+        ImGui::SameLine();
+        drawerButton("Output Log", Drawer::Log, "Show the Output Log");
         ImGui::End();
         ImGui::PopStyleVar(2);
 #else
@@ -1517,13 +1629,51 @@ private:
         ImGui::EndChild();
     }
 
+    // The roots the Content Browser mounts. "Content" is the project's own; "Engine" exposes the
+    // engine's C# classes (AverActor, AverPawn, the Scene maths...) so they can be read from inside the
+    // editor instead of hunted down in the source tree -- the same split Unreal draws between a
+    // project's content and the engine's.
+    //
+    // Engine is absent from a shipped build, where engineRoot() finds no source tree. That is correct
+    // rather than a failure: there is nothing to browse, and a root that lists nothing is worse than no
+    // root at all.
+    struct CbRoot { const char* label; std::string path; bool engine; };
+    std::vector<CbRoot> cbRoots() const {
+        std::vector<CbRoot> r;
+        if (project_.valid()) r.push_back({"Content", project_.contentDir(), false});
+        if (!cbEngineRoot_.empty()) r.push_back({"Engine", cbEngineRoot_, true});
+        return r;
+    }
+
+    // True for a path inside the Engine root -- what earns the Module folder icon.
+    bool isEnginePath(const std::string& p) const {
+        return !cbEngineRoot_.empty() && p.size() >= cbEngineRoot_.size() &&
+               p.compare(0, cbEngineRoot_.size(), cbEngineRoot_) == 0;
+    }
+
     // The Content Browser body: an Add menu (the creation flows, shared with Tools), an Import button, and
-    // a folder tree + file list scanned LIVE from the project's Content directory.
+    // a folder tree + file view scanned LIVE from the mounted roots.
     void drawContentBrowser() {
-        if (!project_.valid()) {
+        const std::vector<CbRoot> roots = cbRoots();
+        if (roots.empty()) {
             ImGui::TextDisabled("No project loaded - nothing is mounted.");
             ImGui::TextDisabled("Create or open a project (File menu) to browse its Content folder.");
             return;
+        }
+        // Land on the project's own Content folder rather than nowhere, so the browser opens showing
+        // the thing the user is working on. Resolved on the first drawn frame, not at parse time:
+        // contentDir() does not exist until a project has been applied.
+        if (cbSelectedDir_.empty()) cbSelectedDir_ = roots.front().path;
+        if (!drawerStartSub_.empty()) {
+            // Resolve through the filesystem so separators and case match the strings the tree builds
+            // from directory_iterator -- a raw join leaves "Content\Scripts/AI", which enumerates fine
+            // but never compares equal, so the tree highlight silently never matches.
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            const fs::path target = fs::canonical(fs::path(roots.front().path) / drawerStartSub_, ec);
+            if (ec) AVER_WARN("[Sandbox] --drawer content:{}: no such folder under Content", drawerStartSub_);
+            else    cbSelectedDir_ = target.string();
+            drawerStartSub_.clear();
         }
         if (ImGui::Button("+ Add")) ImGui::OpenPopup("cbAddMenu");
         if (ImGui::BeginPopup("cbAddMenu")) {
@@ -1537,21 +1687,87 @@ private:
         ImGui::SameLine();
         if (ImGui::Button("Import...")) ImGui::OpenPopup("cbImport");
         drawImportModal();
+
+        // View controls, right-aligned: a two-state segmented control, and the tile zoom when tiles are
+        // showing. Both states are drawn as buttons with the active one held down, rather than one
+        // button labelled with the view you would switch TO -- that reads as a label, not a state.
+        {
+            auto viewTab = [&](const char* label, bool active) {
+                if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                const bool hit = ImGui::Button(label);
+                if (active) ImGui::PopStyleColor();
+                return hit;
+            };
+            // Search first, so it keeps a stable place as the view controls change width.
+            const f32 controls = cbGallery_ ? 250.0f : 130.0f;
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(std::fmax(80.0f*dpi_,
+                ImGui::GetWindowWidth() - ImGui::GetCursorPosX() - (controls + 14.0f)*dpi_));
+            ImGui::InputTextWithHint("##cbsearch", "Search this folder...", cbFilter_, sizeof(cbFilter_));
+
+            ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), ImGui::GetWindowWidth() - controls*dpi_));
+            if (viewTab("Tiles", cbGallery_)) cbGallery_ = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Gallery view");
+            ImGui::SameLine(0.0f, 2.0f*dpi_);
+            if (viewTab("List", !cbGallery_)) cbGallery_ = false;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("List view");
+            if (cbGallery_) {
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(110.0f*dpi_);
+                ImGui::SliderFloat("##cbzoom", &cbTileSize_, 56.0f, 168.0f, "%.0f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tile size");
+            }
+        }
         ImGui::Separator();
 
-        const std::string content = project_.contentDir();
         ImGui::BeginChild("cbTree", ImVec2(220.0f * dpi_, 0), true);
-        ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
-        if (cbSelectedDir_.empty() || cbSelectedDir_ == content) rootFlags |= ImGuiTreeNodeFlags_Selected;
-        const bool rootOpen = ImGui::TreeNodeEx("Content", rootFlags);
-        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) cbSelectedDir_ = content;
-        if (rootOpen) { drawFolderTree(content); ImGui::TreePop(); }
+        for (const CbRoot& r : roots) {
+            ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_SpanAvailWidth;
+            if (!r.engine) rootFlags |= ImGuiTreeNodeFlags_DefaultOpen;   // the project's own opens; the engine's stays furled
+            if (cbSelectedDir_ == r.path) rootFlags |= ImGuiTreeNodeFlags_Selected;
+            ImGui::PushID(r.label);
+            const bool open = ImGui::TreeNodeEx(r.label, rootFlags);
+            if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) cbSelectedDir_ = r.path;
+            if (open) { drawFolderTree(r.path); ImGui::TreePop(); }
+            ImGui::PopID();
+        }
         ImGui::EndChild();
 
         ImGui::SameLine();
         ImGui::BeginChild("cbFiles", ImVec2(0, 0), true);
-        drawFolderFiles(cbSelectedDir_.empty() ? content : cbSelectedDir_);
+        drawFolderFiles(cbSelectedDir_);
         ImGui::EndChild();
+    }
+
+    // The breadcrumb: the selected folder as clickable ancestors, so going back up is one click rather
+    // than a hunt through the tree. Segments are rebuilt from the root prefix so what is clicked is
+    // byte-identical to what the tree stores.
+    void drawBreadcrumb(const std::string& dir) {
+        const std::vector<CbRoot> roots = cbRoots();
+        const CbRoot* owner = nullptr;
+        for (const CbRoot& r : roots)
+            if (dir.size() >= r.path.size() && dir.compare(0, r.path.size(), r.path) == 0) { owner = &r; break; }
+        if (!owner) { ImGui::TextDisabled("%s", dir.c_str()); return; }
+
+        std::string acc = owner->path;
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f*dpi_, 1.0f*dpi_));
+        if (ImGui::SmallButton(owner->label)) cbSelectedDir_ = acc;
+        // The tail after the root, split on either separator -- a path may carry both.
+        std::string tail = dir.substr(owner->path.size());
+        usize i = 0;
+        while (i < tail.size()) {
+            while (i < tail.size() && (tail[i] == '\\' || tail[i] == '/')) ++i;
+            const usize start = i;
+            while (i < tail.size() && tail[i] != '\\' && tail[i] != '/') ++i;
+            if (i == start) break;
+            const std::string seg = tail.substr(start, i - start);
+            acc += "\\" + seg;
+            ImGui::SameLine(0.0f, 2.0f*dpi_); ImGui::TextDisabled(">"); ImGui::SameLine(0.0f, 2.0f*dpi_);
+            ImGui::PushID(static_cast<int>(start));
+            if (ImGui::SmallButton(seg.c_str())) cbSelectedDir_ = acc;
+            ImGui::PopID();
+        }
+        ImGui::PopStyleVar();
     }
 
     // Recurse the folder tree, scanning only the branches the user has opened (TreeNodeEx is lazy), so a
@@ -1564,28 +1780,52 @@ private:
         DirListing& c = dirCache_[dir];
         if (frameNo_ - c.stamp < 20) return c;   // fresh enough
         c.stamp = frameNo_;
-        c.dirs.clear(); c.files.clear();
+        c.entries.clear(); c.dirCount = 0;
         std::error_code ec;
         try {
             for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
                 std::error_code fec;
-                (it->is_directory(fec) ? c.dirs : c.files).push_back(it->path());
+                DirEntry ent;
+                ent.path  = it->path();
+                ent.isDir = it->is_directory(fec);
+                ent.full  = ent.path.string();
+                ent.name  = ent.path.filename().string();
+                if (ent.isDir) {
+                    // A folder wears the Module icon when it is engine content, or when it is a C++
+                    // module in its own right -- both are "part of the engine's machinery" rather than
+                    // a plain bag of assets.
+                    std::error_code mec;
+                    ent.module = isEnginePath(ent.full) ||
+                                 std::filesystem::exists(ent.path / "CMakeLists.txt", mec);
+                    ++c.dirCount;
+                } else {
+                    ent.tile = fileIconTile(ent.full, ent.name, lowerExt(ent.path));
+                }
+                c.entries.push_back(std::move(ent));
             }
         } catch (const std::exception&) { /* keep what we read; a mid-walk failure is not fatal to the UI */ }
-        std::sort(c.dirs.begin(), c.dirs.end());
-        std::sort(c.files.begin(), c.files.end());
+        // Folders first, then files, each alphabetical -- the order every file manager uses, and the
+        // one the views rely on to split the two groups by dirCount alone.
+        std::sort(c.entries.begin(), c.entries.end(), [](const DirEntry& a, const DirEntry& b) {
+            if (a.isDir != b.isDir) return a.isDir;
+            return a.full < b.full;
+        });
         return c;
     }
 
     void drawFolderTree(const std::string& dir) {
-        // Copy the paths out before drawing: a click below reassigns cbSelectedDir_, which the caller may
-        // have passed in by reference, so we must not be iterating a live directory view over it.
-        const std::vector<std::filesystem::path> dirs = dirListing(dir).dirs;
-        for (const auto& p : dirs) {
-            const std::string full = p.string();
+        // Copy the folder paths out before drawing: a click below reassigns cbSelectedDir_ and can
+        // refresh the cache, so we must not still be iterating the listing we came from.
+        std::vector<std::pair<std::string, std::string>> subs;   // (full, name)
+        {
+            const DirListing& l = dirListing(dir);
+            subs.reserve(l.dirCount);
+            for (const DirEntry& e : l.entries) { if (!e.isDir) break; subs.emplace_back(e.full, e.name); }
+        }
+        for (const auto& [full, name] : subs) {
             ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
             if (cbSelectedDir_ == full) flags |= ImGuiTreeNodeFlags_Selected;
-            const bool open = ImGui::TreeNodeEx(p.filename().string().c_str(), flags);
+            const bool open = ImGui::TreeNodeEx(name.c_str(), flags);
             if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) cbSelectedDir_ = full;
             if (open) { drawFolderTree(full); ImGui::TreePop(); }
         }
@@ -1600,9 +1840,17 @@ private:
         if (ext == ".cpp" || ext == ".cxx" || ext == ".cc" || ext == ".hpp" || ext == ".hxx" || ext == ".h")
             return 2;   // C++ Class
         if (ext != ".cs") return -1;
-        if (auto it = fileIconCache_.find(path); it != fileIconCache_.end()) return it->second;
-        int tile = 1;   // default: a plain C# Class
+        // Keyed by modification time, not by path alone: a file edited to derive AverActor mid-session
+        // must lose the plain-class icon. A path-only cache pins the first answer until restart, which
+        // is exactly the icon the gallery now uses as the file's primary identity.
+        std::error_code ec;
+        const auto mtime = std::filesystem::last_write_time(path, ec);
+        if (auto it = fileIconCache_.find(path);
+            it != fileIconCache_.end() && !ec && it->second.first == mtime) return it->second.second;
+
         std::ifstream in(path, std::ios::binary);
+        if (!in.is_open()) return 1;            // unreadable: guess, but never cache the guess
+        int tile = 1;                           // default: a plain C# Class
         char head[8192];
         in.read(head, sizeof(head));            // the head only — a marker past 8 KB is not a class declaration
         const std::string body(head, static_cast<size_t>(in.gcount()));
@@ -1610,40 +1858,189 @@ private:
             "AverBehaviour", "AverActor", "AverPawn", "AverCharacter", "AverPlayerController",
             "AverGameMode", "AverGameInstance", "[AverClass", "[AverGameMode"};
         for (const char* m : kScriptMarkers) if (body.find(m) != std::string::npos) { tile = 0; break; }
-        fileIconCache_[path] = tile;
+        if (!ec) fileIconCache_[path] = {mtime, tile};
         return tile;
     }
 
-    void drawFolderFiles(std::string dir) {   // by value: a double-click below reassigns cbSelectedDir_
-        ImGui::TextDisabled("%s", dir.c_str());
-        ImGui::Separator();
-        const DirListing& listing = dirListing(dir);
-        const std::vector<std::filesystem::path> dirs = listing.dirs;   // copies, since a click mutates the cache key
-        const std::vector<std::filesystem::path> files = listing.files;
-        int shown = 0;
-        // Subfolders first, double-click to enter (so the file view navigates like UE's grid, not only the tree).
-        for (const auto& p : dirs) {
-            if (ImGui::Selectable(("[+]  " + p.filename().string()).c_str(), false, ImGuiSelectableFlags_AllowDoubleClick)
-                && ImGui::IsMouseDoubleClicked(0))
-                cbSelectedDir_ = p.string();
-            ++shown;
+    // A folder, drawn rather than sprited: the supplied icon sheet covers file TYPES, and a folder is
+    // not one of them. A body with a raised tab, which is the shape everyone already reads as "folder".
+    static void folderGlyph(ImDrawList* dl, ImVec2 c, f32 s, ImU32 col) {
+        const f32 w = s, h = s * 0.76f;
+        const f32 x0 = c.x - w*0.5f, y0 = c.y - h*0.5f, tabH = h * 0.17f;
+        dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + w*0.44f, y0 + tabH*2.4f), col, s*0.06f);
+        dl->AddRectFilled(ImVec2(x0, y0 + tabH), ImVec2(x0 + w, y0 + h), col, s*0.07f);
+    }
+
+    // A generic document, for a file the sheet has no tile for -- a page with its corner turned, so an
+    // unrecognised file still reads as a file rather than as a missing icon.
+    static void fileGlyph(ImDrawList* dl, ImVec2 c, f32 s, ImU32 col) {
+        const f32 w = s * 0.74f, h = s;
+        const f32 x0 = c.x - w*0.5f, y0 = c.y - h*0.5f, fold = w * 0.34f;
+        dl->PathLineTo(ImVec2(x0, y0));
+        dl->PathLineTo(ImVec2(x0 + w - fold, y0));
+        dl->PathLineTo(ImVec2(x0 + w, y0 + fold));
+        dl->PathLineTo(ImVec2(x0 + w, y0 + h));
+        dl->PathLineTo(ImVec2(x0, y0 + h));
+        dl->PathFillConvex(col);
+        dl->AddTriangleFilled(ImVec2(x0 + w - fold, y0), ImVec2(x0 + w, y0 + fold),
+                              ImVec2(x0 + w - fold, y0 + fold), IM_COL32(0, 0, 0, 80));
+    }
+
+    // Blit one tile of an N-tile sheet, fitted INSIDE an s-by-s box at its own aspect so a landscape
+    // folder and a portrait document occupy the same visual slot without either being stretched.
+    static void blitTile(ImDrawList* dl, u64 tex, ImVec2 centre, f32 s, f32 aspect, int tile, int tiles) {
+        const f32 w = aspect >= 1.0f ? s : s * aspect;
+        const f32 h = aspect >= 1.0f ? s / aspect : s;
+        dl->AddImage(static_cast<ImTextureID>(tex),
+                     ImVec2(centre.x - w*0.5f, centre.y - h*0.5f),
+                     ImVec2(centre.x + w*0.5f, centre.y + h*0.5f),
+                     ImVec2(static_cast<f32>(tile) / tiles, 0.0f),
+                     ImVec2(static_cast<f32>(tile + 1) / tiles, 1.0f));
+    }
+
+    // One entry's icon, for whichever view is up, so the two cannot drift apart. Every sheet is
+    // optional: a missing one falls back to the drawn glyph rather than to a blank cell.
+    void drawEntryIcon(ImDrawList* dl, ImVec2 centre, f32 s, bool isDir, int tile, bool module) {
+        if (isDir) {
+            if (folderIconsUiId_) blitTile(dl, folderIconsUiId_, centre, s, folderIconAspect_, module ? 1 : 0, 2);
+            else                  folderGlyph(dl, centre, s, IM_COL32(232, 187, 92, 255));
+            return;
         }
-        // Then files, each with its type icon.
-        for (const auto& p : files) {
-            const std::string name = p.filename().string();
-            std::string ext = p.extension().string();
-            for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            const int tile = fileIconTile(p.string(), name, ext);
-            if (tile >= 0 && fileIconsUiId_) {
-                const float h = ImGui::GetTextLineHeight() * 1.3f;
-                ImGui::Image(static_cast<ImTextureID>(fileIconsUiId_), ImVec2(h * 0.74f, h),
-                             ImVec2(tile / 4.0f, 0.0f), ImVec2((tile + 1) / 4.0f, 1.0f));
-                ImGui::SameLine();
+        if (tile >= 0 && fileIconsUiId_) { blitTile(dl, fileIconsUiId_, centre, s, fileIconAspect_, tile, 4); return; }
+        fileGlyph(dl, centre, s, IM_COL32(150, 154, 162, 255));
+    }
+
+    // Lower-cased extension, since the classifier compares against lower-case literals and Windows will
+    // happily hand back ".CS".
+    static std::string lowerExt(const std::filesystem::path& p) {
+        std::string ext = p.extension().string();
+        for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        return ext;
+    }
+
+    // Case-insensitive substring, for the search box. Small and local: pulling in a locale-aware
+    // comparison for a filename filter would be a lot of machinery for "does this name contain that".
+    static bool containsNoCase(const std::string& hay, const char* needle) {
+        if (!needle || !*needle) return true;
+        const usize n = std::strlen(needle);
+        if (hay.size() < n) return false;
+        for (usize i = 0; i + n <= hay.size(); ++i) {
+            usize j = 0;
+            while (j < n && std::tolower(static_cast<unsigned char>(hay[i + j])) ==
+                            std::tolower(static_cast<unsigned char>(needle[j]))) ++j;
+            if (j == n) return true;
+        }
+        return false;
+    }
+
+    // Trim a name to at most `lines` wrapped lines, ending in an ellipsis when it does not fit.
+    // Letting the clip rect cut it instead leaves a half-drawn glyph, which reads as a rendering fault
+    // rather than as "there is more name here" -- and these are dotted namespace names, so the part
+    // that gets cut is exactly the part that distinguishes them.
+    static std::string fitLabel(const std::string& name, f32 wrap, int lines) {
+        const f32 maxH = ImGui::GetTextLineHeight() * lines + 1.0f;
+        if (ImGui::CalcTextSize(name.c_str(), nullptr, false, wrap).y <= maxH) return name;
+        std::string s = name;
+        while (s.size() > 1) {
+            s.pop_back();
+            const std::string t = s + "...";
+            if (ImGui::CalcTextSize(t.c_str(), nullptr, false, wrap).y <= maxH) return t;
+        }
+        return name;
+    }
+
+    // The gallery: a wrapped grid of icon tiles, the view a content browser is normally read in --
+    // you recognise a script or a module by its icon far faster than by finding its name in a column.
+    void drawFolderGallery(const std::vector<const DirEntry*>& shown) {
+        const f32 tile   = cbTileSize_ * dpi_;
+        const f32 pad    = 8.0f * dpi_;
+        const f32 labelH = ImGui::GetTextLineHeight() * 2.0f + 4.0f * dpi_;   // two lines: names wrap
+        const f32 cellW  = tile, cellH = tile + labelH;
+        int perRow = static_cast<int>((ImGui::GetContentRegionAvail().x + pad) / (cellW + pad));
+        if (perRow < 1) perRow = 1;   // a panel narrower than one tile still gets one per row
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const int rows = (static_cast<int>(shown.size()) + perRow - 1) / perRow;
+        // Clip by ROW: a project folder can hold thousands of files, and submitting a cell for every
+        // one of them every frame costs more than everything else the editor draws put together.
+        ImGuiListClipper clipper;
+        clipper.Begin(rows, cellH + pad);
+        while (clipper.Step()) {
+            for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r) {
+                for (int col = 0; col < perRow; ++col) {
+                    const int idx = r * perRow + col;
+                    if (idx >= static_cast<int>(shown.size())) break;
+                    const DirEntry& e = *shown[idx];
+                    if (col) ImGui::SameLine(0.0f, pad);
+                    ImGui::PushID(idx);
+                    const ImVec2 o = ImGui::GetCursorScreenPos();
+                    if (ImGui::Selectable("##cell", cbSelectedFile_ == e.full,
+                                          ImGuiSelectableFlags_AllowDoubleClick, ImVec2(cellW, cellH))) {
+                        cbSelectedFile_ = e.full;
+                        if (e.isDir && (!cbDoubleClickEnter_ || ImGui::IsMouseDoubleClicked(0)))
+                            { cbSelectedDir_ = e.full; cbSelectedFile_.clear(); }
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.name.c_str());
+                    drawEntryIcon(dl, ImVec2(o.x + cellW*0.5f, o.y + tile*0.5f), tile*0.52f, e.isDir, e.tile, e.module);
+                    // Centre a name that fits on one line; let a longer one wrap from the left and clip
+                    // at the cell, so a long class name degrades instead of running into its neighbour.
+                    const f32 wrap = cellW - 4.0f*dpi_;
+                    const std::string label = fitLabel(e.name, wrap, 2);
+                    const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
+                    const f32 tx = ts.x <= wrap ? o.x + (cellW - ts.x)*0.5f : o.x + 2.0f*dpi_;
+                    const ImVec4 clip(o.x, o.y + tile, o.x + cellW, o.y + cellH);
+                    dl->AddText(nullptr, 0.0f, ImVec2(tx, o.y + tile), ImGui::GetColorU32(ImGuiCol_Text),
+                                label.c_str(), nullptr, wrap, &clip);
+                    ImGui::PopID();
+                }
             }
-            ImGui::Selectable(name.c_str());
-            ++shown;
         }
-        if (shown == 0) ImGui::TextDisabled("(this folder is empty)");
+        clipper.End();
+    }
+
+    void drawFolderFiles(std::string dir) {   // by value: a click below reassigns cbSelectedDir_
+        drawBreadcrumb(dir);
+        ImGui::Separator();
+
+        // Pointers into the cached listing rather than copies of it. Nothing mutates dirCache_ during
+        // the draw -- a click only changes which key is looked up NEXT frame -- and copying two vectors
+        // of paths per frame was the panel's largest single cost.
+        const DirListing& listing = dirListing(dir);
+        std::vector<const DirEntry*> shown;
+        shown.reserve(listing.entries.size());
+        for (const DirEntry& e : listing.entries)
+            if (containsNoCase(e.name, cbFilter_)) shown.push_back(&e);
+
+        if (shown.empty()) {
+            ImGui::TextDisabled(listing.entries.empty() ? "(this folder is empty)"
+                                                        : "(nothing here matches the search)");
+            return;
+        }
+        if (cbGallery_) { drawFolderGallery(shown); return; }
+
+        // The list: one row per entry, same icons, for when the names are what you are scanning.
+        const f32 h = ImGui::GetTextLineHeight() * 1.3f;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(shown.size()), h);
+        while (clipper.Step()) {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                const DirEntry& e = *shown[i];
+                ImGui::PushID(i);
+                const ImVec2 o = ImGui::GetCursorScreenPos();
+                ImGui::Dummy(ImVec2(h * 0.78f, h));
+                ImGui::SameLine();
+                drawEntryIcon(dl, ImVec2(o.x + h*0.39f, o.y + h*0.5f), h*0.82f, e.isDir, e.tile, e.module);
+                if (ImGui::Selectable(e.name.c_str(), cbSelectedFile_ == e.full,
+                                      ImGuiSelectableFlags_AllowDoubleClick)) {
+                    cbSelectedFile_ = e.full;
+                    if (e.isDir && (!cbDoubleClickEnter_ || ImGui::IsMouseDoubleClicked(0)))
+                        { cbSelectedDir_ = e.full; cbSelectedFile_.clear(); }
+                }
+                ImGui::PopID();
+            }
+        }
+        clipper.End();
     }
 
     // The Import modal: type a source file, and Import COPIES it into the selected folder — a real, if
@@ -1768,12 +2165,119 @@ private:
         } else ImGui::TextDisabled("Select an actor in the World Outliner");
         ImGui::End();
 
-        ImGui::Begin("Content Browser");
-        drawContentBrowser();
-        ImGui::End();
+    }
 
-        ImGui::Begin("Output Log");
-        drawOutputLog();
+    // The bottom drawer: the Content Browser and the Output Log, which slide up over the viewport
+    // instead of holding a dock node open all session. Closed is the resting state, so the editor
+    // starts with the whole height given to the scene.
+    void drawDrawer(Engine& e) {
+        // Ease the slide, frame-rate independently. dt is clamped because a hitch (a shader compile,
+        // a project load) must not teleport the panel: the drawer should look the same on a stalled
+        // frame as on a fast one.
+        const f32 dt = std::fmin(e.time().dt, 0.05f);
+        const f32 target = drawer_ == Drawer::None ? 0.0f : 1.0f;
+        drawerAnim_ += (target - drawerAnim_) * (1.0f - std::exp(-drawerRate_ * dt));
+        if (drawer_ != Drawer::None) drawerShown_ = drawer_;
+        // Fully retracted: draw nothing at all, so a closed drawer costs no window and no directory walk.
+        if (drawer_ == Drawer::None && drawerAnim_ < 0.004f) { drawerAnim_ = 0.0f; return; }
+
+        const ImGuiViewport* mv = ImGui::GetMainViewport();
+        const ImVec2 wpos = mv->WorkPos, wsize = mv->WorkSize;
+        const f32 statusH = 26.0f * dpi_;
+        const f32 fullH = (wsize.y - statusH) * drawerFrac_;
+        const f32 h = fullH * drawerAnim_;
+
+        ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH - h));
+        ImGui::SetNextWindowSize(ImVec2(wsize.x, h));
+        if (drawerRaise_) { ImGui::SetNextWindowFocus(); drawerRaise_ = false; }
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        // Let the window follow the slide all the way to nothing: the default minimum is 32px, which
+        // would hold the drawer open a third of an inch and then pop it, instead of closing smoothly.
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(0.0f, 0.0f));
+        ImGui::Begin("##drawer", nullptr, kDrawerFlags);
+
+        // Drag the top edge to resize. The grip is claimed before anything else is submitted so it
+        // always wins the hit test against the panel body underneath it.
+        const f32 gripH = 5.0f * dpi_;
+        ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
+        ImGui::InvisibleButton("##drawergrip", ImVec2(std::fmax(wsize.x, 1.0f), gripH));
+        if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+        if (ImGui::IsItemActive() && wsize.y > statusH + 1.0f) {
+            drawerFrac_ -= ImGui::GetIO().MouseDelta.y / (wsize.y - statusH);
+            drawerFrac_ = std::fmin(0.88f, std::fmax(0.14f, drawerFrac_));
+        }
+        // The grip was placed at x=0 to span the full width; put the cursor back inside the padding so
+        // the header and body are not flush against the window edge.
+        ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, gripH + ImGui::GetStyle().WindowPadding.y));
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(wpos.x, ImGui::GetWindowPos().y),
+                                            ImVec2(wpos.x + wsize.x, ImGui::GetWindowPos().y),
+                                            ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
+
+        // Header: which drawer this is, and the ways out of it.
+        if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
+        ImGui::TextUnformatted(drawerShown_ == Drawer::Log ? "Output Log" : "Content Browser");
+        if (fontMedium_) ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::TextDisabled(drawerShown_ == Drawer::Content ? "(Ctrl+Space or Esc to dismiss)" : "(Esc to dismiss)");
+        ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 34.0f * dpi_));
+        if (ImGui::Button("X")) drawer_ = Drawer::None;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Close the drawer");
+        ImGui::Separator();
+
+        // Only draw the body once there is room for it: mid-slide the window is a few pixels tall, and
+        // a Content Browser laid out into that would thrash its column arithmetic for one frame.
+        if (ImGui::GetContentRegionAvail().y > ImGui::GetFrameHeight()) {
+            if (drawerShown_ == Drawer::Log) drawOutputLog();
+            else                             drawContentBrowser();
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+    }
+
+    // Open a drawer, or close it if it is already the one showing -- the toggle behind both the
+    // status-bar buttons and Ctrl+Space.
+    void toggleDrawer(Drawer d) {
+        drawer_ = (drawer_ == d) ? Drawer::None : d;
+        if (drawer_ != Drawer::None) drawerRaise_ = true;
+    }
+
+    // Editor Preferences — how the EDITOR behaves, as opposed to Project Settings, which is what the
+    // GAME is. The split is the same one Unreal draws, and it is the one that decides where a setting
+    // belongs: anything here is this machine's taste and would be wrong to write into a project a
+    // colleague also opens.
+    void buildEditorPrefs() {
+        if (!showEditorPrefs_) return;
+        const ImGuiViewport* mv = ImGui::GetMainViewport();
+        ImGui::SetNextWindowSize(ImVec2(560.0f*dpi_, 460.0f*dpi_), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(mv->GetCenter().x, mv->GetCenter().y), ImGuiCond_FirstUseEver, ImVec2(0.5f,0.5f));
+        if (!ImGui::Begin("Editor Preferences", &showEditorPrefs_, ImGuiWindowFlags_NoDocking)) { ImGui::End(); return; }
+
+        if (ImGui::CollapsingHeader("Content Browser", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Open in gallery (tiles) view", &cbGallery_);
+            ImGui::SliderFloat("Tile size", &cbTileSize_, 56.0f, 168.0f, "%.0f dp");
+            ImGui::Checkbox("Double-click a folder to enter it", &cbDoubleClickEnter_);
+            ImGui::TextDisabled("Single-click always selects; the tree navigates either way.");
+        }
+        if (ImGui::CollapsingHeader("Drawers", ImGuiTreeNodeFlags_DefaultOpen)) {
+            f32 pct = drawerFrac_ * 100.0f;
+            if (ImGui::SliderFloat("Height", &pct, 14.0f, 88.0f, "%.0f%% of the window"))
+                drawerFrac_ = pct / 100.0f;
+            ImGui::SliderFloat("Slide speed", &drawerRate_, 4.0f, 40.0f, "%.0f");
+            ImGui::TextDisabled("Ctrl+Space opens the Content Browser; Esc dismisses a drawer.");
+        }
+        if (ImGui::CollapsingHeader("Output Log", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Auto-scroll to the newest line", &logAutoScroll_);
+            ImGui::Combo("Level filter", &logLevelFilter_, "All\0Info+\0Warn+\0");
+        }
+        if (ImGui::CollapsingHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Show grid", &showGrid_);
+            ImGui::Checkbox("Wireframe", &wireframe_);
+            ImGui::SliderFloat("Fly speed", &flySpeed_, 1.0f, 200.0f, "%.0f");
+            ImGui::SliderFloat("Look sensitivity", &lookSpeed_, 0.001f, 0.02f, "%.4f");
+        }
+        ImGui::Separator();
+        ImGui::TextDisabled("Preferences apply immediately and last for this session.");
+        ImGui::TextDisabled("They are not written to disk yet - there is no editor config file.");
         ImGui::End();
     }
 
@@ -2143,6 +2647,7 @@ private:
     f32 vpX_=0, vpY_=0, vpW_=1600, vpH_=900;
     bool dockBuilt_=false;   // one-shot DockBuilder layout (nothing is persisted to an ini)
     bool showProjectSettings_=false; // Edit > Project Settings window
+    bool showEditorPrefs_=false;     // Edit > Editor Preferences window
     int  settingsPage_=1;            // 0 = Description, 1 = Rendering
     int  focusVoxi_=0;               // --project-settings: frames left to force the window open
     int  msaaOverride_=0;            // --msaa N: apply a sample count at startup
@@ -2172,7 +2677,13 @@ private:
     rhi::TextureHandle logoTexture_=0;
     rhi::TextureHandle fileIconsTexture_=0;     // the Content Browser file-type sprite sheet (4 tiles)
     u64 fileIconsUiId_=0;
-    std::unordered_map<std::string, int> fileIconCache_;   // path -> tile index, so a .cs is classified once
+    f32 fileIconAspect_=0.74f;                  // measured from the sheet; the literal is only the fallback
+    rhi::TextureHandle folderIconsTexture_=0;   // the folder sheet (2 tiles: plain, module)
+    u64 folderIconsUiId_=0;
+    f32 folderIconAspect_=1.24f;
+    // path -> (mtime, tile), so a .cs is classified once but RE-classified when it is edited: a file
+    // that gains an [AverClass] mid-session must stop showing the plain-class icon.
+    std::unordered_map<std::string, std::pair<std::filesystem::file_time_type, int>> fileIconCache_;
     // Throttled directory listings for the Content Browser, so a folder is not re-walked every frame.
     std::unordered_map<std::string, DirListing> dirCache_;
     int frameNo_ = 0;                                      // bumped once per UI frame; the cache freshness clock
@@ -2206,6 +2717,25 @@ private:
     // Content Browser: the folder whose files are listed, and the Import modal's source-path field.
     std::string         cbSelectedDir_;           // empty -> the content root
     char                importPath_[512] = {};
+    bool                cbGallery_ = true;        // tiles vs list; tiles is the default, as in UE
+    f32                 cbTileSize_ = 88.0f;      // gallery tile edge, in dp, driven by the zoom slider
+    std::string         cbSelectedFile_;          // the highlighted entry in the file view
+    char                cbFilter_[128] = {};      // the search box: filters the open folder by name
+    // Where the "Engine" root mounts from -- the engine's C# classes. Empty in a shipped build, which
+    // simply means the root is not offered.
+    std::string         cbEngineRoot_;
+    // The bottom drawers. Both panels start CLOSED -- "all the way down" -- and slide up on demand,
+    // from Ctrl+Space or the status-bar buttons, over the viewport rather than stealing a dock node
+    // from it. drawerAnim_ is the eased 0..1 slide so the panel does not snap into place, and
+    // drawerShown_ is what to KEEP DRAWING while it retracts, after drawer_ has already gone to None.
+    Drawer              drawer_ = Drawer::None;
+    Drawer              drawerShown_ = Drawer::Content;
+    f32                 drawerAnim_ = 0.0f;
+    f32                 drawerFrac_ = 0.42f;      // drawer height as a fraction of the work area
+    f32                 drawerRate_ = 14.0f;      // slide easing rate; higher is snappier
+    bool                cbDoubleClickEnter_ = true;   // double-click a folder to enter it (vs single)
+    bool                drawerRaise_ = false;     // focus it on the frame it opens, so it is on top
+    std::string         drawerStartSub_;          // --drawer content:<sub>, applied once at first draw
 #if AVER_MODULE_SCENE
     // ObjectId -> built-in primitive mesh, for the scene-render pass: a spawned actor names its mesh by
     // the fnv1a64 of a path, and this resolves it to a handle. Small and fixed for now (just the sphere).
@@ -2231,7 +2761,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -2250,6 +2780,13 @@ Application* createApplication(int argc, char** argv) {
             reloadAt = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 20;
         }
         else if (!std::strcmp(argv[i],"--start-screen")) startScreen=true;
+        // Screenshot aid in the --project-settings family: open a bottom drawer that a capture run
+        // has no way to toggle interactively. `content:<sub>` starts inside a Content subfolder.
+        else if (!std::strcmp(argv[i],"--drawer") && i+1<argc) {
+            const char* v = argv[++i];
+            drawerOpen = !std::strcmp(v,"log") ? 2 : 1;
+            if (const char* colon = std::strchr(v, ':')) drawerSub = colon + 1;
+        }
         else if (!std::strcmp(argv[i],"--msaa") && i+1<argc) msaa=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--gi")) gi=3;
         else if (!std::strcmp(argv[i],"--gi-debug")) { gi=3; giDbg=true; }
@@ -2301,6 +2838,7 @@ Application* createApplication(int argc, char** argv) {
     // at all. Opt-in, so no gate can reach it by accident.
     app->armBrowser(startScreen || (!headless && frames == 0 && project.empty()));
     app->setFocusVoxi(focusVoxi);
+    app->setDrawerOpen(drawerOpen, drawerSub);
     app->setFocusScript(focusScript);
     app->setFocusTools(focusTools);
     app->setFocusCompile(focusCompile);

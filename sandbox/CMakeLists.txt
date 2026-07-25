@@ -96,6 +96,18 @@ add_custom_target(Sandbox.FileIcons DEPENDS ${CMAKE_BINARY_DIR}/bin/file-icons.p
 add_dependencies(Sandbox Sandbox.FileIcons)
 set_target_properties(Sandbox.FileIcons PROPERTIES FOLDER "sandbox")
 
+# Ship the Content Browser folder icon sheet (two tiles: plain folder / engine-or-module folder).
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/bin/folder-icons.png
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/branding/folder-icons.png ${CMAKE_BINARY_DIR}/bin/folder-icons.png
+  DEPENDS ${CMAKE_SOURCE_DIR}/branding/folder-icons.png
+  COMMENT "Staging folder-icons.png"
+  VERBATIM)
+add_custom_target(Sandbox.FolderIcons DEPENDS ${CMAKE_BINARY_DIR}/bin/folder-icons.png)
+add_dependencies(Sandbox Sandbox.FolderIcons)
+set_target_properties(Sandbox.FolderIcons PROPERTIES FOLDER "sandbox")
+
 # Ship the editor UI typeface next to the executable. Same OUTPUT/DEPENDS rule as the splash, and
 # for the same reason -- POST_BUILD would not re-copy a font that changed without the exe relinking.
 set(AVER_UI_FONTS Roboto-Regular.ttf Roboto-Medium.ttf)

@@ -23,7 +23,12 @@ changes; do not hand-edit the derived files, they will be overwritten.
 | `logo.png` | 512×512 RGBA | The editor's start screen. `sandbox/CMakeLists.txt` copies it next to the exe; `SandboxApp` decodes it and uploads it through the RHI, and `ProjectBrowser` blits it in the header. Shown at 46dp, so the transparent margin is part of the composition — do not crop it tighter. |
 | `icon512.png` | 512×512 RGBA | Not referenced by code. |
 | `logo256.png` | 256×256 RGBA | Not referenced by code. |
-| `compile-status.png` | 480×160 RGBA, 3 tiles | The Compile C# toolbar button's status icon. **Human-made** (user-provided source, sliced — not AI-generated): the three states — built (green tick), failed (red no-entry), stale/compiling (yellow `?`) — auto-cropped from the user's single graphic, background flood-keyed to transparent, assembled left-to-right. `sandbox/CMakeLists.txt` stages it next to the exe; `SandboxApp::loadCompileIcon` uploads it and `ToolsMenu::drawCompileButton` blits tile 0/1/2 by UV onto the button face. To re-slice from a new source, see `scratchpad/slice_compile_icons.py`. |
+| `compile-status.png` | 768×256 RGBA, 3 tiles | The Compile C# toolbar button's status icon. **Human-made** (user-provided source, sliced — not AI-generated): the three states — built (green tick), failed (red no-entry), stale/compiling (yellow `?`) — auto-cropped from the user's single graphic, background flood-keyed to transparent, assembled left-to-right. `sandbox/CMakeLists.txt` stages it next to the exe; `SandboxApp::loadCompileIcon` uploads it and `ToolsMenu::drawCompileButton` blits tile 0/1/2 by UV onto the button face. Regenerate with `scripts/make-icon-sheet.ps1` (below). |
+| `compile-status.source.png` | 1920×1080 RGB | The author's original of the three states, kept so the sheet can be re-cut at another size without going back to the user. Not referenced by code. |
+| `compile-status.legacy.png` | 480×160 RGBA, 3 tiles | The **previous** status sheet, superseded July 2026 by the artwork above. Kept unreferenced, on request, in case the older look is wanted back — restoring it is a rename, no code change (the button slices by UV fraction, so tile size does not matter). |
+| `file-icons.png` | 1284×432 RGBA, 4 **portrait** tiles (321×432) | The Content Browser's file-type icons — C# Script / C# Class / C++ Class / C++ Module. **Human-made** (user-provided source, sliced). Landed in `5021bad`; the slicing process was not recorded, and it predates `make-icon-sheet.ps1` — which cannot reproduce it as shipped without `-TileW 321 -TileH 432`. `SandboxApp::loadIconSheet` uploads it and `drawEntryIcon` blits tiles by UV. |
+| `folder-icons.png` | 512×206 RGBA, 2 tiles | The Content Browser's folder icons — plain folder, and the "Module" folder used for engine content and C++ modules. **Human-made** (user-provided source, sliced). Cut from `folder-icons.source.png` with `make-icon-sheet.ps1` (below). |
+| `folder-icons.source.png` | 1920×1080 RGB | The author's original of the two folder states, stacked vertically. Not referenced by code. |
 
 The transparent marks are keyed by flood-filling from the corners, **not** by replacing the
 background colour globally: the cube's own outline is near-black and close enough to the #262626
@@ -67,3 +72,36 @@ human. Recorded here because "no AI-generated assets" would otherwise be mislead
 python scripts/brand.py
 ```
 Reads `branding/master-lockup.png`, writes every derived slot listed above.
+
+### Icon sheets
+
+`compile-status.png` and `folder-icons.png` are cut from a single supplied graphic by
+
+```powershell
+powershell -File scripts/make-icon-sheet.ps1 -In "<source.png>" -Out "branding/compile-status.png" -Tiles 3 -TileW 256 -TileH 256
+```
+
+```powershell
+powershell -File scripts/make-icon-sheet.ps1 -In "<source.png>" -Out "branding/folder-icons.png" -Tiles 2 -Layout Rows -TileW 256 -Align PerTile
+```
+
+It splits the source into `-Tiles` equal columns (or rows, with `-Layout Rows`), keys the flat
+background to transparent, crops to the artwork, and writes the tiles side by side — the output is
+always a horizontal strip, because that is what the renderers slice. Four details are deliberate:
+
+- **The background is flood-filled from the border**, not colour-replaced globally — the same lesson
+  recorded above. The stale badge's `?` is nearly the background's own colour, so a global replace
+  punches it straight out and the badge ships hollow.
+- **`-Align Shared`** (the default) uses one crop window for every tile, so the compile badge's three
+  states keep their true relative size and position and the button does not twitch as it changes.
+  **`-Align PerTile`** gives each icon a common window *size* centred on its own bounds — right for
+  the folders, which the artist did not align with each other in the source.
+- **Tile height is derived from the artwork** unless `-TileH` pins it, and the crop window is grown
+  to the output tile's aspect before padding, so a sheet is never itself the reason an icon looks
+  stretched. (`file-icons.png` is portrait 321×432 for exactly this reason — re-cut it with
+  `-TileW 321 -TileH 432`, never with square tiles.)
+- **The sample window is clamped to each tile's own source cell**, so artwork tall enough to need a
+  crop wider than its column cannot drag a sliver of the neighbouring icon in with it.
+
+`SandboxApp::loadIconSheet` measures each sheet's tile aspect from the decoded image rather than
+assuming one, so a re-cut at another shape renders correctly instead of silently stretched.
