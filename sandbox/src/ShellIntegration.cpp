@@ -91,8 +91,21 @@ bool moveToRecycleBin(const std::string& path) {
     op.wFunc  = FO_DELETE;
     op.pFrom  = from.data();
     // ALLOWUNDO is the whole point: it is what makes this the recycle bin rather than an unlink.
-    // NOCONFIRMATION suppresses the SHELL's prompt only — the editor has already asked.
-    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT | FOF_NOCONFIRMMKDIR;
+    // NOCONFIRMATION suppresses the SHELL's "are you sure" only — the editor has already asked.
+    //
+    // WANTNUKEWARNING is NOT optional, and its absence is a silent data-loss bug rather than a
+    // missing nicety. NOCONFIRMATION answers "Yes to All" to EVERY dialog, including the shell's
+    // "this cannot be recycled -- delete it permanently?". Without the override, an item the bin
+    // cannot take -- bigger than the volume's quota, a volume with the bin turned off, a network
+    // share or a removable drive -- is quietly unlinked and SHFileOperationW still returns 0, so the
+    // caller cheerfully reports that it went somewhere recoverable. WANTNUKEWARNING exists precisely
+    // to partially override NOCONFIRMATION for that one prompt, so the escalation from "recoverable"
+    // to "gone" is never silent and is always the user's decision.
+    //
+    // A local disk with a normal recycle bin is the one configuration where this gap cannot show,
+    // which is exactly why testing there was not enough to catch it.
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING |
+                FOF_NOERRORUI | FOF_SILENT | FOF_NOCONFIRMMKDIR;
 
     const int rc = SHFileOperationW(&op);
     if (rc != 0 || op.fAnyOperationsAborted) {

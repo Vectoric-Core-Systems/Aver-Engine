@@ -1783,7 +1783,42 @@ private:
         // no longer resolves and leaving it selected shows an empty view.
         if (cbSelectedDir_ == from)  { cbSelectedDir_ = dst.string(); }
         if (cbSelectedFile_ == from) { cbSelectedFile_ = dst.string(); }
+        cbRewriteHistory(from, dst.string());
         cbStatus_ = "Renamed to " + newName;
+    }
+
+    // Keep Back/Forward honest after a folder is renamed or deleted.
+    //
+    // The history holds PATHS, so a rename leaves entries naming somewhere that no longer exists and
+    // Back walks you to a phantom folder -- breadcrumb drawn, tree highlighting nothing, "(this folder
+    // is empty)" and no error, because an unreadable directory and an empty one look identical here.
+    // `to` empty means the path is gone: drop those entries instead of rewriting them.
+    //
+    // Subfolders are rewritten too: renaming a folder moves everything beneath it.
+    void cbRewriteHistory(const std::string& from, const std::string& to) {
+        std::vector<std::string> kept;
+        kept.reserve(cbHistory_.size());
+        const std::string current = cbHistoryPos_ >= 0 && cbHistoryPos_ < static_cast<int>(cbHistory_.size())
+                                  ? cbHistory_[static_cast<usize>(cbHistoryPos_)] : std::string();
+        std::string newCurrent = current;
+        for (const std::string& h : cbHistory_) {
+            const bool under = h.size() >= from.size() && h.compare(0, from.size(), from) == 0 &&
+                               (h.size() == from.size() || h[from.size()] == '\\' || h[from.size()] == '/');
+            std::string next = h;
+            if (under) {
+                if (to.empty()) { if (h == current) newCurrent.clear(); continue; }   // gone
+                next = to + h.substr(from.size());
+            }
+            if (h == current) newCurrent = next;
+            // Collapse the duplicate a rewrite can create when two entries fold onto one path.
+            if (kept.empty() || kept.back() != next) kept.push_back(next);
+        }
+        cbHistory_.swap(kept);
+        // Re-point the cursor at what the user was actually looking at.
+        cbHistoryPos_ = -1;
+        for (usize i = 0; i < cbHistory_.size(); ++i)
+            if (cbHistory_[i] == newCurrent) { cbHistoryPos_ = static_cast<int>(i); break; }
+        if (cbHistoryPos_ < 0 && !cbHistory_.empty()) cbHistoryPos_ = static_cast<int>(cbHistory_.size()) - 1;
     }
 
     void cbDuplicateEntry(const std::string& path) {
@@ -1811,13 +1846,19 @@ private:
         if (!editor::moveToRecycleBin(path)) { cbStatus_ = "Could not delete " + src.filename().string(); return; }
         cbInvalidate(parent);
         if (cbSelectedFile_ == path) cbSelectedFile_.clear();
-        // Deleting the folder you are standing in has to move you somewhere that still exists.
+        // Deleting the folder you are standing in has to move you somewhere that still exists...
         if (cbSelectedDir_ == path) cbSelectedDir_ = parent;
+        // ...and so does everywhere Back could take you.
+        cbRewriteHistory(path, std::string());
         cbStatus_ = "Moved " + src.filename().string() + " to the recycle bin";
     }
 
     void cbCreateFolder(const std::string& parent, const std::string& name) {
         if (name.empty()) return;
+        // Enforced HERE as well as at the menu items, because a guard that lives only at call sites is
+        // one forgotten call site away from being absent -- which is exactly how the + Add menu ended
+        // up able to write into the engine's own source tree.
+        if (!cbIsEditable(parent)) { cbStatus_ = "Engine content is read-only"; return; }
         std::error_code ec;
         const std::filesystem::path dst = std::filesystem::path(parent) / name;
         if (std::filesystem::exists(dst, ec)) { cbStatus_ = "'" + name + "' already exists"; return; }
@@ -1856,7 +1897,12 @@ private:
             cbContextPath_ = full; cbContextIsDir_ = isDir; cbWantRename_ = true;
             std::snprintf(cbRenameBuf_, sizeof cbRenameBuf_, "%s", name.c_str());
         }
-        if (ImGui::MenuItem("Duplicate", "Ctrl+D")) cbDuplicateEntry(full);
+        // DEFERRED, like rename and delete, and for a harder reason than tidiness: this menu is
+        // submitted from INSIDE the file view's clipper loop, which is iterating raw DirEntry pointers
+        // into dirCache_. Duplicating invalidates that cache entry, destroying the vector and every
+        // string in it, and the loop then reads the freed memory on the very next line. Running it
+        // after the view has finished is what makes the pointers outlive the frame that uses them.
+        if (ImGui::MenuItem("Duplicate", "Ctrl+D")) { cbContextPath_ = full; cbContextIsDir_ = isDir; cbWantDuplicate_ = true; }
         if (ImGui::MenuItem("Delete", "Del")) { cbContextPath_ = full; cbContextIsDir_ = isDir; cbWantDelete_ = true; }
         ImGui::EndDisabled();
         if (!editable) ImGui::TextDisabled("Engine content is read-only here.");
@@ -1914,7 +1960,12 @@ private:
 
         if (ImGui::Button("+ Add")) ImGui::OpenPopup("cbAddMenu");
         if (ImGui::BeginPopup("cbAddMenu")) {
+            // Same read-only guard the BACKGROUND menu has. Engine content is shared source; a New
+            // Folder or an Import into it is never what someone meant, and having the guard on only
+            // one of the two routes to the same operation is the same as not having it.
+            ImGui::BeginDisabled(!cbIsEditable(cbSelectedDir_));
             if (ImGui::MenuItem("New Folder")) { cbWantNewFolder_ = true; cbNewFolderBuf_[0] = '\0'; }
+            ImGui::EndDisabled();
             ImGui::Separator();
             if (ImGui::MenuItem("New C# Script...")) tools_.openNewCsScript();
             if (ImGui::MenuItem("New C# Class..."))  tools_.openNewCsClass();
@@ -1924,7 +1975,9 @@ private:
             ImGui::EndPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Import...")) ImGui::OpenPopup("cbImport");
+        ImGui::BeginDisabled(!cbIsEditable(cbSelectedDir_));
+        if (ImGui::Button("Import...")) cbWantImport_ = true;
+        ImGui::EndDisabled();
         drawImportModal();
 
         // View controls, right-aligned: a two-state segmented control, and the tile zoom when tiles are
@@ -1985,7 +2038,7 @@ private:
             const bool editable = cbIsEditable(cbSelectedDir_);
             ImGui::BeginDisabled(!editable);
             if (ImGui::MenuItem("New Folder")) { cbWantNewFolder_ = true; cbNewFolderBuf_[0] = '\0'; }
-            if (ImGui::MenuItem("Import...")) ImGui::OpenPopup("cbImport");
+            if (ImGui::MenuItem("Import...")) cbWantImport_ = true;
             ImGui::EndDisabled();
             ImGui::Separator();
             if (ImGui::MenuItem("Show in Explorer")) editor::revealInFileManager(cbSelectedDir_);
@@ -2017,12 +2070,23 @@ private:
     }
 
     // F2 / Delete / Enter / Ctrl+D on the selection, the accelerators the context menu advertises.
-    // Gated on the browser actually having focus so they cannot fire from the viewport, and on
-    // WantTextInput so typing a filename into the rename box does not delete it.
+    //
+    // The gate is deliberately three things, because a focus-plus-text-input gate is not enough:
+    //
+    //  * A MODAL of this panel's own still counts as "the browser is focused" -- IsWindowFocused with
+    //    RootAndChildWindows walks the popup hierarchy, and the modal's parent in the begin stack is
+    //    the drawer. So without the popup test, pressing Del while the DELETE CONFIRMATION is open
+    //    re-arms the dialog against whatever is merely SELECTED, silently retargeting the pending
+    //    delete at a different file -- and right-clicking does not change the selection, so the two
+    //    differ exactly when a user is most likely to reach for the key.
+    //  * WantCaptureKeyboard, not just WantTextInput: a modal without a text field sets the former
+    //    and not the latter. The drawer's own Ctrl+Space handler already learned this.
+    //  * Without both, Ctrl+D executed a filesystem write while a blocking confirmation was on screen.
     void cbShortcuts() {
         if (!ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) return;
+        if (ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) return;
         const ImGuiIO& io = ImGui::GetIO();
-        if (io.WantTextInput || cbSelectedFile_.empty()) return;
+        if (io.WantTextInput || io.WantCaptureKeyboard || cbSelectedFile_.empty()) return;
         std::error_code ec;
         const bool isDir = std::filesystem::is_directory(cbSelectedFile_, ec);
         const bool editable = cbIsEditable(cbSelectedFile_);
@@ -2035,16 +2099,28 @@ private:
         if (editable && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
             cbContextPath_ = cbSelectedFile_; cbContextIsDir_ = isDir; cbWantDelete_ = true;
         }
-        if (editable && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false)) cbDuplicateEntry(cbSelectedFile_);
+        if (editable && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false)) {
+            cbContextPath_ = cbSelectedFile_; cbContextIsDir_ = isDir; cbWantDuplicate_ = true;
+        }
     }
 
     // Rename / delete / new-folder, opened from the deferred flags. They live at the PANEL level
     // rather than inside the file view because an ImGui popup id belongs to the window that opens it,
     // and the request comes from a child.
     void cbFileOpModals() {
+        // Duplicate needs no dialog, but it DOES need to happen here rather than where it was asked
+        // for: the request comes from a context menu submitted inside the file view's clipper loop,
+        // which is iterating pointers into the very cache entry this invalidates.
+        if (cbWantDuplicate_) { cbWantDuplicate_ = false; cbDuplicateEntry(cbContextPath_); }
+
         if (cbWantRename_)    { ImGui::OpenPopup("cbRename");    cbWantRename_ = false; }
         if (cbWantDelete_)    { ImGui::OpenPopup("cbDelete");    cbWantDelete_ = false; }
         if (cbWantNewFolder_) { ImGui::OpenPopup("cbNewFolder"); cbWantNewFolder_ = false; }
+        // Import is opened here for the ID-scoping reason the others are: an ImGui popup id belongs to
+        // the window that opens it, so OpenPopup called from inside the background context menu could
+        // never match the BeginPopup that drawImportModal does at panel level -- the menu item simply
+        // did nothing, silently.
+        if (cbWantImport_)    { ImGui::OpenPopup("cbImport");    cbWantImport_ = false; }
 
         if (ImGui::BeginPopupModal("cbRename", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::TextDisabled("Rename %s", cbContextIsDir_ ? "folder" : "file");
@@ -2432,6 +2508,12 @@ private:
 
     void importAsset(const std::string& src, const std::string& destDir) {
         std::error_code ec;
+        // The engine's source tree is not an import target, whichever button got you here.
+        if (!cbIsEditable(destDir)) {
+            AVER_WARN("[Import] '{}' is engine content and is read-only", destDir);
+            cbStatus_ = "Engine content is read-only";
+            return;
+        }
         if (!std::filesystem::exists(src, ec)) { AVER_WARN("[Import] source not found: {}", src); return; }
         const std::string name = std::filesystem::path(src).filename().string();
         const std::string dest = destDir + "\\" + name;
@@ -3123,6 +3205,7 @@ private:
     // level: an ImGui popup id is scoped to the window that opens it, so opening from the child and
     // drawing from the parent would never match.
     bool                cbWantRename_ = false, cbWantDelete_ = false, cbWantNewFolder_ = false;
+    bool                cbWantDuplicate_ = false, cbWantImport_ = false;
     char                cbRenameBuf_[256] = {};
     char                cbNewFolderBuf_[128] = {};
     std::string         cbStatus_;                // last operation's outcome, shown in the footer
