@@ -13,6 +13,8 @@
 #include "ProjectBrowser.hpp"
 #include "ToolsMenu.hpp"
 #include "EngineScaffold.hpp"   // engineRoot(): where the Content Browser's "Engine" root is mounted from
+#include "IdeIntegration.hpp"   // detectedIdes()/openInIde: double-clicking a source file opens it
+#include "ShellIntegration.hpp" // reveal / shell-open / recycle, for the browser's context menu
 
 #if AVER_MODULE_VOXI
 #include "aver/voxi/Voxi.hpp"          // optional render-feature module (AA / GI / RT / PT settings)
@@ -1645,6 +1647,176 @@ private:
         return r;
     }
 
+    // ---- Content Browser navigation ------------------------------------------------------------
+    // Every folder change goes through here so Back/Forward stay honest. Selecting the folder you are
+    // already in is not a navigation and must not push a duplicate entry, or Back becomes a no-op that
+    // has to be pressed twice.
+    void cbNavigate(const std::string& dir) {
+        if (dir.empty() || dir == cbSelectedDir_) return;
+        // Going back and then somewhere new FORKS the history: the forward entries described a future
+        // that no longer happened, and keeping them would let Forward jump somewhere never visited.
+        if (cbHistoryPos_ >= 0 && cbHistoryPos_ + 1 < static_cast<int>(cbHistory_.size()))
+            cbHistory_.resize(static_cast<usize>(cbHistoryPos_) + 1);
+        cbHistory_.push_back(dir);
+        cbHistoryPos_ = static_cast<int>(cbHistory_.size()) - 1;
+        cbSelectedDir_ = dir;
+        cbSelectedFile_.clear();
+        cbFilter_[0] = '\0';   // a search is about the folder you ran it in, not the next one
+    }
+
+    bool cbCanBack()    const { return cbHistoryPos_ > 0; }
+    bool cbCanForward() const { return cbHistoryPos_ >= 0 &&
+                                       cbHistoryPos_ + 1 < static_cast<int>(cbHistory_.size()); }
+    // Back/Forward move the cursor WITHOUT touching the list, which is what makes them reversible.
+    void cbBack()    { if (cbCanBack())    { cbSelectedDir_ = cbHistory_[static_cast<usize>(--cbHistoryPos_)]; cbSelectedFile_.clear(); } }
+    void cbForward() { if (cbCanForward()) { cbSelectedDir_ = cbHistory_[static_cast<usize>(++cbHistoryPos_)]; cbSelectedFile_.clear(); } }
+
+    // The parent, but never above a mounted root -- "up" out of Content into the raw filesystem would
+    // leave the browser showing a folder the tree cannot represent.
+    std::string cbParentDir() const {
+        for (const CbRoot& r : cbRoots())
+            if (cbSelectedDir_ == r.path) return {};        // already at a root
+        std::error_code ec;
+        std::filesystem::path p = std::filesystem::path(cbSelectedDir_).parent_path();
+        if (p.empty()) return {};
+        const std::string up = p.string();
+        for (const CbRoot& r : cbRoots())
+            if (up.size() >= r.path.size() && up.compare(0, r.path.size(), r.path) == 0) return up;
+        return {};
+    }
+
+    // Which extensions an IDE should claim on a double-click. Everything else goes to the shell, so a
+    // .png opens in an image viewer rather than as bytes in a code editor.
+    static bool cbIsSourceFile(const std::string& ext) {
+        static const char* kSource[] = {
+            ".cs", ".cpp", ".cxx", ".cc", ".c", ".hpp", ".hxx", ".h", ".inl",
+            ".hlsl", ".hlsli", ".glsl", ".json", ".xml", ".csproj", ".txt", ".md", ".ini", ".cmake"};
+        for (const char* s : kSource) if (ext == s) return true;
+        return false;
+    }
+
+    const editor::IdeInfo& cbIde() const {
+        const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
+        if (cbIdeChoice_ >= 0 && cbIdeChoice_ < static_cast<int>(ides.size())) return ides[static_cast<usize>(cbIdeChoice_)];
+        return editor::preferredIde();
+    }
+
+    // What a double-click (or Enter) does: enter a folder, open source in the chosen IDE, hand
+    // anything else to the shell.
+    void cbOpenEntry(const std::string& full, bool isDir) {
+        if (isDir) { cbNavigate(full); return; }
+        const std::string ext = lowerExt(std::filesystem::path(full));
+        if (cbIsSourceFile(ext)) {
+            const editor::IdeInfo& ide = cbIde();
+            if (editor::openInIde(ide, full)) { cbStatus_ = "Opened in " + ide.name; return; }
+            cbStatus_ = "Could not open in " + ide.name;
+            return;
+        }
+        cbStatus_ = editor::openWithShell(full) ? "Opened" : "Nothing is registered to open that";
+    }
+
+    // Drop a folder's cached listing so an edit shows at once. Without this the 20-frame throttle
+    // means a rename appears to do nothing for a third of a second, which reads as a failure.
+    void cbInvalidate(const std::string& dir) { dirCache_.erase(dir); }
+
+    // Engine content is READ-ONLY through the browser. It is the engine's own source, shared by every
+    // project on the machine: renaming AverActor.cs from a game's content browser is never what
+    // someone meant to do, and there is no undo for it.
+    bool cbIsEditable(const std::string& path) const { return !isEnginePath(path); }
+
+    void cbRenameEntry(const std::string& from, const std::string& newName) {
+        if (newName.empty()) return;
+        std::error_code ec;
+        const std::filesystem::path src(from);
+        const std::filesystem::path dst = src.parent_path() / newName;
+        if (std::filesystem::exists(dst, ec)) { cbStatus_ = "'" + newName + "' already exists"; return; }
+        std::filesystem::rename(src, dst, ec);
+        if (ec) { cbStatus_ = "Rename failed: " + ec.message(); return; }
+        cbInvalidate(src.parent_path().string());
+        // Follow the rename: if the renamed thing was the open folder or the selection, the old path
+        // no longer resolves and leaving it selected shows an empty view.
+        if (cbSelectedDir_ == from)  { cbSelectedDir_ = dst.string(); }
+        if (cbSelectedFile_ == from) { cbSelectedFile_ = dst.string(); }
+        cbStatus_ = "Renamed to " + newName;
+    }
+
+    void cbDuplicateEntry(const std::string& path) {
+        std::error_code ec;
+        const std::filesystem::path src(path);
+        const std::string stem = src.stem().string(), ext = src.extension().string();
+        // Find a free "<name>2", "<name>3"... rather than overwriting anything.
+        std::filesystem::path dst;
+        for (int n = 2; n < 1000; ++n) {
+            dst = src.parent_path() / (stem + std::to_string(n) + ext);
+            if (!std::filesystem::exists(dst, ec)) break;
+        }
+        if (std::filesystem::is_directory(src, ec))
+            std::filesystem::copy(src, dst, std::filesystem::copy_options::recursive, ec);
+        else
+            std::filesystem::copy_file(src, dst, ec);
+        if (ec) { cbStatus_ = "Duplicate failed: " + ec.message(); return; }
+        cbInvalidate(src.parent_path().string());
+        cbStatus_ = "Duplicated as " + dst.filename().string();
+    }
+
+    void cbDeleteEntry(const std::string& path) {
+        const std::filesystem::path src(path);
+        const std::string parent = src.parent_path().string();
+        if (!editor::moveToRecycleBin(path)) { cbStatus_ = "Could not delete " + src.filename().string(); return; }
+        cbInvalidate(parent);
+        if (cbSelectedFile_ == path) cbSelectedFile_.clear();
+        // Deleting the folder you are standing in has to move you somewhere that still exists.
+        if (cbSelectedDir_ == path) cbSelectedDir_ = parent;
+        cbStatus_ = "Moved " + src.filename().string() + " to the recycle bin";
+    }
+
+    void cbCreateFolder(const std::string& parent, const std::string& name) {
+        if (name.empty()) return;
+        std::error_code ec;
+        const std::filesystem::path dst = std::filesystem::path(parent) / name;
+        if (std::filesystem::exists(dst, ec)) { cbStatus_ = "'" + name + "' already exists"; return; }
+        std::filesystem::create_directory(dst, ec);
+        if (ec) { cbStatus_ = "Could not create folder: " + ec.message(); return; }
+        cbInvalidate(parent);
+        cbStatus_ = "Created " + name;
+    }
+
+    // The right-click menu for one entry. Mirrors the verbs Unreal's browser offers, minus the ones
+    // that need an asset database (Reference Viewer, Migrate) rather than a filesystem.
+    void cbItemContextMenu(const std::string& full, const std::string& name, bool isDir) {
+        if (!ImGui::BeginPopupContextItem("##cbitemctx")) return;
+        const bool editable = cbIsEditable(full);
+        ImGui::TextDisabled("%s", name.c_str());
+        ImGui::Separator();
+        if (ImGui::MenuItem(isDir ? "Open" : "Open in editor", "Double-click")) cbOpenEntry(full, isDir);
+        if (!isDir) {
+            // "Open With" names each IDE, so the click says what will actually happen rather than
+            // trusting the user to know what the default resolved to.
+            if (ImGui::BeginMenu("Open With")) {
+                for (usize i = 0; i < editor::detectedIdes().size(); ++i) {
+                    const editor::IdeInfo& ide = editor::detectedIdes()[i];
+                    if (ImGui::MenuItem(ide.name.c_str()))
+                        cbStatus_ = editor::openInIde(ide, full) ? "Opened in " + ide.name
+                                                                : "Could not open in " + ide.name;
+                }
+                ImGui::EndMenu();
+            }
+        }
+        if (ImGui::MenuItem("Show in Explorer")) editor::revealInFileManager(full);
+        if (ImGui::MenuItem("Copy Path")) { ImGui::SetClipboardText(full.c_str()); cbStatus_ = "Path copied"; }
+        ImGui::Separator();
+        ImGui::BeginDisabled(!editable);
+        if (ImGui::MenuItem("Rename", "F2")) {
+            cbContextPath_ = full; cbContextIsDir_ = isDir; cbWantRename_ = true;
+            std::snprintf(cbRenameBuf_, sizeof cbRenameBuf_, "%s", name.c_str());
+        }
+        if (ImGui::MenuItem("Duplicate", "Ctrl+D")) cbDuplicateEntry(full);
+        if (ImGui::MenuItem("Delete", "Del")) { cbContextPath_ = full; cbContextIsDir_ = isDir; cbWantDelete_ = true; }
+        ImGui::EndDisabled();
+        if (!editable) ImGui::TextDisabled("Engine content is read-only here.");
+        ImGui::EndPopup();
+    }
+
     // True for a path inside the Engine root -- what earns the Module folder icon.
     bool isEnginePath(const std::string& p) const {
         return !cbEngineRoot_.empty() && p.size() >= cbEngineRoot_.size() &&
@@ -1663,7 +1835,7 @@ private:
         // Land on the project's own Content folder rather than nowhere, so the browser opens showing
         // the thing the user is working on. Resolved on the first drawn frame, not at parse time:
         // contentDir() does not exist until a project has been applied.
-        if (cbSelectedDir_.empty()) cbSelectedDir_ = roots.front().path;
+        if (cbSelectedDir_.empty()) cbNavigate(roots.front().path);
         if (!drawerStartSub_.empty()) {
             // Resolve through the filesystem so separators and case match the strings the tree builds
             // from directory_iterator -- a raw join leaves "Content\Scripts/AI", which enumerates fine
@@ -1672,11 +1844,32 @@ private:
             std::error_code ec;
             const fs::path target = fs::canonical(fs::path(roots.front().path) / drawerStartSub_, ec);
             if (ec) AVER_WARN("[Sandbox] --drawer content:{}: no such folder under Content", drawerStartSub_);
-            else    cbSelectedDir_ = target.string();
+            else    cbNavigate(target.string());
             drawerStartSub_.clear();
         }
+        // Back / Forward / Up, in the order and place every file manager puts them.
+        ImGui::BeginDisabled(!cbCanBack());
+        if (ImGui::ArrowButton("##cbback", ImGuiDir_Left)) cbBack();
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Back");
+        ImGui::SameLine(0.0f, 2.0f*dpi_);
+        ImGui::BeginDisabled(!cbCanForward());
+        if (ImGui::ArrowButton("##cbfwd", ImGuiDir_Right)) cbForward();
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Forward");
+        ImGui::SameLine(0.0f, 2.0f*dpi_);
+        const std::string parent = cbParentDir();
+        ImGui::BeginDisabled(parent.empty());
+        if (ImGui::ArrowButton("##cbup", ImGuiDir_Up)) cbNavigate(parent);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(parent.empty() ? "Already at the root" : "Up one folder");
+        ImGui::SameLine();
+
         if (ImGui::Button("+ Add")) ImGui::OpenPopup("cbAddMenu");
         if (ImGui::BeginPopup("cbAddMenu")) {
+            if (ImGui::MenuItem("New Folder")) { cbWantNewFolder_ = true; cbNewFolderBuf_[0] = '\0'; }
+            ImGui::Separator();
             if (ImGui::MenuItem("New C# Script...")) tools_.openNewCsScript();
             if (ImGui::MenuItem("New C# Class..."))  tools_.openNewCsClass();
             ImGui::Separator();
@@ -1720,23 +1913,145 @@ private:
         }
         ImGui::Separator();
 
-        ImGui::BeginChild("cbTree", ImVec2(220.0f * dpi_, 0), true);
+        // Leave room for the footer, which reports the count and the last operation's outcome -- a
+        // file operation that says nothing is indistinguishable from one that silently failed.
+        const f32 footerH = ImGui::GetTextLineHeightWithSpacing() + 6.0f*dpi_;
+        ImGui::BeginChild("cbTree", ImVec2(220.0f * dpi_, -footerH), true);
         for (const CbRoot& r : roots) {
             ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_SpanAvailWidth;
             if (!r.engine) rootFlags |= ImGuiTreeNodeFlags_DefaultOpen;   // the project's own opens; the engine's stays furled
             if (cbSelectedDir_ == r.path) rootFlags |= ImGuiTreeNodeFlags_Selected;
             ImGui::PushID(r.label);
             const bool open = ImGui::TreeNodeEx(r.label, rootFlags);
-            if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) cbSelectedDir_ = r.path;
+            if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) cbNavigate(r.path);
             if (open) { drawFolderTree(r.path); ImGui::TreePop(); }
             ImGui::PopID();
         }
         ImGui::EndChild();
 
         ImGui::SameLine();
-        ImGui::BeginChild("cbFiles", ImVec2(0, 0), true);
+        ImGui::BeginChild("cbFiles", ImVec2(0, -footerH), true);
         drawFolderFiles(cbSelectedDir_);
+        // Right-click on empty space gets the FOLDER's verbs, not an entry's. NoOpenOverItems keeps it
+        // from stealing the right-click an entry already handles.
+        if (ImGui::BeginPopupContextWindow("##cbbgctx",
+                ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
+            const bool editable = cbIsEditable(cbSelectedDir_);
+            ImGui::BeginDisabled(!editable);
+            if (ImGui::MenuItem("New Folder")) { cbWantNewFolder_ = true; cbNewFolderBuf_[0] = '\0'; }
+            if (ImGui::MenuItem("Import...")) ImGui::OpenPopup("cbImport");
+            ImGui::EndDisabled();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Show in Explorer")) editor::revealInFileManager(cbSelectedDir_);
+            if (ImGui::MenuItem("Copy Path")) { ImGui::SetClipboardText(cbSelectedDir_.c_str()); cbStatus_ = "Path copied"; }
+            if (ImGui::MenuItem("Refresh")) cbInvalidate(cbSelectedDir_);
+            ImGui::EndPopup();
+        }
         ImGui::EndChild();
+
+        cbFooter();
+        cbShortcuts();
+        cbFileOpModals();
+    }
+
+    // Count what is on screen, name what is selected, and report the last operation.
+    void cbFooter() {
+        const DirListing& l = dirListing(cbSelectedDir_);
+        const usize files = l.entries.size() - l.dirCount;
+        ImGui::Text("%zu folder%s, %zu file%s", l.dirCount, l.dirCount == 1 ? "" : "s",
+                    files, files == 1 ? "" : "s");
+        if (!cbSelectedFile_.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("|  %s", std::filesystem::path(cbSelectedFile_).filename().string().c_str());
+        }
+        if (!cbStatus_.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("|  %s", cbStatus_.c_str());
+        }
+    }
+
+    // F2 / Delete / Enter / Ctrl+D on the selection, the accelerators the context menu advertises.
+    // Gated on the browser actually having focus so they cannot fire from the viewport, and on
+    // WantTextInput so typing a filename into the rename box does not delete it.
+    void cbShortcuts() {
+        if (!ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) return;
+        const ImGuiIO& io = ImGui::GetIO();
+        if (io.WantTextInput || cbSelectedFile_.empty()) return;
+        std::error_code ec;
+        const bool isDir = std::filesystem::is_directory(cbSelectedFile_, ec);
+        const bool editable = cbIsEditable(cbSelectedFile_);
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false)) cbOpenEntry(cbSelectedFile_, isDir);
+        if (editable && ImGui::IsKeyPressed(ImGuiKey_F2, false)) {
+            cbContextPath_ = cbSelectedFile_; cbContextIsDir_ = isDir; cbWantRename_ = true;
+            std::snprintf(cbRenameBuf_, sizeof cbRenameBuf_, "%s",
+                          std::filesystem::path(cbSelectedFile_).filename().string().c_str());
+        }
+        if (editable && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
+            cbContextPath_ = cbSelectedFile_; cbContextIsDir_ = isDir; cbWantDelete_ = true;
+        }
+        if (editable && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false)) cbDuplicateEntry(cbSelectedFile_);
+    }
+
+    // Rename / delete / new-folder, opened from the deferred flags. They live at the PANEL level
+    // rather than inside the file view because an ImGui popup id belongs to the window that opens it,
+    // and the request comes from a child.
+    void cbFileOpModals() {
+        if (cbWantRename_)    { ImGui::OpenPopup("cbRename");    cbWantRename_ = false; }
+        if (cbWantDelete_)    { ImGui::OpenPopup("cbDelete");    cbWantDelete_ = false; }
+        if (cbWantNewFolder_) { ImGui::OpenPopup("cbNewFolder"); cbWantNewFolder_ = false; }
+
+        if (ImGui::BeginPopupModal("cbRename", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextDisabled("Rename %s", cbContextIsDir_ ? "folder" : "file");
+            ImGui::SetNextItemWidth(360.0f*dpi_);
+            // Focus the field on the frame the modal appears, so a rename is type-then-Enter with no
+            // click in between -- which is what F2 means everywhere else.
+            if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+            const bool submit = ImGui::InputText("##cbrenametxt", cbRenameBuf_, sizeof cbRenameBuf_,
+                                                 ImGuiInputTextFlags_EnterReturnsTrue);
+            const bool valid = cbRenameBuf_[0] != '\0' && !std::strpbrk(cbRenameBuf_, "\\/:*?\"<>|");
+            if (!valid && cbRenameBuf_[0] != '\0') ImGui::TextColored(ImVec4(0.95f,0.5f,0.45f,1), "That name is not a legal filename.");
+            ImGui::BeginDisabled(!valid);
+            if (ImGui::Button("Rename") || (submit && valid)) {
+                cbRenameEntry(cbContextPath_, cbRenameBuf_);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        if (ImGui::BeginPopupModal("cbDelete", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted(cbContextIsDir_
+                ? "Delete this folder and everything in it?"
+                : "Delete this file?");
+            ImGui::TextDisabled("%s", cbContextPath_.c_str());
+            // Say where it goes. "Delete" that means "recoverable" is worth stating, because the user's
+            // decision is different if it does not.
+            ImGui::TextDisabled("It goes to the recycle bin, so it can be restored.");
+            if (ImGui::Button("Delete")) { cbDeleteEntry(cbContextPath_); ImGui::CloseCurrentPopup(); }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        if (ImGui::BeginPopupModal("cbNewFolder", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextDisabled("New folder in %s", cbSelectedDir_.c_str());
+            ImGui::SetNextItemWidth(360.0f*dpi_);
+            if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+            const bool submit = ImGui::InputText("##cbnewfoldertxt", cbNewFolderBuf_, sizeof cbNewFolderBuf_,
+                                                 ImGuiInputTextFlags_EnterReturnsTrue);
+            const bool valid = cbNewFolderBuf_[0] != '\0' && !std::strpbrk(cbNewFolderBuf_, "\\/:*?\"<>|");
+            ImGui::BeginDisabled(!valid);
+            if (ImGui::Button("Create") || (submit && valid)) {
+                cbCreateFolder(cbSelectedDir_, cbNewFolderBuf_);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
     }
 
     // The breadcrumb: the selected folder as clickable ancestors, so going back up is one click rather
@@ -1751,7 +2066,7 @@ private:
 
         std::string acc = owner->path;
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f*dpi_, 1.0f*dpi_));
-        if (ImGui::SmallButton(owner->label)) cbSelectedDir_ = acc;
+        if (ImGui::SmallButton(owner->label)) cbNavigate(acc);
         // The tail after the root, split on either separator -- a path may carry both.
         std::string tail = dir.substr(owner->path.size());
         usize i = 0;
@@ -1764,7 +2079,7 @@ private:
             acc += "\\" + seg;
             ImGui::SameLine(0.0f, 2.0f*dpi_); ImGui::TextDisabled(">"); ImGui::SameLine(0.0f, 2.0f*dpi_);
             ImGui::PushID(static_cast<int>(start));
-            if (ImGui::SmallButton(seg.c_str())) cbSelectedDir_ = acc;
+            if (ImGui::SmallButton(seg.c_str())) cbNavigate(acc);
             ImGui::PopID();
         }
         ImGui::PopStyleVar();
@@ -1826,7 +2141,7 @@ private:
             ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
             if (cbSelectedDir_ == full) flags |= ImGuiTreeNodeFlags_Selected;
             const bool open = ImGui::TreeNodeEx(name.c_str(), flags);
-            if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) cbSelectedDir_ = full;
+            if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) cbNavigate(full);
             if (open) { drawFolderTree(full); ImGui::TreePop(); }
         }
     }
@@ -1977,10 +2292,13 @@ private:
                     if (ImGui::Selectable("##cell", cbSelectedFile_ == e.full,
                                           ImGuiSelectableFlags_AllowDoubleClick, ImVec2(cellW, cellH))) {
                         cbSelectedFile_ = e.full;
-                        if (e.isDir && (!cbDoubleClickEnter_ || ImGui::IsMouseDoubleClicked(0)))
-                            { cbSelectedDir_ = e.full; cbSelectedFile_.clear(); }
+                        // Double-click OPENS, whatever it is: a folder is entered, a source file goes
+                        // to the chosen IDE, anything else to the shell.
+                        if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !cbDoubleClickEnter_))
+                            cbOpenEntry(e.full, e.isDir);
                     }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.name.c_str());
+                    cbItemContextMenu(e.full, e.name, e.isDir);
                     drawEntryIcon(dl, ImVec2(o.x + cellW*0.5f, o.y + tile*0.5f), tile*0.52f, e.isDir, e.tile, e.module);
                     // Centre a name that fits on one line; let a longer one wrap from the left and clip
                     // at the cell, so a long class name degrades instead of running into its neighbour.
@@ -2034,9 +2352,10 @@ private:
                 if (ImGui::Selectable(e.name.c_str(), cbSelectedFile_ == e.full,
                                       ImGuiSelectableFlags_AllowDoubleClick)) {
                     cbSelectedFile_ = e.full;
-                    if (e.isDir && (!cbDoubleClickEnter_ || ImGui::IsMouseDoubleClicked(0)))
-                        { cbSelectedDir_ = e.full; cbSelectedFile_.clear(); }
+                    if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !cbDoubleClickEnter_))
+                        cbOpenEntry(e.full, e.isDir);
                 }
+                cbItemContextMenu(e.full, e.name, e.isDir);
                 ImGui::PopID();
             }
         }
@@ -2257,6 +2576,21 @@ private:
             ImGui::SliderFloat("Tile size", &cbTileSize_, 56.0f, 168.0f, "%.0f dp");
             ImGui::Checkbox("Double-click a folder to enter it", &cbDoubleClickEnter_);
             ImGui::TextDisabled("Single-click always selects; the tree navigates either way.");
+            // Which IDE a double-click on source opens. "Automatic" is first and is the default,
+            // because it is also the entry that works on a machine with no IDE installed.
+            const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
+            std::string label = cbIdeChoice_ < 0 || cbIdeChoice_ >= static_cast<int>(ides.size())
+                              ? "Automatic (" + editor::preferredIde().name + ")"
+                              : ides[static_cast<usize>(cbIdeChoice_)].name;
+            if (ImGui::BeginCombo("Open source in", label.c_str())) {
+                if (ImGui::Selectable("Automatic", cbIdeChoice_ < 0)) cbIdeChoice_ = -1;
+                for (usize i = 0; i < ides.size(); ++i)
+                    if (ImGui::Selectable(ides[i].name.c_str(), cbIdeChoice_ == static_cast<int>(i)))
+                        cbIdeChoice_ = static_cast<int>(i);
+                ImGui::EndCombo();
+            }
+            if (!editor::ideDetectionFinished())
+                ImGui::TextDisabled("Still scanning for installed IDEs...");
         }
         if (ImGui::CollapsingHeader("Drawers", ImGuiTreeNodeFlags_DefaultOpen)) {
             f32 pct = drawerFrac_ * 100.0f;
@@ -2724,6 +3058,24 @@ private:
     // Where the "Engine" root mounts from -- the engine's C# classes. Empty in a shipped build, which
     // simply means the root is not offered.
     std::string         cbEngineRoot_;
+    // Back/Forward history, as a file manager has it: every navigation appends, and going back then
+    // somewhere new forks rather than interleaving.
+    std::vector<std::string> cbHistory_;
+    int                 cbHistoryPos_ = -1;
+    // The right-click target. Held separately from the selection because a context menu acts on what
+    // was right-clicked, which is not necessarily what was selected.
+    std::string         cbContextPath_;
+    bool                cbContextIsDir_ = false;
+    // Deferred popup requests. Set from inside the file view's child window, acted on at the panel
+    // level: an ImGui popup id is scoped to the window that opens it, so opening from the child and
+    // drawing from the parent would never match.
+    bool                cbWantRename_ = false, cbWantDelete_ = false, cbWantNewFolder_ = false;
+    char                cbRenameBuf_[256] = {};
+    char                cbNewFolderBuf_[128] = {};
+    std::string         cbStatus_;                // last operation's outcome, shown in the footer
+    // Which detected IDE a double-click opens source in. -1 = whatever IdeIntegration prefers, which
+    // is the right default because it is also the one that exists on a machine with nothing installed.
+    int                 cbIdeChoice_ = -1;
     // The bottom drawers. Both panels start CLOSED -- "all the way down" -- and slide up on demand,
     // from Ctrl+Space or the status-bar buttons, over the viewport rather than stealing a dock node
     // from it. drawerAnim_ is the eased 0..1 slide so the panel does not snap into place, and
@@ -2731,7 +3083,10 @@ private:
     Drawer              drawer_ = Drawer::None;
     Drawer              drawerShown_ = Drawer::Content;
     f32                 drawerAnim_ = 0.0f;
-    f32                 drawerFrac_ = 0.42f;      // drawer height as a fraction of the work area
+    // Drawer height as a fraction of the work area. 0.48 rather than something smaller so the default
+    // gallery shows a full row INCLUDING its two label lines -- a first row whose captions are cut off
+    // reads as broken rather than as scrollable.
+    f32                 drawerFrac_ = 0.48f;
     f32                 drawerRate_ = 14.0f;      // slide easing rate; higher is snappier
     bool                cbDoubleClickEnter_ = true;   // double-click a folder to enter it (vs single)
     bool                drawerRaise_ = false;     // focus it on the frame it opens, so it is on top
