@@ -39,6 +39,12 @@
 #endif
 
 #if AVER_MODULE_SCENE
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>                  // cursor capture while a game has the mouse
+#endif
 #include "aver/scene/scene_abi.h"     // aver_scene_material: interning the names the surface palette keys on
 #include "aver/scene/World.hpp"       // the one world a spawned actor lives in — walked by the render pass
 #include "aver/scene/Components.hpp"  // CMeshRenderer / CWorld layout, read directly through the pools
@@ -471,6 +477,7 @@ public:
 
     void onInit(Engine& e) override {
         AVER_INFO("[Sandbox] backend={} adapter='{}'", rhi::backendName(e.device()->backend()), e.device()->adapterName());
+        window_ = e.window();   // for the HWND the mouse capture needs
 
         // Always read the recent list, even when the start screen will not be shown: opening a
         // project records it, and recording into a list that was never loaded would truncate the
@@ -742,6 +749,24 @@ public:
         // per group per frame, in order — the framework makes exactly one managed tick_all(group) per
         // call, and the bridge walks its own dense list behind it. Harmless every frame with no actors
         // spawned: with no managed dispatch installed, or empty tick buckets, this is a guarded no-op.
+        // Who owns the mouse. A running game takes it by default -- an FPS with a visible cursor
+        // drifting over the viewport is not playable -- and Shift+F1 gives it back, which is the
+        // shortcut Unreal uses and therefore the one people try first. Ending the session always
+        // returns it: leaving the cursor hidden after Stop would strand the user in an editor they
+        // cannot click.
+        // Never in an automated run. --frames and --play-test enter play exactly like a person would,
+        // and capturing there would hide and confine the REAL cursor of whoever is at the machine
+        // while a headless verification run happens to be going -- a test that reaches out and grabs
+        // the mouse is a bad neighbour, and the gate harness launches dozens of these back to back.
+        const bool interactive = maxFrames_ == 0 && !playTest_;
+        if (e.device()->uiActive() && interactive) {
+            const bool wantCapture = playSessionActive() && !releasedByUser_;
+            if (ImGui::IsKeyPressed(ImGuiKey_F1, false) && ImGui::GetIO().KeyShift && playSessionActive())
+                releasedByUser_ = !releasedByUser_;
+            if (!playSessionActive()) releasedByUser_ = false;   // a fresh session starts captured again
+            setMouseCaptured(wantCapture && !ImGui::GetIO().WantTextInput);
+        }
+        pollCapturedMouse();                 // measure and re-centre before the delta is published
         pushInput(e.device()->uiActive());   // publish this frame's keyboard/mouse for gameplay before the tick
         maybeSpawnTestActor();   // one-shot --spawn-test, after scripts have declared their classes
         maybePlayTest();         // one-shot --play-test: begin_play, tick a few frames, end_play
@@ -949,6 +974,9 @@ public:
 
     void onShutdown(Engine& e) override {
         setLogSink(nullptr, nullptr);   // stop mirroring logs before this object goes away
+        // ShowCursor is a counter and ClipCursor is global to the desktop: leaving either set would
+        // outlive the process and hand the user a machine with an invisible or confined cursor.
+        setMouseCaptured(false);
 #if AVER_MODULE_PHYSICS
         // Before the rest of teardown: the simulation owns worker threads, and they must be joined
         // while the objects their jobs touch are still alive.
@@ -1204,11 +1232,17 @@ private:
         aver_fw_input_set_key(AVER_FW_KEY_DOWN,   kb && ImGui::IsKeyDown(ImGuiKey_DownArrow));
         // Suppress mouse too while a text field has focus (WantCaptureKeyboard), not only when the cursor is
         // over UI (WantCaptureMouse) — otherwise mouse-look would still turn the character while you type.
-        const bool m = !io.WantCaptureMouse && !io.WantCaptureKeyboard;
+        //
+        // CAPTURED is the exception to all of that: the game owns the mouse, so no UI can be under the
+        // cursor to claim it, and the delta must come from the warp rather than from ImGui. The cursor
+        // is re-centred every frame, so ImGui sees an equal-and-opposite jump each time and its own
+        // MouseDelta is worse than useless -- it very nearly cancels the movement out.
+        const bool m = mouseCaptured_ || (!io.WantCaptureMouse && !io.WantCaptureKeyboard);
         aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT,   m && ImGui::IsMouseDown(0));
         aver_fw_input_set_key(AVER_FW_KEY_MOUSE_RIGHT,  m && ImGui::IsMouseDown(1));
         aver_fw_input_set_key(AVER_FW_KEY_MOUSE_MIDDLE, m && ImGui::IsMouseDown(2));
-        aver_fw_input_set_mouse(m ? io.MouseDelta.x : 0.0f, m ? io.MouseDelta.y : 0.0f, m ? io.MouseWheel : 0.0f);
+        if (mouseCaptured_) aver_fw_input_set_mouse(captureDx_, captureDy_, io.MouseWheel);
+        else aver_fw_input_set_mouse(m ? io.MouseDelta.x : 0.0f, m ? io.MouseDelta.y : 0.0f, m ? io.MouseWheel : 0.0f);
 #endif
     }
 
@@ -3228,6 +3262,75 @@ private:
     // undifferentiated grey mass. See the scene-render pass for why it exists.
     struct SurfaceLook { f32 col[3]; f32 metallic; f32 roughness; };
     std::unordered_map<i32, SurfaceLook> surfaceLooks_;
+    // ---- mouse capture -------------------------------------------------------------------------
+    // While a game is playing the mouse belongs to the GAME: the cursor is hidden, confined to the
+    // window, and re-centred every frame so mouse-look has no edge to run into. Shift+F1 hands it
+    // back, which is the shortcut Unreal uses for the same thing and therefore the one people try.
+    //
+    // The delta is measured against the point we last warped the cursor to, NOT ImGui's MouseDelta:
+    // warping makes ImGui see a jump every frame, so its delta is meaningless while captured.
+    bool mouseCaptured_ = false;
+    i32  captureAnchorX_ = 0, captureAnchorY_ = 0;
+    f32  captureDx_ = 0.0f, captureDy_ = 0.0f;
+    Window* window_ = nullptr;   // borrowed from the engine in onInit, for the HWND
+    bool releasedByUser_ = false;   // Shift+F1 during a session; cleared when the session ends
+
+    void setMouseCaptured(bool on) {
+#if defined(_WIN32)
+        if (on == mouseCaptured_) return;
+        mouseCaptured_ = on;
+        if (on) {
+            // ShowCursor is a COUNTER, not a flag, so it must be paired exactly once with its undo --
+            // calling it twice leaves the cursor hidden after release, with no way for the user to
+            // get it back short of restarting the editor.
+            ShowCursor(FALSE);
+            warpToAnchor();
+        } else {
+            ShowCursor(TRUE);
+            ClipCursor(nullptr);
+        }
+        AVER_INFO("[Sandbox] mouse {} the game{}", on ? "captured by" : "released from",
+                  on ? " (Shift+F1 to release)" : "");
+#else
+        mouseCaptured_ = on;
+#endif
+    }
+
+#if defined(_WIN32)
+    // Park the cursor at the centre of the window and remember where that was.
+    void warpToAnchor() {
+        HWND hwnd = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
+        if (!hwnd) return;
+        RECT rc{};
+        if (!GetClientRect(hwnd, &rc)) return;
+        POINT c{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
+        ClientToScreen(hwnd, &c);
+        captureAnchorX_ = c.x; captureAnchorY_ = c.y;
+        SetCursorPos(c.x, c.y);
+        // Confine to the window as well: without this a fast flick can leave the window and land a
+        // click on whatever is behind it.
+        RECT screen{};
+        POINT tl{ rc.left, rc.top }, br{ rc.right, rc.bottom };
+        ClientToScreen(hwnd, &tl); ClientToScreen(hwnd, &br);
+        screen.left = tl.x; screen.top = tl.y; screen.right = br.x; screen.bottom = br.y;
+        ClipCursor(&screen);
+    }
+
+    // One frame of captured mouse movement, then re-centre for the next.
+    void pollCapturedMouse() {
+        captureDx_ = captureDy_ = 0.0f;
+        if (!mouseCaptured_) return;
+        POINT p{};
+        if (!GetCursorPos(&p)) return;
+        captureDx_ = static_cast<f32>(p.x - captureAnchorX_);
+        captureDy_ = static_cast<f32>(p.y - captureAnchorY_);
+        warpToAnchor();
+    }
+#else
+    void warpToAnchor() {}
+    void pollCapturedMouse() { captureDx_ = captureDy_ = 0.0f; }
+#endif
+
     // True while a game is playing, in a build with or without the framework.
     bool playSessionActive() const {
 #if AVER_MODULE_FRAMEWORK

@@ -73,14 +73,32 @@ $Gates = @(
     @{ name = 'ms-rt-gi';      args = @('--ms','--rt','--gi') },
     @{ name = 'gi-debug';      args = @('--gi-debug') },
     @{ name = 'ms-gi-debug';   args = @('--ms','--gi-debug') },
-    @{ name = 'shadow';        args = @('--probe','1413','1042') },
-    @{ name = 'shadow-rt';     args = @('--rt','--probe','1413','1042') },
-    @{ name = 'shadow-ms-rt';  args = @('--ms','--rt','--probe','1413','1042') },
-    @{ name = 'shadow-gi';     args = @('--gi','--probe','1413','1042') },
-    @{ name = 'penumbra';      args = @('--probe','1413','1150') },
-    @{ name = 'penumbra-rt';   args = @('--rt','--probe','1413','1150') },
-    @{ name = 'sunlit';        args = @('--probe','2200','1400') },
-    @{ name = 'sunlit-gi';     args = @('--gi','--probe','2200','1400') }
+    # The coordinates below were RE-PICKED in July 2026. The Content Browser and Output Log became
+    # bottom drawers, which removed the dock's bottom split and made the 3D viewport taller
+    # (2750x1266 -> 2750x1711, same width). These probes are backbuffer-ABSOLUTE, so every one of them
+    # started sampling a different surface: the old shadow pixel landed on the cube, and eighty-six
+    # gates failed at once while the centre probes -- which the engine derives from the viewport rect,
+    # and which are therefore size-invariant -- all still passed. That split is the tell, and it is
+    # worth remembering: a probe that is not expressed relative to the rect is only valid for the
+    # window layout it was recorded under.
+    #
+    # Re-picked by what each gate is DEFINED to sample rather than by scaling the old numbers, and
+    # chosen from a frame captured at the new size: `shadow` is the darkest floor pixel the PCF and
+    # RayQuery paths AGREE on, `sunlit` the brightest they agree on, and `penumbra` the largest
+    # disagreement between them. Both were also checked for a flat 7x7 neighbourhood so a probe does
+    # not sit on a one-pixel feature -- `sunlit` varies by 1 code across 7x7 and `shadow` by 8.
+    #
+    # `penumbra` unavoidably remains on an edge: a search for a disagreement with a flat neighbourhood
+    # in BOTH images found none, because the two paths only ever differ across a shadow boundary. That
+    # was equally true of the pixel it replaces.
+    @{ name = 'shadow';        args = @('--probe','1332','1416') },
+    @{ name = 'shadow-rt';     args = @('--rt','--probe','1332','1416') },
+    @{ name = 'shadow-ms-rt';  args = @('--ms','--rt','--probe','1332','1416') },
+    @{ name = 'shadow-gi';     args = @('--gi','--probe','1332','1416') },
+    @{ name = 'penumbra';      args = @('--probe','1564','1184') },
+    @{ name = 'penumbra-rt';   args = @('--rt','--probe','1564','1184') },
+    @{ name = 'sunlit';        args = @('--probe','2476','1100') },
+    @{ name = 'sunlit-gi';     args = @('--gi','--probe','2476','1100') }
 )
 
 # Each configuration is a device this machine can be made to look like. `--force-caps` is
