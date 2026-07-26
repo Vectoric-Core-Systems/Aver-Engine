@@ -81,6 +81,25 @@ $Gates = @(
     @{ name = 'ms-rt-gi';      args = @('--ms','--rt','--gi') },
     @{ name = 'gi-debug';      args = @('--gi-debug') },
     @{ name = 'ms-gi-debug';   args = @('--ms','--gi-debug') },
+    # RELATIVE, as fractions of the viewport rect, and re-picked against the current scene.
+    #
+    # Absolute pixels broke this oracle twice: once when the Content Browser became a drawer and grew
+    # the viewport, and once when the editor's placeholder scene was rescaled to centimetres. Neither
+    # was a shading change, and both times every hard-coded probe silently started sampling a
+    # different surface while the centre probes -- which the engine has always derived from the rect
+    # -- kept passing. A fraction of the rect cannot go stale that way.
+    #
+    # HOW THESE WERE CHOSEN, so they can be chosen again the same way: capture the scene twice, once
+    # with `--no-gi` and once with `--no-gi --rt`, then take
+    #   shadow    the DARKEST floor pixel where the two frames agree (diff <= 2)
+    #   sunlit    the BRIGHTEST floor pixel where they agree
+    #   penumbra  the LARGEST disagreement between them
+    # each screened for a flat 7x7 neighbourhood so no probe sits on a one-pixel feature. `penumbra`
+    # unavoidably remains on a shadow edge -- that is the only place the two paths ever differ -- so
+    # it is the one probe that a sub-pixel change can move, and the invariant check at the end of
+    # this script exists to say so out loud when it does.
+    #
+    # The older note below is kept because the failure it describes is the same one, first time round:
     # The coordinates below were RE-PICKED in July 2026. The Content Browser and Output Log became
     # bottom drawers, which removed the dock's bottom split and made the 3D viewport taller
     # (2750x1266 -> 2750x1711, same width). These probes are backbuffer-ABSOLUTE, so every one of them
@@ -99,14 +118,14 @@ $Gates = @(
     # `penumbra` unavoidably remains on an edge: a search for a disagreement with a flat neighbourhood
     # in BOTH images found none, because the two paths only ever differ across a shadow boundary. That
     # was equally true of the pixel it replaces.
-    @{ name = 'shadow';        args = @('--no-gi','--probe','1332','1416') },
-    @{ name = 'shadow-rt';     args = @('--no-gi','--rt','--probe','1332','1416') },
-    @{ name = 'shadow-ms-rt';  args = @('--no-gi','--ms','--rt','--probe','1332','1416') },
-    @{ name = 'shadow-gi';     args = @('--gi','--probe','1332','1416') },
-    @{ name = 'penumbra';      args = @('--no-gi','--probe','1564','1184') },
-    @{ name = 'penumbra-rt';   args = @('--no-gi','--rt','--probe','1564','1184') },
-    @{ name = 'sunlit';        args = @('--no-gi','--probe','2476','1100') },
-    @{ name = 'sunlit-gi';     args = @('--gi','--probe','2476','1100') }
+    @{ name = 'shadow';        args = @('--no-gi','--probe-rel','0.50364','0.57101') },
+    @{ name = 'shadow-rt';     args = @('--no-gi','--rt','--probe-rel','0.50364','0.57101') },
+    @{ name = 'shadow-ms-rt';  args = @('--no-gi','--ms','--rt','--probe-rel','0.50364','0.57101') },
+    @{ name = 'shadow-gi';     args = @('--gi','--probe-rel','0.50364','0.57101') },
+    @{ name = 'penumbra';      args = @('--no-gi','--probe-rel','0.49709','0.57101') },
+    @{ name = 'penumbra-rt';   args = @('--no-gi','--rt','--probe-rel','0.49709','0.57101') },
+    @{ name = 'sunlit';        args = @('--no-gi','--probe-rel','0.36945','0.45003') },
+    @{ name = 'sunlit-gi';     args = @('--gi','--probe-rel','0.36945','0.45003') }
 )
 
 # Each configuration is a device this machine can be made to look like. `--force-caps` is
@@ -193,6 +212,7 @@ foreach ($c in $selected) {
 $baseline = Read-Baseline $BaselineFile
 $recorded = [System.Collections.Generic.List[string]]::new()
 $failures = 0
+$seen = @{}
 $flaky = 0
 $tdrBefore = Get-TdrCount
 Write-Host "0x141 LiveKernelEvent count before: $tdrBefore"
@@ -241,7 +261,51 @@ foreach ($c in $selected) {
         if ($verdict -like 'FLAKY*') { $flaky++ }
         Write-Host ("  {0,-14} raw({1,-12}) {2,-8} {3}" -f $g.name, $r.raw, $r.debug, $verdict)
         $recorded.Add("$c | $($g.name) | $($r.raw)")
+        $seen["$c|$($g.name)"] = $r.raw
         Start-Sleep -Milliseconds $spacing
+    }
+}
+
+# ---- INVARIANTS: does each gate still MEASURE what its name says? -----------------------------
+#
+# A probe can stay valid, stable and reproducible while the thing it was chosen to discriminate has
+# quietly stopped existing -- and then the gate passes forever while covering nothing. That is not
+# hypothetical: cascaded shadow maps made the PCF path sharp enough to agree with RayQuery at the
+# `penumbra` pixel, so the pair that exists to prove the no-RT fallback DIFFERS was reporting two
+# identical numbers. A re-record would have frozen that in.
+#
+# Recorded values cannot catch it, because the values were right. Only a statement of INTENT can.
+function Get-Raw([string] $cfg, [string] $gate) {
+    $v = $seen["$cfg|$gate"]
+    if ($null -eq $v) { return $null }
+    $p = $v -split ','
+    return @([int]$p[0], [int]$p[1], [int]$p[2])
+}
+function Lum($rgb) { if ($null -eq $rgb) { return $null }; return 0.2126*$rgb[0] + 0.7152*$rgb[1] + 0.0722*$rgb[2] }
+
+Write-Host ""
+Write-Host "=== gate invariants (what each probe is DEFINED to sample) ==="
+foreach ($c in $selected) {
+    $sh = Get-Raw $c 'shadow'; $su = Get-Raw $c 'sunlit'
+    $pe = Get-Raw $c 'penumbra'; $pr = Get-Raw $c 'penumbra-rt'
+    # `shadow` is the darkest floor pixel and `sunlit` the brightest, so one must clearly outrank
+    # the other. If they converge, both are sampling the same lighting condition.
+    if ($null -ne $sh -and $null -ne $su) {
+        $d = (Lum $su) - (Lum $sh)
+        if ($d -lt 20) {
+            Write-Host ("  {0,-20} INVARIANT FAIL  shadow/sunlit differ by only {1:N1} -- they no longer bracket the lighting" -f $c, $d)
+            $failures++
+        }
+    }
+    # `penumbra` exists ONLY to be a pixel where the shadow map and RayQuery disagree. Where ray
+    # tracing is unavailable the two gates run the same path and are expected to match, so the
+    # invariant applies only where they are genuinely different code paths.
+    if ($null -ne $pe -and $null -ne $pr -and $c -notin @('no-rt','sm60','all-off','no-dxc','warp')) {
+        $diff = [Math]::Abs($pe[0]-$pr[0]) + [Math]::Abs($pe[1]-$pr[1]) + [Math]::Abs($pe[2]-$pr[2])
+        if ($diff -lt 8) {
+            Write-Host ("  {0,-20} INVARIANT FAIL  penumbra vs penumbra-rt differ by {1} -- the probe no longer discriminates the paths" -f $c, $diff)
+            $failures++
+        }
     }
 }
 

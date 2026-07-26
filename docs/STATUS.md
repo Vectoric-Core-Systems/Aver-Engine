@@ -1807,6 +1807,44 @@ configurations, the only failures being the `penumbra` pair that cascaded shadow
 that continues under the camera, but a downward reflection vector picking up a ground colour changes
 every glancing highlight in the scene — so the ground is something a level author turns on.
 
+## 4n. The oracle stops rotting: relative probes and stated intent
+
+The gates broke three times in one working session, and only the first was a renderer regression.
+
+| what moved | what it did to the oracle |
+|---|---|
+| the Content Browser became a drawer | the viewport grew, so every absolute probe sampled a different surface — 86 gates failed |
+| cascaded shadow maps landed | the PCF path got sharp enough to AGREE with RayQuery at the `penumbra` pixel — the gate kept passing while proving nothing |
+| the editor scene was rescaled to centimetres | the scene's composition changed, so `shadow` started reading a lit floor |
+
+Those are **two different failure modes**, and conflating them is why it kept happening.
+
+**Coordinate staleness.** A probe stored an absolute backbuffer pixel, which is only valid for one
+window layout AND one scene. The tell was the same both times: the centre probes kept passing while
+the hard-coded ones failed, because the engine has always derived the centre from the viewport rect
+(`probeX_ ? probeX_ : vpX_ + vpW_*0.5f`) and never derived the others. Fixed: `--probe-rel U V`
+takes fractions of the rect, and all ten explicit gates use it. This class cannot recur.
+
+**Premise dissolution.** A probe can stay valid, stable and reproducible while the thing it was
+chosen to discriminate stops existing. `penumbra` exists to be the pixel where the shadow map and
+RayQuery disagree — proving `--force-caps no-rt` tests something. When the two paths converged there,
+the gate reported two identical numbers and would have gone on passing forever. **Recorded values
+cannot catch this, because the values were right.** Only a statement of intent can, so `gates.ps1`
+now asserts after every run:
+
+- `shadow` must be meaningfully darker than `sunlit` — if they converge, both are sampling the same
+  lighting condition and neither brackets anything.
+- `penumbra` must differ from `penumbra-rt` wherever ray tracing is actually available.
+
+It caught a live instance immediately: tightening the shadow bias moved the edge and left the
+penumbra pair one code apart, which would otherwise have been re-recorded and frozen in.
+
+The picking method is now written into the script rather than reconstructed each time: capture the
+scene with `--no-gi` and with `--no-gi --rt`, take the darkest agreeing floor pixel, the brightest
+agreeing one, and the largest disagreement, each screened for a flat 7x7 neighbourhood. `penumbra`
+unavoidably sits on a shadow edge — that is the only place the two paths ever differ — which is
+exactly why it needs the invariant watching it.
+
 ## 5. Formats — implemented loaders
 
 - `.ocbeam` (Aver.Formats/OcBeam): faithful to OCCompiler Main.java + VehicleDamage.cpp —
