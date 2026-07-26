@@ -128,10 +128,12 @@ void clampCaps(DeviceCaps& caps);
 // (see "camera / post" in RHIShaders.cpp). A material system that owned these would make every
 // shading model reimplement them identically.
 //
-// THE DEFAULTS ARE THE IDENTITY. Exposure 1, no bloom, no adaptation: the chain still runs, but it
-// resolves and tonemaps exactly what the scene shader used to write for itself. That is deliberate
-// — the engine has a pixel-exact oracle behind it, and a post chain whose default state changed the
-// image would invalidate every gate for a feature nobody had switched on yet.
+// The defaults WERE the identity — exposure 1, no bloom, no adaptation — so that a post chain
+// nobody had switched on could not move a pixel the oracle measures. Eye adaptation is no longer
+// among them, and the reason is worth stating: once the light transport became physically correct,
+// scene radiance became a physical quantity with nothing mapping it onto a display range, and an
+// exposure pinned at 1.0 stopped being neutral and started being one arbitrary stop. A capture run
+// still turns adaptation off, which is where that constraint actually belongs.
 struct PostSettings {
     // Linear multiplier on scene radiance, applied BEFORE the tonemap. Overridden every frame by
     // the adaptation when autoExposure is on.
@@ -146,10 +148,17 @@ struct PostSettings {
     f32 bloomThreshold = 1.0f;
     f32 bloomKnee      = 0.5f;
 
-    // Eye adaptation, from a luminance histogram of the frame. Off by default: it is a feedback
-    // loop, so it makes the image depend on the frames BEFORE it, and an oracle that compares one
-    // captured frame cannot express that.
-    bool autoExposure   = false;
+    // Eye adaptation, from a luminance histogram of the frame. ON by default.
+    //
+    // It was off, on the reasoning that a temporal feedback loop makes a frame depend on the frames
+    // before it and the pixel oracle compares single frames. That reasoning is still true and is now
+    // handled where it belongs -- a capture run turns it off (see the sandbox) -- because the other
+    // half of the trade turned out to matter more: once the light transport is physically correct,
+    // scene radiance is a physical quantity and NOTHING was mapping it onto a display range. A dark
+    // concrete arena under a bright sky is genuinely dark in radiance terms, and with exposure
+    // pinned at 1.0 it renders as a black floor beside blown-out walls. Every real camera adapts;
+    // an engine that does not is not neutral, it is stuck at one arbitrary stop.
+    bool autoExposure   = true;
     f32  exposureMin    = 0.05f;   // clamps on the computed multiplier, not on scene luminance
     f32  exposureMax    = 8.0f;
     f32  exposureSpeed  = 3.0f;    // adaptation rate, in e-folds per second

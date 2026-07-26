@@ -1419,7 +1419,18 @@ public:
     void setPost(f32 exposure, f32 bloomIntensity, bool autoExposure) {
         post_.exposure = exposure;
         post_.bloomIntensity = bloomIntensity;
-        post_.autoExposure = autoExposure;
+        if (autoExposure) post_.autoExposure = true;
+    }
+
+    // A CAPTURE RUN GETS NO EYE ADAPTATION unless it explicitly asked for it.
+    //
+    // The adaptation is a temporal feedback loop damped against WALL-CLOCK time, so the exposure a
+    // given frame lands on depends on how long the frames before it happened to take. That is the
+    // right behaviour for someone flying a camera around and exactly the wrong behaviour for an
+    // oracle that compares one captured frame against a recorded number: the same scene would
+    // produce different pixels on a busy machine. Off for --frames runs, on for everyone else.
+    void applyCaptureExposureRule(bool explicitlyRequested) {
+        if (maxFrames_ != 0 && !explicitlyRequested) post_.autoExposure = false;
     }
     void setFocusVoxi(bool b) { focusVoxi_ = b ? 4 : 0; } // --project-settings screenshot aid
     // --drawer screenshot aid: open a drawer from the command line, since a capture run cannot press
@@ -4274,6 +4285,7 @@ Application* createApplication(int argc, char** argv) {
 
     auto* app = new SandboxApp(frames, headless, beam, shot, tool);
     app->setPost(exposure, bloom, autoExposure);
+    app->applyCaptureExposureRule(autoExposure);
     app->setGiForceOff(noGi);
     if (clouds) app->setClouds(cloudCover);
     app->setUseWarp(warp);
