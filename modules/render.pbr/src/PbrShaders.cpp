@@ -197,17 +197,45 @@ struct AverMaps {
 // beyond the compare. Both sides are computed cheaply enough that no permutation is warranted.
 float2 averSurfaceUV(AverVertex v) {
     if (gMaterialFlags & AVER_MAT_WORLD_UV) {
-        float3 a = abs(v.N);
+        // PROJECTED IN THE OBJECT'S OWN FRAME, not the world's.
+        //
+        // This projected world position onto the dominant world axis, which nails the texture to the
+        // world and lets the object slide through it. On anything that moves, the surface swims: turn
+        // the character and the pattern on the gun's grip and sight crawls across them, because the
+        // geometry rotated and the projection did not. Every prop a physics step nudges does it too.
+        //
+        // The axes come from the world matrix's basis rows -- this is a row-vector convention, so
+        // rows 0..2 are the object's X, Y and Z in world space and row 3 is its origin. NORMALISED,
+        // which is what keeps texel density in world centimetres: the offset from the origin is
+        // measured in world units and merely resolved ALONG the object's axes, so a unit cube scaled
+        // to sixteen metres still gets its texture tiled every uvTiling centimetres rather than
+        // stretched once across the whole face.
+        //
+        // No inverse is needed and none is available: HLSL has no matrix-inverse intrinsic, and a
+        // TRS matrix has no shear, so three dot products against an orthonormal basis IS the inverse
+        // rotation.
+        float3 ax = normalize(gWorld[0].xyz);
+        float3 ay = normalize(gWorld[1].xyz);
+        float3 az = normalize(gWorld[2].xyz);
+        float3 d  = v.wpos - gWorld[3].xyz;
+        float3 op = float3(dot(d, ax), dot(d, ay), dot(d, az));      // position in the object's frame
+        float3 on = float3(dot(v.N, ax), dot(v.N, ay), dot(v.N, az)); // normal likewise
+
+        float3 a = abs(on);
         // The plane the surface most faces. Ties go to Z, then X, which only matters on a perfect
         // 45-degree edge where either answer is equally arbitrary -- but it must be DECIDED rather
         // than left to floating-point luck, or adjacent pixels on such a face pick different planes
         // and the seam shimmers.
-        float2 p = (a.z >= a.x && a.z >= a.y) ? v.wpos.xy
-                 : ((a.x >= a.y) ? v.wpos.yz : v.wpos.xz);
-        // No per-face sign flip. Opposite faces of a box therefore MIRROR when seen from outside,
-        // which is what a world-aligned projection is supposed to do: the texture stays locked to
-        // the world rather than to the object, so two adjoining walls meet with their pattern lined
-        // up across the corner. Flipping would break that, which is the thing this mode is for.
+        float2 p = (a.z >= a.x && a.z >= a.y) ? op.xy
+                 : ((a.x >= a.y) ? op.yz : op.xz);
+        // No per-face sign flip, so opposite faces of a box MIRROR when seen from outside. That is
+        // inherent to a dominant-axis projection and is not what changed here.
+        //
+        // WHAT IS GIVEN UP: two separate wall objects meeting at a corner no longer continue one
+        // pattern across the seam, because each is now projected about its own origin. That was the
+        // stated reason this mode existed, and it is worth less than the alternative -- a static
+        // seam is a detail you have to go and look for, while a texture crawling over a weapon in
+        // the middle of the screen is the first thing anyone sees.
         return p * gUvTilesPerCm;
     }
     return v.uv;

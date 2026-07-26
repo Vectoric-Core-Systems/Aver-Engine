@@ -46,6 +46,18 @@ enum class TextureSlot : u32 { BaseColor = 0, MetalRough, Normal, Occlusion, Emi
 //
 // Dominant-axis PROJECTION rather than triplanar BLENDING: a blockout is axis-aligned boxes, where
 // projection is exact and seamless, and blending would cost three samples per map instead of one.
+//
+// PROJECTED IN THE OBJECT'S FRAME, despite the name. It projected in the WORLD's, which nails the
+// texture to the world and lets the object slide through it: anything that moves swims, and it is
+// most obvious on a weapon held in view, where turning the character crawls the pattern across the
+// grip. The projection now resolves along the object's own axes about its own origin, keeping texel
+// density in world centimetres. The cost is that two separate objects meeting at a corner no longer
+// continue one pattern across the seam.
+//
+// The name, the ABI constant AVER_PBR_UV_WORLD_ALIGNED and the .ocmat key `worlduv` are kept as they
+// are: renaming them changes the meaning of an existing entry point, which is a MAJOR ABI break by
+// this tree's own rule, and it would invalidate every .ocmat already authored against them. Read
+// "world" as historical -- what it selects is the projection, not the frame it happens in.
 enum class UvMode : u32 { Mesh = 0, WorldAligned };
 
 inline constexpr u32 kTextureSlotCount = static_cast<u32>(TextureSlot::Count);
