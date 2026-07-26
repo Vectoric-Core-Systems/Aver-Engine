@@ -1,98 +1,100 @@
-# Associate .ocproject with the editor, so double-clicking a project manifest opens it.
+# Associate .ocproject with the editor, so opening a project manifest opens it in Aver Engine.
 #
-#   ./scripts/register-filetype.ps1              # register, pointing at build\bin\Sandbox.exe
-#   ./scripts/register-filetype.ps1 -Release     # ...at build-release\bin instead
-#   ./scripts/register-filetype.ps1 -Exe <path>  # ...at an explicit binary
-#   ./scripts/register-filetype.ps1 -Unregister  # put it back exactly as it was
+#   ./scripts/register-filetype.ps1                        # per-user (HKCU), no admin
+#   ./scripts/register-filetype.ps1 -AllUsers              # machine-wide (HKLM), NEEDS AN ADMIN SHELL
+#   ./scripts/register-filetype.ps1 -Release               # point at build-release\bin
+#   ./scripts/register-filetype.ps1 -Exe <path>            # ...or an explicit binary
+#   ./scripts/register-filetype.ps1 -Unregister            # undo the per-user registration
+#   ./scripts/register-filetype.ps1 -Unregister -AllUsers  # undo the machine-wide one
 #
-# PER-USER, under HKCU\Software\Classes. Nothing here touches HKLM, needs administrator, or changes a
-# setting outside this file type: the whole footprint is two keys named below, and -Unregister
-# deletes both. That matters because a file association is a change to someone's machine rather than
-# to this repository, and the polite version of that is one you can read first and reverse after.
+# TWO SCOPES, AND THE DIFFERENCE MATTERS FOR WHETHER THE PICKER APPEARS.
 #
-# NO ENGINE CHANGE WAS NEEDED for this. Everything the editor loads -- its icon sheets, the C#
-# engine root, the Tools menu's module list -- is resolved from executableDir() and by walking up
-# from it for cmake/AvModule.cmake, never from the working directory. Explorer launches with the
-# working directory set wherever it likes, so a build that read CWD would come up with no icons and
-# an empty Content Browser; this one was verified by launching from an unrelated folder with a
-# relative path and watching it resolve all four.
+# The per-user scope writes a ProgID and an Open-with entry. That is enough for the shell to RESOLVE
+# the file type -- AssocQueryString returns the right command -- but Windows still asks the user
+# which app to use the first time, because a default is a user's decision and nothing a program
+# writes can pre-empt it.
+#
+# -AllUsers additionally registers the engine as a real APPLICATION through Default Programs:
+# a Capabilities key describing what it handles, and an entry in RegisteredApplications pointing at
+# it. That is the documented mechanism by which an installed program presents itself as a candidate
+# handler, and it is what makes Windows treat the engine as the owner of .ocproject rather than as
+# something a user once browsed to.
+#
+# WHAT NEITHER SCOPE DOES, deliberately: write
+# HKCU\...\Explorer\FileExts\.ocproject\UserChoice. That key is protected by a per-user hash
+# specifically so that programs CANNOT seize file types, and forging it is circumventing an
+# anti-hijacking control rather than configuring a machine. If Windows still offers the picker,
+# choosing Aver Engine once with "always use this app" is the supported way to settle it -- and the
+# entry is now named properly, so it is findable.
+#
+# NO ENGINE CHANGE WAS NEEDED for any of this. Everything the editor loads -- its icon sheets, the C#
+# engine root, the Tools menu's module list -- resolves from executableDir() and by walking up from it
+# for cmake/AvModule.cmake, never from the working directory. Explorer launches with the working
+# directory set wherever it likes, so a build that read CWD would come up with no icons and an empty
+# Content Browser; this one was verified by launching from an unrelated folder with a relative path.
 [CmdletBinding()]
 param(
     [switch] $Release,
     [string] $Exe,
-    [switch] $Unregister
+    [switch] $Unregister,
+    [switch] $AllUsers
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
-# The two keys, named once so register and unregister cannot drift apart.
-$progId  = 'AverEngine.Project'
-$extKey  = 'HKCU:\Software\Classes\.ocproject'
-$progKey = "HKCU:\Software\Classes\$progId"
+$progId   = 'AverEngine.Project'
+$appName  = 'Aver Engine'
+$typeName = 'Aver Engine Project'
+$ext      = '.ocproject'
 
-if ($Unregister) {
-    foreach ($k in @($progKey, $extKey)) {
-        if (Test-Path $k) { Remove-Item $k -Recurse -Force; "removed $k" }
-        else              { "absent  $k" }
-    }
-    "`n.ocproject is no longer associated. Explorer may need a sign-out to stop showing the old icon."
-    exit 0
+# Every key this script owns, named once, so register and unregister cannot drift apart.
+$hive     = if ($AllUsers) { 'HKLM:' } else { 'HKCU:' }
+$extKey   = "$hive\Software\Classes$([char]92)$ext"
+$progKey  = "$hive\Software\Classes\$progId"
+$capKey   = "$hive\Software\Aver\Engine\Capabilities"
+$regAppsK = "$hive\Software\RegisteredApplications"
+
+# CAN WE WRITE HKLM? Asked by trying, not by asking who we are.
+#
+# The obvious test -- WindowsPrincipal.IsInRole(Administrator) -- is a proxy, and on this machine it
+# is a proxy that LIES: it returns true under a filtered UAC token while every HKLM write is denied.
+# An account in the Administrators group running unelevated is the normal case, not an exotic one, so
+# the check has to be for the capability rather than for the membership. Creating and removing a
+# throwaway key answers the actual question and leaves nothing behind.
+# The probe lives UNDER HKLM\Software\Aver, which -Unregister -AllUsers already removes, so a probe
+# that cannot clean itself up is swept by the uninstall path instead of becoming litter with its own
+# special case. The first version wrote HKLM\Software\AverEngine.RegistrationProbe -- outside
+# everything the script owns -- and on a machine where the create half-succeeds and the delete is
+# denied, that is a stray key nothing will ever collect.
+function Test-CanWriteHklm {
+    $probe = 'HKLM:\Software\Aver\RegistrationProbe'
+    $ok = $false
+    try {
+        New-Item -Path $probe -Force -ErrorAction Stop | Out-Null
+        $ok = $true
+    } catch { $ok = $false }
+    # Attempted whether or not the create reported success: on a filtered token the two do not agree,
+    # which is the whole reason this function exists.
+    Remove-Item -LiteralPath $probe -Recurse -Force -ErrorAction SilentlyContinue
+    return $ok
 }
 
-if (-not $Exe) {
-    $dir = if ($Release) { 'build-release\bin' } else { 'build\bin' }
-    $Exe = Join-Path $root "$dir\Sandbox.exe"
+# Refused UP FRONT rather than part way through. A machine-wide registration that fails on its third
+# key leaves the extension pointing at a ProgID that does not exist yet, which is a worse state than
+# either doing it or not.
+if ($AllUsers -and -not (Test-CanWriteHklm)) {
+    Write-Error @"
+-AllUsers writes to HKLM and this shell cannot. Nothing has been changed.
+
+Note that being in the Administrators group is not enough: an unelevated shell holds a filtered
+token, and this was checked by attempting a write rather than by asking for group membership.
+
+Open an ADMINISTRATOR PowerShell and run:
+  powershell -ExecutionPolicy Bypass -File "$PSCommandPath" -AllUsers
+"@
 }
-if (-not (Test-Path $Exe)) {
-    Write-Error "Sandbox.exe not found at $Exe - build first, or pass -Exe <path>."
-}
-$Exe = (Resolve-Path $Exe).Path
 
-# The icon is optional: a missing one costs the file type its picture and nothing else.
-$icon = Join-Path $root 'branding\icon.ico'
-$iconRef = if (Test-Path $icon) { "$icon,0" } else { "$Exe,0" }
-
-New-Item -Path $extKey  -Force | Out-Null
-New-Item -Path $progKey -Force | Out-Null
-Set-ItemProperty -Path $extKey  -Name '(default)' -Value $progId
-Set-ItemProperty -Path $progKey -Name '(default)' -Value 'Aver Engine Project'
-
-New-Item -Path "$progKey\DefaultIcon" -Force | Out-Null
-Set-ItemProperty -Path "$progKey\DefaultIcon" -Name '(default)' -Value $iconRef
-
-# "%1" QUOTED, and it is not decoration: the default projects root is under Documents\Aver Projects,
-# which contains a space, and an unquoted %1 hands the editor two arguments that are each half a
-# path. It would work everywhere the tester happened to look and fail for everyone else.
-New-Item -Path "$progKey\shell\open\command" -Force | Out-Null
-Set-ItemProperty -Path "$progKey\shell\open\command" -Name '(default)' -Value "`"$Exe`" `"%1`""
-
-# Advertise the ProgID ON the extension, which is what puts the engine in the Open-with list.
-# Without it the picker offers a browse button and nothing else, and the entry you want is not there
-# to choose -- which reads as the association not having worked at all.
-New-Item -Path "$extKey\OpenWithProgids" -Force | Out-Null
-New-ItemProperty -Path "$extKey\OpenWithProgids" -Name $progId -PropertyType String -Value '' -Force | Out-Null
-
-# REGISTER THE EXECUTABLE AS AN APPLICATION, separately from the file type. These are two different
-# things and only registering the first is why the picker said "Sandbox.exe": a ProgID's description
-# names the FILE TYPE ("Aver Engine Project"), while the name of the APPLICATION comes from the exe's
-# own version resource and from FriendlyAppName here. The exe now carries a VERSIONINFO block
-# (sandbox/Sandbox.rc) so it identifies itself everywhere -- Task Manager, file properties, this
-# picker -- and FriendlyAppName covers a binary built before that landed.
-$appKey = "HKCU:\Software\Classes\Applications\$(Split-Path -Leaf $Exe)"
-New-Item -Path "$appKey\shell\open\command" -Force | Out-Null
-Set-ItemProperty -Path "$appKey\shell\open\command" -Name '(default)' -Value "`"$Exe`" `"%1`""
-Set-ItemProperty -Path $appKey -Name 'FriendlyAppName' -Value 'Aver Engine'
-New-Item -Path "$appKey\SupportedTypes" -Force | Out-Null
-New-ItemProperty -Path "$appKey\SupportedTypes" -Name '.ocproject' -PropertyType String -Value '' -Force | Out-Null
-
-# The same name on the ProgID, so the file type reads as the engine's rather than as an exe name.
-Set-ItemProperty -Path $progKey -Name 'FriendlyTypeName' -Value 'Aver Engine Project'
-
-# TELL THE SHELL. Explorer serves associations from a cached table and does not re-read the registry
-# because someone wrote to it; a registration without this notification is correct on disk and
-# invisible in practice, which is the most confusing possible failure -- every key checks out and
-# double-clicking still does nothing.
 Add-Type -TypeDefinition @'
 using System;using System.Runtime.InteropServices;
 public static class AverShellNotify {
@@ -100,21 +102,102 @@ public static class AverShellNotify {
   public static extern void SHChangeNotify(int eventId, uint flags, IntPtr a, IntPtr b);
 }
 '@ -ErrorAction SilentlyContinue
-[AverShellNotify]::SHChangeNotify(0x08000000, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero)  # SHCNE_ASSOCCHANGED
 
-"registered .ocproject -> $progId"
-"  command : `"$Exe`" `"%1`""
+# Explorer serves associations from a cached table and does not re-read the registry because someone
+# wrote to it. Without this the registration is correct on disk and invisible in practice, which is
+# the most confusing possible failure: every key checks out and nothing happens.
+function Notify-Shell { [AverShellNotify]::SHChangeNotify(0x08000000, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero) }
+
+if ($Unregister) {
+    $appLeafKey = "$hive\Software\Classes\Applications\Sandbox.exe"
+    foreach ($k in @($progKey, $extKey, $appLeafKey, "$hive\Software\Aver")) {
+        if (Test-Path $k) { Remove-Item -LiteralPath $k -Recurse -Force; "removed $k" }
+        else              { "absent  $k" }
+    }
+    if (Test-Path $regAppsK) {
+        if ((Get-Item $regAppsK).GetValueNames() -contains $appName) {
+            Remove-ItemProperty -LiteralPath $regAppsK -Name $appName -Force
+            "removed RegisteredApplications\$appName"
+        }
+    }
+    Notify-Shell
+    "`n$ext is no longer associated in $hive. Explorer may need a sign-out to drop the old icon."
+    exit 0
+}
+
+if (-not $Exe) {
+    $dir = if ($Release) { 'build-release\bin' } else { 'build\bin' }
+    $Exe = Join-Path $root "$dir\Sandbox.exe"
+}
+if (-not (Test-Path $Exe)) { Write-Error "Sandbox.exe not found at $Exe - build first, or pass -Exe <path>." }
+$Exe = (Resolve-Path $Exe).Path
+
+# The icon is optional: a missing one costs the file type its picture and nothing else.
+$icon    = Join-Path $root 'branding\icon.ico'
+$iconRef = if (Test-Path $icon) { "$icon,0" } else { "$Exe,0" }
+
+# "%1" QUOTED, and it is not decoration: the default projects root is Documents\Aver Projects, which
+# contains a space, and an unquoted %1 hands the editor two arguments that are each half a path. It
+# would work everywhere a tester happened to look and fail for everyone at the default location.
+$command = "`"$Exe`" `"%1`""
+
+# ---- the file type ----
+New-Item -Path $extKey  -Force | Out-Null
+New-Item -Path $progKey -Force | Out-Null
+Set-ItemProperty -Path $extKey  -Name '(default)' -Value $progId
+Set-ItemProperty -Path $progKey -Name '(default)' -Value $typeName
+Set-ItemProperty -Path $progKey -Name 'FriendlyTypeName' -Value $typeName
+
+New-Item -Path "$progKey\DefaultIcon" -Force | Out-Null
+Set-ItemProperty -Path "$progKey\DefaultIcon" -Name '(default)' -Value $iconRef
+New-Item -Path "$progKey\shell\open\command" -Force | Out-Null
+Set-ItemProperty -Path "$progKey\shell\open\command" -Name '(default)' -Value $command
+
+# Advertise the ProgID on the extension: this is what puts the engine in the Open-with list at all.
+New-Item -Path "$extKey\OpenWithProgids" -Force | Out-Null
+New-ItemProperty -Path "$extKey\OpenWithProgids" -Name $progId -PropertyType String -Value '' -Force | Out-Null
+
+# ---- the application, which is a different thing from the file type ----
+# A ProgID's description names the FILE TYPE; the name of the APPLICATION comes from the exe's
+# version resource and from FriendlyAppName here. Registering only the first is why the picker
+# offered "Sandbox.exe" -- the binary had no VERSIONINFO at all, so the shell had nothing else to
+# call it. It carries one now (sandbox/Sandbox.rc); this covers a binary built before that landed.
+$appKey = "$hive\Software\Classes\Applications\$(Split-Path -Leaf $Exe)"
+New-Item -Path "$appKey\shell\open\command" -Force | Out-Null
+Set-ItemProperty -Path "$appKey\shell\open\command" -Name '(default)' -Value $command
+Set-ItemProperty -Path $appKey -Name 'FriendlyAppName' -Value $appName
+New-Item -Path "$appKey\SupportedTypes" -Force | Out-Null
+New-ItemProperty -Path "$appKey\SupportedTypes" -Name $ext -PropertyType String -Value '' -Force | Out-Null
+
+# ---- Default Programs, machine-wide only ----
+# Capabilities + RegisteredApplications is the documented way a program declares "I handle this file
+# type" to Windows. It is what makes the engine appear in Settings > Default apps as an application
+# rather than as a stray executable, and it is the difference between a handler Windows knows about
+# and one a user once browsed to. HKCU has no equivalent that suppresses the picker.
+if ($AllUsers) {
+    New-Item -Path $capKey -Force | Out-Null
+    Set-ItemProperty -Path $capKey -Name 'ApplicationName'        -Value $appName
+    Set-ItemProperty -Path $capKey -Name 'ApplicationDescription' -Value 'Aver Engine editor and runtime'
+    New-Item -Path "$capKey\FileAssociations" -Force | Out-Null
+    New-ItemProperty -Path "$capKey\FileAssociations" -Name $ext -PropertyType String -Value $progId -Force | Out-Null
+
+    New-Item -Path $regAppsK -Force | Out-Null
+    New-ItemProperty -Path $regAppsK -Name $appName -PropertyType String `
+                     -Value 'Software\Aver\Engine\Capabilities' -Force | Out-Null
+}
+
+Notify-Shell
+
+"registered $ext -> $progId  [$(if ($AllUsers) { 'machine-wide, HKLM' } else { 'per-user, HKCU' })]"
+"  command : $command"
 "  icon    : $iconRef"
+"  app     : $appName"
+if ($AllUsers) { "  declared through Default Programs (Capabilities + RegisteredApplications)" }
 "  shell notified (SHCNE_ASSOCCHANGED)"
 ""
 "Rebuilding does not need a re-run; the path is to the binary, not to a copy of it."
-"Reverse with -Unregister."
+"Reverse with -Unregister$(if ($AllUsers) { ' -AllUsers' })."
 ""
-"IF DOUBLE-CLICKING STILL SHOWS THE 'How do you want to open this file?' PICKER:"
-"  choose Aver Engine and tick 'Always use this app'. That is not a defect in this script."
-"  Windows 8 and later record the chosen default in"
-"    HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.ocproject\UserChoice"
-"  and protect it with a per-user hash specifically so that an installer CANNOT set it. Only the"
-"  picker can, by design, to stop programs seizing file types. Everything this script writes is the"
-"  half a program is allowed to write: the ProgID, its command, its icon, and the Open-with entry"
-"  that makes 'Aver Engine' appear in that list in the first place."
+"If Windows still asks which app to use, choose $appName once and tick 'always use this app'."
+"That last step is the user's to take by design: the key that records it is hash-protected"
+"precisely so a program cannot claim a file type on someone's behalf."
