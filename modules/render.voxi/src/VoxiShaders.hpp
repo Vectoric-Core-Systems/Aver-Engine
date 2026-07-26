@@ -223,7 +223,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     AverVertex vtx = averVertexOf(i);
     AverLight sun;
     sun.direction  = L;
-    sun.radiance   = srgbToLin(gLightColor.rgb) * 3.0;   // sun radiance
+    sun.radiance   = averSunRadiance();
     sun.visibility = sunVis;
 
     AverSurface s = averEvalMaterial(vtx, sun);
@@ -379,7 +379,11 @@ void PSVoxel(VoxOut i) {
     // and any view-dependent term would be meaningless here.
     AverLight sun;
     sun.direction  = L;
-    sun.radiance   = srgbToLin(gLightColor.rgb);
+    // The SAME radiance the lit pass shades with. It used to be this expression without the factor
+    // of three the lit pass applied, so the radiance injected into the volume -- and therefore every
+    // bounce, every bit of colour bleeding, all of the indirect light -- was a third of the light
+    // that actually fell on the surface.
+    sun.radiance   = averSunRadiance();
     sun.visibility = shadowFactor(i.wpos, N, ndl);
     AverSurface s = averEvalMaterial(voxelVertexOf(i), sun);
     float3 albedo = averDiffuseAlbedo(s);

@@ -186,14 +186,19 @@ static bool rayAabb(const Vec3& o, const Vec3& d, const Vec3& mn, const Vec3& mx
 }
 static void buildGrid(std::vector<rhi::LineVertex>& v, f32 ext, f32 step) {
     const f32 g = 0.26f;
-    for (f32 x = -ext; x <= ext + 0.001f; x += step) {
-        v.push_back({x, -ext, 0.02f, g, g, g}); v.push_back({x, ext, 0.02f, g, g, g});
+    // Lifted off the floor by a fraction of a CELL rather than by a fixed distance: the lift exists
+    // to stop the lines z-fighting the ground under them, and how far that has to be is a property
+    // of the scene's scale.
+    const f32 lift = step * 0.02f;
+    for (f32 x = -ext; x <= ext + step * 0.001f; x += step) {
+        v.push_back({x, -ext, lift, g, g, g}); v.push_back({x, ext, lift, g, g, g});
     }
-    for (f32 y = -ext; y <= ext + 0.001f; y += step) {
-        v.push_back({-ext, y, 0.02f, g, g, g}); v.push_back({ext, y, 0.02f, g, g, g});
+    for (f32 y = -ext; y <= ext + step * 0.001f; y += step) {
+        v.push_back({-ext, y, lift, g, g, g}); v.push_back({ext, y, lift, g, g, g});
     }
-    v.push_back({0,0,0.03f, 0.80f,0.25f,0.25f}); v.push_back({ext,0,0.03f, 0.80f,0.25f,0.25f}); // +X (forward)
-    v.push_back({0,0,0.03f, 0.28f,0.72f,0.30f}); v.push_back({0,ext,0.03f, 0.28f,0.72f,0.30f}); // +Y (right)
+    const f32 axisLift = lift * 1.5f;
+    v.push_back({0,0,axisLift, 0.80f,0.25f,0.25f}); v.push_back({ext,0,axisLift, 0.80f,0.25f,0.25f}); // +X (forward)
+    v.push_back({0,0,axisLift, 0.28f,0.72f,0.30f}); v.push_back({0,ext,axisLift, 0.28f,0.72f,0.30f}); // +Y (right)
 }
 
 // ---- per-mode gizmo geometry (unit-size, local space; scaled by the world matrix) ----
@@ -255,6 +260,22 @@ static constexpr ImGuiWindowFlags kDrawerFlags =
     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings;
 #endif
+
+// THE EDITOR'S PLACEHOLDER SCENE, IN CENTIMETRES -- the engine's unit, and SkyForge's.
+//
+// It used to be authored at roughly a unit per METRE while the contract is centimetres, and that one
+// inconsistency caused three bugs in a row: fog tuned per-unit saturated a few metres into a real
+// level, the grid was a hundred times too fine beside a correctly-sized room, and the cascaded shadow
+// range had to be expressed as a multiple of the near plane because an absolute distance meant two
+// different things in the two scenes. Each was patched with a conditional; this removes the reason
+// for all three.
+inline constexpr f32 kEditorFloorHalf = 1000.0f;   // a 20 m square
+inline constexpr f32 kEditorCubeHalf  = 50.0f;     // a 1 m cube
+inline constexpr f32 kEditorGridCell  = 100.0f;    // 1 m cells
+// The grid is drawn OVER a loaded level as a floor reference, so its extent is a legibility decision
+// and not a scene one: eighty metres of one-metre lines at a grazing angle merges into a solid field
+// of moire that hides what is under it.
+inline constexpr f32 kEditorGridHalf  = 1000.0f;
 
 struct MeshObj {
     std::string name;
@@ -562,10 +583,24 @@ public:
 #endif
         // --- default "blank .ocmap": ground floor + cube + sun + sky + atmosphere ---
         std::vector<rhi::MeshVertex> gv, gi_v; std::vector<u32> gi, ci;
-        appendGround(gv, gi, 40.0f);
+        appendGround(gv, gi, kEditorFloorHalf);
         rhi::MeshHandle ground = e.device()->createMesh(gv.data(), (u32)gv.size(), gi.data(), (u32)gi.size());
-        appendBox(gi_v, ci, 0,0,0, 1.0f);
+        // TWO cubes, and the distinction is load-bearing.
+        //
+        // `unitCube` is half-extent ONE and is what Meshes/cube.ocmesh resolves to. A .ocworld PLACEG
+        // carries its scale as a HALF-EXTENT IN CENTIMETRES applied to that unit -- `PLACEG cube 0 0 -10
+        // 0 0 0 800 800 10` is a sixteen-metre floor -- so the mesh it multiplies must be a unit or
+        // every placement in every level is scaled by whatever the editor's own cube happens to be.
+        // Resizing this one to a metre made SkyForge's arena four hundred metres across and put the
+        // camera inside it, which reads as a lighting bug and is not one.
+        //
+        // `cube` is the EDITOR's placeholder actor and the toolbar's Add > Cube: a one-metre box,
+        // because that is a sensible thing to drop into a scene.
+        appendBox(gi_v, ci, 0,0,0, kEditorCubeHalf);
         rhi::MeshHandle cube = e.device()->createMesh(gi_v.data(), (u32)gi_v.size(), ci.data(), (u32)ci.size());
+        std::vector<rhi::MeshVertex> uv_; std::vector<u32> ui_;
+        appendBox(uv_, ui_, 0,0,0, 1.0f);
+        rhi::MeshHandle unitCube = e.device()->createMesh(uv_.data(), (u32)uv_.size(), ui_.data(), (u32)ui_.size());
 
 #if AVER_MODULE_SCENE
         // Register the built-in primitive meshes a SPAWNED actor's CMeshRenderer can name. A C# class
@@ -581,7 +616,7 @@ public:
             // The unit cube, on the same terms as the sphere. A level blockout is boxes -- floors,
             // walls, platforms, crates -- so with only a sphere registered a gameplay script could
             // spawn actors but could not build anything to walk on or shoot at.
-            sceneMeshes_[fnv1a64(std::string_view("Meshes/cube.ocmesh"))] = cube;
+            sceneMeshes_[fnv1a64(std::string_view("Meshes/cube.ocmesh"))] = unitCube;
         }
 
         // The named surfaces gameplay can ask for. Chosen to READ rather than to be pretty: a floor
@@ -605,10 +640,11 @@ public:
         MeshObj floor; floor.name="Floor"; floor.mesh=ground; floor.tris=(u32)gi.size()/3;
         floor.color[0]=0.34f; floor.color[1]=0.35f; floor.color[2]=0.37f;
         floor.metallic=0.0f; floor.roughness=0.9f;
-        floor.aabbMin=Vec3{-40,-40,-0.05f}; floor.aabbMax=Vec3{40,40,0.05f};
+        floor.aabbMin=Vec3{-kEditorFloorHalf,-kEditorFloorHalf,-5.0f};
+        floor.aabbMax=Vec3{ kEditorFloorHalf, kEditorFloorHalf, 5.0f};
         objects_.push_back(floor);
         cubeMesh_ = cube; cubeTris_ = (u32)ci.size()/3; // reused by the toolbar's Add > Cube
-        MeshObj c; c.name="Cube"; c.mesh=cube; c.tris=(u32)ci.size()/3; c.pos=Vec3{0,0,1};
+        MeshObj c; c.name="Cube"; c.mesh=cube; c.tris=(u32)ci.size()/3; c.pos=Vec3{0,0,kEditorCubeHalf};
         c.color[0]=0.85f; c.color[1]=0.36f; c.color[2]=0.22f;
         c.metallic=0.1f; c.roughness=0.35f;
         objects_.push_back(c);
@@ -634,7 +670,7 @@ public:
         // harmless but running it on half the list would not be obvious from the image.
         for (MeshObj& o : objects_) makeMaterialFor(o);
 
-        std::vector<rhi::LineVertex> gl; buildGrid(gl, 40.0f, 2.0f);
+        std::vector<rhi::LineVertex> gl; buildGrid(gl, kEditorGridHalf, kEditorGridCell);
         gridMesh_ = e.device()->createLineMesh(gl.data(), (u32)gl.size());
 
         // Per-mode gizmos: normal + amber-highlight variant of each axis.
@@ -726,7 +762,7 @@ public:
         framedByLevel = !levelEntities_.empty();
 #endif
         if (!framedByLevel) {
-            camPos_ = Vec3{7.0f, 7.0f, 4.5f};
+            camPos_ = Vec3{700.0f, 700.0f, 450.0f};
             const Vec3 d = (Vec3{0,0,1} - camPos_).getSafeNormal();
             yaw_ = std::atan2(d.y, d.x);
             pitch_ = std::asin(d.z);
@@ -778,7 +814,7 @@ public:
                 pitch_ = pitch_ < -1.54f ? -1.54f : (pitch_ > 1.54f ? 1.54f : pitch_);
                 if (io.MouseWheel != 0.0f) {
                     flySpeed_ *= (1.0f + io.MouseWheel * 0.15f);
-                    flySpeed_ = flySpeed_ < 0.5f ? 0.5f : (flySpeed_ > 400.0f ? 400.0f : flySpeed_);
+                    flySpeed_ = flySpeed_ < 20.0f ? 20.0f : (flySpeed_ > 40000.0f ? 40000.0f : flySpeed_);
                 }
             }
 
@@ -909,10 +945,10 @@ public:
         // Widened only while a level is loaded, so the editor's own scene keeps the depth range it was
         // tuned for and the pixel-exact gates see the projection they recorded. Near stays proportional
         // too: pushing far out without moving near costs depth precision and brings back z-fighting.
-        f32 zNear = 0.05f, zFar = 5000.0f;
-#if AVER_MODULE_SCENE
-        if (!levelEntities_.empty()) { zNear = 2.0f; zFar = 200000.0f; }   // 2cm .. 2km
-#endif
+        // 2 cm to 2 km, unconditionally. This used to widen only while a level was loaded, because
+        // the editor's own scene was metre-scaled and 0.05..5000 was right for it. Both are
+        // centimetres now, so there is one range and no way for them to disagree.
+        const f32 zNear = 2.0f, zFar = 200000.0f;
         const Mat4 proj = Mat4::perspectiveLH(radians(60.0f), aspect, zNear, zFar);
         const Mat4 viewProj = view * proj;
         const Mat4 invVP = viewProj.inverse();
@@ -934,7 +970,7 @@ public:
         // A loaded level's own FOG record wins outright: it is authored in the level's units and is
         // the correct value whether or not a session is running. The play-scaled editor default is
         // only the fallback for a world that has no level loaded.
-        f32 fog = playSessionActive() ? fogDensity_ * 0.01f : fogDensity_;
+        f32 fog = fogDensity_;
 #if AVER_MODULE_SCENE
         if (hasLevelFog_) fog = levelFog_;
 #endif
@@ -1173,14 +1209,18 @@ public:
         // editor's default scene. Hidden while playing; the game builds its own world.
         //
         // Gate-neutral: the oracle runs never enter play, so this is always false at gate time.
-        const bool hideEditorScene = playSessionActive();
+        const bool hideEditorScene = playSessionActive() || !levelEntities_.empty();
         for (int i=0;i<(int)objects_.size();++i) {
             MeshObj& o = objects_[i];
             if (!o.visible || hideEditorScene) continue;
             Transform tr; tr.position=o.pos; tr.rotation=quatFromEulerDeg(o.rotDeg); tr.scale=o.scale;
             Mat4 w = tr.toMatrix();
+            // The selected actor is drawn with its OWN colour. It used to be brightened by 30% and
+            // lifted by 0.1, which says "this object is a slightly different colour" -- unreadable
+            // against a scene that already has colours in it, and actively misleading while tuning a
+            // material, because the surface being edited is not the surface being shown. The outline
+            // below is the whole of the selection feedback, which is what every other editor does.
             f32 col[4]={o.color[0],o.color[1],o.color[2],1};
-            if (i==sel_) for (int k=0;k<3;++k) col[k]=std::fmin(1.0f,col[k]*1.3f+0.10f);
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
             // The actor's material, applied immediately before the draw it belongs to.
             // setDrawBinding is STICKY and is reset every beginFrame to whatever Voxi registered as
@@ -1219,7 +1259,7 @@ public:
             // which is exactly where an outline is most needed to find the thing you selected.
             const Vec3 sp{selectionOutline_.m[3][0], selectionOutline_.m[3][1], selectionOutline_.m[3][2]};
             const f32 camDist = (sp - camPos_).size();
-            const f32 grow = 1.0f + std::fmin(0.12f, std::fmax(0.02f, camDist * 0.0009f));
+            const f32 grow = 1.0f + std::fmin(0.12f, std::fmax(0.02f, camDist * 0.000009f));
             Mat4 o = selectionOutline_;
             for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) o.m[r][c] *= grow;
             e.device()->setWireframe(true);
@@ -1308,10 +1348,10 @@ public:
             //
             // Conditioned on a level being loaded rather than changed outright: the gates draw this
             // grid and compare pixels, and they load no level.
-            Mat4 g = Mat4::identity();
-#if AVER_MODULE_SCENE
-            if (!levelEntities_.empty()) { g.m[0][0] = g.m[1][1] = g.m[2][2] = 100.0f; }
-#endif
+            // No scale hack any more: the grid is built in centimetres with one-metre cells, which
+            // is correct for the editor's own scene AND for a level, because they are finally the
+            // same units.
+            const Mat4 g = Mat4::identity();
             e.device()->drawLines(gridMesh_, &g.m[0][0]);
         }
         drawGizmo(e);
@@ -1683,7 +1723,7 @@ private:
         objects_.push_back(c);
         sel_ = (int)objects_.size() - 1;
     }
-    f32 gizmoLen(const Vec3& origin) const { f32 L = dist(eye_, origin) * 0.17f; return L < 0.5f ? 0.5f : L; }
+    f32 gizmoLen(const Vec3& origin) const { f32 L = dist(eye_, origin) * 0.17f; return L < 50.0f ? 50.0f : L; }
 
     // Project a world point to screen pixels (row-vector clip = p * viewProj).
     bool project(const Vec3& wp, f32& sx, f32& sy) const {
@@ -3096,7 +3136,7 @@ private:
         if (sel_>=0 && sel_<(int)objects_.size()){
             MeshObj& o=objects_[sel_]; ImGui::TextUnformatted(o.name.c_str()); ImGui::Separator();
             if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::DragFloat3("Location", &o.pos.x, 0.05f);
+                ImGui::DragFloat3("Location (cm)", &o.pos.x, 1.0f);
                 ImGui::DragFloat3("Rotation", &o.rotDeg.x, 1.0f);
                 ImGui::DragFloat3("Scale", &o.scale.x, 0.01f, 0.02f, 100.f);
             }
@@ -3327,7 +3367,8 @@ private:
         if (ImGui::CollapsingHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Show grid", &showGrid_);
             ImGui::Checkbox("Wireframe", &wireframe_);
-            ImGui::SliderFloat("Fly speed", &flySpeed_, 1.0f, 200.0f, "%.0f");
+            ImGui::SliderFloat("Fly speed (cm/s)", &flySpeed_, 20.0f, 20000.0f, "%.0f",
+                               ImGuiSliderFlags_Logarithmic);
             ImGui::SliderFloat("Look sensitivity", &lookSpeed_, 0.001f, 0.02f, "%.4f");
         }
         ImGui::Separator();
@@ -3575,7 +3616,10 @@ private:
         ImGui::SameLine(0, gap);
         char camLbl[32]; std::snprintf(camLbl, sizeof camLbl, "Cam %.0f", flySpeed_);
         if (dropButton(camLbl)) ImGui::OpenPopup("camSpeed");
-        if (ImGui::BeginPopup("camSpeed")) { ImGui::SliderFloat("Speed", &flySpeed_, 1.0f, 200.0f, "%.0f"); ImGui::EndPopup(); }
+        if (ImGui::BeginPopup("camSpeed")) {
+            ImGui::SliderFloat("Speed (cm/s)", &flySpeed_, 20.0f, 20000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+            ImGui::EndPopup();
+        }
 
         if (ImGui::BeginPopup("snapMove")) {
             ImGui::Checkbox("Grid snap (position)", &snapMove_); ImGui::Separator();
@@ -3668,7 +3712,7 @@ private:
     Tool tool_ = Tool::Select;
     // Free-fly editor camera (Unreal-style): position + yaw/pitch, no auto-orbit.
     Vec3 camPos_{7.0f, 7.0f, 4.5f};
-    f32 yaw_ = 0.0f, pitch_ = 0.0f, flySpeed_ = 12.0f, lookSpeed_ = 0.005f;
+    f32 yaw_ = 0.0f, pitch_ = 0.0f, flySpeed_ = 800.0f, lookSpeed_ = 0.005f;   // 8 m/s
     bool flying_ = false;
     // The selected object's transform and mesh, latched during the scene pass so the outline can be
     // drawn after every surface is down rather than in the middle of the loop.
@@ -3677,7 +3721,7 @@ private:
     f32 sunAz_=-0.55f, sunAlt_=-0.45f, sunUp_=0.55f, sunColor_[3]={1.0f,0.96f,0.9f}, sunAmbient_=0.28f;
     // sky + atmosphere
     f32 skyZenith_[3]={0.19f,0.42f,0.78f}, skyHorizon_[3]={0.72f,0.80f,0.90f};
-    f32 fogColor_[3]={0.70f,0.78f,0.88f}, fogDensity_=0.014f;
+    f32 fogColor_[3]={0.70f,0.78f,0.88f}, fogDensity_=0.00014f;   // per CENTIMETRE
     // The camera's post chain, at its identity defaults. See rhi::PostSettings for why they are the
     // identity and not something prettier.
     rhi::PostSettings post_{};
@@ -3763,7 +3807,7 @@ private:
     editor::ToolsMenu tools_;
     bool worldSpace_=true;   // gizmo coordinate space toggle (display only for now)
     // Voxi GI volume placement: a cube around the default scene (floor is +/-40, cube at origin).
-    bool giDebugView_=false; Vec3 giCenter_{0,0,8}; f32 giExtent_=44.0f;
+    bool giDebugView_=false; Vec3 giCenter_{0,0,300}; f32 giExtent_=1200.0f;   // centimetres
 #if AVER_MODULE_VOXI
     // Voxi's GPU side. Inert for now: it creates its resources and leaves them idle.
     voxi::VoxiRenderer voxiRenderer_;

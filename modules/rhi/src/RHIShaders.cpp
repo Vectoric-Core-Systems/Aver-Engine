@@ -170,6 +170,13 @@ static const float PI = 3.14159265;
 // one pulls it to a thin bright line and reads as thin high-altitude air. Below the horizon it fades
 // to the ground albedo instead of continuing the sky underneath the camera, which is visible the
 // moment anything reflective looks down.
+// The sun's radiance as every lighting path must see it: the authored colour, decoded, times the
+// authored intensity. ONE definition, because the two paths that used to compute this separately
+// disagreed by a factor of three -- the lit pass multiplied by 3 and the GI injection did not, so
+// every bounce in the engine was a third as bright as the light that produced it. Colour bleeding
+// was not missing; it was there and two thirds too dark to see.
+float3 averSunRadiance() { return srgbToLin(gLightColor.rgb) * gSkyParams.z; }
+
 float3 skyColorFull(float3 dir)
 {
     // The blend parameter is dir.z remapped from [-1,1] to [0,1], which is the curve this engine has

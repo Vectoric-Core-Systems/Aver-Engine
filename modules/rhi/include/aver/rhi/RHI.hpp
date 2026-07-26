@@ -206,7 +206,10 @@ struct SkyAtmosphere {
     // editing does. setSunAngles / sunAngles below are that conversion.
     f32 sunDirection[3] = {-0.55f, -0.45f, 0.55f};
     f32 sunColor[3]     = {1.0f, 0.96f, 0.90f};
-    f32 sunIntensity    = 1.0f;
+    // 3.0 because that is the factor the lit pass had hardcoded. Making it authored is the point:
+    // the same number now scales the direct light, the GI injection and the sun disk, where before
+    // the first had it, the second did not, and the third was a separate literal.
+    f32 sunIntensity    = 3.0f;
     // Kelvin. 0 means "use sunColor as authored"; any other value overrides it with the blackbody
     // colour, which is how a sunset is authored honestly rather than by eye.
     f32 sunTemperatureK = 0.0f;
