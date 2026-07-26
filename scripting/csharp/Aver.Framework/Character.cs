@@ -63,6 +63,26 @@ public abstract class AverCharacter : AverPawn
     private float _yaw;         // facing in degrees, turned by the mouse
     private float _pitch;       // view pitch in degrees, also from the mouse
     private int   _capsule;     // physics character handle; 0 until created, or when unavailable
+    private Entity _view;       // the head: a child at eye height carrying pitch. Default until EnsureView.
+
+    /// <summary>
+    /// The character's HEAD — a child entity at <see cref="EyeHeight"/> that carries the view pitch,
+    /// while the body below it carries only yaw and stays upright. Attach anything that should move
+    /// with the eye to this: a weapon, a torch, a camera shake pivot.
+    /// </summary>
+    /// <remarks>
+    /// <para>This exists because "held item follows the view" and "the camera is somewhere" have to be
+    /// the SAME transform or they drift apart. They used to be two: the editor pinned the camera at
+    /// feet + <see cref="EyeHeight"/> along world up and never moved it when you looked around, while
+    /// pitch was applied to the character root, so anything parented to the character orbited its
+    /// FEET. SkyForge's gun, carried 154cm up, swung through 55cm of world space for 20 degrees of
+    /// look — an arc of radius 160cm about a point 165cm below the eye, when it should have turned on
+    /// a 43cm arc about the eye itself.</para>
+    /// <para>Valid from the first <see cref="Drive"/> or <see cref="OnPossessed"/>, whichever runs
+    /// first. Before that it is <c>default</c>, so a script that attaches in <c>OnBeginPlay</c> should
+    /// call <see cref="EnsureView"/> first or simply attach in <c>OnPossessed</c>.</para>
+    /// </remarks>
+    public Entity View => _view;
 
     /// <summary>The character's facing yaw, degrees. Turned by <see cref="DriveWithInput"/>.</summary>
     public float Yaw => _yaw;
@@ -155,8 +175,10 @@ public abstract class AverCharacter : AverPawn
     /// <param name="pitchDeltaDeg">Degrees to pitch this frame; positive looks up.</param>
     protected void Drive(float dt, Vec3 moveAxis, float yawDeltaDeg, float pitchDeltaDeg)
     {
-        // Publish the camera this character wants, so the editor's play view can follow it.
+        // Publish the camera this character wants, so the editor's play view can follow it. The mode
+        // and the offsets are the request; EnsureView publishes the NODE the camera actually sits on.
         Fw.aver_fw_set_view((int)CameraViewMode, EyeHeight, BoomLength);
+        EnsureView();
 
         _yaw += yawDeltaDeg;
         _pitch = MathF.Max(PitchMin, MathF.Min(PitchMax, _pitch + pitchDeltaDeg));
@@ -194,14 +216,53 @@ public abstract class AverCharacter : AverPawn
         ApplyLookRotation();
     }
 
-    // The transform carries pitch only in FIRST person, because the play camera derives its look
-    // direction from the pawn's forward axis -- so that is the only way to aim up or down. In third
-    // person the body stays upright instead, since there the camera looks AT the character and a
-    // pitched body would just be a character lying over at an angle.
+    /// <summary>
+    /// Create the view node if it does not exist yet, and publish it as the camera's transform.
+    /// Idempotent, and safe to call before the first tick.
+    /// </summary>
+    /// <remarks>
+    /// Called from <see cref="Drive"/> and from possession, so ordinary code never has to. It is
+    /// public because a script that wants to attach something in <c>OnBeginPlay</c> -- before either
+    /// of those has run -- needs a way to bring the head into being first.
+    /// </remarks>
+    public void EnsureView()
+    {
+        if (_view.IsAlive)
+        {
+            // EyeHeight is a public field and scripts set it in OnBeginPlay, after the node may
+            // already exist. Re-seat every time rather than only at creation, or the head silently
+            // keeps whatever height it was born with.
+            _view.SetLocalPosition(Vec3.Up * EyeHeight);
+            Fw.aver_fw_set_view_entity(_view.Handle);
+            return;
+        }
+        int e = SceneNative.aver_scene_create();
+        if (e == 0) return;                       // out of entities; the pawn-matrix fallback still works
+        _view = new Entity(e);
+        _view.SetName("View");
+        _view.SetParent(Self);
+        _view.SetLocalPosition(Vec3.Up * EyeHeight);
+        ApplyLookRotation();
+        Fw.aver_fw_set_view_entity(_view.Handle);
+    }
+
+    // THE BODY CARRIES YAW; THE HEAD CARRIES PITCH.
+    //
+    // Both used to sit on the character root, because the play camera reconstructed its look
+    // direction from the pawn's forward axis and pitching the whole body was the only way to aim up
+    // or down. That made the root's origin -- the FEET -- the pivot for everything parented to the
+    // character, so a held item orbited a point 165cm below the eye while the camera itself did not
+    // move at all. Splitting them puts the camera and whatever it carries on one node with one
+    // pivot, which is the only arrangement in which "the gun follows the view" is true by
+    // construction rather than by two transforms happening to agree.
+    //
+    // The body stays upright in BOTH view modes now. In third person that was already true and was
+    // special-cased; in first person nobody sees the body, and a level's collision capsule is a
+    // capsule about the vertical axis whichever way the head is pointing.
     private void ApplyLookRotation()
     {
-        float pitch = CameraViewMode == CameraView.FirstPerson ? _pitch : 0f;
-        Self.SetLocalRotation(new Rot(_yaw, pitch, 0f).ToQuat());
+        Self.SetLocalRotation(new Rot(_yaw, 0f, 0f).ToQuat());
+        if (_view.IsAlive) _view.SetLocalRotation(new Rot(0f, _pitch, 0f).ToQuat());
     }
 
     /// <summary>Move the character, simulation included, rather than only its entity transform.</summary>

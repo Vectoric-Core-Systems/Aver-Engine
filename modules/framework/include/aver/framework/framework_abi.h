@@ -51,7 +51,9 @@ extern "C" {
  * INDEPENDENTLY of it. The framework's surface will move while the scene's is still settling, and a
  * single shared number would force a lockstep neither module needs. */
 #define AVER_FW_ABI_VERSION_MAJOR 1
-#define AVER_FW_ABI_VERSION_MINOR 0
+/* 1: added aver_fw_set_view_entity / aver_fw_view_entity. Additive only -- every entry point that
+ * existed at 1.0 is unchanged in shape and meaning, so a binding built against 1.0 still runs. */
+#define AVER_FW_ABI_VERSION_MINOR 1
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -236,6 +238,25 @@ AVER_FW_ABI void    aver_fw_input_mouse(float* out3);
 #define AVER_FW_VIEW_THIRD_PERSON 1
 AVER_FW_ABI void aver_fw_set_view(int32_t mode, float eyeHeight, float boomLength);
 AVER_FW_ABI void aver_fw_view(int32_t* outMode, float* outEyeHeight, float* outBoomLength);
+
+/* THE VIEW ENTITY: the scene node the camera sits on, published so the editor can READ a transform
+ * instead of RECONSTRUCTING one.
+ *
+ * Reconstructing it is what this replaces, and it had a real cost. The editor used to take the
+ * possessed pawn's world matrix and use its forward axis as the look direction, which meant the only
+ * way for a character to aim up or down was to pitch its whole body -- about its origin, which is
+ * the feet. Anything parented to the character then swung on an arc of its own height: the SkyForge
+ * gun, carried 154cm up, travelled 55cm through the world for 20 degrees of look, while the camera
+ * (pinned at feet + eyeHeight along WORLD up) did not move at all. Two different pivots for one
+ * head. Hanging the camera and the held item on the same node makes that class of bug unstateable.
+ *
+ * 0 means "no view node published" and the caller falls back to the pawn-matrix path above, so a
+ * character that never sets one behaves exactly as it did before.
+ *
+ * The handle is a scene entity id, valid only while the scene says it is -- check aver_scene_valid
+ * before use; a pawn can be destroyed between the publish and the read. */
+AVER_FW_ABI void    aver_fw_set_view_entity(int32_t entity);
+AVER_FW_ABI int32_t aver_fw_view_entity(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

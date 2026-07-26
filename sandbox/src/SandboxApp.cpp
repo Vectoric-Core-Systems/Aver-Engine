@@ -276,6 +276,11 @@ inline constexpr f32 kEditorGridCell  = 100.0f;    // 1 m cells
 // and not a scene one: eighty metres of one-metre lines at a grazing angle merges into a solid field
 // of moire that hides what is under it.
 inline constexpr f32 kEditorGridHalf  = 1000.0f;
+// How far in front of the camera Add places a new object. Four metres: far enough to be outside the
+// near plane and to be seen whole, close enough to land where the camera is looking rather than
+// somewhere across the level. It was 8 -- eight CENTIMETRES once the world became centimetres, which
+// put every added object inside the near plane.
+inline constexpr f32 kAddDistance     = 400.0f;
 
 struct MeshObj {
     std::string name;
@@ -1209,7 +1214,10 @@ public:
         // editor's default scene. Hidden while playing; the game builds its own world.
         //
         // Gate-neutral: the oracle runs never enter play, so this is always false at gate time.
-        const bool hideEditorScene = playSessionActive() || !levelEntities_.empty();
+        // Latched on the object so the outliner and picking list exactly what the renderer drew,
+        // rather than each deciding for itself and drifting.
+        hideEditorScene_ = playSessionActive() || !levelEntities_.empty();
+        const bool hideEditorScene = hideEditorScene_;
         for (int i=0;i<(int)objects_.size();++i) {
             MeshObj& o = objects_[i];
             if (!o.visible || hideEditorScene) continue;
@@ -1684,9 +1692,18 @@ private:
 #endif
     }
 
-    // While playing, position the view camera from the possessed pawn's transform and the character's
-    // published view (first- or third-person), overriding the fly camera. Reads the pawn's world matrix:
-    // row 3 is the position, row 0 the forward (+X) axis.
+    // While playing, position the view camera from the character's published VIEW NODE, overriding the
+    // fly camera. Reads a world matrix: row 3 is the position, row 0 the forward (+X) axis.
+    //
+    // The view node is the character's head -- a child entity at eye height carrying the look pitch,
+    // published through aver_fw_set_view_entity. Reading it rather than rebuilding the camera from the
+    // pawn's own axes is what lets a held item share the camera's transform: there is now ONE pivot for
+    // the eye and for anything parented to it, where before the camera was pinned to feet + eyeHeight
+    // along world up and the pitch lived on the pawn root, so the two disagreed by the character's whole
+    // height the moment you looked up or down.
+    //
+    // A character that publishes no view node still works: entity 0, or a handle the scene has since
+    // freed, falls back to the pawn matrix exactly as this did before.
     void drivePlayCamera() {
         if (aver_fw_play_state() != AVER_FW_PLAY_PLAYING) return;
         const int32_t pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
@@ -1694,21 +1711,36 @@ private:
         const scene::Entity e = static_cast<scene::Entity>(static_cast<uint32_t>(pawn));
         scene::World& w = scene::World::instance();
         if (!w.valid(e)) return;
-        const Mat4& wm = w.worldMatrix(e);
-        const Vec3 pawnPos{wm.m[3][0], wm.m[3][1], wm.m[3][2]};
-        const Vec3 fwd = Vec3{wm.m[0][0], wm.m[0][1], wm.m[0][2]}.getSafeNormal();
-        const Vec3 up{0, 0, 1};
 
         int32_t mode = AVER_FW_VIEW_THIRD_PERSON; float eye = 160.0f, boom = 450.0f;
         aver_fw_view(&mode, &eye, &boom);
 
+        // Prefer the view node; fall back to the pawn if it has not published one.
+        const int32_t viewId = aver_fw_view_entity();
+        const scene::Entity ve = static_cast<scene::Entity>(static_cast<uint32_t>(viewId));
+        const bool haveView = viewId != 0 && w.valid(ve);
+        const Mat4& vm = haveView ? w.worldMatrix(ve) : w.worldMatrix(e);
+        const Mat4& pm = w.worldMatrix(e);
+
+        const Vec3 headPos{vm.m[3][0], vm.m[3][1], vm.m[3][2]};
+        const Vec3 headFwd = Vec3{vm.m[0][0], vm.m[0][1], vm.m[0][2]}.getSafeNormal();
+        const Vec3 pawnPos{pm.m[3][0], pm.m[3][1], pm.m[3][2]};
+        const Vec3 pawnFwd = Vec3{pm.m[0][0], pm.m[0][1], pm.m[0][2]}.getSafeNormal();
+        const Vec3 up{0, 0, 1};
+
         Vec3 look;
         if (mode == AVER_FW_VIEW_FIRST_PERSON) {
-            camPos_ = pawnPos + up * eye;
-            look    = fwd;
+            // The head IS the camera. Without a view node the head matrix is the pawn's, which sits at
+            // the feet, so the eye offset still has to be added by hand in that case.
+            camPos_ = haveView ? headPos : pawnPos + up * eye;
+            look    = headFwd;
         } else {
-            camPos_ = pawnPos - fwd * boom + up * (boom * 0.55f);
-            look    = (pawnPos + up * 90.0f - camPos_).getSafeNormal();
+            // Orbit the HEAD, along the head's own forward, so looking up swings the boom down and the
+            // character stays framed. The body's yaw alone would ignore pitch entirely.
+            const Vec3 pivot = haveView ? headPos : pawnPos + up * eye;
+            const Vec3 armDir = haveView ? headFwd : pawnFwd;
+            camPos_ = pivot - armDir * boom;
+            look    = (pivot - camPos_).getSafeNormal();
         }
         // camForward() composes {cosP cosY, cosP sinY, sinP}; invert the look direction to yaw/pitch.
         yaw_   = std::atan2(look.y, look.x);
@@ -1725,15 +1757,58 @@ private:
     bool movableSelected() const { return sel_ >= 0 && sel_ < (int)objects_.size(); }
 
     // Spawn a cube in front of the camera and select it (toolbar Add > Cube).
+    //
+    // TWO things were wrong with this and both were scale. It placed the cube 8 units in front of the
+    // camera, which was several metres when the editor was authored at a unit per metre and is EIGHT
+    // CENTIMETRES now that the world is centimetres -- so Add put a cube inside the near plane, and
+    // the only evidence anything had happened was the Details panel filling in. And it always added to
+    // objects_, the placeholder array, so a cube added while a level was open could not be selected in
+    // the outliner, could not be saved into the level, and vanished on reload.
+    //
+    // Now it adds to whichever world is actually on screen: a real scene entity when a level owns the
+    // viewport, the placeholder object otherwise.
     void spawnCube(Engine&) {
+        const Vec3 at = camPos_ + camForward() * kAddDistance;
+#if AVER_MODULE_SCENE
+        if (hideEditorScene_ || !levelPath_.empty()) {
+            scene::World& world = scene::World::instance();
+            Transform xf;
+            xf.position = at;
+            if (snapMove_) for (int k=0;k<3;++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], moveSnap_);
+            xf.rotation = Quat{0,0,0,1};
+            // Scale IS the half-extent, because the mesh is a UNIT cube -- the same contract .ocworld
+            // PLACEG uses, so what Add creates and what a level file stores are the same thing.
+            xf.scale = Vec3{kEditorCubeHalf, kEditorCubeHalf, kEditorCubeHalf};
+
+            // Named for the asset, because that is what saveLevel writes as the placement's asset and
+            // what loadOcworld hashes back into the mesh id. Naming it "Cube 3" would save a level
+            // that cannot be reloaded.
+            static const std::string kCubeAsset = "Meshes/cube.ocmesh";
+            const scene::Entity e = world.create(kCubeAsset, scene::kInvalidEntity, xf);
+            if (e == scene::kInvalidEntity) { AVER_WARN("[Editor] Add: the world refused a new entity"); return; }
+            if (auto* mr = static_cast<scene::CMeshRenderer*>(
+                    world.addComponent(e, scene::kComponentMeshRenderer))) {
+                mr->mesh = fnv1a64(std::string_view(kCubeAsset));
+                mr->flags |= scene::kMeshRendererVisible;
+                mr->aabbMin[0] = mr->aabbMin[1] = mr->aabbMin[2] = -1.0f;
+                mr->aabbMax[0] = mr->aabbMax[1] = mr->aabbMax[2] =  1.0f;
+            }
+            levelEntities_.push_back(e);
+            entityLabels_[static_cast<u32>(e)] = makeEntityLabel(std::string(), kCubeAsset);
+            sel_ = kSelScene; selEntity_ = e;
+            AVER_INFO("[Editor] added cube entity #{} at ({:.0f}, {:.0f}, {:.0f})",
+                      (u32)e, xf.position.x, xf.position.y, xf.position.z);
+            return;
+        }
+#endif
         if (!cubeMesh_) return;
         MeshObj c; c.mesh = cubeMesh_; c.tris = cubeTris_;
         c.name = "Cube " + std::to_string(++spawnCount_);
-        c.pos = camPos_ + camForward() * 8.0f;
+        c.pos = at;
         if (snapMove_) for (int k=0;k<3;++k) (&c.pos.x)[k] = snapf((&c.pos.x)[k], moveSnap_);
         c.color[0]=0.72f; c.color[1]=0.72f; c.color[2]=0.74f; c.metallic=0.0f; c.roughness=0.6f;
         objects_.push_back(c);
-        sel_ = (int)objects_.size() - 1;
+        sel_ = (int)objects_.size() - 1; selEntity_ = scene::kInvalidEntity;
     }
     f32 gizmoLen(const Vec3& origin) const { f32 L = dist(eye_, origin) * 0.17f; return L < 50.0f ? 50.0f : L; }
 
@@ -1861,6 +1936,13 @@ private:
         }
         if (!io.MouseDown[0]) { dragging_=false; activeAxis_=-1; }
 
+        // DELETE THE SELECTION. There was no way to remove anything from the world at all -- the only
+        // Delete in the editor belonged to the Content Browser and deleted FILES. Guarded on keyboard
+        // focus not being in a text field, so typing a name into Details cannot destroy the thing
+        // being named.
+        if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
+            deleteSelection();
+
         if (dragging_ && movableSelected()) {
             MeshObj& o = objects_[sel_];
             const f32 dx=mx-prevMouseX_, dy=my-prevMouseY_;
@@ -1890,6 +1972,31 @@ private:
     }
 
 #if AVER_WITH_IMGUI
+    // Remove whatever is selected from the world. The pseudo-entries (sun, sky, post) are settings
+    // rather than objects and are deliberately not deletable -- there is no world without them.
+    void deleteSelection() {
+#if AVER_MODULE_SCENE
+        if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity) {
+            scene::World& w = scene::World::instance();
+            if (w.valid(selEntity_)) {
+                AVER_INFO("[Editor] deleted entity #{} '{}'", (u32)selEntity_, w.name(selEntity_));
+                w.destroy(selEntity_);   // deferred to the next flush, and takes the whole subtree
+            }
+            // Drop it from the level list too, or a later save would write out a placement for
+            // something the world has already destroyed.
+            levelEntities_.erase(std::remove(levelEntities_.begin(), levelEntities_.end(), selEntity_),
+                                 levelEntities_.end());
+            selEntity_ = scene::kInvalidEntity;
+            sel_ = -1;
+            return;
+        }
+#endif
+        if (sel_ >= 0 && sel_ < (int)objects_.size()) {
+            objects_.erase(objects_.begin() + sel_);
+            sel_ = -1;
+        }
+    }
+
     void pick(Engine& e, const ImGuiIO& io) {
         (void)e;
         const f32 nx = (io.MousePos.x - vpX_) / vpW_ * 2.f - 1.f; // NDC within the viewport rect
@@ -1902,14 +2009,45 @@ private:
         const Vec3 farW{rx/rw, ry/rw, rz/rw};
         const Vec3 ro = eye_, rd = farW - eye_;
         int best=-1; f32 bestT=1e30f;
-        for (int i=0;i<(int)objects_.size();++i){
-            MeshObj& o=objects_[i]; if(!o.visible) continue;
-            Transform tr; tr.position=o.pos; tr.rotation=quatFromEulerDeg(o.rotDeg); tr.scale=o.scale;
-            const Mat4 iw = tr.toMatrix().inverse();
-            const Vec3 lo=xformPoint(iw,ro), ld=xformVec(iw,rd);
-            f32 t; if (rayAabb(lo,ld,o.aabbMin,o.aabbMax,t) && t<bestT){ bestT=t; best=i; }
+        if (!hideEditorScene_)
+            for (int i=0;i<(int)objects_.size();++i){
+                MeshObj& o=objects_[i]; if(!o.visible) continue;
+                Transform tr; tr.position=o.pos; tr.rotation=quatFromEulerDeg(o.rotDeg); tr.scale=o.scale;
+                const Mat4 iw = tr.toMatrix().inverse();
+                const Vec3 lo=xformPoint(iw,ro), ld=xformVec(iw,rd);
+                f32 t; if (rayAabb(lo,ld,o.aabbMin,o.aabbMax,t) && t<bestT){ bestT=t; best=i; }
+            }
+
+        scene::Entity bestEnt = scene::kInvalidEntity;
+#if AVER_MODULE_SCENE
+        // The SAME ray against every drawable scene entity, in the same units, competing on the same
+        // t -- so a level placement in front of a placeholder object wins, which is the whole point of
+        // picking them together rather than in two passes with a precedence rule.
+        {
+            scene::World& w = scene::World::instance();
+            const u32 n = w.count();
+            for (u32 i = 0; i < n; ++i) {
+                const scene::Entity ent = w.at(i);
+                if (!w.valid(ent) || w.destroyPending(ent)) continue;
+                const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
+                if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
+                if (sceneMeshes_.find(mr->mesh) == sceneMeshes_.end()) continue;  // not drawn, so not pickable
+                // Every mesh the scene can resolve today is a UNIT primitive and the placement's scale
+                // is its half-extent, so the local box is the unit box unless the component carries
+                // real bounds. Falling back rather than trusting a zeroed AABB matters: a degenerate
+                // box misses every ray, which would present as "level objects are not clickable" --
+                // exactly the symptom this is fixing.
+                Vec3 lmin{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
+                Vec3 lmax{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
+                if (!(lmax.x > lmin.x && lmax.y > lmin.y && lmax.z > lmin.z)) { lmin = Vec3{-1,-1,-1}; lmax = Vec3{1,1,1}; }
+                const Mat4 iw = w.worldMatrix(ent).inverse();
+                const Vec3 lo = xformPoint(iw, ro), ld = xformVec(iw, rd);
+                f32 t; if (rayAabb(lo, ld, lmin, lmax, t) && t < bestT) { bestT = t; bestEnt = ent; best = -1; }
+            }
         }
-        sel_ = best;
+#endif
+        if (bestEnt != scene::kInvalidEntity) { sel_ = kSelScene; selEntity_ = bestEnt; }
+        else                                  { sel_ = best;     selEntity_ = scene::kInvalidEntity; }
     }
 
     // A button with a drop-down triangle. The triangle is DRAWN, not typed: the default font
@@ -2044,7 +2182,16 @@ private:
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
         ImGui::Begin("##maintoolbar", nullptr, kChromeFlags);
         ImGui::SetCursorPosY((toolbarH - ImGui::GetFrameHeight()) * 0.5f);
-        ImGui::Button("Save"); ImGui::SameLine();
+        // THE SAME ACTION AS File > Save Level, not a second one. This was a bare ImGui::Button whose
+        // return value was discarded, so the most prominent button on the toolbar had never once done
+        // anything. Disabled when there is no level path rather than silently doing nothing, because
+        // a Save that looks live and isn't is worse than one that admits it cannot.
+        ImGui::BeginDisabled(levelPath_.empty());
+        if (ImGui::Button("Save")) saveLevel(levelPath_);
+        ImGui::EndDisabled();
+        if (levelPath_.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("No level loaded - File > New Level, then Save Level As");
+        ImGui::SameLine();
         if (dropButton("Add")) ImGui::OpenPopup("addActor");
         if (ImGui::BeginPopup("addActor")) {
             ImGui::TextDisabled("Place Actor"); ImGui::Separator();
@@ -3136,12 +3283,45 @@ private:
     void buildPanels(Engine& e) {
         (void)e;   // the panels read app/project state, not the device, since the Output Log/Content Browser landed
         ImGui::Begin("World Outliner");
-        for (int i=0;i<(int)objects_.size();++i)
-            if (ImGui::Selectable((std::string("  ")+objects_[i].name).c_str(), sel_==i)) sel_=i;
+        // The placeholder scene, hidden while a level or a play session owns the viewport so the list
+        // shows what is actually on screen rather than what is merely in memory.
+        if (!hideEditorScene_)
+            for (int i=0;i<(int)objects_.size();++i)
+                if (ImGui::Selectable((std::string("  ")+objects_[i].name).c_str(), sel_==i)) { sel_=i; selEntity_=scene::kInvalidEntity; }
+#if AVER_MODULE_SCENE
+        // EVERY LIVE SCENE ENTITY. Walked rather than taken from levelEntities_, because that list
+        // holds only what the level file placed -- a spawned actor is just as real, just as clickable
+        // and just as much a thing someone expects to find here.
+        {
+            scene::World& w = scene::World::instance();
+            const u32 n = w.count();
+            int listed = 0;
+            for (u32 i = 0; i < n; ++i) {
+                const scene::Entity ent = w.at(i);
+                if (!w.valid(ent) || w.destroyPending(ent)) continue;
+                // Anything drawable, plus anything named -- an empty used as a parent is still a node
+                // someone needs to be able to reach.
+                const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
+                const std::string nm = w.name(ent);
+                if (!mr && nm.empty()) continue;
+                if (listed++ == 0 && !hideEditorScene_) ImGui::Separator();
+                // The display label, NOT w.name() -- see entityLabels_ for why they differ. An entity
+                // the editor did not create (a spawned actor) has no label, so it falls back to its
+                // own name, which for an actor is a class name and already readable.
+                const auto lit = entityLabels_.find(static_cast<u32>(ent));
+                const std::string shown = lit != entityLabels_.end() ? lit->second
+                                        : (nm.empty() ? ("Entity " + std::to_string((u32)ent)) : nm);
+                const std::string label = "  " + shown + "##e" + std::to_string((u32)ent);
+                if (ImGui::Selectable(label.c_str(), sel_==kSelScene && selEntity_==ent)) {
+                    sel_ = kSelScene; selEntity_ = ent;
+                }
+            }
+        }
+#endif
         ImGui::Separator();
-        if (ImGui::Selectable("  Directional Light (Sun)", sel_==-2)) sel_=-2;
-        if (ImGui::Selectable("  Sky + Atmosphere", sel_==-3)) sel_=-3;
-        if (ImGui::Selectable("  Post Process", sel_==-4)) sel_=-4;
+        if (ImGui::Selectable("  Directional Light (Sun)", sel_==-2)) { sel_=-2; selEntity_=scene::kInvalidEntity; }
+        if (ImGui::Selectable("  Sky + Atmosphere", sel_==-3))        { sel_=-3; selEntity_=scene::kInvalidEntity; }
+        if (ImGui::Selectable("  Post Process", sel_==-4))            { sel_=-4; selEntity_=scene::kInvalidEntity; }
         ImGui::End();
 
         ImGui::Begin("Details");
@@ -3157,6 +3337,45 @@ private:
                 materialPanel(o);
             }
             ImGui::Checkbox("Visible", &o.visible);
+#if AVER_MODULE_SCENE
+        } else if (sel_==kSelScene && scene::World::instance().valid(selEntity_)) {
+            // A live scene entity. Edits go straight into CLocal and the world recomposes the world
+            // matrix from it, so a dragged value moves children too -- which is the behaviour someone
+            // expects from a hierarchy and which the objects_ path cannot offer at all.
+            scene::World& w = scene::World::instance();
+            const std::string nm = w.name(selEntity_);
+            const auto lit = entityLabels_.find(static_cast<u32>(selEntity_));
+            ImGui::TextUnformatted(lit != entityLabels_.end() ? lit->second.c_str()
+                                                             : (nm.empty() ? "(unnamed entity)" : nm.c_str()));
+            ImGui::SameLine(); ImGui::TextDisabled("#%u  %s", (u32)selEntity_, nm.c_str());
+            ImGui::Separator();
+            if (const auto* loc = w.component<scene::CLocal>(selEntity_, scene::kComponentLocal)) {
+                if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    // Edited on a COPY and written back through setLocalTransform, never poked into
+                    // the component in place: the world caches world matrices and the setter is what
+                    // invalidates them, so an in-place write would show the new number in the panel
+                    // while the viewport kept drawing the old one.
+                    Transform xf = loc->xf;
+                    Vec3 euler = eulerDegFromQuat(xf.rotation);
+                    bool moved = ImGui::DragFloat3("Location (cm)", &xf.position.x, 1.0f);
+                    if (ImGui::DragFloat3("Rotation", &euler.x, 1.0f)) {
+                        xf.rotation = quatFromEulerDeg(euler); moved = true;
+                    }
+                    moved |= ImGui::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f);
+                    if (moved) w.setLocalTransform(selEntity_, xf);
+                }
+            }
+            if (auto* mr = w.component<scene::CMeshRenderer>(selEntity_, scene::kComponentMeshRenderer)) {
+                if (ImGui::CollapsingHeader("Mesh", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    bool vis = (mr->flags & scene::kMeshRendererVisible) != 0;
+                    if (ImGui::Checkbox("Visible", &vis)) {
+                        if (vis) mr->flags |=  scene::kMeshRendererVisible;
+                        else     mr->flags &= ~scene::kMeshRendererVisible;
+                    }
+                    ImGui::TextDisabled("mesh id 0x%llx", (unsigned long long)mr->mesh);
+                }
+            }
+#endif
         } else if (sel_==-2){
             ImGui::TextUnformatted("Directional Light (Sun)"); ImGui::Separator();
             // ELEVATION AND AZIMUTH, in degrees, because that is what a person authoring a time of
@@ -3735,7 +3954,46 @@ private:
     u64 maxFrames_; bool headless_; std::string beamPath_, shot_;
     Tool initialTool_ = Tool::Select;
     std::vector<MeshObj> objects_;
+    // THE SELECTION ADDRESSES EITHER WORLD.
+    //
+    // The editor has two of them: objects_, the fixed placeholder scene the gate oracle measures, and
+    // scene::World, where every level placement and every spawned actor actually lives. sel_ indexes
+    // the first and only ever did, which is why a loaded level's sixteen placements appeared in
+    // nothing -- not the outliner, not a viewport click, not the Details panel, not Delete. They were
+    // drawn and nothing else.
+    //
+    // sel_ >= 0        an objects_ index
+    // sel_ == -1       nothing
+    // sel_ == -2/-3/-4 the sun / sky / post pseudo-entries, which are settings rather than objects
+    // sel_ == kSelScene  selEntity_ names a live scene entity
+    static constexpr int kSelScene = -5;
     int sel_ = 1;
+    scene::Entity selEntity_ = scene::kInvalidEntity;
+    bool hideEditorScene_ = false;   // latched each frame by the scene pass; see there for why
+    // DISPLAY names, which are not the entity's name.
+    //
+    // scene::World::name() holds the ASSET PATH, because that is what saveLevel writes as a
+    // placement's asset and what loadOcworld hashes back into a mesh id -- rename the entity and the
+    // level stops reloading. So the outliner cannot use it: a sixteen-placement level renders as
+    // sixteen rows all reading "Meshes/cube.ocmesh". This carries something a person can tell apart,
+    // built where the surface name is still in hand.
+    std::unordered_map<u32, std::string> entityLabels_;
+    std::unordered_map<std::string, int> labelCounts_;
+
+    // "M_Wall" + a unique ordinal -> "Wall 3". Falls back to the asset's stem when a placement names
+    // no surface, so every row says something even for untextured blockout geometry.
+    std::string makeEntityLabel(const std::string& surface, const std::string& asset) {
+        std::string base = surface;
+        if (base.rfind("M_", 0) == 0) base.erase(0, 2);
+        if (base.empty()) {
+            const std::size_t slash = asset.find_last_of("/\\");
+            base = slash == std::string::npos ? asset : asset.substr(slash + 1);
+            const std::size_t dot = base.find_last_of('.');
+            if (dot != std::string::npos) base.erase(dot);
+        }
+        if (base.empty()) base = "Entity";
+        return base + " " + std::to_string(++labelCounts_[base]);
+    }
     Tool tool_ = Tool::Select;
     // Free-fly editor camera (Unreal-style): position + yaw/pitch, no auto-orbit.
     Vec3 camPos_{7.0f, 7.0f, 4.5f};
@@ -3921,6 +4179,7 @@ private:
 #endif
             }
             levelEntities_.push_back(e);
+            entityLabels_[static_cast<u32>(e)] = makeEntityLabel(p.material, p.asset);
 
 #if AVER_MODULE_PHYSICS
             // A level's collision comes from the level, not from a script that happens to run later.
@@ -4015,6 +4274,12 @@ private:
         scene::World& world = scene::World::instance();
         for (const scene::Entity e : levelEntities_) if (world.valid(e)) world.destroy(e);
         levelEntities_.clear();
+        // Labels and their ordinals go with the level, or reloading it would number the second load's
+        // rows from where the first left off.
+        entityLabels_.clear();
+        labelCounts_.clear();
+        // The selection pointed into the level that is going away.
+        if (sel_ == kSelScene) { sel_ = -1; selEntity_ = scene::kInvalidEntity; }
 #if AVER_MODULE_PHYSICS
         for (const int32_t b : levelBodies_) aver_phys_remove_body(b);
         levelBodies_.clear();

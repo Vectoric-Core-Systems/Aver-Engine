@@ -963,7 +963,11 @@ void aver_fw_input_mouse(float* out3) {
 }
 
 // ---- play view ---------------------------------------------------------------------------------
-struct ViewRequest { int32_t mode = AVER_FW_VIEW_THIRD_PERSON; float eye = 160.0f; float boom = 450.0f; };
+struct ViewRequest {
+    int32_t mode = AVER_FW_VIEW_THIRD_PERSON; float eye = 160.0f; float boom = 450.0f;
+    // 0 until a character publishes one; the editor falls back to the pawn matrix while it is.
+    int32_t entity = 0;
+};
 ViewRequest& viewRequest() { static ViewRequest v; return v; }
 
 void aver_fw_set_view(int32_t mode, float eyeHeight, float boomLength) {
@@ -976,5 +980,8 @@ void aver_fw_view(int32_t* outMode, float* outEyeHeight, float* outBoomLength) {
     if (outEyeHeight)  *outEyeHeight  = v.eye;
     if (outBoomLength) *outBoomLength = v.boom;
 }
+
+void    aver_fw_set_view_entity(int32_t entity) { viewRequest().entity = entity; }
+int32_t aver_fw_view_entity(void)               { return viewRequest().entity; }
 
 }  // extern "C"
