@@ -1853,6 +1853,219 @@ private:
         o.pos = x.pos; o.rotDeg = x.rotDeg; o.scale = x.scale;
     }
 
+    // ================================ UNDO / REDO ================================
+    //
+    // Commands, not snapshots. A level is a few thousand placements and a snapshot per drag would
+    // copy all of them to record that one moved; a command records the one thing that changed and its
+    // two values.
+    //
+    // THE HARD PART IS IDENTITY, and it is why there is an indirection here rather than a raw handle
+    // in each command. A scene entity's handle dies with it, and undoing a delete cannot resurrect
+    // the same handle -- it creates a new entity with a new one. Any command already on the stack
+    // that named the old handle would then address nothing, so undoing a delete and then undoing the
+    // move that preceded it would silently do nothing at all. Commands therefore name an EditId, and
+    // recreating an object rebinds that id to the new handle.
+    using EditId = u32;
+
+    struct EditCmd {
+        enum class Kind { Transform, Create, Destroy };
+        Kind kind = Kind::Transform;
+        EditId id = 0;            // a scene entity, through the indirection
+        int objIndex = -1;        // or an objects_ index, for the placeholder scene
+        EditXform before{}, after{};
+        // Enough to rebuild a destroyed scene entity. Held by VALUE because the entity it describes
+        // may not exist while the command sits on the stack.
+        std::string asset, label;
+        u64 meshId = 0;
+        i32 material = 0;
+        bool hadBody = false;
+        Vec3 bodyHalf{0,0,0};
+    };
+
+    EditId editIdFor(scene::Entity e) {
+        const u32 key = static_cast<u32>(e);
+        if (const auto it = entityToEdit_.find(key); it != entityToEdit_.end()) return it->second;
+        const EditId id = nextEditId_++;
+        entityToEdit_[key] = id;
+        editToEntity_[id]  = e;
+        return id;
+    }
+    scene::Entity entityForEdit(EditId id) const {
+        const auto it = editToEntity_.find(id);
+        return it == editToEntity_.end() ? scene::kInvalidEntity : it->second;
+    }
+    void rebindEdit(EditId id, scene::Entity e) {
+        if (const auto old = editToEntity_.find(id); old != editToEntity_.end())
+            entityToEdit_.erase(static_cast<u32>(old->second));
+        editToEntity_[id] = e;
+        entityToEdit_[static_cast<u32>(e)] = id;
+    }
+
+    // A new edit invalidates everything that was undone -- the standard rule, and the only one that
+    // keeps the stack a history rather than a tree.
+    void pushEdit(EditCmd c) {
+        undoStack_.push_back(std::move(c));
+        redoStack_.clear();
+        if (undoStack_.size() > kUndoDepth) undoStack_.erase(undoStack_.begin());
+    }
+
+    // Record the selection's transform as it was before a gesture. Returns false when there is
+    // nothing selected, so a caller can skip the whole bracket.
+    bool beginTransformEdit() {
+        if (!selectedXform(editBefore_)) return false;
+        editBeforeValid_ = true;
+        return true;
+    }
+    // Close the bracket. Deliberately drops a no-op: a click that grabs a gizmo handle and releases
+    // without moving must not put an entry on the stack, or Ctrl+Z appears to do nothing.
+    void endTransformEdit() {
+        if (!editBeforeValid_) return;
+        editBeforeValid_ = false;
+        EditXform now;
+        if (!selectedXform(now)) return;
+        if (nearlySameXform(editBefore_, now)) return;
+        EditCmd c;
+        c.kind = EditCmd::Kind::Transform;
+        c.before = editBefore_; c.after = now;
+#if AVER_MODULE_SCENE
+        if (sel_ == kSelScene) c.id = editIdFor(selEntity_); else
+#endif
+        c.objIndex = sel_;
+        pushEdit(std::move(c));
+    }
+    static bool nearlySameXform(const EditXform& a, const EditXform& b) {
+        auto same = [](const Vec3& p, const Vec3& q) {
+            return std::fabs(p.x-q.x) < 1e-4f && std::fabs(p.y-q.y) < 1e-4f && std::fabs(p.z-q.z) < 1e-4f;
+        };
+        return same(a.pos,b.pos) && same(a.rotDeg,b.rotDeg) && same(a.scale,b.scale);
+    }
+
+    // Apply a transform command's stored value to whichever target it names.
+    void applyXformTo(const EditCmd& c, const EditXform& x) {
+#if AVER_MODULE_SCENE
+        if (c.id) {
+            const scene::Entity e = entityForEdit(c.id);
+            scene::World& w = scene::World::instance();
+            if (e == scene::kInvalidEntity || !w.valid(e)) return;
+            Transform xf; xf.position = x.pos; xf.rotation = quatFromEulerDeg(x.rotDeg); xf.scale = x.scale;
+            w.setLocalTransform(e, xf);
+            sel_ = kSelScene; selEntity_ = e;      // show the user what just moved
+            return;
+        }
+#endif
+        if (c.objIndex >= 0 && c.objIndex < (int)objects_.size()) {
+            MeshObj& o = objects_[c.objIndex];
+            o.pos = x.pos; o.rotDeg = x.rotDeg; o.scale = x.scale;
+            sel_ = c.objIndex; selEntity_ = scene::kInvalidEntity;
+        }
+    }
+
+#if AVER_MODULE_SCENE
+    // Describe a live entity fully enough to rebuild it after a destroy.
+    EditCmd describeEntity(scene::Entity e) {
+        scene::World& w = scene::World::instance();
+        EditCmd c;
+        c.id = editIdFor(e);
+        c.asset = w.name(e);
+        if (const auto it = entityLabels_.find(static_cast<u32>(e)); it != entityLabels_.end()) c.label = it->second;
+        if (const auto* loc = w.component<scene::CLocal>(e, scene::kComponentLocal)) {
+            c.after.pos = loc->xf.position;
+            c.after.rotDeg = eulerDegFromQuat(loc->xf.rotation);
+            c.after.scale = loc->xf.scale;
+        }
+        if (const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer)) {
+            c.meshId = mr->mesh; c.material = mr->material;
+        }
+#if AVER_MODULE_PHYSICS
+        if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
+            c.hadBody = true;
+            c.bodyHalf = c.after.scale;
+        }
+#endif
+        return c;
+    }
+
+    // Rebuild an entity a command destroyed, and rebind its EditId so every other command that
+    // names it keeps working.
+    void recreateFrom(const EditCmd& c) {
+        scene::World& w = scene::World::instance();
+        Transform xf; xf.position = c.after.pos; xf.rotation = quatFromEulerDeg(c.after.rotDeg); xf.scale = c.after.scale;
+        const scene::Entity e = w.create(c.asset, scene::kInvalidEntity, xf);
+        if (e == scene::kInvalidEntity) { AVER_WARN("[Editor] undo: the world refused to recreate '{}'", c.asset); return; }
+        if (auto* mr = static_cast<scene::CMeshRenderer*>(w.addComponent(e, scene::kComponentMeshRenderer))) {
+            mr->mesh = c.meshId; mr->material = c.material;
+            mr->flags |= scene::kMeshRendererVisible;
+            mr->aabbMin[0] = mr->aabbMin[1] = mr->aabbMin[2] = -1.0f;
+            mr->aabbMax[0] = mr->aabbMax[1] = mr->aabbMax[2] =  1.0f;
+        }
+        levelEntities_.push_back(e);
+        if (!c.label.empty()) entityLabels_[static_cast<u32>(e)] = c.label;
+#if AVER_MODULE_PHYSICS
+        if (c.hadBody && aver_phys_ready()) {
+            const int32_t body = aver_phys_add_static_box(xf.position.x, xf.position.y, xf.position.z,
+                                                          c.bodyHalf.x, c.bodyHalf.y, c.bodyHalf.z);
+            levelBodies_.push_back(body);
+            entityBodies_[static_cast<u32>(e)] = body;
+        }
+#endif
+        rebindEdit(c.id, e);
+        sel_ = kSelScene; selEntity_ = e;
+    }
+
+    // Remove an entity and everything the editor hung off it. Shared by delete and by undoing a
+    // create, so the two can never drift.
+    void destroyEntity(scene::Entity e) {
+        scene::World& w = scene::World::instance();
+        if (!w.valid(e)) return;
+        w.destroy(e);
+        levelEntities_.erase(std::remove(levelEntities_.begin(), levelEntities_.end(), e), levelEntities_.end());
+        entityLabels_.erase(static_cast<u32>(e));
+#if AVER_MODULE_PHYSICS
+        // The collision goes with it. Without this a deleted wall is invisible and still solid.
+        if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
+            aver_phys_remove_body(it->second);
+            levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second), levelBodies_.end());
+            entityBodies_.erase(it);
+        }
+#endif
+    }
+#endif  // AVER_MODULE_SCENE
+
+    bool canUndo() const { return !undoStack_.empty(); }
+    bool canRedo() const { return !redoStack_.empty(); }
+
+    void undo() {
+        if (undoStack_.empty()) return;
+        EditCmd c = undoStack_.back(); undoStack_.pop_back();
+        switch (c.kind) {
+            case EditCmd::Kind::Transform: applyXformTo(c, c.before); break;
+#if AVER_MODULE_SCENE
+            case EditCmd::Kind::Create:    destroyEntity(entityForEdit(c.id));
+                                           sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
+            case EditCmd::Kind::Destroy:   recreateFrom(c); break;
+#else
+            default: break;
+#endif
+        }
+        redoStack_.push_back(std::move(c));
+    }
+
+    void redo() {
+        if (redoStack_.empty()) return;
+        EditCmd c = redoStack_.back(); redoStack_.pop_back();
+        switch (c.kind) {
+            case EditCmd::Kind::Transform: applyXformTo(c, c.after); break;
+#if AVER_MODULE_SCENE
+            case EditCmd::Kind::Create:    recreateFrom(c); break;
+            case EditCmd::Kind::Destroy:   destroyEntity(entityForEdit(c.id));
+                                           sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
+#else
+            default: break;
+#endif
+        }
+        undoStack_.push_back(std::move(c));
+    }
+
     // What the status bar calls the selection. Covers both worlds and the pseudo-entries, so the bar
     // stops saying "nothing selected" while a wall is plainly outlined in orange.
     std::string selectionLabel() const {
@@ -1932,6 +2145,11 @@ private:
             levelEntities_.push_back(e);
             entityLabels_[static_cast<u32>(e)] = makeEntityLabel(std::string(), kCubeAsset);
             sel_ = kSelScene; selEntity_ = e;
+            {   // Undoable: Ctrl+Z after Add removes it again.
+                EditCmd c = describeEntity(e);
+                c.kind = EditCmd::Kind::Create;
+                pushEdit(std::move(c));
+            }
             AVER_INFO("[Editor] added cube entity #{} at ({:.0f}, {:.0f}, {:.0f})",
                       (u32)e, xf.position.x, xf.position.y, xf.position.z);
             return;
@@ -2069,10 +2287,19 @@ private:
             int ax = -1;
             if (haveGizmo)
                 ax = pickAxis(gx.pos, gizmoLen(gx.pos), mx, my);
-            if (ax >= 0) { dragging_=true; activeAxis_=ax; prevMouseX_=mx; prevMouseY_=my; }
+            if (ax >= 0) {
+                dragging_=true; activeAxis_=ax; prevMouseX_=mx; prevMouseY_=my;
+                // ONE UNDO ENTRY PER GESTURE, not per frame. The drag writes a new transform every
+                // frame the mouse moves; recording each would make Ctrl+Z rewind a drag one pixel at
+                // a time, which is not what anyone means by undoing a move.
+                beginTransformEdit();
+            }
             else pick(e, io); // no handle grabbed -> (re)select whatever is under the cursor
         }
-        if (!io.MouseDown[0]) { dragging_=false; activeAxis_=-1; }
+        if (!io.MouseDown[0]) {
+            if (dragging_) endTransformEdit();
+            dragging_=false; activeAxis_=-1;
+        }
 
         // DELETE THE SELECTION. There was no way to remove anything from the world at all -- the only
         // Delete in the editor belonged to the Content Browser and deleted FILES. Guarded on keyboard
@@ -2080,6 +2307,13 @@ private:
         // being named.
         if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
             deleteSelection();
+
+        // Ctrl+Z / Ctrl+Y, and Ctrl+Shift+Z because half the world expects that instead. Suppressed
+        // while a text field has focus so undoing a typo in a name does not undo a move.
+        if (io.KeyCtrl && !io.WantTextInput) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) { if (io.KeyShift) redo(); else undo(); }
+            if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) redo();
+        }
 
         if (dragging_ && anySelected()) {
             EditXform o;
@@ -2123,12 +2357,13 @@ private:
             scene::World& w = scene::World::instance();
             if (w.valid(selEntity_)) {
                 AVER_INFO("[Editor] deleted entity #{} '{}'", (u32)selEntity_, w.name(selEntity_));
-                w.destroy(selEntity_);   // deferred to the next flush, and takes the whole subtree
+                // DESCRIBED BEFORE IT IS DESTROYED -- everything undo needs to rebuild it has to be
+                // read while it still exists.
+                EditCmd c = describeEntity(selEntity_);
+                c.kind = EditCmd::Kind::Destroy;
+                destroyEntity(selEntity_);
+                pushEdit(std::move(c));
             }
-            // Drop it from the level list too, or a later save would write out a placement for
-            // something the world has already destroyed.
-            levelEntities_.erase(std::remove(levelEntities_.begin(), levelEntities_.end(), selEntity_),
-                                 levelEntities_.end());
             selEntity_ = scene::kInvalidEntity;
             sel_ = -1;
             return;
@@ -2292,7 +2527,9 @@ private:
 #endif
                 ImGui::Separator(); if(ImGui::MenuItem("Exit")) e.requestExit(); ImGui::EndMenu(); }
             if (ImGui::BeginMenu("Edit")){
-                ImGui::MenuItem("Undo","Ctrl+Z"); ImGui::MenuItem("Redo","Ctrl+Y"); ImGui::Separator();
+                if (ImGui::MenuItem("Undo", "Ctrl+Z", false, canUndo())) undo();
+                if (ImGui::MenuItem("Redo", "Ctrl+Y", false, canRedo())) redo();
+                ImGui::Separator();
                 if (ImGui::MenuItem("Editor Preferences...")) showEditorPrefs_ = true;
                 if (ImGui::MenuItem("Project Settings...")) showProjectSettings_ = true;
                 ImGui::EndMenu();
@@ -3500,12 +3737,21 @@ private:
                     // while the viewport kept drawing the old one.
                     Transform xf = loc->xf;
                     Vec3 euler = eulerDegFromQuat(xf.rotation);
+                    // Each field brackets its own gesture: activated on grab, closed when the drag
+                    // ends, so a slider dragged across the panel is one undo entry and not eighty.
                     bool moved = ImGui::DragFloat3("Location (cm)", &xf.position.x, 1.0f);
+                    if (ImGui::IsItemActivated()) beginTransformEdit();
+                    bool done = ImGui::IsItemDeactivatedAfterEdit();
                     if (ImGui::DragFloat3("Rotation", &euler.x, 1.0f)) {
                         xf.rotation = quatFromEulerDeg(euler); moved = true;
                     }
+                    if (ImGui::IsItemActivated()) beginTransformEdit();
+                    done = done || ImGui::IsItemDeactivatedAfterEdit();
                     moved |= ImGui::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f);
+                    if (ImGui::IsItemActivated()) beginTransformEdit();
+                    done = done || ImGui::IsItemDeactivatedAfterEdit();
                     if (moved) w.setLocalTransform(selEntity_, xf);
+                    if (done) endTransformEdit();
                 }
             }
             if (auto* mr = w.component<scene::CMeshRenderer>(selEntity_, scene::kComponentMeshRenderer)) {
@@ -4122,6 +4368,18 @@ private:
     // built where the surface name is still in hand.
     std::unordered_map<u32, std::string> entityLabels_;
     std::unordered_map<std::string, int> labelCounts_;
+    // The static collision body an entity owns, so deleting the object deletes the wall you walk into.
+    std::unordered_map<u32, int32_t> entityBodies_;
+
+    // Undo state. The depth is a memory bound, not a usability one: each command is small, and a
+    // hundred is far more history than an editing session reaches back through.
+    static constexpr std::size_t kUndoDepth = 128;
+    std::vector<EditCmd> undoStack_, redoStack_;
+    std::unordered_map<EditId, scene::Entity> editToEntity_;
+    std::unordered_map<u32, EditId> entityToEdit_;
+    EditId nextEditId_ = 1;
+    EditXform editBefore_{};
+    bool editBeforeValid_ = false;
 
     // "M_Wall" + a unique ordinal -> "Wall 3". Falls back to the asset's stem when a placement names
     // no surface, so every row says something even for untextured blockout geometry.
@@ -4326,10 +4584,18 @@ private:
 
 #if AVER_MODULE_PHYSICS
             // A level's collision comes from the level, not from a script that happens to run later.
-            if (p.collide && aver_phys_ready())
-                levelBodies_.push_back(aver_phys_add_static_box(
+            // REMEMBERED AGAINST ITS ENTITY as well as in the flat list: levelBodies_ only exists to
+            // be torn down wholesale on unload, and it cannot answer "which body belongs to this
+            // object" because a placement with collide=false pushes nothing, so the indices do not
+            // line up with levelEntities_. Deleting an object without this leaves its collision
+            // standing -- an invisible wall you still walk into.
+            if (p.collide && aver_phys_ready()) {
+                const int32_t body = aver_phys_add_static_box(
                     static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z),
-                    static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz)));
+                    static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz));
+                levelBodies_.push_back(body);
+                entityBodies_[static_cast<u32>(e)] = body;
+            }
 #endif
         }
 
@@ -4428,6 +4694,14 @@ private:
         // rows from where the first left off.
         entityLabels_.clear();
         labelCounts_.clear();
+        entityBodies_.clear();
+        // The history described a level that no longer exists, and every id in it addresses a
+        // destroyed entity. Undoing across a level change would recreate objects into the wrong world.
+        undoStack_.clear();
+        redoStack_.clear();
+        editToEntity_.clear();
+        entityToEdit_.clear();
+        editBeforeValid_ = false;
         // The selection pointed into the level that is going away.
         if (sel_ == kSelScene) { sel_ = -1; selEntity_ = scene::kInvalidEntity; }
 #if AVER_MODULE_PHYSICS
