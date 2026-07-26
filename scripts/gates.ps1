@@ -64,10 +64,18 @@ $WarpSpacingMs = 4000
 #                           formulation once left all thirteen bit-identical. BRDF work had no
 #                           automated cover at all until this gate existed.
 $Gates = @(
-    @{ name = 'centre';        args = @() },
-    @{ name = 'ms';            args = @('--ms') },
-    @{ name = 'rt';            args = @('--rt') },
-    @{ name = 'ms-rt';         args = @('--ms','--rt') },
+    # --no-gi ON THE TEN NON-GI GATES, and it is not decoration. Global illumination became the
+    # ENGINE DEFAULT, so "GI off" is now a thing that has to be asked for. Without these flags the
+    # ten gates that exist to measure the unlit path would quietly start measuring the same path the
+    # seven `--gi` gates do, seventeen numbers would collapse to seven distinct ones, and the oracle
+    # would still report a confident 153/153 while having lost more than half of what it covers.
+    #
+    # Adding the flags is what keeps the recorded values UNCHANGED across that default flip: each
+    # gate still renders exactly what it rendered before, it just has to name it now.
+    @{ name = 'centre';        args = @('--no-gi') },
+    @{ name = 'ms';            args = @('--no-gi','--ms') },
+    @{ name = 'rt';            args = @('--no-gi','--rt') },
+    @{ name = 'ms-rt';         args = @('--no-gi','--ms','--rt') },
     @{ name = 'gi';            args = @('--gi') },
     @{ name = 'ms-gi';         args = @('--ms','--gi') },
     @{ name = 'ms-rt-gi';      args = @('--ms','--rt','--gi') },
@@ -91,13 +99,13 @@ $Gates = @(
     # `penumbra` unavoidably remains on an edge: a search for a disagreement with a flat neighbourhood
     # in BOTH images found none, because the two paths only ever differ across a shadow boundary. That
     # was equally true of the pixel it replaces.
-    @{ name = 'shadow';        args = @('--probe','1332','1416') },
-    @{ name = 'shadow-rt';     args = @('--rt','--probe','1332','1416') },
-    @{ name = 'shadow-ms-rt';  args = @('--ms','--rt','--probe','1332','1416') },
+    @{ name = 'shadow';        args = @('--no-gi','--probe','1332','1416') },
+    @{ name = 'shadow-rt';     args = @('--no-gi','--rt','--probe','1332','1416') },
+    @{ name = 'shadow-ms-rt';  args = @('--no-gi','--ms','--rt','--probe','1332','1416') },
     @{ name = 'shadow-gi';     args = @('--gi','--probe','1332','1416') },
-    @{ name = 'penumbra';      args = @('--probe','1564','1184') },
-    @{ name = 'penumbra-rt';   args = @('--rt','--probe','1564','1184') },
-    @{ name = 'sunlit';        args = @('--probe','2476','1100') },
+    @{ name = 'penumbra';      args = @('--no-gi','--probe','1564','1184') },
+    @{ name = 'penumbra-rt';   args = @('--no-gi','--rt','--probe','1564','1184') },
+    @{ name = 'sunlit';        args = @('--no-gi','--probe','2476','1100') },
     @{ name = 'sunlit-gi';     args = @('--gi','--probe','2476','1100') }
 )
 

@@ -53,7 +53,16 @@ struct DeviceInfo {
 
 struct Settings {
     Msaa    msaa               = Msaa::X4;
-    Quality globalIllumination = Quality::Off;
+    // ON by default. It was Off, and that single line was the largest gap between what this engine
+    // renders and what it is capable of rendering: with it off there is no bounce light and no
+    // ambient occlusion anywhere, just direct sun plus a flat sky-hemisphere constant, so every
+    // interior reads as evenly lit cardboard. Everything the cone tracer needs already existed and
+    // nothing switched it on.
+    //
+    // The quality LADDER is still only on/off to the renderer -- the cone count is fixed and
+    // voxelResolution is the real dial -- so Medium is the honest name for "on at the default
+    // resolution" rather than a promise of a middle tier that does not exist yet.
+    Quality globalIllumination = Quality::Medium;
     Quality rayTracing         = Quality::Off;
     Quality pathTracing        = Quality::Off;
     // Geometry submission path: mesh shaders when available, else the classic VS/GS path.

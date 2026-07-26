@@ -661,7 +661,11 @@ public:
             voxi::Settings s = voxi::Renderer::get().settings();
             s.msaa = static_cast<voxi::Msaa>(e.device()->sampleCount()); // adopt the live value
             if (msaaOverride_) s.msaa = static_cast<voxi::Msaa>(msaaOverride_);
-            if (giOverride_) s.globalIllumination = static_cast<voxi::Quality>(giOverride_);
+            // --no-gi wins over --gi. GI is ON by default now, so "off" has to be REQUESTABLE:
+            // the pixel oracle measures both paths and, without a way to ask for the unlit one, ten
+            // of its seventeen gates would silently start measuring the same thing the other seven do.
+            if (giForceOff_)     s.globalIllumination = voxi::Quality::Off;
+            else if (giOverride_) s.globalIllumination = static_cast<voxi::Quality>(giOverride_);
             if (rtOverride_) s.rayTracing = static_cast<voxi::Quality>(rtOverride_);
             if (msOverride_) s.meshShaders = true;
             voxi::Renderer::get().setSettings(s);
@@ -1368,6 +1372,7 @@ public:
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
     void setGiOverride(int q, bool dbg) { giOverride_ = q; giDebugView_ = dbg; } // --gi / --gi-debug
+    void setGiForceOff(bool off) { giForceOff_ = off; }                        // --no-gi
     void setRtOverride(int q) { rtOverride_ = q; }                              // --rt
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
@@ -3618,6 +3623,7 @@ private:
     int  focusVoxi_=0;               // --project-settings: frames left to force the window open
     int  msaaOverride_=0;            // --msaa N: apply a sample count at startup
     int  giOverride_=0;              // --gi: GI quality to apply at startup
+    bool giForceOff_=false;          // --no-gi: force it off, whatever the default is
     int  rtOverride_=0;              // --rt: ray tracing quality at startup
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
@@ -4043,7 +4049,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -4071,6 +4077,7 @@ Application* createApplication(int argc, char** argv) {
         }
         else if (!std::strcmp(argv[i],"--msaa") && i+1<argc) msaa=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--gi")) gi=3;
+        else if (!std::strcmp(argv[i],"--no-gi")) noGi=true;
         else if (!std::strcmp(argv[i],"--gi-debug")) { gi=3; giDbg=true; }
         else if (!std::strcmp(argv[i],"--rt")) rt=3;
         else if (!std::strcmp(argv[i],"--ms")) ms=true;
@@ -4112,6 +4119,7 @@ Application* createApplication(int argc, char** argv) {
 
     auto* app = new SandboxApp(frames, headless, beam, shot, tool);
     app->setPost(exposure, bloom, autoExposure);
+    app->setGiForceOff(noGi);
     app->setUseWarp(warp);
     app->setDebugLayer(debugLayer);
     app->setProjectPath(project);
