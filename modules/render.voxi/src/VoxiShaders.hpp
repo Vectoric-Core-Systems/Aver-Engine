@@ -152,7 +152,11 @@ float4 traceCone(float3 originWS, float3 dir, float aperture) {
         if (!insideVolume(uvw)) break;
         float4 s = gVoxelTex.SampleLevel(gVoxelSamp, uvw, mip);
         acc += (1.0 - acc.a) * s;
-        dist += diameter * 0.5;
+        // A FULL footprint per step. Half a diameter samples every voxel of travel twice, and
+        // front-to-back compositing is not idempotent -- each sample eats (1 - acc.a) again -- so
+        // occlusion compounded at twice the physical rate and every cone came back too dark and too
+        // short. Halving the step is only correct with an opacity correction that is not here.
+        dist += diameter;
     }
     return acc;
 }
@@ -232,10 +236,18 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 
     // The sky hemisphere is light transport too, so Voxi supplies it rather than leaving the BRDF
     // to reach into the engine constants for it. With GI off this IS the whole indirect term.
+    // R is built from the SHADING normal -- the one the material perturbed with its normal map --
+    // and not from the geometric one. Reflecting about the geometric normal means every normal map
+    // in the scene is invisible to the environment: a bumped surface reflects as though it were
+    // flat while its diffuse shading says otherwise, which reads as the bump being "painted on".
     float3 V = normalize(gCamPos.xyz - i.wpos);
-    float3 R = reflect(-V, N);
+    float3 R = reflect(-V, averShadingNormal(s));
     AverIndirect ind4;
-    ind4.ambient      = skyColor(N);
+    // The cosine-weighted hemisphere integral of the sky dome, not one tap along the normal. See
+    // averSkyIrradiance: a single sample is the radiance from ONE direction standing in for the
+    // integral of every direction the surface can see, and for a two-colour dome it is wrong by up
+    // to the full horizon-to-zenith difference on any surface that is not facing straight up.
+    ind4.ambient      = averSkyIrradiance(averShadingNormal(s));
     ind4.ambientScale = gAmbient.r;
     ind4.diffuse      = ind;
     ind4.occlusion    = ao;
@@ -247,7 +259,11 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     if (gVoxelParams.w > 0.5) {
         float  specAperture = clamp(s.rough * 0.5 + 0.02, 0.02, 0.4);
         float4 sceneSpec    = traceCone(i.wpos, R, specAperture);
-        ind4.specular       = lerp(skyColor(R), sceneSpec.rgb * gVoxelParams.y, sceneSpec.a);
+        // ADDED, not lerped. traceCone returns PREMULTIPLIED radiance -- rgb is already weighted by
+        // the coverage in a -- so feeding it to lerp() with its own alpha as the blend factor
+        // multiplies the coverage in twice and darkens every partially-covered reflection by that
+        // factor again. The sky fills exactly the uncovered remainder.
+        ind4.specular       = sceneSpec.rgb * gVoxelParams.y + skyColor(R) * (1.0 - sceneSpec.a);
     } else {
         ind4.specular       = skyColor(R);
     }
@@ -387,8 +403,14 @@ void PSVoxel(VoxOut i) {
     sun.visibility = shadowFactor(i.wpos, N, ndl);
     AverSurface s = averEvalMaterial(voxelVertexOf(i), sun);
     float3 albedo = averDiffuseAlbedo(s);
-    float3 radiance = albedo * (sun.radiance * ndl * sun.visibility
-                                + skyColor(N) * gAmbient.r);
+    // EXITANT RADIANCE, which is what a cone gathering this voxel later must read -- not radiosity.
+    // A Lambertian surface receiving irradiance E reflects albedo * E / PI in every direction. The
+    // sun term is an irradiance (radiance times the cosine), so it needs the 1/PI; the sky term is
+    // already a radiance times a scalar, so it does not. Without the split, the sun addend was PI
+    // times too large AND the sky addend PI times too small relative to it -- the bounce was both
+    // over-bright and the wrong colour, sunward far more than skyward.
+    float3 radiance = albedo * (sun.radiance * ndl * sun.visibility / PI
+                                + averSkyIrradiance(N) * gAmbient.r);
     // Bounded before it is quantised so a pathological light colour cannot overflow the 32-bit
     // accumulator; nothing in a physically sane scene comes close to this.
     radiance = clamp(radiance, 0.0, AVER_VOX_MAXRAD);

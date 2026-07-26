@@ -342,6 +342,34 @@ float averOpacity(AverSurface s) { return s.alpha; }
 // light-map bake, an irradiance probe) shades with this, and it must never read s.V.
 float3 averDiffuseAlbedo(AverSurface s) { return s.albedo; }
 
+// The SHADING normal, after normal mapping. A renderer needs it to build the reflection vector for
+// its environment lookup: building R from the geometric normal means the specular reflection ignores
+// every normal map in the scene, so a bumped surface reflects as though it were flat while its
+// diffuse shading says otherwise. AverSurface stays opaque -- this is a function, like every other
+// thing a renderer is allowed to know about a shaded point.
+float3 averShadingNormal(AverSurface s) { return s.N; }
+
+// The split-sum environment BRDF: the DFG integral of the GGX lobe over the hemisphere, as Karis'
+// analytic fit rather than a lookup texture. Returns (A, B) such that the reflected fraction of
+// prefiltered environment radiance is F0 * A + B.
+//
+// This is the term that was MISSING, and its absence was not a small error. What stood in for it was
+// `* (1.0 - rough)`, a linear ramp that drives the reflected fraction to zero as a surface roughens.
+// Roughness does not delete reflected energy, it SPREADS it: A stays in the 0.4..0.9 band across the
+// whole roughness range and never approaches zero. The consequence was worst exactly where it is
+// least affordable -- a metal has kdAlbedo = (1 - metallic) * albedo = 0, so the environment term is
+// the ONLY indirect light it receives, and a rough metal was receiving a fifth of it.
+//
+// A fit and not a LUT because a LUT needs a texture, an SRV and a slot in a root signature that
+// currently declares no descriptor table at all -- see the cloud noise for the same trade.
+float2 averEnvBRDF(float ndv, float rough) {
+    const float4 c0 = float4(-1.0, -0.0275, -0.572,  0.022);
+    const float4 c1 = float4( 1.0,  0.0425,  1.04,  -0.04);
+    float4 r = rough * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * ndv)) * r.x + r.y;
+    return float2(-1.04, 1.04) * a004 + r.zw;
+}
+
 // Radiance ACCUMULATES rather than being summed by the caller. That is not stylistic: the terms
 // below are added in one left-associated chain, and float addition is not associative, so letting
 // the renderer combine partial sums would change the image by a last bit or two - exactly the kind
@@ -375,16 +403,30 @@ float3 averShadeIndirect(float3 radiance, AverSurface s, AverIndirect ind) {
         return radiance + s.emissive;
     default: {
         float3 ambient = s.kdAlbedo * ind.ambient * ind.ambientScale;
-        float3 envSpec = ind.specular * fresnelSchlick(s.ndv, s.F0, s.f90) * (1.0 - s.rough);
+        // SPLIT-SUM, not a Fresnel times a roughness ramp. `ind.specular` is the prefiltered
+        // environment radiance; what multiplies it is the environment BRDF, F0 * A + B. The old
+        // expression -- fresnelSchlick(ndv) * (1 - rough) -- was wrong twice over: it used the raw
+        // Fresnel of a single microfacet where the integrated D and G terms belong, and it deleted
+        // energy with roughness instead of spreading it.
+        float2 dfg = averEnvBRDF(s.ndv, s.rough);
+        float3 envSpec = ind.specular * (s.F0 * dfg.x + dfg.y);
         float3 indirect = s.kdAlbedo * ind.diffuse;
         // Two occlusions, deliberately both: ind.occlusion is what the RENDERER resolved for this
         // point (the cone trace's AO), s.occlusion is what the MATERIAL authored into its map, and
         // neither can stand in for the other -- a baked crevice is invisible to a cone trace at
         // voxel resolution, and a cone trace knows about geometry the map was never baked against.
         ambient *= ind.occlusion * s.occlusion;
+        // The environment is occluded too. A surface inside a room does not see the outdoor sky, and
+        // giving the specular term no occlusion at all is what makes an interior reflect a bright sky
+        // through its own walls. The renderer's cone-traced AO is the honest answer available here;
+        // the material's baked map is deliberately NOT applied, because a crevice map describes
+        // diffuse self-shadowing and a mirror in a crevice still reflects.
         radiance += ambient;
         radiance += indirect;
-        radiance += envSpec * 0.35;
+        // Weight ONE. It was 0.35, which discarded 65% of the reflected energy of every surface in
+        // the engine -- a global dimmer with no derivation behind it, compensating for the missing
+        // DFG term above by making everything too dark instead of only rough metals.
+        radiance += envSpec * ind.occlusion;
         radiance += s.emissive;
         return radiance;
     }

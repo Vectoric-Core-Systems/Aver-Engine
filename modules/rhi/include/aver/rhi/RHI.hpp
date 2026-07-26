@@ -186,16 +186,26 @@ struct SkyAtmosphere {
     // the sky simply continues underneath the camera, which is visible the moment anything is
     // reflective or the camera is above terrain.
     //
-    // groundBlend is how much of it replaces the sky down there, and it defaults to ZERO -- a
-    // downward reflection vector picking up a ground colour changes every glancing highlight in the
-    // scene, so the ground is something a level author turns on rather than something that arrives.
+    // groundBlend is how much of it replaces the sky down there, and it defaults to ONE.
+    //
+    // It was zero, which meant the dome was sky in every direction including straight down. That is
+    // survivable while the fill light is dim; at its real strength it is not. Half of what a vertical
+    // wall sees is below the horizon, so with no ground the whole scene is lit by nothing but a
+    // saturated blue dome and every neutral surface turns blue -- which is exactly what a real
+    // outdoor scene does NOT do, because the ground bounce is a large, warm, desaturating part of
+    // the fill. Turning it on is not a preference; leaving it off was a missing light path.
     f32 groundAlbedo[3] = {0.24f, 0.23f, 0.21f};
-    f32 groundBlend     = 0.0f;
-    // Multiplier on the sky-hemisphere ambient every surface receives. The sky IS the fill light.
-    // 1.0 is NOT the neutral value here: this is the engine's existing ambient scalar and the scene
-    // it was tuned against uses 0.28. Named for what it does rather than renormalised, because
-    // renormalising it would move every pixel the oracle measures for no gain.
-    f32 skyLightIntensity = 0.28f;
+    f32 groundBlend     = 1.0f;
+    // Multiplier on the sky-hemisphere irradiance every surface receives. The sky IS the fill light,
+    // and 1.0 means "as bright as the sky actually is".
+    //
+    // It was 0.28, which made the sky as a LIGHT 3.6x dimmer than the same sky as seen by the camera
+    // -- the one object in the scene lit by a different sky from the one behind it. The consequence
+    // was a diffuse/direct ratio of about 10% where a bright clear day is nearer 35%, so every
+    // shadow crushed to near-black and every surface facing away from the sun lost its colour. That
+    // is most of "too little lighting", and it was hidden for as long as the fog was thick enough to
+    // fill the shadows back in with grey.
+    f32 skyLightIntensity = 1.0f;
 
     // ---- the sun ----
     // The DIRECTION is the authoritative field, pointing TOWARD the light, and it does not have to
@@ -218,9 +228,20 @@ struct SkyAtmosphere {
     f32 sunAngularDiameterDeg = 0.545f;
 
     // ---- the air ----
-    f32 fogColor[3] = {0.70f, 0.78f, 0.88f};
-    // Density at fogHeight, per world unit.
-    f32 fogDensity = 0.0002f;
+    // A TINT on the in-scattered sky, not a replacement for it -- see averFogInscatter. White means
+    // "the air is the colour of the sky", which is what clear air is.
+    f32 fogColor[3] = {1.0f, 1.0f, 1.0f};
+    // Extinction per world unit (centimetres), at fogHeight.
+    //
+    // 4e-6 is LIGHT HAZE. The number is not taste: Koschmieder's law puts meteorological visibility
+    // at 3.912 / extinction, so 4e-6 per cm is about 10 km -- a clear day with enough aerial
+    // perspective to read depth. For reference: 1.7e-6 is a 23 km clear day, 7.8e-6 a 5 km haze,
+    // 7.8e-5 actual fog.
+    //
+    // It was 2e-4, which is 196 m visibility. The WMO calls anything under 1 km fog, so the default
+    // was a fog bank -- half the contrast gone by 35 m and 94% of it by 200 m, on every surface, in
+    // every scene. That single constant was most of "the renderer does not look realistic".
+    f32 fogDensity = 4e-6f;
     // World Z at which the density is exactly fogDensity, and how fast it thins going up. A falloff
     // of ZERO is uniform fog at fogDensity everywhere, which is what this engine had: a grey veil
     // that thickens with distance alone, so a distant mountain top is as hazy as the valley floor.

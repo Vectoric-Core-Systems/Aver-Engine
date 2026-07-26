@@ -51,8 +51,11 @@ struct OcWorldData {
     f64 sunLux = 100000.0;
 
     bool hasFog = false;
-    f64 fogDensity = 0.0002;               // per CENTIMETRE, so a level owns its own depth cue
-    f64 fogColor[3] = {0.70, 0.78, 0.88};
+    // Per CENTIMETRE, so a level owns its own depth cue. 4e-6 is light haze (~10 km visibility by
+    // Koschmieder); it was 2e-4, which is 196 m and therefore fog by the WMO's definition.
+    f64 fogDensity = 4e-6;
+    // A TINT on the in-scattered sky rather than a replacement for it, so white is clear air.
+    f64 fogColor[3] = {1.0, 1.0, 1.0};
 
     bool hasSpawn = false;
     f64 spawnX = 0, spawnY = 0, spawnZ = 0, spawnYaw = 0;

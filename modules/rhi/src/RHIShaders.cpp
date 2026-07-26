@@ -185,7 +185,12 @@ float3 skyColorFull(float3 dir)
     // instead of two thirds of the way to the zenith -- but it is also a different image, and the
     // default of a new authoring surface must not move a pixel. gSkyParams.x is the exponent, so a
     // person who wants the horizon band higher or lower has a control for it either way.
-    float3 above = lerp(gSkyHorizon.rgb, gSkyZenith.rgb, pow(saturate(dir.z * 0.5 + 0.5), gSkyParams.x));
+    // Interpolated in LINEAR light, not in gamma-encoded values. Blending two sRGB triples and
+    // decoding the result is not the same curve as decoding both and blending: the encode is
+    // concave, so a midpoint comes out darker than the average of the two radiances -- which is a
+    // sky whose whole gradient sags in the middle, and an ambient term that inherits the sag.
+    float3 above = lerp(srgbToLin(gSkyHorizon.rgb), srgbToLin(gSkyZenith.rgb),
+                        pow(saturate(dir.z * 0.5 + 0.5), gSkyParams.x));
     // Below the horizon the dome stops being sky. Without this it simply continues underneath the
     // camera, which is visible the moment anything reflective or downward-facing samples it. A soft
     // band rather than a hard line at z = 0, because the ground is not a mirror.
@@ -195,7 +200,7 @@ float3 skyColorFull(float3 dir)
     // vector picking up a ground colour changes every glancing highlight in the scene, and a default
     // that repaints the image is a default nobody asked for.
     float g = saturate(-dir.z * 8.0) * gGroundColor.a;
-    return srgbToLin(lerp(above, gGroundColor.rgb, g));
+    return lerp(above, srgbToLin(gGroundColor.rgb), g);
 }
 // The one every shading path already calls. It forwards to skyColorFull so the authored atmosphere
 // reaches the AMBIENT term as well as the visible dome -- the sky is the fill light, and a version
@@ -204,6 +209,32 @@ float3 skyColorFull(float3 dir)
 // The 0.5+0.5 remap the old body used is kept inside skyColorFull's `saturate(up)` for directions
 // above the horizon; below it, the ground now answers instead of the sky continuing underneath.
 float3 skyColor(float3 dir){ return skyColorFull(dir); }
+
+// The sky as LIGHT: the cosine-weighted average radiance over the hemisphere a surface with normal
+// N can see. This is what a diffuse ambient term needs, and it is NOT skyColor(N).
+//
+// skyColor(N) is the radiance arriving from ONE direction. Using it as the ambient stands a single
+// sample in for an integral over every direction the surface sees, and for a two-colour dome the
+// error is up to the whole horizon-to-zenith difference: a floor was lit by pure zenith blue when
+// half of what it actually sees is the pale horizon, and a wall by the horizon alone when half of
+// what it sees is sky above it and half is ground below.
+//
+// Solved by sampling the dome's own gradient at the cosine-weighted mean direction of the visible
+// hemisphere rather than by a runtime integral. For a hemisphere about N the cosine-weighted mean
+// of dir.z is (1 + N.z) / 3 remapped onto the dome's parameterisation, which is exact for a dome
+// linear in dir.z and a close fit for the authored exponent -- and it costs one lerp, where a real
+// integral costs a sample loop per pixel.
+float3 averSkyIrradiance(float3 N) {
+    // The mean height a hemisphere about N sees, in the same [-1,1] space the dome is authored in.
+    float meanZ = N.z * 0.5;
+    float3 dome = skyColorFull(float3(0.0, 0.0, meanZ));
+    // A surface also sees the ground when it tilts down, and the dome function already blends it in
+    // below the horizon -- but the MEAN direction never goes below -0.5, so the ground would be
+    // under-represented for a downward-facing surface. Fold in the fraction of the hemisphere that
+    // is below the horizon explicitly.
+    float belowFraction = saturate(0.5 - N.z * 0.5) * gGroundColor.a;
+    return lerp(dome, srgbToLin(gGroundColor.rgb), belowFraction * 0.5);
+}
 
 // ---- PBR mesh with sky ambient + distance fog ----
 struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0; };
@@ -321,8 +352,24 @@ float averFogFactor(float3 wpos) {
     return saturate(1.0 - exp(-tau)) * gFogParams.w;
 }
 
+// The in-scatter target is THE SKY ALONG THE VIEW RAY, tinted by the authored fog colour.
+//
+// It used to be a constant. A ray that hits nothing has infinite optical depth, so its in-scattered
+// radiance is the limit distant geometry converges to -- and with a constant target the two limits
+// were independently authored numbers that did not match. Distant ground came out brighter than the
+// sky above it (the opposite of aerial perspective) with a hard step at the horizon wherever they
+// met. Taking the sky as the target makes them agree BY CONSTRUCTION: there is no pair of values
+// left that can disagree.
+//
+// gFogColor is a TINT on that, not a replacement, so a level can still say "the air here is warmer
+// than the sky" without reintroducing a second horizon.
+float3 averFogInscatter(float3 wpos) {
+    float3 dir = normalize(wpos - gCamPos.xyz);
+    return skyColorFull(dir) * srgbToLin(gFogColor.rgb);
+}
+
 float3 averApplyFog(float3 color, float3 wpos) {
-    return lerp(color, srgbToLin(gFogColor.rgb), averFogFactor(wpos));
+    return lerp(color, averFogInscatter(wpos), averFogFactor(wpos));
 }
 
 // ================= volumetric clouds =================

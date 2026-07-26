@@ -3190,8 +3190,16 @@ private:
 
             ImGui::Separator();
             ImGui::TextUnformatted("Height Fog");
-            ImGui::ColorEdit3("Fog Colour", fogColor_);
-            ImGui::SliderFloat("Fog Density", &fogDensity_, 0, 0.06f, "%.4f");
+            ImGui::ColorEdit3("Fog Tint", fogColor_);
+            // LOGARITHMIC, and labelled by what the number means. On a linear 0..0.06 track with
+            // "%.4f" the whole realistic band (1e-6 to 8e-6) was one pixel wide and displayed as
+            // "0.0000" -- clear air was not authorable at all.
+            ImGui::SliderFloat("Fog Density", &fogDensity_, 1e-7f, 1e-3f, "%.2e",
+                               ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Extinction per cm. Visibility = 3.912 / density.\n"
+                                  "2e-6 clear (20 km)   4e-6 light haze (10 km)\n"
+                                  "8e-6 haze (5 km)     8e-5 fog (500 m)");
             // ZERO is the uniform distance fog this engine had: haze that thickens with distance
             // alone, so a mountain top is as murky as the valley floor. Anything above it gives
             // fog that pools low and clears with altitude.
@@ -3718,10 +3726,12 @@ private:
     // drawn after every surface is down rather than in the middle of the loop.
     Mat4 selectionOutline_{}; rhi::MeshHandle selectionMesh_ = 0; bool hasSelection_ = false;
     // sun
-    f32 sunAz_=-0.55f, sunAlt_=-0.45f, sunUp_=0.55f, sunColor_[3]={1.0f,0.96f,0.9f}, sunAmbient_=0.28f;
+    f32 sunAz_=-0.55f, sunAlt_=-0.45f, sunUp_=0.55f, sunColor_[3]={1.0f,0.96f,0.9f}, sunAmbient_=1.0f;   // the sky as a LIGHT, at its real brightness
     // sky + atmosphere
     f32 skyZenith_[3]={0.19f,0.42f,0.78f}, skyHorizon_[3]={0.72f,0.80f,0.90f};
-    f32 fogColor_[3]={0.70f,0.78f,0.88f}, fogDensity_=0.00014f;   // per CENTIMETRE
+    // A TINT on the in-scattered sky (white = clear air), and an extinction per CENTIMETRE:
+    // 4e-6 is ~10 km visibility by Koschmieder's law. It was 1.4e-4, which is 279 m -- fog.
+    f32 fogColor_[3]={1.0f,1.0f,1.0f}, fogDensity_=4e-6f;
     // The camera's post chain, at its identity defaults. See rhi::PostSettings for why they are the
     // identity and not something prettier.
     rhi::PostSettings post_{};
