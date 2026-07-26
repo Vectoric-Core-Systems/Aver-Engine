@@ -1760,6 +1760,53 @@ A longer timeout would only move the cliff. `waitFence` now waits in one-second 
 when the fence is reached or `GetDeviceRemovedReason()` says the device is gone, saying so once at
 five seconds so a genuine hang is still visible. A slow frame is now slow, not fatal.
 
+## 4m. The sky, the sun and the air became authored — and GI came on
+
+**GI is the default now.** `Settings::globalIllumination` was `Off`, and that one line was the
+largest gap between what this engine rendered and what it was already capable of rendering: no
+bounce light and no ambient occlusion anywhere, just direct sun plus a flat constant. `--no-gi` is
+new and the ten non-GI gates pass it — without that, those ten would silently start measuring the
+same path the seven `--gi` gates measure and the oracle would report a confident 153/153 having lost
+half its coverage.
+
+**`rhi::SkyAtmosphere`** replaces `setSky`'s five loose arguments and supersedes `setLight` for the
+sun. It carries the dome (zenith, horizon, atmosphere height, ground albedo and how much of it
+shows), the sun (direction, colour or a colour TEMPERATURE, intensity, angular diameter) and the
+air (colour, density, **height** and falloff, start distance, max opacity), plus the cloud layer.
+
+Two things in it are worth knowing:
+
+- **The sun's DIRECTION is the stored field; degrees are the editing form.** `setSunAngles` /
+  `sunAngles` convert, and the editor calls them only when a slider actually moves. Deriving the
+  vector from angles every frame would push it through two transcendentals and back, and the result
+  differs from an authored vector in the last few bits — invisible to a person, extremely visible to
+  a pixel-exact oracle.
+- **Height fog is solved analytically**, not marched. For `d(z) = d0·exp(-(z-h)·k)` the optical depth
+  along a segment has a closed form, so it costs one `exp` and one divide and is exact. `k = 0`
+  collapses it to the uniform distance fog this engine had, which is the default — so nothing moves
+  until somebody authors a falloff.
+
+**Volumetric clouds** are a single raymarched layer evaluated only on sky pixels: 24 steps, a
+3-step light march, Henyey-Greenstein phase, Beer plus a powder term, and analytic value noise
+rather than a 3D texture (a texture would need an SRV in a scene root signature that today declares
+no descriptor table at all). Two scale bugs were found and fixed by rendering it:
+
+- The marched span is capped by the **noise's feature size**, not by a multiple of the layer
+  thickness. A fixed step count over an unbounded grazing span eventually steps further than one
+  whole feature, at which point consecutive samples are uncorrelated and the layer renders as
+  speckle. It did exactly that first time.
+- Extinction is derived from the layer's **thickness**, so `cloudDensity` is a unitless dial that
+  means the same thing in a centimetre world and a metre one. Authored per-unit, a density of 1
+  through a 1.3 km layer is an optical depth of 130 000 — opaque by four orders of magnitude, which
+  is what the first version rendered.
+
+Every default reproduces the previous image: verified oracle-neutral on the `baseline` and `all-off`
+configurations, the only failures being the `penumbra` pair that cascaded shadow maps already moved.
+
+**The ground blend defaults to ZERO.** A sky dome that stops at the horizon is more correct than one
+that continues under the camera, but a downward reflection vector picking up a ground colour changes
+every glancing highlight in the scene — so the ground is something a level author turns on.
+
 ## 5. Formats — implemented loaders
 
 - `.ocbeam` (Aver.Formats/OcBeam): faithful to OCCompiler Main.java + VehicleDamage.cpp —

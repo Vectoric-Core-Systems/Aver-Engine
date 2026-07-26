@@ -305,11 +305,23 @@ float4 PSMainPlain(VSOut i) : SV_TARGET { return plainShadeSurface(i, 1.0, float
 float4 PSky(SkyOut i) : SV_TARGET {
     float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
     float3 ray = normalize(far.xyz / far.w - gCamPos.xyz);
+    float3 L = normalize(gLightDir.xyz);
     float3 sky = skyColor(ray);
-    float sd = saturate(dot(ray, normalize(gLightDir.xyz)));
-    float3 sunC = srgbToLin(gLightColor.rgb);
-    sky += sunC * pow(sd, 2000.0) * 14.0;  // sun disk
-    sky += sunC * pow(sd, 12.0) * 0.30;    // sun glow
+    float sd = saturate(dot(ray, L));
+    float3 sunC = srgbToLin(gLightColor.rgb) * gSkyParams.z;
+    // The DISK is a hard-edged test against the authored angular radius, not a power curve: half a
+    // degree is what the sun actually subtends, and a pow() large enough to look that tight is one
+    // that aliases into a flickering dot as the camera turns. The soft shoulder is the last term.
+    float cosR = gSkyParams.w;
+    float disk = smoothstep(cosR - 0.0004, cosR + 0.0002, sd);
+    sky += sunC * disk * 14.0;
+    sky += sunC * pow(sd, 12.0) * 0.30;    // the glow around it, which is atmosphere and not sun
+
+    // Clouds LAST, so they occlude the sun disk and the glow rather than being lit through them.
+    // Costs nothing at all when the layer is off or the ray never enters it.
+    float4 cloud = averCloudLayer(gCamPos.xyz, ray, L, sunC);
+    sky = sky * cloud.a + cloud.rgb;
+
     // Linear radiance; the post chain tonemaps. The sun disk in particular is worth far more than 1
     // here, and clamping it to a display value at this point is exactly what would stop it blooming.
     return float4(sky, 1.0);
@@ -354,7 +366,14 @@ struct PerFrameCB {
     f32 ambient[4];
     f32 skyZenith[4];
     f32 skyHorizon[4];
-    f32 fogColor[4];    // a = density
+    f32 fogColor[4];    // a = density at fogHeight
+    // ---- the authored atmosphere (rhi::SkyAtmosphere). MIRRORED in the shared prelude's
+    // `cbuffer PerFrame`, field for field, with the same no-compiler-behind-it warning as above.
+    f32 skyParams[4];    // x atmosphere height, y sky-light intensity, z sun intensity, w cos(sun angular radius)
+    f32 groundColor[4];  // rgb ground albedo below the horizon
+    f32 fogParams[4];    // x height falloff, y fog height, z start distance, w max opacity
+    f32 cloudParams[4];  // x coverage, y density, z layer bottom, w layer top
+    f32 cloudMotion[4];  // xy wind offset in world units, z 1/feature size, w enabled
 };
 
 // MIRRORS `cbuffer AverPost : register(b0)` in rhi::postShaderSource() FIELD FOR FIELD. Same
@@ -677,12 +696,8 @@ public:
         frameCB_.lightColor[0] = color[0]; frameCB_.lightColor[1] = color[1]; frameCB_.lightColor[2] = color[2]; frameCB_.lightColor[3] = 0;
         frameCB_.ambient[0] = frameCB_.ambient[1] = frameCB_.ambient[2] = ambient; frameCB_.ambient[3] = 0;
     }
-    void setSky(bool enabled, const f32 zenith[3], const f32 horizon[3], const f32 fogColor[3], f32 fogDensity) override {
-        skyEnabled_ = enabled;
-        for (int i = 0; i < 3; ++i) { frameCB_.skyZenith[i] = zenith[i]; frameCB_.skyHorizon[i] = horizon[i]; frameCB_.fogColor[i] = fogColor[i]; }
-        frameCB_.skyZenith[3] = frameCB_.skyHorizon[3] = 0;
-        frameCB_.fogColor[3] = fogDensity;
-    }
+    void setSkyAtmosphere(const SkyAtmosphere& s) override;
+    SkyAtmosphere skyAtmosphere() const override { return sky_; }
     void setPostProcess(const PostSettings& p) override { post_ = p; }
     PostSettings postProcess() const override { return post_; }
 
@@ -820,6 +835,9 @@ private:
     bool drawBindingIgnored_ = false;   // the "backend's own pipeline drops it" warning, said once
 
     bool skyEnabled_ = false;
+    // The authored atmosphere, kept whole so skyAtmosphere() can hand it back. The frame block above
+    // is the PACKED form the shader reads; this is the form a person edits.
+    SkyAtmosphere sky_{};
     bool wireframe_ = false;
     bool lineDepth_ = true;
     std::vector<GpuLineMesh> lineMeshes_;
@@ -1606,7 +1624,12 @@ bool D3D12Device::createPipeline() {
 
     // Per-frame constant buffers (one per frame in flight), persistently mapped.
     auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
-    auto cbd = bufferDesc(256);   // PerFrameCB is 144 bytes; CBs bind on 256-byte alignment
+    // Sized from the struct and rounded UP to the 256-byte alignment a constant buffer binds on,
+    // rather than written out as a literal. It was 256 with a comment claiming the struct was 144
+    // when it was already 240, and the authored atmosphere would have walked 64 bytes past the end
+    // of the mapping -- a heap corruption whose only symptom is whatever happened to live after it.
+    static_assert(sizeof(PerFrameCB) % 16 == 0, "a constant buffer's rows are float4s");
+    auto cbd = bufferDesc((sizeof(PerFrameCB) + 255) & ~usize(255));
     for (u32 i = 0; i < kFrameCount; ++i) {
         if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &cbd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&frameCBs_[i])), "create per-frame CB")) return false;
         D3D12_RANGE none{0, 0};
@@ -2155,6 +2178,64 @@ void D3D12Device::toSceneReferred(const f32 display[4], f32 out[4]) {
 
 // Root signature, PSOs and the per-frame constant ring. Built once: none of it depends on the
 // window size, which is what keeps a resize to just the targets and the descriptors.
+// Pack the authored atmosphere into the block the shaders read, and derive from it everything that
+// used to be pushed separately -- most importantly the SUN DIRECTION, which is now a consequence of
+// the authored elevation and azimuth rather than a second thing to keep in step with them.
+void D3D12Device::setSkyAtmosphere(const SkyAtmosphere& s) {
+    sky_ = s;
+    skyEnabled_ = s.enabled;
+
+    // Straight through, unnormalised, exactly as setLight always passed it: the shaders normalise,
+    // and normalising here as well would change the last bits of a value an oracle measures.
+    for (int i = 0; i < 3; ++i) frameCB_.lightDir[i] = s.sunDirection[i];
+    frameCB_.lightDir[3] = 0.0f;
+
+    // A colour temperature, when authored, REPLACES the authored colour rather than tinting it:
+    // two ways to say what colour the sun is that both apply is two ways to be surprised.
+    f32 sun[3] = {s.sunColor[0], s.sunColor[1], s.sunColor[2]};
+    if (s.sunTemperatureK > 0.0f) blackbodySrgb(s.sunTemperatureK, sun);
+    for (int i = 0; i < 3; ++i) frameCB_.lightColor[i] = sun[i];
+    frameCB_.lightColor[3] = 0.0f;
+
+    for (int i = 0; i < 3; ++i) {
+        frameCB_.skyZenith[i]   = s.zenith[i];
+        frameCB_.skyHorizon[i]  = s.horizon[i];
+        frameCB_.fogColor[i]    = s.fogColor[i];
+        frameCB_.groundColor[i] = s.groundAlbedo[i];
+        // The sky IS the fill light, so its intensity has to reach the ambient term the BRDF reads
+        // and not only the dome the camera sees. This is the same scalar setLight's `ambient`
+        // argument carried, which is why setSkyAtmosphere supersedes it for the sun.
+        frameCB_.ambient[i]     = s.skyLightIntensity;
+    }
+    frameCB_.skyZenith[3] = frameCB_.skyHorizon[3] = 0.0f;
+    frameCB_.groundColor[3] = s.groundBlend;
+    frameCB_.ambient[3]   = 0.0f;
+    frameCB_.fogColor[3]  = s.fogDensity;
+
+    frameCB_.skyParams[0] = s.atmosphereHeight > 0.01f ? s.atmosphereHeight : 0.01f;
+    frameCB_.skyParams[1] = s.skyLightIntensity;
+    frameCB_.skyParams[2] = s.sunIntensity;
+    // The disk test is a dot product against this, so the half-angle is what gets stored.
+    frameCB_.skyParams[3] = std::cos(s.sunAngularDiameterDeg * 0.5f * 0.017453292f);
+
+    frameCB_.fogParams[0] = s.fogFalloff;
+    frameCB_.fogParams[1] = s.fogHeight;
+    frameCB_.fogParams[2] = s.fogStart;
+    frameCB_.fogParams[3] = s.fogMaxOpacity;
+
+    frameCB_.cloudParams[0] = s.cloudCoverage;
+    frameCB_.cloudParams[1] = s.cloudDensity;
+    frameCB_.cloudParams[2] = s.cloudBottom;
+    frameCB_.cloudParams[3] = s.cloudTop > s.cloudBottom ? s.cloudTop : s.cloudBottom + 1.0f;
+    // The wind is integrated on the CPU into a world-space OFFSET. Handing the shader a velocity and
+    // a time would make the clouds' position depend on a float that grows without bound, and they
+    // would visibly quantise after a few minutes of play.
+    frameCB_.cloudMotion[0] = s.cloudWind[0] * s.cloudTime;
+    frameCB_.cloudMotion[1] = s.cloudWind[1] * s.cloudTime;
+    frameCB_.cloudMotion[2] = s.cloudScale;
+    frameCB_.cloudMotion[3] = s.cloudsEnabled ? 1.0f : 0.0f;
+}
+
 bool D3D12Device::createPostPipelines() {
     D3D12_DESCRIPTOR_RANGE srvRange{};
     srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;

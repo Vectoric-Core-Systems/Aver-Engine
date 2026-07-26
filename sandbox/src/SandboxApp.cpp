@@ -734,6 +734,9 @@ public:
     }
 
     void onUpdate(Engine& e, const Timestep& t) override {
+        // Only while the layer is on, so a scene with no clouds accumulates no clock and a capture
+        // run of N frames is reproducible whatever the frame rate was.
+        if (sky_.cloudsEnabled) cloudTime_ += t.dt;
 #if AVER_WITH_IMGUI
         if (e.device()->uiActive()) {
             // Dragging the window to a monitor with a different scale changes the size the glyphs
@@ -916,8 +919,9 @@ public:
         e.device()->setCamera(&viewProj.m[0][0], &invVP.m[0][0], &camPos_.x);
         invVP_ = invVP; viewProj_ = viewProj; eye_ = camPos_;
 
-        const Vec3 ld = Vec3{sunAz_, sunAlt_, sunUp_}.getSafeNormal();
-        e.device()->setLight(&ld.x, sunColor_, sunAmbient_);
+        // The sun and the sky are ONE authored thing now (rhi::SkyAtmosphere), so setLight is no
+        // longer called from here: it and setSky were two ways to say where the light was, and the
+        // pair only agreed because the same three variables fed both.
         // Fog density is PER UNIT, and the editor's default is tuned for its own placeholder scene,
         // which is authored at roughly a unit per metre. Gameplay is in CENTIMETRES, so the identical
         // number saturates a few metres out: at the far wall of an 8m room, 1-exp(-0.014 * 1400) is
@@ -934,7 +938,23 @@ public:
 #if AVER_MODULE_SCENE
         if (hasLevelFog_) fog = levelFog_;
 #endif
-        e.device()->setSky(true, skyZenith_, skyHorizon_, fogColor_, fog);
+        // The authored atmosphere, assembled from the editor's own state. The direction is passed
+        // UNNORMALISED exactly as setLight received it: the shaders normalise, and normalising here
+        // too would change the last bits of a value the pixel oracle measures.
+        sky_.enabled = true;
+        sky_.sunDirection[0] = sunAz_; sky_.sunDirection[1] = sunAlt_; sky_.sunDirection[2] = sunUp_;
+        for (int i = 0; i < 3; ++i) {
+            sky_.sunColor[i] = sunColor_[i];
+            sky_.zenith[i]   = skyZenith_[i];
+            sky_.horizon[i]  = skyHorizon_[i];
+            sky_.fogColor[i] = fogColor_[i];
+        }
+        sky_.skyLightIntensity = sunAmbient_;
+        sky_.fogDensity = fog;
+        // Wind is integrated here because the app owns the clock; the device turns it into a
+        // world-space offset so the shader never sees a number that grows without bound.
+        sky_.cloudTime = cloudTime_;
+        e.device()->setSkyAtmosphere(sky_);
         // Outside the viewport rect is editor chrome, not sky — clear to the dark panel colour.
         e.device()->setClearColor(0.055f, 0.055f, 0.062f, 1);
         // Camera post. Pushed every frame beside the sky because it is the same kind of state, and
@@ -1350,6 +1370,12 @@ public:
     }
     // --exposure / --bloom / --auto-exposure. Applied before the first frame so a capture run sees
     // the state it asked for rather than one frame of the defaults.
+    // --clouds [coverage]. A capture run has no way to tick a checkbox, and a feature nothing can
+    // screenshot is a feature nobody can check.
+    void setClouds(f32 coverage) {
+        sky_.cloudsEnabled = true;
+        if (coverage >= 0.0f) sky_.cloudCoverage = coverage;
+    }
     void setPost(f32 exposure, f32 bloomIntensity, bool autoExposure) {
         post_.exposure = exposure;
         post_.bloomIntensity = bloomIntensity;
@@ -3080,13 +3106,77 @@ private:
             }
             ImGui::Checkbox("Visible", &o.visible);
         } else if (sel_==-2){
-            ImGui::TextUnformatted("Directional Light"); ImGui::Separator();
-            ImGui::SliderFloat("Azimuth", &sunAz_, -1, 1); ImGui::SliderFloat("Altitude", &sunAlt_, -1, 1); ImGui::SliderFloat("Up", &sunUp_, 0.05f, 2);
-            ImGui::ColorEdit3("Color", sunColor_); ImGui::SliderFloat("Ambient", &sunAmbient_, 0, 1);
+            ImGui::TextUnformatted("Directional Light (Sun)"); ImGui::Separator();
+            // ELEVATION AND AZIMUTH, in degrees, because that is what a person authoring a time of
+            // day thinks in. The stored value is still the direction vector -- the conversion runs
+            // only when a slider actually moves, so an untouched sun keeps the exact vector it was
+            // authored with rather than being pushed through two transcendentals every frame.
+            {
+                rhi::SkyAtmosphere probe = sky_;
+                probe.sunDirection[0] = sunAz_; probe.sunDirection[1] = sunAlt_; probe.sunDirection[2] = sunUp_;
+                f32 elev = 0.0f, azim = 0.0f;
+                probe.sunAngles(elev, azim);
+                bool moved = ImGui::SliderFloat("Elevation", &elev, -20.0f, 90.0f, "%.1f deg");
+                moved |= ImGui::SliderFloat("Azimuth", &azim, -180.0f, 180.0f, "%.1f deg");
+                if (moved) {
+                    probe.setSunAngles(elev, azim);
+                    sunAz_ = probe.sunDirection[0]; sunAlt_ = probe.sunDirection[1]; sunUp_ = probe.sunDirection[2];
+                }
+            }
+            ImGui::SliderFloat("Intensity", &sky_.sunIntensity, 0.0f, 8.0f, "%.2f");
+            // A temperature REPLACES the colour rather than tinting it, so the control that is not
+            // in effect is disabled rather than silently ignored.
+            bool useTemp = sky_.sunTemperatureK > 0.0f;
+            if (ImGui::Checkbox("Use Colour Temperature", &useTemp))
+                sky_.sunTemperatureK = useTemp ? 5500.0f : 0.0f;
+            if (useTemp) {
+                ImGui::SliderFloat("Temperature", &sky_.sunTemperatureK, 1500.0f, 12000.0f, "%.0f K");
+            } else {
+                ImGui::ColorEdit3("Colour", sunColor_);
+            }
+            // Half a degree is the real sun. It sets the disk's size, and it is what a soft-shadow
+            // filter will read the day one lands.
+            ImGui::SliderFloat("Angular Size", &sky_.sunAngularDiameterDeg, 0.05f, 8.0f, "%.2f deg");
         } else if (sel_==-3){
             ImGui::TextUnformatted("Sky + Atmosphere"); ImGui::Separator();
             ImGui::ColorEdit3("Zenith", skyZenith_); ImGui::ColorEdit3("Horizon", skyHorizon_);
-            ImGui::ColorEdit3("Fog", fogColor_); ImGui::SliderFloat("Fog density", &fogDensity_, 0, 0.06f, "%.4f");
+            // The EXPONENT on the zenith blend. Small pushes the pale band high and reads as thick
+            // hazy air; large pulls it to a thin bright line and reads as thin high-altitude air.
+            ImGui::SliderFloat("Atmosphere Height", &sky_.atmosphereHeight, 0.05f, 4.0f, "%.2f");
+            ImGui::ColorEdit3("Ground", sky_.groundAlbedo);
+            // Zero keeps the sky continuing below the horizon, which is what it always did.
+            ImGui::SliderFloat("Ground Blend", &sky_.groundBlend, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Sky Light", &sunAmbient_, 0.0f, 2.0f, "%.2f");
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Height Fog");
+            ImGui::ColorEdit3("Fog Colour", fogColor_);
+            ImGui::SliderFloat("Fog Density", &fogDensity_, 0, 0.06f, "%.4f");
+            // ZERO is the uniform distance fog this engine had: haze that thickens with distance
+            // alone, so a mountain top is as murky as the valley floor. Anything above it gives
+            // fog that pools low and clears with altitude.
+            ImGui::SliderFloat("Height Falloff", &sky_.fogFalloff, 0.0f, 0.02f, "%.5f",
+                               ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = uniform distance fog (the old behaviour)");
+            ImGui::DragFloat("Fog Height", &sky_.fogHeight, 1.0f);
+            ImGui::DragFloat("Fog Start", &sky_.fogStart, 1.0f, 0.0f, 1e6f);
+            ImGui::SliderFloat("Max Opacity", &sky_.fogMaxOpacity, 0.0f, 1.0f, "%.2f");
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Volumetric Clouds");
+            ImGui::Checkbox("Clouds", &sky_.cloudsEnabled);
+            if (sky_.cloudsEnabled) {
+                ImGui::SliderFloat("Coverage", &sky_.cloudCoverage, 0.0f, 1.0f, "%.2f");
+                ImGui::SliderFloat("Density", &sky_.cloudDensity, 0.0f, 4.0f, "%.2f");
+                ImGui::DragFloat("Layer Bottom", &sky_.cloudBottom, 100.0f);
+                ImGui::DragFloat("Layer Top", &sky_.cloudTop, 100.0f);
+                // The reciprocal of a feature's width, so the slider reads as "how big are the
+                // clouds" the right way round.
+                f32 featureSize = sky_.cloudScale > 1e-9f ? 1.0f / sky_.cloudScale : 50000.0f;
+                if (ImGui::DragFloat("Feature Size", &featureSize, 100.0f, 100.0f, 5e6f))
+                    sky_.cloudScale = 1.0f / std::fmax(featureSize, 1.0f);
+                ImGui::DragFloat2("Wind", sky_.cloudWind, 5.0f);
+            }
         } else if (sel_==-4){
             // The camera's post chain. Everything here defaults to the identity, so an untouched
             // editor renders exactly what it did before the chain existed -- which is what the
@@ -3591,6 +3681,12 @@ private:
     // The camera's post chain, at its identity defaults. See rhi::PostSettings for why they are the
     // identity and not something prettier.
     rhi::PostSettings post_{};
+    // The authored sky, sun and air. The sun direction, colours and fog density are still driven by
+    // the older sunAz_/skyZenith_/fogDensity_ members the Details panel edits, so this carries the
+    // fields those do not: atmosphere height, ground albedo, colour temperature, the sun's angular
+    // size and the whole cloud layer.
+    rhi::SkyAtmosphere sky_{};
+    f32 cloudTime_ = 0.0f;   // seconds of accumulated wind; only advances when clouds are on
     bool capDone_=false;
     // The pixel actually requested and the viewport rect it was requested against, latched at the
     // request frame so the report a few frames later describes the state that produced the value.
@@ -4049,7 +4145,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -4105,6 +4201,11 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--bloom") && i+1<argc) bloom=static_cast<f32>(std::atof(argv[++i]));
         else if (!std::strcmp(argv[i],"--exposure") && i+1<argc) exposure=static_cast<f32>(std::atof(argv[++i]));
         else if (!std::strcmp(argv[i],"--auto-exposure")) autoExposure=true;
+        // Coverage is optional: `--clouds` alone takes the authored default.
+        else if (!std::strcmp(argv[i],"--clouds")) {
+            clouds=1;
+            if (i+1 < argc && argv[i+1][0] != '-') cloudCover=static_cast<f32>(std::atof(argv[++i]));
+        }
         else if (!std::strcmp(argv[i],"--tool") && i+1<argc) {
             const char* t=argv[++i];
             tool = !std::strcmp(t,"move")?Tool::Move : !std::strcmp(t,"rotate")?Tool::Rotate :
@@ -4120,6 +4221,7 @@ Application* createApplication(int argc, char** argv) {
     auto* app = new SandboxApp(frames, headless, beam, shot, tool);
     app->setPost(exposure, bloom, autoExposure);
     app->setGiForceOff(noGi);
+    if (clouds) app->setClouds(cloudCover);
     app->setUseWarp(warp);
     app->setDebugLayer(debugLayer);
     app->setProjectPath(project);

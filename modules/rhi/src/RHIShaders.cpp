@@ -8,10 +8,68 @@
 // geometry registers must match what dispatchMeshFor() binds. Duplicating any of it would make
 // reordering one copy corrupt the other with no diagnostic anywhere.
 #include "aver/rhi/RHIResources.hpp"
+#include "aver/rhi/RHI.hpp"
 
+#include <cmath>
 #include <string>
 
 namespace aver::rhi {
+
+void SkyAtmosphere::setSunAngles(f32 elevationDeg, f32 azimuthDeg) {
+    constexpr f32 kDeg = 3.14159265358979f / 180.0f;
+    const f32 el = elevationDeg * kDeg, az = azimuthDeg * kDeg;
+    const f32 ce = std::cos(el);
+    sunDirection[0] = ce * std::cos(az);
+    sunDirection[1] = ce * std::sin(az);
+    sunDirection[2] = std::sin(el);
+}
+
+void SkyAtmosphere::sunAngles(f32& elevationDeg, f32& azimuthDeg) const {
+    constexpr f32 kRad = 180.0f / 3.14159265358979f;
+    const f32 x = sunDirection[0], y = sunDirection[1], z = sunDirection[2];
+    const f32 len = std::sqrt(x * x + y * y + z * z);
+    if (len < 1e-6f) { elevationDeg = 0.0f; azimuthDeg = 0.0f; return; }
+    elevationDeg = std::asin(z / len) * kRad;
+    // atan2 of a zero pair is 0 rather than undefined, which is the right answer for a sun straight
+    // overhead: every azimuth is equivalent there, so any of them is correct.
+    azimuthDeg = std::atan2(y, x) * kRad;
+}
+
+// Planckian locus to linear sRGB, normalised so the brightest channel is 1 — the value is a COLOUR,
+// and the brightness is sunIntensity's job. Krystek's rational fit for CIE 1960 uv over
+// 1000..15000 K, then uv -> xy -> XYZ -> linear sRGB.
+//
+// A fit and not a spectral integral on purpose: the difference over the range a sun is authored in
+// is far below what an 8-bit display can show, and a table would be one more thing to get subtly
+// wrong with no way to notice.
+void blackbodySrgb(f32 kelvin, f32 outRgb[3]) {
+    const f32 t = kelvin < 1000.0f ? 1000.0f : (kelvin > 15000.0f ? 15000.0f : kelvin);
+    const f32 t2 = t * t;
+    const f32 u = (0.860117757f + 1.54118254e-4f * t + 1.28641212e-7f * t2) /
+                  (1.0f + 8.42420235e-4f * t + 7.08145163e-7f * t2);
+    const f32 v = (0.317398726f + 4.22806245e-5f * t + 4.20481691e-8f * t2) /
+                  (1.0f - 2.89741816e-5f * t + 1.61456053e-7f * t2);
+    const f32 d = 2.0f * u - 8.0f * v + 4.0f;
+    const f32 x = 3.0f * u / d;
+    const f32 y = 2.0f * v / d;
+    const f32 z = 1.0f - x - y;
+
+    const f32 Y = 1.0f;
+    const f32 X = (y > 1e-6f) ? (Y / y) * x : 0.0f;
+    const f32 Z = (y > 1e-6f) ? (Y / y) * z : 0.0f;
+
+    f32 rgb[3] = {
+         3.2404542f * X - 1.5371385f * Y - 0.4985314f * Z,
+        -0.9692660f * X + 1.8760108f * Y + 0.0415560f * Z,
+         0.0556434f * X - 0.2040259f * Y + 1.0572252f * Z,
+    };
+    f32 m = 0.0f;
+    for (f32 c : rgb) if (c > m) m = c;
+    for (int i = 0; i < 3; ++i) {
+        const f32 c = m > 1e-6f ? rgb[i] / m : 1.0f;
+        outRgb[i] = c < 0.0f ? 0.0f : c;
+    }
+}
 
 namespace {
 
@@ -75,7 +133,13 @@ cbuffer PerFrame : register(b0) {
     float4   gAmbient;     // rgb
     float4   gSkyZenith;   // rgb
     float4   gSkyHorizon;  // rgb
-    float4   gFogColor;    // rgb, a = density
+    float4   gFogColor;    // rgb, a = density at gFogParams.y
+    // ---- the authored atmosphere. MIRRORS PerFrameCB's tail field for field. ----
+    float4   gSkyParams;   // x atmosphere height, y sky-light intensity, z sun intensity, w cos(sun radius)
+    float4   gGroundColor; // rgb below the horizon, a = how much of it replaces the sky
+    float4   gFogParams;   // x height falloff, y fog height, z start distance, w max opacity
+    float4   gCloudParams; // x coverage, y density, z layer bottom, w layer top
+    float4   gCloudMotion; // xy wind offset, z 1/feature size, w enabled
 };
 // Per draw. The shading model is an ID rather than a shader permutation: a uniform branch costs one
 // scalar compare per wave, where a permutation would multiply the pipeline count of every renderer
@@ -100,7 +164,39 @@ cbuffer PerObject : register(b1) {
 };
 
 static const float PI = 3.14159265;
-float3 skyColor(float3 dir){ float3 c = lerp(gSkyHorizon.rgb, gSkyZenith.rgb, pow(saturate(dir.z*0.5+0.5), 0.65)); return srgbToLin(c); }
+
+// The sky dome. Above the horizon it is a horizon-to-zenith blend whose EXPONENT is the authored
+// atmosphere height: a small exponent pushes the pale band high and reads as thick hazy air, a large
+// one pulls it to a thin bright line and reads as thin high-altitude air. Below the horizon it fades
+// to the ground albedo instead of continuing the sky underneath the camera, which is visible the
+// moment anything reflective looks down.
+float3 skyColorFull(float3 dir)
+{
+    // The blend parameter is dir.z remapped from [-1,1] to [0,1], which is the curve this engine has
+    // always used and is deliberately NOT changed to the physically tidier saturate(dir.z). The
+    // tidier one is arguably more correct -- it puts the authored horizon colour AT the horizon
+    // instead of two thirds of the way to the zenith -- but it is also a different image, and the
+    // default of a new authoring surface must not move a pixel. gSkyParams.x is the exponent, so a
+    // person who wants the horizon band higher or lower has a control for it either way.
+    float3 above = lerp(gSkyHorizon.rgb, gSkyZenith.rgb, pow(saturate(dir.z * 0.5 + 0.5), gSkyParams.x));
+    // Below the horizon the dome stops being sky. Without this it simply continues underneath the
+    // camera, which is visible the moment anything reflective or downward-facing samples it. A soft
+    // band rather than a hard line at z = 0, because the ground is not a mirror.
+    //
+    // Weighted by gGroundColor.a, which DEFAULTS TO ZERO: with no ground authored the sky continues
+    // below the horizon exactly as it always has. That is not timidity -- a downward reflection
+    // vector picking up a ground colour changes every glancing highlight in the scene, and a default
+    // that repaints the image is a default nobody asked for.
+    float g = saturate(-dir.z * 8.0) * gGroundColor.a;
+    return srgbToLin(lerp(above, gGroundColor.rgb, g));
+}
+// The one every shading path already calls. It forwards to skyColorFull so the authored atmosphere
+// reaches the AMBIENT term as well as the visible dome -- the sky is the fill light, and a version
+// of it that only the camera could see would light the scene from a sky nobody was looking at.
+//
+// The 0.5+0.5 remap the old body used is kept inside skyColorFull's `saturate(up)` for directions
+// above the horizon; below it, the ground now answers instead of the sky continuing underneath.
+float3 skyColor(float3 dir){ return skyColorFull(dir); }
 
 // ---- PBR mesh with sky ambient + distance fog ----
 struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0; };
@@ -180,10 +276,195 @@ float4 plainShadeSurface(VSOut i, float sunVis, float3 indirectRadiance, float a
 // ---- camera / post. Deliberately NOT the material's: fog, tonemap and gamma are properties of
 // the camera looking at the scene, and a material system that owned them would make every shading
 // model reimplement them identically. ----
+// EXPONENTIAL HEIGHT FOG, solved analytically along the view ray rather than marched.
+//
+// For a density that falls off with altitude, d(z) = d0 * exp(-(z - h0) * k), the optical depth
+// along a segment has a closed form: the integral of exp(-k z) over a straight line is
+// (1 - exp(-k dz)) / (k dz) times the density at the near end, times the segment length. So the
+// whole thing is one exp and one divide, and it is EXACT rather than a sum of slabs.
+//
+// k == 0 collapses it to d0 * length, which is the uniform distance fog this engine had -- a grey
+// veil that thickens with distance alone, so a mountain top is as hazy as the valley floor. Any
+// positive falloff gives what people mean by fog: haze that pools low and clears with altitude.
+// The default is 0, so nothing moves until somebody authors a falloff.
+float averFogFactor(float3 wpos) {
+    float3 a = gCamPos.xyz;
+    float3 v = wpos - a;
+    float len = length(v);
+    float start = gFogParams.z;
+    if (len <= start) return 0.0;
+
+    float k  = gFogParams.x;
+    float d0 = gFogColor.a;
+    float tau;
+    if (k <= 1e-8) {
+        tau = d0 * (len - start);
+    } else {
+        float3 dir = v / max(len, 1e-6);
+        a += dir * start;
+        float seg = len - start;
+        float dz = dir.z * seg;
+        float kdz = k * dz;
+        // The dz -> 0 limit of (1 - exp(-x))/x is 1, and the guard is on the PRODUCT because that is
+        // the quantity that vanishes -- a horizontal ray through thick fog has a large seg and a
+        // zero dz, and testing dz alone would divide by nothing at exactly the common case.
+        float f = abs(kdz) > 1e-4 ? (1.0 - exp(-kdz)) / kdz : 1.0;
+        tau = d0 * exp(-(a.z - gFogParams.y) * k) * seg * f;
+    }
+    return saturate(1.0 - exp(-tau)) * gFogParams.w;
+}
+
 float3 averApplyFog(float3 color, float3 wpos) {
-    float dist = length(wpos - gCamPos.xyz);
-    float fog = 1.0 - exp(-dist * gFogColor.a);
-    return lerp(color, srgbToLin(gFogColor.rgb), saturate(fog));
+    return lerp(color, srgbToLin(gFogColor.rgb), averFogFactor(wpos));
+}
+
+// ================= volumetric clouds =================
+// A single raymarched layer, evaluated ONLY on sky pixels. That is the whole of what makes it cheap:
+// the sky is a fullscreen pass drawn before the scene with no depth write, so every pixel geometry
+// covers costs nothing at all, and the march is bounded to the slab the ray actually crosses.
+//
+// The noise is ANALYTIC rather than a 3D texture. A texture would be faster per sample, but it would
+// also need an SRV in the scene root signature -- which today declares no descriptor table at all --
+// and that means changing a root signature every scene pipeline in the engine is built against. A
+// hash is a few ALU and needs nothing.
+
+float averHash13(float3 p) {
+    p = frac(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return frac((p.x + p.y) * p.z);
+}
+
+// Value noise with a smoothstep-interpolated lattice. Eight hashes a call, which is why the octave
+// counts below are as low as they are.
+float averValueNoise(float3 x) {
+    float3 i = floor(x);
+    float3 f = frac(x);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = averHash13(i + float3(0,0,0)), n100 = averHash13(i + float3(1,0,0));
+    float n010 = averHash13(i + float3(0,1,0)), n110 = averHash13(i + float3(1,1,0));
+    float n001 = averHash13(i + float3(0,0,1)), n101 = averHash13(i + float3(1,0,1));
+    float n011 = averHash13(i + float3(0,1,1)), n111 = averHash13(i + float3(1,1,1));
+    return lerp(lerp(lerp(n000, n100, f.x), lerp(n010, n110, f.x), f.y),
+                lerp(lerp(n001, n101, f.x), lerp(n011, n111, f.x), f.y), f.z);
+}
+
+// Cloud density at a world point. `detail` buys a second octave; the light march passes 0 for it,
+// because a shadow ray through a cloud is integrating a bulk quantity and the fine octave costs
+// eight hashes to change it by almost nothing.
+// Extinction per world unit for a fully dense cloud. Derived from the layer's THICKNESS rather
+// than authored directly, so `cloudDensity` is a unitless "how thick do these look" dial that means
+// the same thing in a centimetre world and a metre one. Authored per-unit it would not: a density of
+// 1 through a 1.3 km layer is an optical depth of 130000, which is opaque by a factor of ten
+// thousand, and that is exactly what the first version of this rendered.
+float averCloudSigma() {
+    const float kOpticalDepthAtFull = 9.0;   // a dense cumulus, edge to edge
+    return gCloudParams.y * kOpticalDepthAtFull / max(gCloudParams.w - gCloudParams.z, 1.0);
+}
+
+float averCloudDensity(float3 wpos, bool detail) {
+    float bottom = gCloudParams.z, top = gCloudParams.w;
+    // Height gradient: clouds have flat-ish bases and billowing tops, so the profile rises fast and
+    // tapers slowly. Zero at both faces means the march never produces a hard-edged slab.
+    float h = saturate((wpos.z - bottom) / max(top - bottom, 1.0));
+    float shape = saturate(h * 4.0) * saturate((1.0 - h) * 1.6);
+    if (shape <= 0.001) return 0.0;
+
+    float3 p = (wpos + float3(gCloudMotion.xy, 0.0)) * gCloudMotion.z;
+    float n = averValueNoise(p) * 0.6;
+    if (detail) n += averValueNoise(p * 3.17) * 0.3;
+    else        n += 0.15;   // the mean of the octave being skipped, so the two agree on average
+    n += averValueNoise(p * 0.41) * 0.25;
+
+    // Coverage REMAPS rather than scales: subtracting a threshold and rescaling is what turns a
+    // noise field into distinct clouds with clear sky between them. Scaling would just make one
+    // continuous overcast lighter or darker.
+    float cover = 1.0 - gCloudParams.x;
+    float d = saturate((n - cover) / max(1.0 - cover, 1e-3));
+    return d * shape;
+}
+
+// Henyey-Greenstein. Clouds are strongly forward-scattering, which is why the sky around the sun
+// glows and the same cloud looks dark from the other side.
+float averHG(float ct, float g) {
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * ct, 1e-4), 1.5));
+}
+
+// Marches the layer and returns scattered radiance in rgb, TRANSMITTANCE in a.
+float4 averCloudLayer(float3 ro, float3 rd, float3 sunDir, float3 sunColour) {
+    if (gCloudMotion.w < 0.5) return float4(0, 0, 0, 1);
+    float bottom = gCloudParams.z, top = gCloudParams.w;
+
+    // Slab entry and exit. A ray heading down, or up from above the layer, never enters it -- and
+    // returning early there is most of why this is affordable at all.
+    float t0, t1;
+    if (rd.z > 1e-4) {
+        if (ro.z > top) return float4(0, 0, 0, 1);
+        t0 = max((bottom - ro.z) / rd.z, 0.0);
+        t1 = (top - ro.z) / rd.z;
+    } else if (rd.z < -1e-4) {
+        if (ro.z < bottom) return float4(0, 0, 0, 1);
+        t0 = max((top - ro.z) / rd.z, 0.0);
+        t1 = (bottom - ro.z) / rd.z;
+    } else {
+        if (ro.z < bottom || ro.z > top) return float4(0, 0, 0, 1);
+        t0 = 0.0; t1 = (top - bottom) * 64.0;   // grazing: bounded rather than infinite
+    }
+    const int kSteps = 24;
+    // THE SPAN IS CAPPED BY THE NOISE'S FEATURE SIZE, not by a multiple of the layer thickness.
+    //
+    // A near-horizontal ray crosses an unbounded amount of the slab, and a fixed step count over an
+    // unbounded span means a step that eventually exceeds one whole noise feature -- at which point
+    // consecutive samples are uncorrelated and the layer renders as speckle rather than as cloud.
+    // Capping the span so dt stays a fraction of a feature makes that impossible by construction,
+    // whatever units the world is in, and the cost is that a grazing ray stops marching early and
+    // fades out instead of aliasing.
+    float featureSize = 1.0 / max(gCloudMotion.z, 1e-9);
+    t1 = min(t1, t0 + kSteps * featureSize * 0.35);
+    if (t1 <= t0) return float4(0, 0, 0, 1);
+
+    float dt = (t1 - t0) / kSteps;
+    // Dithered start, from the direction alone. Without it the fixed step size shows as concentric
+    // rings; with it the same error becomes noise, which the eye forgives and a blur would remove.
+    float jitter = averHash13(rd * 811.7);
+    float t = t0 + dt * jitter;
+
+    float sigma = averCloudSigma();
+    float3 scattered = 0.0;
+    float transmittance = 1.0;
+    float phase = averHG(dot(rd, sunDir), 0.62);
+
+    [loop] for (int i = 0; i < kSteps; ++i) {
+        if (transmittance < 0.02) break;   // nothing behind this can still be seen
+        float3 p = ro + rd * t;
+        float d = averCloudDensity(p, true);
+        if (d > 0.001) {
+            // Light march: a few long steps toward the sun. Long on purpose -- this is integrating
+            // bulk occlusion, and the error from a coarse step is a slightly softer cloud, which is
+            // indistinguishable from a slightly different cloud.
+            float lt = 0.0;
+            float lstep = (top - bottom) * 0.25;
+            [unroll] for (int j = 0; j < 3; ++j) {
+                float3 lp = p + sunDir * (lstep * (j + 0.5));
+                lt += averCloudDensity(lp, false) * lstep;
+            }
+            float sunT = exp(-lt * sigma);
+            // Powder: the darkening on the sun-facing side of a cloud that pure Beer's law misses,
+            // because light scattered INTO the eye has to have entered the cloud first.
+            float powder = 1.0 - exp(-d * dt * sigma * 2.0);
+            float3 lit = sunColour * sunT * phase * powder;
+            // Ambient from the sky above the sample, so an overcast base is not simply black.
+            lit += skyColorFull(float3(0, 0, 1)) * 0.9;
+
+            float stepT = exp(-d * dt * sigma);
+            // Energy-conserving accumulation: the light scattered by this step is what it emits
+            // minus what it absorbs, integrated exactly rather than as t * d * dt.
+            scattered += transmittance * lit * (1.0 - stepT);
+            transmittance *= stepT;
+        }
+        t += dt;
+    }
+    return float4(scattered, transmittance);
 }
 
 // ---- procedural sky (fullscreen triangle via SV_VertexID) ----

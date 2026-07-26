@@ -162,6 +162,89 @@ struct PostSettings {
     f32  histogramHighPercent = 0.85f;
 };
 
+// The sky, the sun and the air between them — the authored ones.
+//
+// This replaces setSky's five loose arguments. It is a struct for the same reason PostSettings is:
+// the thing being described has a dozen knobs, and a signature with a dozen parameters is a
+// signature where two floats get swapped and nobody notices until the sunset is the wrong colour.
+//
+// EVERY DEFAULT REPRODUCES WHAT THE ENGINE RENDERED BEFORE IT EXISTED. fogFalloff 0 collapses the
+// height-fog integral back to the uniform distance fog exactly; atmosphereHeight 0.65 is the
+// exponent the sky gradient already used; clouds are off. The oracle measures this scene, and a new
+// authoring surface must not move a pixel until somebody authors something.
+struct SkyAtmosphere {
+    bool enabled = false;
+
+    // ---- the dome ----
+    f32 zenith[3]  = {0.24f, 0.45f, 0.85f};   // authored sRGB, decoded in the shader
+    f32 horizon[3] = {0.72f, 0.83f, 0.95f};
+    // How far up the dome the horizon band reaches. It is the EXPONENT on the zenith blend, so
+    // smaller values push the pale band higher and read as a thicker, hazier atmosphere; larger
+    // ones pull it down to a thin bright line and read as thin, high-altitude air.
+    f32 atmosphereHeight = 0.65f;
+    // What the world below the horizon reflects back into the lower half of the dome. Without it
+    // the sky simply continues underneath the camera, which is visible the moment anything is
+    // reflective or the camera is above terrain.
+    //
+    // groundBlend is how much of it replaces the sky down there, and it defaults to ZERO -- a
+    // downward reflection vector picking up a ground colour changes every glancing highlight in the
+    // scene, so the ground is something a level author turns on rather than something that arrives.
+    f32 groundAlbedo[3] = {0.24f, 0.23f, 0.21f};
+    f32 groundBlend     = 0.0f;
+    // Multiplier on the sky-hemisphere ambient every surface receives. The sky IS the fill light.
+    // 1.0 is NOT the neutral value here: this is the engine's existing ambient scalar and the scene
+    // it was tuned against uses 0.28. Named for what it does rather than renormalised, because
+    // renormalising it would move every pixel the oracle measures for no gain.
+    f32 skyLightIntensity = 0.28f;
+
+    // ---- the sun ----
+    // The DIRECTION is the authoritative field, pointing TOWARD the light, and it does not have to
+    // be normalised -- the shaders always have. Degrees are the editing form, not the stored one:
+    // deriving the vector from angles every frame would push it through two transcendentals and back,
+    // and the result differs from an authored vector in the last few bits. That is invisible to a
+    // person and not at all invisible to a pixel-exact oracle, so the conversion happens where the
+    // editing does. setSunAngles / sunAngles below are that conversion.
+    f32 sunDirection[3] = {-0.55f, -0.45f, 0.55f};
+    f32 sunColor[3]     = {1.0f, 0.96f, 0.90f};
+    f32 sunIntensity    = 1.0f;
+    // Kelvin. 0 means "use sunColor as authored"; any other value overrides it with the blackbody
+    // colour, which is how a sunset is authored honestly rather than by eye.
+    f32 sunTemperatureK = 0.0f;
+    // The real sun subtends about half a degree. It sets the disk's size in the sky AND, once the
+    // shadow filter reads it, how quickly a shadow's edge softens with distance from its caster.
+    f32 sunAngularDiameterDeg = 0.545f;
+
+    // ---- the air ----
+    f32 fogColor[3] = {0.70f, 0.78f, 0.88f};
+    // Density at fogHeight, per world unit.
+    f32 fogDensity = 0.0002f;
+    // World Z at which the density is exactly fogDensity, and how fast it thins going up. A falloff
+    // of ZERO is uniform fog at fogDensity everywhere, which is what this engine had: a grey veil
+    // that thickens with distance alone, so a distant mountain top is as hazy as the valley floor.
+    // Any positive falloff gives the thing people actually mean by fog -- haze that pools low and
+    // clears with altitude.
+    f32 fogHeight  = 0.0f;
+    f32 fogFalloff = 0.0f;
+    f32 fogStart   = 0.0f;      // distance in front of the camera before any fog accumulates
+    f32 fogMaxOpacity = 1.0f;   // so distance never fully erases the world
+
+    // ---- clouds ----
+    bool cloudsEnabled = false;
+    f32  cloudCoverage = 0.45f;   // 0 clear, 1 overcast
+    f32  cloudDensity  = 1.0f;
+    f32  cloudBottom   = 150000.0f;   // world Z of the layer's base and top
+    f32  cloudTop      = 280000.0f;
+    f32  cloudScale    = 0.00002f;    // 1 / the width of one noise feature, in world units
+    f32  cloudWind[2]  = {900.0f, 260.0f};   // world units per second
+    f32  cloudTime     = 0.0f;               // accumulated seconds; the app owns the clock
+
+    // Elevation above the horizon and azimuth as a bearing about +Z from +X, both in degrees --
+    // what a person authoring a time of day actually thinks in. These WRITE and READ sunDirection;
+    // there is no second stored copy to fall out of step with it.
+    void setSunAngles(f32 elevationDeg, f32 azimuthDeg);
+    void sunAngles(f32& elevationDeg, f32& azimuthDeg) const;
+};
+
 class IDevice {
 public:
     virtual ~IDevice() = default;
@@ -229,12 +312,11 @@ public:
         (void)viewProj; (void)invViewProj; (void)cameraPos; return false;
     }
     virtual void setLight(const f32 dirToLight[3], const f32 color[3], f32 ambient) { (void)dirToLight; (void)color; (void)ambient; }
-    // Procedural sky + distance-fog atmosphere. When enabled, a gradient sky (with a sun
-    // disk along the light direction) is drawn behind the scene and meshes fade to fogColor.
-    virtual void setSky(bool enabled, const f32 zenith[3], const f32 horizon[3],
-                        const f32 fogColor[3], f32 fogDensity) {
-        (void)enabled; (void)zenith; (void)horizon; (void)fogColor; (void)fogDensity;
-    }
+    // The sky, the sun and the air; see SkyAtmosphere. It supersedes the five-argument setSky this
+    // replaces, and it also supersedes setLight for the SUN: the direction is derived from the
+    // authored elevation and azimuth, so the two cannot disagree about where the light is.
+    virtual void setSkyAtmosphere(const SkyAtmosphere& s) { (void)s; }
+    virtual SkyAtmosphere skyAtmosphere() const { return {}; }
     // Camera post-processing; see PostSettings. Pushed the same way the sky and the sun are,
     // because it is the same kind of state: what the camera does with the scene, not what the
     // scene contains.
@@ -313,6 +395,11 @@ public:
     // free. Returns 0 where the backend hosts no UI, which the caller treats as "no image".
     virtual u64 uiTextureId(TextureHandle t) { (void)t; return 0; }
 };
+
+// Colour temperature in Kelvin to LINEAR sRGB, normalised so the brightest channel is 1: the result
+// is a colour, and how bright it is belongs to whatever multiplies it. Clamped to 1000..15000 K,
+// which spans candlelight to a clear blue sky.
+void blackbodySrgb(f32 kelvin, f32 outRgb[3]);
 
 IDevice* createDevice(const DeviceDesc& desc = {});
 void destroyDevice(IDevice* device);
