@@ -1642,6 +1642,72 @@ rects, which is loud, does not hide anything, and gives the next occurrence some
 - **The WARP fault is worked around, not diagnosed to a root cause.** Nothing here can see inside
   `d3d10warp.dll`. What is established is that the engine's input is not the variable.
 
+## 4k. Textures reach materials, and the frame gets a camera post chain
+
+Two changes, and the first is smaller than it looks.
+
+### The material system was complete except for one uninstalled callback
+
+`pbr::MaterialSystem` was built to resolve a `TextureRef` through a host-installed
+`TextureResolver`, `fmt::loadTexture` already decoded and mip-filtered images, and
+`averSampleMaps()` already sampled all five glTF slots. **Nothing ever called
+`setTextureResolver()`**, so every slot fell back to its 1×1 identity texture and every surface in
+the engine was a flat colour. That was the entire gap: not a missing feature, an unconnected wire.
+
+What landed with it:
+
+- **`assets::uploadTexture`** (`Aver.Assets.Gpu`, a new target) — decoded mip chain → GPU texture.
+  Its own target because `Aver.Formats` must not name the RHI and the RHI must not know what a
+  normal map is, so the join has to sit above both.
+- **The resolver now carries the `TextureSlot`.** Nothing in an image file says whether its pixels
+  are colour or data, and the slot is the only thing that knows: base colour and emissive decode
+  sRGB, metal-rough and occlusion are linear, a normal map is a vector field that filters
+  differently. A resolver given only the reference would have to guess, and guessing wrong is
+  invisible — an sRGB-decoded roughness map is merely a bit shinier than authored, everywhere.
+- **`.ocmat`** (`Aver.Formats.Material`, a third target) — FORMAT_SPECS §7, parsed straight into
+  `pbr::MaterialDesc` with no intermediate struct. A `GRAPH{}` block is detected, reported and
+  skipped rather than refused. A third target because `Aver.Render.PBR` is a Core-only DLL the
+  scripting layer P/Invokes and cannot link `Aver.Formats`, and pushing the PBR DLL onto every
+  headless map tool would be the only alternative.
+- **`UvMode::WorldAligned`** — the thing a blockout actually needs. A level built from one unit cube
+  scaled to a floor, a wall and a crate has the same 0..1 UVs on all three, so mesh UVs stretch one
+  tile across a sixteen-metre floor and cram the same tile into a fifty-centimetre crate. World
+  space projected onto the dominant axis of the normal, at a fixed centimetres-per-tile. Dominant
+  axis rather than triplanar blending: a blockout is axis-aligned boxes, where projection is exact
+  and seamless, and blending would cost three samples per map instead of one.
+- The flag and its reciprocal tiling **fit in `MaterialConstants`' last padding word**, so the b2
+  block is still 64 bytes and no consumer of that cross-module layout had to change size.
+
+### The post chain — the scene target is HDR now
+
+The scene renders linear radiance into an RGBA16F target and the tonemap is the last thing that
+happens to the frame. Eight bits of gamma-encoded colour cannot carry a sun disk worth ~14 or a
+specular highlight several times white; both used to clamp to 1 at the moment they were written,
+taking with them exactly the range bloom and eye adaptation exist to read.
+
+The chain, all of it skippable:
+
+| Stage | When it runs | Notes |
+|---|---|---|
+| MSAA resolve | `sampleCount > 1` | in linear HDR; at one sample the scene target IS the resolved image and no copy is made |
+| Bloom | `bloomIntensity > 0` | half-res 6-mip pyramid, Karis-weighted prefilter, Jimenez 13-tap down, 9-tap tent up **added by the blender** |
+| Histogram + exposure | `autoExposure` | 256 bins of log2 luminance at quarter res, groupshared atomics, single-threaded reduction, log-space damping |
+| Composite | always | exposure × bloom → ACES → gamma → backbuffer, one pass, four permutations |
+
+The bloom pyramid is **graphics passes, not compute**, and that is portability rather than taste:
+an additive compute upsample has to read its own `RWTexture2D`, and a typed UAV load of RGBA16F is
+an optional D3D12 feature this engine has a whole `no-typed-uav` gate configuration for. The
+fixed-function blender adds for free and is universal.
+
+**Display-referred colours are inverted back through the chain.** Editor lines, gizmos and the clear
+colour name the pixel they want on screen, so `PSLine` writes `averInverseTonemap(srgbToLin(c))` and
+`createMsaaColor` bakes the same transform into the target's optimised clear value. The inverse is
+exact (the ACES fit is a ratio of quadratics, so inverting it is a quadratic), not an approximation
+— a grid whose grey drifts every time the post chain is touched is worse than no grid.
+
+**The defaults are the identity.** Exposure 1, no bloom, no adaptation. A post chain whose default
+state changed the image would invalidate the whole oracle for a feature nobody had switched on.
+
 ## 5. Formats — implemented loaders
 
 - `.ocbeam` (Aver.Formats/OcBeam): faithful to OCCompiler Main.java + VehicleDamage.cpp —
@@ -1830,8 +1896,11 @@ Concrete steps:
    `.ocmesh` static-mesh format + loader (design in `docs/formats/FORMAT_SPECS.md`).
 3. **Generic asset import** — Rust `aver-assetc` (or a C++ path): glTF/OBJ → `.ocmesh/.octex/.ocmat`.
 4. **Scene save/load** — `.ocworld`/`.ocmap` write + load for arbitrary content (not just cages).
-5. **Materials/textures** — `.ocmat` + `.octex`, texture sampling in the shader (currently
-   flat PBR params only).
+5. ~~**Materials/textures** — `.ocmat` + `.octex`, texture sampling in the shader~~ **DONE**, see
+   §4k: `.ocmat` loads, textures resolve and upload, and world-aligned UVs give a blockout a
+   constant texel density. `.octex` (the cooked, block-compressed form) is still not a thing —
+   PNG/JPEG/TGA/BMP decode straight to RGBA8 with a CPU-generated mip chain, so a shipping title
+   would want the cooker before it wanted anything else here.
 6. **Move OpenConstructor bits behind modules** — `Aver.SoftBody/Aver.Vehicle/Aver.Aero`
    as opt-in; `.ocbeam` load stays in `Aver.Formats` but the editor treats it as one importer.
 7. **Editor generalization** — "Add" menu (spawn primitives/lights), open/save scene, an

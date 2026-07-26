@@ -583,4 +583,27 @@ const char* sharedShaderPrelude();
 // no compile error, no debug-layer message, and only on the mesh-shader path.
 std::string meshGeometryDefines(const PipelineLayout& layout);
 
+// The camera post chain's HLSL: bloom, eye adaptation, and the tonemap that ends the frame.
+//
+// It lives here rather than in a backend for the same reason the tonemap itself always has —
+// "camera / post" is the shared prelude's, so that a second backend gets one implementation rather
+// than a second opinion. Self-contained: it declares its own constant buffer and resources and does
+// NOT include the shared prelude, because it runs with a root signature of its own and naming the
+// scene's cbuffer registers would collide with it.
+//
+// Entry points, in the order a frame uses them:
+//   PostVS            fullscreen triangle from SV_VertexID, shared by every pixel entry below
+//   PSBloomPrefilter  scene -> half res, soft-knee threshold + Karis average
+//   PSBloomDown       one halving step of the pyramid
+//   PSBloomUp         one tent-filtered upsample, ADDED by the blender into the level above
+//   CSHistogram       256-bin log-luminance histogram of the scene
+//   CSExposure        histogram -> one adapted exposure value, with temporal damping
+//   PSComposite       scene + bloom -> exposure -> ACES -> gamma -> backbuffer
+//
+// The composite takes two optional defines, AVER_POST_BLOOM and AVER_POST_AUTOEXPOSURE. They are
+// permutations rather than a uniform branch because this is the one pass that runs at full
+// resolution on every pixel of every frame, and because the alternative is sampling a bloom texture
+// that was never built.
+const char* postShaderSource();
+
 } // namespace aver::rhi

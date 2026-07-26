@@ -44,7 +44,14 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     if (d.alphaMode == AlphaMode::Mask)  flags |= MaterialFlag_AlphaMask;
     if (d.alphaMode == AlphaMode::Blend) flags |= MaterialFlag_AlphaBlend;
     if (d.twoSided)                      flags |= MaterialFlag_TwoSided;
+    if (d.uvMode == UvMode::WorldAligned) flags |= MaterialFlag_WorldAlignedUv;
     c.flags = flags;
+
+    // Reciprocal here, once per upload, rather than in the shader once per pixel. A tiling of zero
+    // or less is not an error worth rejecting a whole material for -- it just means somebody dragged
+    // a slider to the end -- so it collapses to zero tiles per cm, which reads one texel of the map
+    // across the surface instead of dividing by zero and producing a NaN UV.
+    c.uvTilesPerCm = d.uvTiling > 0.0f ? 1.0f / d.uvTiling : 0.0f;
     return c;
 }
 

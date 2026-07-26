@@ -211,7 +211,10 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     radiance = averShadeDirect(radiance, s, sun);
     radiance = averShadeIndirect(radiance, s, ind4);
     radiance = averApplyFog(radiance, i.wpos);
-    return float4(toGamma(acesTonemap(radiance)), averOpacity(s));
+    // LINEAR RADIANCE. The scene target is HDR and the frame is tonemapped once, at the end of the
+    // post chain — see PostSettings. Tonemapping here would clamp exactly the above-white range
+    // that bloom and eye adaptation exist to read, and would then be tonemapped a second time.
+    return float4(radiance, averOpacity(s));
 }
 
 // Depth-only pass from the sun's point of view (VSIn comes from the prelude).
@@ -413,7 +416,7 @@ float4 PSVoxelDebug(SkyOut i) : SV_TARGET {
     }
     float3 bg = skyColor(ray);
     float3 col = acc.rgb + bg * (1.0 - acc.a);
-    return float4(toGamma(acesTonemap(col)), 1.0);
+    return float4(col, 1.0);   // linear; the post chain tonemaps (see PSLit above)
 }
 )";
 

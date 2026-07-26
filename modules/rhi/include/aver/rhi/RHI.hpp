@@ -121,6 +121,47 @@ const CapsOverride& capsOverride();
 // Applied by each backend at the end of its own capability query. Monotonically reducing.
 void clampCaps(DeviceCaps& caps);
 
+// Camera post-processing.
+//
+// Every field here is a property of the CAMERA looking at the scene, not of any surface in it —
+// which is the same reason the shared prelude already owns fog, the tonemap and the gamma encode
+// (see "camera / post" in RHIShaders.cpp). A material system that owned these would make every
+// shading model reimplement them identically.
+//
+// THE DEFAULTS ARE THE IDENTITY. Exposure 1, no bloom, no adaptation: the chain still runs, but it
+// resolves and tonemaps exactly what the scene shader used to write for itself. That is deliberate
+// — the engine has a pixel-exact oracle behind it, and a post chain whose default state changed the
+// image would invalidate every gate for a feature nobody had switched on yet.
+struct PostSettings {
+    // Linear multiplier on scene radiance, applied BEFORE the tonemap. Overridden every frame by
+    // the adaptation when autoExposure is on.
+    f32 exposure = 1.0f;
+
+    // Bloom. Zero intensity does not weight the pyramid to nothing — it means no pyramid is built
+    // and no pass is recorded, which is the difference between "off" and "on and invisible".
+    f32 bloomIntensity = 0.0f;
+    // Luminance above which a pixel contributes, and the width of the soft knee below it. A hard
+    // threshold makes bloom pop in and out as a highlight crosses it, which is far more visible in
+    // motion than the halo itself.
+    f32 bloomThreshold = 1.0f;
+    f32 bloomKnee      = 0.5f;
+
+    // Eye adaptation, from a luminance histogram of the frame. Off by default: it is a feedback
+    // loop, so it makes the image depend on the frames BEFORE it, and an oracle that compares one
+    // captured frame cannot express that.
+    bool autoExposure   = false;
+    f32  exposureMin    = 0.05f;   // clamps on the computed multiplier, not on scene luminance
+    f32  exposureMax    = 8.0f;
+    f32  exposureSpeed  = 3.0f;    // adaptation rate, in e-folds per second
+    // The middle-grey the adaptation drives the frame's average luminance towards.
+    f32  exposureKey    = 0.18f;
+    // Fraction of the histogram discarded at each end before averaging. Without the low cut a dark
+    // sky dominates the average and the whole image blows out; without the high cut one specular
+    // highlight closes the aperture on the entire frame.
+    f32  histogramLowPercent  = 0.30f;
+    f32  histogramHighPercent = 0.85f;
+};
+
 class IDevice {
 public:
     virtual ~IDevice() = default;
@@ -138,6 +179,12 @@ public:
     virtual void removeRenderFeature(IRenderFeature* f) { (void)f; }
 
     // Target formats a feature must match when building pipelines that draw into the scene.
+    //
+    // Read the contract, not the name: this is the SCENE colour target's format, which a backend
+    // running a post chain does not present directly. The scene is linear radiance in an HDR format
+    // and the swapchain holds the tonemapped result, so a feature that built its pipelines against
+    // the presented format would fail at draw time with an RTV/PSO mismatch. The name is kept
+    // because it is the one every backend and feature already binds to.
     virtual Format backbufferFormat() const { return Format::Unknown; }
     virtual Format depthFormat() const { return Format::Unknown; }
 
@@ -180,6 +227,11 @@ public:
                         const f32 fogColor[3], f32 fogDensity) {
         (void)enabled; (void)zenith; (void)horizon; (void)fogColor; (void)fogDensity;
     }
+    // Camera post-processing; see PostSettings. Pushed the same way the sky and the sun are,
+    // because it is the same kind of state: what the camera does with the scene, not what the
+    // scene contains.
+    virtual void setPostProcess(const PostSettings& p) { (void)p; }
+    virtual PostSettings postProcess() const { return {}; }
     // Record one draw of `mesh` with a world matrix (row-major), base colour, and PBR
     // metallic/roughness (0..1).
     virtual void drawMesh(MeshHandle mesh, const f32 world[16], const f32 baseColor[4],

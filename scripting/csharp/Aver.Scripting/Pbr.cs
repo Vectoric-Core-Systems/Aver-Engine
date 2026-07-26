@@ -41,6 +41,17 @@ public enum PbrTextureSlot
 public enum PbrAlphaMode { Opaque = 0, Mask = 1, Blend = 2 }
 
 /// <summary>
+/// Where a surface's texture coordinates come from (<c>.ocmat</c> <c>FLAGS worlduv</c>).
+///
+/// <see cref="Mesh"/> uses the mesh's own UV set and is right for anything that was unwrapped.
+/// <see cref="WorldAligned"/> projects world position onto the dominant axis of the surface normal
+/// at a fixed number of centimetres per tile, which is the only thing that gives a blockout a
+/// constant texel density: a level built from one unit cube scaled to a floor, a wall and a crate
+/// has the same 0..1 UVs on all three.
+/// </summary>
+public enum PbrUvMode { Mesh = 0, WorldAligned = 1 }
+
+/// <summary>
 /// C# binding for the PBR material system (<c>Aver.Render.PBR.dll</c>, C ABI <c>aver_pbr_*</c>).
 ///
 /// Unlike <see cref="Voxi"/>, which is one global settings block, materials are INSTANCES — so the
@@ -89,6 +100,11 @@ public static class Pbr
     [DllImport(Lib)] private static extern int aver_pbr_set_two_sided(int m, int on);
     [DllImport(Lib)] private static extern int aver_pbr_get_cast_shadow(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_cast_shadow(int m, int on);
+    [DllImport(Lib)] private static extern int aver_pbr_get_uv_mode(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_uv_mode(int m, int mode);
+    [DllImport(Lib)] private static extern float aver_pbr_get_uv_tiling(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_uv_tiling(int m, float cmPerTile);
+    [DllImport(Lib)] private static extern IntPtr aver_pbr_uv_mode_name(int mode);
 
     [DllImport(Lib)] private static extern IntPtr aver_pbr_get_texture_path(int m, int slot);
     [DllImport(Lib)] private static extern int aver_pbr_set_texture_path(int m, int slot, [MarshalAs(UnmanagedType.LPStr)] string path);
@@ -111,6 +127,7 @@ public static class Pbr
     public static string NameOf(PbrTextureSlot s) => Str(aver_pbr_texture_slot_name((int)s));
     /// <summary>The <c>.ocmat</c> BLEND name, e.g. <c>translucent</c>.</summary>
     public static string NameOf(PbrAlphaMode m) => Str(aver_pbr_alpha_mode_name((int)m));
+    public static string NameOf(PbrUvMode m) => Str(aver_pbr_uv_mode_name((int)m));
 
     // ---- lifetime and enumeration ----
     /// <summary>Creates a material with the glTF default surface. Invalid if none could be created.</summary>
@@ -209,6 +226,24 @@ public static class Pbr
         {
             get => aver_pbr_get_cast_shadow(Handle) != 0;
             set => aver_pbr_set_cast_shadow(Handle, value ? 1 : 0);
+        }
+
+        /// <summary>See <see cref="PbrUvMode"/>. Defaults to <see cref="PbrUvMode.Mesh"/>.</summary>
+        public PbrUvMode UvMode
+        {
+            get => (PbrUvMode)aver_pbr_get_uv_mode(Handle);
+            set => aver_pbr_set_uv_mode(Handle, (int)value);
+        }
+
+        /// <summary>
+        /// World CENTIMETRES per texture tile. Read only under <see cref="PbrUvMode.WorldAligned"/>.
+        /// A value of zero or less is REJECTED rather than clamped — it would collapse the
+        /// projection to a single texel, and silently substituting one would hide a unit mistake.
+        /// </summary>
+        public float UvTiling
+        {
+            get => aver_pbr_get_uv_tiling(Handle);
+            set => aver_pbr_set_uv_tiling(Handle, value);
         }
 
         // ---- texture references: an authoring path AND an opaque id, neither interpreted here ----

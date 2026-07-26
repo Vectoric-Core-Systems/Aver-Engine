@@ -99,12 +99,16 @@ void MaterialSystem::shutdown() {
     res_ = nullptr;
 }
 
-rhi::TextureHandle MaterialSystem::resolveTexture(const TextureRef& ref) {
+rhi::TextureHandle MaterialSystem::resolveTexture(const TextureRef& ref, TextureSlot slot) {
     if (ref.empty() || !resolve_) return 0;
+    // The slot is NOT part of the key. One file bound to two slots is still one upload, and if a
+    // project really did bind the same image as both colour and data it would want the colour space
+    // it authored the file for -- so first use wins, which is at least stable, rather than whichever
+    // material happened to drain first.
     const std::string key = cacheKey(ref);
     auto it = cache_.find(key);
     if (it != cache_.end()) return it->second;
-    const rhi::TextureHandle t = resolve_(ref, resolveUser_);
+    const rhi::TextureHandle t = resolve_(ref, slot, resolveUser_);
     // A failed resolve is cached too, as 0. Otherwise a missing file is retried on every dirty
     // drain, which on a hot-reloading editor is a disk hit per material per frame.
     cache_.emplace(key, t);
@@ -120,7 +124,7 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
         black_,       // Emissive
     };
     for (u32 i = 0; i < kTextureSlotCount; ++i) {
-        const rhi::TextureHandle t = resolveTexture(d.textures[i]);
+        const rhi::TextureHandle t = resolveTexture(d.textures[i], static_cast<TextureSlot>(i));
         res_->setSrv(set, i, t ? t : fallback[i]);
     }
 }

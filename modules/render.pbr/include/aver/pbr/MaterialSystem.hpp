@@ -27,7 +27,16 @@ public:
     // system — which sits a tier above this target and must not be linked from it. So the host
     // installs a resolver. Returning 0 means "not available", and the slot keeps its fallback,
     // which is a complete and correct surface rather than a black one.
-    using TextureResolver = rhi::TextureHandle (*)(const TextureRef& ref, void* user);
+    //
+    // The SLOT is passed because it is the only thing that says what the pixels MEAN, and nothing in
+    // an image file does: base colour and emissive are sRGB-encoded, metal-rough and occlusion are
+    // linear data, and a normal map is a vector field that must be filtered as one. A resolver given
+    // only the reference would have to guess, and guessing wrong is invisible — an sRGB-decoded
+    // roughness map is merely a bit shinier than intended, everywhere, forever.
+    //
+    // OWNERSHIP: the handle returned becomes this system's. It is destroyed at shutdown(), so a
+    // resolver must hand over a texture nothing else frees.
+    using TextureResolver = rhi::TextureHandle (*)(const TextureRef& ref, TextureSlot slot, void* user);
 
     // `tableBaseRegister` is the SRV count of the consuming pipeline's table 0, i.e. the register
     // this table is based at. Carried on every set purely so the backend can catch a set bound at
@@ -72,7 +81,7 @@ private:
     // Identity fallbacks also mean an untextured material is the SAME pipeline and the same
     // branch-free shader as a fully textured one: no permutation, no dynamic branch.
     void writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set);
-    rhi::TextureHandle resolveTexture(const TextureRef& ref);
+    rhi::TextureHandle resolveTexture(const TextureRef& ref, TextureSlot slot);
     Entry& entryFor(MaterialHandle h);
 
     rhi::IResourceFactory* res_ = nullptr;

@@ -64,6 +64,10 @@ extern "C" {
 #define AVER_PBR_TEX_EMISSIVE    4
 #define AVER_PBR_TEX_COUNT       5
 
+/* UV mode ids — must match aver::pbr::UvMode */
+#define AVER_PBR_UV_MESH          0
+#define AVER_PBR_UV_WORLD_ALIGNED 1
+
 /* Alpha mode ids — must match aver::pbr::AlphaMode */
 #define AVER_PBR_ALPHA_OPAQUE 0
 #define AVER_PBR_ALPHA_MASK   1
@@ -123,6 +127,17 @@ AVER_PBR_ABI int32_t aver_pbr_get_two_sided(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_two_sided(aver_pbr_material m, int32_t on);
 AVER_PBR_ABI int32_t aver_pbr_get_cast_shadow(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_cast_shadow(aver_pbr_material m, int32_t on);
+
+/* ---- texture mapping ----
+ * AVER_PBR_UV_WORLD_ALIGNED projects world position onto the dominant axis of the surface normal
+ * instead of using the mesh's own UVs, which is what gives a blockout built from one scaled cube a
+ * constant texel density. Tiling is in world CENTIMETRES per tile and is read only in that mode;
+ * a value <= 0 is rejected rather than stored, because it would collapse the projection. */
+AVER_PBR_ABI int32_t aver_pbr_get_uv_mode(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_uv_mode(aver_pbr_material m, int32_t mode);
+AVER_PBR_ABI float   aver_pbr_get_uv_tiling(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_uv_tiling(aver_pbr_material m, float cmPerTile);
+AVER_PBR_ABI const char* aver_pbr_uv_mode_name(int32_t mode);
 
 /* ---- texture references (path AND opaque id; this module interprets neither) ---- */
 AVER_PBR_ABI const char* aver_pbr_get_texture_path(aver_pbr_material m, int32_t slot); /* "" if unset */

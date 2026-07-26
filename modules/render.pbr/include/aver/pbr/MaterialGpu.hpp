@@ -22,6 +22,10 @@ enum MaterialFlag : u32 {
     MaterialFlag_AlphaMask     = 1u << 5,
     MaterialFlag_AlphaBlend    = 1u << 6,
     MaterialFlag_TwoSided      = 1u << 7,
+    // UvMode::WorldAligned. A flag rather than an enum field because the shader's question is
+    // binary and a uniform branch on a flag word is free, where a second uint would cost 4 bytes
+    // the block does not have.
+    MaterialFlag_WorldAlignedUv = 1u << 8,
 };
 
 // The packed per-material GPU constant block. Field order is the HLSL cbuffer's, and the size is a
@@ -45,7 +49,11 @@ struct MaterialConstants {
     // has to change size. See MaterialDesc for why a surface owns these rather than the shader.
     f32 reflectance;          // F0 of the dielectric base
     f32 f90;                  // reflectance at grazing incidence
-    u32 _pad;
+    // TILES PER CENTIMETRE — the RECIPROCAL of MaterialDesc::uvTiling, so the shader multiplies a
+    // world position by it instead of dividing per pixel. Read only under MaterialFlag_WorldAlignedUv.
+    // Spent out of the last padding word, which is what keeps this block 64 bytes: growing it would
+    // change a cross-module ABI that has no compiler behind it.
+    f32 uvTilesPerCm;
 };
 
 static_assert(sizeof(MaterialConstants) == 64, "the HLSL cbuffer mirrors this byte for byte");

@@ -25,6 +25,8 @@
 #if AVER_MODULE_PBR
 #include "aver/pbr/Material.hpp"       // the authored surface, from the Core-only material DLL
 #include "aver/pbr/MaterialGpu.hpp"    // MaterialConstants: the block setDrawBinding carries
+#include "aver/formats/OcMat.hpp"      // .ocmat: a surface is an ASSET now, not a hardcoded palette row
+#include "aver/assets/TextureUpload.hpp" // and the decode-to-GPU step behind the texture resolver
 #endif
 
 #if AVER_MODULE_SCRIPTING
@@ -671,6 +673,15 @@ public:
             if (voxiRenderer_.init(*e.device())) {
                 e.device()->addRenderFeature(&voxiRenderer_);
                 voxiAttached_ = true;
+#if AVER_MODULE_PBR
+                // The last link in the material chain. MaterialSystem is built to resolve texture
+                // references through a host-installed callback and, until this line, nothing
+                // installed one -- so every slot in every material fell back to its 1x1 identity
+                // texture and every surface the engine drew was a flat colour. The whole texture
+                // path (decode, mip chain, sRGB view, upload) already existed on both sides of it.
+                textureFactory_ = e.device()->resources();
+                voxiRenderer_.materials().setTextureResolver(&SandboxApp::resolveMaterialTexture, this);
+#endif
             }
         }
 #endif
@@ -922,6 +933,9 @@ public:
         e.device()->setSky(true, skyZenith_, skyHorizon_, fogColor_, fog);
         // Outside the viewport rect is editor chrome, not sky — clear to the dark panel colour.
         e.device()->setClearColor(0.055f, 0.055f, 0.062f, 1);
+        // Camera post. Pushed every frame beside the sky because it is the same kind of state, and
+        // because the adaptation is a per-frame feedback loop that has to see the current settings.
+        e.device()->setPostProcess(post_);
     }
 
     // Give one actor a material, and move the parameters the material now owns onto it.
@@ -935,6 +949,182 @@ public:
     // system's FALLBACK block, because rhi::IRenderFeature::submitDraw carries no material yet, so
     // neutralising b1's colour would inject white albedo into the radiance volume and turn every
     // bounce white. Base colour moves the day submitDraw carries a material and not before.
+#if AVER_MODULE_PBR
+    // Turn a material's texture reference into an uploaded GPU texture. Installed on the material
+    // system once, at init; without it every slot falls back to the 1x1 identity texture and every
+    // surface in the engine is a flat colour, which is exactly what it was before this existed.
+    //
+    // Static with a `user` pointer because pbr::MaterialSystem::TextureResolver is a plain function
+    // pointer: the material system is a Core+RHI target and must not carry a std::function, whose
+    // layout is a compiler-and-config-dependent thing to put on a module boundary.
+    static rhi::TextureHandle resolveMaterialTexture(const pbr::TextureRef& ref, pbr::TextureSlot slot,
+                                                     void* user) {
+        auto* self = static_cast<SandboxApp*>(user);
+        if (!self || !self->textureFactory_) return 0;
+
+        const std::string path = self->resolveAssetPath(ref);
+        if (path.empty()) {
+            // An id-only reference with nothing behind it. Named rather than silently ignored: the
+            // slot keeps its identity fallback, so the material still renders as a complete surface
+            // and the log is the only place the missing binding shows up.
+            AVER_WARN("[Material] texture id 0x{:016X} is not in the content index; slot '{}' keeps "
+                      "its fallback", ref.id, pbr::MaterialLibrary::textureSlotName(slot));
+            return 0;
+        }
+
+        // The SLOT decides what the pixels mean, and nothing in an image file does. Getting this
+        // wrong is invisible rather than broken -- an sRGB-decoded roughness map is merely a little
+        // shinier than authored, everywhere -- which is why it is derived here from the one thing
+        // that actually knows, and never guessed from a filename.
+        assets::TextureUsage usage = assets::TextureUsage::Data;
+        switch (slot) {
+            case pbr::TextureSlot::BaseColor:
+            case pbr::TextureSlot::Emissive:  usage = assets::TextureUsage::Colour;    break;
+            case pbr::TextureSlot::Normal:    usage = assets::TextureUsage::NormalMap; break;
+            default:                          usage = assets::TextureUsage::Data;      break;
+        }
+
+        std::string err;
+        assets::TextureUploadInfo info;
+        const rhi::TextureHandle h = assets::uploadTexture(*self->textureFactory_, path, usage, &err, &info);
+        if (!h) {
+            AVER_WARN("[Material] {} — slot '{}' keeps its fallback", err,
+                      pbr::MaterialLibrary::textureSlotName(slot));
+            return 0;
+        }
+        AVER_INFO("[Material] {} -> {}x{}, {} mips ({} KB) for slot '{}'", path, info.width, info.height,
+                  info.mips, info.bytes / 1024, pbr::MaterialLibrary::textureSlotName(slot));
+        return h;
+    }
+
+    // Where an asset reference points on this machine. A path is taken as-is when absolute, and
+    // otherwise resolved against the project's content root -- which is what makes an .ocmat
+    // portable: it names `Textures/floor_basecolor.png`, not somebody's Documents folder.
+    std::string resolveAssetPath(const pbr::TextureRef& ref) const {
+        if (!ref.path.empty()) {
+            const std::string& p = ref.path;
+            const bool absolute = p.size() > 1 && (p[1] == ':' || p[0] == '\\' || p[0] == '/');
+            if (absolute) return p;
+            const std::string content = project_.contentDir();
+            if (!content.empty()) {
+                const std::string full = content + "\\" + p;
+                std::error_code ec;
+                if (std::filesystem::exists(full, ec)) return full;
+            }
+            // No project, or not under Content: let the path stand and let the decoder report it.
+            return p;
+        }
+        if (ref.id) {
+            const auto it = contentIndex_.find(ref.id);
+            if (it != contentIndex_.end()) return it->second;
+        }
+        return {};
+    }
+
+    // Index every asset under the project's content root by fnv1a64 of its CONTENT-RELATIVE path, so
+    // a `{guid:...}` reference resolves without the file having to be found by name at every use.
+    // Rebuilt on project open rather than watched: an editor that rescans a content tree per frame is
+    // a disk hit per frame, and a file added mid-session is picked up by reopening the project.
+    void rebuildContentIndex() {
+        contentIndex_.clear();
+        const std::string content = project_.contentDir();
+        if (content.empty()) return;
+        std::error_code ec;
+        if (!std::filesystem::exists(content, ec)) return;
+        for (std::filesystem::recursive_directory_iterator it(content, ec), end; it != end; it.increment(ec)) {
+            if (ec) break;
+            if (!it->is_regular_file(ec)) continue;
+            std::string rel = std::filesystem::relative(it->path(), content, ec).string();
+            if (ec || rel.empty()) continue;
+            // The id is hashed over the FORWARD-slash spelling, because that is what an .ocmat
+            // authored on any platform writes and what Assets.ObjectIdOf hashes on the C# side. A
+            // backslash here would make the same file hash differently depending on who wrote it.
+            for (char& c : rel) if (c == '\\') c = '/';
+            contentIndex_[fnv1a64(std::string_view(rel))] = it->path().string();
+        }
+        AVER_INFO("[Content] indexed {} asset(s) under {}", contentIndex_.size(), content);
+    }
+
+    // The material a level's surface token names, loaded from `<Content>/Materials/<name>.ocmat`.
+    // 0 when the project ships no such file, which is not an error: the caller then falls back to
+    // the built-in palette, so a blockout with no authored materials still reads as a place.
+    pbr::MaterialHandle materialForSurface(const std::string& name) {
+        if (name.empty()) return 0;
+        const auto cached = materialAssets_.find(name);
+        if (cached != materialAssets_.end()) return cached->second;
+
+        pbr::MaterialHandle h = 0;
+        const std::string content = project_.contentDir();
+        if (!content.empty()) {
+            // Two spellings accepted: a bare token (`M_Floor`) that the convention places under
+            // Materials/, and an explicit content-relative path for a project that files them
+            // elsewhere. Both are one lookup, so neither is the slow path.
+            const std::string candidates[2] = {
+                content + "\\Materials\\" + name + ".ocmat",
+                content + "\\" + name,
+            };
+            for (const std::string& path : candidates) {
+                std::error_code ec;
+                if (!std::filesystem::exists(path, ec)) continue;
+                pbr::MaterialDesc d;
+                fmt::OcMatExtras extras;
+                std::string err;
+                if (!fmt::loadOcmat(path, d, &extras, &err)) { AVER_WARN("[Material] {}", err); break; }
+                h = pbr::MaterialLibrary::get().create(d);
+                if (h) AVER_INFO("[Material] '{}' loaded from {}", d.name, path);
+                break;
+            }
+        }
+        // Cached even when 0, so a level of a thousand placements naming one absent material costs
+        // one stat() rather than a thousand.
+        materialAssets_.emplace(name, h);
+        return h;
+    }
+
+    // Load every material the project ships, up front, and bind each to the surface TOKEN its file
+    // name interns to.
+    //
+    // Up front rather than on demand because a level is not the only thing that names a surface: a
+    // gameplay script spawning an actor at run time writes aver_scene_material(0, "M_Target") into
+    // its CMeshRenderer, and the render pass only ever sees that i32. Resolving lazily from there is
+    // impossible -- there is no way back from the token to the string -- so the mapping has to exist
+    // before anything spawns.
+    void loadProjectMaterials() {
+#if AVER_MODULE_SCENE
+        const std::string dir = project_.contentDir();
+        if (dir.empty()) return;
+        const std::string matDir = dir + "\\Materials";
+        std::error_code ec;
+        if (!std::filesystem::exists(matDir, ec)) return;
+
+        u32 loaded = 0;
+        for (std::filesystem::directory_iterator it(matDir, ec), end; it != end; it.increment(ec)) {
+            if (ec) break;
+            if (!it->is_regular_file(ec)) continue;
+            if (assetTypeFromPath(it->path().string()) != AssetType::Material) continue;
+            const std::string stem = it->path().stem().string();
+            // Through materialForSurface so the two paths share one cache and one set of handles:
+            // a name loaded here must not be loaded a second time by a level that also names it.
+            const pbr::MaterialHandle h = materialForSurface(stem);
+            if (!h) continue;
+            surfaceMaterials_[aver_scene_material(0, stem.c_str())] = h;
+            ++loaded;
+        }
+        if (loaded) AVER_INFO("[Material] {} project material(s) loaded from {}", loaded, matDir);
+#endif
+    }
+
+    // Destroy every material the project owns. MaterialSystem::update() sees the handles go invalid
+    // and retires their binding sets on its next drain; the TEXTURES behind them stay in its cache,
+    // so reopening the same project re-resolves to the same uploads rather than decoding every
+    // image again.
+    void releaseProjectMaterials() {
+        for (const auto& kv : materialAssets_) if (kv.second) pbr::MaterialLibrary::get().destroy(kv.second);
+        materialAssets_.clear();
+        surfaceMaterials_.clear();
+    }
+#endif
+
     void makeMaterialFor(MeshObj& o) {
 #if AVER_MODULE_PBR
         pbr::MaterialDesc d;
@@ -1037,23 +1227,38 @@ public:
                 // b1 to identity and lets its own b2 govern, matching makeMaterialFor's rule for objects_.
                 f32 col[4] = {0.80f, 0.80f, 0.85f, 1.0f};
                 f32 metallic = 0.0f, roughness = 0.5f;
-                // A NAMED SURFACE, if the actor asked for one. Until there is an .ocmat loader, a
-                // material name interns to a bare token with nothing behind it -- so every spawned
-                // actor drew in the same light grey and a whole level merged into one silhouette with
-                // no edges: floor, walls and crates were literally the same colour.
-                //
-                // This palette is the sandbox standing in for the material assets that do not exist
-                // yet. It is deliberately a lookup on the token rather than anything wired into the
-                // PBR system, so it disappears the day real materials load.
-                if (const auto look = surfaceLooks_.find(mat); look != surfaceLooks_.end()) {
+
+                // An AUTHORED material, if the project shipped an .ocmat for this surface. 0 means
+                // there is none, and 0 is also the handle the material system answers with the
+                // fallback for, so one variable covers both cases at every use below.
+                // Typed u32 rather than pbr::MaterialHandle so this block still compiles with the
+                // material module switched off, which is the whole reason that guard exists.
+                u32 authored = 0;
+#if AVER_MODULE_PBR
+                if (const auto it2 = surfaceMaterials_.find(mat); it2 != surfaceMaterials_.end())
+                    authored = it2->second;
+#endif
+                if (authored) {
+                    // b1 pinned to the identity so the material's own block governs outright: the
+                    // shading model computes every factor as b1 * b2 * map, so leaving a palette
+                    // colour in b1 would tint the authored base colour by it.
+                    col[0] = col[1] = col[2] = 1.0f;
+                    metallic = roughness = 1.0f;
+                } else if (const auto look = surfaceLooks_.find(mat); look != surfaceLooks_.end()) {
+                    // The built-in palette, for a surface name with no material asset behind it. It
+                    // is what keeps a blockout legible before anything is authored: without it every
+                    // spawned actor drew in the same light grey and a whole level merged into one
+                    // silhouette with no edges -- floor, walls and crates literally the same colour.
                     col[0] = look->second.col[0]; col[1] = look->second.col[1]; col[2] = look->second.col[2];
                     metallic = look->second.metallic; roughness = look->second.roughness;
                 }
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
-                // Always the FALLBACK binding: the tokens above name no authored material, so binding
-                // `mat` would index a material system that has never heard of it.
+                // The authored material where there is one, the fallback where there is not. Voxi
+                // captures whatever is bound here into its draw list, so the GI bounce is injected
+                // from the same surface the lit pass shades -- a textured floor now colours the
+                // light it throws back onto the walls.
                 if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready())
-                    e.device()->setDrawBinding(ms.bindingSet(0), &ms.constants(0),
+                    e.device()->setDrawBinding(ms.bindingSet(authored), &ms.constants(authored),
                                                sizeof(pbr::MaterialConstants));
 #endif
                 e.device()->drawMesh(it->second, &wm.m[0][0], col, metallic, roughness);
@@ -1118,6 +1323,13 @@ public:
             folderIconsTexture_ = 0; folderIconsUiId_ = 0;
         }
 #endif
+#if AVER_MODULE_PBR
+        // BEFORE the material system goes down with Voxi below. Its shutdown() destroys every
+        // texture the resolver handed it, and the resolver's factory pointer is about to become a
+        // pointer into a dead device.
+        releaseProjectMaterials();
+        textureFactory_ = nullptr;
+#endif
 #if AVER_MODULE_VOXI
         // Deregister before releasing: the device holds a bare pointer to the feature.
         if (voxiAttached_) { e.device()->removeRenderFeature(&voxiRenderer_); voxiAttached_ = false; }
@@ -1131,6 +1343,13 @@ public:
         scripts_.shutdown();
 #endif
         AVER_INFO("[Sandbox] shutdown");
+    }
+    // --exposure / --bloom / --auto-exposure. Applied before the first frame so a capture run sees
+    // the state it asked for rather than one frame of the defaults.
+    void setPost(f32 exposure, f32 bloomIntensity, bool autoExposure) {
+        post_.exposure = exposure;
+        post_.bloomIntensity = bloomIntensity;
+        post_.autoExposure = autoExposure;
     }
     void setFocusVoxi(bool b) { focusVoxi_ = b ? 4 : 0; } // --project-settings screenshot aid
     // --drawer screenshot aid: open a drawer from the command line, since a capture run cannot press
@@ -1168,6 +1387,13 @@ private:
         project_ = browser_.project();
         if (e.window())
             e.window()->setTitle("Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + project_.name);
+#if AVER_MODULE_PBR
+        // All three before the start map, and in this order: a level's surfaces resolve to .ocmat
+        // assets, those name textures by id, and the id index is what answers them.
+        releaseProjectMaterials();
+        rebuildContentIndex();
+        loadProjectMaterials();
+#endif
 #if AVER_MODULE_SCENE
         // Open the project's start map, so the editor shows the LEVEL rather than an empty world that
         // only fills in once someone presses Play.
@@ -2784,6 +3010,22 @@ private:
         changed |= ImGui::DragFloat3("Emissive", d->emissiveFactor, 0.01f, 0.0f, 32.0f);
 
         ImGui::Separator();
+        // How the maps below are laid onto the surface. World-aligned is the one a blockout wants:
+        // every box in a level shares one unit cube's 0..1 UVs, so mesh UVs stretch a single tile
+        // across a sixteen-metre floor and cram the same tile into a fifty-centimetre crate.
+        int uvMode = static_cast<int>(d->uvMode);
+        if (ImGui::Combo("UV Mapping", &uvMode, "Mesh UVs\0World Aligned\0")) {
+            d->uvMode = static_cast<pbr::UvMode>(uvMode);
+            changed = true;
+        }
+        if (d->uvMode == pbr::UvMode::WorldAligned) {
+            // Logarithmic, because the useful range spans a 10 cm decal to a 10 m floor slab and a
+            // linear slider would spend nine tenths of its travel above two metres.
+            changed |= ImGui::SliderFloat("Tile Size (cm)", &d->uvTiling, 5.0f, 2000.0f, "%.0f",
+                                          ImGuiSliderFlags_Logarithmic);
+        }
+
+        ImGui::Separator();
         // One path field per slot. A path is all the material system wants: it holds the
         // reference and never resolves it, because resolving needs the asset system a tier up.
         // Typing a path that does not resolve leaves the slot on its identity fallback, so the
@@ -2816,6 +3058,7 @@ private:
         ImGui::Separator();
         if (ImGui::Selectable("  Directional Light (Sun)", sel_==-2)) sel_=-2;
         if (ImGui::Selectable("  Sky + Atmosphere", sel_==-3)) sel_=-3;
+        if (ImGui::Selectable("  Post Process", sel_==-4)) sel_=-4;
         ImGui::End();
 
         ImGui::Begin("Details");
@@ -2839,6 +3082,31 @@ private:
             ImGui::TextUnformatted("Sky + Atmosphere"); ImGui::Separator();
             ImGui::ColorEdit3("Zenith", skyZenith_); ImGui::ColorEdit3("Horizon", skyHorizon_);
             ImGui::ColorEdit3("Fog", fogColor_); ImGui::SliderFloat("Fog density", &fogDensity_, 0, 0.06f, "%.4f");
+        } else if (sel_==-4){
+            // The camera's post chain. Everything here defaults to the identity, so an untouched
+            // editor renders exactly what it did before the chain existed -- which is what the
+            // pixel-exact gates measure, and why the defaults are not a matter of taste.
+            ImGui::TextUnformatted("Post Process"); ImGui::Separator();
+            ImGui::BeginDisabled(post_.autoExposure);
+            ImGui::SliderFloat("Exposure", &post_.exposure, 0.05f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::EndDisabled();
+            ImGui::Checkbox("Auto Exposure", &post_.autoExposure);
+            if (post_.autoExposure) {
+                ImGui::SliderFloat("Middle Grey", &post_.exposureKey, 0.02f, 0.6f, "%.3f");
+                ImGui::SliderFloat("Adapt Speed", &post_.exposureSpeed, 0.1f, 20.0f, "%.1f/s");
+                ImGui::SliderFloat("Exposure Min", &post_.exposureMin, 0.01f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+                ImGui::SliderFloat("Exposure Max", &post_.exposureMax, 1.0f, 64.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+            }
+            ImGui::Separator();
+            // Zero is OFF, not "on and invisible": the pyramid is not built at all, so the whole
+            // chain costs one fullscreen pass. Worth saying in the tooltip, because a slider at zero
+            // usually still costs what it costs at one.
+            ImGui::SliderFloat("Bloom", &post_.bloomIntensity, 0.0f, 1.0f, "%.3f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Zero skips the whole bloom pyramid, not just its weight");
+            if (post_.bloomIntensity > 0.0f) {
+                ImGui::SliderFloat("Threshold", &post_.bloomThreshold, 0.0f, 8.0f, "%.2f");
+                ImGui::SliderFloat("Knee", &post_.bloomKnee, 0.0f, 2.0f, "%.2f");
+            }
         } else ImGui::TextDisabled("Select an actor in the World Outliner");
         ImGui::End();
 
@@ -3315,6 +3583,9 @@ private:
     // sky + atmosphere
     f32 skyZenith_[3]={0.19f,0.42f,0.78f}, skyHorizon_[3]={0.72f,0.80f,0.90f};
     f32 fogColor_[3]={0.70f,0.78f,0.88f}, fogDensity_=0.014f;
+    // The camera's post chain, at its identity defaults. See rhi::PostSettings for why they are the
+    // identity and not something prettier.
+    rhi::PostSettings post_{};
     bool capDone_=false;
     // The pixel actually requested and the viewport rect it was requested against, latched at the
     // request frame so the report a few frames later describes the state that produced the value.
@@ -3407,6 +3678,21 @@ private:
     // undifferentiated grey mass. See the scene-render pass for why it exists.
     struct SurfaceLook { f32 col[3]; f32 metallic; f32 roughness; };
     std::unordered_map<i32, SurfaceLook> surfaceLooks_;
+#if AVER_MODULE_PBR
+    // Where the texture resolver gets its factory. Cached at init rather than reached through the
+    // Engine, because the resolver is a static callback the material system invokes from inside its
+    // own dirty drain -- there is no Engine& in scope there, and there must not be.
+    rhi::IResourceFactory* textureFactory_ = nullptr;
+    // fnv1a64(content-relative path) -> absolute path, for `{guid:...}` texture references.
+    std::unordered_map<u64, std::string> contentIndex_;
+    // Surface NAME -> the material loaded from its .ocmat. Holds 0 for a name with no asset, which
+    // is a cached negative rather than a miss to retry.
+    std::unordered_map<std::string, pbr::MaterialHandle> materialAssets_;
+    // The same answer keyed by the token the scene interns, which is what a CMeshRenderer carries.
+    // Filled at level load: the render pass has an i32 and no way back to the string, and adding a
+    // reverse lookup to the scene ABI to serve one editor pass would be the wrong place to put it.
+    std::unordered_map<i32, pbr::MaterialHandle> surfaceMaterials_;
+#endif
     // ---- levels (.ocworld) ---------------------------------------------------------------------
 #if AVER_MODULE_SCENE
     // Load the project's start map into the world, as ordinary scene entities.
@@ -3437,6 +3723,16 @@ private:
                 mr->mesh = p.objectId;
                 mr->material = p.material.empty() ? 0 : aver_scene_material(0, p.material.c_str());
                 mr->flags |= scene::kMeshRendererVisible;
+#if AVER_MODULE_PBR
+                // Resolve the surface name to a real material HERE, where the name is still in hand.
+                // The render pass only ever sees the interned token, and materialForSurface caches
+                // both hits and misses, so a level of a thousand placements naming six surfaces does
+                // six file lookups in total.
+                if (mr->material) {
+                    const pbr::MaterialHandle h = materialForSurface(p.material);
+                    if (h) surfaceMaterials_[mr->material] = h;
+                }
+#endif
             }
             levelEntities_.push_back(e);
 
@@ -3526,6 +3822,10 @@ private:
 #endif
         hasLevelFog_ = false;
         levelPath_.clear();
+        // Materials are deliberately NOT released here. They are PROJECT-scoped, not level-scoped:
+        // a script that spawns an actor mid-play names the same surfaces the level does, and
+        // dropping them on a level change would leave everything spawned afterwards on the fallback.
+        // releaseProjectMaterials() owns their lifetime.
     }
 
     // Write the level's entities back out. Only the entities THIS level owns are written: a play
@@ -3730,7 +4030,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -3780,6 +4080,11 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--play-test")) playTest=true;
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
+        // Camera post, for capture runs: the chain's non-default states have no other way in from a
+        // headless run, and a feature nothing can screenshot is a feature nobody can check.
+        else if (!std::strcmp(argv[i],"--bloom") && i+1<argc) bloom=static_cast<f32>(std::atof(argv[++i]));
+        else if (!std::strcmp(argv[i],"--exposure") && i+1<argc) exposure=static_cast<f32>(std::atof(argv[++i]));
+        else if (!std::strcmp(argv[i],"--auto-exposure")) autoExposure=true;
         else if (!std::strcmp(argv[i],"--tool") && i+1<argc) {
             const char* t=argv[++i];
             tool = !std::strcmp(t,"move")?Tool::Move : !std::strcmp(t,"rotate")?Tool::Rotate :
@@ -3793,6 +4098,7 @@ Application* createApplication(int argc, char** argv) {
         AVER_ERROR("[Sandbox] --force-caps '{}' was rejected; running on the UNCLAMPED device", forceCaps);
 
     auto* app = new SandboxApp(frames, headless, beam, shot, tool);
+    app->setPost(exposure, bloom, autoExposure);
     app->setUseWarp(warp);
     app->setDebugLayer(debugLayer);
     app->setProjectPath(project);

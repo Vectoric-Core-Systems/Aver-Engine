@@ -377,6 +377,38 @@ int32_t aver_pbr_set_cast_shadow(aver_pbr_material m, int32_t on) {
     MaterialDesc* d = edit(m); if (!d) return 0; d->castShadow = on != 0; return commit(m);
 }
 
+int32_t aver_pbr_get_uv_mode(aver_pbr_material m) {
+    const MaterialDesc* d = read(m);
+    // A stale handle reads as Mesh, which is the default and the one that changes nothing.
+    return d ? static_cast<int32_t>(d->uvMode) : AVER_PBR_UV_MESH;
+}
+int32_t aver_pbr_set_uv_mode(aver_pbr_material m, int32_t mode) {
+    MaterialDesc* d = edit(m);
+    if (!d || mode < AVER_PBR_UV_MESH || mode > AVER_PBR_UV_WORLD_ALIGNED) return 0;
+    d->uvMode = static_cast<aver::pbr::UvMode>(mode);
+    return commit(m);
+}
+float aver_pbr_get_uv_tiling(aver_pbr_material m) {
+    const MaterialDesc* d = read(m);
+    return d ? d->uvTiling : 0.0f;
+}
+int32_t aver_pbr_set_uv_tiling(aver_pbr_material m, float cmPerTile) {
+    MaterialDesc* d = edit(m);
+    // Rejected rather than clamped: zero or negative centimetres per tile is not a value anybody
+    // means, and silently substituting one would hide the caller's unit mistake. packMaterial still
+    // defends against it, because a desc can also be set directly from C++.
+    if (!d || !(cmPerTile > 0.0f)) return 0;
+    d->uvTiling = cmPerTile;
+    return commit(m);
+}
+const char* aver_pbr_uv_mode_name(int32_t mode) {
+    switch (mode) {
+        case AVER_PBR_UV_MESH:          return "mesh";
+        case AVER_PBR_UV_WORLD_ALIGNED: return "world";
+        default:                        return "?";
+    }
+}
+
 const char* aver_pbr_get_texture_path(aver_pbr_material m, int32_t slot) {
     const MaterialDesc* d = read(m);
     return (d && validSlot(slot)) ? d->textures[slot].path.c_str() : "";

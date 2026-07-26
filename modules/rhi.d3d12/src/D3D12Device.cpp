@@ -12,6 +12,7 @@
 #include <string>
 #include <wrl/client.h>
 
+#include <cmath>     // the post chain's inverse tonemap and its adaptation curve
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -35,6 +36,42 @@ constexpr u32 kFrameCount = 2;
 constexpr u32 kDefaultSampleCount = 4; // MSAA default; runtime-adjustable via setSampleCount
 constexpr DXGI_FORMAT kBackbufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
+
+// The SCENE target's format, which is no longer the backbuffer's.
+//
+// Everything the scene draws is linear radiance now, and the tonemap that turns it into a display
+// image is the last pass of the frame (see rhi::PostSettings). Eight bits of gamma-encoded colour
+// cannot carry that: the sun disk is worth ~14, a specular highlight several times white, and both
+// would clamp to 1 at the moment they were written -- taking with them exactly the range bloom and
+// eye adaptation exist to read.
+//
+// RGBA16F rather than R11G11B10F because the alpha channel is load-bearing (averOpacity), and
+// rather than RGBA32F because f16 already has more precision than the 8-bit backbuffer this
+// resolves into and costs half the bandwidth.
+constexpr DXGI_FORMAT kSceneColorFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+// The bloom pyramid's depth cap. Six halvings from half resolution reaches a 32-pixel-wide level on
+// a 4K frame, which is already wider than any halo anybody wants; more levels would cost dispatches
+// to blur something the composite then samples at one texel.
+constexpr u32 kMaxBloomMips = 6;
+// Descriptor triples the post heap holds: prefilter, histogram, composite, then one per downsample
+// and one per upsample. Laid out as (t0,t1,t2) runs because a root descriptor TABLE has to be
+// contiguous, and building them all once at resize means no descriptor is ever written while a
+// previous frame might still be reading it.
+constexpr u32 kPostTripleCount = 3 + (kMaxBloomMips - 1) * 2;
+constexpr u32 kPostDescriptorCount = kPostTripleCount * 3 + 2;   // + the histogram/exposure UAVs
+// Which triple is which. The bloom ones are ranges based at these.
+constexpr u32 kPostTriplePrefilter = 0;
+constexpr u32 kPostTripleHistogram = 1;
+constexpr u32 kPostTripleComposite = 2;
+constexpr u32 kPostTripleDownBase  = 3;
+constexpr u32 kPostTripleUpBase    = kPostTripleDownBase + (kMaxBloomMips - 1);
+// The luminance window the histogram bins over, in log2. -10 is starlight and +12 is a bright sky;
+// anything outside is clamped into the end bins, which is the correct behaviour for a statistic.
+constexpr f32 kHistogramMinLogLum = -10.0f;
+constexpr f32 kHistogramMaxLogLum = 12.0f;
+// One thread per FOUR pixels each way. See CSHistogram.
+constexpr u32 kHistogramDownscale = 4;
 
 // ---------------------------------------------------------------- shader compilation
 // DXC (DXIL, shader model 6.x) is required for mesh shaders and for DXR's RayQuery; FXC tops out
@@ -273,7 +310,9 @@ float4 PSky(SkyOut i) : SV_TARGET {
     float3 sunC = srgbToLin(gLightColor.rgb);
     sky += sunC * pow(sd, 2000.0) * 14.0;  // sun disk
     sky += sunC * pow(sd, 12.0) * 0.30;    // sun glow
-    return float4(toGamma(acesTonemap(sky)), 1.0);
+    // Linear radiance; the post chain tonemaps. The sun disk in particular is worth far more than 1
+    // here, and clamping it to a display value at this point is exactly what would stop it blooming.
+    return float4(sky, 1.0);
 }
 
 // ---- unlit coloured lines (grid / gizmo) ----
@@ -286,7 +325,16 @@ LVSOut VSLine(LVSIn i) {
     o.col = i.col;
     return o;
 }
-float4 PSLine(LVSOut i) : SV_TARGET { return float4(i.col, 1.0); }
+// A line's colour is authored as the pixel it wants ON SCREEN — grid greys, gizmo axis colours — so
+// it is a DISPLAY value, not radiance. The scene target is HDR now and the frame is tonemapped at
+// the end, so the value written here is the pre-image of that colour under the whole chain: decode
+// the gamma the target no longer applies, then undo the tonemap that will be applied.
+//
+// It rides the camera's exposure with everything else rather than being divided back out. That
+// keeps the DEFAULT (exposure 1) exactly what it always was, which is what the pixel oracle
+// measures, and under eye adaptation an editor overlay that ignored exposure would be the one thing
+// in the viewport that did.
+float4 PSLine(LVSOut i) : SV_TARGET { return float4(averInverseTonemap(srgbToLin(i.col)), 1.0); }
 )";
 
 // The shared prelude and this backend's own shaders form ONE translation unit; every entry point
@@ -308,6 +356,26 @@ struct PerFrameCB {
     f32 skyHorizon[4];
     f32 fogColor[4];    // a = density
 };
+
+// MIRRORS `cbuffer AverPost : register(b0)` in rhi::postShaderSource() FIELD FOR FIELD. Same
+// treatment as PerFrameCB above and for the same reason: there is no compiler behind this, and a
+// mismatch shades plausibly with the wrong parameters rather than failing.
+//
+// One block for the whole chain. A pass reads the fields it needs and ignores the rest, which is
+// what lets seven passes share one root signature and one suballocation each.
+struct PostCB {
+    f32 tone[4];    // exposure, bloom intensity, bloom threshold, bloom knee
+    f32 dst[4];     // destination width, height, 1/width, 1/height
+    f32 src[4];     // source width, height, 1/width, 1/height
+    f32 adapt[4];   // min log2 luminance, 1/log2 range, adaption alpha, unused
+    f32 limit[4];   // exposure min, exposure max, histogram low cut, high cut
+    f32 misc[4];    // middle grey, auto-exposure on, bloom filter radius, unused
+};
+static_assert(sizeof(PostCB) == 96, "the HLSL cbuffer mirrors this byte for byte");
+
+// Per-frame upload for the block above. Sixteen passes at 256-byte alignment is 4 KB; the ring is
+// sized well past that so a deeper pyramid never has to think about it.
+constexpr u32 kPostConstantRingBytes = 16 * 1024;
 
 // The ONE description of rhi::MeshVertex to D3D12. Every pipeline that reads geometry through the
 // input assembler shares it -- the backend's scene pipelines and the generic factory's alike -- so
@@ -563,7 +631,13 @@ public:
 
     // ----- generic RHI surface (render-feature modules) -----
     // Derived from the DXGI constants rather than written out again, so the two can never drift.
-    Format backbufferFormat() const override { return fromDxgiFormat(kBackbufferFormat); }
+    //
+    // This is the SCENE colour format, which is what the interface asks for ("target formats a
+    // feature must match when building pipelines that draw into the scene") and is no longer the
+    // swapchain's: the scene renders HDR and the post chain resolves it to the 8-bit backbuffer.
+    // A feature building its scene PSO against the swapchain's format would fail at draw time with
+    // an RTV/PSO format mismatch, a long way from here.
+    Format backbufferFormat() const override { return fromDxgiFormat(kSceneColorFormat); }
     Format depthFormat() const override { return fromDxgiFormat(kDepthFormat); }
     IResourceFactory* resources() override;
     // NON-owning. Registering the same feature twice would double every hook, so it is ignored.
@@ -603,6 +677,8 @@ public:
         frameCB_.skyZenith[3] = frameCB_.skyHorizon[3] = 0;
         frameCB_.fogColor[3] = fogDensity;
     }
+    void setPostProcess(const PostSettings& p) override { post_ = p; }
+    PostSettings postProcess() const override { return post_; }
 
     MeshHandle createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override;
     void drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) override;
@@ -671,6 +747,20 @@ private:
     void reconcileClearValue();
     void waitForGpu();
 
+    // ---- the camera post chain (rhi::PostSettings) ----
+    bool createPostPipelines();          // root signature, PSOs and the constant ring: once, at init
+    bool createPostTargets();            // resolve target, bloom pyramid and descriptors: per resize
+    void releasePostTargets();
+    void runPostChain(ID3D12Resource* backbuffer);
+    // Suballocate one pass's constants from this frame's post ring.
+    D3D12_GPU_VIRTUAL_ADDRESS postConstants(const void* data, u32 bytes);
+    D3D12_GPU_DESCRIPTOR_HANDLE postTriple(u32 triple) const;
+    D3D12_CPU_DESCRIPTOR_HANDLE postTripleCpu(u32 triple) const;
+    // The value a colour authored as a DISPLAY pixel has to be written as, now that the scene
+    // target is HDR and the frame is tonemapped at the end. Exactly the CPU twin of the shared
+    // prelude's averInverseTonemap(srgbToLin(c)); see PSLine for why it exists.
+    static void toSceneReferred(const f32 display[4], f32 out[4]);
+
     ComPtr<IDXGIFactory4> factory_;   // 6 is optional (see init); 4 is the baseline
     ComPtr<ID3D12Device> device_;
     ComPtr<ID3D12CommandQueue> queue_;
@@ -727,6 +817,39 @@ private:
     ComPtr<ID3D12Resource> frameCBs_[kFrameCount];
     u8* frameCBPtr_[kFrameCount] = {nullptr, nullptr};
 
+    // ---- camera post chain ------------------------------------------------------------------
+    PostSettings post_{};
+    // The MSAA resolve destination. Null when sampleCount_ == 1, where msaaColor_ IS the resolved
+    // scene and a copy would be pure bandwidth.
+    ComPtr<ID3D12Resource> sceneResolved_;
+    ComPtr<ID3D12Resource> bloomTex_;            // half-res RGBA16F pyramid
+    u32 bloomMips_ = 0, bloomW_ = 0, bloomH_ = 0;
+    // Per-mip state, tracked because the pyramid walks up and down through its own subresources and
+    // a barrier from the wrong state is a debug-layer error rather than a visible one.
+    D3D12_RESOURCE_STATES bloomState_[kMaxBloomMips] = {};
+    ComPtr<ID3D12Resource> histBuf_, expBuf_;    // 256-bin histogram, and the one adapted exposure
+    bool expSeeded_ = false;
+    ComPtr<ID3D12DescriptorHeap> postRtvHeap_;   // one RTV per bloom mip
+    ComPtr<ID3D12DescriptorHeap> postSrvHeap_;   // shader-visible: the SRV triples + the UAV pair
+    ComPtr<ID3D12RootSignature> postRootSig_;
+    ComPtr<ID3D12PipelineState> bloomPrefilterPso_, bloomDownPso_, bloomUpPso_;
+    // [bloom on][auto-exposure on]. Permutations rather than a uniform branch: this is the one pass
+    // that touches every pixel of every frame, and the off variants must not sample a bloom texture
+    // that was never built.
+    ComPtr<ID3D12PipelineState> compositePso_[2][2];
+    ComPtr<ID3D12PipelineState> histogramPso_, exposurePso_;
+    ComPtr<ID3D12Resource> postCBs_[kFrameCount];
+    u8* postCBPtr_[kFrameCount] = {nullptr, nullptr};
+    u32 postCBUsed_ = 0;
+    u32 postSrvSize_ = 0, postRtvSize_ = 0;
+    bool postReady_ = false;
+    // Wall-clock seconds since the previous endFrame, for the exposure adaptation. Measured here
+    // rather than passed in: the device is the only thing that knows when a frame actually ended,
+    // and threading a delta through IDevice for one feedback loop would put a clock in the
+    // interface every backend then has to be trusted with.
+    i64 lastFrameTick_ = 0;
+    f32 frameSeconds_ = 1.0f / 60.0f;
+
     ComPtr<ID3D12Resource> captureBuf_;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT captureFp_{};
     bool captureReq_ = false, captureReady_ = false;
@@ -782,6 +905,9 @@ private:
     // chrome on its first frame — so the two are reconciled in beginFrame rather than assumed
     // equal at creation. Seeded to the same literal as clear_ so frame 0 needs no rebuild.
     f32 msaaClear_[4] = {0.10f, 0.12f, 0.16f, 1.0f};
+    // The same colour expressed as the scene radiance that tonemaps back to it. Derived from
+    // msaaClear_ by createMsaaColor and used by every actual clear, so the two can never disagree.
+    f32 sceneClear_[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     std::string adapterName_ = "D3D12 Device";
     // True when the device is running on a software rasteriser (WARP). Kept as a device property
     // rather than a cap because it is not a capability the adapter reports being without — it is
@@ -1180,6 +1306,9 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     setLight(d, c, 0.15f);
 
     if (!createPipeline()) return false;
+    // The camera post chain's size-independent half. Its targets are built lazily on the
+    // first frame, because they need a swapchain and this runs before there is one.
+    if (!createPostPipelines()) return false;
 
     // Generic RHI surface. Its failure is not fatal: a feature module that cannot get a factory
     // declines to initialise, which is exactly what the Null backend already does.
@@ -1265,7 +1394,7 @@ void D3D12Device::queryCaps() {
     caps_.maxMsaaSamples = 1;
     for (u32 s : {2u, 4u, 8u}) {
         D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS ms{};
-        ms.Format = kBackbufferFormat;
+        ms.Format = kSceneColorFormat;
         ms.SampleCount = s;
         if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &ms, sizeof(ms))) && ms.NumQualityLevels > 0) {
             caps_.msaaMask |= s;
@@ -1331,6 +1460,11 @@ bool D3D12Device::setSampleCount(u32 samples) {
         depthBuffer_.Reset();
         msaaColor_.Reset();
         if (!createDepthBuffer() || !createMsaaColor()) { AVER_ERROR("[RHI.D3D12] MSAA {}x target creation failed", samples); return false; }
+        // The post chain's resolve target exists only above one sample, and every descriptor it
+        // holds names a scene texture that was just recreated. Dropped rather than patched: the
+        // next frame rebuilds it, and a descriptor pointing at a released resource is the kind of
+        // fault that shows up as a corrupt frame somewhere else entirely.
+        releasePostTargets();
     }
     // Features own pipelines that bake the sample count too, and this call can only rebuild the
     // ones the backend owns. A stale feature PSO is a draw-time target incompatibility, not a
@@ -1392,7 +1526,7 @@ bool D3D12Device::createPipeline() {
     pso.SampleMask = UINT_MAX;
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pso.NumRenderTargets = 1;
-    pso.RTVFormats[0] = kBackbufferFormat;
+    pso.RTVFormats[0] = kSceneColorFormat;
     pso.DSVFormat = kDepthFormat;
     pso.SampleDesc.Count = sampleCount_;
     if (!hrOk(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pso_)), "CreateGraphicsPipelineState")) return false;
@@ -1416,7 +1550,7 @@ bool D3D12Device::createPipeline() {
     sp.SampleMask = UINT_MAX;
     sp.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     sp.NumRenderTargets = 1;
-    sp.RTVFormats[0] = kBackbufferFormat;
+    sp.RTVFormats[0] = kSceneColorFormat;
     sp.DSVFormat = kDepthFormat;
     sp.SampleDesc.Count = sampleCount_;
     if (!hrOk(device_->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&skyPso_)), "CreateGraphicsPipelineState(sky)")) return false;
@@ -1451,7 +1585,7 @@ bool D3D12Device::createPipeline() {
     lp.SampleMask = UINT_MAX;
     lp.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
     lp.NumRenderTargets = 1;
-    lp.RTVFormats[0] = kBackbufferFormat;
+    lp.RTVFormats[0] = kSceneColorFormat;
     lp.DSVFormat = kDepthFormat;
     lp.SampleDesc.Count = sampleCount_;
     if (!hrOk(device_->CreateGraphicsPipelineState(&lp, IID_PPV_ARGS(&linePso_)), "line pso")) return false;
@@ -1595,7 +1729,7 @@ bool D3D12Device::initMeshShaders() {
     s.blend.value.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     s.sampleMask = UINT_MAX;
     s.rtvs.value.NumRenderTargets = 1;
-    s.rtvs.value.RTFormats[0] = kBackbufferFormat;
+    s.rtvs.value.RTFormats[0] = kSceneColorFormat;
     s.dsv = kDepthFormat;
     s.sample.value.Count = sampleCount_;
     D3D12_PIPELINE_STATE_STREAM_DESC sd{sizeof(s), &s};
@@ -1712,13 +1846,19 @@ bool D3D12Device::createMsaaColor() {
     td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     td.Width = width_; td.Height = height_;
     td.DepthOrArraySize = 1; td.MipLevels = 1;
-    td.Format = kBackbufferFormat; td.SampleDesc.Count = sampleCount_;
+    td.Format = kSceneColorFormat; td.SampleDesc.Count = sampleCount_;
     td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
     // Created with the colour that will actually be cleared to, and the pair is remembered so
     // beginFrame can tell when the app has moved one and not the other.
-    D3D12_CLEAR_VALUE cv{}; cv.Format = kBackbufferFormat;
-    for (int i = 0; i < 4; ++i) { cv.Color[i] = clear_[i]; msaaClear_[i] = clear_[i]; }
+    //
+    // The value STORED is scene-referred while the one remembered is the app's. setClearColor names
+    // the pixel the app wants to see — the editor's dark chrome grey — and that is a display colour;
+    // clearing an HDR target to it directly would hand the composite a value it then tonemaps, and
+    // the chrome would come out lighter than the app asked for. See toSceneReferred.
+    D3D12_CLEAR_VALUE cv{}; cv.Format = kSceneColorFormat;
+    toSceneReferred(clear_, cv.Color);
+    for (int i = 0; i < 4; ++i) { sceneClear_[i] = cv.Color[i]; msaaClear_[i] = clear_[i]; }
     auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
     if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&msaaColor_)), "msaa color")) return false;
     device_->CreateRenderTargetView(msaaColor_.Get(), nullptr, msaaRtvHeap_->GetCPUDescriptorHandleForHeapStart());
@@ -1754,6 +1894,9 @@ void D3D12Device::reconcileClearValue() {
         createMsaaColor();
         return;
     }
+    // At one sample the post chain's scene SRV points straight at msaaColor_, which has just been
+    // replaced — so the descriptors have to go with it.
+    releasePostTargets();
     AVER_TRACE("[RHI.D3D12] scene colour target rebuilt for clear ({:.3f},{:.3f},{:.3f},{:.3f})",
                clear_[0], clear_[1], clear_[2], clear_[3]);
 }
@@ -1803,6 +1946,7 @@ void D3D12Device::beginFrame() {
     allocators_[frameIndex_]->Reset();
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
     boundRootSig_ = nullptr;   // a command-list reset drops every root binding
+    postCBUsed_ = 0;           // ...and the post ring is per frame, bump-allocated from zero
     // The per-draw binding is sticky WITHIN a frame only. Carrying it across would mean a draw that
     // sets none inherits the last draw of the previous frame -- wrong for exactly the draws that
     // forgot, which reads as a content bug rather than as a renderer one.
@@ -1825,7 +1969,10 @@ void D3D12Device::beginFrame() {
     cmdList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
     // Always clear the FULL surface: once the scene is scissored to a sub-rect the sky no longer
     // covers every pixel, and anything outside would keep stale content from an earlier frame.
-    cmdList_->ClearRenderTargetView(rtv, clear_, 0, nullptr);
+    // sceneClear_, not clear_: the target is HDR and the frame is tonemapped at the end, so what is
+    // written here is the pre-image of the colour the app asked for. It matches the value the
+    // resource was created with, which is what keeps the fast-clear path.
+    cmdList_->ClearRenderTargetView(rtv, sceneClear_, 0, nullptr);
     cmdList_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
     // Scene renders into the requested sub-rect (the editor's central dock node), or the whole
@@ -1973,27 +2120,580 @@ void D3D12Device::drawLines(LineHandle mesh, const f32 world[16]) {
     cmdList_->DrawInstanced(m.count, 1, 0, 0);
 }
 
+// ================================================================= the camera post chain
+//
+// Everything from here to runPostChain implements rhi::PostSettings. It lives in the backend rather
+// than in a render feature because it is not a pass over the scene — it is what turns the scene
+// target into the image the swapchain presents, which is the backend's own job. The HLSL is the
+// RHI module's (rhi::postShaderSource), so a second backend gets one implementation and not a
+// second opinion on what a tonemap is.
+
+// The CPU twin of the shared prelude's averInverseTonemap(srgbToLin(c)). Kept identical BY HAND,
+// which is a thing worth being uncomfortable about — but the alternative is a GPU pass to convert
+// one clear colour, and the value has to be known on the CPU anyway because it is baked into the
+// render target's optimised clear value at creation.
+void D3D12Device::toSceneReferred(const f32 display[4], f32 out[4]) {
+    for (int i = 0; i < 3; ++i) {
+        const f32 lin = std::pow(display[i] < 0.0f ? 0.0f : display[i], 2.2f);
+        const f32 y = lin > 1.0329f - 1e-4f ? 1.0329f - 1e-4f : lin;
+        const f32 a = 2.43f * y - 2.51f;   // strictly negative over this range
+        const f32 b = 0.59f * y - 0.03f;
+        const f32 c = 0.14f * y;
+        const f32 d = b * b - 4.0f * a * c;
+        out[i] = (-b - std::sqrt(d < 0.0f ? 0.0f : d)) / (2.0f * a);
+    }
+    out[3] = display[3];
+}
+
+// Root signature, PSOs and the per-frame constant ring. Built once: none of it depends on the
+// window size, which is what keeps a resize to just the targets and the descriptors.
+bool D3D12Device::createPostPipelines() {
+    D3D12_DESCRIPTOR_RANGE srvRange{};
+    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors = 3;              // t0 scene, t1 bloom, t2 exposure
+    srvRange.BaseShaderRegister = 0;
+    D3D12_DESCRIPTOR_RANGE uavRange{};
+    uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    uavRange.NumDescriptors = 2;              // u0 histogram, u1 exposure
+    uavRange.BaseShaderRegister = 0;
+
+    D3D12_ROOT_PARAMETER params[3] = {};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    params[0].Descriptor.ShaderRegister = 0;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[1].DescriptorTable.NumDescriptorRanges = 1;
+    params[1].DescriptorTable.pDescriptorRanges = &srvRange;
+    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[2].DescriptorTable.NumDescriptorRanges = 1;
+    params[2].DescriptorTable.pDescriptorRanges = &uavRange;
+    for (auto& p : params) p.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // Bilinear, clamped. CLAMP and not WRAP: every filter here reaches outside its own footprint at
+    // the edges, and wrapping would fold the far side of the frame into the near one — which reads
+    // as a bright rim on the opposite border from whatever caused it.
+    D3D12_STATIC_SAMPLER_DESC samp{};
+    samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samp.MaxLOD = D3D12_FLOAT32_MAX;
+    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_ROOT_SIGNATURE_DESC rsd{};
+    rsd.NumParameters = 3;
+    rsd.pParameters = params;
+    rsd.NumStaticSamplers = 1;
+    rsd.pStaticSamplers = &samp;
+    // No input assembler: every pass is either a fullscreen triangle generated from SV_VertexID or
+    // a dispatch. Declaring the IA flag would only cost root-signature space.
+    rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+
+    ComPtr<ID3DBlob> rsBlob, rsErr;
+    if (!hrOk(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &rsBlob, &rsErr), "post root signature")) return false;
+    if (!hrOk(device_->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(&postRootSig_)), "post root signature")) return false;
+
+    const char* src = postShaderSource();
+    ComPtr<ID3DBlob> vs;
+    if (FAILED(shaderCompiler().compile(src, "PostVS", "vs_5_1", &vs))) return false;
+
+    // One description, three pixel shaders. Fullscreen triangle, no depth, no input layout.
+    auto makeGfx = [&](const char* entry, DXGI_FORMAT rtFormat, bool additive, const char* defines,
+                       ComPtr<ID3D12PipelineState>& out) {
+        ComPtr<ID3DBlob> ps;
+        if (FAILED(shaderCompiler().compile(src, entry, "ps_5_1", &ps, nullptr, defines))) return false;
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
+        d.pRootSignature = postRootSig_.Get();
+        d.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+        d.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+        d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        auto& rt = d.BlendState.RenderTarget[0];
+        rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        if (additive) {
+            // The upsample ADDS into the level above. Done by the blender rather than by reading the
+            // destination in the shader, because a typed UAV load of RGBA16F is an optional D3D12
+            // feature and this engine explicitly gates hardware without it.
+            rt.BlendEnable = TRUE;
+            rt.SrcBlend = rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+            rt.DestBlend = rt.DestBlendAlpha = D3D12_BLEND_ONE;
+            rt.BlendOp = rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        }
+        d.SampleMask = UINT_MAX;
+        d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        d.NumRenderTargets = 1;
+        d.RTVFormats[0] = rtFormat;
+        d.SampleDesc.Count = 1;   // every post target is single-sampled; the resolve happens first
+        return hrOk(device_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&out)), "post pso");
+    };
+
+    if (!makeGfx("PSBloomPrefilter", kSceneColorFormat, false, nullptr, bloomPrefilterPso_)) return false;
+    if (!makeGfx("PSBloomDown",      kSceneColorFormat, false, nullptr, bloomDownPso_)) return false;
+    if (!makeGfx("PSBloomUp",        kSceneColorFormat, true,  nullptr, bloomUpPso_)) return false;
+
+    for (int bloom = 0; bloom < 2; ++bloom) {
+        for (int autoExp = 0; autoExp < 2; ++autoExp) {
+            std::string defs;
+            if (bloom)   defs += "AVER_POST_BLOOM=1;";
+            if (autoExp) defs += "AVER_POST_AUTOEXPOSURE=1;";
+            if (!makeGfx("PSComposite", kBackbufferFormat, false,
+                         defs.empty() ? nullptr : defs.c_str(), compositePso_[bloom][autoExp]))
+                return false;
+        }
+    }
+
+    // The adaptation passes are compute, and compute alone: they need atomics into a buffer, which
+    // no graphics pass can express. Every D3D12 FL 11_0 device has it (see caps_.computeShaders),
+    // so there is no fallback to write.
+    auto makeCompute = [&](const char* entry, ComPtr<ID3D12PipelineState>& out) {
+        ComPtr<ID3DBlob> cs;
+        if (FAILED(shaderCompiler().compile(src, entry, "cs_5_1", &cs))) return false;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC d{};
+        d.pRootSignature = postRootSig_.Get();
+        d.CS = {cs->GetBufferPointer(), cs->GetBufferSize()};
+        return hrOk(device_->CreateComputePipelineState(&d, IID_PPV_ARGS(&out)), "post compute pso");
+    };
+    if (!makeCompute("CSHistogram", histogramPso_)) return false;
+    if (!makeCompute("CSExposure", exposurePso_)) return false;
+
+    // One upload buffer per frame in flight, bump-allocated and reset in beginFrame. Separate from
+    // the render context's ring because that one is reset by a feature's first allocation and this
+    // runs after every feature has finished.
+    auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+    auto bd = bufferDesc(kPostConstantRingBytes);
+    for (u32 i = 0; i < kFrameCount; ++i) {
+        if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd,
+                  D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&postCBs_[i])), "post constant ring")) return false;
+        D3D12_RANGE none{0, 0};
+        postCBs_[i]->Map(0, &none, reinterpret_cast<void**>(&postCBPtr_[i]));
+    }
+
+    // The histogram and the adapted exposure. Both are DEFAULT-heap buffers written only by the GPU;
+    // the exposure one carries its own "has this ever been written" flag in its second dword, so the
+    // first frame snaps to the measured value instead of easing up from an uninitialised one.
+    // COMMON, not UNORDERED_ACCESS. A buffer is effectively created in COMMON whatever is asked for,
+    // and naming anything else earns debug-layer warning #1328 on every run — which this project
+    // counts per gate, so a permanent two is a permanent two.
+    auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+    auto hd = bufferDesc(256 * sizeof(u32));
+    hd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &hd,
+              D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&histBuf_)), "post histogram")) return false;
+    auto ed = bufferDesc(2 * sizeof(u32));
+    ed.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &ed,
+              D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&expBuf_)), "post exposure")) return false;
+
+    D3D12_DESCRIPTOR_HEAP_DESC sh{};
+    sh.NumDescriptors = kPostDescriptorCount;
+    sh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    sh.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (!hrOk(device_->CreateDescriptorHeap(&sh, IID_PPV_ARGS(&postSrvHeap_)), "post SRV heap")) return false;
+    postSrvSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    D3D12_DESCRIPTOR_HEAP_DESC rh{};
+    rh.NumDescriptors = kMaxBloomMips;
+    rh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    if (!hrOk(device_->CreateDescriptorHeap(&rh, IID_PPV_ARGS(&postRtvHeap_)), "post RTV heap")) return false;
+    // Queried, NOT copied from rtvSize_. This runs at device init, before there is a swapchain, and
+    // rtvSize_ is not filled in until one exists — so copying it lands every bloom mip's RTV on the
+    // same descriptor and the whole pyramid renders into whichever mip was written last.
+    postRtvSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    return true;
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::postTriple(u32 triple) const {
+    D3D12_GPU_DESCRIPTOR_HANDLE h = postSrvHeap_->GetGPUDescriptorHandleForHeapStart();
+    h.ptr += static_cast<UINT64>(triple) * 3 * postSrvSize_;
+    return h;
+}
+D3D12_CPU_DESCRIPTOR_HANDLE D3D12Device::postTripleCpu(u32 triple) const {
+    D3D12_CPU_DESCRIPTOR_HANDLE h = postSrvHeap_->GetCPUDescriptorHandleForHeapStart();
+    h.ptr += static_cast<SIZE_T>(triple) * 3 * postSrvSize_;
+    return h;
+}
+
+void D3D12Device::releasePostTargets() {
+    sceneResolved_.Reset();
+    bloomTex_.Reset();
+    bloomMips_ = bloomW_ = bloomH_ = 0;
+    postReady_ = false;
+}
+
+// The size-dependent half: the resolve destination, the bloom pyramid, and every descriptor that
+// points at either. Rebuilt on resize and on a sample-count change; the pipelines above survive both.
+bool D3D12Device::createPostTargets() {
+    releasePostTargets();
+    if (!postRootSig_ || width_ == 0 || height_ == 0) return false;
+
+    // A resolve destination exists only when there is something to resolve. At one sample the scene
+    // target IS the resolved image, and a copy would be a full-resolution round trip for nothing.
+    if (sampleCount_ > 1) {
+        D3D12_RESOURCE_DESC td{};
+        td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        td.Width = width_; td.Height = height_;
+        td.DepthOrArraySize = 1; td.MipLevels = 1;
+        td.Format = kSceneColorFormat; td.SampleDesc.Count = 1;
+        auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+        if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td,
+                  D3D12_RESOURCE_STATE_RESOLVE_DEST, nullptr, IID_PPV_ARGS(&sceneResolved_)), "scene resolve target"))
+            return false;
+    }
+
+    // The pyramid starts at HALF resolution. A bloom halo is low-frequency by definition, so the
+    // level nobody can distinguish from full res is the one that costs a quarter of the bandwidth.
+    bloomW_ = width_ / 2 > 1 ? width_ / 2 : 1;
+    bloomH_ = height_ / 2 > 1 ? height_ / 2 : 1;
+    bloomMips_ = 1;
+    while (bloomMips_ < kMaxBloomMips &&
+           (bloomW_ >> bloomMips_) >= 8 && (bloomH_ >> bloomMips_) >= 8) ++bloomMips_;
+
+    D3D12_RESOURCE_DESC bd{};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    bd.Width = bloomW_; bd.Height = bloomH_;
+    bd.DepthOrArraySize = 1; bd.MipLevels = static_cast<UINT16>(bloomMips_);
+    bd.Format = kSceneColorFormat; bd.SampleDesc.Count = 1;
+    bd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+    // No optimised clear value: nothing in the chain ever clears the pyramid. The prefilter writes
+    // every texel of mip 0 and each downsample writes every texel of its own level.
+    if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &bd,
+              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&bloomTex_)), "bloom pyramid"))
+        return false;
+    for (u32 m = 0; m < kMaxBloomMips; ++m) bloomState_[m] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+    // ---- descriptors, all of them, once ----
+    ID3D12Resource* scene = sceneResolved_ ? sceneResolved_.Get() : msaaColor_.Get();
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC tex{};
+    tex.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    tex.Format = kSceneColorFormat;
+    tex.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    tex.Texture2D.MipLevels = 1;
+
+    // A triple is (t0, t1, t2). Slots a pass does not read are filled with the scene view rather
+    // than left null: an unwritten descriptor in a shader-visible heap is undefined to READ, even
+    // by a shader that never samples it, and the debug layer is entitled to say so.
+    auto writeTriple = [&](u32 triple, ID3D12Resource* t0, u32 mip0,
+                           ID3D12Resource* t1, u32 mip1, bool expAtT2) {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = postTripleCpu(triple);
+        tex.Texture2D.MostDetailedMip = mip0;
+        device_->CreateShaderResourceView(t0, &tex, h);
+        h.ptr += postSrvSize_;
+        tex.Texture2D.MostDetailedMip = mip1;
+        device_->CreateShaderResourceView(t1, &tex, h);
+        h.ptr += postSrvSize_;
+        if (expAtT2) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC bv{};
+            bv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            bv.Format = DXGI_FORMAT_R32_TYPELESS;
+            bv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            bv.Buffer.NumElements = 2;
+            bv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+            device_->CreateShaderResourceView(expBuf_.Get(), &bv, h);
+        } else {
+            tex.Texture2D.MostDetailedMip = mip1;
+            device_->CreateShaderResourceView(t1, &tex, h);
+        }
+    };
+
+    writeTriple(kPostTriplePrefilter, scene, 0, scene, 0, false);
+    writeTriple(kPostTripleHistogram, scene, 0, scene, 0, false);
+    writeTriple(kPostTripleComposite, scene, 0, bloomTex_.Get(), 0, true);
+    for (u32 m = 1; m < bloomMips_; ++m) {
+        // Down step m reads mip m-1; up step m reads mip m and is blended into mip m-1.
+        writeTriple(kPostTripleDownBase + (m - 1), bloomTex_.Get(), m - 1, bloomTex_.Get(), m - 1, false);
+        writeTriple(kPostTripleUpBase   + (m - 1), bloomTex_.Get(), m,     bloomTex_.Get(), m,     false);
+    }
+
+    // The UAV pair sits past every triple, contiguous, because it is bound as one table.
+    D3D12_CPU_DESCRIPTOR_HANDLE uav = postSrvHeap_->GetCPUDescriptorHandleForHeapStart();
+    uav.ptr += static_cast<SIZE_T>(kPostTripleCount) * 3 * postSrvSize_;
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+    ud.Format = DXGI_FORMAT_R32_TYPELESS;
+    ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+    ud.Buffer.NumElements = 256;
+    device_->CreateUnorderedAccessView(histBuf_.Get(), nullptr, &ud, uav);
+    uav.ptr += postSrvSize_;
+    ud.Buffer.NumElements = 2;
+    device_->CreateUnorderedAccessView(expBuf_.Get(), nullptr, &ud, uav);
+
+    // One RTV per bloom mip.
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = postRtvHeap_->GetCPUDescriptorHandleForHeapStart();
+    for (u32 m = 0; m < bloomMips_; ++m) {
+        D3D12_RENDER_TARGET_VIEW_DESC rd{};
+        rd.Format = kSceneColorFormat;
+        rd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        rd.Texture2D.MipSlice = m;
+        device_->CreateRenderTargetView(bloomTex_.Get(), &rd, rtv);
+        rtv.ptr += postRtvSize_;
+    }
+
+    // expSeeded_ is deliberately NOT reset here. The histogram and exposure buffers belong to
+    // createPostPipelines and outlive every resize, so re-seeding them would issue a barrier out of
+    // COMMON for a resource that has been in UNORDERED_ACCESS since the first frame.
+    postReady_ = true;
+    return true;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS D3D12Device::postConstants(const void* data, u32 bytes) {
+    const u32 f = frameIndex_ < kFrameCount ? frameIndex_ : 0;
+    if (!postCBPtr_[f]) return 0;
+    const u32 offset = (postCBUsed_ + 255u) & ~255u;   // a root CBV binds on 256-byte alignment
+    const u32 size = (bytes + 255u) & ~255u;
+    if (offset + size > kPostConstantRingBytes) {
+        AVER_ERROR("[RHI.D3D12] post constant ring exhausted ({} bytes per frame)", kPostConstantRingBytes);
+        return 0;
+    }
+    std::memcpy(postCBPtr_[f] + offset, data, bytes);
+    postCBUsed_ = offset + size;
+    return postCBs_[f]->GetGPUVirtualAddress() + offset;
+}
+
+// Scene -> backbuffer. Records the whole chain and leaves the backbuffer in RENDER_TARGET.
+//
+// Every stage past the composite is SKIPPED when it would be a no-op — no bloom means no pyramid
+// and no passes at all, not a pyramid weighted to zero. That is what keeps the default cost of
+// this at exactly one fullscreen triangle over the frame plus the resolve that was always there.
+void D3D12Device::runPostChain(ID3D12Resource* bb) {
+    // Measured here because this is the one point that runs exactly once per presented frame.
+    {
+        LARGE_INTEGER now{}, freq{};
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&freq);
+        if (lastFrameTick_ != 0 && freq.QuadPart > 0) {
+            const f64 dt = static_cast<f64>(now.QuadPart - lastFrameTick_) / static_cast<f64>(freq.QuadPart);
+            // Clamped: a frame that took a second (a breakpoint, a device reset, an alt-tab) must
+            // not snap the adaptation, and a zero would freeze it.
+            frameSeconds_ = static_cast<f32>(dt < 1e-4 ? 1e-4 : (dt > 0.25 ? 0.25 : dt));
+        }
+        lastFrameTick_ = now.QuadPart;
+    }
+
+    const bool msaa = sampleCount_ > 1;
+    if (!postReady_ && !createPostTargets()) {
+        // Without the chain there is no way to get an HDR scene onto an 8-bit backbuffer at all, so
+        // this is fatal to the image rather than to the frame. Say it once and present what is
+        // there, which is a black window — better than a silent hang in a resize loop.
+        static bool said = false;
+        if (!said) { AVER_ERROR("[RHI.D3D12] the post chain is unavailable; the scene cannot be presented"); said = true; }
+        auto toRt = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        cmdList_->ResourceBarrier(1, &toRt);
+        return;
+    }
+
+    const bool bloom = post_.bloomIntensity > 0.0f && bloomTex_;
+    const bool autoExp = post_.autoExposure && caps_.computeShaders;
+    ID3D12Resource* scene = msaa ? sceneResolved_.Get() : msaaColor_.Get();
+
+    // A DEFAULT-heap resource has undefined contents until something writes it — "usually zero" is
+    // a driver's habit, not the spec's promise. The adaptation reads its own previous value and its
+    // own seeded flag, so garbage here is an exposure that starts somewhere arbitrary and then eases
+    // towards the right one over a second, which reads as a bug in the adaptation itself.
+    if (!expSeeded_) {
+        const u32 zeros[258] = {};
+        const D3D12_GPU_VIRTUAL_ADDRESS va = postConstants(zeros, sizeof zeros);
+        if (va) {
+            const u32 f = frameIndex_ < kFrameCount ? frameIndex_ : 0;
+            const UINT64 off = va - postCBs_[f]->GetGPUVirtualAddress();
+            // From COMMON, which is where the buffers really are — see createPostPipelines. This is
+            // the one place they are ever in it: the closing barrier below leaves them in
+            // UNORDERED_ACCESS for the rest of the process.
+            D3D12_RESOURCE_BARRIER toCopy[2] = {
+                transition(histBuf_.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST),
+                transition(expBuf_.Get(),  D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST),
+            };
+            cmdList_->ResourceBarrier(2, toCopy);
+            cmdList_->CopyBufferRegion(histBuf_.Get(), 0, postCBs_[f].Get(), off, 256 * sizeof(u32));
+            cmdList_->CopyBufferRegion(expBuf_.Get(), 0, postCBs_[f].Get(), off, 2 * sizeof(u32));
+            D3D12_RESOURCE_BARRIER back[2] = {
+                transition(histBuf_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+                transition(expBuf_.Get(),  D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+            };
+            cmdList_->ResourceBarrier(2, back);
+            expSeeded_ = true;
+        }
+    }
+
+    // ---- resolve ----
+    if (msaa) {
+        D3D12_RESOURCE_BARRIER pre[1] = {
+            transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RESOLVE_SOURCE),
+        };
+        cmdList_->ResourceBarrier(1, pre);
+        cmdList_->ResolveSubresource(scene, 0, msaaColor_.Get(), 0, kSceneColorFormat);
+        // The resolve happens in LINEAR HDR now rather than on gamma-encoded 8-bit values, which is
+        // the physically correct order: averaging display codes darkens edges, because the encode is
+        // concave. It is also why an edge pixel can differ from what the old path produced.
+        auto toSrv = transition(scene, D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cmdList_->ResourceBarrier(1, &toSrv);
+    } else {
+        auto toSrv = transition(scene, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cmdList_->ResourceBarrier(1, &toSrv);
+    }
+
+    ID3D12DescriptorHeap* heaps[] = {postSrvHeap_.Get()};
+    cmdList_->SetDescriptorHeaps(1, heaps);
+    cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
+    boundRootSig_ = nullptr;   // this signature is not one bindGraphicsRoot tracks
+    cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmdList_->IASetVertexBuffers(0, 0, nullptr);
+
+    D3D12_GPU_DESCRIPTOR_HANDLE uavTable = postSrvHeap_->GetGPUDescriptorHandleForHeapStart();
+    uavTable.ptr += static_cast<UINT64>(kPostTripleCount) * 3 * postSrvSize_;
+
+    PostCB cb{};
+    auto fillCommon = [&](u32 dstW, u32 dstH, u32 srcW, u32 srcH) {
+        cb.tone[0] = post_.exposure;       cb.tone[1] = post_.bloomIntensity;
+        cb.tone[2] = post_.bloomThreshold; cb.tone[3] = post_.bloomKnee;
+        cb.dst[0] = static_cast<f32>(dstW); cb.dst[1] = static_cast<f32>(dstH);
+        cb.dst[2] = 1.0f / cb.dst[0];       cb.dst[3] = 1.0f / cb.dst[1];
+        cb.src[0] = static_cast<f32>(srcW); cb.src[1] = static_cast<f32>(srcH);
+        cb.src[2] = 1.0f / cb.src[0];       cb.src[3] = 1.0f / cb.src[1];
+        cb.adapt[0] = kHistogramMinLogLum;
+        cb.adapt[1] = 1.0f / (kHistogramMaxLogLum - kHistogramMinLogLum);
+        // Frame-rate independent: the same speed reaches the same fraction of the way in the same
+        // WALL time whether the frame took 4 ms or 40. A raw per-frame alpha would make the eye
+        // adapt faster on a faster machine, which is a feel bug nobody attributes to the renderer.
+        cb.adapt[2] = 1.0f - std::exp(-post_.exposureSpeed * frameSeconds_);
+        cb.adapt[3] = 0.0f;
+        cb.limit[0] = post_.exposureMin;         cb.limit[1] = post_.exposureMax;
+        cb.limit[2] = post_.histogramLowPercent; cb.limit[3] = post_.histogramHighPercent;
+        cb.misc[0] = post_.exposureKey;
+        cb.misc[1] = autoExp ? 1.0f : 0.0f;
+        // One destination texel of skirt on every upsample. Wider looks softer and starts to reveal
+        // the pyramid's own levels as concentric rings; narrower stops the levels overlapping at all
+        // and the halo becomes a stack of boxes.
+        cb.misc[2] = 1.0f;
+        cb.misc[3] = 0.0f;
+    };
+
+    auto fullscreen = [&](ID3D12PipelineState* pso, u32 triple, u32 w, u32 h,
+                          const D3D12_CPU_DESCRIPTOR_HANDLE* rtv) {
+        cmdList_->SetPipelineState(pso);
+        cmdList_->OMSetRenderTargets(1, rtv, FALSE, nullptr);
+        D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<f32>(w), static_cast<f32>(h), 0.0f, 1.0f};
+        D3D12_RECT sc{0, 0, static_cast<LONG>(w), static_cast<LONG>(h)};
+        cmdList_->RSSetViewports(1, &vp);
+        cmdList_->RSSetScissorRects(1, &sc);
+        cmdList_->SetGraphicsRootConstantBufferView(0, postConstants(&cb, sizeof cb));
+        cmdList_->SetGraphicsRootDescriptorTable(1, postTriple(triple));
+        cmdList_->SetGraphicsRootDescriptorTable(2, uavTable);
+        cmdList_->DrawInstanced(3, 1, 0, 0);
+    };
+
+    auto bloomRtv = [&](u32 mip) {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = postRtvHeap_->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(mip) * postRtvSize_;
+        return h;
+    };
+    auto bloomTo = [&](u32 mip, D3D12_RESOURCE_STATES to) {
+        if (bloomState_[mip] == to) return;
+        D3D12_RESOURCE_BARRIER b = transition(bloomTex_.Get(), bloomState_[mip], to);
+        b.Transition.Subresource = mip;   // per-SUBRESOURCE: the pyramid reads one mip while writing another
+        cmdList_->ResourceBarrier(1, &b);
+        bloomState_[mip] = to;
+    };
+    auto mipW = [&](u32 m) { return bloomW_ >> m ? bloomW_ >> m : 1u; };
+    auto mipH = [&](u32 m) { return bloomH_ >> m ? bloomH_ >> m : 1u; };
+
+    // ---- bloom ----
+    if (bloom) {
+        bloomTo(0, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        fillCommon(mipW(0), mipH(0), width_, height_);
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv = bloomRtv(0);
+        fullscreen(bloomPrefilterPso_.Get(), kPostTriplePrefilter, mipW(0), mipH(0), &rtv);
+
+        for (u32 m = 1; m < bloomMips_; ++m) {
+            bloomTo(m - 1, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            bloomTo(m, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            fillCommon(mipW(m), mipH(m), mipW(m - 1), mipH(m - 1));
+            rtv = bloomRtv(m);
+            fullscreen(bloomDownPso_.Get(), kPostTripleDownBase + (m - 1), mipW(m), mipH(m), &rtv);
+        }
+        for (u32 m = bloomMips_; m-- > 1;) {
+            bloomTo(m, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            bloomTo(m - 1, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            fillCommon(mipW(m - 1), mipH(m - 1), mipW(m), mipH(m));
+            rtv = bloomRtv(m - 1);
+            fullscreen(bloomUpPso_.Get(), kPostTripleUpBase + (m - 1), mipW(m - 1), mipH(m - 1), &rtv);
+        }
+        bloomTo(0, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
+
+    // ---- eye adaptation ----
+    if (autoExp) {
+        const u32 hw = width_ / kHistogramDownscale > 1 ? width_ / kHistogramDownscale : 1;
+        const u32 hh = height_ / kHistogramDownscale > 1 ? height_ / kHistogramDownscale : 1;
+        fillCommon(hw, hh, width_, height_);
+
+        cmdList_->SetComputeRootSignature(postRootSig_.Get());
+        cmdList_->SetPipelineState(histogramPso_.Get());
+        cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
+        cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
+        cmdList_->SetComputeRootDescriptorTable(2, uavTable);
+        cmdList_->Dispatch((hw + 15) / 16, (hh + 15) / 16, 1);
+
+        // The reduction reads every bin the pass above wrote, and zeroes them for the next frame.
+        D3D12_RESOURCE_BARRIER uavB{};
+        uavB.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavB.UAV.pResource = histBuf_.Get();
+        cmdList_->ResourceBarrier(1, &uavB);
+
+        cmdList_->SetPipelineState(exposurePso_.Get());
+        cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
+        cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
+        cmdList_->SetComputeRootDescriptorTable(2, uavTable);
+        cmdList_->Dispatch(1, 1, 1);
+
+        // The graphics root signature was replaced by the compute one above on the same slot list;
+        // rebind before the composite or its table bindings land on the wrong parameter.
+        cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
+    }
+
+    // ---- composite ----
+    fillCommon(width_, height_, width_, height_);
+    {
+        // Moved to a readable state whether or not the composite's permutation samples it. The
+        // descriptor is bound either way, and GPU-based validation checks the STATE of everything a
+        // bound table names, not only what a shader happens to touch.
+        auto expToSrv = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cmdList_->ResourceBarrier(1, &expToSrv);
+        auto toRt = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        cmdList_->ResourceBarrier(1, &toRt);
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
+        rtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
+        fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0].Get(), kPostTripleComposite,
+                   width_, height_, &rtv);
+    }
+
+    // ---- restore ----
+    // Back to the states the next frame's beginFrame assumes. Doing it here rather than there keeps
+    // every state this function moved in one place, which is the only way the pyramid's per-mip
+    // bookkeeping stays auditable.
+    {
+        auto expBack = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmdList_->ResourceBarrier(1, &expBack);
+    }
+    auto sceneBack = msaa
+        ? transition(scene, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RESOLVE_DEST)
+        : transition(scene, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    cmdList_->ResourceBarrier(1, &sceneBack);
+    if (msaa) {
+        auto msaaBack = transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RESOLVE_SOURCE,
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
+        cmdList_->ResourceBarrier(1, &msaaBack);
+    }
+}
+
 void D3D12Device::endFrame() {
     if (!hasSwapchain_) return;
     ID3D12Resource* bb = renderTargets_[frameIndex_].Get();
 
-    // Move the scene target into the backbuffer. With MSAA on that is a resolve; with MSAA off
-    // (1 sample) ResolveSubresource is illegal, so copy instead.
-    const bool msaa = sampleCount_ > 1;
-    const D3D12_RESOURCE_STATES srcState = msaa ? D3D12_RESOURCE_STATE_RESOLVE_SOURCE : D3D12_RESOURCE_STATE_COPY_SOURCE;
-    const D3D12_RESOURCE_STATES dstState = msaa ? D3D12_RESOURCE_STATE_RESOLVE_DEST   : D3D12_RESOURCE_STATE_COPY_DEST;
-    D3D12_RESOURCE_BARRIER pre[2] = {
-        transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, srcState),
-        transition(bb, D3D12_RESOURCE_STATE_PRESENT, dstState),
-    };
-    cmdList_->ResourceBarrier(2, pre);
-    if (msaa) cmdList_->ResolveSubresource(bb, 0, msaaColor_.Get(), 0, kBackbufferFormat);
-    else      cmdList_->CopyResource(bb, msaaColor_.Get());
-    D3D12_RESOURCE_BARRIER post[2] = {
-        transition(bb, dstState, D3D12_RESOURCE_STATE_RENDER_TARGET),
-        transition(msaaColor_.Get(), srcState, D3D12_RESOURCE_STATE_RENDER_TARGET),
-    };
-    cmdList_->ResourceBarrier(2, post);
+    // The scene target is HDR linear radiance; the post chain is what turns it into the display
+    // image the backbuffer holds. It replaces what used to be a straight resolve/copy here, and it
+    // leaves the backbuffer in RENDER_TARGET, which is the state the UI pass below expects.
+    runPostChain(bb);
 
 #if AVER_WITH_IMGUI
     if (uiActive_) {
@@ -2081,6 +2781,9 @@ void D3D12Device::resize(u32 w, u32 h) {
     createRenderTargetViews();
     createDepthBuffer();
     createMsaaColor();
+    // Every post target is sized from the frame, and every post descriptor names one. Dropped here
+    // and rebuilt on the next frame, which is also where a failure has somewhere to be reported.
+    releasePostTargets();
     D3D12_RESOURCE_DESC bbDesc = renderTargets_[0]->GetDesc();
     UINT64 total = 0;
     device_->GetCopyableFootprints(&bbDesc, 0, 1, 0, &captureFp_, nullptr, nullptr, &total);

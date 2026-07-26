@@ -56,7 +56,7 @@ cbuffer AverMaterial : register(b2) {
     uint   gMaterialFlags;
     float  gMatReflectance;
     float  gMatF90;
-    uint   _materialPad;
+    float  gUvTilesPerCm;   // reciprocal of the authored cm-per-tile; see MaterialConstants
 };
 
 // gMaterialFlags bits, mirroring pbr::MaterialFlag.
@@ -68,6 +68,7 @@ cbuffer AverMaterial : register(b2) {
 #define AVER_MAT_ALPHA_MASK     (1u << 5)
 #define AVER_MAT_ALPHA_BLEND    (1u << 6)
 #define AVER_MAT_TWO_SIDED      (1u << 7)
+#define AVER_MAT_WORLD_UV       (1u << 8)
 
 // ---- shading models. The id arrives per draw in gShadingModel and is dispatched by a UNIFORM
 // switch, not by a pipeline permutation: the branch is scalar and free, while a permutation would
@@ -188,6 +189,30 @@ struct AverMaps {
     float3 emissive;
 };
 
+// The texture coordinate this surface is sampled at. Either the mesh's own, or a world-space planar
+// projection onto the dominant axis of the normal -- see pbr::UvMode for why a blockout needs the
+// second one.
+//
+// The branch is on a MATERIAL flag, so it is uniform across every pixel of a draw and costs nothing
+// beyond the compare. Both sides are computed cheaply enough that no permutation is warranted.
+float2 averSurfaceUV(AverVertex v) {
+    if (gMaterialFlags & AVER_MAT_WORLD_UV) {
+        float3 a = abs(v.N);
+        // The plane the surface most faces. Ties go to Z, then X, which only matters on a perfect
+        // 45-degree edge where either answer is equally arbitrary -- but it must be DECIDED rather
+        // than left to floating-point luck, or adjacent pixels on such a face pick different planes
+        // and the seam shimmers.
+        float2 p = (a.z >= a.x && a.z >= a.y) ? v.wpos.xy
+                 : ((a.x >= a.y) ? v.wpos.yz : v.wpos.xz);
+        // No per-face sign flip. Opposite faces of a box therefore MIRROR when seen from outside,
+        // which is what a world-aligned projection is supposed to do: the texture stays locked to
+        // the world rather than to the object, so two adjoining walls meet with their pattern lined
+        // up across the corner. Flipping would break that, which is the thing this mode is for.
+        return p * gUvTilesPerCm;
+    }
+    return v.uv;
+}
+
 AverMaps averSampleMaps(float2 uv) {
     AverMaps m;
 #ifdef AVER_MATERIAL_SRV
@@ -240,7 +265,12 @@ float3 averPerturbNormal(float3 N, float3 wpos, float2 uv, float3 nTS) {
 // view-independent rather than view-independent by convention, so the voxelisation pass -- which
 // hands this a zero view vector and a fabricated light -- gets the same answer the lit pass does.
 AverSurface averEvalMaterial(AverVertex v, AverLight l) {
-    AverMaps map = averSampleMaps(v.uv);
+    // Resolved ONCE and passed to both the sampler and the tangent frame. Two calls would compile to
+    // the same thing today, but the frame must be solved against the very coordinates the normal map
+    // was sampled at -- deriving it from v.uv while sampling at a world-aligned uv would tilt every
+    // normal by the difference between the two parameterisations.
+    float2 uv = averSurfaceUV(v);
+    AverMaps map = averSampleMaps(uv);
 
     // Base colour is the product of three things and NONE of them is decoded here. The map arrives
     // linear because its view format is sRGB and the TEXTURE UNIT decoded it -- doing it after the
@@ -253,7 +283,7 @@ AverSurface averEvalMaterial(AverVertex v, AverLight l) {
     float4 base = gBaseColorFactor * map.baseColor;
 
     AverSurface s;
-    s.N = averPerturbNormal(v.N, v.wpos, v.uv, map.normalTS);
+    s.N = averPerturbNormal(v.N, v.wpos, uv, map.normalTS);
     s.V = v.V;
     s.H = normalize(v.V + l.direction);
     // Factors MULTIPLY their maps, which is glTF's rule and also what makes an unset map free: the

@@ -34,6 +34,20 @@ enum class AlphaMode : u32 { Opaque = 0, Mask, Blend };
 // slot count, so an array indexed by this is exactly the right size.
 enum class TextureSlot : u32 { BaseColor = 0, MetalRough, Normal, Occlusion, Emissive, Count };
 
+// Where a surface's texture coordinates come from.
+//
+// Mesh is the mesh's own UV set and is right for anything that was unwrapped. WorldAligned projects
+// world position onto the dominant axis of the surface normal instead, at a fixed number of
+// centimetres per tile — which is the only thing that gives a BLOCKOUT a constant texel density.
+// A level built from one unit cube scaled to a floor, a wall and a crate has the same 0..1 UVs on
+// all three, so a mesh-UV material stretches one tile of texture over a sixteen-metre floor and
+// packs the same tile into a fifty-centimetre crate. Unreal calls its version world-aligned
+// texturing and it exists for exactly this reason.
+//
+// Dominant-axis PROJECTION rather than triplanar BLENDING: a blockout is axis-aligned boxes, where
+// projection is exact and seamless, and blending would cost three samples per map instead of one.
+enum class UvMode : u32 { Mesh = 0, WorldAligned };
+
 inline constexpr u32 kTextureSlotCount = static_cast<u32>(TextureSlot::Count);
 
 // Handle-with-generation: materials are INSTANCES that can be destroyed and their slot reused, so a
@@ -94,6 +108,11 @@ struct MaterialDesc {
     f32       alphaCutoff = 0.5f;   // read only under AlphaMode::Mask
     bool      twoSided    = false;
     bool      castShadow  = true;
+
+    // See UvMode. Mesh is the default so an imported asset keeps the parameterisation it was baked
+    // against; nothing about an unwrapped mesh should change because this field was added.
+    UvMode uvMode   = UvMode::Mesh;
+    f32    uvTiling = 200.0f;   // world CENTIMETRES per tile, read only under WorldAligned
 
     TextureRef textures[kTextureSlotCount];
 };

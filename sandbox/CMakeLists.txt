@@ -20,6 +20,10 @@ if(TARGET Aver.Render.PBR)
   # Both are named here for the same reason Voxi's two are: the executable is what the C# layer
   # P/Invokes, so it must depend on the material system whether or not a render feature does.
   target_link_libraries(Sandbox PRIVATE Aver.Render.PBR Aver.Render.PBR.Materials)
+  # The .ocmat reader and the decode-to-GPU step. Both are only meaningful with a material system,
+  # so they hang off the same guard rather than being linked unconditionally: with PBR off the
+  # editor has no material to load a file into and nothing to upload a texture for.
+  target_link_libraries(Sandbox PRIVATE Aver.Formats.Material Aver.Assets.Gpu)
 endif()
 if(TARGET Aver.Scene)
   # The world DLL (brings AVER_MODULE_SCENE=1). Named explicitly for the reason the material system
