@@ -141,7 +141,14 @@ struct PostSettings {
 
     // Bloom. Zero intensity does not weight the pyramid to nothing — it means no pyramid is built
     // and no pass is recorded, which is the difference between "off" and "on and invisible".
-    f32 bloomIntensity = 0.0f;
+    //
+    // ON by default, modestly. With eye adaptation choosing the stop, anything the scene contains
+    // that is genuinely brighter than the exposed range -- the sun disk, a specular highlight, a sky
+    // seen from inside a dark interior -- has nowhere to go but clipped white. Bloom is what carries
+    // that energy back into the image as a halo instead of a flat plateau, and it is the difference
+    // between a highlight reading as bright and reading as blown. Deterministic per frame, unlike
+    // the adaptation, so it needs no capture-run exception.
+    f32 bloomIntensity = 0.06f;
     // Luminance above which a pixel contributes, and the width of the soft knee below it. A hard
     // threshold makes bloom pop in and out as a highlight crosses it, which is far more visible in
     // motion than the halo itself.

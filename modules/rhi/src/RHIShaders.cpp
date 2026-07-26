@@ -177,30 +177,45 @@ static const float PI = 3.14159265;
 // was not missing; it was there and two thirds too dark to see.
 float3 averSunRadiance() { return srgbToLin(gLightColor.rgb) * gSkyParams.z; }
 
+// The dome ABOVE the horizon. Split out from skyColorFull so the ground below it can be LIT by the
+// sky without the two calling each other.
+//
+// The blend parameter is dir.z remapped from [-1,1] to [0,1], which is the curve this engine has
+// always used; gSkyParams.x is the exponent, so the horizon band's height is authorable either way.
+// Interpolated in LINEAR light: blending two sRGB triples and decoding the result is not the same
+// curve as decoding both and blending, and the encode being concave made every midpoint of the sky
+// sag darker than the radiances it lies between.
+float3 averSkyAbove(float3 dir) {
+    return lerp(srgbToLin(gSkyHorizon.rgb), srgbToLin(gSkyZenith.rgb),
+                pow(saturate(dir.z * 0.5 + 0.5), gSkyParams.x));
+}
+
+// What the ground below the horizon actually RADIATES.
+//
+// gGroundColor is an ALBEDO, and it was being used directly as a radiance -- so the lower half of
+// the dome was a flat unlit swatch that read as a painted wall standing behind the scene rather than
+// as a surface receding into the distance. The ground is a surface: what a camera sees is its albedo
+// times the light falling on it, over pi. It faces up, so it collects the sun at cos(elevation) and
+// the whole upper hemisphere of sky.
+float3 averGroundRadiance() {
+    float3 albedo = srgbToLin(gGroundColor.rgb);
+    float  ndl    = saturate(normalize(gLightDir.xyz).z);
+    // The sky's contribution to a horizontal surface: a hemisphere of radiance L delivers PI*L.
+    float3 E = averSunRadiance() * ndl + PI * averSkyAbove(float3(0, 0, 0.5)) * gAmbient.r;
+    return albedo * E / PI;
+}
+
 float3 skyColorFull(float3 dir)
 {
-    // The blend parameter is dir.z remapped from [-1,1] to [0,1], which is the curve this engine has
-    // always used and is deliberately NOT changed to the physically tidier saturate(dir.z). The
-    // tidier one is arguably more correct -- it puts the authored horizon colour AT the horizon
-    // instead of two thirds of the way to the zenith -- but it is also a different image, and the
-    // default of a new authoring surface must not move a pixel. gSkyParams.x is the exponent, so a
-    // person who wants the horizon band higher or lower has a control for it either way.
-    // Interpolated in LINEAR light, not in gamma-encoded values. Blending two sRGB triples and
-    // decoding the result is not the same curve as decoding both and blending: the encode is
-    // concave, so a midpoint comes out darker than the average of the two radiances -- which is a
-    // sky whose whole gradient sags in the middle, and an ambient term that inherits the sag.
-    float3 above = lerp(srgbToLin(gSkyHorizon.rgb), srgbToLin(gSkyZenith.rgb),
-                        pow(saturate(dir.z * 0.5 + 0.5), gSkyParams.x));
-    // Below the horizon the dome stops being sky. Without this it simply continues underneath the
-    // camera, which is visible the moment anything reflective or downward-facing samples it. A soft
-    // band rather than a hard line at z = 0, because the ground is not a mirror.
-    //
-    // Weighted by gGroundColor.a, which DEFAULTS TO ZERO: with no ground authored the sky continues
-    // below the horizon exactly as it always has. That is not timidity -- a downward reflection
-    // vector picking up a ground colour changes every glancing highlight in the scene, and a default
-    // that repaints the image is a default nobody asked for.
-    float g = saturate(-dir.z * 8.0) * gGroundColor.a;
-    return lerp(above, srgbToLin(gGroundColor.rgb), g);
+    float3 above = averSkyAbove(dir);
+    // The ground fades in across the whole lower hemisphere, not in a seven-degree band at the
+    // horizon. The old saturate(-dir.z * 8.0) reached full ground within about seven degrees, which
+    // put a hard edge under the horizon and a flat colour everywhere below it -- exactly the two
+    // things that make a dome read as a wall. A smoothstep over the first twenty degrees leaves the
+    // near-horizon band sky-coloured, which is also what aerial perspective does: that is where the
+    // air between you and the ground is deepest.
+    float g = smoothstep(0.0, 0.35, saturate(-dir.z)) * gGroundColor.a;
+    return lerp(above, averGroundRadiance(), g);
 }
 // The one every shading path already calls. It forwards to skyColorFull so the authored atmosphere
 // reaches the AMBIENT term as well as the visible dome -- the sky is the fill light, and a version
@@ -233,7 +248,10 @@ float3 averSkyIrradiance(float3 N) {
     // under-represented for a downward-facing surface. Fold in the fraction of the hemisphere that
     // is below the horizon explicitly.
     float belowFraction = saturate(0.5 - N.z * 0.5) * gGroundColor.a;
-    return lerp(dome, srgbToLin(gGroundColor.rgb), belowFraction * 0.5);
+    // The LIT ground, for the same reason the visible dome uses it: bouncing a raw albedo into the
+    // scene as though it were radiance makes the ground a light source of its own brightness rather
+    // than a surface reflecting the sky.
+    return lerp(dome, averGroundRadiance(), belowFraction * 0.5);
 }
 
 // ---- PBR mesh with sky ambient + distance fog ----
