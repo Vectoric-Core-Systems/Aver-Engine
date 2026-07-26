@@ -2483,7 +2483,9 @@ bool D3D12Device::createPostTargets() {
         }
     };
 
-    writeTriple(kPostTriplePrefilter, scene, 0, scene, 0, false);
+    // t2 is the EXPOSURE buffer, because the bloom threshold has to be applied to exposed
+    // radiance -- see averBloomPrefilter.
+    writeTriple(kPostTriplePrefilter, scene, 0, scene, 0, true);
     writeTriple(kPostTripleHistogram, scene, 0, scene, 0, false);
     writeTriple(kPostTripleComposite, scene, 0, bloomTex_.Get(), 0, true);
     for (u32 m = 1; m < bloomMips_; ++m) {
@@ -2684,30 +2686,6 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     auto mipW = [&](u32 m) { return bloomW_ >> m ? bloomW_ >> m : 1u; };
     auto mipH = [&](u32 m) { return bloomH_ >> m ? bloomH_ >> m : 1u; };
 
-    // ---- bloom ----
-    if (bloom) {
-        bloomTo(0, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        fillCommon(mipW(0), mipH(0), width_, height_);
-        D3D12_CPU_DESCRIPTOR_HANDLE rtv = bloomRtv(0);
-        fullscreen(bloomPrefilterPso_.Get(), kPostTriplePrefilter, mipW(0), mipH(0), &rtv);
-
-        for (u32 m = 1; m < bloomMips_; ++m) {
-            bloomTo(m - 1, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            bloomTo(m, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            fillCommon(mipW(m), mipH(m), mipW(m - 1), mipH(m - 1));
-            rtv = bloomRtv(m);
-            fullscreen(bloomDownPso_.Get(), kPostTripleDownBase + (m - 1), mipW(m), mipH(m), &rtv);
-        }
-        for (u32 m = bloomMips_; m-- > 1;) {
-            bloomTo(m, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            bloomTo(m - 1, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            fillCommon(mipW(m - 1), mipH(m - 1), mipW(m), mipH(m));
-            rtv = bloomRtv(m - 1);
-            fullscreen(bloomUpPso_.Get(), kPostTripleUpBase + (m - 1), mipW(m - 1), mipH(m - 1), &rtv);
-        }
-        bloomTo(0, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    }
-
     // ---- eye adaptation ----
     if (autoExp) {
         const u32 hw = width_ / kHistogramDownscale > 1 ? width_ / kHistogramDownscale : 1;
@@ -2738,15 +2716,42 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
     }
 
-    // ---- composite ----
-    fillCommon(width_, height_, width_, height_);
+    // The exposure buffer stays READABLE from here to the end of the chain: the bloom prefilter
+    // below reads it to threshold on exposed radiance, and the composite reads it to apply the
+    // exposure itself. Moved out of UnorderedAccess once, not twice.
     {
-        // Moved to a readable state whether or not the composite's permutation samples it. The
-        // descriptor is bound either way, and GPU-based validation checks the STATE of everything a
-        // bound table names, not only what a shader happens to touch.
         auto expToSrv = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         cmdList_->ResourceBarrier(1, &expToSrv);
+    }
+
+    // ---- bloom ----
+    if (bloom) {
+        bloomTo(0, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        fillCommon(mipW(0), mipH(0), width_, height_);
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv = bloomRtv(0);
+        fullscreen(bloomPrefilterPso_.Get(), kPostTriplePrefilter, mipW(0), mipH(0), &rtv);
+
+        for (u32 m = 1; m < bloomMips_; ++m) {
+            bloomTo(m - 1, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            bloomTo(m, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            fillCommon(mipW(m), mipH(m), mipW(m - 1), mipH(m - 1));
+            rtv = bloomRtv(m);
+            fullscreen(bloomDownPso_.Get(), kPostTripleDownBase + (m - 1), mipW(m), mipH(m), &rtv);
+        }
+        for (u32 m = bloomMips_; m-- > 1;) {
+            bloomTo(m, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            bloomTo(m - 1, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            fillCommon(mipW(m - 1), mipH(m - 1), mipW(m), mipH(m));
+            rtv = bloomRtv(m - 1);
+            fullscreen(bloomUpPso_.Get(), kPostTripleUpBase + (m - 1), mipW(m - 1), mipH(m - 1), &rtv);
+        }
+        bloomTo(0, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
+
+    // ---- composite ----
+    fillCommon(width_, height_, width_, height_);
+    {
         auto toRt = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
         cmdList_->ResourceBarrier(1, &toRt);
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();

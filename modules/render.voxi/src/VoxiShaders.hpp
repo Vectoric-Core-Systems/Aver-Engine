@@ -121,7 +121,11 @@ float shadowFactor(float3 wpos, float3 N, float ndl) {
     float slope = saturate(1.0 - ndl);
     [loop] for (uint c = 0; c < count; ++c) {
         if (distance(wpos, gCamPos.xyz) > gCascadeSplit[c].x) continue;
-        float bias = gCascadeSplit[c].y * (1.0 + 2.0 * slope);
+        // Up to TWO texels at grazing incidence, not four and a half. The offset moves the sample
+        // position along the normal, so every texel of it erodes the shadow's edge inward -- a
+        // generous bias buys freedom from acne by paying in crispness, and 4.5 texels was paying
+        // far more than the acne was worth.
+        float bias = gCascadeSplit[c].y * (1.0 + slope);
         float s = shadowSampleCascade(wpos + N * bias, c);
         if (s >= 0.0) return s;
     }

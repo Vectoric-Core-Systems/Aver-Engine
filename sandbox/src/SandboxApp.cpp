@@ -1453,6 +1453,7 @@ public:
     void setRtOverride(int q) { rtOverride_ = q; }                              // --rt
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
+    void setProbeRel(f32 u, f32 v) { probeU_ = u; probeV_ = v; }                 // --probe-rel U V
     void setScriptsDir(std::string d) { scriptsDir_ = std::move(d); }            // --scripts <dir>
     void setSpawnTest(std::string cls) { spawnTestClass_ = std::move(cls); }      // --spawn-test <ClassName>
     void setPlayTest() { playTest_ = true; }                                       // --play-test
@@ -3677,8 +3678,17 @@ private:
         // `--probe X Y` overrides it with absolute backbuffer pixels. Needed because the centre
         // lands on the cube's UNLIT left face, where ndl is ~0 and the sun term drops out entirely
         // -- so any shadow/ray-tracing A/B must probe a sunlit or cast-shadow pixel instead.
-        const u32 px_ = probeX_ ? probeX_ : (u32)(vpX_ + vpW_*0.5f);
-        const u32 py_ = probeY_ ? probeY_ : (u32)(vpY_ + vpH_*0.5f);
+        // A RELATIVE probe is resolved against the live viewport rect, an absolute one is taken as
+        // given, and no probe at all means the centre. The relative form exists because the absolute
+        // one has broken the oracle twice: it encodes a pixel, not the thing the pixel was chosen
+        // for, so any change to the dock layout OR to the scene silently repoints it at a different
+        // surface while every gate keeps reporting a number. Both times the tell was the same --
+        // the centre probes, which the engine has always derived from the rect, kept passing while
+        // the hard-coded ones failed.
+        const u32 px_ = probeU_ >= 0.0f ? (u32)(vpX_ + vpW_ * probeU_)
+                      : (probeX_ ? probeX_ : (u32)(vpX_ + vpW_*0.5f));
+        const u32 py_ = probeV_ >= 0.0f ? (u32)(vpY_ + vpH_ * probeV_)
+                      : (probeY_ ? probeY_ : (u32)(vpY_ + vpH_*0.5f));
         if (f==sf) {
             e.device()->requestCapture(px_, py_);
             // Latch the rect the request was made against. The rect is written by buildUI and can
@@ -3788,6 +3798,7 @@ private:
     int  rtOverride_=0;              // --rt: ray tracing quality at startup
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
+    f32  probeU_=-1.0f, probeV_=-1.0f;   // --probe-rel U V: a FRACTION of the viewport rect
     bool useWarp_=false;             // --warp: run on the D3D12 software rasteriser
     bool debugLayer_=false;          // --debug-layer: validate every graphics call (a real per-call tax)
     std::string scriptsDir_;         // --scripts <dir>: where to look for user script assemblies
@@ -4210,7 +4221,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -4271,6 +4282,10 @@ Application* createApplication(int argc, char** argv) {
             clouds=1;
             if (i+1 < argc && argv[i+1][0] != '-') cloudCover=static_cast<f32>(std::atof(argv[++i]));
         }
+        else if (!std::strcmp(argv[i],"--probe-rel") && i+2<argc) {
+            probeU=static_cast<f32>(std::atof(argv[++i]));
+            probeV=static_cast<f32>(std::atof(argv[++i]));
+        }
         else if (!std::strcmp(argv[i],"--tool") && i+1<argc) {
             const char* t=argv[++i];
             tool = !std::strcmp(t,"move")?Tool::Move : !std::strcmp(t,"rotate")?Tool::Rotate :
@@ -4312,6 +4327,7 @@ Application* createApplication(int argc, char** argv) {
     app->setRtOverride(rt);
     app->setMsOverride(ms);
     app->setProbe(probeX, probeY);
+    if (probeU >= 0.0f) app->setProbeRel(probeU, probeV);
     app->setScriptsDir(scriptsDir);
     app->setSpawnTest(spawnTest);
     if (playTest) app->setPlayTest();

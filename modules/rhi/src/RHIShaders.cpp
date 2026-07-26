@@ -684,6 +684,12 @@ float3 averBloomKaris(float3 c) { return c / (1.0 + averLuminance(c)); }
 // Soft-knee threshold, the standard quadratic ramp. A hard cut makes bloom appear and disappear as
 // a highlight crosses it, which reads as flicker in motion and is far more objectionable than the
 // halo the threshold exists to control.
+// The exposure this frame settled on, as the bloom threshold must see it. gPostMisc.y is the
+// auto-exposure flag; with it off the authored value applies.
+float averPostExposure() {
+    return gPostMisc.y > 0.5 ? asfloat(gPostExpRead.Load(0)) : gPostTone.x;
+}
+
 float3 averBloomPrefilter(float3 c) {
     float br = max(c.r, max(c.g, c.b));
     float knee = max(gPostTone.w, 1e-4);
@@ -712,7 +718,12 @@ float4 PSBloomPrefilter(AverPostVSOut i) : SV_TARGET {
     float3 c = gPostSceneTex.SampleLevel(gPostSamp, i.uv + float2(-o.x,  o.y), 0).rgb;
     float3 d = gPostSceneTex.SampleLevel(gPostSamp, i.uv + float2( o.x,  o.y), 0).rgb;
     float3 sum = averBloomKaris(a) + averBloomKaris(b) + averBloomKaris(c) + averBloomKaris(d);
-    return float4(averBloomPrefilter(sum * 0.25), 1.0);
+    // EXPOSED before it is thresholded. The threshold asks "is this brighter than white?", and white
+    // is a property of the exposed image, not of the raw radiance. Thresholding unexposed radiance
+    // meant that any scene needing an exposure above 1 -- which is any scene darker than a lit
+    // studio, SkyForge included at about 3x -- had nothing at all cross the threshold, so bloom was
+    // switched on, costing a full pyramid every frame, and producing exactly nothing.
+    return float4(averBloomPrefilter(sum * 0.25 * averPostExposure()), 1.0);
 }
 
 // Jimenez' 13-tap downsample (Call of Duty: Advanced Warfare, SIGGRAPH 2014). The extra centre box
@@ -857,13 +868,15 @@ void CSExposure() {
 // round trip through memory per stage for no benefit at all.
 float4 PSComposite(AverPostVSOut i) : SV_TARGET {
     float3 c = gPostSceneTex.SampleLevel(gPostSamp, i.uv, 0).rgb;
-#ifdef AVER_POST_BLOOM
-    c += gPostBloomTex.SampleLevel(gPostSamp, i.uv, 0).rgb * gPostTone.y;
-#endif
+    // Exposure FIRST. The bloom pyramid was built from an already-exposed scene, so adding it before
+    // this would expose it a second time.
 #ifdef AVER_POST_AUTOEXPOSURE
     c *= asfloat(gPostExpRead.Load(0));
 #else
     c *= gPostTone.x;
+#endif
+#ifdef AVER_POST_BLOOM
+    c += gPostBloomTex.SampleLevel(gPostSamp, i.uv, 0).rgb * gPostTone.y;
 #endif
     return float4(toGamma(acesTonemap(c)), 1.0);
 }
