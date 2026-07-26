@@ -230,7 +230,30 @@ struct SkyAtmosphere {
     // and the result differs from an authored vector in the last few bits. That is invisible to a
     // person and not at all invisible to a pixel-exact oracle, so the conversion happens where the
     // editing does. setSunAngles / sunAngles below are that conversion.
-    f32 sunDirection[3] = {-0.55f, -0.45f, 0.55f};
+    //
+    // A THREE-QUARTER KEY, from setSunAngles(48, 145). The number to keep in mind is not the
+    // elevation but the angle between this vector and the camera: the previous default sat 172
+    // degrees from the editor's view axis, which is eight degrees off being directly behind the
+    // eye. That is on-camera flash. Every visible face was lit at once, every cast shadow fell into
+    // the blind spot its own caster occupies, and no reflection vector could ever find the sun -- a
+    // capture of it put 48% of the frame inside a single 16-level luminance band with nothing
+    // brighter than 227/255. It read as a diagram rather than a photograph, and no amount of
+    // tuning downstream of it could have helped.
+    //
+    // 145 degrees is not free choice: the editor has TWO default cameras looking in OPPOSITE
+    // directions -- the placeholder scene at sandbox/src/SandboxApp.cpp:765 (bearing 225) and the
+    // level-load framing at :3969 (bearing 45) -- so no azimuth is over the shoulder of both, and
+    // the only band that serves both is the near-perpendicular one. This lands 118.8 degrees off
+    // the level camera and 101.6 off the placeholder's. Move either camera and this wants
+    // re-deriving with it.
+    //
+    // 48 degrees of elevation is chosen against the shadow bias rather than by eye. The cascade's
+    // normal-offset (modules/render.voxi/src/VoxiRenderer.cpp:589 and VoxiShaders.hpp:121-129)
+    // buys 1.5*(2 - sin el)*sin el texels of depth and needs 0.5*cot(el); that ratio is monotone
+    // in elevation and goes under water at 25 degrees. 48 holds a 3.1x margin where the old 37.7
+    // held 2.0x, and leaves 23.8 degrees before |z| > 0.95 flips the light basis at
+    // VoxiRenderer.cpp:510, which has no hysteresis.
+    f32 sunDirection[3] = {-0.5481f, 0.3838f, 0.7431f};
     f32 sunColor[3]     = {1.0f, 0.96f, 0.90f};
     // 3.0 because that is the factor the lit pass had hardcoded. Making it authored is the point:
     // the same number now scales the direct light, the GI injection and the sun disk, where before

@@ -46,7 +46,13 @@ struct OcWorldData {
 
     // Environment. Optional: a world that sets none inherits whatever the editor has.
     bool hasSun = false;
-    f64 sunDir[3] = {-0.3, -0.4, -0.85};
+    // POINTS TOWARD THE LIGHT, the same convention as rhi::SkyAtmosphere::sunDirection, and its
+    // default is the same sun. It was {-0.3, -0.4, -0.85} -- the exact negation of the engine's
+    // then-default -- so the field was either authored as a direction of TRAVEL or was a sign slip,
+    // and nothing consumes it yet to settle which. Nothing consuming it is precisely why this is
+    // worth pinning down now: the first code to read it would inherit a sun below the horizon and
+    // the bug would present as "the level is unlit", a long way from this line.
+    f64 sunDir[3] = {-0.5481, 0.3838, 0.7431};
     f64 sunColor[3] = {1.0, 0.98, 0.92};
     f64 sunLux = 100000.0;
 

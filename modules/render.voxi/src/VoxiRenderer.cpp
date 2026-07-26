@@ -506,7 +506,12 @@ u32 VoxiRenderer::fitCascades() {
     if (!(zFar > zNear)) return 0;
 
     Vec3 dir = Vec3{sunDir_[0], sunDir_[1], sunDir_[2]}.getSafeNormal();
-    if (dir.sizeSquared() < 0.5f) dir = Vec3{0.3f, 0.4f, 0.85f}.getSafeNormal();
+    // Only reachable if setSun() was handed an exactly-zero vector -- sunDir_'s own default is a
+    // unit direction. Falls back to the engine default rather than to a fourth invented sun.
+    if (dir.sizeSquared() < 0.5f) {
+        const rhi::SkyAtmosphere def{};
+        dir = Vec3{def.sunDirection[0], def.sunDirection[1], def.sunDirection[2]}.getSafeNormal();
+    }
     const Vec3 up = std::fabs(dir.z) > 0.95f ? Vec3{1, 0, 0} : Vec3{0, 0, 1};
 
     const Vec3 volCentre{center_[0], center_[1], center_[2]};

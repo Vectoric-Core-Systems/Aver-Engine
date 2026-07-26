@@ -59,10 +59,22 @@ $WarpSpacingMs = 4000
 #                           paths -- so without these, `--force-caps no-rt` produces thirteen
 #                           identical numbers and proves nothing about the fallback it exists to test.
 #   sunlit / sunlit-gi      a sunlit floor pixel that actually receives DIRECT SPECULAR. The centre
-#                           probe sits on the cube's unlit left face (ndl ~ 0) and (1413,1042) sits
-#                           in shadow (visibility ~ 0), so a change to the whole masking-shadowing
-#                           formulation once left all thirteen bit-identical. BRDF work had no
-#                           automated cover at all until this gate existed.
+#                           probe was sun-blind and (1413,1042) sits in shadow (visibility ~ 0), so a
+#                           change to the whole masking-shadowing formulation once left all thirteen
+#                           bit-identical. BRDF work had no automated cover at all until this gate
+#                           existed.
+#
+# THE CENTRE PROBE IS NO LONGER SUN-BLIND, and that is not a value change -- it is the premise of the
+# sentence above dissolving. It held only because the old default sun sat 8 degrees behind the
+# camera: the centre pixel aims straight down the view axis at the placeholder cube's +X/+Y CORNER
+# EDGE, and the two candidate faces both had ndl exactly 0, so which one the rasteriser handed the
+# pixel could not matter. Under the sun this engine now defaults to, ndl is 0 on +X and 0.3838 on
+# +Y, and a subpixel decision -- flipped by MSAA, by WARP versus hardware, by any viewport parity
+# change -- decides whether the probe sees direct sun.
+#
+# So the centre probe must be RE-PICKED off the corner edge, not merely re-recorded. It was always
+# sitting on a geometric discontinuity; identical shading on both faces was masking it, and better
+# lighting took the mask off. Re-recording alone would freeze a coin flip into the baseline.
 $Gates = @(
     # --no-gi ON THE TEN NON-GI GATES, and it is not decoration. Global illumination became the
     # ENGINE DEFAULT, so "GI off" is now a thing that has to be asked for. Without these flags the

@@ -927,7 +927,8 @@ public:
             voxiRenderer_.setSettings(vs);
             voxiRenderer_.setVolume(c, giExtent_);
             voxiRenderer_.setDebugView(giDebugView_);
-            const Vec3 sd = Vec3{sunAz_, sunAlt_, sunUp_}.getSafeNormal();
+            const Vec3 sd = Vec3{sky_.sunDirection[0], sky_.sunDirection[1],
+                                 sky_.sunDirection[2]}.getSafeNormal();
             voxiRenderer_.setSun(&sd.x, sunColor_, sunAmbient_);
         }
 #endif
@@ -978,7 +979,6 @@ public:
         // UNNORMALISED exactly as setLight received it: the shaders normalise, and normalising here
         // too would change the last bits of a value the pixel oracle measures.
         sky_.enabled = true;
-        sky_.sunDirection[0] = sunAz_; sky_.sunDirection[1] = sunAlt_; sky_.sunDirection[2] = sunUp_;
         for (int i = 0; i < 3; ++i) {
             sky_.sunColor[i] = sunColor_[i];
             sky_.zenith[i]   = skyZenith_[i];
@@ -3164,16 +3164,14 @@ private:
             // only when a slider actually moves, so an untouched sun keeps the exact vector it was
             // authored with rather than being pushed through two transcendentals every frame.
             {
-                rhi::SkyAtmosphere probe = sky_;
-                probe.sunDirection[0] = sunAz_; probe.sunDirection[1] = sunAlt_; probe.sunDirection[2] = sunUp_;
                 f32 elev = 0.0f, azim = 0.0f;
-                probe.sunAngles(elev, azim);
+                sky_.sunAngles(elev, azim);
                 bool moved = ImGui::SliderFloat("Elevation", &elev, -20.0f, 90.0f, "%.1f deg");
                 moved |= ImGui::SliderFloat("Azimuth", &azim, -180.0f, 180.0f, "%.1f deg");
-                if (moved) {
-                    probe.setSunAngles(elev, azim);
-                    sunAz_ = probe.sunDirection[0]; sunAlt_ = probe.sunDirection[1]; sunUp_ = probe.sunDirection[2];
-                }
+                // Written back ONLY on a real move: sunAngles/setSunAngles is a lossy round trip
+                // through two transcendentals, and running it every frame would walk the authored
+                // vector's last bits under a pixel-exact oracle that measures them.
+                if (moved) sky_.setSunAngles(elev, azim);
             }
             ImGui::SliderFloat("Intensity", &sky_.sunIntensity, 0.0f, 8.0f, "%.2f");
             // A temperature REPLACES the colour rather than tinting it, so the control that is not
@@ -3747,7 +3745,16 @@ private:
     // drawn after every surface is down rather than in the middle of the loop.
     Mat4 selectionOutline_{}; rhi::MeshHandle selectionMesh_ = 0; bool hasSelection_ = false;
     // sun
-    f32 sunAz_=-0.55f, sunAlt_=-0.45f, sunUp_=0.55f, sunColor_[3]={1.0f,0.96f,0.9f}, sunAmbient_=1.0f;   // the sky as a LIGHT, at its real brightness
+    //
+    // The DIRECTION deliberately does not live here. It used to, as sunAz_/sunAlt_/sunUp_ -- three
+    // floats that were not an azimuth, an altitude and an up at all, but the x, y and z of a
+    // direction vector wearing three angle names. That is why (-0.55, -0.45, 0.55) survived review
+    // for so long: nobody reading "azimuth -0.55, altitude -0.45" questions it. It also meant
+    // rhi::SkyAtmosphere's default was overwritten from here every frame before it was ever
+    // sampled, so editing the engine's default sun changed nothing and only editing this line did.
+    // sky_.sunDirection is the single owner now; the editor inherits the engine default by
+    // construction and cannot disagree with it.
+    f32 sunColor_[3]={1.0f,0.96f,0.9f}, sunAmbient_=1.0f;   // the sky as a LIGHT, at its real brightness
     // sky + atmosphere
     f32 skyZenith_[3]={0.19f,0.42f,0.78f}, skyHorizon_[3]={0.72f,0.80f,0.90f};
     // A TINT on the in-scattered sky (white = clear air), and an extinction per CENTIMETRE:
@@ -3756,10 +3763,11 @@ private:
     // The camera's post chain, at its identity defaults. See rhi::PostSettings for why they are the
     // identity and not something prettier.
     rhi::PostSettings post_{};
-    // The authored sky, sun and air. The sun direction, colours and fog density are still driven by
-    // the older sunAz_/skyZenith_/fogDensity_ members the Details panel edits, so this carries the
-    // fields those do not: atmosphere height, ground albedo, colour temperature, the sun's angular
-    // size and the whole cloud layer.
+    // The authored sky, sun and air, and the SOLE owner of the sun's direction. The colours and the
+    // fog density are still driven by the older skyZenith_/fogColor_/fogDensity_ members the
+    // Details panel edits and copied in each frame; everything else -- direction, atmosphere
+    // height, ground albedo, colour temperature, the sun's angular size and the whole cloud layer
+    // -- lives here and nowhere else.
     rhi::SkyAtmosphere sky_{};
     f32 cloudTime_ = 0.0f;   // seconds of accumulated wind; only advances when clouds are on
     bool capDone_=false;

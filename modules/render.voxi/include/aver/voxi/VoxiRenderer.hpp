@@ -216,9 +216,18 @@ private:
     // cascades, 0 when there is no camera to fit to.
     u32 fitCascades();
     bool giEnabled() const { return settings_.globalIllumination != Quality::Off; }
-    f32 sunDir_[3] = {0, 0, 1};
-    f32 sunColor_[3] = {1, 1, 1};
-    f32 ambient_ = 0.2f;
+    // FROM the engine's default sky, not a restatement of it. sunDir_ was {0, 0, 1} -- a sun
+    // straight overhead -- so on any frame before setSun() ran, the cascades and the GI injection
+    // used a direction nothing else in the engine agreed with. It also made the degenerate-input
+    // guard in fitCascades() unreachable: getSafeNormal({0,0,1}) has sizeSquared 1, so that
+    // fallback could only ever fire for an exactly-zero vector, which is not what it was guarding.
+    f32 sunDir_[3]   = {rhi::SkyAtmosphere{}.sunDirection[0],
+                        rhi::SkyAtmosphere{}.sunDirection[1],
+                        rhi::SkyAtmosphere{}.sunDirection[2]};
+    f32 sunColor_[3] = {rhi::SkyAtmosphere{}.sunColor[0],
+                        rhi::SkyAtmosphere{}.sunColor[1],
+                        rhi::SkyAtmosphere{}.sunColor[2]};
+    f32 ambient_     = rhi::SkyAtmosphere{}.skyLightIntensity;
 
     u32  voxelMips_ = 0, voxelResBuilt_ = 0;
     bool giReady_ = false, rtSupported_ = false, rtActive_ = false, debugView_ = false;

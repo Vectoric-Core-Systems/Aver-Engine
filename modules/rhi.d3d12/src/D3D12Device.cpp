@@ -1328,9 +1328,13 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     queryCaps();
     if (!(caps_.msaaMask & sampleCount_)) sampleCount_ = 1; // fall back if 4x is unsupported
 
-    // Sensible default light so meshes are lit before the app sets one.
-    const f32 d[3] = {0.3f, 0.4f, 0.85f}, c[3] = {1, 1, 1};
-    setLight(d, c, 0.15f);
+    // A default light so meshes are lit before the app authors a sky. Taken FROM the engine default
+    // rather than restated: this had its own vector and its own 0.15 fill, which meant a host that
+    // never called setSkyAtmosphere was lit by a sun nothing else in the engine agreed with, under a
+    // fill light six commits stale. A default that disagrees with the default is worse than no
+    // default, because it looks deliberate.
+    const SkyAtmosphere def{};
+    setLight(def.sunDirection, def.sunColor, def.skyLightIntensity);
 
     if (!createPipeline()) return false;
     // The camera post chain's size-independent half. Its targets are built lazily on the

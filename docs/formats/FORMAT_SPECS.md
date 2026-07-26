@@ -429,7 +429,7 @@ STREAM cell_12_7 aabb=… assets=[{guid:…},…]
 
 # --- NEW: lighting / environment ---
 ENV sky {octex-cube guid:0x…} intensity 1.0
-SUN dir -0.3 -0.4 -0.85 color 1.0 0.98 0.92 lux 100000
+SUN dir -0.5481 0.3838 0.7431 color 1.0 0.98 0.92 lux 100000   # dir points TOWARD the sun (+Z up)
 FOG exp density 0.0002 color 0.7 0.8 0.9
 
 # --- NEW: terrain / georef (Cesium-style dormant hook) ---
