@@ -839,8 +839,26 @@ public:
                 if (io.MouseWheel != 0.0f) camPos_ += fwd * io.MouseWheel * (flySpeed_ * 0.15f); // dolly
                 if (io.MouseDown[2]) { camPos_ -= right * io.MouseDelta.x * 0.02f; camPos_ += up * io.MouseDelta.y * 0.02f; } // MMB pan
             }
-            if (!io.WantCaptureKeyboard && ImGui::IsKeyPressed(ImGuiKey_F) && sel_ >= 0 && sel_ < (int)objects_.size())
-                camPos_ = objects_[sel_].pos - fwd * 6.0f; // focus selection
+            // F FRAMES THE SELECTION, in either world, at a distance derived from its SIZE.
+            //
+            // It was `objects_[sel_].pos - fwd * 6.0f`, which did nothing at all for a level object
+            // (sel_ names a scene entity now, not an objects_ index) and put the camera six
+            // CENTIMETRES from the thing it framed when it did fire -- six units was a sensible
+            // several metres when the editor was authored at a unit per metre. Framing a 20 m wall
+            // and a 1 m crate from the same distance cannot both be right, so the distance follows
+            // the radius: far enough that the whole thing fits the vertical field of view, with a
+            // margin so it does not touch the frame edge.
+            if (!io.WantCaptureKeyboard && ImGui::IsKeyPressed(ImGuiKey_F) && anySelected()) {
+                EditXform x;
+                if (selectedXform(x)) {
+                    const f32 r = selectedRadius();
+                    const f32 d = std::fmax(50.0f, r / std::tan(radians(30.0f)) * 1.6f);
+                    camPos_ = x.pos - fwd * d;
+                    // The fly speed is per-frame centimetres, so crossing a level you just framed
+                    // should not take a different number of seconds than crossing one you loaded.
+                    flySpeed_ = std::fmax(flySpeed_, r * 0.4f);
+                }
+            }
         }
 #endif
 #if AVER_MODULE_SCRIPTING
@@ -1260,21 +1278,10 @@ public:
         // straight over the pixel the centre gate probes, so the oracle stops measuring the BRDF and
         // starts measuring the selection highlight. Re-recording would have hidden that rather than
         // fixed it: a shading gate must not be able to pass or fail on editor chrome.
-        if (hasSelection_ && !hideEditorScene && maxFrames_ == 0) {
-            static constexpr f32 kSelect[4] = {1.0f, 0.62f, 0.12f, 1.0f};   // UE's selection orange
-            // The shell is grown by a PROPORTION of its distance from the camera, not by a fixed
-            // factor: a constant offset that reads well up close vanishes to sub-pixel across a room,
-            // which is exactly where an outline is most needed to find the thing you selected.
-            const Vec3 sp{selectionOutline_.m[3][0], selectionOutline_.m[3][1], selectionOutline_.m[3][2]};
-            const f32 camDist = (sp - camPos_).size();
-            const f32 grow = 1.0f + std::fmin(0.12f, std::fmax(0.02f, camDist * 0.000009f));
-            Mat4 o = selectionOutline_;
-            for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) o.m[r][c] *= grow;
-            e.device()->setWireframe(true);
-            e.device()->drawMesh(selectionMesh_, &o.m[0][0], kSelect, 0.0f, 1.0f);
-            e.device()->setWireframe(wireframe_);
-        }
-        hasSelection_ = false;
+        // The DRAW is below, after the scene-entity pass. It used to sit here, which meant only an
+        // objects_ entry could ever be outlined -- the pass that draws level geometry had not run yet,
+        // and hasSelection_ was cleared on the next line. It was also gated on !hideEditorScene, which
+        // is true exactly when a level is loaded, so selecting a wall lit up nothing twice over.
 #if AVER_MODULE_SCENE
         // Scene-entity pass: draw every live entity carrying a CMeshRenderer. This is the bridge from a
         // SPAWNED actor — which lives in the world, not in objects_ above — to the screen. It is additive
@@ -1334,6 +1341,8 @@ public:
                                                sizeof(pbr::MaterialConstants));
 #endif
                 e.device()->drawMesh(it->second, &wm.m[0][0], col, metallic, roughness);
+                if (sel_ == kSelScene && ent == selEntity_)
+                    selectionOutline_ = wm, selectionMesh_ = it->second, hasSelection_ = true;
                 ++drawn;
             }
             if (drawn != lastSceneDrawn_) {   // one log line when the count changes, never per frame
@@ -1343,6 +1352,37 @@ public:
             }
         }
 #endif
+        // The selection outline, in Unreal's bright orange-yellow. AFTER both passes, so it does not
+        // care which world the selected thing lives in -- whichever pass drew it latched its matrix
+        // and its mesh, and only a pass that actually drew something can have latched.
+        //
+        // Drawn as a WIREFRAME pass over the top rather than by tinting the surface: a tint says
+        // "this object is a slightly different colour", which is unreadable against a scene that
+        // already has colours in it, whereas an edge that follows the silhouette says "this one" at
+        // any distance and against any background.
+        //
+        // Interactive runs only. The outline is an editor AFFORDANCE, not part of the scene's shading,
+        // and the cube primitive is triangulated -- so a wireframe pass draws a diagonal across every
+        // face, not merely the silhouette. Enlarged, that diagonal lands in front of the face and
+        // straight over the pixel the centre gate probes, so the oracle stops measuring the BRDF and
+        // starts measuring the selection highlight. Re-recording would have hidden that rather than
+        // fixed it: a shading gate must not be able to pass or fail on editor chrome.
+        if (hasSelection_ && maxFrames_ == 0) {
+            static constexpr f32 kSelect[4] = {1.0f, 0.62f, 0.12f, 1.0f};   // UE's selection orange
+            // The shell is grown by a PROPORTION of its distance from the camera, not by a fixed
+            // factor: a constant offset that reads well up close vanishes to sub-pixel across a room,
+            // which is exactly where an outline is most needed to find the thing you selected.
+            const Vec3 sp{selectionOutline_.m[3][0], selectionOutline_.m[3][1], selectionOutline_.m[3][2]};
+            const f32 camDist = (sp - camPos_).size();
+            const f32 grow = 1.0f + std::fmin(0.12f, std::fmax(0.02f, camDist * 0.000009f));
+            Mat4 o = selectionOutline_;
+            for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) o.m[r][c] *= grow;
+            e.device()->setWireframe(true);
+            e.device()->drawMesh(selectionMesh_, &o.m[0][0], kSelect, 0.0f, 1.0f);
+            e.device()->setWireframe(wireframe_);
+        }
+        hasSelection_ = false;
+
         e.device()->setWireframe(false); // lines are always solid
         if (showGrid_) {
             // The grid mesh is built as a 40-unit extent with a 2-unit step, which is a 40cm grid of
@@ -1756,6 +1796,102 @@ private:
     }
     bool movableSelected() const { return sel_ >= 0 && sel_ < (int)objects_.size(); }
 
+    // THE GIZMO'S VIEW OF A SELECTION, and the reason the manipulation maths below needs no idea
+    // which world it is editing. The field NAMES match MeshObj's on purpose: applyMove/applyRotate/
+    // applyScale were written against MeshObj and now take one of these unchanged.
+    //
+    // Euler degrees rather than a quaternion because that is what the tools manipulate -- the rotate
+    // tool adds to one component and snaps it, which is a statement about angles and not about
+    // orientations, and round-tripping it through a quaternion every drag would drift.
+    struct EditXform { Vec3 pos, rotDeg, scale; };
+
+    // True when the selection is a THING IN THE WORLD -- either world -- as opposed to nothing or one
+    // of the sun/sky/post pseudo-entries, which have no transform to manipulate.
+    bool anySelected() const {
+#if AVER_MODULE_SCENE
+        if (sel_ == kSelScene) return scene::World::instance().valid(selEntity_);
+#endif
+        return movableSelected();
+    }
+
+    bool selectedXform(EditXform& x) const {
+#if AVER_MODULE_SCENE
+        if (sel_ == kSelScene) {
+            const scene::World& w = scene::World::instance();
+            if (!w.valid(selEntity_)) return false;
+            const auto* loc = w.component<scene::CLocal>(selEntity_, scene::kComponentLocal);
+            if (!loc) return false;
+            x.pos = loc->xf.position;
+            x.rotDeg = eulerDegFromQuat(loc->xf.rotation);
+            x.scale = loc->xf.scale;
+            return true;
+        }
+#endif
+        if (!movableSelected()) return false;
+        const MeshObj& o = objects_[sel_];
+        x.pos = o.pos; x.rotDeg = o.rotDeg; x.scale = o.scale;
+        return true;
+    }
+
+    void setSelectedXform(const EditXform& x) {
+#if AVER_MODULE_SCENE
+        if (sel_ == kSelScene) {
+            scene::World& w = scene::World::instance();
+            if (!w.valid(selEntity_)) return;
+            Transform xf;
+            xf.position = x.pos;
+            xf.rotation = quatFromEulerDeg(x.rotDeg);
+            xf.scale    = x.scale;
+            // Through the setter, never into the component: the world caches world matrices and this
+            // is what invalidates them. See the Details panel for the same reasoning.
+            w.setLocalTransform(selEntity_, xf);
+            return;
+        }
+#endif
+        if (!movableSelected()) return;
+        MeshObj& o = objects_[sel_];
+        o.pos = x.pos; o.rotDeg = x.rotDeg; o.scale = x.scale;
+    }
+
+    // What the status bar calls the selection. Covers both worlds and the pseudo-entries, so the bar
+    // stops saying "nothing selected" while a wall is plainly outlined in orange.
+    std::string selectionLabel() const {
+#if AVER_MODULE_SCENE
+        if (sel_ == kSelScene && scene::World::instance().valid(selEntity_)) {
+            const auto it = entityLabels_.find(static_cast<u32>(selEntity_));
+            if (it != entityLabels_.end()) return it->second;
+            const std::string nm = scene::World::instance().name(selEntity_);
+            return nm.empty() ? ("Entity " + std::to_string((u32)selEntity_)) : nm;
+        }
+#endif
+        if (movableSelected()) return objects_[sel_].name;
+        if (sel_ == -2) return "Directional Light (Sun)";
+        if (sel_ == -3) return "Sky + Atmosphere";
+        if (sel_ == -4) return "Post Process";
+        return "nothing selected";
+    }
+
+    // A radius for framing and for sizing the gizmo: the selection's largest half-extent in world
+    // units. The gizmo used to take its length from camera distance alone, which is right, but F used
+    // a FIXED six units -- six centimetres once the world became centimetres, so focusing put the
+    // camera inside whatever it was focusing on.
+    f32 selectedRadius() const {
+        EditXform x;
+        if (!selectedXform(x)) return kEditorCubeHalf;
+        const f32 s = std::fmax(std::fabs(x.scale.x), std::fmax(std::fabs(x.scale.y), std::fabs(x.scale.z)));
+#if AVER_MODULE_SCENE
+        // A scene entity's scale IS its half-extent, because every mesh the scene resolves is a unit
+        // primitive. An objects_ entry carries its own local bounds instead.
+        if (sel_ == kSelScene) return std::fmax(1.0f, s);
+#endif
+        if (movableSelected()) {
+            const MeshObj& o = objects_[sel_];
+            const Vec3 e{o.aabbMax.x - o.aabbMin.x, o.aabbMax.y - o.aabbMin.y, o.aabbMax.z - o.aabbMin.z};
+            return std::fmax(1.0f, 0.5f * std::fmax(e.x, std::fmax(e.y, e.z)) * s);
+        }
+        return std::fmax(1.0f, s);
+    }
+
     // Spawn a cube in front of the camera and select it (toolbar Add > Cube).
     //
     // TWO things were wrong with this and both were scale. It placed the cube 8 units in front of the
@@ -1864,7 +2000,7 @@ private:
         return best;
     }
 
-    void applyMove(MeshObj& o, f32 dx, f32 dy) {
+    void applyMove(EditXform& o, f32 dx, f32 dy) {
         if (activeAxis_ == 3) { // screen-plane move along camera right/up
             const Vec3 fwd = camForward();
             const Vec3 s = cross(Vec3{0,0,1}, fwd).getSafeNormal();
@@ -1881,7 +2017,7 @@ private:
         }
         if (snapMove_) for (int k=0;k<3;++k) (&o.pos.x)[k] = snapf((&o.pos.x)[k], moveSnap_);
     }
-    void applyScale(MeshObj& o, f32 dx, f32 dy) {
+    void applyScale(EditXform& o, f32 dx, f32 dy) {
         auto bump = [&](int a, f32 amt){ f32& c=(&o.scale.x)[a]; c += amt; if (c<0.02f) c=0.02f; };
         if (activeAxis_ == 3) { const f32 amt=(dx - dy)/80.0f; for (int a=0;a<3;++a) bump(a, amt); }
         else {
@@ -1894,7 +2030,7 @@ private:
         }
         if (snapScale_) for (int k=0;k<3;++k) (&o.scale.x)[k] = std::fmax(0.02f, snapf((&o.scale.x)[k], scaleSnap_));
     }
-    void applyRotate(MeshObj& o, f32 px, f32 py, f32 mx, f32 my) {
+    void applyRotate(EditXform& o, f32 px, f32 py, f32 mx, f32 my) {
         f32 ox, oy; if (!project(o.pos, ox, oy)) return;
         const f32 a0=std::atan2(py-oy, px-ox), a1=std::atan2(my-oy, mx-ox);
         f32 da=a1-a0; while (da> kPi) da-=kTwoPi; while (da< -kPi) da+=kTwoPi;
@@ -1924,13 +2060,15 @@ private:
 
         // Hover highlight when idle over a handle.
         hoverAxis_ = -1;
-        if (tool_!=Tool::Select && movableSelected() && !dragging_ && overScene)
-            hoverAxis_ = pickAxis(objects_[sel_].pos, gizmoLen(objects_[sel_].pos), mx, my);
+        EditXform gx;
+        const bool haveGizmo = tool_!=Tool::Select && anySelected() && selectedXform(gx);
+        if (haveGizmo && !dragging_ && overScene)
+            hoverAxis_ = pickAxis(gx.pos, gizmoLen(gx.pos), mx, my);
 
         if (ImGui::IsMouseClicked(0) && overScene) {
             int ax = -1;
-            if (tool_!=Tool::Select && movableSelected())
-                ax = pickAxis(objects_[sel_].pos, gizmoLen(objects_[sel_].pos), mx, my);
+            if (haveGizmo)
+                ax = pickAxis(gx.pos, gizmoLen(gx.pos), mx, my);
             if (ax >= 0) { dragging_=true; activeAxis_=ax; prevMouseX_=mx; prevMouseY_=my; }
             else pick(e, io); // no handle grabbed -> (re)select whatever is under the cursor
         }
@@ -1943,12 +2081,15 @@ private:
         if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
             deleteSelection();
 
-        if (dragging_ && movableSelected()) {
-            MeshObj& o = objects_[sel_];
-            const f32 dx=mx-prevMouseX_, dy=my-prevMouseY_;
-            if (tool_==Tool::Move)        applyMove(o, dx, dy);
-            else if (tool_==Tool::Rotate) applyRotate(o, prevMouseX_, prevMouseY_, mx, my);
-            else if (tool_==Tool::Scale)  applyScale(o, dx, dy);
+        if (dragging_ && anySelected()) {
+            EditXform o;
+            if (selectedXform(o)) {
+                const f32 dx=mx-prevMouseX_, dy=my-prevMouseY_;
+                if (tool_==Tool::Move)        applyMove(o, dx, dy);
+                else if (tool_==Tool::Rotate) applyRotate(o, prevMouseX_, prevMouseY_, mx, my);
+                else if (tool_==Tool::Scale)  applyScale(o, dx, dy);
+                setSelectedXform(o);
+            }
             prevMouseX_=mx; prevMouseY_=my;
         }
 #else
@@ -1957,8 +2098,10 @@ private:
     }
 
     void drawGizmo(Engine& e) {
-        if (tool_==Tool::Select || !movableSelected()) return;
-        const Vec3 O = objects_[sel_].pos;
+        if (tool_==Tool::Select) return;
+        EditXform x;
+        if (!selectedXform(x)) return;
+        const Vec3 O = x.pos;
         const f32 L = gizmoLen(O);
         const Mat4 w = Mat4::scale(Vec3{L,L,L}) * Mat4::translation(O);
         const rhi::LineHandle* nrm = tool_==Tool::Move ? gzMove_ : tool_==Tool::Rotate ? gzRot_ : gzScale_;
@@ -2304,7 +2447,7 @@ private:
                     project_.valid() ? project_.name.c_str() : "No project",
                     rhi::backendName(e.device()->backend()), e.device()->adapterName(), dpi_*100.f,
                     dt>1e-6f?1.f/dt:0.f, dt*1000.f, objects_.size(),
-                    movableSelected() ? objects_[sel_].name.c_str() : "nothing selected");
+                    selectionLabel().c_str());
 
         // The drawer handles live at the right of the status bar, where Unreal keeps them: the bar is
         // the edge the panels come out of, so it is the edge that should open them.
@@ -4201,6 +4344,13 @@ private:
         }
         levelPath_ = path;
         levelName_ = w.name;
+
+        // A level HIDES the placeholder scene, so the default selection -- objects_ index 1, the
+        // placeholder cube -- now names something invisible. Left alone it puts the gizmo in empty
+        // space and the status bar reports a "Cube" nobody can see. Nothing is selected until the
+        // user picks something in the level.
+        sel_ = -1;
+        selEntity_ = scene::kInvalidEntity;
 
         // Frame the camera on what was just loaded.
         //
