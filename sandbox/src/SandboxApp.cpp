@@ -791,8 +791,11 @@ public:
                 applyDpi(dpi);
             }
         }
-        // The camera must not fly and the viewport must not be dollied while the start screen is up.
-        if (e.device()->uiActive() && !browserActive_) {
+        // The camera must not fly and the viewport must not be dollied while the start screen is up,
+        // nor while the GAME owns the mouse -- see gameHasInput(). Right-drag is aim in most games and
+        // fly-look in the editor, and both reading it means the editor camera fights drivePlayCamera
+        // for the same fields every frame the player looks around.
+        if (e.device()->uiActive() && !browserActive_ && !gameHasInput()) {
             const ImGuiIO& io = ImGui::GetIO();
             // The central dock node is a transparent hole, so WantCaptureMouse is false over it
             // AND over any empty dockspace gap — require the cursor to be inside the viewport too.
@@ -886,6 +889,23 @@ public:
         // the mouse is a bad neighbour, and the gate harness launches dozens of these back to back.
         const bool interactive = maxFrames_ == 0 && !playTest_;
         if (e.device()->uiActive() && interactive) {
+            // CLICKING THE VIEWPORT PUTS YOU BACK IN THE GAME.
+            //
+            // Shift+F1 releases the mouse so the editor is usable mid-session, but nothing ever took
+            // it back -- the only way to resume was another Shift+F1, a chord you have to remember
+            // while the thing you were testing carries on without you. Clicking on the picture of the
+            // game is what everyone tries first, and it is what Unreal does.
+            //
+            // Tested BEFORE wantCapture is computed, so the click that asks for the game is the same
+            // frame the game gets it; a frame of lag here reads as the click not having registered.
+            // Guarded on the cursor being over the scene rather than over a panel, or clicking Stop
+            // would hand control back to a session you were trying to leave.
+            {
+                const ImGuiIO& mio = ImGui::GetIO();
+                if (playSessionActive() && releasedByUser_ && ImGui::IsMouseClicked(0) &&
+                    !mio.WantCaptureMouse && inViewport(mio.MousePos.x, mio.MousePos.y))
+                    releasedByUser_ = false;
+            }
             const bool wantCapture = playSessionActive() && !releasedByUser_;
             if (ImGui::IsKeyPressed(ImGuiKey_F1, false) && ImGui::GetIO().KeyShift && playSessionActive())
                 releasedByUser_ = !releasedByUser_;
@@ -1796,6 +1816,13 @@ private:
     }
     bool movableSelected() const { return sel_ >= 0 && sel_ < (int)objects_.size(); }
 
+    // True while a play session has the mouse, i.e. the player is playing rather than editing. The
+    // editor's own scene interaction -- picking, the gizmo, Delete, undo, the fly camera -- must all
+    // stand down in that state, because every one of them shares a button or a key with the game.
+    // Shift+F1 (or Stop) hands control back and this goes false, which is what makes the editor
+    // usable mid-session without it also being live UNDER the session.
+    bool gameHasInput() const { return playSessionActive() && !releasedByUser_; }
+
     // THE GIZMO'S VIEW OF A SELECTION, and the reason the manipulation maths below needs no idea
     // which world it is editing. The field NAMES match MeshObj's on purpose: applyMove/applyRotate/
     // applyScale were written against MeshObj and now take one of these unchanged.
@@ -2263,6 +2290,12 @@ private:
     void handleManip(Engine& e) {
 #if AVER_WITH_IMGUI
         if (!e.device()->uiActive() || browserActive_) return; // no scene interaction behind the start screen
+        // NOR WHILE THE GAME OWNS THE MOUSE. Nothing gated this on the play session, so with a
+        // session captured the fire button also ran pick() -- and because the captured cursor is
+        // re-centred every frame, it picked whatever was under the middle of the screen. Shooting
+        // selected things. With a gizmo tool active it could drag level geometry out from under the
+        // player, and Delete and Ctrl+Z were live on the level while the game ran on top of it.
+        if (gameHasInput()) return;
         const ImGuiIO& io = ImGui::GetIO();
 
         if (!io.WantCaptureKeyboard) {
