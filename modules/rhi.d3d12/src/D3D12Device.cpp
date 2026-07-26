@@ -666,6 +666,12 @@ public:
         std::memcpy(frameCB_.invViewProj, invViewProj, sizeof(frameCB_.invViewProj));
         frameCB_.camPos[0] = camPos[0]; frameCB_.camPos[1] = camPos[1]; frameCB_.camPos[2] = camPos[2]; frameCB_.camPos[3] = 1;
     }
+    bool camera(f32 viewProj[16], f32 invViewProj[16], f32 cameraPos[3]) const override {
+        if (viewProj)    std::memcpy(viewProj, frameCB_.viewProj, sizeof(frameCB_.viewProj));
+        if (invViewProj) std::memcpy(invViewProj, frameCB_.invViewProj, sizeof(frameCB_.invViewProj));
+        if (cameraPos)   std::memcpy(cameraPos, frameCB_.camPos, 3 * sizeof(f32));
+        return true;
+    }
     void setLight(const f32 dir[3], const f32 color[3], f32 ambient) override {
         frameCB_.lightDir[0] = dir[0]; frameCB_.lightDir[1] = dir[1]; frameCB_.lightDir[2] = dir[2]; frameCB_.lightDir[3] = 0;
         frameCB_.lightColor[0] = color[0]; frameCB_.lightColor[1] = color[1]; frameCB_.lightColor[2] = color[2]; frameCB_.lightColor[3] = 0;
@@ -746,6 +752,9 @@ private:
     bool createMsaaColor();
     void reconcileClearValue();
     void waitForGpu();
+    // Block until the fence reaches `value`; false only when the device has been removed. See the
+    // definition for why this is not a bounded wait.
+    bool waitFence(u64 value);
 
     // ---- the camera post chain (rhi::PostSettings) ----
     bool createPostPipelines();          // root signature, PSOs and the constant ring: once, at init
@@ -1938,11 +1947,10 @@ void D3D12Device::beginFrame() {
     // can never block on an unsignalled value (fenceValues_ only holds already-signalled ones).
     frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
     const u64 want = fenceValues_[frameIndex_];
-    if (want != 0 && fence_->GetCompletedValue() < want) {
-        fence_->SetEventOnCompletion(want, fenceEvent_);
-        if (WaitForSingleObject(fenceEvent_, 5000) == WAIT_TIMEOUT)
-            AVER_ERROR("[RHI.D3D12] GPU frame wait timed out (device removed 0x{:08X})", static_cast<u32>(device_->GetDeviceRemovedReason()));
-    }
+    // The allocator below is only safe to reset once the GPU has passed the frame that used it, so
+    // this wait is not advisory. waitFence returns false only for a device that is already gone, in
+    // which case resetting is moot and every call after it will fail anyway.
+    if (want != 0) waitFence(want);
     allocators_[frameIndex_]->Reset();
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
     boundRootSig_ = nullptr;   // a command-list reset drops every root binding
@@ -2794,15 +2802,44 @@ void D3D12Device::resize(u32 w, u32 h) {
     AVER_TRACE("[RHI.D3D12] resized to {}x{}", w, h);
 }
 
+// Block until the fence reaches `value`. Returns false ONLY when the device is gone.
+//
+// The single flat five-second wait this replaces did the one thing a fence wait must never do: on
+// timeout it logged and CARRIED ON, and every caller then went and reset a command allocator the GPU
+// was still reading. That is D3D12 error #541 followed by device removal, and it is guaranteed
+// corruption rather than a risk of it.
+//
+// A longer timeout would only move the cliff. What is actually wanted is "wait until the work is
+// done, unless the device died", and the device is the only thing that can say a wait is hopeless —
+// so the wait is chunked and the removal reason is what ends it. A slow frame is now slow, not fatal:
+// WARP raymarching a voxel volume at 3532x1987 and then running a full-resolution post chain over it
+// takes seconds per frame, and that is a legitimate thing to be waiting for.
+bool D3D12Device::waitFence(u64 value) {
+    if (!fence_ || !fenceEvent_) return true;
+    if (fence_->GetCompletedValue() >= value) return true;
+    if (FAILED(fence_->SetEventOnCompletion(value, fenceEvent_))) return false;
+
+    // One second a slice, so a genuinely wedged GPU is still noticed promptly and said out loud
+    // once, rather than hanging silently forever.
+    for (u32 slice = 0;; ++slice) {
+        if (WaitForSingleObject(fenceEvent_, 1000) != WAIT_TIMEOUT) return true;
+        const HRESULT removed = device_->GetDeviceRemovedReason();
+        if (FAILED(removed)) {
+            AVER_ERROR("[RHI.D3D12] the device was removed while waiting for the GPU (0x{:08X})",
+                       static_cast<u32>(removed));
+            return false;
+        }
+        if (slice == 4)   // five seconds in, and still healthy: say so once and keep waiting
+            AVER_WARN("[RHI.D3D12] still waiting on the GPU after 5 s; the device is healthy, so "
+                      "this is a slow frame (WARP, or a very large viewport) and not a hang");
+    }
+}
+
 void D3D12Device::waitForGpu() {
     if (!queue_ || !fence_ || !fenceEvent_) return;
     const u64 v = ++nextFence_;
     if (FAILED(queue_->Signal(fence_.Get(), v))) return;
-    if (fence_->GetCompletedValue() < v) {
-        fence_->SetEventOnCompletion(v, fenceEvent_);
-        if (WaitForSingleObject(fenceEvent_, 5000) == WAIT_TIMEOUT)
-            AVER_ERROR("[RHI.D3D12] waitForGpu timed out (device removed 0x{:08X})", static_cast<u32>(device_->GetDeviceRemovedReason()));
-    }
+    waitFence(v);
 }
 
 bool D3D12Device::uiInit(void* hwnd) {

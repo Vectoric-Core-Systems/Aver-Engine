@@ -191,10 +191,30 @@ private:
     struct FrameConstants {
         f32 voxelOrigin[4] = {};
         f32 voxelParams[4] = {};
-        f32 lightViewProj[16] = {};
-        // x = 1/shadowMapSize, y = shadow map usable, z = acceleration structure built this frame
+        // One light view-projection per CASCADE, tightest first. Each maps world space to that
+        // cascade's own [-1,1] clip box; the shader remaps into the atlas quadrant itself, because
+        // baking the quadrant into the matrix would make a matrix that could not be reused for the
+        // depth-only render pass that fills it.
+        f32 cascadeViewProj[4][16] = {};
+        // x = the RADIUS in world units at which each cascade stops being used. Radial, not planar,
+        // because the cascades are fitted to bounding SPHERES -- see fitCascades for why.
+        // y = normal-offset bias in world units for that cascade, scaled by its own texel size.
+        // zw = unused.
+        f32 cascadeSplit[4][4] = {};
+        // x = 1/atlas size, y = shadow map usable, z = acceleration structure built this frame,
+        // w = live cascade count
         f32 shadowParams[4] = {};
+        // x = which cascade the depth-only shadow pass is currently filling. A field of its own
+        // rather than a spare lane of shadowParams: that block means something to every other pass
+        // in the module, and a value that is a cascade index for one pass and an acceleration-
+        // structure flag for the rest is the kind of overload that survives review and then breaks
+        // the day the passes are reordered.
+        f32 shadowDraw[4] = {};
     } cb_;
+
+    // Build the cascade matrices and splits for this frame's camera. Returns the number of usable
+    // cascades, 0 when there is no camera to fit to.
+    u32 fitCascades();
     bool giEnabled() const { return settings_.globalIllumination != Quality::Off; }
     f32 sunDir_[3] = {0, 0, 1};
     f32 sunColor_[3] = {1, 1, 1};

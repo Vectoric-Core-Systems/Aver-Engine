@@ -220,6 +220,14 @@ public:
     virtual void setCamera(const f32 viewProj[16], const f32 invViewProj[16], const f32 cameraPos[3]) {
         (void)viewProj; (void)invViewProj; (void)cameraPos;
     }
+    // Read it back. A feature that has to fit its own frustum to the view — cascaded shadow maps
+    // are the reason this exists — otherwise needs the app to push the same matrices a second time,
+    // which is two sources of truth for one camera and a guarantee that one of them goes stale on
+    // the frame somebody adds a camera shake. The backend already owns this state; it just never
+    // offered it back. false when the backend has no camera to give. Any output may be null.
+    virtual bool camera(f32 viewProj[16], f32 invViewProj[16], f32 cameraPos[3]) const {
+        (void)viewProj; (void)invViewProj; (void)cameraPos; return false;
+    }
     virtual void setLight(const f32 dirToLight[3], const f32 color[3], f32 ambient) { (void)dirToLight; (void)color; (void)ambient; }
     // Procedural sky + distance-fog atmosphere. When enabled, a gradient sky (with a sun
     // disk along the light direction) is drawn behind the scene and meshes fade to fogColor.

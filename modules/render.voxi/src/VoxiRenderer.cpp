@@ -24,7 +24,39 @@ namespace {
 
 // Core feature-level 11_0 sizing, so shadowed light injection works on every DX12 GPU rather than
 // only where ray tracing does.
-constexpr u32 kShadowSize = 2048;
+//
+// FOUR CASCADES IN ONE ATLAS, 2x2, and the atlas is the texture. A texture ARRAY would be the
+// conventional shape and the RHI does not expose one -- TextureDesc's DepthOrArraySize is a Tex3D
+// depth. An atlas needs no interface change, costs one viewport per cascade instead of one render
+// target per cascade, and the only thing it asks of the shader is that a PCF tap must not wander
+// out of its own quadrant. That clamp is cheaper than the RHI surface an array would need.
+constexpr u32 kShadowCascades   = 4;
+constexpr u32 kShadowCascadeSize = 2048;
+constexpr u32 kShadowSize        = kShadowCascadeSize * 2;   // 2x2 atlas
+static_assert(kShadowCascades == 4, "the atlas below is laid out as 2x2");
+
+// How the view range is split between cascades. 0 is uniform (equal slabs), 1 is logarithmic (equal
+// RATIOS, which is what perspective actually wants). Neither alone is right: uniform starves the
+// near field where the pixels are, logarithmic spends almost everything within arm's reach and
+// leaves the far cascade covering kilometres. The practical scheme is the blend, and 0.85 is the
+// value most engines land on.
+constexpr f32 kCascadeSplitLambda = 0.85f;
+
+// How far the cascades reach, as a MULTIPLE OF THE CAMERA'S NEAR PLANE rather than an absolute
+// distance. That is deliberate and it is the only unit-agnostic option available here.
+//
+// The engine's contract is centimetres, but the editor's own placeholder scene is authored at
+// roughly a unit per metre, and the same number therefore means two different things in the two
+// scenes an oracle run and a game run each render. An absolute 200 m would put the entire editor
+// scene inside the first cascade's near clip and produce no shadows at all -- which is exactly the
+// class of mistake the fog density already made once (see the sandbox's play-scaled fog).
+//
+// The near plane is chosen for depth precision and so tracks scene scale, which makes it the best
+// proxy available without a new authored setting. 4000x gives 200 m from a level's 2 cm near plane
+// and 200 units from the editor's 0.05. A real `shadowDistance` on voxi::Settings is the honest
+// long-term answer; it needs an ABI field and a C# binding, so it is a follow-up and not a silent
+// omission.
+constexpr f32 kShadowRangeFromNear = 4000.0f;
 
 // The draw-list cap, and therefore the instance count the TLAS is sized for. One owner: a TLAS
 // sized for fewer instances than submit() will accept silently drops the overflow at build time.
@@ -405,51 +437,211 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     ctx.popMarker();
 }
 
-// Fit an orthographic light frustum around the volume, so the map's resolution is spent exactly
-// where the GI samples it.
+namespace {
+// Row-vector transform of a POINT (w = 1), which is this engine's matrix convention throughout.
+Vec3 xformPoint(const Vec3& p, const Mat4& m) {
+    return Vec3{p.x * m.m[0][0] + p.y * m.m[1][0] + p.z * m.m[2][0] + m.m[3][0],
+                p.x * m.m[0][1] + p.y * m.m[1][1] + p.z * m.m[2][1] + m.m[3][1],
+                p.x * m.m[0][2] + p.y * m.m[1][2] + p.z * m.m[2][2] + m.m[3][2]};
+}
+// Same, but through a projective matrix, so the perspective divide happens.
+Vec3 xformProjected(const Vec3& p, const Mat4& m) {
+    const f32 x = p.x * m.m[0][0] + p.y * m.m[1][0] + p.z * m.m[2][0] + m.m[3][0];
+    const f32 y = p.x * m.m[0][1] + p.y * m.m[1][1] + p.z * m.m[2][1] + m.m[3][1];
+    const f32 z = p.x * m.m[0][2] + p.y * m.m[1][2] + p.z * m.m[2][2] + m.m[3][2];
+    const f32 w = p.x * m.m[0][3] + p.y * m.m[1][3] + p.z * m.m[2][3] + m.m[3][3];
+    const f32 inv = std::fabs(w) > 1e-9f ? 1.0f / w : 0.0f;
+    return Vec3{x * inv, y * inv, z * inv};
+}
+} // namespace
+
+// Build one orthographic light frustum per cascade, fitted to a slice of the CAMERA's view.
+//
+// The single map this replaces was fitted to the GI VOLUME, which meant its 2048 texels were spread
+// over whatever the volume happened to be and there were no shadows at all outside it. Cascades put
+// the resolution where the pixels are: the nearest slab gets a box a few metres across, and the
+// furthest still reaches 200 m.
+//
+// Two details are the whole difference between this and a shimmering mess:
+//
+//   BOUNDING SPHERES, not boxes. A box fitted to the frustum slice changes SIZE as the camera
+//   rotates, so every texel lands somewhere new every frame and every shadow edge crawls. The
+//   bounding sphere of a slice is rotation-invariant, so the box built around it has a constant
+//   size and only ever translates.
+//
+//   TEXEL SNAPPING. Having made the box a constant size, its translation is quantised to whole
+//   shadow texels, so the depth samples land on the same world positions frame to frame. Without
+//   this the edges still crawl, just smoothly instead of by jumps.
+u32 VoxiRenderer::fitCascades() {
+    f32 invViewProj[16] = {};
+    f32 camPos[3] = {};
+    if (!dev_ || !dev_->camera(nullptr, invViewProj, camPos)) return 0;
+
+    Mat4 invVP;
+    std::memcpy(&invVP.m[0][0], invViewProj, sizeof(invViewProj));
+    const Vec3 eye{camPos[0], camPos[1], camPos[2]};
+
+    // The frustum's eight world-space corners, from clip space. D3D depth is [0,1], so the near
+    // plane is z = 0 and the far plane z = 1.
+    Vec3 nearC[4], farC[4];
+    const f32 nx[4] = {-1, 1, 1, -1};
+    const f32 ny[4] = {-1, -1, 1, 1};
+    for (int i = 0; i < 4; ++i) {
+        nearC[i] = xformProjected(Vec3{nx[i], ny[i], 0.0f}, invVP);
+        farC[i]  = xformProjected(Vec3{nx[i], ny[i], 1.0f}, invVP);
+    }
+
+    // View depth at each plane, measured along the view axis rather than radially: the corner-to-
+    // corner edge is a straight line in world space and view depth varies LINEARLY along it, which
+    // is what makes the interpolation below exact for any projection.
+    Vec3 fwd = (farC[0] + farC[1] + farC[2] + farC[3]) * 0.25f - eye;
+    fwd = fwd.getSafeNormal();
+    const f32 camNear = dot(nearC[0] - eye, fwd);
+    const f32 camFar  = dot(farC[0] - eye, fwd);
+    if (!(camFar > camNear + 1e-3f)) return 0;
+
+    const f32 zNear = camNear;
+    const f32 reach = camNear * kShadowRangeFromNear;
+    const f32 zFar  = camFar < reach ? camFar : reach;
+    if (!(zFar > zNear)) return 0;
+
+    Vec3 dir = Vec3{sunDir_[0], sunDir_[1], sunDir_[2]}.getSafeNormal();
+    if (dir.sizeSquared() < 0.5f) dir = Vec3{0.3f, 0.4f, 0.85f}.getSafeNormal();
+    const Vec3 up = std::fabs(dir.z) > 0.95f ? Vec3{1, 0, 0} : Vec3{0, 0, 1};
+
+    const Vec3 volCentre{center_[0], center_[1], center_[2]};
+    const f32 volRadius = (extent_ > 1.0f ? extent_ : 1.0f) * 1.7320508f;   // the box's circumsphere
+
+    f32 sliceNear = zNear;
+    for (u32 c = 0; c < kShadowCascades; ++c) {
+        const f32 p = static_cast<f32>(c + 1) / static_cast<f32>(kShadowCascades);
+        const f32 logSplit = zNear * std::pow(zFar / zNear, p);
+        const f32 uniSplit = zNear + (zFar - zNear) * p;
+        f32 sliceFar = kCascadeSplitLambda * logSplit + (1.0f - kCascadeSplitLambda) * uniSplit;
+
+        // The corners of THIS slice, interpolated along the frustum's own edges.
+        const f32 tN = (sliceNear - camNear) / (camFar - camNear);
+        const f32 tF = (sliceFar  - camNear) / (camFar - camNear);
+        Vec3 corner[8];
+        for (int i = 0; i < 4; ++i) {
+            corner[i]     = nearC[i] + (farC[i] - nearC[i]) * tN;
+            corner[i + 4] = nearC[i] + (farC[i] - nearC[i]) * tF;
+        }
+
+        Vec3 centre{0, 0, 0};
+        for (const Vec3& v : corner) centre = centre + v;
+        centre = centre * 0.125f;
+        f32 radius = 0.0f;
+        for (const Vec3& v : corner) {
+            const f32 d = (v - centre).size();
+            if (d > radius) radius = d;
+        }
+        radius = std::ceil(radius * 16.0f) / 16.0f;   // stop the radius itself jittering in the LSBs
+
+        // The LAST cascade also has to contain the GI volume, because the voxelisation pass samples
+        // this same map for every voxel it injects and the volume is not tied to the camera. Without
+        // it, a voxel outside every cascade injects UNSHADOWED radiance and the bounce leaks through
+        // walls -- the exact failure shadowed injection exists to prevent.
+        //
+        // The UNION of the two spheres, not a substitution: replacing the slice with the volume
+        // would buy shadowed injection at the cost of every shadow in the distance.
+        if (c == kShadowCascades - 1) {
+            const Vec3 delta = volCentre - centre;
+            const f32 d = delta.size();
+            if (d + volRadius > radius) {                 // the volume is not already inside
+                if (d + radius <= volRadius) {            // ...and the slice is inside the volume
+                    centre = volCentre;
+                    radius = volRadius;
+                } else {
+                    const f32 R = (radius + volRadius + d) * 0.5f;
+                    centre = centre + delta * ((R - radius) / (d > 1e-4f ? d : 1.0f));
+                    radius = R;
+                }
+            }
+        }
+
+        // Snap the centre to a whole texel of THIS cascade, in light space.
+        const f32 texel = 2.0f * radius / static_cast<f32>(kShadowCascadeSize);
+        Mat4 view = Mat4::lookAtLH(centre + dir * (radius * 2.0f), centre, up);
+        Vec3 cLs = xformPoint(centre, view);
+        cLs.x = std::floor(cLs.x / texel) * texel;
+        cLs.y = std::floor(cLs.y / texel) * texel;
+        const Vec3 snapped = xformPoint(cLs, view.inverse());
+        view = Mat4::lookAtLH(snapped + dir * (radius * 2.0f), snapped, up);
+
+        Mat4 proj;   // orthographic, row-vector, depth [0,1]
+        proj.m[0][0] = 1.0f / radius;
+        proj.m[1][1] = 1.0f / radius;
+        proj.m[2][2] = 1.0f / (radius * 4.0f);
+        proj.m[3][2] = 0.0f;
+        proj.m[3][3] = 1.0f;
+        const Mat4 lvp = view * proj;
+        std::memcpy(cb_.cascadeViewProj[c], &lvp.m[0][0], sizeof(lvp.m));
+
+        // Selection is RADIAL because the fit is: a point inside the slice's bounding sphere is
+        // inside that cascade's box, and comparing planar depth against a sphere-fitted cascade
+        // would select a cascade that does not actually contain the point near the frustum edges.
+        cb_.cascadeSplit[c][0] = (centre - eye).size() + radius;
+        // Normal-offset bias, in world units, scaled to this cascade's own texel. A constant bias
+        // cannot work across cascades whose texels differ by two orders of magnitude: tuned for the
+        // near one it does nothing far away, tuned for the far one it detaches near shadows from
+        // their casters.
+        cb_.cascadeSplit[c][1] = texel * 1.5f;
+        cb_.cascadeSplit[c][2] = 0.0f;
+        cb_.cascadeSplit[c][3] = 0.0f;
+
+        sliceNear = sliceFar;
+    }
+    return kShadowCascades;
+}
+
 void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
     // No geometry means no shadow map: flag it disabled so the lit pass does not sample a stale one.
     if (!shadowPso_ || drawsPrev_.empty()) { cb_.shadowParams[1] = 0.0f; return; }
+    const u32 cascades = fitCascades();
+    if (cascades == 0) { cb_.shadowParams[1] = 0.0f; return; }
 
-    const Vec3 centre{center_[0], center_[1], center_[2]};
-    const f32 r = extent_ > 1.0f ? extent_ : 1.0f;
-    Vec3 dir = Vec3{sunDir_[0], sunDir_[1], sunDir_[2]}.getSafeNormal();
-    if (dir.sizeSquared() < 0.5f) dir = Vec3{0.3f, 0.4f, 0.85f}.getSafeNormal();
-    const Vec3 eye = centre + dir * (r * 2.0f);              // sunDir_ points TOWARD the light
-    const Vec3 up = std::fabs(dir.z) > 0.95f ? Vec3{1, 0, 0} : Vec3{0, 0, 1};
-    const Mat4 view = Mat4::lookAtLH(eye, centre, up);
-    Mat4 proj;                                                // orthographic, row-vector convention
-    proj.m[0][0] = 1.0f / r; proj.m[1][1] = 1.0f / r;
-    proj.m[2][2] = 1.0f / (r * 4.0f); proj.m[3][2] = 0.0f; proj.m[3][3] = 1.0f;
-    const Mat4 lvp = view * proj;
-    std::memcpy(cb_.lightViewProj, &lvp.m[0][0], sizeof(cb_.lightViewProj));
     cb_.shadowParams[0] = 1.0f / static_cast<f32>(kShadowSize);
     cb_.shadowParams[1] = 1.0f;
+    cb_.shadowParams[3] = static_cast<f32>(cascades);
 
     ctx.pushMarker("Voxi shadow");
     ctx.textureBarrier(shadowTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::DepthWrite);
     ctx.setPipeline(shadowPso_);
     ctx.setBindingSet(bindings_);       // Tier 1: bind every declared table, read or not
-    ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
     ctx.setRenderTargets(nullptr, 0, shadowTex_);
-    ctx.clearDepth(shadowTex_, 1.0f);
-    // Both, and not just the viewport: the scissor is independent, and the editor leaves one set to
-    // its dock rect, which would silently clip the map.
-    ctx.setViewport(0, 0, kShadowSize, kShadowSize);
-    ctx.setScissor(0, 0, kShadowSize, kShadowSize);
-    for (const Draw& d : drawsPrev_) {
-        f32 consts[rhi::kObjectConstantDwords]{};
-        std::memcpy(consts, d.world, 16 * sizeof(f32));   // depth-only: nothing else is read
-        ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
-        // The same per-draw material the voxelise and lit passes use. This pass is depth-only -- it
-        // has no pixel shader and reads no b2 -- so the binding changes nothing it outputs today; it
-        // is bound uniformly with the other passes because Tier 1 requires table 1 populated and
-        // because an alpha-masked shadow, when it lands, will clip on exactly this block.
-        if (d.matSet) ctx.setDrawBinding(d.matSet, d.mat, d.matBytes);
-        else          ctx.setDrawBinding(materials_.fallbackBindingSet(),
-                                         &materials_.fallbackConstants(), sizeof(pbr::MaterialConstants));
-        ctx.drawMesh(d.mesh);
+    ctx.clearDepth(shadowTex_, 1.0f);   // the whole atlas, once, before any quadrant is drawn
+
+    for (u32 c = 0; c < cascades; ++c) {
+        // Which cascade the depth-only vertex shader projects with. Republished per cascade rather
+        // than passed as a root constant so the shader reads ONE block, the same one every other
+        // pass reads -- setConstantBuffer suballocates from the frame ring, so re-publishing is free.
+        cb_.shadowDraw[0] = static_cast<f32>(c);
+        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+
+        const u32 qx = (c & 1u) * kShadowCascadeSize;
+        const u32 qy = (c >> 1) * kShadowCascadeSize;
+        // Both, and not just the viewport: the scissor is independent, and the editor leaves one set
+        // to its dock rect, which would silently clip the map. Here it also CONFINES each cascade to
+        // its own quadrant, which is what makes one clear enough for all four.
+        ctx.setViewport(qx, qy, kShadowCascadeSize, kShadowCascadeSize);
+        ctx.setScissor(qx, qy, kShadowCascadeSize, kShadowCascadeSize);
+
+        for (const Draw& d : drawsPrev_) {
+            f32 consts[rhi::kObjectConstantDwords]{};
+            std::memcpy(consts, d.world, 16 * sizeof(f32));   // depth-only: nothing else is read
+            ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
+            // The same per-draw material the voxelise and lit passes use. This pass is depth-only --
+            // it has no pixel shader and reads no b2 -- so the binding changes nothing it outputs
+            // today; it is bound uniformly with the other passes because Tier 1 requires table 1
+            // populated and because an alpha-masked shadow, when it lands, will clip on exactly it.
+            if (d.matSet) ctx.setDrawBinding(d.matSet, d.mat, d.matBytes);
+            else          ctx.setDrawBinding(materials_.fallbackBindingSet(),
+                                             &materials_.fallbackConstants(), sizeof(pbr::MaterialConstants));
+            ctx.drawMesh(d.mesh);
+        }
     }
+
     ctx.textureBarrier(shadowTex_, rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderResource);
     ctx.popMarker();
 }

@@ -12,13 +12,22 @@ namespace aver::voxi {
 inline constexpr const char* kVoxiHLSL = R"(
 // Feature-owned frame constants, at the register RHIResources.hpp reserves for exactly this. Split
 // out of b0 so the engine block carries nothing a render feature introduced, and so a pass that
-// recomputes only these (the shadow matrix is not known until the shadow pass runs) re-uploads 112
-// bytes instead of the whole engine block.
+// recomputes only these (the cascade matrices are not known until the shadow pass runs) re-uploads
+// this block alone rather than the whole engine one -- which the shadow pass now does once per
+// cascade.
+#define AVER_SHADOW_CASCADES 4
+
 cbuffer VoxiFrame : register(b4) {
     float4   gVoxelOrigin; // xyz = volume min corner, w = 1/volumeWorldSize
     float4   gVoxelParams; // x = resolution, y = intensity, z = maxDistance, w = enabled|debug<<1
-    float4x4 gLightViewProj;
-    float4   gShadowParams; // x = 1/shadowMapSize, y = enabled, z = acceleration structure built
+    // One per cascade, tightest first. Each maps world space into its own [-1,1] clip box; the
+    // remap into the atlas quadrant happens in the sampler below, not in the matrix, so the SAME
+    // matrix serves both the depth-only fill and the lookup.
+    float4x4 gCascadeViewProj[AVER_SHADOW_CASCADES];
+    // x = the RADIUS at which this cascade stops applying, y = its normal-offset bias in world units
+    float4   gCascadeSplit[AVER_SHADOW_CASCADES];
+    float4   gShadowParams; // x = 1/atlasSize, y = enabled, z = accel structure built, w = cascades
+    float4   gShadowDraw;   // x = the cascade the depth-only pass is filling right now
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -70,19 +79,55 @@ float rtShadow(float3 wpos, float3 N, float3 L) {
 }
 #endif
 
-// 3x3 PCF. Returns 1 = fully lit, 0 = fully shadowed.
-float shadowFactor(float3 wpos, float ndl) {
-    if (gShadowParams.y < 0.5) return 1.0;
-    float4 lp = mul(float4(wpos, 1.0), gLightViewProj);
+// 3x3 PCF inside ONE cascade's quadrant of the atlas. Returns 1 = fully lit, 0 = fully shadowed,
+// -1 when the point falls outside this cascade so the caller can try the next one.
+float shadowSampleCascade(float3 wpos, uint c) {
+    float4 lp = mul(float4(wpos, 1.0), gCascadeViewProj[c]);
     float3 p = lp.xyz / lp.w;
     float2 uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
-    if (any(uv < 0.0) || any(uv > 1.0) || p.z > 1.0) return 1.0;  // outside the map = lit
-    float bias = max(0.0015 * (1.0 - ndl), 0.0003);               // depth bias, light-space units
+    if (any(uv < 0.0) || any(uv > 1.0) || p.z > 1.0 || p.z < 0.0) return -1.0;
+
+    // Into the atlas. The 2x2 layout is the C++ side's (quadrant x = c&1, y = c>>1) and the halving
+    // here is the only place that has to agree with it.
+    float2 quad = float2(c & 1u, c >> 1u) * 0.5;
+    // Inset by one texel so a PCF tap at the edge of a cascade cannot reach into its neighbour's
+    // quadrant, which would read a completely unrelated depth and punch a hard line across the
+    // shadow. This is the one cost of an atlas over a texture array, and it is one saturate.
+    float inset = gShadowParams.x;
+    uv = quad + clamp(uv * 0.5, float2(inset, inset), float2(0.5 - inset, 0.5 - inset));
+
     float s = 0.0;
     [unroll] for (int y = -1; y <= 1; ++y)
     [unroll] for (int x = -1; x <= 1; ++x)
-        s += gShadowTex.SampleCmpLevelZero(gShadowSamp, uv + float2(x, y) * gShadowParams.x, p.z - bias);
+        s += gShadowTex.SampleCmpLevelZero(gShadowSamp, uv + float2(x, y) * gShadowParams.x, p.z);
     return s / 9.0;
+}
+
+// Pick a cascade by distance and sample it. `N` is the surface normal: the bias is applied by
+// OFFSETTING ALONG IT rather than by subtracting a constant from the depth.
+//
+// That is the whole reason this takes a normal now. A depth bias has to be tuned against the texel
+// size, and a cascaded map's texels differ by two orders of magnitude between the near and far
+// cascade -- tuned for one it either does nothing or detaches every shadow from its caster in the
+// other. Offsetting the SAMPLE POSITION by a fraction of the cascade's own world-space texel is
+// scale-correct by construction, and it moves the sample off the surface rather than lying about
+// how far away the light is, so contact shadows stay attached.
+float shadowFactor(float3 wpos, float3 N, float ndl) {
+    if (gShadowParams.y < 0.5) return 1.0;
+    uint count = (uint)gShadowParams.w;
+
+    // Grazing surfaces need more offset: at ndl ~ 0 a texel of depth spans a long way along the
+    // surface, which is exactly where acne appears.
+    float slope = saturate(1.0 - ndl);
+    [loop] for (uint c = 0; c < count; ++c) {
+        if (distance(wpos, gCamPos.xyz) > gCascadeSplit[c].x) continue;
+        float bias = gCascadeSplit[c].y * (1.0 + 2.0 * slope);
+        float s = shadowSampleCascade(wpos + N * bias, c);
+        if (s >= 0.0) return s;
+    }
+    // Past the last cascade, or in none of them. Lit: an unshadowed distance is far less visible
+    // than a black horizon, and the alternative would be a shadow that is simply wrong.
+    return 1.0;
 }
 
 // Mip level being read by CSMip (b3: b0/b1 are taken by the graphics root signature).
@@ -166,9 +211,9 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     // the backend would have to keep in step.
     float sunVis;
     if (gShadowParams.z > 0.5) sunVis = rtShadow(i.wpos, N, L);   // exact ray-traced occlusion
-    else                       sunVis = shadowFactor(i.wpos, ndl); // shadow map + PCF
+    else                       sunVis = shadowFactor(i.wpos, N, ndl); // cascaded shadow map + PCF
 #else
-    const float sunVis = shadowFactor(i.wpos, ndl);       // shadow map + PCF
+    const float sunVis = shadowFactor(i.wpos, N, ndl);   // cascaded shadow map + PCF
 #endif
     // Voxi indirect bounce: cone-traced diffuse GI + the ambient occlusion that falls out of it.
     float ao = 1.0;
@@ -217,9 +262,11 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     return float4(radiance, averOpacity(s));
 }
 
-// Depth-only pass from the sun's point of view (VSIn comes from the prelude).
+// Depth-only pass from the sun's point of view (VSIn comes from the prelude). Runs once per
+// cascade; which one is in gShadowDraw.x, and the viewport confines the output to that cascade's
+// quadrant of the atlas.
 float4 VSShadow(VSIn i) : SV_POSITION {
-    return mul(mul(float4(i.pos, 1.0), gWorld), gLightViewProj);
+    return mul(mul(float4(i.pos, 1.0), gWorld), gCascadeViewProj[(uint)gShadowDraw.x]);
 }
 
 // ================= Voxi: voxelisation =================
@@ -333,7 +380,7 @@ void PSVoxel(VoxOut i) {
     AverLight sun;
     sun.direction  = L;
     sun.radiance   = srgbToLin(gLightColor.rgb);
-    sun.visibility = shadowFactor(i.wpos, ndl);
+    sun.visibility = shadowFactor(i.wpos, N, ndl);
     AverSurface s = averEvalMaterial(voxelVertexOf(i), sun);
     float3 albedo = averDiffuseAlbedo(s);
     float3 radiance = albedo * (sun.radiance * ndl * sun.visibility

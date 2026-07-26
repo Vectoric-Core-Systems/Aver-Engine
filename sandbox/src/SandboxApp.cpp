@@ -3795,6 +3795,19 @@ private:
         // The fly speed is per-frame centimetres here, so a level this size needs a bigger step than
         // the placeholder scene's 12 or crossing the room takes half a minute.
         flySpeed_ = std::fmax(flySpeed_, radius * 0.02f);
+
+#if AVER_MODULE_VOXI
+        // ...and so does the GI volume, for the same reason and with the same failure mode as the
+        // grid and the fog. Its default (centre 0,0,8 extent 44) is authored for the placeholder
+        // scene at roughly a unit per metre; a centimetre-scale level got a FORTY-FOUR CENTIMETRE
+        // box, so cone-traced GI covered a patch of floor smaller than the player and every other
+        // surface fell back to sky ambient. Fitted to the level here, where the bounds are already
+        // in hand for the camera.
+        //
+        // Not conditioned on anything: this runs only when a level loads, and the gates load none.
+        giCenter_ = centre;
+        giExtent_ = radius;
+#endif
     }
 
     // The project's STARTMAP, resolved against its content directory. Missing is not an error: a new

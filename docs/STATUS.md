@@ -1708,6 +1708,58 @@ exact (the ACES fit is a ratio of quadratics, so inverting it is a quadratic), n
 **The defaults are the identity.** Exposure 1, no bloom, no adaptation. A post chain whose default
 state changed the image would invalidate the whole oracle for a feature nobody had switched on.
 
+## 4l. Cascaded shadow maps, and the fence wait that was lying
+
+### Four cascades in one atlas
+
+The single 2048² map this replaces was fitted to the **GI volume**, not to the view. That had two
+consequences and the second is the serious one: its texels were spread over whatever the volume
+happened to be, and there were no shadows AT ALL outside it. In SkyForge — where the GI volume was
+still the editor's 44-unit default and the level is centimetres — that box was forty-four
+centimetres across, so the arena had no shadows and no GI worth the name.
+
+Now: four cascades, each fitted to a slice of the camera frustum, packed 2×2 into one 4096² depth
+texture. An atlas rather than a texture array because the RHI exposes no array dimension and an
+atlas needs no interface change; the price is one clamp so a PCF tap cannot wander into the
+neighbouring quadrant.
+
+Three details carry the quality:
+
+- **Bounding spheres, not boxes.** A box fitted to a frustum slice changes SIZE as the camera
+  rotates, so every texel lands somewhere new every frame and every shadow edge crawls. A sphere is
+  rotation-invariant, so the box around it only ever translates.
+- **Texel snapping.** Having made the box a constant size, its translation is quantised to whole
+  shadow texels. Without this the edges still crawl, just smoothly.
+- **Normal-offset bias, scaled per cascade.** A constant depth bias cannot work across cascades
+  whose texels differ by two orders of magnitude — tuned for the near one it does nothing far away,
+  tuned for the far one it detaches near shadows from their casters. Offsetting the sample position
+  along the normal by a fraction of that cascade's own world texel is scale-correct by construction.
+
+The last cascade is **unioned with the GI volume**, because the voxelisation pass samples this same
+map for every voxel it injects and the volume is not tied to the camera. A voxel outside every
+cascade would inject unshadowed radiance and the bounce would leak through walls.
+
+The cascade RANGE is a multiple of the camera's NEAR PLANE, not an absolute distance. The engine's
+contract is centimetres but the editor's placeholder scene is authored at roughly a unit per metre,
+so an absolute 200 m would put that whole scene inside the first cascade's near clip and produce no
+shadows at all — the same class of mistake the fog density made once. A real `shadowDistance` on
+`voxi::Settings` is the honest long-term answer and is a named follow-up, not a silent omission.
+
+`IDevice::camera()` was added for this: the backend already owned the matrices and simply never
+offered them back, and having the app push them a second time would be two sources of truth for one
+camera.
+
+### The fence wait was treating a timeout as success
+
+The post chain made WARP's debug-view frame slow enough to cross a five-second fence wait, which
+exposed a latent bug far worse than the slowness: **on timeout the wait logged an error and carried
+on**, and the caller then reset a command allocator the GPU was still reading. That is D3D12 error
+#541 followed immediately by device removal — guaranteed corruption, not a risk of it.
+
+A longer timeout would only move the cliff. `waitFence` now waits in one-second slices and ends only
+when the fence is reached or `GetDeviceRemovedReason()` says the device is gone, saying so once at
+five seconds so a genuine hang is still visible. A slow frame is now slow, not fatal.
+
 ## 5. Formats — implemented loaders
 
 - `.ocbeam` (Aver.Formats/OcBeam): faithful to OCCompiler Main.java + VehicleDamage.cpp —
