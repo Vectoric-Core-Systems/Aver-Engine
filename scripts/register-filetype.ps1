@@ -67,11 +67,27 @@ Set-ItemProperty -Path "$progKey\DefaultIcon" -Name '(default)' -Value $iconRef
 New-Item -Path "$progKey\shell\open\command" -Force | Out-Null
 Set-ItemProperty -Path "$progKey\shell\open\command" -Name '(default)' -Value "`"$Exe`" `"%1`""
 
-# Advertise the ProgID ON the extension, which is what puts "Aver Engine" in the Open-with list.
+# Advertise the ProgID ON the extension, which is what puts the engine in the Open-with list.
 # Without it the picker offers a browse button and nothing else, and the entry you want is not there
 # to choose -- which reads as the association not having worked at all.
 New-Item -Path "$extKey\OpenWithProgids" -Force | Out-Null
 New-ItemProperty -Path "$extKey\OpenWithProgids" -Name $progId -PropertyType String -Value '' -Force | Out-Null
+
+# REGISTER THE EXECUTABLE AS AN APPLICATION, separately from the file type. These are two different
+# things and only registering the first is why the picker said "Sandbox.exe": a ProgID's description
+# names the FILE TYPE ("Aver Engine Project"), while the name of the APPLICATION comes from the exe's
+# own version resource and from FriendlyAppName here. The exe now carries a VERSIONINFO block
+# (sandbox/Sandbox.rc) so it identifies itself everywhere -- Task Manager, file properties, this
+# picker -- and FriendlyAppName covers a binary built before that landed.
+$appKey = "HKCU:\Software\Classes\Applications\$(Split-Path -Leaf $Exe)"
+New-Item -Path "$appKey\shell\open\command" -Force | Out-Null
+Set-ItemProperty -Path "$appKey\shell\open\command" -Name '(default)' -Value "`"$Exe`" `"%1`""
+Set-ItemProperty -Path $appKey -Name 'FriendlyAppName' -Value 'Aver Engine'
+New-Item -Path "$appKey\SupportedTypes" -Force | Out-Null
+New-ItemProperty -Path "$appKey\SupportedTypes" -Name '.ocproject' -PropertyType String -Value '' -Force | Out-Null
+
+# The same name on the ProgID, so the file type reads as the engine's rather than as an exe name.
+Set-ItemProperty -Path $progKey -Name 'FriendlyTypeName' -Value 'Aver Engine Project'
 
 # TELL THE SHELL. Explorer serves associations from a cached table and does not re-read the registry
 # because someone wrote to it; a registration without this notification is correct on disk and
