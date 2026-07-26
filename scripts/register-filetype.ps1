@@ -67,8 +67,38 @@ Set-ItemProperty -Path "$progKey\DefaultIcon" -Name '(default)' -Value $iconRef
 New-Item -Path "$progKey\shell\open\command" -Force | Out-Null
 Set-ItemProperty -Path "$progKey\shell\open\command" -Name '(default)' -Value "`"$Exe`" `"%1`""
 
+# Advertise the ProgID ON the extension, which is what puts "Aver Engine" in the Open-with list.
+# Without it the picker offers a browse button and nothing else, and the entry you want is not there
+# to choose -- which reads as the association not having worked at all.
+New-Item -Path "$extKey\OpenWithProgids" -Force | Out-Null
+New-ItemProperty -Path "$extKey\OpenWithProgids" -Name $progId -PropertyType String -Value '' -Force | Out-Null
+
+# TELL THE SHELL. Explorer serves associations from a cached table and does not re-read the registry
+# because someone wrote to it; a registration without this notification is correct on disk and
+# invisible in practice, which is the most confusing possible failure -- every key checks out and
+# double-clicking still does nothing.
+Add-Type -TypeDefinition @'
+using System;using System.Runtime.InteropServices;
+public static class AverShellNotify {
+  [DllImport("shell32.dll", CharSet=CharSet.Unicode)]
+  public static extern void SHChangeNotify(int eventId, uint flags, IntPtr a, IntPtr b);
+}
+'@ -ErrorAction SilentlyContinue
+[AverShellNotify]::SHChangeNotify(0x08000000, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero)  # SHCNE_ASSOCCHANGED
+
 "registered .ocproject -> $progId"
 "  command : `"$Exe`" `"%1`""
 "  icon    : $iconRef"
-"`nDouble-click any .ocproject to open it. Reverse with -Unregister."
+"  shell notified (SHCNE_ASSOCCHANGED)"
+""
 "Rebuilding does not need a re-run; the path is to the binary, not to a copy of it."
+"Reverse with -Unregister."
+""
+"IF DOUBLE-CLICKING STILL SHOWS THE 'How do you want to open this file?' PICKER:"
+"  choose Aver Engine and tick 'Always use this app'. That is not a defect in this script."
+"  Windows 8 and later record the chosen default in"
+"    HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.ocproject\UserChoice"
+"  and protect it with a per-user hash specifically so that an installer CANNOT set it. Only the"
+"  picker can, by design, to stop programs seizing file types. Everything this script writes is the"
+"  half a program is allowed to write: the ProgID, its command, its icon, and the Open-with entry"
+"  that makes 'Aver Engine' appear in that list in the first place."
