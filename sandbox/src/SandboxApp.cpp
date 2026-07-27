@@ -15,6 +15,7 @@
 
 #include "ProjectBrowser.hpp"
 #include "ToolsMenu.hpp"
+#include "AssetEditor.hpp"
 #include "EngineScaffold.hpp"   // engineRoot(): where the Content Browser's "Engine" root is mounted from
 #include "IdeIntegration.hpp"   // detectedIdes()/openInIde: double-clicking a source file opens it
 #include "ShellIntegration.hpp" // reveal / shell-open / recycle, for the browser's context menu
@@ -529,6 +530,11 @@ public:
 
     void onInit(Engine& e) override {
         AVER_INFO("[Sandbox] backend={} adapter='{}'", rhi::backendName(e.device()->backend()), e.device()->adapterName());
+
+        // Which asset types have an editor. Registration order is precedence -- the first factory
+        // that accepts a path wins -- so a future .ocmesh-specific editor would go before a generic
+        // binary viewer rather than after it.
+        assetEditors_.registerFactory(&editor::makeMeshEditor);
         window_ = e.window();   // for the HWND the mouse capture needs
 
         // Always read the recent list, even when the start screen will not be shown: opening a
@@ -2801,6 +2807,9 @@ private:
         drawDrawer(e);   // over the viewport, so after the overlay it would otherwise sit behind
         buildEditorPrefs();
         buildProjectSettings();
+        // After the docked panels and before the status bar, so an asset editor floats over the
+        // level editor rather than being clipped by the dockspace it does not belong to.
+        assetEditors_.draw(e);
         tools_.drawModals(project_, dpi_);
 
         // ---------------- status bar ----------------
@@ -2955,6 +2964,12 @@ private:
             cbStatus_ = "Could not open in " + ide.name;
             return;
         }
+        // AN ASSET WITH AN EDITOR OPENS IN IT. Before this every non-source file went to the shell,
+        // so double-clicking a .ocmesh asked Windows to open it and Windows has never heard of one.
+        // The shell stays as the fallback rather than being replaced: a .txt or a .png beside your
+        // content is better served by whatever you already use than by an editor this engine would
+        // have to grow.
+        if (assetEditors_.open(full)) { cbStatus_ = "Opened in the asset editor"; return; }
         cbStatus_ = editor::openWithShell(full) ? "Opened" : "Nothing is registered to open that";
     }
 
@@ -4572,6 +4587,9 @@ private:
     scene::Entity selEntity_ = scene::kInvalidEntity;
     bool hideEditorScene_ = false;   // latched each frame by the scene pass; see there for why
     rhi::IDevice* prefsDevice_ = nullptr;   // borrowed, latched in buildUI for the settings panels
+    // Every open asset editor. Separate from the level editor the way Unreal separates them:
+    // the main window stays the level, and an asset opens its own editor with its own state.
+    editor::AssetEditorHost assetEditors_;
     bool vsyncOffRequested_ = false;        // --no-vsync, pending a device to apply it to
     // Set by an import, consumed on the next frame that has an Engine&. The import runs from inside
     // an ImGui popup, which has no device in reach, and createMesh needs one.
