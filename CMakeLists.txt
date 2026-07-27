@@ -124,6 +124,10 @@ add_subdirectory(modules/render.ui)
 # And the plain-C seam onto it, so a game's HUD is authored in the game's language rather than in
 # the engine's. A DLL because the .NET host P/Invokes it; Core-only, like everything under ui/.
 add_subdirectory(modules/ui.abi)
+# Audio. Core-only and unconditional for the same reason the UI is: the mixer fills a buffer the
+# caller supplies and touches no device, so there is no backend it could depend on and no build
+# configuration in which it does not exist. See docs/AUDIO.md.
+add_subdirectory(modules/audio)
 add_subdirectory(modules/runtime)
 
 if(AVER_BUILD_SANDBOX)
@@ -138,6 +142,8 @@ if(AVER_BUILD_TESTS)
   # The renderer's half, and unconditional for the same reason: it talks to the generic RHI, which
   # always exists, and the test supplies its own recording device rather than needing a backend.
   add_subdirectory(tests/render.ui)
+  # Unconditional, like the module.
+  add_subdirectory(tests/audio)
   if(AVER_MODULE_PHYSICS)
     add_subdirectory(tests/physics)
   endif()
