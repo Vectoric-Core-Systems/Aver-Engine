@@ -1,6 +1,6 @@
 #include "aver/audio/audio_abi.h"
 #include "aver/audio/AudioDevice.hpp"
-#include "aver/formats/Wav.hpp"
+#include "aver/formats/OcAudio.hpp"
 #include "aver/core/Log.hpp"
 
 #include <string>
@@ -64,10 +64,26 @@ int32_t aver_audio_load(const char* utf8Path) {
     if (auto it = g_byPath.find(path); it != g_byPath.end()) return static_cast<int32_t>(it->second);
 
     aver::audio::SoundData data;
-    const aver::formats::WavResult r = aver::formats::wavReadFile(path, data);
-    if (!r.ok) {
-        AVER_ERROR("[Audio] could not load '{}': {}", path, r.error);
-        return 0;
+    // .ocaudio is the ENGINE's format and the fast path: decoded interleaved float, ready to play,
+    // no decoder involved. Anything else is imported on the spot, which is a convenience for
+    // development -- pointing at a .wav or an .mp3 while iterating -- and is not what a shipped game
+    // should be doing when it opens a door.
+    const bool cooked = path.size() > 8 &&
+                        path.compare(path.size() - 8, 8, ".ocaudio") == 0;
+    if (cooked) {
+        std::string why;
+        if (!aver::fmt::loadOcAudio(path, data, &why)) {
+            AVER_ERROR("[Audio] could not load '{}': {}", path, why);
+            return 0;
+        }
+    } else {
+        const aver::fmt::AudioImportResult r = aver::fmt::audioImportFile(path, data);
+        if (!r.ok) {
+            AVER_ERROR("[Audio] could not import '{}': {}", path, r.error);
+            return 0;
+        }
+        AVER_WARN("[Audio] '{}' was decoded at load time via {}; import it to .ocaudio for a shipped build",
+                  path, r.decoder);
     }
     const aver::audio::SoundHandle h = g_device.mixer().addSound(std::move(data));
     if (!h) return 0;

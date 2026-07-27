@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace aver::formats {
+namespace aver::fmt {
 
 struct WavResult {
     bool ok = false;
@@ -26,4 +26,4 @@ struct WavResult {
 WavResult wavRead(const std::vector<u8>& bytes, audio::SoundData& out);
 WavResult wavReadFile(const std::string& path, audio::SoundData& out);
 
-} // namespace aver::formats
+} // namespace aver::fmt

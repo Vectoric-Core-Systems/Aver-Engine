@@ -45,8 +45,16 @@ if(TARGET Aver.Audio)
   aver_add_module(Aver.Formats.Audio
     SOURCES
       src/Wav.cpp
+      src/OcAudio.cpp
     DEPS
       Aver.Formats
       Aver.Audio
   )
+  if(WIN32)
+    # Media Foundation is how .mp3/.m4a/.wma/.flac get imported without vendoring a decoder. An MP3
+    # decoder is two thousand lines of Huffman, IMDCT and polyphase synthesis, and the operating
+    # system already ships a correct one -- the same reasoning that chose WASAPI over a vendored
+    # audio backend. .wav still goes through this module's own reader, which needs none of it.
+    target_link_libraries(Aver.Formats.Audio PRIVATE mfplat mfreadwrite mfuuid ole32)
+  endif()
 endif()

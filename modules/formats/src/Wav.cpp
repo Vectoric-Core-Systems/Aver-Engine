@@ -3,7 +3,7 @@
 #include <cstring>
 #include <cstdio>
 
-namespace aver::formats {
+namespace aver::fmt {
 namespace {
 
 constexpr u16 kFormatPcm   = 1;
@@ -111,4 +111,4 @@ WavResult wavReadFile(const std::string& path, audio::SoundData& out) {
     return wavRead(bytes, out);
 }
 
-} // namespace aver::formats
+} // namespace aver::fmt
