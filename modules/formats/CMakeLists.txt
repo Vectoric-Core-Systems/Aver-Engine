@@ -1,7 +1,9 @@
 aver_add_module(Aver.Formats
   SOURCES
+    src/Avr1.cpp
     src/OcBeam.cpp
     src/OcMap.cpp
+    src/OcMesh.cpp
     src/OcWorld.cpp
     src/OcProject.cpp
     src/Texture.cpp

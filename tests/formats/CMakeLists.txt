@@ -3,6 +3,14 @@ target_link_libraries(FormatTest PRIVATE Aver.Formats Aver.Assets Aver.Core Aver
 set_target_properties(FormatTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# MeshTest — the AVR1 container and .ocmesh. A THIRD executable rather than more cases in FormatTest
+# because FormatTest takes file paths on the command line and reports usage with none, so a binary
+# format that must be exercised from memory would never run in a plain `MeshTest.exe` invocation.
+add_executable(MeshTest src/MeshTest.cpp)
+target_link_libraries(MeshTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(MeshTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # MaterialTest — the .ocmat reader/writer and the mip filter. A SECOND executable rather than more
 # cases in FormatTest, because it is the only one that needs the material DLL: a machine where
 # Aver.Render.PBR.dll fails to load would otherwise report the .ocbeam parser as broken.

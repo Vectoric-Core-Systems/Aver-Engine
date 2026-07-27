@@ -110,7 +110,15 @@ Magic disambiguation: text formats have no magic bytes at 0x00 (`.ocmat`/`.ocwor
 | 0x08 | 8 | u64 | `Offset` | file offset of chunk payload (aligned) |
 | 0x10 | 8 | u64 | `SizeOnDisk` | compressed bytes |
 | 0x18 | 8 | u64 | `SizeUncompressed` | == SizeOnDisk if Compression=0 |
-| 0x20 | 8 | u64 | `Hash` | xxHash3-64 of the **uncompressed** payload |
+| 0x20 | 8 | u64 | `Hash` | **xxHash64** of the **uncompressed** payload (see note) |
+
+> **Hash note (v1, as implemented).** This field originally specified xxHash3-64. The implementation
+> (`modules/formats/src/Avr1.cpp`) uses **xxHash64** — the same author's earlier function — because
+> xxHash3 is not vendored in this tree and adding a third-party dependency is not a decision a format
+> reader should take on its own. The field's size, offset and purpose are unchanged; only the
+> algorithm differs. This is recorded here rather than left as a silent divergence, because a reader
+> built to the original text would report every file written by this engine as corrupt. Changing to
+> xxHash3 later is a `ContainerVersion` bump, not a silent swap.
 
 **Chunk framework rules (the compat contract):**
 - Chunks may appear in any order; the directory is authoritative. Duplicate `ChunkId` is illegal except where a spec says a chunk is arrayed (none in v1).
