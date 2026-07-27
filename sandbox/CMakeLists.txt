@@ -9,6 +9,9 @@ add_executable(Sandbox
   src/ToolsMenu.cpp
   Sandbox.rc)
 target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
+# The retained game UI and the render feature that draws it. Both unconditional: neither depends on
+# an optional module, and the renderer declines at create() on a backend with no GPU support.
+target_link_libraries(Sandbox PRIVATE Aver.UI Aver.Render.UI)
 if(TARGET Aver.Render.Voxi)
   # Settings DLL (brings AVER_MODULE_VOXI=1) + the static render feature that drives the RHI.
   target_link_libraries(Sandbox PRIVATE Aver.Render.Voxi Aver.Render.Voxi.Renderer)

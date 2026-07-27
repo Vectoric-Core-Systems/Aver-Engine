@@ -12,6 +12,8 @@
 #include "aver/formats/OcWorld.hpp"      // .ocworld: the level format the editor loads and saves
 #include "aver/formats/OcMesh.hpp"       // .ocmesh: the static mesh the Content Browser now loads
 #include "aver/formats/GltfImport.hpp"   // glTF/GLB -> .ocmesh, behind the Import button
+#include "aver/ui/UiDrawList.hpp"        // the retained game UI: what a widget tree produces...
+#include "aver/render/ui/UiRenderer.hpp" // ...and the render feature that puts one on the backbuffer
 
 #include "ProjectBrowser.hpp"
 #include "ToolsMenu.hpp"
@@ -738,6 +740,14 @@ public:
             }
         }
 #endif
+        // The game UI's render feature. Unconditional, because Aver.UI and its renderer depend on no
+        // optional module -- and a create() that declines on a backend without a resource factory is
+        // the same "run without the feature" path Voxi takes above.
+        //
+        // Registered AFTER Voxi and it does not matter: this one implements overlayPass alone, which
+        // runs after the post chain, so no ordering against a scene feature is possible.
+        gameUi_ = aver::render::ui::UiRenderer::create(*e.device());
+        if (gameUi_) e.device()->addRenderFeature(gameUi_);
 #if AVER_MODULE_SCRIPTING
         // Scripting is started LAST, after every rendering subsystem is up. It touches none of
         // them, so ordering is free -- and putting the one subsystem that may take a second to
@@ -786,6 +796,17 @@ public:
         // Only while the layer is on, so a scene with no clouds accumulates no clock and a capture
         // run of N frames is reproducible whatever the frame rate was.
         if (sky_.cloudsEnabled) cloudTime_ += t.dt;
+        // Only while the demo HUD is on, for the reason above: a value that keeps moving off-screen
+        // makes an otherwise identical frame differ from the one before it.
+        if (showUiDemo_) {
+            // Animated so the path is proved to rebuild and re-upload every frame, not just once.
+            // A static HUD would look identical whether the vertex buffer were being written or the
+            // GPU were reading a stale one -- which is exactly the bug the triple buffer guards.
+            uiDemoHealth_  = 0.5f + 0.5f * std::sin(uiDemoClock_ * 0.7f);
+            uiDemoStamina_ = 0.5f + 0.5f * std::sin(uiDemoClock_ * 1.6f + 1.0f);
+            uiDemoScroll_  = std::fmod(uiDemoScroll_ + t.dt * 24.0f, 216.0f);   // 12 rows * 18 px
+            uiDemoClock_  += t.dt;
+        }
 #if AVER_WITH_IMGUI
         if (e.device()->uiActive()) {
             // Dragging the window to a monitor with a different scale changes the size the glyphs
@@ -1498,7 +1519,87 @@ public:
         }
         drawGizmo(e);
         buildUI(e);
+        submitGameUi(e);
         captureCheck(e);
+    }
+
+    // The retained game UI, built and handed to its render feature once per frame.
+    //
+    // What it draws is a DEMONSTRATION and is meant to be deleted: there is no widget tree yet, so
+    // this is the draw list a widget tree will eventually produce, written by hand. It is here
+    // because the alternative is a render path with nothing exercising it, and this engine has a
+    // documented history of subsystems that compiled, had tests, and had never once reached a screen.
+    //
+    // Off by default, and not merely as politeness: the gates compare backbuffer pixels, and a HUD
+    // over the viewport would move every one of them.
+    void submitGameUi(Engine& e) {
+        if (!gameUi_) return;
+        aver::ui::UiDrawList& dl = uiList_;
+        dl.clear();
+        if (!showUiDemo_) { gameUi_->submit(dl); return; }   // submitting an empty list clears the UI
+
+        // Laid out inside the EDITOR VIEWPORT, not over the whole window. A game HUD belongs to the
+        // world it is a HUD for, and the viewport rect is where that world is -- the same rect
+        // setViewportRect confines the scene to. In a shipped build there is no dockspace, the rect
+        // is the whole backbuffer, and this reduces to a full-screen layout with no special case.
+        const f32 ox = vpX_, oy = vpY_, sw = vpW_, sh = vpH_;
+        if (sw < 80.0f || sh < 60.0f) { gameUi_->submit(dl); return; }
+
+        // Nothing may escape into the editor chrome. Every clip pushed below is intersected with
+        // this one, so containment is structural rather than a promise each widget keeps.
+        dl.pushClip(aver::ui::UiClip{static_cast<i32>(ox), static_cast<i32>(oy),
+                                     static_cast<i32>(ox + sw), static_cast<i32>(oy + sh)});
+
+        // Colours are 0xAABBGGRR -- the order a R8G8B8A8_UNORM vertex attribute reads on this
+        // machine -- and are premultiplied by addRect on the way in.
+        constexpr u32 kPanel  = 0xB0201814;   // 69% alpha, near-black: proves the blend
+        constexpr u32 kFrame  = 0xFF3A3226;
+        constexpr u32 kHealth = 0xFF2E4CE8;   // red, in BGR order
+        constexpr u32 kStamina= 0xFF3FC8E8;   // amber
+        constexpr u32 kInk    = 0xFFE8E4DC;
+
+        // ---- Content: the HUD proper, bottom-left ----
+        dl.setLayer(aver::ui::UiLayer::Content);
+        const f32 barW = 260.0f, barH = 14.0f;
+        const f32 barX = ox + 32.0f, barY = oy + sh - 96.0f;
+        dl.addRect(barX - 3, barY - 3, barW + 6, barH * 2 + 12, kPanel);
+        dl.addRect(barX, barY, barW, barH, kFrame);
+        dl.addRect(barX + 1, barY + 1, (barW - 2) * uiDemoHealth_, barH - 2, kHealth);
+        dl.addRect(barX, barY + barH + 6, barW, barH, kFrame);
+        dl.addRect(barX + 1, barY + barH + 7, (barW - 2) * uiDemoStamina_, barH - 2, kStamina);
+
+        // A crosshair, four ticks around a gap. Four rects sharing one texture and one clip, so the
+        // batcher must merge them into a single draw -- the same property UiTest asserts on the CPU.
+        const f32 cx = ox + sw * 0.5f, cy = oy + sh * 0.5f;
+        dl.addRect(cx - 11, cy - 1, 7, 2, kInk);
+        dl.addRect(cx + 4,  cy - 1, 7, 2, kInk);
+        dl.addRect(cx - 1, cy - 11, 2, 7, kInk);
+        dl.addRect(cx - 1, cy + 4,  2, 7, kInk);
+
+        // ---- Overlay: a panel with a CLIPPED list inside it ----
+        // The rows deliberately overrun the panel. Nothing but the clip stops them, so if the
+        // scissor were wrong they would run down the whole right-hand side of the screen -- which is
+        // the point of drawing it this way rather than sizing the rows to fit.
+        const f32 pw = 220.0f, ph = 132.0f;
+        const f32 px = ox + sw - pw - 32.0f, py = oy + 96.0f;
+        dl.setLayer(aver::ui::UiLayer::Overlay);
+        dl.addRect(px, py, pw, ph, kPanel);
+        dl.pushClip(aver::ui::UiClip{static_cast<i32>(px) + 8, static_cast<i32>(py) + 8,
+                                     static_cast<i32>(px + pw) - 8, static_cast<i32>(py + ph) - 8});
+        for (int i = 0; i < 12; ++i) {
+            const f32 ry = py + 12.0f + static_cast<f32>(i) * 18.0f - uiDemoScroll_;
+            dl.addRect(px + 12, ry, pw - 24, 12, (i & 1) ? 0x60E8E4DC : 0x30E8E4DC);
+        }
+        dl.popClip();
+
+        // ---- Tooltip: above the overlay, and overlapping it on purpose ----
+        // If layer ordering were wrong this would vanish under the panel rather than sit on it.
+        dl.setLayer(aver::ui::UiLayer::Tooltip);
+        dl.addRect(px - 40, py + ph - 24, 96, 20, 0xE0202020);
+        dl.addRect(px - 38, py + ph - 22, 92, 16, 0xFF6AC46A);
+
+        dl.popClip();
+        gameUi_->submit(dl);
     }
 
     void onShutdown(Engine& e) override {
@@ -1536,6 +1637,12 @@ public:
         releaseProjectMaterials();
         textureFactory_ = nullptr;
 #endif
+        // Deregister before releasing, for the reason stated below: the device holds a bare pointer.
+        if (gameUi_) {
+            e.device()->removeRenderFeature(gameUi_);
+            delete gameUi_;
+            gameUi_ = nullptr;
+        }
 #if AVER_MODULE_VOXI
         // Deregister before releasing: the device holds a bare pointer to the feature.
         if (voxiAttached_) { e.device()->removeRenderFeature(&voxiRenderer_); voxiAttached_ = false; }
@@ -2676,6 +2783,17 @@ private:
                 // Checked against the drawer state, so the menu reports what is actually up.
                 if (ImGui::MenuItem("Content Browser", "Ctrl+Space", drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
                 if (ImGui::MenuItem("Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
+                ImGui::Separator();
+                // The GAME UI, which is a different system from every other item in this menu: those
+                // are ImGui panels belonging to the editor, this is Aver.UI drawing onto the
+                // backbuffer through its own render feature. Disabled when the feature declined to
+                // initialise, rather than offering a switch that does nothing.
+                ImGui::BeginDisabled(gameUi_ == nullptr);
+                if (ImGui::MenuItem("Game UI Demo", nullptr, showUiDemo_)) showUiDemo_ = !showUiDemo_;
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip(gameUi_ ? "A hand-written Aver.UI draw list, until there is a widget tree to produce one."
+                                              : "The UI render feature is unavailable on this backend.");
                 ImGui::Separator(); if (ImGui::MenuItem("Reset Layout")) dockBuilt_=false; ImGui::EndMenu();
             }
             // Tools sits between Window and Build, where Unreal puts it. It owns its own
@@ -4753,6 +4871,14 @@ private:
     // configures it -- the composition root has no business knowing scripting exists.
     scripting::ScriptHost scripts_;
 #endif
+    // The retained game UI. The renderer is heap-owned because create() may decline (no GPU backend)
+    // and a member would have no way to say so; the draw list is a member so its buffers survive
+    // between frames instead of being reallocated sixty times a second.
+    aver::render::ui::UiRenderer* gameUi_ = nullptr;
+    aver::ui::UiDrawList uiList_;
+    bool showUiDemo_ = false;
+    f32  uiDemoHealth_ = 0.72f, uiDemoStamina_ = 0.44f, uiDemoScroll_ = 0.0f, uiDemoClock_ = 0.0f;
+
     rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;
     // Named surfaces a spawned actor can ask for by name, keyed by the token aver_scene_material
     // interns. A stand-in for authored materials, so a level can read as a place rather than as one

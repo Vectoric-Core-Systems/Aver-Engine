@@ -116,6 +116,11 @@ endif()
 # device, no backend and no render feature it could depend on. A build with every optional module off
 # still gets a working UI system, which is what makes it testable.
 add_subdirectory(modules/ui)              # retained game UI (NOT the editor's ImGui)
+# The GPU half of the above, and a SEPARATE target for the reason Aver.Render.Voxi.Renderer is one:
+# it needs the RHI, and giving Aver.UI that dependency would end the property that makes the widget
+# tree testable with no device. Unconditional too — the RHI always exists, and a backend without GPU
+# support declines at create() rather than failing to link.
+add_subdirectory(modules/render.ui)
 add_subdirectory(modules/runtime)
 
 if(AVER_BUILD_SANDBOX)
