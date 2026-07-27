@@ -10,6 +10,8 @@
 #include "aver/formats/OcBeam.hpp"
 #include "aver/formats/OcProject.hpp"
 #include "aver/formats/OcWorld.hpp"      // .ocworld: the level format the editor loads and saves
+#include "aver/formats/OcMesh.hpp"       // .ocmesh: the static mesh the Content Browser now loads
+#include "aver/formats/GltfImport.hpp"   // glTF/GLB -> .ocmesh, behind the Import button
 
 #include "ProjectBrowser.hpp"
 #include "ToolsMenu.hpp"
@@ -1192,6 +1194,72 @@ public:
     // its CMeshRenderer, and the render pass only ever sees that i32. Resolving lazily from there is
     // impossible -- there is no way back from the token to the string -- so the mapping has to exist
     // before anything spawns.
+    // Every .ocmesh under the project's Content, registered by the id a CMeshRenderer names.
+    //
+    // THE KEY IS THE CONTENT-RELATIVE PATH WITH FORWARD SLASHES, because that is the string every
+    // other producer of a mesh id hashes: a C# class written with Mesh("Meshes/rifle.ocmesh"), a
+    // .ocworld placement's asset field, and the two built-in primitives registered at startup all
+    // arrive at fnv1a64 of that exact spelling. Hash a Windows path with backslashes here and the id
+    // is a different number, the lookup misses, and the mesh silently draws nothing -- which is
+    // indistinguishable from the loader never having run.
+    //
+    // Recursive, because a project puts meshes in subfolders and the id includes them.
+    void loadProjectMeshes(Engine& e) {
+#if AVER_MODULE_SCENE
+        const std::string dir = project_.contentDir();
+        if (dir.empty()) return;
+        std::error_code ec;
+        if (!std::filesystem::exists(dir, ec)) return;
+
+        u32 loaded = 0, failed = 0;
+        for (std::filesystem::recursive_directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
+            if (ec) break;
+            if (!it->is_regular_file(ec)) continue;
+            const std::string full = it->path().string();
+            if (assetTypeFromPath(full) != AssetType::Mesh) continue;
+
+            std::string rel = std::filesystem::relative(it->path(), dir, ec).string();
+            if (ec) continue;
+            for (char& c : rel) if (c == '\\') c = '/';
+
+            fmt::OcMeshData md;
+            std::string why;
+            if (!fmt::loadOcMesh(full, md, &why)) { AVER_WARN("[Mesh] {}", why); ++failed; continue; }
+
+            // Into the engine's interleaved 32-byte vertex. The FILE keeps the spec's stream layout;
+            // this is the conversion the .ocmesh reader exists to make cheap. See OcMesh.hpp.
+            std::vector<rhi::MeshVertex> verts(md.vertexCount());
+            for (u32 i = 0; i < md.vertexCount(); ++i) {
+                rhi::MeshVertex& v = verts[i];
+                v.px = md.positions[usize(i)*3+0]; v.py = md.positions[usize(i)*3+1]; v.pz = md.positions[usize(i)*3+2];
+                v.nx = md.normals[usize(i)*3+0];   v.ny = md.normals[usize(i)*3+1];   v.nz = md.normals[usize(i)*3+2];
+                v.u  = md.uvs[usize(i)*2+0];       v.v  = md.uvs[usize(i)*2+1];
+            }
+            const rhi::MeshHandle h = e.device()->createMesh(verts.data(), (u32)verts.size(),
+                                                            md.indices.data(), (u32)md.indices.size());
+            if (!h) { AVER_WARN("[Mesh] the device refused '{}'", rel); ++failed; continue; }
+
+            const u64 id = fnv1a64(std::string_view(rel));
+            sceneMeshes_[id] = h;
+            projectMeshIds_.push_back(id);
+            ++loaded;
+            AVER_INFO("[Mesh] '{}' -> {} verts, {} indices", rel, verts.size(), md.indices.size());
+        }
+        if (loaded || failed)
+            AVER_INFO("[Mesh] {} project mesh(es) loaded from {}{}", loaded, dir,
+                      failed ? (", " + std::to_string(failed) + " failed") : "");
+#else
+        (void)e;
+#endif
+    }
+
+    // Dropped when the project changes. The two built-in primitives are NOT in projectMeshIds_, so
+    // they survive -- a level that names Meshes/cube.ocmesh must keep working after a project swap.
+    void releaseProjectMeshes() {
+        for (const u64 id : projectMeshIds_) sceneMeshes_.erase(id);
+        projectMeshIds_.clear();
+    }
+
     void loadProjectMaterials() {
 #if AVER_MODULE_SCENE
         const std::string dir = project_.contentDir();
@@ -1548,6 +1616,13 @@ private:
         releaseProjectMaterials();
         rebuildContentIndex();
         loadProjectMaterials();
+#endif
+#if AVER_MODULE_SCENE
+        // Meshes BEFORE the start map: loadLevel resolves each placement's asset id through
+        // sceneMeshes_, and a mesh registered after the level has loaded draws nothing until
+        // something reloads the level.
+        releaseProjectMeshes();
+        loadProjectMeshes(e);
 #endif
 #if AVER_MODULE_SCENE
         // Open the project's start map, so the editor shows the LEVEL rather than an empty world that
@@ -2513,6 +2588,14 @@ private:
         // Latched for the panels below, which are called without the engine. A raw borrowed pointer
         // and not an owner: the device outlives every frame this is read in.
         prefsDevice_ = e.device();
+#if AVER_MODULE_SCENE
+        // An import wrote .ocmesh files; pick them up now that there is a device to create with.
+        if (wantMeshReload_) {
+            wantMeshReload_ = false;
+            releaseProjectMeshes();
+            loadProjectMeshes(e);
+        }
+#endif
         // --no-vsync, applied once the device exists. Refused rather than silently ignored where the
         // machine cannot tear, because "I asked for it and nothing happened" is the state this whole
         // change exists to avoid.
@@ -3637,9 +3720,75 @@ private:
             AVER_WARN("[Import] '{}' already exists in {} - not overwritten; rename the source or remove it first", name, destDir);
             return;
         }
+        // A MODEL IS CONVERTED, NOT COPIED. Everything else still copies, which is right for a .png
+        // a material names or a .ocmat authored by hand -- but dropping a .gltf into Content used to
+        // produce a .gltf sitting in Content that no subsystem could read. There was an Import
+        // button, and pressing it achieved nothing a file manager could not.
+        const std::string ext = std::filesystem::path(src).extension().string();
+        std::string lower;
+        for (const char c : ext) lower.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
+        if (lower == ".gltf" || lower == ".glb") { importModel(src, destDir); return; }
+
         std::filesystem::copy_file(src, dest, ec);
-        if (ec) AVER_WARN("[Import] failed to copy '{}' -> '{}': {}", src, dest, ec.message());
-        else    AVER_INFO("[Import] imported '{}' into {}", name, destDir);
+        if (ec) { AVER_WARN("[Import] failed to copy '{}' -> '{}': {}", src, dest, ec.message());
+                  cbStatus_ = "Import failed - see the Output Log"; return; }
+        AVER_INFO("[Import] imported '{}' into {}", name, destDir);
+        cbStatus_ = "Imported " + name;
+        cbInvalidate(destDir);
+    }
+
+    // glTF/GLB -> one .ocmesh per mesh in the source, written into the destination folder and
+    // registered immediately so it is usable without reopening the project.
+    void importModel(const std::string& src, const std::string& destDir) {
+        fmt::GltfImportResult res;
+        std::string why;
+        if (!fmt::importGltf(src, res, {}, &why)) {
+            AVER_WARN("[Import] {}", why);
+            // The Output Log carries the detail; the status line has to say SOMETHING, because three
+            // of the four failure paths here used to be silent unless the log was already open.
+            cbStatus_ = "Import failed - see the Output Log";
+            return;
+        }
+        // Named rather than counted: "3 features were ignored" tells the user nothing they can act on.
+        for (const std::string& u : res.unsupported)
+            AVER_WARN("[Import] '{}' contains {} - not imported", std::filesystem::path(src).filename().string(), u);
+
+        std::error_code ec;
+        const std::string stem = std::filesystem::path(src).stem().string();
+        u32 written = 0;
+        for (usize i = 0; i < res.meshes.size(); ++i) {
+            fmt::OcMeshData& m = res.meshes[i];
+            if (!m.valid()) { AVER_WARN("[Import] mesh {} came out empty and was skipped", i); continue; }
+
+            // One source can hold several meshes, so a name is only unique with the mesh's own name
+            // or its index appended. The source's name is preferred because it is what the author
+            // typed in the DCC and what they will look for in the Content Browser.
+            std::string base = i < res.meshNames.size() && !res.meshNames[i].empty() ? res.meshNames[i] : stem;
+            if (res.meshes.size() > 1 && base == stem) base += "_" + std::to_string(i);
+            for (char& c : base) if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
+                                     c == '"' || c == '<' || c == '>' || c == '|') c = '_';
+
+            std::string out = destDir + "\\" + base + ".ocmesh";
+            // Refused rather than overwritten, matching the copy path: silently replacing an asset
+            // other things reference is data loss whose only feedback is a success line.
+            if (std::filesystem::exists(out, ec)) {
+                AVER_WARN("[Import] '{}.ocmesh' already exists - not overwritten", base);
+                continue;
+            }
+            if (!fmt::saveOcMesh(out, m, &why)) { AVER_WARN("[Import] {}", why); continue; }
+            AVER_INFO("[Import] {} -> {} ({} verts, {} tris)", std::filesystem::path(src).filename().string(),
+                      base + ".ocmesh", m.vertexCount(), m.indices.size() / 3);
+            ++written;
+        }
+
+        if (written == 0) { cbStatus_ = "Import produced nothing - see the Output Log"; return; }
+        cbStatus_ = "Imported " + std::to_string(written) + " mesh(es) from " +
+                    std::filesystem::path(src).filename().string();
+        cbInvalidate(destDir);
+        // Registered NOW rather than on the next project open, so an imported model can be placed in
+        // the level it was imported for. Deferred by one frame because this runs from inside an ImGui
+        // popup with no Engine& in reach, and createMesh needs the device.
+        wantMeshReload_ = true;
     }
 
     // Docked panels. These are plain windows — the dock builder placed them, and the user can
@@ -4424,6 +4573,10 @@ private:
     bool hideEditorScene_ = false;   // latched each frame by the scene pass; see there for why
     rhi::IDevice* prefsDevice_ = nullptr;   // borrowed, latched in buildUI for the settings panels
     bool vsyncOffRequested_ = false;        // --no-vsync, pending a device to apply it to
+    // Set by an import, consumed on the next frame that has an Engine&. The import runs from inside
+    // an ImGui popup, which has no device in reach, and createMesh needs one.
+    bool wantMeshReload_ = false;
+    std::vector<u64> projectMeshIds_;      // what loadProjectMeshes added, so it can be undone
     // DISPLAY names, which are not the entity's name.
     //
     // scene::World::name() holds the ASSET PATH, because that is what saveLevel writes as a

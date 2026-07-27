@@ -39,3 +39,9 @@ if(TARGET Aver.Formats.Material)
   set_target_properties(MaterialTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# ConvertTool -- drives the importer over a real file and writes a real .ocmesh. Not a test: a small
+# harness so the end-to-end path can be exercised without the editor's UI.
+add_executable(ConvertTool src/ConvertTool.cpp)
+target_link_libraries(ConvertTool PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(ConvertTool PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
