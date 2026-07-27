@@ -41,6 +41,7 @@ enum class Format : u8 {
     R8Unorm,
     RGBA16F,      // radiance volumes, HDR targets
     R32Float,
+    RG32Float,    // two floats; a vertex position or texture coordinate, not a texture format here
     R32Uint,      // the only typed format D3D12 guarantees UAV atomics on
     D32Float,     // depth-stencil view format
     R32Typeless,  // aliased depth: DSV sees D32Float, SRV sees R32Float
@@ -276,10 +277,48 @@ constexpr u32 kBindingTableCount = 2;
 inline u32 declaredSrvCount(const PipelineLayout& l) { return l.srvCount + l.srvCount1; }
 inline u32 declaredUavCount(const PipelineLayout& l) { return l.uavCount + l.uavCount1; }
 
+// ---------------------------------------------------------------- vertex layout
+//
+// For pipelines that draw geometry the CALLER owns, rather than geometry the backend owns. Every
+// draw in this engine used to be addressed by MeshHandle, so exactly one vertex format could reach
+// the input assembler and the backend was free to bake it in. That is still true of the scene, and
+// it stays true: this does not replace MeshHandle, it exists beside it.
+//
+// It exists because a UI vertex is not a MeshVertex and never can be. A screen-space quad has no
+// normal, no world position and no third coordinate; forcing it through the 32-byte scene vertex
+// would spend more than a third of every UI buffer on fields no UI shader reads, and would make the
+// engine's one vertex struct answer to two unrelated consumers -- which is how a struct ends up with
+// a union in it. A feature that owns its own geometry should own its own vertex format.
+enum class VertexSemantic : u8 { Position, Normal, TexCoord, Color };
+
+struct VertexAttrib {
+    VertexSemantic semantic = VertexSemantic::Position;
+    u8             semanticIndex = 0;    // POSITION0, TEXCOORD1, ...
+    Format         format = Format::Unknown;
+    u32            offset = 0;           // bytes from the start of the vertex
+};
+
+constexpr u32 kMaxVertexAttribs = 8;
+
+struct VertexLayout {
+    VertexAttrib attribs[kMaxVertexAttribs] = {};
+    u32          attribCount = 0;
+    // Bytes per vertex. Required whenever attribCount is non-zero and NOT derived from the
+    // attributes: a layout may legally leave padding at the end, and deriving it would silently
+    // repack every such vertex by a few bytes -- which reads as geometry that drifts as it goes.
+    u32          stride = 0;
+};
+
 struct GraphicsPipelineDesc {
     // Either (vs[,gs]) or ms must be set. A mesh pipeline has no input assembler; the backend picks
     // the matching root-signature flavour automatically.
     ShaderHandle vs = 0, gs = 0, ms = 0, ps = 0;
+
+    // The vertex format this pipeline's input assembler reads. LEFT EMPTY, the backend uses the
+    // engine's own MeshVertex, which is what every scene pipeline wants and why there was no field
+    // here before. Ignored entirely by a mesh-shader pipeline, which has no input assembler, and by
+    // drawFullscreen, which binds no vertex buffer.
+    VertexLayout vertexLayout{};
 
     PipelineLayout layout{};
 
@@ -456,6 +495,17 @@ public:
     // Distinct name, not an overload: every handle type is the same underlying integer.
     virtual void setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle tlas) = 0;
 
+    // Write bytes into a BufferKind::Upload buffer. Rejected on any other kind, because a GPU-local
+    // buffer cannot be written without a staging copy and a barrier -- and quietly performing one
+    // here would hide a per-frame upload inside what reads like a memcpy.
+    //
+    // The write is IMMEDIATE and unsynchronised: the caller owns the N-buffering. A module that
+    // writes a buffer the GPU may still be reading corrupts the frame in flight, which is why the
+    // one consumer of this rotates a buffer per frame in flight rather than reusing one. There is
+    // deliberately no map()/unmap() pair -- a raw pointer into GPU-visible memory is the same hazard
+    // with nothing at the call site to say so.
+    virtual bool writeBuffer(BufferHandle h, const void* src, u64 bytes, u64 offset = 0) = 0;
+
     // Resolved description, with `mips` filled in when the desc asked for a full chain. The module
     // must not recompute the mip count: it drives the descriptor loop, the per-mip barrier sequence
     // and the dispatch loop, and an off-by-one makes the closing whole-resource transition illegal.
@@ -520,6 +570,24 @@ public:
     virtual void drawMesh(MeshHandle mesh) = 0;
     virtual void dispatchMeshFor(MeshHandle mesh) = 0;
     virtual void dispatch(u32 gx, u32 gy, u32 gz) = 0;
+
+    // ---- geometry the CALLER owns ----
+    //
+    // The counterpart to GraphicsPipelineDesc::vertexLayout, and the reason both exist: a feature
+    // that builds its own vertices per frame -- a UI, a particle system, a debug overlay -- cannot
+    // express that as a MeshHandle, which names an immutable upload.
+    //
+    // `stride` is passed at bind rather than taken from the pipeline because the two are checked
+    // against each other by nobody: a buffer of 20-byte vertices bound to a pipeline expecting 32
+    // draws garbage that still rasterises. Naming it here keeps the number beside the buffer it
+    // describes, which is the only place a reader can compare them.
+    virtual void setVertexBuffer(BufferHandle b, u32 stride) = 0;
+    // Format must be R32Uint or R16Uint-equivalent; anything else is rejected rather than guessed.
+    virtual void setIndexBuffer(BufferHandle b, Format indexFormat) = 0;
+    // Draws from the currently bound vertex and index buffers. `baseVertex` is ADDED to every index
+    // before the fetch, which is what lets many draws share one buffer without rewriting indices.
+    virtual void drawIndexed(u32 indexCount, u32 firstIndex = 0, i32 baseVertex = 0) = 0;
+
     // 3-vertex fullscreen triangle. The pipeline supplies its OWN vertex shader generating the
     // triangle from SV_VertexID — no backend vertex shader is implied.
     virtual void drawFullscreen() = 0;
@@ -591,6 +659,23 @@ public:
     // Suppression must cover line/overlay draws too, or they float over the replacement.
     virtual bool suppressesScene() const { return false; }
     virtual void scenePass(IRenderContext& ctx) { (void)ctx; }
+
+    // After the camera post chain, drawing onto the BACKBUFFER. This is the only hook downstream of
+    // the tonemap, and that is the whole point of it: a HUD is authored in display colours and must
+    // not be tonemapped, exposed or bloomed along with the world behind it. A feature that drew a
+    // white panel into the scene target would watch the eye adaptation stop down the entire frame
+    // because the UI is the brightest thing in it.
+    //
+    // The backbuffer is ALREADY BOUND as the sole render target with no depth, and the viewport and
+    // scissor are already the full backbuffer, whose extent is passed because a feature has no other
+    // way to ask -- the backbuffer is not a TextureHandle any module can name. A feature that
+    // narrows either must not assume the next one restores it.
+    //
+    // Runs BEFORE the editor's own UI is recorded, so editor chrome composites over a game HUD
+    // rather than under it. In a shipped build there is no editor UI and the distinction is moot.
+    virtual void overlayPass(IRenderContext& ctx, u32 width, u32 height) {
+        (void)ctx; (void)width; (void)height;
+    }
 
     // Pipelines that bake sample count or target formats must be rebuilt when those change.
     // setSampleCount can only rebuild the ones the backend owns.

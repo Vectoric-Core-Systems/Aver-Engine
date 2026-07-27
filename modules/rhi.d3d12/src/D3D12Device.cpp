@@ -449,6 +449,7 @@ DXGI_FORMAT toDxgiFormat(Format f) {
         case Format::R8Unorm:        return DXGI_FORMAT_R8_UNORM;
         case Format::RGBA16F:        return DXGI_FORMAT_R16G16B16A16_FLOAT;
         case Format::R32Float:       return DXGI_FORMAT_R32_FLOAT;
+        case Format::RG32Float:      return DXGI_FORMAT_R32G32_FLOAT;
         case Format::R32Uint:        return DXGI_FORMAT_R32_UINT;
         case Format::D32Float:       return DXGI_FORMAT_D32_FLOAT;
         case Format::R32Typeless:    return DXGI_FORMAT_R32_TYPELESS;
@@ -474,6 +475,43 @@ DXGI_FORMAT toDxgiDsvFormat(Format f) {
     return (f == Format::R32Typeless || f == Format::D32Float) ? DXGI_FORMAT_D32_FLOAT : toDxgiFormat(f);
 }
 
+// A caller-declared vertex layout (GraphicsPipelineDesc::vertexLayout) to D3D12's input elements.
+// The semantic NAME is a string literal, so the pointer outlives the D3D12_INPUT_LAYOUT_DESC that
+// borrows it. The ELEMENT ARRAY does not, which is why it is an out parameter the caller keeps alive
+// across CreateGraphicsPipelineState rather than a temporary returned by value.
+const char* semanticName(VertexSemantic s) {
+    switch (s) {
+        case VertexSemantic::Position: return "POSITION";
+        case VertexSemantic::Normal:   return "NORMAL";
+        case VertexSemantic::TexCoord: return "TEXCOORD";
+        case VertexSemantic::Color:    return "COLOR";
+    }
+    return "POSITION";
+}
+
+UINT buildInputLayout(const VertexLayout& l, D3D12_INPUT_ELEMENT_DESC (&out)[kMaxVertexAttribs]) {
+    UINT n = 0;
+    for (u32 i = 0; i < l.attribCount && i < kMaxVertexAttribs; ++i) {
+        const VertexAttrib& a = l.attribs[i];
+        const DXGI_FORMAT f = toDxgiFormat(a.format);
+        if (f == DXGI_FORMAT_UNKNOWN) {
+            // Dropped rather than passed through: D3D12 rejects UNKNOWN in an input element, and its
+            // rejection names the element index, not the attribute the caller actually wrote.
+            AVER_ERROR("[RHI.D3D12] vertex attribute {} has no usable format", i);
+            continue;
+        }
+        out[n].SemanticName = semanticName(a.semantic);
+        out[n].SemanticIndex = a.semanticIndex;
+        out[n].Format = f;
+        out[n].InputSlot = 0;
+        out[n].AlignedByteOffset = a.offset;
+        out[n].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+        out[n].InstanceDataStepRate = 0;
+        ++n;
+    }
+    return n;
+}
+
 Format fromDxgiFormat(DXGI_FORMAT f) {
     switch (f) {
         case DXGI_FORMAT_R8G8B8A8_UNORM:      return Format::RGBA8Unorm;
@@ -482,6 +520,7 @@ Format fromDxgiFormat(DXGI_FORMAT f) {
         case DXGI_FORMAT_R8_UNORM:            return Format::R8Unorm;
         case DXGI_FORMAT_R16G16B16A16_FLOAT:  return Format::RGBA16F;
         case DXGI_FORMAT_R32_FLOAT:           return Format::R32Float;
+        case DXGI_FORMAT_R32G32_FLOAT:        return Format::RG32Float;
         case DXGI_FORMAT_R32_UINT:            return Format::R32Uint;
         case DXGI_FORMAT_D32_FLOAT:           return Format::D32Float;
         case DXGI_FORMAT_R32_TYPELESS:        return Format::R32Typeless;
@@ -1145,6 +1184,7 @@ public:
     void setUav(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip) override;
     void setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle tlas) override;
 
+    bool writeBuffer(BufferHandle h, const void* src, u64 bytes, u64 offset) override;
     bool textureInfo(TextureHandle h, TextureDesc& out) const override;
     void waitIdle() override;
 
@@ -1225,6 +1265,9 @@ public:
     void dispatchMeshFor(MeshHandle mesh) override;
     void dispatch(u32 gx, u32 gy, u32 gz) override;
     void drawFullscreen() override;
+    void setVertexBuffer(BufferHandle b, u32 stride) override;
+    void setIndexBuffer(BufferHandle b, Format indexFormat) override;
+    void drawIndexed(u32 indexCount, u32 firstIndex, i32 baseVertex) override;
     void buildBlas(BlasHandle blas) override;
     void buildTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
     void textureBarrier(TextureHandle t, ResourceState from, ResourceState to, u32 subresource) override;
@@ -2826,6 +2869,26 @@ void D3D12Device::endFrame() {
     // leaves the backbuffer in RENDER_TARGET, which is the state the UI pass below expects.
     runPostChain(bb);
 
+    // ---- overlay features, on the tonemapped backbuffer ----
+    // Bound here rather than by the feature because the backbuffer is not a TextureHandle any module
+    // can name. Depth is deliberately absent: an overlay composites in submission order and a depth
+    // test against the scene's buffer would let world geometry occlude a HUD.
+    if (rhiContext_ && !features_.empty()) {
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
+        rtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
+        cmdList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        // The post chain leaves the viewport at whatever its last pass wanted, which for a bloom
+        // pyramid is a fraction of the screen. Restored here so a feature that sets neither still
+        // draws over the whole backbuffer, which is what the hook's contract promises.
+        D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(width_), static_cast<float>(height_), 0.0f, 1.0f};
+        D3D12_RECT sc{0, 0, static_cast<LONG>(width_), static_cast<LONG>(height_)};
+        cmdList_->RSSetViewports(1, &vp);
+        cmdList_->RSSetScissorRects(1, &sc);
+        // The post chain bound its own root signature and descriptor heap; both are re-stated by the
+        // feature's own setPipeline / setBindingSet, which is why nothing is reset here.
+        for (IRenderFeature* f : features_) f->overlayPass(*rhiContext_, width_, height_);
+    }
+
 #if AVER_WITH_IMGUI
     if (uiActive_) {
         ImGui::Render();
@@ -3878,14 +3941,23 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
         D3D12_PIPELINE_STATE_STREAM_DESC sd{sizeof(s), &s};
         if (!hrOk(device2->CreatePipelineState(&sd, IID_PPV_ARGS(&p.pso)), "rhi mesh pipeline")) return 0;
     } else {
-        // Geometry is only ever addressed by MeshHandle, so the one vertex layout a draw can
-        // present is the engine's MeshVertex. drawFullscreen binds no vertex buffer and ignores it.
+        // Geometry addressed by MeshHandle presents the engine's MeshVertex, which is what an empty
+        // vertexLayout selects and what every scene pipeline uses. A pipeline that declares its own
+        // layout owns its own buffers too (setVertexBuffer / drawIndexed). drawFullscreen binds no
+        // vertex buffer at all and ignores whichever is in force.
+        //
+        // The element array is a LOCAL that must outlive the desc borrowing it, so it is declared
+        // here rather than returned from the helper.
+        D3D12_INPUT_ELEMENT_DESC elems[kMaxVertexAttribs] = {};
+        const UINT elemCount = buildInputLayout(d.vertexLayout, elems);
+
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
         pd.pRootSignature = rs->sig.Get();
         pd.VS = {vs->blob->GetBufferPointer(), vs->blob->GetBufferSize()};
         if (gs) pd.GS = {gs->blob->GetBufferPointer(), gs->blob->GetBufferSize()};
         if (ps) pd.PS = {ps->blob->GetBufferPointer(), ps->blob->GetBufferSize()};
-        pd.InputLayout = {kMeshInputLayout, kMeshInputLayoutCount};
+        pd.InputLayout = elemCount ? D3D12_INPUT_LAYOUT_DESC{elems, elemCount}
+                                   : D3D12_INPUT_LAYOUT_DESC{kMeshInputLayout, kMeshInputLayoutCount};
         pd.RasterizerState = raster;
         pd.DepthStencilState = depth;
         pd.BlendState = blend;
@@ -4150,6 +4222,24 @@ void D3D12ResourceFactory::setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.RaytracingAccelerationStructure.Location = t->as->GetGPUVirtualAddress();
     dev_->device_->CreateShaderResourceView(nullptr, &sv, cpuSlot(s->heapBase + slot));
+}
+
+// Upload buffers are mapped for their whole life (see createBuffer), so this is the memcpy it looks
+// like. Every rejection below is a case where the alternative is a write that lands somewhere: a
+// GPU-local buffer has no CPU pointer at all, and an over-long write past the end of an upload heap
+// corrupts whatever the allocator placed after it with no fault to say so.
+bool D3D12ResourceFactory::writeBuffer(BufferHandle h, const void* src, u64 bytes, u64 offset) {
+    if (h == 0 || h > buffers_.size()) { AVER_ERROR("[RHI.D3D12] writeBuffer with an invalid handle"); return false; }
+    RhiBuffer& b = buffers_[h - 1];
+    if (!b.mapped) { AVER_ERROR("[RHI.D3D12] writeBuffer on a buffer that is not BufferKind::Upload"); return false; }
+    if (!src || bytes == 0) return true;   // writing nothing is not a failure
+    if (offset + bytes > b.desc.bytes) {
+        AVER_ERROR("[RHI.D3D12] writeBuffer of {} bytes at {} overruns a {}-byte buffer",
+                   bytes, offset, b.desc.bytes);
+        return false;
+    }
+    std::memcpy(b.mapped + offset, src, static_cast<usize>(bytes));
+    return true;
 }
 
 bool D3D12ResourceFactory::textureInfo(TextureHandle h, TextureDesc& out) const {
@@ -4532,6 +4622,45 @@ void D3D12RenderContext::drawFullscreen() {
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     dev_->cmdList_->IASetVertexBuffers(0, 0, nullptr);
     dev_->cmdList_->DrawInstanced(3, 1, 0, 0);
+}
+
+// Caller-owned geometry. These are thin on purpose: the input assembler is stateful in D3D12 too,
+// so binding at the bind call and drawing at the draw call is the same shape the API already has,
+// and adding a cache of "what is currently bound" here would be a second opinion about it.
+void D3D12RenderContext::setVertexBuffer(BufferHandle h, u32 stride) {
+    if (!dev_->cmdList_) return;
+    RhiBuffer* b = res_->buffer(h);
+    if (!b) { AVER_ERROR("[RHI.D3D12] setVertexBuffer with an invalid handle"); return; }
+    if (stride == 0) { AVER_ERROR("[RHI.D3D12] setVertexBuffer with a zero stride"); return; }
+    D3D12_VERTEX_BUFFER_VIEW v{};
+    v.BufferLocation = b->res->GetGPUVirtualAddress();
+    v.SizeInBytes = static_cast<UINT>(b->desc.bytes);
+    v.StrideInBytes = stride;
+    dev_->cmdList_->IASetVertexBuffers(0, 1, &v);
+}
+
+void D3D12RenderContext::setIndexBuffer(BufferHandle h, Format indexFormat) {
+    if (!dev_->cmdList_) return;
+    RhiBuffer* b = res_->buffer(h);
+    if (!b) { AVER_ERROR("[RHI.D3D12] setIndexBuffer with an invalid handle"); return; }
+    // Refused rather than defaulted to 32-bit: a 16-bit buffer read as 32-bit indexes past the end
+    // of the vertex buffer, which is a hang on some drivers and garbage geometry on the rest.
+    if (indexFormat != Format::R32Uint) {
+        AVER_ERROR("[RHI.D3D12] setIndexBuffer needs Format::R32Uint");
+        return;
+    }
+    D3D12_INDEX_BUFFER_VIEW v{};
+    v.BufferLocation = b->res->GetGPUVirtualAddress();
+    v.SizeInBytes = static_cast<UINT>(b->desc.bytes);
+    v.Format = DXGI_FORMAT_R32_UINT;
+    dev_->cmdList_->IASetIndexBuffer(&v);
+}
+
+void D3D12RenderContext::drawIndexed(u32 indexCount, u32 firstIndex, i32 baseVertex) {
+    if (!dev_->cmdList_ || indexCount == 0) return;
+    applyDrawBinding();
+    dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    dev_->cmdList_->DrawIndexedInstanced(indexCount, 1, firstIndex, baseVertex, 0);
 }
 
 void D3D12RenderContext::buildBlas(BlasHandle h) {
