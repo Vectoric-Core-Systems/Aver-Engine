@@ -9,6 +9,7 @@
 #include "aver/formats/OcProject.hpp"
 
 #include <string>
+#include <vector>
 
 namespace aver::editor {
 
@@ -83,5 +84,48 @@ std::string scriptsCsprojPath(const fmt::ProjectDesc& proj);
 // OUTSIDE `Content\`, deliberately: `Content` is the asset mount root a shipped game reads, and
 // build output is neither content nor something anyone should ship.
 std::string scriptsBinaryDir(const fmt::ProjectDesc& proj);
+
+// ---------------------------------------------------------------- upgrading an older project
+//
+// What a project needs has grown: four engine references where there was one, a Materials folder
+// with a Compile glob pointing at it, a `.csproj` that exists before the first script. A project
+// scaffolded before any of that is not broken in a way it can report -- it simply fails to build a
+// HUD, or bakes no materials, with an error naming an assembly nobody chose.
+//
+// So the editor looks when it opens one, and ASKS. It never modifies a project silently: the files
+// belong to whoever wrote them, and a tool that edits your build on startup is a tool you cannot
+// trust with the rest.
+
+// One thing that is missing, and what would be done about it.
+struct ProjectFix {
+    enum class Kind {
+        CreateFolder,      // a Content subfolder the layout expects
+        CreateCsproj,      // no Scripts.csproj at all
+        AddReference,      // an engine assembly the .csproj does not name
+        AddMaterialsGlob,  // the <Compile Include="..\Materials\**\*.cs" /> item
+        RepointReference,  // a ProjectReference whose target does not exist (a moved or deleted tree)
+    };
+    Kind kind = Kind::CreateFolder;
+    std::string summary;   // one line, for the prompt
+    std::string detail;    // the path, or the exact text that would be inserted
+};
+
+struct ProjectUpgrade {
+    std::vector<ProjectFix> fixes;
+    bool empty() const { return fixes.empty(); }
+};
+
+// What `proj` is missing. Reads only; writes nothing. An empty result means the project is current.
+ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj);
+
+// Apply everything `inspectProject` found.
+//
+// The `.csproj` is MERGED, never regenerated: a project may carry a PropertyGroup, a
+// PackageReference or a target somebody added by hand, and replacing the file to add a reference
+// would throw all of it away. Missing items are appended as a new ItemGroup before `</Project>`,
+// which MSBuild merges with whatever is already there.
+//
+// Returns false with `err` set on the first failure, having applied whatever came before it.
+bool applyProjectUpgrade(const fmt::ProjectDesc& proj, const ProjectUpgrade& up, std::string* err);
 
 } // namespace aver::editor

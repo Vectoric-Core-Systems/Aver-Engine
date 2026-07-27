@@ -1762,6 +1762,15 @@ private:
     // are the two places the editor claims to have one, so both must actually change.
     void applyProject(Engine& e) {
         project_ = browser_.project();
+        // What this project is missing, checked once on open. Never acted on here: the prompt is
+        // what acts, and only if somebody says yes. A tool that edits your build on startup is a
+        // tool you cannot trust with the rest of your disk.
+        pendingUpgrade_ = editor::inspectProject(project_);
+        upgradeAsked_ = false;
+        upgradeStatus_.clear();
+        if (!pendingUpgrade_.empty())
+            AVER_INFO("[Editor] project '{}' predates {} of this editor's project files; offering to upgrade",
+                      project_.name, pendingUpgrade_.fixes.size());
         if (e.window())
             e.window()->setTitle("Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + project_.name);
 #if AVER_MODULE_PBR
@@ -2738,6 +2747,74 @@ private:
     }
 #endif
 
+    // "This project predates some of the editor's project files. Add them?"
+    //
+    // A LIST, not a reassurance. Every line names a folder that will appear or a reference that will
+    // be added, because the one thing an author needs to decide is whether they mind, and "upgrade
+    // your project" gives them nothing to decide with.
+    //
+    // Declining is remembered for the session and nothing nags: a project that is deliberately
+    // minimal is a legitimate project, and an editor that asks again every time it is opened is one
+    // people learn to dismiss without reading.
+    void drawUpgradePrompt() {
+#if AVER_WITH_IMGUI
+        if (pendingUpgrade_.empty() || upgradeAsked_) return;
+        constexpr const char* kTitle = "Upgrade project?";
+        if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
+
+        const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(560.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+        if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+        ImGui::TextWrapped("'%s' was created by an earlier version of the editor and is missing some "
+                           "of the files a project now needs.", project_.name.c_str());
+        ImGui::Spacing();
+        ImGui::TextDisabled("Nothing you wrote is replaced. The .csproj is edited by appending, not "
+                            "regenerated, so anything you added by hand stays.");
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        if (ImGui::BeginChild("##upgradeList", ImVec2(0.0f, 200.0f * dpi_), ImGuiChildFlags_Borders)) {
+            for (const editor::ProjectFix& f : pendingUpgrade_.fixes) {
+                ImGui::BulletText("%s", f.summary.c_str());
+                if (!f.detail.empty()) {
+                    ImGui::Indent();
+                    ImGui::TextDisabled("%s", f.detail.c_str());
+                    ImGui::Unindent();
+                }
+            }
+        }
+        ImGui::EndChild();
+        ImGui::Separator();
+
+        if (ImGui::Button("Upgrade", ImVec2(120.0f * dpi_, 0.0f))) {
+            std::string err;
+            if (editor::applyProjectUpgrade(project_, pendingUpgrade_, &err)) {
+                upgradeStatus_ = "Project upgraded - Compile C# to rebuild.";
+                AVER_INFO("[Editor] '{}' upgraded", project_.name);
+            } else {
+                upgradeStatus_ = "Upgrade failed: " + err;
+                AVER_ERROR("[Editor] upgrade of '{}' failed: {}", project_.name, err);
+            }
+            pendingUpgrade_ = {};
+            upgradeAsked_ = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Not now", ImVec2(120.0f * dpi_, 0.0f))) {
+            // Kept, not cleared: declining should not mean the editor forgets what it found, and the
+            // status line below says how to get back to it.
+            upgradeAsked_ = true;
+            upgradeStatus_ = "Project left as it is.";
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("Not now leaves every file untouched.");
+        ImGui::EndPopup();
+#endif
+    }
+
     void buildUI(Engine& e) {
         // Latched for the panels below, which are called without the engine. A raw borrowed pointer
         // and not an owner: the device outlives every frame this is read in.
@@ -2970,6 +3047,7 @@ private:
         // level editor rather than being clipped by the dockspace it does not belong to.
         assetEditors_.draw(e);
         tools_.drawModals(project_, dpi_);
+        drawUpgradePrompt();
 
         // ---------------- status bar ----------------
         ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH));
@@ -5002,6 +5080,13 @@ private:
     // What the last 'Save to C#' did, shown beside the button. Kept on the object rather than
     // static, so a second project does not inherit the first one's message.
     std::string matSaveStatus_;
+
+    // What the last opened project is missing, and whether the prompt has had its answer this
+    // session. Held rather than recomputed per frame: inspectProject touches the filesystem, and a
+    // modal that stats six paths every frame is a modal that makes the editor feel slow.
+    editor::ProjectUpgrade pendingUpgrade_;
+    bool        upgradeAsked_ = false;
+    std::string upgradeStatus_;
     f32  uiDemoHealth_ = 0.72f, uiDemoStamina_ = 0.44f, uiDemoScroll_ = 0.0f, uiDemoClock_ = 0.0f;
 
     rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;
@@ -5423,6 +5508,28 @@ Application* createApplication(int argc, char** argv) {
             }
             AVER_ERROR("[Sandbox] could not scaffold '{}': {}", nm, why);
             std::exit(1);
+        }
+        // --upgrade-project <path.ocproject> applies what the prompt would apply, and exits. The
+        // prompt is the way a person does this; a flag is the only way a TEST does, and the apply
+        // path edits somebody's build file, which is precisely the code that should not ship on the
+        // strength of having been clicked once.
+        else if (!std::strcmp(argv[i],"--upgrade-project") && i+1<argc) {
+            const std::string manifest = argv[++i];
+            fmt::ProjectDesc p;
+            std::string why;
+            if (!fmt::loadOcproject(manifest, p, &why)) {
+                AVER_ERROR("[Sandbox] could not load '{}': {}", manifest, why);
+                std::exit(1);
+            }
+            const editor::ProjectUpgrade up = editor::inspectProject(p);
+            if (up.empty()) { AVER_INFO("[Sandbox] '{}' is already current", p.name); std::exit(0); }
+            for (const editor::ProjectFix& f : up.fixes)
+                AVER_INFO("  {} : {}", f.summary, f.detail);
+            if (!editor::applyProjectUpgrade(p, up, &why)) {
+                AVER_ERROR("[Sandbox] upgrade failed: {}", why);
+                std::exit(1);
+            }
+            std::exit(0);
         }
         else if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;

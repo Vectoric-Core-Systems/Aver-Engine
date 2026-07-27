@@ -556,4 +556,183 @@ bool createScript(const fmt::ProjectDesc& proj, const std::string& name, CsKind 
     return true;
 }
 
+// ---------------------------------------------------------------- upgrading an older project
+
+namespace {
+
+struct RefSpec { const char* label; const char* tail; };
+
+const RefSpec kEngineRefSpecs[] = {
+    {"Aver.Scripting", "scripting/csharp/Aver.Scripting/Aver.Scripting.csproj"},
+    {"Aver.Framework", "scripting/csharp/Aver.Framework/Aver.Framework.csproj"},
+    {"Aver.UI",        "scripting/csharp/Aver.UI/Aver.UI.csproj"},
+    {"Aver.Materials", "scripting/csharp/Aver.Materials/Aver.Materials.csproj"},
+};
+
+// Every ProjectReference Include="..." value in the file, in order.
+std::vector<std::string> projectReferences(const std::string& xml) {
+    std::vector<std::string> out;
+    usize i = 0;
+    while ((i = xml.find("<ProjectReference", i)) != std::string::npos) {
+        const usize inc = xml.find("Include=\"", i);
+        if (inc == std::string::npos) break;
+        const usize a = inc + 9;
+        const usize b = xml.find('"', a);
+        if (b == std::string::npos) break;
+        out.push_back(xml.substr(a, b - a));
+        i = b;
+    }
+    return out;
+}
+
+} // namespace
+
+ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
+    ProjectUpgrade up;
+    if (!proj.valid()) return up;
+
+    const std::string content = proj.contentDir();
+    const std::string scriptsDir = proj.scriptsDir();
+
+    // Reported one folder at a time, because "this project is out of date" tells an author nothing
+    // and a list of the paths about to appear tells them exactly what is being done to their disk.
+    for (const char* d : {"Maps", "Meshes", "Materials", "Textures", "Sounds", "Scripts"}) {
+        const std::string path = content + "\\" + d;
+        if (!fileExists(path))
+            up.fixes.push_back({ProjectFix::Kind::CreateFolder, std::string("Create Content\\") + d, path});
+    }
+
+    const std::string csproj = scriptsCsprojPath(proj);
+    if (csproj.empty()) return up;
+
+    if (!fileExists(csproj)) {
+        up.fixes.push_back({ProjectFix::Kind::CreateCsproj,
+                            "Create Content\\Scripts\\Scripts.csproj", csproj});
+        return up;   // everything below edits a file that is about to be generated whole
+    }
+
+    std::string xml;
+    if (!readFileText(csproj, xml)) return up;
+
+    for (const RefSpec& r : kEngineRefSpecs) {
+        // Matched on the project file's LEAF name, not the whole path: a reference written by hand,
+        // by an older editor, or from a different directory depth spells the same target three
+        // different ways, and only the file name is stable across all of them.
+        const std::string leaf = std::filesystem::path(r.tail).filename().string();
+        if (xml.find(leaf) != std::string::npos) continue;
+        const std::string ref = engineProjectReference(scriptsDir, r.tail);
+        up.fixes.push_back({ProjectFix::Kind::AddReference, std::string("Reference ") + r.label,
+                            ref.empty() ? std::string("(engine tree not found from the editor)") : ref});
+    }
+
+    // A reference whose target is not there. This is the one that bites hardest: MSBuild's error
+    // names a path and not a reason, and the path is often a build tree deleted months ago.
+    // Reported apart from a missing reference, because ADDING one is safe and REPOINTING one is a
+    // change to something the author wrote.
+    for (const std::string& ref : projectReferences(xml)) {
+        std::error_code ec;
+        // NORMALISED before the test. A reference is relative and full of `..`, and joining it to
+        // the Scripts directory produces a path that still carries every one of them -- which on a
+        // deep tree runs past MAX_PATH and comes back "does not exist" for a file that plainly does.
+        //
+        // The symptom was the prompt offering, on every single open, to repoint three references to
+        // exactly the paths they already had. An upgrade prompt that reappears after being satisfied
+        // is one people learn to dismiss without reading, which costs more than the bug it nags about.
+        const std::filesystem::path abs =
+            (std::filesystem::path(scriptsDir) / ref).lexically_normal();
+        if (std::filesystem::exists(abs, ec)) continue;
+        std::string repointed;
+        for (const RefSpec& r : kEngineRefSpecs) {
+            const std::string leaf = std::filesystem::path(r.tail).filename().string();
+            if (ref.find(leaf) == std::string::npos) continue;
+            repointed = engineProjectReference(scriptsDir, r.tail);
+            break;
+        }
+        up.fixes.push_back({ProjectFix::Kind::RepointReference,
+                            "Repoint a reference whose target no longer exists",
+                            ref + (repointed.empty() ? std::string("  ->  (cannot resolve; edit by hand)")
+                                                     : "  ->  " + repointed)});
+    }
+
+    if (xml.find("..\\Materials\\") == std::string::npos && xml.find("../Materials/") == std::string::npos)
+        up.fixes.push_back({ProjectFix::Kind::AddMaterialsGlob,
+                            "Compile the C# materials under Content\\Materials",
+                            "<Compile Include=\"..\\Materials\\**\\*.cs\" />"});
+    return up;
+}
+
+bool applyProjectUpgrade(const fmt::ProjectDesc& proj, const ProjectUpgrade& up, std::string* err) {
+    if (!proj.valid()) { if (err) *err = "no project"; return false; }
+    if (up.empty()) return true;
+
+    const std::string scriptsDir = proj.scriptsDir();
+    const std::string csproj = scriptsCsprojPath(proj);
+
+    for (const ProjectFix& f : up.fixes) {
+        if (f.kind == ProjectFix::Kind::CreateFolder) {
+            if (!createDirectories(f.detail)) { if (err) *err = "could not create " + f.detail; return false; }
+        } else if (f.kind == ProjectFix::Kind::CreateCsproj) {
+            if (!writeFileText(csproj, csprojText(engineRefs(scriptsDir)))) {
+                if (err) *err = "could not write " + csproj;
+                return false;
+            }
+        }
+    }
+
+    // The .csproj edits, in ONE read-modify-write. Applying them one at a time would re-read a file
+    // this function has already changed, so the second edit would be computed against the first
+    // one's output rather than against what the author actually has.
+    std::string xml;
+    if (!fileExists(csproj) || !readFileText(csproj, xml)) return true;
+    bool touched = false;
+
+    for (const ProjectFix& f : up.fixes) {
+        if (f.kind != ProjectFix::Kind::RepointReference) continue;
+        const usize arrow = f.detail.find("  ->  ");
+        if (arrow == std::string::npos) continue;
+        const std::string from = f.detail.substr(0, arrow);
+        const std::string to = f.detail.substr(arrow + 6);
+        if (to.empty() || to[0] == '(') continue;   // unresolvable; left for the author
+        const usize at = xml.find(from);
+        if (at == std::string::npos) continue;
+        xml.replace(at, from.size(), to);
+        touched = true;
+    }
+
+    std::string additions;
+    for (const ProjectFix& f : up.fixes)
+        if (f.kind == ProjectFix::Kind::AddReference && !f.detail.empty() && f.detail[0] != '(')
+            additions += "    <ProjectReference Include=\"" + f.detail + "\" />\n";
+
+    bool wantGlob = false;
+    for (const ProjectFix& f : up.fixes)
+        if (f.kind == ProjectFix::Kind::AddMaterialsGlob) wantGlob = true;
+
+    if (!additions.empty() || wantGlob) {
+        // APPENDED as a new ItemGroup rather than merged into an existing one. MSBuild unions
+        // ItemGroups, so the result is identical -- and inserting into somebody's existing group
+        // means guessing at their formatting, where appending leaves every byte they wrote alone.
+        std::string block;
+        block += "\n  <!-- Added by the Aver Engine editor when this project was upgraded.\n";
+        block += "       Everything above is as you left it. -->\n";
+        if (!additions.empty()) block += "  <ItemGroup>\n" + additions + "  </ItemGroup>\n";
+        if (wantGlob) {
+            block += "  <ItemGroup>\n";
+            block += "    <Compile Include=\"..\\Materials\\**\\*.cs\" />\n";
+            block += "  </ItemGroup>\n";
+        }
+        const usize close = xml.rfind("</Project>");
+        if (close == std::string::npos) { if (err) *err = "the .csproj has no </Project>"; return false; }
+        xml.insert(close, block);
+        touched = true;
+    }
+
+    if (touched && !writeFileText(csproj, xml)) {
+        if (err) *err = "could not write " + csproj;
+        return false;
+    }
+    AVER_INFO("[Editor] project '{}' upgraded: {} change(s)", proj.name, up.fixes.size());
+    return true;
+}
+
 } // namespace aver::editor
