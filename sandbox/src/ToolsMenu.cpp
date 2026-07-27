@@ -129,6 +129,45 @@ bool shellOpen(const std::string&) { return false; }
 
 #endif
 
+// Bake every C# material in the assembly just built into .ocmat files the engine reads.
+//
+// `scriptsOutDir` is where dotnet put the assembly (…\Binaries\Scripts). The materials go beside it
+// under …\Binaries\Materials, because both are BUILD OUTPUT and neither is authored.
+//
+// Returns false when the tool is simply absent, which is not an error: a source build that has not
+// staged bin/Tools yet, or a stripped install, should compile scripts exactly as it did before.
+bool bakeMaterials(const std::string& scriptsOutDir, std::string& log, int& exitCode) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+
+    const fs::path binaries = fs::path(scriptsOutDir).parent_path();
+    const fs::path assembly = fs::path(scriptsOutDir) / "Scripts.dll";
+    if (!fs::exists(assembly, ec)) { log = "no Scripts.dll to read materials from"; return false; }
+
+#if defined(_WIN32)
+    wchar_t exe[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) return false;
+    const fs::path tool = fs::path(exe).parent_path() / "Tools" / "avermatc.dll";
+    if (!fs::exists(tool, ec)) return false;   // not staged; nothing to say and nothing to do
+
+    const fs::path outDir = binaries / "Materials";
+    fs::create_directories(outDir, ec);
+
+    const std::wstring cmd = L"dotnet \"" + tool.wstring() + L"\" --assembly \"" +
+                             assembly.wstring() + L"\" --out \"" + outDir.wstring() + L"\"";
+    if (!runCaptured(cmd, fs::path(exe).parent_path().wstring(), log, exitCode)) {
+        log = "could not start dotnet to bake materials";
+        exitCode = -1;
+        return true;   // it was ATTEMPTED, so the caller reports it rather than staying silent
+    }
+    return true;
+#else
+    (void)binaries; (void)exitCode;
+    log = "material baking is implemented for Windows only";
+    return false;
+#endif
+}
+
 #if AVER_WITH_IMGUI
 // A tooltip that also shows for a DISABLED item. ImGui's SetItemTooltip deliberately will not,
 // and a greyed-out row with no explanation is the exact thing this menu must not have.
@@ -775,6 +814,27 @@ bool newestDllTime(const std::string& dir, std::filesystem::file_time_type& out)
     return any;
 }
 
+
+// The newest .cs anywhere the project's assembly is built FROM, which since materials became C# is
+// two directories: Content\Scripts and Content\Materials. Scanning only the first made the
+// toolbar's "changed since the last build" light blind to every material edit -- it would sit green
+// while the surface on screen was a build behind.
+bool newestProjectCsTime(const std::string& scriptsDir, std::filesystem::file_time_type& out) {
+    namespace fs = std::filesystem;
+    const std::string materialsDir =
+        (fs::path(scriptsDir).parent_path() / "Materials").string();
+
+    bool any = false;
+    fs::file_time_type newest{};
+    for (const std::string& dir : {scriptsDir, materialsDir}) {
+        fs::file_time_type t{};
+        if (!newestCsTime(dir, t)) continue;
+        if (!any || t > newest) { newest = t; any = true; }
+    }
+    out = newest;
+    return any;
+}
+
 } // namespace
 
 // Outside the ImGui guard: joining the build thread and swapping the assemblies are neither of
@@ -820,7 +880,7 @@ void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDi
     {
         const std::string scriptsDir = std::filesystem::path(csproj).parent_path().string();
         std::filesystem::file_time_type stamp{};
-        haveBuiltStamp_ = newestCsTime(scriptsDir, stamp);
+        haveBuiltStamp_ = newestProjectCsTime(scriptsDir, stamp);
         builtStamp_ = stamp;
     }
 
@@ -857,6 +917,26 @@ void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDi
             if (bl.isError) ++job->errors;
             else if (bl.isWarning) ++job->warnings;
         }
+        // ---- materials ----
+        // A .cs under Content\Materials is the SOURCE of a surface; avermatc runs its Configure and
+        // writes the .ocmat the engine actually reads. Done here, on the build thread, right after
+        // the compile that produced the assembly it reflects -- a separate button would be a button
+        // somebody forgets, and a surface a build behind looks like a material bug rather than a
+        // missing step.
+        //
+        // Its failure does NOT fail the compile. The C# built; the assembly is good; a material that
+        // could not bake is reported and the previous .ocmat stays. Turning a bad Configure into a
+        // red build light would make it read as a compile error, which it is not.
+        if (code == 0) {
+            std::string bakeLog;
+            int bakeCode = -1;
+            if (bakeMaterials(outDir, bakeLog, bakeCode) && bakeCode != 0) {
+                out += "\n[materials] avermatc exited " + std::to_string(bakeCode) + "\n" + bakeLog;
+            } else if (!bakeLog.empty()) {
+                out += "\n[materials] " + bakeLog;
+            }
+        }
+
         job->output = std::move(out);
         job->exitCode = code;
         job->done.store(true); // last: the UI thread reads output/exitCode once this is set
@@ -893,7 +973,7 @@ void ToolsMenu::refreshScriptStatus(const fmt::ProjectDesc& project) {
 
     const std::string scriptsDir = std::filesystem::path(csproj).parent_path().string();
     std::filesystem::file_time_type newestCs{};
-    if (!newestCsTime(scriptsDir, newestCs)) { scriptStatus_ = ScriptStatus::UpToDate; return; }
+    if (!newestProjectCsTime(scriptsDir, newestCs)) { scriptStatus_ = ScriptStatus::UpToDate; return; }
 
     if (haveBuiltStamp_) {
         // Priority is the user's wording: unbuilt CHANGES win over a stale failure, so a fresh edit

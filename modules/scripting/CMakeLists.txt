@@ -147,3 +147,39 @@ else()
   message(STATUS "Aver.Scripting.Host: no Microsoft.NETCore.App.Host.win-x64 pack found - nethost.dll "
                  "will not be staged, and the scripting host will decline at run time")
 endif()
+
+# ---------------------------------------------------------------------------------------------------
+# avermatc — the material compiler, staged to bin/Tools/.
+#
+# The editor invokes it after a successful Compile C#, so a .cs material under Content/Materials
+# becomes an .ocmat under Binaries/Materials without anybody running a command. A separate directory
+# from bin/Scripting because it is a TOOL the editor runs, not an assembly the host loads: nothing
+# should be able to reach it by the bridge's probing path.
+#
+# OUTPUT/DEPENDS rather than POST_BUILD, for the reason stated above the bridge: a POST_BUILD only
+# fires when a target relinks, so editing a .cs alone would leave the previous compiler in place with
+# a clean build reporting success.
+set(AVER_MATC_PROJ ${AVER_CSHARP_DIR}/Aver.MaterialCompiler/Aver.MaterialCompiler.csproj)
+set(AVER_MATC_DIR ${CMAKE_BINARY_DIR}/bin/Tools)
+
+file(GLOB AVER_MATC_SOURCES CONFIGURE_DEPENDS
+  ${AVER_CSHARP_DIR}/Aver.MaterialCompiler/*.cs
+  ${AVER_CSHARP_DIR}/Aver.MaterialCompiler/*.csproj
+  ${AVER_CSHARP_DIR}/Aver.Materials/*.cs
+  ${AVER_CSHARP_DIR}/Aver.Materials/*.csproj)
+
+set(AVER_MATC_OUTPUTS
+  ${AVER_MATC_DIR}/avermatc.dll
+  ${AVER_MATC_DIR}/avermatc.runtimeconfig.json
+  ${AVER_MATC_DIR}/Aver.Materials.dll)
+
+add_custom_command(
+  OUTPUT ${AVER_MATC_OUTPUTS}
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_MATC_PROJ} -c Release --nologo -v quiet
+          -o ${AVER_MATC_DIR}
+  DEPENDS ${AVER_MATC_SOURCES}
+  COMMENT "Building the material compiler (staged to bin/Tools)"
+  VERBATIM)
+add_custom_target(Aver.MaterialCompiler DEPENDS ${AVER_MATC_OUTPUTS})
+set_target_properties(Aver.MaterialCompiler PROPERTIES FOLDER "modules")
+add_dependencies(Aver.Scripting.Host Aver.MaterialCompiler)

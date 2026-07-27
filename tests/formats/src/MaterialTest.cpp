@@ -11,6 +11,7 @@
 // even though it lives in the RHI-linking half of the module: it is a hand-maintained byte layout
 // shared with a HLSL cbuffer, which is the single easiest thing here to get silently wrong.
 #include "aver/formats/OcMat.hpp"
+#include "aver/formats/MaterialScript.hpp"
 #include "aver/formats/Texture.hpp"
 #include "aver/pbr/MaterialGpu.hpp"   // packMaterial: the block the shader actually reads
 #include "aver/core/Log.hpp"
@@ -384,6 +385,139 @@ static void testGeneratedByCsharp() {
     check(d2.textures[oc].path == d.textures[oc].path, "and the shared-texture binding");
 }
 
+
+// Rewriting the C# SOURCE from an edited material.
+//
+// With C# as the source of a surface, the Details panel saving to the .ocmat would write a build
+// artefact the next compile overwrites -- a change that appears to work and then silently vanishes.
+// So it writes the .cs, and this is what stops that rewrite eating the file.
+static void testScriptRewrite() {
+    AVER_INFO("=== rewriting the C# source ===");
+
+    static const char* kSource =
+        "using Aver.Materials;\n"
+        "\n"
+        "namespace SkyForge.Materials;\n"
+        "\n"
+        "/// <summary>Timber crates.</summary>\n"
+        "[AverMaterial(\"M_Crate\")]\n"
+        "public sealed class Crate : Material\n"
+        "{\n"
+        "    public static void Configure(MaterialBuilder b) => b\n"
+        "        .Comment(\"Timber crates: warm, against a deliberately cool room.\")\n"
+        "        .WorldUv(true).Tiling(60f)\n"
+        "        .NormalScale(1.2f).Reflectance(0.035f).F90(0.6f)\n"
+        "        .Texture(Slot.BaseColor,  \"Textures/T_Crate_BC.png\");\n"
+        "}\n"
+        "\n"
+        "[AverMaterial(\"M_Other\")]\n"
+        "public sealed class Other : Material\n"
+        "{\n"
+        "    public static void Configure(MaterialBuilder b) => b.Roughness(0.25f);\n"
+        "}\n";
+
+    pbr::MaterialDesc d;
+    d.name = "M_Crate";
+    d.uvMode = pbr::UvMode::WorldAligned;
+    d.uvTiling = 75.0f;            // changed from 60
+    d.normalScale = 1.2f;
+    d.reflectance = 0.035f;
+    d.f90 = 0.6f;
+    d.roughnessFactor = 0.5f;      // newly set
+    d.textures[static_cast<u32>(pbr::TextureSlot::BaseColor)].path = "Textures/T_Crate_BC.png";
+
+    std::string out, err;
+    check(fmt::rewriteMaterialScript(kSource, "M_Crate", d, nullptr, out, &err),
+          "it rewrites: " + err);
+
+    check(out.find(".Tiling(75f)") != std::string::npos, "the edited value is written");
+    check(out.find("60f") == std::string::npos, "and the old one is gone");
+    check(out.find(".Roughness(0.5f)") != std::string::npos, "a newly-set value appears");
+
+    // The authored prose survives. Nothing in a MaterialDesc could reproduce it, so losing it would
+    // be losing the only part of the file that says WHY.
+    check(out.find("Timber crates: warm, against a deliberately cool room.") != std::string::npos,
+          "the .Comment prose is preserved");
+
+    // Everything outside Configure is byte-identical.
+    check(out.find("using Aver.Materials;") != std::string::npos, "the usings survive");
+    check(out.find("namespace SkyForge.Materials;") != std::string::npos, "the namespace survives");
+    check(out.find("/// <summary>Timber crates.</summary>") != std::string::npos, "the doc comment survives");
+    check(out.find("public sealed class Crate : Material") != std::string::npos, "the class declaration survives");
+
+    // THE OTHER MATERIAL IN THE SAME FILE IS UNTOUCHED. A rewriter that took the first Configure in
+    // the file would silently rewrite somebody else's material with these values.
+    check(out.find("public static void Configure(MaterialBuilder b) => b.Roughness(0.25f);") != std::string::npos,
+          "a second material in the same file is left exactly as it was");
+
+    // Defaults are NOT written back. Restating eighteen unchanged values is what makes a
+    // generated-then-edited file stop being worth editing.
+    check(out.find(".Metallic(") == std::string::npos, "an unchanged default is not emitted");
+    check(out.find(".OcclusionStrength(") == std::string::npos, "nor another");
+
+    // Idempotent: rewriting the result with the same values must produce the same bytes, or every
+    // save would show a diff whether or not anything changed.
+    std::string twice;
+    check(fmt::rewriteMaterialScript(out, "M_Crate", d, nullptr, twice, &err), "it rewrites its own output");
+    check(twice == out, "and rewriting twice changes nothing");
+
+    AVER_INFO("=== what the rewriter refuses ===");
+    {
+        std::string o, e;
+        check(!fmt::rewriteMaterialScript(kSource, "M_Missing", d, nullptr, o, &e),
+              "a name that is not in the file is refused");
+        check(o.empty(), "and nothing is written on refusal");
+
+        // A Configure doing more than the chain cannot be preserved, so it is declined rather than
+        // truncated. Losing a loop or a local is not something a save should be able to do.
+        static const char* kRich =
+            "[AverMaterial(\"M_Rich\")]\n"
+            "public sealed class Rich : Material\n"
+            "{\n"
+            "    public static void Configure(MaterialBuilder b)\n"
+            "    {\n"
+            "        float k = 0.5f;\n"
+            "        b.Roughness(k);\n"
+            "    }\n"
+            "}\n";
+        check(!fmt::rewriteMaterialScript(kRich, "M_Rich", d, nullptr, o, &e),
+              "a Configure with more than one statement is refused, not truncated");
+
+        // A brace inside a texture path must not be read as punctuation.
+        static const char* kBrace =
+            "[AverMaterial(\"M_Odd\")]\n"
+            "public sealed class Odd : Material\n"
+            "{\n"
+            "    public static void Configure(MaterialBuilder b) => b\n"
+            "        .Texture(Slot.BaseColor, \"Textures/a;b}c.png\");\n"
+            "}\n";
+        pbr::MaterialDesc od;
+        od.textures[static_cast<u32>(pbr::TextureSlot::BaseColor)].path = "Textures/a;b}c.png";
+        check(fmt::rewriteMaterialScript(kBrace, "M_Odd", od, nullptr, o, &e),
+              "a path containing a brace and a semicolon does not end the body early: " + e);
+        check(o.find("a;b}c.png") != std::string::npos, "and it survives the round trip");
+    }
+
+    AVER_INFO("=== a brand new material source ===");
+    {
+        pbr::MaterialDesc nd;
+        nd.roughnessFactor = 0.3f;
+        const std::string src = fmt::newMaterialScript("M_Glass", "MyGame.Materials", nd, nullptr);
+        check(src.find("[AverMaterial(\"M_Glass\")]") != std::string::npos, "it carries the bound name");
+        // The CLASS drops the M_ prefix; the BOUND name keeps it. `class M_Glass` reads as a C
+        // prefix in a language with namespaces, and the bound name is what a level references.
+        check(src.find("class Glass : Material") != std::string::npos, "the class name drops the M_ prefix");
+        check(src.find(".Roughness(0.3f)") != std::string::npos, "and the value is in it");
+
+        // And what it produces must be something the rewriter can then edit.
+        std::string o, e;
+        nd.roughnessFactor = 0.9f;
+        check(fmt::rewriteMaterialScript(src, "M_Glass", nd, nullptr, o, &e),
+              "a newly-created source is rewritable: " + e);
+        check(o.find(".Roughness(0.9f)") != std::string::npos, "with the new value");
+    }
+}
+
 int main() {
     testFullParse();
     testTolerance();
@@ -392,6 +526,7 @@ int main() {
     testBlendModes();
     testMipChain();
     testGeneratedByCsharp();
+    testScriptRewrite();
 
     if (g_failures == 0) AVER_INFO("=== all material tests passed ===");
     else AVER_ERROR("=== {} material assertion(s) failed ===", g_failures);

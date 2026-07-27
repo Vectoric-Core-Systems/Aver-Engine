@@ -30,6 +30,7 @@ if(AVER_MODULE_PBR)
   aver_add_module(Aver.Formats.Material
     SOURCES
       src/OcMat.cpp
+      src/MaterialScript.cpp
     DEPS
       Aver.Formats
       Aver.Render.PBR

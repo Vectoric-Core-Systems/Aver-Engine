@@ -31,7 +31,8 @@
 #if AVER_MODULE_PBR
 #include "aver/pbr/Material.hpp"       // the authored surface, from the Core-only material DLL
 #include "aver/pbr/MaterialGpu.hpp"    // MaterialConstants: the block setDrawBinding carries
-#include "aver/formats/OcMat.hpp"      // .ocmat: a surface is an ASSET now, not a hardcoded palette row
+#include "aver/formats/OcMat.hpp"
+#include "aver/formats/MaterialScript.hpp" // the Details panel writes back to the C# source, not the .ocmat      // .ocmat: a surface is an ASSET now, not a hardcoded palette row
 #include "aver/assets/TextureUpload.hpp" // and the decode-to-GPU step behind the texture resolver
 #endif
 
@@ -3972,6 +3973,58 @@ private:
     //
     // Without the module this falls back to editing the actor, because the frozen no-material
     // path reads b1 directly and there is nothing else for a slider to write to.
+    // Write an edited material back to the C# that declares it. Returns the file written, or "" with
+    // `err` set.
+    //
+    // The declaring file is FOUND rather than recorded, because one .cs may declare several
+    // materials (SkyForge's seven live in one) and the .ocmat the material was loaded from says
+    // nothing about which. rewriteMaterialScript declines a file that does not declare the name, so
+    // trying each in turn is both the search and the check.
+    std::string saveMaterialSource(const std::string& name, const pbr::MaterialDesc& d, std::string& err) {
+#if AVER_MODULE_PBR
+        namespace fs = std::filesystem;
+        const std::string content = project_.contentDir();
+        if (content.empty()) { err = "no project"; return {}; }
+        const fs::path dir = fs::path(content) / "Materials";
+        std::error_code ec;
+        if (!fs::exists(dir, ec)) { err = "no Content\\Materials directory"; return {}; }
+
+        std::string firstError;
+        for (fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
+             it != end; it.increment(ec)) {
+            if (ec) break;
+            if (!it->is_regular_file(ec) || it->path().extension() != ".cs") continue;
+            const std::string path = it->path().string();
+
+            std::ifstream in(path, std::ios::binary);
+            if (!in) continue;
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            in.close();
+
+            std::string out, why;
+            if (!fmt::rewriteMaterialScript(text, name, d, nullptr, out, &why)) {
+                // A file that simply does not declare this material is not an error; one that
+                // declares it and could not be rewritten IS, and its reason is the one worth
+                // reporting if nothing else matches.
+                if (text.find("[AverMaterial(\"" + name + "\")]") != std::string::npos && firstError.empty())
+                    firstError = why;
+                continue;
+            }
+            if (out == text) return path;   // nothing changed; a no-op save must not touch the mtime
+
+            std::ofstream os(path, std::ios::binary | std::ios::trunc);
+            if (!os) { err = "could not open " + path + " for writing"; return {}; }
+            os.write(out.data(), static_cast<std::streamsize>(out.size()));
+            if (!os) { err = "write failed"; return {}; }
+            return path;
+        }
+        err = firstError.empty() ? ("no .cs under Content\\Materials declares '" + name + "'") : firstError;
+        return {};
+#else
+        (void)name; (void)d; err = "built without the material system"; return {};
+#endif
+    }
+
     void materialPanel(MeshObj& o) {
 #if AVER_MODULE_PBR
         pbr::MaterialDesc* d = pbr::MaterialLibrary::get().mutableDesc(o.material);
@@ -4023,6 +4076,36 @@ private:
         // forgot this would show in the panel and never reach the GPU -- the exact failure the
         // library's comment warns about.
         if (changed) pbr::MaterialLibrary::get().touch(o.material);
+
+        // ---- saving ----
+        // To the C# SOURCE, never to the .ocmat. The .ocmat under Binaries is a build artefact that
+        // the next Compile C# overwrites, so writing there is a change that appears to work and then
+        // silently vanishes -- the worst possible behaviour for a save button.
+        //
+        // The sliders above are already live: they edit the material the renderer is using, so the
+        // viewport shows the change immediately whether or not this is pressed. This is what makes
+        // it PERSIST. Compile C# then regenerates the .ocmat from the source that was just written.
+        ImGui::Separator();
+        ImGui::BeginDisabled(!project_.valid() || d->name.empty());
+        if (ImGui::Button("Save to C#")) {
+            std::string err;
+            const std::string file = saveMaterialSource(d->name, *d, err);
+            if (file.empty()) {
+                matSaveStatus_ = "Could not save: " + err;
+                AVER_ERROR("[Material] save failed for '{}': {}", d->name, err);
+            } else {
+                matSaveStatus_ = "Saved to " + std::filesystem::path(file).filename().string() +
+                                 " - Compile C# to regenerate the .ocmat";
+                AVER_INFO("[Material] '{}' written back to {}", d->name, file);
+            }
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(project_.valid()
+                ? "Rewrites this material's Configure in Content\\Materials.\n"
+                  "The .ocmat under Binaries is regenerated by Compile C#."
+                : "Open a project first - a material belongs to one.");
+        if (!matSaveStatus_.empty()) { ImGui::SameLine(); ImGui::TextDisabled("%s", matSaveStatus_.c_str()); }
 #else
         ImGui::SliderFloat("Metallic", &o.metallic, 0.0f, 1.0f);
         ImGui::SliderFloat("Roughness", &o.roughness, 0.02f, 1.0f);
@@ -4915,6 +4998,9 @@ private:
     // lives inside Aver.UI.Abi, so a game's HUD and the editor's own contributions are ONE list.
     aver::render::ui::UiRenderer* gameUi_ = nullptr;
     bool showUiDemo_ = false;
+    // What the last 'Save to C#' did, shown beside the button. Kept on the object rather than
+    // static, so a second project does not inherit the first one's message.
+    std::string matSaveStatus_;
     f32  uiDemoHealth_ = 0.72f, uiDemoStamina_ = 0.44f, uiDemoScroll_ = 0.0f, uiDemoClock_ = 0.0f;
 
     rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;
