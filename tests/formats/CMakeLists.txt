@@ -6,6 +6,14 @@ set_target_properties(FormatTest PROPERTIES
 # MeshTest — the AVR1 container and .ocmesh. A THIRD executable rather than more cases in FormatTest
 # because FormatTest takes file paths on the command line and reports usage with none, so a binary
 # format that must be exercised from memory would never run in a plain `MeshTest.exe` invocation.
+# JsonTest — the reader the glTF importer stands on. Its own executable because everything
+# downstream trusts it silently: an importer does not verify that a number was understood, so a
+# parser bug surfaces as wrong vertices several modules away, and a failure should name this layer.
+add_executable(JsonTest src/JsonTest.cpp)
+target_link_libraries(JsonTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(JsonTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(MeshTest src/MeshTest.cpp)
 target_link_libraries(MeshTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(MeshTest PROPERTIES
