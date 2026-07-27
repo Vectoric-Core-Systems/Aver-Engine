@@ -17,6 +17,7 @@
 #include "aver/ui/ui_abi.h"              // ...reached through the same C seam a game's HUD uses
 
 #include "ProjectBrowser.hpp"
+#include "ProjectScaffold.hpp"   // --new-project: scaffolding a project without a mouse
 #include "ToolsMenu.hpp"
 #include "AssetEditor.hpp"
 #include "EngineScaffold.hpp"   // engineRoot(): where the Content Browser's "Engine" root is mounted from
@@ -5406,7 +5407,24 @@ static bool isOcproject(const char* p) {
 Application* createApplication(int argc, char** argv) {
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false;
     for (int i=1;i<argc;++i){
-        if (!std::strcmp(argv[i],"--headless")) headless=true;
+        // --new-project <location> <name> scaffolds a project and EXITS, touching no device.
+        //
+        // It exists for the reason --ui-demo and --no-vsync do: project creation was reachable only
+        // from the browser's modal, so the files it writes had no regression test at all -- and a
+        // generated Scripts.csproj that MSBuild refuses to load is exactly the kind of thing that
+        // ships silently, because nobody creates a project on the day they change the generator.
+        if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
+            const std::string loc = argv[++i], nm = argv[++i];
+            fmt::ProjectDesc made;
+            std::string why;
+            if (editor::scaffoldProject(loc, nm, made, &why)) {
+                AVER_INFO("[Sandbox] scaffolded '{}' at {}", nm, made.dir);
+                std::exit(0);
+            }
+            AVER_ERROR("[Sandbox] could not scaffold '{}': {}", nm, why);
+            std::exit(1);
+        }
+        else if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
         else if (!std::strcmp(argv[i],"--new-script")) focusScript=true;
         // Holds the Tools dropdown open so it can be photographed. Opt-in, like the two above:
