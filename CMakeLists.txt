@@ -121,6 +121,9 @@ add_subdirectory(modules/ui)              # retained game UI (NOT the editor's I
 # tree testable with no device. Unconditional too — the RHI always exists, and a backend without GPU
 # support declines at create() rather than failing to link.
 add_subdirectory(modules/render.ui)
+# And the plain-C seam onto it, so a game's HUD is authored in the game's language rather than in
+# the engine's. A DLL because the .NET host P/Invokes it; Core-only, like everything under ui/.
+add_subdirectory(modules/ui.abi)
 add_subdirectory(modules/runtime)
 
 if(AVER_BUILD_SANDBOX)

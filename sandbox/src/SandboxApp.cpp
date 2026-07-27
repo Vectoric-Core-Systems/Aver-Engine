@@ -14,6 +14,7 @@
 #include "aver/formats/GltfImport.hpp"   // glTF/GLB -> .ocmesh, behind the Import button
 #include "aver/ui/UiDrawList.hpp"        // the retained game UI: what a widget tree produces...
 #include "aver/render/ui/UiRenderer.hpp" // ...and the render feature that puts one on the backbuffer
+#include "aver/ui/ui_abi.h"              // ...reached through the same C seam a game's HUD uses
 
 #include "ProjectBrowser.hpp"
 #include "ToolsMenu.hpp"
@@ -943,6 +944,10 @@ public:
         }
         pollCapturedMouse();                 // measure and re-centre before the delta is published
         pushInput(e.device()->uiActive());   // publish this frame's keyboard/mouse for gameplay before the tick
+        // The UI frame opens BEFORE gameplay ticks, because ticking is when a game draws its HUD.
+        // The HOST owns this call and a game must never make it: a game that cleared the list would
+        // erase whatever another system had contributed, and the last one to run would win silently.
+        aver_ui_begin_frame(vpX_, vpY_, vpW_, vpH_);
         maybeSpawnTestActor();   // one-shot --spawn-test, after scripts have declared their classes
         maybePlayTest();         // one-shot --play-test: begin_play, tick a few frames, end_play
         // Gate the actor tick on PLAYING: in EDITOR gameplay is frozen (like an unopened level), and a
@@ -1523,58 +1528,77 @@ public:
         captureCheck(e);
     }
 
-    // The retained game UI, built and handed to its render feature once per frame.
+    // The retained game UI, handed to its render feature once per frame.
     //
-    // What it draws is a DEMONSTRATION and is meant to be deleted: there is no widget tree yet, so
-    // this is the draw list a widget tree will eventually produce, written by hand. It is here
-    // because the alternative is a render path with nothing exercising it, and this engine has a
-    // documented history of subsystems that compiled, had tests, and had never once reached a screen.
-    //
-    // Off by default, and not merely as politeness: the gates compare backbuffer pixels, and a HUD
-    // over the viewport would move every one of them.
+    // The list itself lives inside Aver.UI.Abi, not here, and that is the point: ONE list, so a
+    // game's HUD and anything the editor contributes composite against each other instead of each
+    // holding a list only one of which could be submitted. The host opened the frame back in
+    // onUpdate, before gameplay ticked; this is the other end of that.
     void submitGameUi(Engine& e) {
+        (void)e;
         if (!gameUi_) return;
-        aver::ui::UiDrawList& dl = uiList_;
-        dl.clear();
-        if (!showUiDemo_) { gameUi_->submit(dl); return; }   // submitting an empty list clears the UI
 
-        // Laid out inside the EDITOR VIEWPORT, not over the whole window. A game HUD belongs to the
-        // world it is a HUD for, and the viewport rect is where that world is -- the same rect
-        // setViewportRect confines the scene to. In a shipped build there is no dockspace, the rect
-        // is the whole backbuffer, and this reduces to a full-screen layout with no special case.
-        const f32 ox = vpX_, oy = vpY_, sw = vpW_, sh = vpH_;
-        if (sw < 80.0f || sh < 60.0f) { gameUi_->submit(dl); return; }
+        // The demo, drawn AFTER gameplay has had its turn, so it composites over a game HUD rather
+        // than under one. Drawn through the C ABI rather than against a UiDrawList directly -- the
+        // editor is a consumer of the same seam a game uses, which is the only way that seam gets
+        // exercised by anything before a game exists to exercise it.
+        if (showUiDemo_) drawUiDemo();
+
+        // The ABI's list, cast back. Safe because the pointer is const and nothing on this side ever
+        // allocates through it: the DLL owns every byte and submit() copies what it needs out. Null
+        // before the first begin_frame, which is the frame the editor is still starting up in.
+        const auto* dl = static_cast<const aver::ui::UiDrawList*>(aver_ui_draw_list());
+        if (!dl) return;
+        gameUi_->submit(*dl);   // an empty list clears the UI, which is how a hidden HUD disappears
+    }
+
+    // A hand-written draw list, standing in for the widget tree that does not exist yet.
+    //
+    // It is a DEMONSTRATION and is meant to be deleted. It is here because the alternative is a
+    // render path with nothing exercising it, and this repository has a documented history of
+    // subsystems that compiled, had tests, and had never once reached a screen.
+    //
+    // Off by default, and not merely as politeness: the gates compare backbuffer pixels and a HUD
+    // over the viewport would move every one of them.
+    void drawUiDemo() {
+        float vp[4] = {};
+        aver_ui_viewport(vp);
+        // Laid out inside the EDITOR VIEWPORT, not over the whole window. A HUD belongs to the world
+        // it is a HUD for, and the viewport rect is where that world is. In a shipped build there is
+        // no dockspace, the rect is the whole backbuffer, and this reduces to a full-screen layout.
+        const f32 ox = vp[0], oy = vp[1], sw = vp[2], sh = vp[3];
+        if (sw < 80.0f || sh < 60.0f) return;
 
         // Nothing may escape into the editor chrome. Every clip pushed below is intersected with
-        // this one, so containment is structural rather than a promise each widget keeps.
-        dl.pushClip(aver::ui::UiClip{static_cast<i32>(ox), static_cast<i32>(oy),
-                                     static_cast<i32>(ox + sw), static_cast<i32>(oy + sh)});
+        // this one, so containment is structural rather than a promise each element keeps.
+        aver_ui_push_clip(static_cast<i32>(ox), static_cast<i32>(oy),
+                          static_cast<i32>(ox + sw), static_cast<i32>(oy + sh));
 
-        // Colours are 0xAABBGGRR -- the order a R8G8B8A8_UNORM vertex attribute reads on this
-        // machine -- and are premultiplied by addRect on the way in.
-        constexpr u32 kPanel  = 0xB0201814;   // 69% alpha, near-black: proves the blend
-        constexpr u32 kFrame  = 0xFF3A3226;
-        constexpr u32 kHealth = 0xFF2E4CE8;   // red, in BGR order
-        constexpr u32 kStamina= 0xFF3FC8E8;   // amber
-        constexpr u32 kInk    = 0xFFE8E4DC;
+        // 0xAABBGGRR -- the order a R8G8B8A8_UNORM vertex attribute reads on this machine -- and
+        // premultiplied on the way in, so these are written straight.
+        constexpr u32 kPanel   = 0xB0201814;   // 69% alpha, near-black: proves the blend
+        constexpr u32 kFrame   = 0xFF3A3226;
+        constexpr u32 kHealth  = 0xFF2E4CE8;   // red, in BGR order
+        constexpr u32 kStamina = 0xFF3FC8E8;   // amber
+        constexpr u32 kInk     = 0xFFE8E4DC;
 
         // ---- Content: the HUD proper, bottom-left ----
-        dl.setLayer(aver::ui::UiLayer::Content);
+        aver_ui_set_layer(AVER_UI_LAYER_CONTENT);
         const f32 barW = 260.0f, barH = 14.0f;
         const f32 barX = ox + 32.0f, barY = oy + sh - 96.0f;
-        dl.addRect(barX - 3, barY - 3, barW + 6, barH * 2 + 12, kPanel);
-        dl.addRect(barX, barY, barW, barH, kFrame);
-        dl.addRect(barX + 1, barY + 1, (barW - 2) * uiDemoHealth_, barH - 2, kHealth);
-        dl.addRect(barX, barY + barH + 6, barW, barH, kFrame);
-        dl.addRect(barX + 1, barY + barH + 7, (barW - 2) * uiDemoStamina_, barH - 2, kStamina);
+        aver_ui_rect(barX - 3, barY - 3, barW + 6, barH * 2 + 12, kPanel);
+        aver_ui_rect(barX, barY, barW, barH, kFrame);
+        aver_ui_rect(barX + 1, barY + 1, (barW - 2) * uiDemoHealth_, barH - 2, kHealth);
+        aver_ui_rect(barX, barY + barH + 6, barW, barH, kFrame);
+        aver_ui_rect(barX + 1, barY + barH + 7, (barW - 2) * uiDemoStamina_, barH - 2, kStamina);
 
         // A crosshair, four ticks around a gap. Four rects sharing one texture and one clip, so the
-        // batcher must merge them into a single draw -- the same property UiTest asserts on the CPU.
+        // batcher must merge them into a single draw -- the property UiTest asserts on the CPU.
         const f32 cx = ox + sw * 0.5f, cy = oy + sh * 0.5f;
-        dl.addRect(cx - 11, cy - 1, 7, 2, kInk);
-        dl.addRect(cx + 4,  cy - 1, 7, 2, kInk);
-        dl.addRect(cx - 1, cy - 11, 2, 7, kInk);
-        dl.addRect(cx - 1, cy + 4,  2, 7, kInk);
+        aver_ui_rect(cx - 11, cy - 1, 7, 2, kInk);
+        aver_ui_rect(cx + 4,  cy - 1, 7, 2, kInk);
+        aver_ui_rect(cx - 1, cy - 11, 2, 7, kInk);
+        aver_ui_rect(cx - 1, cy + 4,  2, 7, kInk);
 
         // ---- Overlay: a panel with a CLIPPED list inside it ----
         // The rows deliberately overrun the panel. Nothing but the clip stops them, so if the
@@ -1582,24 +1606,23 @@ public:
         // the point of drawing it this way rather than sizing the rows to fit.
         const f32 pw = 220.0f, ph = 132.0f;
         const f32 px = ox + sw - pw - 32.0f, py = oy + 96.0f;
-        dl.setLayer(aver::ui::UiLayer::Overlay);
-        dl.addRect(px, py, pw, ph, kPanel);
-        dl.pushClip(aver::ui::UiClip{static_cast<i32>(px) + 8, static_cast<i32>(py) + 8,
-                                     static_cast<i32>(px + pw) - 8, static_cast<i32>(py + ph) - 8});
+        aver_ui_set_layer(AVER_UI_LAYER_OVERLAY);
+        aver_ui_rect(px, py, pw, ph, kPanel);
+        aver_ui_push_clip(static_cast<i32>(px) + 8, static_cast<i32>(py) + 8,
+                          static_cast<i32>(px + pw) - 8, static_cast<i32>(py + ph) - 8);
         for (int i = 0; i < 12; ++i) {
             const f32 ry = py + 12.0f + static_cast<f32>(i) * 18.0f - uiDemoScroll_;
-            dl.addRect(px + 12, ry, pw - 24, 12, (i & 1) ? 0x60E8E4DC : 0x30E8E4DC);
+            aver_ui_rect(px + 12, ry, pw - 24, 12, (i & 1) ? 0x60E8E4DC : 0x30E8E4DC);
         }
-        dl.popClip();
+        aver_ui_pop_clip();
 
         // ---- Tooltip: above the overlay, and overlapping it on purpose ----
         // If layer ordering were wrong this would vanish under the panel rather than sit on it.
-        dl.setLayer(aver::ui::UiLayer::Tooltip);
-        dl.addRect(px - 40, py + ph - 24, 96, 20, 0xE0202020);
-        dl.addRect(px - 38, py + ph - 22, 92, 16, 0xFF6AC46A);
+        aver_ui_set_layer(AVER_UI_LAYER_TOOLTIP);
+        aver_ui_rect(px - 40, py + ph - 24, 96, 20, 0xE0202020);
+        aver_ui_rect(px - 38, py + ph - 22, 92, 16, 0xFF6AC46A);
 
-        dl.popClip();
-        gameUi_->submit(dl);
+        aver_ui_pop_clip();
     }
 
     void onShutdown(Engine& e) override {
@@ -4872,10 +4895,9 @@ private:
     scripting::ScriptHost scripts_;
 #endif
     // The retained game UI. The renderer is heap-owned because create() may decline (no GPU backend)
-    // and a member would have no way to say so; the draw list is a member so its buffers survive
-    // between frames instead of being reallocated sixty times a second.
+    // and a member would have no way to say so. There is no draw list here: the one that matters
+    // lives inside Aver.UI.Abi, so a game's HUD and the editor's own contributions are ONE list.
     aver::render::ui::UiRenderer* gameUi_ = nullptr;
-    aver::ui::UiDrawList uiList_;
     bool showUiDemo_ = false;
     f32  uiDemoHealth_ = 0.72f, uiDemoStamina_ = 0.44f, uiDemoScroll_ = 0.0f, uiDemoClock_ = 0.0f;
 

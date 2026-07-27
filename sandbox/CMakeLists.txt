@@ -12,6 +12,10 @@ target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
 # The retained game UI and the render feature that draws it. Both unconditional: neither depends on
 # an optional module, and the renderer declines at create() on a backend with no GPU support.
 target_link_libraries(Sandbox PRIVATE Aver.UI Aver.Render.UI)
+# ...and the C seam onto it. The editor draws its own demo through this rather than against a
+# UiDrawList directly, so the seam a game's HUD uses is exercised by the editor too. Aver.UI is
+# still named above because the host casts aver_ui_draw_list() back to that type.
+target_link_libraries(Sandbox PRIVATE Aver.UI.Abi)
 if(TARGET Aver.Render.Voxi)
   # Settings DLL (brings AVER_MODULE_VOXI=1) + the static render feature that drives the RHI.
   target_link_libraries(Sandbox PRIVATE Aver.Render.Voxi Aver.Render.Voxi.Renderer)
