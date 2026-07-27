@@ -14,6 +14,13 @@ target_link_libraries(JsonTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(JsonTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# GltfTest — the importer. Builds its glTF documents by hand rather than shipping a binary fixture,
+# so what each case exercises is legible and a failure names the field that broke.
+add_executable(GltfTest src/GltfTest.cpp)
+target_link_libraries(GltfTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(GltfTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(MeshTest src/MeshTest.cpp)
 target_link_libraries(MeshTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(MeshTest PROPERTIES

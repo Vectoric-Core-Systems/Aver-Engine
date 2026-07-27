@@ -1,6 +1,7 @@
 aver_add_module(Aver.Formats
   SOURCES
     src/Avr1.cpp
+    src/GltfImport.cpp
     src/Json.cpp
     src/OcAnim.cpp
     src/OcBeam.cpp
