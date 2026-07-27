@@ -28,6 +28,12 @@ struct ProjectDesc {
     // Absolute content mount root. Empty when the project was parsed from memory with no `dir`.
     std::string contentDir() const { return dir.empty() ? std::string() : dir + "\\" + contentRoot; }
     std::string scriptsDir() const { return dir.empty() ? std::string() : contentDir() + "\\Scripts"; }
+    // Build OUTPUT, beside Content rather than inside it: what a compiler wrote, never what a person
+    // authored. Scripts.dll is staged here already; the material compiler writes Materials\*.ocmat
+    // here from the .cs sources under Content\Materials. Not in the manifest, because it is not a
+    // choice -- a project that could relocate its build output would be a project whose .gitignore,
+    // packaging step and clean command each had to be told separately.
+    std::string binariesDir() const { return dir.empty() ? std::string() : dir + "\\Binaries"; }
 };
 
 // Parse from memory. `dir`/`manifestPath` are left for the caller to fill.

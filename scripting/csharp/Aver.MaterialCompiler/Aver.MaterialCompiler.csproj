@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- avermatc: loads a built assembly, finds every [AverMaterial] type, runs its Configure, and
+       writes an .ocmat per material into an output directory.
+
+       A console tool rather than something inside the editor, so a material can be baked by a build
+       script, by CI, and by a machine with no GPU. The editor invokes it; it does not depend on the
+       editor. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>avermatc</AssemblyName>
+    <RootNamespace>Aver.MaterialCompiler</RootNamespace>
+    <RollForward>LatestMinor</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Aver.Materials\Aver.Materials.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1196,7 +1196,16 @@ public:
             // Two spellings accepted: a bare token (`M_Floor`) that the convention places under
             // Materials/, and an explicit content-relative path for a project that files them
             // elsewhere. Both are one lookup, so neither is the slow path.
-            const std::string candidates[2] = {
+            // ...and BINARIES is tried before either. A .cs under Content\Materials is the source of
+            // a surface; avermatc runs its Configure at build time and writes the .ocmat there. So a
+            // project that has adopted C# materials finds the BUILT file, and one that has not falls
+            // straight through to the hand-authored file, which still works exactly as it did.
+            //
+            // Binaries wins rather than merging, because the generated file is the newer of the two
+            // by construction -- it is rewritten from source on every build -- and a stale
+            // hand-authored file left beside the source must not shadow it.
+            const std::string candidates[3] = {
+                project_.binariesDir() + "\\Materials\\" + name + ".ocmat",
                 content + "\\Materials\\" + name + ".ocmat",
                 content + "\\" + name,
             };
