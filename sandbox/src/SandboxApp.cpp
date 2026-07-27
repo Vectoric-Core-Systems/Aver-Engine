@@ -1480,6 +1480,10 @@ public:
     // the state it asked for rather than one frame of the defaults.
     // --clouds [coverage]. A capture run has no way to tick a checkbox, and a feature nothing can
     // screenshot is a feature nobody can check.
+    // --no-vsync. Stored rather than applied: the device does not exist yet when the flags are
+    // parsed, so it is pushed on the first frame that has one.
+    void setVSyncOff(bool off) { vsyncOffRequested_ = off; }
+
     void setClouds(f32 coverage) {
         sky_.cloudsEnabled = true;
         if (coverage >= 0.0f) sky_.cloudCoverage = coverage;
@@ -2506,6 +2510,17 @@ private:
 #endif
 
     void buildUI(Engine& e) {
+        // Latched for the panels below, which are called without the engine. A raw borrowed pointer
+        // and not an owner: the device outlives every frame this is read in.
+        prefsDevice_ = e.device();
+        // --no-vsync, applied once the device exists. Refused rather than silently ignored where the
+        // machine cannot tear, because "I asked for it and nothing happened" is the state this whole
+        // change exists to avoid.
+        if (vsyncOffRequested_) {
+            vsyncOffRequested_ = false;
+            if (prefsDevice_->vsyncCanDisable()) { prefsDevice_->setVSync(false); AVER_INFO("[Sandbox] vsync OFF (--no-vsync)"); }
+            else AVER_WARN("[Sandbox] --no-vsync ignored: this display path cannot tear");
+        }
 #if AVER_WITH_IMGUI
         if (!e.device()->uiActive()) return;
         ++frameNo_;   // the Content Browser's directory-cache freshness clock
@@ -4023,6 +4038,21 @@ private:
             ImGui::Checkbox("Auto-scroll to the newest line", &logAutoScroll_);
             ImGui::Combo("Level filter", &logLevelFilter_, "All\0Info+\0Warn+\0");
         }
+        if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
+            // Asked of the device rather than tracked here, so the checkbox cannot drift from what
+            // the swapchain is actually doing -- and DISABLED where the machine cannot tear, because
+            // a switch that silently does nothing is worse than one that says it cannot.
+            const bool canDisable = prefsDevice_ && prefsDevice_->vsyncCanDisable();
+            bool vs = prefsDevice_ ? prefsDevice_->vsync() : true;
+            ImGui::BeginDisabled(!canDisable);
+            if (ImGui::Checkbox("V-Sync", &vs) && prefsDevice_) prefsDevice_->setVSync(vs);
+            ImGui::EndDisabled();
+            if (!canDisable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("This display path cannot tear, so vsync cannot be turned off.\n"
+                                  "Needs DXGI tearing support (DXGI 1.5+).");
+            ImGui::SameLine();
+            ImGui::TextDisabled(vs ? "(capped to the refresh rate)" : "(uncapped, may tear)");
+        }
         if (ImGui::CollapsingHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Show grid", &showGrid_);
             ImGui::Checkbox("Wireframe", &wireframe_);
@@ -4392,6 +4422,8 @@ private:
     int sel_ = 1;
     scene::Entity selEntity_ = scene::kInvalidEntity;
     bool hideEditorScene_ = false;   // latched each frame by the scene pass; see there for why
+    rhi::IDevice* prefsDevice_ = nullptr;   // borrowed, latched in buildUI for the settings panels
+    bool vsyncOffRequested_ = false;        // --no-vsync, pending a device to apply it to
     // DISPLAY names, which are not the entity's name.
     //
     // scene::World::name() holds the ASSET PATH, because that is what saveLevel writes as a
@@ -4951,7 +4983,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -5007,6 +5039,10 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--bloom") && i+1<argc) bloom=static_cast<f32>(std::atof(argv[++i]));
         else if (!std::strcmp(argv[i],"--exposure") && i+1<argc) exposure=static_cast<f32>(std::atof(argv[++i]));
         else if (!std::strcmp(argv[i],"--auto-exposure")) autoExposure=true;
+        // --no-vsync exists so the setting is REACHABLE without a mouse. A checkbox nobody can drive
+        // from a script is a feature that cannot be regression-tested, and this session has already
+        // shipped several controls whose only proof was that they compiled.
+        else if (!std::strcmp(argv[i],"--no-vsync")) vsyncOff=true;
         // Coverage is optional: `--clouds` alone takes the authored default.
         else if (!std::strcmp(argv[i],"--clouds")) {
             clouds=1;
@@ -5033,6 +5069,7 @@ Application* createApplication(int argc, char** argv) {
     app->applyCaptureExposureRule(autoExposure);
     app->setGiForceOff(noGi);
     if (clouds) app->setClouds(cloudCover);
+    app->setVSyncOff(vsyncOff);
     app->setUseWarp(warp);
     app->setDebugLayer(debugLayer);
     app->setProjectPath(project);

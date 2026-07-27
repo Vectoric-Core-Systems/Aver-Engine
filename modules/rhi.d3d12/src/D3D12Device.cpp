@@ -672,6 +672,11 @@ public:
     }
 
     void setClearColor(f32 r, f32 g, f32 b, f32 a) override { clear_[0] = r; clear_[1] = g; clear_[2] = b; clear_[3] = a; }
+    // Takes effect on the NEXT present, with no swapchain rebuild: the tearing capability was baked
+    // in at creation and this only chooses whether to use it.
+    void setVSync(bool on) override { vsync_ = on; }
+    bool vsync() const override { return vsync_; }
+    bool vsyncCanDisable() const override { return tearingSupported_; }
 
     void setViewportRect(u32 x, u32 y, u32 w, u32 h) override {
         if (w == 0 || h == 0 || x >= width_ || y >= height_) { vpX_ = vpY_ = vpW_ = vpH_ = 0; return; }
@@ -925,6 +930,13 @@ private:
     ID3D12RootSignature* boundRootSig_ = nullptr;   // raw: cache only, ownership stays in the ComPtrs
 
     bool hasSwapchain_ = false;
+    // Vsync ON by default, which is what a windowed editor should do: an uncapped editor spins the
+    // GPU at several hundred frames a second to redraw a mostly-static viewport, and on a laptop
+    // that is heat and fan noise for nothing. Off is for measuring, and for anyone who wants it.
+    bool vsync_ = true;
+    // Whether the swapchain was CREATED able to tear. Fixed for the swapchain's life -- see
+    // createSwapchain. False means vsync-off is not available on this machine at all.
+    bool tearingSupported_ = false;
     f32 clear_[4] = {0.10f, 0.12f, 0.16f, 1.0f};
     // The value the CURRENT scene colour target was created with. A render target carries one
     // optimised clear value, and clearing it to anything else costs the fast-clear path (debug
@@ -1793,6 +1805,26 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
     if (!d.windowHandle) { AVER_WARN("[RHI.D3D12] createSwapchain without a window (headless)"); return false; }
     width_ = d.width; height_ = d.height;
 
+    // TEARING SUPPORT IS A SWAPCHAIN-CREATION DECISION, not a present-time one. Present(0, ...)
+    // without it does not disable vsync on a flip-model swapchain -- it queues frames and the queue
+    // itself becomes the wait, so the frame rate stays pinned to the refresh and only the latency
+    // gets worse. The ALLOW_TEARING flag has to be on the swapchain from the start AND the matching
+    // flag passed to every Present, so this has to be asked BEFORE the swapchain exists and cannot
+    // be turned on later without recreating it.
+    //
+    // Absent on a machine without a DXGI 1.5 factory, or with it disabled by policy: then vsync-off
+    // simply is not available and asking for it keeps the interval at 1, which is the honest failure.
+    // Reported through caps so the UI can grey the control rather than offer a switch that does
+    // nothing.
+    {
+        ComPtr<IDXGIFactory5> f5;
+        BOOL allow = FALSE;
+        if (SUCCEEDED(factory_.As(&f5)) &&
+            SUCCEEDED(f5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow, sizeof(allow))))
+            tearingSupported_ = allow != FALSE;
+        AVER_INFO("[RHI.D3D12] tearing (vsync-off) {}", tearingSupported_ ? "supported" : "unavailable");
+    }
+
     DXGI_SWAP_CHAIN_DESC1 sd{};
     sd.Width = width_; sd.Height = height_;
     sd.Format = kBackbufferFormat;
@@ -1800,6 +1832,7 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
     sd.BufferCount = kFrameCount;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     sd.SampleDesc.Count = 1;
+    if (tearingSupported_) sd.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
 
     HWND hwnd = static_cast<HWND>(d.windowHandle);
     ComPtr<IDXGISwapChain1> sc1;
@@ -2826,7 +2859,14 @@ void D3D12Device::endFrame() {
 
 void D3D12Device::present() {
     if (!hasSwapchain_) return;
-    const HRESULT pr = swapChain_->Present(1, 0);
+    // Both halves or neither: DXGI rejects the tearing PRESENT flag on a swapchain that was not
+    // created with the tearing SWAPCHAIN flag, and it must never be combined with a non-zero sync
+    // interval. vsync_ false without tearing support therefore stays at interval 1 rather than
+    // silently presenting a stutter -- see createSwapchain for why Present(0) alone does not work.
+    const bool tearing = !vsync_ && tearingSupported_;
+    const UINT interval = vsync_ ? 1u : 0u;
+    const UINT flags = tearing ? DXGI_PRESENT_ALLOW_TEARING : 0u;
+    const HRESULT pr = swapChain_->Present(tearingSupported_ ? interval : 1u, flags);
     if (FAILED(pr))
         AVER_ERROR("[RHI.D3D12] Present failed 0x{:08X} removed=0x{:08X}", (u32)pr, (u32)device_->GetDeviceRemovedReason());
 

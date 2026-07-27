@@ -345,6 +345,17 @@ public:
     // Frame clear colour (linear RGBA, 0..1). Default no-op for backends without a target.
     virtual void setClearColor(f32 r, f32 g, f32 b, f32 a) { (void)r; (void)g; (void)b; (void)a; }
 
+    // ---- vertical sync ----
+    // ON by default. Turning it off needs the swapchain to have been CREATED able to tear, which is
+    // decided once at creation and cannot be changed afterwards without rebuilding it -- so a
+    // backend that cannot tear reports vsyncSupported() false and setVSync(false) is a no-op that
+    // keeps presenting at the refresh rate. That is deliberately not silent-failure-shaped: the
+    // caller can ask first and grey the control rather than offer a switch that does nothing.
+    virtual void setVSync(bool on) { (void)on; }
+    virtual bool vsync() const { return true; }
+    // Whether turning vsync OFF is possible here (DXGI tearing support, a compositor that allows it).
+    virtual bool vsyncCanDisable() const { return false; }
+
     // Confine scene rendering to a sub-rectangle of the backbuffer, in physical pixels with a
     // top-left origin. Used by the editor so the 3D view fills only the dockspace's central
     // node instead of the whole window. (0,0,0,0) = full backbuffer.
