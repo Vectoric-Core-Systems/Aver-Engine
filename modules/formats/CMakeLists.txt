@@ -35,3 +35,18 @@ if(AVER_MODULE_PBR)
       Aver.Render.PBR
   )
 endif()
+
+# Aver.Formats.Audio — the WAV reader, deliberately a FOURTH target, for the reason Material is a
+# third: it is the only format that parses into a type from outside Aver.Formats. It fills an
+# audio::SoundData directly rather than a duplicate struct that something would then have to copy
+# across, and making Aver.Formats itself depend on Aver.Audio would put an audio dependency on every
+# consumer of a mesh loader.
+if(TARGET Aver.Audio)
+  aver_add_module(Aver.Formats.Audio
+    SOURCES
+      src/Wav.cpp
+    DEPS
+      Aver.Formats
+      Aver.Audio
+  )
+endif()

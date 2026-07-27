@@ -65,6 +65,15 @@ endif()
 add_subdirectory(modules/core)
 add_subdirectory(modules/platform)
 add_subdirectory(modules/assets)   # Phase 2
+# Audio. Core-only and unconditional for the same reason the UI is: the mixer fills a buffer the
+# caller supplies and touches no device, so there is no backend it could depend on and no build
+# configuration in which it does not exist. See docs/AUDIO.md.
+add_subdirectory(modules/audio)
+# ...and the device under it. Windows-only, so it is guarded the way the D3D12 backend is rather
+# than being unconditional like the mixer: a build with no backend still has a working mixer.
+if(WIN32)
+  add_subdirectory(modules/audio.wasapi)
+endif()
 add_subdirectory(modules/formats)  # Phase 2 (.ocbeam / .ocmap loaders)
 if(AVER_MODULE_PHYSICS)
   add_subdirectory(modules/physics)   # Jolt behind the engine's plain-C ABI
@@ -124,10 +133,9 @@ add_subdirectory(modules/render.ui)
 # And the plain-C seam onto it, so a game's HUD is authored in the game's language rather than in
 # the engine's. A DLL because the .NET host P/Invokes it; Core-only, like everything under ui/.
 add_subdirectory(modules/ui.abi)
-# Audio. Core-only and unconditional for the same reason the UI is: the mixer fills a buffer the
-# caller supplies and touches no device, so there is no backend it could depend on and no build
-# configuration in which it does not exist. See docs/AUDIO.md.
-add_subdirectory(modules/audio)
+# The audio seam. Added down HERE rather than beside the mixer because it links the WAV reader,
+# which is a target inside modules/formats and so does not exist until that has been added.
+add_subdirectory(modules/audio.abi)
 add_subdirectory(modules/runtime)
 
 if(AVER_BUILD_SANDBOX)
