@@ -112,25 +112,54 @@ float shadowSampleCascade(float3 wpos, uint c) {
 // other. Offsetting the SAMPLE POSITION by a fraction of the cascade's own world-space texel is
 // scale-correct by construction, and it moves the sample off the surface rather than lying about
 // how far away the light is, so contact shadows stay attached.
+// Where the shadowed distance starts giving way to the unshadowed one, as a fraction of the last
+// cascade's reach. The tail has to be long enough that the ramp is slower than the eye's ability to
+// notice a change in brightness sweeping across a surface, and short enough that it does not eat
+// shadow everyone can see. A sixth of the range is about two cascades' worth of the far end.
+#define AVER_SHADOW_FADE_START 0.84
+
 float shadowFactor(float3 wpos, float3 N, float ndl) {
     if (gShadowParams.y < 0.5) return 1.0;
     uint count = (uint)gShadowParams.w;
+    // count == 0 is reachable: fitCascades returns 0 when there is no camera to fit to, and it does
+    // not clear the "shadow map usable" flag when it does. Without this the fade below indexes
+    // gCascadeSplit[count - 1] with an unsigned wraparound to 4294967295.
+    if (count == 0) return 1.0;
 
     // Grazing surfaces need more offset: at ndl ~ 0 a texel of depth spans a long way along the
     // surface, which is exactly where acne appears.
     float slope = saturate(1.0 - ndl);
+    float dist  = distance(wpos, gCamPos.xyz);
+
+    // HOW THE SHADOWED WORLD ENDS. Past the last cascade this returned 1.0 -- fully lit, in one
+    // step, with nothing between shadowed and not. Walk away from anything and at a fixed distance
+    // its shadowing vanished outright; because the boundary is a sphere about the camera, it crossed
+    // a surface as a moving edge, so what you saw was a wave of light washing over the object rather
+    // than the object simply changing. It is the most visible artefact the shadow path had, and it
+    // was entirely a matter of there being no ramp.
+    //
+    // The reach is not the problem and is not what changed: it is camNear * 4000, so eighty metres
+    // at a two-centimetre near plane. Extending it would buy a more distant cliff at the cost of
+    // texel density everywhere nearer, which is the trade cascades exist to avoid. What was missing
+    // was the fade.
+    float fadeSpan = max(gCascadeSplit[count - 1].x * (1.0 - AVER_SHADOW_FADE_START), 1e-3);
+    float fade = saturate((dist - gCascadeSplit[count - 1].x * AVER_SHADOW_FADE_START) / fadeSpan);
+
     [loop] for (uint c = 0; c < count; ++c) {
-        if (distance(wpos, gCamPos.xyz) > gCascadeSplit[c].x) continue;
+        if (dist > gCascadeSplit[c].x) continue;
         // Up to TWO texels at grazing incidence, not four and a half. The offset moves the sample
         // position along the normal, so every texel of it erodes the shadow's edge inward -- a
         // generous bias buys freedom from acne by paying in crispness, and 4.5 texels was paying
         // far more than the acne was worth.
         float bias = gCascadeSplit[c].y * (1.0 + slope);
         float s = shadowSampleCascade(wpos + N * bias, c);
-        if (s >= 0.0) return s;
+        // Toward lit as the far edge approaches, so the boundary is met already unshadowed and
+        // crossing it changes nothing.
+        if (s >= 0.0) return lerp(s, 1.0, fade);
     }
     // Past the last cascade, or in none of them. Lit: an unshadowed distance is far less visible
-    // than a black horizon, and the alternative would be a shadow that is simply wrong.
+    // than a black horizon, and the alternative would be a shadow that is simply wrong. Reached with
+    // fade already at 1.0 for the distance case, which is what makes it continuous.
     return 1.0;
 }
 
