@@ -3821,8 +3821,38 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
     depth.DepthWriteMask = d.depth.write ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
     depth.DepthFunc = toComparison(d.depth.op);
 
+    // Set once and used by BOTH the mesh-shader stream and the classic desc below, which is why
+    // this is a local rather than written twice: the two paths must be pixel-identical, and the
+    // mesh path exists precisely to be a drop-in for the IA one.
     D3D12_BLEND_DESC blend{};
-    blend.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    {
+        auto& rt0 = blend.RenderTarget[0];
+        rt0.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        switch (d.blend) {
+            case BlendMode::Opaque:
+                break;                                   // BlendEnable stays FALSE
+            case BlendMode::AlphaBlend:
+                rt0.BlendEnable = TRUE;
+                rt0.SrcBlend  = D3D12_BLEND_SRC_ALPHA;
+                rt0.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+                rt0.BlendOp   = D3D12_BLEND_OP_ADD;
+                // ALPHA IS NOT THE SAME EQUATION AS COLOUR, and the difference is the one everybody
+                // gets wrong. src.a + dst.a saturates: two overlapping half-transparent draws give
+                // an opaque result, so an offscreen target composited later has wrong coverage
+                // wherever anything overlapped. ONE / INV_SRC_ALPHA is the correct accumulation and
+                // costs nothing.
+                rt0.SrcBlendAlpha  = D3D12_BLEND_ONE;
+                rt0.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+                rt0.BlendOpAlpha   = D3D12_BLEND_OP_ADD;
+                break;
+            case BlendMode::Additive:
+                rt0.BlendEnable = TRUE;
+                rt0.SrcBlend  = rt0.SrcBlendAlpha  = D3D12_BLEND_ONE;
+                rt0.DestBlend = rt0.DestBlendAlpha = D3D12_BLEND_ONE;
+                rt0.BlendOp   = rt0.BlendOpAlpha   = D3D12_BLEND_OP_ADD;
+                break;
+        }
+    }
 
     const u32 rtCount = d.renderTargetCount < 4 ? d.renderTargetCount : 4;
     const u32 samples = d.sampleCount ? d.sampleCount : 1;

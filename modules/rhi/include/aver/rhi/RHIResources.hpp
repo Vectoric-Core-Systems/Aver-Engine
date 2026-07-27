@@ -200,6 +200,24 @@ struct ShaderDesc {
 };
 
 enum class CullMode : u8 { None, Back, Front };
+
+// How a pipeline's colour output combines with what is already in the render target.
+//
+// Three modes rather than a general blend-state struct. The general form -- per-channel source and
+// destination factors with a selectable op -- is more expressive and is also a surface on which
+// every combination is a pipeline somebody can get subtly wrong, for expressiveness a renderer
+// almost never spends. These are what is actually reached for; a fourth is an additive change.
+enum class BlendMode : u8 {
+    Opaque,        // no blending, all channels written. What every existing pipeline wants.
+    // src.rgb * src.a + dst.rgb * (1 - src.a), and alpha as src.a + dst.a * (1 - src.a).
+    //
+    // The ALPHA channel matters even when nothing samples it: an offscreen target that is later
+    // composited needs correct coverage, and the naive src.a + dst.a saturates to white after two
+    // overlapping half-transparent draws. Correct alpha costs nothing here and is impossible to
+    // retrofit once content depends on the wrong one.
+    AlphaBlend,
+    Additive,      // src.rgb + dst.rgb, for light, fire, and anything that only ever brightens
+};
 enum class FillMode : u8 { Solid, Wireframe };
 
 struct DepthState {
@@ -279,11 +297,24 @@ struct GraphicsPipelineDesc {
     DepthState depth{};
 
     // Zero render targets is legal and meaningful: a pass whose only output is a UAV write.
-    // Blending is always off and all colour channels are written.
     u32    renderTargetCount = 0;
     Format renderTargets[4]  = {};
     Format depthFormat       = Format::Unknown;
     u32    sampleCount       = 1;
+
+    // BLENDING. Off by default, which is what every existing pipeline in this engine wants and why
+    // there was no field here at all until now: opaque geometry blends nothing, and a bloom pass
+    // that adds does it with its own explicit pipeline.
+    //
+    // It exists now because nothing could be TRANSPARENT. A material authored translucent rendered
+    // fully opaque with no diagnostic, and glass, water, foliage cards, particles, decals and every
+    // UI element are all one flag away from possible and were all impossible. This is the flag.
+    //
+    // One mode rather than a full blend-state struct, deliberately. Separate src/dst factors per
+    // channel with a selectable op is the general answer and it is also a large surface where every
+    // combination is a pipeline someone can get subtly wrong. These three are what a renderer
+    // actually reaches for, and adding a fourth later is additive.
+    BlendMode blend = BlendMode::Opaque;
 };
 
 struct ComputePipelineDesc {
