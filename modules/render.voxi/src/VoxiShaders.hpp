@@ -120,11 +120,21 @@ float shadowSampleCascade(float3 wpos, uint c) {
 
 float shadowFactor(float3 wpos, float3 N, float ndl) {
     if (gShadowParams.y < 0.5) return 1.0;
+    // CLAMPED AT BOTH ENDS before it is ever used as an index, and both ends are reachable.
+    //
+    // Zero: fitCascades returns 0 when there is no camera to fit to and does not clear the
+    // "shadow map usable" flag when it does, so count - 1 would wrap to 4294967295.
+    //
+    // Above the array: gShadowParams.w is a float carrying a count, and this reads it back through a
+    // conversion. Anything that leaves that lane stale, garbage or simply larger than the array --
+    // an uninitialised constant block, a partially-filled upload, a future cascade count raised in
+    // C++ without raising AVER_SHADOW_CASCADES here -- indexes a cbuffer out of bounds. That is
+    // undefined behaviour rather than a clamped read, and on a real driver it is an access violation
+    // inside the driver's own DLL, which is a crash with no line of this file anywhere near it. The
+    // first version guarded the underflow and not the overflow, which is half a guard.
     uint count = (uint)gShadowParams.w;
-    // count == 0 is reachable: fitCascades returns 0 when there is no camera to fit to, and it does
-    // not clear the "shadow map usable" flag when it does. Without this the fade below indexes
-    // gCascadeSplit[count - 1] with an unsigned wraparound to 4294967295.
     if (count == 0) return 1.0;
+    count = min(count, (uint)AVER_SHADOW_CASCADES);
 
     // Grazing surfaces need more offset: at ndl ~ 0 a texel of depth spans a long way along the
     // surface, which is exactly where acne appears.

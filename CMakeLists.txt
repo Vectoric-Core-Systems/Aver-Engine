@@ -112,6 +112,10 @@ endif()
 if(AVER_MODULE_FRAMEWORK)
   add_subdirectory(modules/framework)     # optional: gameplay vocabulary over the world
 endif()
+# Unconditional and Core-only: it produces a draw list and renders nothing itself, so there is no
+# device, no backend and no render feature it could depend on. A build with every optional module off
+# still gets a working UI system, which is what makes it testable.
+add_subdirectory(modules/ui)              # retained game UI (NOT the editor's ImGui)
 add_subdirectory(modules/runtime)
 
 if(AVER_BUILD_SANDBOX)
@@ -120,6 +124,9 @@ endif()
 
 if(AVER_BUILD_TESTS)
   add_subdirectory(tests/formats)
+  # Unconditional, like the module: Aver.UI depends on nothing optional, so there is no combination
+  # of switches in which it exists and its test does not.
+  add_subdirectory(tests/ui)
   if(AVER_MODULE_PHYSICS)
     add_subdirectory(tests/physics)
   endif()
