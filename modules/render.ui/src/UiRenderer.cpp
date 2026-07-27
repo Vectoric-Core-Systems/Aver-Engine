@@ -108,7 +108,10 @@ bool UiRenderer::init(rhi::IDevice& device) {
         gd.depth.test = false;
         gd.depth.write = false;
         gd.cull = rhi::CullMode::None;                 // a UI quad has no meaningful winding
-        gd.blend = rhi::BlendMode::AlphaBlend;
+        // PREMULTIPLIED, matching what uiPremultiply already did to every vertex colour on the way
+        // into the list. AlphaBlend would multiply by alpha a second time, which leaves every
+        // translucent panel darker than authored while still looking like a plausible panel.
+        gd.blend = rhi::BlendMode::PremultipliedAlpha;
         gd.renderTargetCount = 1;
         gd.renderTargets[0] = rhi::Format::RGBA8Unorm; // the backbuffer, which this pass draws onto
         gd.depthFormat = rhi::Format::Unknown;

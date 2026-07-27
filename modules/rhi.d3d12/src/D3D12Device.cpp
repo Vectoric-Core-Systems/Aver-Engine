@@ -702,6 +702,11 @@ public:
     void addRenderFeature(IRenderFeature* f) override;
     void removeRenderFeature(IRenderFeature* f) override;
     void notifyRenderTargetsChanged();
+    // What the features were last told. Seeded with a sample count of 0, which no device ever
+    // reports, so the first notification always goes out however the formats compare.
+    u32    notifiedSamples_ = 0;
+    Format notifiedColor_   = Format::Unknown;
+    Format notifiedDepth_   = Format::Unknown;
     u32 sampleCount() const override { return sampleCount_; }
     bool setSampleCount(u32 samples) override;
 
@@ -1560,7 +1565,27 @@ bool D3D12Device::setSampleCount(u32 samples) {
     return true;
 }
 
+// Only when something a PIPELINE bakes has actually changed, which is the sample count and the two
+// target formats -- and nothing else.
+//
+// A RESIZE was calling this, and a resize changes none of them. What it changed was the target
+// RESOURCES, which no pipeline references. The cost of that was not theoretical: every feature's
+// onRenderTargetsChanged rebuilds its pipelines, and Voxi's rebuild recompiles every scene shader
+// from HLSL source and hands the resulting DXIL back to the driver to turn into ISA. Dragging a
+// window edge recompiled the entire renderer, once per resize message.
+//
+// It is also the best candidate this project has for the crash that has been killing the editor. Six
+// separate crashes across four hours and three builds all landed at the IDENTICAL fault offset
+// inside amdxc64.dll -- AMD's shader compiler -- which is where a rebuild goes and where a resize had
+// no business sending it. Stated as a candidate rather than a diagnosis: the dumps cannot be
+// symbolised on this machine, and what is claimed here is that the rebuild was unnecessary, which is
+// true whatever the driver does with it.
 void D3D12Device::notifyRenderTargetsChanged() {
+    if (sampleCount_ == notifiedSamples_ &&
+        backbufferFormat() == notifiedColor_ && depthFormat() == notifiedDepth_) return;
+    notifiedSamples_ = sampleCount_;
+    notifiedColor_   = backbufferFormat();
+    notifiedDepth_   = depthFormat();
     for (IRenderFeature* f : features_)
         f->onRenderTargetsChanged(sampleCount_, backbufferFormat(), depthFormat());
 }
@@ -2973,7 +2998,28 @@ void D3D12Device::resize(u32 w, u32 h) {
     for (auto& rt : renderTargets_) rt.Reset();
     depthBuffer_.Reset();
     msaaColor_.Reset();
-    if (!hrOk(swapChain_->ResizeBuffers(kFrameCount, w, h, kBackbufferFormat, 0), "ResizeBuffers")) return;
+    // THE FLAGS MUST MATCH WHAT THE SWAPCHAIN WAS CREATED WITH. This passed 0, which was right for as
+    // long as creation passed no flags -- and stopped being right the moment vsync-off added
+    // DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING there. DXGI does not reinterpret a resize as a request to
+    // drop a capability: it returns E_INVALIDARG, and EVERY resize on a tearing-capable machine
+    // failed from that point on.
+    const UINT scFlags = tearingSupported_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u;
+    if (!hrOk(swapChain_->ResizeBuffers(kFrameCount, w, h, kBackbufferFormat, scFlags), "ResizeBuffers")) {
+        // A FAILED RESIZE MUST NOT LEAVE THE DEVICE WITH NOTHING TO DRAW INTO. The back buffers were
+        // released above, before the call that can fail, because ResizeBuffers requires it -- so the
+        // early return this replaces left renderTargets_ full of nulls, width_/height_ unchanged and
+        // no views rebuilt. The next beginFrame then handed a null resource to a barrier, which is
+        // not a reported error but a fault inside the driver.
+        //
+        // A failed ResizeBuffers leaves the swapchain UNCHANGED, so its buffers are still there at
+        // the old size and re-acquiring them puts the device back exactly where it was. The window
+        // is then the wrong size for the swapchain, which is a stretched frame -- visibly wrong, and
+        // recoverable on the next resize, which is what an error path should cost.
+        createRenderTargetViews();
+        createDepthBuffer();
+        createMsaaColor();
+        return;
+    }
     width_ = w; height_ = h;
     vpX_ = vpY_ = vpW_ = vpH_ = 0; // drop the stale rect; the app re-pushes it next frame
     // GPU is idle, so no backbuffer has pending work; clear per-buffer fences (beginFrame reacquires
@@ -3907,6 +3953,14 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
                 rt0.SrcBlendAlpha  = D3D12_BLEND_ONE;
                 rt0.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
                 rt0.BlendOpAlpha   = D3D12_BLEND_OP_ADD;
+                break;
+            case BlendMode::PremultipliedAlpha:
+                // ONE, not SRC_ALPHA: the source has its alpha folded in already. The alpha channel
+                // uses the same accumulation as AlphaBlend and for the same reason.
+                rt0.BlendEnable = TRUE;
+                rt0.SrcBlend  = rt0.SrcBlendAlpha  = D3D12_BLEND_ONE;
+                rt0.DestBlend = rt0.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+                rt0.BlendOp   = rt0.BlendOpAlpha   = D3D12_BLEND_OP_ADD;
                 break;
             case BlendMode::Additive:
                 rt0.BlendEnable = TRUE;

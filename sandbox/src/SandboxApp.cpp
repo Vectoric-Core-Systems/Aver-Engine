@@ -1585,7 +1585,10 @@ public:
         // ---- Content: the HUD proper, bottom-left ----
         aver_ui_set_layer(AVER_UI_LAYER_CONTENT);
         const f32 barW = 260.0f, barH = 14.0f;
-        const f32 barX = ox + 32.0f, barY = oy + sh - 96.0f;
+        // Lifted clear of the editor's status overlay, which composites over the game UI by design
+        // and was hiding most of this. A shipped game has no such overlay; the demo is what has to
+        // move, because it is the thing that exists to be LOOKED at.
+        const f32 barX = ox + 32.0f, barY = oy + sh - 240.0f;
         aver_ui_rect(barX - 3, barY - 3, barW + 6, barH * 2 + 12, kPanel);
         aver_ui_rect(barX, barY, barW, barH, kFrame);
         aver_ui_rect(barX + 1, barY + 1, (barW - 2) * uiDemoHealth_, barH - 2, kHealth);
@@ -1605,7 +1608,8 @@ public:
         // scissor were wrong they would run down the whole right-hand side of the screen -- which is
         // the point of drawing it this way rather than sizing the rows to fit.
         const f32 pw = 220.0f, ph = 132.0f;
-        const f32 px = ox + sw - pw - 32.0f, py = oy + 96.0f;
+        // Below the viewport toolbar, for the same reason.
+        const f32 px = ox + sw - pw - 32.0f, py = oy + 240.0f;
         aver_ui_set_layer(AVER_UI_LAYER_OVERLAY);
         aver_ui_rect(px, py, pw, ph, kPanel);
         aver_ui_push_clip(static_cast<i32>(px) + 8, static_cast<i32>(py) + 8,
@@ -1687,6 +1691,9 @@ public:
     // --no-vsync. Stored rather than applied: the device does not exist yet when the flags are
     // parsed, so it is pushed on the first frame that has one.
     void setVSyncOff(bool off) { vsyncOffRequested_ = off; }
+    // Turns the game-UI demo on for a capture run, so the render path has a regression test that
+    // does not depend on somebody clicking a menu.
+    void setUiDemo(bool on) { showUiDemo_ = on; }
 
     void setClouds(f32 coverage) {
         sky_.cloudsEnabled = true;
@@ -5302,7 +5309,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false;
     for (int i=1;i<argc;++i){
         if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
@@ -5362,6 +5369,9 @@ Application* createApplication(int argc, char** argv) {
         // from a script is a feature that cannot be regression-tested, and this session has already
         // shipped several controls whose only proof was that they compiled.
         else if (!std::strcmp(argv[i],"--no-vsync")) vsyncOff=true;
+        // The game UI, for the same reason: it is behind a menu item, and a render path whose only
+        // proof is that somebody clicked a menu is a render path with no regression test at all.
+        else if (!std::strcmp(argv[i],"--ui-demo")) uiDemo=true;
         // Coverage is optional: `--clouds` alone takes the authored default.
         else if (!std::strcmp(argv[i],"--clouds")) {
             clouds=1;
@@ -5389,6 +5399,7 @@ Application* createApplication(int argc, char** argv) {
     app->setGiForceOff(noGi);
     if (clouds) app->setClouds(cloudCover);
     app->setVSyncOff(vsyncOff);
+    app->setUiDemo(uiDemo);
     app->setUseWarp(warp);
     app->setDebugLayer(debugLayer);
     app->setProjectPath(project);

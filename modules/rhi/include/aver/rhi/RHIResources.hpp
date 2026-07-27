@@ -217,6 +217,15 @@ enum class BlendMode : u8 {
     // overlapping half-transparent draws. Correct alpha costs nothing here and is impossible to
     // retrofit once content depends on the wrong one.
     AlphaBlend,
+    // src.rgb + dst.rgb * (1 - src.a), for colour that ALREADY has its alpha folded in.
+    //
+    // The distinction from AlphaBlend is not a preference and the two are not interchangeable.
+    // Multiplying by src.a is what AlphaBlend does; a source that premultiplied on the way in has had
+    // it done already, so AlphaBlend applies it a SECOND time. The error scales with how transparent
+    // the thing is and how bright: an opaque draw is unaffected, and a 38%-alpha white lands at 31/255
+    // instead of 83/255 -- less than half the intended brightness, on a surface that still looks like
+    // a plausible translucent panel. Nothing about the result says "wrong blend mode".
+    PremultipliedAlpha,
     Additive,      // src.rgb + dst.rgb, for light, fire, and anything that only ever brightens
 };
 enum class FillMode : u8 { Solid, Wireframe };

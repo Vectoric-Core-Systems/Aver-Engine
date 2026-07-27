@@ -181,7 +181,10 @@ int main() {
 
         check(f.pipelines.size() == 1, "one pipeline: solid and textured share it");
         const rhi::GraphicsPipelineDesc& p = f.pipelines[0];
-        check(p.blend == rhi::BlendMode::AlphaBlend, "it blends, or nothing transparent could exist");
+        // PREMULTIPLIED specifically, not AlphaBlend. The list premultiplies every colour on the way
+        // in, so AlphaBlend would apply alpha a second time -- and the result still looks like a
+        // plausible translucent panel, which is why this is asserted rather than eyeballed.
+        check(p.blend == rhi::BlendMode::PremultipliedAlpha, "it blends PREMULTIPLIED source colour");
         check(!p.depth.test && !p.depth.write, "no depth test and no depth write");
         check(p.depthFormat == rhi::Format::Unknown, "and no depth format, because the pass binds none");
         check(p.cull == rhi::CullMode::None, "nothing is culled: a UI quad has no meaningful winding");
