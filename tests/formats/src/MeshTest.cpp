@@ -8,6 +8,7 @@
 //
 // No GPU: everything here is bytes in memory.
 #include "aver/formats/Avr1.hpp"
+#include "aver/formats/OcAnim.hpp"
 #include "aver/formats/OcMesh.hpp"
 #include "aver/core/Log.hpp"
 
@@ -214,7 +215,148 @@ int main() {
         check(m.indices.size() == 3 && m.indices[2] == 69999, "a 32-bit index survives");
     }
 
-    if (g_failures == 0) AVER_INFO("=== all mesh format tests passed ===");
+    AVER_INFO("=== .ocskel round trip ===");
+    {
+        fmt::OcSkeleton s;
+        s.rootBone = 0;
+        fmt::OcBone root;  root.name = "root";   root.parent = -1;
+        fmt::OcBone spine; spine.name = "spine"; spine.parent = 0; spine.translation = Vec3{0, 0, 40};
+        fmt::OcBone head;  head.name = "head";   head.parent = 1; head.translation = Vec3{0, 0, 60};
+        head.rotation = Quat{0.0f, 0.0f, 0.3826834f, 0.9238795f};   // 45 deg about Z
+        head.inverseBind[12] = 1.5f;                                 // a translation in the bind matrix
+        s.bones = {root, spine, head};
+
+        std::vector<u8> bytes; std::string why;
+        check(fmt::writeOcSkel(s, bytes, &why), "writes: " + why);
+        fmt::OcSkeleton b;
+        check(fmt::parseOcSkel(bytes.data(), bytes.size(), b, &why), "reads: " + why);
+        check(b.bones.size() == 3, "three bones");
+        check(b.bones[2].name == "head", "bone names via the string table");
+        check(b.bones[2].parent == 1, "parent index survives");
+        checkNear(b.bones[1].translation.z, 40.0f, 1e-6f, "local translation survives");
+        checkNear(b.bones[2].rotation.w, 0.9238795f, 1e-6f, "local rotation survives");
+        checkNear(b.bones[2].inverseBind[12], 1.5f, 1e-6f, "inverse bind matrix survives");
+        check(b.rootBone == 0, "root hint survives");
+
+        // A child stored BEFORE its parent must be refused. Every consumer composes world transforms
+        // in one forward pass, so this ordering is a contract and not a preference.
+        fmt::OcSkeleton bad = s;
+        bad.bones[1].parent = 2;                     // spine's parent is head, which comes after it
+        check(!fmt::writeOcSkel(bad, bytes, &why), "child-before-parent ordering is refused on write");
+
+        fmt::OcSkeleton oob = s;
+        oob.bones[1].parent = 99;
+        check(!fmt::writeOcSkel(oob, bytes, &why), "out-of-range parent is refused");
+    }
+
+    AVER_INFO("=== .ocanim round trip and the three fidelity rules ===");
+    {
+        fmt::OcAnimation a;
+        a.duration = 2.5f;
+        a.flags = fmt::kOcAnimLoop;
+        a.skeletonRef = "SK_Character";
+
+        // NON-UNIFORM key times. This is the "no forced 30 fps resample" rule: if the writer or the
+        // reader quietly regularised these, the clip would come back with different times.
+        fmt::OcTrack t0;
+        t0.boneIndex = 1;
+        t0.channels = fmt::kOcChannelTranslation | fmt::kOcChannelRotation;
+        t0.interp = fmt::OcInterp::Linear;
+        t0.times  = {0.0f, 0.017f, 0.9f, 2.5f};
+        for (int k = 0; k < 4; ++k) {
+            const f32 f = static_cast<f32>(k);
+            t0.values.insert(t0.values.end(), {f, f * 2.0f, f * 3.0f});          // translation
+            t0.values.insert(t0.values.end(), {0.0f, 0.0f, 0.0f, 1.0f});         // rotation
+        }
+
+        // A STEP curve, carried as a mode rather than approximated with dense linear keys.
+        fmt::OcTrack t1;
+        t1.boneIndex = 2;
+        t1.channels = fmt::kOcChannelScale;
+        t1.interp = fmt::OcInterp::Step;
+        t1.times = {0.0f, 1.25f};
+        t1.values = {1,1,1, 2,2,2};
+
+        // CUBICSPLINE, which stores in-tangent / value / out-tangent per component.
+        fmt::OcTrack t2;
+        t2.boneIndex = 3;
+        t2.channels = fmt::kOcChannelTranslation;
+        t2.interp = fmt::OcInterp::CubicSpline;
+        t2.times = {0.0f, 1.0f};
+        t2.values = {0,0,0,  10,20,30,  1,1,1,      0,0,0,  40,50,60,  2,2,2};
+
+        a.tracks = {t0, t1, t2};
+        check(a.valid(), "the authored clip is self-consistent");
+
+        std::vector<u8> bytes; std::string why;
+        check(fmt::writeOcAnim(a, bytes, &why), "writes: " + why);
+        fmt::OcAnimation b;
+        check(fmt::parseOcAnim(bytes.data(), bytes.size(), b, &why), "reads: " + why);
+
+        checkNear(b.duration, 2.5f, 1e-6f, "duration survives");
+        check(b.flags == fmt::kOcAnimLoop, "flags survive");
+        check(b.skeletonRef == "SK_Character", "skeleton reference survives");
+        check(b.tracks.size() == 3, "three tracks");
+
+        check(b.tracks[0].times == a.tracks[0].times, "NON-UNIFORM key times survive exactly (no resample)");
+        check(b.tracks[0].values == a.tracks[0].values, "linear track values survive exactly");
+        check(b.tracks[0].channels == (fmt::kOcChannelTranslation | fmt::kOcChannelRotation), "channel mask survives");
+
+        check(b.tracks[1].interp == fmt::OcInterp::Step, "STEP interpolation survives as a mode");
+        check(b.tracks[1].values == a.tracks[1].values, "step track values survive exactly");
+
+        check(b.tracks[2].interp == fmt::OcInterp::CubicSpline, "CUBICSPLINE interpolation survives");
+        check(b.tracks[2].componentsPerKey() == 9, "cubicspline stride is 3 components x 3 tangents");
+        check(b.tracks[2].values == a.tracks[2].values, "cubicspline tangents survive exactly");
+        check(b.tracks[2].values.size() == b.tracks[2].times.size() * 9, "value count matches the stride");
+    }
+
+    AVER_INFO("=== .ocanim refuses malformed clips ===");
+    {
+        std::vector<u8> bytes; std::string why;
+
+        fmt::OcAnimation none;
+        check(!fmt::writeOcAnim(none, bytes, &why), "a clip with no tracks is refused");
+
+        fmt::OcAnimation mismatched;
+        fmt::OcTrack t; t.boneIndex = 0; t.channels = fmt::kOcChannelTranslation;
+        t.times = {0.0f, 1.0f}; t.values = {1, 2, 3};        // 3 values for 2 keys x 3 components
+        mismatched.tracks = {t};
+        check(!fmt::writeOcAnim(mismatched, bytes, &why), "a value/key count mismatch is refused");
+
+        fmt::OcAnimation backwards;
+        fmt::OcTrack d; d.boneIndex = 0; d.channels = fmt::kOcChannelTranslation;
+        d.times = {1.0f, 0.0f}; d.values = {0,0,0, 1,1,1};
+        backwards.tracks = {d};
+        check(!fmt::writeOcAnim(backwards, bytes, &why), "descending key times are refused");
+
+        fmt::OcAnimation noChannels;
+        fmt::OcTrack e; e.boneIndex = 0; e.channels = 0; e.times = {0.0f}; e.values = {};
+        noChannels.tracks = {e};
+        check(!fmt::writeOcAnim(noChannels, bytes, &why), "an empty channel mask is refused");
+
+        fmt::OcAnimation baked;
+        baked.storage = fmt::OcAnimStorage::BakedUniform;
+        baked.sampleRate = 0;
+        baked.tracks = {t};
+        check(!fmt::writeOcAnim(baked, bytes, &why), "baked-uniform storage without a sample rate is refused");
+    }
+
+    AVER_INFO("=== a clip is not a skeleton is not a mesh ===");
+    {
+        // Every one of these is a valid AVR1 container with the WRONG subtype. Loading a .ocanim as
+        // a mesh must say so rather than reading a track table as a vertex buffer.
+        std::vector<u8> bytes; std::string why;
+        fmt::OcSkeleton s; fmt::OcBone r; r.name = "root"; r.parent = -1; s.bones = {r}; s.rootBone = 0;
+        check(fmt::writeOcSkel(s, bytes, &why), "skeleton writes");
+
+        fmt::OcMeshData asMesh;
+        check(!fmt::parseOcMesh(bytes.data(), bytes.size(), asMesh, &why), "a .ocskel is refused as a mesh");
+        fmt::OcAnimation asAnim;
+        check(!fmt::parseOcAnim(bytes.data(), bytes.size(), asAnim, &why), "a .ocskel is refused as an animation");
+    }
+
+    if (g_failures == 0) AVER_INFO("=== all mesh, skeleton and animation format tests passed ===");
     else                 AVER_ERROR("=== {} FAILED ===", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
