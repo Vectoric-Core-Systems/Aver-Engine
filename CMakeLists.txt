@@ -132,6 +132,9 @@ if(AVER_BUILD_TESTS)
   # Unconditional, like the module: Aver.UI depends on nothing optional, so there is no combination
   # of switches in which it exists and its test does not.
   add_subdirectory(tests/ui)
+  # The renderer's half, and unconditional for the same reason: it talks to the generic RHI, which
+  # always exists, and the test supplies its own recording device rather than needing a backend.
+  add_subdirectory(tests/render.ui)
   if(AVER_MODULE_PHYSICS)
     add_subdirectory(tests/physics)
   endif()
