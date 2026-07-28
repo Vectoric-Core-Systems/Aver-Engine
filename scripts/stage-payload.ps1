@@ -139,7 +139,18 @@ foreach ($raw in Get-Content -LiteralPath $allowPath) {
         continue
     }
     if (-not $current) { throw "[stage] allowlist entry '$line' appears before any [section]" }
-    $sections[$current] += $line
+
+    # `<pattern>  ?AVER_SOMETHING` ties an entry to a CMake option, which is what lets one allowlist
+    # describe every edition instead of one per edition.
+    $cond = $null
+    if ($line -match '^(.*?)\s+\?([A-Za-z0-9_]+)\s*$') {
+        $line = $Matches[1].Trim()
+        $cond = $Matches[2]
+        if (-not $options.ContainsKey($cond)) {
+            Fail "allowlist entry '$line' is conditional on $cond, which $BuildDir\CMakeCache.txt does not mention"
+        }
+    }
+    $sections[$current] += [pscustomobject]@{ Pattern = $line; Condition = $cond }
 }
 Note ("allowlist: {0} bin, {1} samples, {2} engine patterns" -f
       $sections.bin.Count, $sections.samples.Count, $sections.engine.Count)
@@ -182,10 +193,30 @@ function Resolve-Pattern {
 # path-in-output -> source FileInfo
 $plan = [ordered]@{}
 
+$excludedByOption = 0
+
 function Add-Section {
     param([string] $Name, [string] $Base, [string] $Prefix)
-    foreach ($pattern in $sections[$Name]) {
+    foreach ($entry in $sections[$Name]) {
+        $pattern = $entry.Pattern
         $hits = Resolve-Pattern -Base $Base -Pattern $pattern
+
+        if ($entry.Condition -and -not $options[$entry.Condition]) {
+            # The module is OFF, so this file must not exist. A reconfigured tree keeps the DLL from
+            # the previous configure -- Ninja has no reason to delete an output it no longer builds --
+            # so without this check a "Minimal" edition ships the binaries it claims not to have.
+            if ($hits.Count -gt 0) {
+                Fail ("$($entry.Condition)=OFF but [$Name] '$pattern' still matched $($hits.Count) file(s) in " +
+                      "$Base. That tree holds stale output from an earlier configure; build this edition " +
+                      "in its own directory (build.ps1 -BuildDir) or delete the tree and rebuild.")
+            } else {
+                # Counted only when the entry was genuinely absent. Reporting a failed entry as
+                # "skipped" would describe a refusal as a clean omission.
+                $script:excludedByOption++
+            }
+            continue
+        }
+
         if ($hits.Count -eq 0) {
             Fail "allowlist pattern [$Name] '$pattern' matched no files under $Base"
             continue
@@ -202,12 +233,16 @@ Add-Section -Name 'bin'    -Base $bin  -Prefix 'bin'
 if ($WithSamples) { Add-Section -Name 'samples' -Base $bin -Prefix 'bin' }
 # [engine] patterns are repo-relative and keep their own path, which is what puts scripting\csharp\
 # where ProjectScaffold.cpp's walk-up expects it.
-foreach ($pattern in $sections['engine']) {
-    $hits = Resolve-Pattern -Base $root -Pattern $pattern
+foreach ($entry in $sections['engine']) {
+    if ($entry.Condition -and -not $options[$entry.Condition]) { $excludedByOption++; continue }
+    $hits = Resolve-Pattern -Base $root -Pattern $entry.Pattern
     # Generated build output under the C# projects is not source and must not ship.
     $hits = @($hits | Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' })
-    if ($hits.Count -eq 0) { Fail "allowlist pattern [engine] '$pattern' matched no files under $root"; continue }
+    if ($hits.Count -eq 0) { Fail "allowlist pattern [engine] '$($entry.Pattern)' matched no files under $root"; continue }
     foreach ($f in $hits) { $plan[$f.FullName.Substring($root.Length).TrimStart('\')] = $f }
+}
+if ($excludedByOption -gt 0) {
+    Note "$excludedByOption allowlist entr$(if ($excludedByOption -eq 1) {'y'} else {'ies'}) skipped: their module is OFF in this edition"
 }
 
 if ($failures.Count -gt 0) {

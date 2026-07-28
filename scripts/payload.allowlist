@@ -1,4 +1,4 @@
-# Aver Engine — shipping payload allowlist
+# Aver Engine -- shipping payload allowlist
 #
 # What a DOWNLOADED engine consists of. Read by scripts/stage-payload.ps1, which copies exactly
 # these paths out of a build tree and refuses to invent any.
@@ -6,7 +6,7 @@
 # WHY AN ALLOWLIST AND NOT A DENYLIST: build-release\bin holds 90 files, of which 17 are test
 # executables, 14 are .pdb/.ilk, and 6 are stale leftovers that nothing loads. A denylist means
 # every new test target silently ships until someone notices. `aver_add_module` takes an explicit
-# SOURCES list for the same reason — if a new file has to be named to be built, a new file should
+# SOURCES list for the same reason -- if a new file has to be named to be built, a new file should
 # have to be named to be shipped.
 #
 # FORMAT: [section] headers, then one path or glob per line. Blank lines and # comments ignored.
@@ -15,21 +15,33 @@
 #   [engine]   relative to the repo root        -> staged at <out>\<same relative path>
 # Globs may use * and **. A pattern matching nothing is an ERROR, not a warning: it means the
 # build layout moved and the payload silently lost a file.
+#
+# A trailing `?AVER_SOMETHING` makes an entry CONDITIONAL on that CMake option, which is what makes
+# more than one edition publishable from one allowlist. The check runs BOTH ways:
+#   option ON  -> the pattern must match at least one file (as usual)
+#   option OFF -> the pattern must match NOTHING
+# The second half is the useful half. A build tree reconfigured with a module off still contains that
+# module's DLL from the previous configure, and Ninja has no reason to delete it -- so without this
+# assertion a "Minimal" edition would quietly ship the very binaries it claims not to have.
 
 [bin]
 # The editor. Named Sandbox.exe because the CMake target is; the public README calls it
 # AverEngine.exe, and one of the two has to change before release.
 Sandbox.exe
 
-# The seven C-seam DLLs the editor load-time links. Listed individually rather than as Aver.*.dll
-# on purpose: that glob would also sweep the dead root-level Aver.Scripting.dll (see below).
+# The C-seam DLLs the editor load-time links. Listed individually rather than as Aver.*.dll on
+# purpose: that glob would also sweep the dead root-level Aver.Scripting.dll (see below), and it
+# would hide which DLLs an edition is supposed to have.
+#
+# Audio and UI are unconditional in the top-level CMakeLists, so they are in every edition. The rest
+# are behind their module option, and an edition built without one must not contain it.
 Aver.Audio.Abi.dll
-Aver.Framework.dll
-Aver.Physics.dll
-Aver.Render.PBR.dll
-Aver.Render.Voxi.dll
-Aver.Scene.dll
 Aver.UI.Abi.dll
+Aver.Render.PBR.dll   ?AVER_MODULE_PBR
+Aver.Render.Voxi.dll  ?AVER_MODULE_VOXI
+Aver.Scene.dll        ?AVER_MODULE_SCENE
+Aver.Framework.dll    ?AVER_MODULE_FRAMEWORK
+Aver.Physics.dll      ?AVER_MODULE_PHYSICS
 
 # Redistributables that are NOT part of Windows and must sit beside the executable.
 #   dxcompiler.dll + dxil.dll  HLSL is compiled at RUNTIME; dxil.dll is the signing library, and
@@ -40,7 +52,7 @@ dxcompiler.dll
 dxil.dll
 nethost.dll
 
-# Fonts the editor loads by name from executableDir(). Roboto, Apache-2.0 — the notice is required.
+# Fonts the editor loads by name from executableDir(). Roboto, Apache-2.0 -- the notice is required.
 Roboto-Regular.ttf
 Roboto-Medium.ttf
 
@@ -52,13 +64,14 @@ compile-status.png
 file-icons.png
 folder-icons.png
 
-# The managed bridge and the C# contract assemblies. This subdirectory — not bin\ — is the live
+# The managed bridge and the C# contract assemblies. This subdirectory -- not bin\ -- is the live
 # copy: SandboxApp.cpp sets hd.bridgeDir = executableDir() + "\\Scripting", and ScriptHost.cpp
 # builds the bridge DLL and runtimeconfig paths from it.
-Scripting/**
+Scripting/**   ?AVER_MODULE_SCRIPTING
 
-# avermatc, the material compiler the editor shells out to for Compile C#.
-Tools/**
+# avermatc, the material compiler the editor shells out to for Compile C#. Part of the material
+# system, so it follows PBR rather than scripting.
+Tools/**       ?AVER_MODULE_PBR
 
 [samples]
 # Sample behaviour/actor assemblies. Useful for a first look, dead weight for a real project, so
@@ -67,7 +80,7 @@ SampleScripts/**
 ActorScripts/**
 
 [engine]
-# ENGINE C# SOURCE — LOAD-BEARING, NOT OPTIONAL.
+# ENGINE C# SOURCE -- LOAD-BEARING, NOT OPTIONAL.
 #
 # ProjectScaffold.cpp generates every project's Content\Scripts\Scripts.csproj with relative
 # <ProjectReference> paths to these .csproj files, resolved by walking up from executableDir()
@@ -79,7 +92,7 @@ ActorScripts/**
 # This is also why the staged layout puts bin\ and scripting\ as SIBLINGS: from <install>\bin the
 # walk finds <install>\scripting\csharp at one level up.
 #
-# The fix that would remove this from the payload is engine-side — emit <Reference> + <HintPath>
+# The fix that would remove this from the payload is engine-side -- emit <Reference> + <HintPath>
 # into bin\Scripting\*.dll instead of <ProjectReference> to source. Until then, it ships.
 scripting/csharp/**
 
@@ -103,7 +116,7 @@ scripting/csharp/**
 #   bin\Aver.Scripting.dll            STALE DUPLICATES, superseded by bin\Scripting\. Verified:
 #   bin\Aver.Scripting.xml            root Aver.Scripting.dll is 14,848 bytes dated 2026-07-22
 #   bin\Aver.Scripting.deps.json      while Scripting\Aver.Scripting.dll is 15,360 bytes dated
-#   bin\Aver.Scripting.Bridge.*       2026-07-26. Nothing reads the root copies — the bridge path
+#   bin\Aver.Scripting.Bridge.*       2026-07-26. Nothing reads the root copies -- the bridge path
 #                                     is executableDir() + "\Scripting". They are left over from
 #                                     before the managed assemblies moved into a subdirectory, to
 #                                     avoid overwriting the same-named NATIVE DLLs in bin\.

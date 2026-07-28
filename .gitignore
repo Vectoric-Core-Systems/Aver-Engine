@@ -1,8 +1,10 @@
 # --- Build outputs ---
+# A glob rather than one line per configuration: publishing more than one EDITION means one build
+# tree per module combination (scripts/build.ps1 -BuildDir build-minimal ...), and those trees cannot
+# be enumerated in advance. Staging an edition from a tree that was reconfigured in place ships stale
+# output, so a tree per edition is the supported way to do it.
 /build/
-/build-release/
-/build-relwithdebinfo/
-/build-minsizerel/
+/build-*/
 /out/
 [Bb]in/
 [Oo]bj/
