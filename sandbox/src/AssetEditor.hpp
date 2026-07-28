@@ -70,7 +70,23 @@ public:
 
     // Draw every open editor. Returns true if any is open, so the caller can tell whether the level
     // viewport should still be taking input.
-    bool draw(Engine& e);
+    // `dockInto` is the dock node a NEWLY opened editor becomes a tab in -- the editor's central
+    // region, the same area the level viewport occupies. FirstUseEver, so it is a starting position
+    // and not a cage: drag the tab out and it stays out.
+    //
+    // Passed per frame rather than stored because editor windows do not exist at layout time (their
+    // ImGui names are built from their paths), so DockBuilderDockWindow cannot name them and the
+    // dock has to happen as each one first appears.
+    //
+    // `dpi` scales the fallback size for an UNDOCKED window. Without it the default is raw pixels:
+    // 720x520 on a 300% display is a window barely a fifth of the screen with its own toolbar
+    // clipped, which is exactly how this first shipped.
+    bool draw(Engine& e, unsigned dockInto = 0, float dpi = 1.0f);
+
+    // Whether anything is open at all. The level's viewport overlay -- the Perspective/Lit/Show
+    // bar and the gizmo toolbar -- is hidden while an editor covers the central region, because it
+    // is drawn later and would otherwise sit on top of the tab's own toolbar. Which it did.
+    bool anyOpen() const { return !editors_.empty(); }
 
     bool anyDirty() const;
     usize count() const { return editors_.size(); }

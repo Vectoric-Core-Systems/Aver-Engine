@@ -39,7 +39,13 @@ public:
     // A FAILURE IS CACHED TOO. Without that, an actor naming a missing mesh re-reads the disk for
     // every model, every frame, and the editor's frame time quietly becomes a function of how wrong
     // the file is.
-    rhi::MeshHandle resolve(rhi::IDevice& device, std::string_view meshPath);
+    rhi::MeshHandle resolve(rhi::IDevice& device, std::string_view meshPath, f32* outRadius = nullptr);
+
+    // The furthest vertex from the origin, in the mesh's own units. Needed because framing cannot be
+    // done from placement ORIGINS alone: a class-level mesh has no placement at all -- it sits at the
+    // origin with no transform -- so every such actor would frame identically and a unit sphere would
+    // arrive on screen as one pixel. It did.
+    f32 radiusOf(std::string_view meshPath) const;
 
     // Every path that failed to resolve, canonical form, in first-asked order. The panel shows these:
     // an actor whose meshes are all missing renders an empty view, and an empty view with no
@@ -53,6 +59,7 @@ private:
     std::string root_;
     // Keyed by CANONICAL path, so the two spellings collapse to one entry and one upload.
     std::unordered_map<std::string, rhi::MeshHandle> meshes_;
+    std::unordered_map<std::string, f32> radii_;
     std::vector<std::string> missing_;
     usize loaded_ = 0;
 };

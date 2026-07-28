@@ -38,6 +38,10 @@ struct PreviewDraw {
     rhi::MeshHandle mesh = 0;
     f32 world[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};   // row-major, row-vector, cm
     f32 baseColor[4] = {0.8f, 0.8f, 0.82f, 1.0f};
+    // How far this mesh reaches from its own origin, in ITS units, before the world matrix. Framing
+    // needs it: a class-level mesh sits at the origin with no placement, so origins alone put every
+    // such actor at the same distance and a unit sphere arrives as one pixel.
+    f32 boundsRadius = 0.0f;
     f32 metallic = 0.0f;
     f32 roughness = 0.6f;
     // Highlighted in the view, because a viewport you cannot tell the selection in is a viewport you

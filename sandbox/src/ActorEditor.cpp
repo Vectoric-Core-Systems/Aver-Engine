@@ -209,14 +209,14 @@ void ActorEditor::buildDrawList(Engine& e) {
     // only understood placements would show an empty view for all of them.
     if (const fmt::ActorClassInfo* info = activeInfo(); info && info->hasMesh) {
         render::preview::PreviewDraw d;
-        d.mesh = g_meshes.resolve(*e.device(), info->meshPath);
+        d.mesh = g_meshes.resolve(*e.device(), info->meshPath, &d.boundsRadius);
         d.selected = (selected_ == -1);
         draws.push_back(d);
     }
     for (int i = 0; i < static_cast<int>(script_.models.size()); ++i) {
         const fmt::ActorModel& m = script_.models[static_cast<usize>(i)];
         render::preview::PreviewDraw d;
-        d.mesh = g_meshes.resolve(*e.device(), m.meshPath);
+        d.mesh = g_meshes.resolve(*e.device(), m.meshPath, &d.boundsRadius);
         composeTransform(m.pos, m.rot, m.scale, d.world);
         d.selected = (i == selected_);
         draws.push_back(d);
@@ -406,12 +406,20 @@ void ActorEditor::draw(Engine& e) {
     ImGui::Separator();
 
     // ---- the view ----
+    // DPI-SCALED, like everything else the editor lays out. Raw pixels here made the side panel a
+    // tenth of a 300% display and the toolbar above it clip its own buttons.
+    const f32 dpi = ImGui::GetFontSize() / 16.0f;
     const f32 avail = ImGui::GetContentRegionAvail().x;
-    const f32 side = 320.0f;
-    const f32 viewW = avail > side * 2.0f ? avail - side : avail;
+    const f32 side = 300.0f * dpi;
+    const f32 viewW = avail > side * 1.6f ? avail - side : avail;
 
     if (g_preview && g_preview->uiTextureId()) {
-        const f32 s = viewW < 64.0f ? 64.0f : viewW;
+        // SQUARE, and bounded by the HEIGHT as well as the width: the target is square, so sizing on
+        // width alone makes a wide short panel draw an image taller than the panel and the model list
+        // beside it disappears below the fold.
+        const f32 availH = ImGui::GetContentRegionAvail().y;
+        f32 s = viewW < 64.0f ? 64.0f : viewW;
+        if (availH > 64.0f && s > availH) s = availH;
         const ImVec2 at = ImGui::GetCursorScreenPos();
         ImGui::Image(static_cast<ImTextureID>(g_preview->uiTextureId()), ImVec2(s, s));
 

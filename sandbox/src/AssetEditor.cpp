@@ -33,7 +33,7 @@ bool AssetEditorHost::anyDirty() const {
     return false;
 }
 
-bool AssetEditorHost::draw(Engine& e) {
+bool AssetEditorHost::draw(Engine& e, unsigned dockInto, float dpi) {
 #if AVER_WITH_IMGUI
     if (editors_.empty()) return false;
     closing_.clear();
@@ -47,7 +47,12 @@ bool AssetEditorHost::draw(Engine& e) {
         // position and its docking.
         const std::string label = ed.title() + "###assetEditor:" + ed.path();
         if (ed.path() == focusRequest_) { ImGui::SetNextWindowFocus(); focusRequest_.clear(); }
-        ImGui::SetNextWindowSize(ImVec2(720, 520), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(760.0f * dpi, 560.0f * dpi), ImGuiCond_FirstUseEver);
+        // Into the editor's central region on first appearance, so an asset editor arrives where the
+        // work is rather than as a small window over the menu bar. ImGui then supplies the tab bar,
+        // the drag-to-undock and the drag-back-to-dock -- all of which are its docking behaviour
+        // rather than anything this host implements.
+        if (dockInto) ImGui::SetNextWindowDockID(static_cast<ImGuiID>(dockInto), ImGuiCond_FirstUseEver);
 
         if (ImGui::Begin(label.c_str(), &open, ed.dirty() ? ImGuiWindowFlags_UnsavedDocument : 0)) {
             ed.draw(e);
@@ -67,7 +72,7 @@ bool AssetEditorHost::draw(Engine& e) {
     }
     return !editors_.empty();
 #else
-    (void)e;
+    (void)e; (void)dockInto; (void)dpi;
     return false;
 #endif
 }

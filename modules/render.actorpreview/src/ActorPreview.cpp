@@ -223,10 +223,22 @@ void ActorPreview::frameAll() {
     // covers the geometry hanging off them.
     f32 lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
     for (const PreviewDraw& d : draws_) {
+        // The mesh's own reach, scaled by the row lengths of its world matrix. Framing from the
+        // translation alone put every class-level actor -- which has no placement, so its
+        // translation is the origin -- at one identical distance, and a unit sphere came out as a
+        // single white pixel. That is the bug this loop exists to not have.
+        f32 sx = 0.0f, sy = 0.0f, sz = 0.0f;
+        for (int k = 0; k < 3; ++k) {
+            sx += d.world[0 + k] * d.world[0 + k];
+            sy += d.world[4 + k] * d.world[4 + k];
+            sz += d.world[8 + k] * d.world[8 + k];
+        }
+        const f32 scale = std::sqrt(std::fmax(sx, std::fmax(sy, sz)));
+        const f32 r = d.boundsRadius * (scale > 0.0f ? scale : 1.0f);
         for (int i = 0; i < 3; ++i) {
             const f32 v = d.world[12 + i];   // translation is the LAST ROW
-            if (v < lo[i]) lo[i] = v;
-            if (v > hi[i]) hi[i] = v;
+            if (v - r < lo[i]) lo[i] = v - r;
+            if (v + r > hi[i]) hi[i] = v + r;
         }
     }
     f32 span = 0.0f;
@@ -234,9 +246,9 @@ void ActorPreview::frameAll() {
         camera_.pivot[i] = (lo[i] + hi[i]) * 0.5f;
         span = std::fmax(span, hi[i] - lo[i]);
     }
-    // A single placement at the origin has zero span; 100 cm is a sensible object rather than a
-    // camera inside the geometry.
-    camera_.distance = clampf(std::fmax(span, 100.0f) * 2.2f, 20.0f, 500000.0f);
+    // Proportional to what is actually there, with a floor only for the degenerate case of a draw
+    // list whose every mesh failed to resolve and therefore has no extent at all.
+    camera_.distance = clampf(std::fmax(span, 1.0f) * 1.8f, 2.0f, 500000.0f);
 }
 
 void ActorPreview::buildViewProj(f32 out[16]) const {

@@ -1726,6 +1726,8 @@ public:
     // Turns the game-UI demo on for a capture run, so the render path has a regression test that
     // does not depend on somebody clicking a menu.
     void setUiDemo(bool on) { showUiDemo_ = on; }
+    // --open-asset: drive the double-click path without a mouse.
+    void setOpenAsset(std::string p) { openAsset_ = std::move(p); }
 
     void setClouds(f32 coverage) {
         sky_.cloudsEnabled = true;
@@ -3059,17 +3061,32 @@ private:
         // backbuffer pixels here: DisplaySize is the physical client size, DPI is done via style).
         if (ImGuiDockNode* cn = ImGui::DockBuilderGetCentralNode(dockId)) {
             vpX_ = cn->Pos.x; vpY_ = cn->Pos.y; vpW_ = cn->Size.x; vpH_ = cn->Size.y;
+            // The node an asset editor opens into. Read every frame rather than latched: a user can
+            // split or merge their way to a different central node, and an editor docked into one
+            // that no longer exists floats loose with nothing saying why.
+            centralDock_ = cn->ID;
         }
         ImGui::End(); // ##dockhost  (panels are separate windows, so Begin them after this)
 
         buildPanels(e);
-        buildViewportOverlay();
+        // NOT while an asset editor covers the central region. The overlay is drawn after the
+        // dockspace and before the editors, so it would land on top of the tab's own toolbar -- and
+        // it did: Compile C# and Open in IDE were half-hidden under Perspective/Lit/Show.
+        if (!assetEditors_.anyOpen()) buildViewportOverlay();
         drawDrawer(e);   // over the viewport, so after the overlay it would otherwise sit behind
         buildEditorPrefs();
         buildProjectSettings();
         // After the docked panels and before the status bar, so an asset editor floats over the
         // level editor rather than being clipped by the dockspace it does not belong to.
-        assetEditors_.draw(e);
+        // --open-asset, once, a few frames in. Late enough that a project (and therefore the
+        // content root the preview needs) has been adopted.
+        if (!openAsset_.empty() && frameNo_ > 5) {
+            const std::string want = openAsset_;
+            openAsset_.clear();
+            if (assetEditors_.open(want)) AVER_INFO("[Editor] --open-asset opened {}", want);
+            else AVER_ERROR("[Editor] --open-asset: no registered editor accepts {}", want);
+        }
+        assetEditors_.draw(e, centralDock_, dpi_);
         tools_.drawModals(project_, dpi_);
         drawUpgradePrompt();
 
@@ -5111,6 +5128,9 @@ private:
     // What the last 'Save to C#' did, shown beside the button. Kept on the object rather than
     // static, so a second project does not inherit the first one's message.
     std::string matSaveStatus_;
+    // The dock node the viewport occupies, and therefore where an opened asset editor lands.
+    unsigned centralDock_ = 0;
+    std::string openAsset_;
 
     // What the last opened project is missing, and whether the prompt has had its answer this
     // session. Held rather than recomputed per frame: inspectProject touches the filesystem, and a
@@ -5521,7 +5541,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and EXITS, touching no device.
         //
@@ -5562,6 +5582,11 @@ Application* createApplication(int argc, char** argv) {
             }
             std::exit(0);
         }
+        // --open-asset <path> opens a file through the SAME host a double-click goes through, N
+        // frames in. It exists because "does double-clicking an actor script open a tab" had no
+        // answer that did not involve a person and a mouse, and the one time it was checked by
+        // reading the code the answer was wrong for a subtle reason (cbOpenEntry returned early).
+        else if (!std::strcmp(argv[i],"--open-asset") && i+1<argc) openAsset=argv[++i];
         else if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
         else if (!std::strcmp(argv[i],"--new-script")) focusScript=true;
@@ -5651,6 +5676,7 @@ Application* createApplication(int argc, char** argv) {
     if (clouds) app->setClouds(cloudCover);
     app->setVSyncOff(vsyncOff);
     app->setUiDemo(uiDemo);
+    app->setOpenAsset(openAsset);
     app->setUseWarp(warp);
     app->setDebugLayer(debugLayer);
     app->setProjectPath(project);
