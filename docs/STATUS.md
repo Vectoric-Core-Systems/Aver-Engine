@@ -1,13 +1,25 @@
 # Aver Engine — Status & Handoff
 
-Living record of where the engine stands and what's next. Updated 2026-07-21.
-`git log --oneline | wc -l` and `git rev-parse HEAD` are the authority; the last phase recorded here
-repaired everything degraded-device testing found and turned those configurations into standing
-verification — `./scripts/gates.ps1` (§4h).
+Living record of where the engine stands and what's next. Updated 2026-07-28 at `d04fe1a`
+(195 commits). `git log --oneline | wc -l` and `git rev-parse HEAD` are the authority. The phase
+recorded here gave a game its own UI, its own audio and its own materials — three C seams and the
+modules behind them — and opened an asset editor for actors (§4o–§4s).
+
+**This document has a hole in it, and reading it as complete will mislead you.** §4n was written at
+`d8fc062`; §4o picks up at `083d687`. The **twenty** commits in between — `Aver.Scene`,
+`Aver.Framework`, `Aver.Physics`, `.ocmesh`/`.ocskel`/`.ocanim`, the JSON reader, the glTF importer,
+the asset-editor shell, `.ocproject` shell association — landed and are covered by
+`docs/SCENE_FRAMEWORK.md`, `docs/ABI.md` and `docs/SCRIPTING_API.md`, but **were never written up
+here**. Several statements below still describe the tree as it was before them; the ones found while
+writing §4o–§4s are corrected in place and say so, and the rest have not been audited. Treat any
+claim in §4–§4n about what does *not* exist as suspect until checked against the tree.
 
 Read this first after a context compaction, then `docs/ARCHITECTURE.md` (module DAG),
+`docs/ABI.md` (every C seam, export by export), `docs/SCENE_FRAMEWORK.md` (scene + gameplay),
 `docs/MINIMUM_SPECS.md` (hardware requirements / launcher spec),
-`docs/formats/DECISIONS.md` (formats), and `docs/PROJECTS.md` (engine⟂project).
+`docs/formats/DECISIONS.md` (formats), `docs/PROJECTS.md` (engine⟂project),
+`docs/AUDIO.md` (the audio plan §4p implements) and `docs/ACTOR_EDITOR.md` +
+`docs/DESIGNER_REWRITE.md` (the actor editor and the region-rewrite grammar, §4r).
 
 ---
 
@@ -57,8 +69,10 @@ modules/
   core/      Aver.Core      types, Math (Vec/Mat/Quat/Transform/AABB + Mat4::inverse), Log, Time, Hash(fnv1a64)
   platform/  Aver.Platform  Win32 Window (+icon, message hook), Splash (layered win + stb_image), FileSystem (+executableDir),
                             DirectoryWatcher (ReadDirectoryChangesW, debounced — modules/platform/README.md)
-  assets/    Aver.Assets    ObjectId (fnv1a64), AssetType
-  formats/   Aver.Formats   .ocbeam + .ocmap loaders (+ detail/TextScan.hpp)
+  assets/    Aver.Assets    ObjectId (fnv1a64), AssetType (+ Aver.Assets.Gpu: decoded mips -> texture)
+  formats/   Aver.Formats   .ocbeam/.ocmap/.ocproject/.ocmesh/.ocskel/.ocanim/.ocworld, JSON, glTF
+                             import, .ocaudio (Aver.Formats.Audio), .ocmat (Aver.Formats.Material),
+                             MaterialScript + ActorScript (the C#-source rewriters, §4q/§4r)
   rhi/       Aver.RHI        IDevice/ISwapchain + the generic render-feature surface
                              (RHIResources.hpp) + shared shader prelude + Null backend + uiWndProc
   rhi.d3d12/ Aver.RHI.D3D12  THE backend (device, swapchain, MSAA, PBR, sky, lines, mesh-shader
@@ -66,14 +80,27 @@ modules/
   rhi.d3d11/ rhi.vulkan/     stubs
   render.voxi/               Aver.Render.Voxi (SHARED: settings + C ABI, Core only) and
                              Aver.Render.Voxi.Renderer (STATIC: GI/shadow/RayQuery, drives Aver.RHI)
+  render.pbr/                Aver.Render.PBR (SHARED, Core only) + .Materials (STATIC, Aver.RHI) — §4e
+  ui/        Aver.UI        STATIC, Core only. The retained game-UI draw list — §4o
+  render.ui/ Aver.Render.UI STATIC, Aver.RHI. Turns a UiDrawList into draw calls — §4o
+  ui.abi/    Aver.UI.Abi    SHARED. The 11-export C seam for a game's HUD — §4o
+  audio/     Aver.Audio     STATIC, Core only. The mixer; no device — §4p
+  audio.wasapi/ Aver.Audio.Wasapi  Windows only. The device (WASAPI shared mode) — §4p
+  audio.abi/ Aver.Audio.Abi SHARED. The 24-export C seam for audio — §4p
+  render.actorpreview/       Aver.Render.ActorPreview (STATIC, Aver.RHI + Aver.Formats): the actor
+                             editor's own colour+depth target, pipeline, camera at b4 — §4r
+  scene/ framework/ physics/ Aver.Scene, Aver.Framework, Aver.Physics — built, tested, and NOT
+                             written up in this file (see the hole named at the top)
   scripting/ Aver.Scripting.Host (STATIC: in-process CLR host via nethost/hostfxr, Core+Platform,
                              never the RHI) + the managed bridge under scripting/csharp/
   runtime/   Aver.Runtime    Engine loop, Application, EntryPoint (splash + ImGui hooks)
-  (skeleton, not yet wired: render, render.gi, scene, physics, softbody, aero, gpudeform,
-   fracture, vehicle, net, netvehicle, match, audio, world, abi — each has a README)
-sandbox/     Sandbox.exe      the editor app (SandboxApp.cpp) + Sandbox.rc (icon)
-tests/formats/ FormatTest.exe golden test for the loaders
-third_party/ imgui/ (docking, MIT) stb/ (stb_image + stb_image_write, PD)
+  (skeleton, not yet wired: render, render.gi, softbody, aero, gpudeform,
+   fracture, vehicle, net, netvehicle, match, world, abi — each has a README)
+sandbox/     Sandbox.exe      the editor app (SandboxApp.cpp) + Sandbox.rc (icon), the asset-editor
+                              shell (AssetEditor.*), ActorEditor.*, ProjectScaffold.*, ToolsMenu.*
+tools/       ActorSweep.exe   opens every actor .cs in a real project and reports what parses (§4r)
+tests/       formats/ scene/ framework/ physics/ ui/ render.ui/ audio/ render.actorpreview/
+third_party/ imgui/ (docking, MIT) stb/ (stb_image + stb_image_write, PD) JoltPhysics/ (MIT — the whole physics module rests on it) fonts/ (Roboto)
 branding/    master-lockup.png (HUMAN, source of truth) -> splash.png, icon.ico, logo*.png
              ai-generated/ (Claude's superseded vector concepts, shipped nowhere), ASSETS.md
 docs/        ARCHITECTURE, formats/, rendering/, physics-net/, recon/, PROJECTS, EDITOR, this file
@@ -168,8 +195,9 @@ Dear ImGui (docking) hosted inside the D3D12 backend; dark Unreal-style theme.
 
   `.ocproject` carries no build integration, so **game C++ has nowhere project-side to live** and
   a new module goes into the ENGINE. The item labels, the group headers and the modals all say so.
-  The first C# file in a project also emits `Scripts.csproj`, referencing the engine's
-  `Aver.Scripting.csproj` so the folder opens as a buildable project rather than a loose `.cs`.
+  `Scripts.csproj` is now written **at project creation** with four engine references, not emitted by
+  the first C# file with one — that changed in §4s, and the sentence that used to stand here described
+  the older behaviour.
   Nothing overwrites an existing file; names are validated as identifiers; every project-dependent
   item is **disabled with an explaining tooltip** rather than hidden. The C# modals and the
   generated file headers now say that **the script DOES run**, and say what it can and cannot
@@ -262,8 +290,15 @@ input and watch a per-frame heartbeat instead.
 
 Dev flags on `Sandbox.exe`: `--frames N`, `--screenshot out.png`, `--tool <select|move|rotate|scale>`,
 `--project-settings`, `--new-script`, `--tools-menu`, `--compile-scripts`, `--reload-scripts [N]`,
-`--start-screen`, `--msaa N`, `--gi`, `--gi-debug`, `--rt`, `--ms`, `--probe X Y`, `--scripts <dir>`,
-`--force-caps <list>`, `--warp` (§4g), `--debug-layer` (§4i).
+`--start-screen`, `--msaa N`, `--gi`, `--no-gi`, `--gi-debug`, `--rt`, `--ms`, `--probe X Y`,
+`--probe-rel U V` (§4n), `--scripts <dir>`, `--force-caps <list>`, `--warp` (§4g),
+`--debug-layer` (§4i), `--no-vsync`, `--ui-demo` (§4o). From the phase this document never wrote up:
+`--headless`, `--drawer`, `--play-test`, `--spawn-test`, `--bloom`, `--exposure`, `--auto-exposure`,
+`--clouds`. That is the complete set as of `d04fe1a`, taken from the argument parser rather than from
+this list, which had drifted.
+
+Two more scaffold and **exit without touching a device**, so project creation is reachable from a
+script: `--new-project <location> <name>` and `--upgrade-project <path.ocproject>` (§4s).
 
 `--debug-layer` turns the D3D12 debug layer on. It is OFF by default in every build type, because it
 validates every API call; `scripts/gates.ps1` passes it so the per-gate corruption/error/warning
@@ -1426,9 +1461,47 @@ numbers have gaps in them.
     existing manifest back, so Project Settings ▸ Description is a display. `STARTMAP` is
     recorded and shown but not acted on — there is no scene load yet (item 16).
 15. Toolbar Save / Play / Pause / Stop are **non-functional stubs**.
-16. No scene save/load, no `.ocmesh`, no asset import — the general-purpose roadmap in §9 is
-    otherwise untouched.
-17. `modules/abi` is still an empty skeleton (the C ABI lives in the Voxi module instead).
+16. ~~No scene save/load, no `.ocmesh`, no asset import~~ — **WRONG as written, corrected 2026-07-28.**
+    `fmt::loadOcworld`/`saveOcworld`, `.ocmesh`/`.ocskel`/`.ocanim` and a glTF/GLB importer behind the
+    Content Browser's Import button all exist. They landed in the commits this document never wrote up
+    (see the hole named at the top) and this item was simply never struck off. What is genuinely
+    missing is `.octex`, the cooked block-compressed texture form — §9.5.
+17. `modules/abi` was DROPPED, not deferred (its README records that). The C ABI lives in eight modules — scene, framework, physics, render.pbr, render.voxi, ui.abi, audio.abi, scripting — which is the thesis of docs/ABI.md.
+
+**New this phase (§4o–§4t)**
+24. **The actor editor has never been opened by a human.** Compiles, links, registers; its parser is
+    checked against two real projects by `tools/ActorSweep.cpp`; `ActorPreviewTest` drives the preview
+    headlessly. No pixel of it has been seen. Everything an editor can be wrong about that a compiler
+    and a headless test cannot see — layout, input, whether the image appears at all — is unmeasured.
+    Also: no rotate or scale handles, and no Roslyn backend.
+25. **The Media Foundation audio import path is covered by nothing.** `OcAudioTest` SKIPS it for want
+    of a file and still exits 0, so mp3/m4a/aac/wma/flac decode is asserted by no test at all. A
+    checked-in short sample of each, or a suite that FAILS rather than skips when none is present,
+    would close it; a skip that passes is how an untested path stays untested.
+26. **No sound has been heard.** `AudioTest` is 70 headless assertions on the mixer and `AudioProbe.exe`
+    exists, but nothing recorded a listening test. Silence passes every one of those assertions.
+27. **The full oracle has not been run since `d8fc062`, thirty-nine commits ago.** §8's own rule says
+    to run `./scripts/gates.ps1` before calling a renderer change safe, and this phase changed the
+    blend-mode enum, the resize path and the pipeline-rebuild gating. Nothing here claims a gate
+    result, which is the honest position and not a substitute for the sweep.
+28. **The renderer is not bit-deterministic between runs, and the oracle assumes it is** (measured at
+    `083d687`, and it is a finding about the engine rather than about that change). The same binary run
+    twice, nothing altered, differed by 17714 bytes of 28072336 with a maximum delta of 188; removing
+    `--auto-exposure`, whose histogram adaptation is frame-timing dependent, drops the floor to 2406
+    and does not reach zero. `scripts/gates.ps1` compares single probe values exactly, and single
+    pixels in stable regions mostly survive — which is why it passes at all — but the last full run
+    recorded two gates as FLAKY-passed-on-retry, which is exactly what this looks like under an exact
+    oracle. Likeliest suspects: the voxel volume's atomic injection order, and Voxi's one-frame-delayed
+    draw replay. **This is the same class of thing as item 22 and they should be investigated
+    together**; a retry that hides both is not a fix.
+29. **`docs/ABI.md` documents seven C seams and 201 exports. There are eight and 225.** The audio seam
+    (`modules/audio.abi`, 24 exports) is absent from it entirely — the string "audio" does not appear
+    in that file. Nothing else in the tree cross-checks the count, so it will not self-correct.
+30. **The game UI has no text and no widget tree.** Text is blocked on an unmade font decision
+    (vendoring `stb_truetype.h`, or bitmap fonts); the demo HUD is a hand-written draw list standing in
+    for what a widget tree would produce, and is meant to be deleted. There is also no gate covering
+    the UI — `--ui-demo` is in no configuration in `scripts/gates.ps1`, so the one pixel-probe result
+    in §4o protects nothing going forward.
 
 **Decisions taken (do not re-litigate without reason)**
 - Ray tracing targets **DXR 1.1 inline RayQuery only**; DXR 1.0 would add only GPUs that emulate
@@ -1845,6 +1918,355 @@ agreeing one, and the largest disagreement, each screened for a flat 7x7 neighbo
 unavoidably sits on a shadow edge — that is the only place the two paths ever differ — which is
 exactly why it needs the invariant watching it.
 
+## 4o. The game UI — a draw list, a renderer, a C seam, and two RHI bugs it exposed
+
+Dear ImGui is the EDITOR's and stays the editor's. A shipped game should not link an editor UI
+toolkit, and a HUD authored as immediate-mode C++ has nothing a designer can open, diff or hand to an
+artist. So there are three targets, split on the same line `Aver.Render.Voxi` is split on:
+
+| target | kind | links | owns |
+|---|---|---|---|
+| `Aver.UI` | STATIC | `Aver.Core` ONLY | `UiDrawList`: five named layers, one shared vertex/index buffer, clip stack, batching |
+| `Aver.Render.UI` | STATIC | `Aver.RHI` (**never** the backend) | the pipeline, the per-frame upload, the draw loop |
+| `Aver.UI.Abi` | **SHARED** | `Aver.Core` + `Aver.UI` statically | 11 exports, no handles, no version |
+
+Keeping the RHI out of `Aver.UI` is the point of the module rather than an accident of what it
+happens to need: the whole UI system is then testable with no GPU and no device, and it can never
+quietly become a second place that knows how to render. `tests/ui` (26 checks) and `tests/render.ui`
+(60) both run headless, the second against a **recording device** rather than a screenshot — which is
+what let it assert the blend mode, a thing no capture can see.
+
+**Layers are named bands, not numbers** (`Background`, `Content`, `Overlay`, `Tooltip`, `Debug`), and
+`set_layer` IGNORES an out-of-range band rather than clamping. Clamping would silently move a widget
+to a band its author did not choose, and `Debug` becoming `Tooltip` is a shipped debug overlay.
+Vertices and indices are shared across layers — one upload rather than five — and the layers
+partition only the COMMANDS.
+
+**The frame belongs to the host.** `aver_ui_begin_frame` clears the list and records the rectangle
+the UI is laid out against; the host calls it once and a game must never. There is ONE list, not one
+per caller: a per-caller list would let two systems each build a HUD and neither see the other's,
+which is not composition but two UIs racing for the same screen. The viewport is PASSED IN rather
+than queried, because the module has no device and no window, and it is deliberately not the window —
+in the editor the game draws into a dockspace panel, and a HUD anchored to the window would sit
+partly under the editor's own chrome.
+
+`Aver.Render.UI` runs from `IRenderFeature::overlayPass`, which is downstream of the tonemap and
+after the backbuffer is bound: a white panel composited into the HDR scene target would watch eye
+adaptation stop down the entire frame because the UI is the brightest thing in it. It runs BEFORE the
+editor's own ImGui, so editor chrome composites over a game HUD rather than under it.
+
+C# half: `scripting/csharp/Aver.UI` (`Layer`, `Colour`, `Rect`, `Hud`), P/Invoking `"Aver.UI.Abi"`.
+The native file name and the managed assembly name differ **on purpose** — `Aver.Scene` and
+`Aver.Framework` each ship a native DLL and a managed assembly with the SAME file name, so `DllImport`
+probes the calling assembly's directory, finds the managed one and tries to load it as a native
+library; both work around it with a `NativeResolver`. Naming these apart removes the problem instead.
+
+**`--ui-demo` turns the game UI on for a capture run, and it is OFF by default.** That is not
+politeness: the gates compare backbuffer pixels and a HUD over the viewport would move every one of
+them. The demo is hand-written and meant to be deleted — there is no widget tree yet, so it is the
+draw list a widget tree will eventually produce.
+
+### Two RHI bugs, and the one that had been crashing the editor since vsync-off landed
+
+**Every resize failed, on any machine that supports tearing.** `ResizeBuffers` was passed `flags=0`,
+which was right for as long as the swapchain was created with no flags and stopped being right the
+moment vsync-off added `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING` at creation. DXGI does not reinterpret a
+resize as a request to drop a capability — it returns `E_INVALIDARG`.
+
+The failure was not the crash. This was:
+
+```cpp
+for (auto& rt : renderTargets_) rt.Reset();     // required before ResizeBuffers
+if (!hrOk(swapChain_->ResizeBuffers(...), "...")) return;
+```
+
+The back buffers are released BEFORE the call that can fail, because `ResizeBuffers` requires it. The
+early return therefore left `renderTargets_` full of nulls, `width_`/`height_` unchanged and no views
+rebuilt; the next `beginFrame` handed a null resource to a barrier, which is not a reported error but
+a fault inside the driver. That is why six crashes across four hours all landed at the identical
+offset inside `amdxc64.dll` and nothing in the engine's log ever named a cause. A failed
+`ResizeBuffers` leaves the swapchain UNCHANGED, so re-acquiring its buffers puts the device back where
+it was: the window is then the wrong size for the swapchain, which is a stretched frame — visibly
+wrong, recoverable on the next resize, and what an error path should cost. `modules/rhi.d3d12/src/D3D12Device.cpp`,
+`D3D12Device::resize`.
+
+**Reproduced, not reasoned about**: driving the window through 3840x2160, 900x600, 2560x1080,
+1600x900 and a maximise killed the editor at the first before, and survives all five after. Maximise
+alone never reproduced it — at this DPI the maximised size already equalled the swapchain size, so
+`resize()` early-returned and the bug never ran.
+
+**The UI was applying alpha twice.** `BlendMode::AlphaBlend` is `SRC_ALPHA`/`INV_SRC_ALPHA` — straight
+alpha — and `UiDrawList` premultiplies every colour on the way in. An opaque draw is unaffected, which
+is why the demo's bars looked right; a 38%-alpha white lands at 31/255 instead of 83/255, less than
+half the intended brightness, on something that still looks like a plausible translucent panel.
+`BlendMode::PremultipliedAlpha` (`ONE`/`INV_SRC_ALPHA`) is the correct pairing and is what the UI
+pipeline asks for. `UiRenderTest` asserts the mode specifically, because the wrong one is invisible in
+a screenshot.
+
+**A resize no longer rebuilds every pipeline.** `notifyRenderTargetsChanged` fired from both
+`setSampleCount` and `resize`, and a resize changes none of the three things a pipeline BAKES (sample
+count, the two target formats). Voxi's rebuild recompiles every scene shader from HLSL source, so
+dragging a window edge recompiled the entire renderer once per resize message. Now gated on the values
+actually changing. Found while hunting the crash; not its cause.
+
+### VERIFIED ON SCREEN — the one thing in this phase that was
+
+Recorded in `6f8516a`. A capture run with `--ui-demo` was probed for the colours the demo draws, at a
+tolerance of 2/255, and each was found at its authored value **and** at the coordinate the layout
+predicts:
+
+```
+health   (232,76,46)   558 hits, bbox (34,1670)-(218,1680)
+stamina  (232,200,63)  732 hits, bbox (34,1690)-(276,1700)
+crosshair(220,228,232)  14 hits, bbox (1364,1042)-(1384,1062)
+tooltip  (106,196,106) 368 hits, bbox (2460,548)-(2550,562)
+```
+
+The first attempt found only two of them, because the demo was laid out underneath the editor's own
+status overlay — which composites over the game UI by design — so the demo moved rather than the rule.
+
+**What this does NOT establish.** It is a one-off manual run, not a gate: `scripts/gates.ps1` has no
+`--ui-demo` configuration and `scripts/gates.baseline.txt` records nothing about the UI, so nothing
+would catch a regression here. There is also **no text and no widget tree** — text is blocked on a
+font decision (vendor `stb_truetype.h`, or bitmap fonts) that has not been made.
+
+## 4p. Audio — a mixer that can be tested, and a device that cannot
+
+Same split, and audio needs it more than the UI does: a wrong pan law and a right one are the same
+waveform to a reader and the same silence to a screenshot, so a mixer that cannot be run headlessly
+and asserted on sample by sample cannot be checked at all. `Aver.Audio` is **Core only** — `mix()`
+fills a buffer the caller supplies. `Aver.Audio.Wasapi` is the only thing in the stack that knows a
+sound card exists. `Aver.Audio.Abi` is SHARED and links the DEVICE rather than just the mixer, because
+"play a sound" only means anything once something is driving hardware. Plan: `docs/AUDIO.md`.
+
+- **WASAPI shared mode over XAudio2**, and the reason is testability rather than taste: XAudio2 would
+  own the mixing, the 3D and the DSP, which would make `Aver.Audio` a wrapper around a thing it can
+  neither test nor port. The render thread joins the Pro Audio scheduling class (`avrt`) — an ordinary
+  thread preempted for 10 ms is a gap somebody hears.
+- Voices (64 by default), buses, master volume, per-voice volume/pitch/position, voice stealing with a
+  `stolenVoices` counter, and an `underruns` counter. Positional voices are panned and attenuated;
+  non-positional ones play at `volume` in both ears.
+- **Constant-power pan** (`l*l + r*r == 1`), so a source swept across the field holds its energy.
+  Attenuation is EXACTLY 1 at or inside the inner radius and EXACTLY 0 at or beyond the outer — every
+  game clamps it somewhere, because inverse-square goes infinitely loud as the listener arrives.
+- The listener is nine atomics rather than a struct behind a lock: written once per frame, read by the
+  render thread, and the worst a torn read costs is very slightly wrong panning, which is inaudible,
+  where a lock costs a priority inversion on an audio thread.
+
+`AudioTest` is 70 headless checks. **No sound has been heard.** There is a `build/bin/AudioProbe.exe`,
+but nothing in this document records a listening test, and a mixer that passes 70 assertions and
+outputs silence would pass them all the same way.
+
+### `.ocaudio`
+
+An AVR1 container (`AHDR` header chunk + `APCM` sample chunk), `modules/formats/src/OcAudio.cpp`.
+Importers: **an own WAV reader** (`Wav.hpp`/`.cpp`), plus **Media Foundation** for mp3/m4a/aac/wma/flac
+— so mp3 and the rest arrive without vendoring a decoder, which the permissive-licence rule would
+otherwise have made a research project. `Aver.Formats.Audio` is its own target linking
+`mfplat mfreadwrite mfuuid ole32`, so nothing else in the tree pays for Media Foundation.
+
+**`OcAudioTest` passes but SKIPS the Media Foundation check.** It says so:
+`skip  Media Foundation NOT exercised: pass a .mp3/.m4a/.flac/.wma path to do it`. The WAV path and the
+container are tested; **the mp3/m4a/aac/wma/flac path is exercised by nothing in CI**, and the skip is
+silent in an exit code. That is a real gap, not a formality — see §4d item 25.
+
+### `docs/ABI.md` is now stale, and it is the one place that counts
+
+It opens with "**seven** separate C surfaces" and "201 exported C functions declared across seven
+headers". There are **eight**: `modules/audio.abi/include/aver/audio/audio_abi.h` declares 24 exports
+and the word "audio" does not appear anywhere in `docs/ABI.md`. Fixing it is a separate edit to a
+separate file and has not been made.
+
+## 4q. Materials are authored in C#, and the `.ocmat` becomes build output
+
+The direction of the arrow is the whole decision. **A `.cs` under `Content/Materials` is the SOURCE**;
+`Binaries/Materials/*.ocmat` is the build output; the engine reads Binaries FIRST. Resolution order,
+`sandbox/src/SandboxApp.cpp`:
+
+```cpp
+project_.binariesDir() + "\\Materials\\" + name + ".ocmat",   // build output, authoritative
+content + "\\Materials\\" + name + ".ocmat",                  // a stale hand-authored file
+content + "\\" + name,
+```
+
+Binaries first so a stale hand-authored `.ocmat` left beside the source cannot shadow the thing that
+is rewritten from source on every build.
+
+- `scripting/csharp/Aver.Materials` — `[AverMaterial]`, `MaterialBuilder`, the `.ocmat` emitter.
+- `scripting/csharp/Aver.MaterialCompiler` — **`avermatc`**: reflects over a built assembly, finds
+  every `[AverMaterial]` type, runs its `Configure` and writes the `.ocmat`. Staged to `bin/Tools/`
+  and run automatically by **Tools ▸ Compile C#**, so a surface becomes an `.ocmat` without anybody
+  running a command (`modules/scripting/CMakeLists.txt`, `sandbox/src/ToolsMenu.cpp`).
+- `fmt::rewriteMaterialScript` (`modules/formats/MaterialScript.hpp/.cpp`) rewrites a C# material's
+  `Configure` from an edited `MaterialDesc`.
+
+**The Details panel's "Save to C#" writes the `.cs` and never the `.ocmat`.** The `.ocmat` under
+Binaries is an artefact the next compile overwrites, so writing there is a change that appears to work
+and then silently vanishes — the worst possible behaviour for a save button. The sliders above it are
+already live (they edit the material the renderer is using, so the viewport shows the change
+immediately); the button is what makes it PERSIST, and Compile C# then regenerates the `.ocmat` from
+the source just written.
+
+One trap recorded for whoever touches the formatter: `MaterialScript.cpp`'s float writer walks
+`%.1g`..`%.9g`, so values outside `%g`'s fixed range come back as `1e+07f`. That is fine here — C#
+accepts exponent literals — and is **not** fine for the actor rewriter, whose locked grammar has no
+exponent form (§4r, `docs/DESIGNER_REWRITE.md`).
+
+## 4r. The actor editor — built, linked, registered, and NEVER OPENED BY A HUMAN
+
+**Read this heading literally.** As of `d04fe1a` the tab compiles, links, registers and its parser is
+checked against two real projects. **No pixel of it has been seen by anyone.** It is the largest
+untested surface in the tree and nothing below changes that.
+
+An asset editor, separate from the level editor the way Unreal separates them. A `.cs` opens as an
+ASSET rather than as text: the placements it declares, drawn in local space, with the numbers beside
+them.
+
+### `Aver.Render.ActorPreview` — a feature, not a second viewport
+
+It owns a colour target, a depth target, one pipeline and one camera, and **publishes that camera at
+`b4`, not `b0`** (`rhi::kFeatureFrameConstantRegister`). `b0` is the engine's `PerFrame` block and
+belongs to the scene's frame; a preview that wrote it would either fight the scene for it or draw with
+the previous frame's camera, silently. Reasoning in `docs/ACTOR_EDITOR.md` §3.
+
+It links the generic RHI and never a backend, so a recording device can drive it with no GPU — the
+same property that made `Aver.Render.UI` testable. `ActorPreviewTest`: 51 checks, headless.
+
+**Its own mesh registry** (`PreviewMeshCache`), on purpose. The editor already has one — a private
+member of the app, filled by a sweep of the content root when a project opens — and the preview
+deliberately does not use it. An asset editor that reached into the level editor's state cannot exist
+without a level open, cannot be tested without one, and makes "this tab is independent of the level"
+false. Loaded ON DEMAND (a preview needs the three to six meshes one actor names; the sweep exists
+because a LEVEL may reference anything), and **a miss is cached too, as handle 0** — without that, an
+actor naming a mesh that is not there re-reads the disk once per model per frame and the editor's
+frame time becomes a function of how wrong the file is.
+
+**ONE preview, shared, driven by the active tab**, and the reason is a hard limit rather than thrift:
+the UI descriptor heap holds sixteen slots and the editor already spends five, so a target per tab
+exhausts it at about eleven and the failure is a black image, not an assert.
+
+### `ActorScript` — reads two halves, writes one
+
+`modules/formats/ActorScript.hpp/.cpp`.
+
+- **Reads** the `.Designer.cs` generated region (the placements) AND what a class declares in
+  `Configure(ClassBuilder)` — mesh, camera, point light. `docs/DESIGNER_REWRITE.md` used to say the
+  editor never reads or writes a byte of the hand-written half; that is **amended, in that document,
+  to never WRITES**. The write rule is untouched and absolute. A rule about writing had been stated as
+  a rule about looking, and honouring it literally would have meant refusing to preview the common
+  case — most actors in most games are one mesh declared with `b.Mesh(...)` and no designer file at
+  all, and every actor in the SkyForge template is that shape.
+- **Writes** position, rotation and scale only, matched by `ObjectId`. Mesh, material and id are
+  untouched by a save.
+- `canonicalMeshPath()` reconciles the `"Content/Meshes/X"` vs `"Meshes/X"` spellings the tree
+  disagrees on, so the two collapse to one cache entry and one upload rather than hashing differently.
+
+**Two parser bugs a fixture would never have found**, both from running against a real project:
+attribute kinds were searched in turn, so the parser found whichever kind came first in the SEARCH
+rather than first in the FILE (`FpsGameMode.cs` came back named `BP_FpsController`); and a file was
+assumed to declare ONE actor, where SkyForge's `FpsGameMode.cs` declares five and `Gun.cs` declares
+two. Each entry now carries only what appears between its own attribute and the next, so two actors in
+one file cannot borrow each other's mesh, and the tab shows a picker. That sweep is now
+`tools/ActorSweep.cpp` and a build target, **because a fixture is written by the same person who wrote
+the parser and agrees with it by construction.**
+
+### The tab
+
+- The factory DECLINES anything that is neither a `.cs` carrying a generated region nor a class
+  declaring a mesh, camera or point light. A hand-written actor with nothing previewable belongs in the
+  IDE and opening it here would be taking something away. A region it cannot READ is declined
+  **loudly** rather than opened as an empty tab that cannot save.
+- **A translate gizmo**, drawn as an ImGui overlay projected through the preview's OWN camera, not as
+  geometry in the pass — the preview feature must stay drivable with no ImGui (that is what lets a test
+  be the device), and a handle has to be pickable at a constant SCREEN size, which it cannot be if it
+  scales with the scene. The axis is latched on mouse-down and held for the whole gesture: deciding per
+  frame lets a drag that began on a handle become an orbit the moment the cursor leaves it, which is
+  exactly when a user is dragging fastest. Picking is against the whole SEGMENT, or the near end of
+  every axis is dead.
+- **Source-to-view reload is one `stat` per visible tab, NOT a watcher.** `docs/ACTOR_EDITOR.md`
+  planned `DirectoryWatcher`; that was rejected on contact. It has zero consumers and zero tests in
+  this tree, its `poll()` returns true to mean "the OS dropped records, rescan yourself" — a case
+  nothing handles — and `dotnet build` runs with its working directory inside `Content\Scripts`, so a
+  recursive watch covers that project's own `obj\` and `bin\` and **a build is exactly the burst that
+  overflows it**. One stat is cheaper than a thread, an OS handle, a filter list and an overflow path,
+  and it cannot lose an event.
+- **A reload is REFUSED while the tab is dirty, and says so.** Silently replacing somebody's
+  in-progress drag with what a background tool wrote is the one behaviour a live sync must never have.
+  A file mid-write that fails to parse leaves the previous good state on screen rather than blanking
+  the tab.
+- Missing meshes are named in the panel: an actor whose meshes are all absent renders an EMPTY view,
+  and an empty view with no explanation is indistinguishable from a broken preview.
+
+**NOT DONE:** no rotate or scale handles, only translate. No Roslyn backend — the grammar is the
+hand-written scanner's, and `Malformed` is the signal a Roslyn backend would pick up. No pixel seen.
+
+## 4s. Projects: a new one is complete, an old one is merged rather than regenerated
+
+`sandbox/src/ProjectScaffold.cpp`.
+
+A new project gets `Content/{Maps,Meshes,Materials,Textures,Sounds,Scripts}`, a `Scripts.csproj`
+written **at creation** rather than on the first `.cs` (the old behaviour left the folder as a loose
+file with every `Aver.Scripting` symbol underlined red), a starter `M_Default` material, and **four**
+engine references:
+
+| reference | why it is there by default |
+|---|---|
+| `Aver.Scripting` | behaviours |
+| `Aver.Framework` | actors — and it pulls `Aver.Scene` in behind it |
+| `Aver.UI` | the game's HUD; a leaf that references nothing |
+| `Aver.Materials` | the material authoring surface — `Scripts.csproj` globs `Content\Materials` |
+
+`Aver.Materials` is referenced even though a new project has no materials yet, for the same reason
+`Aver.Framework` is: the alternative is an author who has to add a `ProjectReference` by hand before
+the second thing they try works.
+
+**Opening an older project offers an upgrade, and the `.csproj` is MERGED, never regenerated.**
+Regenerating would discard whatever the author had added to their own build file — package
+references, analysers, a target — which is a data-loss bug wearing the costume of a convenience. The
+upgrade adds only the missing directories, the missing references and the missing starter material.
+
+Two new CLI entry points, both of which scaffold and EXIT without touching a device, so project
+creation is reachable without a mouse: `--new-project <location> <name>` and
+`--upgrade-project <path.ocproject>`.
+
+## 4t. What this phase verified, and what it did not
+
+The rule this project keeps re-learning is that "the tests pass" and "it works" are different claims.
+Both are recorded here.
+
+**Verified — every headless suite re-run from `build/bin` on 2026-07-28 with the tree at `d04fe1a`,
+each exiting 0.** Only the first three print a total; the rest print one line per check and the counts
+below are of those lines, which is why they are stated as checks rather than assertions.
+
+| suite | result |
+|---|---|
+| `SceneTest` | 538 assertions, 0 failed |
+| `FrameworkTest` | 218 assertions, 0 failed |
+| `PhysicsTest` | 42 assertions, 0 failed |
+| `AudioTest` | 70 checks |
+| `UiRenderTest` | 60 checks |
+| `ActorScriptTest` | 51 checks |
+| `ActorPreviewTest` | 51 checks |
+| `UiTest` | 26 checks |
+| `MaterialTest`, `JsonTest`, `MeshTest`, `GltfTest`, `FormatTest` | pass, no per-check count printed |
+| `OcAudioTest` | passes, **1 check SKIPPED** — Media Foundation not exercised |
+
+**Verified on a screen:** the game UI, once, by pixel probe (§4o). That is the whole list.
+
+**NOT verified, and each of these is a specific hole rather than a general caveat:**
+
+- **The actor editor tab has never been opened.** §4r.
+- **No sound has been played.** §4p — the mixer is asserted sample by sample and has never driven a
+  speaker in a way anyone recorded.
+- **The Media Foundation import path is not covered by any suite.** §4p.
+- **`./scripts/gates.ps1` has not been run across any of this work.** `scripts/gates.baseline.txt` was
+  last touched at `d8fc062`, thirty-nine commits ago. §8 says in as many words to run the whole oracle
+  before calling a renderer change safe, and this phase changed renderer code — the blend-mode enum,
+  the resize path, the pipeline-rebuild gating. A sweep is owed. Two things make it awkward and
+  neither excuses it: the probes are layout-fragile and the editor gained an asset-editor tab strip,
+  and the renderer has been measured NOT to be bit-deterministic run to run, which the pixel-exact
+  oracle assumes. Both belong in §4d.
+
 ## 5. Formats — implemented loaders
 
 - `.ocbeam` (Aver.Formats/OcBeam): faithful to OCCompiler Main.java + VehicleDamage.cpp —
@@ -2021,6 +2443,27 @@ ab2264a Aver Engine foundation: modular core + .oc* format loaders
 - **`insideVolume()` is inclusive of 1.0.** Anything turning volume UVW into an integer voxel index
   must clamp to `res - 1`. Hardware discards an out-of-bounds typed-UAV write, so getting this wrong
   is invisible on a GPU and an access violation on WARP.
+- **`ResizeBuffers` must be passed the SAME flags the swapchain was created with.** DXGI returns
+  `E_INVALIDARG` rather than reinterpreting the call as a request to drop a capability, so adding a
+  creation flag (`ALLOW_TEARING`, for vsync-off) and leaving the resize at 0 breaks EVERY resize. And
+  because the back buffers must be released before the call, **a failed `ResizeBuffers` must not
+  early-return** — re-acquire the old buffers and rebuild the views, or the next `beginFrame` hands a
+  null resource to a barrier and faults inside the driver with nothing in the engine's log. §4o.
+- **Premultiplied colour needs `BlendMode::PremultipliedAlpha`** (`ONE`/`INV_SRC_ALPHA`), not
+  `AlphaBlend` (`SRC_ALPHA`/`INV_SRC_ALPHA`). `UiDrawList` premultiplies on the way in. The wrong
+  pairing applies alpha twice, leaves opaque draws untouched, and produces a translucent panel that
+  still looks plausible at less than half its authored brightness — so it is invisible in a
+  screenshot and has to be asserted in a test.
+- **A game HUD is drawn from `IRenderFeature::overlayPass`, downstream of the tonemap.** Compositing
+  UI into the HDR scene target makes eye adaptation stop down the whole frame, because the UI is
+  reliably the brightest thing in it.
+- **`aver_ui_begin_frame` belongs to the HOST, and there is exactly one draw list.** A game that
+  cleared the list would erase whatever another system had already contributed, and the last caller to
+  run would win with nothing anywhere to say so.
+- **The actor editor never writes the hand-written half of a `.cs`.** It READS `Configure(ClassBuilder)`
+  to know what to preview; it writes only pos/rot/scale inside the generated region, matched by
+  `ObjectId`. And do not reuse `MaterialScript.cpp`'s float formatter there — it emits `1e+07f` for
+  values outside `%g`'s fixed range, and the locked designer grammar has no exponent form.
 
 ## 9. Next steps — including the general-purpose direction
 
@@ -2047,5 +2490,21 @@ Concrete steps:
 shadow maps; then Phase 4 soft-body (make the cage deform), Phase 6 net (needs OCServer
 Wire.cs), Phase 7 C# editor + Rust pipeline.
 
-**Immediate (once VS finishes updating):** rebuild to confirm green, then start §9.1
-(generic scene layer) or §9.2 (primitives + `.ocmesh`).
+**Items 1–4 are stale and were never struck off.** `Aver.Scene` exists and `SceneTest` is 538
+assertions; `.ocmesh`/`.ocskel`/`.ocanim` exist with `MeshTest` behind them; the glTF/GLB importer
+exists as the C++ path rather than Rust, behind the Content Browser's Import button; `.ocworld` has
+both `loadOcworld` and `saveOcworld`. None of that is written up in this document — see the hole
+named at the top. What survives from this list is `.octex` (item 5), engine-provided primitives
+(item 2), moving the OpenConstructor pieces behind opt-in modules (item 6) and the editor's Add menu
+(item 7).
+
+**Immediate, in the order the evidence argues for:**
+1. **Open the actor editor.** It is the only substantial surface in the tree that has never been run,
+   and every hour spent adding to it before somebody looks at it compounds. §4r.
+2. **Run `./scripts/gates.ps1`.** Thirty-nine commits of renderer-adjacent change are unswept, and the
+   layout has moved, so expect to re-record with a stated reason rather than to pass clean. §4d item 27.
+3. **Investigate items 22 and 28 together** — the intermittent 45x45 startup and the renderer's
+   run-to-run non-determinism are both "the oracle sometimes reads a plausible wrong number", and a
+   retry that hides both is not a fix.
+4. Then: a font for the game UI (item 30), a Media Foundation fixture (item 25), and `docs/ABI.md`'s
+   missing eighth seam (item 29).

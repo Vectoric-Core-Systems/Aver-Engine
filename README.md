@@ -1,45 +1,93 @@
 # Aver Engine
 
-A custom, **modular** 3D game engine built exclusively on **permissively-licensed** libraries (MIT / BSD / zlib / Apache-2.0 / public-domain). It is the successor runtime for the **OpenConstructor** soft-body destructible racing sim — carrying its `.oc*` storage formats forward while replacing Unreal Engine.
+A custom, **modular** 3D game engine built exclusively on **permissively-licensed** libraries (MIT / BSD / zlib / Apache-2.0 / public-domain). It began as the successor runtime for the **OpenConstructor** soft-body destructible racing sim — carrying its `.oc*` storage formats forward while replacing Unreal Engine — and has since been taken in a more general-purpose direction. The engine holds no game content: a game is a sibling folder with its own `.ocproject` manifest.
 
-- **Polyglot:** C++ (core, RHI, renderer, physics), C (stable ABI), C# (.NET 10 editor + scripting), Rust (asset pipeline).
-- **Render backends:** DirectX 12 (primary), DirectX 11, Vulkan — behind one RHI abstraction.
-- **Anti-bloat:** strict dependency DAG, no `UObject`, pay-for-what-you-use modules, offline content-addressed cook.
-- **Coordinate contract:** centimeters, +Z up, +X forward, +Y right, left-handed (carried from OpenConstructor).
+- **Polyglot:** C++ (core, RHI, renderer, physics), C (one seam per module, not one seam for everything), C# on .NET 10 (scripting, gameplay, materials, HUD). **There is no Rust in this tree.** `tools/README.md` still advertises a Rust asset pipeline that was never written, and `abi/README.md` records why the single flat `Aver.ABI` those files describe is not coming either.
+- **Render backends:** DirectX 12 is the only one implemented. `modules/rhi.d3d11` and `modules/rhi.vulkan` are stubs that log and return a null device. All three sit behind one RHI abstraction, and Vulkan is compiled out by default.
+- **Anti-bloat:** strict dependency DAG, no `UObject`, pay-for-what-you-use modules behind `AVER_MODULE_*` switches — the engine builds and runs with every optional one off, which is what makes the headless tests meaningful.
+- **Coordinate contract:** centimetres, +Z up, +X forward, +Y right, left-handed, row-major with row vectors (`v * M`) — carried from OpenConstructor.
 
-See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for the full module design, **[docs/formats/FORMAT_SPECS.md](docs/formats/FORMAT_SPECS.md)** for the storage formats, and **[docs/recon/](docs/recon/)** for the authoritative extraction of the existing OpenConstructor formats & solver.
+See **[docs/ABI.md](docs/ABI.md)** for every C entry point and which seam to reach for, **[docs/STATUS.md](docs/STATUS.md)** for where the work actually stands, **[docs/formats/FORMAT_SPECS.md](docs/formats/FORMAT_SPECS.md)** for the storage formats, and **[docs/recon/](docs/recon/)** for the extraction of the existing OpenConstructor formats & solver. **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** holds the original module design and is worth reading for the principles, but it predates most of the tree and its Tier 7 (a C# editor, Rust tools, one flat ABI) describes none of what was built.
 
 ## Status
 
-**Phase 1 — Foundation (current).** Buildable slice: `Aver.Core` + `Aver.Platform` (Win32 window) + `Aver.RHI` (Null backend; D3D12/D3D11 stubs) + `Aver.Runtime` + a `Sandbox` app that opens a window and runs the engine loop.
+**`build/bin/Sandbox.exe` *is* the editor** — a Dear ImGui shell composited over the D3D12 viewport, with a project browser, asset and actor editor tabs, a Details panel and a Tools menu that compiles a project's C#. The separate C# editor process that `editor/` and `interop/` describe was never started; both directories hold one README and no code.
 
-Roadmap: Phase 2 formats (`.ocbeam`/`.ocmap` loaders, golden-tested against real files) → Phase 3 D3D12 renderer → Phase 4 soft-body + GPU deform → Phase 5 aero/vehicle/fracture → Phase 6 net/match → Phase 7 Rust pipeline + C# editor.
+Two of its panels write back to C# source rather than to a built artefact, which is the shape the editor is converging on. The actor editor (`sandbox/src/ActorEditor.*`) opens a `.cs` that carries a generated designer region — or, read-only, one whose class declares a mesh, camera or light — draws it through `Aver.Render.ActorPreview`, and rewrites the placements in that file when you drag the gizmo. An external edit reloads into the view unless the tab is dirty, in which case the reload is refused and says so. The Details panel's **Save to C#** writes the material's `.cs`, never the `.ocmat` — a save into a build artefact appears to work and then vanishes on the next compile.
+
+Implemented and exercised by headless tests: the D3D12 renderer, the AVR1 container and the `.oc*` readers on it, the entity/component world and the gameplay layer over it, Jolt physics behind the engine's own C seam, the in-process CoreCLR host with hot reload, the retained game UI and its renderer, and the audio mixer.
+
+Not implemented — each is a README under `modules/` describing a responsibility nothing has taken yet: `render`, `render.gi`, `softbody`, `aero`, `gpudeform`, `fracture`, `vehicle`, `net`, `netvehicle`, `match`, `world`. `modules/abi` and `abi/` are empty *by decision* rather than by omission; `abi/README.md` says why.
+
+Audio is the newest and the least connected: the mixer, the WASAPI device and the C seam all exist and are tested, but nothing in the editor plays a sound, no managed `Aver.Audio` assembly exists yet, and `sandbox` does not link any of it.
 
 ## Build
 
-Requires Visual Studio 18 (C++ workload), which supplies CMake + Ninja + the Windows SDK.
+Requires Visual Studio 18 (C++ workload), which supplies CMake + Ninja + the Windows SDK; `scripts/build.bat` hard-codes its install path. `dotnet` is optional — CMake reports at configure time when it is missing, skips the managed half, and the scripting host then declines at run time rather than the editor failing.
 
 ```powershell
 # from the repo root
 ./scripts/build.ps1                     # configure + build (Debug)
 ./scripts/build.ps1 -Release            # ...or Release, into a separate tree
-./scripts/run.ps1 --frames 5            # build then run the sandbox for 5 frames
+./scripts/run.ps1                       # build then launch the editor
 ./scripts/run.ps1 --headless --frames 5 # run without opening a window
+./scripts/run.ps1 --ui-demo             # draw a HUD through the C seam, to see the game UI working
+./scripts/gates.ps1 -Config baseline    # probe rendered frames against a recorded baseline
 ```
 
-Output goes to `build/bin/` (`build-release/bin/` for `-Release`; the two coexist). Vulkan stays compiled out (`-DAVER_RHI_VULKAN=ON` to enable once the SDK is installed).
+Output goes to `build/bin/` (`build-release/bin/` for `-Release`). The two trees coexist on purpose: each has its own gates baseline, and optimisation changes floating-point codegen, so comparing one build against the other's numbers is a mistake the pairing exists to prevent. `scripts/run.ps1` always builds and launches the Debug tree. Vulkan stays compiled out (`-DAVER_RHI_VULKAN=ON` to enable once the SDK is installed).
+
+The test executables land beside `Sandbox.exe` and each is a standalone `.exe` you run directly — `UiTest`, `UiRenderTest`, `ActorPreviewTest`, `AudioTest`, `OcAudioTest`, `FormatTest`, `JsonTest`, `GltfTest`, `MeshTest`, `MaterialTest`, `ActorScriptTest`, `SceneTest`, `FrameworkTest`, `PhysicsTest`. None needs a GPU: the two renderer tests stand up their own mock `IDevice` and assert on what was recorded, rather than needing a backend. Which ones exist depends on the `AVER_MODULE_*` switches, since a test is added with its module.
 
 ## Layout
 
 ```
 modules/          C++ engine modules (strict DAG: core -> platform -> rhi/assets -> ... -> runtime)
-  core/ platform/ rhi/ rhi.d3d12/ rhi.d3d11/ rhi.vulkan/ runtime/   (implemented)
-  assets/ formats/ render/ scene/ physics/ softbody/ aero/ ...        (skeleton — see each README)
-abi/              stable extern "C" seam (Aver.ABI) — C#/Rust bind here
-tools/            Rust asset pipeline (aver-assetc, aver-ocbeamc, ...)
-editor/ scripting/  C# / .NET 10
-sandbox/          sample app
-shaders/          HLSL sources
-docs/             architecture, format specs, recon of the existing engine
-cmake/            AvModule.cmake helper
+sandbox/          Sandbox.exe — the editor
+scripting/csharp/ the C# side: what a project references, the CLR bridge, avermatc
+tests/            headless test executables, one directory per area
+tools/            ActorSweep.cpp — reports what the actor editor makes of a real project's scripts
+docs/             the C seams, format specs, editor and project specs, recon of the existing engine
+cmake/            AvModule.cmake (aver_add_module)
+third_party/      imgui (docking), stb, Jolt Physics, fonts (Roboto)
+branding/         master lockup (human-authored) -> splash, icons, logo
+abi/ interop/ editor/ shaders/ content/   README only — nothing is built from these
 ```
+
+`shaders/` is one of those placeholders: HLSL is embedded in C++ next to the code that compiles it (`modules/rhi/src/RHIShaders.cpp` for the shared prelude, `modules/render.pbr/include/aver/pbr/PbrShaders.hpp`, `modules/render.ui/src/UiShaders.hpp`) and is compiled at run time by DXC. Game content lives outside the engine entirely — see [docs/PROJECTS.md](docs/PROJECTS.md).
+
+## Modules
+
+| Directory | Target(s) | What it is |
+|---|---|---|
+| `core` | `Aver.Core` | Maths, log, time, hashing, types. Depends on nothing engine-specific. |
+| `platform` | `Aver.Platform` | Win32 window and input, splash, filesystem, image decode, a debounced directory watcher. |
+| `assets` | `Aver.Assets`, `Aver.Assets.Gpu` | Asset ids; the decode-to-GPU texture step. |
+| `formats` | `Aver.Formats` (+ `.Material`, `.Audio`) | The AVR1 container and the `.oc*` readers/writers, glTF import, JSON, and the C# source rewriters (`MaterialScript`, `ActorScript`). |
+| `rhi` | `Aver.RHI` | Device/swapchain interface, the generic render-feature surface, the shared shader prelude, a Null backend. |
+| `rhi.d3d12` | `Aver.RHI.D3D12` | The backend: PBR, procedural sky, lines, wireframe, MSAA as a runtime setting, a mesh-shader geometry path, the ImGui host, capture. |
+| `rhi.d3d11`, `rhi.vulkan` | `Aver.RHI.D3D11`, `Aver.RHI.Vulkan` | Stubs. Both return a null device. |
+| `render.pbr` | `Aver.Render.PBR`, `.Materials` | The material system and its C seam; the surface BRDF and the GPU binding half. |
+| `render.voxi` | `Aver.Render.Voxi`, `.Renderer` | Render-feature settings + C seam (Core-only) and the GI / shadow / RayQuery feature that drives the RHI. |
+| `render.ui` | `Aver.Render.UI` | Turns a `UiDrawList` into draw calls in the overlay pass, after the camera post chain, so a HUD is not tonemapped with the world. |
+| `render.actorpreview` | `Aver.Render.ActorPreview` | The actor editor's 3D preview: its own colour+depth target, pipeline, mesh registry, and a camera published at `b4` so it never collides with the shared prelude's blocks. |
+| `scene` | `Aver.Scene` | Entities, packed component pools, hierarchy, fields addressed by name, and a C seam readable end to end without meeting the word *actor*. |
+| `framework` | `Aver.Framework` | The gameplay vocabulary over that world — class registry, defaults, spawn, possess, begin/end play — as data rather than an inheritance tree. |
+| `physics` | `Aver.Physics` | Jolt behind the engine's own plain-C seam. |
+| `scripting` | `Aver.Scripting.Host` | In-process CoreCLR via nethost/hostfxr; collectible load context, reflection discovery, hot reload. Needs Core and Platform, never the RHI. |
+| `ui` | `Aver.UI` | The retained game UI draw list — layers, batching, clip intersection, premultiplied alpha. Core-only, which is what makes it testable with no device. Not the editor's ImGui. |
+| `ui.abi` | `Aver.UI.Abi` | The C seam a game's HUD calls. |
+| `audio` | `Aver.Audio` | The mixer — voices, buses, 3D pan and attenuation. Core-only; it fills a buffer the caller supplies and never touches a device. |
+| `audio.wasapi` | `Aver.Audio.Wasapi` | The device. Windows only, so it is guarded the way the D3D12 backend is. |
+| `audio.abi` | `Aver.Audio.Abi` | The C seam for audio. Links the device, because "play a sound" only means something once something drives a sound card. |
+| `runtime` | `Aver.Runtime` | The engine loop, `Application`, and the entry point that wires the compiled-in modules. |
+
+Each seam versions on its own, and most are exported by their own DLL. `docs/ABI.md` catalogues them entry point by entry point; note that it was written before `audio.abi` landed, so it counts one seam fewer than the tree now has.
+
+## The C# side
+
+`scripting/csharp/` holds what a project references and what the host loads. The user-facing assemblies are `Aver.Scripting` (`AverBehaviour`, `Log`, the Voxi and PBR bindings — its assembly version is a contract the host enforces), `Aver.Framework` and `Aver.Scene` (actors, pawns, `ActorBuilder`, `ClassBuilder`, entities and transforms), `Aver.UI` (`Hud`, `Layer`, `Colour`, `Rect`, over `Aver.UI.Abi`), and `Aver.Materials` (`[AverMaterial]`, `MaterialBuilder`). `Aver.Scripting.Bridge` is the managed end of the host and is never referenced by a script.
+
+A material is authored as a C# class: `avermatc` (`Aver.MaterialCompiler`, staged to `bin/Tools/`) reflects the built assembly and emits `.ocmat`. So `Content/Materials/*.cs` is the source and `Binaries/Materials/*.ocmat` is the build output, and the editor looks in `Binaries` **first** — a project that has not adopted C# materials falls through to a hand-authored `.ocmat` and still works. **Tools ▸ Compile Scripts** builds both halves; **Tools ▸ Reload Scripts** swaps the result into the running editor without a restart. Hot reload does not carry state: a behaviour's fields start again from their initialisers.
+
+A new project is scaffolded with a `Scripts.csproj` referencing four of those — `Aver.Scripting`, `Aver.Framework` (which carries `Aver.Scene` behind it), `Aver.UI` and `Aver.Materials` — plus `Content/{Maps,Meshes,Materials,Textures,Sounds,Scripts}` and a starter `M_Default` material. Opening an older project offers an upgrade, and that upgrade **merges** the `.csproj` rather than regenerating it, so hand-added references and settings survive. Both are reachable without the UI: `Sandbox.exe --new-project <location> <name>` and `--upgrade-project <path.ocproject>`.

@@ -8,7 +8,11 @@ spawning is a memcpy of that row's defaults — so scripts are thin, and the sur
 
 This document is the reference for that surface. It lives in `Aver.Framework` (namespace
 `Aver.Framework`); vector maths (`Vec3`, `Quat`, `Rot`) lives in `Aver.Scene`; the log (`Log`) lives in
-`Aver.Scripting`.
+`Aver.Scripting`. Two further assemblies a game author writes against directly are documented here too:
+**`Aver.UI`** (the game's HUD) and **`Aver.Materials`** (surfaces authored in C#). A new project
+references all four whether or not it uses them (`sandbox/src/ProjectScaffold.cpp`) — an unused
+reference costs nothing, and the alternative is a compile error naming an assembly the author has never
+heard of, in a file the editor generated.
 
 ---
 
@@ -27,9 +31,12 @@ This document is the reference for that surface. It lives in `Aver.Framework` (n
 11. [Attributes](#11-attributes)
 12. [Enums](#12-enums)
 13. [`ClassBuilder` and `ActorBuilder`](#13-classbuilder-and-actorbuilder)
-14. [Maths — `Vec3`, `Quat`, `Rot`](#14-maths--vec3-quat-rot)
-15. [Worked examples](#15-worked-examples)
-16. [Not yet available](#16-not-yet-available)
+14. [`Physics`](#14-physics)
+15. [Maths — `Vec3`, `Quat`, `Rot`](#15-maths--vec3-quat-rot)
+16. [`Aver.UI` — the game's HUD](#16-averui--the-games-hud)
+17. [`Aver.Materials` — surfaces authored in C#](#17-avermaterials--surfaces-authored-in-c)
+18. [Worked examples](#18-worked-examples)
+19. [Not yet available](#19-not-yet-available)
 
 ---
 
@@ -68,10 +75,19 @@ public sealed class Rotator : AverActor
 }
 ```
 
-**How it runs.** The editor's *Compile C#* button (or **Tools → Compile Scripts**) builds your
-`Content/Scripts` into an assembly and hot-swaps it in. At load the host reflects every `AverActor`-derived
-type, calls its `static Configure(ClassBuilder)` (if present) to register the class's defaults, and wires
-the lifecycle. Pressing **Play** starts a session (below); your actors' hooks then fire.
+**How it runs.** The editor's *Compile C#* button builds the project's `Scripts.csproj` and, when the
+scripting host is present, swaps the result in live. The two Tools items are the halves of that button
+and fail differently, which is why they are separate: **Tools → Compile Scripts** only builds (the
+editor keeps running whatever it already loaded), **Tools → Reload Scripts** builds and then unloads and
+reloads. At load the host reflects every `AverActor`-derived type, calls its
+`static Configure(ClassBuilder)` (if present) to register the class's defaults, and wires the lifecycle.
+Pressing **Play** starts a session (below); your actors' hooks then fire.
+
+One assembly, two source roots: `Scripts.csproj` compiles `Content/Scripts` **and** `Content/Materials`
+(see [§17](#17-avermaterials--surfaces-authored-in-c)). After a successful build the editor runs
+`avermatc` over that assembly to bake the C# materials; a material that fails to bake is reported but
+does **not** fail the build, because the C# did compile and a red build light would say otherwise
+(`sandbox/src/ToolsMenu.cpp`).
 
 **Two rules worth knowing up front:**
 
@@ -139,7 +155,7 @@ Override these on your `AverActor` subclass. All are optional; the defaults do n
 | `void OnBeginPlay(BeginReason reason)` | Once when the actor begins playing. `reason` is `Spawn` (fresh), `Play` (an already-placed actor entering Play), or `Reload` (after a hot reload). |
 | `void OnTick(float dt)` | Every frame the class is scheduled to tick, in its tick group. `dt` is clamped seconds. Requires `b.Ticks(...)` in `Configure`. |
 | `void OnEndPlay(EndReason reason)` | Once when the actor stops playing. `Stop` = the world stopped; `Destroy` = it was destroyed; `Reload` = the entity stays, only the managed half is rebuilt. |
-| `void OnRebound()` | After a hot reload rebinds this instance and restores its `[Editable]` state — re-derive cached state here, not in `OnBeginPlay`. |
+| `void OnRebound()` | **DECLARED BUT NEVER CALLED.** The hook exists in `framework_hooks.h` and nothing in the engine invokes it; the bridge's own comment records the rebind path as out of scope. Do not put logic here expecting it to run. |
 | `void BuildModels(ActorBuilder builder)` | `protected`. Builds the actor's model tree; the editor overrides it in a generated `.Designer.cs`. Hand code rarely writes this. |
 
 Pawn-only hooks (`AverPawn`): `OnPossessed(Entity controller)`, `OnUnpossessed()`.
@@ -317,6 +333,42 @@ field has focus). Read it from `OnTick`.
 `Key` values: `A`–`Z`, `D0`–`D9`, `Space`, `LeftShift`, `LeftCtrl`, `LeftAlt`, `Enter`, `Escape`, `Tab`,
 `Left`, `Right`, `Up`, `Down`, `MouseLeft`, `MouseRight`, `MouseMiddle`.
 
+### Action mappings
+
+`Input` is the device. `EnhancedInput` is the layer above it, for gameplay that should name *what the
+player is doing* rather than which key they pressed — so a pawn asks whether `Fire` happened and never
+mentions a key (`scripting/csharp/Aver.Framework/EnhancedInput.cs`).
+
+| Type | Description |
+|---|---|
+| `InputAction` | A thing the player can do. `InputAction.Digital(name)` / `.Axis1D(name)` / `.Axis2D(name)`. Read `IsHeld`, `WasPressed`, `WasReleased`, `Value1D`, `Value2D`. Declare each **once**, usually as a `static readonly` field on a class shared between the pawn that reads it and the context that binds it. |
+| `InputMappingContext` | A set of key→action bindings pushed and popped as a whole. Derive it and bind in the constructor: `BindKey`, `BindAxis1D(action, positive, negative)`, `BindAxis2D(action, up, down, right, left)`, `BindMouseLook`, `BindMouseWheel`. |
+| `EnhancedInput` | The router: `AddContext(context, priority = 0)`, `RemoveContext`, `ClearContexts`, `ContextCount`. |
+
+A **higher-priority context consumes the keys it binds**, so a lower one never sees them — pushing a
+menu or vehicle context suppresses the walking bindings without anything having to disable them.
+Consumption is per *context*, not per binding, so one key can still feed two actions in the same
+context. Actions are recomputed once per frame before the first tick group, so every actor in a frame
+reads the same input; polling per actor would let two pawns disagree about a "was pressed" edge purely
+because of tick order.
+
+```csharp
+static class GameActions
+{
+    public static readonly InputAction Move = InputAction.Axis2D("Move");
+    public static readonly InputAction Jump = InputAction.Digital("Jump");
+}
+
+public sealed class OnFoot : InputMappingContext
+{
+    public OnFoot()
+    {
+        BindAxis2D(GameActions.Move, Key.W, Key.S, Key.D, Key.A);   // X forward, Y right
+        BindKey(GameActions.Jump, Key.Space);
+    }
+}
+```
+
 ---
 
 ## 9. Spawning and destroying
@@ -404,9 +456,19 @@ Configure(ClassBuilder b)`:
 `ActorBuilder` writes the editor-owned **model tree** inside `BuildModels`; hand code rarely touches it.
 `ModelHandle` is the handle a placed model returns.
 
+**How a mesh path resolves.** `Mesh("Meshes/crate.ocmesh")` stores no string: the path is hashed
+(fnv1a64) to the `u64` ObjectId the `CMeshRenderer` field actually holds. Every `.ocmesh` under the
+project's `Content` is loaded at project open and registered under the hash of its **content-relative
+path with forward slashes** — so that exact spelling is the contract between a C# class, a level
+placement and the loader, and a path spelt any other way hashes to a different number and silently draws
+nothing. Two primitives are registered without a file behind them: `Meshes/cube.ocmesh` and
+`Meshes/sphere.ocmesh`. The `material` argument is a *name*, resolved to its `i32` handle the same way
+`Entity.SetMaterial` resolves one — see [§17](#17-avermaterials--surfaces-authored-in-c) for where that
+name comes from.
+
 ---
 
-## 13a. `Physics`
+## 14. `Physics`
 
 Static, in `Aver.Framework`. Everything is in the engine's contract — centimetres, +X forward,
 +Y right, +Z up, left-handed. The backend (Jolt, MIT) is right-handed, +Y up and metric; that
@@ -438,7 +500,7 @@ happened in a `PostPhysics` one.
 
 ---
 
-## 14. Maths — `Vec3`, `Quat`, `Rot`
+## 15. Maths — `Vec3`, `Quat`, `Rot`
 
 In `Aver.Scene` (centimetres; +X forward, +Y right, +Z up; left-handed).
 
@@ -450,7 +512,195 @@ In `Aver.Scene` (centimetres; +X forward, +Y right, +Z up; left-handed).
 
 ---
 
-## 15. Worked examples
+## 16. `Aver.UI` — the game's HUD
+
+Namespace `Aver.UI`, in the assembly of the same name (`scripting/csharp/Aver.UI/Hud.cs`). It references
+nothing else — a HUD is drawn in screen coordinates and knows nothing about entities or the world — and
+P/Invokes the native `Aver.UI.Abi` (`modules/ui.abi/include/aver/ui/ui_abi.h`), which is the seam that
+exists so a HUD can be authored in the game's language rather than in engine C++.
+
+**Screen pixels, top-left origin, +Y down.** Not the world's centimetres and not normalised coordinates:
+a UI is authored against a resolution, and every layout number a designer types is a pixel.
+
+Three rules carry most of the design:
+
+- **You draw from a tick; the HOST owns the frame.** The host clears the list once per frame *before*
+  anything ticks and submits it after (`aver_ui_begin_frame` and `submitGameUi` in
+  `sandbox/src/SandboxApp.cpp`). There is deliberately no `Begin` for a game to call: a game that
+  cleared the list would erase whatever another system had contributed, and the last one to run would
+  win with nothing anywhere to say so. One consequence to expect — gameplay ticks only while `Playing`,
+  so a HUD drawn from `OnTick` is absent in EDITOR, which is correct rather than a bug to chase.
+- **Anchor to `Hud.Viewport`, never to the window.** In the editor the game is drawn into a dockspace
+  panel and the two rectangles differ; a HUD laid out against the window sits partly under the editor's
+  own chrome. In a shipped build they are the same rectangle and nothing changes.
+- **There is no text.** Nothing in the engine can rasterise a glyph, so there is no `Hud.Text` to call.
+  A HUD today is rectangles, bars and tinted quads. There is no widget tree above the draw list either:
+  a HUD is laid out by the code that draws it.
+
+**`Hud`** — static, and the whole drawing surface:
+
+| Member | Description |
+|---|---|
+| `Rect Viewport` | The rectangle this frame's UI is laid out against, in backbuffer pixels. |
+| `Layer CurrentLayer` | The band subsequent draws land in. **Reset to `Layer.Content` at the start of every frame**, so set it in each frame that wants another band. An out-of-range value is ignored, not clamped — clamping would move a widget to a band its author did not choose and nothing would notice. |
+| `void Box(Rect r, Colour c)` / `void Box(float x, float y, float w, float h, Colour c)` | A solid rectangle. |
+| `void Frame(Rect r, float thickness, Colour border, Colour fill)` | A border drawn **inside** the bounds: a frame that grew its own bounds would not fit the layout that positioned it, and every caller would subtract the thickness back off by hand. |
+| `void Bar(Rect r, float fraction, Colour border, Colour empty, Colour full)` | A 1px-framed bar filled left to right; `fraction` is clamped to 0..1. |
+| `void Image(Rect r, ulong texture, Colour tint, float u0 = 0, float v0 = 0, float u1 = 1, float v1 = 1)` | A textured quad. |
+| `void PushClip(Rect r)` / `void PopClip()` | Nested clips **intersect**, so a child can never escape its parent by pushing a larger rectangle. That is containment by construction, not a promise each element keeps. |
+| `int DrawCallCount` | Draw calls this frame's UI will cost — the whole list, so it includes anything the host contributed. For a debug readout, not for logic. |
+
+`Image`'s `texture` is `0` for the built-in white texel, or a value the renderer recognises. **There is
+no managed way to obtain one of those values yet**, so in practice a game passes `0` and tints; a
+texture bound this way must also be premultiplied, because the colour is.
+
+**`Layer`** — `Background` (0), `Content` (1, the default), `Overlay` (2), `Tooltip` (3), `Debug` (4).
+Coarse and named on purpose: a widget picks the band it belongs in rather than a depth number that would
+make every z decision global, so adding a tooltip does not mean auditing every other widget. Order
+*within* a layer is the order you drew in.
+
+**`Colour`** — `Colour.Rgb(232, 228, 220)` (opaque unless a fourth byte is given), `Colour.Argb(0xFFE8E4DC)`,
+`WithAlpha(float)` (clamped 0..1), `Colour.Lerp(from, to, t)`. Alpha is **straight**: the
+premultiplication the renderer needs happens on the native side, and the packing the vertex actually
+holds is internal precisely so a game never carries it around.
+
+**`Rect`** — a `readonly record struct (float X, float Y, float Width, float Height)` with `Right`,
+`Bottom`, `Inset(by)` (negative grows), and:
+
+```csharp
+Rect.Anchored(Rect container, float ax, float ay, float w, float h,
+              float offsetX = 0f, float offsetY = 0f)
+```
+
+Anchoring rather than absolute placement, because a HUD outlives the resolution it was authored at: an
+element pinned to the bottom-right by subtraction walks off-screen the moment the window is smaller than
+the number that was subtracted.
+
+```csharp
+using Aver.Framework;
+using Aver.UI;
+
+[AverClass("BP_PlayerHud")]
+public sealed class PlayerHud : AverActor
+{
+    // PostPhysics: draw what the frame settled on, not what it was asked for.
+    public static void Configure(ClassBuilder b) => b.Ticks(TickGroup.PostPhysics);
+
+    static readonly Colour Ink   = Colour.Argb(0xFFE8E4DC);
+    static readonly Colour Panel = Colour.Argb(0xB0141820);   // 69% alpha — proves the blend
+    static readonly Colour Hurt  = Colour.Rgb(232, 76, 46);
+
+    [Editable(Min = 0f, Max = 1f)] public float Health = 1f;
+
+    public override void OnTick(float dt)
+    {
+        Rect vp = Hud.Viewport;                       // NOT the window
+        Rect bar = Rect.Anchored(vp, 0f, 1f, 260f, 18f, offsetX: 24f, offsetY: -24f);
+
+        Hud.PushClip(vp);                             // nothing escapes into the editor's chrome
+        Hud.Box(bar.Inset(-6f), Panel);               // Layer.Content — the default, every frame
+        Hud.Bar(bar, Health, Ink, Panel, Colour.Lerp(Hurt, Ink, Health));
+        Hud.PopClip();
+
+        if (Health <= 0f)                             // a full-screen wash, over the HUD
+        {
+            Hud.CurrentLayer = Layer.Overlay;         // set per frame; it does not persist
+            Hud.Box(vp, Hurt.WithAlpha(0.35f));
+        }
+    }
+}
+```
+
+---
+
+## 17. `Aver.Materials` — surfaces authored in C#
+
+Namespace `Aver.Materials` (`scripting/csharp/Aver.Materials/`). Like `Aver.UI` it is a leaf: a material
+describes a surface and knows nothing about entities, the world or a device.
+
+**The C# is the source; the `.ocmat` is build output.** A `.cs` under `Content/Materials` declares a
+surface. *Compile C#* builds it into the project's one script assembly, then `avermatc`
+(`scripting/csharp/Aver.MaterialCompiler/`) reflects over that assembly, runs every `Configure`, and
+writes one `.ocmat` per material into `<project>/Binaries/Materials`. The engine looks in
+`Binaries/Materials` **first**, then `Content/Materials`, then a content-relative path
+(`SandboxApp::materialForSurface`) — so a project that has adopted C# materials gets the built file and
+one that has not keeps working exactly as it did with hand-authored `.ocmat`.
+
+That ordering is why editing the generated file is a mistake with a delay on it: it is a build artefact,
+the next compile overwrites it, and the header it carries says so. The Details panel's **Save to C#**
+writes back to the `.cs` for the same reason (`modules/formats/include/aver/formats/MaterialScript.hpp`);
+it rewrites only the body of `Configure`, preserves the `.Comment(…)` calls — authored prose that cannot
+be re-derived from a material's numbers — and declines outright rather than half-succeeding on a file it
+did not parse.
+
+**Declaring one.** `[AverMaterial("M_Crate")]` gives the **bound name** a mesh references. The name is
+given in the attribute rather than taken from the class name for the reason `[AverClass]` does it:
+renaming a C# class should not silently unbind every mesh that used it. Two classes claiming one name is
+refused outright, not last-one-wins, since which of the two won would depend on reflection order.
+
+`Configure` is **`static`**. A material is never instantiated and never ticks — it is a description the
+compiler runs once, at build time, and nothing about it exists at run time — so there is no instance for
+a virtual call to dispatch on. The compiler finds it by reflection and reports a `[AverMaterial]` class
+that lacks one. `Material` is the base the templates derive; it carries nothing and exists so a material
+is findable by type rather than only by attribute.
+
+```csharp
+using Aver.Materials;
+
+namespace MyGame.Materials;
+
+[AverMaterial("M_Crate")]
+public sealed class Crate : Material
+{
+    public static void Configure(MaterialBuilder b) => b
+        .Comment("Painted wood, scuffed. Roughness stays high — a gloss here reads as plastic.")
+        .BaseColor(0.62f, 0.48f, 0.31f)
+        .Metallic(0f)
+        .Roughness(0.78f)
+        .Texture(Slot.BaseColor, "Textures/crate_basecolor.png")
+        .Texture(Slot.Normal,    "Textures/crate_normal.png");
+}
+```
+
+Bind it from a class recipe with `b.Mesh("Meshes/crate.ocmesh", "M_Crate")`, or at run time with
+`entity.SetMaterial("M_Crate")`.
+
+**`MaterialBuilder`** — every call returns the builder, so a declaration is one chain:
+
+| Member | Description |
+|---|---|
+| `Comment(string)` | A line written into the output above the parameters. Carried through on purpose: the generated file is what somebody debugging a surface opens, and a bare table of numbers with the reasoning left behind in a `.cs` is how a value becomes mysterious. |
+| `Shader(Shading)` | The shading model. `Shading.Standard` — the metallic-roughness BRDF — is the only one. |
+| `Blending(Blend, float cutoff = 0.5f)` | `Opaque` / `Masked` (the cutoff applies here only) / `Translucent` / `Additive`. |
+| `Culling(Cull)` | `Back` / `Front` / `None`. `None` implies two-sided. |
+| `CastShadow(bool)` | On by default. |
+| `WorldUv(bool)` / `Tiling(float centimetres)` | Project UVs from world space at N cm per tile — what untextured blockout geometry wants. `Tiling` is written whether or not world UVs are on, so toggling the mode off and back on does not reset it. |
+| `BaseColor(r, g, b, a = 1)` | Linear multiplier. |
+| `Metallic(v)` / `Roughness(v)` | Multipliers, both defaulting to 1 — that is, "whatever the metalRough texture says". |
+| `Emissive(r, g, b)` | Added, not multiplied, so it lights itself and nothing else. |
+| `NormalScale(v)` / `OcclusionStrength(v)` | Strength of the normal map / of baked occlusion. |
+| `Reflectance(v)` / `F90(v)` | Dielectric reflectance at normal incidence (0.04 is almost every non-metal) and at grazing incidence. |
+| `Texture(Slot, string contentRelativePath)` | Bind a texture. The path is relative to the project's content root; backslashes are normalised to forward slashes. |
+
+**`Slot`** — `BaseColor`, `MetalRough` (metallic in blue, roughness in green: the glTF packing),
+`Normal`, `Occlusion`, `Emissive`.
+
+**Colour space is a property of the slot and is deliberately not authorable.** `Texture` takes no
+colour-space argument. Base colour and emissive are always sRGB, normal is always a normal map, and the
+rest are always linear; letting a caller choose would only let a caller choose wrong. The emitter writes
+the slot's space into the `TEX` line and the reader validates it, so the two cannot quietly disagree.
+
+> The `.ocmat` grammar has **two writers** — this builder and `modules/formats/src/OcMat.cpp` — which is
+> a real cost, paid so that baking a material does not require a loaded engine on the build path. The
+> guard against them drifting is weaker than it sounds, and worth knowing before trusting it:
+> `testGeneratedByCsharp` in `tests/formats/src/MaterialTest.cpp` parses a **pasted, verbatim** sample
+> of `MaterialBuilder.Emit`'s output with the C++ reader. Nothing runs the C# emitter, so a change made
+> only to `Emit` goes unnoticed until somebody re-pastes the sample. (The comment in `MaterialBuilder.cs`
+> claiming a `MaterialCompilerTest` does this is wrong — no such test exists.)
+
+---
+
+## 18. Worked examples
 
 ### A player character (WASD + mouse, first/third person)
 
@@ -513,16 +763,26 @@ public sealed class Coin : AverActor
 
 ---
 
-## 16. Not yet available
+## 19. Not yet available
 
-The gameplay object model above is complete. These are **separate subsystems** that do not exist yet — a
-script cannot use them, and a character does not (for example) collide or fall:
+The gameplay object model above is complete. What follows is what a script still **cannot** reach,
+stated as absences rather than left to be discovered:
 
-- **Input bindings** — input is raw polling (`Input.GetKey`), not a remappable action/axis map.
-- **Audio**, **timers / coroutines**, **UI (in-game)**, **networking**.
+- **Audio.** The pieces exist — a mixer with voices, 3D panning and attenuation, a WASAPI device, the
+  `.ocaudio` container, and a C seam (`modules/audio`, `modules/audio.wasapi`, `modules/audio.abi`, and
+  `modules/formats`; see `docs/AUDIO.md`). None of them are joined up: there is no managed binding, and
+  neither the editor nor the runtime opens a device. A script cannot play a sound.
+- **Text, and widgets, in the UI.** `Aver.UI` (§16) draws rectangles and tinted quads. Nothing in the
+  engine rasterises a glyph, so there is no `Hud.Text`; and there is no widget tree above the draw list,
+  so layout is whatever the drawing code computes. There is also no input routing into the UI — a HUD is
+  drawn, not clicked.
+- **Timers and coroutines.** No `SetTimer`, no `yield`. Count down in `OnTick`.
+- **Networking.** `modules/net` exists; nothing in it is reachable from C#.
 - **Hot-reload state migration** beyond `[Editable]` fields.
-- A **converting asset importer** — the Content Browser's Import copies files in; it does not convert
-  FBX/PNG into engine formats. Meshes referenced by `Mesh("…")` resolve against the built-in primitives and
-  (eventually) a real `.ocmesh` loader.
+- **Import beyond glTF.** The Content Browser's Import *converts* `.gltf`/`.glb` into one `.ocmesh` per
+  mesh and registers the result immediately (`SandboxApp::importModel`); every other file type is copied
+  in unchanged. That is right for a `.png` a material names — a texture is decoded and uploaded straight
+  from the source file, with its colour space taken from the slot that binds it — and wrong for an FBX,
+  which is not read at all. No texture is converted, compressed or packed at import.
 
 These are the natural next layers; the object model is the foundation they plug into.
