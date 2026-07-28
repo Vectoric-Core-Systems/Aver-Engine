@@ -43,6 +43,9 @@ bool g_previewTried = false;
 rhi::IDevice* g_device = nullptr;
 ActorEditorHooks g_hooks;
 bool g_liveDefault = false;
+// Bumped by the app when the script assembly is swapped. Never reset: a tab compares values rather
+// than testing a flag, so wrapping is the only failure and it takes 4 billion reloads.
+u32 g_scriptGeneration = 1;
 
 bool readFile(const std::string& path, std::string& out) {
     std::ifstream in(path, std::ios::binary);
@@ -178,6 +181,11 @@ public:
     std::string title() const override { return dirty_ ? title_ + " *" : title_; }
     bool dirty() const override { return dirty_; }
 
+    // The watcher saw it. Do NOT read the file here: this runs between frames, off the back of an
+    // OS notification, and the editor's whole reload path wants a device and a preview that only
+    // exist inside draw(). Latching a flag keeps every file read on the frame thread.
+    void onFileChanged() override { externalChange_ = true; }
+
     void draw(Engine& e) override;
 
     bool save(std::string* why) override {
@@ -290,6 +298,17 @@ private:
     std::string liveWhy_;               // why it is off, or what the last rebuild found
     int liveUnnamed_ = 0;               // models whose mesh id resolved to no path this could open
     bool liveCapsuleFromSource_ = false;   // the one figure in the live view that the spawn did not give
+    // The generation the current live snapshot was built against. Different from g_scriptGeneration
+    // means the class that produced it has since been unloaded, so the picture is of dead code.
+    u32 liveGeneration_ = 0;
+
+    // Set by the host when the watcher saw this file change, cleared when the reload is done.
+    //
+    // Separate from the mtime stamp rather than folded into it: the stamp answers "has the file
+    // moved on since I read it", which a background tab cannot ask because it is not drawn. This
+    // answers "somebody told me it did", and the two agree in the common case and cost nothing when
+    // they do -- reloadIfChanged still re-stats, so a spurious notification reloads nothing.
+    bool externalChange_ = false;
     std::vector<render::preview::PreviewDraw> liveDraws_;
     void rebuildLive(Engine& e);
 
@@ -307,10 +326,21 @@ private:
 // because silently replacing somebody's in-progress drag with what a background tool wrote is the
 // one behaviour a live-sync feature must never have. Saving, or closing without saving, resolves it.
 bool ActorEditor::reloadIfChanged() {
+    // The watcher's word, taken and cleared whatever happens below.
+    //
+    // It does not REPLACE the stamp check, it bypasses it. A safe save (write temp, replace target,
+    // rename) can leave a modification time this tab has already seen -- the writer preserves it, or
+    // the filesystem's resolution rounds two writes in the same tick to the same value -- and the
+    // stamp then says "nothing happened" about a file whose bytes are entirely different. That is
+    // the precise failure this whole watcher exists to fix, so an explicit notification has to win
+    // over the stamp rather than be filtered by it.
+    const bool told = externalChange_;
+    externalChange_ = false;
+
     std::error_code ec;
     const std::filesystem::file_time_type now = std::filesystem::last_write_time(path_, ec);
     if (ec) return false;
-    if (haveStamp_ && now == stamp_) return false;
+    if (!told && haveStamp_ && now == stamp_) return false;
     stamp_ = now;
     haveStamp_ = true;
 
@@ -349,6 +379,7 @@ bool ActorEditor::reloadIfChanged() {
 
 void ActorEditor::rebuildLive(Engine& e) {
     liveStale_ = false;
+    liveGeneration_ = g_scriptGeneration;
     liveDraws_.clear();
     liveUnnamed_ = 0;
     liveCapsuleFromSource_ = false;
@@ -456,6 +487,11 @@ void ActorEditor::buildDrawList(Engine& e) {
     // every model that agrees on top of each other and read as z-fighting, which is the opposite of
     // what a comparison is for.
     if (live_) {
+        // A RELOAD invalidates the snapshot regardless of what the source did. The classes in the
+        // registry are new types built by new code; a picture produced by the old ones is of code
+        // that is no longer running, and it is the case a user is most likely to be looking at --
+        // they pressed Compile precisely to see the difference.
+        if (liveGeneration_ != g_scriptGeneration) liveStale_ = true;
         if (liveStale_) rebuildLive(e);
         if (live_) {
             std::vector<render::preview::PreviewDraw> copy = liveDraws_;
@@ -982,6 +1018,11 @@ void setActorEditorContentRoot(std::string root) {
 void setActorEditorHooks(ActorEditorHooks hooks) { g_hooks = std::move(hooks); }
 
 void setActorEditorLiveByDefault(bool on) { g_liveDefault = on; }
+
+void notifyActorEditorsScriptsReloaded() {
+    ++g_scriptGeneration;
+    AVER_INFO("[ActorEditor] scripts reloaded; live views are generation {}", g_scriptGeneration);
+}
 
 void shutdownActorEditors() {
     if (g_device && g_preview) g_device->removeRenderFeature(g_preview);

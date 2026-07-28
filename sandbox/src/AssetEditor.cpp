@@ -3,6 +3,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcMesh.hpp"
 
+#include <cctype>
 #include <filesystem>
 
 #if AVER_WITH_IMGUI
@@ -31,6 +32,51 @@ bool AssetEditorHost::open(const std::string& path) {
 bool AssetEditorHost::anyDirty() const {
     for (const auto& ed : editors_) if (ed->dirty()) return true;
     return false;
+}
+
+namespace {
+// Are these two strings the same file?
+//
+// `equivalent` FIRST, because it is the only answer that is actually right: it compares the
+// filesystem's own identity for the file rather than the spelling of the route taken to it, so a
+// junction, a substituted drive, a short 8.3 name and a long one all resolve together. It needs
+// both to exist, which on a delete or a safe-save-in-flight they may not.
+//
+// The string fallback is therefore not a shortcut but the case `equivalent` cannot serve.
+// weakly_canonical is used rather than a raw compare because the two sides arrive by different
+// routes -- the watcher builds its path from the watch root, the editor holds the one the content
+// browser opened -- so they differ in separators and in any `..` either side picked up, and on
+// Windows in case. lexically_normal is not enough on its own for the same reason it was not enough
+// for the project-reference check: it does not resolve a relative root.
+bool samePath(const std::string& a, const std::string& b) {
+    std::error_code ec;
+    if (std::filesystem::equivalent(a, b, ec) && !ec) return true;
+    const std::filesystem::path na = std::filesystem::weakly_canonical(std::filesystem::path(a), ec);
+    if (ec) return false;
+    const std::filesystem::path nb = std::filesystem::weakly_canonical(std::filesystem::path(b), ec);
+    if (ec) return false;
+#ifdef _WIN32
+    // Windows paths are case-insensitive, and the watcher reports whatever case the writer used --
+    // which for a safe save is the temporary file's, not the one the user typed.
+    std::string sa = na.string(), sb = nb.string();
+    for (char& c : sa) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+    for (char& c : sb) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+    return sa == sb;
+#else
+    return na == nb;
+#endif
+}
+} // namespace
+
+bool AssetEditorHost::notifyFileChanged(const std::string& path) {
+    for (const auto& ed : editors_) {
+        if (samePath(ed->path(), path)) { ed->onFileChanged(); return true; }
+    }
+    return false;
+}
+
+void AssetEditorHost::notifyWatchLost() {
+    for (const auto& ed : editors_) ed->onWatchLost();
 }
 
 bool AssetEditorHost::draw(Engine& e, unsigned dockInto, float dpi) {

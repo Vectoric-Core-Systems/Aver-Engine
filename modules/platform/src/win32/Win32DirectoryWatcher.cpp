@@ -86,8 +86,35 @@ public:
             return false;
         }
 
+        // ARMED, manual-reset. See the wait below -- this is the whole of the fix for the startup
+        // race and it has to exist before the thread that sets it.
+        armed_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!armed_) {
+            AVER_WARN("[Watcher] declined: could not create the arm event for '{}'", root);
+            shutdown();
+            return false;
+        }
+
         buffer_.resize(kBufferDwords);
         thread_ = std::thread([this] { run(); });
+
+        // DO NOT RETURN UNTIL THE FIRST READ IS OUTSTANDING.
+        //
+        // The kernel records changes to a directory only while a ReadDirectoryChangesW is in flight
+        // on its handle; nothing is retained from before the first one is issued. That call happens
+        // at the top of run(), on the worker thread -- so a start() that returned as soon as the
+        // thread was spawned handed back a watcher with a live-looking `watching()` and a window,
+        // however short, in which every change was silently dropped.
+        //
+        // Found by WatcherTest: the first file written after start() was never reported and the
+        // second always was, which is this race exactly and nothing else.
+        //
+        // The timeout is a backstop against a thread that cannot start at all, not a tuning knob --
+        // the wait is normally microseconds. Timing out is reported and does NOT fail the start: a
+        // watch that armed late is worth more to the editor than no watch, and poll() is honest
+        // either way.
+        if (WaitForSingleObject(armed_, 5000) != WAIT_OBJECT_0)
+            AVER_WARN("[Watcher] '{}' did not arm within 5 s; early changes may have been missed", root);
         return true;
     }
 
@@ -111,6 +138,7 @@ private:
         // for as long as a read is in flight.
         if (overlapped_.hEvent) { CloseHandle(overlapped_.hEvent); overlapped_.hEvent = nullptr; }
         if (stop_) { CloseHandle(stop_); stop_ = nullptr; }
+        if (armed_) { CloseHandle(armed_); armed_ = nullptr; }
         if (dir_) { CloseHandle(dir_); dir_ = nullptr; }
     }
 
@@ -129,6 +157,12 @@ private:
     bool throttle() { return WaitForSingleObject(stop_, 50) == WAIT_TIMEOUT; }
 
     void run() {
+        // Releases init()'s wait exactly once, whatever happens next. Deliberately fired on EVERY
+        // exit from the loop as well as on the first successful read: a first read that fails would
+        // otherwise leave start() blocked for the full timeout on a watch that was already dead.
+        bool armedOnce = false;
+        const auto arm = [&] { if (!armedOnce) { armedOnce = true; SetEvent(armed_); } };
+
         for (;;) {
             ResetEvent(overlapped_.hEvent);
             if (!ReadDirectoryChangesW(dir_, buffer_.data(),
@@ -145,8 +179,14 @@ private:
                 }
                 if (err != ERROR_OPERATION_ABORTED)
                     AVER_WARN("[Watcher] ReadDirectoryChangesW failed ({}); watch stopped", (u32)err);
+                arm();
                 break;
             }
+
+            // The read is now OUTSTANDING, which is the instant the kernel begins recording changes
+            // for this handle. That -- not the thread starting, and not the handle opening -- is what
+            // start() has to wait for.
+            arm();
 
             HANDLE waits[2] = {overlapped_.hEvent, stop_};
             const DWORD w = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
@@ -238,6 +278,8 @@ private:
 
     HANDLE dir_ = nullptr;
     HANDLE stop_ = nullptr;
+    // Set by the worker once its first read is outstanding; waited on by init(). See there.
+    HANDLE armed_ = nullptr;
     OVERLAPPED overlapped_{};
     std::vector<DWORD> buffer_;
     std::string root_;

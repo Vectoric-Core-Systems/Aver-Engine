@@ -21,6 +21,7 @@
 #include "ToolsMenu.hpp"
 #include "AssetEditor.hpp"
 #include "ActorEditor.hpp"   // a .Designer.cs opened as an asset, with a 3D preview of what it declares
+#include "aver/platform/DirectoryWatcher.hpp"   // the editor notices an IDE writing behind its back
 #include "EngineScaffold.hpp"   // engineRoot(): where the Content Browser's "Engine" root is mounted from
 #include "IdeIntegration.hpp"   // detectedIdes()/openInIde: double-clicking a source file opens it
 #include "ShellIntegration.hpp" // reveal / shell-open / recycle, for the browser's context menu
@@ -1792,6 +1793,7 @@ private:
         // Mesh paths in a designer file are relative to this, and the actor editor's factory has
         // nowhere to carry it -- see ActorEditor.hpp.
         editor::setActorEditorContentRoot(project_.contentDir());
+        startContentWatch();
         pendingUpgrade_ = editor::inspectProject(project_);
         upgradeAsked_ = false;
         upgradeStatus_.clear();
@@ -1852,6 +1854,58 @@ private:
 
     // Tools > Reload Scripts, after its `dotnet build` has already succeeded. Runs on the main
     // thread: OnShutdown and OnStart are called from here, and behaviours are a main-thread thing.
+    // ---- the file watcher --------------------------------------------------------------------
+    //
+    // WHY A WATCHER AND NOT THE POLL THAT WAS ALREADY THERE. Two polls existed and both are kept,
+    // because each is right for its own job and neither can do this one:
+    //   * ActorEditor::reloadIfChanged stats one file per DRAWN tab. It cannot see a tab behind
+    //     another tab, and it cannot see a file that is not open at all.
+    //   * ToolsMenu::refreshScriptStatus walks the scripts directory twice a second to colour one
+    //     button. Making that the change signal would mean either walking the whole content tree at
+    //     that rate or accepting a half-second lag on every save.
+    // The watcher covers what neither does: every file under the content root, open or not, with the
+    // OS doing the noticing.
+    //
+    // CONTENT ROOT rather than the scripts folder, because materials, meshes and levels are edited
+    // outside this editor too and every one of them has a consumer that would like to know.
+    void startContentWatch() {
+        contentWatch_.stop();
+        if (!project_.valid()) return;
+        const std::string root = project_.contentDir();
+        if (root.empty()) return;
+        // The default 150 ms settle is what the watcher documents as clearing a Visual Studio or
+        // VS Code save burst by an order of magnitude, and it is well inside the ~250 ms at which an
+        // update stops feeling immediate. Left alone deliberately rather than re-tuned here.
+        if (contentWatch_.start(root, /*recursive=*/true))
+            AVER_INFO("[Editor] watching '{}' for changes made outside this editor", root);
+    }
+
+    // Once a frame, on the frame thread, BEFORE the tabs draw -- so a save that landed since the last
+    // frame is already reflected in what is about to be drawn rather than one frame later.
+    void pumpContentWatch() {
+        if (!contentWatch_.watching()) return;
+        watchEvents_.clear();
+        if (contentWatch_.poll(watchEvents_)) {
+            // Overflow: the OS dropped records and nothing can say which. The watcher deliberately
+            // returns this rather than logging and swallowing it, so it must not be swallowed here.
+            AVER_WARN("[Editor] the watcher lost records; every open editor is being told to re-read");
+            assetEditors_.notifyWatchLost();
+            return;
+        }
+        for (const FileEvent& ev : watchEvents_) {
+            // A delete is not a change to re-read. The tab keeps what it has and says so on its own
+            // next save attempt; blanking an editor because a file vanished mid-safe-save would
+            // destroy work for a save that is about to complete.
+            if (ev.kind == FileChange::Deleted) continue;
+            const std::string full = (std::filesystem::path(contentWatch_.root()) / ev.path).string();
+            if (assetEditors_.notifyFileChanged(full))
+                AVER_TRACE("[Editor] '{}' changed on disk; its tab was told", ev.path);
+        }
+    }
+
+    DirectoryWatcher contentWatch_;
+    std::vector<FileEvent> watchEvents_;   // reused, so a quiet frame allocates nothing
+
     bool reloadScripts(const std::string& binDir, std::string* status) {
         if (!scripts_.ready()) {
             if (status) *status = "The scripting host is not running: " + scripts_.declineReason();
@@ -1869,6 +1923,10 @@ private:
             *status = std::to_string(n) + " behaviour(s) live from " + binDir +
                       (collected ? "" : " (the previous load context is still finalising)");
         }
+        // Every class in the registry is now a NEW type. Any actor tab holding a live snapshot built
+        // from the old ones is showing code that is no longer running, which is the one moment a user
+        // is most likely to be looking -- they pressed Compile to see the difference.
+        editor::notifyActorEditorsScriptsReloaded();
         return true;
     }
 #endif
@@ -3142,6 +3200,7 @@ private:
             if (assetEditors_.open(want)) AVER_INFO("[Editor] --open-asset opened {}", want);
             else AVER_ERROR("[Editor] --open-asset: no registered editor accepts {}", want);
         }
+        pumpContentWatch();
         assetEditors_.draw(e, centralDock_, dpi_);
         tools_.drawModals(project_, dpi_);
         drawUpgradePrompt();

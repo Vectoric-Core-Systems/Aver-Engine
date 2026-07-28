@@ -39,6 +39,16 @@ struct ActorEditorHooks {
 };
 void setActorEditorHooks(ActorEditorHooks hooks);
 
+// The scripting host has swapped the script assembly: every loaded class is a NEW type, and every
+// Live view now holds a snapshot built by code that is no longer running.
+//
+// A GENERATION rather than a flag, and rather than a callback per tab. The app does not know which
+// tabs exist -- deliberately, the asset-editor host owns that -- and a bare flag would be consumed
+// by whichever tab drew first, leaving every other tab stale with nothing to tell it. A counter
+// each tab compares against its own last-seen value is read-only for the tabs, correct for any
+// number of them, and costs one integer compare per frame.
+void notifyActorEditorsScriptsReloaded();
+
 // Opens every new actor tab with the LIVE view already on.
 //
 // Exists for the headless run, and that is the honest reason: Live is a checkbox nobody can tick

@@ -52,6 +52,25 @@ public:
 
     // Write the asset back. Returns false and leaves `why` set if it could not.
     virtual bool save(std::string* why) { (void)why; return true; }
+
+    // The host has SEEN this editor's asset change on disk, from a DirectoryWatcher event rather
+    // than from anything this editor did.
+    //
+    // It exists because an editor can only poll while it is being drawn, and a tab behind another
+    // tab is not drawn. Without this, editing a file in Visual Studio while its tab sat in the
+    // background left that tab showing the old content until it was clicked, re-polled, and only
+    // THEN caught up -- a visible lag exactly when the user has switched to it to look.
+    //
+    // Called from the main thread between frames. An editor that does not care may ignore it: the
+    // per-draw poll is still there and still correct, so this is a promptness fix, not a
+    // correctness one.
+    virtual void onFileChanged() {}
+
+    // The watcher lost records and cannot say what changed (its buffer overflowed). Every editor
+    // must assume its asset is stale. Separate from onFileChanged because "something changed,
+    // possibly yours" is a different instruction from "yours changed", and an editor that treated
+    // them the same would reload every open file on every overflow.
+    virtual void onWatchLost() { onFileChanged(); }
 };
 
 // Creates an editor for a path, or nullptr if this factory does not handle it. Registered by the
@@ -90,6 +109,17 @@ public:
 
     bool anyDirty() const;
     usize count() const { return editors_.size(); }
+
+    // Route a disk change to whichever editor owns that path. Returns true if one did.
+    //
+    // Path comparison is by std::filesystem::equivalent where both exist and by a normalised
+    // string otherwise, because the watcher hands back a path built from the watch root while an
+    // editor holds the one the content browser opened -- the same file reached two ways, differing
+    // in separators, case and any `..` either side picked up.
+    bool notifyFileChanged(const std::string& path);
+
+    // The watcher overflowed. Tell every open editor, because nothing else can say who is affected.
+    void notifyWatchLost();
 
 private:
     std::vector<AssetEditorFactory> factories_;

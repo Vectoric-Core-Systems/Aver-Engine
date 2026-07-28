@@ -157,6 +157,10 @@ if(AVER_BUILD_TESTS)
   add_subdirectory(tests/render.actorpreview)
   # Unconditional, like the module.
   add_subdirectory(tests/audio)
+  # The directory watcher. Unconditional because Aver.Platform always exists, and needed because the
+  # editor's live sync now rests on it -- it shipped with no consumer and no test, and the first
+  # thing that depended on it should not also be the first thing that exercised it.
+  add_subdirectory(tests/platform)
   if(AVER_MODULE_PHYSICS)
     add_subdirectory(tests/physics)
   endif()
