@@ -366,15 +366,15 @@ private:
     //
     // Projection goes through the preview's own camera, so what is drawn is where the handle
     // actually points. Deriving it from anything else is how a gizmo ends up offset from its object.
-    bool projectToScreen(const f32 world[3], f32 imageSize, ImVec2& out) const;
-    int  pickGizmoAxis(ImVec2 local, f32 imageSize) const;
-    void drawGizmo(ImVec2 imageTopLeft, f32 imageSize, const fmt::ActorModel& m) const;
+    bool projectToScreen(const f32 world[3], ImVec2 imageSize, ImVec2& out) const;
+    int  pickGizmoAxis(ImVec2 local, ImVec2 imageSize) const;
+    void drawGizmo(ImVec2 imageTopLeft, ImVec2 imageSize, const fmt::ActorModel& m) const;
     // The components that have no mesh, drawn as wireframes over the image -- a camera's frustum and
     // a light's reach. UE draws both in its Blueprint viewport and an actor that is only a camera is
     // otherwise an empty box.
-    void drawComponentWireframes(ImVec2 imageTopLeft, f32 imageSize) const;
-    void dragAlongAxis(fmt::ActorModel& m, int axis, ImVec2 delta, f32 imageSize) const;
-    bool axisTip(const fmt::ActorModel& m, int axis, f32 imageSize, ImVec2& out) const;
+    void drawComponentWireframes(ImVec2 imageTopLeft, ImVec2 imageSize) const;
+    void dragAlongAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVec2 imageSize) const;
+    bool axisTip(const fmt::ActorModel& m, int axis, ImVec2 imageSize, ImVec2& out) const;
 
     // -1 when not dragging. Latched on mouse-down and held for the whole gesture.
     int draggingAxis_ = -1;
@@ -936,7 +936,7 @@ constexpr f32 kGizmoPixels = 64.0f;
 constexpr f32 kGrabPixels = 10.0f;
 } // namespace
 
-bool ActorEditor::projectToScreen(const f32 world[3], f32 imageSize, ImVec2& out) const {
+bool ActorEditor::projectToScreen(const f32 world[3], ImVec2 imageSize, ImVec2& out) const {
     if (!g_preview) return false;
     f32 vp[16];
     g_preview->viewProj(vp);
@@ -946,12 +946,20 @@ bool ActorEditor::projectToScreen(const f32 world[3], f32 imageSize, ImVec2& out
     const f32 y = world[0]*vp[1] + world[1]*vp[5] + world[2]*vp[9]  + vp[13];
     const f32 w = world[0]*vp[3] + world[1]*vp[7] + world[2]*vp[11] + vp[15];
     if (w <= 1e-4f) return false;   // behind the eye; there is no honest screen position
-    out.x = (x / w * 0.5f + 0.5f) * imageSize;
-    out.y = (0.5f - y / w * 0.5f) * imageSize;   // screen +Y is down
+    // NDC -> PIXELS, each axis by its OWN extent.
+    //
+    // One extent was right only while the target was square. It no longer is: the viewport fills a
+    // column of whatever shape the splitters leave it, and the projection matrix already carries
+    // that aspect -- so NDC is correct and it is this mapping that was wrong. Scaling both axes by
+    // the smaller extent left a handle sitting on its object at the centre of the view and drifting
+    // further from it towards the edges, which reads as a gizmo that is subtly mis-calibrated rather
+    // than as a projection bug.
+    out.x = (x / w * 0.5f + 0.5f) * imageSize.x;
+    out.y = (0.5f - y / w * 0.5f) * imageSize.y;   // screen +Y is down
     return true;
 }
 
-int ActorEditor::pickGizmoAxis(ImVec2 local, f32 imageSize) const {
+int ActorEditor::pickGizmoAxis(ImVec2 local, ImVec2 imageSize) const {
     if (selected_ < 0 || selected_ >= static_cast<int>(script_.models.size())) return -1;
     const fmt::ActorModel& m = script_.models[static_cast<usize>(selected_)];
     ImVec2 origin;
@@ -975,7 +983,7 @@ int ActorEditor::pickGizmoAxis(ImVec2 local, f32 imageSize) const {
     return best;
 }
 
-bool ActorEditor::axisTip(const fmt::ActorModel& m, int axis, f32 imageSize, ImVec2& out) const {
+bool ActorEditor::axisTip(const fmt::ActorModel& m, int axis, ImVec2 imageSize, ImVec2& out) const {
     ImVec2 origin;
     if (!projectToScreen(m.pos, imageSize, origin)) return false;
     // A world offset whose SCREEN length is kGizmoPixels, found by projecting a unit step and
@@ -993,7 +1001,7 @@ bool ActorEditor::axisTip(const fmt::ActorModel& m, int axis, f32 imageSize, ImV
     return true;
 }
 
-void ActorEditor::drawComponentWireframes(ImVec2 topLeft, f32 imageSize) const {
+void ActorEditor::drawComponentWireframes(ImVec2 topLeft, ImVec2 imageSize) const {
     if (!g_preview || tree_.empty()) return;
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
@@ -1068,7 +1076,7 @@ void ActorEditor::drawComponentWireframes(ImVec2 topLeft, f32 imageSize) const {
     }
 }
 
-void ActorEditor::drawGizmo(ImVec2 topLeft, f32 imageSize, const fmt::ActorModel& m) const {
+void ActorEditor::drawGizmo(ImVec2 topLeft, ImVec2 imageSize, const fmt::ActorModel& m) const {
     ImVec2 origin;
     if (!projectToScreen(m.pos, imageSize, origin)) return;
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1090,7 +1098,7 @@ void ActorEditor::drawGizmo(ImVec2 topLeft, f32 imageSize, const fmt::ActorModel
     dl->AddCircleFilled(o, 3.0f, IM_COL32(240, 240, 240, 255));
 }
 
-void ActorEditor::dragAlongAxis(fmt::ActorModel& m, int axis, ImVec2 delta, f32 imageSize) const {
+void ActorEditor::dragAlongAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVec2 imageSize) const {
     ImVec2 origin, tip;
     if (!projectToScreen(m.pos, imageSize, origin)) return;
     if (!axisTip(m, axis, imageSize, tip)) return;
@@ -1215,7 +1223,6 @@ void ActorEditor::draw(Engine& e) {
     // display and the toolbar above it clip its own buttons.
     const f32 dpi = ImGui::GetFontSize() / 16.0f;
     const f32 avail = ImGui::GetContentRegionAvail().x;
-    const f32 spacing = ImGui::GetStyle().ItemSpacing.x;
 
     // The widths are MEMBERS, so a split the user drags survives every frame this tab is open.
     // Seeded once from a sensible default rather than stored, because a per-tab layout that
@@ -1299,10 +1306,10 @@ void ActorEditor::draw(Engine& e) {
         requestPreviewSize(iw, ih);
         const ImVec2 at = ImGui::GetCursorScreenPos();
         ImGui::Image(static_cast<ImTextureID>(g_preview->uiTextureId()), ImVec2(iw, ih));
-        // The gizmo and the wireframes project into a SQUARE of this size, because projectToScreen
-        // takes one extent. Passing the smaller of the two keeps a handle on the object when the
-        // panel is not square; making that exact is a change to projectToScreen, not to the layout.
-        const f32 s = iw < ih ? iw : ih;
+        // BOTH extents. The gizmo and the wireframes project through the same matrix the picture was
+        // drawn with, and that matrix's aspect is the target's -- so the NDC-to-pixel mapping needs
+        // the real width and the real height, not one number standing in for both.
+        const ImVec2 s(iw, ih);
 
         // Orbit, zoom, and the gizmo. Input lives HERE rather than in the preview feature, because
         // the feature must stay drivable with no ImGui at all -- that is what lets a test be the
@@ -1462,15 +1469,17 @@ void ActorEditor::draw(Engine& e) {
                                 180.0, 34.0);
     }
 
-    // What this actor declares beyond geometry. Said out loud because NEITHER is drawn: an actor
-    // that is only a camera previews as an empty view, and empty is indistinguishable from broken.
+    // What this actor declares beyond geometry. It used to say "(not drawn)" of both, which was true
+    // when it was written and stopped being true when the wireframes landed -- the frustum and the
+    // light's three circles are on screen. A panel that describes the viewport wrongly is worse than
+    // one that says nothing, because it sends somebody looking for a bug that is not there.
     if (const fmt::ActorClassInfo* k = activeInfo()) {
         if (k->hasCamera)
-            ImGui::TextDisabled("camera: %.0f deg, %.0f-%.0f cm (not drawn)",
+            ImGui::TextDisabled("camera: %.0f deg, %.0f-%.0f cm (frustum shown at a fixed 60 cm)",
                                 static_cast<double>(k->cameraFovDeg),
                                 static_cast<double>(k->cameraNearCm), static_cast<double>(k->cameraFarCm));
         if (k->hasPointLight)
-            ImGui::TextDisabled("point light: %.0f lux, %.0f cm (not drawn)",
+            ImGui::TextDisabled("point light: %.0f lux, %.0f cm (range shown as three circles)",
                                 static_cast<double>(k->lightIntensityLux),
                                 static_cast<double>(k->lightRangeCm));
         // Only when there is genuinely nothing to show. A Character declares no mesh and is still

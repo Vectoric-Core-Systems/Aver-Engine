@@ -306,6 +306,15 @@ before it finds it by name. Selecting a row highlights that component in the vie
 row came from a `b.Place`, drives the gizmo and the transform editor — the tree index and the model
 index are **derived** from one another rather than kept in step by hand.
 
+**The gizmo and the wireframes project with BOTH extents.** `projectToScreen` scaled NDC to pixels by
+one number, which was right only while the target was square. It is not: the viewport fills a column
+of whatever shape the splitters leave it. The projection matrix already carries that aspect, so NDC
+was correct and it was the pixel mapping that was wrong — scaling both axes by the smaller extent
+left a handle sitting on its object at the centre of the view and drifting further from it towards
+the edges, which reads as a mis-calibrated gizmo rather than as a projection bug. Measured on a
+1732×1423 viewport: a light's range circles, which are centred on the actor at the origin, land on
+the viewport's exact centre; under the old mapping they sat ~155 px left of it.
+
 **Components with no geometry are drawn as wireframes**, projected through the preview's own camera:
 a camera as a frustum pointing down +X at a fixed 60 cm (a real far plane is tens of metres and
 would fill the preview with lines that say nothing about where the camera is), and a point light as
