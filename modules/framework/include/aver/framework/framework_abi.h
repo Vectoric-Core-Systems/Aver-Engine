@@ -155,6 +155,25 @@ AVER_FW_ABI int32_t aver_fw_class_set_player_controller(int32_t gameMode, const 
 AVER_FW_ABI int32_t aver_fw_spawn(int32_t c, const char* name,
                                   const float* pos3, const float* quat4, const float* scale3);
 AVER_FW_ABI int32_t aver_fw_destroy(int32_t e);
+
+/* Spawn for a PREVIEW: bind and build_models, and STOP. OnBeginPlay is not dispatched.
+ *
+ * The distinction is the whole point and it is not a convenience. A normal spawn runs
+ * bind -> build_models -> beginPlay, and OnBeginPlay is where a game does things: SkyForge's game
+ * mode spawns five targets and six crates there, its target adds a physics body, its character
+ * pushes an input context. An editor that spawned an actor to look at it would run all of that, into
+ * the live world, every time somebody opened a tab.
+ *
+ * build_models is the part a preview wants -- it is this engine's construction script, the code that
+ * says what the actor is MADE of -- and it is the part with no side effects outside the actor's own
+ * child entities. UE draws the same line: its blueprint viewport runs the construction script and
+ * does not run BeginPlay.
+ *
+ * Destroy with aver_fw_destroy_preview, never aver_fw_destroy: dispatching OnEndPlay to an instance
+ * that never had OnBeginPlay is the same error in the other direction. */
+AVER_FW_ABI int32_t aver_fw_spawn_preview(int32_t c, const char* name,
+                                          const float* pos3, const float* quat4, const float* scale3);
+AVER_FW_ABI int32_t aver_fw_destroy_preview(int32_t e);
 AVER_FW_ABI int32_t aver_fw_class_of(int32_t e);   /* the entity's class, or 0 — != 0 IS "actor" */
 
 /* ---- possession — flag-gated ----

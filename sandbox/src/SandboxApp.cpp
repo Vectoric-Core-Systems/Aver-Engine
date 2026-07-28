@@ -5650,6 +5650,9 @@ Application* createApplication(int argc, char** argv) {
         // answer that did not involve a person and a mouse, and the one time it was checked by
         // reading the code the answer was wrong for a subtle reason (cbOpenEntry returned early).
         else if (!std::strcmp(argv[i],"--open-asset") && i+1<argc) openAsset=argv[++i];
+        // Pairs with --open-asset: the tab comes up with LIVE already on, so a headless run exercises
+        // the spawn-and-read path a checkbox otherwise gates behind a human with a mouse.
+        else if (!std::strcmp(argv[i],"--actor-live")) editor::setActorEditorLiveByDefault(true);
         else if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
         else if (!std::strcmp(argv[i],"--new-script")) focusScript=true;

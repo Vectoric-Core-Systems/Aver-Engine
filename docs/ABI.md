@@ -4,7 +4,7 @@
 
 > **Three README files in this tree are stale and should be read as historical.** `abi/README.md:3` describes "Aver.ABI — stable `extern "C"` interop seam … Everything non-C++ binds here". `modules/abi/README.md:7-11` describes "The flat extern "C" seam: opaque handles, out-pointer returns, aver_abi_version(). The single interop boundary C#/Rust bind against", adding that it will be wired into the build "when Phase 7 implements it". Neither describes anything that exists: both directories contain exactly one file — that README — with no header, no source and no `CMakeLists.txt`, and neither is named by an `add_subdirectory` in the top-level `CMakeLists.txt` (verified by directory listing and by grep over the tree). No symbol named `aver_abi_version` exists anywhere; the only hits are those READMEs and `docs/ARCHITECTURE.md:158, 230, 303, 307`, which carries the same sketch and is stale the same way. `interop/README.md:3` promises "Generated P/Invoke (C#) and bindgen (Rust) bindings derived from abi/ headers"; that directory also holds only its README, the C# bindings under `scripting/csharp/` are hand-written, and a search for `*.rs` and `Cargo.toml` over the whole tree returns nothing — there is no Rust in this repository.
 
-**201 exported C functions declared across seven headers**, plus five reverse entry points the script host binds by name. Counts verified by grepping each header for its export macro at line start: scene 35, framework 46, framework hooks 4, physics 36, PBR 48, Voxi 21, UI 11. Read that number as *declared in headers*: the shipped DLLs export 202, because `aver_scene_debug_string_pool_size` is `AVER_SCENE_ABI`-exported from `modules/scene/src/SceneAbi.cpp:111` and declared in no header (§3). A `dumpbin /exports` will therefore show one more than this document lists, and that is the one.
+**203 exported C functions declared across seven headers**, plus five reverse entry points the script host binds by name. Counts verified by grepping each header for its export macro at line start: scene 35, framework 48, framework hooks 4, physics 36, PBR 48, Voxi 21, UI 11. Read that number as *declared in headers*: the shipped DLLs export 204, because `aver_scene_debug_string_pool_size` is `AVER_SCENE_ABI`-exported from `modules/scene/src/SceneAbi.cpp:111` and declared in no header (§3). A `dumpbin /exports` will therefore show one more than this document lists, and that is the one.
 
 ---
 
@@ -300,9 +300,16 @@ AVER_FW_ABI int32_t aver_fw_spawn(int32_t c, const char* name,
                                   const float* pos3, const float* quat4, const float* scale3);
 AVER_FW_ABI int32_t aver_fw_destroy(int32_t e);
 AVER_FW_ABI int32_t aver_fw_class_of(int32_t e);   /* the entity's class, or 0 — != 0 IS "actor" */
+
+/* the PREVIEW pair: bind + build_models, and no begin/end edge */
+AVER_FW_ABI int32_t aver_fw_spawn_preview(int32_t c, const char* name,
+                                          const float* pos3, const float* quat4, const float* scale3);
+AVER_FW_ABI int32_t aver_fw_destroy_preview(int32_t e);
 ```
 
 Rotation crosses as a **quaternion** though the author writes degrees higher up; a null `pos3`/`quat4`/`scale3` means "use the class default" (`framework_abi.h:149-156`).
+
+**The preview pair is a different operation, not a convenience.** An ordinary spawn runs `bind → build_models → beginPlay`; `aver_fw_spawn_preview` stops after `build_models`, and `aver_fw_destroy_preview` skips `endPlay` (but still `unbind`s — an instance was bound, so one must be dropped). The line is drawn where it is because `build_models` is this engine's construction script and has no side effects outside the actor's own child entities, while `OnBeginPlay` is where a game *does things*: SkyForge's game mode spawns eleven actors there and its target adds a physics body. An editor that opened a tab by spawning normally would run all of that into the live world. UE draws the same line — its Blueprint viewport runs the construction script and does not run BeginPlay. Pinned by ten assertions in `tests/framework/src/FrameworkTest.cpp`.
 
 ### Possession
 *You are handing control of a pawn to a controller, taking it away, or asking who drives what.*

@@ -1,10 +1,19 @@
 #include "ActorEditor.hpp"
 
+#include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/ActorScript.hpp"
 #include "aver/render/preview/ActorPreview.hpp"
 #include "aver/render/preview/PreviewMeshCache.hpp"
 #include "aver/runtime/Engine.hpp"
+
+// The LIVE view's two dependencies, and the only place this tab reaches past its own source text.
+// Guarded because a build without them still gets the whole parsed editor -- Live is the extra, not
+// the editor.
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
+#  include "aver/framework/framework_abi.h"
+#  include "aver/scene/scene_abi.h"
+#endif
 
 #if AVER_WITH_IMGUI
 #  include <imgui.h>
@@ -14,6 +23,7 @@
 #include <fstream>
 #include <sstream>
 #include <filesystem>
+#include <unordered_map>
 
 namespace aver::editor {
 namespace {
@@ -32,6 +42,7 @@ bool g_previewTried = false;
 // a deleted feature calls prePass on freed memory, which is not an error anything reports.
 rhi::IDevice* g_device = nullptr;
 ActorEditorHooks g_hooks;
+bool g_liveDefault = false;
 
 bool readFile(const std::string& path, std::string& out) {
     std::ifstream in(path, std::ios::binary);
@@ -41,6 +52,95 @@ bool readFile(const std::string& path, std::string& out) {
     out = ss.str();
     return true;
 }
+
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
+// ObjectId as the managed side mints it: aver::fnv1a64 over the path's bytes AS WRITTEN.
+//
+// core's, not a copy: FormatTest already pins fnv1a64 against Aver.Scene's ObjectIdOf by value, so
+// borrowing it means the agreement stays tested. A private FNV here would be a second constant pair
+// nothing checks, and it would drift silently the first time either side changed.
+//
+// AS WRITTEN matters and is not a detail. ObjectIdOf does not canonicalise, so a script that says
+// "Content/Meshes/Car.ocmesh" and one that says "Meshes/Car.ocmesh" produce different ids for the
+// same file. Reading an id back therefore cannot be undone by hashing the canonical form -- the
+// table below has to hold every spelling that could have produced it.
+inline u64 objectIdOf(std::string_view path) { return aver::fnv1a64(path); }
+
+// id -> a path the mesh cache can open. Built once per content root, because a Live rebuild that
+// walked the content tree every time would stat the whole project on every toggle.
+//
+// Three sources, and all three are needed. The BUILT-INS are not files and no walk would find them,
+// yet nearly every template actor names one. The DISK WALK covers meshes the script names through a
+// variable or a constant, which no amount of reading this one file would recover. The SOURCE
+// LITERALS cover the reverse case -- a path written in this file for a mesh that has not been built
+// yet, where the id is real and the file is not.
+class MeshNameTable {
+public:
+    void reset(std::string root) {
+        if (root == root_ && built_) return;
+        root_ = std::move(root);
+        byId_.clear();
+        built_ = false;
+    }
+    void ensure() {
+        if (built_) return;
+        built_ = true;
+        add("Meshes/cube.ocmesh");
+        add("Meshes/sphere.ocmesh");
+        if (root_.empty()) return;
+        std::error_code ec;
+        const std::filesystem::path base(root_);
+        for (std::filesystem::recursive_directory_iterator it(base, ec), end; it != end && !ec; it.increment(ec)) {
+            if (!it->is_regular_file(ec)) continue;
+            if (it->path().extension() != ".ocmesh") continue;
+            const std::string rel = std::filesystem::relative(it->path(), base, ec).generic_string();
+            if (ec || rel.empty()) continue;
+            add(rel);
+            // Both spellings, because a script may write either and they hash differently. The value
+            // stored is the same file either way, so the cache resolves the same mesh.
+            add("Content/" + rel);
+        }
+    }
+    // Every string literal in the tab's own source that names a `.ocmesh`. Cheap, and it is what
+    // makes a freshly written Place call resolve before anything has been cooked.
+    void addLiteralsFrom(std::string_view text) {
+        for (usize i = 0; i + 1 < text.size(); ++i) {
+            if (text[i] != '"') continue;
+            const usize end = text.find('"', i + 1);
+            if (end == std::string_view::npos) break;
+            const std::string_view lit = text.substr(i + 1, end - i - 1);
+            if (lit.size() > 7 && lit.substr(lit.size() - 7) == ".ocmesh") add(std::string(lit));
+            i = end;
+        }
+    }
+    const std::string* find(u64 id) const {
+        const auto it = byId_.find(id);
+        return it == byId_.end() ? nullptr : &it->second;
+    }
+private:
+    void add(std::string path) { byId_.emplace(objectIdOf(path), std::move(path)); }
+    std::unordered_map<u64, std::string> byId_;
+    std::string root_;
+    bool built_ = false;
+};
+MeshNameTable g_meshNames;
+
+// The scene field ids, resolved once. aver_scene_field is a lookup by qualified name and the ids are
+// stable for the process, so caching them keeps the per-entity walk to two integer reads.
+struct MeshFields {
+    int32_t mesh = 0, flags = 0;
+    bool ok() const { return mesh != 0 && flags != 0; }
+};
+const MeshFields& meshFields() {
+    static const MeshFields f = [] {
+        MeshFields m;
+        m.mesh  = aver_scene_field("CMeshRenderer.mesh");
+        m.flags = aver_scene_field("CMeshRenderer.flags");
+        return m;
+    }();
+    return f;
+}
+#endif
 
 // Degrees (yaw, pitch, roll) about +Z, +Y, +X and a scale, into the engine's row-vector matrix with
 // the translation in the LAST ROW. Written out rather than borrowed from the scene, because this
@@ -175,6 +275,24 @@ private:
              ? &classes_[static_cast<usize>(activeClass_)] : nullptr;
     }
     std::filesystem::file_time_type stamp_{};
+    // ---- the LIVE view ----
+    //
+    // What the class BUILDS, as against what the file SAYS. The parsed view is always available and
+    // needs nothing loaded; this one spawns the real class, lets its BuildModels run, reads the child
+    // transforms back out and destroys it. The two disagree exactly when BuildModels does something
+    // the parser cannot see -- a loop, a constant, a branch on a field -- which is precisely the case
+    // where an author needs to look rather than guess.
+    //
+    // It is NOT a play session and must never become one: aver_fw_spawn_preview withholds the BEGIN
+    // edge, so no OnBeginPlay runs, nothing is possessed and nothing ticks. See framework_abi.h.
+    bool live_ = g_liveDefault;
+    bool liveStale_ = true;             // rebuild on the next draw
+    std::string liveWhy_;               // why it is off, or what the last rebuild found
+    int liveUnnamed_ = 0;               // models whose mesh id resolved to no path this could open
+    bool liveCapsuleFromSource_ = false;   // the one figure in the live view that the spawn did not give
+    std::vector<render::preview::PreviewDraw> liveDraws_;
+    void rebuildLive(Engine& e);
+
     bool haveStamp_ = false;
     bool dirty_ = false;
     int selected_ = -1;
@@ -217,15 +335,135 @@ bool ActorEditor::reloadIfChanged() {
     classes_ = fmt::parseActorClasses(source_);
     pickFirstPreviewable();
     if (selected_ >= static_cast<int>(script_.models.size())) selected_ = -1;
+    // The source changed, so the LIVE view is stale too -- but only against the class that is loaded
+    // now. A text edit does not reload C#, so the respawn shows the same thing until Compile C# runs;
+    // that is honest, and it is what the panel says.
+    liveStale_ = true;
     status_ = "Reloaded from disk.";
     AVER_INFO("[ActorEditor] {} changed on disk; reloaded {} placement(s)",
               path_, script_.models.size());
     return true;
 }
 
+// ---------------------------------------------------------------- the live view
+
+void ActorEditor::rebuildLive(Engine& e) {
+    liveStale_ = false;
+    liveDraws_.clear();
+    liveUnnamed_ = 0;
+    liveCapsuleFromSource_ = false;
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
+    const fmt::ActorClassInfo* info = activeInfo();
+    if (!info || !e.device()) { liveWhy_ = "No class selected."; live_ = false; return; }
+
+    // The REGISTRY name, which is the attribute's when there is one and the C# type name otherwise --
+    // HostBridge.ResolveClassIdentity decides it that way and this has to agree, or a class declared
+    // [AverClass("Crate")] on `class WoodenCrate` would be looked up under the wrong one. Both are
+    // tried because the parser cannot always tell which the bridge chose.
+    const std::string& reg = info->className.empty() ? info->typeName : info->className;
+    int32_t c = reg.empty() ? 0 : aver_fw_class_find(reg.c_str());
+    if (!c && !info->typeName.empty() && info->typeName != reg)
+        c = aver_fw_class_find(info->typeName.c_str());
+    if (!c) {
+        liveWhy_ = "'" + (reg.empty() ? info->typeName : reg) +
+                   "' is not loaded. Compile C#, then start the project's scripts.";
+        live_ = false;
+        return;
+    }
+
+    // At the ORIGIN with no overrides, so every world matrix that comes back IS the local transform
+    // relative to the actor -- the same space the parsed view draws in, which is what lets the two
+    // be compared by flicking the toggle rather than by reading numbers.
+    const int32_t root = aver_fw_spawn_preview(c, "$ActorEditorPreview", nullptr, nullptr, nullptr);
+    if (!root) {
+        liveWhy_ = "'" + reg + "' would not spawn. Abstract classes cannot be instanced.";
+        live_ = false;
+        return;
+    }
+
+    g_meshNames.reset(g_contentRoot);
+    g_meshNames.ensure();
+    g_meshNames.addLiteralsFrom(source_);
+
+    const MeshFields& mf = meshFields();
+    // Depth-first over the spawned subtree, iteratively -- BuildModels is authored code and nothing
+    // stops it nesting, so a recursive walk here would put the depth limit in the wrong place.
+    std::vector<int32_t> stack{root};
+    while (!stack.empty()) {
+        const int32_t ent = stack.back();
+        stack.pop_back();
+        for (int32_t k = aver_scene_first_child(ent); k; k = aver_scene_next_sibling(k))
+            stack.push_back(k);
+        if (!mf.ok()) continue;
+
+        const i64 id = aver_scene_get_i64(ent, mf.mesh);
+
+        // HIDDEN before anything else can draw it. world().flush retires a destroy on the NEXT frame
+        // boundary, so between this call and that flush the preview actor is a live entity sitting at
+        // the world origin -- and the level viewport would render it. Clearing the visible bit makes
+        // that impossible regardless of where in the frame this tab happens to be drawn.
+        aver_scene_set_i32(ent, mf.flags, aver_scene_get_i32(ent, mf.flags) & ~0x1);
+
+        if (id == 0) continue;
+        const std::string* path = g_meshNames.find(static_cast<u64>(id));
+        if (!path) { ++liveUnnamed_; continue; }
+
+        render::preview::PreviewDraw d;
+        d.mesh = g_meshes.resolve(*e.device(), *path, &d.boundsRadius);
+        aver_scene_world_matrix(ent, d.world);
+        liveDraws_.push_back(d);
+    }
+
+    aver_fw_destroy_preview(root);
+
+    // A CHARACTER THAT BUILT NOTHING still has a shape, and it is the capsule.
+    //
+    // AverCharacter keeps Height and Radius as plain managed fields -- there is no component and no
+    // scene field, so a native walk of the spawned actor cannot see them at all. The only place those
+    // numbers are legible is the source, which is where the parsed view already gets them. Falling
+    // back to it here is the difference between opening a project's central actor and finding an
+    // empty box; the panel says outright that this one figure did not come from the spawn.
+    if (liveDraws_.empty() && info->kind == fmt::ActorKind::Character) {
+        render::preview::PreviewDraw d;
+        d.mesh = g_meshes.capsule(*e.device(), info->capsuleHeight, info->capsuleRadius,
+                                  &d.boundsRadius);
+        d.baseColor[0] = 0.45f; d.baseColor[1] = 0.62f; d.baseColor[2] = 0.85f;
+        liveDraws_.push_back(d);
+        liveCapsuleFromSource_ = true;
+    }
+
+    char msg[192];
+    if (liveCapsuleFromSource_)
+        std::snprintf(msg, sizeof msg,
+                      "%s built no models; the capsule shown is the source's, not the class's.",
+                      reg.c_str());
+    else
+        std::snprintf(msg, sizeof msg, "%zu model(s) built by %s.", liveDraws_.size(), reg.c_str());
+    liveWhy_ = msg;
+    AVER_INFO("[ActorEditor] live {}: {} model(s), {} unnamed", reg, liveDraws_.size(), liveUnnamed_);
+#else
+    (void)e;
+    liveWhy_ = "This build has no framework or scene module.";
+    live_ = false;
+#endif
+}
+
 void ActorEditor::buildDrawList(Engine& e) {
     if (!g_preview || !e.device()) return;
     g_meshes.setContentRoot(*e.device(), g_contentRoot);
+
+    // LIVE replaces the parsed list rather than adding to it. Drawing both would put two copies of
+    // every model that agrees on top of each other and read as z-fighting, which is the opposite of
+    // what a comparison is for.
+    if (live_) {
+        if (liveStale_) rebuildLive(e);
+        if (live_) {
+            std::vector<render::preview::PreviewDraw> copy = liveDraws_;
+            g_preview->setDrawList(std::move(copy));
+            if (!framed_) { g_preview->frameAll(); framed_ = true; }
+            return;
+        }
+    }
 
     std::vector<render::preview::PreviewDraw> draws;
     draws.reserve(script_.models.size() + 1);
@@ -438,6 +676,27 @@ void ActorEditor::draw(Engine& e) {
         ImGui::SameLine();
         if (ImGui::Button("Frame All") && g_preview) g_preview->frameAll();
 
+        // ---- Live ----
+        //
+        // Off by default, and deliberately. The parsed view works with nothing loaded, on a file that
+        // has never compiled, in a build with no CLR; Live works only once the class is in the
+        // registry. Defaulting to the fragile one would make the tab look broken in every case where
+        // the robust one had something useful to show.
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Live", &live_)) { liveStale_ = true; framed_ = false; selected_ = -1; }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Spawn the compiled class, run its BuildModels and show what it actually "
+                              "builds.\nNo OnBeginPlay, no ticking, nothing possessed -- the actor is "
+                              "destroyed the same frame.");
+        if (live_) {
+            ImGui::SameLine();
+            if (ImGui::Button("Refresh")) { liveStale_ = true; framed_ = false; }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Spawn it again. Do this after a Compile C#, which replaces the class.");
+        }
+
         // The one thing a reader of this panel must not have to discover for themselves.
         ImGui::SameLine();
         ImGui::TextDisabled("|  preview lighting is fixed and does not match the level viewport");
@@ -507,7 +766,11 @@ void ActorEditor::draw(Engine& e) {
             // decided on mouse-DOWN and held for the whole gesture: deciding per frame would let a
             // drag that started on the gizmo become an orbit the moment the cursor left the handle,
             // which is exactly when a user is dragging fastest.
-            const bool haveSel = selected_ >= 0 && selected_ < static_cast<int>(script_.models.size());
+            // NO DRAGGING IN THE LIVE VIEW. What is on screen there was produced by code, and there
+            // is no byte in the file to write a new coordinate back to -- a handle that moved a model
+            // and then lost the move on the next Refresh would be worse than no handle.
+            const bool haveSel = !live_ && selected_ >= 0
+                              && selected_ < static_cast<int>(script_.models.size());
             if (haveSel && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::IsItemHovered()) {
                 const ImVec2 m = io.MousePos;
                 draggingAxis_ = pickGizmoAxis(ImVec2(m.x - at.x, m.y - at.y), s);
@@ -530,7 +793,7 @@ void ActorEditor::draw(Engine& e) {
                 g_preview->camera().addZoom(io.MouseWheel > 0.0f ? 0.88f : 1.0f / 0.88f);
         }
 
-        if (selected_ >= 0 && selected_ < static_cast<int>(script_.models.size()))
+        if (!live_ && selected_ >= 0 && selected_ < static_cast<int>(script_.models.size()))
             drawGizmo(at, s, script_.models[static_cast<usize>(selected_)]);
     } else if (!noViewport) {
         // Only when a viewport WAS expected. Saying "no preview on this backend" about a Game Mode
@@ -569,7 +832,7 @@ void ActorEditor::draw(Engine& e) {
         }
         for (const std::string& n : labels) items.push_back(n.c_str());
         if (ImGui::Combo("Actor", &activeClass_, items.data(), static_cast<int>(items.size())))
-            { selected_ = -1; framed_ = false; }
+            { selected_ = -1; framed_ = false; liveStale_ = true; }
     } else if (const fmt::ActorClassInfo* k = activeInfo()) {
         // The C# type, which is what the author named the thing. The bound name is shown below as
         // bookkeeping.
@@ -685,6 +948,20 @@ void ActorEditor::draw(Engine& e) {
     }
 
     ImGui::Separator();
+    // The live line is kept SEPARATE from status_ and outlives it: status_ is the last thing that
+    // happened, and "why Live is off" is a standing condition that has to stay readable while the
+    // user goes and compiles.
+    if (!liveWhy_.empty()) {
+        if (live_) {
+            ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.60f, 1.0f), "Live: %s", liveWhy_.c_str());
+            if (liveUnnamed_ > 0)
+                ImGui::TextColored(ImVec4(0.98f, 0.80f, 0.35f, 1.0f),
+                                   "%d model(s) name a mesh no file in this project matches.",
+                                   liveUnnamed_);
+        } else {
+            ImGui::TextColored(ImVec4(0.98f, 0.80f, 0.35f, 1.0f), "Live off: %s", liveWhy_.c_str());
+        }
+    }
     if (!status_.empty()) ImGui::TextDisabled("%s", status_.c_str());
 
     ImGui::EndGroup();
@@ -695,9 +972,16 @@ void ActorEditor::draw(Engine& e) {
 
 } // namespace
 
-void setActorEditorContentRoot(std::string root) { g_contentRoot = std::move(root); }
+void setActorEditorContentRoot(std::string root) {
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
+    g_meshNames.reset(root);   // a different project is a different set of meshes under the same names
+#endif
+    g_contentRoot = std::move(root);
+}
 
 void setActorEditorHooks(ActorEditorHooks hooks) { g_hooks = std::move(hooks); }
+
+void setActorEditorLiveByDefault(bool on) { g_liveDefault = on; }
 
 void shutdownActorEditors() {
     if (g_device && g_preview) g_device->removeRenderFeature(g_preview);

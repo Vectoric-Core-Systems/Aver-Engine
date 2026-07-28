@@ -542,8 +542,11 @@ int32_t aver_fw_class_set_player_controller(int32_t gameMode, const char* contro
 
 // ---- actors ------------------------------------------------------------------------------------
 
-int32_t aver_fw_spawn(int32_t c, const char* name,
-                      const float* pos3, const float* quat4, const float* scale3) {
+// The spawn body, parameterised by whether it dispatches the BEGIN edge. aver_fw_spawn passes true;
+// aver_fw_spawn_preview passes false, so an editor gets bind + build_models and no OnBeginPlay.
+static int32_t spawnActor(int32_t c, const char* name,
+                          const float* pos3, const float* quat4, const float* scale3,
+                          bool dispatchBeginPlay) {
     ClassRecord* r = rec(c);
     if (!r) return 0;
     // An ABSTRACT class is a lineage anchor (the Pawn/GameMode/... bases), never an instance. Rejecting
@@ -600,7 +603,7 @@ int32_t aver_fw_spawn(int32_t c, const char* name,
         const bool bound = d.bind && d.bind(static_cast<int64_t>(r->nameHash), ae) == 1;
         if (bound) {
             if (d.build_models) d.build_models(ae);
-            if (d.beginPlay)    d.beginPlay(ae, AVER_FW_BEGIN_SPAWN);
+            if (dispatchBeginPlay && d.beginPlay) d.beginPlay(ae, AVER_FW_BEGIN_SPAWN);
         }
     }
 
@@ -609,7 +612,7 @@ int32_t aver_fw_spawn(int32_t c, const char* name,
 
 // The teardown body, parameterised by the end reason it dispatches. aver_fw_destroy passes DESTROY; the
 // play-stop path passes STOP so a script's OnEndPlay can tell "the world stopped" from "I was destroyed".
-static int32_t destroyActor(int32_t e, int32_t endReason) {
+static int32_t destroyActor(int32_t e, int32_t endReason, bool dispatchEndPlay = true) {
     const Entity ent = toEntity(e);
     if (!world().valid(ent)) return 0;
 
@@ -637,7 +640,10 @@ static int32_t destroyActor(int32_t e, int32_t endReason) {
     if (classHasFlags(ent, AVER_FW_CLASS_MANAGED) && managedInstalled()) {
         AvManagedDispatch& d = managedDispatch();
         const aver_entity  ae = static_cast<aver_entity>(e);
-        if (d.endPlay) d.endPlay(ae, endReason);
+        // unbind is NOT under the switch. A preview spawn still BOUND an instance, so it still has one
+        // to drop; skipping that would leak a managed object per preview and leave tick_all walking a
+        // dead entity. Only the hook the actor never received is withheld.
+        if (dispatchEndPlay && d.endPlay) d.endPlay(ae, endReason);
         if (d.unbind)  d.unbind(ae);
     }
 
@@ -662,6 +668,22 @@ static int32_t destroyActor(int32_t e, int32_t endReason) {
 }
 
 int32_t aver_fw_destroy(int32_t e) { return destroyActor(e, AVER_FW_END_DESTROY); }
+
+int32_t aver_fw_spawn(int32_t c, const char* name,
+                      const float* pos3, const float* quat4, const float* scale3) {
+    return spawnActor(c, name, pos3, quat4, scale3, /*dispatchBeginPlay=*/true);
+}
+
+// The preview pair. See framework_abi.h for why build_models is the half an editor wants and
+// OnBeginPlay is the half it must not run.
+int32_t aver_fw_spawn_preview(int32_t c, const char* name,
+                              const float* pos3, const float* quat4, const float* scale3) {
+    return spawnActor(c, name, pos3, quat4, scale3, /*dispatchBeginPlay=*/false);
+}
+
+int32_t aver_fw_destroy_preview(int32_t e) {
+    return destroyActor(e, AVER_FW_END_DESTROY, /*dispatchEndPlay=*/false);
+}
 
 int32_t aver_fw_class_of(int32_t e) {
     return classOfEntity(toEntity(e));

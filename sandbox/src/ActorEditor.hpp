@@ -39,6 +39,14 @@ struct ActorEditorHooks {
 };
 void setActorEditorHooks(ActorEditorHooks hooks);
 
+// Opens every new actor tab with the LIVE view already on.
+//
+// Exists for the headless run, and that is the honest reason: Live is a checkbox nobody can tick
+// without a window, so without this the one path that spawns a real class could only ever be checked
+// by a human looking at a screen. `--actor-live` sets it, `--open-asset` opens the tab, and the log
+// line says how many models the class actually built.
+void setActorEditorLiveByDefault(bool on);
+
 // Releases the shared preview and its meshes. Called before the device goes.
 void shutdownActorEditors();
 

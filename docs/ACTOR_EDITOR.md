@@ -57,6 +57,7 @@ and zero tests.** It is a starting point, not a dependency that has been exercis
 | The preview render feature | `modules/render.actorpreview/` | `ActorPreviewTest`, 51 assertions |
 | The preview's own mesh registry | `modules/render.actorpreview/src/PreviewMeshCache.cpp` | — |
 | The tab, gizmo and reload | `sandbox/src/ActorEditor.{hpp,cpp}` | not covered by a test |
+| The **Live** view — spawn the class, read what it built | same, plus `aver_fw_spawn_preview` | `FrameworkTest` (the ABI edge); `--open-asset … --actor-live` (the tab) |
 
 **It is general, and that was checked against real projects rather than a fixture.** A sweep over
 SkyForge's scripts opens `Gun.cs` (2 actors), `FpsGameMode.cs` (5 actors, 2 previewable) and
@@ -136,7 +137,7 @@ See §3. This is the piece that decides the shape of everything else.
 
 ### Piece 4 — live sync
 
-See §4.
+See §4. Shipped as the **Live** toggle described in §4b.
 
 ---
 
@@ -221,6 +222,63 @@ comes with it.
 replacing somebody's in-progress drag with what a background tool wrote is the one behaviour a live
 sync must never have. Saving, or closing without saving, resolves it. A file mid-write that fails to
 parse also leaves the previous good state on screen rather than blanking the tab.
+
+---
+
+## 4b. The Live toggle, as shipped
+
+The tab draws two things, and the toggle picks between them.
+
+**Off (the default) — the PARSED view.** What the source *says*: the class's `Configure` mesh, the
+designer region's placements, a character's capsule. It needs nothing loaded, works on a file that
+has never compiled and in a build with no CLR, and it is what the gizmo drags — the picture and the
+bytes are the same data.
+
+**On — the LIVE view.** What the class *builds*. It resolves the class by its registry name
+(`aver_fw_class_find`), spawns it with `aver_fw_spawn_preview`, walks the resulting subtree reading
+`CMeshRenderer.mesh` and `aver_scene_world_matrix` off each child, and destroys it with
+`aver_fw_destroy_preview` — all within the one call. Nothing is left in the world.
+
+The two disagree exactly when `BuildModels` does something the parser cannot see — a loop, a
+constant, a branch on a field — which is precisely when an author needs to look rather than guess.
+Live is off by default because the parsed view is the robust one: defaulting to the fragile one
+would make the tab look broken in every case where the other had something useful to show.
+
+Four properties are load-bearing, and each is measured rather than asserted:
+
+1. **No `OnBeginPlay`.** `aver_fw_spawn_preview` stops after `build_models`. Opening `Target.cs`
+   with Live on produces no `Physics.AddStaticBox` — the log shows the ground body and nothing else,
+   where a normal spawn would have added one per open. See `docs/ABI.md` for the full argument.
+2. **Nothing leaks into the level.** The spawned entity's `CMeshRenderer` visible bit is cleared
+   before anything can draw it, because `World::flush` retires a destroy on the *next* frame
+   boundary. Measured: `scene-render: 16 spawned CMeshRenderer entities drawn`, identical with and
+   without `--actor-live`.
+3. **`unbind` still fires** on `aver_fw_destroy_preview`, or the editor would leak one managed object
+   per Refresh.
+4. **Mesh ids resolve back to paths.** `CMeshRenderer.mesh` is an `fnv1a64` ObjectId, and
+   `Aver.Scene.ObjectIdOf` hashes the path *as written* rather than canonically — so the reverse
+   table holds every spelling that could have produced an id: the two built-in primitives, every
+   `.ocmesh` under the content root in both bare and `Content/`-prefixed form, and every `.ocmesh`
+   string literal in the file itself. The hash is `aver::fnv1a64`, which `FormatTest` already pins
+   against the C# side by value.
+
+**What Live cannot show.** `AverCharacter` keeps `Height` and `Radius` as plain managed fields —
+no component, no scene field — so a native walk of a spawned character sees nothing. A character
+that built no models therefore falls back to the source's capsule, and the panel says so rather than
+passing it off as measured. The gizmo is disabled in the live view: what is on screen there was
+produced by code, and there is no byte in the file to write a new coordinate back to.
+
+**Refresh is manual.** A Compile C# replaces the class in the registry; the tab does not currently
+notice, so the button is there and its tooltip says when to press it.
+
+Measured against SkyForge with `--open-asset <file> --actor-live`:
+
+| File | Class Live spawned | Result |
+|---|---|---|
+| `Target.cs` | `BP_Target` | 1 model, `Meshes/sphere.ocmesh` |
+| `Gun.cs` | `BP_GunPart` | 1 model, `Meshes/cube.ocmesh` |
+| `FpsGameMode.cs` | `BP_Block` | 1 model, `Meshes/cube.ocmesh` |
+| `FpsCharacter.cs` | `BP_FpsCharacter` | 0 models; capsule 180×34 cm from source |
 
 ---
 

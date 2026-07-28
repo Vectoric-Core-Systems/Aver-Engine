@@ -491,6 +491,36 @@ static void testManagedDispatch() {
     check(g_disp.bindOrder < g_disp.buildOrder && g_disp.buildOrder < g_disp.beginOrder,
           "the begin edge fires in order: bind -> build_models -> begin_play");
 
+    // ---- THE PREVIEW EDGE: spawn_preview runs the construction and stops.
+    //
+    // This is the contract the actor editor's Live view rests on, and getting it wrong is not a
+    // cosmetic bug -- it would run every OnBeginPlay in the project into the live world every time
+    // somebody opened a tab. SkyForge's game mode spawns eleven actors there.
+    //
+    // What must still happen is as important as what must not: bind() has to fire (there is no
+    // instance to build models on otherwise) and build_models() has to fire (it IS the preview), and
+    // on the way out unbind() has to fire or the editor leaks a managed object per Refresh.
+    g_disp.reset();
+    g_dispSeq = 0;
+    const int32_t prev = aver_fw_spawn_preview(managedC, "preview-1", nullptr, nullptr, nullptr);
+    check(prev != 0, "the managed actor spawns for a preview");
+    check(g_disp.bindCount == 1, "spawn_preview still binds the managed instance");
+    check(g_disp.buildCount == 1, "spawn_preview still runs build_models — that is what a preview shows");
+    check(g_disp.beginCount == 0, "spawn_preview does NOT fire begin_play");
+    check(g_disp.bindOrder < g_disp.buildOrder, "bind still precedes build_models on the preview edge");
+
+    check(aver_fw_destroy_preview(prev) == 1, "the preview actor is destroyed");
+    check(g_disp.endCount == 0, "destroy_preview does NOT fire end_play");
+    check(g_disp.unbindCount == 1, "destroy_preview still unbinds — an instance was bound, so one is dropped");
+
+    // And the ordinary pair is unaffected by the split: a normal spawn/destroy still fires both edges.
+    g_disp.reset();
+    g_dispSeq = 0;
+    const int32_t normal = aver_fw_spawn(managedC, "after-preview", nullptr, nullptr, nullptr);
+    check(g_disp.beginCount == 1, "an ordinary spawn still fires begin_play after the preview split");
+    aver_fw_destroy(normal);
+    check(g_disp.endCount == 1, "an ordinary destroy still fires end_play after the preview split");
+
     // ---- a NON-managed spawn fires NOTHING (Prop carries no MANAGED flag).
     g_disp.reset();
     const int32_t plain = aver_fw_spawn(g_actor, "plain-1", nullptr, nullptr, nullptr);
