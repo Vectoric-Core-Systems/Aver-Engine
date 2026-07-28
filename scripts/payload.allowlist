@@ -1,0 +1,109 @@
+# Aver Engine — shipping payload allowlist
+#
+# What a DOWNLOADED engine consists of. Read by scripts/stage-payload.ps1, which copies exactly
+# these paths out of a build tree and refuses to invent any.
+#
+# WHY AN ALLOWLIST AND NOT A DENYLIST: build-release\bin holds 90 files, of which 17 are test
+# executables, 14 are .pdb/.ilk, and 6 are stale leftovers that nothing loads. A denylist means
+# every new test target silently ships until someone notices. `aver_add_module` takes an explicit
+# SOURCES list for the same reason — if a new file has to be named to be built, a new file should
+# have to be named to be shipped.
+#
+# FORMAT: [section] headers, then one path or glob per line. Blank lines and # comments ignored.
+#   [bin]      relative to <buildTree>\bin      -> staged at <out>\bin
+#   [samples]  same, but only with -WithSamples -> staged at <out>\bin
+#   [engine]   relative to the repo root        -> staged at <out>\<same relative path>
+# Globs may use * and **. A pattern matching nothing is an ERROR, not a warning: it means the
+# build layout moved and the payload silently lost a file.
+
+[bin]
+# The editor. Named Sandbox.exe because the CMake target is; the public README calls it
+# AverEngine.exe, and one of the two has to change before release.
+Sandbox.exe
+
+# The seven C-seam DLLs the editor load-time links. Listed individually rather than as Aver.*.dll
+# on purpose: that glob would also sweep the dead root-level Aver.Scripting.dll (see below).
+Aver.Audio.Abi.dll
+Aver.Framework.dll
+Aver.Physics.dll
+Aver.Render.PBR.dll
+Aver.Render.Voxi.dll
+Aver.Scene.dll
+Aver.UI.Abi.dll
+
+# Redistributables that are NOT part of Windows and must sit beside the executable.
+#   dxcompiler.dll + dxil.dll  HLSL is compiled at RUNTIME; dxil.dll is the signing library, and
+#                              without it drivers reject the compiled DXIL. From the Windows SDK.
+#   nethost.dll                loaded with LoadLibraryW (not linked) so the editor still starts on
+#                              a machine with no .NET at all.
+dxcompiler.dll
+dxil.dll
+nethost.dll
+
+# Fonts the editor loads by name from executableDir(). Roboto, Apache-2.0 — the notice is required.
+Roboto-Regular.ttf
+Roboto-Medium.ttf
+
+# Artwork sampled from executableDir(). splash.png is shown at NATIVE SIZE by the layered-window
+# splash, and the icon sheets are sliced on fixed tile dimensions, so none of these may be rescaled.
+splash.png
+logo.png
+compile-status.png
+file-icons.png
+folder-icons.png
+
+# The managed bridge and the C# contract assemblies. This subdirectory — not bin\ — is the live
+# copy: SandboxApp.cpp sets hd.bridgeDir = executableDir() + "\\Scripting", and ScriptHost.cpp
+# builds the bridge DLL and runtimeconfig paths from it.
+Scripting/**
+
+# avermatc, the material compiler the editor shells out to for Compile C#.
+Tools/**
+
+[samples]
+# Sample behaviour/actor assemblies. Useful for a first look, dead weight for a real project, so
+# they are opt-in rather than part of the default payload.
+SampleScripts/**
+ActorScripts/**
+
+[engine]
+# ENGINE C# SOURCE — LOAD-BEARING, NOT OPTIONAL.
+#
+# ProjectScaffold.cpp generates every project's Content\Scripts\Scripts.csproj with relative
+# <ProjectReference> paths to these .csproj files, resolved by walking up from executableDir()
+# looking for scripting/csharp/Aver.X/Aver.X.csproj. When the walk fails,
+# engineProjectReference() returns an EMPTY STRING, so the generated project gets Include="" and
+# MSBuild reports an error naming nothing useful. Drop this directory and every project's
+# `dotnet build` breaks, with a diagnostic that points nowhere.
+#
+# This is also why the staged layout puts bin\ and scripting\ as SIBLINGS: from <install>\bin the
+# walk finds <install>\scripting\csharp at one level up.
+#
+# The fix that would remove this from the payload is engine-side — emit <Reference> + <HintPath>
+# into bin\Scripting\*.dll instead of <ProjectReference> to source. Until then, it ships.
+scripting/csharp/**
+
+# NOT SHIPPED, and both halves of that are deliberate:
+#
+#   cmake/AvModule.cmake + modules/   EngineScaffold.cpp engineRoot() requires BOTH markers before
+#                                     it enables the Tools menu's C++ items and lists modules. A
+#                                     binary install cannot rebuild the engine, so the correct
+#                                     state is for that walk to fail and those items to be
+#                                     disabled. Shipping ONE of the two markers is the worst case:
+#                                     still degraded, but now it looks like a bug.
+#
+#   *.pdb / *.ilk                     ~340 MB in Debug. Symbols are a crash-triage tool for the
+#                                     engine developer, not part of the product.
+#
+#   the 17 test executables           UiTest, UiRenderTest, ActorPreviewTest, AudioTest,
+#                                     OcAudioTest, AudioProbe, FormatTest, JsonTest, GltfTest,
+#                                     MeshTest, MaterialTest, ActorScriptTest, SceneTest,
+#                                     FrameworkTest, PhysicsTest, ConvertTool, ActorSweep.
+#
+#   bin\Aver.Scripting.dll            STALE DUPLICATES, superseded by bin\Scripting\. Verified:
+#   bin\Aver.Scripting.xml            root Aver.Scripting.dll is 14,848 bytes dated 2026-07-22
+#   bin\Aver.Scripting.deps.json      while Scripting\Aver.Scripting.dll is 15,360 bytes dated
+#   bin\Aver.Scripting.Bridge.*       2026-07-26. Nothing reads the root copies — the bridge path
+#                                     is executableDir() + "\Scripting". They are left over from
+#                                     before the managed assemblies moved into a subdirectory, to
+#                                     avoid overwriting the same-named NATIVE DLLs in bin\.
