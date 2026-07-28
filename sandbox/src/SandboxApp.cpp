@@ -862,8 +862,18 @@ public:
             const ImGuiIO& io = ImGui::GetIO();
             // The central dock node is a transparent hole, so WantCaptureMouse is false over it
             // AND over any empty dockspace gap — require the cursor to be inside the viewport too.
-            const bool overUI = io.WantCaptureMouse || !inViewport(io.MousePos.x, io.MousePos.y) ||
-                                !levelFocused_;
+            // MOUSE follows the CURSOR, not the focus. Requiring focus here meant the first right
+            // click over an unfocused viewport was spent focusing it -- levelFocused_ is read from
+            // the previous frame -- so fly mode needed two presses to start. Hovering is what the
+            // user is expressing when they put the pointer on the scene and press a button.
+            const bool overUI = !levelHovered_ || !inViewport(io.MousePos.x, io.MousePos.y);
+            if (inputProbe_ && (ImGui::GetFrameCount() % 30) == 0)
+                AVER_INFO("[input-probe] mouse=({},{}) wantCaptureMouse={} hovered={} inViewport={} "
+                          "focused={} -> overUI={} | flying={} cam=({:.0f},{:.0f},{:.0f}) yaw={:.2f}",
+                          (int)io.MousePos.x, (int)io.MousePos.y, (int)io.WantCaptureMouse,
+                          (int)levelHovered_, (int)inViewport(io.MousePos.x, io.MousePos.y),
+                          (int)levelFocused_, (int)overUI, (int)flying_,
+                          camPos_.x, camPos_.y, camPos_.z, yaw_);
 
             // Right mouse enters fly mode (look + WASD/QE), like Unreal's viewport.
             //
@@ -915,7 +925,9 @@ public:
             // and a 1 m crate from the same distance cannot both be right, so the distance follows
             // the radius: far enough that the whole thing fits the vertical field of view, with a
             // margin so it does not touch the frame edge.
-            if (!io.WantCaptureKeyboard && ImGui::IsKeyPressed(ImGuiKey_F) && anySelected()) {
+            // Focus, not hover: F is a keystroke, and an actor tab having focus must not mean F
+            // moves the LEVEL camera underneath it.
+            if (levelFocused_ && !io.WantCaptureKeyboard && ImGui::IsKeyPressed(ImGuiKey_F) && anySelected()) {
                 EditXform x;
                 if (selectedXform(x)) {
                     const f32 r = selectedRadius();
@@ -1742,6 +1754,7 @@ public:
     void setUiDemo(bool on) { showUiDemo_ = on; }
     // --open-asset: drive the double-click path without a mouse.
     void setOpenAsset(std::string p) { openAsset_ = std::move(p); }
+    void setInputProbe(bool on) { inputProbe_ = on; }
 
     void setClouds(f32 coverage) {
         sky_.cloudsEnabled = true;
@@ -2653,12 +2666,15 @@ private:
         // selected things. With a gizmo tool active it could drag level geometry out from under the
         // player, and Delete and Ctrl+Z were live on the level while the game ran on top of it.
         if (gameHasInput()) return;
-        // NOR WHILE ANOTHER TAB HAS FOCUS. The level's tool keys, Delete and Ctrl+Z were live
-        // whatever was on screen; with the level now one tab among several that stops being latent.
-        if (!levelFocused_) return;
         const ImGuiIO& io = ImGui::GetIO();
 
-        if (!io.WantCaptureKeyboard) {
+        // KEYBOARD needs FOCUS; the MOUSE needs the cursor. Returning early on !levelFocused_ -- which
+        // is what this did -- gated the tool keys correctly and took picking and the gizmo out with
+        // them, so you could not click an object in a viewport you had not already clicked in.
+        //
+        // The focus test is still exactly right for the keys: the level's tool keys, Delete and
+        // Ctrl+Z must not be live while an actor tab has focus.
+        if (levelFocused_ && !io.WantCaptureKeyboard) {
             if (ImGui::IsKeyPressed(ImGuiKey_1)) tool_=Tool::Select;
             if (ImGui::IsKeyPressed(ImGuiKey_2)) tool_=Tool::Move;
             if (ImGui::IsKeyPressed(ImGuiKey_3)) tool_=Tool::Rotate;
@@ -2667,7 +2683,10 @@ private:
         const f32 mx=io.MousePos.x, my=io.MousePos.y;
         // Only the viewport rect drives the gizmo: the central dock node is a transparent hole,
         // so WantCaptureMouse alone would also let clicks in empty dockspace gaps through.
-        const bool overScene = !io.WantCaptureMouse && inViewport(mx, my) && levelFocused_;
+        // Hovered rather than !WantCaptureMouse, for the reason spelled out where levelHovered_ is
+        // published: over a docked Level window WantCaptureMouse is always true, so this was always
+        // false and nothing in the viewport could be clicked at all.
+        const bool overScene = levelHovered_ && inViewport(mx, my);
 
         // Hover highlight when idle over a handle.
         hoverAxis_ = -1;
@@ -2698,12 +2717,15 @@ private:
         // Delete in the editor belonged to the Content Browser and deleted FILES. Guarded on keyboard
         // focus not being in a text field, so typing a name into Details cannot destroy the thing
         // being named.
-        if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
+        // levelFocused_ carried explicitly now that the early return is gone. Delete and undo are
+        // KEYBOARD actions on the level's selection, so an actor tab holding focus must not have
+        // Delete quietly destroying level geometry behind it.
+        if (levelFocused_ && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
             deleteSelection();
 
         // Ctrl+Z / Ctrl+Y, and Ctrl+Shift+Z because half the world expects that instead. Suppressed
         // while a text field has focus so undoing a typo in a name does not undo a move.
-        if (io.KeyCtrl && !io.WantTextInput) {
+        if (levelFocused_ && io.KeyCtrl && !io.WantTextInput) {
             if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) { if (io.KeyShift) redo(); else undo(); }
             if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) redo();
         }
@@ -3188,6 +3210,23 @@ private:
             // as a gap.
             vpX_ = at.x; vpY_ = at.y; vpW_ = w; vpH_ = h;
             levelFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+            // IS THE CURSOR OVER THE LEVEL, AND IS THE LEVEL WHAT IT IS OVER?
+            //
+            // This replaces `!io.WantCaptureMouse` everywhere a viewport interaction is gated, and
+            // the replacement is not a refinement -- the old test became WRONG the moment the level
+            // stopped being a hole in the dockspace.
+            //
+            // WantCaptureMouse means "some ImGui window wants this mouse". While the central node
+            // was a transparent passthru gap that was false over the scene, so it read as "the mouse
+            // is on the scene, not on the UI" and every viewport gate was written against it. The
+            // Level is now a real docked window drawing a texture, so WantCaptureMouse is
+            // permanently TRUE over the viewport -- measured -- and fly, dolly, pan, picking and the
+            // gizmo were all gated off. IsWindowHovered asks the question the code actually meant.
+            //
+            // AllowWhenBlockedByActiveItem so a drag that began on the scene keeps being delivered
+            // once ImGui has an active item; without it a gizmo drag would drop the moment it started.
+            levelHovered_ = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+                                                   ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
 
             if (levelVisible_ && e.device()) {
                 e.device()->setViewportToTexture(true);
@@ -5279,6 +5318,9 @@ private:
     // exactly on top of it, and the level's Delete, Ctrl+Z, tool keys and gizmo would otherwise act
     // on a click the editor is also receiving.
     bool levelFocused_ = true;
+    // Whether the cursor is over the Level tab and the Level tab is the topmost thing under it.
+    bool levelHovered_ = true;
+    bool inputProbe_ = false;
     // Whether the Level tab is the SELECTED tab. Distinct from focused: a tab can be visible
     // while the keyboard belongs to a panel beside it.
     bool levelVisible_ = true;
@@ -5693,7 +5735,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and EXITS, touching no device.
         //
@@ -5743,6 +5785,7 @@ Application* createApplication(int argc, char** argv) {
         // the spawn-and-read path a checkbox otherwise gates behind a human with a mouse.
         else if (!std::strcmp(argv[i],"--actor-live")) editor::setActorEditorLiveByDefault(true);
         else if (!std::strcmp(argv[i],"--headless")) headless=true;
+        else if (!std::strcmp(argv[i],"--input-probe")) inputProbe=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
         else if (!std::strcmp(argv[i],"--new-script")) focusScript=true;
         // Holds the Tools dropdown open so it can be photographed. Opt-in, like the two above:
@@ -5832,6 +5875,7 @@ Application* createApplication(int argc, char** argv) {
     app->setVSyncOff(vsyncOff);
     app->setUiDemo(uiDemo);
     app->setOpenAsset(openAsset);
+    app->setInputProbe(inputProbe);
     app->setUseWarp(warp);
     app->setDebugLayer(debugLayer);
     app->setProjectPath(project);
