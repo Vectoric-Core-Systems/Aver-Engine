@@ -3,6 +3,9 @@
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/ActorScript.hpp"
+#if AVER_HAVE_ROSLYN
+#  include "aver/formats/AverDesign.hpp"   // the Roslyn escalation, when the scanner declines
+#endif
 #include "aver/render/preview/ActorPreview.hpp"
 #include "aver/render/preview/PreviewMeshCache.hpp"
 #include "aver/runtime/Engine.hpp"
@@ -1045,6 +1048,32 @@ std::unique_ptr<AssetEditor> makeActorEditor(const std::string& path) {
     fmt::ActorScript parsed = fmt::parseActorScript(source);
     std::vector<fmt::ActorClassInfo> classes = fmt::parseActorClasses(source);
 
+    // THE ESCALATION. Malformed means the region is real C# that has left the locked grammar -- a
+    // named argument moved, an argument omitted, a coordinate written as an expression, a `#if`
+    // around a placement. The scanner is right to decline it and Roslyn is right to read it, so the
+    // retry is automatic and needs no setting: `Malformed` IS the signal.
+    //
+    // Only on Malformed. A file the scanner read is not re-read by a slower parser that would have
+    // to agree with it anyway, and a file with no region has nothing for either to read.
+#if AVER_HAVE_ROSLYN
+    if (parsed.status == fmt::ActorParseStatus::Malformed && fmt::averDesignAvailable()) {
+        fmt::RoslynParse rp;
+        std::string why;
+        if (fmt::parseActorFileRoslyn(path, rp, &why) &&
+            rp.script.status == fmt::ActorParseStatus::Ok) {
+            AVER_INFO("[ActorEditor] {} left the locked grammar; Roslyn read it: {} placement(s)",
+                      p.filename().string(), rp.script.models.size());
+            parsed = std::move(rp.script);
+            // The class facts come from the same run, because they were parsed from the same bytes by
+            // the same parser. Mixing one backend's classes with the other's models would be two
+            // readings of one file presented as one.
+            if (!rp.classes.empty()) classes = std::move(rp.classes);
+        } else if (!why.empty()) {
+            AVER_WARN("[ActorEditor] Roslyn could not read {} either: {}", p.filename().string(), why);
+        }
+    }
+#endif
+
     // ANY recognised actor opens, not only one with geometry. A GameMode declaring nothing at all is
     // still an actor the editor can say something about -- its kind, its base, and a route to the
     // code -- and refusing it would send the most structural classes in a project to the IDE with no
@@ -1064,11 +1093,15 @@ std::unique_ptr<AssetEditor> makeActorEditor(const std::string& path) {
         return std::make_unique<ActorEditor>(path, fmt::ActorScript{}, std::move(classes), std::move(source));
     }
     if (parsed.status != fmt::ActorParseStatus::Ok) {
-        // Declined LOUDLY. Malformed is the signal that the text has left the locked grammar, which
-        // is the case a Roslyn backend would pick up; until that exists, saying so beats opening a
-        // tab that shows nothing and cannot save.
-        AVER_WARN("[ActorEditor] {} has a generated region this build cannot read: {}",
-                  path, parsed.error);
+        // Declined LOUDLY, and now only after Roslyn has also been asked (or is not installed).
+        // Opening a tab that shows nothing and cannot save would be worse than saying why.
+#if AVER_HAVE_ROSLYN
+        const char* note = fmt::averDesignAvailable() ? "" : " (averdesign is not installed)";
+#else
+        const char* note = " (this build has no Roslyn backend)";
+#endif
+        AVER_WARN("[ActorEditor] {} has a generated region neither backend could read: {}{}",
+                  path, parsed.error, note);
         return nullptr;
     }
     return std::make_unique<ActorEditor>(path, std::move(parsed), std::move(classes), std::move(source));

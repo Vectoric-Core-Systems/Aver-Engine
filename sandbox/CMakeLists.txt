@@ -10,6 +10,15 @@ add_executable(Sandbox
   src/ToolsMenu.cpp
   Sandbox.rc)
 target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
+# The Roslyn escalation for an actor script the built-in scanner declines. Linked here rather
+# than pulled in by Aver.Formats, which must stay dependency-free -- see its own CMakeLists.
+if(TARGET Aver.Formats.Roslyn)
+  target_link_libraries(Sandbox PRIVATE Aver.Formats.Roslyn)
+  # The tab compiles either way; this is what decides whether it can ESCALATE. A build without the
+  # backend still opens every conforming actor, which is the point of the scanner being sufficient
+  # on its own.
+  target_compile_definitions(Sandbox PRIVATE AVER_HAVE_ROSLYN=1)
+endif()
 # The retained game UI and the render feature that draws it. Both unconditional: neither depends on
 # an optional module, and the renderer declines at create() on a backend with no GPU support.
 target_link_libraries(Sandbox PRIVATE Aver.UI Aver.Render.UI)

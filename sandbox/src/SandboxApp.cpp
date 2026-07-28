@@ -22,6 +22,9 @@
 #include "AssetEditor.hpp"
 #include "ActorEditor.hpp"   // a .Designer.cs opened as an asset, with a 3D preview of what it declares
 #include "aver/platform/DirectoryWatcher.hpp"   // the editor notices an IDE writing behind its back
+#if AVER_HAVE_ROSLYN
+#  include "aver/formats/AverDesign.hpp"        // where averdesign is staged, told once at startup
+#endif
 #include "EngineScaffold.hpp"   // engineRoot(): where the Content Browser's "Engine" root is mounted from
 #include "IdeIntegration.hpp"   // detectedIdes()/openInIde: double-clicking a source file opens it
 #include "ShellIntegration.hpp" // reveal / shell-open / recycle, for the browser's context menu
@@ -546,6 +549,15 @@ public:
         // declines anything that is not a .cs carrying a generated region, so it can sit
         // anywhere; registered after the mesh editor only because that is reading order.
         assetEditors_.registerFactory(&editor::makeActorEditor);
+        // WHERE averdesign IS, told before any factory can run.
+        //
+        // Here rather than on project open, and that ordering is the whole point: the first thing an
+        // actor factory does with a file it cannot scan is ask whether Roslyn is available, and that
+        // answer is CACHED. Setting the path afterwards left the cache holding a "no" produced by a
+        // PATH search that was never going to find a tool staged in bin/Tools -- which is exactly how
+        // this shipped broken for one run. The location depends on the executable, not the project,
+        // so there was never a reason to wait for one.
+        locateAverDesign();
         // What the actor tab's toolbar does. Installed rather than reached for: an asset editor that
         // knew how to find a compile job or the project's IDE could not be tested or reused.
         {
@@ -1844,6 +1856,24 @@ private:
     //
     // The override wins so the staged sample stays reachable (`--scripts SampleScripts`) with a
     // project open, and so no oracle gate can ever be made to load a project's scripts by accident.
+    // Where averdesign lives, told to the formats layer once.
+    //
+    // bin/Tools, beside avermatc, because both are tools the editor SHELLS OUT TO rather than
+    // assemblies the scripting host loads -- and bin/Tools is deliberately outside the bridge's
+    // probing path so nothing can reach them by accident.
+    //
+    // Told rather than discovered because a formats module has no business knowing an editor's
+    // install layout. If it is not there, averDesignAvailable() says so once and the built-in scanner
+    // remains the only backend, which is a supported configuration rather than a broken one.
+    void locateAverDesign() const {
+#if AVER_HAVE_ROSLYN
+        // Forward slashes, deliberately. Windows accepts them everywhere a path is taken, and a
+        // backslash literal here is one careless edit away from "\Tools\averdesign.exe", where `\a`
+        // is a bell character and the path silently becomes "binToolsverdesign.exe". Which it did.
+        fmt::setAverDesignPath(executableDir() + "/Tools/averdesign.exe");
+#endif
+    }
+
     std::string resolveScriptsDir() const {
         if (scriptsDir_.empty())
             return project_.valid() ? editor::scriptsBinaryDir(project_) : executableDir() + "\\Scripts";

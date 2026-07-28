@@ -12,7 +12,9 @@
 //     rewriting a designer-owned region needs no compiler. A designer-owned region is a region whose
 //     shape the designer chose.
 //
-//   Roslyn -- the `averdesign` tool, if it is staged. It parses real C#, so it survives everything
+//   Roslyn -- the `averdesign` tool (BUILT: scripting/csharp/Aver.Design, staged to bin/Tools, and
+//     invoked from Aver.Formats.Roslyn, which is a module above this one precisely so that this one
+//     keeps its no-dependency, no-process guarantee). It parses real C#, so it survives everything
 //     the locked grammar forbids: a named argument moved, an argument omitted, a coordinate written
 //     as an expression rather than a literal, a `#if` around a placement. The moment somebody hand
 //     edits inside the region -- which the header of every generated file tells them not to do, and

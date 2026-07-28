@@ -75,6 +75,10 @@ if(WIN32)
   add_subdirectory(modules/audio.wasapi)
 endif()
 add_subdirectory(modules/formats)  # Phase 2 (.ocbeam / .ocmap loaders)
+# The Roslyn backend for actor scripts. Above Aver.Formats rather than inside it, so the base
+# module keeps its no-dependency, no-process guarantee. See its CMakeLists for the full argument --
+# including why it is guarded on Aver.Formats.Material rather than on a switch of its own.
+add_subdirectory(modules/formats.roslyn)
 if(AVER_MODULE_PHYSICS)
   add_subdirectory(modules/physics)   # Jolt behind the engine's plain-C ABI
 endif()
@@ -161,6 +165,9 @@ if(AVER_BUILD_TESTS)
   # editor's live sync now rests on it -- it shipped with no consumer and no test, and the first
   # thing that depended on it should not also be the first thing that exercised it.
   add_subdirectory(tests/platform)
+  # The Roslyn backend, checked against the scanner it falls back from. Unconditional like its module;
+  # the test itself skips when averdesign is not staged.
+  add_subdirectory(tests/formats.roslyn)
   if(AVER_MODULE_PHYSICS)
     add_subdirectory(tests/physics)
   endif()

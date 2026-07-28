@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- averdesign: the Roslyn half of reading an actor script.
+
+       WHY IT IS A SEPARATE PROCESS. The alternative is hosting Roslyn inside the editor, which means
+       loading a compiler into a process whose job is to draw frames, and which the editor's own
+       collectible load context would then have to keep clear of on every script reload. A console
+       tool is invoked, answers, and exits; nothing about the editor's lifetime touches it.
+
+       WHY IT IS THE FALLBACK AND NOT THE PARSER. The built-in scanner in modules/formats needs no
+       .NET, no NuGet and no process, and it is sufficient by construction for the locked grammar
+       that docs/DESIGNER_REWRITE.md defines. This runs only when the scanner reports Malformed,
+       which is precisely the signal that the text has left that grammar, because somebody hand
+       edited inside a region the header told them not to. Neither is a degraded mode; they cover
+       different files.
+
+       THE FIRST NUGET CONSUMER IN THIS REPO, and deliberately a small one. Microsoft.CodeAnalysis is
+       MIT, so it satisfies the permissive-dependency rule, and it is already in the machine's NuGet
+       cache because the .NET SDK ships it, so this restores with no network. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>averdesign</AssemblyName>
+    <RootNamespace>Aver.Design</RootNamespace>
+    <RollForward>LatestMinor</RollForward>
+    <!-- The tool is invoked once per file that needs it and its answer is cached by the caller, so
+         start-up time matters more than steady-state throughput. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TieredPGO>false</TieredPGO>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- PINNED, not floating. A parser whose version can move underneath the build is a parser whose
+         output can change between two runs of the same source, and the C++ side compares spans byte
+         for byte against text it read itself. 4.13.0 is what this machine's SDK carries. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.13.0" />
+  </ItemGroup>
+
+</Project>

@@ -238,7 +238,26 @@ A file with no region — the single-mesh actor declared on the class — is a *
 
 **Rough edges worth knowing.** The save does not re-stamp the write time, so the next frame's reload fires on the tab's own write; it is harmless, the text being identical, but it replaces `Saved.` with `Reloaded from disk.` immediately. And the selection is an *index* into the parsed models rather than an ObjectId, so a reload that reorders the region moves the selection to a different placement.
 
-**There is no Roslyn backend.** `ActorScript.hpp` describes two and declares `ActorParserBackend::Roslyn`, but nothing in the tree produces it: there is no `averdesign` tool, and every parse is the builtin scanner. So the escalation that header describes does not happen — a named argument moved, an argument omitted, a coordinate written as an expression, a `#if` around a placement, or any hand edit inside the region, and the file is declined rather than opened by a second parser.
+**The Roslyn backend exists.** `averdesign` is a console tool at
+`scripting/csharp/Aver.Design/`, staged to `bin/Tools/`, built on `Microsoft.CodeAnalysis.CSharp`
+(MIT, and already in the SDK's package cache, so it restores offline). It is the repo's only NuGet
+consumer.
+
+It runs **only** when the builtin scanner returns `Malformed`, which is exactly the signal that the
+text has left the locked grammar of `docs/DESIGNER_REWRITE.md` rather than that the text is wrong.
+So a named argument moved, an argument omitted, or a coordinate written as an expression now opens
+instead of being declined. A file the scanner reads is never re-read by the slower parser.
+
+The C++ side is `Aver.Formats.Roslyn`, deliberately a module ABOVE `Aver.Formats`: the base module
+reads bytes and depends on nothing, which is what lets the scanner run on a machine with no .NET at
+all, and process spawning does not belong below that line. A build without the module has no
+escalation and still opens every conforming actor.
+
+`RoslynTest` pins the property that matters: on a file both backends read they must produce identical
+ids, values and **byte spans**. A fallback that quietly disagreed would write a coordinate into the
+wrong byte of somebody's source. It also covers a non-ASCII file, because Roslyn counts UTF-16
+characters while the C++ side slices UTF-8 bytes, and the two agree only until the first accented
+letter.
 
 ---
 

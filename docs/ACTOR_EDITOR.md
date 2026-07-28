@@ -1,10 +1,10 @@
 # Actor Editor with Live Sync
 
-> **Status: pieces 1-4 of the viewport/sync work are built.** The preview, the designer reader and
-> rewriter, the tab, the translate gizmo and source-to-view reload all exist and are in the build.
-> What is NOT built: the Roslyn backend (`averdesign`), rotate/scale gizmo handles, and the tab
-> infrastructure fixes in §2 Piece 1. Sections below marked *(built)* describe what shipped; the rest
-> is still plan.
+> **Status: all four pieces are built.** The preview, the designer reader and rewriter, the tab, the
+> translate gizmo, source-to-view reload, the Live view (§4b), the file watcher (§4c) and the Roslyn
+> backend `averdesign` (§4d) all exist and are in the build.
+> What is NOT built: rotate/scale gizmo handles, and the tab infrastructure fixes in §2 Piece 1.
+> Sections below marked *(built)* describe what shipped; the rest is still plan.
 
 
 A tab for a C# actor class: a 3D preview of its authored model tree, a properties panel, and a save
@@ -58,6 +58,8 @@ and zero tests.** It is a starting point, not a dependency that has been exercis
 | The preview's own mesh registry | `modules/render.actorpreview/src/PreviewMeshCache.cpp` | — |
 | The tab, gizmo and reload | `sandbox/src/ActorEditor.{hpp,cpp}` | not covered by a test |
 | The **Live** view — spawn the class, read what it built | same, plus `aver_fw_spawn_preview` | `FrameworkTest` (the ABI edge); `--open-asset … --actor-live` (the tab) |
+| The file watcher, and routing a disk change to a tab | `modules/platform/…/DirectoryWatcher`, `sandbox/src/AssetEditor.cpp` | `WatcherTest`, 33 assertions against a real filesystem |
+| The **Roslyn** backend | `scripting/csharp/Aver.Design/` → `bin/Tools/averdesign.exe`; `modules/formats.roslyn/` | `RoslynTest` — agreement with the scanner, and the cases it declines |
 
 **It is general, and that was checked against real projects rather than a fixture.** A sweep over
 SkyForge's scripts opens `Gun.cs` (2 actors), `FpsGameMode.cs` (5 actors, 2 previewable) and
@@ -279,6 +281,60 @@ Measured against SkyForge with `--open-asset <file> --actor-live`:
 | `Gun.cs` | `BP_GunPart` | 1 model, `Meshes/cube.ocmesh` |
 | `FpsGameMode.cs` | `BP_Block` | 1 model, `Meshes/cube.ocmesh` |
 | `FpsCharacter.cs` | `BP_FpsCharacter` | 0 models; capsule 180×34 cm from source |
+
+---
+
+## 4c. The file watcher, as shipped
+
+`DirectoryWatcher` is started on the project's **Content** root when a project opens, pumped once a
+frame *before* the tabs draw, and routed to whichever editor owns the changed path.
+
+It does not replace the two polls that were already there; it covers what neither can. The tab's own
+per-frame `stat` only sees the tab being **drawn**, so a background tab lagged until it was clicked.
+The Compile button's half-second directory walk colours one button and would have to cover the whole
+content tree at that rate to be a change signal.
+
+The notification **bypasses** the mtime stamp rather than feeding it: a safe save can leave a
+modification time the tab has already seen, and the stamp then says nothing happened about a file
+whose bytes are entirely different.
+
+`WatcherTest` is new and found a real bug on its first run: `start()` opened the directory handle,
+spawned the worker and returned, but the kernel only records changes while a `ReadDirectoryChangesW`
+is outstanding — and that call happens on the worker thread. The first file written after `start()`
+was silently dropped. `start()` now waits for an event the worker sets once its first read is in
+flight.
+
+## 4d. The Roslyn backend, as shipped
+
+`averdesign` (`scripting/csharp/Aver.Design/`, staged to `bin/Tools/`) parses a `.cs` with
+`Microsoft.CodeAnalysis.CSharp` and prints what it declares as JSON. It is the repo's **only** NuGet
+consumer; Roslyn is MIT and ships inside the .NET SDK, so the restore resolves from the machine's
+package cache with no network.
+
+**It runs only on `Malformed`.** That status means the text has left the locked grammar rather than
+that the text is wrong. A file the scanner reads is never re-read by the slower parser, and a file
+with no region has nothing for either to read.
+
+**A separate process, not a hosted library.** The alternative is loading a compiler into a process
+whose job is to draw frames, which the editor's collectible load context would then have to keep
+clear of on every script reload.
+
+**A separate module, not part of `Aver.Formats`.** The base module reads bytes and depends on
+nothing, which is what lets a test link it alone and what lets the scanner run on a machine with no
+.NET. `Aver.Formats.Roslyn` sits above that line; a build without it simply has no escalation.
+
+Two things are easy to get wrong here and both are pinned by `RoslynTest`:
+
+- **Byte offsets, not character offsets.** Roslyn counts UTF-16 chars; the C++ side slices UTF-8
+  bytes. They agree only while the file is pure ASCII, and one accented letter in a comment above a
+  placement shifts every subsequent span — so a rewrite lands in the middle of another token.
+  `averdesign` converts every offset through a prefix table before it leaves.
+- **The object id crosses as a string.** It is a full 64 bits and a JSON number is a double, so a
+  numeric round trip would silently round the one field every rewrite is matched by.
+
+Measured end to end: a `Car.Designer.cs` with its named arguments reordered — which the scanner
+declines — opens in the editor with all five placements, logging
+`Rig.Designer.cs left the locked grammar; Roslyn read it: 5 placement(s)`.
 
 ---
 

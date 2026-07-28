@@ -183,3 +183,35 @@ add_custom_command(
 add_custom_target(Aver.MaterialCompiler DEPENDS ${AVER_MATC_OUTPUTS})
 set_target_properties(Aver.MaterialCompiler PROPERTIES FOLDER "modules")
 add_dependencies(Aver.Scripting.Host Aver.MaterialCompiler)
+
+# ---------------------------------------------------------------------------------------------------
+# averdesign - the Roslyn reader for an actor script, staged to bin/Tools/ beside avermatc.
+#
+# Same reasoning as avermatc and the same shape: a TOOL the editor shells out to, not an assembly the
+# scripting host loads, so it goes in bin/Tools where the bridge's probing path cannot reach it.
+#
+# THE ONLY NUGET CONSUMER IN THE TREE. Microsoft.CodeAnalysis is MIT and ships inside the .NET SDK, so
+# the restore resolves from the machine's package cache with no network. A machine without it fails
+# THIS custom command and nothing else: averDesignAvailable() then reports the tool missing and the
+# editor runs with the built-in scanner as its only backend, which is a supported configuration.
+set(AVER_DESIGN_PROJ ${AVER_CSHARP_DIR}/Aver.Design/Aver.Design.csproj)
+set(AVER_DESIGN_DIR ${CMAKE_BINARY_DIR}/bin/Tools)
+
+file(GLOB AVER_DESIGN_SOURCES CONFIGURE_DEPENDS
+  ${AVER_CSHARP_DIR}/Aver.Design/*.cs
+  ${AVER_CSHARP_DIR}/Aver.Design/*.csproj)
+
+set(AVER_DESIGN_OUTPUTS
+  ${AVER_DESIGN_DIR}/averdesign.dll
+  ${AVER_DESIGN_DIR}/averdesign.runtimeconfig.json)
+
+add_custom_command(
+  OUTPUT ${AVER_DESIGN_OUTPUTS}
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_DESIGN_PROJ} -c Release --nologo -v quiet
+          -o ${AVER_DESIGN_DIR}
+  DEPENDS ${AVER_DESIGN_SOURCES}
+  COMMENT "Building the Roslyn actor-script reader (staged to bin/Tools)"
+  VERBATIM)
+add_custom_target(Aver.Design DEPENDS ${AVER_DESIGN_OUTPUTS})
+set_target_properties(Aver.Design PROPERTIES FOLDER "modules")
+add_dependencies(Aver.Scripting.Host Aver.Design)
