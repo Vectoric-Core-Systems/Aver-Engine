@@ -163,17 +163,40 @@ std::vector<AttrHit> actorAttributes(std::string_view t) {
 // Numbers following a call, e.g. `.Camera(70f, 5f, 100000f)`. Returns true when the CALL is present
 // at all -- a value that is not a plain literal still means the feature is declared, and the number
 // is what could not be read rather than the fact.
-bool numbersAfter(std::string_view t, const char* call, f32* out, int count) {
+bool numbersAfter(std::string_view t, const char* call, f32* out, int count, ActorValueSpan* spans) {
     const usize at = t.find(call);
     if (at == std::string_view::npos) return false;
     usize p = at + std::strlen(call);
     for (int k = 0; k < count; ++k) {
         p = skipSpace(t, p);
-        if (!parseFloatLiteral(t, p, out[k])) return true;
+        const usize valueAt = p;
+        if (parseFloatLiteral(t, p, out[k])) {
+            if (spans) { spans[k].begin = valueAt; spans[k].end = p; }
+        } else {
+            // Not a literal -- a constant, an expression. The argument is still DECLARED, so the
+            // feature is real; it simply has no span and nothing will offer to edit it. Skip to the
+            // next comma rather than giving up on the call, so the literals AFTER it keep their
+            // spans: one non-literal argument must not make its neighbours uneditable.
+            int depth = 0;
+            while (p < t.size()) {
+                const char ch = t[p];
+                if (ch == '(') ++depth;
+                else if (ch == ')') { if (depth == 0) break; --depth; }
+                else if (ch == ',' && depth == 0) break;
+                ++p;
+            }
+        }
         p = skipSpace(t, p);
         if (k + 1 < count) { if (p >= t.size() || t[p] != ',') return true; ++p; }
     }
     return true;
+}
+
+// Rebase a slice-relative span onto the whole file, and drop one that was never set.
+void rebase(ActorValueSpan& sp, usize base) {
+    if (!sp.valid()) return;
+    sp.begin += base;
+    sp.end += base;
 }
 
 } // namespace
@@ -225,7 +248,7 @@ ActorKind kindOfBase(std::string_view base) {
 // `Field = 123f;` or `Field = 123;` anywhere in the class. Scanned rather than parsed to a method
 // because a character sets these in OnBeginPlay, not in Configure -- which is where the framework's
 // own template puts them and where every real character puts them too.
-bool assignedNumber(std::string_view t, const char* field, f32& out) {
+bool assignedNumber(std::string_view t, const char* field, f32& out, ActorValueSpan* span = nullptr) {
     const usize n = std::strlen(field);
     usize i = 0;
     while ((i = t.find(field, i)) != std::string_view::npos) {
@@ -237,13 +260,18 @@ bool assignedNumber(std::string_view t, const char* field, f32& out) {
             if (p < t.size() && t[p] == '=' && (p + 1 >= t.size() || t[p + 1] != '=')) {
                 ++p;
                 p = skipSpace(t, p);
-                if (parseFloatLiteral(t, p, out)) return true;
+                const usize valueAt = p;
+                if (parseFloatLiteral(t, p, out)) {
+                    if (span) { span->begin = valueAt; span->end = p; }
+                    return true;
+                }
                 // An int literal is legal here (`Health = 3;`) even though the coordinate grammar
                 // forbids one; this is ordinary C#, not the locked region.
                 const usize d = p;
                 while (p < t.size() && isDigit(t[p])) ++p;
                 if (p > d) {
                     out = static_cast<f32>(std::strtod(std::string(t.substr(d, p - d)).c_str(), nullptr));
+                    if (span) { span->begin = d; span->end = p; }
                     return true;
                 }
             }
@@ -286,31 +314,49 @@ std::vector<ActorClassInfo> parseActorClasses(std::string_view t) {
         info.kind = kindOfBase(info.baseType);
 
         if (info.kind == ActorKind::Character) {
-            assignedNumber(slice, "Height", info.capsuleHeight);
-            assignedNumber(slice, "Radius", info.capsuleRadius);
-            assignedNumber(slice, "EyeHeight", info.eyeHeight);
+            assignedNumber(slice, "Height", info.capsuleHeight, &info.capsuleHeightSpan);
+            assignedNumber(slice, "Radius", info.capsuleRadius, &info.capsuleRadiusSpan);
+            assignedNumber(slice, "EyeHeight", info.eyeHeight, &info.eyeHeightSpan);
         }
 
         usize m = slice.find(".Mesh(");
         if (m != std::string_view::npos) {
-            usize q = m + 6;
+            usize q = skipSpace(slice, m + 6);
+            const usize meshAt = q;
             if (parseString(slice, q, info.meshPath)) {
                 info.hasMesh = true;
+                // The span is the literal's CONTENTS, quotes excluded, so a rewrite replaces the path
+                // and not the syntax around it.
+                info.meshPathSpan = {meshAt + 1, q - 1};
                 q = skipSpace(slice, q);
-                if (q < slice.size() && slice[q] == ',') { ++q; parseString(slice, q, info.material); }
+                if (q < slice.size() && slice[q] == ',') {
+                    ++q;
+                    const usize matAt = skipSpace(slice, q);
+                    usize r = matAt;
+                    if (parseString(slice, r, info.material)) info.materialSpan = {matAt + 1, r - 1};
+                }
             }
         }
 
         f32 cam[3] = {};
-        if (numbersAfter(slice, ".Camera(", cam, 3)) {
+        if (numbersAfter(slice, ".Camera(", cam, 3, info.cameraSpan)) {
             info.hasCamera = true;
             info.cameraFovDeg = cam[0]; info.cameraNearCm = cam[1]; info.cameraFarCm = cam[2];
         }
         f32 lit[2] = {};
-        if (numbersAfter(slice, ".PointLight(", lit, 2)) {
+        if (numbersAfter(slice, ".PointLight(", lit, 2, info.lightSpan)) {
             info.hasPointLight = true;
             info.lightIntensityLux = lit[0]; info.lightRangeCm = lit[1];
         }
+        // Every span was measured against the SLICE; the caller edits the whole file.
+        const usize base = hits[h].at;
+        rebase(info.meshPathSpan, base);
+        rebase(info.materialSpan, base);
+        for (ActorValueSpan& sp : info.cameraSpan) rebase(sp, base);
+        for (ActorValueSpan& sp : info.lightSpan) rebase(sp, base);
+        rebase(info.capsuleHeightSpan, base);
+        rebase(info.capsuleRadiusSpan, base);
+        rebase(info.eyeHeightSpan, base);
         out.push_back(std::move(info));
     }
     return out;
@@ -319,6 +365,63 @@ std::vector<ActorClassInfo> parseActorClasses(std::string_view t) {
 ActorClassInfo parseActorClass(std::string_view t) {
     const std::vector<ActorClassInfo> all = parseActorClasses(t);
     return all.empty() ? ActorClassInfo{} : all.front();
+}
+
+bool rewriteActorClass(std::string_view t, const ActorClassInfo& edited,
+                       std::string& out, std::string* err) {
+    // Collected then applied BACK TO FRONT, so every span stays valid as the text shortens or grows
+    // under it. Applying forwards means the second edit is computed against the first one's output.
+    struct Edit { usize begin, end; std::string text; };
+    std::vector<Edit> edits;
+
+    auto number = [](f32 v) {
+        // FIXED NOTATION, never exponent. %g switches to 1e+05 above five digits, and this rewriter
+        // edits ordinary hand-written code: a save that turned somebody's `100000f` into `1e+05f`
+        // would compile, mean the same thing, and rewrite a value they never touched. The test that
+        // an unedited save is byte-identical is what caught it.
+        char buf[64];
+        std::snprintf(buf, sizeof buf, "%.6f", static_cast<double>(v));
+        std::string t(buf);
+        if (t.find('.') != std::string::npos) {
+            while (!t.empty() && t.back() == '0') t.pop_back();
+            if (!t.empty() && t.back() == '.') t.pop_back();
+        }
+        if (t.empty() || t == "-") t = "0";
+        return t + "f";
+    };
+    auto put = [&](const ActorValueSpan& sp, std::string text) {
+        if (!sp.valid() || sp.end > t.size()) return;
+        edits.push_back({sp.begin, sp.end, std::move(text)});
+    };
+
+    put(edited.meshPathSpan, edited.meshPath);
+    put(edited.materialSpan, edited.material);
+    put(edited.capsuleHeightSpan, number(edited.capsuleHeight));
+    put(edited.capsuleRadiusSpan, number(edited.capsuleRadius));
+    put(edited.eyeHeightSpan, number(edited.eyeHeight));
+    const f32 cam[3] = {edited.cameraFovDeg, edited.cameraNearCm, edited.cameraFarCm};
+    for (int i = 0; i < 3; ++i) put(edited.cameraSpan[i], number(cam[i]));
+    const f32 lit[2] = {edited.lightIntensityLux, edited.lightRangeCm};
+    for (int i = 0; i < 2; ++i) put(edited.lightSpan[i], number(lit[i]));
+
+    if (edits.empty()) { out.assign(t); return true; }
+
+    // Overlapping spans mean the parse this came from does not describe this text. Refused rather
+    // than applied in some order, because the result would be a file nobody wrote.
+    for (usize a = 0; a + 1 < edits.size(); ++a)
+        for (usize c = a + 1; c < edits.size(); ++c)
+            if (edits[a].begin < edits[c].end && edits[c].begin < edits[a].end) {
+                if (err) *err = "the class's value spans overlap; re-read the file before saving";
+                return false;
+            }
+
+    for (usize a = 0; a + 1 < edits.size(); ++a)
+        for (usize c = a + 1; c < edits.size(); ++c)
+            if (edits[c].begin > edits[a].begin) std::swap(edits[a], edits[c]);
+
+    out.assign(t);
+    for (const Edit& e : edits) out.replace(e.begin, e.end - e.begin, e.text);
+    return true;
 }
 
 ActorScript parseActorScript(std::string_view t) {

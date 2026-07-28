@@ -122,8 +122,126 @@ static void testClassLevelActor() {
     check(!fmt::parseActorClass(kPlain).anything(), "a plain helper class declares nothing");
 }
 
+
+// Editing what a class declares about ITSELF, and putting it back in the bytes it came from.
+//
+// This is a rewriter over ordinary hand-written code rather than a generated region, so it has no
+// markers to hide behind: the only thing keeping a save out of the wrong line is that each value
+// carries the span it was read from. Every case below is a way that goes wrong silently.
+static void testClassDefaultsRewrite() {
+    AVER_INFO("=== editing class defaults ===");
+
+    static const char* kSrc =
+        "using Aver.Framework;\n"
+        "namespace Game;\n"
+        "\n"
+        "[AverClass(\"Hero\")]\n"
+        "public sealed class Hero : AverCharacter\n"
+        "{\n"
+        "    public static void Configure(ClassBuilder b) => b.Camera(70f, 5f, 100000f);\n"
+        "    public override void OnBeginPlay(BeginReason r)\n"
+        "    {\n"
+        "        Height    = 180f;   // a person, in centimetres\n"
+        "        Radius    = 34f;\n"
+        "        EyeHeight = 165f;\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "[AverClass(\"Prop\")]\n"
+        "public sealed class Prop : AverActor\n"
+        "{\n"
+        "    public static void Configure(ClassBuilder b) => b.Mesh(\"Meshes/crate.ocmesh\", \"M_Wood\");\n"
+        "    public int Height = 999;\n"
+        "}\n";
+
+    std::vector<fmt::ActorClassInfo> all = fmt::parseActorClasses(kSrc);
+    check(all.size() == 2, "two classes");
+    if (all.size() != 2) return;
+
+    check(all[0].kind == fmt::ActorKind::Character, "the first is a Character");
+    check(near(all[0].capsuleHeight, 180.0f) && near(all[0].capsuleRadius, 34.0f), "with its capsule read");
+    check(all[0].capsuleHeightSpan.valid(), "and a span for the height");
+    check(all[1].hasMesh && all[1].material == "M_Wood", "the second declares a mesh and material");
+
+    // The span must point at the value and nothing else. Checked against the source directly,
+    // because a span that is off by the width of a quote writes into the syntax around the value.
+    const std::string src(kSrc);
+    check(src.substr(all[0].capsuleHeightSpan.begin,
+                     all[0].capsuleHeightSpan.end - all[0].capsuleHeightSpan.begin) == "180f",
+          "the height span covers exactly the literal");
+    check(src.substr(all[1].meshPathSpan.begin,
+                     all[1].meshPathSpan.end - all[1].meshPathSpan.begin) == "Meshes/crate.ocmesh",
+          "the mesh span covers the path WITHOUT its quotes");
+
+    AVER_INFO("=== writing them back ===");
+    {
+        fmt::ActorClassInfo hero = all[0];
+        hero.capsuleHeight = 195.0f;
+        hero.eyeHeight = 178.0f;
+        hero.cameraFovDeg = 90.0f;
+
+        std::string out, err;
+        check(fmt::rewriteActorClass(kSrc, hero, out, &err), "it rewrites: " + err);
+        check(out.find("Height    = 195f;") != std::string::npos, "the height is written");
+        check(out.find("EyeHeight = 178f;") != std::string::npos, "and the eye height");
+        check(out.find("b.Camera(90f, 5f, 100000f)") != std::string::npos,
+              "and one camera argument, leaving the other two alone");
+        check(out.find("Radius    = 34f;") != std::string::npos, "an untouched field is untouched");
+        // The COMMENT beside the value survives. This rewriter edits ordinary code, and a save that
+        // ate somebody's trailing comment would be a save nobody uses twice.
+        check(out.find("// a person, in centimetres") != std::string::npos, "the trailing comment survives");
+
+        // THE OTHER CLASS IS UNTOUCHED, and `public int Height = 999;` is the trap: a rewriter that
+        // searched for the field name instead of using the span would rewrite the wrong class's
+        // Height, and both files would still compile.
+        check(out.find("public int Height = 999;") != std::string::npos,
+              "a same-named field in ANOTHER class is not touched");
+        check(out.find("[AverClass(\"Prop\")]") != std::string::npos, "and that class still stands");
+    }
+
+    AVER_INFO("=== strings, idempotence and refusals ===");
+    {
+        fmt::ActorClassInfo prop = all[1];
+        prop.meshPath = "Meshes/barrel.ocmesh";
+        prop.material = "M_Metal";
+        std::string out, err;
+        check(fmt::rewriteActorClass(kSrc, prop, out, &err), "a string value rewrites");
+        check(out.find("b.Mesh(\"Meshes/barrel.ocmesh\", \"M_Metal\")") != std::string::npos,
+              "both literals are replaced, quotes intact");
+        check(out.find("Height    = 180f;") != std::string::npos, "the character is untouched by it");
+
+        // Saving what was read changes nothing. A save that reformatted every number would put a
+        // diff in every commit whether or not anything moved.
+        std::string same;
+        check(fmt::rewriteActorClass(kSrc, all[0], same, &err) && same == src,
+              "rewriting with the values as read is byte-identical");
+
+        // A class with no spans at all writes nothing rather than failing.
+        fmt::ActorClassInfo empty;
+        std::string untouched;
+        check(fmt::rewriteActorClass(kSrc, empty, untouched, &err) && untouched == src,
+              "a class carrying no spans leaves the file alone");
+    }
+
+    AVER_INFO("=== values that cannot be written back ===");
+    {
+        // A non-literal is READ as "the feature is declared" but carries NO span, so the editor shows
+        // no control for it. Offering a box that silently would not save is worse than offering none.
+        static const char* kConst =
+            "[AverClass(\"C\")]\n"
+            "public sealed class C : AverActor {\n"
+            "    public static void Configure(ClassBuilder b) => b.Camera(DefaultFov, 1f, 2f);\n"
+            "}\n";
+        const fmt::ActorClassInfo c = fmt::parseActorClass(kConst);
+        check(c.hasCamera, "the camera is still recognised as declared");
+        check(!c.cameraSpan[0].valid(), "but its first argument has no span, so nothing offers to edit it");
+        check(c.cameraSpan[1].valid(), "while the literals after it do");
+    }
+}
+
 int main() {
     testClassLevelActor();
+    testClassDefaultsRewrite();
 
     AVER_INFO("=== reading the generated region ===");
     {

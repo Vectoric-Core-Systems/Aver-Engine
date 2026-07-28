@@ -115,6 +115,16 @@ const char* actorKindName(ActorKind k);
 // Whether a 3D preview is meaningful. False for the three that have no transform.
 bool actorKindHasViewport(ActorKind k);
 
+// Where a value LIVES in the source, so an edit can go back to the byte it came from.
+//
+// A span rather than a re-search, for the reason the placement rows carry one: finding the value
+// twice means the write can land somewhere the read did not, and the two searches drift the moment a
+// file has two classes that both set Height.
+struct ActorValueSpan {
+    usize begin = 0, end = 0;
+    bool valid() const { return end > begin; }
+};
+
 struct ActorClassInfo {
     std::string className;      // from [AverClass("BP_Thing")] / [AverGameMode(...)]
     std::string typeName;       // the C# class the attribute is on
@@ -126,17 +136,21 @@ struct ActorClassInfo {
     // real character sets them too. Zero means "not stated"; the caller substitutes a default rather
     // than drawing a capsule of no height.
     f32 capsuleHeight = 0.0f, capsuleRadius = 0.0f, eyeHeight = 0.0f;
+    ActorValueSpan capsuleHeightSpan{}, capsuleRadiusSpan{}, eyeHeightSpan{};
 
     bool hasMesh = false;
     std::string meshPath, material;
+    ActorValueSpan meshPathSpan{}, materialSpan{};
 
     // Declared but not drawn as geometry -- see ActorPreview. They are surfaced so the panel can say
     // an actor HAS a camera or a light, because an actor that is only a light previews as nothing
     // and "nothing" and "broken" look identical.
     bool hasCamera = false;
     f32  cameraFovDeg = 0.0f, cameraNearCm = 0.0f, cameraFarCm = 0.0f;
+    ActorValueSpan cameraSpan[3]{};
     bool hasPointLight = false;
     f32  lightIntensityLux = 0.0f, lightRangeCm = 0.0f;
+    ActorValueSpan lightSpan[2]{};
 
     bool anything() const { return hasMesh || hasCamera || hasPointLight; }
     bool hasViewport() const { return actorKindHasViewport(kind); }
@@ -159,6 +173,19 @@ std::vector<ActorClassInfo> parseActorClasses(std::string_view csText);
 
 // The first actor a file declares, or an empty one. A convenience for the common single-actor file.
 ActorClassInfo parseActorClass(std::string_view csText);
+
+// Write an edited class's values back to the bytes they came from.
+//
+// ONLY the values that carry a span, and each one in place: the file's structure, its comments, its
+// formatting and every other class in it are untouched. This is not the generated-region rewriter --
+// there is no region here, and the values live in ordinary hand-written code -- so it edits the
+// smallest thing it can and refuses anything it did not read.
+//
+// `edited` must be an ActorClassInfo that came from parseActorClasses on THIS text, with values
+// changed but spans left alone. Returns false with `err` set when a span no longer matches what was
+// read there, which is the check that stops a stale parse writing into the wrong place.
+bool rewriteActorClass(std::string_view csText, const ActorClassInfo& edited,
+                       std::string& out, std::string* err = nullptr);
 
 // Read the generated region. Never modifies anything.
 ActorScript parseActorScript(std::string_view csText);

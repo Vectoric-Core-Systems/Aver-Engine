@@ -82,8 +82,25 @@ public:
 
     bool save(std::string* why) override {
         if (!dirty_) return true;
-        std::string out;
-        if (!fmt::rewriteActorScript(source_, script_.models, out, why)) return false;
+        std::string out = source_;
+
+        // CLASS DEFAULTS FIRST, then the generated region. Both rewrite the same text, and the
+        // region's spans were measured against the source as read -- so doing the class edits second
+        // would apply them to byte offsets the region rewrite has already moved.
+        //
+        // In practice a file has one or the other: a designer region is generated and its class
+        // values are not usually spanned. Ordering is stated because "in practice" is not a
+        // guarantee, and the failure would be an edit landing in the middle of a different line.
+        for (const fmt::ActorClassInfo& k : classes_) {
+            std::string next;
+            if (!fmt::rewriteActorClass(out, k, next, why)) return false;
+            out = std::move(next);
+        }
+        if (!script_.models.empty()) {
+            std::string next;
+            if (!fmt::rewriteActorScript(out, script_.models, next, why)) return false;
+            out = std::move(next);
+        }
         std::ofstream os(path_, std::ios::binary | std::ios::trunc);
         if (!os) { if (why) *why = "could not open " + path_ + " for writing"; return false; }
         os.write(out.data(), static_cast<std::streamsize>(out.size()));
@@ -148,6 +165,10 @@ private:
         // Nothing previewable but classes present: still name the first, so the panel says what the
         // file HOLDS rather than looking empty.
         if (activeClass_ < 0 && !classes_.empty()) activeClass_ = 0;
+    }
+    fmt::ActorClassInfo* activeInfoMutable() {
+        return (activeClass_ >= 0 && activeClass_ < static_cast<int>(classes_.size()))
+             ? &classes_[static_cast<usize>(activeClass_)] : nullptr;
     }
     const fmt::ActorClassInfo* activeInfo() const {
         return (activeClass_ >= 0 && activeClass_ < static_cast<int>(classes_.size()))
@@ -542,7 +563,7 @@ void ActorEditor::draw(Engine& e) {
         labels.reserve(classes_.size());
         items.reserve(classes_.size());
         for (const fmt::ActorClassInfo& k : classes_) {
-            std::string n = k.className.empty() ? k.typeName : k.className;
+            std::string n = k.typeName.empty() ? k.className : k.typeName;
             if (!k.anything()) n += "  (nothing to draw)";
             labels.push_back(std::move(n));
         }
@@ -550,7 +571,9 @@ void ActorEditor::draw(Engine& e) {
         if (ImGui::Combo("Actor", &activeClass_, items.data(), static_cast<int>(items.size())))
             { selected_ = -1; framed_ = false; }
     } else if (const fmt::ActorClassInfo* k = activeInfo()) {
-        ImGui::Text("%s", (k->className.empty() ? k->typeName : k->className).c_str());
+        // The C# type, which is what the author named the thing. The bound name is shown below as
+        // bookkeeping.
+        ImGui::Text("%s", (k->typeName.empty() ? k->className : k->typeName).c_str());
     }
 
     // CLASS DEFAULTS. What the class states about itself, which for a GameMode or a Controller is
@@ -558,16 +581,59 @@ void ActorEditor::draw(Engine& e) {
     if (const fmt::ActorClassInfo* k = activeInfo()) {
         ImGui::TextDisabled("%s%s%s", fmt::actorKindName(k->kind),
                             k->baseType.empty() ? "" : "  :  ", k->baseType.c_str());
-        if (k->kind == fmt::ActorKind::Character) {
-            // Read from assignments anywhere in the class, because a character sets these in
-            // OnBeginPlay -- which is where the framework's own template puts them.
-            ImGui::TextDisabled("capsule: %.0f cm tall, %.0f cm radius%s",
-                                static_cast<double>(k->capsuleHeight > 0 ? k->capsuleHeight : 180.0f),
-                                static_cast<double>(k->capsuleRadius > 0 ? k->capsuleRadius : 34.0f),
-                                k->capsuleHeight > 0 ? "" : "  (default)");
-            if (k->eyeHeight > 0.0f)
-                ImGui::TextDisabled("eye height: %.0f cm", static_cast<double>(k->eyeHeight));
+        // The BOUND name, small and secondary. It is what a level and a GameMode reference, so it
+        // cannot be hidden -- but it is bookkeeping, not the thing being edited, and leading it with
+        // a BP_ prefix made the panel read as if the prefix were the actor's name.
+        if (!k->className.empty() && k->className != k->typeName)
+            ImGui::TextDisabled("binds as \"%s\"", k->className.c_str());
+    }
+
+    // ---- class defaults, EDITABLE ----
+    //
+    // Each control is shown only when the parse found a SPAN for it -- the byte the value came from.
+    // A field with no span is a value written in a form this cannot put back (a constant, an
+    // expression, a computed default), and showing a box that silently would not save is worse than
+    // showing nothing. So the panel offers exactly what it can honour.
+    if (fmt::ActorClassInfo* k = activeInfoMutable()) {
+        bool edited = false;
+        ImGui::Separator();
+        // Room for the LABEL. ImGui puts a widget's label to its right, and a full-width widget
+        // pushes it off the panel -- which left a column of bare numbers with nothing saying which
+        // was the height and which the radius.
+        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
+
+        if (k->meshPathSpan.valid()) {
+            char buf[260];
+            std::snprintf(buf, sizeof buf, "%s", k->meshPath.c_str());
+            if (ImGui::InputText("Mesh", buf, sizeof buf)) { k->meshPath = buf; edited = true; }
         }
+        if (k->materialSpan.valid()) {
+            char buf[128];
+            std::snprintf(buf, sizeof buf, "%s", k->material.c_str());
+            if (ImGui::InputText("Material", buf, sizeof buf)) { k->material = buf; edited = true; }
+        }
+        if (k->capsuleHeightSpan.valid())
+            edited |= ImGui::DragFloat("Height (cm)", &k->capsuleHeight, 1.0f, 1.0f, 1000.0f, "%.0f");
+        if (k->capsuleRadiusSpan.valid())
+            edited |= ImGui::DragFloat("Radius (cm)", &k->capsuleRadius, 0.5f, 1.0f, 500.0f, "%.0f");
+        if (k->eyeHeightSpan.valid())
+            edited |= ImGui::DragFloat("Eye height (cm)", &k->eyeHeight, 1.0f, 0.0f, 1000.0f, "%.0f");
+        if (k->cameraSpan[0].valid())
+            edited |= ImGui::DragFloat("FOV (deg)", &k->cameraFovDeg, 0.5f, 5.0f, 170.0f, "%.0f");
+        if (k->lightSpan[0].valid())
+            edited |= ImGui::DragFloat("Intensity (lux)", &k->lightIntensityLux, 10.0f, 0.0f, 100000.0f, "%.0f");
+        if (k->lightSpan[1].valid())
+            edited |= ImGui::DragFloat("Light range (cm)", &k->lightRangeCm, 5.0f, 1.0f, 100000.0f, "%.0f");
+
+        // The capsule the preview draws is rebuilt from these, so a drag moves the shape on screen
+        // immediately -- the same property the placement gizmo has, and for the same reason: the
+        // picture is built from the values every frame rather than from a spawned copy of them.
+        ImGui::PopItemWidth();
+        if (edited) { dirty_ = true; framed_ = false; }
+
+        if (k->kind == fmt::ActorKind::Character && !k->capsuleHeightSpan.valid())
+            ImGui::TextDisabled("capsule: %.0f x %.0f cm (framework default; this class states none)",
+                                180.0, 34.0);
     }
 
     // What this actor declares beyond geometry. Said out loud because NEITHER is drawn: an actor
