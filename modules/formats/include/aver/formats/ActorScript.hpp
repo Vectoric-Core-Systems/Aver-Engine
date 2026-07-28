@@ -93,9 +93,39 @@ struct ActorScript {
 // a byte outside the generated region and that is unchanged and unchangeable; displaying what a
 // class declares is not writing it, and refusing to look would mean refusing to preview the common
 // case in order to honour a rule about a different operation.
+// What an actor IS, which decides whether a 3D view means anything for it.
+//
+// A GameMode is rules, a GameInstance is process-wide state, a PlayerController is input and a
+// camera possession policy. NONE of them has a transform, so a viewport showing one would be a
+// viewport showing nothing -- and an empty 3D view reads as a broken editor rather than as a
+// category that has no geometry. An Actor, a Pawn or a Character does have a place in the world, and
+// a Character has a capsule even when it has no mesh at all (first-person characters deliberately
+// have none: you are inside your own head).
+enum class ActorKind {
+    Unknown,            // no recognised base: treated as spatial, since guessing the other way hides things
+    Actor,
+    Pawn,
+    Character,
+    PlayerController,
+    GameMode,
+    GameInstance,
+};
+
+const char* actorKindName(ActorKind k);
+// Whether a 3D preview is meaningful. False for the three that have no transform.
+bool actorKindHasViewport(ActorKind k);
+
 struct ActorClassInfo {
     std::string className;      // from [AverClass("BP_Thing")] / [AverGameMode(...)]
     std::string typeName;       // the C# class the attribute is on
+    std::string baseType;       // the C# base it derives, verbatim
+    ActorKind   kind = ActorKind::Unknown;
+
+    // A CHARACTER's capsule, in centimetres. Read from assignments anywhere in the class, not only
+    // from Configure: the framework's own template sets them in OnBeginPlay, which is where every
+    // real character sets them too. Zero means "not stated"; the caller substitutes a default rather
+    // than drawing a capsule of no height.
+    f32 capsuleHeight = 0.0f, capsuleRadius = 0.0f, eyeHeight = 0.0f;
 
     bool hasMesh = false;
     std::string meshPath, material;
@@ -109,6 +139,10 @@ struct ActorClassInfo {
     f32  lightIntensityLux = 0.0f, lightRangeCm = 0.0f;
 
     bool anything() const { return hasMesh || hasCamera || hasPointLight; }
+    bool hasViewport() const { return actorKindHasViewport(kind); }
+    // Something to DRAW: geometry, or a character's capsule. A Pawn that declares nothing has a
+    // transform but no shape, and the panel says so rather than showing an empty box.
+    bool drawable() const { return hasMesh || kind == ActorKind::Character; }
 };
 
 // Every actor a file declares, in the order they appear.

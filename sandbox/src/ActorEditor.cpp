@@ -138,8 +138,13 @@ private:
 
     void pickFirstPreviewable() {
         activeClass_ = -1;
+        // Something to LOOK at first, because a file that declares a GameMode above three meshed
+        // actors should open on one of the meshes rather than on the rules object.
         for (int i = 0; i < static_cast<int>(classes_.size()); ++i)
-            if (classes_[static_cast<usize>(i)].anything()) { activeClass_ = i; break; }
+            if (classes_[static_cast<usize>(i)].drawable()) { activeClass_ = i; break; }
+        if (activeClass_ < 0)
+            for (int i = 0; i < static_cast<int>(classes_.size()); ++i)
+                if (classes_[static_cast<usize>(i)].anything()) { activeClass_ = i; break; }
         // Nothing previewable but classes present: still name the first, so the panel says what the
         // file HOLDS rather than looking empty.
         if (activeClass_ < 0 && !classes_.empty()) activeClass_ = 0;
@@ -207,11 +212,24 @@ void ActorEditor::buildDrawList(Engine& e) {
     // THE COMMON CASE FIRST. Most actors in most games are one mesh declared on the class, with no
     // designer region at all -- every actor in the SkyForge template is that shape. An editor that
     // only understood placements would show an empty view for all of them.
-    if (const fmt::ActorClassInfo* info = activeInfo(); info && info->hasMesh) {
-        render::preview::PreviewDraw d;
-        d.mesh = g_meshes.resolve(*e.device(), info->meshPath, &d.boundsRadius);
-        d.selected = (selected_ == -1);
-        draws.push_back(d);
+    if (const fmt::ActorClassInfo* info = activeInfo()) {
+        if (info->hasMesh) {
+            render::preview::PreviewDraw d;
+            d.mesh = g_meshes.resolve(*e.device(), info->meshPath, &d.boundsRadius);
+            d.selected = (selected_ == -1);
+            draws.push_back(d);
+        } else if (info->kind == fmt::ActorKind::Character) {
+            // A first-person character has NO mesh on purpose -- you are inside your own head, and a
+            // body drawn at the eye fills the screen. Its shape is the physics capsule, and drawing
+            // that is the difference between opening the most important actor in a project and
+            // showing a blank box for it.
+            render::preview::PreviewDraw d;
+            d.mesh = g_meshes.capsule(*e.device(), info->capsuleHeight, info->capsuleRadius,
+                                      &d.boundsRadius);
+            d.baseColor[0] = 0.45f; d.baseColor[1] = 0.62f; d.baseColor[2] = 0.85f;
+            d.selected = (selected_ == -1);
+            draws.push_back(d);
+        }
     }
     for (int i = 0; i < static_cast<int>(script_.models.size()); ++i) {
         const fmt::ActorModel& m = script_.models[static_cast<usize>(i)];
@@ -413,7 +431,42 @@ void ActorEditor::draw(Engine& e) {
     const f32 side = 300.0f * dpi;
     const f32 viewW = avail > side * 1.6f ? avail - side : avail;
 
-    if (g_preview && g_preview->uiTextureId()) {
+    // ---- classes with no viewport ----
+    //
+    // A GameMode is rules, a GameInstance is process-wide state, a PlayerController is input and a
+    // possession policy. None has a transform, so a 3D view of one shows nothing -- and an empty
+    // viewport reads as a broken editor rather than as a category that simply has no geometry. UE
+    // solves the same problem by opening these on their defaults with a route to the full editor;
+    // this does the same, and the route is the IDE because the behaviour half is text.
+    const fmt::ActorClassInfo* active = activeInfo();
+    const bool noViewport = active && !active->hasViewport();
+    if (noViewport) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.16f, 0.14f, 0.10f, 1.0f));
+        if (ImGui::BeginChild("##noviewport", ImVec2(viewW, 132.0f * dpi), ImGuiChildFlags_Borders)) {
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.98f, 0.80f, 0.35f, 1.0f),
+                               "  A %s has no viewport.", fmt::actorKindName(active->kind));
+            ImGui::TextWrapped("  It has no transform and nothing to place, so there is nothing for a "
+                               "3D view to show. Its settings are below; its behaviour is code.");
+            ImGui::Spacing();
+            ImGui::Indent();
+            ImGui::BeginDisabled(!g_hooks.openInIde);
+            const std::string open = g_hooks.ideName.empty() ? std::string("Open in IDE")
+                                                             : ("Open in " + g_hooks.ideName);
+            if (ImGui::Button(open.c_str(), ImVec2(260.0f * dpi, 0.0f))) g_hooks.openInIde(path_);
+            ImGui::EndDisabled();
+            ImGui::Unindent();
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    } else if (active && !active->drawable()) {
+        // Spatial, but nothing declared to draw. Distinct from the case above and said differently:
+        // this one CAN have geometry and does not yet, which is a thing the author can fix.
+        ImGui::TextDisabled("This %s declares no mesh yet. Add one with b.Mesh(\"...\") in Configure.",
+                            fmt::actorKindName(active->kind));
+    }
+
+    if (!noViewport && g_preview && g_preview->uiTextureId()) {
         // SQUARE, and bounded by the HEIGHT as well as the width: the target is square, so sizing on
         // width alone makes a wide short panel draw an image taller than the panel and the model list
         // beside it disappears below the fold.
@@ -458,7 +511,10 @@ void ActorEditor::draw(Engine& e) {
 
         if (selected_ >= 0 && selected_ < static_cast<int>(script_.models.size()))
             drawGizmo(at, s, script_.models[static_cast<usize>(selected_)]);
-    } else {
+    } else if (!noViewport) {
+        // Only when a viewport WAS expected. Saying "no preview on this backend" about a Game Mode
+        // blames the hardware for a category that never had geometry, and sends somebody looking for
+        // a driver problem that is not there.
         ImGui::TextDisabled("No 3D preview on this backend.");
     }
 
@@ -497,6 +553,23 @@ void ActorEditor::draw(Engine& e) {
         ImGui::Text("%s", (k->className.empty() ? k->typeName : k->className).c_str());
     }
 
+    // CLASS DEFAULTS. What the class states about itself, which for a GameMode or a Controller is
+    // the whole of what an editor can usefully show.
+    if (const fmt::ActorClassInfo* k = activeInfo()) {
+        ImGui::TextDisabled("%s%s%s", fmt::actorKindName(k->kind),
+                            k->baseType.empty() ? "" : "  :  ", k->baseType.c_str());
+        if (k->kind == fmt::ActorKind::Character) {
+            // Read from assignments anywhere in the class, because a character sets these in
+            // OnBeginPlay -- which is where the framework's own template puts them.
+            ImGui::TextDisabled("capsule: %.0f cm tall, %.0f cm radius%s",
+                                static_cast<double>(k->capsuleHeight > 0 ? k->capsuleHeight : 180.0f),
+                                static_cast<double>(k->capsuleRadius > 0 ? k->capsuleRadius : 34.0f),
+                                k->capsuleHeight > 0 ? "" : "  (default)");
+            if (k->eyeHeight > 0.0f)
+                ImGui::TextDisabled("eye height: %.0f cm", static_cast<double>(k->eyeHeight));
+        }
+    }
+
     // What this actor declares beyond geometry. Said out loud because NEITHER is drawn: an actor
     // that is only a camera previews as an empty view, and empty is indistinguishable from broken.
     if (const fmt::ActorClassInfo* k = activeInfo()) {
@@ -508,8 +581,10 @@ void ActorEditor::draw(Engine& e) {
             ImGui::TextDisabled("point light: %.0f lux, %.0f cm (not drawn)",
                                 static_cast<double>(k->lightIntensityLux),
                                 static_cast<double>(k->lightRangeCm));
-        if (!k->anything())
-            ImGui::TextDisabled("This actor declares no mesh, camera or light.");
+        // Only when there is genuinely nothing to show. A Character declares no mesh and is still
+        // drawn -- its capsule IS its shape -- so saying "declares nothing" there is simply untrue.
+        if (!k->anything() && !k->drawable() && k->hasViewport())
+            ImGui::TextDisabled("This %s declares no mesh, camera or light.", fmt::actorKindName(k->kind));
     }
     ImGui::Separator();
     ImGui::Text("%zu placement(s)", script_.models.size());
@@ -578,8 +653,15 @@ std::unique_ptr<AssetEditor> makeActorEditor(const std::string& path) {
 
     fmt::ActorScript parsed = fmt::parseActorScript(source);
     std::vector<fmt::ActorClassInfo> classes = fmt::parseActorClasses(source);
+
+    // ANY recognised actor opens, not only one with geometry. A GameMode declaring nothing at all is
+    // still an actor the editor can say something about -- its kind, its base, and a route to the
+    // code -- and refusing it would send the most structural classes in a project to the IDE with no
+    // sign the editor knows what they are. A class with no recognised base and nothing declared is
+    // not an actor and still goes to the IDE.
     bool previewable = false;
-    for (const fmt::ActorClassInfo& k : classes) if (k.anything()) previewable = true;
+    for (const fmt::ActorClassInfo& k : classes)
+        if (k.anything() || k.kind != fmt::ActorKind::Unknown) previewable = true;
 
     // Openable if it has EITHER a designer region or something the class itself declares. A plain
     // .cs with neither is not an actor and belongs in the IDE -- opening it here would be taking

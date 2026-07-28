@@ -178,6 +178,83 @@ bool numbersAfter(std::string_view t, const char* call, f32* out, int count) {
 
 } // namespace
 
+const char* actorKindName(ActorKind k) {
+    switch (k) {
+        case ActorKind::Actor:            return "Actor";
+        case ActorKind::Pawn:             return "Pawn";
+        case ActorKind::Character:        return "Character";
+        case ActorKind::PlayerController: return "Player Controller";
+        case ActorKind::GameMode:         return "Game Mode";
+        case ActorKind::GameInstance:     return "Game Instance";
+        default:                          return "Class";
+    }
+}
+
+bool actorKindHasViewport(ActorKind k) {
+    // Unknown counts as spatial. Guessing the other way HIDES something: a class deriving a base
+    // this build has not heard of is far more likely to be an actor than a rules object, and the
+    // cost of being wrong is an empty viewport rather than a missing one.
+    switch (k) {
+        case ActorKind::PlayerController:
+        case ActorKind::GameMode:
+        case ActorKind::GameInstance: return false;
+        default:                      return true;
+    }
+}
+
+namespace {
+
+ActorKind kindOfBase(std::string_view base) {
+    // Matched on a SUFFIX rather than equality, so a project's own intermediate base -- and
+    // MyGameCharacter is the first thing anybody writes -- still classifies. A class deriving
+    // something entirely its own falls to Unknown and keeps its viewport, per the note above.
+    auto ends = [&](const char* x) {
+        const usize n = std::strlen(x);
+        return base.size() >= n && base.compare(base.size() - n, n, x) == 0;
+    };
+    if (ends("GameInstance"))     return ActorKind::GameInstance;
+    if (ends("GameMode"))         return ActorKind::GameMode;
+    if (ends("PlayerController")) return ActorKind::PlayerController;
+    if (ends("Controller"))       return ActorKind::PlayerController;
+    if (ends("Character"))        return ActorKind::Character;
+    if (ends("Pawn"))             return ActorKind::Pawn;
+    if (ends("Actor"))            return ActorKind::Actor;
+    return ActorKind::Unknown;
+}
+
+// `Field = 123f;` or `Field = 123;` anywhere in the class. Scanned rather than parsed to a method
+// because a character sets these in OnBeginPlay, not in Configure -- which is where the framework's
+// own template puts them and where every real character puts them too.
+bool assignedNumber(std::string_view t, const char* field, f32& out) {
+    const usize n = std::strlen(field);
+    usize i = 0;
+    while ((i = t.find(field, i)) != std::string_view::npos) {
+        // A whole identifier, so `Height` does not match `EyeHeight`.
+        const bool leftOk = i == 0 || !isIdent(t[i - 1]);
+        usize p = i + n;
+        if (leftOk && p < t.size()) {
+            p = skipSpace(t, p);
+            if (p < t.size() && t[p] == '=' && (p + 1 >= t.size() || t[p + 1] != '=')) {
+                ++p;
+                p = skipSpace(t, p);
+                if (parseFloatLiteral(t, p, out)) return true;
+                // An int literal is legal here (`Health = 3;`) even though the coordinate grammar
+                // forbids one; this is ordinary C#, not the locked region.
+                const usize d = p;
+                while (p < t.size() && isDigit(t[p])) ++p;
+                if (p > d) {
+                    out = static_cast<f32>(std::strtod(std::string(t.substr(d, p - d)).c_str(), nullptr));
+                    return true;
+                }
+            }
+        }
+        i += n;
+    }
+    return false;
+}
+
+} // namespace
+
 std::vector<ActorClassInfo> parseActorClasses(std::string_view t) {
     std::vector<ActorClassInfo> out;
     const std::vector<AttrHit> hits = actorAttributes(t);
@@ -198,6 +275,20 @@ std::vector<ActorClassInfo> parseActorClasses(std::string_view t) {
         if (const usize c = slice.find("class "); c != std::string_view::npos) {
             usize q = skipSpace(slice, c + 6);
             while (q < slice.size() && isIdent(slice[q])) info.typeName += slice[q++];
+            // The base, after the colon. It is what decides whether a viewport means anything: a
+            // GameMode has no transform, and a 3D view of one shows nothing while looking broken.
+            q = skipSpace(slice, q);
+            if (q < slice.size() && slice[q] == ':') {
+                q = skipSpace(slice, q + 1);
+                while (q < slice.size() && isIdent(slice[q])) info.baseType += slice[q++];
+            }
+        }
+        info.kind = kindOfBase(info.baseType);
+
+        if (info.kind == ActorKind::Character) {
+            assignedNumber(slice, "Height", info.capsuleHeight);
+            assignedNumber(slice, "Radius", info.capsuleRadius);
+            assignedNumber(slice, "EyeHeight", info.eyeHeight);
         }
 
         usize m = slice.find(".Mesh(");

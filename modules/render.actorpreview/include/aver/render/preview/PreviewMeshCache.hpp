@@ -47,6 +47,17 @@ public:
     // arrive on screen as one pixel. It did.
     f32 radiusOf(std::string_view meshPath) const;
 
+    // A CHARACTER'S CAPSULE, which is what a character has instead of a mesh.
+    //
+    // A first-person character deliberately has no mesh at all -- you are inside your own head, and
+    // a body drawn at the eye fills the screen. Its shape is the physics capsule, and drawing that is
+    // the difference between an editor that can open a character and one that shows a blank box for
+    // the most important actor in the project.
+    //
+    // Cached per (height, radius) so a project's characters share one upload; the units are
+    // centimetres, standing on Z=0 the way the framework places one.
+    rhi::MeshHandle capsule(rhi::IDevice& device, f32 heightCm, f32 radiusCm, f32* outRadius = nullptr);
+
     // Every path that failed to resolve, canonical form, in first-asked order. The panel shows these:
     // an actor whose meshes are all missing renders an empty view, and an empty view with no
     // explanation is indistinguishable from a broken preview.

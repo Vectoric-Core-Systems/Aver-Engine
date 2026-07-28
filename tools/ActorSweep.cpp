@@ -33,7 +33,8 @@ int main(int argc, char** argv) {
         const fmt::ActorScript s = fmt::parseActorScript(text);
         const std::vector<fmt::ActorClassInfo> classes = fmt::parseActorClasses(text);
         u32 previewable = 0;
-        for (const fmt::ActorClassInfo& k : classes) if (k.anything()) ++previewable;
+        for (const fmt::ActorClassInfo& k : classes)
+            if (k.anything() || k.kind != fmt::ActorKind::Unknown) ++previewable;
         const std::string name = it->path().filename().string();
 
         if (s.status == fmt::ActorParseStatus::Ok) {
@@ -43,8 +44,11 @@ int main(int argc, char** argv) {
             ++openable;
             AVER_INFO("  OPEN   {}  {} class(es), {} previewable", name, classes.size(), previewable);
             for (const fmt::ActorClassInfo& k : classes)
-                AVER_INFO("           {} '{}'{}{}{}", k.anything() ? "*" : " ", k.className,
+                AVER_INFO("           {} {:<18} '{}'{}{}{}{}",
+                          k.hasViewport() ? (k.drawable() ? "3D " : "3d?") : "-- ",
+                          fmt::actorKindName(k.kind), k.className,
                           k.hasMesh ? (" mesh " + k.meshPath) : std::string(),
+                          k.kind == fmt::ActorKind::Character ? " capsule" : "",
                           k.hasCamera ? " camera" : "", k.hasPointLight ? " light" : "");
         } else if (s.status == fmt::ActorParseStatus::NoRegion) {
             ++skipped;

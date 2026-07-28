@@ -4,6 +4,7 @@
 #include "aver/core/Log.hpp"
 
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 
 namespace aver::render::preview {
@@ -78,11 +79,6 @@ void PreviewMeshCache::clear(rhi::IDevice& device) {
     loaded_ = 0;
 }
 
-f32 PreviewMeshCache::radiusOf(std::string_view meshPath) const {
-    const auto it = radii_.find(fmt::canonicalMeshPath(meshPath));
-    return it == radii_.end() ? 0.0f : it->second;
-}
-
 namespace {
 f32 maxRadius(const std::vector<rhi::MeshVertex>& v) {
     f32 r2 = 0.0f;
@@ -92,7 +88,69 @@ f32 maxRadius(const std::vector<rhi::MeshVertex>& v) {
     }
     return std::sqrt(r2);
 }
+
+// A capsule standing on Z = 0: two hemispheres and a cylinder, built as one ring-and-sector sweep so
+// the seam between cap and shaft carries no normal discontinuity.
+void appendCapsule(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
+                   f32 height, f32 radius, u32 rings, u32 sectors) {
+    const f32 pi = 3.14159265358979f;
+    // The framework's capsule is TOTAL height including both caps, so the cylinder is what is left
+    // after them. A capsule shorter than twice its radius is a sphere, not an error.
+    const f32 half = std::fmax(height * 0.5f - radius, 0.0f);
+    const f32 centreZ = height * 0.5f;
+    const u32 base = static_cast<u32>(v.size());
+    for (u32 ring = 0; ring <= rings; ++ring) {
+        const f32 phi = pi * (static_cast<f32>(ring) / static_cast<f32>(rings));
+        const f32 nz = std::cos(phi), rad = std::sin(phi);
+        // The offset is what turns a sphere into a capsule: the top half is pushed up and the bottom
+        // half down, and the ring normals are the sphere's throughout, which is why the seam is smooth.
+        const f32 off = nz >= 0.0f ? half : -half;
+        for (u32 sec = 0; sec <= sectors; ++sec) {
+            const f32 th = 2.0f * pi * (static_cast<f32>(sec) / static_cast<f32>(sectors));
+            const f32 nx = rad * std::cos(th), ny = rad * std::sin(th);
+            v.push_back({nx * radius, ny * radius, centreZ + nz * radius + off, nx, ny, nz,
+                         static_cast<f32>(sec) / static_cast<f32>(sectors),
+                         static_cast<f32>(ring) / static_cast<f32>(rings)});
+        }
+    }
+    const u32 stride = sectors + 1;
+    for (u32 ring = 0; ring < rings; ++ring)
+        for (u32 sec = 0; sec < sectors; ++sec) {
+            const u32 a = base + ring * stride + sec, b = a + stride;
+            idx.push_back(a); idx.push_back(b); idx.push_back(a + 1);
+            idx.push_back(a + 1); idx.push_back(b); idx.push_back(b + 1);
+        }
+}
 } // namespace
+
+rhi::MeshHandle PreviewMeshCache::capsule(rhi::IDevice& device, f32 heightCm, f32 radiusCm, f32* outRadius) {
+    // Defaults are the framework's own person: 180 cm tall, 34 cm across. A character that states
+    // neither still gets a body rather than nothing.
+    const f32 h = heightCm > 1.0f ? heightCm : 180.0f;
+    const f32 r = radiusCm > 0.1f ? radiusCm : 34.0f;
+    char key[64];
+    std::snprintf(key, sizeof key, "$capsule/%.2f/%.2f", static_cast<double>(h), static_cast<double>(r));
+    const std::string k = key;
+    if (const auto it = meshes_.find(k); it != meshes_.end()) {
+        if (outRadius) *outRadius = radiusOf(k);
+        return it->second;
+    }
+    std::vector<rhi::MeshVertex> v;
+    std::vector<u32> idx;
+    appendCapsule(v, idx, h, r, 16, 24);
+    const rhi::MeshHandle handle = device.createMesh(v.data(), static_cast<u32>(v.size()),
+                                                     idx.data(), static_cast<u32>(idx.size()));
+    meshes_[k] = handle;
+    radii_[k] = maxRadius(v);
+    if (outRadius) *outRadius = radii_[k];
+    if (handle) { ++loaded_; AVER_INFO("[Preview] capsule {}x{} cm -> {} verts", h, r, v.size()); }
+    return handle;
+}
+
+f32 PreviewMeshCache::radiusOf(std::string_view meshPath) const {
+    const auto it = radii_.find(fmt::canonicalMeshPath(meshPath));
+    return it == radii_.end() ? 0.0f : it->second;
+}
 
 rhi::MeshHandle PreviewMeshCache::resolve(rhi::IDevice& device, std::string_view meshPath, f32* outRadius) {
     if (meshPath.empty()) return 0;
