@@ -169,6 +169,66 @@ void composeTransform(const f32 pos[3], const f32 rotDeg[3], const f32 scale[3],
     out[12] = pos[0];         out[13] = pos[1];         out[14] = pos[2];         out[15] = 1.0f;
 }
 
+// ---------------------------------------------------------------- the component tree
+//
+// WHAT AN ACTOR IS MADE OF, as a hierarchy -- UE's Components panel, and for the same reason. An
+// actor is not a flat list of meshes: it is a root with a transform and a tree of things attached to
+// it, some of which draw and some of which do not. Until you can see that tree you are editing an
+// actor by guessing which line in the file corresponds to the box you are looking at.
+//
+// It is built from BOTH sources and is the same shape either way, which is what lets the Live toggle
+// be a toggle rather than a different editor:
+//   * PARSED  -- the class's own declarations (mesh, capsule, camera, light) plus every b.Place row.
+//   * LIVE    -- the spawned subtree, walked, so nesting that BuildModels created is real here.
+//
+// A FLAT VECTOR with child INDICES rather than pointers or owned children. Nodes are appended while
+// walking, and a vector that reallocates would invalidate every pointer taken so far -- which is the
+// standard way this shape gets written and then subtly broken by the first actor with enough parts.
+enum class ComponentKind { Root, StaticMesh, Capsule, Camera, PointLight };
+
+const char* componentKindName(ComponentKind k) {
+    switch (k) {
+        case ComponentKind::Root:       return "Root";
+        case ComponentKind::StaticMesh: return "Static Mesh";
+        case ComponentKind::Capsule:    return "Capsule";
+        case ComponentKind::Camera:     return "Camera";
+        case ComponentKind::PointLight: return "Point Light";
+    }
+    return "Component";
+}
+
+struct ComponentNode {
+    std::string name;                 // what the author called it, or the component's own kind
+    std::string detail;               // the mesh path, the capsule size -- the second line in the tree
+    ComponentKind kind = ComponentKind::StaticMesh;
+
+    // Which b.Place row this came from, or -1. It is what connects a click in the tree to the bytes
+    // the gizmo writes back, so a node without one is a node the gizmo must not offer to drag.
+    int modelIndex = -1;
+
+    // Local, and the world it composes to. Both kept: the panel edits LOCAL (that is what the source
+    // stores) while the viewport and the gizmo need WORLD.
+    f32 local[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    f32 world[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+
+    int parent = -1;
+    std::vector<int> children;
+
+    // Does it put geometry on screen? A camera and a light do not, and the panel says so rather than
+    // leaving somebody hunting for a mesh that was never going to be there.
+    bool drawsGeometry = false;
+};
+
+// row-vector, translation in the last row: world = local * parentWorld.
+void multiply4x4(const f32 a[16], const f32 b[16], f32 out[16]) {
+    f32 t[16];
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            t[r*4+c] = a[r*4+0]*b[0*4+c] + a[r*4+1]*b[1*4+c] +
+                       a[r*4+2]*b[2*4+c] + a[r*4+3]*b[3*4+c];
+    for (int i = 0; i < 16; ++i) out[i] = t[i];
+}
+
 class ActorEditor final : public AssetEditor {
 public:
     ActorEditor(std::string path, fmt::ActorScript parsed,
@@ -227,6 +287,43 @@ public:
 private:
     void buildDrawList(Engine& e);
 
+    // Is the tree row currently selected THIS draw? Asked by kind rather than by index because the
+    // draw list and the tree are built from the same data by two walks, and matching them on
+    // position would break the first time either grew a row the other did not.
+    bool nodeSelected(ComponentKind kind, int modelIndex) const {
+        if (selectedNode_ < 0 || selectedNode_ >= static_cast<int>(tree_.size())) return false;
+        const ComponentNode& n = tree_[static_cast<usize>(selectedNode_)];
+        return n.kind == kind && n.modelIndex == modelIndex;
+    }
+
+    // ---- the component tree ----
+    std::vector<ComponentNode> tree_;
+    int selectedNode_ = -1;
+
+    int addNode(ComponentNode n, int parent) {
+        n.parent = parent;
+        // Compose as we go. Every parent is appended before its children -- both builders walk
+        // top-down -- so the parent's world is always final by the time a child needs it.
+        if (parent >= 0) multiply4x4(n.local, tree_[static_cast<usize>(parent)].world, n.world);
+        else             for (int i = 0; i < 16; ++i) n.world[i] = n.local[i];
+        tree_.push_back(std::move(n));
+        const int idx = static_cast<int>(tree_.size()) - 1;
+        if (parent >= 0) tree_[static_cast<usize>(parent)].children.push_back(idx);
+        return idx;
+    }
+
+    void buildTree();
+    void drawComponentTree();
+    void drawTreeNode(int idx);
+    // Keep selected_ (an index into script_.models, which the gizmo and the rewriter use) in step
+    // with selectedNode_ (an index into the tree, which the panel uses). One is the source of truth
+    // for editing and the other for display; deriving rather than duplicating is what stops them
+    // disagreeing about which thing is selected.
+    void syncSelectionFromNode() {
+        selected_ = (selectedNode_ >= 0 && selectedNode_ < static_cast<int>(tree_.size()))
+                  ? tree_[static_cast<usize>(selectedNode_)].modelIndex : -1;
+    }
+
     // ---- the gizmo ----
     //
     // A TRANSLATE gizmo, three axes, drawn as an ImGui overlay over the preview image rather than as
@@ -239,6 +336,10 @@ private:
     bool projectToScreen(const f32 world[3], f32 imageSize, ImVec2& out) const;
     int  pickGizmoAxis(ImVec2 local, f32 imageSize) const;
     void drawGizmo(ImVec2 imageTopLeft, f32 imageSize, const fmt::ActorModel& m) const;
+    // The components that have no mesh, drawn as wireframes over the image -- a camera's frustum and
+    // a light's reach. UE draws both in its Blueprint viewport and an actor that is only a camera is
+    // otherwise an empty box.
+    void drawComponentWireframes(ImVec2 imageTopLeft, f32 imageSize) const;
     void dragAlongAxis(fmt::ActorModel& m, int axis, ImVec2 delta, f32 imageSize) const;
     bool axisTip(const fmt::ActorModel& m, int axis, f32 imageSize, ImVec2& out) const;
 
@@ -368,6 +469,8 @@ bool ActorEditor::reloadIfChanged() {
     classes_ = fmt::parseActorClasses(source_);
     pickFirstPreviewable();
     if (selected_ >= static_cast<int>(script_.models.size())) selected_ = -1;
+    // The tree is rebuilt from the new parse next frame, so an index into the old one names nothing.
+    selectedNode_ = -1;
     // The source changed, so the LIVE view is stale too -- but only against the class that is loaded
     // now. A text edit does not reload C#, so the respawn shows the same thing until Compile C# runs;
     // that is honest, and it is what the panel says.
@@ -376,6 +479,206 @@ bool ActorEditor::reloadIfChanged() {
     AVER_INFO("[ActorEditor] {} changed on disk; reloaded {} placement(s)",
               path_, script_.models.size());
     return true;
+}
+
+// ---------------------------------------------------------------- the component tree
+
+void ActorEditor::buildTree() {
+    tree_.clear();
+    const fmt::ActorClassInfo* info = activeInfo();
+
+    // THE ROOT IS THE ACTOR ITSELF, always, even when it has nothing attached. UE shows it and so
+    // does this: the root carries the transform everything else is relative to, and an empty tree
+    // reads as "the editor failed" where a lone root reads as "this actor has no components yet",
+    // which is a true and actionable thing to say.
+    ComponentNode root;
+    root.kind = ComponentKind::Root;
+    // The class's own name where there is one. Falling back to the FILE means a `.Designer.cs`
+    // would show as "Car.Designer" -- the generated half's filename rather than the actor -- so the
+    // suffix comes off. A designer file's partial class carries no attribute and no base, so there
+    // is genuinely no ActorClassInfo for it and the filename is the only name available.
+    if (info) {
+        root.name = info->typeName.empty() ? info->className : info->typeName;
+    } else {
+        std::string stem = std::filesystem::path(path_).stem().string();
+        if (stem.size() > 9 && stem.compare(stem.size() - 9, 9, ".Designer") == 0)
+            stem.erase(stem.size() - 9);
+        root.name = std::move(stem);
+    }
+    if (info) root.detail = fmt::actorKindName(info->kind);
+    const int rootIdx = addNode(std::move(root), -1);
+
+    // ---- LIVE: the spawned subtree, which is the assembled truth ----
+    //
+    // The live draws already carry WORLD matrices read off real entities, so nesting BuildModels
+    // created is preserved exactly. They are attached under the root as a flat set because the walk
+    // that produced them flattened the parentage -- the transforms are still right, which is what
+    // the viewport needs; recovering the shape as well is a job for the walk, not for this.
+    if (live_) {
+        for (usize i = 0; i < liveDraws_.size(); ++i) {
+            ComponentNode n;
+            n.kind = ComponentKind::StaticMesh;
+            char nm[64];
+            std::snprintf(nm, sizeof nm, "Model %zu", i);
+            n.name = nm;
+            n.detail = "built at run time";
+            n.drawsGeometry = liveDraws_[i].mesh != 0;
+            for (int k = 0; k < 16; ++k) n.local[k] = liveDraws_[i].world[k];
+            const int idx = addNode(std::move(n), rootIdx);
+            // The live world matrix is already absolute in the actor's frame, so overwrite the
+            // composed one rather than letting it be multiplied by the root a second time.
+            for (int k = 0; k < 16; ++k) tree_[static_cast<usize>(idx)].world[k] = liveDraws_[i].world[k];
+        }
+        return;
+    }
+
+    // ---- PARSED: what the class declares, then what the designer region places ----
+    if (info) {
+        if (info->hasMesh) {
+            ComponentNode n;
+            n.kind = ComponentKind::StaticMesh;
+            n.name = "StaticMesh";
+            n.detail = info->meshPath;
+            n.drawsGeometry = true;
+            addNode(std::move(n), rootIdx);
+        }
+        if (info->kind == fmt::ActorKind::Character) {
+            ComponentNode n;
+            n.kind = ComponentKind::Capsule;
+            n.name = "Capsule";
+            char d[96];
+            std::snprintf(d, sizeof d, "%.0f x %.0f cm",
+                          static_cast<double>(info->capsuleHeight > 1.0f ? info->capsuleHeight : 180.0f),
+                          static_cast<double>(info->capsuleRadius > 0.1f ? info->capsuleRadius : 34.0f));
+            n.detail = d;
+            n.drawsGeometry = true;
+            addNode(std::move(n), rootIdx);
+        }
+        // A CAMERA AND A LIGHT ARE COMPONENTS TOO, and they are the reason this panel exists rather
+        // than a list of meshes. An actor that is only a camera previewed as nothing at all, and
+        // "nothing" and "broken" are indistinguishable on screen. Here it has a row.
+        if (info->hasCamera) {
+            ComponentNode n;
+            n.kind = ComponentKind::Camera;
+            n.name = "Camera";
+            char d[96];
+            std::snprintf(d, sizeof d, "fov %.0f deg", static_cast<double>(info->cameraFovDeg));
+            n.detail = d;
+            // The eye height is where the camera SITS on a character, so the row is drawn there
+            // rather than at the actor's feet -- a frustum at the origin of a 180 cm character is
+            // pointing out of its ankles.
+            if (info->eyeHeight > 0.1f) n.local[14] = info->eyeHeight;
+            addNode(std::move(n), rootIdx);
+        }
+        if (info->hasPointLight) {
+            ComponentNode n;
+            n.kind = ComponentKind::PointLight;
+            n.name = "PointLight";
+            char d[96];
+            std::snprintf(d, sizeof d, "%.0f lx, %.0f cm",
+                          static_cast<double>(info->lightIntensityLux),
+                          static_cast<double>(info->lightRangeCm));
+            n.detail = d;
+            addNode(std::move(n), rootIdx);
+        }
+    }
+
+    for (int i = 0; i < static_cast<int>(script_.models.size()); ++i) {
+        const fmt::ActorModel& m = script_.models[static_cast<usize>(i)];
+        ComponentNode n;
+        n.kind = ComponentKind::StaticMesh;
+        n.name = m.property.empty() ? "Model" : m.property;
+        n.detail = m.meshPath;
+        n.modelIndex = i;
+        n.drawsGeometry = true;
+        composeTransform(m.pos, m.rot, m.scale, n.local);
+        addNode(std::move(n), rootIdx);
+    }
+}
+
+// ---------------------------------------------------------------- the Components panel
+
+namespace {
+// A colour per kind, so the tree is scannable without reading it. UE tints its component icons for
+// exactly this reason: in a list of twenty rows the eye finds "the light" by colour long before it
+// finds it by name.
+ImVec4 kindColour(ComponentKind k) {
+    switch (k) {
+        case ComponentKind::Root:       return ImVec4(0.95f, 0.80f, 0.45f, 1.0f);
+        case ComponentKind::StaticMesh: return ImVec4(0.62f, 0.78f, 0.95f, 1.0f);
+        case ComponentKind::Capsule:    return ImVec4(0.45f, 0.85f, 0.70f, 1.0f);
+        case ComponentKind::Camera:     return ImVec4(0.85f, 0.70f, 0.98f, 1.0f);
+        case ComponentKind::PointLight: return ImVec4(0.98f, 0.88f, 0.45f, 1.0f);
+    }
+    return ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
+}
+// A one-glyph stand-in for an icon. Deliberately ASCII: the editor ships no icon font for this panel
+// yet, and a missing glyph renders as a box that looks like a bug rather than like a placeholder.
+const char* kindGlyph(ComponentKind k) {
+    switch (k) {
+        case ComponentKind::Root:       return "*";
+        case ComponentKind::StaticMesh: return "#";
+        case ComponentKind::Capsule:    return "0";
+        case ComponentKind::Camera:     return ">";
+        case ComponentKind::PointLight: return "o";
+    }
+    return "-";
+}
+} // namespace
+
+void ActorEditor::drawTreeNode(int idx) {
+    if (idx < 0 || idx >= static_cast<int>(tree_.size())) return;
+    const ComponentNode& n = tree_[static_cast<usize>(idx)];
+
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth |
+                               ImGuiTreeNodeFlags_DefaultOpen;
+    if (n.children.empty()) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+    if (idx == selectedNode_) flags |= ImGuiTreeNodeFlags_Selected;
+
+    ImGui::PushStyleColor(ImGuiCol_Text, kindColour(n.kind));
+    ImGui::TextUnformatted(kindGlyph(n.kind));
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+
+    const bool open = ImGui::TreeNodeEx(reinterpret_cast<void*>(static_cast<intptr_t>(idx)), flags,
+                                        "%s", n.name.c_str());
+    // OpenOnArrow means a click on the LABEL is a selection rather than an expand, which is what
+    // makes a tree usable as a picker. IsItemToggledOpen excludes the arrow itself.
+    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+        selectedNode_ = idx;
+        syncSelectionFromNode();
+    }
+    if (!n.detail.empty() && ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s\n%s", componentKindName(n.kind), n.detail.c_str());
+
+    if (open && !n.children.empty()) {
+        // A COPY of the child list, because a node's children can be reallocated out from under this
+        // if anything appends to tree_ during the walk. Nothing does today; the copy costs a few
+        // integers and removes the class of bug entirely.
+        const std::vector<int> kids = n.children;
+        for (const int c : kids) drawTreeNode(c);
+        ImGui::TreePop();
+    }
+}
+
+void ActorEditor::drawComponentTree() {
+    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    ImGui::TextDisabled("COMPONENTS");
+    if (ImGui::BeginChild("##components", ImVec2(0.0f, 190.0f * dpi), ImGuiChildFlags_Borders)) {
+        if (tree_.empty()) ImGui::TextDisabled("  nothing declared");
+        else               drawTreeNode(0);
+    }
+    ImGui::EndChild();
+
+    // What the selected row IS, spelled out under the tree. The tree gives names; this gives the
+    // kind and the one fact that matters for that kind, which is what a Details panel is for.
+    if (selectedNode_ >= 0 && selectedNode_ < static_cast<int>(tree_.size())) {
+        const ComponentNode& n = tree_[static_cast<usize>(selectedNode_)];
+        ImGui::TextColored(kindColour(n.kind), "%s", componentKindName(n.kind));
+        if (!n.detail.empty()) ImGui::TextDisabled("%s", n.detail.c_str());
+        if (!n.drawsGeometry && n.kind != ComponentKind::Root)
+            ImGui::TextDisabled("(no geometry -- shown in the viewport as a wireframe)");
+    }
 }
 
 // ---------------------------------------------------------------- the live view
@@ -500,6 +803,7 @@ void ActorEditor::buildDrawList(Engine& e) {
             std::vector<render::preview::PreviewDraw> copy = liveDraws_;
             g_preview->setDrawList(std::move(copy));
             if (!framed_) { g_preview->frameAll(); framed_ = true; }
+            buildTree();
             return;
         }
     }
@@ -514,7 +818,7 @@ void ActorEditor::buildDrawList(Engine& e) {
         if (info->hasMesh) {
             render::preview::PreviewDraw d;
             d.mesh = g_meshes.resolve(*e.device(), info->meshPath, &d.boundsRadius);
-            d.selected = (selected_ == -1);
+            d.selected = nodeSelected(ComponentKind::StaticMesh, -1);
             draws.push_back(d);
         } else if (info->kind == fmt::ActorKind::Character) {
             // A first-person character has NO mesh on purpose -- you are inside your own head, and a
@@ -525,7 +829,7 @@ void ActorEditor::buildDrawList(Engine& e) {
             d.mesh = g_meshes.capsule(*e.device(), info->capsuleHeight, info->capsuleRadius,
                                       &d.boundsRadius);
             d.baseColor[0] = 0.45f; d.baseColor[1] = 0.62f; d.baseColor[2] = 0.85f;
-            d.selected = (selected_ == -1);
+            d.selected = nodeSelected(ComponentKind::Capsule, -1);
             draws.push_back(d);
         }
     }
@@ -534,11 +838,12 @@ void ActorEditor::buildDrawList(Engine& e) {
         render::preview::PreviewDraw d;
         d.mesh = g_meshes.resolve(*e.device(), m.meshPath, &d.boundsRadius);
         composeTransform(m.pos, m.rot, m.scale, d.world);
-        d.selected = (i == selected_);
+        d.selected = nodeSelected(ComponentKind::StaticMesh, i);
         draws.push_back(d);
     }
     g_preview->setDrawList(std::move(draws));
     if (!framed_) { g_preview->frameAll(); framed_ = true; }
+    buildTree();
 }
 
 // ---------------------------------------------------------------- the gizmo
@@ -605,6 +910,81 @@ bool ActorEditor::axisTip(const fmt::ActorModel& m, int axis, f32 imageSize, ImV
     out.x = origin.x + dx / len * kGizmoPixels;
     out.y = origin.y + dy / len * kGizmoPixels;
     return true;
+}
+
+void ActorEditor::drawComponentWireframes(ImVec2 topLeft, f32 imageSize) const {
+    if (!g_preview || tree_.empty()) return;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // A point in a node's own frame, through its world matrix, to the screen. Row-vector with the
+    // translation in the last row, matching composeTransform and the engine everywhere else.
+    auto projectLocal = [&](const ComponentNode& n, f32 lx, f32 ly, f32 lz, ImVec2& out) {
+        const f32 w[3] = {
+            lx*n.world[0] + ly*n.world[4] + lz*n.world[8]  + n.world[12],
+            lx*n.world[1] + ly*n.world[5] + lz*n.world[9]  + n.world[13],
+            lx*n.world[2] + ly*n.world[6] + lz*n.world[10] + n.world[14],
+        };
+        ImVec2 p;
+        if (!projectToScreen(w, imageSize, p)) return false;
+        out = ImVec2(topLeft.x + p.x, topLeft.y + p.y);
+        return true;
+    };
+
+    for (usize i = 0; i < tree_.size(); ++i) {
+        const ComponentNode& n = tree_[i];
+        if (n.kind != ComponentKind::Camera && n.kind != ComponentKind::PointLight) continue;
+
+        const bool sel = (static_cast<int>(i) == selectedNode_);
+        const ImVec4 c = kindColour(n.kind);
+        // Selected draws brighter and thicker rather than a different colour: the colour is the
+        // component's identity in the tree, and changing it on selection would break that link.
+        const ImU32 col = ImGui::GetColorU32(ImVec4(c.x, c.y, c.z, sel ? 1.0f : 0.55f));
+        const f32 th = sel ? 2.0f : 1.0f;
+
+        if (n.kind == ComponentKind::Camera) {
+            // A FRUSTUM, pointing down +X, which is this engine's forward. Drawn at a fixed 60 cm
+            // rather than at the real far plane: a far plane is tens of metres and would fill the
+            // whole preview with lines, saying nothing about where the camera is or which way it
+            // looks -- which is the entire question the wireframe answers.
+            const fmt::ActorClassInfo* info = activeInfo();
+            const f32 fov = (info && info->cameraFovDeg > 1.0f) ? info->cameraFovDeg : 60.0f;
+            const f32 len = 60.0f;
+            const f32 half = len * std::tan(fov * 0.5f * 3.14159265f / 180.0f);
+            ImVec2 apex, corner[4];
+            if (!projectLocal(n, 0, 0, 0, apex)) continue;
+            const f32 cy[4] = {-half,  half,  half, -half};
+            const f32 cz[4] = {-half, -half,  half,  half};
+            bool ok = true;
+            for (int k = 0; k < 4; ++k) ok = ok && projectLocal(n, len, cy[k], cz[k], corner[k]);
+            if (!ok) continue;
+            for (int k = 0; k < 4; ++k) {
+                dl->AddLine(apex, corner[k], col, th);
+                dl->AddLine(corner[k], corner[(k + 1) % 4], col, th);
+            }
+        } else {
+            // A LIGHT'S REACH, as three orthogonal circles. One circle reads as a disc and hides
+            // which plane it is in; three read as a sphere from any angle, which is what a range is.
+            const fmt::ActorClassInfo* info = activeInfo();
+            const f32 r = (info && info->lightRangeCm > 1.0f) ? info->lightRangeCm : 100.0f;
+            constexpr int kSegments = 24;
+            for (int plane = 0; plane < 3; ++plane) {
+                ImVec2 prev;
+                bool have = false;
+                for (int k = 0; k <= kSegments; ++k) {
+                    const f32 a = 6.2831853f * static_cast<f32>(k) / static_cast<f32>(kSegments);
+                    const f32 u = std::cos(a) * r, v = std::sin(a) * r;
+                    const f32 lx = plane == 0 ? u : (plane == 1 ? u : 0.0f);
+                    const f32 ly = plane == 0 ? v : (plane == 1 ? 0.0f : u);
+                    const f32 lz = plane == 0 ? 0.0f : (plane == 1 ? v : v);
+                    ImVec2 p;
+                    if (!projectLocal(n, lx, ly, lz, p)) { have = false; continue; }
+                    if (have) dl->AddLine(prev, p, col, th);
+                    prev = p;
+                    have = true;
+                }
+            }
+        }
+    }
 }
 
 void ActorEditor::drawGizmo(ImVec2 topLeft, f32 imageSize, const fmt::ActorModel& m) const {
@@ -724,7 +1104,7 @@ void ActorEditor::draw(Engine& e) {
         ImGui::SameLine();
         ImGui::TextDisabled("|");
         ImGui::SameLine();
-        if (ImGui::Checkbox("Live", &live_)) { liveStale_ = true; framed_ = false; selected_ = -1; }
+        if (ImGui::Checkbox("Live", &live_)) { liveStale_ = true; framed_ = false; selected_ = -1; selectedNode_ = -1; }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Spawn the compiled class, run its BuildModels and show what it actually "
                               "builds.\nNo OnBeginPlay, no ticking, nothing possessed -- the actor is "
@@ -832,6 +1212,8 @@ void ActorEditor::draw(Engine& e) {
                 g_preview->camera().addZoom(io.MouseWheel > 0.0f ? 0.88f : 1.0f / 0.88f);
         }
 
+        // Before the gizmo, so a handle is never hidden behind a frustum line.
+        drawComponentWireframes(at, s);
         if (!live_ && selected_ >= 0 && selected_ < static_cast<int>(script_.models.size()))
             drawGizmo(at, s, script_.models[static_cast<usize>(selected_)]);
     } else if (!noViewport) {
@@ -871,7 +1253,7 @@ void ActorEditor::draw(Engine& e) {
         }
         for (const std::string& n : labels) items.push_back(n.c_str());
         if (ImGui::Combo("Actor", &activeClass_, items.data(), static_cast<int>(items.size())))
-            { selected_ = -1; framed_ = false; liveStale_ = true; }
+            { selected_ = -1; selectedNode_ = -1; framed_ = false; liveStale_ = true; }
     } else if (const fmt::ActorClassInfo* k = activeInfo()) {
         // The C# type, which is what the author named the thing. The bound name is shown below as
         // bookkeeping.
@@ -955,17 +1337,10 @@ void ActorEditor::draw(Engine& e) {
             ImGui::TextDisabled("This %s declares no mesh, camera or light.", fmt::actorKindName(k->kind));
     }
     ImGui::Separator();
-    ImGui::Text("%zu placement(s)", script_.models.size());
-    ImGui::TextDisabled("Preview lighting is fixed and does not match the level viewport.");
-    ImGui::Separator();
-
-    for (int i = 0; i < static_cast<int>(script_.models.size()); ++i) {
-        const fmt::ActorModel& m = script_.models[static_cast<usize>(i)];
-        char label[192];
-        std::snprintf(label, sizeof label, "%s##model%d", m.property.c_str(), i);
-        if (ImGui::Selectable(label, selected_ == i)) selected_ = i;
-    }
-
+    // THE COMPONENT TREE, in place of the flat list of placements that used to be here. The list
+    // showed b.Place rows and nothing else, so a camera, a light and a class-level mesh -- three of
+    // the four things an actor can be made of -- had no row at all.
+    drawComponentTree();
     ImGui::Separator();
     if (selected_ >= 0 && selected_ < static_cast<int>(script_.models.size())) {
         fmt::ActorModel& m = script_.models[static_cast<usize>(selected_)];

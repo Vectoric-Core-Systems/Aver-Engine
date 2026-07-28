@@ -58,6 +58,7 @@ and zero tests.** It is a starting point, not a dependency that has been exercis
 | The preview's own mesh registry | `modules/render.actorpreview/src/PreviewMeshCache.cpp` | — |
 | The tab, gizmo and reload | `sandbox/src/ActorEditor.{hpp,cpp}` | not covered by a test |
 | The **Live** view — spawn the class, read what it built | same, plus `aver_fw_spawn_preview` | `FrameworkTest` (the ABI edge); `--open-asset … --actor-live` (the tab) |
+| The Components tree, and the camera/light wireframes | `sandbox/src/ActorEditor.cpp` | not covered by a test; verified by screenshot against `Car.Designer.cs` and `FpsCharacter.cs` |
 | The file watcher, and routing a disk change to a tab | `modules/platform/…/DirectoryWatcher`, `sandbox/src/AssetEditor.cpp` | `WatcherTest`, 33 assertions against a real filesystem |
 | The **Roslyn** backend | `scripting/csharp/Aver.Design/` → `bin/Tools/averdesign.exe`; `modules/formats.roslyn/` | `RoslynTest` — agreement with the scanner, and the cases it declines |
 
@@ -226,6 +227,45 @@ sync must never have. Saving, or closing without saving, resolves it. A file mid
 parse also leaves the previous good state on screen rather than blanking the tab.
 
 ---
+
+## 4a. The Components panel
+
+UE's Blueprint editor shows an actor as a **tree**, not a list, and this now does the same. An actor
+is a root with a transform and a set of things attached to it, some of which draw and some of which
+do not.
+
+What replaced what: the panel used to be a flat list of `b.Place` rows. That meant a class-level
+mesh, a character's capsule, a camera and a light — three of the four things an actor can be made
+of — had **no row at all**. A class whose only component was a camera showed an empty panel over an
+empty viewport.
+
+The tree is built to one shape from either source, which is what lets Live be a toggle rather than a
+second editor:
+
+- **Parsed** — the root, then the class's own declarations (`b.Mesh`, capsule, camera, light), then
+  every `b.Place` row.
+- **Live** — the root, then the spawned subtree, whose world matrices are read off real entities, so
+  nesting that `BuildModels` created survives.
+
+Rows are colour-coded by kind, because in a list of twenty the eye finds "the light" by colour long
+before it finds it by name. Selecting a row highlights that component in the viewport and, when the
+row came from a `b.Place`, drives the gizmo and the transform editor — the tree index and the model
+index are **derived** from one another rather than kept in step by hand.
+
+**Components with no geometry are drawn as wireframes**, projected through the preview's own camera:
+a camera as a frustum pointing down +X at a fixed 60 cm (a real far plane is tens of metres and
+would fill the preview with lines that say nothing about where the camera is), and a point light as
+three orthogonal circles at its range — one circle reads as a disc and hides which plane it is in.
+
+**A stored vector with child indices**, not owned children or pointers: nodes are appended during a
+walk, and a vector that reallocates invalidates every pointer taken so far. That is the standard way
+this shape gets written and then quietly broken by the first actor with enough parts.
+
+**What it will not show, and should not.** An actor that assembles itself in `OnBeginPlay` — SkyForge's
+`Gun` builds its five boxes in `AttachTo()`, from gameplay — appears as its class-level mesh only.
+That is not a gap: the preview runs the construction and stops (§4b), and UE's Blueprint viewport
+does not run BeginPlay either. Measured against a real designer file, the five-placement `Car`
+renders assembled at its authored ±120/±80 cm offsets with all five rows in the tree.
 
 ## 4b. The Live toggle, as shipped
 
