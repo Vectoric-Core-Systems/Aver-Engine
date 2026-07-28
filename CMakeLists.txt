@@ -133,6 +133,9 @@ add_subdirectory(modules/render.ui)
 # And the plain-C seam onto it, so a game's HUD is authored in the game's language rather than in
 # the engine's. A DLL because the .NET host P/Invokes it; Core-only, like everything under ui/.
 add_subdirectory(modules/ui.abi)
+# The actor editor's preview. Talks to the generic RHI and never to a backend, so it exists in
+# every configuration and declines at create() where there is no GPU.
+add_subdirectory(modules/render.actorpreview)
 # The audio seam. Added down HERE rather than beside the mixer because it links the WAV reader,
 # which is a target inside modules/formats and so does not exist until that has been added.
 add_subdirectory(modules/audio.abi)
@@ -150,6 +153,8 @@ if(AVER_BUILD_TESTS)
   # The renderer's half, and unconditional for the same reason: it talks to the generic RHI, which
   # always exists, and the test supplies its own recording device rather than needing a backend.
   add_subdirectory(tests/render.ui)
+  # The actor preview, for the same reason and by the same means.
+  add_subdirectory(tests/render.actorpreview)
   # Unconditional, like the module.
   add_subdirectory(tests/audio)
   if(AVER_MODULE_PHYSICS)
