@@ -45,3 +45,13 @@ endif()
 add_executable(ConvertTool src/ConvertTool.cpp)
 target_link_libraries(ConvertTool PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(ConvertTool PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ActorScriptTest — reading and rewriting the actor designer's generated region.
+#
+# A THIRD executable rather than more assertions in MaterialTest: it exercises a different format
+# with a different grammar, and the point of splitting is that a failure names which one broke.
+if(TARGET Aver.Formats.Material)
+  add_executable(ActorScriptTest src/ActorScriptTest.cpp)
+  target_link_libraries(ActorScriptTest PRIVATE Aver.Formats.Material Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(ActorScriptTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

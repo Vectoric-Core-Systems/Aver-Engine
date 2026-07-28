@@ -31,6 +31,7 @@ if(AVER_MODULE_PBR)
     SOURCES
       src/OcMat.cpp
       src/MaterialScript.cpp
+      src/ActorScript.cpp
     DEPS
       Aver.Formats
       Aver.Render.PBR
