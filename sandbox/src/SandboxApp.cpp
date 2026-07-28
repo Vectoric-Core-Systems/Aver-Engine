@@ -545,6 +545,19 @@ public:
         // declines anything that is not a .cs carrying a generated region, so it can sit
         // anywhere; registered after the mesh editor only because that is reading order.
         assetEditors_.registerFactory(&editor::makeActorEditor);
+        // What the actor tab's toolbar does. Installed rather than reached for: an asset editor that
+        // knew how to find a compile job or the project's IDE could not be tested or reused.
+        {
+            editor::ActorEditorHooks hooks;
+            hooks.compileScripts = [this] { tools_.triggerToolbarCompile(project_); };
+            hooks.compileBusy    = [this] { return tools_.compiling(); };
+            hooks.openInIde      = [this](const std::string& p) {
+                const editor::IdeInfo& ide = cbIde();
+                if (!editor::openInIde(ide, p)) AVER_WARN("[Editor] could not open {} in {}", p, ide.name);
+            };
+            hooks.ideName = cbIde().name;
+            editor::setActorEditorHooks(std::move(hooks));
+        }
         window_ = e.window();   // for the HWND the mouse capture needs
 
         // Always read the recent list, even when the start screen will not be shown: opening a
@@ -3206,18 +3219,25 @@ private:
     void cbOpenEntry(const std::string& full, bool isDir) {
         if (isDir) { cbNavigate(full); return; }
         const std::string ext = lowerExt(std::filesystem::path(full));
+        // AN ASSET EDITOR IS TRIED BEFORE THE IDE, including for source. This used to return here for
+        // anything cbIsSourceFile accepted, so a .cs could never reach the editor host at all -- the
+        // actor editor was registered and unreachable, which is the same as not existing.
+        //
+        // Ordering is safe because the factories DECLINE: makeActorEditor takes a .cs only when it
+        // has a generated region or declares a mesh, camera or light. A helper class, a GameInput
+        // table, a HUD script -- none of them are actors, none are accepted, and all still go to the
+        // IDE below exactly as before. Nothing is taken away; something is added for the files that
+        // have an editor.
+        if (assetEditors_.open(full)) { cbStatus_ = "Opened in the asset editor"; return; }
         if (cbIsSourceFile(ext)) {
             const editor::IdeInfo& ide = cbIde();
             if (editor::openInIde(ide, full)) { cbStatus_ = "Opened in " + ide.name; return; }
             cbStatus_ = "Could not open in " + ide.name;
             return;
         }
-        // AN ASSET WITH AN EDITOR OPENS IN IT. Before this every non-source file went to the shell,
-        // so double-clicking a .ocmesh asked Windows to open it and Windows has never heard of one.
-        // The shell stays as the fallback rather than being replaced: a .txt or a .png beside your
-        // content is better served by whatever you already use than by an editor this engine would
-        // have to grow.
-        if (assetEditors_.open(full)) { cbStatus_ = "Opened in the asset editor"; return; }
+        // The shell is the LAST resort, not a replacement for the editor host above: a .txt or a
+        // .png beside your content is better served by whatever you already use than by an editor
+        // this engine would have to grow.
         cbStatus_ = editor::openWithShell(full) ? "Opened" : "Nothing is registered to open that";
     }
 

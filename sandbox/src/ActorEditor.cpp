@@ -31,6 +31,7 @@ bool g_previewTried = false;
 // Held so shutdown can unregister before the feature goes. A device that still holds a pointer to
 // a deleted feature calls prePass on freed memory, which is not an error anything reports.
 rhi::IDevice* g_device = nullptr;
+ActorEditorHooks g_hooks;
 
 bool readFile(const std::string& path, std::string& out) {
     std::ifstream in(path, std::ios::binary);
@@ -360,6 +361,50 @@ void ActorEditor::draw(Engine& e) {
 
     buildDrawList(e);
 
+    // ---- the toolbar ----
+    //
+    // At the top, and carrying the two actions this tab's work actually needs: a build, because
+    // editing an actor is editing C# and the whole point is to see the result; and the IDE, because
+    // a preview is for placement and the behaviour half is still text. Without them the tab is a
+    // dead end -- you would look at an actor, then go elsewhere to do anything about it.
+    {
+        const bool busy = g_hooks.compileBusy && g_hooks.compileBusy();
+        ImGui::BeginDisabled(!g_hooks.compileScripts || busy);
+        if (ImGui::Button(busy ? "Compiling..." : "Compile C#")) g_hooks.compileScripts();
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(g_hooks.compileScripts
+                ? "Build this project's scripts, and bake its C# materials."
+                : "No project is open.");
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!g_hooks.openInIde);
+        const std::string ideLabel = g_hooks.ideName.empty() ? std::string("Open in IDE")
+                                                             : ("Open in " + g_hooks.ideName);
+        if (ImGui::Button(ideLabel.c_str())) g_hooks.openInIde(path_);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(g_hooks.openInIde
+                ? "The behaviour half of this actor is text, and belongs in a text editor."
+                : "No IDE was found on this machine.");
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!dirty_);
+        if (ImGui::Button("Save")) {
+            std::string why;
+            status_ = save(&why) ? "Saved." : ("Save failed: " + why);
+        }
+        ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        if (ImGui::Button("Frame All") && g_preview) g_preview->frameAll();
+
+        // The one thing a reader of this panel must not have to discover for themselves.
+        ImGui::SameLine();
+        ImGui::TextDisabled("|  preview lighting is fixed and does not match the level viewport");
+    }
+    ImGui::Separator();
+
     // ---- the view ----
     const f32 avail = ImGui::GetContentRegionAvail().x;
     const f32 side = 320.0f;
@@ -491,14 +536,6 @@ void ActorEditor::draw(Engine& e) {
     }
 
     ImGui::Separator();
-    ImGui::BeginDisabled(!dirty_);
-    if (ImGui::Button("Save to C#")) {
-        std::string why;
-        status_ = save(&why) ? "Saved." : ("Save failed: " + why);
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (ImGui::Button("Frame All")) { g_preview ? g_preview->frameAll() : void(); }
     if (!status_.empty()) ImGui::TextDisabled("%s", status_.c_str());
 
     ImGui::EndGroup();
@@ -510,6 +547,8 @@ void ActorEditor::draw(Engine& e) {
 } // namespace
 
 void setActorEditorContentRoot(std::string root) { g_contentRoot = std::move(root); }
+
+void setActorEditorHooks(ActorEditorHooks hooks) { g_hooks = std::move(hooks); }
 
 void shutdownActorEditors() {
     if (g_device && g_preview) g_device->removeRenderFeature(g_preview);

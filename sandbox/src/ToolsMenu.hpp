@@ -72,6 +72,19 @@ public:
     // that already loaded something — firing it on frame 0 would prove nothing that init does not.
     void armReload(int frames) { armReload_ = frames > 0 ? frames : 20; }
 
+    // Build + reload, as the toolbar button does it: a clean build stays silent and a failed one
+    // opens the Compile modal on the errors.
+    //
+    // PUBLIC because it is no longer only the toolbar's. The actor editor's tab carries a Compile C#
+    // button too -- editing an actor is editing C#, and a tab you have to leave to build is a tab
+    // that does half a job. Exposing the action is better than each panel growing its own copy of
+    // the build logic.
+    void triggerToolbarCompile(const fmt::ProjectDesc& project);
+
+    // Whether a build is running, so another panel can disable its own button rather than starting a
+    // second job that startCompile would silently drop on the floor.
+    bool compiling() const { return compileThread_.joinable(); }
+
 private:
     enum class Modal { None, CsScript, CsClass, CppModule, CppClass, Compile, Reload };
 
@@ -93,9 +106,6 @@ private:
 
     void startCompile(const std::string& csproj, const std::string& outDir, bool reload);
 
-    // Toolbar-initiated build+reload. Sets openModalOnFail_ so a clean build stays silent and a
-    // failed one opens the Compile modal on the errors; the menu items do neither.
-    void triggerToolbarCompile(const fmt::ProjectDesc& project);
     // Throttled staleness check driving the toolbar light: newest .cs against the last build.
     void refreshScriptStatus(const fmt::ProjectDesc& project);
 

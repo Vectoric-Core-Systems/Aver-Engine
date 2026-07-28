@@ -7,6 +7,7 @@
 // to keep in step.
 #include "AssetEditor.hpp"
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -23,6 +24,20 @@ std::unique_ptr<AssetEditor> makeActorEditor(const std::string& path);
 // clearing it leaves the tab drawing an empty preview and saying why, which is better than an editor
 // that cannot open at all.
 void setActorEditorContentRoot(std::string root);
+
+// What the tab's toolbar does. Installed by the app, because the tab must not reach into the editor
+// to find a compile job or an IDE choice -- those belong to the app, and an asset editor that knew
+// about them could not be tested or reused.
+//
+// Either may be left empty: the corresponding button is then disabled and says why, which is better
+// than a button that silently does nothing.
+struct ActorEditorHooks {
+    std::function<void()> compileScripts;              // Tools > Compile C#
+    std::function<void(const std::string&)> openInIde; // the project's chosen IDE
+    std::function<bool()> compileBusy;                 // true while a build is running
+    std::string ideName;                               // for the button's label
+};
+void setActorEditorHooks(ActorEditorHooks hooks);
 
 // Releases the shared preview and its meshes. Called before the device goes.
 void shutdownActorEditors();
