@@ -10,7 +10,13 @@
 aver_add_module(Aver.Render.ActorPreview
   SOURCES
     src/ActorPreview.cpp
+    src/PreviewMeshCache.cpp
   DEPS
     Aver.RHI
+    # The .ocmesh reader, for the preview's OWN mesh registry. Aver.Formats knows nothing of the
+    # RHI, so naming it here creates no cycle -- and the alternative was reaching into the level
+    # editor's private table, which is exactly the seam this module must not cross.
+    Aver.Formats.Material
+    Aver.Formats
     Aver.Core
 )

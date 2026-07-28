@@ -20,6 +20,7 @@
 #include "ProjectScaffold.hpp"   // --new-project: scaffolding a project without a mouse
 #include "ToolsMenu.hpp"
 #include "AssetEditor.hpp"
+#include "ActorEditor.hpp"   // a .Designer.cs opened as an asset, with a 3D preview of what it declares
 #include "EngineScaffold.hpp"   // engineRoot(): where the Content Browser's "Engine" root is mounted from
 #include "IdeIntegration.hpp"   // detectedIdes()/openInIde: double-clicking a source file opens it
 #include "ShellIntegration.hpp" // reveal / shell-open / recycle, for the browser's context menu
@@ -540,6 +541,10 @@ public:
         // that accepts a path wins -- so a future .ocmesh-specific editor would go before a generic
         // binary viewer rather than after it.
         assetEditors_.registerFactory(&editor::makeMeshEditor);
+        // Ordering is registration order and the FIRST accepting factory wins. The actor editor
+        // declines anything that is not a .cs carrying a generated region, so it can sit
+        // anywhere; registered after the mesh editor only because that is reading order.
+        assetEditors_.registerFactory(&editor::makeActorEditor);
         window_ = e.window();   // for the HWND the mouse capture needs
 
         // Always read the recent list, even when the start screen will not be shown: opening a
@@ -1642,6 +1647,9 @@ public:
 
     void onShutdown(Engine& e) override {
         setLogSink(nullptr, nullptr);   // stop mirroring logs before this object goes away
+        // The actor preview's targets, while the device is still there to drain. It holds a UI
+        // descriptor like the mark below, and the same rule applies: release it before the device.
+        editor::shutdownActorEditors();
         // ShowCursor is a counter and ClipCursor is global to the desktop: leaving either set would
         // outlive the process and hand the user a machine with an invisible or confined cursor.
         setMouseCaptured(false);
@@ -1765,6 +1773,9 @@ private:
         // What this project is missing, checked once on open. Never acted on here: the prompt is
         // what acts, and only if somebody says yes. A tool that edits your build on startup is a
         // tool you cannot trust with the rest of your disk.
+        // Mesh paths in a designer file are relative to this, and the actor editor's factory has
+        // nowhere to carry it -- see ActorEditor.hpp.
+        editor::setActorEditorContentRoot(project_.contentDir());
         pendingUpgrade_ = editor::inspectProject(project_);
         upgradeAsked_ = false;
         upgradeStatus_.clear();

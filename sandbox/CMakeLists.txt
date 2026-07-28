@@ -1,6 +1,7 @@
 add_executable(Sandbox
   src/SandboxApp.cpp
   src/AssetEditor.cpp
+  src/ActorEditor.cpp
   src/ProjectBrowser.cpp
   src/ProjectScaffold.cpp
   src/EngineScaffold.cpp
@@ -16,6 +17,9 @@ target_link_libraries(Sandbox PRIVATE Aver.UI Aver.Render.UI)
 # UiDrawList directly, so the seam a game's HUD uses is exercised by the editor too. Aver.UI is
 # still named above because the host casts aver_ui_draw_list() back to that type.
 target_link_libraries(Sandbox PRIVATE Aver.UI.Abi)
+# The actor editor's preview. Its own mesh registry, deliberately: an asset editor that reached
+# into the level editor's table could not exist or be tested without one.
+target_link_libraries(Sandbox PRIVATE Aver.Render.ActorPreview)
 if(TARGET Aver.Render.Voxi)
   # Settings DLL (brings AVER_MODULE_VOXI=1) + the static render feature that drives the RHI.
   target_link_libraries(Sandbox PRIVATE Aver.Render.Voxi Aver.Render.Voxi.Renderer)
