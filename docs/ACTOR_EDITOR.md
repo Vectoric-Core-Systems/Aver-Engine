@@ -243,6 +243,28 @@ for a viewport"* rather than as a ratio between the side panels — phrased as a
 reached three columns at 300% DPI at all, because the panels scale with DPI and a ratio between them
 ignores how much room there actually is.
 
+**The dividers are draggable.** ImGui has no splitter widget — the docking system has one, but that
+is for dock *nodes*, and these columns are children inside a single window. The idiom is ImGui's own:
+an `InvisibleButton` is a hit region with press-and-hold already tracked, so the drag is
+`IsItemActive` plus a mouse delta. The line is drawn only while hot — a permanent rule between every
+column is chrome, one that appears under the cursor is an affordance. Widths are clamped against the
+*current* available width every frame rather than once when set, so shrinking the tab cannot leave a
+column wider than the tab. They live for as long as the tab is open; there is nowhere to persist a
+per-tab layout to yet, and this is the first thing that would have wanted one.
+
+**An actor tab hides the level's panels.** Opening one now fills the editor the way a Blueprint
+editor does, instead of sitting in a slot with a World Outliner beside it listing a level it has
+nothing to do with. Not submitting a window leaves its dock node with no tabs, so ImGui folds the
+node away and the central region takes the width; submitting them again puts them back where they
+were docked. The gate is *"the Level tab is not the active one"* rather than *"an editor exists"*,
+because an actor tab torn off into its own window leaves the level on screen and its panels should
+still be there.
+
+That has an obvious failure mode — the panels never coming back — which no screenshot of a single
+state can catch and no click can be delivered to headlessly. `--focus-level-at <N>` brings the Level
+tab forward at frame N so the whole return path can be exercised; measured, both panels return to
+their original dock and the actor tab is still open beside the level.
+
 **The viewport fills its column.** The preview target used to be square and fixed at creation, so a
 wide panel letterboxed — most of a wide monitor's viewport spent on nothing. `ActorPreview::resize`
 now matches the target to the panel, and the projection's aspect follows the target (it was

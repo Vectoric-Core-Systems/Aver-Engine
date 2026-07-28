@@ -315,6 +315,8 @@ private:
         previewResizeAt_ = -1.0;
         g_preview->resize(pendingPreviewW_, pendingPreviewH_);
     }
+    // Column widths, dragged by the splitters and clamped every frame against the tab's own width.
+    f32 leftColW_ = 0.0f, rightColW_ = 0.0f;
     double previewResizeAt_ = -1.0;
     u32 pendingPreviewW_ = 0, pendingPreviewH_ = 0;
 
@@ -654,6 +656,50 @@ const char* kindGlyph(ComponentKind k) {
         case ComponentKind::PointLight: return "o";
     }
     return "-";
+}
+} // namespace
+
+namespace {
+// A DRAGGABLE DIVIDER between two columns.
+//
+// Written out because ImGui has no splitter widget -- the docking system has one, but that is for
+// dock nodes, and these columns are children inside a single window rather than nodes. The idiom
+// below is the one ImGui's own demo uses for the same problem: an invisible button is a hit region
+// with press-and-hold state already tracked, so the drag is IsItemActive plus a mouse delta.
+//
+// `width` is read AND written: the caller owns the value across frames, which is what makes the
+// split persist while a tab is open. Clamped every frame against the CURRENT available width rather
+// than once when set, so shrinking the tab cannot leave a column wider than the tab itself.
+bool columnSplitter(const char* id, f32 thickness, f32* width, f32 avail, f32 minSelf, f32 minOther) {
+    ImGui::SameLine(0.0f, 0.0f);
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const f32 h = ImGui::GetContentRegionAvail().y;
+    ImGui::InvisibleButton(id, ImVec2(thickness, h > 8.0f ? h : 8.0f));
+
+    const bool hot = ImGui::IsItemActive() || ImGui::IsItemHovered();
+    // The cursor is the only thing that tells a user a two-pixel gap is draggable at all.
+    if (hot) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+
+    bool moved = false;
+    if (ImGui::IsItemActive() && ImGui::GetIO().MouseDelta.x != 0.0f) {
+        *width += ImGui::GetIO().MouseDelta.x;
+        moved = true;
+    }
+    // Clamped here rather than at the drag, so a resize of the whole tab is corrected too.
+    const f32 maxSelf = avail - minOther;
+    if (*width < minSelf) *width = minSelf;
+    if (maxSelf > minSelf && *width > maxSelf) *width = maxSelf;
+
+    // Drawn only when hot. A permanent line between every column is chrome; a line that appears
+    // under the cursor is an affordance.
+    if (hot) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const f32 x = at.x + thickness * 0.5f;
+        dl->AddLine(ImVec2(x, at.y), ImVec2(x, at.y + (h > 8.0f ? h : 8.0f)),
+                    ImGui::GetColorU32(ImGuiCol_SeparatorActive), 2.0f);
+    }
+    ImGui::SameLine(0.0f, 0.0f);
+    return moved;
 }
 } // namespace
 
@@ -1171,8 +1217,14 @@ void ActorEditor::draw(Engine& e) {
     const f32 avail = ImGui::GetContentRegionAvail().x;
     const f32 spacing = ImGui::GetStyle().ItemSpacing.x;
 
-    f32 leftW  = 200.0f * dpi;
-    f32 rightW = 280.0f * dpi;
+    // The widths are MEMBERS, so a split the user drags survives every frame this tab is open.
+    // Seeded once from a sensible default rather than stored, because a per-tab layout that
+    // persisted across sessions would need somewhere to persist to -- and this is the first thing
+    // in the tab that would have wanted such a place.
+    if (leftColW_ <= 0.0f)  leftColW_  = 200.0f * dpi;
+    if (rightColW_ <= 0.0f) rightColW_ = 280.0f * dpi;
+    f32 leftW  = leftColW_;
+    f32 rightW = rightColW_;
     // NARROW TABS COLLAPSE RATHER THAN CLIP: below the point where the viewport would be squeezed
     // under about 260 units, the left column folds back into the right one and the tab is two
     // columns again -- which is what it was, and is still usable.
@@ -1183,14 +1235,21 @@ void ActorEditor::draw(Engine& e) {
     // between them is a rule that ignores how much room there actually is.
     const bool threeColumns = (avail - leftW - rightW) >= 260.0f * dpi;
     if (!threeColumns) leftW = 0.0f;
-    const f32 viewW = avail - leftW - rightW - spacing * (threeColumns ? 2.0f : 1.0f);
+
+    // The splitters are zero-spacing on both sides, so the gap the user grabs is the splitter itself
+    // rather than the splitter plus ImGui's item spacing -- which would make the visible line and the
+    // hit region disagree by a few pixels in a way that feels like a miss.
+    const f32 split = 6.0f * dpi;
+    const f32 minView = 200.0f * dpi;
+    const f32 viewW = avail - leftW - rightW - (threeColumns ? split * 2.0f : split);
 
     // ---- the Components column ----
     if (threeColumns) {
         ImGui::BeginChild("##componentcol", ImVec2(leftW, 0.0f), ImGuiChildFlags_None);
         drawComponentTree(/*ownColumn=*/true);
         ImGui::EndChild();
-        ImGui::SameLine();
+        columnSplitter("##splitL", split, &leftColW_, avail - rightW - split * 2.0f,
+                       120.0f * dpi, minView);
     }
 
     ImGui::BeginChild("##viewcol", ImVec2(viewW, 0.0f), ImGuiChildFlags_None);
@@ -1303,7 +1362,18 @@ void ActorEditor::draw(Engine& e) {
     }
 
     ImGui::EndChild();   // ##viewcol
-    ImGui::SameLine();
+    // The RIGHT splitter moves the boundary the other way, so the delta has to be inverted: dragging
+    // right must make the details column narrower, not wider. Done by splitting on a scratch value
+    // and reflecting the movement, rather than by giving the widget a direction flag it would only
+    // ever be passed once.
+    {
+        f32 mirrored = avail - rightColW_;
+        const f32 before = mirrored;
+        columnSplitter("##splitR", split, &mirrored, avail - leftW - split * 2.0f,
+                       minView + leftW, 160.0f * dpi);
+        if (mirrored != before) rightColW_ = avail - mirrored;
+        if (rightColW_ < 160.0f * dpi) rightColW_ = 160.0f * dpi;
+    }
     ImGui::BeginChild("##detailscol", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
     ImGui::BeginGroup();
 

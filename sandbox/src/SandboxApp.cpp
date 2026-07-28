@@ -1759,6 +1759,7 @@ public:
     void setOpenAsset(std::string p) { openAsset_ = std::move(p); }
     void setInputProbe(bool on) { inputProbe_ = on; }
     void setAutoCompile(bool on) { autoCompile_ = on; }   // --auto-compile, and the Tools menu
+    void setFocusLevelAt(int frame) { focusLevelAt_ = frame; }   // --focus-level-at <N>
     bool* autoCompileFlag() { return &autoCompile_; }     // the menu checkbox binds straight to it
 
     void setClouds(f32 coverage) {
@@ -2024,6 +2025,7 @@ private:
     // thing to start doing unasked -- on a large project a build is seconds of CPU, and it swaps the
     // script assembly under a running editor.
     bool autoCompile_ = false;
+    int focusLevelAt_ = 0;
     static constexpr int kAutoCompileQuietMs = 500;
     std::chrono::steady_clock::time_point autoCompileDue_{};
     int autoCompilePending_ = 0;
@@ -3276,6 +3278,16 @@ private:
             // window that is not the active tab returns false. That is what the viewport overlay
             // gates on, so Perspective/Lit/Show follows the tab instead of merely disappearing
             // whenever any editor is open.
+            // --focus-level-at <N>: bring the Level tab forward once, at frame N.
+            //
+            // It exists because hiding the level's panels while an actor tab is active (see
+            // buildPanels) has an obvious failure mode -- the panels never coming BACK -- that no
+            // screenshot of a single state can catch and no click can be delivered to headlessly.
+            // One frame-triggered focus request exercises the whole return path.
+            if (focusLevelAt_ > 0 && ImGui::GetFrameCount() == focusLevelAt_) {
+                ImGui::SetWindowFocus("Level");
+                AVER_INFO("[Editor] --focus-level-at: bringing the Level tab forward");
+            }
             levelVisible_ = ImGui::Begin("Level", nullptr,
                                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
                                          ImGuiWindowFlags_NoCollapse);
@@ -3331,7 +3343,17 @@ private:
             ImGui::PopStyleVar();
         }
 
-        buildPanels(e);
+        // THE LEVEL'S PANELS BELONG TO THE LEVEL. Not submitting a window leaves its dock node with
+        // no tabs, so ImGui folds the node away and the central region takes the width -- which is
+        // what makes an actor tab fill the editor the way a Blueprint editor does, rather than
+        // sitting in a slot with a World Outliner beside it listing a level it has nothing to do
+        // with. Submitting them again puts them back where they were docked; the dock layout is
+        // ImGui's, not ours, and it survives the gap.
+        //
+        // Gated on the LEVEL TAB not being the active one rather than on "an editor exists": an
+        // actor tab torn off into its own window leaves the level on screen, and the level's panels
+        // should still be there when it is.
+        if (levelVisible_ || !assetEditors_.anyOpen()) buildPanels(e);
         // NOT while an asset editor covers the central region. The overlay is drawn after the
         // dockspace and before the editors, so it would land on top of the tab's own toolbar -- and
         // it did: Compile C# and Open in IDE were half-hidden under Perspective/Lit/Show.
@@ -5815,7 +5837,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; int focusLevelAt=0; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and EXITS, touching no device.
         //
@@ -5867,6 +5889,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--input-probe")) inputProbe=true;
         else if (!std::strcmp(argv[i],"--auto-compile")) autoCompile=true;
+        else if (!std::strcmp(argv[i],"--focus-level-at") && i+1<argc) focusLevelAt=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
         else if (!std::strcmp(argv[i],"--new-script")) focusScript=true;
         // Holds the Tools dropdown open so it can be photographed. Opt-in, like the two above:
@@ -5958,6 +5981,7 @@ Application* createApplication(int argc, char** argv) {
     app->setOpenAsset(openAsset);
     app->setInputProbe(inputProbe);
     app->setAutoCompile(autoCompile);
+    app->setFocusLevelAt(focusLevelAt);
     app->setUseWarp(warp);
     app->setDebugLayer(debugLayer);
     app->setProjectPath(project);
