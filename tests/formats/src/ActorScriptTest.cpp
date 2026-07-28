@@ -43,7 +43,88 @@ static const char* kCar =
     "    // </aver-generated>\n"
     "}\n";
 
+
+// THE COMMON ACTOR: one mesh declared on the class, no designer region at all.
+//
+// This is what most actors in most games are, and every actor in the SkyForge template. An editor
+// that only understood placements would show an empty view for all of them, which is the difference
+// between an actor editor and a car editor.
+static void testClassLevelActor() {
+    AVER_INFO("=== an actor that declares itself ===");
+
+    static const char* kGun =
+        "using Aver.Framework;\n"
+        "namespace SkyForge;\n"
+        "\n"
+        "[AverClass(\"BP_Gun\")]\n"
+        "public sealed class Gun : AverActor\n"
+        "{\n"
+        "    public static void Configure(ClassBuilder b) => b.Mesh(\"Meshes/cube.ocmesh\");\n"
+        "}\n";
+
+    const fmt::ActorClassInfo g = fmt::parseActorClass(kGun);
+    check(g.className == "BP_Gun", "the bound name is read from [AverClass]");
+    check(g.hasMesh, "a class-level mesh is found");
+    check(g.meshPath == "Meshes/cube.ocmesh", "with its path");
+    check(g.anything(), "so the file is previewable");
+    // And it has NO designer region, which is not an error -- it is the ordinary case.
+    check(fmt::parseActorScript(kGun).status == fmt::ActorParseStatus::NoRegion,
+          "and no generated region, which is legal");
+
+    // A mesh WITH a material.
+    static const char* kWithMat =
+        "[AverClass(\"BP_Crate\")]\n"
+        "public sealed class Crate : AverActor {\n"
+        "    public static void Configure(ClassBuilder b) {\n"
+        "        b.Mesh(\"Meshes/box.ocmesh\", \"M_Crate\");\n"
+        "        b.Ticks(TickGroup.PostPhysics);\n"
+        "    }\n"
+        "}\n";
+    const fmt::ActorClassInfo c = fmt::parseActorClass(kWithMat);
+    check(c.hasMesh && c.material == "M_Crate", "a block-bodied Configure is read too, with material");
+
+    // A GAME MODE is an actor as far as the editor is concerned. Recognising only [AverClass] would
+    // open some of a project's files and not others, for no reason a user could see.
+    static const char* kMode =
+        "[AverGameMode(\"BP_FpsGameMode\", DefaultPawnClass = \"BP_FpsCharacter\")]\n"
+        "public sealed class FpsGameMode : AverGameMode { }\n";
+    check(fmt::parseActorClass(kMode).className == "BP_FpsGameMode",
+          "[AverGameMode] carries a bound name too");
+
+    // A CAMERA and a LIGHT are recorded but not drawn. An actor that is only a light previews as an
+    // empty view, and empty is indistinguishable from broken unless something says otherwise.
+    static const char* kRig =
+        "[AverClass(\"BP_Rig\")]\n"
+        "public sealed class Rig : AverPawn {\n"
+        "    public static void Configure(ClassBuilder b) {\n"
+        "        b.Camera(70f, 5f, 100000f);\n"
+        "        b.PointLight(1200f, 800f);\n"
+        "    }\n"
+        "}\n";
+    const fmt::ActorClassInfo r = fmt::parseActorClass(kRig);
+    check(r.hasCamera && !r.hasMesh, "a camera is recorded without a mesh");
+    check(near(r.cameraFovDeg, 70.0f) && near(r.cameraFarCm, 100000.0f), "with its numbers");
+    check(r.hasPointLight && near(r.lightIntensityLux, 1200.0f), "and so is a point light");
+    check(r.anything(), "so a camera-only actor is still worth opening");
+
+    // A value that is not a plain literal still means the feature IS declared. The number is what
+    // could not be read, not the fact -- and refusing the whole declaration over one constant would
+    // make the preview lie about what the actor has.
+    static const char* kConst =
+        "[AverClass(\"BP_C\")]\n"
+        "public sealed class C : AverActor {\n"
+        "    public static void Configure(ClassBuilder b) => b.Camera(Fov, 1f, 2f);\n"
+        "}\n";
+    check(fmt::parseActorClass(kConst).hasCamera, "a non-literal argument still declares the camera");
+
+    // A plain class with none of it declares nothing, and the editor leaves it to the IDE.
+    static const char* kPlain = "public static class Helpers { public static int Add(int a) => a; }\n";
+    check(!fmt::parseActorClass(kPlain).anything(), "a plain helper class declares nothing");
+}
+
 int main() {
+    testClassLevelActor();
+
     AVER_INFO("=== reading the generated region ===");
     {
         const fmt::ActorScript s = fmt::parseActorScript(kCar);

@@ -1,4 +1,11 @@
-# Actor Editor with Live Sync — the plan
+# Actor Editor with Live Sync
+
+> **Status: pieces 1-4 of the viewport/sync work are built.** The preview, the designer reader and
+> rewriter, the tab, the translate gizmo and source-to-view reload all exist and are in the build.
+> What is NOT built: the Roslyn backend (`averdesign`), rotate/scale gizmo handles, and the tab
+> infrastructure fixes in §2 Piece 1. Sections below marked *(built)* describe what shipped; the rest
+> is still plan.
+
 
 A tab for a C# actor class: a 3D preview of its authored model tree, a properties panel, and a save
 path that rewrites the actor's `.Designer.cs`. Two-way — dragging in the preview changes the source;
@@ -40,6 +47,28 @@ what any "class defaults" panel could ever show.
 and zero tests.** It is a starting point, not a dependency that has been exercised.
 
 ---
+
+## 1b. What is built, and where
+
+| Piece | Where | Verified by |
+|---|---|---|
+| Reading the generated region, and rewriting coordinates | `modules/formats/{include/aver/formats,src}/ActorScript.*` | `ActorScriptTest`, 51 assertions |
+| Reading what a class declares (`Configure`) | same | same |
+| The preview render feature | `modules/render.actorpreview/` | `ActorPreviewTest`, 51 assertions |
+| The preview's own mesh registry | `modules/render.actorpreview/src/PreviewMeshCache.cpp` | — |
+| The tab, gizmo and reload | `sandbox/src/ActorEditor.{hpp,cpp}` | not covered by a test |
+
+**It is general, and that was checked against real projects rather than a fixture.** A sweep over
+SkyForge's scripts opens `Gun.cs` (2 actors), `FpsGameMode.cs` (5 actors, 2 previewable) and
+`Target.cs`, and over the engine's own sample opens `Car.Designer.cs` (5 placements). Files that
+declare nothing previewable are skipped rather than opened empty. Two bugs came straight out of that
+sweep and neither would have shown up in a fixture:
+
+1. Attribute kinds were searched in turn, so a file naming a `[AverGameMode]` above an `[AverClass]`
+   came back named after the wrong one. Attributes are now collected in **file order**.
+2. A file was assumed to declare one actor. Real ones declare several, and each entry now carries
+   only what appears between its own attribute and the next — so two actors in one file cannot
+   borrow each other's mesh. The tab shows a picker.
 
 ## 2. The four pieces, in dependency order
 
@@ -163,23 +192,35 @@ And it is not reusable as a *scene* view — no picture-in-picture camera actor,
 
 ## 4. The live-sync contract
 
-**Viewport-edit → source.** Drag ends → the editor holds a new TRS → `averdesign` rewrites that
-model's row in the generated region → the file is written → the write is hash-suppressed so the
-watcher does not read it back as an external change.
+**Viewport-edit → source.** *(built)* A drag on a gizmo handle moves the placement; Save rewrites
+that row through `fmt::rewriteActorScript`, matched by ObjectId, touching only the three coordinate
+tuples.
 
-**Source-edit → viewport.** Watcher fires → debounce settles → re-parse → diff against the displayed
-rows → update. **No rebuild is required for the preview**, because the preview reads the *parsed
-source*, not a spawned actor. That is a direct consequence of the Piece 3 decision and it is what
-makes source→viewport cheap.
+The gizmo is an **ImGui overlay projected through the preview's own camera**, not geometry in the
+pass. Two reasons: the preview feature must stay drivable with no ImGui at all — that is what lets a
+test be the device — and a handle has to be pickable at a constant *screen* size, which it cannot be
+if it is part of a scene that scales. The axis is latched on mouse-down and held for the whole
+gesture, because deciding per frame lets a drag that began on the handle become an orbit the moment
+the cursor leaves it, which is exactly when a user is dragging fastest.
 
-**When both race**, the source wins and the editor's pending drag is dropped with a message. A
-half-applied drag silently overwriting somebody's text edit is worse than a lost drag.
+**Source-edit → viewport.** *(built, and not with a watcher.)* The open tab compares the file's
+last-write time once per frame it is visible and re-reads when it changes. **No rebuild is required**,
+because the preview reads the *parsed source* rather than a spawned actor — that is the direct
+consequence of the Piece 3 decision and it is what makes this cheap.
 
-**The failure the draft missed:** `DirectoryWatcher::poll()` returns `true` to mean *the OS dropped
-records, nothing was appended, rescan yourself*. That is not exotic here — `dotnet build` runs with
-its working directory inside `Content\Scripts`, so a recursive watch covers that project's own `obj/`
-and `bin/`, and a build is exactly the burst that overflows. The watch must be filtered to `*.cs` and
-must exclude `obj/` and `bin/`, and the overflow return must be handled.
+A `DirectoryWatcher` was the planned answer and was rejected on contact. It has **zero consumers and
+zero tests** in this tree, and its `poll()` returns `true` to mean *the OS dropped records, rescan
+yourself* — a case nothing handles. Worse, `dotnet build` runs with its working directory inside
+`Content\Scripts`, so a recursive watch covers that project's own `obj/` and `bin/` and **a build is
+exactly the burst that overflows it**. One `stat` per visible tab is cheaper than a thread, an OS
+handle, a filter list and an overflow path, and it cannot lose an event. If a future need is a
+project-wide watch rather than a per-tab one, the watcher is still the right tool and its first test
+comes with it.
+
+**When both race**, *(built)* the reload is **refused** while the tab is dirty and says so. Silently
+replacing somebody's in-progress drag with what a background tool wrote is the one behaviour a live
+sync must never have. Saving, or closing without saving, resolves it. A file mid-write that fails to
+parse also leaves the previous good state on screen rather than blanking the tab.
 
 ---
 

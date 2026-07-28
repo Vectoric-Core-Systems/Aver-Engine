@@ -78,6 +78,11 @@ public:
     // on screen without anybody scrolling.
     void frameAll();
 
+    // The matrix the pass will use this frame. Exposed because a GIZMO has to project through the
+    // very same camera the picture was drawn with -- deriving it independently is how a handle ends
+    // up a few pixels off its object, and then a few more as the camera turns.
+    void viewProj(f32 out[16]) const { buildViewProj(out); }
+
     // The texture the panel draws. 0 before the first render.
     u64 uiTextureId() const { return uiTextureId_; }
     u32 size() const { return size_; }

@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 
 namespace aver::fmt {
 namespace {
@@ -131,6 +132,102 @@ std::string canonicalMeshPath(std::string_view path) {
         if (prefixed) s.erase(0, 8);
     }
     return s;
+}
+
+namespace {
+
+// Where each [AverClass("...")] / [AverGameMode("...")] / [AverActor("...")] sits, in FILE ORDER.
+//
+// File order, not attribute-kind order, and that is the whole fix: scanning for one attribute kind
+// and then the next finds whichever kind comes first in the SEARCH rather than in the FILE, which is
+// how FpsGameMode.cs came back named after the controller declared below its game mode.
+struct AttrHit { usize at; usize nameAt; };
+
+std::vector<AttrHit> actorAttributes(std::string_view t) {
+    static const char* kAttrs[] = {"[AverClass(\"", "[AverGameMode(\"", "[AverActor(\""};
+    std::vector<AttrHit> hits;
+    for (const char* a : kAttrs) {
+        const usize n = std::strlen(a);
+        usize i = 0;
+        while ((i = t.find(a, i)) != std::string_view::npos) {
+            hits.push_back({i, i + n});
+            i += n;
+        }
+    }
+    for (usize x = 0; x + 1 < hits.size(); ++x)
+        for (usize y = x + 1; y < hits.size(); ++y)
+            if (hits[y].at < hits[x].at) std::swap(hits[x], hits[y]);
+    return hits;
+}
+
+// Numbers following a call, e.g. `.Camera(70f, 5f, 100000f)`. Returns true when the CALL is present
+// at all -- a value that is not a plain literal still means the feature is declared, and the number
+// is what could not be read rather than the fact.
+bool numbersAfter(std::string_view t, const char* call, f32* out, int count) {
+    const usize at = t.find(call);
+    if (at == std::string_view::npos) return false;
+    usize p = at + std::strlen(call);
+    for (int k = 0; k < count; ++k) {
+        p = skipSpace(t, p);
+        if (!parseFloatLiteral(t, p, out[k])) return true;
+        p = skipSpace(t, p);
+        if (k + 1 < count) { if (p >= t.size() || t[p] != ',') return true; ++p; }
+    }
+    return true;
+}
+
+} // namespace
+
+std::vector<ActorClassInfo> parseActorClasses(std::string_view t) {
+    std::vector<ActorClassInfo> out;
+    const std::vector<AttrHit> hits = actorAttributes(t);
+
+    for (usize h = 0; h < hits.size(); ++h) {
+        ActorClassInfo info;
+
+        usize p = hits[h].nameAt;
+        while (p < t.size() && t[p] != '"') info.className += t[p++];
+
+        // Only the text belonging to THIS class: from its attribute up to the next one. Without the
+        // bound, two actors in one file borrow each other's mesh -- and the picture would be of a
+        // class the panel is not naming.
+        const usize sliceEnd = (h + 1 < hits.size()) ? hits[h + 1].at : t.size();
+        const std::string_view slice = t.substr(hits[h].at, sliceEnd - hits[h].at);
+
+        // The C# type the attribute is on, for the panel: `public sealed class Gun : AverActor`.
+        if (const usize c = slice.find("class "); c != std::string_view::npos) {
+            usize q = skipSpace(slice, c + 6);
+            while (q < slice.size() && isIdent(slice[q])) info.typeName += slice[q++];
+        }
+
+        usize m = slice.find(".Mesh(");
+        if (m != std::string_view::npos) {
+            usize q = m + 6;
+            if (parseString(slice, q, info.meshPath)) {
+                info.hasMesh = true;
+                q = skipSpace(slice, q);
+                if (q < slice.size() && slice[q] == ',') { ++q; parseString(slice, q, info.material); }
+            }
+        }
+
+        f32 cam[3] = {};
+        if (numbersAfter(slice, ".Camera(", cam, 3)) {
+            info.hasCamera = true;
+            info.cameraFovDeg = cam[0]; info.cameraNearCm = cam[1]; info.cameraFarCm = cam[2];
+        }
+        f32 lit[2] = {};
+        if (numbersAfter(slice, ".PointLight(", lit, 2)) {
+            info.hasPointLight = true;
+            info.lightIntensityLux = lit[0]; info.lightRangeCm = lit[1];
+        }
+        out.push_back(std::move(info));
+    }
+    return out;
+}
+
+ActorClassInfo parseActorClass(std::string_view t) {
+    const std::vector<ActorClassInfo> all = parseActorClasses(t);
+    return all.empty() ? ActorClassInfo{} : all.front();
 }
 
 ActorScript parseActorScript(std::string_view t) {

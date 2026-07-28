@@ -55,3 +55,19 @@ if(TARGET Aver.Formats.Material)
   target_link_libraries(ActorScriptTest PRIVATE Aver.Formats.Material Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(ActorScriptTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# ActorSweep — not a test. A TOOL that reports what the actor editor would make of every .cs under a
+# directory, run against a REAL project rather than a fixture.
+#
+# It exists because a fixture is written by the same person who wrote the parser, so it agrees with
+# that parser by construction. Pointed at SkyForge, this found two bugs on its first run that no
+# fixture had: attribute kinds were searched in turn rather than in file order, so a file naming an
+# [AverGameMode] above an [AverClass] came back named after the wrong one; and a file was assumed to
+# declare ONE actor, where real ones declare several.
+#
+#     ActorSweep.exe "<project>\Content\Scripts"
+if(TARGET Aver.Formats.Material)
+  add_executable(ActorSweep ${CMAKE_SOURCE_DIR}/tools/ActorSweep.cpp)
+  target_link_libraries(ActorSweep PRIVATE Aver.Formats.Material Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(ActorSweep PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

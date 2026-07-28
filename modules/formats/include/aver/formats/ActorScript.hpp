@@ -81,6 +81,51 @@ struct ActorScript {
     usize regionBegin = 0, regionEnd = 0;   // the span strictly between the marker lines
 };
 
+// What an actor declares ABOUT ITSELF, in `Configure(ClassBuilder b)`.
+//
+// The generated region is the MULTI-PART path: an actor assembled from several placed meshes. Most
+// actors in most games are not that. They are one mesh, declared with `b.Mesh(...)` in the class's
+// own Configure, and they have no designer file at all -- every actor in the SkyForge template is
+// this shape. A preview that only understood placements would show an empty view for all of them,
+// which is not a general-purpose actor editor.
+//
+// So this reads the hand-written half. READS. docs/DESIGNER_REWRITE.md says the editor never writes
+// a byte outside the generated region and that is unchanged and unchangeable; displaying what a
+// class declares is not writing it, and refusing to look would mean refusing to preview the common
+// case in order to honour a rule about a different operation.
+struct ActorClassInfo {
+    std::string className;      // from [AverClass("BP_Thing")] / [AverGameMode(...)]
+    std::string typeName;       // the C# class the attribute is on
+
+    bool hasMesh = false;
+    std::string meshPath, material;
+
+    // Declared but not drawn as geometry -- see ActorPreview. They are surfaced so the panel can say
+    // an actor HAS a camera or a light, because an actor that is only a light previews as nothing
+    // and "nothing" and "broken" look identical.
+    bool hasCamera = false;
+    f32  cameraFovDeg = 0.0f, cameraNearCm = 0.0f, cameraFarCm = 0.0f;
+    bool hasPointLight = false;
+    f32  lightIntensityLux = 0.0f, lightRangeCm = 0.0f;
+
+    bool anything() const { return hasMesh || hasCamera || hasPointLight; }
+};
+
+// Every actor a file declares, in the order they appear.
+//
+// A VECTOR, not one, and that is a correctness fix rather than a generalisation for its own sake: a
+// real project puts several actors in one file. SkyForge's FpsGameMode.cs declares a GameMode, a
+// PlayerController, a Block, a Crate and a GameInstance; its Gun.cs declares a GunPart and a Gun.
+// Returning the first found made the editor name the wrong class -- it reported Gun.cs as 'BP_GunPart'
+// -- and would have previewed the wrong mesh with nothing anywhere to say so.
+//
+// Each entry carries only what is declared between its own attribute and the next, so two actors in
+// one file cannot borrow each other's mesh.
+std::vector<ActorClassInfo> parseActorClasses(std::string_view csText);
+
+// The first actor a file declares, or an empty one. A convenience for the common single-actor file.
+ActorClassInfo parseActorClass(std::string_view csText);
+
 // Read the generated region. Never modifies anything.
 ActorScript parseActorScript(std::string_view csText);
 

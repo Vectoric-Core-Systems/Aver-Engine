@@ -22,7 +22,21 @@ inherited unchanged from `Aver.Scripting/Behaviour.cs`; they are not re-argued h
 An actor is one `partial class` split across two files:
 
 - **The user half** (`Car.cs`) — hand-written behaviour. `[Editable]` fields, hooks, `Configure`, and any
-  code that *computes* placement. The editor never reads or writes a byte of it.
+  code that *computes* placement. The editor never **writes** a byte of it.
+
+  > **Amended.** This said "never reads or writes". Reading is now permitted, and only reading.
+  >
+  > The reason is not convenience. The generated region is the *multi-part* path — an actor assembled
+  > from several placed meshes — and **most actors in most games are not that shape**. They are one
+  > mesh declared with `b.Mesh(...)` in the class's own `Configure`, with no designer file at all.
+  > Every actor in the SkyForge template is that shape. An editor that refused to look would preview
+  > an empty view for all of them, which is not an actor editor; it is an editor for one kind of
+  > actor.
+  >
+  > So `fmt::parseActorClasses` reads `Configure` to display what a class declares — mesh, camera,
+  > point light — and nothing in the editor writes outside the generated region. The write rule is
+  > untouched and remains absolute; what changed is that a rule about *writing* had been stated as a
+  > rule about *looking*.
 - **The editor half** (`Car.Designer.cs`) — the model tree the actor viewport shows. Generated, and
   rewritten on save. It declares the `[Model]` slot properties and one `BuildModels(ActorBuilder)`
   override whose body is a flat list of `Place(...)` statements.
