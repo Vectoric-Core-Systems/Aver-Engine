@@ -287,6 +287,37 @@ public:
 private:
     void buildDrawList(Engine& e);
 
+    // Ask the shared preview to match the panel, once the panel has stopped moving.
+    //
+    // DEBOUNCED, and that is the whole design rather than a refinement. Resizing the target destroys
+    // a texture the UI is sampling, which needs a waitIdle -- a whole-GPU stall. Doing that on every
+    // frame of a splitter drag is one stall per frame for as long as the drag lasts. Waiting for the
+    // size to settle costs one stall per gesture.
+    //
+    // The 24-pixel deadband is the second half of it: without one, a layout that oscillates by a
+    // pixel between frames (a scrollbar appearing and disappearing) would resize forever.
+    void requestPreviewSize(f32 w, f32 h) {
+        if (!g_preview) return;
+        const u32 want [2] = {static_cast<u32>(w), static_cast<u32>(h)};
+        const u32 have [2] = {g_preview->width(), g_preview->height()};
+        const auto far_ = [](u32 a, u32 b) { return (a > b ? a - b : b - a) > 24u; };
+        if (!far_(want[0], have[0]) && !far_(want[1], have[1])) { previewResizeAt_ = -1.0; return; }
+
+        const double now = ImGui::GetTime();
+        if (previewResizeAt_ < 0.0 || far_(want[0], pendingPreviewW_) || far_(want[1], pendingPreviewH_)) {
+            // A NEW size restarts the timer, so a drag keeps deferring instead of firing mid-way.
+            previewResizeAt_ = now + 0.25;
+            pendingPreviewW_ = want[0];
+            pendingPreviewH_ = want[1];
+            return;
+        }
+        if (now < previewResizeAt_) return;
+        previewResizeAt_ = -1.0;
+        g_preview->resize(pendingPreviewW_, pendingPreviewH_);
+    }
+    double previewResizeAt_ = -1.0;
+    u32 pendingPreviewW_ = 0, pendingPreviewH_ = 0;
+
     // Is the tree row currently selected THIS draw? Asked by kind rather than by index because the
     // draw list and the tree are built from the same data by two walks, and matching them on
     // position would break the first time either grew a row the other did not.
@@ -313,7 +344,7 @@ private:
     }
 
     void buildTree();
-    void drawComponentTree();
+    void drawComponentTree(bool ownColumn);
     void drawTreeNode(int idx);
     // Keep selected_ (an index into script_.models, which the gizmo and the rewriter use) in step
     // with selectedNode_ (an index into the tree, which the panel uses). One is the source of truth
@@ -661,10 +692,14 @@ void ActorEditor::drawTreeNode(int idx) {
     }
 }
 
-void ActorEditor::drawComponentTree() {
+void ActorEditor::drawComponentTree(bool ownColumn) {
     const f32 dpi = ImGui::GetFontSize() / 16.0f;
     ImGui::TextDisabled("COMPONENTS");
-    if (ImGui::BeginChild("##components", ImVec2(0.0f, 190.0f * dpi), ImGuiChildFlags_Borders)) {
+    // In its own column the tree takes the height it is given, less the room the summary below it
+    // needs. Folded into the shared column it must NOT, or it would push the class defaults and the
+    // transform editor off the bottom -- which is the whole reason it is a fixed height there.
+    const f32 h = ownColumn ? -(76.0f * dpi) : 190.0f * dpi;
+    if (ImGui::BeginChild("##components", ImVec2(0.0f, h), ImGuiChildFlags_Borders)) {
         if (tree_.empty()) ImGui::TextDisabled("  nothing declared");
         else               drawTreeNode(0);
     }
@@ -1122,13 +1157,43 @@ void ActorEditor::draw(Engine& e) {
     }
     ImGui::Separator();
 
-    // ---- the view ----
-    // DPI-SCALED, like everything else the editor lays out. Raw pixels here made the side panel a
-    // tenth of a 300% display and the toolbar above it clip its own buttons.
+    // ---- the layout ----
+    //
+    // THREE COLUMNS, the way UE's Blueprint editor lays one out: Components on the LEFT, the
+    // viewport in the MIDDLE with everything that is left over, Details on the RIGHT. It was two --
+    // viewport then everything else -- which put the component tree in the same column as the class
+    // defaults and the transform editor, so the tree had to be short to leave them room and the
+    // viewport was squeezed by a column carrying three unrelated things.
+    //
+    // DPI-SCALED, like everything else here. Raw pixels made the side panel a tenth of a 300%
+    // display and the toolbar above it clip its own buttons.
     const f32 dpi = ImGui::GetFontSize() / 16.0f;
     const f32 avail = ImGui::GetContentRegionAvail().x;
-    const f32 side = 300.0f * dpi;
-    const f32 viewW = avail > side * 1.6f ? avail - side : avail;
+    const f32 spacing = ImGui::GetStyle().ItemSpacing.x;
+
+    f32 leftW  = 200.0f * dpi;
+    f32 rightW = 280.0f * dpi;
+    // NARROW TABS COLLAPSE RATHER THAN CLIP: below the point where the viewport would be squeezed
+    // under about 260 units, the left column folds back into the right one and the tab is two
+    // columns again -- which is what it was, and is still usable.
+    //
+    // The test states what it MEANS -- "is there still room for a viewport" -- rather than comparing
+    // the side panels to some multiple of themselves, which is what it did first and which never
+    // reached three columns at 300% DPI: the panels scale with DPI, so a rule phrased as a ratio
+    // between them is a rule that ignores how much room there actually is.
+    const bool threeColumns = (avail - leftW - rightW) >= 260.0f * dpi;
+    if (!threeColumns) leftW = 0.0f;
+    const f32 viewW = avail - leftW - rightW - spacing * (threeColumns ? 2.0f : 1.0f);
+
+    // ---- the Components column ----
+    if (threeColumns) {
+        ImGui::BeginChild("##componentcol", ImVec2(leftW, 0.0f), ImGuiChildFlags_None);
+        drawComponentTree(/*ownColumn=*/true);
+        ImGui::EndChild();
+        ImGui::SameLine();
+    }
+
+    ImGui::BeginChild("##viewcol", ImVec2(viewW, 0.0f), ImGuiChildFlags_None);
 
     // ---- classes with no viewport ----
     //
@@ -1166,14 +1231,19 @@ void ActorEditor::draw(Engine& e) {
     }
 
     if (!noViewport && g_preview && g_preview->uiTextureId()) {
-        // SQUARE, and bounded by the HEIGHT as well as the width: the target is square, so sizing on
-        // width alone makes a wide short panel draw an image taller than the panel and the model list
-        // beside it disappears below the fold.
-        const f32 availH = ImGui::GetContentRegionAvail().y;
-        f32 s = viewW < 64.0f ? 64.0f : viewW;
-        if (availH > 64.0f && s > availH) s = availH;
+        // FILLS THE COLUMN. The target is no longer square, so there is nothing to letterbox: the
+        // image is the whole area and the projection's aspect follows the target. A square target in
+        // a wide column spent most of a wide monitor's viewport on nothing.
+        const ImVec2 box = ImGui::GetContentRegionAvail();
+        const f32 iw = box.x < 64.0f ? 64.0f : box.x;
+        const f32 ih = box.y < 64.0f ? 64.0f : box.y;
+        requestPreviewSize(iw, ih);
         const ImVec2 at = ImGui::GetCursorScreenPos();
-        ImGui::Image(static_cast<ImTextureID>(g_preview->uiTextureId()), ImVec2(s, s));
+        ImGui::Image(static_cast<ImTextureID>(g_preview->uiTextureId()), ImVec2(iw, ih));
+        // The gizmo and the wireframes project into a SQUARE of this size, because projectToScreen
+        // takes one extent. Passing the smaller of the two keeps a handle on the object when the
+        // panel is not square; making that exact is a change to projectToScreen, not to the layout.
+        const f32 s = iw < ih ? iw : ih;
 
         // Orbit, zoom, and the gizmo. Input lives HERE rather than in the preview feature, because
         // the feature must stay drivable with no ImGui at all -- that is what lets a test be the
@@ -1232,7 +1302,9 @@ void ActorEditor::draw(Engine& e) {
         for (const std::string& m : g_meshes.missing()) ImGui::BulletText("%s", m.c_str());
     }
 
+    ImGui::EndChild();   // ##viewcol
     ImGui::SameLine();
+    ImGui::BeginChild("##detailscol", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
     ImGui::BeginGroup();
 
     // ---- the models ----
@@ -1337,11 +1409,9 @@ void ActorEditor::draw(Engine& e) {
             ImGui::TextDisabled("This %s declares no mesh, camera or light.", fmt::actorKindName(k->kind));
     }
     ImGui::Separator();
-    // THE COMPONENT TREE, in place of the flat list of placements that used to be here. The list
-    // showed b.Place rows and nothing else, so a camera, a light and a class-level mesh -- three of
-    // the four things an actor can be made of -- had no row at all.
-    drawComponentTree();
-    ImGui::Separator();
+    // ONLY when the tab is too narrow for three columns. With the left column present the tree is
+    // already there, and drawing it twice would give two selections that could disagree.
+    if (!threeColumns) { drawComponentTree(/*ownColumn=*/false); ImGui::Separator(); }
     if (selected_ >= 0 && selected_ < static_cast<int>(script_.models.size())) {
         fmt::ActorModel& m = script_.models[static_cast<usize>(selected_)];
         ImGui::TextDisabled("%s", m.meshPath.c_str());
@@ -1379,6 +1449,7 @@ void ActorEditor::draw(Engine& e) {
     if (!status_.empty()) ImGui::TextDisabled("%s", status_.c_str());
 
     ImGui::EndGroup();
+    ImGui::EndChild();   // ##detailscol
 #else
     (void)e;
 #endif

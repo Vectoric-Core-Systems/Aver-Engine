@@ -318,6 +318,51 @@ int main() {
         check(p->camera().distance > 0.0f, "framing an empty list does not divide by zero");
     }
 
+    // ---- RESIZE, which juggles live GPU resources -------------------------------------------
+    //
+    // Every assertion here is about a use-after-free that no validation layer catches: the UI holds
+    // a descriptor for the colour target and samples it in a frame that may still be in flight, so
+    // the ORDER of drain, create, destroy and re-fetch is the whole correctness of this function.
+    AVER_INFO("=== resize ===");
+    {
+        const u32 texBefore     = static_cast<u32>(dev.factory.textures.size());
+        const u32 waitedBefore  = dev.factory.waited;
+        const u32 destroyBefore = dev.factory.destroyedTextures;
+        const u64 idBefore      = p->uiTextureId();
+
+        check(p->resize(1600, 900), "a resize to a new size succeeds");
+        check(p->width() == 1600 && p->height() == 900, "and the reported size follows");
+        check(dev.factory.waited > waitedBefore, "the GPU is DRAINED first -- the UI may still be sampling");
+        check(dev.factory.textures.size() == texBefore + 2, "a new colour and depth pair is created");
+        check(dev.factory.destroyedTextures == destroyBefore + 2, "and the old pair is released");
+        // A new texture is a new descriptor. Keeping the old id would leave ImGui sampling a
+        // destroyed resource -- the exact bug the drain above exists to prevent, one line later.
+        check(p->uiTextureId() != idBefore, "the UI texture id is RE-FETCHED, not carried over");
+
+        // Non-square is the point of the change: a square target in a wide panel letterboxes, and
+        // the projection has to follow the target or every actor is stretched.
+        const std::vector<rhi::TextureDesc>& tx = dev.factory.textures;
+        check(tx[tx.size()-2].width == 1600 && tx[tx.size()-2].height == 900,
+              "the new colour target is NON-SQUARE, at the asked size");
+
+        MockContext ctx;
+        p->setDrawList({});
+        p->prePass(ctx);
+        const std::vector<Call> vp2 = ctx.ofKind(Call::Kind::Viewport);
+        check(vp2.size() == 1 && vp2[0].c == 1600 && vp2[0].d == 900,
+              "and the pass's viewport follows the new target rather than the old one");
+
+        // Idempotence matters: the editor calls this from a debounce that can fire with an unchanged
+        // size, and a resize that destroyed and recreated on every such call would stall the GPU for
+        // no reason at all.
+        const u32 waitedIdem = dev.factory.waited;
+        check(p->resize(1600, 900), "resizing to the SAME size succeeds");
+        check(dev.factory.waited == waitedIdem, "and does nothing at all -- no drain, no reallocation");
+
+        check(!p->resize(0, 900), "a zero extent is refused rather than creating a degenerate target");
+        check(p->width() == 1600 && p->height() == 900, "and the old target is still the live one");
+    }
+
     AVER_INFO("=== teardown ===");
     {
         const u32 waitedBefore = dev.factory.waited;

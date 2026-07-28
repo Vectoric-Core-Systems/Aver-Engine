@@ -137,9 +137,9 @@ float4 PreviewPS(PreviewOut i) : SV_TARGET {
 )";
 }
 
-ActorPreview* ActorPreview::create(rhi::IDevice& device, u32 size) {
+ActorPreview* ActorPreview::create(rhi::IDevice& device, u32 width, u32 height) {
     auto* p = new ActorPreview();
-    if (!p->init(device, size)) { delete p; return nullptr; }
+    if (!p->init(device, width, height)) { delete p; return nullptr; }
     return p;
 }
 
@@ -155,14 +155,12 @@ ActorPreview::~ActorPreview() {
     if (depth_) res_->destroyTexture(depth_);
 }
 
-bool ActorPreview::init(rhi::IDevice& device, u32 size) {
-    device_ = &device;
-    res_ = device.resources();
-    if (!res_) return false;   // no GPU backend; the editor shows the panel without a 3D view
-    size_ = size ? size : 1024;
-
+// The colour and depth targets, at a size. Split out of init so resize can make a NEW pair before
+// it destroys the old one -- see resize for why that order matters.
+bool ActorPreview::createTargets(u32 width, u32 height) {
     rhi::TextureDesc cd;
-    cd.width = cd.height = size_;
+    cd.width = width;
+    cd.height = height;
     cd.format = rhi::Format::RGBA8Unorm;   // NOT sRGB: the pixel shader gamma-encodes itself
     cd.bind = rhi::ResourceBind::RenderTarget | rhi::ResourceBind::ShaderResource;
     cd.initialState = rhi::ResourceState::ShaderResource;
@@ -171,7 +169,8 @@ bool ActorPreview::init(rhi::IDevice& device, u32 size) {
     color_ = res_->createTexture(cd);
 
     rhi::TextureDesc dd;
-    dd.width = dd.height = size_;
+    dd.width = width;
+    dd.height = height;
     dd.format = rhi::Format::D32Float;
     dd.bind = rhi::ResourceBind::DepthStencil;
     dd.initialState = rhi::ResourceState::DepthWrite;
@@ -180,6 +179,18 @@ bool ActorPreview::init(rhi::IDevice& device, u32 size) {
     dd.debugName = "ActorPreview.Depth";
     depth_ = res_->createTexture(dd);
     if (!color_ || !depth_) { AVER_ERROR("[Preview] could not create the preview targets"); return false; }
+    width_ = width;
+    height_ = height;
+    return true;
+}
+
+bool ActorPreview::init(rhi::IDevice& device, u32 width, u32 height) {
+    device_ = &device;
+    res_ = device.resources();
+    if (!res_) return false;   // no GPU backend; the editor shows the panel without a 3D view
+    if (width == 0) width = 1024;
+    if (height == 0) height = width;   // a lone argument still means "square, at that size"
+    if (!createTargets(width, height)) return false;
 
     rhi::ShaderDesc vd;
     vd.source = actorPreviewShaderSource();
@@ -212,7 +223,41 @@ bool ActorPreview::init(rhi::IDevice& device, u32 size) {
     if (!pipeline_) { AVER_ERROR("[Preview] the preview pipeline would not build"); return false; }
 
     uiTextureId_ = device.uiTextureId(color_);
-    AVER_INFO("[Preview] ready: {}x{} target, pipeline {}", size_, size_, pipeline_);
+    AVER_INFO("[Preview] ready: {}x{} target, pipeline {}", width_, height_, pipeline_);
+    return true;
+}
+
+bool ActorPreview::resize(u32 width, u32 height) {
+    if (!res_ || width == 0 || height == 0) return false;
+    if (width == width_ && height == height_) return true;
+
+    // WAIT FIRST. The UI sampled the old colour target in a frame that may still be in flight, and
+    // destroying it underneath that is a use-after-free the validation layer does not catch because
+    // the handle is still nominally alive. This is the stall the class documents; the editor pays it
+    // once per resize gesture, not once per frame, which is the whole reason resize is debounced.
+    res_->waitIdle();
+
+    const rhi::TextureHandle oldColor = color_;
+    const rhi::TextureHandle oldDepth = depth_;
+    color_ = 0;
+    depth_ = 0;
+    if (!createTargets(width, height)) {
+        // Put the old pair back rather than leaving the feature with no target at all: a viewport
+        // that did not resize is a far better failure than one that went black.
+        color_ = oldColor;
+        depth_ = oldDepth;
+        AVER_WARN("[Preview] could not resize to {}x{}; keeping {}x{}", width, height, width_, height_);
+        return false;
+    }
+    if (oldColor) res_->destroyTexture(oldColor);
+    if (oldDepth) res_->destroyTexture(oldDepth);
+
+    // A NEW texture is a NEW descriptor, so the id the UI draws has to be re-fetched. Leaving the
+    // old one would have ImGui sampling a destroyed resource -- which is exactly the bug the waitIdle
+    // above exists to prevent, reintroduced one line later.
+    uiTextureId_ = device_ ? device_->uiTextureId(color_) : 0;
+    everRendered_ = false;   // the new target has never been written, so its first barrier differs
+    AVER_INFO("[Preview] target resized to {}x{}", width_, height_);
     return true;
 }
 
@@ -263,7 +308,12 @@ void ActorPreview::buildViewProj(f32 out[16]) const {
     lookAt(eye, camera_.pivot, view);
     // Near and far derived from the orbit distance rather than fixed: an actor framed at 20 cm and
     // one framed at 200 m cannot share a depth range without one of them z-fighting.
-    perspective(camera_.fovDeg, 1.0f, std::fmax(camera_.distance * 0.01f, 0.5f),
+    // THE TARGET'S OWN ASPECT. Hard-coding 1 was right only while the target was square; against a
+    // wide one it stretches every actor horizontally, which reads as a modelling mistake rather than
+    // as a projection one.
+    const f32 aspect = (width_ > 0 && height_ > 0)
+                     ? static_cast<f32>(width_) / static_cast<f32>(height_) : 1.0f;
+    perspective(camera_.fovDeg, aspect, std::fmax(camera_.distance * 0.01f, 0.5f),
                 camera_.distance * 10.0f + 1000.0f, proj);
     multiply(view, proj, out);
 }
@@ -281,10 +331,10 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
 
     const rhi::TextureHandle targets[1] = {color_};
     ctx.setRenderTargets(targets, 1, depth_);
-    ctx.setViewport(0, 0, size_, size_);
+    ctx.setViewport(0, 0, width_, height_);
     // Set explicitly and not inherited: the editor leaves the scissor on its dock rect, which would
     // silently clip this pass to wherever the 3D view happens to be.
-    ctx.setScissor(0, 0, size_, size_);
+    ctx.setScissor(0, 0, width_, height_);
     ctx.clearDepth(depth_, 1.0f);
 
     ctx.setPipeline(pipeline_);

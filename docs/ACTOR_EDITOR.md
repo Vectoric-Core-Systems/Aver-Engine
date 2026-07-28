@@ -59,6 +59,7 @@ and zero tests.** It is a starting point, not a dependency that has been exercis
 | The tab, gizmo and reload | `sandbox/src/ActorEditor.{hpp,cpp}` | not covered by a test |
 | The **Live** view — spawn the class, read what it built | same, plus `aver_fw_spawn_preview` | `FrameworkTest` (the ABI edge); `--open-asset … --actor-live` (the tab) |
 | The Components tree, and the camera/light wireframes | `sandbox/src/ActorEditor.cpp` | not covered by a test; verified by screenshot against `Car.Designer.cs` and `FpsCharacter.cs` |
+| A resizable, non-square preview target | `modules/render.actorpreview/` | `ActorPreviewTest` — drain/create/destroy order, id re-fetch, idempotence, zero-extent refusal |
 | The file watcher, and routing a disk change to a tab | `modules/platform/…/DirectoryWatcher`, `sandbox/src/AssetEditor.cpp` | `WatcherTest`, 33 assertions against a real filesystem |
 | The **Roslyn** backend | `scripting/csharp/Aver.Design/` → `bin/Tools/averdesign.exe`; `modules/formats.roslyn/` | `RoslynTest` — agreement with the scanner, and the cases it declines |
 
@@ -228,7 +229,38 @@ parse also leaves the previous good state on screen rather than blanking the tab
 
 ---
 
-## 4a. The Components panel
+## 4a. The layout, and the Components panel
+
+**Three columns, the way UE lays a Blueprint editor out:** Components on the left, the viewport in
+the middle with everything left over, Details on the right. It was two — viewport, then one column
+carrying the class picker, the class defaults, the component tree and the transform editor — so the
+tree had to be kept short to leave the others room, and the viewport was squeezed by a column doing
+three unrelated jobs.
+
+Below the width where the viewport would be squeezed under ~260 units the left column folds back
+into the right one and the tab is two columns again. The test is phrased as *"is there still room
+for a viewport"* rather than as a ratio between the side panels — phrased as a ratio it never
+reached three columns at 300% DPI at all, because the panels scale with DPI and a ratio between them
+ignores how much room there actually is.
+
+**The viewport fills its column.** The preview target used to be square and fixed at creation, so a
+wide panel letterboxed — most of a wide monitor's viewport spent on nothing. `ActorPreview::resize`
+now matches the target to the panel, and the projection's aspect follows the target (it was
+hard-coded to 1, which against a wide target stretches every actor horizontally and reads as a
+modelling mistake rather than a projection one).
+
+Resizing destroys a texture the UI is sampling, which needs a `waitIdle` — a whole-GPU stall. The
+editor therefore **debounces**: a size must hold still for 250 ms, and must differ by more than 24
+pixels, before a resize is asked for. Without the deadband a layout that oscillates by a pixel
+between frames — a scrollbar appearing and disappearing — would resize forever. That costs one stall
+per resize gesture instead of one per frame.
+
+`ActorPreviewTest` pins the order, because every hazard here is a use-after-free no validation layer
+catches: drain first, create the new pair, destroy the old, **re-fetch the UI texture id** (a new
+texture is a new descriptor; keeping the old id reintroduces the exact bug the drain prevents), and
+do nothing at all when the size is unchanged.
+
+### The Components panel
 
 UE's Blueprint editor shows an actor as a **tree**, not a list, and this now does the same. An actor
 is a root with a transform and a set of things attached to it, some of which draw and some of which

@@ -68,7 +68,7 @@ class ActorPreview final : public rhi::IRenderFeature {
 public:
     // Returns null when the backend has no GPU support, which is how this declines instead of
     // failing the editor -- the same contract every other feature here follows.
-    static ActorPreview* create(rhi::IDevice& device, u32 size = 1024);
+    static ActorPreview* create(rhi::IDevice& device, u32 width = 1024, u32 height = 0);
     ~ActorPreview() override;
 
     const char* name() const override { return "Aver.Render.ActorPreview"; }
@@ -89,10 +89,24 @@ public:
 
     // The texture the panel draws. 0 before the first render.
     u64 uiTextureId() const { return uiTextureId_; }
-    u32 size() const { return size_; }
-    // Squared and fixed at creation. The panel letterboxes rather than resizing per frame, because
-    // destroying a texture the UI is drawing needs a waitIdle, and doing that during a panel drag
-    // stalls the whole GPU once a frame.
+    u32 width() const { return width_; }
+    u32 height() const { return height_; }
+
+    // Match the target to the panel it is drawn in.
+    //
+    // NOT PER FRAME, and the caller is responsible for that: destroying a texture the UI is sampling
+    // needs a waitIdle, and doing that on every frame of a splitter drag stalls the whole GPU once a
+    // frame. The editor debounces -- it asks only once a size has stopped changing -- which is what
+    // makes this affordable at all.
+    //
+    // It exists because the alternative is worse than a stall. A square target drawn in a wide panel
+    // letterboxes, and on a wide monitor that is most of the viewport spent on nothing; and the
+    // camera's aspect has to match the target or every actor is stretched.
+    //
+    // Returns false and keeps the old target if the new one could not be made, so a failure is a
+    // viewport that did not resize rather than a viewport that went black.
+    bool resize(u32 width, u32 height);
+
     bool ready() const { return pipeline_ != 0; }
 
     // ---- the frame ----
@@ -102,7 +116,8 @@ public:
 
 private:
     ActorPreview() = default;
-    bool init(rhi::IDevice& device, u32 size);
+    bool init(rhi::IDevice& device, u32 width, u32 height);
+    bool createTargets(u32 width, u32 height);
     void buildViewProj(f32 out[16]) const;
 
     rhi::IDevice* device_ = nullptr;
@@ -112,7 +127,7 @@ private:
     rhi::PipelineHandle pipeline_ = 0;
     rhi::ShaderHandle vs_ = 0, ps_ = 0;
     u64 uiTextureId_ = 0;
-    u32 size_ = 0;
+    u32 width_ = 0, height_ = 0;
     // The colour target starts in ShaderResource because that is where every frame LEAVES it: the
     // UI samples it after the pass. Tracking the state this way means the pass's first barrier is
     // honest about where the resource actually is rather than about where it was created.
