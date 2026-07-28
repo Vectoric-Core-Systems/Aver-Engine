@@ -849,7 +849,8 @@ public:
             const ImGuiIO& io = ImGui::GetIO();
             // The central dock node is a transparent hole, so WantCaptureMouse is false over it
             // AND over any empty dockspace gap — require the cursor to be inside the viewport too.
-            const bool overUI = io.WantCaptureMouse || !inViewport(io.MousePos.x, io.MousePos.y);
+            const bool overUI = io.WantCaptureMouse || !inViewport(io.MousePos.x, io.MousePos.y) ||
+                                !levelFocused_;
 
             // Right mouse enters fly mode (look + WASD/QE), like Unreal's viewport.
             //
@@ -2564,6 +2565,9 @@ private:
         // selected things. With a gizmo tool active it could drag level geometry out from under the
         // player, and Delete and Ctrl+Z were live on the level while the game ran on top of it.
         if (gameHasInput()) return;
+        // NOR WHILE ANOTHER TAB HAS FOCUS. The level's tool keys, Delete and Ctrl+Z were live
+        // whatever was on screen; with the level now one tab among several that stops being latent.
+        if (!levelFocused_) return;
         const ImGuiIO& io = ImGui::GetIO();
 
         if (!io.WantCaptureKeyboard) {
@@ -2575,7 +2579,7 @@ private:
         const f32 mx=io.MousePos.x, my=io.MousePos.y;
         // Only the viewport rect drives the gizmo: the central dock node is a transparent hole,
         // so WantCaptureMouse alone would also let clicks in empty dockspace gaps through.
-        const bool overScene = !io.WantCaptureMouse && inViewport(mx, my);
+        const bool overScene = !io.WantCaptureMouse && inViewport(mx, my) && levelFocused_;
 
         // Hover highlight when idle over a handle.
         hoverAxis_ = -1;
@@ -3052,6 +3056,11 @@ private:
             ImGui::DockBuilderSplitNode(right,  ImGuiDir_Down,  0.60f, &rightBottom, &rightTop);
             ImGui::DockBuilderDockWindow("World Outliner",  rightTop);
             ImGui::DockBuilderDockWindow("Details",         rightBottom);
+            // THE LEVEL IS A TAB. It used to be the central node's transparent hole, and a hole can
+            // never appear in a tab bar -- which is why docking an asset editor there left no way
+            // back to the level. It is a window now, drawing the scene as an IMAGE, so it tabs,
+            // splits, floats and drags like anything else.
+            ImGui::DockBuilderDockWindow("Level",           centre);
             // No bottom split: the Content Browser and Output Log are DRAWERS (drawDrawer), closed on
             // launch and raised over the viewport on demand. They took a quarter of the height
             // permanently before, which is a poor trade for panels you consult in bursts.
@@ -3059,20 +3068,67 @@ private:
         }
         // Latch the central node -> that's the 3D viewport rect (ImGui coords are 1:1 with
         // backbuffer pixels here: DisplaySize is the physical client size, DPI is done via style).
-        if (ImGuiDockNode* cn = ImGui::DockBuilderGetCentralNode(dockId)) {
-            vpX_ = cn->Pos.x; vpY_ = cn->Pos.y; vpW_ = cn->Size.x; vpH_ = cn->Size.y;
-            // The node an asset editor opens into. Read every frame rather than latched: a user can
-            // split or merge their way to a different central node, and an editor docked into one
-            // that no longer exists floats loose with nothing saying why.
-            centralDock_ = cn->ID;
-        }
+        // The node an asset editor opens into. Read every frame rather than latched: a user can
+        // split or merge their way to a different central node, and an editor docked into one that
+        // no longer exists floats loose with nothing saying why.
+        if (const ImGuiDockNode* cn = ImGui::DockBuilderGetCentralNode(dockId)) centralDock_ = cn->ID;
         ImGui::End(); // ##dockhost  (panels are separate windows, so Begin them after this)
+
+        // ---------------- the level, as a tab ----------------
+        //
+        // It draws the scene TEXTURE. That is what makes it a tab at all: with the scene scissored
+        // into a transparent gap, docking anything into that gap made ImGui paint the node and the
+        // 3D vanished -- measured, the probe read editor grey instead of the cube. An image has no
+        // such problem.
+        {
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            // Begin's RETURN VALUE is what says whether the Level tab is the selected one: a docked
+            // window that is not the active tab returns false. That is what the viewport overlay
+            // gates on, so Perspective/Lit/Show follows the tab instead of merely disappearing
+            // whenever any editor is open.
+            levelVisible_ = ImGui::Begin("Level", nullptr,
+                                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                                         ImGuiWindowFlags_NoCollapse);
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            const ImVec2 avail = ImGui::GetContentRegionAvail();
+            const f32 w = avail.x > 8.0f ? avail.x : 8.0f;
+            const f32 h = avail.y > 8.0f ? avail.y : 8.0f;
+
+            // The rect the SCENE renders into, which is this window's content area. Published before
+            // the image is drawn so the next frame's scene matches the box it lands in; the image is
+            // therefore one frame behind on a resize, which shows as a moment of stretch rather than
+            // as a gap.
+            vpX_ = at.x; vpY_ = at.y; vpW_ = w; vpH_ = h;
+            levelFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+
+            if (levelVisible_ && e.device()) {
+                e.device()->setViewportToTexture(true);
+                if (const u64 tex = e.device()->viewportTextureId()) {
+                    // The texture is the FULL backbuffer; the scene occupies only this sub-rect of
+                    // it, so it is drawn by its texture coordinates rather than resized. Resizing a
+                    // target the UI samples needs a waitIdle, and doing that during a splitter drag
+                    // stalls the whole GPU once a frame.
+                    // DisplaySize IS the backbuffer size here -- the backend keeps ImGui coordinates
+                    // 1:1 with physical pixels and does DPI through the style, which is the same
+                    // property the viewport rect above relies on.
+                    const f32 bw = ImGui::GetIO().DisplaySize.x;
+                    const f32 bh = ImGui::GetIO().DisplaySize.y;
+                    if (bw > 1.0f && bh > 1.0f) {
+                        const ImVec2 uv0(at.x / bw, at.y / bh);
+                        const ImVec2 uv1((at.x + w) / bw, (at.y + h) / bh);
+                        ImGui::Image(static_cast<ImTextureID>(tex), ImVec2(w, h), uv0, uv1);
+                    }
+                }
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
+        }
 
         buildPanels(e);
         // NOT while an asset editor covers the central region. The overlay is drawn after the
         // dockspace and before the editors, so it would land on top of the tab's own toolbar -- and
         // it did: Compile C# and Open in IDE were half-hidden under Perspective/Lit/Show.
-        if (!assetEditors_.anyOpen()) buildViewportOverlay();
+        if (levelVisible_) buildViewportOverlay();
         drawDrawer(e);   // over the viewport, so after the overlay it would otherwise sit behind
         buildEditorPrefs();
         buildProjectSettings();
@@ -5130,6 +5186,13 @@ private:
     std::string matSaveStatus_;
     // The dock node the viewport occupies, and therefore where an opened asset editor lands.
     unsigned centralDock_ = 0;
+    // Whether the LEVEL tab is the focused one. With the level in a tab strip an asset editor can sit
+    // exactly on top of it, and the level's Delete, Ctrl+Z, tool keys and gizmo would otherwise act
+    // on a click the editor is also receiving.
+    bool levelFocused_ = true;
+    // Whether the Level tab is the SELECTED tab. Distinct from focused: a tab can be visible
+    // while the keyboard belongs to a panel beside it.
+    bool levelVisible_ = true;
     std::string openAsset_;
 
     // What the last opened project is missing, and whether the prompt has had its answer this

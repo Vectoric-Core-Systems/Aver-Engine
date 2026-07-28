@@ -702,6 +702,14 @@ public:
     void addRenderFeature(IRenderFeature* f) override;
     void removeRenderFeature(IRenderFeature* f) override;
     void notifyRenderTargetsChanged();
+    // The scene-as-a-texture path. Created through the FACTORY rather than as another device-owned
+    // ComPtr, so it is an ordinary TextureHandle with an RTV and an SRV the UI can already name --
+    // uiTextureId works on it unchanged, and nothing here grows a second resource lifetime to get
+    // wrong.
+    bool ensureViewportTexture();
+    bool           viewportToTex_ = false;
+    TextureHandle  viewportTex_ = 0;
+    u32            viewportTexW_ = 0, viewportTexH_ = 0;
     // What the features were last told. Seeded with a sample count of 0, which no device ever
     // reports, so the first notification always goes out however the formats compare.
     u32    notifiedSamples_ = 0;
@@ -721,6 +729,10 @@ public:
     void setVSync(bool on) override { vsync_ = on; }
     bool vsync() const override { return vsync_; }
     bool vsyncCanDisable() const override { return tearingSupported_; }
+
+    void setViewportToTexture(bool on) override { viewportToTex_ = on; }
+    bool viewportToTexture() const override { return viewportToTex_; }
+    u64  viewportTextureId() override;
 
     void setViewportRect(u32 x, u32 y, u32 w, u32 h) override {
         if (w == 0 || h == 0 || x >= width_ || y >= height_) { vpX_ = vpY_ = vpW_ = vpH_ = 0; return; }
@@ -1580,6 +1592,47 @@ bool D3D12Device::setSampleCount(u32 samples) {
 // no business sending it. Stated as a candidate rather than a diagnosis: the dumps cannot be
 // symbolised on this machine, and what is claimed here is that the rebuild was unnecessary, which is
 // true whatever the driver does with it.
+// The offscreen the post chain composites into when the editor wants the scene as an image.
+//
+// FULL backbuffer size and recreated only when that changes. Sizing it to the panel would destroy
+// and recreate a render target the UI is sampling every time somebody drags a splitter, and that
+// needs a waitIdle -- a whole-GPU stall once a frame for the duration of the drag.
+bool D3D12Device::ensureViewportTexture() {
+    IResourceFactory* f = resources();
+    if (!f || width_ == 0 || height_ == 0) return false;
+    if (viewportTex_ && viewportTexW_ == width_ && viewportTexH_ == height_) return true;
+
+    if (viewportTex_) {
+        // Drained first: the UI sampled this texture last frame, and the destroy is deferred behind
+        // the fence but the DESCRIPTOR the UI holds is not.
+        f->waitIdle();
+        f->destroyTexture(viewportTex_);
+        viewportTex_ = 0;
+    }
+    TextureDesc d;
+    d.width = width_;
+    d.height = height_;
+    // The presented format, expressed in the RHI's own enum: kBackbufferFormat is a DXGI value.
+    d.format = fromDxgiFormat(kBackbufferFormat);
+    d.bind = ResourceBind::RenderTarget | ResourceBind::ShaderResource;
+    // Where every frame LEAVES it: the UI samples it after the composite. Seeding the tracker from
+    // the state it actually ends in means the first barrier of frame 0 is honest.
+    d.initialState = ResourceState::ShaderResource;
+    d.hasClearValue = true;
+    d.debugName = "Viewport.Composite";
+    viewportTex_ = f->createTexture(d);
+    viewportTexW_ = width_;
+    viewportTexH_ = height_;
+    if (!viewportTex_) { AVER_ERROR("[RHI.D3D12] the viewport texture could not be created"); return false; }
+    AVER_INFO("[RHI.D3D12] viewport composited to a texture ({}x{})", width_, height_);
+    return true;
+}
+
+u64 D3D12Device::viewportTextureId() {
+    if (!viewportToTex_ || !ensureViewportTexture()) return 0;
+    return uiTextureId(viewportTex_);
+}
+
 void D3D12Device::notifyRenderTargetsChanged() {
     if (sampleCount_ == notifiedSamples_ &&
         backbufferFormat() == notifiedColor_ && depthFormat() == notifiedDepth_) return;
@@ -2857,12 +2910,38 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     // ---- composite ----
     fillCommon(width_, height_, width_, height_);
     {
+        // The backbuffer is made a render target either way: the composite lands there in the normal
+        // path, and the UI lands there in both.
         auto toRt = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
         cmdList_->ResourceBarrier(1, &toRt);
-        D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
-        rtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
-        fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0].Get(), kPostTripleComposite,
-                   width_, height_, &rtv);
+        D3D12_CPU_DESCRIPTOR_HANDLE bbRtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
+        bbRtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
+
+        const RhiTexture* vt = (viewportToTex_ && ensureViewportTexture() && rhiFactory_)
+                             ? rhiFactory_->texture(viewportTex_) : nullptr;
+        if (vt && vt->rtvHeap) {
+            // Into the texture, and the BACKBUFFER IS CLEARED rather than left alone. The UI draws
+            // over it and would otherwise be compositing onto whatever the previous frame left --
+            // which on a flip-model swapchain is a frame or two old and reads as ghosting.
+            const f32 blank[4] = {clear_[0], clear_[1], clear_[2], 1.0f};
+            cmdList_->ClearRenderTargetView(bbRtv, blank, 0, nullptr);
+
+            auto toRtTex = transition(vt->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                      D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cmdList_->ResourceBarrier(1, &toRtTex);
+            D3D12_CPU_DESCRIPTOR_HANDLE trtv = vt->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+            fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0].Get(), kPostTripleComposite,
+                       width_, height_, &trtv);
+            auto backToSrv = transition(vt->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cmdList_->ResourceBarrier(1, &backToSrv);
+            // The UI pass expects the backbuffer bound; the fullscreen helper above left the texture
+            // bound instead.
+            cmdList_->OMSetRenderTargets(1, &bbRtv, FALSE, nullptr);
+        } else {
+            fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0].Get(), kPostTripleComposite,
+                       width_, height_, &bbRtv);
+        }
     }
 
     // ---- restore ----

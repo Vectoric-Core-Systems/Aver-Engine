@@ -361,6 +361,29 @@ public:
     // node instead of the whole window. (0,0,0,0) = full backbuffer.
     virtual void setViewportRect(u32 x, u32 y, u32 w, u32 h) { (void)x; (void)y; (void)w; (void)h; }
 
+    // ---- the scene as a texture ----
+    //
+    // Send the post chain's output to an offscreen texture instead of the backbuffer, so the UI can
+    // DRAW the scene rather than having to leave a hole for it.
+    //
+    // The hole is the reason this exists. An editor that scissors the 3D into a transparent gap in
+    // its dockspace can never make that gap a TAB: docking a window into a node stops the node being
+    // empty, ImGui then paints the node's background, and the scene -- already on the backbuffer --
+    // is covered. Measured, not assumed: the probe read editor grey instead of the scene. With the
+    // scene in a texture the viewport becomes an ordinary image in an ordinary window, which can be
+    // tabbed, split, floated or dragged like anything else.
+    //
+    // The texture is the FULL backbuffer size, not the viewport's. Sizing it to the panel would mean
+    // destroying and recreating a render target the UI is sampling every time somebody drags a
+    // splitter, and that needs a waitIdle -- a whole-GPU stall once a frame during a drag. The scene
+    // still renders only into setViewportRect's sub-rectangle, and the caller draws that sub-rect by
+    // its texture coordinates.
+    virtual void setViewportToTexture(bool on) { (void)on; }
+    virtual bool viewportToTexture() const { return false; }
+    // The UI identifier for that texture, or 0 when the mode is off or unsupported. Same contract as
+    // uiTextureId: a plain integer, so no UI type crosses into this header.
+    virtual u64 viewportTextureId() { return 0; }
+
     // GPU self-test: clear a tiny offscreen target to `in` and read the pixel back into
     // `outRGBA`. Returns true if the read-back matches (proves the GPU path works). A
     // backend without real GPU support returns false.
