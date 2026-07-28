@@ -40,6 +40,15 @@ public:
     using ReloadFn = std::function<bool(const std::string& binDir, std::string* status)>;
     void setReloader(ReloadFn fn) { reload_ = std::move(fn); }
 
+    // The app's auto-compile-on-save flag, bound so the menu's checkbox writes it directly.
+    //
+    // A POINTER rather than a copy, because the flag is also set by --auto-compile and read by the
+    // watcher pump every frame: a second copy here would be a second thing to keep in step, and the
+    // one that got out of step would be the one the user could see. The menu is a VIEW of the app's
+    // state, not an owner of it. Null when the app installs nothing, and the item is then hidden --
+    // an unbacked checkbox is worse than no checkbox.
+    void setAutoCompileFlag(bool* p) { autoCompile_ = p; }
+
     // The Tools dropdown. Called from inside BeginMainMenuBar, and owns its own BeginMenu so the
     // `--tools-menu` screenshot aid can force the popup open with the menu bar as parent window.
     void drawMenu(const fmt::ProjectDesc& project);
@@ -126,6 +135,7 @@ private:
     int  armCompile_ = 0;           // --compile-scripts: frames left to fire the build once
     int  armReload_ = 0;            // --reload-scripts: frames left before the reload fires
     ReloadFn reload_;               // empty in a build with no scripting host
+    bool* autoCompile_ = nullptr;   // the app's flag, not ours; null hides the item
     bool idesLogged_ = false;       // the detected-IDE list is logged once, when the scan lands
 
     char name_[96] = {};            // shared by all four New ... modals; one at a time is open

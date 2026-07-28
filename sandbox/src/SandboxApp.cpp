@@ -81,6 +81,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -803,6 +804,8 @@ public:
             // even when init declined: the host answers honestly either way, and a menu item that
             // reports "the scripting host is not running" is better than one that is greyed out
             // for a reason nobody can see.
+            // The menu's checkbox writes the app's flag directly; see setAutoCompileFlag.
+            tools_.setAutoCompileFlag(autoCompileFlag());
             tools_.setReloader([this](const std::string& binDir, std::string* status) {
                 return reloadScripts(binDir, status);
             });
@@ -1755,6 +1758,8 @@ public:
     // --open-asset: drive the double-click path without a mouse.
     void setOpenAsset(std::string p) { openAsset_ = std::move(p); }
     void setInputProbe(bool on) { inputProbe_ = on; }
+    void setAutoCompile(bool on) { autoCompile_ = on; }   // --auto-compile, and the Tools menu
+    bool* autoCompileFlag() { return &autoCompile_; }     // the menu checkbox binds straight to it
 
     void setClouds(f32 coverage) {
         sky_.cloudsEnabled = true;
@@ -1933,6 +1938,10 @@ private:
             // returns this rather than logging and swallowing it, so it must not be swallowed here.
             AVER_WARN("[Editor] the watcher lost records; every open editor is being told to re-read");
             assetEditors_.notifyWatchLost();
+            // A rescan implies a rebuild: a lost record may have been the only script change, and
+            // records are lost exactly during the storm of edits that makes one most likely -- a
+            // branch switch, a bulk rename, a generator run.
+            if (autoCompile_) scheduleAutoCompile("the watcher lost records");
             return;
         }
         for (const FileEvent& ev : watchEvents_) {
@@ -1943,11 +1952,82 @@ private:
             const std::string full = (std::filesystem::path(contentWatch_.root()) / ev.path).string();
             if (assetEditors_.notifyFileChanged(full))
                 AVER_TRACE("[Editor] '{}' changed on disk; its tab was told", ev.path);
+            if (autoCompile_ && isScriptSource(ev.path)) scheduleAutoCompile(ev.path);
         }
+        serviceAutoCompile();
+    }
+
+    // ---- auto-compile on save -------------------------------------------------------------------
+    //
+    // Is this a script the USER wrote, as against one the BUILD wrote?
+    //
+    // THE bin/obj EXCLUSION IS NOT TIDINESS, IT IS THE LOOP BREAKER. MSBuild regenerates
+    // obj/<config>/<tfm>/Scripts.AssemblyInfo.cs, Scripts.GlobalUsings.g.cs and
+    // .NETCoreApp,Version=v10.0.AssemblyAttributes.cs on EVERY build, and those are .cs files inside
+    // the watched tree. Without this, one save triggers a build, the build writes those, the watcher
+    // reports them, and the editor builds forever at whatever rate dotnet can manage.
+    //
+    // Matched on whole path SEGMENTS, so a legitimate Content/Scripts/Robots/BinPacker.cs is not
+    // mistaken for a build directory.
+    static bool isScriptSource(const std::string& rel) {
+        if (rel.size() < 4 || rel.compare(rel.size() - 3, 3, ".cs") != 0) return false;
+        for (usize seg = 0; seg < rel.size(); ) {
+            const usize slash = rel.find('/', seg);
+            const usize len = (slash == std::string::npos ? rel.size() : slash) - seg;
+            const std::string_view part(rel.data() + seg, len);
+            if (part == "bin" || part == "obj") return false;
+            if (slash == std::string::npos) break;
+            seg = slash + 1;
+        }
+        return true;
+    }
+
+    // Push the deadline out rather than starting a build.
+    //
+    // A SECOND debounce on top of the watcher's, for a different reason. The watcher's 150 ms settle
+    // coalesces the burst ONE save produces into one event per path. This coalesces events across
+    // MANY paths into one build: a Save All, a formatter over a folder or a branch switch touches
+    // several files and must produce one build, not one per file -- and sequential dotnet builds each
+    // lock the script assembly for as long as they run.
+    void scheduleAutoCompile(const std::string& why) {
+        autoCompileDue_ = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(kAutoCompileQuietMs);
+        if (autoCompileReason_.empty()) autoCompileReason_ = why;
+        ++autoCompilePending_;
+    }
+
+    void serviceAutoCompile() {
+        if (autoCompilePending_ == 0) return;
+        if (std::chrono::steady_clock::now() < autoCompileDue_) return;
+        // Never stack a build on a build. startCompile drops a second job on the floor, and dropping
+        // it silently would mean the LAST edit -- the one being waited on -- is the one never built.
+        // Holding the deadline retries next frame instead.
+        if (tools_.compiling()) {
+            autoCompileDue_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+            return;
+        }
+        if (!project_.valid()) { autoCompilePending_ = 0; autoCompileReason_.clear(); return; }
+        AVER_INFO("[Editor] auto-compile: {} script change(s) settled (first was '{}')",
+                  autoCompilePending_, autoCompileReason_);
+        autoCompilePending_ = 0;
+        autoCompileReason_.clear();
+        // The SAME path the toolbar button takes. It builds and then reloads when a host is present,
+        // and that reload is what bumps the actor editors' generation so every Live view rebuilds. A
+        // quieter private path here would be a second thing to keep in step.
+        tools_.triggerToolbarCompile(project_);
     }
 
     DirectoryWatcher contentWatch_;
     std::vector<FileEvent> watchEvents_;   // reused, so a quiet frame allocates nothing
+
+    // OFF BY DEFAULT. It spawns a compiler in response to somebody else's file write, which is not a
+    // thing to start doing unasked -- on a large project a build is seconds of CPU, and it swaps the
+    // script assembly under a running editor.
+    bool autoCompile_ = false;
+    static constexpr int kAutoCompileQuietMs = 500;
+    std::chrono::steady_clock::time_point autoCompileDue_{};
+    int autoCompilePending_ = 0;
+    std::string autoCompileReason_;
 
     bool reloadScripts(const std::string& binDir, std::string* status) {
         if (!scripts_.ready()) {
@@ -5735,7 +5815,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and EXITS, touching no device.
         //
@@ -5786,6 +5866,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--actor-live")) editor::setActorEditorLiveByDefault(true);
         else if (!std::strcmp(argv[i],"--headless")) headless=true;
         else if (!std::strcmp(argv[i],"--input-probe")) inputProbe=true;
+        else if (!std::strcmp(argv[i],"--auto-compile")) autoCompile=true;
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
         else if (!std::strcmp(argv[i],"--new-script")) focusScript=true;
         // Holds the Tools dropdown open so it can be photographed. Opt-in, like the two above:
@@ -5876,6 +5957,7 @@ Application* createApplication(int argc, char** argv) {
     app->setUiDemo(uiDemo);
     app->setOpenAsset(openAsset);
     app->setInputProbe(inputProbe);
+    app->setAutoCompile(autoCompile);
     app->setUseWarp(warp);
     app->setDebugLayer(debugLayer);
     app->setProjectPath(project);

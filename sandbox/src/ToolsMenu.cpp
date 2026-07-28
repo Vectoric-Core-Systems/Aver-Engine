@@ -287,6 +287,25 @@ void ToolsMenu::drawMenu(const fmt::ProjectDesc& project) {
         : compileThread_.joinable() ? "A build is already running."
         : "Rebuild, then unload and reload the project's scripts in place.\nRunning behaviours get OnShutdown, the new ones get OnStart.\nNo editor restart, and no state is carried across.");
 
+    // AUTO-COMPILE ON SAVE. Beneath the two manual items because it is the same operation done for
+    // you: it runs exactly the Reload Scripts path, on a debounce, when a .cs under Content changes.
+    //
+    // Off until asked, because it spawns a compiler in response to somebody else's file write and
+    // swaps the script assembly under a running editor.
+    if (autoCompile_) {
+        const bool canAuto = haveProject && haveCsproj && dotnetOk;
+        ImGui::BeginDisabled(!canAuto);
+        ImGui::MenuItem("Auto-compile on Save", nullptr, autoCompile_);
+        ImGui::EndDisabled();
+        tip(!haveProject  ? kNoProject
+            : !dotnetOk   ? "dotnet was not found on PATH, so there is nothing to build with."
+            : !haveCsproj ? "This project has no Content\\Scripts\\Scripts.csproj yet."
+            : "Rebuild and reload whenever a .cs under Content changes on disk - saving in Visual\n"
+              "Studio is enough. Edits are debounced, so a Save All is ONE build, not one per file.\n"
+              "bin\\ and obj\\ are ignored: the build writes .cs there itself, and reacting to\n"
+              "those would compile in a loop forever.");
+    }
+
     ImGui::Separator();
     if (ImGui::MenuItem("Open Project Folder", nullptr, false, haveProject)) {
         if (!shellOpen(project.dir)) AVER_WARN("[Editor] could not open {}", project.dir);

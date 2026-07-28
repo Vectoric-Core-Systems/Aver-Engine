@@ -304,6 +304,29 @@ is outstanding — and that call happens on the worker thread. The first file wr
 was silently dropped. `start()` now waits for an event the worker sets once its first read is in
 flight.
 
+### Auto-compile on save
+
+**Tools > Auto-compile on Save**, off by default, or `--auto-compile`. With it on, a `.cs` change
+anywhere under Content rebuilds and reloads the project's scripts, which closes the loop: save in
+Visual Studio, and the Live view updates with nothing pressed.
+
+Two things it must get right, and both are measured:
+
+- **One build per burst, not one per file.** A second debounce sits on top of the watcher's. The
+  watcher's 150 ms settle coalesces the burst *one* save produces into one event per path; this
+  coalesces events across *many* paths into one build, because a Save All or a branch switch touches
+  several files and sequential `dotnet build` runs each lock the script assembly. Measured: two saves
+  200 ms apart produced `auto-compile: 2 script change(s) settled` — once — and one build.
+- **It must not compile in a loop.** MSBuild regenerates `Scripts.AssemblyInfo.cs`,
+  `Scripts.GlobalUsings.g.cs` and `.NETCoreApp,Version=v10.0.AssemblyAttributes.cs` under `obj/` on
+  **every** build, and those are `.cs` files inside the watched tree. Any path with a `bin` or `obj`
+  segment is therefore ignored — matched on whole segments, so `Scripts/Robots/BinPacker.cs` is
+  safe. Measured: no second trigger in the 30 s after a build.
+
+It takes the same path as the Reload Scripts button rather than a quieter private one, so the reload
+that bumps the Live views' generation happens here too. A build already running holds the deadline
+rather than being dropped: the last edit is the one being waited on.
+
 ## 4d. The Roslyn backend, as shipped
 
 `averdesign` (`scripting/csharp/Aver.Design/`, staged to `bin/Tools/`) parses a `.cs` with
