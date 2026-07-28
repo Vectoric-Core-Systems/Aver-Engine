@@ -249,8 +249,30 @@ an `InvisibleButton` is a hit region with press-and-hold already tracked, so the
 `IsItemActive` plus a mouse delta. The line is drawn only while hot — a permanent rule between every
 column is chrome, one that appears under the cursor is an affordance. Widths are clamped against the
 *current* available width every frame rather than once when set, so shrinking the tab cannot leave a
-column wider than the tab. They live for as long as the tab is open; there is nowhere to persist a
-per-tab layout to yet, and this is the first thing that would have wanted one.
+column wider than the tab. They are **shared by every actor tab and persisted** — see below.
+
+**Column widths persist across sessions**, in `%LOCALAPPDATA%\AverEngine\editor.ini`. The editor had
+nowhere to put UI state: ImGui's own persistence is deliberately off (`io.IniFilename = nullptr`, and
+the dock layout is rebuilt in code every run — the right call for a designed default, but it left no
+home for the small things a user adjusts and expects to stay put). `sandbox/src/EditorPrefs` is that
+home: `key=value` lines, every read takes a fallback so a missing or corrupt file is a fresh-looking
+editor rather than a broken one, and nothing about a *project* goes in it.
+
+Two details that are easy to get wrong and are pinned by `EditorPrefsTest`: values are stored in
+**DPI-independent units**, or a layout set on a 300% display would arrive three times too wide on a
+100% one; and parsing uses `from_chars`/`to_chars` rather than `atof`, which is locale-**dependent**
+— a machine set to a comma locale would write `230.5` and read back `230`, degrading silently on
+somebody else's machine and nowhere else.
+
+Widths are shared by every actor tab rather than kept per-tab: dragging the split in one and finding
+a different one in the next is the sort of inconsistency nobody reports and everybody finds
+irritating. UE remembers a layout per editor *type* for the same reason.
+
+**Window > Reset Layout is scoped to what is on screen.** It used to rebuild the whole editor dock
+unconditionally, so reaching for it while an actor tab was open — to straighten that tab's columns,
+the only layout you can see — threw away the level editor's arrangement too, and that is not
+undoable. It now resets the layout of the tab in front and says which in its own label
+("Reset Tab Layout" vs "Reset Layout").
 
 **An actor tab hides the level's panels.** Opening one now fills the editor the way a Blueprint
 editor does, instead of sitting in a slot with a World Outliner beside it listing a level it has

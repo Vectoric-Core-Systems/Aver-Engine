@@ -165,6 +165,9 @@ if(AVER_BUILD_TESTS)
   # editor's live sync now rests on it -- it shipped with no consumer and no test, and the first
   # thing that depended on it should not also be the first thing that exercised it.
   add_subdirectory(tests/platform)
+  # The editor's preferences store. Unconditional: it depends only on Core and Platform, and its
+  # failure mode -- a setting that silently does not persist -- is one nobody ever reports.
+  add_subdirectory(tests/editor)
   # The Roslyn backend, checked against the scanner it falls back from. Unconditional like its module;
   # the test itself skips when averdesign is not staged.
   add_subdirectory(tests/formats.roslyn)

@@ -57,6 +57,10 @@ void notifyActorEditorsScriptsReloaded();
 // line says how many models the class actually built.
 void setActorEditorLiveByDefault(bool on);
 
+// Restore the tab's columns to their defaults, and persist that. Called by Window > Reset Layout
+// when an actor tab is the active one.
+void resetActorEditorLayout();
+
 // Releases the shared preview and its meshes. Called before the device goes.
 void shutdownActorEditors();
 

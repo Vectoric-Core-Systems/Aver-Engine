@@ -1,4 +1,5 @@
 #include "ActorEditor.hpp"
+#include "EditorPrefs.hpp"
 
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
@@ -46,6 +47,15 @@ bool g_previewTried = false;
 rhi::IDevice* g_device = nullptr;
 ActorEditorHooks g_hooks;
 bool g_liveDefault = false;
+// Column widths in PHYSICAL pixels, shared by every actor tab and seeded from the prefs file on
+// first use. Zero means "not seeded yet", which is why they are not simply defaulted here.
+f32 g_leftColW = 0.0f, g_rightColW = 0.0f;
+// The defaults, named once. Reset Layout and the first-use seed both need them, and two literals
+// that must agree are two literals that eventually will not.
+constexpr f32 kDefaultLeftColumn  = 200.0f;
+constexpr f32 kDefaultRightColumn = 280.0f;
+constexpr const char* kPrefLeft  = "actorEditor.leftColumn";
+constexpr const char* kPrefRight = "actorEditor.rightColumn";
 // Bumped by the app when the script assembly is swapped. Never reset: a tab compares values rather
 // than testing a flag, so wrapping is the only failure and it takes 4 billion reloads.
 u32 g_scriptGeneration = 1;
@@ -315,8 +325,6 @@ private:
         previewResizeAt_ = -1.0;
         g_preview->resize(pendingPreviewW_, pendingPreviewH_);
     }
-    // Column widths, dragged by the splitters and clamped every frame against the tab's own width.
-    f32 leftColW_ = 0.0f, rightColW_ = 0.0f;
     double previewResizeAt_ = -1.0;
     u32 pendingPreviewW_ = 0, pendingPreviewH_ = 0;
 
@@ -670,7 +678,8 @@ namespace {
 // `width` is read AND written: the caller owns the value across frames, which is what makes the
 // split persist while a tab is open. Clamped every frame against the CURRENT available width rather
 // than once when set, so shrinking the tab cannot leave a column wider than the tab itself.
-bool columnSplitter(const char* id, f32 thickness, f32* width, f32 avail, f32 minSelf, f32 minOther) {
+bool columnSplitter(const char* id, f32 thickness, f32* width, f32 avail, f32 minSelf, f32 minOther,
+                    bool* released = nullptr) {
     ImGui::SameLine(0.0f, 0.0f);
     const ImVec2 at = ImGui::GetCursorScreenPos();
     const f32 h = ImGui::GetContentRegionAvail().y;
@@ -685,6 +694,9 @@ bool columnSplitter(const char* id, f32 thickness, f32* width, f32 avail, f32 mi
         *width += ImGui::GetIO().MouseDelta.x;
         moved = true;
     }
+    // The RELEASE, not the movement, is when a width is worth writing to disk. Saving while dragging
+    // would rewrite the file on every frame of the gesture for a value that is still changing.
+    if (released) *released = ImGui::IsItemDeactivated();
     // Clamped here rather than at the drag, so a resize of the whole tab is corrected too.
     const f32 maxSelf = avail - minOther;
     if (*width < minSelf) *width = minSelf;
@@ -1224,14 +1236,19 @@ void ActorEditor::draw(Engine& e) {
     const f32 dpi = ImGui::GetFontSize() / 16.0f;
     const f32 avail = ImGui::GetContentRegionAvail().x;
 
-    // The widths are MEMBERS, so a split the user drags survives every frame this tab is open.
-    // Seeded once from a sensible default rather than stored, because a per-tab layout that
-    // persisted across sessions would need somewhere to persist to -- and this is the first thing
-    // in the tab that would have wanted such a place.
-    if (leftColW_ <= 0.0f)  leftColW_  = 200.0f * dpi;
-    if (rightColW_ <= 0.0f) rightColW_ = 280.0f * dpi;
-    f32 leftW  = leftColW_;
-    f32 rightW = rightColW_;
+    // SHARED by every actor tab, and PERSISTED.
+    //
+    // Shared rather than per-tab: dragging the split in one tab and finding a different one in the
+    // next is the sort of inconsistency nobody reports as a bug and everybody finds irritating. UE
+    // remembers a layout per editor TYPE, not per asset, for the same reason.
+    //
+    // Stored in DPI-INDEPENDENT units, which matters more than it looks: the widths are used in
+    // physical pixels, so writing those to disk would make a layout set on a 300% display arrive
+    // three times too wide on a 100% one. Dividing out here and multiplying back is the whole fix.
+    if (g_leftColW <= 0.0f)  g_leftColW  = prefFloat(kPrefLeft,  kDefaultLeftColumn)  * dpi;
+    if (g_rightColW <= 0.0f) g_rightColW = prefFloat(kPrefRight, kDefaultRightColumn) * dpi;
+    f32 leftW  = g_leftColW;
+    f32 rightW = g_rightColW;
     // NARROW TABS COLLAPSE RATHER THAN CLIP: below the point where the viewport would be squeezed
     // under about 260 units, the left column folds back into the right one and the tab is two
     // columns again -- which is what it was, and is still usable.
@@ -1255,8 +1272,10 @@ void ActorEditor::draw(Engine& e) {
         ImGui::BeginChild("##componentcol", ImVec2(leftW, 0.0f), ImGuiChildFlags_None);
         drawComponentTree(/*ownColumn=*/true);
         ImGui::EndChild();
-        columnSplitter("##splitL", split, &leftColW_, avail - rightW - split * 2.0f,
-                       120.0f * dpi, minView);
+        bool doneL = false;
+        columnSplitter("##splitL", split, &g_leftColW, avail - rightW - split * 2.0f,
+                       120.0f * dpi, minView, &doneL);
+        if (doneL) { setPrefFloat(kPrefLeft, g_leftColW / dpi); flushEditorPrefs(); }
     }
 
     ImGui::BeginChild("##viewcol", ImVec2(viewW, 0.0f), ImGuiChildFlags_None);
@@ -1374,14 +1393,34 @@ void ActorEditor::draw(Engine& e) {
     // and reflecting the movement, rather than by giving the widget a direction flag it would only
     // ever be passed once.
     {
-        f32 mirrored = avail - rightColW_;
+        f32 mirrored = avail - g_rightColW;
         const f32 before = mirrored;
-        columnSplitter("##splitR", split, &mirrored, avail - leftW - split * 2.0f,
-                       minView + leftW, 160.0f * dpi);
-        if (mirrored != before) rightColW_ = avail - mirrored;
-        if (rightColW_ < 160.0f * dpi) rightColW_ = 160.0f * dpi;
+        bool doneR = false;
+        // FULL avail, because `mirrored` is a POSITION measured from the left edge, not a width.
+        //
+        // Passing the width budget (avail - leftW - splitters) clamped a perfectly valid divider
+        // position against a smaller span, so a right column narrower than about a third of the tab
+        // was silently widened back out -- which is exactly what a persisted 190 turned into 512.
+        // The bug was invisible while both columns sat at their defaults and appeared the moment a
+        // width was restored from disk.
+        //
+        // The lower bound is what the columns to its LEFT need: the left column, both splitters and
+        // a viewport. The upper bound is the minimum the details column itself may be, which
+        // columnSplitter derives as avail - minOther.
+        columnSplitter("##splitR", split, &mirrored, avail,
+                       leftW + split * 2.0f + minView, 160.0f * dpi, &doneR);
+        if (mirrored != before) g_rightColW = avail - mirrored;
+        if (g_rightColW < 160.0f * dpi) g_rightColW = 160.0f * dpi;
+        if (doneR) { setPrefFloat(kPrefRight, g_rightColW / dpi); flushEditorPrefs(); }
     }
-    ImGui::BeginChild("##detailscol", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
+    // EXPLICIT width, not "fill the rest".
+    //
+    // Filling was wrong in a way that only shows up once a width is persisted and no longer matches
+    // the default: the viewport is sized as avail - left - right - splitters, but a details column
+    // that takes ALL the remainder does not necessarily take `right`, so the two disagreed and the
+    // viewport came out narrower than the arithmetic said. All three columns are now stated, and any
+    // rounding slack lands at the right edge where nothing depends on it.
+    ImGui::BeginChild("##detailscol", ImVec2(rightW, 0.0f), ImGuiChildFlags_None);
     ImGui::BeginGroup();
 
     // ---- the models ----
@@ -1544,6 +1583,20 @@ void setActorEditorContentRoot(std::string root) {
 }
 
 void setActorEditorHooks(ActorEditorHooks hooks) { g_hooks = std::move(hooks); }
+
+// Window > Reset Layout, when an actor tab is the one on screen. See SandboxApp for why that menu
+// item is scoped to the active tab rather than to the whole editor.
+void resetActorEditorLayout() {
+    // Zeroed so the next draw reseeds from the prefs -- which are being set to the defaults right
+    // here, so the reseed lands on them. Writing the defaults rather than deleting the keys means a
+    // reset is a value somebody can see in the file, not an absence they have to infer.
+    g_leftColW = 0.0f;
+    g_rightColW = 0.0f;
+    setPrefFloat(kPrefLeft,  kDefaultLeftColumn);
+    setPrefFloat(kPrefRight, kDefaultRightColumn);
+    flushEditorPrefs();
+    AVER_INFO("[ActorEditor] layout reset to the default columns");
+}
 
 void setActorEditorLiveByDefault(bool on) { g_liveDefault = on; }
 

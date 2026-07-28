@@ -21,6 +21,7 @@
 #include "ToolsMenu.hpp"
 #include "AssetEditor.hpp"
 #include "ActorEditor.hpp"   // a .Designer.cs opened as an asset, with a 3D preview of what it declares
+#include "EditorPrefs.hpp"   // UI geometry that outlives a session
 #include "aver/platform/DirectoryWatcher.hpp"   // the editor notices an IDE writing behind its back
 #if AVER_HAVE_ROSLYN
 #  include "aver/formats/AverDesign.hpp"        // where averdesign is staged, told once at startup
@@ -1691,6 +1692,9 @@ public:
         setLogSink(nullptr, nullptr);   // stop mirroring logs before this object goes away
         // The actor preview's targets, while the device is still there to drain. It holds a UI
         // descriptor like the mark below, and the same rule applies: release it before the device.
+        // Last chance for anything set but never settled -- a width changed by a drag the user
+        // was still holding when they closed the editor is still a width they chose.
+        editor::flushEditorPrefs();
         editor::shutdownActorEditors();
         // ShowCursor is a counter and ClipCursor is global to the desktop: leaving either set would
         // outlive the process and hand the user a machine with an invisible or confined cursor.
@@ -3134,7 +3138,27 @@ private:
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip(gameUi_ ? "A hand-written Aver.UI draw list, until there is a widget tree to produce one."
                                               : "The UI render feature is unavailable on this backend.");
-                ImGui::Separator(); if (ImGui::MenuItem("Reset Layout")) dockBuilt_=false; ImGui::EndMenu();
+                ImGui::Separator();
+                // RESET LAYOUT IS SCOPED TO WHAT IS ON SCREEN.
+                //
+                // It used to set dockBuilt_=false unconditionally, which rebuilds the WHOLE editor
+                // dock: every panel back to its default slot. Reaching for it while an actor tab is
+                // open -- to straighten that tab's columns, the only layout you can see -- threw away
+                // the level editor's arrangement as well, which is not what anybody was asking for
+                // and is not undoable.
+                //
+                // So the item now resets the layout of the tab that is actually in front, and says
+                // which that is in its own label rather than leaving it to be discovered.
+                const bool assetTabActive = !levelVisible_ && assetEditors_.anyOpen();
+                if (ImGui::MenuItem(assetTabActive ? "Reset Tab Layout" : "Reset Layout")) {
+                    if (assetTabActive) editor::resetActorEditorLayout();
+                    else                dockBuilt_ = false;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(assetTabActive
+                        ? "Restores this tab's column widths.\nThe editor's panel layout is left alone."
+                        : "Restores every panel to its default slot.\nOpen an asset tab to reset that tab instead.");
+                ImGui::EndMenu();
             }
             // Tools sits between Window and Build, where Unreal puts it. It owns its own
             // BeginMenu (see ToolsMenu.cpp) — this file is the frame loop, not a scaffolder.

@@ -4,6 +4,7 @@ add_executable(Sandbox
   src/ActorEditor.cpp
   src/ProjectBrowser.cpp
   src/ProjectScaffold.cpp
+  src/EditorPrefs.cpp
   src/EngineScaffold.cpp
   src/IdeIntegration.cpp
   src/ShellIntegration.cpp
