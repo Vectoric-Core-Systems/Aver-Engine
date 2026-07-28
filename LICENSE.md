@@ -1,9 +1,9 @@
 AVER ENGINE — SOURCE CODE EVALUATION LICENSE AGREEMENT
 
-Copyright (c) 2026 Hydrogen. All Rights Reserved.
+Copyright (c) 2026 Hydrogen-Isotope. All Rights Reserved.
 
 This Evaluation License Agreement ("Agreement") is a legal agreement between you 
-("Licensee" or "Tester") and [Your Name/Legal Entity] ("Licensor") for access to the 
+("Licensee" or "Tester") and Hydrogen-Isotope ("Licensor") for access to the 
 private source code, binaries, and related documentation for the Aver Engine ("Software").
 
 BY CLONING, DOWNLOADING, COMPILING, OR USING THIS SOFTWARE, YOU AGREE TO BE BOUND BY 
