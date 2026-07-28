@@ -1764,6 +1764,7 @@ public:
     void setInputProbe(bool on) { inputProbe_ = on; }
     void setAutoCompile(bool on) { autoCompile_ = on; }   // --auto-compile, and the Tools menu
     void setFocusLevelAt(int frame) { focusLevelAt_ = frame; }   // --focus-level-at <N>
+    void setShowEditorPrefs(bool on) { if (on) showEditorPrefs_ = true; }   // --editor-prefs
     bool* autoCompileFlag() { return &autoCompile_; }     // the menu checkbox binds straight to it
 
     void setClouds(f32 coverage) {
@@ -3045,6 +3046,9 @@ private:
         // Latched for the panels below, which are called without the engine. A raw borrowed pointer
         // and not an owner: the device outlives every frame this is read in.
         prefsDevice_ = e.device();
+        // Once, and here rather than at construction: V-Sync needs the device, and this is the first
+        // point in the frame where there certainly is one.
+        if (!prefsLoaded_) { prefsLoaded_ = true; loadEditorPreferences(); }
 #if AVER_MODULE_SCENE
         // An import wrote .ocmesh files; pick them up now that there is a device to create with.
         if (wantMeshReload_) {
@@ -4840,7 +4844,82 @@ private:
     // GAME is. The split is the same one Unreal draws, and it is the one that decides where a setting
     // belongs: anything here is this machine's taste and would be wrong to write into a project a
     // colleague also opens.
+    // Read every preference into the members that back the widgets.
+    //
+    // Called once, AFTER the device exists, because V-Sync is not a member: it lives on the
+    // swapchain, and asking for it before there is one would apply a stored preference to nothing.
+    // Everything else could have been loaded earlier; keeping them together means one place to look
+    // when a setting does not come back.
+    void loadEditorPreferences() {
+        using namespace editor;
+        cbGallery_          = prefBool ("contentBrowser.gallery",        cbGallery_);
+        cbTileSize_         = prefFloat("contentBrowser.tileSize",       cbTileSize_);
+        cbDoubleClickEnter_ = prefBool ("contentBrowser.dblClickEnter",  cbDoubleClickEnter_);
+        drawerFrac_         = prefFloat("drawers.heightFraction",        drawerFrac_);
+        drawerRate_         = prefFloat("drawers.slideRate",             drawerRate_);
+        logAutoScroll_      = prefBool ("outputLog.autoScroll",          logAutoScroll_);
+        logLevelFilter_     = prefInt  ("outputLog.levelFilter",         logLevelFilter_);
+        showGrid_           = prefBool ("viewport.showGrid",             showGrid_);
+        wireframe_          = prefBool ("viewport.wireframe",            wireframe_);
+        flySpeed_           = prefFloat("viewport.flySpeed",             flySpeed_);
+        lookSpeed_          = prefFloat("viewport.lookSensitivity",      lookSpeed_);
+
+        // THE IDE IS STORED BY NAME, NEVER BY INDEX. cbIdeChoice_ indexes detectedIdes(), a list
+        // built by scanning this machine -- so it changes when an IDE is installed or removed, and
+        // it is populated ASYNCHRONOUSLY, which means index 2 on one run is a different program on
+        // the next. A stored index would quietly open the wrong editor. The name is resolved back to
+        // an index below, and an unresolvable name falls through to Automatic, which is the entry
+        // that works on a machine with no IDE at all.
+        prefIdeName_ = prefString("contentBrowser.ide", "");
+
+        // V-Sync is asked of the device, so it is APPLIED rather than stored in a member -- and only
+        // when the machine can actually tear. Applying "off" on a path that cannot honour it would
+        // leave the checkbox and the swapchain disagreeing from the first frame.
+        if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
+            prefsDevice_->setVSync(prefBool("display.vsync", prefsDevice_->vsync()));
+    }
+
+    // Resolve the stored IDE NAME to an index, once the async scan has produced the list.
+    void resolvePreferredIdeFromPrefs() {
+        if (prefIdeName_.empty() || !editor::ideDetectionFinished()) return;
+        const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
+        for (usize i = 0; i < ides.size(); ++i)
+            if (ides[i].name == prefIdeName_) { cbIdeChoice_ = static_cast<int>(i); break; }
+        prefIdeName_.clear();   // resolved, or the name names nothing installed: either way, done
+    }
+
+    // Write every preference back. Called each frame the window is open, which is affordable because
+    // every setter compares before it stores -- an unchanged value marks nothing dirty and the flush
+    // below then does nothing at all. The alternative, a changed-flag per widget, is fourteen places
+    // to forget one.
+    void saveEditorPreferences() {
+        using namespace editor;
+        setPrefBool ("contentBrowser.gallery",       cbGallery_);
+        setPrefFloat("contentBrowser.tileSize",      cbTileSize_);
+        setPrefBool ("contentBrowser.dblClickEnter", cbDoubleClickEnter_);
+        setPrefFloat("drawers.heightFraction",       drawerFrac_);
+        setPrefFloat("drawers.slideRate",            drawerRate_);
+        setPrefBool ("outputLog.autoScroll",         logAutoScroll_);
+        setPrefInt  ("outputLog.levelFilter",        logLevelFilter_);
+        setPrefBool ("viewport.showGrid",            showGrid_);
+        setPrefBool ("viewport.wireframe",           wireframe_);
+        setPrefFloat("viewport.flySpeed",            flySpeed_);
+        setPrefFloat("viewport.lookSensitivity",     lookSpeed_);
+
+        const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
+        if (cbIdeChoice_ >= 0 && cbIdeChoice_ < static_cast<int>(ides.size()))
+            setPrefString("contentBrowser.ide", ides[static_cast<usize>(cbIdeChoice_)].name);
+        else
+            setPrefString("contentBrowser.ide", "");   // Automatic, stored explicitly
+
+        if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
+            setPrefBool("display.vsync", prefsDevice_->vsync());
+
+        flushEditorPrefs();
+    }
+
     void buildEditorPrefs() {
+        resolvePreferredIdeFromPrefs();
         if (!showEditorPrefs_) return;
         const ImGuiViewport* mv = ImGui::GetMainViewport();
         ImGui::SetNextWindowSize(ImVec2(560.0f*dpi_, 460.0f*dpi_), ImGuiCond_FirstUseEver);
@@ -4902,9 +4981,13 @@ private:
             ImGui::SliderFloat("Look sensitivity", &lookSpeed_, 0.001f, 0.02f, "%.4f");
         }
         ImGui::Separator();
-        ImGui::TextDisabled("Preferences apply immediately and last for this session.");
-        ImGui::TextDisabled("They are not written to disk yet - there is no editor config file.");
+        ImGui::TextDisabled("Preferences apply immediately and are saved for next time.");
+        ImGui::TextDisabled("%s", editor::editorPrefsPath().c_str());
         ImGui::End();
+
+        // AFTER End, so a value a widget changed this frame is the value written. Doing it before
+        // would store what the previous frame had and lag every setting by one edit.
+        saveEditorPreferences();
     }
 
     // Project Settings — a floating, categorised window like Unreal's, opened from
@@ -5264,6 +5347,8 @@ private:
     scene::Entity selEntity_ = scene::kInvalidEntity;
     bool hideEditorScene_ = false;   // latched each frame by the scene pass; see there for why
     rhi::IDevice* prefsDevice_ = nullptr;   // borrowed, latched in buildUI for the settings panels
+    std::string prefIdeName_;               // stored IDE name, pending the async scan that resolves it
+    bool prefsLoaded_ = false;
     // Every open asset editor. Separate from the level editor the way Unreal separates them:
     // the main window stays the level, and an asset opens its own editor with its own state.
     editor::AssetEditorHost assetEditors_;
@@ -5861,7 +5946,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; int focusLevelAt=0; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; int focusLevelAt=0; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and EXITS, touching no device.
         //
@@ -5915,6 +6000,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--auto-compile")) autoCompile=true;
         else if (!std::strcmp(argv[i],"--focus-level-at") && i+1<argc) focusLevelAt=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
+        else if (!std::strcmp(argv[i],"--editor-prefs")) showPrefs=true;   // screenshot aid, like --project-settings
         else if (!std::strcmp(argv[i],"--new-script")) focusScript=true;
         // Holds the Tools dropdown open so it can be photographed. Opt-in, like the two above:
         // it changes only what hangs BELOW the menu bar, never the bar's height, but no oracle
@@ -6006,6 +6092,7 @@ Application* createApplication(int argc, char** argv) {
     app->setInputProbe(inputProbe);
     app->setAutoCompile(autoCompile);
     app->setFocusLevelAt(focusLevelAt);
+    app->setShowEditorPrefs(showPrefs);
     app->setUseWarp(warp);
     app->setDebugLayer(debugLayer);
     app->setProjectPath(project);

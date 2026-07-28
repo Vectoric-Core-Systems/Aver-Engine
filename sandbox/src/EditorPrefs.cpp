@@ -75,11 +75,60 @@ void setPrefFloat(std::string_view key, f32 value) {
     char buf[48];
     const auto r = std::to_chars(buf, buf + sizeof buf, value);
     if (r.ec != std::errc{}) return;
-    std::string text(buf, static_cast<usize>(r.ptr - buf));
+    setPrefString(key, std::string_view(buf, static_cast<usize>(r.ptr - buf)));
+}
 
+// Bools are "true"/"false" rather than 1/0. The file is meant to be read and edited by a person, and
+// a column of ones and zeros is a column nobody can interpret without the source open.
+bool prefBool(std::string_view key, bool fallback) {
+    ensureLoaded();
     const auto it = g_values.find(key);
-    if (it != g_values.end() && it->second == text) return;   // unchanged: not a reason to rewrite
-    g_values[std::string(key)] = std::move(text);
+    if (it == g_values.end()) return fallback;
+    if (it->second == "true"  || it->second == "1") return true;
+    if (it->second == "false" || it->second == "0") return false;
+    return fallback;
+}
+
+void setPrefBool(std::string_view key, bool value) {
+    setPrefString(key, value ? "true" : "false");
+}
+
+i32 prefInt(std::string_view key, i32 fallback) {
+    ensureLoaded();
+    const auto it = g_values.find(key);
+    if (it == g_values.end()) return fallback;
+    i32 v = fallback;
+    const char* first = it->second.data();
+    const auto r = std::from_chars(first, first + it->second.size(), v);
+    if (r.ec != std::errc{}) return fallback;
+    return v;
+}
+
+void setPrefInt(std::string_view key, i32 value) {
+    char buf[24];
+    const auto r = std::to_chars(buf, buf + sizeof buf, value);
+    if (r.ec != std::errc{}) return;
+    setPrefString(key, std::string_view(buf, static_cast<usize>(r.ptr - buf)));
+}
+
+std::string prefString(std::string_view key, std::string_view fallback) {
+    ensureLoaded();
+    const auto it = g_values.find(key);
+    return it == g_values.end() ? std::string(fallback) : it->second;
+}
+
+void setPrefString(std::string_view key, std::string_view value) {
+    ensureLoaded();
+    // A newline would split the entry across two lines and silently lose the tail. Refused rather
+    // than escaped: see the header for why escaping is not worth a parser here.
+    if (value.find('\n') != std::string_view::npos ||
+        value.find('\r') != std::string_view::npos) {
+        AVER_WARN("[Prefs] refusing to store a multi-line value for '{}'", key);
+        return;
+    }
+    const auto it = g_values.find(key);
+    if (it != g_values.end() && it->second == value) return;   // unchanged: not a reason to rewrite
+    g_values[std::string(key)] = std::string(value);
     g_dirty = true;
 }
 

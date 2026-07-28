@@ -31,6 +31,19 @@ namespace aver::editor {
 f32  prefFloat(std::string_view key, f32 fallback);
 void setPrefFloat(std::string_view key, f32 value);
 
+bool prefBool(std::string_view key, bool fallback);
+void setPrefBool(std::string_view key, bool value);
+
+i32  prefInt(std::string_view key, i32 fallback);
+void setPrefInt(std::string_view key, i32 value);
+
+// Strings are stored verbatim and therefore must not contain a newline -- one would split the entry
+// into two lines and the second would be discarded as having no '='. Callers here store names and
+// short identifiers, so the restriction costs nothing; a setter that had to escape would need a
+// parser that unescapes, and neither is worth it for the content this file actually holds.
+std::string prefString(std::string_view key, std::string_view fallback);
+void setPrefString(std::string_view key, std::string_view value);
+
 // Write, if anything changed since the last write. Cheap to call when nothing has.
 //
 // EXPLICIT rather than written on every set, because a caller that sets a value per frame -- which a
