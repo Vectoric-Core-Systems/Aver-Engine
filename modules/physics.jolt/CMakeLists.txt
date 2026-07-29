@@ -1,4 +1,15 @@
-# Jolt Physics, vendored. See README.md here for provenance and what was left out.
+# Aver.Physics.Jolt — the rigid-body backend behind Aver.Physics's plain-C ABI.
+#
+# It lives under modules/ and is named the way every other backend in this tree is named:
+# rhi + rhi.d3d12, audio + audio.wasapi, formats + formats.roslyn, physics + physics.jolt. The
+# generic module states the contract; the dotted one is the concrete thing that satisfies it. Jolt
+# is to Aver.Physics what WASAPI is to the mixer, and the directory now says so.
+#
+# The sources are still VENDORED and still not ours to edit -- moving them did not make them ours.
+# README.md here keeps the whole provenance apparatus (version, upstream, archive SHA-256, licence,
+# what was left out, how to update), the LICENSE file beside it is what scripts/stage-payload.ps1
+# concatenates into THIRD-PARTY-NOTICES.txt, and the /W0 at the bottom is unchanged. A local fix in
+# Jolt/ is still invisible at the next update.
 #
 # This file exists because upstream's option declarations live in Jolt's own Build/CMakeLists.txt,
 # which is NOT vendored -- only the Jolt/ library directory is. Jolt/Jolt.cmake is self-contained
@@ -65,7 +76,13 @@ set_target_properties(Jolt PROPERTIES
   CXX_STANDARD 17
   CXX_STANDARD_REQUIRED ON
   CXX_EXTENSIONS OFF
-  FOLDER "third_party")
+  FOLDER "modules")
+
+# The target is created by the vendored Jolt.cmake and so is called `Jolt`, which is upstream's name
+# and not this tree's. An ALIAS rather than a rename: renaming would mean editing a vendored file,
+# and the next update would silently undo it. Consumers link Aver.Physics.Jolt, so a link line reads
+# the same as every other module's and the vendored file stays untouched.
+add_library(Aver.Physics.Jolt ALIAS Jolt)
 
 # Vendored code is not ours to fix warnings in, and it is compiled far more often than it is read.
 if (MSVC)

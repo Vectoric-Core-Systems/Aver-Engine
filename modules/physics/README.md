@@ -1,14 +1,33 @@
 # Aver.Physics  (`modules/physics`)
 
 - **Language:** C++
-- **Depends on:** Core
+- **Depends on:** Core, and `Aver.Physics.Jolt` **privately**
 - **Planned phase:** 4
 
-Rigid-body dynamics + collision (Jolt Physics, MIT) behind an AvPhysics facade: bodies, shapes, broadphase, raycasts (aero ride-height probe), contact callbacks.
+Rigid-body dynamics + collision behind an AvPhysics facade: bodies, shapes, broadphase, raycasts (aero ride-height probe), contact callbacks.
 
 **Implemented and wired.** Built as `Aver.Physics` (SHARED, so the C# layer P/Invokes one binary and
-therefore one world), with Jolt linked `PRIVATE` — nothing above this module can include a `JPH::`
-header, so replacing the backend stays a decision about this module rather than about the tree.
+therefore one world), with the backend linked `PRIVATE` — nothing above this module can include a
+`JPH::` header, so replacing the backend stays a decision about this module rather than about the
+tree.
+
+## The backend is a sibling module: [`physics.jolt`](../physics.jolt/README.md)
+
+This pair is `rhi` + `rhi.d3d12` again, and the naming is the same claim: the module here states a
+contract, and the dotted one satisfies it. Jolt is to physics what WASAPI is to the mixer and D3D12
+is to the RHI — the engine's backend, not a dependency the build happens to pull in.
+
+Two properties follow from that split, and both are enforced by a link line rather than a convention:
+
+- **The ABI above is expressible without the backend.** `physics_abi.h` names no `JPH::` type, and
+  could not, because nothing that includes it links anything that defines one.
+- **The exception is visible.** `tests/physics` links `Aver.Physics.Jolt` directly and is the only
+  thing in the tree that does, because checking that the change of basis commutes with rotation
+  needs to speak both sides. A second consumer appearing there would mean the rule had stopped
+  holding.
+
+Jolt's sources are **vendored** — MIT, 5.6.0, not edited here. The provenance, the conventions table
+(all four of Jolt's differ from the engine's) and the update procedure live in that module's README.
 
 - **Frame loop:** `SandboxApp` starts the simulation in `onInit`, steps it in `onUpdate` between the
   `PRE_PHYSICS` and `PHYSICS` tick groups, and shuts it down first in `onShutdown` (Jolt owns worker

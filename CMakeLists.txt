@@ -38,6 +38,12 @@ option(AVER_MODULE_PBR  "PBR material system: material library, C ABI and the su
 option(AVER_MODULE_SCRIPTING "In-process .NET scripting host (hostfxr/CoreCLR)" ON)
 option(AVER_MODULE_SCENE "Entity/component world: entities, transforms, hierarchy and the C ABI" ON)
 option(AVER_MODULE_FRAMEWORK "Gameplay framework: game instance, game mode, actors, pawns" ON)
+# Physics is declared HERE, beside its peers, rather than down in the third-party section where it
+# used to sit. Jolt is the engine's rigid-body backend, not a dependency the build happens to pull
+# in, and the switch that turns physics off is the same kind of switch as the five above it. Still
+# optional for the same two reasons as before: the engine configures and runs without it, and 153
+# translation units are worth being able to opt out of.
+option(AVER_MODULE_PHYSICS "Physics module: rigid bodies, characters and raycasts (Jolt backend)" ON)
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -53,12 +59,6 @@ message(STATUS "Aver Engine ${PROJECT_VERSION} | D3D12=${AVER_RHI_D3D12} D3D11=$
 # ---- Third-party (permissively-licensed) ----
 if(AVER_ENABLE_UI)
   add_subdirectory(third_party/imgui)
-endif()
-# Jolt Physics (MIT). Optional so the engine still configures without it -- and so the cost of
-# compiling 153 translation units is opt-out for anyone who does not need physics.
-option(AVER_MODULE_PHYSICS "Build the physics module (Jolt Physics)" ON)
-if(AVER_MODULE_PHYSICS)
-  add_subdirectory(third_party/JoltPhysics)
 endif()
 
 # ---- Tier 0-6 implemented modules ----
@@ -79,8 +79,12 @@ add_subdirectory(modules/formats)  # Phase 2 (.ocbeam / .ocmap loaders)
 # module keeps its no-dependency, no-process guarantee. See its CMakeLists for the full argument --
 # including why it is guarded on Aver.Formats.Material rather than on a switch of its own.
 add_subdirectory(modules/formats.roslyn)
+# Physics: the backend first, then the module that fronts it. Two directories rather than one for
+# the reason rhi/ and rhi.d3d12/ are two -- the ABI above must be expressible without the backend,
+# and a link line is the only place that can be enforced.
 if(AVER_MODULE_PHYSICS)
-  add_subdirectory(modules/physics)   # Jolt behind the engine's plain-C ABI
+  add_subdirectory(modules/physics.jolt)   # vendored Jolt, built as Aver.Physics.Jolt
+  add_subdirectory(modules/physics)        # the engine's plain-C ABI over it
 endif()
 add_subdirectory(modules/rhi)
 if(AVER_RHI_D3D12)

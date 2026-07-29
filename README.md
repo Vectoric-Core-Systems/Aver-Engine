@@ -49,7 +49,8 @@ tests/            headless test executables, one directory per area
 tools/            ActorSweep.cpp — reports what the actor editor makes of a real project's scripts
 docs/             the C seams, format specs, editor and project specs, recon of the existing engine
 cmake/            AvModule.cmake (aver_add_module)
-third_party/      imgui (docking), stb, Jolt Physics, fonts (Roboto)
+third_party/      imgui (docking), stb, fonts (Roboto). Jolt is vendored under modules/, at
+                  physics.jolt/ — it is the rigid-body backend, not an incidental dependency
 branding/         master lockup (human-authored) -> splash, icons, logo
 abi/ interop/ editor/ shaders/ content/   README only — nothing is built from these
 ```

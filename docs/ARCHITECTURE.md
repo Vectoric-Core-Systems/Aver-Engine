@@ -392,7 +392,7 @@ option(AVER_MODULE_PBR       "PBR material system"          ON)
 option(AVER_MODULE_SCRIPTING "In-process .NET scripting host" ON)
 option(AVER_MODULE_SCENE     "Entity/component world"       ON)
 option(AVER_MODULE_FRAMEWORK "Gameplay framework"           ON)
-option(AVER_MODULE_PHYSICS   "Physics module (Jolt Physics)" ON)   # declared beside third_party/
+option(AVER_MODULE_PHYSICS   "Physics module (Jolt backend)" ON)
 
 # Two combinations are not valid, and the build says so instead of failing four includes deep:
 if(AVER_MODULE_VOXI AND NOT AVER_MODULE_PBR)          set(AVER_MODULE_VOXI OFF)      endif()
@@ -517,8 +517,14 @@ of independent features, each driving `Aver.RHI` directly with no render graph b
   authoring surface is **C#** rather than a runtime graph API — `[AverMaterial]` and
   `MaterialBuilder` under `scripting/csharp/Aver.Materials`, compiled to `.ocmat` by `avermatc`. The
   recon's headless-crash lesson still holds: nothing recompiles a shader to change a material.
-- **Third-party actually vendored:** `third_party/` contains **four** things — Jolt Physics (MIT),
-  Dear ImGui (MIT, editor only), stb (public domain), and the editor's fonts. Everything else this
+- **Third-party actually vendored:** **four** things, and one of them is not under `third_party/`.
+  Dear ImGui (MIT, editor only), stb (public domain) and the editor's fonts are; **Jolt Physics
+  (MIT) is vendored at `modules/physics.jolt/`**, because it is the rigid-body backend behind
+  `Aver.Physics` and is named like every other backend here (`rhi.d3d12`, `audio.wasapi`,
+  `formats.roslyn`). The directory says what it is in the module graph; the README in it keeps the
+  provenance — version, upstream archive, SHA-256, licence, and what upstream was left out.
+  Vendored is still vendored: those sources are not edited, and `scripts/stage-payload.ps1`
+  concatenates the `LICENSE` there into `THIRD-PARTY-NOTICES.txt`. Everything else this
   list used to claim is absent: no meshoptimizer, no DirectXTex, no FSR, no EnTT, no miniaudio, no
   cgltf, no xxHash, no Blake3, no Recast/Detour. Where a capability was needed and no permissive
   dependency was taken, the tree either wrote its own (the audio mixer, the WAV reader, the glTF
@@ -541,8 +547,8 @@ Aver Engine/
   CMakePresets.json
   cmake/AvModule.cmake           # aver_add_module(): STATIC lib, PUBLIC include dir, PUBLIC deps
   modules/
-    BUILT:    core/ platform/ assets/ formats/ rhi/ rhi.d3d12/ rhi.d3d11/ rhi.vulkan/
-              scene/ framework/ physics/ scripting/ runtime/
+    BUILT:    core/ platform/ assets/ formats/ formats.roslyn/ rhi/ rhi.d3d12/ rhi.d3d11/
+              rhi.vulkan/ scene/ framework/ physics/ physics.jolt/ scripting/ runtime/
               render.pbr/ render.voxi/ render.ui/ render.actorpreview/
               ui/ ui.abi/ audio/ audio.wasapi/ audio.abi/
     ‹README›: render/ render.gi/ world/ softbody/ aero/ gpudeform/ fracture/
@@ -552,7 +558,8 @@ Aver Engine/
                                  #   scene/ framework/ physics/ — each a plain exe in bin/
   scripting/csharp/              # Aver.Scripting(+.Bridge) Aver.Scene Aver.Framework
                                  #   Aver.UI Aver.Materials Aver.MaterialCompiler + samples
-  third_party/                   # JoltPhysics/ imgui/ stb/ fonts/ — and nothing else
+  third_party/                   # imgui/ stb/ fonts/ — and nothing else. Jolt is NOT here: it is
+                                 #   the physics backend, and lives at modules/physics.jolt/
   branding/                      # splash, logo, icon sheets staged beside the exe
   scripts/                       # build.ps1, run.ps1, gates.ps1 + baselines, brand.py
   content/legacy/                # sample fixtures for golden tests

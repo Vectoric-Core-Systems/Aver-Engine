@@ -91,6 +91,8 @@ modules/
                              editor's own colour+depth target, pipeline, camera at b4 — §4r
   scene/ framework/ physics/ Aver.Scene, Aver.Framework, Aver.Physics — built, tested, and NOT
                              written up in this file (see the hole named at the top)
+  physics.jolt/              Jolt 5.6.0 (MIT), VENDORED. The rigid-body backend, linked PRIVATE by
+                             Aver.Physics and aliased Aver.Physics.Jolt. Was third_party/JoltPhysics
   scripting/ Aver.Scripting.Host (STATIC: in-process CLR host via nethost/hostfxr, Core+Platform,
                              never the RHI) + the managed bridge under scripting/csharp/
   runtime/   Aver.Runtime    Engine loop, Application, EntryPoint (splash + ImGui hooks)
@@ -100,7 +102,8 @@ sandbox/     Sandbox.exe      the editor app (SandboxApp.cpp) + Sandbox.rc (icon
                               shell (AssetEditor.*), ActorEditor.*, ProjectScaffold.*, ToolsMenu.*
 tools/       ActorSweep.exe   opens every actor .cs in a real project and reports what parses (§4r)
 tests/       formats/ scene/ framework/ physics/ ui/ render.ui/ audio/ render.actorpreview/
-third_party/ imgui/ (docking, MIT) stb/ (stb_image + stb_image_write, PD) JoltPhysics/ (MIT — the whole physics module rests on it) fonts/ (Roboto)
+third_party/ imgui/ (docking, MIT) stb/ (stb_image + stb_image_write, PD) fonts/ (Roboto)
+             Jolt is vendored too, but at modules/physics.jolt/ — it is the physics BACKEND
 branding/    master-lockup.png (HUMAN, source of truth) -> splash.png, icon.ico, logo*.png
              ai-generated/ (Claude's superseded vector concepts, shipped nowhere), ASSETS.md
 docs/        ARCHITECTURE, formats/, rendering/, physics-net/, recon/, PROJECTS, EDITOR, this file

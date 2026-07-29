@@ -1,4 +1,27 @@
-# Jolt Physics — vendored
+# Aver.Physics.Jolt  (`modules/physics.jolt`) — the rigid-body backend, vendored
+
+- **Language:** C++ (vendored, not authored here)
+- **Depends on:** nothing in this tree
+- **Consumed by:** `Aver.Physics` (`PRIVATE`), and `tests/physics` alone
+
+Jolt is the concrete backend behind [`Aver.Physics`](../physics/README.md)'s plain-C ABI, and this
+directory is named the way every other backend in the tree is named: `rhi` + `rhi.d3d12`, `audio` +
+`audio.wasapi`, `formats` + `formats.roslyn`, `physics` + `physics.jolt`. The generic module states
+the contract; the dotted one satisfies it. That is a claim about the module graph — physics is not a
+dependency the build happens to pull in, it is a subsystem of the engine — and it is enforced on a
+link line rather than asserted: `Aver.Physics` links this `PRIVATE`, so no `JPH::` header can reach
+anything above.
+
+**It moved out of `third_party/` in July 2026 and NOTHING else about it changed.** The sources are
+still upstream's, still not ours to edit, and still MIT — the provenance table below, the `LICENSE`
+beside this file, the `/W0`, and the update procedure at the bottom are all exactly as they were. If
+you are here to change a file under `Jolt/`, the answer is still no: see *Updating*.
+
+The target the vendored `Jolt/Jolt.cmake` creates is called `Jolt`, because that file is upstream's
+and editing it would be undone by the next update. `CMakeLists.txt` here adds an
+`add_library(Aver.Physics.Jolt ALIAS Jolt)` so consumers' link lines read like every other module's.
+
+## Provenance
 
 | | |
 |---|---|
@@ -7,7 +30,12 @@
 | **Source archive** | `https://github.com/jrouwe/JoltPhysics/archive/refs/tags/v5.6.0.zip` |
 | **SHA-256 of that archive** | `0AF9BEEA51637EF805E624FE838EA2870F7B68CD48CBE1615C853BD9BCF4F1D7` |
 | **Licence** | **MIT**, © Jorrit Rouwe — see `LICENSE`. Verified from the upstream `LICENSE` file: no fee, no revenue threshold, no per-title registration, no commercial tier. |
-| **Vendored** | July 2026 |
+| **Vendored** | July 2026, as `third_party/JoltPhysics`; moved here July 2026 with the sources untouched |
+
+`scripts/stage-payload.ps1` concatenates the `LICENSE` beside this file into
+`THIRD-PARTY-NOTICES.txt`, by a repo-relative path that names this directory. The MIT copyright
+notice is mandatory in a shipped build, so that script **fails** rather than warns if the file is not
+where it expects — which is what stops this obligation being quietly dropped by a rename.
 
 ## What is here, and what is not
 

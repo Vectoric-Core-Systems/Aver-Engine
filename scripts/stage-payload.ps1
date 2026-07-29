@@ -276,8 +276,13 @@ Note "copied $($plan.Count) files -> $outFull"
 #    Required, and not discharged by whatever licence the binaries themselves ship under: Roboto is
 #    Apache-2.0 (notice mandatory), Jolt and Dear ImGui are MIT (copyright notice mandatory). This
 #    concatenates the vendored licence files rather than restating them, so it cannot drift.
+#
+#    Paths below are REPO-RELATIVE, not relative to third_party/. Jolt's vendored tree moved to
+#    modules/physics.jolt/ -- it is the engine's rigid-body backend and is named like every other
+#    backend in the tree -- but moving it changed nothing about the obligation, and the notice is not
+#    something that may quietly stop being emitted because a directory was renamed. A missing file is
+#    a hard Fail here for exactly that reason.
 # ---------------------------------------------------------------------------------------------
-$tp = Join-Path $root 'third_party'
 $notices = [System.Text.StringBuilder]::new()
 [void]$notices.AppendLine("Aver Engine $version - third-party notices")
 [void]$notices.AppendLine('')
@@ -286,13 +291,13 @@ $notices = [System.Text.StringBuilder]::new()
 [void]$notices.AppendLine('')
 
 $components = @(
-    @{ Name = 'Roboto (fonts)';        Licence = 'Apache-2.0';      File = 'fonts\LICENSE' }
-    @{ Name = 'Dear ImGui';            Licence = 'MIT';             File = 'imgui\LICENSE.txt' }
-    @{ Name = 'Jolt Physics';          Licence = 'MIT';             File = 'JoltPhysics\LICENSE' }
-    @{ Name = 'stb (stb_image, stb_image_write)'; Licence = 'MIT / public domain'; File = 'stb\LICENSE.txt' }
+    @{ Name = 'Roboto (fonts)';        Licence = 'Apache-2.0';      File = 'third_party\fonts\LICENSE' }
+    @{ Name = 'Dear ImGui';            Licence = 'MIT';             File = 'third_party\imgui\LICENSE.txt' }
+    @{ Name = 'Jolt Physics';          Licence = 'MIT';             File = 'modules\physics.jolt\LICENSE' }
+    @{ Name = 'stb (stb_image, stb_image_write)'; Licence = 'MIT / public domain'; File = 'third_party\stb\LICENSE.txt' }
 )
 foreach ($c in $components) {
-    $p = Join-Path $tp $c.File
+    $p = Join-Path $root $c.File
     if (-not (Test-Path -LiteralPath $p)) { Fail "third-party licence file missing: $p"; continue }
     [void]$notices.AppendLine('=' * 78)
     [void]$notices.AppendLine("$($c.Name) - $($c.Licence)")

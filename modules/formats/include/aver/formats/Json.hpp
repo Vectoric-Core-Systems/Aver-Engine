@@ -3,7 +3,8 @@
 //
 // WHY THIS EXISTS. glTF is the import format this engine needs -- it is open, and one file carries
 // meshes, skeletons and animations, which is exactly the set .ocmesh/.ocskel/.ocanim was built for.
-// glTF is JSON, and this tree vendors no JSON library: third_party holds Jolt, imgui, stb and fonts.
+// glTF is JSON, and this tree vendors no JSON library: what IS vendored is imgui, stb and fonts
+// under third_party, and Jolt under modules/physics.jolt. Nothing that parses JSON.
 // The alternative was vendoring one, which needs a licence review and a file this machine cannot
 // download. glTF's JSON is a constrained subset -- no comments, no NaN, no trailing commas, nesting
 // a handful deep -- so a correct reader for it is a few hundred lines, and owning it outright is
