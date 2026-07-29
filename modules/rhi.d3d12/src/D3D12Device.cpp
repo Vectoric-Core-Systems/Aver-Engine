@@ -2980,7 +2980,32 @@ void D3D12Device::endFrame() {
     if (rhiContext_ && !features_.empty()) {
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
         rtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
-        cmdList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+
+        // INTO THE VIEWPORT TEXTURE when there is one, not onto the backbuffer.
+        //
+        // This is what makes a game's HUD visible at all in the editor, and its absence was invisible
+        // in the worst way: the overlay WAS drawn, correctly, onto the backbuffer -- and then ImGui
+        // painted the viewport texture over that exact region a few lines later and covered it. The
+        // pass ran, the draws were submitted, nothing errored, and nothing appeared. `--ui-demo`
+        // showed it too, so this predates and outlives any one HUD.
+        //
+        // Compositing into the texture is also the semantically right answer rather than merely the
+        // working one: the HUD belongs to the VIEWPORT, so it should travel with the viewport into
+        // whatever panel draws it, be clipped by that panel, and not float over the editor's chrome.
+        const RhiTexture* ovt = (viewportToTex_ && viewportTex_ && rhiFactory_)
+                              ? rhiFactory_->texture(viewportTex_) : nullptr;
+        const bool intoTexture = ovt && ovt->rtvHeap;
+        D3D12_CPU_DESCRIPTOR_HANDLE overlayRtv = rtv;
+        if (intoTexture) {
+            // The composite left it in SRV a few lines above; it has to be a render target again for
+            // the length of this pass and back afterwards, or the ImGui draw that samples it reads a
+            // resource in the wrong state.
+            auto toRt = transition(ovt->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cmdList_->ResourceBarrier(1, &toRt);
+            overlayRtv = ovt->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        }
+        cmdList_->OMSetRenderTargets(1, &overlayRtv, FALSE, nullptr);
         // The post chain leaves the viewport at whatever its last pass wanted, which for a bloom
         // pyramid is a fraction of the screen. Restored here so a feature that sets neither still
         // draws over the whole backbuffer, which is what the hook's contract promises.
@@ -2991,6 +3016,14 @@ void D3D12Device::endFrame() {
         // The post chain bound its own root signature and descriptor heap; both are re-stated by the
         // feature's own setPipeline / setBindingSet, which is why nothing is reset here.
         for (IRenderFeature* f : features_) f->overlayPass(*rhiContext_, width_, height_);
+
+        if (intoTexture) {
+            auto backToSrv = transition(ovt->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cmdList_->ResourceBarrier(1, &backToSrv);
+            // ImGui expects the backbuffer bound, and the block above left the texture bound.
+            cmdList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        }
     }
 
 #if AVER_WITH_IMGUI

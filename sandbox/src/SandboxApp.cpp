@@ -1018,9 +1018,15 @@ public:
             const i32 n = scripts_.hudCount();
             AVER_INFO("[HUD] {} declared", n);
             for (i32 i = 0; i < n; ++i) AVER_INFO("[HUD]   {}: '{}'", i, scripts_.hudName(i));
-            if (hudTest_ < n) setHudPreview(hudTest_, vpX_, vpY_, vpW_, vpH_);
-            else AVER_WARN("[HUD] no HUD at index {}", hudTest_);
+            if (hudTest_ >= n) AVER_WARN("[HUD] no HUD at index {}", hudTest_);
         }
+        // The RECT IS REFRESHED EVERY FRAME, not latched with the index. It was set once, on the
+        // frame scripts became ready -- which is before buildUI has run, so vpW_/vpH_ were still
+        // their constructed defaults and the HUD anchored its bottom-left panel against a 1600x900
+        // box that had nothing to do with the viewport. It drew, in the wrong place, which is the
+        // kind of wrong that reads as a HUD-authoring mistake.
+        if (hudTest_ >= 0 && hudTest_ < scripts_.hudCount())
+            setHudPreview(hudTest_, vpX_, vpY_, vpW_, vpH_);
 #endif
         if (hudPreviewActive()) aver_ui_begin_frame(hudRectX_, hudRectY_, hudRectW_, hudRectH_);
         else                    aver_ui_begin_frame(vpX_, vpY_, vpW_, vpH_);
