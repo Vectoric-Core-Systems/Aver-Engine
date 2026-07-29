@@ -283,21 +283,86 @@ bool assignedNumber(std::string_view t, const char* field, f32& out, ActorValueS
 
 } // namespace
 
+// Every `class <Ident>` in the text, with the position of the keyword. Used to find actors that
+// carry no attribute at all -- see parseActorClasses.
+struct ClassDecl { usize at; std::string name; std::string base; };
+
+std::vector<ClassDecl> classDeclarations(std::string_view t) {
+    std::vector<ClassDecl> out;
+    usize i = 0;
+    while ((i = t.find("class ", i)) != std::string_view::npos) {
+        // `class` has to be a word of its own: "subclassing" and "MyClass " both contain it.
+        const bool boundedLeft = (i == 0) || !isIdent(t[i - 1]);
+        if (!boundedLeft) { i += 6; continue; }
+
+        ClassDecl d;
+        d.at = i;
+        usize q = skipSpace(t, i + 6);
+        while (q < t.size() && isIdent(t[q])) d.name += t[q++];
+        q = skipSpace(t, q);
+        if (q < t.size() && t[q] == ':') {
+            q = skipSpace(t, q + 1);
+            while (q < t.size() && isIdent(t[q])) d.base += t[q++];
+        }
+        if (!d.name.empty()) out.push_back(std::move(d));
+        i += 6;
+    }
+    return out;
+}
+
 std::vector<ActorClassInfo> parseActorClasses(std::string_view t) {
     std::vector<ActorClassInfo> out;
-    const std::vector<AttrHit> hits = actorAttributes(t);
+    const std::vector<AttrHit> attrs = actorAttributes(t);
 
-    for (usize h = 0; h < hits.size(); ++h) {
+    // WHERE EACH CLASS'S TEXT BEGINS.
+    //
+    // Attributes alone are not enough, and that gap was invisible for as long as the only project to
+    // hand attributed everything. The RUNTIME registers an unattributed class perfectly well --
+    // HostBridge.ResolveClassIdentity falls back to the C# type name and the base's own lineage --
+    // so a file the engine happily loads was a file the editor could not see a single actor in.
+    //
+    // So a class is a candidate if it carries an attribute OR its base has a recognised suffix. The
+    // suffix is what carries a kind across a project's own intermediate base: `Guard : SkyForgePawn`
+    // never mentions AverPawn, and matching on the tail is the only thing that classifies it.
+    struct Start { usize at; usize nameAt; };   // nameAt == npos for an unattributed class
+    std::vector<Start> starts;
+    starts.reserve(attrs.size() + 4);
+    for (const AttrHit& a : attrs) starts.push_back({a.at, a.nameAt});
+
+    for (const ClassDecl& d : classDeclarations(t)) {
+        if (kindOfBase(d.base) == ActorKind::Unknown) continue;   // not an actor by its base
+        // Already covered by an attribute? An attribute sits immediately above its class, so the
+        // nearest preceding start owns this declaration if nothing else intervenes.
+        bool attributed = false;
+        for (const AttrHit& a : attrs) {
+            if (a.at >= d.at) continue;
+            // Nothing but whitespace, attributes and modifiers between them: no other class start.
+            bool intervening = false;
+            for (const ClassDecl& o : classDeclarations(t))
+                if (o.at > a.at && o.at < d.at) { intervening = true; break; }
+            if (!intervening) { attributed = true; break; }
+        }
+        if (!attributed) starts.push_back({d.at, std::string_view::npos});
+    }
+
+    std::sort(starts.begin(), starts.end(), [](const Start& a, const Start& b) { return a.at < b.at; });
+
+    for (usize h = 0; h < starts.size(); ++h) {
         ActorClassInfo info;
 
-        usize p = hits[h].nameAt;
-        while (p < t.size() && t[p] != '"') info.className += t[p++];
+        if (starts[h].nameAt != std::string_view::npos) {
+            usize p = starts[h].nameAt;
+            while (p < t.size() && t[p] != '"') info.className += t[p++];
+        }
+        // An unattributed class leaves className EMPTY. It is not invented from the type name: the
+        // registry name and the C# identifier are separate facts, and the bridge is what decides
+        // they coincide when no attribute says otherwise.
 
-        // Only the text belonging to THIS class: from its attribute up to the next one. Without the
+        // Only the text belonging to THIS class: from its start up to the next one. Without the
         // bound, two actors in one file borrow each other's mesh -- and the picture would be of a
         // class the panel is not naming.
-        const usize sliceEnd = (h + 1 < hits.size()) ? hits[h + 1].at : t.size();
-        const std::string_view slice = t.substr(hits[h].at, sliceEnd - hits[h].at);
+        const usize sliceEnd = (h + 1 < starts.size()) ? starts[h + 1].at : t.size();
+        const std::string_view slice = t.substr(starts[h].at, sliceEnd - starts[h].at);
 
         // The C# type the attribute is on, for the panel: `public sealed class Gun : AverActor`.
         if (const usize c = slice.find("class "); c != std::string_view::npos) {
@@ -349,7 +414,7 @@ std::vector<ActorClassInfo> parseActorClasses(std::string_view t) {
             info.lightIntensityLux = lit[0]; info.lightRangeCm = lit[1];
         }
         // Every span was measured against the SLICE; the caller edits the whole file.
-        const usize base = hits[h].at;
+        const usize base = starts[h].at;
         rebase(info.meshPathSpan, base);
         rebase(info.materialSpan, base);
         for (ActorValueSpan& sp : info.cameraSpan) rebase(sp, base);

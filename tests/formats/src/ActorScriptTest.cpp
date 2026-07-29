@@ -239,7 +239,126 @@ static void testClassDefaultsRewrite() {
     }
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// EVERY SHAPE AN ACTOR CAN TAKE
+// ---------------------------------------------------------------------------------------------
+//
+// The actor tab opens a file when the parser recognises a class in it -- either by KIND, read off
+// the base type's suffix, or because the class DECLARES something. This asserts that rule across
+// every shape a real project produces, because the tab's usefulness is exactly its generality: a
+// picker that only understood the four classes the template happens to ship would send everything
+// else to the IDE with no sign the editor knew what it was.
+//
+// The suffix rule is what makes a PROJECT'S OWN intermediate base work. `SkyForgePawn : AverPawn`
+// then `Guard : SkyForgePawn` -- the parser never sees AverPawn from Guard's declaration, only the
+// name "SkyForgePawn", and matching on the suffix is what carries the kind across that hop.
+static void testEveryActorShape() {
+    AVER_INFO("=== every shape an actor can take ===");
+
+    struct Case {
+        const char* what;
+        const char* src;
+        fmt::ActorKind kind;
+        bool openable;      // would the tab accept the file
+    };
+
+    const Case cases[] = {
+        {"a plain attributed actor",
+         "using Aver.Framework;@[AverClass(\"BP_Crate\")]@public sealed class Crate : AverActor {@"
+         "  public static void Configure(ClassBuilder b) => b.Mesh(\"Meshes/cube.ocmesh\");@}",
+         fmt::ActorKind::Actor, true},
+
+        {"an UNATTRIBUTED actor -- discovered by its base alone",
+         "using Aver.Framework;@public sealed class Barrel : AverActor {@"
+         "  public static void Configure(ClassBuilder b) => b.Mesh(\"Meshes/cube.ocmesh\");@}",
+         fmt::ActorKind::Actor, true},
+
+        {"a pawn",
+         "using Aver.Framework;@[AverClass(\"BP_Drone\")]@public sealed class Drone : AverPawn {@}",
+         fmt::ActorKind::Pawn, true},
+
+        {"a character, which has a capsule and no mesh",
+         "using Aver.Framework;@public sealed class Hero : AverCharacter {@"
+         "  public float Height = 180f;@  public float Radius = 34f;@}",
+         fmt::ActorKind::Character, true},
+
+        {"a player controller",
+         "using Aver.Framework;@public sealed class Cam : AverPlayerController {@}",
+         fmt::ActorKind::PlayerController, true},
+
+        {"a game mode",
+         "using Aver.Framework;@[AverGameMode(\"BP_Rules\")]@public sealed class Rules : AverGameMode {@}",
+         fmt::ActorKind::GameMode, true},
+
+        {"a game instance",
+         "using Aver.Framework;@public sealed class Save : AverGameInstance {@}",
+         fmt::ActorKind::GameInstance, true},
+
+        {"a PROJECT'S OWN pawn base, one hop from the framework's",
+         "using Aver.Framework;@public class SkyForgePawn : AverPawn {@}@"
+         "public sealed class Guard : SkyForgePawn {@}",
+         fmt::ActorKind::Pawn, true},
+
+        {"a class with an unrecognised base that still DECLARES a mesh",
+         "using Aver.Framework;@[AverClass(\"BP_Odd\")]@public sealed class Odd : SomethingElse {@"
+         "  public static void Configure(ClassBuilder b) => b.Mesh(\"Meshes/cube.ocmesh\");@}",
+         fmt::ActorKind::Unknown, true},
+
+        {"a plain helper -- no base, nothing declared, and NOT an actor",
+         "namespace X;@public static class Helper {@  public static int Add(int a, int b) => a + b;@}",
+         fmt::ActorKind::Unknown, false},
+    };
+
+    for (const Case& c : cases) {
+        std::string src = c.src;
+        for (char& ch : src) if (ch == '@') ch = 0x0A;
+
+        const std::vector<fmt::ActorClassInfo> ks = fmt::parseActorClasses(src);
+
+        // "Openable" mirrors makeActorEditor: a recognised KIND or something DECLARED.
+        bool openable = false;
+        fmt::ActorKind best = fmt::ActorKind::Unknown;
+        for (const fmt::ActorClassInfo& k : ks) {
+            if (k.anything() || k.kind != fmt::ActorKind::Unknown) openable = true;
+            if (k.kind != fmt::ActorKind::Unknown) best = k.kind;
+        }
+        // The last-declared class is the principal one in these fixtures; for the intermediate-base
+        // case that is Guard, whose kind must have come across the hop.
+        if (!ks.empty() && best == fmt::ActorKind::Unknown) best = ks.back().kind;
+
+        check(openable == c.openable, std::string(c.what) + ": the tab "
+              + (c.openable ? "opens it" : "declines it"));
+        if (c.openable)
+            check(best == c.kind, std::string(c.what) + ": classified as "
+                  + fmt::actorKindName(c.kind));
+    }
+
+    // A file declaring SEVERAL kinds keeps them apart. SkyForge's FpsGameMode.cs is this shape and
+    // it is what made the picker necessary in the first place.
+    {
+        std::string src =
+            "using Aver.Framework;@[AverGameMode(\"BP_Mode\")]@public sealed class Mode : AverGameMode {@}@"
+            "[AverClass(\"BP_Block\")]@public sealed class Block : AverActor {@"
+            "  public static void Configure(ClassBuilder b) => b.Mesh(\"Meshes/cube.ocmesh\");@}@"
+            "public sealed class Watcher : AverGameInstance {@}";
+        for (char& ch : src) if (ch == '@') ch = 0x0A;
+        const std::vector<fmt::ActorClassInfo> ks = fmt::parseActorClasses(src);
+        check(ks.size() == 3, "three classes in one file are all found");
+        if (ks.size() == 3) {
+            check(ks[0].kind == fmt::ActorKind::GameMode, "the first is the game mode");
+            check(ks[1].kind == fmt::ActorKind::Actor && ks[1].hasMesh,
+                  "the second is an actor with its own mesh");
+            check(ks[2].kind == fmt::ActorKind::GameInstance, "the third is the game instance");
+            // Each entry carries only what lies between its own attribute and the next: two actors
+            // in one file must not be able to borrow each other's mesh.
+            check(!ks[0].hasMesh && !ks[2].hasMesh, "and neither of the others claims its mesh");
+        }
+    }
+}
+
 int main() {
+    testEveryActorShape();
     testClassLevelActor();
     testClassDefaultsRewrite();
 

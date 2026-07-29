@@ -158,6 +158,27 @@ const MeshFields& meshFields() {
 }
 #endif
 
+// WHAT TO CALL AN ACTOR ON SCREEN.
+//
+// One function because the rule was written out three times and each copy fell back to className --
+// so an actor whose C# type the parser could not read showed as "BP_Gun", and the Live panel said
+// "BP_Gun built nothing" even where the tab above it said "Gun". The BP_ prefix is a REGISTRY
+// convention: it is what a level file stores and what aver_fw_class_find resolves. It is not the
+// actor's name and it should never be presented as one.
+//
+// Preference order: the C# type, then the bound name with the template's prefix stripped, then the
+// file. Never empty, because a nameless row in a picker is a row nobody can choose deliberately.
+std::string actorDisplayName(const fmt::ActorClassInfo& k, std::string_view fileStem = {}) {
+    if (!k.typeName.empty()) return k.typeName;
+    if (!k.className.empty()) {
+        // Only the prefix the templates actually use. Stripping any capitalised prefix would rename
+        // a class somebody deliberately called AIGuard.
+        if (k.className.rfind("BP_", 0) == 0 && k.className.size() > 3) return k.className.substr(3);
+        return k.className;
+    }
+    return std::string(fileStem);
+}
+
 // Degrees (yaw, pitch, roll) about +Z, +Y, +X and a scale, into the engine's row-vector matrix with
 // the translation in the LAST ROW. Written out rather than borrowed from the scene, because this
 // module must not depend on the world to draw something that is not in it.
@@ -571,7 +592,7 @@ void ActorEditor::buildTree() {
     // suffix comes off. A designer file's partial class carries no attribute and no base, so there
     // is genuinely no ActorClassInfo for it and the filename is the only name available.
     if (info) {
-        root.name = info->typeName.empty() ? info->className : info->typeName;
+        root.name = actorDisplayName(*info);
     } else {
         std::string stem = std::filesystem::path(path_).stem().string();
         if (stem.size() > 9 && stem.compare(stem.size() - 9, 9, ".Designer") == 0)
@@ -822,13 +843,16 @@ void ActorEditor::rebuildLive(Engine& e) {
     // HostBridge.ResolveClassIdentity decides it that way and this has to agree, or a class declared
     // [AverClass("Crate")] on `class WoodenCrate` would be looked up under the wrong one. Both are
     // tried because the parser cannot always tell which the bridge chose.
+    // TWO NAMES, and they are not interchangeable. `reg` is what the registry knows the class by and
+    // is the only thing aver_fw_class_find will resolve; `shown` is what a person is told. Mixing
+    // them is how "BP_" ends up in a sentence a user reads.
     const std::string& reg = info->className.empty() ? info->typeName : info->className;
+    const std::string shown = actorDisplayName(*info, std::filesystem::path(path_).stem().string());
     int32_t c = reg.empty() ? 0 : aver_fw_class_find(reg.c_str());
     if (!c && !info->typeName.empty() && info->typeName != reg)
         c = aver_fw_class_find(info->typeName.c_str());
     if (!c) {
-        liveWhy_ = "'" + (reg.empty() ? info->typeName : reg) +
-                   "' is not loaded. Compile C#, then start the project's scripts.";
+        liveWhy_ = "'" + shown + "' is not loaded. Compile C#, then start the project's scripts.";
         live_ = false;
         return;
     }
@@ -838,7 +862,7 @@ void ActorEditor::rebuildLive(Engine& e) {
     // be compared by flicking the toggle rather than by reading numbers.
     const int32_t root = aver_fw_spawn_preview(c, "$ActorEditorPreview", nullptr, nullptr, nullptr);
     if (!root) {
-        liveWhy_ = "'" + reg + "' would not spawn. Abstract classes cannot be instanced.";
+        liveWhy_ = "'" + shown + "' would not spawn. Abstract classes cannot be instanced.";
         live_ = false;
         return;
     }
@@ -911,15 +935,15 @@ void ActorEditor::rebuildLive(Engine& e) {
     if (liveCapsuleFromSource_)
         std::snprintf(msg, sizeof msg,
                       "%s built no models; the capsule shown is the source's, not the class's.",
-                      reg.c_str());
+                      shown.c_str());
     else if (fromBuild == 0 && classDeclaresMesh)
         std::snprintf(msg, sizeof msg,
-                      "1 model from %s's class default. BuildModels built none.", reg.c_str());
+                      "1 model from %s's class default. BuildModels built none.", shown.c_str());
     else if (fromBuild == 0)
-        std::snprintf(msg, sizeof msg, "%s built nothing.", reg.c_str());
+        std::snprintf(msg, sizeof msg, "%s built nothing.", shown.c_str());
     else
         std::snprintf(msg, sizeof msg, "%zu model(s) built by %s's BuildModels%s.",
-                      fromBuild, reg.c_str(), classDeclaresMesh ? ", plus its class default" : "");
+                      fromBuild, shown.c_str(), classDeclaresMesh ? ", plus its class default" : "");
     liveWhy_ = msg;
 
     // THE SENTENCE THAT PREVENTS THE BUG REPORT. A class that overrides no BuildModels and has no
@@ -927,7 +951,10 @@ void ActorEditor::rebuildLive(Engine& e) {
     // SkyForge's Gun, whose five boxes are assembled in AttachTo at play time, is exactly that.
     // Saying so is the difference between "the editor is broken" and "that geometry is gameplay".
     liveAssemblesAtPlayTime_ = (fromBuild == 0 && script_.models.empty());
-    AVER_INFO("[ActorEditor] live {}: {} model(s), {} unnamed", reg, liveDraws_.size(), liveUnnamed_);
+    // The LOG carries both: it is read when something is wrong, and "which registry row" is
+    // exactly the question that arises then.
+    AVER_INFO("[ActorEditor] live {} (registry '{}'): {} model(s), {} unnamed",
+              shown, reg, liveDraws_.size(), liveUnnamed_);
 #else
     (void)e;
     liveWhy_ = "This build has no framework or scene module.";
@@ -1492,7 +1519,7 @@ void ActorEditor::draw(Engine& e) {
         labels.reserve(classes_.size());
         items.reserve(classes_.size());
         for (const fmt::ActorClassInfo& k : classes_) {
-            std::string n = k.typeName.empty() ? k.className : k.typeName;
+            std::string n = actorDisplayName(k);
             if (!k.anything()) n += "  (nothing to draw)";
             labels.push_back(std::move(n));
         }
@@ -1502,7 +1529,7 @@ void ActorEditor::draw(Engine& e) {
     } else if (const fmt::ActorClassInfo* k = activeInfo()) {
         // The C# type, which is what the author named the thing. The bound name is shown below as
         // bookkeeping.
-        ImGui::Text("%s", (k->typeName.empty() ? k->className : k->typeName).c_str());
+        ImGui::Text("%s", actorDisplayName(*k).c_str());
     }
 
     // CLASS DEFAULTS. What the class states about itself, which for a GameMode or a Controller is
@@ -1514,7 +1541,7 @@ void ActorEditor::draw(Engine& e) {
         // cannot be hidden -- but it is bookkeeping, not the thing being edited, and leading it with
         // a BP_ prefix made the panel read as if the prefix were the actor's name.
         if (!k->className.empty() && k->className != k->typeName)
-            ImGui::TextDisabled("binds as \"%s\"", k->className.c_str());
+            ImGui::TextDisabled("registry name: %s", k->className.c_str());
     }
 
     // ---- class defaults, EDITABLE ----
