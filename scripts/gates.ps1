@@ -373,6 +373,32 @@ Write-Host "0x141 LiveKernelEvent count after: $tdrAfter (was $tdrBefore)"
 if ($tdrAfter -ne $tdrBefore) { Write-Host "NEW TDRs -- this run is a failure regardless of pixels"; $failures++ }
 
 if ($Record) {
+    # REFUSE TO WRITE A POISONED BASELINE. Every gate's value is added to $recorded whatever happened
+    # to it, including one that CRASHED or came back BAD-PROBE -- so without this guard a run could
+    # exit non-zero and still have written editor chrome into the oracle as an expected value. The
+    # next run then passes, and the gate is dead without ever having reported anything.
+    #
+    # Under -Record a value mismatch is not a failure (it becomes 'recorded'), so $failures counts
+    # only the things that must never be recorded: crashes, probes outside the viewport, missing or
+    # non-zero debug-layer totals, new TDRs, and BROKEN INVARIANTS. That last one is the important
+    # one -- a baseline whose probes no longer measure what they claim is exactly what re-recording
+    # must not be allowed to freeze in, and it is the mistake this repo has already come closest to
+    # making.
+    #
+    # FLAKY counts as a refusal too, and that is not belt-and-braces. The line below records
+    # `$r.raw` -- the FIRST reading -- always. A gate that came back BAD-PROBE and then passed on
+    # retry is scored FLAKY, which is deliberately not a failure, so without this the bad first
+    # value would be written as the expected one. Beyond that: a gate that needed a retry during a
+    # RECORDING run has no settled value to record. Run it again.
+    if ($failures -gt 0 -or $flaky -gt 0) {
+        Write-Host ""
+        Write-Host "REFUSING TO RECORD: $failures gate(s) failed, $flaky flaky." -ForegroundColor Red
+        Write-Host "$BaselineFile is UNCHANGED. Fix the runs above, then record again."
+        if ($flaky -gt 0) {
+            Write-Host "A FLAKY gate has no value to freeze -- compare its two viewport rects first." -ForegroundColor Red
+        }
+        exit $(if ($failures -gt 0) { $failures } else { $flaky })
+    }
     # Only the configurations that were actually run are rewritten; the rest of the file survives, so
     # recording one configuration cannot quietly erase the baseline of another.
     $keep = Get-Content $BaselineFile -ErrorAction SilentlyContinue | Where-Object {
