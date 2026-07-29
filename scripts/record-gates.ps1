@@ -85,6 +85,29 @@ function Show-Moves($before, $after, [string] $label) {
     return $moved.Count
 }
 
+# Runs one of this repo's own scripts and hands back its EXIT CODE.
+#
+# The $ErrorActionPreference dance is not defensive noise -- without it this wrapper does not work.
+# Preference variables are inherited by a called script, so under 'Stop' a Write-Error inside
+# gates.ps1 (an unknown configuration, a missing Sandbox.exe) becomes a TERMINATING error HERE. This
+# script then died with a raw PowerShell stack before it could print "RECORD REFUSED ... UNCHANGED",
+# and the Summary never ran at all -- which is the exact opposite of what a wrapper around a
+# destructive operation is for. Measured by running it, not reasoned about.
+#
+# These scripts report failure through their exit code, so an error record from one of them is
+# information to print, never a reason to unwind.
+function Invoke-Child([string] $path, [hashtable] $named) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        # Out-Host, not a bare call. build.ps1 shells out to build.bat, and a native command's stdout
+        # would otherwise become the CALLING function's pipeline output -- returned alongside its
+        # $true/$false and read as a truthy array whatever actually happened.
+        & $path @named | Out-Host
+        return $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prev }
+}
+
 # One tree, end to end. Returns $true only if it recorded AND verified.
 function Invoke-Tree([string] $flavour) {
     $isRelease   = ($flavour -eq 'Release')
@@ -96,12 +119,9 @@ function Invoke-Tree([string] $flavour) {
 
     if (-not $SkipBuild) {
         Say "building $flavour ..." 'DarkGray'
-        # Out-Host, not bare invocation. build.ps1 shells out to build.bat, and a native command's
-        # stdout becomes this FUNCTION's pipeline output -- which would be returned alongside the
-        # $true/$false below and read as a truthy array whatever actually happened.
-        if ($isRelease) { & "$PSScriptRoot\build.ps1" -Release | Out-Host }
-        else            { & "$PSScriptRoot\build.ps1"          | Out-Host }
-        if ($LASTEXITCODE -ne 0) {
+        if ($isRelease) { $buildExit = Invoke-Child "$PSScriptRoot\build.ps1" @{ Release = $true } }
+        else            { $buildExit = Invoke-Child "$PSScriptRoot\build.ps1" @{} }
+        if ($buildExit -ne 0) {
             Say "BUILD FAILED -- nothing recorded. A baseline is only meaningful against a tree that builds." 'Red'
             return $false
         }
@@ -131,8 +151,7 @@ function Invoke-Tree([string] $flavour) {
 
     Say "recording -- this is the slow part" 'DarkGray'
     $started = Get-Date
-    & "$PSScriptRoot\gates.ps1" @recordArgs | Out-Host
-    $recordExit = $LASTEXITCODE
+    $recordExit = Invoke-Child "$PSScriptRoot\gates.ps1" $recordArgs
     Say ("record finished in {0:N1} min" -f ((Get-Date) - $started).TotalMinutes) 'DarkGray'
 
     if ($recordExit -ne 0) {
@@ -140,7 +159,10 @@ function Invoke-Tree([string] $flavour) {
         # the baseline is untouched here rather than half-written. Say so explicitly: "it failed" and
         # "it failed and wrote nothing" are very different things to walk away from.
         Say ""
-        Say "RECORD REFUSED -- $recordExit gate(s) did not record cleanly. $baseline is UNCHANGED." 'Red'
+        # "exit code", not "N gate(s)". gates.ps1 also exits non-zero for reasons that are not gates
+        # at all -- an unknown configuration, a missing Sandbox.exe -- and a wrapper that reports
+        # those as failing gates sends the reader looking at the renderer.
+        Say "RECORD REFUSED -- gates.ps1 exited $recordExit. $baseline is UNCHANGED." 'Red'
         Say "Read the run above: a CRASH, a BAD-PROBE or a broken INVARIANT must be fixed, not recorded." 'Red'
         return $false
     }
@@ -158,8 +180,7 @@ function Invoke-Tree([string] $flavour) {
     $verifyArgs = @{}
     if ($isRelease)    { $verifyArgs.Release = $true }
     if ($Config.Count) { $verifyArgs.Config  = $Config }
-    & "$PSScriptRoot\gates.ps1" @verifyArgs | Out-Host
-    $verifyExit = $LASTEXITCODE
+    $verifyExit = Invoke-Child "$PSScriptRoot\gates.ps1" $verifyArgs
 
     if ($verifyExit -eq 0) {
         Say "$flavour VERIFIED -- recorded and green against the binary it was recorded from." 'Green'
@@ -208,6 +229,10 @@ $bad = @($ok.Values | Where-Object { -not $_ }).Count
 if ($bad -eq 0) {
     Write-Host ""
     Say "Both baselines are a measurement of THIS tree. Commit them on their own, with the reason:" 'White'
+    # The cd is not padding. This script is meant to be run from anywhere -- it finds the repo from
+    # $PSScriptRoot, not from the working directory -- so a bare `git add scripts/...` printed here
+    # would be a relative path against whatever directory the user happened to be in.
+    Say "  cd `"$root`"" 'DarkGray'
     Say "  git add scripts/gates.baseline*.txt" 'DarkGray'
     Say "  git commit    # say WHICH values moved and WHY -- see the table above" 'DarkGray'
 }
