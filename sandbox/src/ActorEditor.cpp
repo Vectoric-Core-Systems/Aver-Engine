@@ -408,16 +408,45 @@ private:
 
     void pickFirstPreviewable() {
         activeClass_ = -1;
-        // Something to LOOK at first, because a file that declares a GameMode above three meshed
-        // actors should open on one of the meshes rather than on the rules object.
+        if (classes_.empty()) return;
+
+        // THE FILE'S OWN NAME FIRST, and this is a fix rather than a preference.
+        //
+        // The rule was "the first class in FILE order that draws something". Gun.cs declares
+        // GunPart above Gun, and GunPart has a mesh -- so opening Gun.cs opened BP_GunPart, an
+        // eight-line helper, and named the tab after it. The principal actor in a file is almost
+        // always the one the file is named for; every actor in the SkyForge template follows that,
+        // and so does every one anybody writes, because that is what naming a file after a class
+        // means.
+        //
+        // Matched against typeName and className, and against the className with a BP_ prefix
+        // stripped, because a class is free to bind under a different name than its C# type.
+        std::string stem = std::filesystem::path(path_).stem().string();
+        if (stem.size() > 9 && stem.compare(stem.size() - 9, 9, ".Designer") == 0)
+            stem.erase(stem.size() - 9);
+        const auto namesFile = [&](const fmt::ActorClassInfo& k) {
+            if (!stem.empty() && k.typeName == stem) return true;
+            if (!stem.empty() && k.className == stem) return true;
+            // "BP_Gun" for Gun.cs. Only the prefix the templates use, not any prefix -- guessing
+            // more broadly would start matching classes that merely end with the file's name.
+            if (!stem.empty() && k.className.rfind("BP_", 0) == 0 &&
+                k.className.compare(3, std::string::npos, stem) == 0) return true;
+            return false;
+        };
         for (int i = 0; i < static_cast<int>(classes_.size()); ++i)
-            if (classes_[static_cast<usize>(i)].drawable()) { activeClass_ = i; break; }
+            if (namesFile(classes_[static_cast<usize>(i)])) { activeClass_ = i; break; }
+
+        // Then something to LOOK at, because a file that declares a GameMode above three meshed
+        // actors should open on one of the meshes rather than on the rules object.
+        if (activeClass_ < 0)
+            for (int i = 0; i < static_cast<int>(classes_.size()); ++i)
+                if (classes_[static_cast<usize>(i)].drawable()) { activeClass_ = i; break; }
         if (activeClass_ < 0)
             for (int i = 0; i < static_cast<int>(classes_.size()); ++i)
                 if (classes_[static_cast<usize>(i)].anything()) { activeClass_ = i; break; }
         // Nothing previewable but classes present: still name the first, so the panel says what the
         // file HOLDS rather than looking empty.
-        if (activeClass_ < 0 && !classes_.empty()) activeClass_ = 0;
+        if (activeClass_ < 0) activeClass_ = 0;
     }
     fmt::ActorClassInfo* activeInfoMutable() {
         return (activeClass_ >= 0 && activeClass_ < static_cast<int>(classes_.size()))
@@ -443,6 +472,9 @@ private:
     std::string liveWhy_;               // why it is off, or what the last rebuild found
     int liveUnnamed_ = 0;               // models whose mesh id resolved to no path this could open
     bool liveCapsuleFromSource_ = false;   // the one figure in the live view that the spawn did not give
+    // The class built nothing and declares no placements: whatever it looks like in game is
+    // assembled by gameplay, which a construction-only preview cannot and must not show.
+    bool liveAssemblesAtPlayTime_ = false;
     // The generation the current live snapshot was built against. Different from g_scriptGeneration
     // means the class that produced it has since been unloaded, so the picture is of dead code.
     u32 liveGeneration_ = 0;
@@ -862,14 +894,39 @@ void ActorEditor::rebuildLive(Engine& e) {
         liveCapsuleFromSource_ = true;
     }
 
-    char msg[192];
+    // WHAT ACTUALLY PRODUCED THE PICTURE, said precisely.
+    //
+    // "N model(s) built by X" was wrong for the most common case and wrong in the direction that
+    // costs somebody an afternoon: a class whose only geometry is `b.Mesh` in Configure has that
+    // mesh attached by the ARCHETYPE at spawn, before BuildModels is called at all. Crediting
+    // BuildModels for it means a script that overrides no BuildModels still reads as though it ran
+    // one, so an author looking for why their BuildModels seems to do nothing has been told it did.
+    //
+    // The distinction is knowable: the class's own declaration is what the parser found, and
+    // anything beyond that count came from the spawn.
+    const bool classDeclaresMesh = info->hasMesh;
+    const usize fromBuild = liveDraws_.size() > (classDeclaresMesh ? 1u : 0u)
+                          ? liveDraws_.size() - (classDeclaresMesh ? 1u : 0u) : 0u;
+    char msg[256];
     if (liveCapsuleFromSource_)
         std::snprintf(msg, sizeof msg,
                       "%s built no models; the capsule shown is the source's, not the class's.",
                       reg.c_str());
+    else if (fromBuild == 0 && classDeclaresMesh)
+        std::snprintf(msg, sizeof msg,
+                      "1 model from %s's class default. BuildModels built none.", reg.c_str());
+    else if (fromBuild == 0)
+        std::snprintf(msg, sizeof msg, "%s built nothing.", reg.c_str());
     else
-        std::snprintf(msg, sizeof msg, "%zu model(s) built by %s.", liveDraws_.size(), reg.c_str());
+        std::snprintf(msg, sizeof msg, "%zu model(s) built by %s's BuildModels%s.",
+                      fromBuild, reg.c_str(), classDeclaresMesh ? ", plus its class default" : "");
     liveWhy_ = msg;
+
+    // THE SENTENCE THAT PREVENTS THE BUG REPORT. A class that overrides no BuildModels and has no
+    // designer region cannot show more than it declares, however long somebody stares at it -- and
+    // SkyForge's Gun, whose five boxes are assembled in AttachTo at play time, is exactly that.
+    // Saying so is the difference between "the editor is broken" and "that geometry is gameplay".
+    liveAssemblesAtPlayTime_ = (fromBuild == 0 && script_.models.empty());
     AVER_INFO("[ActorEditor] live {}: {} model(s), {} unnamed", reg, liveDraws_.size(), liveUnnamed_);
 #else
     (void)e;
@@ -1555,13 +1612,24 @@ void ActorEditor::draw(Engine& e) {
     // user goes and compiles.
     if (!liveWhy_.empty()) {
         if (live_) {
-            ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.60f, 1.0f), "Live: %s", liveWhy_.c_str());
+            // WRAPPED. The sentence is long by design -- it names the class and says what produced
+            // the picture -- and an unwrapped one is clipped to the column, which cuts it off at
+            // exactly the word that carries the meaning ("BuildModels built none").
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.85f, 0.60f, 1.0f));
+            ImGui::TextWrapped("Live: %s", liveWhy_.c_str());
+            ImGui::PopStyleColor();
+            if (liveAssemblesAtPlayTime_)
+                ImGui::TextWrapped("This class assembles itself at play time. Live runs the "
+                                   "construction only, so it shows what the class declares and "
+                                   "nothing a Begin Play would add.");
             if (liveUnnamed_ > 0)
                 ImGui::TextColored(ImVec4(0.98f, 0.80f, 0.35f, 1.0f),
                                    "%d model(s) name a mesh no file in this project matches.",
                                    liveUnnamed_);
         } else {
-            ImGui::TextColored(ImVec4(0.98f, 0.80f, 0.35f, 1.0f), "Live off: %s", liveWhy_.c_str());
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.98f, 0.80f, 0.35f, 1.0f));
+            ImGui::TextWrapped("Live off: %s", liveWhy_.c_str());
+            ImGui::PopStyleColor();
         }
     }
     if (!status_.empty()) ImGui::TextDisabled("%s", status_.c_str());

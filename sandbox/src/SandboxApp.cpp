@@ -764,6 +764,9 @@ public:
             if (voxiRenderer_.init(*e.device())) {
                 e.device()->addRenderFeature(&voxiRenderer_);
                 voxiAttached_ = true;
+                // A project opened from the command line is adopted BEFORE the device attaches, so
+                // its render settings were deferred above. Now the caps are known, apply them.
+                if (projectRenderPending_) applyProjectRenderSettings();
 #if AVER_MODULE_PBR
                 // The last link in the material chain. MaterialSystem is built to resolve texture
                 // references through a host-installed callback and, until this line, nothing
@@ -1829,6 +1832,7 @@ private:
         // Mesh paths in a designer file are relative to this, and the actor editor's factory has
         // nowhere to carry it -- see ActorEditor.hpp.
         editor::setActorEditorContentRoot(project_.contentDir());
+        applyProjectRenderSettings();
         startContentWatch();
         pendingUpgrade_ = editor::inspectProject(project_);
         upgradeAsked_ = false;
@@ -1908,6 +1912,84 @@ private:
 
     // Tools > Reload Scripts, after its `dotnet build` has already succeeded. Runs on the main
     // thread: OnShutdown and OnStart are called from here, and behaviours are a main-thread thing.
+    // ---- the project's render settings -----------------------------------------------------
+    //
+    // WHAT THE PROJECT ASKED FOR, kept apart from what this GPU agreed to.
+    //
+    // This is the whole subtlety of persisting render settings, and getting it wrong is not
+    // recoverable by the person it happens to. voxi::Renderer::setSettings CLAMPS what it is given
+    // to what the device supports -- ray tracing off on a card with none, a smaller voxel grid, and
+    // so on. So the value read back is not the value the author chose; it is the intersection of
+    // their choice and this machine. Writing THAT into the manifest would permanently downgrade the
+    // project for the whole team the first time somebody opened it on a weaker laptop, and nothing
+    // would ever put it back.
+    //
+    // So the requested value is captured from the CONTROLS, written to the manifest, and only
+    // pushed through the clamp on its way to the renderer.
+#if AVER_MODULE_VOXI
+    void applyProjectRenderSettings() {
+        if (!project_.valid() || !project_.hasRenderSettings()) return;
+        // ONLY once the device info is known. setSettings clamps against the device, and before
+        // setDeviceInfo has run the renderer knows of no capabilities at all -- so applying a
+        // project's GI quality that early clamps it straight to Off, which is exactly what happened:
+        // the voxel grid and the intensity survived and the quality did not, because those two are
+        // not capability-gated and it is.
+        if (!voxiAttached_) { projectRenderPending_ = true; return; }
+        projectRenderPending_ = false;
+
+        voxi::Renderer& vx = voxi::Renderer::get();
+        voxi::Settings s = vx.settings();
+        // Each key applies ONLY if the manifest states it. An absent key means "this project has no
+        // opinion", which is different from "this project wants zero" -- and zero is a legal value
+        // for every one of them.
+        if (project_.giQuality       >= 0)    s.globalIllumination = static_cast<voxi::Quality>(project_.giQuality);
+        if (project_.rayTracing      >= 0)    s.rayTracing         = static_cast<voxi::Quality>(project_.rayTracing);
+        if (project_.pathTracing     >= 0)    s.pathTracing        = static_cast<voxi::Quality>(project_.pathTracing);
+        if (project_.voxelResolution >  0)    s.voxelResolution    = static_cast<u32>(project_.voxelResolution);
+        if (project_.giIntensity     >= 0.0f) s.giIntensity        = project_.giIntensity;
+        if (project_.giMaxDistance   >= 0.0f) s.giMaxDistance      = project_.giMaxDistance;
+        vx.setSettings(s);   // clamps to this device; the manifest keeps what was asked for
+        // The RENDER FEATURE holds its own copy -- the singleton is the settings, the feature is
+        // what draws with them. Updating one and not the other leaves the panel showing a value the
+        // frame does not use.
+        voxiRenderer_.setSettings(vx.settings());
+        AVER_INFO("[Project] applied render settings from {}", project_.manifestPath);
+    }
+
+    // Copy the CONTROLS' values into the manifest struct, before the renderer sees them.
+    void captureRenderSettingsFromUi(const voxi::Settings& requested) {
+        project_.giQuality       = static_cast<int>(requested.globalIllumination);
+        project_.rayTracing      = static_cast<int>(requested.rayTracing);
+        project_.pathTracing     = static_cast<int>(requested.pathTracing);
+        project_.voxelResolution = static_cast<int>(requested.voxelResolution);
+        project_.giIntensity     = requested.giIntensity;
+        project_.giMaxDistance   = requested.giMaxDistance;
+        projectDirty_ = true;
+    }
+#else
+    void applyProjectRenderSettings() {}
+#endif
+
+    // Write the manifest. EXPLICIT, from a button, never on close and never on startup: this is
+    // somebody's project file, probably under version control and probably shared, and an editor
+    // that rewrote it as a side effect of being opened is an editor nobody can trust with a repo.
+    bool saveProjectManifest(std::string* why) {
+        if (!project_.valid()) { if (why) *why = "no project is open"; return false; }
+        std::string existing;
+        readFileText(project_.manifestPath, existing);   // absent is fine; the writer makes a fresh one
+        const std::string out = fmt::writeOcproject(project_, existing);
+        if (!writeFileText(project_.manifestPath, out)) {
+            if (why) *why = "could not write " + project_.manifestPath;
+            return false;
+        }
+        projectDirty_ = false;
+        AVER_INFO("[Project] wrote {}", project_.manifestPath);
+        return true;
+    }
+    bool projectDirty_ = false;
+    bool projectRenderPending_ = false;   // manifest read before the device attached
+    std::string projectSaveStatus_;
+
     // ---- the file watcher --------------------------------------------------------------------
     //
     // WHY A WATCHER AND NOT THE POLL THAT WAS ALREADY THERE. Two polls existed and both are kept,
@@ -5031,8 +5113,28 @@ private:
                 ImGui::Separator();
                 ImGui::TextDisabled("%s", project_.manifestPath.c_str());
                 ImGui::Spacing();
-                ImGui::TextDisabled("These are read-only: the editor loads .ocproject but does not");
-                ImGui::TextDisabled("write it back yet.");
+                if (project_.hasRenderSettings())
+                    ImGui::TextDisabled("This project states render settings; they were applied on open.");
+                else
+                    ImGui::TextDisabled("This project states no render settings yet.");
+                ImGui::Spacing();
+
+                ImGui::BeginDisabled(!projectDirty_);
+                if (ImGui::Button("Save Project Settings", ImVec2(260.0f * dpi_, 0.0f))) {
+                    std::string why;
+                    projectSaveStatus_ = saveProjectManifest(&why) ? "Saved." : ("Save failed: " + why);
+                }
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip(projectDirty_
+                        ? "Writes the Rendering page's settings into the .ocproject.\nComments and any keys this build does not know are preserved."
+                        : "Nothing has changed since the manifest was last read.");
+                if (!projectSaveStatus_.empty()) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", projectSaveStatus_.c_str());
+                }
+                ImGui::TextDisabled("Rendering settings are the game's, so they go in the project.");
+                ImGui::TextDisabled("The editor's own preferences are per-machine and do not.");
             } else {
                 ImGui::TextDisabled("No project loaded. The editor runs fine without one; open or");
                 ImGui::TextDisabled("create a project from the start screen to populate this page.");
@@ -5139,7 +5241,11 @@ private:
         ImGui::TextDisabled("Scriptable from C# via aver_voxi_* (Aver.Scripting)");
         ImGui::PopTextWrapPos();
 
-        if (changed) vx.setSettings(s);
+        if (changed) {
+            // The REQUESTED settings reach the manifest before setSettings can clamp them.
+            captureRenderSettingsFromUi(s);
+            vx.setSettings(s);
+        }
         // No ImGui::End() here: this renders as a page inside the Project Settings child region.
     }
 #endif

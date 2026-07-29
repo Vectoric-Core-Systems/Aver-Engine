@@ -3,7 +3,10 @@
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Version.hpp"
 
+#include <charconv>
 #include <filesystem>
+#include <string>
+#include <vector>
 
 namespace aver::fmt {
 using namespace aver::fmt::detail;
@@ -61,6 +64,18 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.startMap = std::string(t[1]);
         } else if (equalsCI(key, "AUTHOR")) {
             out.author = std::string(restOfLine(line, key));
+        } else if (equalsCI(key, "RENDER.GI")) {
+            if (t.size() > 1) out.giQuality = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.RAYTRACING")) {
+            if (t.size() > 1) out.rayTracing = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.PATHTRACING")) {
+            if (t.size() > 1) out.pathTracing = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.VOXELRES")) {
+            if (t.size() > 1) out.voxelResolution = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.GIINTENSITY")) {
+            if (t.size() > 1) out.giIntensity = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "RENDER.GIDISTANCE")) {
+            if (t.size() > 1) out.giMaxDistance = static_cast<f32>(parseF64(t[1], -1.0));
         }
         // Everything else is ignored on purpose — the format is forward-compatible, so a key this
         // build has never heard of (dependencies, plugins, cook targets) must not fail the load.
@@ -107,6 +122,120 @@ bool loadOcproject(const std::string& path, ProjectDesc& out, std::string* err) 
         return false;
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// writeOcproject
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// One "KEY value" line, or nothing when the value is not stated.
+void appendKey(std::string& out, const char* key, int v) {
+    if (v < 0) return;
+    out += key; out += ' '; out += std::to_string(v); out += '\n';
+}
+void appendKey(std::string& out, const char* key, f32 v) {
+    if (v < 0.0f) return;
+    // Shortest round-trip, and NOT %g: the OC dialect's own reader is from_chars, which does not
+    // accept an exponent-free locale-formatted number written by printf under a comma locale.
+    char buf[48];
+    const auto r = std::to_chars(buf, buf + sizeof buf, v);
+    if (r.ec != std::errc{}) return;
+    out += key; out += ' '; out.append(buf, static_cast<usize>(r.ptr - buf)); out += '\n';
+}
+
+// Is this line one of the keys writeOcproject owns? Only those are replaced; everything else --
+// comments, blank lines, and any key a newer build wrote -- passes through untouched.
+bool isOwnedKey(std::string_view line) {
+    const std::string_view l = trim(line);
+    if (l.empty() || l[0] == '#') return false;
+    static const char* kOwned[] = {
+        "NAME", "ENGINE", "CONTENT", "STARTMAP", "AUTHOR",
+        "RENDER.GI", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
+        "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
+    };
+    const std::vector<std::string_view> t = splitWhitespace(l);
+    if (t.empty()) return false;
+    for (const char* k : kOwned) if (equalsCI(t[0], k)) return true;
+    return false;
+}
+
+} // namespace
+
+std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
+    // What the owned keys become. Built first so the rewrite below is a lookup rather than a
+    // second copy of the formatting rules.
+    std::string owned;
+    if (!d.name.empty())             { owned += "NAME "; owned += d.name; owned += '\n'; }
+    if (!d.engineName.empty()) {
+        owned += "ENGINE "; owned += d.engineName;
+        if (!d.engineMinVersion.empty()) { owned += ' '; owned += d.engineMinVersion; }
+        owned += '\n';
+    }
+    if (!d.contentRoot.empty())      { owned += "CONTENT ";  owned += d.contentRoot; owned += '\n'; }
+    if (!d.startMap.empty())         { owned += "STARTMAP "; owned += d.startMap;    owned += '\n'; }
+    if (!d.author.empty())           { owned += "AUTHOR ";   owned += d.author;      owned += '\n'; }
+    appendKey(owned, "RENDER.GI",          d.giQuality);
+    appendKey(owned, "RENDER.RAYTRACING",  d.rayTracing);
+    appendKey(owned, "RENDER.PATHTRACING", d.pathTracing);
+    appendKey(owned, "RENDER.VOXELRES",    d.voxelResolution);
+    appendKey(owned, "RENDER.GIINTENSITY", d.giIntensity);
+    appendKey(owned, "RENDER.GIDISTANCE",  d.giMaxDistance);
+
+    // A FRESH file: header, then the keys. The header line is not optional -- parseOcproject
+    // refuses a file without it, so a writer that omitted it would produce a manifest the engine
+    // could not load.
+    if (trim(existing).empty()) {
+        std::string out = "OCPROJECT " + std::to_string(d.version > 0 ? d.version : 1) + "\n";
+        out += "# Written by the Aver Engine editor.\n";
+        out += owned;
+        return out;
+    }
+
+    // AN EXISTING file: copy it through, dropping the owned keys, and put the owned block where the
+    // FIRST of them was. Anchoring to the first rather than appending keeps a hand-arranged manifest
+    // recognisable -- SkyForge's has a comment block above NAME that would otherwise end up
+    // describing a file whose content had moved below it.
+    std::string out;
+    out.reserve(existing.size() + owned.size() + 64);
+    bool placed = false;
+    bool sawHeader = false;
+    // `pos < size`, NOT `<=`. A file that ends with a newline -- every one of them -- leaves pos
+    // exactly at size after its last real line, and a `<=` loop then processes one more, empty,
+    // segment and emits a newline for it. That is one blank line appended per save: the file grows
+    // every time somebody presses the button, which is the slow corruption this writer exists not to
+    // cause. Caught by the idempotence assertion in FormatTest, which is the only kind of test that
+    // finds it -- a single write looks perfect.
+    usize pos = 0;
+    while (pos < existing.size()) {
+        usize nl = existing.find('\n', pos);
+        const bool last = (nl == std::string_view::npos);
+        if (last) nl = existing.size();
+        const std::string_view raw = existing.substr(pos, nl - pos);
+        pos = nl + 1;
+
+        const std::vector<std::string_view> t = splitWhitespace(trim(truncateHash(raw)));
+        if (!sawHeader && !t.empty() && equalsCI(t[0], "OCPROJECT")) {
+            sawHeader = true;
+            // Rewritten rather than copied, so a version bump is expressible.
+            out += "OCPROJECT "; out += std::to_string(d.version > 0 ? d.version : 1); out += '\n';
+            if (last) break;
+            continue;
+        }
+        if (isOwnedKey(raw)) {
+            if (!placed) { placed = true; out += owned; }
+            if (last) break;
+            continue;   // the old line is dropped; its value is already in `owned`
+        }
+        out += raw;
+        out += '\n';
+        if (last) break;
+    }
+    // No owned key was in the file at all -- possible for a manifest that is only a header and
+    // comments. The block still has to land somewhere.
+    if (!placed) out += owned;
+    return out;
 }
 
 } // namespace aver::fmt

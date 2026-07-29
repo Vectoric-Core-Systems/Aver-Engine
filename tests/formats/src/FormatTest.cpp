@@ -2,10 +2,12 @@
 // it parses each, prints a summary, and checks invariants. Exit code = failure count.
 #include "aver/formats/OcBeam.hpp"
 #include "aver/formats/OcMap.hpp"
+#include "aver/formats/OcProject.hpp"
 #include "aver/assets/AssetId.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Hash.hpp"   // fnv1a64 — re-computed below to guard the offset-basis constant
 
+#include <cmath>
 #include <filesystem>
 #include <string>
 
@@ -90,8 +92,90 @@ static void checkFnv() {
           "fnv1a64(\"Meshes/sphere.ocmesh\") agrees with the C# ObjectId");
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// .ocproject round trip
+// ---------------------------------------------------------------------------------------------
+//
+// This writer edits a file a TEAM shares and a person hand-edits. The two properties that matter are
+// not "does it parse" but "does it keep what it did not write" and "does an old manifest still
+// load" -- a serialiser that rebuilt the file from the struct would silently delete the comment
+// block every scaffolded project ships with.
+static void checkOcproject() {
+    using namespace aver::fmt;
+
+    // Exactly what SkyForge's manifest looks like on disk, hand-edits and all.
+    const std::string original =
+        "OCPROJECT 1\n"
+        "# Created by the Aver Engine editor. This project lives OUTSIDE the engine tree and\n"
+        "# references it; see the engine's docs/PROJECTS.md.\n"
+        "NAME SkyForge\n"
+        "ENGINE Aver 0.1.0\n"
+        "CONTENT Content\n"
+        "STARTMAP Maps/Default.ocworld\n"
+        "# AUTHOR <your name>\n";
+
+    ProjectDesc d;
+    std::string err;
+    check(parseOcproject(original, d, &err), "the existing manifest parses");
+    check(d.name == "SkyForge", "with its name");
+    // An old manifest states no render settings, and must not be read as stating zero.
+    check(!d.hasRenderSettings(), "and states no render settings at all");
+    check(d.giQuality == -1, "an absent RENDER.GI is -1, not 0 -- 0 would mean 'GI off'");
+
+    // Set what the editor would set, and write it back.
+    d.giQuality = 3;
+    d.voxelResolution = 256;
+    d.giIntensity = 1.25f;
+    d.giMaxDistance = 3500.0f;
+    const std::string written = writeOcproject(d, original);
+
+    // THE PROPERTY THAT MATTERS MOST: everything the writer does not own survived.
+    check(written.find("# Created by the Aver Engine editor.") != std::string::npos,
+          "the hand-written comment block survives a write");
+    check(written.find("# references it; see the engine's docs/PROJECTS.md.") != std::string::npos,
+          "including its second line");
+    check(written.find("# AUTHOR <your name>") != std::string::npos,
+          "and a commented-out key is not resurrected as a real one");
+    check(written.rfind("OCPROJECT 1", 0) == 0, "the header is still the first line");
+
+    ProjectDesc back;
+    check(parseOcproject(written, back, &err), "what was written parses again");
+    check(back.name == d.name && back.startMap == d.startMap && back.contentRoot == d.contentRoot,
+          "and the original keys round-trip");
+    check(back.giQuality == 3 && back.voxelResolution == 256, "the new integer settings round-trip");
+    check(std::fabs(back.giIntensity - 1.25f) < 1.0e-6f, "and the float ones, exactly");
+    check(std::fabs(back.giMaxDistance - 3500.0f) < 1.0e-3f, "including the large one");
+
+    // IDEMPOTENT. Writing what was just written must not grow the file -- an editor that appended a
+    // duplicate key per save would corrupt a manifest over a working week rather than at once.
+    const std::string again = writeOcproject(back, written);
+    check(again == written, "writing an unchanged manifest reproduces it byte for byte");
+
+    // A key this build has never heard of must survive too: the format is documented
+    // forward-compatible, so a manifest written by a newer editor has to come back intact.
+    const std::string future = written + "COOKTARGET WindowsClient\n";
+    ProjectDesc f;
+    check(parseOcproject(future, f, &err), "a manifest with an unknown key still parses");
+    const std::string refuture = writeOcproject(f, future);
+    check(refuture.find("COOKTARGET WindowsClient") != std::string::npos,
+          "and the unknown key survives being written back");
+
+    // A fresh file, with no existing text, must still be loadable.
+    ProjectDesc n;
+    n.name = "Fresh";
+    n.engineName = "Aver";
+    n.engineMinVersion = "0.1.0";
+    n.startMap = "Maps/Default.ocworld";
+    const std::string fresh = writeOcproject(n, "");
+    ProjectDesc nb;
+    check(parseOcproject(fresh, nb, &err), "a manifest written from nothing parses");
+    check(nb.name == "Fresh", "and carries its name");
+}
+
 int main(int argc, char** argv) {
     checkFnv();
+    checkOcproject();
     if (argc < 2) {
         AVER_INFO("usage: FormatTest <file.ocbeam|file.ocmap> [more...]");
         return g_failures;
