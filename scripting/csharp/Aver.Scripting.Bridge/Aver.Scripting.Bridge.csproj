@@ -35,6 +35,12 @@
          managed copies land in the bridge's own output dir (bin/Scripting), NOT next to the executable,
          so they never overwrite the native DLLs of the same name — see NativeResolver in each assembly. -->
     <ProjectReference Include="..\Aver.Framework\Aver.Framework.csproj" />
+    <!-- Aver.UI, so [AverHud] and the Hud draw calls resolve out of the BRIDGE's context, the same
+         one a user script resolves them from. Without this a HUD assembly would load its own copy of
+         Aver.UI, its attribute would be a different Type object, and discovery would silently match
+         nothing at all. Discovery matches the attribute by NAME for the same reason; see
+         DiscoverHuds, but the draw calls still have to reach one shared native seam. -->
+    <ProjectReference Include="..\Aver.UI\Aver.UI.csproj" />
   </ItemGroup>
 
 </Project>

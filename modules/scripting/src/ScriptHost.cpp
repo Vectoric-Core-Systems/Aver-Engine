@@ -59,6 +59,9 @@ using loadScripts_fn   = int32_t(__cdecl*)(const char* utf8Dir);
 using unloadScripts_fn = int32_t(__cdecl*)(void);
 using update_fn        = void(__cdecl*)(float dt);
 using shutdown_fn      = void(__cdecl*)(void);
+using hud_count_fn     = int32_t(__cdecl*)(void);
+using hud_name_fn      = int32_t(__cdecl*)(int32_t, char*, int32_t);
+using hud_draw_fn      = int32_t(__cdecl*)(int32_t, float);
 
 std::wstring widen(const std::string& s) {
     if (s.empty()) return {};
@@ -96,6 +99,9 @@ struct ScriptHost::Impl {
     unloadScripts_fn unload = nullptr;
     update_fn update = nullptr;
     shutdown_fn shutdown = nullptr;
+    hud_count_fn hudCount = nullptr;
+    hud_name_fn  hudName  = nullptr;
+    hud_draw_fn  hudDraw  = nullptr;
 };
 
 ScriptHost::ScriptHost() = default;
@@ -195,6 +201,19 @@ bool ScriptHost::init(const HostDesc& desc) {
                        "points — it is from a different engine build");
     }
 
+    // The HUD three are bound SEPARATELY and are allowed to fail. A bridge that predates them is
+    // already refused by the contract check below, so a miss here means something stranger -- and a
+    // host that declined to start because an editor-facing entry point was absent would be refusing
+    // to run somebody's game over a preview feature.
+    if (!bind(L"HudCount", reinterpret_cast<void**>(&impl_->hudCount)) ||
+        !bind(L"HudName",  reinterpret_cast<void**>(&impl_->hudName))  ||
+        !bind(L"HudDraw",  reinterpret_cast<void**>(&impl_->hudDraw))) {
+        impl_->hudCount = nullptr;
+        impl_->hudName  = nullptr;
+        impl_->hudDraw  = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no HUD entry points; HUD preview is unavailable");
+    }
+
     AverScriptHostApi api{};
     api.structBytes = static_cast<int32_t>(sizeof(AverScriptHostApi));
     api.contractVersion = AVER_SCRIPTING_CONTRACT_VERSION;
@@ -238,6 +257,21 @@ bool ScriptHost::unloadScripts() {
     const int32_t collected = impl_->unload();
     behaviours_ = 0;
     return collected != 0;
+}
+
+i32 ScriptHost::hudCount() const {
+    return (ready_ && impl_ && impl_->hudCount) ? impl_->hudCount() : 0;
+}
+
+std::string ScriptHost::hudName(i32 index) const {
+    if (!ready_ || !impl_ || !impl_->hudName) return {};
+    char buf[128] = {};
+    const int32_t n = impl_->hudName(index, buf, static_cast<int32_t>(sizeof buf));
+    return n > 0 ? std::string(buf, static_cast<usize>(n)) : std::string();
+}
+
+bool ScriptHost::hudDraw(i32 index, f32 dt) {
+    return (ready_ && impl_ && impl_->hudDraw) && impl_->hudDraw(index, dt) == 1;
 }
 
 void ScriptHost::update(f32 dt) {

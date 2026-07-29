@@ -24,7 +24,7 @@ namespace Aver.Scripting.Bridge;
 public static class HostBridge
 {
     // Must match AVER_SCRIPTING_CONTRACT_VERSION in modules/scripting/include/aver/scripting/scripting_abi.h.
-    private const int ContractVersion = 2;
+    private const int ContractVersion = 3;   // v3: HudCount / HudName / HudDraw
 
     // Must match the AVER_SCRIPT_* codes in the same header.
     private const int Ok = 0;
@@ -86,6 +86,21 @@ public static class HostBridge
     }
 
     private static readonly Dictionary<long, ClassInfo> s_classes = new();
+
+    /// <summary>One discovered [AverHud]: its instance, its display name, and the Draw it promised.</summary>
+    private sealed class LiveHud
+    {
+        public required object Instance;
+        public required string Name;
+        public required MethodInfo Draw;
+        public bool Disabled;   // it threw once; a HUD that faults every frame would flood the log
+    }
+
+    // A THIRD discovery world, kept apart from the other two for the same reason they are apart from
+    // each other: a HUD is neither a behaviour (no OnStart/OnUpdate lifecycle) nor an actor (no
+    // transform, no class row, nothing to spawn). Sharing a list would mean every consumer of that
+    // list testing what kind of thing it had before doing anything with it.
+    private static readonly List<LiveHud> s_huds = new();
     private static readonly Dictionary<int, ActorLive> s_actorsByEntity = new();
     // Dense per-group lists tick_all walks; only ticking actors are added.
     private static readonly List<ActorLive>[] s_tickBuckets =
@@ -241,6 +256,10 @@ public static class HostBridge
             }
         }
         s_live.Clear();
+        // HUD instances hold TYPES from the collectible context exactly as actor instances do, so they
+        // have to be dropped here or the ALC can never be collected. There is no shutdown hook to
+        // drain first: a HUD draws and holds state, it does not own anything that needs releasing.
+        s_huds.Clear();
 
         // The actor instances and the class map hold TYPES from the collectible context; dropping them
         // here too is what lets the ALC actually collect. The native side keeps its entities (still flagged
@@ -258,6 +277,68 @@ public static class HostBridge
         var weak = new WeakReference(ctx, trackResurrection: true);
         ctx.Unload();
         return weak;
+    }
+
+    /// <summary>How many [AverHud] classes the loaded assemblies declared.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int HudCount()
+    {
+        try { return s_huds.Count; } catch { return 0; }
+    }
+
+    /// <summary>
+    /// Copies HUD <paramref name="index"/>'s display name into <paramref name="buffer"/> as UTF-8,
+    /// NUL-terminated. Returns the byte count written, or 0.
+    /// </summary>
+    /// <remarks>
+    /// The caller supplies the buffer, so nothing managed has to stay alive across the boundary and
+    /// there is no free() for the native side to forget. A name longer than the buffer is truncated
+    /// rather than refused: it is a label in a list, and half a label beats none.
+    /// </remarks>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static unsafe int HudName(int index, byte* buffer, int capacity)
+    {
+        try
+        {
+            if (buffer is null || capacity <= 1) return 0;
+            if (index < 0 || index >= s_huds.Count) return 0;
+            byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(s_huds[index].Name);
+            int n = Math.Min(utf8.Length, capacity - 1);
+            for (int i = 0; i < n; ++i) buffer[i] = utf8[i];
+            buffer[n] = 0;
+            return n;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>Calls HUD <paramref name="index"/>'s Draw. Returns 1 if it ran, 0 otherwise.</summary>
+    /// <remarks>
+    /// A HUD that throws is DISABLED rather than retried. Draw runs once a frame, so a faulting one
+    /// would otherwise write the same stack trace sixty times a second into the Output Log and bury
+    /// whatever the user was actually reading — the same rule Invoke applies to a behaviour's hooks.
+    /// </remarks>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int HudDraw(int index, float dt)
+    {
+        try
+        {
+            if (index < 0 || index >= s_huds.Count) return 0;
+            LiveHud h = s_huds[index];
+            if (h.Disabled) return 0;
+            try
+            {
+                h.Draw.Invoke(h.Instance, new object[] { dt });
+                return 1;
+            }
+            catch (Exception ex)
+            {
+                h.Disabled = true;
+                Emit((int)Log.Level.Error,
+                     $"[Scripting] HUD '{h.Name}'.Draw threw: {Describe(ex)} - it has been disabled");
+                return 0;
+            }
+        }
+        catch { return 0; }
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -355,6 +436,7 @@ public static class HostBridge
             // actor instance is constructed later, by bind(), when the framework spawns one. Run per
             // assembly right after the behaviour pass so both worlds are driven from the same load.
             int actors = DeclareActors(asm, file);
+            DiscoverHuds(asm, file);
 
             // Only warn about near-misses when the assembly yielded NEITHER a behaviour nor an actor: an
             // actor class is an intentional non-behaviour, not a class that forgot to derive AverBehaviour.
@@ -550,6 +632,60 @@ public static class HostBridge
         if (flags != 0)
             Fw.aver_fw_class_set_flags(c, Fw.aver_fw_class_get_flags(c) | flags);
         Fw.aver_fw_class_seal(c);
+    }
+
+    /// <summary>
+    /// Finds every [AverHud] class in an assembly and constructs one of each.
+    /// </summary>
+    /// <remarks>
+    /// The attribute is matched BY NAME rather than by type. The bridge would otherwise need a
+    /// project reference to Aver.UI purely to name one attribute, and the same name-matching is
+    /// already how WarnAboutNearMisses recognises the gameplay attributes — a HUD assembly resolves
+    /// Aver.UI out of its own load context, so a typed comparison would be comparing two Type objects
+    /// from different contexts anyway and would silently never match.
+    ///
+    /// Draw is located by SIGNATURE, not named by the attribute: an attribute carries data, never the
+    /// name of a hook, which is the rule Aver.Framework/Attributes.cs settles and explains. A marked
+    /// class without one is reported by name at load rather than left to never draw.
+    /// </remarks>
+    private static void DiscoverHuds(Assembly asm, string file)
+    {
+        foreach (Type type in asm.GetTypes())
+        {
+            CustomAttributeData? marker = type.GetCustomAttributesData()
+                .FirstOrDefault(a => a.AttributeType.Name == "AverHudAttribute");
+            if (marker is null || type.IsAbstract) continue;
+
+            string name = marker.ConstructorArguments.Count > 0 &&
+                          marker.ConstructorArguments[0].Value is string n && n.Length > 0
+                        ? n : (type.Name);
+
+            if (type.GetConstructor(Type.EmptyTypes) is null)
+            {
+                Emit((int)Log.Level.Warn,
+                     $"[Scripting] {file}: {type.FullName} is [AverHud] but has no public parameterless "
+                     + "constructor - skipped");
+                continue;
+            }
+            MethodInfo? draw = type.GetMethod("Draw", BindingFlags.Public | BindingFlags.Instance,
+                                              null, new[] { typeof(float) }, null);
+            if (draw is null)
+            {
+                Emit((int)Log.Level.Warn,
+                     $"[Scripting] {file}: {type.FullName} is [AverHud] but has no "
+                     + "'public void Draw(float dt)' - skipped");
+                continue;
+            }
+            try
+            {
+                s_huds.Add(new LiveHud { Instance = Activator.CreateInstance(type)!, Name = name, Draw = draw });
+                Emit((int)Log.Level.Info, $"[Scripting] HUD '{name}' ({type.FullName})");
+            }
+            catch (Exception ex)
+            {
+                Emit((int)Log.Level.Error, $"[Scripting] {type.FullName} would not construct: {Describe(ex)}");
+            }
+        }
     }
 
     /// <summary>Declares every non-abstract AverActor-derived type in an assembly. Returns the count.</summary>

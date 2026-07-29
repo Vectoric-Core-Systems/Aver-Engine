@@ -1000,7 +1000,32 @@ public:
         // The UI frame opens BEFORE gameplay ticks, because ticking is when a game draws its HUD.
         // The HOST owns this call and a game must never make it: a game that cleared the list would
         // erase whatever another system had contributed, and the last one to run would win silently.
-        aver_ui_begin_frame(vpX_, vpY_, vpW_, vpH_);
+        //
+        // THE HUD PREVIEW takes the rect instead, when its tab is the one on screen. There is exactly
+        // one draw list -- the seam is a process-global -- so a preview cannot coexist with a running
+        // game's HUD, and it does not try to: it is refused while a session is playing. Setting the
+        // rect to the PANEL is what makes a HUD authored in viewport fractions land inside it, and it
+        // is why this needs no offscreen target at all.
+#if AVER_MODULE_SCRIPTING
+        // --hud-preview <n>: name every HUD once, then preview one over the level viewport. It is the
+        // only way to exercise discovery-through-draw without a tab, and it is what proves the seam
+        // before anything is built on top of it.
+        if (hudTest_ >= 0 && !hudTestReported_ && scripts_.ready()) {
+            hudTestReported_ = true;
+            const i32 n = scripts_.hudCount();
+            AVER_INFO("[HUD] {} declared", n);
+            for (i32 i = 0; i < n; ++i) AVER_INFO("[HUD]   {}: '{}'", i, scripts_.hudName(i));
+            if (hudTest_ < n) setHudPreview(hudTest_, vpX_, vpY_, vpW_, vpH_);
+            else AVER_WARN("[HUD] no HUD at index {}", hudTest_);
+        }
+#endif
+        if (hudPreviewActive()) aver_ui_begin_frame(hudRectX_, hudRectY_, hudRectW_, hudRectH_);
+        else                    aver_ui_begin_frame(vpX_, vpY_, vpW_, vpH_);
+#if AVER_MODULE_SCRIPTING
+        // Drawn straight after the frame opens, so a HUD's own draw order is whatever it wrote and
+        // nothing of the editor's is interleaved with it.
+        if (hudPreviewActive()) scripts_.hudDraw(hudPreviewIndex_, t.dt);
+#endif
         maybeSpawnTestActor();   // one-shot --spawn-test, after scripts have declared their classes
         maybePlayTest();         // one-shot --play-test: begin_play, tick a few frames, end_play
         // Gate the actor tick on PLAYING: in EDITOR gameplay is frozen (like an unopened level), and a
@@ -1768,6 +1793,7 @@ public:
     void setAutoCompile(bool on) { autoCompile_ = on; }   // --auto-compile, and the Tools menu
     void setFocusLevelAt(int frame) { focusLevelAt_ = frame; }   // --focus-level-at <N>
     void setShowEditorPrefs(bool on) { if (on) showEditorPrefs_ = true; }   // --editor-prefs
+    void setHudTest(int idx) { hudTest_ = idx; }   // --hud-preview <index>
     bool* autoCompileFlag() { return &autoCompile_; }     // the menu checkbox binds straight to it
 
     void setClouds(f32 coverage) {
@@ -1989,6 +2015,31 @@ private:
     bool projectDirty_ = false;
     bool projectRenderPending_ = false;   // manifest read before the device attached
     std::string projectSaveStatus_;
+
+    // ---- the HUD preview ---------------------------------------------------------------------
+    //
+    // Refused while a session is PLAYING, and that is a hard constraint rather than caution: the UI
+    // seam owns one process-global draw list, cleared once per frame by whoever opens the frame. A
+    // preview drawing into it during play would replace the game's own HUD with a mock one, which is
+    // both wrong and the sort of wrong somebody would file against the game.
+    bool hudPreviewActive() const {
+#if AVER_MODULE_SCRIPTING && AVER_MODULE_FRAMEWORK
+        return hudPreviewIndex_ >= 0 && hudRectW_ > 1.0f &&
+               aver_fw_play_state() != AVER_FW_PLAY_PLAYING;
+#elif AVER_MODULE_SCRIPTING
+        return hudPreviewIndex_ >= 0 && hudRectW_ > 1.0f;
+#else
+        return false;
+#endif
+    }
+    // Published by the HUD tab each frame it draws; cleared when it does not.
+    void setHudPreview(int index, f32 x, f32 y, f32 w, f32 h) {
+        hudPreviewIndex_ = index; hudRectX_ = x; hudRectY_ = y; hudRectW_ = w; hudRectH_ = h;
+    }
+    int hudPreviewIndex_ = -1;
+    int hudTest_ = -1;
+    bool hudTestReported_ = false;
+    f32 hudRectX_ = 0, hudRectY_ = 0, hudRectW_ = 0, hudRectH_ = 0;
 
     // ---- the file watcher --------------------------------------------------------------------
     //
@@ -6052,7 +6103,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; int focusLevelAt=0; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and EXITS, touching no device.
         //
@@ -6107,6 +6158,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--focus-level-at") && i+1<argc) focusLevelAt=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
         else if (!std::strcmp(argv[i],"--editor-prefs")) showPrefs=true;   // screenshot aid, like --project-settings
+        else if (!std::strcmp(argv[i],"--hud-preview") && i+1<argc) hudTest=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--new-script")) focusScript=true;
         // Holds the Tools dropdown open so it can be photographed. Opt-in, like the two above:
         // it changes only what hangs BELOW the menu bar, never the bar's height, but no oracle
@@ -6199,6 +6251,7 @@ Application* createApplication(int argc, char** argv) {
     app->setAutoCompile(autoCompile);
     app->setFocusLevelAt(focusLevelAt);
     app->setShowEditorPrefs(showPrefs);
+    app->setHudTest(hudTest);
     app->setUseWarp(warp);
     app->setDebugLayer(debugLayer);
     app->setProjectPath(project);

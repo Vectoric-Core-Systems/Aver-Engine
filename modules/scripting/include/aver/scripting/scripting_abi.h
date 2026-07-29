@@ -31,8 +31,13 @@ extern "C" {
  *
  * v2 adds `UnloadScripts`, the drain half of hot reload. A v1 bridge next to a v2 host would bind
  * every entry point it does have and then simply not reload, which is the failure this constant
- * exists to turn into a message. */
-#define AVER_SCRIPTING_CONTRACT_VERSION 2
+ * exists to turn into a message.
+ *
+ * v3 adds `HudCount` / `HudName` / `HudDraw` -- discovery and invocation for [AverHud] classes. A HUD
+ * is not an actor and not a behaviour: it has no transform and no lifecycle, so none of the existing
+ * discovery reaches it and there was no way to call one at all. These three are what let the editor
+ * ask what HUDs a project declares and draw one without a game running. */
+#define AVER_SCRIPTING_CONTRACT_VERSION 3
 
 /* Log levels — must match aver::LogLevel. */
 #define AVER_SCRIPT_LOG_TRACE 0
@@ -57,6 +62,14 @@ typedef struct AverScriptHostApi {
  *   int32_t UnloadScripts(void)                  drain OnShutdown and unload the collectible ALC
  *   void    Update(float dt)                     drive OnUpdate on every live behaviour
  *   void    Shutdown(void)                       drain, unload, drop the host API
+ *   int32_t HudCount(void)                       how many [AverHud] classes were found
+ *   int32_t HudName(int32_t i, char* buf, int32_t cap)   the display name, UTF-8, NUL-terminated
+ *   int32_t HudDraw(int32_t i, float dt)         call its Draw(dt); 1 if it ran
+ *
+ * The HUD three are OPTIONAL at bind time. A bridge that predates them is refused by the contract
+ * check above long before binding, so a missing symbol here means something stranger -- and a host
+ * that declined to start over a HUD entry point would be refusing to run a game because an editor
+ * feature was absent.
  *
  * Hot reload is UnloadScripts -> (the host rebuilds the assemblies) -> LoadScripts. The rebuild
  * step is deliberately native: the host already owns the `dotnet build` shell-out, and a managed

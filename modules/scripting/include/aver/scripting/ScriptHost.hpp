@@ -59,6 +59,19 @@ public:
     // Drives OnUpdate on every live behaviour. Safe (and free) after a declined init.
     void update(f32 dt);
 
+    // ---- HUDs ------------------------------------------------------------------------------
+    //
+    // A HUD is neither a behaviour nor an actor -- no lifecycle, no transform -- so it gets its own
+    // three entries rather than being squeezed into either. All three are safe to call on a host
+    // that is not ready or a bridge that predates them: the count is 0, the name is empty and the
+    // draw is a no-op, which is what lets the editor offer the feature without testing for it.
+    i32 hudCount() const;
+    std::string hudName(i32 index) const;
+    // Calls the HUD's Draw(dt). The caller is responsible for having set the UI frame's rect first:
+    // a HUD draws into whatever aver_ui_begin_frame last established, and drawing one into the
+    // previous frame's rect is how a preview lands on top of the level.
+    bool hudDraw(i32 index, f32 dt);
+
     // Drives OnShutdown, unloads the collectible context and closes the host context.
     // Safe after a declined init, and safe called twice.
     void shutdown();

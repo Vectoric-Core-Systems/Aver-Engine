@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Aver.Framework\Aver.Framework.csproj" Private="false" />
+    <ProjectReference Include="..\Aver.UI\Aver.UI.csproj" Private="false" />
   </ItemGroup>
 
 </Project>
