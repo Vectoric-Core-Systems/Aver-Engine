@@ -767,6 +767,9 @@ public:
                 // A project opened from the command line is adopted BEFORE the device attaches, so
                 // its render settings were deferred above. Now the caps are known, apply them.
                 if (projectRenderPending_) applyProjectRenderSettings();
+                // After the caps are known, so a seeded manifest states values this build actually
+                // declares rather than whatever was in the struct before setDeviceInfo ran.
+                if (saveProject_ && !saveProjectDone_) { saveProjectDone_ = true; seedAndSaveProject(); }
 #if AVER_MODULE_PBR
                 // The last link in the material chain. MaterialSystem is built to resolve texture
                 // references through a host-installed callback and, until this line, nothing
@@ -1794,6 +1797,7 @@ public:
     void setFocusLevelAt(int frame) { focusLevelAt_ = frame; }   // --focus-level-at <N>
     void setShowEditorPrefs(bool on) { if (on) showEditorPrefs_ = true; }   // --editor-prefs
     void setHudTest(int idx) { hudTest_ = idx; }   // --hud-preview <index>
+    void setSaveProject(bool on) { saveProject_ = on; }   // --save-project
     bool* autoCompileFlag() { return &autoCompile_; }     // the menu checkbox binds straight to it
 
     void setClouds(f32 coverage) {
@@ -1996,6 +2000,28 @@ private:
     void applyProjectRenderSettings() {}
 #endif
 
+    // --save-project: state the project's render settings explicitly, then write the manifest.
+    //
+    // It writes the ENGINE'S DECLARED DEFAULTS for any key the manifest does not already state, NOT
+    // the live values. The live ones have been through setSettings, which clamps to this GPU -- so
+    // saving them would bake whichever machine happened to run this into the project, which is the
+    // whole failure the requested/clamped split exists to prevent. A default written from a fresh
+    // voxi::Settings is the same on every machine.
+    void seedAndSaveProject() {
+#if AVER_MODULE_VOXI
+        const voxi::Settings d{};   // as DECLARED, never as clamped
+        if (project_.giQuality       < 0)    project_.giQuality       = static_cast<int>(d.globalIllumination);
+        if (project_.rayTracing      < 0)    project_.rayTracing      = static_cast<int>(d.rayTracing);
+        if (project_.pathTracing     < 0)    project_.pathTracing     = static_cast<int>(d.pathTracing);
+        if (project_.voxelResolution <= 0)   project_.voxelResolution = static_cast<int>(d.voxelResolution);
+        if (project_.giIntensity     < 0.0f) project_.giIntensity     = d.giIntensity;
+        if (project_.giMaxDistance   < 0.0f) project_.giMaxDistance   = d.giMaxDistance;
+#endif
+        std::string why;
+        if (saveProjectManifest(&why)) AVER_INFO("[Project] --save-project wrote the manifest");
+        else                           AVER_WARN("[Project] --save-project failed: {}", why);
+    }
+
     // Write the manifest. EXPLICIT, from a button, never on close and never on startup: this is
     // somebody's project file, probably under version control and probably shared, and an editor
     // that rewrote it as a side effect of being opened is an editor nobody can trust with a repo.
@@ -2038,6 +2064,8 @@ private:
     }
     int hudPreviewIndex_ = -1;
     int hudTest_ = -1;
+    bool saveProject_ = false;
+    bool saveProjectDone_ = false;
     bool hudTestReported_ = false;
     f32 hudRectX_ = 0, hudRectY_ = 0, hudRectW_ = 0, hudRectH_ = 0;
 
@@ -6103,7 +6131,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and EXITS, touching no device.
         //
@@ -6159,6 +6187,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
         else if (!std::strcmp(argv[i],"--editor-prefs")) showPrefs=true;   // screenshot aid, like --project-settings
         else if (!std::strcmp(argv[i],"--hud-preview") && i+1<argc) hudTest=std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i],"--save-project")) saveProject=true;
         else if (!std::strcmp(argv[i],"--new-script")) focusScript=true;
         // Holds the Tools dropdown open so it can be photographed. Opt-in, like the two above:
         // it changes only what hangs BELOW the menu bar, never the bar's height, but no oracle
@@ -6252,6 +6281,7 @@ Application* createApplication(int argc, char** argv) {
     app->setFocusLevelAt(focusLevelAt);
     app->setShowEditorPrefs(showPrefs);
     app->setHudTest(hudTest);
+    app->setSaveProject(saveProject);
     app->setUseWarp(warp);
     app->setDebugLayer(debugLayer);
     app->setProjectPath(project);
