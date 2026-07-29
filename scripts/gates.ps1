@@ -75,6 +75,22 @@ $WarpSpacingMs = 4000
 # So the centre probe must be RE-PICKED off the corner edge, not merely re-recorded. It was always
 # sitting on a geometric discontinuity; identical shading on both faces was masking it, and better
 # lighting took the mask off. Re-recording alone would freeze a coin flip into the baseline.
+#
+# DONE, 2026-07-29, and the note above is kept because it is the reason. Measured rather than
+# reasoned this time: the 7x7 neighbourhood around the viewport centre varies by **83 codes**, and a
+# horizontal slice through it steps from (182,68,41) to (99,38,30) between x=1369 and x=1375 with the
+# probe landing on 1375. One pixel. That is the coin flip, photographed.
+#
+# The nine gates below therefore probe (0.51691, 0.46461) -- the deepest interior point of the SAME
+# face the centre was already reporting, 46 px of clear space in every direction and a 7x7 that
+# varies by 0. Same face on purpose: it is the sun-blind +X one, where indirect light is the whole
+# signal, which is what makes the `gi` gates worth running. Direct-lighting cover is `sunlit`'s job
+# and is not lost.
+#
+# The names stay `centre`, `ms`, `rt` ... even though the probe is no longer the literal centre.
+# Renaming would break every baseline key and orphan the history in docs/STATUS.md, and the property
+# that made "centre" meaningful was never the 0.5 -- it was being derived from the viewport rect,
+# which `--probe-rel` is too.
 $Gates = @(
     # --no-gi ON THE TEN NON-GI GATES, and it is not decoration. Global illumination became the
     # ENGINE DEFAULT, so "GI off" is now a thing that has to be asked for. Without these flags the
@@ -84,15 +100,15 @@ $Gates = @(
     #
     # Adding the flags is what keeps the recorded values UNCHANGED across that default flip: each
     # gate still renders exactly what it rendered before, it just has to name it now.
-    @{ name = 'centre';        args = @('--no-gi') },
-    @{ name = 'ms';            args = @('--no-gi','--ms') },
-    @{ name = 'rt';            args = @('--no-gi','--rt') },
-    @{ name = 'ms-rt';         args = @('--no-gi','--ms','--rt') },
-    @{ name = 'gi';            args = @('--gi') },
-    @{ name = 'ms-gi';         args = @('--ms','--gi') },
-    @{ name = 'ms-rt-gi';      args = @('--ms','--rt','--gi') },
-    @{ name = 'gi-debug';      args = @('--gi-debug') },
-    @{ name = 'ms-gi-debug';   args = @('--ms','--gi-debug') },
+    @{ name = 'centre';        args = @('--no-gi','--probe-rel','0.51691','0.46461') },
+    @{ name = 'ms';            args = @('--no-gi','--ms','--probe-rel','0.51691','0.46461') },
+    @{ name = 'rt';            args = @('--no-gi','--rt','--probe-rel','0.51691','0.46461') },
+    @{ name = 'ms-rt';         args = @('--no-gi','--ms','--rt','--probe-rel','0.51691','0.46461') },
+    @{ name = 'gi';            args = @('--gi','--probe-rel','0.51691','0.46461') },
+    @{ name = 'ms-gi';         args = @('--ms','--gi','--probe-rel','0.51691','0.46461') },
+    @{ name = 'ms-rt-gi';      args = @('--ms','--rt','--gi','--probe-rel','0.51691','0.46461') },
+    @{ name = 'gi-debug';      args = @('--gi-debug','--probe-rel','0.51691','0.46461') },
+    @{ name = 'ms-gi-debug';   args = @('--ms','--gi-debug','--probe-rel','0.51691','0.46461') },
     # RELATIVE, as fractions of the viewport rect, and re-picked against the current scene.
     #
     # Absolute pixels broke this oracle twice: once when the Content Browser became a drawer and grew
@@ -130,14 +146,44 @@ $Gates = @(
     # `penumbra` unavoidably remains on an edge: a search for a disagreement with a flat neighbourhood
     # in BOTH images found none, because the two paths only ever differ across a shadow boundary. That
     # was equally true of the pixel it replaces.
-    @{ name = 'shadow';        args = @('--no-gi','--probe-rel','0.50364','0.57101') },
-    @{ name = 'shadow-rt';     args = @('--no-gi','--rt','--probe-rel','0.50364','0.57101') },
-    @{ name = 'shadow-ms-rt';  args = @('--no-gi','--ms','--rt','--probe-rel','0.50364','0.57101') },
-    @{ name = 'shadow-gi';     args = @('--gi','--probe-rel','0.50364','0.57101') },
-    @{ name = 'penumbra';      args = @('--no-gi','--probe-rel','0.49709','0.57101') },
-    @{ name = 'penumbra-rt';   args = @('--no-gi','--rt','--probe-rel','0.49709','0.57101') },
-    @{ name = 'sunlit';        args = @('--no-gi','--probe-rel','0.36945','0.45003') },
-    @{ name = 'sunlit-gi';     args = @('--gi','--probe-rel','0.36945','0.45003') }
+    # RE-PICKED AGAIN, 2026-07-29, by the recipe above and not by scaling. `0fe81e2` made the level a
+    # docked tab and the scene composite into a texture, which changed the viewport from 2750x1711 to
+    # 2750x1639 -- and a relative probe is invariant to the rect's SIZE, not to its ASPECT. The
+    # projection changed with the aspect, so the same fraction looked at different geometry: all
+    # three probes slid off onto plain floor and five gates defined to differ returned one number.
+    #
+    # The tell that this was geometry and not shading: re-picking by intent lands `shadow` on
+    # (23,40,86) against a recorded 22,40,86, and `sunlit` on (95,103,129) against 102,108,132.
+    # The surfaces were exactly where they had always been. Only the probes had moved.
+    #
+    # `sunlit` gets one extra constraint it did not have before. Taking the brightest agreeing floor
+    # pixel outright put it at u=0.047 -- hard against the left border, and bright because the floor
+    # is fogging into the sky there rather than because it receives sun. That satisfies the letter of
+    # "brightest floor pixel" while gutting a gate whose stated job is direct-light cover. So it is
+    # now constrained to the SAME DEPTH BAND as `shadow`, and in fact to the same scanline: same
+    # surface, same distance, same fog, differing only in visibility. That is what the invariant
+    # means when it asks whether the pair still brackets the LIGHTING.
+    #
+    # Measured margins at the picked pixels, so a future reader can see how much room there is:
+    #   shadow    (23,40,86)   7x7 varies by 0 in both frames
+    #   sunlit    (95,103,129) 7x7 varies by 0 in both frames; lum(sunlit)-lum(shadow) = 63.5
+    #                          against an invariant that fails below 20
+    #   penumbra  pcf (54,67,105) vs rt (23,40,86), L1 = 77 against an invariant that fails below 8
+    #
+    # `penumbra` is scored differently now, and this is the one methodological change. It used to be
+    # simply the largest disagreement, which is a knife edge by construction. It is now the pixel
+    # with the largest disagreement in the WEAKEST cell of its 3x3 -- so the L1 stays at 14 even if
+    # the sample slips a pixel in any direction, and the gate cannot be flipped by a subpixel wobble.
+    # Only 576 pixels in the whole frame disagree at all; the two paths are bit-identical on the
+    # other 4.5 million, which is itself worth knowing.
+    @{ name = 'shadow';        args = @('--no-gi','--probe-rel','0.53545','0.48536') },
+    @{ name = 'shadow-rt';     args = @('--no-gi','--rt','--probe-rel','0.53545','0.48536') },
+    @{ name = 'shadow-ms-rt';  args = @('--no-gi','--ms','--rt','--probe-rel','0.53545','0.48536') },
+    @{ name = 'shadow-gi';     args = @('--gi','--probe-rel','0.53545','0.48536') },
+    @{ name = 'penumbra';      args = @('--no-gi','--probe-rel','0.57545','0.50610') },
+    @{ name = 'penumbra-rt';   args = @('--no-gi','--rt','--probe-rel','0.57545','0.50610') },
+    @{ name = 'sunlit';        args = @('--no-gi','--probe-rel','0.42636','0.48536') },
+    @{ name = 'sunlit-gi';     args = @('--gi','--probe-rel','0.42636','0.48536') }
 )
 
 # Each configuration is a device this machine can be made to look like. `--force-caps` is

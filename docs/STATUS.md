@@ -2371,9 +2371,138 @@ hiding and returning; Project Settings applying a manifest; Editor Preferences r
   failures: five gates defined to differ return one value, which says the probes sample the wrong
   pixels rather than that shading regressed. **Not re-recorded.** See §4d and the memory note
   `aver-gates-red-at-head`.
+  **Resolved in §4v** — the diagnosis above was correct. The probes were re-picked, both invariants
+  now pass, and re-picking landed fifteen of the seventeen back within a few codes of the values
+  recorded on 2026-07-21.
 - **No editor tab hosts a HUD yet.** `--hud-preview` proves the seam; the UI editor is not built.
 - **The actor tab's own Save does not compile** unless Auto-compile on Save is on. That is by design,
   but it is the first thing somebody will expect otherwise.
+
+---
+
+## 4v. The gates were red because the PROBES were wrong, not the pixels
+
+19 of 19 failing, including both invariants. The conclusion §4u recorded — "the probes sample the
+wrong pixels rather than shading regressed" — turned out to be exactly right, and this section is
+what proving it looked like.
+
+### What the failure actually was
+
+Two independent faults, and neither could be diagnosed until the other was separated out.
+
+**1. The relative probes had gone stale to a change of ASPECT, not of size.** `0fe81e2` made the
+level a docked tab and the scene composite into a texture; the viewport went `2750x1711` to
+`2750x1639`. `--probe-rel` was introduced precisely so a probe survives a resize — and it does, but
+only for a change of *scale*. The projection moves with the ASPECT, so the same fraction of the rect
+looked at different geometry. `shadow`, `shadow-rt`, `shadow-ms-rt`, `penumbra` and `penumbra-rt`
+all slid off the cast shadow onto open floor and returned one identical `94,102,129`.
+
+**That is a real limit of the relative form and it is now written down**, because "relative probes
+are layout-invariant" was believed here and is only three-quarters true.
+
+**2. The centre probe was sitting on a coin flip, and `gates.ps1` had said so for weeks.** The script
+carried a standing note that the centre pixel aims down the view axis at the placeholder cube's
+`+X/+Y` corner edge and must be **re-picked, not re-recorded**. Measured this time rather than
+argued: the 7x7 neighbourhood around the viewport centre varies by **83 codes**, and a horizontal
+slice steps from `(182,68,41)` to `(99,38,30)` between x=1369 and x=1375 — with the probe landing on
+1375. One pixel from an 83-code cliff.
+
+### How each probe was re-picked
+
+By what the gate is DEFINED to sample, from a `--no-gi` and a `--no-gi --rt` capture of the current
+scene — the recipe `gates.ps1` already documented — not by scaling the old coordinates.
+
+| gate | new u,v | value | how it was chosen |
+|---|---|---|---|
+| `centre` ×9 | `0.51691, 0.46461` | `99,38,30` | deepest interior of the SAME face the centre already reported — 46 px clear in every direction, 7x7 varies by 0 |
+| `shadow` ×4 | `0.53545, 0.48536` | `23,40,86` | darkest floor pixel where PCF and RayQuery agree, flat 7x7 in both |
+| `sunlit` ×2 | `0.42636, 0.48536` | `95,103,129` | brightest such pixel **on the same scanline as `shadow`** |
+| `penumbra` ×2 | `0.57545, 0.50610` | `54,67,105` / `23,40,86` | largest disagreement, scored on the WEAKEST cell of its 3x3 |
+
+Two of those deserve their reasoning kept.
+
+**`sunlit` gained a constraint.** Taking the brightest agreeing floor pixel outright put it at
+`u=0.047` — hard against the left border, and bright because the floor fogs into the sky there
+rather than because it receives sun. That satisfies the letter of "brightest floor pixel" while
+gutting a gate whose whole job is direct-light cover. Constraining it to the same scanline as
+`shadow` makes the pair differ in **visibility and nothing else**: same surface, same distance, same
+fog. That is what the invariant means when it asks whether they still bracket the lighting.
+
+**`penumbra` is scored differently.** It used to be simply the largest disagreement, which is a
+knife edge by construction. It is now the pixel whose *weakest* 3x3 neighbour still disagrees most —
+L1 stays at 14 even if the sample slips a pixel in any direction, against an invariant that fails
+below 8. Worth recording alongside: only **576 pixels in the entire frame** disagree between the two
+shadow paths at all. The other 4.5 million are bit-identical.
+
+### The tell that this was never a shading regression
+
+Re-picking by intent landed the probes back on almost exactly the recorded numbers:
+
+| gate | recorded 2026-07-21 | after re-picking |
+|---|---|---|
+| `shadow` | `22,40,86` | `23,40,86` |
+| `sunlit` | `102,108,132` | `95,103,129` |
+| `gi-debug` | `101,38,31` | `103,39,30` (it read `156,55,36` from the corner edge) |
+| `centre` | `98,37,30` | `99,38,30` |
+
+The geometry had never moved. **Both invariants now pass.**
+
+### What genuinely did move, and why
+
+One value, once the probes were honest: **`gi` 75,25,21 → 92,28,22**. That face is sun-blind — its
+entire brightness is indirect light — and two announced GI changes landed since the baseline was
+recorded: `1b4db02` (the shadowed world ends in a ramp instead of a cliff) and `a743ab0`
+(dominant-axis projection in the object's frame). Brighter and warmer is what a ramp instead of a
+cliff looks like on a surface whose whole budget is bounce. Ten render-touching commits sit between
+the 2026-07-21 baseline and here; that the other sixteen gates came back within a few codes is the
+surprise, not that one moved.
+
+### Repeatability was measured before anything was written down
+
+Five consecutive runs each of `centre`, `gi`, `penumbra`, `sunlit` and `shadow` returned
+**bit-identical** codes. This matters more than usual here, because whole-frame screenshots of this
+renderer are *not* reproducible — see §4d and `aver-render-nondeterminism`, ~2400 differing bytes
+run to run. The oracle survives that only because its probes sit in flat neighbourhoods, and that is
+now a **stated selection criterion** rather than a property it happened to have.
+
+### Verified across all nine configurations — 2026-07-29
+
+Every configuration was swept read-only with the repointed probes. **Both invariants pass in all
+nine**, and there were no crashes, no `BAD-PROBE`, no missing debug-layer totals, no non-zero
+corruption/error counts, no flakes and no new TDRs (`0x141` count 67 before and after).
+
+The strongest evidence that the new coordinates are the right ones is that they reproduce every
+structural distinction the old baseline encoded, at different pixels:
+
+- **`penumbra-rt` collapses onto `penumbra`'s exact value in precisely the four RT-unavailable
+  configurations** — `no-rt`, `sm60`, `all-off`, `no-dxc` — and differs in the four where RayQuery
+  exists. That pairing is the entire reason those two gates exist, and it is 8-for-8.
+- **`no-cons-raster` and `all-off` still shift GI** (`96,28,22` against `92,28,22` elsewhere). The
+  old baseline carried the same split at `76,26,22` against `75,25,21`: turning conservative
+  rasterisation off changes voxelisation, and it still does.
+- **WARP still differs from hardware by a single code**, now in blue (`23,40,87` against
+  `23,40,86`). It differed by one code before too, in red. A second, independent CPU implementation
+  of D3D12 agreeing to within one LSB is the result that was wanted.
+- **WARP's MSAA-on-GI split survives** — `ms-gi`/`ms-rt-gi` at `96,28,22` against `gi` at
+  `92,28,22`, exactly the split the old baseline recorded at `76,26,22` against `75,25,21`.
+
+Worth recording because it was expected and did not happen: **the WARP GI sky-colour fault did not
+recur.** §4d item 22 describes a WARP GI gate returning the sky colour instead of the scene, twice,
+at both 800 ms and 4 s of launch spacing. All seventeen WARP gates returned plausible scene values
+this run. That is one clean run, not a fix — the item stays open.
+
+### NOT YET DONE
+
+**The baseline is not re-recorded.** Everything above is measurement; `-Record` is the write, and it
+has not been run. Until it is, `gates.ps1` compares the new probes against the 2026-07-21 numbers and
+reports 153 failures — all of them value mismatches by construction, none of them findings.
+
+The probe repair and the re-record are deliberately **separate commits**, so the oracle move is one
+reviewable diff of nothing but numbers.
+
+**The Release baseline is invalid as of this change** and needs the same treatment. It is generated
+by the same `gates.ps1`, so repointing the probes invalidated it too; `-Release -Record` against a
+current `build-release` tree is what closes it.
 
 ---
 
