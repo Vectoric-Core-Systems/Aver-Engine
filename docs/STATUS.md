@@ -2491,6 +2491,50 @@ recur.** §4d item 22 describes a WARP GI gate returning the sky colour instead 
 at both 800 ms and 4 s of launch spacing. All seventeen WARP gates returned plausible scene values
 this run. That is one clean run, not a fix — the item stays open.
 
+### The Release sweep found a way `-Record` could poison the oracle, at ~1.3% per gate
+
+Sweeping Release read-only was meant to be a formality. 150 of 152 gates came back **bit-identical to
+Debug** — `/fp:precise` holding across every degraded path and WARP, which is the result the separate
+baselines exist to check for. The two that did not are the finding.
+
+Both read `14,14,16`, and both reported `viewport (0,270 45x24)`:
+
+```
+penumbra  raw(14,14,16) rect=0,270 45x24  then 54,67,105 rect=0,270 2750x1639
+centre    raw(14,14,16) rect=0,270 45x24  then NO-PROBE
+```
+
+`14,14,16` is the **dock clear colour** — `gates.ps1` has named it as such for months. The window
+comes up small and grows, and a run that samples during that window measures editor chrome. Four
+readings out of 304, about **1.3%**.
+
+**Nothing detected it, and the reason is worth stating.** The probe is a FRACTION of the viewport
+rect, so a probe inside a 45x24 rect *is* inside it: the engine tags the sample `in-viewport`, quite
+correctly, `insideReq` and `rectStable` both hold, and every guard passes. It is exactly the
+"plausible wrong pixel with a correct-looking rect" the retry comment was written about — and the
+retry only ever ran because the value disagreed with a baseline.
+
+**Under `-Record` there is no baseline to disagree with.** A recorded gate was never retried, so at
+1.3% across 153 gates a full re-record would have frozen the dock clear colour in as an expected
+value roughly twice, and exited 0. That is a gate which then passes forever while measuring nothing.
+
+Three fixes, in `f4ff2dd` and after:
+
+1. **A minimum viewport size.** A rect below 256 on either axis is the window still coming up, not a
+   layout; it is now `BAD-PROBE tiny-rect` and takes the retry path. It is a *parameter*, not a
+   constant, so the branch is testable — `-MinViewport 99999` forces every reading to look
+   degenerate, which is how the detection was checked rather than waiting for a 1-in-76 race.
+2. **The retry's value is what gets recorded.** `$recorded.Add()` took `$r.raw`, the first reading,
+   unconditionally — so a gate that read chrome and then measured perfectly still wrote the chrome.
+   Recording now asks "is this a real measurement", not "does it match", and a first reading that is
+   unusable is re-measured and replaced.
+3. **`-Record` refuses to write anything** if a gate crashed, probed outside the viewport, came back
+   on a degenerate rect, reported debug-layer errors, left a new TDR, or **broke an invariant** — and
+   says the file is UNCHANGED rather than leaving it half-written.
+
+`./scripts/record-gates.ps1` wraps the whole move: build, snapshot, record, print every value that
+moved old → new, then re-run read-only and require green.
+
 ### NOT YET DONE
 
 **The baseline is not re-recorded.** Everything above is measurement; `-Record` is the write, and it

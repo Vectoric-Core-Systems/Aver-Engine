@@ -30,6 +30,26 @@ param(
     [switch]   $Record,
     [switch]   $Release,
     [int]      $Frames = 40,
+    # The smallest 3D viewport that can be a real editor layout. Anything under this is the window
+    # still coming up, and the reading must be thrown away rather than believed.
+    #
+    # MEASURED, not guessed: a nine-configuration sweep produced four readings at
+    # `viewport (0,270 45x24)` out of 304 -- about 1.3% -- each returning raw(14,14,16), the dock
+    # clear colour.
+    #
+    # The reason this needs its own check is the nasty part. The probe is a FRACTION of the rect, so
+    # a probe inside a 45x24 rect is genuinely inside it: the engine tags the sample `in-viewport`,
+    # quite correctly, and every other guard passes. It is the "plausible wrong pixel with a
+    # correct-looking rect" the retry comment further down was written about, and nothing caught it.
+    #
+    # Under -Record that was a live hazard, not a theoretical one. A recorded gate was never retried
+    # -- there is no baseline for it to disagree with -- so at 1.3% a 153-gate record would have
+    # frozen the dock clear colour into the oracle as an expected value about twice, and exited 0.
+    #
+    # A parameter rather than a constant so the branch can be TESTED: `-MinViewport 99999` makes
+    # every reading count as degenerate, which is how the detection was checked without waiting for
+    # a 1-in-76 race to happen again.
+    [int]      $MinViewport = 256,
     [string]   $Exe = $(if ($Release) { "$PSScriptRoot\..\build-release\bin\Sandbox.exe" } else { "$PSScriptRoot\..\build\bin\Sandbox.exe" }),
     [string]   $BaselineFile = $(if ($Release) { "$PSScriptRoot\gates.baseline.release.txt" } else { "$PSScriptRoot\gates.baseline.txt" })
 )
@@ -234,7 +254,8 @@ function Invoke-Gate($exe, [string[]] $gateArgs, [string[]] $extra, [int] $frame
     $all = @('--frames', "$frames", '--debug-layer') + $gateArgs + $extra
     $out = & $exe @all 2>&1 | Out-String
     $exit = $LASTEXITCODE
-    $r = [pscustomobject]@{ raw = 'NO-PROBE'; place = '?'; debug = 'NO-TOTALS'; exit = $exit; rect = '?' }
+    $r = [pscustomobject]@{ raw = 'NO-PROBE'; place = '?'; debug = 'NO-TOTALS'; exit = $exit; rect = '?'
+                            rectW = 0; rectH = 0 }
     $probe = $out -split "`r?`n" | Select-String 'probe \(' | Select-Object -First 1
     if ($probe -match 'raw \(([\d, ]+)\)') { $r.raw = ($Matches[1] -replace '\s', '') }
     if ($probe -match '(in-viewport|OUTSIDE-VIEWPORT|VIEWPORT-MOVED)') { $r.place = $Matches[1] }
@@ -243,7 +264,13 @@ function Invoke-Gate($exe, [string[]] $gateArgs, [string[]] $extra, [int] $frame
     # at while still reporting `in-viewport`. Without the rect in the failure line, that is
     # indistinguishable from a shading regression -- which is exactly the confusion the probe's own
     # self-validation was added to end, and the runner should not throw the information away.
-    if ($probe -match 'viewport \((\d+),(\d+) (\d+)x(\d+)\)') { $r.rect = "$($Matches[1]),$($Matches[2]) $($Matches[3])x$($Matches[4])" }
+    if ($probe -match 'viewport \((\d+),(\d+) (\d+)x(\d+)\)') {
+        $r.rect  = "$($Matches[1]),$($Matches[2]) $($Matches[3])x$($Matches[4])"
+        # Kept as numbers too, so the size can be JUDGED and not merely printed. Printing it was the
+        # old plan and it is not enough: nobody reads the rect on a line that says PASS.
+        $r.rectW = [int]$Matches[3]
+        $r.rectH = [int]$Matches[4]
+    }
     # A MISSING totals line is itself a result: the device logs them at destruction, so its absence
     # means the process died before shutdown. That is how the WARP fault was first seen.
     $tot = $out -split "`r?`n" | Select-String 'debug layer totals' | Select-Object -First 1
@@ -288,6 +315,10 @@ foreach ($c in $selected) {
         $verdict = 'PASS'
         if ($r.exit -ne 0)                   { $verdict = "CRASH exit=0x{0:X8}" -f $r.exit }
         elseif ($r.place -ne 'in-viewport')  { $verdict = "BAD-PROBE $($r.place)" }
+        # A rect too small to be a layout. Checked BEFORE the debug-layer and value branches because
+        # such a run is not a measurement of anything -- see $MinViewport.
+        elseif ($r.rectW -lt $MinViewport -or $r.rectH -lt $MinViewport) {
+                                               $verdict = "BAD-PROBE tiny-rect $($r.rect)" }
         elseif ($r.debug -eq 'NO-TOTALS')    { $verdict = 'NO-TOTALS (died before shutdown?)' }
         elseif ($r.debug -notmatch '^C0 E0') { $verdict = "DEBUG-LAYER $($r.debug)" }
         elseif ($Record)                     { $verdict = 'recorded' }
@@ -305,21 +336,55 @@ foreach ($c in $selected) {
         # engine says so and this reads BAD-PROBE; the worrying variant is a plausible WRONG pixel
         # with a correct-looking rect, which is why both rects are printed and why a repeat is
         # required before anything is believed either way.
+        # $use is the reading that will be RECORDED and fed to the invariants. It starts as the first
+        # run and is replaced only by a retry that came back clean. Before this existed the first
+        # reading was recorded unconditionally, so a gate that read the dock clear colour out of a
+        # 45x24 window and then measured perfectly on retry still wrote the clear colour.
+        $use = $r
+
+        # A miss is run ONCE more before it is believed, and BOTH results are printed whatever
+        # happens. This is not a retry that hides a failure -- a gate that misses twice still fails,
+        # and a gate that misses once is reported as FLAKY with both values and both viewport rects,
+        # which is strictly more information than a single number.
+        #
+        # BAD-PROBE now retries under -Record too, and that is the point of the restructure. A
+        # recorded gate has no baseline to disagree with, so it never took this path -- which is
+        # exactly how a 1.3%-likely bad reading would have been frozen in silently.
         if ($verdict -like 'FAIL*' -or $verdict -like 'BAD-PROBE*') {
+            # WHY the first reading was rejected, kept for the message below. Without it a retry that
+            # also fails prints an ordinary value mismatch, and "the window came up at 45x24" becomes
+            # indistinguishable from "the shading moved" -- which is the single most expensive
+            # confusion this oracle produces.
+            # ...but only worth SAYING when the first reading was rejected for a reason other than
+            # its value. "FAIL [FAIL expected 98,37,30] expected 98,37,30" is noise, and noise in a
+            # 153-line report is how the interesting line gets skimmed past.
+            if ($verdict -like 'BAD-PROBE*') { $why = "[$verdict] " } else { $why = '' }
             Start-Sleep -Milliseconds $spacing
             $r2 = Invoke-Gate $Exe $g.args $extra $Frames
-            if ($r2.raw -eq $want -and $r2.place -eq 'in-viewport' -and $r2.exit -eq 0) {
-                $verdict = "FLAKY first=$($r.raw) rect=$($r.rect) / retry=$($r2.raw) rect=$($r2.rect)"
+            $r2Clean = $r2.exit -eq 0 -and $r2.place -eq 'in-viewport' -and
+                       $r2.rectW -ge $MinViewport -and $r2.rectH -ge $MinViewport -and
+                       $r2.debug -match '^C0 E0'
+            if ($Record) {
+                # Recording: the question is not "does it match" but "is this a real measurement".
+                if ($r2Clean) {
+                    $use = $r2
+                    $verdict = "recorded on retry (first $($r.raw) rect=$($r.rect))"
+                } else {
+                    $verdict = "FAIL ${why}unusable twice: $($r.raw) rect=$($r.rect) then $($r2.raw) rect=$($r2.rect)"
+                }
+            }
+            elseif ($r2.raw -eq $want -and $r2Clean) {
+                $verdict = "FLAKY ${why}first=$($r.raw) rect=$($r.rect) / retry=$($r2.raw) rect=$($r2.rect)"
             } else {
-                $verdict = "FAIL expected $want, got $($r.raw) rect=$($r.rect) then $($r2.raw) rect=$($r2.rect)"
+                $verdict = "FAIL ${why}expected $want, got $($r.raw) rect=$($r.rect) then $($r2.raw) rect=$($r2.rect)"
             }
         }
 
-        if ($verdict -notlike 'PASS*' -and $verdict -ne 'recorded' -and $verdict -notlike 'FLAKY*') { $failures++ }
+        if ($verdict -notlike 'PASS*' -and $verdict -notlike 'recorded*' -and $verdict -notlike 'FLAKY*') { $failures++ }
         if ($verdict -like 'FLAKY*') { $flaky++ }
-        Write-Host ("  {0,-14} raw({1,-12}) {2,-8} {3}" -f $g.name, $r.raw, $r.debug, $verdict)
-        $recorded.Add("$c | $($g.name) | $($r.raw)")
-        $seen["$c|$($g.name)"] = $r.raw
+        Write-Host ("  {0,-14} raw({1,-12}) {2,-8} {3}" -f $g.name, $use.raw, $use.debug, $verdict)
+        $recorded.Add("$c | $($g.name) | $($use.raw)")
+        $seen["$c|$($g.name)"] = $use.raw
         Start-Sleep -Milliseconds $spacing
     }
 }
@@ -385,11 +450,10 @@ if ($Record) {
     # must not be allowed to freeze in, and it is the mistake this repo has already come closest to
     # making.
     #
-    # FLAKY counts as a refusal too, and that is not belt-and-braces. The line below records
-    # `$r.raw` -- the FIRST reading -- always. A gate that came back BAD-PROBE and then passed on
-    # retry is scored FLAKY, which is deliberately not a failure, so without this the bad first
-    # value would be written as the expected one. Beyond that: a gate that needed a retry during a
-    # RECORDING run has no settled value to record. Run it again.
+    # $flaky is a BACKSTOP here and should always be 0 under -Record: the FLAKY verdict is only
+    # reachable on the comparison path, because recording asks "is this a real measurement" rather
+    # than "does it match". It is left in the condition so that a future edit which makes FLAKY
+    # reachable under -Record cannot silently start freezing unsettled values.
     if ($failures -gt 0 -or $flaky -gt 0) {
         Write-Host ""
         Write-Host "REFUSING TO RECORD: $failures gate(s) failed, $flaky flaky." -ForegroundColor Red
