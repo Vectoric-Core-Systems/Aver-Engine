@@ -71,3 +71,19 @@ if(TARGET Aver.Formats.Material)
   target_link_libraries(ActorSweep PRIVATE Aver.Formats.Material Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(ActorSweep PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# MakeSamples -- not a test either. A GENERATOR that synthesises a few short .wav files, so a
+# template project has sounds to play and the editor's audio import has real input to decode.
+#
+# SYNTHESISED rather than sourced: a downloaded sample carries somebody's licence into whatever
+# repository it lands in, and this tree already decided against that -- OcAudioTest ships no media
+# and reports a SKIP rather than a pass, on exactly that reasoning. Generated audio has no licence,
+# is byte-identical everywhere, and is retuned by editing a number.
+#
+# It emits .wav, NOT .ocaudio, on purpose: the point is to exercise the import path end to end, and a
+# generator that wrote the engine's own container would be testing only itself.
+#
+#     MakeSamples.exe "<project>\Content\Audio\Source"
+add_executable(MakeSamples ${CMAKE_SOURCE_DIR}/tools/MakeSamples.cpp)
+target_link_libraries(MakeSamples PRIVATE Aver.Core)
+set_target_properties(MakeSamples PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

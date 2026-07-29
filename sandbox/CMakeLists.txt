@@ -20,6 +20,13 @@ if(TARGET Aver.Formats.Roslyn)
   # on its own.
   target_compile_definitions(Sandbox PRIVATE AVER_HAVE_ROSLYN=1)
 endif()
+# The audio importer, behind the Content Browser's Import button: .wav/.mp3/.m4a/.flac -> .ocaudio.
+# A separate target like the mesh and material readers, and for the same reason: it pulls in Media
+# Foundation, which nothing else in the editor needs.
+if(TARGET Aver.Formats.Audio)
+  target_link_libraries(Sandbox PRIVATE Aver.Formats.Audio)
+  target_compile_definitions(Sandbox PRIVATE AVER_HAVE_AUDIO_IMPORT=1)
+endif()
 # The retained game UI and the render feature that draws it. Both unconditional: neither depends on
 # an optional module, and the renderer declines at create() on a backend with no GPU support.
 target_link_libraries(Sandbox PRIVATE Aver.UI Aver.Render.UI)

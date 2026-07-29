@@ -12,6 +12,9 @@
 #include "aver/formats/OcWorld.hpp"      // .ocworld: the level format the editor loads and saves
 #include "aver/formats/OcMesh.hpp"       // .ocmesh: the static mesh the Content Browser now loads
 #include "aver/formats/GltfImport.hpp"   // glTF/GLB -> .ocmesh, behind the Import button
+#if AVER_HAVE_AUDIO_IMPORT
+#  include "aver/formats/OcAudio.hpp"    // .wav/.mp3/.m4a/.flac -> .ocaudio, behind the same button
+#endif
 #include "aver/ui/UiDrawList.hpp"        // the retained game UI: what a widget tree produces...
 #include "aver/render/ui/UiRenderer.hpp" // ...and the render feature that puts one on the backbuffer
 #include "aver/ui/ui_abi.h"              // ...reached through the same C seam a game's HUD uses
@@ -770,6 +773,10 @@ public:
                 // After the caps are known, so a seeded manifest states values this build actually
                 // declares rather than whatever was in the struct before setDeviceInfo ran.
                 if (saveProject_ && !saveProjectDone_) { saveProjectDone_ = true; seedAndSaveProject(); }
+                if (!importSrc_.empty() && !importDone_) {
+                    importDone_ = true;
+                    importAsset(importSrc_, importDst_);
+                }
 #if AVER_MODULE_PBR
                 // The last link in the material chain. MaterialSystem is built to resolve texture
                 // references through a host-installed callback and, until this line, nothing
@@ -1804,6 +1811,10 @@ public:
     void setShowEditorPrefs(bool on) { if (on) showEditorPrefs_ = true; }   // --editor-prefs
     void setHudTest(int idx) { hudTest_ = idx; }   // --hud-preview <index>
     void setSaveProject(bool on) { saveProject_ = on; }   // --save-project
+    // --import <src> <destDir>: run one import through the Content Browser's own path.
+    // The button cannot be pressed headlessly, and an import that only a human can trigger
+    // is an import nothing can regression-test.
+    void setImportOnce(std::string src, std::string dst) { importSrc_ = std::move(src); importDst_ = std::move(dst); }
     bool* autoCompileFlag() { return &autoCompile_; }     // the menu checkbox binds straight to it
 
     void setClouds(f32 coverage) {
@@ -2071,6 +2082,8 @@ private:
     int hudPreviewIndex_ = -1;
     int hudTest_ = -1;
     bool saveProject_ = false;
+    std::string importSrc_, importDst_;
+    bool importDone_ = false;
     bool saveProjectDone_ = false;
     bool hudTestReported_ = false;
     f32 hudRectX_ = 0, hudRectY_ = 0, hudRectW_ = 0, hudRectH_ = 0;
@@ -4467,7 +4480,12 @@ private:
     // outcome to the Output Log.
     void drawImportModal() {
         if (!ImGui::BeginPopup("cbImport")) return;
-        ImGui::TextUnformatted("Import an asset by copying it into the selected folder.");
+        ImGui::TextUnformatted("Import an asset into the selected folder.");
+        // What it will DO, which differs by type and used not to be said anywhere: a model and a
+        // sound are converted into engine formats, everything else is copied. Somebody who expects a
+        // copy and gets a conversion has lost track of their source file.
+        ImGui::TextDisabled(".gltf/.glb become .ocmesh; .wav/.mp3/.m4a/.flac become .ocaudio.");
+        ImGui::TextDisabled("Anything else is copied as-is.");
         ImGui::SetNextItemWidth(420.0f * dpi_);
         ImGui::InputText("Source file", importPath_, sizeof(importPath_));
         const std::string dest = cbSelectedDir_.empty() ? project_.contentDir() : cbSelectedDir_;
@@ -4509,6 +4527,14 @@ private:
         std::string lower;
         for (const char c : ext) lower.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
         if (lower == ".gltf" || lower == ".glb") { importModel(src, destDir); return; }
+#if AVER_HAVE_AUDIO_IMPORT
+        // AUDIO IS CONVERTED, NOT COPIED, for the same reason a model is: a .wav dropped into
+        // Content used to be a .wav sitting in Content, which the mixer cannot open -- it reads
+        // .ocaudio and nothing else. The extension test lives in the formats module rather than here
+        // so the list of what can be imported has ONE owner; a second copy in the editor would be
+        // the one that went stale when a decoder was added.
+        if (fmt::isImportableAudio(src)) { importAudio(src, destDir); return; }
+#endif
 
         std::filesystem::copy_file(src, dest, ec);
         if (ec) { AVER_WARN("[Import] failed to copy '{}' -> '{}': {}", src, dest, ec.message());
@@ -4517,6 +4543,56 @@ private:
         cbStatus_ = "Imported " + name;
         cbInvalidate(destDir);
     }
+
+#if AVER_HAVE_AUDIO_IMPORT
+    // .wav / .mp3 / .m4a / .flac -> one .ocaudio in the destination folder.
+    //
+    // The SOURCE IS NOT COPIED. A model import writes only its .ocmesh and this matches: an engine
+    // that kept both would have two files claiming to be the same sound, one of which nothing loads,
+    // and the first person to delete "the duplicate" would have to guess which. Keep the original
+    // wherever it is authored; the project holds the engine's copy.
+    void importAudio(const std::string& src, const std::string& destDir) {
+        audio::SoundData data;
+        const fmt::AudioImportResult r = fmt::audioImportFile(src, data);
+        if (!r.ok) {
+            AVER_WARN("[Import] {} could not be decoded: {}",
+                      std::filesystem::path(src).filename().string(), r.error);
+            cbStatus_ = "Import failed - see the Output Log";
+            return;
+        }
+
+        // The conventional output name, asked of the module rather than assembled here -- the same
+        // one-owner argument as the extension test.
+        const std::string outName = std::filesystem::path(fmt::ocAudioPathFor(src)).filename().string();
+        const std::string out = destDir + "\\" + outName;
+        std::error_code ec;
+        if (std::filesystem::exists(out, ec)) {
+            AVER_WARN("[Import] '{}' already exists in {} - not overwritten", outName, destDir);
+            cbStatus_ = "Already imported";
+            return;
+        }
+
+        std::string why;
+        // The SOURCE NAME is recorded in the container. It is the only thing that can answer "what
+        // was this made from" once the original has moved, and a re-import is the one operation that
+        // needs to know.
+        if (!fmt::saveOcAudio(out, data, std::filesystem::path(src).filename().string(), &why)) {
+            AVER_WARN("[Import] could not write '{}': {}", out, why);
+            cbStatus_ = "Import failed - see the Output Log";
+            return;
+        }
+
+        const f64 seconds = data.sampleRate > 0
+                          ? static_cast<f64>(data.samples.size()) /
+                            static_cast<f64>(data.channels ? data.channels : 1) /
+                            static_cast<f64>(data.sampleRate) : 0.0;
+        AVER_INFO("[Import] '{}' -> {} ({} via {}, {} ch, {} Hz, {:.2f} s)",
+                  std::filesystem::path(src).filename().string(), outName,
+                  data.samples.size(), r.decoder, data.channels, data.sampleRate, seconds);
+        cbStatus_ = "Imported " + outName;
+        cbInvalidate(destDir);
+    }
+#endif
 
     // glTF/GLB -> one .ocmesh per mesh in the source, written into the destination folder and
     // registered immediately so it is usable without reopening the project.
@@ -6137,7 +6213,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and EXITS, touching no device.
         //
@@ -6194,6 +6270,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--editor-prefs")) showPrefs=true;   // screenshot aid, like --project-settings
         else if (!std::strcmp(argv[i],"--hud-preview") && i+1<argc) hudTest=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--save-project")) saveProject=true;
+        else if (!std::strcmp(argv[i],"--import") && i+2<argc) { importSrc=argv[++i]; importDst=argv[++i]; }
         else if (!std::strcmp(argv[i],"--new-script")) focusScript=true;
         // Holds the Tools dropdown open so it can be photographed. Opt-in, like the two above:
         // it changes only what hangs BELOW the menu bar, never the bar's height, but no oracle
@@ -6288,6 +6365,7 @@ Application* createApplication(int argc, char** argv) {
     app->setShowEditorPrefs(showPrefs);
     app->setHudTest(hudTest);
     app->setSaveProject(saveProject);
+    app->setImportOnce(importSrc, importDst);
     app->setUseWarp(warp);
     app->setDebugLayer(debugLayer);
     app->setProjectPath(project);
