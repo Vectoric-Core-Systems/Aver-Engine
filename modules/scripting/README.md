@@ -40,7 +40,7 @@ not by reading the code:
 | `nethost.dll` replaced with an unrelated DLL | `init declined: nethost.dll exports no get_hostfxr_path` |
 | bridge assembly not staged | `init declined: the managed bridge was not staged next to the executable …` |
 | runtimeconfig demanding a framework nobody has | `init declined: hostfxr_initialize_for_runtime_config failed (0x80008096) — the framework the bridge targets is not installed` |
-| bridge built to a different host contract | `init declined: the staged Aver.Scripting.Bridge.dll speaks a different host contract than this build (host v2) — rebuild the managed side` |
+| bridge built to a different host contract | `init declined: the staged Aver.Scripting.Bridge.dll speaks a different host contract than this build (host v3) — rebuild the managed side` |
 
 All thirteen oracle gates return their exact raw codes in every one of those runs. Scripting does
 not touch rendering, and the gates are how that is kept true.
@@ -52,7 +52,8 @@ not touch rendering, and the gates are how that is kept true.
    `Aver.Scripting.Bridge.runtimeconfig.json`.
 3. `hostfxr_get_runtime_delegate(hdt_load_assembly_and_get_function_pointer)`.
 4. Bind five `[UnmanagedCallersOnly]` entry points on `Aver.Scripting.Bridge.HostBridge` —
-   `Bootstrap`, `LoadScripts`, `UnloadScripts`, `Update`, `Shutdown` — and call `Bootstrap`.
+   `Bootstrap`, `LoadScripts`, `UnloadScripts`, `Update`, `Shutdown`, and the three HUD
+   entries `HudCount` / `HudName` / `HudDraw` — then call `Bootstrap`.
 
 The hostfxr declarations live in `src/ScriptHost.cpp` rather than coming from `nethost.h` /
 `hostfxr.h`. Those headers ship in the .NET **host pack**, which only exists on a machine with the
@@ -122,6 +123,36 @@ is logged and **disabled** for the session. Measured:
 [INFO ] [Survivor] still running at update 20
 ```
 
+## HUDs get their own three entries (contract v3)
+
+A HUD is neither a behaviour nor an actor. It has no lifecycle, so `Update` never reaches it, and no
+transform or class row, so none of the actor discovery finds it. Before v3 there was no way to call
+one at all: `aver_fw_spawn_preview` works only because an actor is a registered class with a vtable
+slot.
+
+`[AverHud]` (in `Aver.UI`) marks a class the bridge should discover at load. The contract is short on
+purpose — a public parameterless constructor and a `public void Draw(float dt)`. The attribute
+carries DATA only and never names the hook, which is the same rule `Aver.Framework/Attributes.cs`
+settles: `Draw` is found by SIGNATURE, and a marked class without one is reported by name at load
+rather than left to silently never draw.
+
+`Draw(float dt)` and nothing more is the load-bearing decision. A HUD whose signature demanded its
+game's state — `Draw(dt, shots, hits, recoil, cooldown)`, which is what SkyForge's had — can only
+ever be called by that game, which is exactly the editor's problem. State goes on the instance:
+gameplay writes the fields, the editor writes none and gets the defaults.
+
+Discovery matches the attribute **by name**, not by type. A HUD assembly resolves `Aver.UI` out of
+its own load context, so a typed comparison would compare `Type` objects from two contexts and match
+nothing at all — the same reason `WarnAboutNearMisses` matches the gameplay attributes by name.
+
+A HUD that throws is **disabled**, not retried. `Draw` runs once a frame, so a faulting one would
+otherwise write the same stack trace sixty times a second into the Output Log.
+
+The three entries are bound **separately** from the five above and are allowed to fail: a bridge
+predating them is already refused by the contract check, and a host that declined to start because an
+editor-facing entry point was missing would be refusing to run somebody's game over a preview
+feature.
+
 ## Two versioned contracts, checked at their own boundaries
 
 | Boundary | Version | Checked by |
@@ -148,6 +179,9 @@ the running editor. The sequence is three steps and each one belongs where it is
 UnloadScripts()   managed  OnShutdown on everything live, drop the list, unload the ALC
 dotnet build      native   off-thread, into <project>\Binaries\Scripts
 LoadScripts(dir)  managed  fresh collectible context, discover, construct, OnStart
+HudCount()        managed  how many [AverHud] classes the loaded assemblies declared
+HudName(i,buf,n)  managed  its display name, UTF-8, into a caller-owned buffer
+HudDraw(i, dt)     managed  call its Draw(dt); 1 if it ran
 ```
 
 The **rebuild is native** because the host already owns the `dotnet build` shell-out, and a managed
@@ -229,7 +263,7 @@ build\bin\Sandbox.exe --scripts SampleScripts
 not run unasked in the product:
 
 ```
-[INFO ] [Scripting] managed bridge online (contract v2, 10.0.10, API v1.0.0.0)
+[INFO ] [Scripting] managed bridge online (contract v3, 10.0.10, API v1.0.0.0)
 [INFO ] [GiSwitch] global illumination is Off at startup (status: Ready)
 [INFO ] [HelloBehaviour] OnStart from managed code - hosted in-process on 10.0.10
 [INFO ] [Scripting] loaded Aver.Scripting.SampleBehaviour.dll: 2 behaviour(s)

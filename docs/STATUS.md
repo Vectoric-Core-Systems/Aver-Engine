@@ -2112,11 +2112,15 @@ One trap recorded for whoever touches the formatter: `MaterialScript.cpp`'s floa
 accepts exponent literals — and is **not** fine for the actor rewriter, whose locked grammar has no
 exponent form (§4r, `docs/DESIGNER_REWRITE.md`).
 
-## 4r. The actor editor — built, linked, registered, and NEVER OPENED BY A HUMAN
+## 4r. The actor editor — built, linked, registered, and (as of §4u) SEEN
 
-**Read this heading literally.** As of `d04fe1a` the tab compiles, links, registers and its parser is
-checked against two real projects. **No pixel of it has been seen by anyone.** It is the largest
-untested surface in the tree and nothing below changes that.
+**This heading used to read "NEVER OPENED BY A HUMAN", and at `d04fe1a` that was exact.** It is not
+any more: §4u opened the tab repeatedly, screenshotted it against real projects, and found nine
+defects by doing so.
+
+The original warning is kept because the lesson is not: a subsystem that compiles, links, registers
+and passes tests can still never have been looked at, and this one was the largest such surface in
+the tree. The section below describes the architecture as built; its current state is §4u.
 
 An asset editor, separate from the level editor the way Unreal separates them. A `.cs` opens as an
 ASSET rather than as text: the placements it declares, drawn in local space, with the numbers beside
@@ -2266,6 +2270,109 @@ below are of those lines, which is why they are stated as checks rather than ass
   neither excuses it: the probes are layout-fragile and the editor gained an asset-editor tab strip,
   and the renderer has been measured NOT to be bit-deterministic run to run, which the pixel-exact
   oracle assumes. Both belong in §4d.
+
+## 4u. The editor phase — the tab opened, and nearly everything it touched was wrong somewhere
+
+Seventeen commits, `8e62406` to `e9ba7f5`. The theme is not a feature. It is that **opening the tab
+and looking at it** found defects that compiling, linking and passing tests had not.
+
+### The steps, in order
+
+| # | commit | what |
+|---|---|---|
+| 1 | `8e62406` | **Live view.** `aver_fw_spawn_preview` / `aver_fw_destroy_preview` split the spawn edge: bind + `build_models`, and no `OnBeginPlay`. Ten new assertions in `FrameworkTest`. |
+| 2 | `c96b51d` | **The watcher gets a consumer.** `DirectoryWatcher` had shipped complete with zero callers. Wired to the content root; `AssetEditor` gains `onFileChanged` / `onWatchLost`. `WatcherTest` is new. |
+| 3 | `44de451` | **Roslyn.** `averdesign`, the repo's first NuGet consumer, invoked from `Aver.Formats.Roslyn`. Runs only on `Malformed`. `RoslynTest` pins agreement with the built-in scanner. |
+| 4 | `6970f55` | **Viewport input.** Every gate tested `!io.WantCaptureMouse`, which stopped discriminating anything once the level became a window. |
+| 5 | `55c7bcf` | **Auto-compile on save**, debounced, with the `bin/` + `obj/` exclusion that stops it building forever. |
+| 6 | `7b15fe8` | **Component tree**, UE-style, plus camera-frustum and light-range wireframes. |
+| 7 | `78b4246` | **Three columns**, and a resizable non-square preview target. |
+| 8 | `b2f854f` | **Draggable dividers**, and an actor tab that hides the level's panels. |
+| 9 | `1d01471` | **Gizmo projection** takes both extents rather than one. |
+| 10 | `b6c4717` | **`EditorPrefs`** — the editor had nowhere at all to store UI state. Reset Layout scoped to the active tab. |
+| 11 | `ff9e782` | **Editor Preferences persist**, and the IDE choice stops being a scan-order index. |
+| 12 | `760f053` | **`writeOcproject`** — project settings into the manifest. `Gun.cs` opens on `Gun`. |
+| 13 | `dc1c886` | **`[AverHud]`** — scripting contract v2 to v3: `HudCount` / `HudName` / `HudDraw`. |
+| 14 | `c62e76a` | **`--save-project`**, writing declared defaults rather than device-clamped ones. |
+| 15 | `035b889` | **The game UI had never been visible.** A composition-order fix. |
+| 16 | `b288c70` | **Audio import** behind the Content Browser's button; `MakeSamples` generates a template's sounds. |
+| 17 | `e9ba7f5` | **Any valid actor opens**, and `BP_` stops being presented as a name. |
+
+### The nine defects, and how each was found
+
+Every one was invisible to the suites, which is the point of listing them.
+
+1. **The game UI had never reached a screen.** `overlayPass` drew to the backbuffer; ImGui then
+   painted the viewport texture over that exact region. Found because `--ui-demo` drew nothing, then
+   confirmed by stashing every change and screenshotting a clean HEAD build. `035b889`
+2. **Viewport input was entirely dead** — fly, dolly, pan, picking and the gizmo. `WantCaptureMouse`
+   is `1` over a docked window, so the gate meaning "is the mouse on the scene" always answered no.
+   Measured with a real cursor driven over a running editor. `6970f55`
+3. **`DirectoryWatcher::start()` dropped every change** until its worker's first read was
+   outstanding, while `watching()` said true. Found by `WatcherTest` on its first run. `c96b51d`
+4. **`parseActorClasses` only saw attributed classes**, while the runtime registers unattributed ones
+   perfectly well. Found by writing a nine-shape test; five shapes failed. `e9ba7f5`
+5. **`Gun.cs` opened on `BP_GunPart`** — the first *drawable* class in file order rather than the one
+   the file is named for. `760f053`
+6. **`writeOcproject` appended a blank line per save.** A `<=` loop consuming a phantom segment after
+   the trailing newline. Caught by asserting byte-for-byte idempotence rather than "it parses".
+   `760f053`
+7. **The manifest applied before the device attached**, so `setSettings` clamped GI against
+   capabilities the renderer did not yet know it had — quality went to Off while the two settings
+   that are not capability-gated survived. `760f053`
+8. **The right splitter clamped a divider POSITION against a WIDTH budget**, silently widening any
+   right column narrower than about a third of the tab. Only surfaced once widths persisted.
+   `b6c4717`
+9. **The three-column threshold never fired at 300% DPI** — it compared the side panels to a multiple
+   of themselves instead of asking whether a viewport still had room. `78b4246`
+
+### Standing traps this phase re-confirmed
+
+- **`voxi::Renderer::setSettings` CLAMPS to the device.** Never persist what you read back; keep the
+  requested value separately, or one open on a weaker machine downgrades the project for the team.
+- **MSBuild rewrites `.cs` under `obj/` on every build.** Any watcher-driven build must exclude it,
+  or it compiles in a loop at whatever rate `dotnet` manages.
+- **A `--` inside an XML comment breaks a `.csproj`** (`MSB4025`). Hit twice this phase.
+- **`atof` is locale-dependent.** `EditorPrefs` and the `.ocproject` writer both use
+  `from_chars` / `to_chars`; a comma-locale machine would otherwise write `230.5` and read back 230.
+- **A HUD or actor preview must not run `OnBeginPlay`.** SkyForge's game mode spawns eleven actors
+  there. That is what the preview spawn edge exists to prevent.
+
+### Verified this phase — 2026-07-29, tree at `e9ba7f5`
+
+| suite | result |
+|---|---|
+| `SceneTest` | 538 assertions, 0 failed |
+| `FrameworkTest` | **228** assertions, 0 failed (was 218; the preview edge added ten) |
+| `PhysicsTest` | 42 assertions, 0 failed |
+| `WatcherTest` | **new** — 33 checks against a real filesystem |
+| `EditorPrefsTest` | **new** — 22 checks |
+| `RoslynTest` | **new** — agreement with the scanner, and the cases it declines |
+| `ActorScriptTest` | 51, plus nine-shape coverage of what the tab accepts |
+| `ActorPreviewTest` | 51, plus the resize path |
+| `AudioTest`, `UiRenderTest`, `UiTest`, `MaterialTest`, `JsonTest`, `MeshTest`, `GltfTest`, `FormatTest` | pass |
+| `OcAudioTest` | passes, **1 check still SKIPPED** — Media Foundation not exercised |
+
+**Verified on a screen, by screenshot:** the actor tab against `Car.Designer.cs`, `FpsCharacter.cs`,
+`Gun.cs` and a camera/light probe actor; the three-column layout at 300% DPI; the level's panels
+hiding and returning; Project Settings applying a manifest; Editor Preferences round-tripping;
+`--ui-demo`; and SkyForge's `PlayerHud` drawing through `[AverHud]`.
+
+**STILL NOT verified, and each is specific rather than a caveat:**
+
+- **No sound has been played.** The template now holds four `.ocaudio` files and nothing references
+  them. §4p stands unchanged.
+- **The Media Foundation import path** remains uncovered; the `.wav` arm runs on every invocation.
+- **`./scripts/gates.ps1` fails 19 of 19**, and was measured failing *identically* on a clean HEAD
+  build with every change stashed — so the breakage predates this phase. Two are **invariant**
+  failures: five gates defined to differ return one value, which says the probes sample the wrong
+  pixels rather than that shading regressed. **Not re-recorded.** See §4d and the memory note
+  `aver-gates-red-at-head`.
+- **No editor tab hosts a HUD yet.** `--hud-preview` proves the seam; the UI editor is not built.
+- **The actor tab's own Save does not compile** unless Auto-compile on Save is on. That is by design,
+  but it is the first thing somebody will expect otherwise.
+
+---
 
 ## 5. Formats — implemented loaders
 

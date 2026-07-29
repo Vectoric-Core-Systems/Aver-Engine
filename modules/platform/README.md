@@ -173,9 +173,24 @@ coalesced events — printing millisecond stamps and the worst poll duration.
 
 Exactly one event per logical change, in every case. 31 assertions, passing in Debug and Release.
 
-**A save from a real editor has not been driven through this harness.** It is one of the shapes
-above — an in-place `MODIFIED` burst, or the atomic-replace pair — but that is inference, not a
-measurement, and an earlier revision of this file asserted it as one.
+**A save from a real editor HAS now been driven through this, and the watcher has a consumer.**
+
+Both were open at the time this file first claimed them. The editor now starts a watch on the
+project's Content root when a project opens, pumps it once a frame before the tabs draw, and routes
+each event to whichever asset editor owns that path. Measured with the editor running: an external
+write to `Scripts/Target.cs` produced one `Modified` event, the owning tab was told, and the tab
+re-read the file.
+
+**Wiring it up immediately found a bug this harness had not.** `start()` opened the directory handle,
+spawned the worker and returned — but the kernel only records changes for a handle while a
+`ReadDirectoryChangesW` is outstanding, and that call happens at the top of the worker's loop. So
+`start()` handed back a watcher whose `watching()` said true and which silently dropped everything
+until the thread got going: the first file written after `start()` was never reported, the second
+always was. `start()` now waits on an event the worker sets the instant its first read is in flight,
+fired on every loop exit too, so a first read that fails does not block `start()` for the full
+backstop.
+
+That is what `tests/platform/WatcherTest` exists for, and it found it on its first run.
 
 Overflow was exercised three ways, and they are not equally well covered:
 
