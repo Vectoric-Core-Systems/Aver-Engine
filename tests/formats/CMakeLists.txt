@@ -26,6 +26,17 @@ target_link_libraries(MeshTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(MeshTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# LandscapeTest — `.ocland`, the landscape heightfield. Its own executable for MeshTest's reason: the
+# fixtures are synthesised in memory, so it has nothing to say when handed a file path.
+#
+# It links nothing but Aver.Formats, and that is the point of landscape stage 1 rather than an
+# accident of it: the whole data model is checkable with no device, no .NET and no GPU, so the terrain
+# arithmetic is settled before anything tries to draw it.
+add_executable(LandscapeTest src/LandscapeTest.cpp)
+target_link_libraries(LandscapeTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(LandscapeTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # MaterialTest — the .ocmat reader/writer and the mip filter. A SECOND executable rather than more
 # cases in FormatTest, because it is the only one that needs the material DLL: a machine where
 # Aver.Render.PBR.dll fails to load would otherwise report the .ocbeam parser as broken.

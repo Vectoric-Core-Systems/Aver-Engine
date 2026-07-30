@@ -1,0 +1,200 @@
+// `.ocland`, the landscape heightfield. Exit code = failure count.
+//
+// Runs entirely on the CPU with no device, which is the property landscape stage 1 exists to establish:
+// the whole data model can be checked on a machine with no GPU before a single triangle is drawn.
+#include "aver/core/Log.hpp"
+#include "aver/formats/OcLand.hpp"
+
+#include <cmath>
+#include <string>
+#include <vector>
+
+using namespace aver;
+
+static int g_checks = 0, g_failures = 0;
+
+static void check(bool cond, const std::string& what) {
+    ++g_checks;
+    if (cond) { AVER_INFO("  ok    {}", what); return; }
+    AVER_ERROR("   FAIL  {}", what);
+    ++g_failures;
+}
+
+// A grid whose every sample is DISTINGUISHABLE and ASYMMETRIC in its two indices:
+//   height(ix, iy) = iy*1000 + ix
+// A transposed read swaps them, and 1000*ix + iy is a completely different surface -- so a row/column
+// mix-up fails loudly here instead of producing a plausible-looking landscape that is rotated ninety
+// degrees from what was authored. A symmetric fixture could not tell the two apart at all.
+static fmt::OcLandData makeGrid(u32 n, f32 spacing = 100.0f) {
+    fmt::OcLandData d;
+    d.sampleCount = n;
+    d.spacingCm = spacing;
+    d.originCm[0] = 500.0f;
+    d.originCm[1] = -250.0f;
+    d.originCm[2] = 0.0f;
+    d.heights.resize(static_cast<usize>(n) * n);
+    for (u32 iy = 0; iy < n; ++iy)
+        for (u32 ix = 0; ix < n; ++ix)
+            d.heights[static_cast<usize>(iy) * n + ix] =
+                static_cast<f32>(iy) * 1000.0f + static_cast<f32>(ix);
+    return d;
+}
+
+int main() {
+    AVER_INFO("=== .ocland round trip ===");
+    {
+        const u32 N = 9;                 // deliberately not a power of two and not a multiple of 8
+        const fmt::OcLandData src = makeGrid(N);
+
+        std::vector<u8> bytes;
+        std::string why;
+        check(fmt::writeOcLand(src, bytes, &why), "writes (" + why + ")");
+        check(bytes.size() > 64, "produced a container of " + std::to_string(bytes.size()) + " bytes");
+
+        fmt::OcLandData back;
+        check(fmt::parseOcLand(bytes.data(), bytes.size(), back, &why), "parses back (" + why + ")");
+        check(back.valid(), "the result is internally consistent");
+        check(back.sampleCount == N, "sampleCount survives");
+        check(back.spacingCm == src.spacingCm, "spacing survives");
+        check(back.originCm[0] == src.originCm[0] && back.originCm[1] == src.originCm[1],
+              "origin survives");
+
+        // WITHIN ONE QUANTISATION STEP, not exactly: heights are u16 across the grid's own relief, so
+        // the step here is (8008 - 0) / 65535 = 0.122 cm. Asserting equality would be asserting that a
+        // lossy encoding is lossless.
+        const f32 step = 8008.0f / 65535.0f;
+        f32 worst = 0.0f;
+        for (u32 iy = 0; iy < N; ++iy) {
+            for (u32 ix = 0; ix < N; ++ix) {
+                const f32 want = static_cast<f32>(iy) * 1000.0f + static_cast<f32>(ix);
+                worst = std::fmax(worst, std::fabs(back.heightAt(ix, iy) - want));
+            }
+        }
+        check(worst <= step,
+              "every height is within one quantisation step (worst " + std::to_string(worst) +
+              " cm, step " + std::to_string(step) + ")");
+
+        // THE TRANSPOSE TRAP. If rows and columns were swapped anywhere in the encode/decode, this
+        // sample would come back as 1*1000 + 7 rather than 7*1000 + 1.
+        check(std::fabs(back.heightAt(1, 7) - 7001.0f) <= step,
+              "sample (ix=1, iy=7) is 7001, not 1007 -- rows and columns are not transposed");
+
+        // Bounds are RECOMPUTED, so they must match the data rather than whatever was written.
+        check(std::fabs(back.boundsMin[2] - 0.0f) <= step, "bounds min z recomputed from the heights");
+        check(std::fabs(back.boundsMax[2] - 8008.0f) <= step, "bounds max z recomputed");
+        check(std::fabs(back.boundsMax[0] - (src.originCm[0] + 800.0f)) < 0.01f,
+              "footprint is (n-1) spacings wide, not n");
+
+        // The axis convention, asserted rather than left in a comment.
+        f32 w[3];
+        back.worldAt(2, 3, w);
+        check(std::fabs(w[0] - (src.originCm[0] + 200.0f)) < 0.01f, "column ix runs along +X");
+        check(std::fabs(w[1] - (src.originCm[1] + 300.0f)) < 0.01f, "row iy runs along +Y");
+        check(std::fabs(w[2] - 3002.0f) <= step, "height is the +Z component");
+    }
+
+    AVER_INFO("=== degenerate and hostile input ===");
+    {
+        std::string why;
+        fmt::OcLandData out;
+
+    // ORDER OF EVALUATION. Every message below is built from `why` in a statement SEPARATE from the
+    // call that fills it, and that is not style. C++ leaves the order of a function's argument
+    // evaluation unspecified, so `check(!parse(..., &why), "..." + why)` may build the string first --
+    // and it did: the first run of this test reported the flipped-magic case with an empty reason and
+    // the flipped-header case with "bad magic", each line carrying the PREVIOUS case's reason. The
+    // assertions were all correct and every refusal was real; only the diagnostics lied, which is the
+    // worst combination because nothing fails until somebody trusts them.
+    auto refused = [&](bool didRefuse, const std::string& what) {
+        check(didRefuse, what + " (" + why + ")");
+    };
+
+
+        // A FLAT section: zero relief, which is the case that divides by the span. It must encode
+        // exactly, not produce infinities.
+        fmt::OcLandData flat = makeGrid(4);
+        for (f32& h : flat.heights) h = 1234.5f;
+        std::vector<u8> flatBytes;
+        check(fmt::writeOcLand(flat, flatBytes, &why), "a perfectly flat section writes (" + why + ")");
+        check(fmt::parseOcLand(flatBytes.data(), flatBytes.size(), out, &why),
+              "and parses (" + why + ")");
+        bool allFlat = true;
+        for (f32 h : out.heights) if (std::fabs(h - 1234.5f) > 0.01f) allFlat = false;
+        check(allFlat, "every sample of a flat section decodes exactly (no divide by a zero span)");
+
+        // Refused rather than half-read. Each of these is a real way a file arrives broken.
+        std::vector<u8> good;
+        check(fmt::writeOcLand(makeGrid(8), good, &why), "a reference file for the corruption cases");
+
+        std::vector<u8> badMagic = good;
+        badMagic[0] ^= 0xFF;
+        why.clear();
+        { const bool r = !fmt::parseOcLand(badMagic.data(), badMagic.size(), out, &why);
+          refused(r, "a flipped magic byte is refused"); }
+
+        std::vector<u8> badHeader = good;
+        badHeader[0x0A] ^= 0x01;        // inside the range the header CRC32C covers
+        why.clear();
+        { const bool r = !fmt::parseOcLand(badHeader.data(), badHeader.size(), out, &why);
+          refused(r, "a flipped header byte is caught by the header CRC"); }
+
+        std::vector<u8> badPayload = good;
+        badPayload[badPayload.size() - 1] ^= 0x01;
+        why.clear();
+        { const bool r = !fmt::parseOcLand(badPayload.data(), badPayload.size(), out, &why);
+          refused(r, "a flipped last payload byte is caught by the chunk hash"); }
+
+        std::vector<u8> truncated(good.begin(), good.end() - 16);
+        why.clear();
+        { const bool r = !fmt::parseOcLand(truncated.data(), truncated.size(), out, &why);
+          refused(r, "a truncated file is refused"); }
+
+        why.clear();
+        { const bool r = !fmt::parseOcLand(good.data(), 4, out, &why);
+          refused(r, "a file shorter than the header is refused"); }
+        check(!fmt::parseOcLand(nullptr, 0, out, &why), "null input is refused rather than read");
+
+        // A grid too small to have a quad at all.
+        fmt::OcLandData tiny;
+        tiny.sampleCount = 1;
+        tiny.spacingCm = 100.0f;
+        tiny.heights.assign(1, 0.0f);
+        std::vector<u8> tinyBytes;
+        why.clear();
+        { const bool r = !fmt::writeOcLand(tiny, tinyBytes, &why);
+          refused(r, "a 1x1 grid is refused -- one sample is a point, not a surface"); }
+
+        // Inconsistent input: a header that claims more samples than the payload holds.
+        fmt::OcLandData lying = makeGrid(4);
+        lying.sampleCount = 5;          // heights still hold 16, not 25
+        std::vector<u8> lyingBytes;
+        why.clear();
+        { const bool r = !fmt::writeOcLand(lying, lyingBytes, &why);
+          refused(r, "a sampleCount that disagrees with the height count is refused"); }
+    }
+
+    AVER_INFO("=== forward compatibility ===");
+    {
+        // The property the container's Required flag exists to give: a file written by a LATER writer,
+        // carrying a chunk this build has never heard of, must still load. Without this the first time
+        // splat weights are added, every older editor stops opening every landscape.
+        std::string why;
+        std::vector<u8> bytes;
+        check(fmt::writeOcLand(makeGrid(8), bytes, &why), "a base file");
+
+        fmt::Avr1File file;
+        check(fmt::parseAvr1(bytes.data(), bytes.size(), file, &why), "reopened as a container");
+        std::vector<u8> future(64, 0xAB);
+        file.add(fmt::avrFourCC("LMSK"), std::move(future), /*flags*/0);   // NOT Required
+        std::vector<u8> withFuture;
+        check(fmt::writeAvr1(file, withFuture, &why), "rewritten with an unknown chunk added");
+
+        fmt::OcLandData out;
+        check(fmt::parseOcLand(withFuture.data(), withFuture.size(), out, &why),
+              "an unknown non-Required chunk is skipped and the landscape still loads (" + why + ")");
+        check(out.valid() && out.sampleCount == 8, "and the surface is intact");
+    }
+
+    AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
+    return g_failures;
+}
