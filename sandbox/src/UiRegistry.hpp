@@ -72,6 +72,12 @@ public:
 
     // Everything drawn last frame, as "name=x,y,w,h" separated by spaces.
     //
+    // A MENU ITEM ONLY APPEARS WHILE ITS MENU IS OPEN, and that is correct rather than a limitation:
+    // the list describes what is ON SCREEN, and an item inside a closed menu genuinely cannot be
+    // clicked. So driving one is two steps -- click "menu.window", then click "window.outputLog" --
+    // which is exactly what a user does. A registry that listed closed-menu items would be offering
+    // click targets that do not exist.
+    //
     // THIS LIST IS THE CLICKABLE SURFACE. It is generated from what actually drew, so it cannot claim a
     // button that is not there -- which is what makes "can this be driven like a user would?" a question
     // with an answer rather than an aspiration.

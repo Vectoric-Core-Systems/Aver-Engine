@@ -3322,8 +3322,11 @@ private:
                 const bool haveProject = project_.valid();
                 ImGui::BeginDisabled(!haveProject);
                 if (ImGui::MenuItem("New Level")) { unloadLevel(); levelName_ = "untitled"; }
+                uiReg_.track("file.newLevel");
                 if (ImGui::MenuItem("Open Level")) loadStartMap();
+                uiReg_.track("file.openLevel");
                 if (ImGui::MenuItem("Save Level", "Ctrl+S") && !levelPath_.empty()) saveLevel(levelPath_);
+                uiReg_.track("file.saveLevel");
                 ImGui::EndDisabled();
                 if (!haveProject && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip("Open or create a project first - a level belongs to one.");
@@ -3338,10 +3341,14 @@ private:
             uiReg_.track("menu.edit");
             if (open_edit){
                 if (ImGui::MenuItem("Undo", "Ctrl+Z", false, canUndo())) undo();
+                uiReg_.track("edit.undo");
                 if (ImGui::MenuItem("Redo", "Ctrl+Y", false, canRedo())) redo();
+                uiReg_.track("edit.redo");
                 ImGui::Separator();
                 if (ImGui::MenuItem("Editor Preferences...")) showEditorPrefs_ = true;
+                uiReg_.track("edit.editorPreferences");
                 if (ImGui::MenuItem("Project Settings...")) showProjectSettings_ = true;
+                uiReg_.track("edit.projectSettings");
                 ImGui::EndMenu();
             }
                         const bool open_window = ImGui::BeginMenu("Window");
@@ -3353,7 +3360,9 @@ private:
                 ImGui::MenuItem("World Outliner"); ImGui::MenuItem("Details");
                 // Checked against the drawer state, so the menu reports what is actually up.
                 if (ImGui::MenuItem("Content Browser", "Ctrl+Space", drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
+                uiReg_.track("window.contentBrowser");
                 if (ImGui::MenuItem("Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
+                uiReg_.track("window.outputLog");
                 ImGui::Separator();
                 // The GAME UI, which is a different system from every other item in this menu: those
                 // are ImGui panels belonging to the editor, this is Aver.UI drawing onto the
@@ -3361,6 +3370,7 @@ private:
                 // initialise, rather than offering a switch that does nothing.
                 ImGui::BeginDisabled(gameUi_ == nullptr);
                 if (ImGui::MenuItem("Game UI Demo", nullptr, showUiDemo_)) showUiDemo_ = !showUiDemo_;
+                uiReg_.track("window.gameUiDemo");
                 ImGui::EndDisabled();
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip(gameUi_ ? "A hand-written Aver.UI draw list, until there is a widget tree to produce one."
@@ -3437,6 +3447,7 @@ private:
         // click rebuilds and hot-swaps the project's scripts, and the icon ON the button says whether
         // disk is built. The play group centres on an absolute position, so this does not shift it.
         tools_.drawCompileButton(project_, dpi_, compileIconUiId_);
+        uiReg_.track("toolbar.compileCs");
         ImGui::SameLine();
         // Play controls, centred like Unreal's.
         {
