@@ -225,6 +225,73 @@ float3 skyColorFull(float3 dir)
 // above the horizon; below it, the ground now answers instead of the sky continuing underneath.
 float3 skyColor(float3 dir){ return skyColorFull(dir); }
 
+// ---- fog ---------------------------------------------------------------------------------------
+// MOVED UP HERE from below the shaders, because the base PBR pixel shader now calls averApplyFog and
+// HLSL needs a declaration before use. It sits directly under skyColor() because averFogInscatter
+// reads skyColorFull -- fog IS the sky seen through depth, so the dependency runs this way and only
+// this way.
+// ---- camera / post. Deliberately NOT the material's: fog, tonemap and gamma are properties of
+// the camera looking at the scene, and a material system that owned them would make every shading
+// model reimplement them identically. ----
+// EXPONENTIAL HEIGHT FOG, solved analytically along the view ray rather than marched.
+//
+// For a density that falls off with altitude, d(z) = d0 * exp(-(z - h0) * k), the optical depth
+// along a segment has a closed form: the integral of exp(-k z) over a straight line is
+// (1 - exp(-k dz)) / (k dz) times the density at the near end, times the segment length. So the
+// whole thing is one exp and one divide, and it is EXACT rather than a sum of slabs.
+//
+// k == 0 collapses it to d0 * length, which is the uniform distance fog this engine had -- a grey
+// veil that thickens with distance alone, so a mountain top is as hazy as the valley floor. Any
+// positive falloff gives what people mean by fog: haze that pools low and clears with altitude.
+// The default is 0, so nothing moves until somebody authors a falloff.
+float averFogFactor(float3 wpos) {
+    float3 a = gCamPos.xyz;
+    float3 v = wpos - a;
+    float len = length(v);
+    float start = gFogParams.z;
+    if (len <= start) return 0.0;
+
+    float k  = gFogParams.x;
+    float d0 = gFogColor.a;
+    float tau;
+    if (k <= 1e-8) {
+        tau = d0 * (len - start);
+    } else {
+        float3 dir = v / max(len, 1e-6);
+        a += dir * start;
+        float seg = len - start;
+        float dz = dir.z * seg;
+        float kdz = k * dz;
+        // The dz -> 0 limit of (1 - exp(-x))/x is 1, and the guard is on the PRODUCT because that is
+        // the quantity that vanishes -- a horizontal ray through thick fog has a large seg and a
+        // zero dz, and testing dz alone would divide by nothing at exactly the common case.
+        float f = abs(kdz) > 1e-4 ? (1.0 - exp(-kdz)) / kdz : 1.0;
+        tau = d0 * exp(-(a.z - gFogParams.y) * k) * seg * f;
+    }
+    return saturate(1.0 - exp(-tau)) * gFogParams.w;
+}
+
+// The in-scatter target is THE SKY ALONG THE VIEW RAY, tinted by the authored fog colour.
+//
+// It used to be a constant. A ray that hits nothing has infinite optical depth, so its in-scattered
+// radiance is the limit distant geometry converges to -- and with a constant target the two limits
+// were independently authored numbers that did not match. Distant ground came out brighter than the
+// sky above it (the opposite of aerial perspective) with a hard step at the horizon wherever they
+// met. Taking the sky as the target makes them agree BY CONSTRUCTION: there is no pair of values
+// left that can disagree.
+//
+// gFogColor is a TINT on that, not a replacement, so a level can still say "the air here is warmer
+// than the sky" without reintroducing a second horizon.
+float3 averFogInscatter(float3 wpos) {
+    float3 dir = normalize(wpos - gCamPos.xyz);
+    return skyColorFull(dir) * srgbToLin(gFogColor.rgb);
+}
+
+float3 averApplyFog(float3 color, float3 wpos) {
+    return lerp(color, averFogInscatter(wpos), averFogFactor(wpos));
+}
+
+
 // The sky as LIGHT: the cosine-weighted average radiance over the hemisphere a surface with normal
 // N can see. This is what a diffuse ambient term needs, and it is NOT skyColor(N).
 //
@@ -318,10 +385,14 @@ float4 plainShadeSurface(VSOut i, float sunVis, float3 indirectRadiance, float a
     ambient *= ao;   // whatever produced the indirect term already knows what is occluded
     float3 color = direct + ambient + indirect + envSpec * 0.35;
 
-    // distance fog (linear space)
-    float dist = length(i.wpos - gCamPos.xyz);
-    float fog = 1.0 - exp(-dist * gFogColor.a);
-    color = lerp(color, srgbToLin(gFogColor.rgb), saturate(fog));
+    // THE SAME FOG VOXI USES. This path had its own: a flat lerp towards gFogColor over
+    // 1-exp(-dist*a), with no sky and no height falloff -- so the same scene fogged differently
+    // depending on which renderer drew it, and the flat one could not agree with the sky because
+    // it never looked at it. That is the 'void fog does not match the sky' symptom.
+    //
+    // averApplyFog takes the sky along the view ray as the in-scatter target and treats
+    // gFogColor as a TINT, so the two agree by construction rather than by matching swatches.
+    color = averApplyFog(color, i.wpos);
 
     // LINEAR RADIANCE, not a display colour. The scene target is HDR and the tonemap is the last
     // thing that happens to the frame, in the post chain — a shader that tonemapped here would be
@@ -329,66 +400,6 @@ float4 plainShadeSurface(VSOut i, float sunVis, float3 indirectRadiance, float a
     return float4(color, gBaseColor.a);
 }
 
-// ---- camera / post. Deliberately NOT the material's: fog, tonemap and gamma are properties of
-// the camera looking at the scene, and a material system that owned them would make every shading
-// model reimplement them identically. ----
-// EXPONENTIAL HEIGHT FOG, solved analytically along the view ray rather than marched.
-//
-// For a density that falls off with altitude, d(z) = d0 * exp(-(z - h0) * k), the optical depth
-// along a segment has a closed form: the integral of exp(-k z) over a straight line is
-// (1 - exp(-k dz)) / (k dz) times the density at the near end, times the segment length. So the
-// whole thing is one exp and one divide, and it is EXACT rather than a sum of slabs.
-//
-// k == 0 collapses it to d0 * length, which is the uniform distance fog this engine had -- a grey
-// veil that thickens with distance alone, so a mountain top is as hazy as the valley floor. Any
-// positive falloff gives what people mean by fog: haze that pools low and clears with altitude.
-// The default is 0, so nothing moves until somebody authors a falloff.
-float averFogFactor(float3 wpos) {
-    float3 a = gCamPos.xyz;
-    float3 v = wpos - a;
-    float len = length(v);
-    float start = gFogParams.z;
-    if (len <= start) return 0.0;
-
-    float k  = gFogParams.x;
-    float d0 = gFogColor.a;
-    float tau;
-    if (k <= 1e-8) {
-        tau = d0 * (len - start);
-    } else {
-        float3 dir = v / max(len, 1e-6);
-        a += dir * start;
-        float seg = len - start;
-        float dz = dir.z * seg;
-        float kdz = k * dz;
-        // The dz -> 0 limit of (1 - exp(-x))/x is 1, and the guard is on the PRODUCT because that is
-        // the quantity that vanishes -- a horizontal ray through thick fog has a large seg and a
-        // zero dz, and testing dz alone would divide by nothing at exactly the common case.
-        float f = abs(kdz) > 1e-4 ? (1.0 - exp(-kdz)) / kdz : 1.0;
-        tau = d0 * exp(-(a.z - gFogParams.y) * k) * seg * f;
-    }
-    return saturate(1.0 - exp(-tau)) * gFogParams.w;
-}
-
-// The in-scatter target is THE SKY ALONG THE VIEW RAY, tinted by the authored fog colour.
-//
-// It used to be a constant. A ray that hits nothing has infinite optical depth, so its in-scattered
-// radiance is the limit distant geometry converges to -- and with a constant target the two limits
-// were independently authored numbers that did not match. Distant ground came out brighter than the
-// sky above it (the opposite of aerial perspective) with a hard step at the horizon wherever they
-// met. Taking the sky as the target makes them agree BY CONSTRUCTION: there is no pair of values
-// left that can disagree.
-//
-// gFogColor is a TINT on that, not a replacement, so a level can still say "the air here is warmer
-// than the sky" without reintroducing a second horizon.
-float3 averFogInscatter(float3 wpos) {
-    float3 dir = normalize(wpos - gCamPos.xyz);
-    return skyColorFull(dir) * srgbToLin(gFogColor.rgb);
-}
-
-float3 averApplyFog(float3 color, float3 wpos) {
-    return lerp(color, averFogInscatter(wpos), averFogFactor(wpos));
-}
 
 // ================= volumetric clouds =================
 // A single raymarched layer, evaluated ONLY on sky pixels. That is the whole of what makes it cheap:
