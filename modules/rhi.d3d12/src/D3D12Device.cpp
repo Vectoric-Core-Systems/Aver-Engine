@@ -306,7 +306,10 @@ float4 PSky(SkyOut i) : SV_TARGET {
     float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
     float3 ray = normalize(far.xyz / far.w - gCamPos.xyz);
     float3 L = normalize(gLightDir.xyz);
-    float3 sky = skyColor(ray);
+    // THE ONLY PLACE THE FULL SCATTERING INTEGRAL RUNS. Everything else in the engine reads the
+    // two-colour dome, which the physical model fits on the CPU each frame -- so a physical sky
+    // costs one fullscreen march and nothing at all per shaded surface.
+    float3 sky = averAtmoOn() ? averSkyPhysical(ray) : skyColor(ray);
     float sd = saturate(dot(ray, L));
     float3 sunC = srgbToLin(gLightColor.rgb) * gSkyParams.z;
     // The DISK is a hard-edged test against the authored angular radius, not a power curve: half a
@@ -315,7 +318,10 @@ float4 PSky(SkyOut i) : SV_TARGET {
     float cosR = gSkyParams.w;
     float disk = smoothstep(cosR - 0.0004, cosR + 0.0002, sd);
     sky += sunC * disk * 14.0;
-    sky += sunC * pow(sd, 12.0) * 0.30;    // the glow around it, which is atmosphere and not sun
+    // The glow around it. Authored as a power curve, because the authored dome has no air in it to
+    // scatter; under the physical model the Mie forward lobe already IS that glow, and adding this
+    // on top would be counting the same light twice.
+    if (!averAtmoOn()) sky += sunC * pow(sd, 12.0) * 0.30;
 
     // Clouds LAST, so they occlude the sun disk and the glow rather than being lit through them.
     // Costs nothing at all when the layer is off or the ray never enters it.
@@ -374,6 +380,13 @@ struct PerFrameCB {
     f32 fogParams[4];    // x height falloff, y fog height, z start distance, w max opacity
     f32 cloudParams[4];  // x coverage, y density, z layer bottom, w layer top
     f32 cloudMotion[4];  // xy wind offset in world units, z 1/feature size, w enabled
+    // ---- the physical atmosphere (rhi::AtmosphereProfile), mirrored in the prelude the same way.
+    f32 atmoRayleigh[4]; // rgb scattering per km, w scale height km
+    f32 atmoMie[4];      // x scatter, y extinction, z scale height km, w phase g
+    f32 atmoOzone[4];    // rgb absorption per km, w tent half-width km
+    f32 atmoPlanet[4];   // x planet radius km, y atmosphere top radius km, z world->km, w on/off
+    f32 atmoTune[4];     // x ozone centre km, y multi-scatter gain, z view steps, w aerial steps
+    f32 atmoSunE0[4];    // rgb sun irradiance above the air, w ground albedo
 };
 
 // MIRRORS `cbuffer AverPost : register(b0)` in rhi::postShaderSource() FIELD FOR FIELD. Same
@@ -759,6 +772,9 @@ public:
     }
     void setSkyAtmosphere(const SkyAtmosphere& s) override;
     SkyAtmosphere skyAtmosphere() const override { return sky_; }
+    // The physical half of the pack, and the four authored fields it derives instead. Split out
+    // because it is the only part that computes rather than copies.
+    void packAtmosphere(const SkyAtmosphere& s);
     void setPostProcess(const PostSettings& p) override { post_ = p; }
     PostSettings postProcess() const override { return post_; }
 
@@ -2392,6 +2408,86 @@ void D3D12Device::setSkyAtmosphere(const SkyAtmosphere& s) {
     frameCB_.cloudMotion[1] = s.cloudWind[1] * s.cloudTime;
     frameCB_.cloudMotion[2] = s.cloudScale;
     frameCB_.cloudMotion[3] = s.cloudsEnabled ? 1.0f : 0.0f;
+
+    packAtmosphere(s);
+}
+
+// The physical model, and the four authored fields it TAKES OVER when it is on.
+//
+// The dome, its exponent and the sun's colour stop being authored and become consequences of the
+// sun's elevation. They are still written into the same constant-buffer fields, which is the whole
+// trick: every cheap consumer of the sky -- the ambient term, environment reflections, the fog
+// in-scatter target, the ground's own radiance, the cloud fill -- keeps reading a two-colour dome
+// and gets a physical one, with no per-pixel march anywhere but the sky pass itself.
+//
+// s.zenith, s.horizon, s.atmosphereHeight and s.sunColor are NOT modified: they stay exactly as the
+// level authored them, so switching the model back restores them rather than having overwritten them.
+void D3D12Device::packAtmosphere(const SkyAtmosphere& s) {
+    const AtmosphereProfile& a = s.air;
+    const bool on = s.model == SkyModel::Physical;
+
+    for (int i = 0; i < 3; ++i) {
+        frameCB_.atmoRayleigh[i] = a.rayleighScatter[i];
+        frameCB_.atmoOzone[i]    = a.ozoneAbsorb[i];
+    }
+    frameCB_.atmoRayleigh[3] = a.rayleighScaleKm > 1e-3f ? a.rayleighScaleKm : 1e-3f;
+    frameCB_.atmoOzone[3]    = a.ozoneWidthKm > 1e-3f ? a.ozoneWidthKm : 1e-3f;
+    frameCB_.atmoMie[0] = a.mieScatter;
+    frameCB_.atmoMie[1] = a.mieExtinction;
+    frameCB_.atmoMie[2] = a.mieScaleKm > 1e-3f ? a.mieScaleKm : 1e-3f;
+    frameCB_.atmoMie[3] = a.miePhaseG;
+    frameCB_.atmoPlanet[0] = a.planetRadiusKm;
+    frameCB_.atmoPlanet[1] = a.planetRadiusKm + a.atmosphereHeightKm;
+    // The engine's world is centimetres by contract, and the model's is kilometres because that is
+    // the only scale at which 6360 and 8 are both representable in a float.
+    frameCB_.atmoPlanet[2] = 1e-5f;
+    frameCB_.atmoPlanet[3] = on ? 1.0f : 0.0f;
+    frameCB_.atmoTune[0] = a.ozoneCentreKm;
+    frameCB_.atmoTune[1] = a.multiScatterGain;
+    frameCB_.atmoTune[2] = static_cast<f32>(a.viewSteps > 1 ? a.viewSteps : 1);
+    frameCB_.atmoTune[3] = static_cast<f32>(a.aerialSteps > 1 ? a.aerialSteps : 1);
+
+    if (!on) {
+        for (int i = 0; i < 4; ++i) frameCB_.atmoSunE0[i] = 0.0f;
+        return;
+    }
+
+    // ONE ground albedo, not two: the model's ground term reads the same swatch the dome does.
+    AtmosphereProfile fit = a;
+    f32 groundLin[3];
+    for (int i = 0; i < 3; ++i) groundLin[i] = std::pow(std::fmax(s.groundAlbedo[i], 0.0f), 2.2f);
+    fit.groundAlbedo = 0.2126f * groundLin[0] + 0.7152f * groundLin[1] + 0.0722f * groundLin[2];
+
+    // Irradiance ABOVE the air: the authored colour, decoded, times the authored intensity. The
+    // model attenuates it; nothing else may, or the attenuation lands twice.
+    f32 e0[3];
+    for (int i = 0; i < 3; ++i)
+        e0[i] = std::pow(std::fmax(frameCB_.lightColor[i], 0.0f), 2.2f) * s.sunIntensity;
+    for (int i = 0; i < 3; ++i) frameCB_.atmoSunE0[i] = e0[i];
+    frameCB_.atmoSunE0[3] = fit.groundAlbedo;
+
+    const f32 len = std::sqrt(s.sunDirection[0] * s.sunDirection[0] +
+                              s.sunDirection[1] * s.sunDirection[1] +
+                              s.sunDirection[2] * s.sunDirection[2]);
+    const f32 sunCos = len > 1e-6f ? s.sunDirection[2] / len : 1.0f;
+    const f32 sunRadius = s.sunAngularDiameterDeg * 0.5f * 0.017453292f;
+    // Sea level. The dome a camera 3 metres up sees differs from this by far less than a code.
+    AtmosphereDome dome{};
+    atmoFitDome(fit, 0.0f, sunCos, e0, sunRadius, dome);
+
+    // Written back through the SAME sRGB encode the authored fields use, because the shader decodes
+    // whatever is in these slots. The encode is a plain 2.2 power, so it round-trips above 1 too --
+    // which the sky near a low sun genuinely is.
+    for (int i = 0; i < 3; ++i) {
+        frameCB_.skyZenith[i]  = std::pow(std::fmax(dome.zenith[i], 0.0f), 1.0f / 2.2f);
+        frameCB_.skyHorizon[i] = std::pow(std::fmax(dome.horizon[i], 0.0f), 1.0f / 2.2f);
+        // The DIRECT sun, reddened and dimmed by the air it came through. This is the field the lit
+        // pass, the GI injection and the sun disk all read, so all three redden together.
+        frameCB_.lightColor[i] =
+            std::pow(std::fmax(e0[i] * dome.sunTransmittance[i] / std::fmax(s.sunIntensity, 1e-6f), 0.0f),
+                     1.0f / 2.2f);
+    }
+    frameCB_.skyParams[0] = dome.exponent;
 }
 
 bool D3D12Device::createPostPipelines() {

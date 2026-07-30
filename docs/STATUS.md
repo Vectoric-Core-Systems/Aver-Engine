@@ -2675,19 +2675,55 @@ The sky is **not** static and clouds are **already volumetric**:
 `0e38292` unified fog: the base PBR path had its own flat lerp with no sky and no height, so the same
 scene fogged differently depending on which renderer drew it. Both now go through `averApplyFog`.
 
-### The five real gaps
+### The five real gaps — 1, 2 and 4 are now CLOSED
 
-1. **The sky is authored, not derived.** Two sRGB colours lerped by `pow(dir.z*0.5+0.5, k)`. A real
-   globe needs Rayleigh (β ≈ 5.8 / 13.5 / 33.1 x 10⁻⁶ m⁻¹ — the λ⁻⁴ that makes zenith blue and horizon
-   pale) plus Mie, integrated along a ray against a spherical shell, with **sun elevation as the only
-   input**. Sunset then becomes a consequence of geometry rather than a colour somebody typed.
-2. **Aerial perspective.** Once (1) exists, fog stops being a tint on `skyColorFull` and becomes the
-   atmosphere's own in-scattering over distance. Consistency by construction.
+1. ~~**The sky is authored, not derived.**~~ **DONE.** Rayleigh + Mie + ozone single scattering
+   against a spherical shell, sun elevation as the only input. See §4y and `docs/rendering/ATMOSPHERE.md`.
+2. ~~**Aerial perspective.**~~ **DONE.** `averApplyFog` is the atmosphere's own bounded in-scattering
+   from the same integral the dome is made of, with the authored height fog layered on top.
 3. **Clouds are not PBR-consistent.** HG + powder is respectable but ad-hoc — wants energy-conserving
-   multiple scattering, and lighting from the same sky radiance the surfaces use.
-4. **The sun does not drive anything but direction.** It should be the single input to (1).
+   multiple scattering, and lighting from the same sky radiance the surfaces use. STILL OPEN; the
+   clouds now read a *physical* dome, which is an improvement by accident rather than by design.
+4. ~~**The sun does not drive anything but direction.**~~ **DONE.** The direct sun is the authored
+   colour times the air's transmittance at its own elevation, so the lit pass, the GI injection, the
+   ground's radiance and the sun disk all redden together.
 5. **SkyForge has not been upgraded** — and it should be done *after* the atmosphere, because a better
-   sky changes how the whole project reads.
+   sky changes how the whole project reads. STILL OPEN.
+
+## 4y. The atmosphere became physical — and the oracle did not move
+
+`docs/rendering/ATMOSPHERE.md` is the full account: the derivations, every coefficient's source, and
+which claims are measured rather than asserted. The short version:
+
+- **`SkyAtmosphere::model` is `Authored` or `Physical`, and it DEFAULTS TO AUTHORED.** With the
+  default nothing in the new block is reachable and the engine renders exactly what it did before —
+  51/51 gates bit-exact across `baseline`, `no-rt` and `all-off`, zero corruption/error/warning.
+  That is deliberate: the baseline records 17 gates × 9 configurations, and a new sky that moved
+  them would report as a regression in all of them at once. `--sky-physical [elevation]` turns it on
+  for a capture run; the sun/sky Details panel has a `Sky Model` combo and an `Air` group.
+- **The sun ray is ANALYTIC, not marched.** The Chapman function gives the slant column in closed
+  form, so a scattering integral has no inner loop. `atmoErfcx` is one exp and ten multiply-adds.
+  Measured against a 2,000,000-step numeric integral: worst error 0.125%.
+- **The sky pass marches; nothing else does.** Once per frame the CPU fits the existing two-colour
+  dome to the model and writes it into the same constant-buffer fields, so the ambient term,
+  environment reflections, the fog target, the ground's radiance and the cloud fill all read a
+  physical sky at no per-surface cost.
+- **`tests/rhi/AtmosphereTest`** is the oracle for all of it — Chapman against brute force, single
+  scattering against its closed form, step-count convergence, and two independent calibrations
+  (diffuse/direct illuminance 15-30%, zenith blue/red 2.5-5) that together pin the one fitted number.
+
+Three findings worth carrying forward, each of which looked fine on screen:
+
+| what | how it showed |
+|---|---|
+| 32 UNIFORM steps were 7% off at the zenith | nothing at all — a slightly different sky with nothing to compare it against. Caught by marching the same ray at 512 steps. Fixed by sampling `t` as `u^(1+\|cos\|)`. |
+| fitting the dome exponent to a 45° sample | `k` walked 0.22 → 2.46 non-monotonically across a sunset, so the fill light breathed. Fixed by fitting `k` to the dome's IRRADIANCE, which is monotone and closed-form. |
+| intersecting the model's planet in the sky pass | a hard-edged SECOND horizon at constant elevation, floating above the floor the engine had drawn. The shader now flattens the ray and hands over to `averGroundRadiance`. |
+
+And one where the measurement overruled the eye: the multiple-scattering stand-in *looked* washed
+out, so it was reshaped as `σ_s²` — which is the formally tidier form. That put the zenith's blue/red
+at 7.2 against a real 2.9-4. The flat version was already right on colour AND on brightness. Both
+numbers are now assertions, so it cannot be "improved" back.
 
 ### Practical notes that will save an hour
 
@@ -2702,6 +2738,9 @@ scene fogged differently depending on which renderer drew it. Both now go throug
   in flat neighbourhoods are — 25 runs, zero variation. Never A/B a rendering change by diffing PNGs.
 - `Aver.Mcp` can now drive the editor to compare skies interactively: `--mcp`, then `widgets`, `click`
   by name, and `editor::screenshot`.
+- **A green C++ build still proves nothing about the shader, and `aver_run` does not build.** Two of
+  the shader edits in §4y appeared to change nothing because the HLSL is a string baked into the
+  binary: build first, THEN run.
 
 ---
 

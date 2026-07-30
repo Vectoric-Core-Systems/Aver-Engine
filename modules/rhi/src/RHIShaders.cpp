@@ -140,6 +140,13 @@ cbuffer PerFrame : register(b0) {
     float4   gFogParams;   // x height falloff, y fog height, z start distance, w max opacity
     float4   gCloudParams; // x coverage, y density, z layer bottom, w layer top
     float4   gCloudMotion; // xy wind offset, z 1/feature size, w enabled
+    // ---- the PHYSICAL atmosphere (rhi::AtmosphereProfile). Mirrors PerFrameCB's tail too. ----
+    float4   gAtmoRayleigh; // rgb scattering per km, w scale height km
+    float4   gAtmoMie;      // x scatter, y extinction, z scale height km, w phase g
+    float4   gAtmoOzone;    // rgb absorption per km, w tent half-width km
+    float4   gAtmoPlanet;   // x planet radius km, y atmosphere top radius km, z world->km, w on/off
+    float4   gAtmoTune;     // x ozone centre km, y multi-scatter gain, z view steps, w aerial steps
+    float4   gAtmoSunE0;    // rgb sun irradiance ABOVE the air, w ground albedo
 };
 // Per draw. The shading model is an ID rather than a shader permutation: a uniform branch costs one
 // scalar compare per wave, where a permutation would multiply the pipeline count of every renderer
@@ -176,6 +183,169 @@ static const float PI = 3.14159265;
 // every bounce in the engine was a third as bright as the light that produced it. Colour bleeding
 // was not missing; it was there and two thirds too dark to see.
 float3 averSunRadiance() { return srgbToLin(gLightColor.rgb) * gSkyParams.z; }
+
+// ---- the physical atmosphere -----------------------------------------------------------------
+// Rayleigh + Mie + ozone single scattering against a spherical shell, with one isotropic term for
+// everything that scatters more than once. MIRRORS modules/rhi/src/Atmosphere.cpp function for
+// function; that copy is the one AtmosphereTest checks against a numeric integral, and there is no
+// compiler keeping the two in step. Derivations: docs/rendering/ATMOSPHERE.md.
+//
+// It is switched on by gAtmoPlanet.w. With it off nothing below is reachable and the authored dome
+// underneath is exactly what the engine always drew.
+
+bool averAtmoOn() { return gAtmoPlanet.w > 0.5; }
+
+// sin from cos, guarded against a cosine that drifted outside [-1,1].
+float averAtmoSin(float c) { return sqrt(saturate(1.0 - c * c)); }
+
+// exp(y*y)*erfc(y) for y >= 0, from Numerical Recipes' Chebyshev fit with the exp(-y*y) cancelled
+// out: one exp and ten multiply-adds, fractional error below 1.2e-7.
+float averAtmoErfcx(float y) {
+    float t = 2.0 / (2.0 + max(y, 0.0));
+    float p = -1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 +
+               t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 +
+               t * (-0.82215223 + t * 0.17087277))))))));
+    return t * exp(p);
+}
+
+// Chapman airmass: the slant column along a ray as a multiple of the vertical column at the same
+// altitude. This is what replaces a nested march toward the sun -- the inner loop is the whole cost
+// of a scattering integral, and here there is none.
+float averAtmoChapman(float xr, float cosZenith) {
+    float half = sqrt(xr * 0.5);
+    float up   = sqrt(PI * xr * 0.5);
+    if (cosZenith >= 0.0) return up * averAtmoErfcx(cosZenith * half);
+    // Below the local horizon and still escaping: reflected about the tangent point. Bounded,
+    // because the caller only reaches this when the ray misses the planet.
+    float sinChi = averAtmoSin(cosZenith);
+    return 2.0 * sqrt(PI * xr * sinChi * 0.5) * exp(xr * (1.0 - sinChi)) -
+           up * averAtmoErfcx(-cosZenith * half);
+}
+
+float averAtmoOzoneDensity(float altKm) {
+    return saturate(1.0 - abs(altKm - gAtmoTune.x) / max(gAtmoOzone.w, 1e-4));
+}
+
+// Vertical column of the ozone tent from altKm upward, in km. Piecewise-quadratic and exact.
+float averAtmoOzoneColumn(float altKm) {
+    float w = max(gAtmoOzone.w, 1e-4), c = gAtmoTune.x;
+    if (altKm >= c + w) return 0.0;
+    if (altKm >= c)     { float s = (c + w - altKm) / w; return w * s * s * 0.5; }
+    if (altKm >= c - w) { float u = (c - altKm) / w;     return w * (u - u * u * 0.5) + w * 0.5; }
+    return w;
+}
+
+// The tent has no Chapman form, so the layer is treated as a thin shell and the divergence at
+// tangency is capped by the chord a ray really travels through a tent of that half-width.
+float averAtmoOzoneAirmass(float rKm, float cosZenith) {
+    float w  = max(gAtmoOzone.w, 1e-4);
+    float ro = gAtmoPlanet.x + gAtmoTune.x;
+    float s  = rKm * averAtmoSin(cosZenith) / ro;
+    float maxAir = 1.2 * sqrt(2.0 * ro * w) / w;
+    float capped = clamp(1.0 / sqrt(1.0 - clamp(s * s, 0.0, 0.999999)), 1.0, maxAir);
+    return cosZenith >= 0.0 ? capped : 2.0 * maxAir - capped;
+}
+
+// Optical depth from an altitude out to space. Returns a wall of extinction when the ray meets the
+// planet first, which is the same thing as "the sun is down" wherever this is used.
+float3 averAtmoOpticalDepth(float altKm, float cosZenith) {
+    float z = max(altKm, 0.0);
+    float r = gAtmoPlanet.x + z;
+    if (cosZenith < 0.0 && r * averAtmoSin(cosZenith) < gAtmoPlanet.x) return 1e9;
+
+    float colR = gAtmoRayleigh.w * exp(-z / gAtmoRayleigh.w) * averAtmoChapman(r / gAtmoRayleigh.w, cosZenith);
+    float colM = gAtmoMie.z      * exp(-z / gAtmoMie.z)      * averAtmoChapman(r / gAtmoMie.z, cosZenith);
+    float colO = averAtmoOzoneColumn(z) * averAtmoOzoneAirmass(r, cosZenith);
+    return gAtmoRayleigh.rgb * colR + gAtmoMie.y * colM + gAtmoOzone.rgb * colO;
+}
+
+// What the air leaves of the sun at an altitude. Zero in the planet's shadow, and the terminator is
+// softened across the sun's own angular radius because a point sun bands along a marched ray.
+float3 averAtmoSunTransmittance(float altKm, float sunCosZenith) {
+    float z = max(altKm, 0.0);
+    float ratio = gAtmoPlanet.x / (gAtmoPlanet.x + z);
+    float cosHorizon = -sqrt(saturate(1.0 - ratio * ratio));
+    float halfWidth = sqrt(saturate(1.0 - gSkyParams.w * gSkyParams.w)) + 1e-5;
+    float shadow = smoothstep(cosHorizon - halfWidth, cosHorizon + halfWidth, sunCosZenith);
+    if (shadow <= 0.0) return 0.0;
+    return exp(-averAtmoOpticalDepth(z, max(sunCosZenith, cosHorizon))) * shadow;
+}
+
+// The scattering integral along a segment. `tMaxKm` bounds it, so the SAME function serves the sky
+// (bounded by the atmosphere's top or the ground) and aerial perspective (bounded by the surface
+// being shaded) -- which is what makes the two agree by construction rather than by tuning.
+float3 averAtmoScatter(float r0, float cosV, float cosS, float cosVS, float tMaxKm, int steps,
+                       out float3 transmittance) {
+    transmittance = 1.0;
+    float3 total = 0.0;
+    if (tMaxKm <= 0.0) return total;
+
+    float pR = 3.0 / (16.0 * PI) * (1.0 + cosVS * cosVS);
+    // Cornette-Shanks: Henyey-Greenstein's forward lobe with the symmetry that stops the Mie
+    // backscatter collapsing, which is what keeps the sky opposite the sun reading as air.
+    float g  = gAtmoMie.w;
+    float g2 = g * g;
+    float dn = 1.0 + g2 - 2.0 * g * cosVS;
+    float pM = 3.0 * (1.0 - g2) * (1.0 + cosVS * cosVS) /
+               (8.0 * PI * (2.0 + g2) * max(dn * sqrt(max(dn, 1e-4)), 1e-6));
+
+    // WHERE THE SAMPLES GO, which at these step counts matters more than how many there are.
+    // Density falls exponentially with altitude, so uniform steps spend most of their samples where
+    // there is nothing. A vertical ray climbs a scale height in 8 km and a horizontal one takes 300,
+    // so t is sampled as u^p with p = 1 + |cos|: uniform along the horizon, quadratic straight up.
+    // At 32 uniform steps the zenith was 7% off its own converged answer; this is what closed it.
+    float p = 1.0 + abs(cosV);
+    float invN = 1.0 / steps;
+
+    [loop] for (int i = 0; i < steps; ++i) {
+        float lo = tMaxKm * pow(i * invN, p);
+        float hi = tMaxKm * pow((i + 1) * invN, p);
+        float dt = hi - lo;
+        if (dt <= 0.0) continue;
+        float t = 0.5 * (lo + hi);
+        float r = sqrt(r0 * r0 + 2.0 * r0 * cosV * t + t * t);
+        float alt = max(r - gAtmoPlanet.x, 0.0);
+        // The sun's zenith angle where the sample IS, from the two cosines at the viewer.
+        float sunCosHere = (r0 * cosS + t * cosVS) / max(r, 1e-4);
+
+        float dR = exp(-alt / gAtmoRayleigh.w);
+        float dM = exp(-alt / gAtmoMie.z);
+        float dO = averAtmoOzoneDensity(alt);
+
+        float3 sunT  = averAtmoSunTransmittance(alt, sunCosHere);
+        float3 scatR = gAtmoRayleigh.rgb * dR;
+        float  scatM = gAtmoMie.x * dM;
+        float3 ext   = scatR + gAtmoMie.y * dM + gAtmoOzone.rgb * dO;
+
+        // Single scattering, plus one SPECTRALLY FLAT isotropic term standing in for every further
+        // bounce. Flat is measured, not lazy -- shaping it by sigma_s squared over-blues the zenith
+        // by a factor of two. See Atmosphere.cpp, and the two checks in AtmosphereTest that hold it.
+        float3 source = ((scatR * pR + scatM * pM) +
+                         (scatR + scatM) * gAtmoTune.y / (4.0 * PI)) * sunT * gAtmoSunE0.rgb;
+        float3 stepT = exp(-ext * dt);
+        total += transmittance * source * (1.0 - stepT) / max(ext, 1e-12);
+        transmittance *= stepT;
+    }
+    return total;
+}
+
+// The camera's altitude in kilometres, and its radius from the planet centre.
+float averAtmoCamAlt()    { return max(gCamPos.z * gAtmoPlanet.z, 0.0); }
+float averAtmoCamRadius() { return gAtmoPlanet.x + averAtmoCamAlt(); }
+
+// AERIAL PERSPECTIVE: the same integral, bounded by the surface being shaded instead of by the sky.
+// This is what makes distance read as distance without a fog colour to author -- and because it is
+// the same function the dome uses, the two cannot disagree about what the air is.
+float3 averAtmoAerial(float3 wpos, out float3 transmittance) {
+    transmittance = 1.0;
+    float3 v = wpos - gCamPos.xyz;
+    float len = length(v);
+    if (len < 1e-4) return 0.0;
+    float3 dir = v / len;
+    float3 L = normalize(gLightDir.xyz);
+    return averAtmoScatter(averAtmoCamRadius(), dir.z, L.z, dot(dir, L),
+                           len * gAtmoPlanet.z, (int)gAtmoTune.w, transmittance);
+}
 
 // The dome ABOVE the horizon. Split out from skyColorFull so the ground below it can be LIT by the
 // sky without the two calling each other.
@@ -224,6 +394,29 @@ float3 skyColorFull(float3 dir)
 // The 0.5+0.5 remap the old body used is kept inside skyColorFull's `saturate(up)` for directions
 // above the horizon; below it, the ground now answers instead of the sky continuing underneath.
 float3 skyColor(float3 dir){ return skyColorFull(dir); }
+
+// The sky along one view ray, marched: the whole reason the atmosphere block above exists. Sunset is
+// geometry here, not a colour somebody typed -- the only inputs are the sun's elevation and the
+// medium's coefficients.
+//
+// Below the horizon it hands over to averGroundRadiance across the SAME twenty-degree smoothstep the
+// authored dome uses, and deliberately does NOT intersect the model's planet. Intersecting it was
+// the obvious thing and it drew a hard-edged SECOND horizon, at a constant elevation, floating above
+// the floor the engine had actually drawn -- correct for a planet nobody is standing on, and wrong
+// for every scene in this engine, which brings its own ground.
+float3 averSkyPhysical(float3 dir) {
+    float3 L = normalize(gLightDir.xyz);
+    float cosV = max(dir.z, 0.0);          // flattened to level rather than allowed to dip inside
+    float r0 = averAtmoCamRadius();
+    float b = r0 * cosV;
+    float disc = b * b - (r0 * r0 - gAtmoPlanet.y * gAtmoPlanet.y);
+    if (disc < 0.0) return 0.0;
+
+    float3 T;
+    float3 sky = averAtmoScatter(r0, cosV, L.z, dot(dir, L), -b + sqrt(disc), (int)gAtmoTune.z, T);
+    float g = smoothstep(0.0, 0.35, saturate(-dir.z)) * gGroundColor.a;
+    return lerp(sky, averGroundRadiance(), g);
+}
 
 // ---- fog ---------------------------------------------------------------------------------------
 // MOVED UP HERE from below the shaders, because the base PBR pixel shader now calls averApplyFog and
@@ -287,7 +480,18 @@ float3 averFogInscatter(float3 wpos) {
     return skyColorFull(dir) * srgbToLin(gFogColor.rgb);
 }
 
+// The air between the camera and a surface, in two layers that do not compete.
+//
+// FIRST the atmosphere itself, when the physical model is on: real extinction and real in-scatter
+// over the real distance, from the same integral the dome is made of. THEN the authored height fog
+// on top, which is a level's own weather and still targets the sky along the view ray. Before the
+// physical model existed the second was the only one, and it had to stand in for both.
 float3 averApplyFog(float3 color, float3 wpos) {
+    if (averAtmoOn()) {
+        float3 T;
+        float3 inscatter = averAtmoAerial(wpos, T);
+        color = color * T + inscatter;
+    }
     return lerp(color, averFogInscatter(wpos), averFogFactor(wpos));
 }
 

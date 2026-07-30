@@ -1,5 +1,6 @@
 #pragma once
 #include "aver/core/Types.hpp"
+#include "aver/rhi/Atmosphere.hpp"
 #include "aver/rhi/RHIResources.hpp"
 
 #include <cstddef>
@@ -188,8 +189,21 @@ struct PostSettings {
 // height-fog integral back to the uniform distance fog exactly; atmosphereHeight 0.65 is the
 // exponent the sky gradient already used; clouds are off. The oracle measures this scene, and a new
 // authoring surface must not move a pixel until somebody authors something.
+// Which sky the engine draws. Authored is the two-colour dome above; Physical derives that dome, the
+// direct sun's colour and the aerial perspective from Rayleigh/Mie/ozone scattering, with the sun's
+// elevation as the only input.
+//
+// It DEFAULTS TO AUTHORED, for the same reason every field below defaults to what the engine already
+// rendered: the pixel oracle measures this scene, and a new model that moved it would report as a
+// regression in nine device configurations at once. Turning it on is a level's decision.
+enum class SkyModel : u32 { Authored = 0, Physical = 1 };
+
 struct SkyAtmosphere {
     bool enabled = false;
+
+    // ---- which model ----
+    SkyModel          model = SkyModel::Authored;
+    AtmosphereProfile air{};   // only read when model is Physical
 
     // ---- the dome ----
     f32 zenith[3]  = {0.24f, 0.45f, 0.85f};   // authored sRGB, decoded in the shader

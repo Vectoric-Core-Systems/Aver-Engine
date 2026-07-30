@@ -186,6 +186,10 @@ if(AVER_BUILD_TESTS)
   add_subdirectory(tests/render.actorpreview)
   # Unconditional, like the module.
   add_subdirectory(tests/audio)
+  # The atmosphere model. Unconditional because Aver.RHI always exists, and needed because the sky
+  # is now derived rather than authored -- an airmass that is quietly 20% low still renders a blue
+  # sky, so the only thing that can catch it is a numeric integral of the same physics.
+  add_subdirectory(tests/rhi)
   # The directory watcher. Unconditional because Aver.Platform always exists, and needed because the
   # editor's live sync now rests on it -- it shipped with no consumer and no test, and the first
   # thing that depended on it should not also be the first thing that exercised it.

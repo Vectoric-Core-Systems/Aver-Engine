@@ -1868,6 +1868,17 @@ public:
         sky_.cloudsEnabled = true;
         if (coverage >= 0.0f) sky_.cloudCoverage = coverage;
     }
+    // --sky-physical [elevation]. The model defaults to Authored so the pixel oracle stays exact,
+    // which means a capture run is the only way to see the derived sky at all -- and a sky that
+    // only a human clicking a combo box can produce is a sky nothing can regression-test.
+    void setSkyPhysical(f32 elevationDeg) {
+        sky_.model = rhi::SkyModel::Physical;
+        if (elevationDeg > -90.0f) {
+            f32 elev = 0.0f, azim = 0.0f;
+            sky_.sunAngles(elev, azim);
+            sky_.setSunAngles(elevationDeg, azim);
+        }
+    }
     void setPost(f32 exposure, f32 bloomIntensity, bool autoExposure) {
         post_.exposure = exposure;
         post_.bloomIntensity = bloomIntensity;
@@ -4994,10 +5005,63 @@ private:
             ImGui::SliderFloat("Angular Size", &sky_.sunAngularDiameterDeg, 0.05f, 8.0f, "%.2f deg");
         } else if (sel_==-3){
             ImGui::TextUnformatted("Sky + Atmosphere"); ImGui::Separator();
+            // WHICH SKY. Authored is the two-colour dome; Physical derives that dome, the sun's own
+            // colour and the aerial perspective from Rayleigh/Mie/ozone scattering, with the sun's
+            // elevation as the only input. Authored is the default because the pixel oracle
+            // measures this scene, and a new model that moved it would read as a regression.
+            {
+                int model = sky_.model == rhi::SkyModel::Physical ? 1 : 0;
+                const char* names[] = {"Authored (two-colour dome)", "Physical (Rayleigh + Mie + ozone)"};
+                if (ImGui::Combo("Sky Model", &model, names, 2))
+                    sky_.model = model ? rhi::SkyModel::Physical : rhi::SkyModel::Authored;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Physical derives the dome below from the sun's elevation.\n"
+                                      "Sunset stops being a colour somebody picked and becomes geometry.");
+            }
+            const bool physicalSky = sky_.model == rhi::SkyModel::Physical;
+
+            // The authored dome stays VISIBLE while Physical is on, because it is still what the
+            // level authored and switching back restores it untouched -- but it is disabled and
+            // says why, rather than sitting there live-looking and changing nothing.
+            ImGui::BeginDisabled(physicalSky);
             ImGui::ColorEdit3("Zenith", skyZenith_); ImGui::ColorEdit3("Horizon", skyHorizon_);
             // The EXPONENT on the zenith blend. Small pushes the pale band high and reads as thick
             // hazy air; large pulls it to a thin bright line and reads as thin high-altitude air.
             ImGui::SliderFloat("Atmosphere Height", &sky_.atmosphereHeight, 0.05f, 4.0f, "%.2f");
+            ImGui::EndDisabled();
+            if (physicalSky) {
+                ImGui::TextDisabled("^ derived from the sun's elevation while the model is Physical");
+                if (ImGui::TreeNode("Air")) {
+                    ImGui::SliderFloat("Mie Scatter", &sky_.air.mieScatter, 0.0f, 4e-2f, "%.5f /km",
+                                       ImGuiSliderFlags_Logarithmic);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Aerosol. Raise it for haze, dust or a coastal day; the\n"
+                                          "sun's halo and the pale band at the horizon both grow.");
+                    ImGui::SliderFloat("Mie Extinction", &sky_.air.mieExtinction, 0.0f, 4e-2f, "%.5f /km",
+                                       ImGuiSliderFlags_Logarithmic);
+                    ImGui::SliderFloat("Mie Anisotropy", &sky_.air.miePhaseG, 0.0f, 0.95f, "%.2f");
+                    ImGui::SliderFloat("Rayleigh Height", &sky_.air.rayleighScaleKm, 1.0f, 20.0f, "%.1f km");
+                    ImGui::SliderFloat("Mie Height", &sky_.air.mieScaleKm, 0.2f, 8.0f, "%.2f km");
+                    // The one fitted number in the model. Two measurements hold it -- see
+                    // AtmosphereTest -- so moving it trades brightness against believability.
+                    ImGui::SliderFloat("Multi-Scatter", &sky_.air.multiScatterGain, 0.0f, 4.0f, "%.2f");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Stands in for every bounce after the first. 1.70 is\n"
+                                          "calibrated: it puts diffuse light at 15-30%% of direct\n"
+                                          "and the zenith's blue/red between 2.5 and 5.");
+                    ImGui::SliderFloat("Planet Radius", &sky_.air.planetRadiusKm, 100.0f, 20000.0f, "%.0f km");
+                    ImGui::SliderFloat("Air Depth", &sky_.air.atmosphereHeightKm, 5.0f, 200.0f, "%.0f km");
+                    ImGui::SliderInt("Sky Steps", &sky_.air.viewSteps, 4, 96);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Samples along a sky ray. 32 is within 3%% of a converged\n"
+                                          "march; below about 16 the horizon starts to band.");
+                    ImGui::SliderInt("Aerial Steps", &sky_.air.aerialSteps, 1, 16);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Samples along the air between the camera and a surface.\n"
+                                          "This one runs per shaded pixel, so it is the expensive one.");
+                    ImGui::TreePop();
+                }
+            }
             ImGui::ColorEdit3("Ground", sky_.groundAlbedo);
             // Zero keeps the sky continuing below the horizon, which is what it always did.
             ImGui::SliderFloat("Ground Blend", &sky_.groundBlend, 0.0f, 1.0f, "%.2f");
@@ -6417,7 +6481,7 @@ static bool isOcproject(const char* p) {
 
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and EXITS, touching no device.
         //
@@ -6546,6 +6610,14 @@ Application* createApplication(int argc, char** argv) {
             clouds=1;
             if (i+1 < argc && argv[i+1][0] != '-') cloudCover=static_cast<f32>(std::atof(argv[++i]));
         }
+        // The derived sky. An optional sun elevation in degrees comes with it, because the whole
+        // claim of the model is that elevation alone produces noon, dusk and night -- and a flag
+        // that could not sweep it would leave that claim untested.
+        else if (!std::strcmp(argv[i],"--sky-physical")) {
+            skyPhysical=true;
+            if (i+1 < argc && (argv[i+1][0] != '-' || (argv[i+1][1] >= '0' && argv[i+1][1] <= '9')))
+                skyElevation=static_cast<f32>(std::atof(argv[++i]));
+        }
         else if (!std::strcmp(argv[i],"--probe-rel") && i+2<argc) {
             probeU=static_cast<f32>(std::atof(argv[++i]));
             probeV=static_cast<f32>(std::atof(argv[++i]));
@@ -6567,6 +6639,7 @@ Application* createApplication(int argc, char** argv) {
     app->applyCaptureExposureRule(autoExposure);
     app->setGiForceOff(noGi);
     if (clouds) app->setClouds(cloudCover);
+    if (skyPhysical) app->setSkyPhysical(skyElevation);
     app->setVSyncOff(vsyncOff);
     app->setUiDemo(uiDemo);
     app->setOpenAsset(openAsset);
