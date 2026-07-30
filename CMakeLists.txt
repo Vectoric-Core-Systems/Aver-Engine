@@ -47,6 +47,11 @@ option(AVER_MODULE_PHYSICS "Physics module: rigid bodies, characters and raycast
 # Landscape: the chunked heightfield terrain. CPU-only at this stage -- the quadtree, the LOD metric,
 # culling and chunk geometry -- so it depends on nothing optional and costs nothing to leave on.
 option(AVER_MODULE_LANDSCAPE "Landscape module: chunked heightfield terrain, LOD and chunk geometry" ON)
+# The editor control channel, so a tool can press the editor's own buttons and then look at the result.
+# OFF BY DEFAULT: it is a debugging aid, the editor must work without it, and nobody should ship an
+# editor that can be driven over a socket unless they asked for it. Even built, it listens only when the
+# app is told to with --mcp.
+option(AVER_MODULE_MCP "Editor control channel over loopback (debugging aid, not needed to run)" OFF)
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -159,6 +164,10 @@ add_subdirectory(modules/render.actorpreview)
 # The audio seam. Added down HERE rather than beside the mixer because it links the WAV reader,
 # which is a target inside modules/formats and so does not exist until that has been added.
 add_subdirectory(modules/audio.abi)
+# The control channel. Core-only, so it could sit anywhere; here because it is the editor that uses it.
+if(AVER_MODULE_MCP AND WIN32)
+  add_subdirectory(modules/mcp)
+endif()
 add_subdirectory(modules/runtime)
 
 if(AVER_BUILD_SANDBOX)
@@ -189,6 +198,9 @@ if(AVER_BUILD_TESTS)
   add_subdirectory(tests/formats.roslyn)
   if(AVER_MODULE_LANDSCAPE)
     add_subdirectory(tests/landscape)
+  endif()
+  if(AVER_MODULE_MCP AND WIN32)
+    add_subdirectory(tests/mcp)
   endif()
   if(AVER_MODULE_PHYSICS)
     add_subdirectory(tests/physics)
