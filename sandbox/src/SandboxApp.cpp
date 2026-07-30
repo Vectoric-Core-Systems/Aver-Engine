@@ -22,6 +22,13 @@
 #include "ProjectBrowser.hpp"
 #include "ProjectScaffold.hpp"   // --new-project: scaffolding a project without a mouse
 #include "ToolsMenu.hpp"
+
+// The editor control channel. Behind its own macro AND its own include, so a build without the module
+// does not merely skip the calls -- it never sees the header. That is what "the editor works without
+// it" means in practice.
+#if AVER_MODULE_MCP
+#include "aver/mcp/McpBridge.hpp"
+#endif
 #include "ToolGlyphs.hpp"
 #include "AssetEditor.hpp"
 #include "ActorEditor.hpp"   // a .Designer.cs opened as an asset, with a 3D preview of what it declares
@@ -586,6 +593,17 @@ public:
         }
         window_ = e.window();   // for the HWND the mouse capture needs
 
+#if AVER_MODULE_MCP
+        // Started ONLY when asked. See McpBridge.hpp: a build that silently listens has opened a hole
+        // in somebody's machine without telling them.
+        if (mcpPort_) {
+            registerMcpAbis();
+            if (!mcp_.start(mcpPort_))
+                AVER_WARN("[Mcp] --mcp was given but the channel did not start; the editor is "
+                          "unaffected and carries on");
+        }
+#endif
+
         // Always read the recent list, even when the start screen will not be shown: opening a
         // project records it, and recording into a list that was never loaded would truncate the
         // user's history to the one project the command line named.
@@ -852,6 +870,12 @@ public:
     }
 
     void onUpdate(Engine& e, const Timestep& t) override {
+#if AVER_MODULE_MCP
+        // ONE EVENT PER FRAME, which is McpBridge's contract and not an economy: a click is a press and
+        // a release, and ImGui registers one only if a frame saw the press and a LATER frame saw the
+        // release. Called before the UI is built so an injected click is seen by this frame's widgets.
+        if (mcp_.listening()) mcp_.pump([this](const mcp::Command& c) { applyMcpCommand(c); });
+#endif
         // Only while the layer is on, so a scene with no clouds accumulates no clock and a capture
         // run of N frames is reproducible whatever the frame rate was.
         if (sky_.cloudsEnabled) cloudTime_ += t.dt;
@@ -1741,6 +1765,11 @@ public:
     }
 
     void onShutdown(Engine& e) override {
+#if AVER_MODULE_MCP
+        // First, and before anything it might be driving is torn down: stop() joins the socket thread,
+        // so after this no synthetic input can arrive during shutdown.
+        mcp_.stop();
+#endif
         setLogSink(nullptr, nullptr);   // stop mirroring logs before this object goes away
         // The actor preview's targets, while the device is still there to drain. It holds a UI
         // descriptor like the mark below, and the same rule applies: release it before the device.
@@ -1862,6 +1891,9 @@ public:
     // dropdown is a DIFFERENT popup in a different window drawing the same items -- photographing the
     // Tools menu proves nothing about it, and this dropdown is the only way to reach Reload from a tab.
     void setFocusCompileMenu(bool b) { tools_.armCompileMenu(b); }
+#if AVER_MODULE_MCP
+    void setMcpPort(u16 p) { mcpPort_ = p; }
+#endif
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts screenshot aid
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
@@ -5460,15 +5492,31 @@ private:
             return clk;
         };
 
+#if AVER_MODULE_MCP
+        toolButtonRects_.clear();
+        auto recordRect = [&](const char* name) {
+            const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "%s%s=%.0f,%.0f,%.0f,%.0f",
+                          toolButtonRects_.empty() ? "" : " ", name, a.x, a.y, b.x - a.x, b.y - a.y);
+            toolButtonRects_ += buf;
+        };
+#else
+        auto recordRect = [](const char*) {};
+#endif
         if (toolBtn("##tSel", 0, tool_==Tool::Select)) tool_=Tool::Select;
+        recordRect("select");
         ImGui::SameLine(0, gap);
         if (toolBtn("##tMove", 1, tool_==Tool::Move)) tool_=Tool::Move;
+        recordRect("move");
         ImGui::SameLine(0, tiny); if (caretBtn("##cMove", snapMove_)) ImGui::OpenPopup("snapMove");
         ImGui::SameLine(0, gap);
         if (toolBtn("##tRot", 2, tool_==Tool::Rotate)) tool_=Tool::Rotate;
+        recordRect("rotate");
         ImGui::SameLine(0, tiny); if (caretBtn("##cRot", snapRot_)) ImGui::OpenPopup("snapRot");
         ImGui::SameLine(0, gap);
         if (toolBtn("##tScl", 3, tool_==Tool::Scale)) tool_=Tool::Scale;
+        recordRect("scale");
         ImGui::SameLine(0, tiny); if (caretBtn("##cScl", snapScale_)) ImGui::OpenPopup("snapScale");
         ImGui::SameLine(0, gap*2);
         if (ImGui::Button(worldSpace_ ? "World" : "Local")) worldSpace_ = !worldSpace_; // coord space, like UE's globe/cube
@@ -6043,6 +6091,160 @@ private:
     i32  captureAnchorX_ = 0, captureAnchorY_ = 0;
     f32  captureDx_ = 0.0f, captureDy_ = 0.0f;
     Window* window_ = nullptr;   // borrowed from the engine in onInit, for the HWND
+
+#if AVER_MODULE_MCP
+    // Where the four tool buttons were drawn this frame, recorded BY the toolbar rather than guessed
+    // from a screenshot. A client that has to read coordinates off a picture is a client that breaks
+    // the first time the layout moves -- and at 300% DPI a screenshot pixel is not an ImGui unit.
+    std::string toolButtonRects_;
+#endif
+#if AVER_MODULE_MCP
+    // The control channel. Constructed unconditionally but INERT until --mcp asks for it: a build that
+    // silently listened on a port would have opened a hole in somebody's machine without telling them.
+    mcp::McpBridge mcp_;
+    u16  mcpPort_ = 0;           // 0 = never asked for
+
+    // Turn one synthetic event into the Win32 message the editor already handles.
+    //
+    // POSTED, not sent, and posted to the window rather than fed to ImGui directly. The editor's real
+    // input arrives through ImGui_ImplWin32_WndProcHandler, so this travels the identical path -- same
+    // handler, same order, same frame boundaries. Feeding io.Add*Event instead would fight the Win32
+    // backend's own NewFrame and would exercise a path no user ever takes.
+    void applyMcpCommand(const mcp::Command& c) {
+        HWND hwnd = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
+        if (!hwnd) return;
+
+        if (c.name == "abi") {
+            std::string result, why;
+            if (mcp_.callAbi(c.abi, result, why))
+                AVER_INFO("[Mcp] {}::{} -> {}", c.abi.module, c.abi.fn, result);
+            else
+                AVER_WARN("[Mcp] {}::{} refused: {}", c.abi.module, c.abi.fn, why);
+            return;
+        }
+
+        for (const mcp::InputEvent& e : c.events) {
+            const LPARAM lp = MAKELPARAM(e.x, e.y);
+            switch (e.kind) {
+                case mcp::InputEvent::Kind::MouseMove: {
+                    // THE REAL CURSOR IS MOVED, and it has to be. Posting WM_MOUSEMOVE alone does not
+                    // work: imgui_impl_win32.cpp:371 calls ::GetCursorPos() every NewFrame and re-supplies
+                    // the position through AddMousePosEvent whenever the window is focused, so a
+                    // synthetic move is overwritten before the next frame reads it. The first version
+                    // did exactly that -- the click was accepted, the log was clean, and the tool never
+                    // changed, because the press landed wherever the physical mouse happened to be.
+                    //
+                    // Consequence worth stating rather than hiding: this HIJACKS THE POINTER. That is
+                    // inherent to driving a real UI through the OS, and it is also the point -- a
+                    // synthetic click that did not go where a user's would is not testing what a user
+                    // does. --mcp is opt-in partly for this reason.
+                    POINT pt{ e.x, e.y };
+                    ::ClientToScreen(hwnd, &pt);
+                    ::SetCursorPos(pt.x, pt.y);
+                    // Posted as well, for the case the window is NOT focused -- there the backend's
+                    // GetCursorPos fallback does not run and WM_MOUSEMOVE is the only source.
+                    ::PostMessageW(hwnd, WM_MOUSEMOVE, 0, lp);
+                    // Brought forward once, because the same backend path only trusts the cursor while
+                    // the window is focused. Done here rather than at start() so a channel that is
+                    // merely open never steals focus from whatever the user is doing.
+                    if (::GetForegroundWindow() != hwnd) ::SetForegroundWindow(hwnd);
+                    break;
+                }
+                case mcp::InputEvent::Kind::MouseDown:
+                    ::PostMessageW(hwnd,
+                        e.button == 1 ? WM_RBUTTONDOWN : e.button == 2 ? WM_MBUTTONDOWN : WM_LBUTTONDOWN,
+                        e.button == 1 ? MK_RBUTTON : e.button == 2 ? MK_MBUTTON : MK_LBUTTON, lp);
+                    break;
+                case mcp::InputEvent::Kind::MouseUp:
+                    ::PostMessageW(hwnd,
+                        e.button == 1 ? WM_RBUTTONUP : e.button == 2 ? WM_MBUTTONUP : WM_LBUTTONUP,
+                        0, lp);
+                    break;
+                case mcp::InputEvent::Kind::KeyDown:
+                    ::PostMessageW(hwnd, WM_KEYDOWN, static_cast<WPARAM>(e.key), 0);
+                    break;
+                case mcp::InputEvent::Kind::KeyUp:
+                    ::PostMessageW(hwnd, WM_KEYUP, static_cast<WPARAM>(e.key), 0);
+                    break;
+                case mcp::InputEvent::Kind::Text:
+                    // WM_CHAR per code unit, which is what a text field actually consumes -- WM_KEYDOWN
+                    // carries a virtual key, not a character, and typing "a" is not VK_A on every layout.
+                    for (char ch : e.text)
+                        ::PostMessageW(hwnd, WM_CHAR, static_cast<WPARAM>(static_cast<unsigned char>(ch)), 0);
+                    break;
+            }
+        }
+    }
+
+    // Every built module's plain-C seam, registered under its own name. THIS is the "Aver ABI": not one
+    // surface but the union of these, and a module that was switched off simply is not here -- so the
+    // registry reports what this binary can actually reach.
+    void registerMcpAbis() {
+        mcp_.registerAbi("editor", [this](const mcp::AbiCall& a, std::string& r, std::string& w) {
+            // The editor's own seam. Not a module ABI header, but the same idea: the things a user can
+            // do from the UI, reachable by name.
+            if (a.fn == "tool") {
+                if (a.args.empty()) { w = "tool needs a tool index 0-3"; return false; }
+                const int t = static_cast<int>(a.args[0]);
+                if (t < 0 || t > 3) { w = "tool index out of range 0-3"; return false; }
+                tool_ = static_cast<Tool>(t);
+                r = kToolNames[t];
+                return true;
+            }
+            if (a.fn == "screenshot") {
+                if (a.text.empty()) { w = "screenshot needs a path in \"text\""; return false; }
+                shot_ = a.text;
+                capDone_ = false;
+                r = a.text;
+                return true;
+            }
+            // The diagnostic that distinguishes "my coordinates are wrong" from "the input never
+            // arrived". Without it, a click that does nothing has two indistinguishable causes and
+            // debugging is guesswork -- which it was, once, before this existed.
+            if (a.fn == "mouse") {
+#if AVER_WITH_IMGUI
+                const ImGuiIO& io = ImGui::GetIO();
+                char b[160];
+                std::snprintf(b, sizeof b, "imgui pos=(%.0f,%.0f) display=(%.0f,%.0f) down=%d focus=%d",
+                              io.MousePos.x, io.MousePos.y, io.DisplaySize.x, io.DisplaySize.y,
+                              io.MouseDown[0] ? 1 : 0, io.AppFocusLost ? 0 : 1);
+                r = b;
+                return true;
+#else
+                w = "this build has no UI";
+                return false;
+#endif
+            }
+            if (a.fn == "tools") {
+                // Where the tool buttons actually ARE, straight from the widget rects the toolbar drew,
+                // so a client never has to guess a coordinate off a screenshot.
+                //
+                // REFUSES WHEN EMPTY rather than returning an empty success, and that is not defensive
+                // padding -- it is currently empty in practice and I have not established why. The
+                // toolbar records these every frame it draws, so an empty string means the row had not
+                // been drawn when this was serviced. An entry point that answered "" cheerfully would
+                // hand a client no coordinates and no clue, which is worse than saying so.
+                if (toolButtonRects_.empty()) {
+                    w = "no tool rects recorded yet -- the level toolbar has not drawn since the "
+                        "channel opened. KNOWN GAP: this is empty more often than it should be.";
+                    return false;
+                }
+                r = toolButtonRects_;
+                return true;
+            }
+            w = "editor has no entry point '" + a.fn + "'";
+            return false;
+        });
+#if AVER_MODULE_PHYSICS
+        mcp_.registerAbi("physics", [](const mcp::AbiCall& a, std::string& r, std::string& w) {
+            if (a.fn == "bodyCount") { r = std::to_string(aver_phys_body_count()); return true; }
+            if (a.fn == "ready")     { r = aver_phys_ready() ? "1" : "0"; return true; }
+            w = "aver_phys_" + a.fn + " is not exposed";
+            return false;
+        });
+#endif
+    }
+#endif // AVER_MODULE_MCP
     bool releasedByUser_ = false;   // Shift+F1 during a session; cleared when the session ends
 
     void setMouseCaptured(bool on) {
@@ -6192,6 +6394,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
+    u16 mcpPort=0;
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and EXITS, touching no device.
@@ -6256,6 +6459,12 @@ Application* createApplication(int argc, char** argv) {
         // gate passes it and none can reach it by accident.
         else if (!std::strcmp(argv[i],"--tools-menu")) focusTools=true;
         else if (!std::strcmp(argv[i],"--compile-menu")) focusCompileMenu=true;
+        // --mcp [port] : open the editor control channel. Its own flag rather than on by default,
+        // because a listening socket is something a user opts into, not something an editor does.
+        else if (!std::strcmp(argv[i],"--mcp")) {
+            mcpPort = 45123;
+            if (i+1 < argc && argv[i+1][0] != '-') mcpPort = (u16)std::atoi(argv[++i]);
+        }
         else if (!std::strcmp(argv[i],"--compile-scripts")) focusCompile=true;
         // --reload-scripts [N] fires Tools > Reload Scripts once, N frames in (default 20). Same
         // family as the three above, and the only way to prove a reload without a mouse: the point
@@ -6364,6 +6573,12 @@ Application* createApplication(int argc, char** argv) {
     app->setFocusScript(focusScript);
     app->setFocusTools(focusTools);
     app->setFocusCompileMenu(focusCompileMenu);
+#if AVER_MODULE_MCP
+    app->setMcpPort(mcpPort);
+#else
+    if (mcpPort) AVER_WARN("[Mcp] --mcp was given but this build has no control channel "
+                           "(-DAVER_MODULE_MCP=ON to include it); the editor runs regardless");
+#endif
     app->setFocusCompile(focusCompile);
     app->setFocusReload(reloadAt);
     app->setMsaaOverride(msaa);

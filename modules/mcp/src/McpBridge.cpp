@@ -106,6 +106,11 @@ bool parseCommand(const std::string& line, Command& out, std::string* why) {
 
     if (cmd == "ping") return true;
 
+    // "what can I reach?" -- the first thing a client should be able to ask, and the answer is this
+    // binary's build configuration rather than a fixed list. Answered on the socket thread; see the
+    // worker loop for why it is not queued.
+    if (cmd == "modules") return true;
+
     if (cmd == "shot") {
         if (!findString(line, "path", out.arg)) return fail("shot needs a \"path\"");
         return true;
@@ -317,7 +322,21 @@ bool McpBridge::start(u16 port) {
                     Command c;
                     std::string why;
                     std::string reply;
-                    if (parseCommand(line, c, &why)) {
+                    if (parseCommand(line, c, &why) && c.name == "modules") {
+                        // Answered HERE rather than queued. It reads the registry, which is
+                        // lock-guarded and needs no frame at all, so queueing it would add a frame of
+                        // latency to the one question a client asks before anything else.
+                        std::string list;
+                        {
+                            std::lock_guard<std::mutex> lock(impl->mutex);
+                            for (const auto& kv : impl->abis) {
+                                if (!list.empty()) list += ",";
+                                list += "\"" + kv.first + "\"";
+                            }
+                        }
+                        reply = "{\"id\":" + std::to_string(c.id) +
+                                ",\"ok\":true,\"modules\":[" + list + "]}\n";
+                    } else if (parseCommand(line, c, &why)) {
                         {
                             std::lock_guard<std::mutex> lock(impl->mutex);
                             impl->queue.push_back(c);

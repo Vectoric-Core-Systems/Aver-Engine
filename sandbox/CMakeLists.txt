@@ -170,3 +170,9 @@ set_target_properties(Sandbox.Fonts PROPERTIES FOLDER "sandbox")
 # replacing the icon would not re-run the resource compiler and the exe would keep the old one.
 set_property(SOURCE Sandbox.rc APPEND PROPERTY
   OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/branding/icon.ico)
+
+# The editor control channel. OPTIONAL in the strongest sense: without it the editor has no idea it
+# ever existed, which is what `if(TARGET ...)` here and AVER_MODULE_MCP in the module both enforce.
+if(TARGET Aver.Mcp)
+  target_link_libraries(Sandbox PRIVATE Aver.Mcp)
+endif()
