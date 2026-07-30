@@ -47,13 +47,39 @@ struct InputEvent {
     std::string text;          // for Text
 };
 
+// A call into ONE MODULE'S ABI.
+//
+// THE ROUTING RULE. A client says which module it wants and the name of an entry point, and this goes
+// to that module's own plain-C seam -- Aver.Framework's request lands on framework_abi.h, Aver.Physics'
+// on physics_abi.h, and so on. Presented to a client as one surface, "the Aver ABI", but there is no
+// such single thing: it is the union of the seams where each module meets the engine core, and that is
+// deliberately what it is.
+//
+// Why it matters that this is a lookup and not a switch: a switch here would mean Aver.Mcp knew the
+// name of every module, and knowing them is one step from linking them. This target is Core-only, and
+// staying that way is what lets the editor be built without it.
+struct AbiCall {
+    std::string module;        // "framework", "scene", "physics", "voxi", "ui", "audio", ...
+    std::string fn;            // the entry point, without its module prefix: "spawn", not "aver_fw_spawn"
+    std::vector<f64> args;     // numeric arguments, in order
+    std::string text;          // one string argument, for the entries that take a name or a path
+};
+
 // What a client asked for, once it has been parsed off the wire.
 struct Command {
-    std::string name;                  // "click", "move", "key", "text", "ping", "shot"
+    std::string name;                  // "click", "move", "key", "text", "ping", "shot", "abi"
     std::vector<InputEvent> events;    // already expanded: a click is a move, a down and an up
     std::string arg;                   // e.g. a screenshot path
+    AbiCall abi;                       // filled when name == "abi"
     u64 id = 0;                        // echoed back, so a client can match reply to request
 };
+
+// How a module's ABI answers. Returns false and fills `why` when the entry point is unknown or the
+// arguments are wrong -- refused with a reason, never silently ignored.
+//
+// `result` is free-form text the client gets back, so an entry that returns a handle or a count can say
+// so without this module needing a type for it.
+using AbiDispatch = std::function<bool(const AbiCall& call, std::string& result, std::string& why)>;
 
 class McpBridge {
 public:
@@ -82,6 +108,25 @@ public:
     //
     // Returns how many commands were applied, so a caller can log activity rather than guess at it.
     u32 pump(const std::function<void(const Command&)>& apply);
+
+    // ---- the ABI registry -------------------------------------------------------------------------
+    //
+    // INVERSION OF CONTROL, and it is the whole reason this module can stay Core-only. Aver.Mcp does not
+    // call into Aver.Framework; the APP hands it a dispatcher for "framework" and Aver.Mcp forwards to
+    // it, exactly the arrangement ActorEditorHooks uses to keep an asset editor from reaching into the
+    // application.
+    //
+    // A pleasant consequence: the registry IS the build configuration. A module that was switched off
+    // registers nothing, so `modules()` reports what this binary can actually reach and a call to a
+    // missing one is refused with a reason instead of pretending.
+    void registerAbi(const std::string& module, AbiDispatch dispatch);
+
+    // Route a call. Refuses -- with a reason naming the module -- when nothing is registered under that
+    // name, so "AVER_MODULE_PHYSICS was off in this build" is a diagnosable answer rather than silence.
+    bool callAbi(const AbiCall& call, std::string& result, std::string& why) const;
+
+    // Every module name with an ABI registered, sorted. What a client should ask for first.
+    std::vector<std::string> modules() const;
 
 private:
     struct Impl;

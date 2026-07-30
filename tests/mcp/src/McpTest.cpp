@@ -123,6 +123,82 @@ int main() {
         check(!bridge.listening(), "stop() on an unstarted bridge is harmless");
     }
 
+
+    AVER_INFO("=== the ABI registry: one surface, many module seams ===");
+    {
+        Command c;
+        std::string why;
+
+        // Parsing first: an abi call names a module and an entry point, and carries numbers and at most
+        // one string.
+        check(parseCommand(R"({"id":11,"cmd":"abi","module":"framework","fn":"spawn","args":[1,2.5,-3]})",
+                           c, &why), "an abi call parses (" + why + ")");
+        check(c.abi.module == "framework", "the module is carried");
+        check(c.abi.fn == "spawn", "and the entry point, WITHOUT its module prefix");
+        check(c.abi.args.size() == 3, "three numeric args (got " + std::to_string(c.abi.args.size()) + ")");
+        check(c.abi.args[1] > 2.4 && c.abi.args[1] < 2.6, "a fractional arg survives (" +
+                                                          std::to_string(c.abi.args[1]) + ")");
+        check(c.abi.args[2] < -2.9, "and a negative one stays negative");
+
+        check(parseCommand(R"({"cmd":"abi","module":"scene","fn":"find","text":"Player"})", c, &why),
+              "a string argument parses");
+        check(c.abi.text == "Player", "and is carried");
+        check(c.abi.args.empty(), "args may be absent entirely");
+
+        why.clear();
+        check(!parseCommand(R"({"cmd":"abi","fn":"spawn"})", c, &why),
+              "an abi call with no module is refused (" + why + ")");
+        why.clear();
+        check(!parseCommand(R"({"cmd":"abi","module":"framework"})", c, &why),
+              "and one with no fn (" + why + ")");
+
+        // ROUTING. This is the property the whole design exists for: a call for "framework" reaches the
+        // dispatcher registered for framework and nothing else.
+        McpBridge bridge;
+        check(bridge.modules().empty(), "a fresh bridge exposes NO ABI at all");
+
+        std::string sawModule, sawFn;
+        int frameworkCalls = 0, physicsCalls = 0;
+        bridge.registerAbi("framework", [&](const AbiCall& a, std::string& r, std::string& w) {
+            ++frameworkCalls; sawModule = a.module; sawFn = a.fn;
+            if (a.fn != "spawn") { w = "aver_fw_" + a.fn + " is not an entry point"; return false; }
+            r = "entity 42";
+            return true;
+        });
+        bridge.registerAbi("physics", [&](const AbiCall&, std::string& r, std::string&) {
+            ++physicsCalls; r = "ok"; return true;
+        });
+
+        const std::vector<std::string> mods = bridge.modules();
+        check(mods.size() == 2, "two ABIs registered");
+        check(mods[0] == "framework" && mods[1] == "physics", "and reported sorted, so a client can list them");
+
+        std::string result, err;
+        AbiCall call; call.module = "framework"; call.fn = "spawn";
+        check(bridge.callAbi(call, result, err), "a framework call is routed (" + err + ")");
+        check(frameworkCalls == 1 && physicsCalls == 0,
+              "to the FRAMEWORK dispatcher and no other -- that is the whole point");
+        check(sawModule == "framework" && sawFn == "spawn", "which saw the module and entry point");
+        check(result == "entity 42", "and its result comes back to the caller");
+
+        // A module's own refusal must survive the trip: the ABI, not the bridge, decides what its
+        // entry points are.
+        err.clear();
+        call.fn = "explode";
+        check(!bridge.callAbi(call, result, err), "an unknown entry point is refused by the MODULE");
+        check(err.find("aver_fw_explode") != std::string::npos,
+              "in the module's own words (" + err + ")");
+
+        // AND THE CASE THAT MATTERS FOR AN OPTIONAL BUILD: a module that was never registered -- because
+        // it was switched off -- is refused with a reason that says so, rather than silently doing
+        // nothing.
+        err.clear();
+        AbiCall missing; missing.module = "voxi"; missing.fn = "setQuality";
+        check(!bridge.callAbi(missing, result, err), "a call to an unregistered module is refused");
+        check(err.find("voxi") != std::string::npos && err.find("not built") != std::string::npos,
+              "naming the module and the likely cause (" + err + ")");
+    }
+
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;
 }

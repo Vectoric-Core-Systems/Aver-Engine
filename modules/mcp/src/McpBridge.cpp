@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <thread>
 
@@ -156,6 +157,36 @@ bool parseCommand(const std::string& line, Command& out, std::string* why) {
         return true;
     }
 
+    if (cmd == "abi") {
+        // ROUTED, not interpreted. This module does not know what "framework" means -- it knows only
+        // that something registered under that name, and hands the call there. See McpBridge::callAbi.
+        if (!findString(line, "module", out.abi.module)) return fail("abi needs a \"module\"");
+        if (!findString(line, "fn", out.abi.fn)) return fail("abi needs an \"fn\"");
+        findString(line, "text", out.abi.text);
+        // The numeric argument list. Scanned by hand for the same reason findNumber is: a flat array of
+        // numbers does not justify pulling Aver.Formats -- and its Platform and Assets dependencies --
+        // into an optional debugging channel.
+        const usize a = line.find("\"args\"");
+        if (a != std::string::npos) {
+            const usize lb = line.find('[', a);
+            const usize rb = lb == std::string::npos ? std::string::npos : line.find(']', lb);
+            if (lb == std::string::npos || rb == std::string::npos) return fail("abi args must be an array");
+            usize c = lb + 1;
+            while (c < rb) {
+                while (c < rb && (std::isspace(static_cast<unsigned char>(line[c])) || line[c] == ',')) ++c;
+                if (c >= rb) break;
+                const usize start = c;
+                if (line[c] == '-' || line[c] == '+') ++c;
+                while (c < rb && (std::isdigit(static_cast<unsigned char>(line[c])) ||
+                                  line[c] == '.' || line[c] == 'e' || line[c] == 'E' ||
+                                  line[c] == '-' || line[c] == '+')) ++c;
+                if (c == start) return fail("abi args holds something that is not a number");
+                out.abi.args.push_back(std::strtod(line.substr(start, c - start).c_str(), nullptr));
+            }
+        }
+        return true;
+    }
+
     // REFUSED, not ignored. A client that misspelled `click` should be told, rather than left waiting
     // for a button that was never pressed.
     return fail("unknown cmd");
@@ -172,6 +203,9 @@ struct McpBridge::Impl {
     // because pacing has to be per EVENT: see pump().
     usize cursor = 0;
     u16 port = 0;
+    // name -> that module's ABI. A map, not a switch: a switch would mean this module knew every
+    // module's name, and knowing them is one step from linking them.
+    std::map<std::string, AbiDispatch> abis;
 #if defined(_WIN32)
     SOCKET listener = INVALID_SOCKET;
     bool wsaUp = false;
@@ -183,6 +217,43 @@ McpBridge::~McpBridge() { stop(); }
 
 bool McpBridge::listening() const { return impl_ && impl_->running.load(); }
 u16  McpBridge::port() const { return impl_ ? impl_->port : 0; }
+
+void McpBridge::registerAbi(const std::string& module, AbiDispatch dispatch) {
+    if (!impl_ || module.empty() || !dispatch) return;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const bool replacing = impl_->abis.find(module) != impl_->abis.end();
+    impl_->abis[module] = std::move(dispatch);
+    // Said out loud, because the registry IS the reachable surface: a reader of the log should be able
+    // to see exactly which module seams this binary exposes, without inferring it from the build flags.
+    AVER_INFO("[Mcp] ABI registered: {}{}", module, replacing ? " (replacing)" : "");
+}
+
+bool McpBridge::callAbi(const AbiCall& call, std::string& result, std::string& why) const {
+    AbiDispatch fn;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        const auto it = impl_->abis.find(call.module);
+        if (it == impl_->abis.end()) {
+            // Named, and with the likely cause. "no ABI for physics" sends a reader to look for a typo;
+            // saying the module may simply not be in this build sends them to the switch that decides it.
+            why = "no ABI registered for '" + call.module +
+                  "' -- either the name is wrong or that module was not built into this binary";
+            return false;
+        }
+        fn = it->second;
+    }
+    // Called OUTSIDE the lock. A dispatcher runs module code of unknown duration, and holding the queue
+    // mutex across it would stall the socket thread for as long as the engine took to answer.
+    return fn(call, result, why);
+}
+
+std::vector<std::string> McpBridge::modules() const {
+    std::vector<std::string> out;
+    if (!impl_) return out;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    for (const auto& kv : impl_->abis) out.push_back(kv.first);   // std::map: already sorted
+    return out;
+}
 
 #if !defined(_WIN32)
 bool McpBridge::start(u16) {
