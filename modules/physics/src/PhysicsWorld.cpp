@@ -616,13 +616,21 @@ int32_t aver_phys_add_mesh(const float* verts, int32_t vertexCount,
 int32_t aver_phys_add_heightfield(const float* samples, int32_t sampleCount, float spacingCm,
                                   float cx, float cy, float cz) {
     if (!g_world || !samples || sampleCount < 2 || spacingCm <= 0.0f) return 0;
-    // Jolt requires the sample count to be a multiple of its block size; round DOWN so a caller's
-    // grid is cropped rather than read past the end of.
-    const int32_t n = (sampleCount / 8) * 8;
-    if (n < 8) { AVER_WARN("[Physics] heightfield needs at least 8x8 samples"); return 0; }
-    if (n != sampleCount)
-        AVER_WARN("[Physics] heightfield {}x{} cropped to {}x{} (Jolt needs a multiple of 8)",
-                  sampleCount, sampleCount, n, n);
+    // EVERY sample is passed through. This used to crop to a multiple of 8 on the belief that "Jolt
+    // requires the sample count to be a multiple of its block size", and that belief was wrong in the
+    // direction that loses data:
+    //
+    //   * HeightFieldShape.cpp:441 rounds the count UP to a block multiple, not down --
+    //     `mSampleCount(((mSampleCount + mBlockSize - 1) / mBlockSize) * mBlockSize)`.
+    //   * The quantise loop at :531-558 indexes only `inSettings.mSampleCount` in the CALLER's array
+    //     and pads the rounded-up remainder itself with `cNoCollisionValue16`, under its own comments
+    //     "Pad remaining columns with no collision" / "Pad remaining rows with no collision".
+    //
+    // So there was never a read past the end to protect against, and the crop silently threw away the
+    // caller's last rows and columns -- a 9x9 field became 8x8, and a 1025x1025 one lost exactly the
+    // shared edge that makes adjacent chunks meet. A collision surface smaller than the one asked for
+    // is the kind of defect that shows up as a character falling through a seam, a long way from here.
+    const int32_t n = sampleCount;
 
     JPH::Array<float> heights;
     heights.reserve(static_cast<size_t>(n) * static_cast<size_t>(n));

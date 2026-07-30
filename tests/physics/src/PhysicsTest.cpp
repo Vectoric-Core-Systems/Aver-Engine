@@ -18,6 +18,7 @@
 
 #include <cmath>
 #include <string>
+#include <vector>
 
 using namespace aver;
 using namespace aver::physics;
@@ -268,12 +269,96 @@ static void testShapes() {
     aver_phys_shutdown();
 }
 
+// Does a heightfield keep EVERY sample it was given?
+//
+// This exists because the 8x8 field above is exactly a multiple of Jolt's block size, so it could
+// never have caught what it was hiding: aver_phys_add_heightfield used to crop the grid DOWN to a
+// multiple of 8, on a comment claiming Jolt required that. Jolt rounds UP and pads the remainder
+// itself (HeightFieldShape.cpp:441 and :531-558), so the crop was pure data loss -- a 9x9 field
+// became 8x8 and lost its last row and column, which for tiled terrain is exactly the shared edge
+// where two chunks are supposed to meet.
+//
+// DIFFERENTIAL, on purpose, so it asserts nothing about the axis mapping. Two 9x9 fields identical
+// except in the final row cannot be told apart by any query if that row is discarded. Comparing them
+// tests precisely "the last row survives" and stays true no matter which engine axis a grid row runs
+// along -- which matters, because that mapping is genuinely confusing here (the field is built in
+// Jolt's own Y-up axes and only its centre goes through the axis map).
+void testHeightfieldKeepsEverySample() {
+    AVER_INFO("-- heightfield sample retention --");
+
+    const int32_t N = 9;                  // deliberately NOT a multiple of 8
+    const float   spacing = 200.0f;       // cm
+    const float   raised = 400.0f;        // cm, well clear of the flat rows
+
+    // Sweep the whole footprint plus a margin, straight down, and collect every hit height.
+    // Swept over BOTH signs of both axes, which is what keeps this test axis-agnostic in practice as
+    // well as in intention. The first version marched ix,iy from -1..N assuming a grid row ran along
+    // engine +X; it does not. The field is built in Jolt's own axes and only its centre goes through
+    // the axis map, so composing that map (Convert.hpp: Aver +X -> Jolt -Z) puts a row along engine
+    // -X: a 9x9 field pinned at the origin occupies x in [-1600, 0], and the old sweep looked at
+    // x in [-200, 1800] and missed almost all of it. Every ray reported a miss, the two fields
+    // "agreed", and the test failed for a reason that had nothing to do with what it was testing.
+    //
+    // Covering +-(N+1) in both axes costs 361 rays and removes the need to be right about any of that.
+    auto sweep = [&]() {
+        std::vector<float> zs;
+        for (int32_t iy = -(N + 1); iy <= N + 1; ++iy) {
+            for (int32_t ix = -(N + 1); ix <= N + 1; ++ix) {
+                const float x = static_cast<float>(ix) * spacing;
+                const float y = static_cast<float>(iy) * spacing;
+                float p[3] = {0,0,0}, nrm[3] = {0,0,0};
+                const int32_t hit = aver_phys_raycast(x, y, 5000.0f, 0.0f, 0.0f, -1.0f,
+                                                      20000.0f, p, nrm);
+                zs.push_back(hit ? p[2] : -99999.0f);
+            }
+        }
+        return zs;
+    };
+
+    std::vector<float> flatHits, raisedHits;
+
+    std::vector<float> flat(static_cast<size_t>(N) * N, 0.0f);
+    check(aver_phys_init() == 1, "physics up for the flat field");
+    check(aver_phys_add_heightfield(flat.data(), N, spacing, 0.0f, 0.0f, 0.0f) != 0,
+          "9x9 heightfield created (not a multiple of 8)");
+    flatHits = sweep();
+    aver_phys_shutdown();
+
+    // The same field with only its LAST ROW raised. Under the old crop this is byte-identical to the
+    // flat one after cropping, so every ray would agree and the difference below would be zero.
+    std::vector<float> bumped = flat;
+    for (int32_t x = 0; x < N; ++x)
+        bumped[static_cast<size_t>(N - 1) * N + x] = raised;
+
+    check(aver_phys_init() == 1, "physics up for the bumped field");
+    check(aver_phys_add_heightfield(bumped.data(), N, spacing, 0.0f, 0.0f, 0.0f) != 0,
+          "9x9 heightfield with a raised last row created");
+    raisedHits = sweep();
+    aver_phys_shutdown();
+
+    check(flatHits.size() == raisedHits.size(), "both sweeps cast the same number of rays");
+
+    int differing = 0, raisedSeen = 0;
+    for (size_t i = 0; i < flatHits.size() && i < raisedHits.size(); ++i) {
+        if (std::fabs(flatHits[i] - raisedHits[i]) > 1.0f) ++differing;
+        if (raisedHits[i] > raised * 0.5f) ++raisedSeen;
+    }
+    // THE ASSERTION THAT WOULD HAVE FAILED BEFORE THE FIX. A discarded last row is unobservable, so
+    // the two fields would have been indistinguishable and `differing` would be 0.
+    check(differing > 0,
+          "the last row of a 9x9 heightfield is not discarded (" + std::to_string(differing) +
+          " ray(s) differ from the flat field)");
+    check(raisedSeen > 0,
+          "a ray actually landed on the raised last row (" + std::to_string(raisedSeen) + " hit(s))");
+}
+
 int main() {
     testAxisMap();
     testRotationMap();
     testSimulation();
     testEventsAndQueries();
     testShapes();
+    testHeightfieldKeepsEverySample();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;
 }
