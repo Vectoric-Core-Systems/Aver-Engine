@@ -1,4 +1,5 @@
 #include "ActorEditor.hpp"
+#include "ToolGlyphs.hpp"
 #include "EditorPrefs.hpp"
 
 #include "aver/core/Hash.hpp"
@@ -403,6 +404,20 @@ private:
     // otherwise an empty box.
     void drawComponentWireframes(ImVec2 imageTopLeft, ImVec2 imageSize) const;
     void dragAlongAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVec2 imageSize) const;
+    // The rotate and scale halves of the same gesture, plus the projection all three share.
+    bool dragAlong(const fmt::ActorModel& m, int axis, ImVec2 delta, ImVec2 imageSize,
+                   f32& outAlong) const;
+    void dragRotateAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVec2 imageSize) const;
+    void dragScaleAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVec2 imageSize) const;
+
+    // Which transform the gizmo applies. The SAME four tools as the level viewport, selected the same
+    // way (the 1-4 keys) and drawn with the same icons out of ToolGlyphs.hpp -- an actor viewport whose
+    // tools were a different set, or looked different, would be a second editor to learn.
+    //
+    // Per-tab rather than shared with the level's tool: the two viewports hold different selections
+    // and a user switching tabs to nudge a placement does not expect the level's tool to change under
+    // them.
+    int tool_ = ToolMove;
     bool axisTip(const fmt::ActorModel& m, int axis, ImVec2 imageSize, ImVec2& out) const;
 
     // -1 when not dragging. Latched on mouse-down and held for the whole gesture.
@@ -1219,6 +1234,60 @@ void ActorEditor::dragAlongAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVe
     m.pos[axis] += along * (kGizmoPixels / unitLen);
 }
 
+// How far the mouse moved ALONG a handle, in fractions of that handle's screen length. Shared by the
+// rotate and scale drags, and it is the same projection dragAlongAxis opens with -- dragging across a
+// handle does nothing, which is what makes a single-axis gizmo feel like one.
+//
+// Returns false when the handle is degenerate on screen (edge-on to the camera), because a projection
+// onto a zero-length direction is a division by nearly nothing and would send the value to infinity
+// on a one-pixel wobble.
+bool ActorEditor::dragAlong(const fmt::ActorModel& m, int axis, ImVec2 delta,
+                            ImVec2 imageSize, f32& outAlong) const {
+    ImVec2 origin, tip;
+    if (!projectToScreen(m.pos, imageSize, origin)) return false;
+    if (!axisTip(m, axis, imageSize, tip)) return false;
+    const f32 dx = tip.x - origin.x, dy = tip.y - origin.y;
+    const f32 len2 = dx*dx + dy*dy;
+    if (len2 < 1e-4f) return false;
+    outAlong = (delta.x * dx + delta.y * dy) / len2;
+    return true;
+}
+
+void ActorEditor::dragRotateAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVec2 imageSize) const {
+    f32 along = 0.0f;
+    if (!dragAlong(m, axis, delta, imageSize, along)) return;
+
+    // WHICH component. `rot` is (yaw, pitch, roll) about (+Z, +Y, +X) applied Z-then-Y-then-X -- see
+    // composeTransform at the top of this file, which is the one place that ordering is decided. So a
+    // gizmo axis maps to rot[2 - axis]: X handle -> roll, Y -> pitch, Z -> yaw. Getting this backwards
+    // gives a gizmo where dragging the blue handle tilts the object sideways, which reads as a broken
+    // gizmo rather than as a wrong index.
+    const int comp = 2 - axis;
+
+    // A full handle length is a quarter turn. Angles are unbounded on purpose -- rot is degrees in the
+    // source text and 370 and 10 are different things to a reader diffing the file, so this does not
+    // wrap them behind the author's back.
+    m.rot[comp] += along * 90.0f;
+}
+
+void ActorEditor::dragScaleAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVec2 imageSize) const {
+    f32 along = 0.0f;
+    if (!dragAlong(m, axis, delta, imageSize, along)) return;
+
+    // MULTIPLICATIVE, for the reason PreviewCamera::addZoom is: a drag should change the same
+    // PROPORTION at every size, or the gesture that nudges a 2 m crate obliterates a 5 cm bolt.
+    // A full handle length doubles.
+    f32 factor = 1.0f + along;
+    // Clamped away from zero and from negatives. A zero scale collapses the mesh to a plane and its
+    // normals with it; a negative one mirrors the geometry, which inverts the winding and makes the
+    // object render inside-out. Neither is something a drag should be able to reach by accident, and
+    // an author who genuinely wants a mirrored placement can type it in the Details panel.
+    if (factor < 0.02f) factor = 0.02f;
+    if (factor > 50.0f) factor = 50.0f;
+    m.scale[axis] *= factor;
+    if (m.scale[axis] < 1e-4f) m.scale[axis] = 1e-4f;
+}
+
 void ActorEditor::draw(Engine& e) {
 #if AVER_WITH_IMGUI
     // The preview is created on FIRST DRAW rather than at registration, because the factory is a
@@ -1289,6 +1358,27 @@ void ActorEditor::draw(Engine& e) {
 
         ImGui::SameLine();
         if (ImGui::Button("Frame All") && g_preview) g_preview->frameAll();
+
+        // ---- the transform tools ----
+        //
+        // The same four as the level viewport, the same icons, the same 1-4 keys. Drawn here rather
+        // than over the image because this tab already has a toolbar and a floating overlay would sit
+        // on top of the preview, which is the one thing in the tab worth looking at.
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        {
+            const f32 icon = ImGui::GetFrameHeight();
+            const f32 dpi  = icon / 19.0f;   // the glyphs' line weights are authored against ~19px
+            for (int k = ToolSelect; k <= ToolScale; ++k) {
+                if (k != ToolSelect) ImGui::SameLine(0.0f, 2.0f);
+                char id[16];
+                std::snprintf(id, sizeof id, "##aeTool%d", k);
+                if (toolButton(id, k, tool_ == k, icon, dpi)) tool_ = k;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s  (%d)", toolName(k), k + 1);
+            }
+        }
 
         // ---- Live ----
         //
@@ -1437,7 +1527,21 @@ void ActorEditor::draw(Engine& e) {
             // NO DRAGGING IN THE LIVE VIEW. What is on screen there was produced by code, and there
             // is no byte in the file to write a new coordinate back to -- a handle that moved a model
             // and then lost the move on the next Refresh would be worse than no handle.
-            const bool haveSel = !live_ && selected_ >= 0
+            // Tools 1-4, only while the pointer is over the viewport. Guarded that way because this
+            // tab has text fields -- the Details panel's name and mesh boxes -- and a bare key handler
+            // would eat a "2" somebody was typing into one.
+            if (ImGui::IsItemHovered() && !ImGui::GetIO().WantTextInput) {
+                if (ImGui::IsKeyPressed(ImGuiKey_1)) tool_ = ToolSelect;
+                if (ImGui::IsKeyPressed(ImGuiKey_2)) tool_ = ToolMove;
+                if (ImGui::IsKeyPressed(ImGuiKey_3)) tool_ = ToolRotate;
+                if (ImGui::IsKeyPressed(ImGuiKey_4)) tool_ = ToolScale;
+                // F frames, as it does in the level viewport.
+                if (ImGui::IsKeyPressed(ImGuiKey_F) && g_preview) g_preview->frameAll();
+            }
+
+            // Select puts no handles on screen, so there is nothing to grab and a left-drag is always
+            // an orbit -- which is what makes Select the tool you use to look at something.
+            const bool haveSel = !live_ && tool_ != ToolSelect && selected_ >= 0
                               && selected_ < static_cast<int>(script_.models.size());
             if (haveSel && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::IsItemHovered()) {
                 const ImVec2 m = io.MousePos;
@@ -1448,7 +1552,10 @@ void ActorEditor::draw(Engine& e) {
             if (draggingAxis_ >= 0 && haveSel) {
                 const ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
                 if (d.x != 0.0f || d.y != 0.0f) {
-                    dragAlongAxis(script_.models[static_cast<usize>(selected_)], draggingAxis_, d, s);
+                    fmt::ActorModel& m = script_.models[static_cast<usize>(selected_)];
+                    if      (tool_ == ToolMove)   dragAlongAxis(m, draggingAxis_, d, s);
+                    else if (tool_ == ToolRotate) dragRotateAxis(m, draggingAxis_, d, s);
+                    else if (tool_ == ToolScale)  dragScaleAxis(m, draggingAxis_, d, s);
                     ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
                     dirty_ = true;
                 }
@@ -1457,13 +1564,32 @@ void ActorEditor::draw(Engine& e) {
                 g_preview->camera().addOrbit(-d.x * 0.4f, d.y * 0.4f);
                 ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
             }
+
+            // MMB PAN, the level viewport's own binding, and the motion this camera was missing: an
+            // actor's interesting part is rarely its pivot, and without a pan the only way to centre a
+            // muzzle or a head was to zoom out until it happened to be in frame. Right-drag pans too,
+            // because on a trackpad there is no middle button.
+            //
+            // The RENDERED height is passed, not the widget's: they differ while a resize is still
+            // being debounced, and the pixel-to-world scale must match the picture actually on screen.
+            for (ImGuiMouseButton b : {ImGuiMouseButton_Middle, ImGuiMouseButton_Right}) {
+                if (ImGui::IsMouseDragging(b)) {
+                    const ImVec2 d = ImGui::GetMouseDragDelta(b);
+                    g_preview->camera().panPixels(d.x, d.y, static_cast<f32>(g_preview->height()));
+                    ImGui::ResetMouseDragDelta(b);
+                }
+            }
+
             if (io.MouseWheel != 0.0f && draggingAxis_ < 0)
                 g_preview->camera().addZoom(io.MouseWheel > 0.0f ? 0.88f : 1.0f / 0.88f);
         }
 
         // Before the gizmo, so a handle is never hidden behind a frustum line.
         drawComponentWireframes(at, s);
-        if (!live_ && selected_ >= 0 && selected_ < static_cast<int>(script_.models.size()))
+        // No handles under Select. A gizmo you can see but not use is worse than no gizmo, and it is
+        // the only visual difference between Select and the other three.
+        if (!live_ && tool_ != ToolSelect && selected_ >= 0
+            && selected_ < static_cast<int>(script_.models.size()))
             drawGizmo(at, s, script_.models[static_cast<usize>(selected_)]);
     } else if (!noViewport) {
         // Only when a viewport WAS expected. Saying "no preview on this backend" about a Game Mode

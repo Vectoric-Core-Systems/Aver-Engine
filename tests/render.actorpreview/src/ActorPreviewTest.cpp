@@ -300,6 +300,48 @@ int main() {
         c.addZoom(0.0001f);
         check(c.distance >= 5.0f, "and clamped so it cannot reach the pivot");
 
+        // ---- pan ----
+        //
+        // Checked by PROPERTY rather than against hand-computed numbers, because the failure mode here
+        // is a mirrored or transposed basis, and those produce perfectly plausible-looking values. A
+        // pan that moved the pivot the wrong way would read as "the mouse is inverted", which people
+        // blame on themselves.
+        {
+            PreviewCamera p;
+            p.yawDeg = 0.0f; p.pitchDeg = 0.0f; p.distance = 400.0f; p.fovDeg = 45.0f;
+            p.pivot[0] = p.pivot[1] = p.pivot[2] = 0.0f;
+
+            // At yaw 0 the camera looks along +X, so its right is +Y. Dragging the cursor RIGHT must
+            // move the pivot towards -Y, because the scene follows the cursor.
+            p.panPixels(100.0f, 0.0f, 1000.0f);
+            check(p.pivot[1] < -1.0f, "drag right pans the pivot along -Y (scene follows the cursor)");
+            check(std::fabs(p.pivot[2]) < 1e-3f, "a horizontal drag does not change height");
+            check(std::fabs(p.pivot[0]) < 1e-3f, "and does not move along the view axis");
+
+            // Dragging DOWN must raise the pivot, for the same reason: screen +Y is down.
+            PreviewCamera q;
+            q.yawDeg = 0.0f; q.pitchDeg = 0.0f; q.distance = 400.0f; q.fovDeg = 45.0f;
+            q.pivot[0] = q.pivot[1] = q.pivot[2] = 0.0f;
+            q.panPixels(0.0f, 100.0f, 1000.0f);
+            check(q.pivot[2] > 1.0f, "drag down pans the pivot UP (+Z), the engine's up axis");
+
+            // Scale must follow the orbit distance: a pan at 10x the distance covers 10x the world, or
+            // panning a large actor takes a hundred drags and panning a small one overshoots.
+            PreviewCamera near_ = q, far_ = q;
+            near_.pivot[2] = far_.pivot[2] = 0.0f;
+            near_.distance = 100.0f; far_.distance = 1000.0f;
+            near_.panPixels(0.0f, 100.0f, 1000.0f);
+            far_.panPixels(0.0f, 100.0f, 1000.0f);
+            check(far_.pivot[2] > near_.pivot[2] * 9.0f,
+                  "pan distance scales with the orbit distance");
+
+            // A degenerate viewport must be ignored rather than divided by.
+            PreviewCamera z = q;
+            const f32 before = z.pivot[2];
+            z.panPixels(50.0f, 50.0f, 0.0f);
+            check(z.pivot[2] == before, "a zero-height viewport pans nothing instead of dividing by it");
+        }
+
         // frameAll sizes to the placements, so an actor authored in centimetres and one authored in
         // metres both arrive on screen without anybody scrolling.
         std::vector<PreviewDraw> wide;

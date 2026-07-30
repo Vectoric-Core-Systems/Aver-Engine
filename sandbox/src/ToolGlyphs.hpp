@@ -1,0 +1,83 @@
+#pragma once
+// The four transform-tool icons, and the button chrome around them.
+//
+// Shared because the actor editor's viewport has the same tools as the level's and must therefore
+// have the same PICTURE of them. These were private to SandboxApp; a second set drawn by eye in the
+// actor tab would have been recognisably not-quite-the-same, and the two would have drifted every
+// time one was touched. Lifting them cost nothing: `drawToolGlyph` was already a const member that
+// read no state, taking its size, colour and DPI as arguments.
+//
+// Header-only and free functions rather than a class, because there is no state here at all -- an
+// icon is a pure function of a rectangle.
+#if AVER_WITH_IMGUI
+#include "imgui.h"
+
+#include "aver/core/Types.hpp"
+
+#include <cmath>
+
+namespace aver::editor {
+
+// The tool identities, in the order the toolbar draws them and the order the 1-4 keys select them.
+// A plain enum with an int value on purpose: it crosses to `drawToolGlyph`'s `kind` and is persisted
+// by EditorPrefs, and a scoped enum would need a cast at both ends for no benefit.
+enum ToolKind { ToolSelect = 0, ToolMove = 1, ToolRotate = 2, ToolScale = 3 };
+
+// A compact vector icon (kind: 0 Select, 1 Move, 2 Rotate, 3 Scale) drawn into a cell.
+inline void drawToolGlyph(ImDrawList* dl, ImVec2 p, f32 sz, int kind, ImU32 fg, f32 dpi) {
+    auto P = [&](f32 fx, f32 fy){ return ImVec2(p.x+fx*sz, p.y+fy*sz); };
+    const f32 th = std::fmax(1.6f, 2.0f*dpi);
+    if (kind == 0) { // pointer/cursor
+        dl->AddTriangleFilled(P(0.30f,0.20f), P(0.30f,0.70f), P(0.45f,0.56f), fg);
+        dl->AddTriangleFilled(P(0.30f,0.20f), P(0.45f,0.56f), P(0.63f,0.49f), fg);
+        dl->AddLine(P(0.47f,0.55f), P(0.61f,0.80f), fg, th*1.6f);
+    } else if (kind == 1) { // 4-way move
+        dl->AddLine(P(0.5f,0.15f), P(0.5f,0.85f), fg, th);
+        dl->AddLine(P(0.15f,0.5f), P(0.85f,0.5f), fg, th);
+        const f32 a = 0.08f*sz;
+        dl->AddTriangleFilled(P(0.5f,0.11f), ImVec2(P(0.5f,0.25f).x-a,P(0.5f,0.25f).y), ImVec2(P(0.5f,0.25f).x+a,P(0.5f,0.25f).y), fg);
+        dl->AddTriangleFilled(P(0.5f,0.89f), ImVec2(P(0.5f,0.75f).x-a,P(0.5f,0.75f).y), ImVec2(P(0.5f,0.75f).x+a,P(0.5f,0.75f).y), fg);
+        dl->AddTriangleFilled(P(0.11f,0.5f), ImVec2(P(0.25f,0.5f).x,P(0.25f,0.5f).y-a), ImVec2(P(0.25f,0.5f).x,P(0.25f,0.5f).y+a), fg);
+        dl->AddTriangleFilled(P(0.89f,0.5f), ImVec2(P(0.75f,0.5f).x,P(0.75f,0.5f).y-a), ImVec2(P(0.75f,0.5f).x,P(0.75f,0.5f).y+a), fg);
+    } else if (kind == 2) { // rotate arc + arrowhead
+        const ImVec2 c = P(0.5f,0.5f); const f32 r = 0.30f*sz;
+        dl->PathArcTo(c, r, -2.30f, 1.15f, 24); dl->PathStroke(fg, 0, th);
+        const f32 ea=1.15f; const ImVec2 end(c.x+std::cos(ea)*r, c.y+std::sin(ea)*r); const f32 a=0.07f*sz;
+        dl->AddTriangleFilled(ImVec2(end.x-a,end.y-a*0.4f), ImVec2(end.x+a*0.6f,end.y-a), ImVec2(end.x+a*0.2f,end.y+a), fg);
+    } else { // scale: diagonal + boxes
+        dl->AddLine(P(0.26f,0.74f), P(0.74f,0.26f), fg, th);
+        const ImVec2 tl=P(0.74f,0.26f); const f32 b=0.10f*sz;
+        dl->AddRectFilled(ImVec2(tl.x-b,tl.y-b), ImVec2(tl.x+b,tl.y+b), fg, 1.5f);
+        const ImVec2 br=P(0.26f,0.74f); const f32 b2=0.07f*sz;
+        dl->AddRect(ImVec2(br.x-b2,br.y-b2), ImVec2(br.x+b2,br.y+b2), fg, 1.0f, 0, th);
+    }
+}
+
+// One tool button: an InvisibleButton with the icon and the active/hover fill painted on. Returns
+// true when clicked. The orange active fill is the editor's selection colour and is what makes the
+// current tool readable at a glance.
+inline bool toolButton(const char* id, int kind, bool active, f32 icon, f32 dpi) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton(id, ImVec2(icon, icon));
+    const bool hov = ImGui::IsItemHovered(), clk = ImGui::IsItemClicked();
+    const ImU32 bg = active ? IM_COL32(232,110,35,235)
+                            : (hov ? IM_COL32(74,76,82,255) : IM_COL32(48,49,54,220));
+    dl->AddRectFilled(p, ImVec2(p.x+icon, p.y+icon), bg, 4.0f);
+    drawToolGlyph(dl, p, icon, kind, IM_COL32(236,237,240,255), dpi);
+    return clk;
+}
+
+// The human name, for a tooltip or a status line. Kept beside the glyphs so a fifth tool cannot be
+// added to one and forgotten in the other.
+inline const char* toolName(int kind) {
+    switch (kind) {
+        case ToolSelect: return "Select";
+        case ToolMove:   return "Move";
+        case ToolRotate: return "Rotate";
+        default:         return "Scale";
+    }
+}
+
+} // namespace aver::editor
+#endif // AVER_WITH_IMGUI

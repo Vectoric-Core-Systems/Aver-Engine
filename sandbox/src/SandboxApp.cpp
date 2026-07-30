@@ -22,6 +22,7 @@
 #include "ProjectBrowser.hpp"
 #include "ProjectScaffold.hpp"   // --new-project: scaffolding a project without a mouse
 #include "ToolsMenu.hpp"
+#include "ToolGlyphs.hpp"
 #include "AssetEditor.hpp"
 #include "ActorEditor.hpp"   // a .Designer.cs opened as an asset, with a 3D preview of what it declares
 #include "EditorPrefs.hpp"   // UI geometry that outlives a session
@@ -3134,35 +3135,8 @@ private:
         return clicked;
     }
 
-    // A compact vector icon (kind: 0 Select, 1 Move, 2 Rotate, 3 Scale) drawn into a cell.
-    void drawToolGlyph(ImDrawList* dl, ImVec2 p, f32 sz, int kind, ImU32 fg) const {
-        auto P = [&](f32 fx, f32 fy){ return ImVec2(p.x+fx*sz, p.y+fy*sz); };
-        const f32 th = std::fmax(1.6f, 2.0f*dpi_);
-        if (kind == 0) { // pointer/cursor
-            dl->AddTriangleFilled(P(0.30f,0.20f), P(0.30f,0.70f), P(0.45f,0.56f), fg);
-            dl->AddTriangleFilled(P(0.30f,0.20f), P(0.45f,0.56f), P(0.63f,0.49f), fg);
-            dl->AddLine(P(0.47f,0.55f), P(0.61f,0.80f), fg, th*1.6f);
-        } else if (kind == 1) { // 4-way move
-            dl->AddLine(P(0.5f,0.15f), P(0.5f,0.85f), fg, th);
-            dl->AddLine(P(0.15f,0.5f), P(0.85f,0.5f), fg, th);
-            const f32 a = 0.08f*sz;
-            dl->AddTriangleFilled(P(0.5f,0.11f), ImVec2(P(0.5f,0.25f).x-a,P(0.5f,0.25f).y), ImVec2(P(0.5f,0.25f).x+a,P(0.5f,0.25f).y), fg);
-            dl->AddTriangleFilled(P(0.5f,0.89f), ImVec2(P(0.5f,0.75f).x-a,P(0.5f,0.75f).y), ImVec2(P(0.5f,0.75f).x+a,P(0.5f,0.75f).y), fg);
-            dl->AddTriangleFilled(P(0.11f,0.5f), ImVec2(P(0.25f,0.5f).x,P(0.25f,0.5f).y-a), ImVec2(P(0.25f,0.5f).x,P(0.25f,0.5f).y+a), fg);
-            dl->AddTriangleFilled(P(0.89f,0.5f), ImVec2(P(0.75f,0.5f).x,P(0.75f,0.5f).y-a), ImVec2(P(0.75f,0.5f).x,P(0.75f,0.5f).y+a), fg);
-        } else if (kind == 2) { // rotate arc + arrowhead
-            const ImVec2 c = P(0.5f,0.5f); const f32 r = 0.30f*sz;
-            dl->PathArcTo(c, r, -2.30f, 1.15f, 24); dl->PathStroke(fg, 0, th);
-            const f32 ea=1.15f; const ImVec2 end(c.x+std::cos(ea)*r, c.y+std::sin(ea)*r); const f32 a=0.07f*sz;
-            dl->AddTriangleFilled(ImVec2(end.x-a,end.y-a*0.4f), ImVec2(end.x+a*0.6f,end.y-a), ImVec2(end.x+a*0.2f,end.y+a), fg);
-        } else { // scale: diagonal + boxes
-            dl->AddLine(P(0.26f,0.74f), P(0.74f,0.26f), fg, th);
-            const ImVec2 tl=P(0.74f,0.26f); const f32 b=0.10f*sz;
-            dl->AddRectFilled(ImVec2(tl.x-b,tl.y-b), ImVec2(tl.x+b,tl.y+b), fg, 1.5f);
-            const ImVec2 br=P(0.26f,0.74f); const f32 b2=0.07f*sz;
-            dl->AddRect(ImVec2(br.x-b2,br.y-b2), ImVec2(br.x+b2,br.y+b2), fg, 1.0f, 0, th);
-        }
-    }
+    // drawToolGlyph moved to ToolGlyphs.hpp: the actor editor's viewport has the same tools and
+    // therefore needs the same icons, and two hand-drawn copies would have drifted.
 #endif
 
     // "This project predates some of the editor's project files. Add them?"
@@ -5473,13 +5447,7 @@ private:
         ImGui::Begin("##vpbar_right", nullptr, f);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         auto toolBtn = [&](const char* id, int kind, bool active)->bool {
-            const ImVec2 p = ImGui::GetCursorScreenPos();
-            ImGui::InvisibleButton(id, ImVec2(icon, icon));
-            const bool hov = ImGui::IsItemHovered(), clk = ImGui::IsItemClicked();
-            const ImU32 bg = active ? IM_COL32(232,110,35,235) : (hov ? IM_COL32(74,76,82,255) : IM_COL32(48,49,54,220));
-            dl->AddRectFilled(p, ImVec2(p.x+icon,p.y+icon), bg, 4.0f);
-            drawToolGlyph(dl, p, icon, kind, IM_COL32(236,237,240,255));
-            return clk;
+            return editor::toolButton(id, kind, active, icon, dpi_);
         };
         auto caretBtn = [&](const char* id, bool on)->bool {
             const ImVec2 p = ImGui::GetCursorScreenPos();

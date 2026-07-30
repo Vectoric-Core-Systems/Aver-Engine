@@ -73,6 +73,33 @@ void PreviewCamera::addOrbit(f32 dYaw, f32 dPitch) {
     pitchDeg = clampf(pitchDeg + dPitch, -85.0f, 85.0f);
 }
 
+void PreviewCamera::panPixels(f32 dxPx, f32 dyPx, f32 viewportHeightPx) {
+    if (viewportHeightPx < 1.0f) return;
+    const f32 cy = std::cos(rad(yawDeg)), sy = std::sin(rad(yawDeg));
+    const f32 cp = std::cos(rad(pitchDeg)), sp = std::sin(rad(pitchDeg));
+
+    // The camera basis, derived the same way buildViewProj derives the eye. Forward is
+    // (cp*cy, cp*sy, -sp), so:
+    //   right = (-sy, cy, 0)              -- horizontal, perpendicular to the azimuth
+    //   up    = (cy*sp, sy*sp, cp)        -- which is -(right x forward)
+    // The sign on `up` is worth the check rather than the guess: right x forward comes out as
+    // (-cy*sp, -sy*sp, -cp), which at pitch 0 is (0,0,-1) -- straight DOWN. Negating it gives (0,0,1)
+    // at pitch 0, which is +Z up, the engine's up.
+    const f32 right[3] = {-sy, cy, 0.0f};
+    const f32 up[3]    = {cy * sp, sy * sp, cp};
+
+    // World centimetres per pixel at the pivot's depth. Uses HEIGHT for both axes on purpose: the
+    // projection is built from a vertical fov and an aspect, so a pixel is square in world terms and
+    // scaling x by the width would double-count the aspect.
+    const f32 perPx = 2.0f * distance * std::tan(rad(fovDeg) * 0.5f) / viewportHeightPx;
+
+    // The scene follows the cursor, so the pivot moves AGAINST the drag. Screen +Y is down while the
+    // camera's up is up, hence dy is added rather than subtracted.
+    const f32 dx = -dxPx * perPx;
+    const f32 dy =  dyPx * perPx;
+    for (int i = 0; i < 3; ++i) pivot[i] += right[i] * dx + up[i] * dy;
+}
+
 void PreviewCamera::addZoom(f32 factor) {
     // Multiplicative, so a wheel notch moves the same PROPORTION at every scale. An additive zoom is
     // unusable across the range an actor can span -- a step that frames a 5 cm bolt puts a 20 m

@@ -62,6 +62,21 @@ struct PreviewCamera {
     // rolls over with no hysteresis.
     void addOrbit(f32 dYaw, f32 dPitch);
     void addZoom(f32 factor);
+
+    // Slide the PIVOT across the view plane, in screen pixels, so the scene tracks the cursor. This is
+    // the third motion an orbit camera needs and the one it was missing: without it an actor whose
+    // interesting part is off the pivot -- a gun's muzzle, a character's head -- can only be brought
+    // to the middle of the frame by zooming out until it happens to be visible.
+    //
+    // IN PIXELS, and in the module rather than the caller, because getting from a mouse delta to a
+    // world offset needs the camera basis AND the projection: the basis is derived here from yaw and
+    // pitch exactly as buildViewProj derives the eye, and the scale is the pixel size at the pivot's
+    // depth, 2*distance*tan(fov/2)/viewportHeightPx. An editor that did this itself would be a second
+    // derivation of the same matrix, free to disagree with the one the picture was drawn with.
+    //
+    // `viewportHeightPx` is the RENDERED height, not the widget's -- they differ while a resize is
+    // still being debounced.
+    void panPixels(f32 dxPx, f32 dyPx, f32 viewportHeightPx);
 };
 
 class ActorPreview final : public rhi::IRenderFeature {
