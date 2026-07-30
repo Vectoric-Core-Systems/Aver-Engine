@@ -44,6 +44,9 @@ option(AVER_MODULE_FRAMEWORK "Gameplay framework: game instance, game mode, acto
 # optional for the same two reasons as before: the engine configures and runs without it, and 153
 # translation units are worth being able to opt out of.
 option(AVER_MODULE_PHYSICS "Physics module: rigid bodies, characters and raycasts (Jolt backend)" ON)
+# Landscape: the chunked heightfield terrain. CPU-only at this stage -- the quadtree, the LOD metric,
+# culling and chunk geometry -- so it depends on nothing optional and costs nothing to leave on.
+option(AVER_MODULE_LANDSCAPE "Landscape module: chunked heightfield terrain, LOD and chunk geometry" ON)
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -79,6 +82,11 @@ add_subdirectory(modules/formats)  # Phase 2 (.ocbeam / .ocmap loaders)
 # module keeps its no-dependency, no-process guarantee. See its CMakeLists for the full argument --
 # including why it is guarded on Aver.Formats.Material rather than on a switch of its own.
 add_subdirectory(modules/formats.roslyn)
+# Landscape, above formats because it reads .ocland through it and below anything that draws. The
+# renderer half is a separate target and is not built yet, which is why this needs no RHI.
+if(AVER_MODULE_LANDSCAPE)
+  add_subdirectory(modules/landscape)
+endif()
 # Physics: the backend first, then the module that fronts it. Two directories rather than one for
 # the reason rhi/ and rhi.d3d12/ are two -- the ABI above must be expressible without the backend,
 # and a link line is the only place that can be enforced.
@@ -175,6 +183,9 @@ if(AVER_BUILD_TESTS)
   # The Roslyn backend, checked against the scanner it falls back from. Unconditional like its module;
   # the test itself skips when averdesign is not staged.
   add_subdirectory(tests/formats.roslyn)
+  if(AVER_MODULE_LANDSCAPE)
+    add_subdirectory(tests/landscape)
+  endif()
   if(AVER_MODULE_PHYSICS)
     add_subdirectory(tests/physics)
   endif()
