@@ -478,6 +478,95 @@ int main() {
     }
 #endif
 
+
+    AVER_INFO("=== a production-size section ===");
+    {
+        // Every test above uses 257 samples / 21 nodes because it is fast. The size the design actually
+        // specifies is 1025, and its headline numbers -- 341 nodes, 5 levels, ~80 MiB fully resident --
+        // were arithmetic on paper until this block. A subdivision that is off by one level is invisible
+        // at 257 and wrong at 1025.
+        const u32 P = 1025;                       // 16*64 + 1
+        const fmt::OcLandData big = makeTerrain(P);
+        LandscapeTree bigTree;
+        std::string why;
+        check(bigTree.build(big, 64, &why), "1025 samples build (" + why + ")");
+        check(bigTree.levelCount() == 5, "5 levels (got " + std::to_string(bigTree.levelCount()) + ")");
+        check(bigTree.nodes().size() == 341,
+              "256+64+16+4+1 = 341 nodes (got " + std::to_string(bigTree.nodes().size()) + ")");
+
+        // The root must span the WHOLE section: 1024 quads. An off-by-one here means the last row of
+        // samples is never drawn by anything, which is exactly the row a neighbouring section shares.
+        const LandscapeNode& r = bigTree.nodes()[bigTree.root()];
+        check(r.spanQuads == 1024, "the root spans all 1024 quads (got " +
+                                   std::to_string(r.spanQuads) + ")");
+        check(r.stride == 16, "at stride 16");
+
+        // Level 0 must still be exact, at the real size.
+        f32 worstL0 = 0.0f;
+        for (const LandscapeNode& n : bigTree.nodes())
+            if (n.level == 0) worstL0 = std::fmax(worstL0, n.errorCm);
+        check(worstL0 == 0.0f, "geometric error is still exactly 0 at level 0");
+
+        // The per-node memory figure the draw budget was derived from.
+        const ChunkCounts cc = chunkCounts(64);
+        const usize perNode = cc.vertices * sizeof(LandVertex) + cc.indices * sizeof(u32);
+        check(perNode > 240u * 1024u && perNode < 250u * 1024u,
+              "a node is ~242 KiB as designed (" + std::to_string(perNode / 1024) + " KiB)");
+        const usize fullTree = perNode * bigTree.nodes().size();
+        check(fullTree > 75u * 1024u * 1024u && fullTree < 85u * 1024u * 1024u,
+              "a fully resident section is ~80 MiB (" + std::to_string(fullTree / (1024*1024)) + " MiB)");
+
+        // And the selection still tiles 1024x1024 exactly, which is the property a renderer depends on.
+        SelectParams sp;
+        sp.cameraCm[0] = r.centre[0];
+        sp.cameraCm[1] = r.centre[1] - 50000.0f;
+        sp.cameraCm[2] = r.centre[2] + 20000.0f;
+        sp.maxDraws = 0;                          // unclamped, so tiling is testable
+        SelectResult sr;
+        bigTree.resetHysteresis();
+        bigTree.select(sp, sr);
+        u64 area = 0;
+        for (u32 i : sr.nodes) {
+            const LandscapeNode& n = bigTree.nodes()[i];
+            area += static_cast<u64>(n.spanQuads) * n.spanQuads;
+        }
+        check(area == 1024ull * 1024ull,
+              "a mid-range selection tiles 1024x1024 exactly (" + std::to_string(sr.nodes.size()) +
+              " nodes, area " + std::to_string(area) + ")");
+
+        // THE DRAW CLAMP AT THE REAL SIZE. 1025 samples can select far more than 192 nodes, which is
+        // the whole reason the clamp exists -- and this is the first test where it could actually be
+        // exceeded rather than being a rule about a 16-node tree.
+        //
+        // A camera low over the middle only selected 64 nodes, so `<= 192` passed without the clamp
+        // ever firing -- an assertion that cannot fail is not a test. Driving the threshold to 0.01 px
+        // forces every one of the 256 level-0 nodes to be selected, which is the first time in this
+        // suite that the ceiling is genuinely hit.
+        SelectParams cp = sp;
+        cp.cameraCm[1] = r.centre[1];
+        cp.cameraCm[2] = r.centre[2] + 200.0f;
+        cp.screenErrorPx = 0.01f;                 // refine everything, whatever the distance
+        cp.maxDraws = 192;
+        SelectResult cr;
+        bigTree.resetHysteresis();
+        bigTree.select(cp, cr);
+        check(cr.nodes.size() == 192, "the clamp holds at exactly 192 at the real section size (got " +
+                                      std::to_string(cr.nodes.size()) + ")");
+        check(cr.dropped == 256 - 192,
+              "and reports the 64 it dropped, rather than truncating quietly (" +
+              std::to_string(cr.dropped) + ")");
+
+        // Unclamped, the same camera must select all 256 -- which is what proves the clamp above was
+        // the thing limiting it and not the selection running out of nodes.
+        SelectParams uc = cp;
+        uc.maxDraws = 0;
+        SelectResult ur;
+        bigTree.resetHysteresis();
+        bigTree.select(uc, ur);
+        check(ur.nodes.size() == 256, "unclamped, the same view selects all 256 level-0 nodes (got " +
+                                      std::to_string(ur.nodes.size()) + ")");
+    }
+
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;
 }

@@ -6,6 +6,8 @@
 #include "aver/formats/OcLand.hpp"
 
 #include <cmath>
+#include <cstdio>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -193,6 +195,74 @@ int main() {
         check(fmt::parseOcLand(withFuture.data(), withFuture.size(), out, &why),
               "an unknown non-Required chunk is skipped and the landscape still loads (" + why + ")");
         check(out.valid() && out.sampleCount == 8, "and the surface is intact");
+    }
+
+
+    AVER_INFO("=== through a real file ===");
+    {
+        // saveOcLand / loadOcLand had NO coverage at all until this block. The in-memory pair above is
+        // not a substitute: those two go through the container's file reader and writer, which do the
+        // CRC and chunk-hash work, and loadOcLand in particular takes a route worth exercising -- it
+        // reads the container, re-serialises it, and parses that.
+        std::string why;
+        const fmt::OcLandData src = makeGrid(17);      // 16 quads: a valid section size
+
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "aver-ocland-test";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        const std::string path = (dir / "section.ocland").string();
+
+        check(fmt::saveOcLand(path, src, &why), "saves to a file (" + why + ")");
+        check(std::filesystem::exists(path), "the file is on disk");
+        const auto onDisk = std::filesystem::file_size(path, ec);
+        check(onDisk > 64, "and has real content (" + std::to_string(onDisk) + " bytes)");
+
+        fmt::OcLandData back;
+        why.clear();
+        const bool loaded = fmt::loadOcLand(path, back, &why);
+        check(loaded, "loads back from the file (" + why + ")");
+        check(back.sampleCount == src.sampleCount, "sampleCount survives the file");
+        check(back.spacingCm == src.spacingCm, "spacing survives");
+        check(back.originCm[0] == src.originCm[0], "origin survives");
+
+        // The same transpose trap as the in-memory case, because the file path is separate code.
+        const f32 step = 16016.0f / 65535.0f;
+        check(std::fabs(back.heightAt(1, 7) - 7001.0f) <= step,
+              "and the file path does not transpose either");
+
+        // A missing file must be refused with a reason, not read as an empty landscape.
+        fmt::OcLandData missing;
+        why.clear();
+        const bool gone = fmt::loadOcLand((dir / "does-not-exist.ocland").string(), missing, &why);
+        check(!gone, "a missing file is refused (" + why + ")");
+
+        // A file corrupted ON DISK, which is the case the container's own reader has to catch rather
+        // than the in-memory parser.
+        {
+            std::vector<u8> bytes;
+            std::FILE* f = std::fopen(path.c_str(), "rb");
+            if (f) {
+                std::fseek(f, 0, SEEK_END);
+                const long n = std::ftell(f);
+                std::fseek(f, 0, SEEK_SET);
+                bytes.resize(static_cast<usize>(n));
+                const usize got = std::fread(bytes.data(), 1, bytes.size(), f);
+                std::fclose(f);
+                check(got == bytes.size(), "the saved file reads back byte for byte");
+            }
+            const std::string bad = (dir / "corrupt.ocland").string();
+            if (!bytes.empty()) {
+                bytes[bytes.size() / 2] ^= 0xFF;
+                std::FILE* g = std::fopen(bad.c_str(), "wb");
+                if (g) { std::fwrite(bytes.data(), 1, bytes.size(), g); std::fclose(g); }
+                fmt::OcLandData rotten;
+                why.clear();
+                const bool read = fmt::loadOcLand(bad, rotten, &why);
+                check(!read, "a byte flipped on disk is refused (" + why + ")");
+            }
+        }
+        std::filesystem::remove_all(dir, ec);
     }
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
