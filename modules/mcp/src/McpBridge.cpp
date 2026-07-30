@@ -5,7 +5,9 @@
 #include "aver/core/Log.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -81,6 +83,37 @@ u32 keyCodeFor(const std::string& name) {
     for (char c : name) lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     for (const Named& e : table) if (lower == e.n) return e.vk;
     return 0;
+}
+
+// Escape a value being placed inside a JSON string.
+//
+// NOT OPTIONAL, and it was missing. A reply carrying a Windows path -- which `editor::screenshot`
+// returns, and which is one of the most obvious things to ask for -- emitted
+// "result":"C:\Users\..." and every client's JSON parser rejected the line. The reply was invalid
+// from the first backslash, and the failure looked like the server had gone away rather than like a
+// quoting bug.
+std::string jsonEscape(const std::string& in) {
+    std::string out;
+    out.reserve(in.size() + 8);
+    for (const char c : in) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                // Control characters are not legal raw inside a JSON string either.
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof buf, "\\u%04x", static_cast<unsigned>(c) & 0xFFu);
+                    out += buf;
+                } else {
+                    out.push_back(c);
+                }
+        }
+    }
+    return out;
 }
 
 int buttonFor(const std::string& s) {
@@ -372,7 +405,7 @@ bool McpBridge::start(u16 port) {
                             // it is useless a frame late -- which is why this is answered from the
                             // socket thread rather than queued.
                             reply = "{\"id\":" + std::to_string(c.id) +
-                                    ",\"ok\":false,\"error\":\"no widget named " + c.arg +
+                                    ",\"ok\":false,\"error\":\"no widget named " + jsonEscape(c.arg) +
                                     "; ask cmd=widgets for the list\"}\n";
                         } else {
                             // Expanded into exactly what a coordinate click produces, so there is ONE
@@ -403,7 +436,7 @@ bool McpBridge::start(u16 port) {
                             list = impl->lister;
                         }
                         reply = "{\"id\":" + std::to_string(c.id) + ",\"ok\":true,\"widgets\":\"" +
-                                (list ? list() : std::string()) + "\"}\n";
+                                jsonEscape(list ? list() : std::string()) + "\"}\n";
                     } else if (parseCommand(line, c, &why) && c.name == "modules") {
                         // Answered HERE rather than queued. It reads the registry, which is
                         // lock-guarded and needs no frame at all, so queueing it would add a frame of
@@ -418,11 +451,41 @@ bool McpBridge::start(u16 port) {
                         }
                         reply = "{\"id\":" + std::to_string(c.id) +
                                 ",\"ok\":true,\"modules\":[" + list + "]}\n";
+                    } else if (parseCommand(line, c, &why) && c.name == "abi") {
+                        // WAITED ON, because this is a question. The old code queued it and answered
+                        // {"ok":true} straight away -- so a client was told its call had succeeded
+                        // before anything had tried it, and `nosuch::x` came back ok:true while the
+                        // refusal went only to the log. An acknowledgement that cannot say no is not one.
+                        c.pending = std::make_shared<PendingResult>();
+                        {
+                            std::lock_guard<std::mutex> lock(impl->mutex);
+                            impl->queue.push_back(c);
+                        }
+                        std::unique_lock<std::mutex> wait(c.pending->mutex);
+                        // Bounded. If the editor stalls, is minimised into never pumping, or is shutting
+                        // down, a client must get an answer rather than a socket that never speaks
+                        // again -- and "timed out" is itself diagnostic.
+                        const bool answered = c.pending->cv.wait_for(
+                            wait, std::chrono::seconds(5), [&] { return c.pending->done; });
+                        if (!answered) {
+                            reply = "{\"id\":" + std::to_string(c.id) +
+                                    ",\"ok\":false,\"error\":\"timed out after 5s -- the editor did not "
+                                    "pump; is it running and not shutting down?\"}\n";
+                        } else if (c.pending->ok) {
+                            reply = "{\"id\":" + std::to_string(c.id) + ",\"ok\":true,\"result\":\"" +
+                                    jsonEscape(c.pending->result) + "\"}\n";
+                        } else {
+                            reply = "{\"id\":" + std::to_string(c.id) + ",\"ok\":false,\"error\":\"" +
+                                    jsonEscape(c.pending->why) + "\"}\n";
+                        }
                     } else if (parseCommand(line, c, &why)) {
                         {
                             std::lock_guard<std::mutex> lock(impl->mutex);
                             impl->queue.push_back(c);
                         }
+                        // Input commands stay fire-and-forget: a click has no return value, and making
+                        // a client wait a frame for "yes, that was queued" would slow every gesture for
+                        // no information.
                         reply = "{\"id\":" + std::to_string(c.id) + ",\"ok\":true}\n";
                     } else {
                         // Answered immediately rather than queued: a malformed command has nothing for
@@ -450,6 +513,23 @@ void McpBridge::stop() {
         // for the lifetime of the process.
         ::closesocket(impl_->listener);
         impl_->listener = INVALID_SOCKET;
+    }
+    // Release anyone waiting on an ABI answer BEFORE joining. A client blocked on a call that the
+    // editor will now never pump would otherwise sit out the full timeout during shutdown, and the
+    // join below would wait for that same thread.
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        for (Command& q : impl_->queue) {
+            if (!q.pending) continue;
+            {
+                std::lock_guard<std::mutex> p(q.pending->mutex);
+                q.pending->ok = false;
+                q.pending->why = "the editor is shutting down";
+                q.pending->done = true;
+            }
+            q.pending->cv.notify_all();
+        }
+        impl_->queue.clear();
     }
     if (impl_->worker.joinable()) impl_->worker.join();
     if (impl_->wsaUp) { WSACleanup(); impl_->wsaUp = false; }
@@ -490,6 +570,28 @@ u32 McpBridge::pump(const std::function<void(const Command&)>& apply) {
             }
         }
     }
+    // AN ABI CALL IS DISPATCHED HERE, not handed to `apply`. Two reasons, and the second is the point:
+    // this module owns the registry, so it is the right place; and it is the only place on the MAIN
+    // THREAD that knows the call has finished, which is what the waiting socket thread needs. Routing
+    // it out to the app and back would put the answer somewhere nobody could return it from.
+    if (single.name == "abi") {
+        std::string result, why;
+        const bool ok = callAbi(single.abi, result, why);
+        if (single.pending) {
+            {
+                std::lock_guard<std::mutex> lock(single.pending->mutex);
+                single.pending->ok = ok;
+                single.pending->result = result;
+                single.pending->why = why;
+                single.pending->done = true;
+            }
+            single.pending->cv.notify_all();
+        }
+        // Still handed on, so the app can log it or act on it, but the reply no longer depends on that.
+        apply(single);
+        return 1;
+    }
+
     apply(single);
     return 1;
 }

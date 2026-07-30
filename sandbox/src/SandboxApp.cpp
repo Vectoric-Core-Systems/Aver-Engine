@@ -3312,7 +3312,12 @@ private:
             // Medium weight on the menu bar, matching Unreal's; 0.0f keeps the size already in use.
             if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
             ImGui::TextColored(ImVec4(0.95f,0.42f,0.13f,1),"AE");
-            if (ImGui::BeginMenu("File")){
+                        const bool open_file = ImGui::BeginMenu("File");
+            // Tracked whether or not the menu OPENED. BeginMenu submits the header item either way,
+            // and tracking inside the body recorded it only while open -- so File/Edit/Window were
+            // simply absent from the list a client reads to find them.
+            uiReg_.track("menu.file");
+            if (open_file){
 #if AVER_MODULE_SCENE
                 const bool haveProject = project_.valid();
                 ImGui::BeginDisabled(!haveProject);
@@ -3326,7 +3331,12 @@ private:
                 ImGui::MenuItem("New Level"); ImGui::MenuItem("Open Level..."); ImGui::MenuItem("Save Level");
 #endif
                 ImGui::Separator(); if(ImGui::MenuItem("Exit")) e.requestExit(); ImGui::EndMenu(); }
-            if (ImGui::BeginMenu("Edit")){
+                        const bool open_edit = ImGui::BeginMenu("Edit");
+            // Tracked whether or not the menu OPENED. BeginMenu submits the header item either way,
+            // and tracking inside the body recorded it only while open -- so File/Edit/Window were
+            // simply absent from the list a client reads to find them.
+            uiReg_.track("menu.edit");
+            if (open_edit){
                 if (ImGui::MenuItem("Undo", "Ctrl+Z", false, canUndo())) undo();
                 if (ImGui::MenuItem("Redo", "Ctrl+Y", false, canRedo())) redo();
                 ImGui::Separator();
@@ -3334,7 +3344,12 @@ private:
                 if (ImGui::MenuItem("Project Settings...")) showProjectSettings_ = true;
                 ImGui::EndMenu();
             }
-            if (ImGui::BeginMenu("Window")){
+                        const bool open_window = ImGui::BeginMenu("Window");
+            // Tracked whether or not the menu OPENED. BeginMenu submits the header item either way,
+            // and tracking inside the body recorded it only while open -- so File/Edit/Window were
+            // simply absent from the list a client reads to find them.
+            uiReg_.track("menu.window");
+            if (open_window){
                 ImGui::MenuItem("World Outliner"); ImGui::MenuItem("Details");
                 // Checked against the drawer state, so the menu reports what is actually up.
                 if (ImGui::MenuItem("Content Browser", "Ctrl+Space", drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
@@ -3376,8 +3391,11 @@ private:
             // BeginMenu (see ToolsMenu.cpp) — this file is the frame loop, not a scaffolder.
             tools_.drawMenu(project_);
             if (ImGui::BeginMenu("Build")){ ImGui::MenuItem("Build Lighting"); ImGui::MenuItem("Build Geometry"); ImGui::EndMenu(); }
+            uiReg_.track("menu.build");
             if (ImGui::BeginMenu("Select")){ if(ImGui::MenuItem("Select All")) {} if(ImGui::MenuItem("Select None")) sel_=-1; ImGui::EndMenu(); }
+            uiReg_.track("menu.select");
             if (ImGui::BeginMenu("Help")){ ImGui::MenuItem("About Aver Engine"); ImGui::EndMenu(); }
+            uiReg_.track("menu.help");
             if (fontMedium_) ImGui::PopFont();
             ImGui::EndMainMenuBar();
         }
@@ -3399,11 +3417,13 @@ private:
         // a Save that looks live and isn't is worse than one that admits it cannot.
         ImGui::BeginDisabled(levelPath_.empty());
         if (ImGui::Button("Save")) saveLevel(levelPath_);
+        uiReg_.track("toolbar.save");
         ImGui::EndDisabled();
         if (levelPath_.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("No level loaded - File > New Level, then Save Level As");
         ImGui::SameLine();
         if (dropButton("Add")) ImGui::OpenPopup("addActor");
+        uiReg_.track("toolbar.add");
         if (ImGui::BeginPopup("addActor")) {
             ImGui::TextDisabled("Place Actor"); ImGui::Separator();
             if (ImGui::Selectable("Cube"))     spawnCube(e);
@@ -3429,6 +3449,7 @@ private:
             const bool playing = ps != AVER_FW_PLAY_EDITOR;
             ImGui::BeginDisabled(playing);
             if (ImGui::Button("Play")) startPlay();
+            uiReg_.track("toolbar.play");
             ImGui::EndDisabled();
             ImGui::SameLine();
             ImGui::BeginDisabled(!playing);
@@ -3436,6 +3457,7 @@ private:
                 aver_fw_set_paused(ps != AVER_FW_PLAY_PAUSED ? 1 : 0);
             ImGui::SameLine();
             if (ImGui::Button("Stop")) { aver_fw_end_play(); AVER_INFO("[Sandbox] Stop: play session ended"); }
+            uiReg_.track("toolbar.stop");
             ImGui::EndDisabled();
 #else
             ImGui::BeginDisabled(true);
@@ -5454,6 +5476,7 @@ private:
         ImGui::SetNextWindowBgAlpha(0.62f);
         ImGui::Begin("##vpbar_left", nullptr, f);
         if (dropButton("Perspective")) ImGui::OpenPopup("viewType");
+        uiReg_.track("viewport.perspective");
         if (ImGui::BeginPopup("viewType")) {
             ImGui::Selectable("Perspective", true);
             const char* orthos[] = {"Top","Bottom","Left","Right","Front","Back"};
@@ -5475,6 +5498,7 @@ private:
         }
         ImGui::SameLine();
         if (dropButton("Show")) ImGui::OpenPopup("showFlags");
+        uiReg_.track("viewport.show");
         if (ImGui::BeginPopup("showFlags")) {
             ImGui::Checkbox("Grid", &showGrid_);
             bool t=true; ImGui::Checkbox("Static Meshes", &t);

@@ -31,7 +31,9 @@
 // without telling them. Loopback only, and it says on which port when it starts.
 #include "aver/core/Types.hpp"
 
+#include <condition_variable>
 #include <functional>
+#include <mutex>
 #include <memory>
 #include <string>
 #include <vector>
@@ -65,12 +67,32 @@ struct AbiCall {
     std::string text;          // one string argument, for the entries that take a name or a path
 };
 
+// Where an ABI call's answer is left for the socket thread to collect.
+//
+// EXISTS BECAUSE THE ACK USED TO LIE. A command was answered {"ok":true} the moment it was QUEUED, so
+// a client was told its call had succeeded before anything had tried it -- and a refusal reached only
+// the log. `nosuch::x` came back ok:true. An acknowledgement that cannot say no is not one.
+//
+// Request/response, therefore: the socket thread waits for the main thread to actually run the call.
+// It blocks for about a frame, which is the correct trade -- a client that asked a question is waiting
+// for the answer, and 16 ms is cheaper than a protocol where success is unknowable.
+struct PendingResult {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done = false;
+    bool ok = false;
+    std::string result;
+    std::string why;
+};
+
 // What a client asked for, once it has been parsed off the wire.
 struct Command {
     std::string name;                  // "click", "move", "key", "text", "ping", "shot", "abi"
     std::vector<InputEvent> events;    // already expanded: a click is a move, a down and an up
     std::string arg;                   // e.g. a screenshot path
     AbiCall abi;                       // filled when name == "abi"
+    // Non-null for a command whose caller is waiting on the outcome. See PendingResult.
+    std::shared_ptr<PendingResult> pending;
     u64 id = 0;                        // echoed back, so a client can match reply to request
 };
 
