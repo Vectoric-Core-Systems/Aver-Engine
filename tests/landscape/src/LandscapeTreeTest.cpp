@@ -4,6 +4,10 @@
 #include "aver/core/Math.hpp"
 #include "aver/landscape/ChunkMesh.hpp"
 #include "aver/landscape/LandscapeTree.hpp"
+#include "aver/landscape/PhysicsBridge.hpp"
+#if AVER_LANDSCAPE_TEST_PHYSICS
+#include "aver/physics/physics_abi.h"
+#endif
 
 #include <cmath>
 #include <string>
@@ -307,6 +311,80 @@ int main() {
         check(worstRatio >= 1.0f,
               "every node's skirt is at least as deep as the worst gap a 2:1 coarser neighbour opens "
               "(worst skirt/gap ratio " + std::to_string(worstRatio) + ")");
+    }
+
+
+    AVER_INFO("=== the physics bridge ===");
+    {
+        // A section with ONE sharp peak at a known, ASYMMETRIC sample. Asymmetric is the whole point:
+        // the render grid runs column->+X and row->+Y while a physics column runs +Y and a physics row
+        // runs -X, so the map between them is a transpose AND a row flip. A peak at (ix, iy) with
+        // ix == iy would survive a plain transpose and prove nothing.
+        const u32 M = 33;                       // 32 quads: small, and a multiple of 8
+        const u32 peakIx = 7, peakIy = 22;
+        fmt::OcLandData d;
+        d.sampleCount = M;
+        d.spacingCm = 200.0f;
+        d.originCm[0] = 1000.0f;                // a non-zero origin, so an origin bug cannot hide
+        d.originCm[1] = -3000.0f;
+        d.originCm[2] = 0.0f;
+        d.heights.assign(static_cast<usize>(M) * M, 0.0f);
+        d.heights[static_cast<usize>(peakIy) * M + peakIx] = 900.0f;
+
+        PhysicsHeightfield ph;
+        check(toPhysicsHeightfield(d, ph), "the section converts");
+        check(ph.sampleCount == M, "every sample is carried across, none cropped");
+        check(ph.samples.size() == static_cast<usize>(M) * M, "and the array is the full square");
+
+        // The peak must land at the transposed-and-flipped index, checked directly on the array before
+        // any physics is involved -- so a failure here names the map rather than the simulation.
+        const u32 px = peakIy, py = (M - 1) - peakIx;
+        check(ph.samples[static_cast<usize>(py) * M + px] == 900.0f,
+              "the peak sits at the transposed-and-row-flipped index");
+        check(ph.samples[static_cast<usize>(peakIy) * M + peakIx] != 900.0f,
+              "and NOT where a plain copy would have put it");
+        check(std::fabs(ph.cornerCm[0] - (d.originCm[0] + d.extentCm())) < 0.01f,
+              "the corner is the field's +X end, not its minimum corner");
+
+#if AVER_LANDSCAPE_TEST_PHYSICS
+        // END TO END. Where the RENDER geometry puts the peak, a downward ray must hit it. This is the
+        // assertion the whole bridge exists to make true, and nothing short of running the simulation
+        // establishes it.
+        f32 want[3];
+        d.worldAt(peakIx, peakIy, want);
+
+        check(aver_phys_init() == 1, "physics starts");
+        const int32_t body = aver_phys_add_heightfield(ph.samples.data(),
+                                                       static_cast<int32_t>(ph.sampleCount),
+                                                       ph.spacingCm,
+                                                       ph.cornerCm[0], ph.cornerCm[1], ph.cornerCm[2]);
+        check(body != 0, "the heightfield body is created");
+
+        f32 hit[3] = {0,0,0}, nrm[3] = {0,0,0};
+        const int32_t got = aver_phys_raycast(want[0], want[1], 5000.0f, 0.0f, 0.0f, -1.0f,
+                                              20000.0f, hit, nrm);
+        check(got == body, "a ray dropped where the peak is DRAWN hits the collision field");
+        // Generous on height: Jolt quantises heights internally and a raycast lands on a triangle, not
+        // on the sample. The point is that it is near the peak and nowhere near the flat plain.
+        check(hit[2] > 600.0f,
+              "and lands on the peak rather than the surrounding flat (z=" + std::to_string(hit[2]) + ")");
+
+        // The control that makes the above mean something: the diagonally opposite sample is flat, so a
+        // ray there must NOT find the peak. Without this, a bridge that returned a peak everywhere
+        // would pass.
+        f32 flat[3];
+        d.worldAt(peakIy, peakIx, flat);        // indices swapped -- where a plain transpose would put it
+        f32 hit2[3] = {0,0,0};
+        const int32_t got2 = aver_phys_raycast(flat[0], flat[1], 5000.0f, 0.0f, 0.0f, -1.0f,
+                                               20000.0f, hit2, nrm);
+        check(got2 == body, "the transposed position is still on the field");
+        check(hit2[2] < 100.0f,
+              "but it is FLAT there -- a plain transpose would have put the peak here (z=" +
+              std::to_string(hit2[2]) + ")");
+        aver_phys_shutdown();
+#else
+        AVER_INFO("  ..    physics not in this build; the index map above is still checked");
+#endif
     }
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);

@@ -10,7 +10,9 @@
 # RHI, and giving this target that dependency would end the property above. It is not added yet.
 add_library(Aver.Landscape STATIC
   src/LandscapeTree.cpp
-  src/ChunkMesh.cpp)
+  src/ChunkMesh.cpp
+  # The physics sample adapter. Emits a plain array, so this stays free of Aver.Physics.
+  src/PhysicsBridge.cpp)
 
 target_include_directories(Aver.Landscape PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Landscape PUBLIC cxx_std_20)

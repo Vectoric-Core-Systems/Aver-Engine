@@ -119,8 +119,25 @@ AVER_PHYS_API int32_t aver_phys_add_mesh(const float* verticesXyz, int32_t verte
                                          float cx, float cy, float cz);
 
 // A heightfield: `samples` is a row-major sampleCount x sampleCount grid of heights in centimetres,
-// spaced `spacingCm` apart, with its corner at (cx, cy, cz). Static, like a mesh. sampleCount must be
-// a power of two plus nothing -- Jolt requires a multiple of its block size, so it is rounded down.
+// spaced `spacingCm` apart. Static, like a mesh.
+//
+// EVERY SAMPLE IS USED. sampleCount has no alignment requirement. The previous version of this comment
+// said Jolt "requires a multiple of its block size, so it is rounded down"; that was wrong in the
+// direction that loses data -- Jolt rounds UP and pads the remainder itself with no-collision -- and
+// the crop silently discarded the caller's last row and column. A 9x9 field became 8x8.
+//
+// WHERE THE GRID GOES, which is NOT what a reader assumes. The field is built in Jolt's own Y-up axes
+// and only the body centre passes through the axis map, so composing the two puts sample
+// (column x, row y) at engine
+//
+//     (cx - y*spacingCm,  cy + x*spacingCm,  cz + height)
+//
+// A COLUMN therefore runs along engine +Y and a ROW along engine -X, and (cx, cy, cz) names the
+// field's +X corner, not its minimum corner. A caller whose grid is laid out column->+X, row->+Y --
+// which is the natural layout, and the one `.ocland` uses -- must transpose AND flip a row axis.
+// modules/landscape/PhysicsBridge.hpp does exactly that and derives it in full; use it rather than
+// re-deriving, and see tests/landscape for the end-to-end check that collision lands where the terrain
+// is drawn.
 AVER_PHYS_API int32_t aver_phys_add_heightfield(const float* samples, int32_t sampleCount,
                                                 float spacingCm,
                                                 float cx, float cy, float cz);
