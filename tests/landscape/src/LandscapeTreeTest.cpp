@@ -5,6 +5,9 @@
 #include "aver/landscape/ChunkMesh.hpp"
 #include "aver/landscape/LandscapeTree.hpp"
 #include "aver/landscape/PhysicsBridge.hpp"
+#if AVER_LANDSCAPE_TEST_RENDERER
+#include "aver/landscape/LandscapeRenderer.hpp"
+#endif
 #if AVER_LANDSCAPE_TEST_PHYSICS
 #include "aver/physics/physics_abi.h"
 #endif
@@ -386,6 +389,94 @@ int main() {
         AVER_INFO("  ..    physics not in this build; the index map above is still checked");
 #endif
     }
+
+
+#if AVER_LANDSCAPE_TEST_RENDERER
+    AVER_INFO("=== the renderer's residency ===");
+    {
+        // A RECORDING DEVICE, not a real one. IDevice's methods are virtual with default no-op bodies,
+        // so a test can be the device -- the same trick tests/render.ui uses. That is what lets the
+        // residency and fallback logic, which is the only interesting part of the renderer half, be
+        // checked with no GPU at all.
+        struct Recorder final : rhi::IDevice {
+            u32 created = 0, draws = 0;
+            std::vector<rhi::MeshHandle> drawn;
+            // IDevice's pure virtuals, satisfied the way tests/render.actorpreview's MockDevice does.
+            // Everything this test cares about has a default no-op body already, so only createMesh and
+            // drawMesh below are actually overridden for behaviour.
+            rhi::Backend backend() const override { return rhi::Backend::Null; }
+            const char* adapterName() const override { return "recording device"; }
+            rhi::IResourceFactory* resources() override { return nullptr; }
+            rhi::ISwapchain* createSwapchain(const rhi::SwapchainDesc&) override { return nullptr; }
+            void beginFrame() override {}
+            void endFrame() override {}
+            rhi::MeshHandle createMesh(const rhi::MeshVertex* v, u32 vc,
+                                       const u32* idx, u32 ic) override {
+                // Asserted here rather than trusted: this is the reinterpret_cast's only witness.
+                if (!v || !idx || vc == 0 || ic == 0) return 0;
+                ++created;
+                return static_cast<rhi::MeshHandle>(created);   // 0 stays invalid
+            }
+            void drawMesh(rhi::MeshHandle m, const f32*, const f32*, f32, f32) override {
+                ++draws;
+                drawn.push_back(m);
+            }
+        };
+
+        SelectParams p;
+        const LandscapeNode& root = tree.nodes()[tree.root()];
+        p.cameraCm[0] = root.centre[0];
+        p.cameraCm[1] = root.centre[1];
+        p.cameraCm[2] = root.centre[2];
+        SelectResult sel;
+        tree.resetHysteresis();
+        tree.select(p, sel);
+
+        f32 identity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+
+        Recorder dev;
+        LandscapeRenderer r(512);
+        r.draw(dev, terrain, tree, sel, identity, 1000.0f);
+        check(r.stats().submitted == sel.nodes.size(),
+              "every selected node is submitted (" + std::to_string(r.stats().submitted) + " of " +
+              std::to_string(sel.nodes.size()) + ")");
+        check(r.stats().created == sel.nodes.size() + 1,
+              "each uploaded one mesh, plus the always-resident root (" +
+              std::to_string(r.stats().created) + ")");
+        check(r.stats().skipped == 0, "nothing is skipped -- a skipped node is a hole in the ground");
+        check(dev.draws == r.stats().submitted, "the device saw the same number of draws");
+
+        // Drawn AGAIN with nothing changed: the cache must hold, so no new uploads.
+        const u32 createdBefore = dev.created;
+        r.draw(dev, terrain, tree, sel, identity, 1000.0f);
+        check(dev.created == createdBefore, "a second identical frame uploads nothing new");
+        check(r.stats().created == 0, "and reports zero creations");
+
+        // THE CAP. With room for one mesh only, every other selected node must fall back to a resident
+        // ancestor rather than vanish -- and the ancestor must be drawn ONCE however many defer to it.
+        Recorder dev2;
+        LandscapeRenderer tiny(1);
+        tiny.draw(dev2, terrain, tree, sel, identity, 1000.0f);
+        // The ROOT takes the only slot, so every leaf falls back to it: one draw, complete coverage.
+        check(dev2.created == 1, "a cache of 1 uploads exactly one mesh -- the root");
+        check(tiny.stats().submitted >= 1, "and still submits geometry rather than nothing");
+        // Deduplication: no handle appears twice in a frame.
+        bool unique = true;
+        for (usize i = 0; i < dev2.drawn.size(); ++i)
+            for (usize j = i + 1; j < dev2.drawn.size(); ++j)
+                if (dev2.drawn[i] == dev2.drawn[j]) unique = false;
+        check(unique, "no mesh is drawn twice in one frame (" +
+                      std::to_string(dev2.drawn.size()) + " draws)");
+// NOTHING IS EVER SKIPPED, which is the guarantee the reserved root exists to provide. Before it
+        // the leaves were the only resident nodes, a leaf is nobody's ancestor, and fifteen of sixteen
+        // selected nodes were dropped -- holes in the ground with no diagnostic beyond a counter.
+        check(tiny.stats().skipped == 0,
+              "at the cache cap nothing is skipped: everything falls back to the root (" +
+              std::to_string(tiny.stats().substituted) + " substituted)");
+        check(tiny.stats().substituted == sel.nodes.size(),
+              "every selected node substituted, so the section is still fully covered");
+    }
+#endif
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;

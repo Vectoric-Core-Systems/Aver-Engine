@@ -23,3 +23,18 @@ target_link_libraries(Aver.Landscape PUBLIC Aver.Core Aver.Formats)
 target_compile_definitions(Aver.Landscape PUBLIC AVER_MODULE_LANDSCAPE=1)
 
 set_target_properties(Aver.Landscape PROPERTIES FOLDER "modules")
+
+# Aver.Landscape.Renderer -- the GPU half, and a SECOND target for the reason
+# Aver.Render.Voxi.Renderer is one: it needs the RHI, and giving the target above that dependency
+# would end the property that makes the CPU model testable with no device.
+#
+# Aver.RHI is the GENERIC interface. Never Aver.RHI.D3D12: no backend type may cross this boundary, and
+# a link line is the only place that rule can actually be enforced.
+add_library(Aver.Landscape.Renderer STATIC
+  src/LandscapeRenderer.cpp)
+
+target_include_directories(Aver.Landscape.Renderer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(Aver.Landscape.Renderer PUBLIC cxx_std_20)
+target_link_libraries(Aver.Landscape.Renderer PUBLIC Aver.Core Aver.RHI Aver.Landscape)
+
+set_target_properties(Aver.Landscape.Renderer PROPERTIES FOLDER "modules")

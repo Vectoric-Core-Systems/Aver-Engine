@@ -84,9 +84,6 @@ add_subdirectory(modules/formats)  # Phase 2 (.ocbeam / .ocmap loaders)
 add_subdirectory(modules/formats.roslyn)
 # Landscape, above formats because it reads .ocland through it and below anything that draws. The
 # renderer half is a separate target and is not built yet, which is why this needs no RHI.
-if(AVER_MODULE_LANDSCAPE)
-  add_subdirectory(modules/landscape)
-endif()
 # Physics: the backend first, then the module that fronts it. Two directories rather than one for
 # the reason rhi/ and rhi.d3d12/ are two -- the ABI above must be expressible without the backend,
 # and a link line is the only place that can be enforced.
@@ -95,6 +92,13 @@ if(AVER_MODULE_PHYSICS)
   add_subdirectory(modules/physics)        # the engine's plain-C ABI over it
 endif()
 add_subdirectory(modules/rhi)
+# Landscape, AFTER the RHI rather than beside formats: the CPU half needs neither, but the renderer
+# half is a second target in the same directory and links Aver.RHI, and a target cannot link something
+# CMake has not defined yet. The CPU half still depends on nothing but Core and Formats -- that is
+# enforced on its own link line, not by where this appears.
+if(AVER_MODULE_LANDSCAPE)
+  add_subdirectory(modules/landscape)
+endif()
 if(AVER_RHI_D3D12)
   add_subdirectory(modules/rhi.d3d12)
 endif()

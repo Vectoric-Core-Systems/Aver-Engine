@@ -16,3 +16,11 @@ if(TARGET Aver.Physics)
   target_link_libraries(LandscapeTreeTest PRIVATE Aver.Physics)
   target_compile_definitions(LandscapeTreeTest PRIVATE AVER_LANDSCAPE_TEST_PHYSICS=1)
 endif()
+
+# The renderer half is checked with a RECORDING DEVICE rather than a real one -- IDevice's methods are
+# virtual no-ops, so a test can be the device, which is the same trick tests/render.ui uses. So this
+# still needs no GPU; it needs the RHI's interface, which always exists.
+if(TARGET Aver.Landscape.Renderer)
+  target_link_libraries(LandscapeTreeTest PRIVATE Aver.Landscape.Renderer)
+  target_compile_definitions(LandscapeTreeTest PRIVATE AVER_LANDSCAPE_TEST_RENDERER=1)
+endif()
