@@ -7,8 +7,44 @@
 # A value here moving is either an announced, understood, oracle-moving change or a regression. There
 # is no third case. Whichever it is belongs in the commit message and in docs/STATUS.md.
 #
-# Recorded 2026-07-21 on an AMD Radeon RX 7800 XT (driver 32.0.23027.2005), after the degraded-path
-# repairs. See docs/STATUS.md 4h for what each configuration is and why its numbers differ.
+# THE VALUES BELOW ARE STALE. They were measured 2026-07-21; the PROBES were repaired on 2026-07-29
+# in 086e92b and now sample different pixels, so a sweep reports 153 mismatches -- every one of them a
+# value mismatch by construction, and none of them a finding.
+#
+# TO FIX, and it must be a human: `-Record` is refused for the agent by the permission classifier.
+#
+#     ./scripts/record-gates.ps1        # builds both trees, records, shows what moved, verifies green
+#
+# This header survives that (the recorder preserves comments), so what follows stays true afterwards.
+# Measured on an AMD Radeon RX 7800 XT, driver 32.0.23027.2005. See docs/STATUS.md 4h for what each
+# configuration is and why its numbers differ, and 4v for the repair.
+#
+# WHY THE PROBES MOVED, since the header above says a moved value is either announced or a regression.
+# Both applied, and they had to be separated before either could be believed:
+#
+#   * The PROBES had gone wrong, and that is not a value change. `0fe81e2` made the level a docked
+#     tab and the scene composite into a texture; the viewport went 2750x1711 -> 2750x1639. A
+#     relative probe survives a change of SIZE but not of ASPECT, because the projection moves with
+#     it -- so shadow/sunlit/penumbra slid onto plain floor and five gates defined to differ all
+#     returned 94,102,129. Re-picking them by intent lands `shadow` on 23,40,86 against a recorded
+#     22,40,86: the geometry never moved, the probes did.
+#   * The CENTRE probe was on the placeholder cube's corner edge, where the 7x7 varies by 83 codes
+#     and one pixel decides which face is sampled. gates.ps1 has carried a note saying it must be
+#     re-picked rather than re-recorded; this is that being done. `gi-debug` read 156,55,36 from the
+#     edge and reads 103,39,30 from the face interior, against a recorded 101,38,31.
+#   * What genuinely moved, once the probes were honest, is the GI value on the sun-blind face:
+#     75,25,21 -> 92,28,22. That face is lit only by indirect light, and `1b4db02` (the shadowed
+#     world ends in a ramp instead of a cliff) and `a743ab0` (dominant-axis projection in the
+#     object's frame) are both announced GI changes. Brighter and warmer is what a ramp instead of a
+#     cliff looks like on a surface whose entire budget is bounce.
+#
+# THE NEW PROBES WERE CHECKED FOR REPEATABILITY BEFORE ANY OF THIS WAS WRITTEN DOWN: five consecutive
+# runs each of centre / gi / penumbra / sunlit / shadow returned bit-identical codes, 25 runs with zero
+# variation. That matters here more than usual, because whole-frame screenshots of this renderer are
+# NOT reproducible (~2400 differing bytes run to run). The oracle survives that only because these
+# probes sit in flat neighbourhoods -- which is now a stated selection criterion rather than a lucky
+# property. So when the re-record above is run, the values it writes are already known to be stable;
+# what it changes is this file, not what the renderer does.
 baseline | centre | 98,37,30
 baseline | ms | 98,37,30
 baseline | rt | 98,37,30
