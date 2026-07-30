@@ -110,6 +110,8 @@ bool parseCommand(const std::string& line, Command& out, std::string* why) {
     // binary's build configuration rather than a fixed list. Answered on the socket thread; see the
     // worker loop for why it is not queued.
     if (cmd == "modules") return true;
+    // What can be clicked, by name. Answered on the socket thread like `modules`.
+    if (cmd == "widgets") return true;
 
     if (cmd == "shot") {
         if (!findString(line, "path", out.arg)) return fail("shot needs a \"path\"");
@@ -125,7 +127,22 @@ bool parseCommand(const std::string& line, Command& out, std::string* why) {
     }
 
     if (cmd == "click") {
-        if (!haveXY) return fail("click needs \"x\" and \"y\"");
+        // BY NAME, and this is the form a client should prefer. A coordinate click is only as good as
+        // the coordinate, and reading one off a screenshot survives exactly until the layout moves or
+        // the DPI changes. The name is resolved against what the editor actually drew -- see the
+        // worker loop, which expands this into the same three events a coordinate click produces.
+        std::string widget;
+        if (findString(line, "widget", widget)) {
+            out.arg = widget;
+            std::string b; findString(line, "button", b);
+            // The button is stashed on an otherwise-empty event so resolution can fill in the point
+            // without re-parsing the line.
+            InputEvent pending; pending.kind = InputEvent::Kind::MouseDown;
+            pending.button = buttonFor(b);
+            out.events.push_back(pending);
+            return true;
+        }
+        if (!haveXY) return fail("click needs \"x\" and \"y\", or a \"widget\" name");
         std::string b; findString(line, "button", b);
         const int btn = buttonFor(b);
         // EXPANDED HERE, into move-then-down-then-up. A click is three events and the editor should not
@@ -211,6 +228,8 @@ struct McpBridge::Impl {
     // name -> that module's ABI. A map, not a switch: a switch would mean this module knew every
     // module's name, and knowing them is one step from linking them.
     std::map<std::string, AbiDispatch> abis;
+    WidgetResolver resolver;
+    WidgetLister lister;
 #if defined(_WIN32)
     SOCKET listener = INVALID_SOCKET;
     bool wsaUp = false;
@@ -231,6 +250,18 @@ void McpBridge::registerAbi(const std::string& module, AbiDispatch dispatch) {
     // Said out loud, because the registry IS the reachable surface: a reader of the log should be able
     // to see exactly which module seams this binary exposes, without inferring it from the build flags.
     AVER_INFO("[Mcp] ABI registered: {}{}", module, replacing ? " (replacing)" : "");
+}
+
+void McpBridge::setWidgetResolver(WidgetResolver fn) {
+    if (!impl_) return;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->resolver = std::move(fn);
+}
+
+void McpBridge::setWidgetLister(WidgetLister fn) {
+    if (!impl_) return;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->lister = std::move(fn);
 }
 
 bool McpBridge::callAbi(const AbiCall& call, std::string& result, std::string& why) const {
@@ -322,7 +353,58 @@ bool McpBridge::start(u16 port) {
                     Command c;
                     std::string why;
                     std::string reply;
-                    if (parseCommand(line, c, &why) && c.name == "modules") {
+                    // A click BY NAME is resolved here, on the socket thread, so an unknown name is
+                    // refused instantly and specifically rather than a frame later and silently.
+                    if (parseCommand(line, c, &why) && c.name == "click" && !c.arg.empty()) {
+                        WidgetResolver resolve;
+                        {
+                            std::lock_guard<std::mutex> lock(impl->mutex);
+                            resolve = impl->resolver;
+                        }
+                        f32 wx = 0.0f, wy = 0.0f;
+                        const int btn = c.events.empty() ? 0 : c.events[0].button;
+                        if (!resolve) {
+                            reply = "{\"id\":" + std::to_string(c.id) +
+                                    ",\"ok\":false,\"error\":\"this build resolves no widget names\"}\n";
+                        } else if (!resolve(c.arg, wx, wy)) {
+                            // NAMED and ACTIONABLE. "no widget named tool.rotor" plus where to get the
+                            // real list is the single most useful thing a client can be told here, and
+                            // it is useless a frame late -- which is why this is answered from the
+                            // socket thread rather than queued.
+                            reply = "{\"id\":" + std::to_string(c.id) +
+                                    ",\"ok\":false,\"error\":\"no widget named " + c.arg +
+                                    "; ask cmd=widgets for the list\"}\n";
+                        } else {
+                            // Expanded into exactly what a coordinate click produces, so there is ONE
+                            // path from here on and pacing stays in pump().
+                            Command k;
+                            k.name = "click";
+                            k.id = c.id;
+                            InputEvent mv; mv.kind = InputEvent::Kind::MouseMove;
+                            mv.x = static_cast<i32>(wx); mv.y = static_cast<i32>(wy);
+                            InputEvent dn = mv; dn.kind = InputEvent::Kind::MouseDown; dn.button = btn;
+                            InputEvent up = mv; up.kind = InputEvent::Kind::MouseUp;   up.button = btn;
+                            k.events.push_back(mv); k.events.push_back(dn); k.events.push_back(up);
+                            {
+                                std::lock_guard<std::mutex> lock(impl->mutex);
+                                impl->queue.push_back(k);
+                            }
+                            // The resolved point comes BACK. A client that asked for a name can then
+                            // check where it actually clicked, which is the difference between "it did
+                            // nothing" and "it clicked the wrong thing".
+                            reply = "{\"id\":" + std::to_string(c.id) +
+                                    ",\"ok\":true,\"at\":[" + std::to_string((int)wx) +
+                                    "," + std::to_string((int)wy) + "]}\n";
+                        }
+                    } else if (parseCommand(line, c, &why) && c.name == "widgets") {
+                        WidgetLister list;
+                        {
+                            std::lock_guard<std::mutex> lock(impl->mutex);
+                            list = impl->lister;
+                        }
+                        reply = "{\"id\":" + std::to_string(c.id) + ",\"ok\":true,\"widgets\":\"" +
+                                (list ? list() : std::string()) + "\"}\n";
+                    } else if (parseCommand(line, c, &why) && c.name == "modules") {
                         // Answered HERE rather than queued. It reads the registry, which is
                         // lock-guarded and needs no frame at all, so queueing it would add a frame of
                         // latency to the one question a client asks before anything else.

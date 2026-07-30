@@ -128,6 +128,25 @@ public:
     // Every module name with an ABI registered, sorted. What a client should ask for first.
     std::vector<std::string> modules() const;
 
+    // ---- clicking by NAME -------------------------------------------------------------------------
+    //
+    // The editor knows where its widgets are; this module must not. So the app installs a resolver that
+    // turns a name into a point, and `{"cmd":"click","widget":"tool.rotate"}` is expanded into the same
+    // move/press/release a coordinate click produces. Coordinates never cross the wire, and the click
+    // still travels the ordinary input path -- so it tests the BUTTON, not the handler behind it.
+    //
+    // Resolved on the SOCKET THREAD, at queue time, which is why the registry behind it must be
+    // thread-safe. That buys an immediate, specific refusal for an unknown name instead of silence and
+    // a frame's wait -- "no widget named tool.rotor" is the single most useful thing a client can be
+    // told, and it is useless a frame late.
+    using WidgetResolver = std::function<bool(const std::string& name, f32& x, f32& y)>;
+    void setWidgetResolver(WidgetResolver fn);
+
+    // The names the resolver would accept, for `{"cmd":"widgets"}`. Supplied by the app for the same
+    // reason as above: this module has no idea what a widget is.
+    using WidgetLister = std::function<std::string()>;
+    void setWidgetLister(WidgetLister fn);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

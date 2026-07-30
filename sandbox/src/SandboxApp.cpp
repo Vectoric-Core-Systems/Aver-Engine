@@ -22,6 +22,7 @@
 #include "ProjectBrowser.hpp"
 #include "ProjectScaffold.hpp"   // --new-project: scaffolding a project without a mouse
 #include "ToolsMenu.hpp"
+#include "UiRegistry.hpp"
 
 // The editor control channel. Behind its own macro AND its own include, so a build without the module
 // does not merely skip the calls -- it never sees the header. That is what "the editor works without
@@ -598,6 +599,12 @@ public:
         // in somebody's machine without telling them.
         if (mcpPort_) {
             registerMcpAbis();
+            // How a NAME becomes a point. The bridge knows nothing about widgets; this is the whole of
+            // what it is told, and it is enough for {"cmd":"click","widget":"tool.rotate"}.
+            mcp_.setWidgetResolver([this](const std::string& n, f32& x, f32& y) {
+                return uiReg_.centreOf(n, x, y);
+            });
+            mcp_.setWidgetLister([this] { return uiReg_.describe(); });
             if (!mcp_.start(mcpPort_))
                 AVER_WARN("[Mcp] --mcp was given but the channel did not start; the editor is "
                           "unaffected and carries on");
@@ -1659,6 +1666,9 @@ public:
         }
         drawGizmo(e);
         buildUI(e);
+        // Published AFTER the build, so a reader on the socket thread sees a whole UI or the previous
+        // whole UI, never a half-built one.
+        uiReg_.endFrame();
         submitGameUi(e);
         captureCheck(e);
     }
@@ -3240,6 +3250,7 @@ private:
     }
 
     void buildUI(Engine& e) {
+        uiReg_.beginFrame();
         // Latched for the panels below, which are called without the engine. A raw borrowed pointer
         // and not an owner: the device outlives every frame this is read in.
         prefsDevice_ = e.device();
@@ -5492,31 +5503,19 @@ private:
             return clk;
         };
 
-#if AVER_MODULE_MCP
-        toolButtonRects_.clear();
-        auto recordRect = [&](const char* name) {
-            const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
-            char buf[96];
-            std::snprintf(buf, sizeof buf, "%s%s=%.0f,%.0f,%.0f,%.0f",
-                          toolButtonRects_.empty() ? "" : " ", name, a.x, a.y, b.x - a.x, b.y - a.y);
-            toolButtonRects_ += buf;
-        };
-#else
-        auto recordRect = [](const char*) {};
-#endif
         if (toolBtn("##tSel", 0, tool_==Tool::Select)) tool_=Tool::Select;
-        recordRect("select");
+        uiReg_.track("tool.select");
         ImGui::SameLine(0, gap);
         if (toolBtn("##tMove", 1, tool_==Tool::Move)) tool_=Tool::Move;
-        recordRect("move");
+        uiReg_.track("tool.move");
         ImGui::SameLine(0, tiny); if (caretBtn("##cMove", snapMove_)) ImGui::OpenPopup("snapMove");
         ImGui::SameLine(0, gap);
         if (toolBtn("##tRot", 2, tool_==Tool::Rotate)) tool_=Tool::Rotate;
-        recordRect("rotate");
+        uiReg_.track("tool.rotate");
         ImGui::SameLine(0, tiny); if (caretBtn("##cRot", snapRot_)) ImGui::OpenPopup("snapRot");
         ImGui::SameLine(0, gap);
         if (toolBtn("##tScl", 3, tool_==Tool::Scale)) tool_=Tool::Scale;
-        recordRect("scale");
+        uiReg_.track("tool.scale");
         ImGui::SameLine(0, tiny); if (caretBtn("##cScl", snapScale_)) ImGui::OpenPopup("snapScale");
         ImGui::SameLine(0, gap*2);
         if (ImGui::Button(worldSpace_ ? "World" : "Local")) worldSpace_ = !worldSpace_; // coord space, like UE's globe/cube
@@ -6092,11 +6091,11 @@ private:
     f32  captureDx_ = 0.0f, captureDy_ = 0.0f;
     Window* window_ = nullptr;   // borrowed from the engine in onInit, for the HWND
 
-#if AVER_MODULE_MCP
-    // Where the four tool buttons were drawn this frame, recorded BY the toolbar rather than guessed
-    // from a screenshot. A client that has to read coordinates off a picture is a client that breaks
-    // the first time the layout moves -- and at 300% DPI a screenshot pixel is not an ImGui unit.
-    std::string toolButtonRects_;
+#if AVER_WITH_IMGUI
+    // What the editor drew, by name. Replaces an earlier ad-hoc string of tool rects that came back
+    // EMPTY and whose cause I never established -- a registry with one owner, one clear point and one
+    // publish point removes the whole class of question.
+    editor::UiRegistry uiReg_;
 #endif
 #if AVER_MODULE_MCP
     // The control channel. Constructed unconditionally but INERT until --mcp asks for it: a build that
@@ -6215,21 +6214,9 @@ private:
                 return false;
 #endif
             }
-            if (a.fn == "tools") {
-                // Where the tool buttons actually ARE, straight from the widget rects the toolbar drew,
-                // so a client never has to guess a coordinate off a screenshot.
-                //
-                // REFUSES WHEN EMPTY rather than returning an empty success, and that is not defensive
-                // padding -- it is currently empty in practice and I have not established why. The
-                // toolbar records these every frame it draws, so an empty string means the row had not
-                // been drawn when this was serviced. An entry point that answered "" cheerfully would
-                // hand a client no coordinates and no clue, which is worse than saying so.
-                if (toolButtonRects_.empty()) {
-                    w = "no tool rects recorded yet -- the level toolbar has not drawn since the "
-                        "channel opened. KNOWN GAP: this is empty more often than it should be.";
-                    return false;
-                }
-                r = toolButtonRects_;
+            if (a.fn == "widgets") {
+                r = uiReg_.describe();
+                if (r.empty()) { w = "nothing tracked yet -- no UI frame has completed"; return false; }
                 return true;
             }
             w = "editor has no entry point '" + a.fn + "'";
