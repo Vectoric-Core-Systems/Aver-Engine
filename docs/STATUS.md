@@ -2371,9 +2371,9 @@ hiding and returning; Project Settings applying a manifest; Editor Preferences r
   failures: five gates defined to differ return one value, which says the probes sample the wrong
   pixels rather than that shading regressed. **Not re-recorded.** See §4d and the memory note
   `aver-gates-red-at-head`.
-  **Resolved in §4v** — the diagnosis above was correct. The probes were re-picked, both invariants
-  now pass, and re-picking landed fifteen of the seventeen back within a few codes of the values
-  recorded on 2026-07-21.
+  **Resolved in §4v, and CLOSED in §4w** — the probes were re-picked, both invariants pass, and both
+  baselines have since been re-recorded and verified green (`4efc326` Debug, `b26700e` Release). The
+  oracle is a working regression check again.
 - **No editor tab hosts a HUD yet.** `--hud-preview` proves the seam; the UI editor is not built.
 - **The actor tab's own Save does not compile** unless Auto-compile on Save is on. That is by design,
   but it is the first thing somebody will expect otherwise.
@@ -2547,6 +2547,161 @@ reviewable diff of nothing but numbers.
 **The Release baseline is invalid as of this change** and needs the same treatment. It is generated
 by the same `gates.ps1`, so repointing the probes invalidated it too; `-Release -Record` against a
 current `build-release` tree is what closes it.
+
+---
+
+## 4w. The session that fixed the oracle, added a control channel, and started landscape
+
+Seventeen commits. Written up in full because the next session is expected to start on **rendering**,
+and everything below is either something that session will stand on or something it must not trip over.
+
+### The gates work again — this is the headline
+
+Both baselines are **recorded and verified green**, for the first time in weeks.
+
+| | |
+|---|---|
+| Debug | `4efc326` — 153 gates, nine configurations, 33 min, `ALL GATES PASS` |
+| Release | `b26700e` — 153 gates, 35 min, `ALL GATES PASS`, and **bit-identical to Debug on all 153** |
+
+They were red 153-of-153 by construction, and the cause was the **probes, not the pixels** (§4v). Two
+faults: `--probe-rel` survives a change of viewport SIZE but not of ASPECT, and the centre probe sat
+one pixel from an 83-code cliff on the placeholder cube's corner. Re-picking by intent landed them
+back on almost exactly the old recorded values, which is what proved the shading had never moved.
+
+**What this buys the rendering work:** a sweep now makes a precise statement. `centre`/`gi` sit on the
+sun-blind cube face fed by sky ambient; `sunlit`/`shadow` bracket direct lighting; `shadow-gi` and
+`sunlit-gi` combine both. Those *should* move when the sky changes. Anything else moving is a finding.
+And since the two baselines now agree bit-for-bit, a Debug/Release divergence after a change is itself
+a signal.
+
+`./scripts/record-gates.ps1` wraps the whole move — build, snapshot, record, print every value that
+moved, then re-run read-only and require green. **The verify-after-record step is the point**: values
+that fail to reproduce minutes after being measured are non-determinism, not a regression, and that is
+the only moment the distinction can be drawn cleanly.
+
+Two guards were added to `-Record` after finding it could poison the oracle: it refuses to write if
+anything crashed, probed outside the viewport, was flaky, or broke an invariant; and a **minimum
+viewport size** rejects the 45x24 window that the editor intermittently comes up at during launch. That
+second one earned its place immediately — a Release sweep had two gates reading `14,14,16`, the dock
+clear colour, and without the guard the re-record would have frozen editor chrome into the oracle at
+two of its gates, permanently and silently.
+
+**Execution policy:** `record-gates.ps1` needs `powershell -NoProfile -ExecutionPolicy Bypass -File
+<abs path>`. No admin. `Set-ExecutionPolicy` is the wrong fix.
+
+### Aver.Mcp — driving the editor over a socket
+
+A new module, `AVER_MODULE_MCP`, **default OFF**. The editor is complete without it: no target, no
+thread, no port, and `Sandbox.exe` runs and exits 0 — verified both ways every commit.
+
+It clicks by **posting real Win32 messages**, so a synthetic click travels the identical path as a
+human one through `ImGui_ImplWin32_WndProcHandler`. Two things had to be learnt the hard way:
+
+- **`WM_MOUSEMOVE` alone does nothing.** `imgui_impl_win32.cpp:371` calls `::GetCursorPos()` every
+  `NewFrame` and re-supplies the position while the window is focused, so a synthetic move is
+  overwritten before the next frame reads it. The real cursor must be moved (`SetCursorPos`). That
+  **hijacks the pointer**, which is inherent to driving a real UI and part of why `--mcp` is opt-in.
+- **Pacing is per EVENT, not per command.** ImGui registers a click only when one frame saw the press
+  and a LATER frame saw the release, so `pump()` delivers one event per frame.
+
+Calls route to **each module's own ABI** — `{"cmd":"abi","module":"physics","fn":"raycast"}` reaches
+`physics_abi.h`. A registry, not a switch, because a switch would mean the module knew every module's
+name and knowing them is one step from linking them. `Aver.Mcp` links Core and nothing else. The
+registry therefore **is** the build configuration: a module switched off registers nothing, and a call
+to it is refused by name.
+
+Widgets are addressable by **name, not coordinates** — `{"cmd":"click","widget":"tool.rotate"}`. The
+editor publishes what it drew (`sandbox/src/UiRegistry.hpp`, double-buffered because the reader is the
+socket thread). Deriving coordinates from a screenshot instead predicted a button 28 px from where it
+actually was. 27 widgets tagged; menus, toolbars and tools. A menu item only appears while its menu is
+open, which is correct — the list describes what is on screen.
+
+**Not done:** most of the UI is untagged (tabs, drawers, panels, the actor editor's toolbar, Tools menu
+items, context menus). Each is one `uiReg_.track(...)` line.
+
+### Landscape — stages 1 to 4 of 5
+
+| stage | commit | what |
+|---|---|---|
+| 1 | `d9f09f1` | `.ocland`, the heightfield section, AVR1 subtype. 43 assertions |
+| 2 | `3c2ee2a` | quadtree, screen-space-error LOD, frustum culling, chunk meshes with skirts |
+| 3 | `28f128c` | collision — the physics grid needs a **transpose and a row flip** |
+| 4 | `8696916` | node meshes and a residency cache that cannot leave holes |
+
+`Aver.Landscape` has **no RHI dependency**, which is why all of it is checkable headlessly. Production
+size verified: 1025 samples, 5 levels, 341 nodes, 242 KiB/node, 80 MiB resident, selection tiling
+1024x1024 exactly, and the crack-free gate at a skirt/gap ratio of 1.505.
+
+**Stage 5 (the editor tab, sculpt brushes, storage) is not started, and no pixel of landscape has ever
+been on a screen** — nothing in the editor calls `LandscapeRenderer::draw`.
+
+### Two real defects found in passing
+
+- **`aver_phys_add_heightfield` cropped every grid to a multiple of 8** (`b6ddba8`) on a comment
+  claiming Jolt required it. Jolt rounds UP and pads itself. A 9x9 field became 8x8 — for tiled terrain
+  that is exactly the shared edge. The existing test used an 8x8 field, so the crop was a no-op on the
+  only input ever tried.
+- **`gates.baseline.release.txt` had never been updated since the commit that created it.** Debug was
+  re-recorded twice in between; the two agreed on **zero of 153** entries while the header claimed they
+  were identical.
+
+### Other work
+
+`6ffcd43` Jolt moved `third_party/JoltPhysics` to `modules/physics.jolt` — it is the rigid-body
+backend, named like `rhi.d3d12` and `audio.wasapi`. Provenance kept; `stage-payload.ps1`'s licence path
+updated, since that notice is a legal obligation a rename could have silently dropped.
+`96217b3` Compile C# became one split button with a dropdown, shared by the menu and every tab.
+`e1eb870` The actor editor got the level viewport's four tools, rotate/scale write-back, and camera pan.
+
+---
+
+## 4x. RENDERING — where to start, and what is already true
+
+The next session's brief. **Read this before touching the sky.**
+
+### What already exists, which is more than it looks
+
+The sky is **not** static and clouds are **already volumetric**:
+
+| | where | today |
+|---|---|---|
+| Sky dome | `RHIShaders.cpp:188` `averSkyAbove` | two-colour horizon→zenith lerp, authored, blended in **linear light** |
+| Ground | `:199` `averGroundRadiance` | proper radiance — albedo x (sun·cosθ + π·sky), not a flat swatch |
+| Fog | `averApplyFog` | **sky-derived in-scatter**, height falloff, `gFogColor` as a TINT |
+| Clouds | `:466` `averCloudLayer` | **raymarched**, Henyey-Greenstein phase, light march, powder term, wind |
+| Cloud height | `RHI.hpp:298` | already definitive — 1.5 km to 2.8 km |
+
+`0e38292` unified fog: the base PBR path had its own flat lerp with no sky and no height, so the same
+scene fogged differently depending on which renderer drew it. Both now go through `averApplyFog`.
+
+### The five real gaps
+
+1. **The sky is authored, not derived.** Two sRGB colours lerped by `pow(dir.z*0.5+0.5, k)`. A real
+   globe needs Rayleigh (β ≈ 5.8 / 13.5 / 33.1 x 10⁻⁶ m⁻¹ — the λ⁻⁴ that makes zenith blue and horizon
+   pale) plus Mie, integrated along a ray against a spherical shell, with **sun elevation as the only
+   input**. Sunset then becomes a consequence of geometry rather than a colour somebody typed.
+2. **Aerial perspective.** Once (1) exists, fog stops being a tint on `skyColorFull` and becomes the
+   atmosphere's own in-scattering over distance. Consistency by construction.
+3. **Clouds are not PBR-consistent.** HG + powder is respectable but ad-hoc — wants energy-conserving
+   multiple scattering, and lighting from the same sky radiance the surfaces use.
+4. **The sun does not drive anything but direction.** It should be the single input to (1).
+5. **SkyForge has not been upgraded** — and it should be done *after* the atmosphere, because a better
+   sky changes how the whole project reads.
+
+### Practical notes that will save an hour
+
+- **HLSL is compiled by DXC at RUN TIME.** A green C++ build proves nothing about a shader edit. Run
+  `Sandbox.exe --frames 40` and grep the log for shader errors before believing anything.
+- `RHIShaders.cpp` lines 126-617 are **one HLSL string**. Declaration must precede use — the fog
+  helpers had to be moved 60 lines up for the base path to call them.
+- **The gates will not see a small fog change.** `fogDensity` defaults to 4e-6/cm and every probe sits
+  within a few thousand cm of the camera, so fog contributes about 1% there — under half an 8-bit code.
+  Long-range effects need a distant-horizon probe, which does not exist yet.
+- Whole-frame screenshots are **not** reproducible (~2400 differing bytes run to run), but probe pixels
+  in flat neighbourhoods are — 25 runs, zero variation. Never A/B a rendering change by diffing PNGs.
+- `Aver.Mcp` can now drive the editor to compare skies interactively: `--mcp`, then `widgets`, `click`
+  by name, and `editor::screenshot`.
 
 ---
 
