@@ -68,13 +68,29 @@ public:
     // project's scripts and hot-swaps them in with no editor restart, and the status ICON on the
     // button's own face says whether what is on disk has been built. Silent on success — the Compile
     // Scripts modal only pops if the build fails. `iconTex` is the UI id of the compile-status sprite
-    // sheet (three tiles: built / failed / stale); 0 falls back to a drawn dot. Call in the menu-bar.
+    // sheet (three tiles: built / failed / stale); 0 falls back to a drawn dot.
+    //
+    // A SPLIT button: the face compiles, and the arrow beside it opens the same items the Tools menu
+    // shows (drawScriptItems). Split rather than a plain button because "compile" is the common case
+    // and should stay one click, while Reload, Auto-compile on Save and Open Scripts In are the things
+    // you reach for from the same place and previously meant a trip to the menu bar.
+    //
+    // Safe to call from a menu-bar OR from a tab's own toolbar, which is why every tab can now show
+    // it: nothing here assumes the surrounding window.
     void drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 iconTex);
+
+    // The build/reload/open items, drawn into whatever menu or popup is already open. Shared by the
+    // Tools menu and by the button's dropdown so the two cannot drift apart.
+    void drawScriptItems(const fmt::ProjectDesc& project);
 
     // Screenshot aids, in the family of --project-settings/--start-screen. Opt-in flags only:
     // no oracle gate passes them, and none of them changes the menu BAR, only what hangs off it.
     void armNewScript(bool on) { armScript_ = on ? 4 : 0; }
     void armToolsMenu(bool on) { armMenu_ = on; }
+    // The Compile C# button's own dropdown. Separate from armToolsMenu because they are now different
+    // popups in different windows drawing the same items, and photographing one proves nothing about
+    // the other.
+    void armCompileMenu(bool on) { armCompileMenu_ = on; }
     void armCompile(bool on) { armCompile_ = on ? 4 : 0; }
     // --reload-scripts [N]: fire Reload Scripts once, N frames in. A COUNTDOWN rather than an
     // immediate shot, because the whole point of a reload is that it happens to a running editor
@@ -132,6 +148,7 @@ private:
     Modal pending_ = Modal::None;   // opened by the menu, consumed by drawModals
     int  armScript_ = 0;            // --new-script: frames left to force the modal open
     bool armMenu_ = false;          // --tools-menu: hold the dropdown open
+    bool armCompileMenu_ = false;   // --compile-menu: hold the Compile C# split-button's popup open
     int  armCompile_ = 0;           // --compile-scripts: frames left to fire the build once
     int  armReload_ = 0;            // --reload-scripts: frames left before the reload fires
     ReloadFn reload_;               // empty in a build with no scripting host

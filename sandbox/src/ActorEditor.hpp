@@ -36,6 +36,19 @@ struct ActorEditorHooks {
     std::function<void(const std::string&)> openInIde; // the project's chosen IDE
     std::function<bool()> compileBusy;                 // true while a build is running
     std::string ideName;                               // for the button's label
+
+    // Draws the app's OWN Compile C# split button -- status icon, label, and the dropdown carrying
+    // Reload / Auto-compile on Save / Open Scripts In -- at the current cursor.
+    //
+    // A hook rather than this tab drawing its own, because the tab previously had a plain
+    // `ImGui::Button("Compile C#")`: same words, no status icon, no dropdown, and a separate idea of
+    // when it should be disabled. Two buttons that claim to do the same thing and look different is
+    // worse than either. The tab still knows nothing about ToolsMenu -- it calls a std::function and
+    // the app decides what that means, which is the same arrangement as `compileScripts`.
+    //
+    // If empty, the tab falls back to the plain button, so a build or a test that installs no hooks
+    // still gets something that works.
+    std::function<void()> drawCompileButton;
 };
 void setActorEditorHooks(ActorEditorHooks hooks);
 

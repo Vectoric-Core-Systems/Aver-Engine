@@ -249,105 +249,11 @@ void ToolsMenu::drawMenu(const fmt::ProjectDesc& project) {
 
     if (!ImGui::BeginMenu("Tools")) return;
 
-    const bool haveProject = project.valid();
-
-    const char* kNoProject = "Open or create a project first - C# lives in the\nproject's Content\\Scripts folder.";
-
-    // Creation (New C# Script/Class, New C++ Module/Class) now lives on the Content Browser's "+ Add"
-    // button — the same place UE keeps its Add menu — and opens the same modals drawn below. The Tools
-    // menu keeps the build/reload/open-project actions.
-    ImGui::TextDisabled("New scripts & classes: Content Browser  >  + Add");
-    ImGui::Separator();
-    const std::string csproj = haveProject ? scriptsCsprojPath(project) : std::string();
-    const std::string binDir = haveProject ? scriptsBinaryDir(project) : std::string();
-    const bool haveCsproj = !csproj.empty() && fileExists(csproj);
-    const bool dotnetOk = haveDotnet();
-    const bool canCompile = haveProject && haveCsproj && dotnetOk && !compileThread_.joinable();
-    if (ImGui::MenuItem("Compile Scripts", nullptr, false, canCompile)) {
-        open(Modal::Compile);
-        startCompile(csproj, binDir, false);
-    }
-    tip(!haveProject  ? kNoProject
-        : !dotnetOk   ? "dotnet was not found on PATH, so there is nothing to build with.\nInstall the .NET SDK and restart the editor."
-        : !haveCsproj ? "This project has no Content\\Scripts\\Scripts.csproj yet.\nUse New C# Script or New C# Class to generate one."
-        : compileThread_.joinable() ? "A build is already running."
-        : "dotnet build into Binaries\\Scripts.\nThe editor keeps running whatever it loaded - use Reload Scripts to swap it in.");
-
-    // Reload is a SEPARATE item and not a checkbox on Compile: they fail differently and a user
-    // reaches for them at different moments. Compile answers "does it build"; Reload answers
-    // "does it do what I meant", and it swaps live behaviours out from under a running editor.
-    if (ImGui::MenuItem("Reload Scripts", nullptr, false, canCompile && reload_ != nullptr)) {
-        open(Modal::Reload);
-        startCompile(csproj, binDir, true);
-    }
-    tip(!haveProject  ? kNoProject
-        : !reload_    ? "This build has no scripting host, so there is nothing to reload into.\n(-DAVER_MODULE_SCRIPTING=OFF, or the host declined at startup.)"
-        : !dotnetOk   ? "dotnet was not found on PATH, so there is nothing to build with.\nInstall the .NET SDK and restart the editor."
-        : !haveCsproj ? "This project has no Content\\Scripts\\Scripts.csproj yet.\nUse New C# Script or New C# Class to generate one."
-        : compileThread_.joinable() ? "A build is already running."
-        : "Rebuild, then unload and reload the project's scripts in place.\nRunning behaviours get OnShutdown, the new ones get OnStart.\nNo editor restart, and no state is carried across.");
-
-    // AUTO-COMPILE ON SAVE. Beneath the two manual items because it is the same operation done for
-    // you: it runs exactly the Reload Scripts path, on a debounce, when a .cs under Content changes.
-    //
-    // Off until asked, because it spawns a compiler in response to somebody else's file write and
-    // swaps the script assembly under a running editor.
-    if (autoCompile_) {
-        const bool canAuto = haveProject && haveCsproj && dotnetOk;
-        ImGui::BeginDisabled(!canAuto);
-        ImGui::MenuItem("Auto-compile on Save", nullptr, autoCompile_);
-        ImGui::EndDisabled();
-        tip(!haveProject  ? kNoProject
-            : !dotnetOk   ? "dotnet was not found on PATH, so there is nothing to build with."
-            : !haveCsproj ? "This project has no Content\\Scripts\\Scripts.csproj yet."
-            : "Rebuild and reload whenever a .cs under Content changes on disk - saving in Visual\n"
-              "Studio is enough. Edits are debounced, so a Save All is ONE build, not one per file.\n"
-              "bin\\ and obj\\ are ignored: the build writes .cs there itself, and reacting to\n"
-              "those would compile in a loop forever.");
-    }
-
-    ImGui::Separator();
-    if (ImGui::MenuItem("Open Project Folder", nullptr, false, haveProject)) {
-        if (!shellOpen(project.dir)) AVER_WARN("[Editor] could not open {}", project.dir);
-    }
-    tip(haveProject ? "Opens the project folder in Explorer."
-                    : "Open or create a project first - there is no folder to show.");
-
-    // Named after what is actually installed rather than after Visual Studio in hope. The list is
-    // never empty — the shell fallback is always its last entry — so there is always exactly one
-    // item or exactly one submenu, and the no-project / no-csproj tooltips are unchanged.
-    const std::vector<IdeInfo>& ides = detectedIdes();
-    const char* kOpenBlocked = !haveProject ? kNoProject
-        : "There is no Content\\Scripts\\Scripts.csproj to open yet.\nUse New C# Script or New C# Class to generate one.";
-
-    if (ides.size() > 1) {
-        if (ImGui::BeginMenu("Open Scripts In", haveCsproj)) {
-            for (const IdeInfo& ide : ides) {
-                if (ImGui::MenuItem(ide.name.c_str())) {
-                    if (!openProjectInIde(ide, csproj))
-                        AVER_WARN("[Editor] could not open {} in {}", csproj, ide.name);
-                }
-                tip(ide.kind == IdeKind::VsCode
-                        ? "Opens the Content\\Scripts FOLDER - handing Code a .csproj\nwould just show you the XML."
-                    : ide.kind == IdeKind::ShellDefault
-                        ? "Hands Scripts.csproj to whatever is registered for .csproj."
-                        : "Opens Content\\Scripts\\Scripts.csproj.");
-            }
-            ImGui::EndMenu();
-        }
-        tip(haveCsproj ? "Every code editor found on this machine, best first." : kOpenBlocked);
-    } else {
-        const IdeInfo& ide = ides.front();
-        const std::string label = "Open Scripts in " + ide.name;
-        if (ImGui::MenuItem(label.c_str(), nullptr, false, haveCsproj)) {
-            if (!openProjectInIde(ide, csproj))
-                AVER_WARN("[Editor] could not open {} in {}", csproj, ide.name);
-        }
-        tip(!haveCsproj ? kOpenBlocked
-            : !ideDetectionFinished()
-                ? "Still looking for installed IDEs. Until that finishes this hands\nScripts.csproj to the shell, which is what it always did."
-                : "No IDE was detected, so Scripts.csproj goes to whatever is\nregistered for .csproj - normally Visual Studio.");
-    }
+    // Every item is drawn by drawScriptItems so that the Tools menu and the Compile C# button's
+    // dropdown cannot drift apart. They are the same actions with the same tooltips and the same
+    // disabled reasons, and one of them being subtly staler than the other is exactly the kind of
+    // difference nobody notices until it matters.
+    drawScriptItems(project);
 
     ImGui::EndMenu();
 #endif
@@ -1010,6 +916,113 @@ void ToolsMenu::refreshScriptStatus(const fmt::ProjectDesc& project) {
     scriptStatus_ = (anyDll && newestDll >= newestCs) ? ScriptStatus::UpToDate : ScriptStatus::Stale;
 }
 
+// The build/reload/open items, drawn into WHATEVER menu or popup is currently open.
+//
+// Extracted from drawMenu so the Compile C# button's dropdown is not a second, quietly divergent
+// copy. The tooltips here carry the reasons an item is disabled, which is most of their value: a
+// greyed-out Compile with no explanation sends people hunting for a bug in their project.
+void ToolsMenu::drawScriptItems(const fmt::ProjectDesc& project) {
+    const bool haveProject = project.valid();
+
+    const char* kNoProject = "Open or create a project first - C# lives in the\nproject's Content\\Scripts folder.";
+
+    // Creation (New C# Script/Class, New C++ Module/Class) now lives on the Content Browser's "+ Add"
+    // button — the same place UE keeps its Add menu — and opens the same modals drawn below. The Tools
+    // menu keeps the build/reload/open-project actions.
+    ImGui::TextDisabled("New scripts & classes: Content Browser  >  + Add");
+    ImGui::Separator();
+    const std::string csproj = haveProject ? scriptsCsprojPath(project) : std::string();
+    const std::string binDir = haveProject ? scriptsBinaryDir(project) : std::string();
+    const bool haveCsproj = !csproj.empty() && fileExists(csproj);
+    const bool dotnetOk = haveDotnet();
+    const bool canCompile = haveProject && haveCsproj && dotnetOk && !compileThread_.joinable();
+    if (ImGui::MenuItem("Compile Scripts", nullptr, false, canCompile)) {
+        open(Modal::Compile);
+        startCompile(csproj, binDir, false);
+    }
+    tip(!haveProject  ? kNoProject
+        : !dotnetOk   ? "dotnet was not found on PATH, so there is nothing to build with.\nInstall the .NET SDK and restart the editor."
+        : !haveCsproj ? "This project has no Content\\Scripts\\Scripts.csproj yet.\nUse New C# Script or New C# Class to generate one."
+        : compileThread_.joinable() ? "A build is already running."
+        : "dotnet build into Binaries\\Scripts.\nThe editor keeps running whatever it loaded - use Reload Scripts to swap it in.");
+
+    // Reload is a SEPARATE item and not a checkbox on Compile: they fail differently and a user
+    // reaches for them at different moments. Compile answers "does it build"; Reload answers
+    // "does it do what I meant", and it swaps live behaviours out from under a running editor.
+    if (ImGui::MenuItem("Reload Scripts", nullptr, false, canCompile && reload_ != nullptr)) {
+        open(Modal::Reload);
+        startCompile(csproj, binDir, true);
+    }
+    tip(!haveProject  ? kNoProject
+        : !reload_    ? "This build has no scripting host, so there is nothing to reload into.\n(-DAVER_MODULE_SCRIPTING=OFF, or the host declined at startup.)"
+        : !dotnetOk   ? "dotnet was not found on PATH, so there is nothing to build with.\nInstall the .NET SDK and restart the editor."
+        : !haveCsproj ? "This project has no Content\\Scripts\\Scripts.csproj yet.\nUse New C# Script or New C# Class to generate one."
+        : compileThread_.joinable() ? "A build is already running."
+        : "Rebuild, then unload and reload the project's scripts in place.\nRunning behaviours get OnShutdown, the new ones get OnStart.\nNo editor restart, and no state is carried across.");
+
+    // AUTO-COMPILE ON SAVE. Beneath the two manual items because it is the same operation done for
+    // you: it runs exactly the Reload Scripts path, on a debounce, when a .cs under Content changes.
+    //
+    // Off until asked, because it spawns a compiler in response to somebody else's file write and
+    // swaps the script assembly under a running editor.
+    if (autoCompile_) {
+        const bool canAuto = haveProject && haveCsproj && dotnetOk;
+        ImGui::BeginDisabled(!canAuto);
+        ImGui::MenuItem("Auto-compile on Save", nullptr, autoCompile_);
+        ImGui::EndDisabled();
+        tip(!haveProject  ? kNoProject
+            : !dotnetOk   ? "dotnet was not found on PATH, so there is nothing to build with."
+            : !haveCsproj ? "This project has no Content\\Scripts\\Scripts.csproj yet."
+            : "Rebuild and reload whenever a .cs under Content changes on disk - saving in Visual\n"
+              "Studio is enough. Edits are debounced, so a Save All is ONE build, not one per file.\n"
+              "bin\\ and obj\\ are ignored: the build writes .cs there itself, and reacting to\n"
+              "those would compile in a loop forever.");
+    }
+
+    ImGui::Separator();
+    if (ImGui::MenuItem("Open Project Folder", nullptr, false, haveProject)) {
+        if (!shellOpen(project.dir)) AVER_WARN("[Editor] could not open {}", project.dir);
+    }
+    tip(haveProject ? "Opens the project folder in Explorer."
+                    : "Open or create a project first - there is no folder to show.");
+
+    // Named after what is actually installed rather than after Visual Studio in hope. The list is
+    // never empty — the shell fallback is always its last entry — so there is always exactly one
+    // item or exactly one submenu, and the no-project / no-csproj tooltips are unchanged.
+    const std::vector<IdeInfo>& ides = detectedIdes();
+    const char* kOpenBlocked = !haveProject ? kNoProject
+        : "There is no Content\\Scripts\\Scripts.csproj to open yet.\nUse New C# Script or New C# Class to generate one.";
+
+    if (ides.size() > 1) {
+        if (ImGui::BeginMenu("Open Scripts In", haveCsproj)) {
+            for (const IdeInfo& ide : ides) {
+                if (ImGui::MenuItem(ide.name.c_str())) {
+                    if (!openProjectInIde(ide, csproj))
+                        AVER_WARN("[Editor] could not open {} in {}", csproj, ide.name);
+                }
+                tip(ide.kind == IdeKind::VsCode
+                        ? "Opens the Content\\Scripts FOLDER - handing Code a .csproj\nwould just show you the XML."
+                    : ide.kind == IdeKind::ShellDefault
+                        ? "Hands Scripts.csproj to whatever is registered for .csproj."
+                        : "Opens Content\\Scripts\\Scripts.csproj.");
+            }
+            ImGui::EndMenu();
+        }
+        tip(haveCsproj ? "Every code editor found on this machine, best first." : kOpenBlocked);
+    } else {
+        const IdeInfo& ide = ides.front();
+        const std::string label = "Open Scripts in " + ide.name;
+        if (ImGui::MenuItem(label.c_str(), nullptr, false, haveCsproj)) {
+            if (!openProjectInIde(ide, csproj))
+                AVER_WARN("[Editor] could not open {} in {}", csproj, ide.name);
+        }
+        tip(!haveCsproj ? kOpenBlocked
+            : !ideDetectionFinished()
+                ? "Still looking for installed IDEs. Until that finishes this hands\nScripts.csproj to the shell, which is what it always did."
+                : "No IDE was detected, so Scripts.csproj goes to whatever is\nregistered for .csproj - normally Visual Studio.");
+    }
+}
+
 void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 iconTex) {
     (void)dpi;
     refreshScriptStatus(project);
@@ -1042,6 +1055,17 @@ void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 
     const float gap = st.ItemInnerSpacing.x;
     const ImVec2 btnSize(st.FramePadding.x * 2.0f + ih + gap + tsz.x, 0.0f);
 
+    // The two halves are pushed together with ItemSpacing 0 so they read as ONE control with a
+    // divider rather than as two buttons that happen to be adjacent.
+    //
+    // No PushID is needed even though this widget is now drawn in several places in the same frame --
+    // the menu bar and every open tab's toolbar. ImGui seeds the ID stack from the CURRENT WINDOW, so
+    // "##compilecs" in two different windows is already two different widgets, and the same holds for
+    // the popup below. It would only collide if one window drew the button twice, which no caller
+    // does. (An earlier attempt scoped it with GetCurrentWindow() -- that is imgui_internal.h, and it
+    // was solving a problem ImGui had already solved.)
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, st.ItemSpacing.y));
+
     ImGui::BeginDisabled(!canCompile);
     const bool clicked = ImGui::Button("##compilecs", btnSize);   // empty label: the face is drawn below
     ImGui::EndDisabled();
@@ -1071,9 +1095,53 @@ void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 
     }
     dl->AddText(ImVec2(ix + ih + gap, cy - tsz.y * 0.5f),
                 ImGui::GetColorU32(dim ? ImGuiCol_TextDisabled : ImGuiCol_Text), label);
+
+    // --- the dropdown half -------------------------------------------------------------------------
+    //
+    // NOT disabled with the face. The face needs dotnet, a project and a .csproj before it can do
+    // anything; the menu behind the arrow is where a user finds out WHY it cannot, and it also holds
+    // Open Scripts In, which is exactly what you want when there is no .csproj yet. An arrow that
+    // greys out alongside the button would hide the explanation at the only moment it is wanted.
+    ImGui::SameLine();
+    const float aw = ImGui::GetFrameHeight() * 0.72f;    // narrow: an affordance, not a second button
+    const bool arrow = ImGui::Button("##compilecsmenu", ImVec2(aw, 0.0f));
+    if (arrow) ImGui::OpenPopup("##compilecsitems");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reload, auto-compile on save, and open the scripts.");
+
+    const ImVec2 amin = ImGui::GetItemRectMin();
+    const ImVec2 amax = ImGui::GetItemRectMax();
+    // A hairline on the shared edge, so the pair reads as one split control. Drawn at the button's own
+    // frame colour rather than a border colour: this is a seam INSIDE a control, not around one.
+    dl->AddLine(ImVec2(amin.x, amin.y + st.FramePadding.y),
+                ImVec2(amin.x, amax.y - st.FramePadding.y),
+                ImGui::GetColorU32(ImGuiCol_Separator));
+    const ImVec2 ac((amin.x + amax.x) * 0.5f, (amin.y + amax.y) * 0.5f);
+    const float  ar = ImGui::GetFontSize() * 0.22f;
+    const ImU32  acol = ImGui::GetColorU32(ImGuiCol_Text);
+    dl->AddTriangleFilled(ImVec2(ac.x - ar, ac.y - ar * 0.5f),
+                          ImVec2(ac.x + ar, ac.y - ar * 0.5f),
+                          ImVec2(ac.x,      ac.y + ar * 0.7f), acol);
+
+    ImGui::PopStyleVar();
+
+    // --arm-compile-menu (screenshot aid), re-issued every frame for the reason armMenu_ is: the
+    // popup ID belongs to this window, so it has to be opened with this window current.
+    if (armCompileMenu_) ImGui::OpenPopup("##compilecsitems");
+
+    // ANCHORED under the arrow, explicitly, rather than left to ImGui's default. A popup that was not
+    // opened by an item interaction is placed at the MOUSE, which for a --frames run with no cursor is
+    // (0,0): the first screenshot of this had the menu in the window's top-left corner, covering the
+    // very toolbar the button lives on. Setting it here is not just a fix for the headless case
+    // either -- a split button's menu belongs under its own arrow whether a mouse opened it or not.
+    ImGui::SetNextWindowPos(ImVec2(amin.x, amax.y), ImGuiCond_Always);
+    if (ImGui::BeginPopup("##compilecsitems")) {
+        drawScriptItems(project);
+        ImGui::EndPopup();
+    }
 }
 #else
 void ToolsMenu::refreshScriptStatus(const fmt::ProjectDesc&) {}
+void ToolsMenu::drawScriptItems(const fmt::ProjectDesc&) {}
 void ToolsMenu::drawCompileButton(const fmt::ProjectDesc&, f32, u64) {}
 #endif // AVER_WITH_IMGUI
 

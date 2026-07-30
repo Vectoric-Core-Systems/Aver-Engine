@@ -1249,14 +1249,24 @@ void ActorEditor::draw(Engine& e) {
     // a preview is for placement and the behaviour half is still text. Without them the tab is a
     // dead end -- you would look at an actor, then go elsewhere to do anything about it.
     {
-        const bool busy = g_hooks.compileBusy && g_hooks.compileBusy();
-        ImGui::BeginDisabled(!g_hooks.compileScripts || busy);
-        if (ImGui::Button(busy ? "Compiling..." : "Compile C#")) g_hooks.compileScripts();
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip(g_hooks.compileScripts
-                ? "Build this project's scripts, and bake its C# materials."
-                : "No project is open.");
+        // The app's own split button, so this tab's Compile C# is the SAME control as the level
+        // toolbar's -- status icon on its face, and the dropdown behind the arrow. It used to be a
+        // plain button with the same words and none of that, which is the sort of difference that
+        // makes an editor feel assembled from parts.
+        if (g_hooks.drawCompileButton) {
+            g_hooks.drawCompileButton();
+        } else {
+            // No hook installed (a test, or a build with no ToolsMenu). Better a working plain button
+            // than a toolbar with a hole in it.
+            const bool busy = g_hooks.compileBusy && g_hooks.compileBusy();
+            ImGui::BeginDisabled(!g_hooks.compileScripts || busy);
+            if (ImGui::Button(busy ? "Compiling..." : "Compile C#")) g_hooks.compileScripts();
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip(g_hooks.compileScripts
+                    ? "Build this project's scripts, and bake its C# materials."
+                    : "No project is open.");
+        }
 
         ImGui::SameLine();
         ImGui::BeginDisabled(!g_hooks.openInIde);

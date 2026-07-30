@@ -569,6 +569,13 @@ public:
             editor::ActorEditorHooks hooks;
             hooks.compileScripts = [this] { tools_.triggerToolbarCompile(project_); };
             hooks.compileBusy    = [this] { return tools_.compiling(); };
+            // The same call the level toolbar makes, so both draw one control from one implementation
+            // rather than two that merely agree today. Captures `this` and reads project_ and the icon
+            // id at DRAW time, which matters: a project can be opened or closed while a tab is open,
+            // and a hook that had snapshotted them would keep showing the old project's build state.
+            hooks.drawCompileButton = [this] {
+                tools_.drawCompileButton(project_, dpi_, compileIconUiId_);
+            };
             hooks.openInIde      = [this](const std::string& p) {
                 const editor::IdeInfo& ide = cbIde();
                 if (!editor::openInIde(ide, p)) AVER_WARN("[Editor] could not open {} in {}", p, ide.name);
@@ -1850,6 +1857,10 @@ public:
     }
     void setFocusScript(bool b) { tools_.armNewScript(b); }  // --new-script screenshot aid
     void setFocusTools(bool b) { tools_.armToolsMenu(b); }   // --tools-menu screenshot aid
+    // --compile-menu. Its own flag rather than a mode of the above, because the Compile C# button's
+    // dropdown is a DIFFERENT popup in a different window drawing the same items -- photographing the
+    // Tools menu proves nothing about it, and this dropdown is the only way to reach Reload from a tab.
+    void setFocusCompileMenu(bool b) { tools_.armCompileMenu(b); }
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts screenshot aid
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
@@ -6213,7 +6224,7 @@ static bool isOcproject(const char* p) {
 }
 
 Application* createApplication(int argc, char** argv) {
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and EXITS, touching no device.
         //
@@ -6276,6 +6287,7 @@ Application* createApplication(int argc, char** argv) {
         // it changes only what hangs BELOW the menu bar, never the bar's height, but no oracle
         // gate passes it and none can reach it by accident.
         else if (!std::strcmp(argv[i],"--tools-menu")) focusTools=true;
+        else if (!std::strcmp(argv[i],"--compile-menu")) focusCompileMenu=true;
         else if (!std::strcmp(argv[i],"--compile-scripts")) focusCompile=true;
         // --reload-scripts [N] fires Tools > Reload Scripts once, N frames in (default 20). Same
         // family as the three above, and the only way to prove a reload without a mouse: the point
@@ -6383,6 +6395,7 @@ Application* createApplication(int argc, char** argv) {
     app->setDrawerOpen(drawerOpen, drawerSub);
     app->setFocusScript(focusScript);
     app->setFocusTools(focusTools);
+    app->setFocusCompileMenu(focusCompileMenu);
     app->setFocusCompile(focusCompile);
     app->setFocusReload(reloadAt);
     app->setMsaaOverride(msaa);
