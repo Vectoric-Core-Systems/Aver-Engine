@@ -1,22 +1,16 @@
-// avermatc — the material compiler.
-//
-// C# in Content/Materials is the SOURCE; .ocmat under Binaries is the build output; the engine only
-// ever reads the latter. This is the step in between: load the assembly those sources compiled into,
-// find every [AverMaterial] type, run its Configure, and write one .ocmat per material.
-//
+// avermatc: loads a compiled scripts assembly, runs every [AverMaterial] type's Configure, and
+// writes one .ocmat per material.
 //     avermatc --assembly <path.dll> --out <dir> [--verify]
-//
-// A console tool rather than something inside the editor, so a material can be baked by a build
-// script, by CI, and by a machine with no GPU. The editor invokes it; it does not depend on the
-// editor.
 using System.Reflection;
 using System.Runtime.Loader;
 using Aver.Materials;
 
 namespace Aver.MaterialCompiler;
 
+// The avermatc command line tool.
 internal static class Program
 {
+    // Parses the arguments, bakes every material, and returns the process exit code.
     private static int Main(string[] args)
     {
         string? assemblyPath = null;
@@ -29,8 +23,7 @@ internal static class Program
             {
                 case "--assembly" when i + 1 < args.Length: assemblyPath = args[++i]; break;
                 case "--out" when i + 1 < args.Length: outDir = args[++i]; break;
-                // Writes nothing and reports what WOULD change. For a build that wants to fail when
-                // the checked-in output is stale, rather than quietly fixing it.
+                // Writes nothing; reports what would change and fails if anything is stale.
                 case "--verify": verify = true; break;
                 default:
                     Console.Error.WriteLine($"avermatc: unrecognised argument '{args[i]}'");
@@ -52,10 +45,7 @@ internal static class Program
         Assembly asm;
         try
         {
-            // A load CONTEXT with a resolver rooted at the assembly's own directory, so its
-            // references (Aver.Materials, and whatever else a project's scripts pull in) are found
-            // beside it. Assembly.LoadFrom would probe this tool's directory instead and fail on the
-            // first reference the tool does not itself carry.
+            // A load context whose resolver is rooted at the assembly's own directory.
             var ctx = new AssemblyLoadContext("avermatc", isCollectible: false);
             string dir = Path.GetDirectoryName(Path.GetFullPath(assemblyPath))!;
             ctx.Resolving += (c, name) =>
@@ -75,8 +65,7 @@ internal static class Program
         try { types = asm.GetTypes(); }
         catch (ReflectionTypeLoadException e)
         {
-            // Partial results are still useful: one broken type should not hide every good material
-            // in the assembly. The ones that failed are named so the cause is findable.
+            // Keep the types that did load, and name the ones that did not.
             types = e.Types.Where(t => t is not null).Cast<Type>().ToArray();
             foreach (Exception? le in e.LoaderExceptions)
                 if (le is not null) Console.Error.WriteLine($"avermatc: (partial load) {le.Message}");
@@ -90,15 +79,11 @@ internal static class Program
 
         if (found.Count == 0)
         {
-            // Not an error. A project may legitimately have no C# materials yet, and failing here
-            // would make adding the compiler to a build break every project that has not adopted it.
             Console.WriteLine("avermatc: no [AverMaterial] types found; nothing to do");
             return 0;
         }
 
-        // Duplicate bound names are refused OUTRIGHT rather than last-one-wins. Two classes claiming
-        // M_Crate would produce one file whose contents depend on reflection order, which is not
-        // stable and not something anybody could debug from the output.
+        // Two classes claiming one bound name is an error, not last-one-wins.
         var duplicates = found.GroupBy(x => x.Attr!.Name, StringComparer.Ordinal)
                               .Where(g => g.Count() > 1).ToList();
         if (duplicates.Count > 0)
@@ -123,8 +108,6 @@ internal static class Program
             }
             catch (TargetInvocationException e)
             {
-                // Configure threw. Unwrapped, because the reflection wrapper is noise and the inner
-                // message is the one that names the mistake.
                 Console.Error.WriteLine($"avermatc: {name}: Configure threw: {e.InnerException?.Message ?? e.Message}");
                 ++failed;
                 continue;
@@ -150,9 +133,6 @@ internal static class Program
                 ++stale;
                 continue;
             }
-            // Newline-normalised on write so the output is byte-identical whatever platform ran the
-            // compiler. A file that differs only in line endings between two machines is a diff in
-            // every commit and a cache miss in every build.
             File.WriteAllText(path, text);
             ++written;
         }

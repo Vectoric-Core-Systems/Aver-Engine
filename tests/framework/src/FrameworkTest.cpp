@@ -1,10 +1,6 @@
-// Hand-run test for Aver.Framework STEP 8: the class registry, class defaults, spawn, class identity
-// and flag-gated possession. Exit code = failure count, matching tests/scene.
-//
-// It drives the framework's C ABI (framework_abi.h) and reads the results back through the ONE
-// process-global World the framework spawned into — the same one-world design tests/scene relies on:
-// the framework DLL, the scene DLL and this exe all resolve World::instance() to the single instance
-// exported from Aver.Scene.dll, so what spawn wrote is exactly what getComponent here reads.
+// Test for Aver.Framework: the class registry, defaults, spawn, possession, managed dispatch, the
+// play lifecycle and input. Drives the C ABI and reads back through the one process-global World.
+// Exit code = failure count.
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/framework/framework_abi.h"
@@ -22,6 +18,7 @@ using namespace aver::scene;
 static int g_checks   = 0;
 static int g_failures = 0;
 
+// Counts one assertion, and logs it if it failed.
 static void check(bool cond, const std::string& what) {
     ++g_checks;
     if (cond) return;
@@ -29,8 +26,7 @@ static void check(bool cond, const std::string& what) {
     ++g_failures;
 }
 
-// ---------------------------------------------------------------------------- registry + identity
-
+// Checks that declaring a class is idempotent by name, and that lookups round-trip.
 static void testDeclareIdentity() {
     AVER_INFO("=== declare is idempotent by name ===");
 
@@ -49,8 +45,6 @@ static void testDeclareIdentity() {
     check(aver_fw_class_parent(a1) == 0, "a root class has parent 0");
 }
 
-// --------------------------------------------------------------------- components + typed defaults
-
 // Filled in by testDefaults, read back after spawn.
 static int32_t g_actor    = 0;
 static int64_t g_meshId   = 0x00000000DEADBEEFLL;
@@ -59,6 +53,7 @@ static float   g_colour[3] = {0.10f, 0.20f, 0.30f};
 static float   g_intensity = 2500.0f;
 static float   g_scale[3]  = {2.0f, 2.0f, 2.0f};
 
+// Adds components to a class, sets one default of each kind, and checks the wrong-kind refusals.
 static void testDefaults() {
     AVER_INFO("=== add components + set a default of each kind ===");
 
@@ -80,7 +75,6 @@ static void testDefaults() {
     g_material = aver_scene_material(0, "steel");
     check(g_material > 0, "a material name resolves to a positive handle");
 
-    // One default of each storable kind. mesh is I64 written with set_default_i64 — NEVER set_default_str.
     check(aver_fw_class_set_default_i64(g_actor, fMesh, g_meshId) == 1, "set_default_i64 writes the mesh ObjectId");
     check(aver_fw_class_set_default_i32(g_actor, fMat, g_material) == 1, "set_default_i32 writes the material handle");
     check(aver_fw_class_set_default_f32(g_actor, fLux, g_intensity) == 1, "set_default_f32 writes the light intensity");
@@ -92,22 +86,18 @@ static void testDefaults() {
     check(aver_fw_class_set_default_i64(g_actor, fLux, 1) == 0, "i64 into an F32 field is rejected");
     check(aver_fw_class_set_default_vec(g_actor, fMesh, g_colour) == 0, "vec into an I64 field is rejected");
     check(aver_fw_class_set_default_i32(g_actor, fMesh, 7) == 0, "i32 into an I64 field is rejected");
-    // The resolved contradiction: a String default into mesh/material is rejected by the kind check.
     check(aver_fw_class_set_default_str(g_actor, fMesh, "meshes/box") == 0, "set_default_str into the I64 mesh field is rejected");
     check(aver_fw_class_set_default_str(g_actor, fMat, "steel") == 0, "set_default_str into the I32 material field is rejected");
-    // A default for a component the class never added is rejected (CCamera was not added).
     check(aver_fw_class_set_default_f32(g_actor, aver_scene_field("CCamera.fovYRad"), 1.0f) == 0,
           "a default for an un-added component is rejected");
 
     check(aver_fw_class_seal(g_actor) == 1, "the class seals");
 }
 
-// -------------------------------------------------------------------------------- parent chains
-
+// Checks that seal flattens a parent chain, and refuses a cycle or a parent that was never declared.
 static void testParentChainsAndCycle() {
     AVER_INFO("=== seal flattens a chain and refuses a cycle ===");
 
-    // A legal two-level chain: Base owns a CLight default, Derived adds CMeshRenderer.
     const int32_t base = aver_fw_class_declare("Base", "");
     check(aver_fw_class_add_component(base, static_cast<int32_t>(kComponentLight)) == 1, "Base adds CLight");
     check(aver_fw_class_set_default_f32(base, aver_scene_field("CLight.intensityLux"), 777.0f) == 1,
@@ -116,7 +106,6 @@ static void testParentChainsAndCycle() {
     check(aver_fw_class_add_component(derived, static_cast<int32_t>(kComponentMeshRenderer)) == 1, "Derived adds CMeshRenderer");
     check(aver_fw_class_seal(derived) == 1, "Derived seals over its parent chain");
 
-    // Spawn Derived and confirm it carries BOTH the inherited CLight and its own CMeshRenderer.
     const int32_t d = aver_fw_spawn(derived, "derived-inst", nullptr, nullptr, nullptr);
     check(d != 0, "Derived spawns");
     World& w = World::instance();
@@ -126,23 +115,17 @@ static void testParentChainsAndCycle() {
     check(w.getComponent(static_cast<Entity>(static_cast<uint32_t>(d)), kComponentMeshRenderer) != nullptr,
           "the derived instance also carries its own CMeshRenderer");
 
-    // A cycle: A's parent is B, B's parent is A. Sealing either must refuse rather than loop.
     aver_fw_class_declare("CycleA", "CycleB");
     aver_fw_class_declare("CycleB", "CycleA");
     check(aver_fw_class_seal(aver_fw_class_find("CycleA")) == 0, "seal refuses a parent cycle (A)");
     check(aver_fw_class_seal(aver_fw_class_find("CycleB")) == 0, "seal refuses a parent cycle (B)");
 
-    // A named-but-undeclared parent is a missing parent: seal refuses it too.
     const int32_t orphan = aver_fw_class_declare("Orphan", "NeverDeclared");
     check(aver_fw_class_seal(orphan) == 0, "seal refuses a named parent that was never declared");
 }
 
-// ------------------------------------------------------------- field-level default inheritance
-
-// Regression for the whole-component clobber: seal used to memcpy each class's own component blob over
-// the resolved one, so a subclass's un-authored built-in CLocal (scale 1,1,1 / pos 0) silently
-// overwrote a parent's authored transform defaults. CLocal is auto-added to every class, so this fired
-// on 100% of subclasses. The fix makes default inheritance field-level.
+// Checks that default inheritance is per FIELD: a subclass keeps a parent's defaults it does not
+// re-author, and a leaf's own override wins for that field alone.
 static void testDefaultInheritance() {
     AVER_INFO("=== a subclass inherits a parent's per-FIELD defaults it does not re-author ===");
 
@@ -152,14 +135,12 @@ static void testDefaultInheritance() {
 
     World& w = World::instance();
 
-    // Base authors two CLocal transform defaults on the auto-added CLocal channel.
     const int32_t base = aver_fw_class_declare("InheritBase", "");
     const float baseScale[3] = {5.0f, 5.0f, 5.0f};
     const float basePos[3]   = {1.0f, 2.0f, 3.0f};
     check(aver_fw_class_set_default_vec(base, fScale, baseScale) == 1, "Base authors CLocal.scale = (5,5,5)");
     check(aver_fw_class_set_default_vec(base, fPos,   basePos)   == 1, "Base authors CLocal.position = (1,2,3)");
 
-    // Derived declares Base as parent and authors NOTHING on CLocal. It must inherit both defaults.
     const int32_t derived = aver_fw_class_declare("InheritDerived", "InheritBase");
     check(aver_fw_class_seal(derived) == 1, "Derived seals over Base");
     const int32_t d = aver_fw_spawn(derived, "inherit-derived", nullptr, nullptr, nullptr);
@@ -172,7 +153,6 @@ static void testDefaultInheritance() {
     check(dl && dl->xf.position.x == 1.0f && dl->xf.position.y == 2.0f && dl->xf.position.z == 3.0f,
           "the parent's authored CLocal.position is inherited too");
 
-    // A grandchild that overrides only ONE field keeps the other inherited (leaf wins per field).
     const int32_t grand = aver_fw_class_declare("InheritGrand", "InheritDerived");
     const float grandScale[3] = {9.0f, 9.0f, 9.0f};
     check(aver_fw_class_set_default_vec(grand, fScale, grandScale) == 1, "Grandchild overrides only CLocal.scale");
@@ -187,11 +167,8 @@ static void testDefaultInheritance() {
           "and the un-overridden CLocal.position is still inherited down the chain");
 }
 
-// ---------------------------------------------------------------- class_of after a subtree destroy
-
-// Regression for the stale class-identity read: aver_fw_destroy forgets only the single handle it is
-// given, but world().destroy takes the whole subtree, so a child destroyed via its parent kept a
-// non-zero class_of until its index was reused. class_of must read 0 the instant the handle dies.
+// Checks that class_of reads 0 the instant a handle dies, including a child destroyed with its
+// parent's subtree and an actor destroyed through the scene ABI.
 static void testSubtreeDestroyClassOf() {
     AVER_INFO("=== class_of reads 0 for an actor destroyed as part of a parent's subtree ===");
 
@@ -201,13 +178,11 @@ static void testSubtreeDestroyClassOf() {
     check(aver_scene_set_parent(q, p) == 1, "the child is parented under the parent via the scene ABI");
     check(aver_fw_class_of(q) == g_actor, "class_of on the live child is its class");
 
-    // Destroying only the parent takes the child with it on flush. The framework forgot only P's row.
     check(aver_fw_destroy(p) == 1, "destroy accepts the parent");
     World::instance().flush();
     check(aver_fw_class_of(p) == 0, "class_of on the destroyed parent is 0");
     check(aver_fw_class_of(q) == 0, "class_of on the subtree-destroyed child is 0 (not a stale class)");
 
-    // Same gap via the scene C ABI destroy, which never runs the framework's forgetClass at all.
     const int32_t s = aver_fw_spawn(g_actor, "scene-destroyed", nullptr, nullptr, nullptr);
     check(s != 0, "a fresh actor spawns");
     check(aver_scene_destroy(s) == 1, "the scene ABI accepts the destroy");
@@ -215,8 +190,8 @@ static void testSubtreeDestroyClassOf() {
     check(aver_fw_class_of(s) == 0, "class_of on an actor destroyed via the scene ABI is 0");
 }
 
-// ------------------------------------------------------------------------------------------ spawn
-
+// Checks that spawn lays the archetype defaults down, applies a pos override, and that class_of
+// answers for a spawned actor, a plain scene entity and a destroyed one.
 static void testSpawnAndClassOf() {
     AVER_INFO("=== spawn lays the archetype defaults down byte-identical ===");
 
@@ -228,17 +203,11 @@ static void testSpawnAndClassOf() {
     check(w.valid(ent), "the spawned entity is valid in the world");
     check(std::string(w.name(ent)) == "hero", "the optional name was applied");
 
-    // class_of IS the definition of 'actor'.
     check(aver_fw_class_of(e) == g_actor, "class_of on the spawned entity returns its class");
     const int32_t plain = aver_scene_create();
     check(aver_fw_class_of(plain) == 0, "class_of on a plain scene entity returns 0");
 
-    // ---- the CMeshRenderer default laid down field-by-field. Compare only the DEFINED fields, never a
-    // whole-struct memcmp: sizeof(CMeshRenderer) rounds up to an 8-aligned 48 bytes with 4 trailing
-    // padding bytes the ABI never defines, and both the archetype blob and a stack `want{}` carry
-    // compiler-left padding a memcmp would compare — an over-reach that can spuriously fail under a
-    // toolchain that does not zero-init padding. Checking the members constrains exactly the bytes the
-    // ABI defines.
+    // Field by field, never a whole-struct memcmp: CMeshRenderer carries padding the ABI never defines.
     const CMeshRenderer* mr =
         static_cast<const CMeshRenderer*>(w.getComponent(ent, kComponentMeshRenderer));
     check(mr != nullptr, "the actor carries CMeshRenderer");
@@ -257,7 +226,6 @@ static void testSpawnAndClassOf() {
     check(li && li->colour[0] == g_colour[0] && li->colour[1] == g_colour[1] && li->colour[2] == g_colour[2],
           "CLight.colour is the Vec3 default");
 
-    // CLocal: scale came from a default; position was NOT overridden, so it is the CLocal default (0).
     const CLocal* lo = static_cast<const CLocal*>(w.getComponent(ent, kComponentLocal));
     check(lo != nullptr, "the actor carries CLocal (a birth component)");
     check(lo && lo->xf.scale.x == g_scale[0] && lo->xf.scale.y == g_scale[1] && lo->xf.scale.z == g_scale[2],
@@ -275,14 +243,13 @@ static void testSpawnAndClassOf() {
           "the pos override landed at (10,20,30)");
     check(lo2 && lo2->xf.scale.x == g_scale[0], "and the un-overridden scale is still the class default");
 
-    // destroy + class_of afterwards
     check(aver_fw_destroy(e2) == 1, "destroy accepts the actor");
     World::instance().flush();
     check(aver_fw_class_of(e2) == 0, "class_of on a destroyed actor is 0");
 }
 
-// ------------------------------------------------------------------------------------- possession
-
+// Checks that possession is gated on the CONTROLLER and PAWN class flags, and that destroying a
+// possessed pawn leaves no dangling forward entry.
 static void testPossession() {
     AVER_INFO("=== possession is flag-gated ===");
 
@@ -298,7 +265,6 @@ static void testPossession() {
     const int32_t pawn       = aver_fw_spawn(pawnC, "pawn", nullptr, nullptr, nullptr);
     check(controller != 0 && pawn != 0, "the controller and pawn spawn");
 
-    // ---- rejections: the flag check is the whole of the type safety.
     check(aver_fw_possess(pawn, controller) == 0, "possess is refused when the controller side lacks CONTROLLER");
     check(aver_fw_possess(controller, controller) == 0, "possess is refused when the pawn side lacks PAWN");
     const int32_t plainC = aver_fw_spawn(g_actor, "not-a-controller", nullptr, nullptr, nullptr);
@@ -306,7 +272,6 @@ static void testPossession() {
     const int32_t plainScene = aver_scene_create();
     check(aver_fw_possess(controller, plainScene) == 0, "a plain scene entity (no class) cannot be possessed");
 
-    // ---- the valid pair
     check(aver_fw_possess(controller, pawn) == 1, "a CONTROLLER possessing a PAWN is accepted");
     check(aver_fw_controlled_pawn(controller) == pawn, "controlled_pawn reads the possessed pawn");
     check(aver_fw_controller_of(pawn) == controller, "controller_of reads the controller");
@@ -316,10 +281,6 @@ static void testPossession() {
     check(aver_fw_controller_of(pawn) == 0, "controller_of is 0 after unpossess");
     check(aver_fw_unpossess(controller) == 0, "unpossess with nothing to release returns 0");
 
-    // ---- destroying a possessed PAWN must clean the controller's forward entry too, or the two maps
-    // stop being mutual inverses and pawnByController leaks. Observable through the pure ABI: after the
-    // pawn dies the controller controls nothing, so unpossess must report 0 (it returned 1 with the
-    // dangling forward entry — the leak this asserts against).
     const int32_t ctrl2 = aver_fw_spawn(ctrlC, "controller2", nullptr, nullptr, nullptr);
     const int32_t pawn2 = aver_fw_spawn(pawnC, "pawn2", nullptr, nullptr, nullptr);
     check(ctrl2 != 0 && pawn2 != 0, "a second controller and pawn spawn");
@@ -331,11 +292,8 @@ static void testPossession() {
           "unpossess returns 0 after a possessed-pawn destroy (no dangling forward entry left to release)");
 }
 
-// ---------------------------------------------------------------- managed-actor dispatch (step 10)
-
-// A STAND-IN for the C# bridge: plain C functions that record (entity, reason, group, dt) into globals.
-// Step 10 is the NATIVE dispatch mechanism only — no CLR, no bridge — so the table the framework routes
-// through is exactly this hand-written one, which lets the test assert the routing in isolation.
+// What the stand-in managed dispatch recorded: a count and the arguments for each hook. The *Order
+// fields are stamps off g_dispSeq, so the test can pin the order the edges fired in.
 struct DispatchLog {
     int     beginCount = 0;
     int32_t beginEntity = 0;
@@ -346,17 +304,17 @@ struct DispatchLog {
     int     endCount = 0;
     int32_t endEntity = 0;
     int32_t endReason = -1;
-    bool    endSawLiveEntity = false;   // was the entity still valid at hook time?
-    int32_t endClass = -1;              // what class_of(e) resolved to when endPlay fired
-    int     bindCount = 0;              // times the framework called bind()         — step 11 wires it
-    int     unbindCount = 0;            // times the framework called unbind()       — step 11 wires it
-    int     buildCount = 0;             // times the framework called build_models() — step 11 wires it
-    int32_t bindOrder = 0;              // monotonic call order, to pin bind < build_models < beginPlay
+    bool    endSawLiveEntity = false;
+    int32_t endClass = -1;
+    int     bindCount = 0;
+    int     unbindCount = 0;
+    int     buildCount = 0;
+    int32_t bindOrder = 0;
     int32_t buildOrder = 0;
     int32_t beginOrder = 0;
-    int32_t endOrder = 0;               // and end_play < unbind on the destroy edge
+    int32_t endOrder = 0;
     int32_t unbindOrder = 0;
-    int     possessCount = 0;           // v2 possession hooks
+    int     possessCount = 0;
     int32_t possessPawn = 0, possessController = 0;
     int     unpossessCount = 0;
     int32_t unpossessPawn = 0;
@@ -367,90 +325,89 @@ struct DispatchLog {
 static DispatchLog g_disp;
 static int32_t g_dispSeq = 0;   // shared monotonic counter the stand-ins stamp their call order from
 
+// Records a begin_play call.
 static void AVER_FW_CALL standInBeginPlay(aver_entity e, int32_t reason) {
     ++g_disp.beginCount;
     g_disp.beginEntity = e;
     g_disp.beginReason = reason;
     g_disp.beginOrder = ++g_dispSeq;
 }
+// Records a build_models call.
 static void AVER_FW_CALL standInBuildModels(aver_entity /*e*/) {
     ++g_disp.buildCount;
     g_disp.buildOrder = ++g_dispSeq;
 }
+// Records a tick_all call and its group and dt.
 static void AVER_FW_CALL standInTickAll(int32_t group, float dt) {
     ++g_disp.tickCount;
     g_disp.tickGroup = group;
     g_disp.tickDt = dt;
 }
+// Records an end_play call, plus whether the entity was still live and what its class read as.
 static void AVER_FW_CALL standInEndPlay(aver_entity e, int32_t reason) {
     ++g_disp.endCount;
     g_disp.endEntity = e;
     g_disp.endReason = reason;
-    // The entity is still valid at hook time (world().destroy is deferred to the next flush) — but that
-    // alone is a weak claim, since deferred destroy keeps valid(e) true regardless of internal ordering.
-    // The ordering that actually matters is that endPlay fires BEFORE forgetClass, so the hook can still
-    // resolve the actor's class: capture class_of here — it flips to 0 the instant endPlay is moved after
-    // forgetClass — and record the (trivially-true-under-deferred-destroy) valid() flag alongside it.
     g_disp.endSawLiveEntity = World::instance().valid(static_cast<Entity>(static_cast<uint32_t>(e)));
     g_disp.endClass = aver_fw_class_of(e);
     g_disp.endOrder = ++g_dispSeq;
 }
+// Records a bind call. Returns 1, which means a managed instance now exists.
 static int32_t AVER_FW_CALL standInBind(int64_t /*classNameHash*/, aver_entity /*e*/) {
     ++g_disp.bindCount;
     g_disp.bindOrder = ++g_dispSeq;
-    return 1;   // 1 == a managed instance now exists (a real bridge constructs+binds it here)
+    return 1;
 }
+// Records an unbind call.
 static void AVER_FW_CALL standInUnbind(aver_entity /*e*/) {
     ++g_disp.unbindCount;
     g_disp.unbindOrder = ++g_dispSeq;
 }
+// Records a possessed call and its pair.
 static void AVER_FW_CALL standInPossessed(aver_entity pawn, aver_entity controller) {
     ++g_disp.possessCount; g_disp.possessPawn = pawn; g_disp.possessController = controller;
 }
+// Records an unpossessed call and its pawn.
 static void AVER_FW_CALL standInUnpossessed(aver_entity pawn) {
     ++g_disp.unpossessCount; g_disp.unpossessPawn = pawn;
 }
+// Records a post_login call and its game mode and controller.
 static void AVER_FW_CALL standInPostLogin(aver_entity mode, aver_entity controller) {
     ++g_disp.postLoginCount; g_disp.postLoginMode = mode; g_disp.postLoginController = controller;
 }
 
-// A possessed stand-in that re-enters possession from inside OnPossessed — the possess-edge analogue of
-// the Destroy(Self) re-entrancy. It re-possesses the SAME controller onto a DIFFERENT pawn; absent the
-// framework's possessInFlight guard this recurses managed->native->managed to a stack overflow, so the
-// guard must refuse the nested call (return 0) and let the outer finish. It records the nested result and
-// its own depth so the test can assert both no-recursion and the refusal.
 static int32_t g_rpCtrl = 0, g_rpPawn2 = 0;
 static int     g_rpDepth = 0;
 static int32_t g_rpNestedResult = -1;
+// A possessed hook that re-possesses its controller onto another pawn, recording the nested result
+// and its own depth.
 static void AVER_FW_CALL standInReentrantPossessed(aver_entity /*pawn*/, aver_entity /*ctrl*/) {
     ++g_rpDepth;
     if (g_rpDepth == 1)
-        g_rpNestedResult = aver_fw_possess(g_rpCtrl, g_rpPawn2);   // must be refused, not recursed
+        g_rpNestedResult = aver_fw_possess(g_rpCtrl, g_rpPawn2);
 }
 
-// A SECOND stand-in whose endPlay calls Destroy(Self) — the re-entrant managed teardown of finding 1.
-// It guards its own re-entry so that, absent the framework's re-entrancy guard, the double-fire is a
-// clean, assertable endCount == 2 rather than unbounded recursion to a stack overflow.
 static int  g_reentrantEndCount = 0;
 static bool g_reentrantReentered = false;
+// An end_play hook that calls Destroy(Self) once, guarding its own re-entry.
 static void AVER_FW_CALL standInReentrantEndPlay(aver_entity e, int32_t /*reason*/) {
     ++g_reentrantEndCount;
     if (!g_reentrantReentered) {
         g_reentrantReentered = true;
-        aver_fw_destroy(static_cast<int32_t>(e));   // a managed OnEndPlay doing Destroy(Self)
+        aver_fw_destroy(static_cast<int32_t>(e));
     }
 }
 
+// Checks that a managed actor's lifecycle routes through the installed dispatch: the begin and end
+// edges and their order, the preview edge, ticks, possession hooks, and install/clear.
 static void testManagedDispatch() {
     AVER_INFO("=== managed actors route their lifecycle through the installed dispatch ===");
 
-    // A MANAGED class (flagged + ticks) and re-using the plain, non-managed Prop for the negative case.
     const int32_t managedC = aver_fw_class_declare("ManagedActor", "");
     aver_fw_class_set_flags(managedC, AVER_FW_CLASS_MANAGED | AVER_FW_CLASS_TICKS);
     aver_fw_class_set_tick(managedC, AVER_FW_TICK_PHYSICS, 0);
     check(aver_fw_class_seal(managedC) == 1, "the managed class seals");
 
-    // Build the stand-in table. structBytes + version make install accept it.
     AvManagedDispatch table{};
     table.structBytes     = static_cast<int32_t>(sizeof(AvManagedDispatch));
     table.contractVersion = AVER_FW_DISPATCH_VERSION;
@@ -464,18 +421,15 @@ static void testManagedDispatch() {
     table.unpossessed     = &standInUnpossessed;
     table.post_login      = &standInPostLogin;
 
-    // ---- install, and the second-install refusal.
     check(aver_fw_managed_dispatch_installed() == 0, "no dispatch is installed to begin with");
     check(aver_fw_install_managed_dispatch(&table) == 1, "the first install is accepted");
     check(aver_fw_managed_dispatch_installed() == 1, "the dispatch reports installed");
     check(aver_fw_install_managed_dispatch(&table) == 0, "a SECOND install is refused (returns 0)");
-    // A short / wrong-version table is rejected even as the first install would be.
     AvManagedDispatch bad{};
     bad.structBytes = 4;   // not sizeof
     bad.contractVersion = AVER_FW_DISPATCH_VERSION;
     check(aver_fw_install_managed_dispatch(&bad) == 0, "a wrong-structBytes table is rejected");
 
-    // ---- a MANAGED spawn drives the full BEGIN edge bind -> build_models -> begin_play, once each.
     g_disp.reset();
     g_dispSeq = 0;
     const int32_t m = aver_fw_spawn(managedC, "managed-1", nullptr, nullptr, nullptr);
@@ -483,23 +437,12 @@ static void testManagedDispatch() {
     check(g_disp.beginCount == 1, "begin_play fired exactly once on a managed spawn");
     check(g_disp.beginEntity == m, "begin_play got the spawned entity");
     check(g_disp.beginReason == AVER_FW_BEGIN_SPAWN, "begin_play got reason SPAWN");
-    // Step 11 wires the whole BEGIN edge: bind() constructs the managed instance and gates the rest, then
-    // build_models() runs, then begin_play(). All three fire exactly once, and in that order — bind must
-    // precede begin_play so OnBeginPlay never runs against an instance that was never constructed.
     check(g_disp.bindCount == 1, "step 11 calls bind() once on a managed spawn");
     check(g_disp.buildCount == 1, "step 11 calls build_models() once on a managed spawn");
     check(g_disp.bindOrder < g_disp.buildOrder && g_disp.buildOrder < g_disp.beginOrder,
           "the begin edge fires in order: bind -> build_models -> begin_play");
 
-    // ---- THE PREVIEW EDGE: spawn_preview runs the construction and stops.
-    //
-    // This is the contract the actor editor's Live view rests on, and getting it wrong is not a
-    // cosmetic bug -- it would run every OnBeginPlay in the project into the live world every time
-    // somebody opened a tab. SkyForge's game mode spawns eleven actors there.
-    //
-    // What must still happen is as important as what must not: bind() has to fire (there is no
-    // instance to build models on otherwise) and build_models() has to fire (it IS the preview), and
-    // on the way out unbind() has to fire or the editor leaks a managed object per Refresh.
+    // The preview edge: spawn_preview binds and builds models, but does not begin play.
     g_disp.reset();
     g_dispSeq = 0;
     const int32_t prev = aver_fw_spawn_preview(managedC, "preview-1", nullptr, nullptr, nullptr);
@@ -513,7 +456,6 @@ static void testManagedDispatch() {
     check(g_disp.endCount == 0, "destroy_preview does NOT fire end_play");
     check(g_disp.unbindCount == 1, "destroy_preview still unbinds — an instance was bound, so one is dropped");
 
-    // And the ordinary pair is unaffected by the split: a normal spawn/destroy still fires both edges.
     g_disp.reset();
     g_dispSeq = 0;
     const int32_t normal = aver_fw_spawn(managedC, "after-preview", nullptr, nullptr, nullptr);
@@ -521,48 +463,36 @@ static void testManagedDispatch() {
     aver_fw_destroy(normal);
     check(g_disp.endCount == 1, "an ordinary destroy still fires end_play after the preview split");
 
-    // ---- a NON-managed spawn fires NOTHING (Prop carries no MANAGED flag).
     g_disp.reset();
     const int32_t plain = aver_fw_spawn(g_actor, "plain-1", nullptr, nullptr, nullptr);
     check(plain != 0, "the non-managed actor spawns");
     check(g_disp.beginCount == 0, "a non-managed spawn fires no begin_play");
 
-    // ---- aver_fw_tick(group, dt) fires tick_all(group, dt) exactly once.
     g_disp.reset();
     check(aver_fw_tick(AVER_FW_TICK_PHYSICS, 0.25f) == 1, "aver_fw_tick reports a managed tick fired");
     check(g_disp.tickCount == 1, "tick_all fired exactly once");
     check(g_disp.tickGroup == AVER_FW_TICK_PHYSICS, "tick_all got the group it was called with");
     check(g_disp.tickDt == 0.25f, "tick_all got the dt it was called with");
-    // Exactly ONE per invocation: a second call to a different group is a second single dispatch.
     aver_fw_tick(AVER_FW_TICK_POST_PHYSICS, 0.5f);
     check(g_disp.tickCount == 2 && g_disp.tickGroup == AVER_FW_TICK_POST_PHYSICS,
           "each aver_fw_tick is exactly one tick_all for its group");
 
-    // ---- destroy a managed actor fires end_play(entity, DESTROY) while the entity is still live.
     g_disp.reset();
     check(aver_fw_destroy(m) == 1, "the managed actor is destroyed");
     check(g_disp.endCount == 1, "end_play fired exactly once on a managed destroy");
     check(g_disp.endEntity == m, "end_play got the destroyed entity");
     check(g_disp.endReason == AVER_FW_END_DESTROY, "end_play got reason DESTROY");
     check(g_disp.endSawLiveEntity, "end_play saw the entity still valid at hook time");
-    // The real before-teardown constraint: endPlay fires BEFORE forgetClass, so the hook can still
-    // resolve the actor's class. Deferred destroy leaves valid(e) true regardless of internal ordering,
-    // so endSawLiveEntity above cannot catch a mis-ordering; this class read flips to 0 the instant the
-    // dispatch is moved after forgetClass(), which is the ordering that actually matters.
     check(g_disp.endClass == managedC, "end_play could still resolve the actor's class (fired before forgetClass)");
-    // Step 11 wires the whole END edge: unbind() drops the managed instance from the bridge's list, and
-    // it fires AFTER end_play so OnEndPlay still runs against a bound instance. Pin the order too.
     check(g_disp.unbindCount == 1, "step 11 calls unbind() once on a managed destroy");
     check(g_disp.endOrder < g_disp.unbindOrder, "the end edge fires in order: end_play -> unbind");
     World::instance().flush();
 
-    // A non-managed destroy fires nothing.
     g_disp.reset();
     check(aver_fw_destroy(plain) == 1, "the non-managed actor is destroyed");
     check(g_disp.endCount == 0, "a non-managed destroy fires no end_play");
     World::instance().flush();
 
-    // ---- v2 possession hooks route through the dispatch (MANAGED pawn + controller so the guard fires).
     const int32_t hkPawnC = aver_fw_class_declare("HookPawn", "");
     aver_fw_class_set_flags(hkPawnC, AVER_FW_CLASS_MANAGED | AVER_FW_CLASS_PAWN);
     aver_fw_class_seal(hkPawnC);
@@ -583,8 +513,6 @@ static void testManagedDispatch() {
     check(g_disp.unpossessCount == 1 && g_disp.unpossessPawn == hkPawn,
           "unpossess fired the unpossessed hook for the released pawn");
 
-    // Moving the controller to a SECOND pawn displaces the first: the outgoing pawn is unpossessed and the
-    // new one possessed, in that order.
     const int32_t hkPawn2 = aver_fw_spawn(hkPawnC, "hook-pawn-2", nullptr, nullptr, nullptr);
     aver_fw_possess(hkCtrl, hkPawn);
     g_disp.reset();
@@ -592,8 +520,6 @@ static void testManagedDispatch() {
     check(g_disp.unpossessCount == 1 && g_disp.unpossessPawn == hkPawn, "the displaced first pawn was unpossessed");
     check(g_disp.possessCount == 1 && g_disp.possessPawn == hkPawn2, "the second pawn was possessed");
 
-    // Stealing a pawn from ANOTHER controller: the pawn gets OnUnpossessed (from its old controller) then
-    // OnPossessed (by the new one) — a clean pair, not a second OnPossessed with no release.
     const int32_t hkCtrl2 = aver_fw_spawn(hkCtrlC, "hook-ctrl-2", nullptr, nullptr, nullptr);
     aver_fw_possess(hkCtrl, hkPawn);   // hkCtrl drives hkPawn again
     g_disp.reset();
@@ -603,7 +529,6 @@ static void testManagedDispatch() {
     check(aver_fw_controller_of(hkPawn) == hkCtrl2, "the pawn now reports the new controller");
     check(aver_fw_controlled_pawn(hkCtrl) == 0, "and the old controller no longer drives it");
 
-    // Idempotent: re-possessing the pair a controller already drives is a no-op that fires no hooks.
     g_disp.reset();
     check(aver_fw_possess(hkCtrl2, hkPawn) == 1, "re-possessing the same pair returns 1");
     check(g_disp.possessCount == 0 && g_disp.unpossessCount == 0, "and fires no hooks (idempotent)");
@@ -611,7 +536,6 @@ static void testManagedDispatch() {
     aver_fw_destroy(hkPawn); aver_fw_destroy(hkPawn2); aver_fw_destroy(hkCtrl); aver_fw_destroy(hkCtrl2);
     World::instance().flush();
 
-    // ---- after CLEAR, no hook fires, and spawn/destroy still work (a headless / no-CLR build).
     check(aver_fw_clear_managed_dispatch() == 1, "clear returns 1");
     check(aver_fw_managed_dispatch_installed() == 0, "the dispatch reports not-installed after clear");
     g_disp.reset();
@@ -624,18 +548,11 @@ static void testManagedDispatch() {
     check(g_disp.endCount == 0, "no end_play fires after clear");
     World::instance().flush();
 
-    // Re-install is allowed once the table is clear again (the refusal is only against a LIVE second one).
     check(aver_fw_install_managed_dispatch(&table) == 1, "install is accepted again after a clear");
     check(aver_fw_clear_managed_dispatch() == 1, "and clears again");
 }
 
-// ------------------------------------------------------- re-entrant managed destroy (Destroy(Self))
-
-// Regression for the destroy re-entrancy hazard: aver_fw_destroy fires endPlay BEFORE forgetClass, and
-// world().destroy is deferred to flush, so a managed OnEndPlay that calls Destroy(Self) on its own entity
-// used to re-enter a destroy that still saw MANAGED + valid — firing endPlay a SECOND time (and, for a
-// script that does Destroy(Self) in EVERY OnEndPlay, recursing to a stack overflow). The re-entrancy guard
-// makes a destroy already in progress for an entity refuse a nested destroy of the same entity.
+// Checks that a managed OnEndPlay calling Destroy(Self) does not double-fire endPlay.
 static void testDestroyReentrancy() {
     AVER_INFO("=== a managed OnEndPlay calling Destroy(Self) does not double-fire endPlay ===");
 
@@ -646,7 +563,7 @@ static void testDestroyReentrancy() {
     AvManagedDispatch table{};
     table.structBytes     = static_cast<int32_t>(sizeof(AvManagedDispatch));
     table.contractVersion = AVER_FW_DISPATCH_VERSION;
-    table.endPlay         = &standInReentrantEndPlay;   // this endPlay calls Destroy(Self)
+    table.endPlay         = &standInReentrantEndPlay;
     check(aver_fw_install_managed_dispatch(&table) == 1, "the re-entrant stand-in installs");
 
     g_reentrantEndCount  = 0;
@@ -654,9 +571,6 @@ static void testDestroyReentrancy() {
     const int32_t r = aver_fw_spawn(managedC, "reentrant-1", nullptr, nullptr, nullptr);
     check(r != 0, "the re-entrant managed actor spawns");
 
-    // The outer destroy fires endPlay, whose stand-in re-enters aver_fw_destroy(r). The guard makes that
-    // nested call a no-op (returns 0 without firing endPlay again), so endPlay fires EXACTLY once. Without
-    // the guard this is 2 (the double-fire), and Destroy(Self)-in-every-OnEndPlay would stack-overflow.
     check(aver_fw_destroy(r) == 1, "the outer destroy is accepted");
     check(g_reentrantEndCount == 1, "endPlay fired exactly once despite Destroy(Self) inside OnEndPlay");
     World::instance().flush();

@@ -1,4 +1,5 @@
 #pragma once
+// The engine's fixed-width scalar aliases and its generic runtime handle.
 #include <cstddef>
 #include <cstdint>
 
@@ -17,8 +18,8 @@ using f64 = double;
 using usize = std::size_t;
 using isize = std::ptrdiff_t;
 
-// Generic 32-bit runtime handle/id (0 == invalid). Entities/components are handles,
-// never base-class objects — this is the anti-UObject contract (docs/ARCHITECTURE.md P2).
+// Generic 32-bit runtime handle/id (0 == invalid). Entities and components are handles,
+// never base-class objects.
 using AvId = u32;
 inline constexpr AvId kInvalidId = 0u;
 

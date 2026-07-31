@@ -1,8 +1,9 @@
+// C# binding for the PBR material system.
 using System.Runtime.InteropServices;
 
 namespace Aver.Scripting;
 
-/// <summary>Parts of a material, reported individually so nothing is offered before it shades.</summary>
+/// <summary>The parts of a material, reported individually.</summary>
 public enum PbrFeature
 {
     /// <summary>The scalar and vector PARAM block.</summary>
@@ -40,24 +41,10 @@ public enum PbrTextureSlot
 /// <summary>How base colour alpha is interpreted (<c>.ocmat</c> BLEND).</summary>
 public enum PbrAlphaMode { Opaque = 0, Mask = 1, Blend = 2 }
 
-/// <summary>
-/// Where a surface's texture coordinates come from (<c>.ocmat</c> <c>FLAGS worlduv</c>).
-///
-/// <see cref="Mesh"/> uses the mesh's own UV set and is right for anything that was unwrapped.
-/// <see cref="WorldAligned"/> projects world position onto the dominant axis of the surface normal
-/// at a fixed number of centimetres per tile, which is the only thing that gives a blockout a
-/// constant texel density: a level built from one unit cube scaled to a floor, a wall and a crate
-/// has the same 0..1 UVs on all three.
-/// </summary>
+/// <summary>Where texture coordinates come from: the mesh's UV set, or a world-axis projection.</summary>
 public enum PbrUvMode { Mesh = 0, WorldAligned = 1 }
 
-/// <summary>
-/// C# binding for the PBR material system (<c>Aver.Render.PBR.dll</c>, C ABI <c>aver_pbr_*</c>).
-///
-/// Unlike <see cref="Voxi"/>, which is one global settings block, materials are INSTANCES — so the
-/// entry points here create and address them by handle. Check <see cref="StatusOf"/> before
-/// offering a feature to a user: everything currently reports NotImplemented.
-/// </summary>
+/// <summary>Creates and addresses PBR materials over the <c>aver_pbr_*</c> C ABI.</summary>
 public static class Pbr
 {
     private const string Lib = "Aver.Render.PBR";
@@ -114,19 +101,25 @@ public static class Pbr
 
     [DllImport(Lib)] private static extern int aver_pbr_consume_dirty(int m);
 
+    /// <summary>Marshals a native string pointer, or "?" when it is null.</summary>
     private static string Str(IntPtr p) => Marshal.PtrToStringAnsi(p) ?? "?";
 
     // ---- feature introspection ----
     public static int FeatureCount => aver_pbr_feature_count();
+    /// <summary>The feature's display name.</summary>
     public static string NameOf(PbrFeature f) => Str(aver_pbr_feature_name((int)f));
+    /// <summary>Whether the feature reaches the screen.</summary>
     public static PbrStatus StatusOf(PbrFeature f) => (PbrStatus)aver_pbr_status((int)f);
+    /// <summary>One line explaining the feature's status.</summary>
     public static string StatusTextOf(PbrFeature f) => Str(aver_pbr_status_text((int)f));
+    /// <summary>True when the feature is Ready.</summary>
     public static bool IsAvailable(PbrFeature f) => StatusOf(f) == PbrStatus.Ready;
 
     /// <summary>The <c>.ocmat</c> TEX slot name, e.g. <c>metalRough</c>.</summary>
     public static string NameOf(PbrTextureSlot s) => Str(aver_pbr_texture_slot_name((int)s));
     /// <summary>The <c>.ocmat</c> BLEND name, e.g. <c>translucent</c>.</summary>
     public static string NameOf(PbrAlphaMode m) => Str(aver_pbr_alpha_mode_name((int)m));
+    /// <summary>The <c>.ocmat</c> UV mode name.</summary>
     public static string NameOf(PbrUvMode m) => Str(aver_pbr_uv_mode_name((int)m));
 
     // ---- lifetime and enumeration ----
@@ -134,20 +127,20 @@ public static class Pbr
     public static PbrMaterial Create(string name) => new(aver_pbr_create(name));
     /// <summary>Live materials. The index is not stable across a destroy — hold the handle instead.</summary>
     public static int Count => aver_pbr_count();
+    /// <summary>The material at an enumeration index.</summary>
     public static PbrMaterial At(int index) => new(aver_pbr_at(index));
 
-    /// <summary>
-    /// A handle to one material. Carries a generation, so a handle to a destroyed material reports
-    /// <see cref="IsValid"/> false rather than addressing whatever reused its slot.
-    /// </summary>
+    /// <summary>A generational handle to one material, with its properties.</summary>
     public readonly struct PbrMaterial : IEquatable<PbrMaterial>
     {
+        /// <summary>Wraps a raw ABI handle.</summary>
         internal PbrMaterial(int handle) => Handle = handle;
 
         /// <summary>The raw ABI handle. 0 is invalid.</summary>
         public int Handle { get; }
 
         public bool IsValid => aver_pbr_valid(Handle) != 0;
+        /// <summary>Destroys the material. False when the handle was already dead.</summary>
         public bool Destroy() => aver_pbr_destroy(Handle) != 0;
 
         public string Name
@@ -235,11 +228,7 @@ public static class Pbr
             set => aver_pbr_set_uv_mode(Handle, (int)value);
         }
 
-        /// <summary>
-        /// World CENTIMETRES per texture tile. Read only under <see cref="PbrUvMode.WorldAligned"/>.
-        /// A value of zero or less is REJECTED rather than clamped — it would collapse the
-        /// projection to a single texel, and silently substituting one would hide a unit mistake.
-        /// </summary>
+        /// <summary>World CENTIMETRES per texture tile. Zero or less is rejected, not clamped.</summary>
         public float UvTiling
         {
             get => aver_pbr_get_uv_tiling(Handle);
@@ -247,17 +236,18 @@ public static class Pbr
         }
 
         // ---- texture references: an authoring path AND an opaque id, neither interpreted here ----
+        /// <summary>The authoring path bound to a slot.</summary>
         public string GetTexturePath(PbrTextureSlot slot) => Str(aver_pbr_get_texture_path(Handle, (int)slot));
+        /// <summary>Binds an authoring path to a slot.</summary>
         public bool SetTexturePath(PbrTextureSlot slot, string path) => aver_pbr_set_texture_path(Handle, (int)slot, path) != 0;
         /// <summary>Opaque asset id (an ObjectId or an <c>.octex</c> GUID). 0 means unset.</summary>
         public long GetTextureId(PbrTextureSlot slot) => aver_pbr_get_texture_id(Handle, (int)slot);
+        /// <summary>Binds an opaque asset id to a slot.</summary>
         public bool SetTextureId(PbrTextureSlot slot, long id) => aver_pbr_set_texture_id(Handle, (int)slot, id) != 0;
+        /// <summary>Clears both the path and the id on a slot.</summary>
         public bool ClearTexture(PbrTextureSlot slot) => aver_pbr_clear_texture(Handle, (int)slot) != 0;
 
-        /// <summary>
-        /// True when this material still owes the GPU an upload. READING IT CLEARS IT, so exactly
-        /// one consumer acts on each change.
-        /// </summary>
+        /// <summary>True when this material owes the GPU an upload. Reading it clears it.</summary>
         public bool ConsumeDirty() => aver_pbr_consume_dirty(Handle) != 0;
 
         public bool Equals(PbrMaterial other) => Handle == other.Handle;

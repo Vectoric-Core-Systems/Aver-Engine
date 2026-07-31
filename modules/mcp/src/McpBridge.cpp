@@ -1,5 +1,4 @@
-// See McpBridge.hpp. In particular: the editor must work without this module, so nothing here is
-// reachable unless AVER_MODULE_MCP built it and the app called start().
+// The MCP control channel: the line protocol parser, the loopback listener, and the frame pump.
 #include "aver/mcp/McpBridge.hpp"
 
 #include "aver/core/Log.hpp"
@@ -24,10 +23,7 @@
 namespace aver::mcp {
 namespace {
 
-// A deliberately tiny scalar reader. This does NOT reach for Aver.Formats' JSON DOM: the wire protocol
-// is a handful of flat keys, and taking a dependency on the formats module -- which pulls in Platform
-// and Assets -- to read {"x":100} would make an optional debugging channel heavier than the thing it
-// controls.
+// Reads an integer value for a flat JSON key. Returns false when the key is absent or not a number.
 bool findNumber(const std::string& s, const char* key, i64& out) {
     const std::string pat = std::string("\"") + key + "\"";
     const usize k = s.find(pat);
@@ -44,6 +40,7 @@ bool findNumber(const std::string& s, const char* key, i64& out) {
     return true;
 }
 
+// Reads a string value for a flat JSON key. Returns false when the key is absent or unterminated.
 bool findString(const std::string& s, const char* key, std::string& out) {
     const std::string pat = std::string("\"") + key + "\"";
     const usize k = s.find(pat);
@@ -55,7 +52,7 @@ bool findString(const std::string& s, const char* key, std::string& out) {
     const usize start = ++c;
     std::string v;
     while (c < s.size() && s[c] != '"') {
-        if (s[c] == '\\' && c + 1 < s.size()) ++c;   // one level of escape, enough for a path
+        if (s[c] == '\\' && c + 1 < s.size()) ++c;
         v.push_back(s[c++]);
     }
     if (c >= s.size()) return false;
@@ -63,9 +60,7 @@ bool findString(const std::string& s, const char* key, std::string& out) {
     return true;
 }
 
-// Virtual-key codes for the keys an editor test actually needs, by name. A table rather than a cast of
-// the first character, because "F" and "F1" are different keys and a caller should be able to say
-// either without knowing Win32's numbering.
+// The virtual-key code for a key name. Returns 0 for an unknown name.
 u32 keyCodeFor(const std::string& name) {
     if (name.size() == 1) {
         const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(name[0])));
@@ -85,13 +80,7 @@ u32 keyCodeFor(const std::string& name) {
     return 0;
 }
 
-// Escape a value being placed inside a JSON string.
-//
-// NOT OPTIONAL, and it was missing. A reply carrying a Windows path -- which `editor::screenshot`
-// returns, and which is one of the most obvious things to ask for -- emitted
-// "result":"C:\Users\..." and every client's JSON parser rejected the line. The reply was invalid
-// from the first backslash, and the failure looked like the server had gone away rather than like a
-// quoting bug.
+// Escapes a value being placed inside a JSON string.
 std::string jsonEscape(const std::string& in) {
     std::string out;
     out.reserve(in.size() + 8);
@@ -103,7 +92,6 @@ std::string jsonEscape(const std::string& in) {
             case '\r': out += "\\r";  break;
             case '\t': out += "\\t";  break;
             default:
-                // Control characters are not legal raw inside a JSON string either.
                 if (static_cast<unsigned char>(c) < 0x20) {
                     char buf[8];
                     std::snprintf(buf, sizeof buf, "\\u%04x", static_cast<unsigned>(c) & 0xFFu);
@@ -116,14 +104,16 @@ std::string jsonEscape(const std::string& in) {
     return out;
 }
 
+// The button index for a button name. Defaults to left.
 int buttonFor(const std::string& s) {
     if (s == "right") return 1;
     if (s == "middle") return 2;
-    return 0;   // left, and the default
+    return 0;
 }
 
 } // namespace
 
+// Parses one protocol line into a Command, expanding a click into move/down/up.
 bool parseCommand(const std::string& line, Command& out, std::string* why) {
     auto fail = [&](const char* m) { if (why) *why = m; return false; };
 
@@ -139,11 +129,8 @@ bool parseCommand(const std::string& line, Command& out, std::string* why) {
 
     if (cmd == "ping") return true;
 
-    // "what can I reach?" -- the first thing a client should be able to ask, and the answer is this
-    // binary's build configuration rather than a fixed list. Answered on the socket thread; see the
-    // worker loop for why it is not queued.
+    // Answered on the socket thread by the worker loop, not queued.
     if (cmd == "modules") return true;
-    // What can be clicked, by name. Answered on the socket thread like `modules`.
     if (cmd == "widgets") return true;
 
     if (cmd == "shot") {
@@ -160,16 +147,11 @@ bool parseCommand(const std::string& line, Command& out, std::string* why) {
     }
 
     if (cmd == "click") {
-        // BY NAME, and this is the form a client should prefer. A coordinate click is only as good as
-        // the coordinate, and reading one off a screenshot survives exactly until the layout moves or
-        // the DPI changes. The name is resolved against what the editor actually drew -- see the
-        // worker loop, which expands this into the same three events a coordinate click produces.
         std::string widget;
         if (findString(line, "widget", widget)) {
             out.arg = widget;
             std::string b; findString(line, "button", b);
-            // The button is stashed on an otherwise-empty event so resolution can fill in the point
-            // without re-parsing the line.
+            // The button is stashed on an otherwise-empty event; the worker loop fills in the point.
             InputEvent pending; pending.kind = InputEvent::Kind::MouseDown;
             pending.button = buttonFor(b);
             out.events.push_back(pending);
@@ -178,10 +160,6 @@ bool parseCommand(const std::string& line, Command& out, std::string* why) {
         if (!haveXY) return fail("click needs \"x\" and \"y\", or a \"widget\" name");
         std::string b; findString(line, "button", b);
         const int btn = buttonFor(b);
-        // EXPANDED HERE, into move-then-down-then-up. A click is three events and the editor should not
-        // have to know that; more importantly, ImGui only registers a press it saw in one frame and a
-        // release it saw in another, so the pacing in pump() needs them as separate events rather than
-        // as one opaque "click".
         InputEvent mv; mv.kind = InputEvent::Kind::MouseMove;
         mv.x = static_cast<i32>(x); mv.y = static_cast<i32>(y);
         InputEvent dn = mv; dn.kind = InputEvent::Kind::MouseDown; dn.button = btn;
@@ -213,14 +191,9 @@ bool parseCommand(const std::string& line, Command& out, std::string* why) {
     }
 
     if (cmd == "abi") {
-        // ROUTED, not interpreted. This module does not know what "framework" means -- it knows only
-        // that something registered under that name, and hands the call there. See McpBridge::callAbi.
         if (!findString(line, "module", out.abi.module)) return fail("abi needs a \"module\"");
         if (!findString(line, "fn", out.abi.fn)) return fail("abi needs an \"fn\"");
         findString(line, "text", out.abi.text);
-        // The numeric argument list. Scanned by hand for the same reason findNumber is: a flat array of
-        // numbers does not justify pulling Aver.Formats -- and its Platform and Assets dependencies --
-        // into an optional debugging channel.
         const usize a = line.find("\"args\"");
         if (a != std::string::npos) {
             const usize lb = line.find('[', a);
@@ -242,25 +215,18 @@ bool parseCommand(const std::string& line, Command& out, std::string* why) {
         return true;
     }
 
-    // REFUSED, not ignored. A client that misspelled `click` should be told, rather than left waiting
-    // for a button that was never pressed.
     return fail("unknown cmd");
 }
 
-// --------------------------------------------------------------------------------------------------
-
+// The bridge's state: the listener thread, the command queue and the ABI registry.
 struct McpBridge::Impl {
     std::thread worker;
     std::atomic<bool> running{false};
     std::mutex mutex;
     std::deque<Command> queue;
-    // How far into queue.front()'s events pump() has got. A CURSOR rather than popping the command,
-    // because pacing has to be per EVENT: see pump().
-    usize cursor = 0;
+    usize cursor = 0;   // how far into queue.front()'s events pump() has got
     u16 port = 0;
-    // name -> that module's ABI. A map, not a switch: a switch would mean this module knew every
-    // module's name, and knowing them is one step from linking them.
-    std::map<std::string, AbiDispatch> abis;
+    std::map<std::string, AbiDispatch> abis;   // module name -> that module's ABI
     WidgetResolver resolver;
     WidgetLister lister;
 #if defined(_WIN32)
@@ -269,53 +235,55 @@ struct McpBridge::Impl {
 #endif
 };
 
+// Allocates the bridge's state. Nothing listens until start().
 McpBridge::McpBridge() : impl_(std::make_unique<Impl>()) {}
+// Stops the channel.
 McpBridge::~McpBridge() { stop(); }
 
 bool McpBridge::listening() const { return impl_ && impl_->running.load(); }
 u16  McpBridge::port() const { return impl_ ? impl_->port : 0; }
 
+// Registers, or replaces, the dispatcher a module's calls are routed to.
 void McpBridge::registerAbi(const std::string& module, AbiDispatch dispatch) {
     if (!impl_ || module.empty() || !dispatch) return;
     std::lock_guard<std::mutex> lock(impl_->mutex);
     const bool replacing = impl_->abis.find(module) != impl_->abis.end();
     impl_->abis[module] = std::move(dispatch);
-    // Said out loud, because the registry IS the reachable surface: a reader of the log should be able
-    // to see exactly which module seams this binary exposes, without inferring it from the build flags.
     AVER_INFO("[Mcp] ABI registered: {}{}", module, replacing ? " (replacing)" : "");
 }
 
+// Installs the resolver that turns a widget name into a point.
 void McpBridge::setWidgetResolver(WidgetResolver fn) {
     if (!impl_) return;
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->resolver = std::move(fn);
 }
 
+// Installs the lister that answers a widgets request.
 void McpBridge::setWidgetLister(WidgetLister fn) {
     if (!impl_) return;
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->lister = std::move(fn);
 }
 
+// Routes a call to its module's dispatcher. Refuses, naming the module, when none is registered.
 bool McpBridge::callAbi(const AbiCall& call, std::string& result, std::string& why) const {
     AbiDispatch fn;
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         const auto it = impl_->abis.find(call.module);
         if (it == impl_->abis.end()) {
-            // Named, and with the likely cause. "no ABI for physics" sends a reader to look for a typo;
-            // saying the module may simply not be in this build sends them to the switch that decides it.
             why = "no ABI registered for '" + call.module +
                   "' -- either the name is wrong or that module was not built into this binary";
             return false;
         }
         fn = it->second;
     }
-    // Called OUTSIDE the lock. A dispatcher runs module code of unknown duration, and holding the queue
-    // mutex across it would stall the socket thread for as long as the engine took to answer.
+    // Called outside the lock: a dispatcher runs module code of unknown duration.
     return fn(call, result, why);
 }
 
+// Every module name with an ABI registered, sorted.
 std::vector<std::string> McpBridge::modules() const {
     std::vector<std::string> out;
     if (!impl_) return out;
@@ -325,14 +293,18 @@ std::vector<std::string> McpBridge::modules() const {
 }
 
 #if !defined(_WIN32)
+// Refuses to start: the control channel is Windows-only.
 bool McpBridge::start(u16) {
     AVER_WARN("[Mcp] the control channel is Windows-only for now; not started");
     return false;
 }
+// Nothing to stop off Windows.
 void McpBridge::stop() {}
+// Nothing to pump off Windows.
 u32 McpBridge::pump(const std::function<void(const Command&)>&) { return 0; }
 #else
 
+// Binds the loopback listener and starts the socket thread. Returns false and logs why on failure.
 bool McpBridge::start(u16 port) {
     if (impl_->running.load()) return true;
 
@@ -353,8 +325,7 @@ bool McpBridge::start(u16 port) {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    // LOOPBACK, hard-coded. This posts synthetic clicks into a running editor; it must not be
-    // reachable from another machine, and a configurable address would be offering that as an option.
+    // Loopback, hard-coded: this must never be reachable from another machine.
     ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     if (::bind(impl_->listener, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == SOCKET_ERROR ||
@@ -386,8 +357,7 @@ bool McpBridge::start(u16 port) {
                     Command c;
                     std::string why;
                     std::string reply;
-                    // A click BY NAME is resolved here, on the socket thread, so an unknown name is
-                    // refused instantly and specifically rather than a frame later and silently.
+                    // A click by name is resolved here, on the socket thread.
                     if (parseCommand(line, c, &why) && c.name == "click" && !c.arg.empty()) {
                         WidgetResolver resolve;
                         {
@@ -400,16 +370,11 @@ bool McpBridge::start(u16 port) {
                             reply = "{\"id\":" + std::to_string(c.id) +
                                     ",\"ok\":false,\"error\":\"this build resolves no widget names\"}\n";
                         } else if (!resolve(c.arg, wx, wy)) {
-                            // NAMED and ACTIONABLE. "no widget named tool.rotor" plus where to get the
-                            // real list is the single most useful thing a client can be told here, and
-                            // it is useless a frame late -- which is why this is answered from the
-                            // socket thread rather than queued.
                             reply = "{\"id\":" + std::to_string(c.id) +
                                     ",\"ok\":false,\"error\":\"no widget named " + jsonEscape(c.arg) +
                                     "; ask cmd=widgets for the list\"}\n";
                         } else {
-                            // Expanded into exactly what a coordinate click produces, so there is ONE
-                            // path from here on and pacing stays in pump().
+                            // Expanded into exactly what a coordinate click produces.
                             Command k;
                             k.name = "click";
                             k.id = c.id;
@@ -422,9 +387,7 @@ bool McpBridge::start(u16 port) {
                                 std::lock_guard<std::mutex> lock(impl->mutex);
                                 impl->queue.push_back(k);
                             }
-                            // The resolved point comes BACK. A client that asked for a name can then
-                            // check where it actually clicked, which is the difference between "it did
-                            // nothing" and "it clicked the wrong thing".
+                            // The resolved point comes back, so a client can see where it clicked.
                             reply = "{\"id\":" + std::to_string(c.id) +
                                     ",\"ok\":true,\"at\":[" + std::to_string((int)wx) +
                                     "," + std::to_string((int)wy) + "]}\n";
@@ -438,9 +401,6 @@ bool McpBridge::start(u16 port) {
                         reply = "{\"id\":" + std::to_string(c.id) + ",\"ok\":true,\"widgets\":\"" +
                                 jsonEscape(list ? list() : std::string()) + "\"}\n";
                     } else if (parseCommand(line, c, &why) && c.name == "modules") {
-                        // Answered HERE rather than queued. It reads the registry, which is
-                        // lock-guarded and needs no frame at all, so queueing it would add a frame of
-                        // latency to the one question a client asks before anything else.
                         std::string list;
                         {
                             std::lock_guard<std::mutex> lock(impl->mutex);
@@ -452,19 +412,13 @@ bool McpBridge::start(u16 port) {
                         reply = "{\"id\":" + std::to_string(c.id) +
                                 ",\"ok\":true,\"modules\":[" + list + "]}\n";
                     } else if (parseCommand(line, c, &why) && c.name == "abi") {
-                        // WAITED ON, because this is a question. The old code queued it and answered
-                        // {"ok":true} straight away -- so a client was told its call had succeeded
-                        // before anything had tried it, and `nosuch::x` came back ok:true while the
-                        // refusal went only to the log. An acknowledgement that cannot say no is not one.
+                        // Waited on: the reply carries the call's real outcome.
                         c.pending = std::make_shared<PendingResult>();
                         {
                             std::lock_guard<std::mutex> lock(impl->mutex);
                             impl->queue.push_back(c);
                         }
                         std::unique_lock<std::mutex> wait(c.pending->mutex);
-                        // Bounded. If the editor stalls, is minimised into never pumping, or is shutting
-                        // down, a client must get an answer rather than a socket that never speaks
-                        // again -- and "timed out" is itself diagnostic.
                         const bool answered = c.pending->cv.wait_for(
                             wait, std::chrono::seconds(5), [&] { return c.pending->done; });
                         if (!answered) {
@@ -483,13 +437,9 @@ bool McpBridge::start(u16 port) {
                             std::lock_guard<std::mutex> lock(impl->mutex);
                             impl->queue.push_back(c);
                         }
-                        // Input commands stay fire-and-forget: a click has no return value, and making
-                        // a client wait a frame for "yes, that was queued" would slow every gesture for
-                        // no information.
+                        // Input commands stay fire-and-forget.
                         reply = "{\"id\":" + std::to_string(c.id) + ",\"ok\":true}\n";
                     } else {
-                        // Answered immediately rather than queued: a malformed command has nothing for
-                        // the main thread to do, and a client should not wait a frame to learn it.
                         reply = "{\"id\":" + std::to_string(c.id) + ",\"ok\":false,\"error\":\"" +
                                 why + "\"}\n";
                     }
@@ -505,18 +455,16 @@ bool McpBridge::start(u16 port) {
     return true;
 }
 
+// Closes the socket, releases every waiting caller and joins the worker thread.
 void McpBridge::stop() {
     if (!impl_ || !impl_->running.load()) return;
     impl_->running.store(false);
     if (impl_->listener != INVALID_SOCKET) {
-        // Closed before joining, so the blocking accept() returns instead of holding the thread open
-        // for the lifetime of the process.
+        // Closed before joining, so the blocking accept() returns.
         ::closesocket(impl_->listener);
         impl_->listener = INVALID_SOCKET;
     }
-    // Release anyone waiting on an ABI answer BEFORE joining. A client blocked on a call that the
-    // editor will now never pump would otherwise sit out the full timeout during shutdown, and the
-    // join below would wait for that same thread.
+    // Waiting ABI callers are released before the join, or they would sit out the full timeout.
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         for (Command& q : impl_->queue) {
@@ -536,18 +484,11 @@ void McpBridge::stop() {
     AVER_INFO("[Mcp] control channel stopped");
 }
 
+// Delivers ONE queued input event to `apply`, so a click straddles frames the way ImGui needs.
+// Returns how many commands were applied.
 u32 McpBridge::pump(const std::function<void(const Command&)>& apply) {
     if (!impl_ || !apply) return 0;
 
-    // ONE EVENT PER FRAME, not one command. This is the whole reason pacing lives on the main thread.
-    //
-    // A click is a move, a press and a release. ImGui registers a click only when one frame saw the
-    // press and a LATER frame saw the release -- so delivering all three between two NewFrame calls
-    // means nothing is ever clicked. The first version of this popped a whole Command per frame and
-    // would have done exactly that: three events, one frame, no click, and a very confusing screenshot.
-    //
-    // So the front command is held and walked with a cursor, and only retired once its last event has
-    // gone out. A click therefore takes three frames, which at 60 Hz is 50 ms and unnoticeable.
     Command single;
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -570,10 +511,7 @@ u32 McpBridge::pump(const std::function<void(const Command&)>& apply) {
             }
         }
     }
-    // AN ABI CALL IS DISPATCHED HERE, not handed to `apply`. Two reasons, and the second is the point:
-    // this module owns the registry, so it is the right place; and it is the only place on the MAIN
-    // THREAD that knows the call has finished, which is what the waiting socket thread needs. Routing
-    // it out to the app and back would put the answer somewhere nobody could return it from.
+    // An ABI call is dispatched here, on the main thread, and its waiter released.
     if (single.name == "abi") {
         std::string result, why;
         const bool ok = callAbi(single.abi, result, why);
@@ -587,7 +525,6 @@ u32 McpBridge::pump(const std::function<void(const Command&)>& apply) {
             }
             single.pending->cv.notify_all();
         }
-        // Still handed on, so the app can log it or act on it, but the reply no longer depends on that.
         apply(single);
         return 1;
     }

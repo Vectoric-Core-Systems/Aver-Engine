@@ -1,3 +1,4 @@
+// .ocworld reader and writer: the text scanner and serialiser for the native world format.
 #include "aver/formats/OcWorld.hpp"
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/core/Hash.hpp"
@@ -12,11 +13,12 @@ using namespace aver::fmt::detail;
 
 namespace {
 
+// Token `i` as a double, or `dflt` when the line is shorter than that.
 f64 tokF(const std::vector<std::string_view>& t, usize i, f64 dflt = 0.0) {
     return i < t.size() ? parseF64(t[i]) : dflt;
 }
 
-// Formatting that round-trips: enough digits to reproduce the double, no trailing noise.
+// Formats a number for the text form: enough digits to round-trip, no trailing noise.
 std::string num(f64 v) {
     char buf[40];
     std::snprintf(buf, sizeof buf, "%.6g", v);
@@ -25,6 +27,7 @@ std::string num(f64 v) {
 
 } // namespace
 
+// Parses an .ocworld or .ocmap from memory. Unknown records are skipped.
 bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
     out = OcWorldData{};
     bool sawHeader = false;
@@ -36,8 +39,6 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
         std::string_view rawLine = text.substr(pos, nl - pos);
         pos = nl + 1;
 
-        // Same comment/terminator rule as .ocmap, because §11 says every .ocmap record is a legal
-        // .ocworld record -- which has to include how a line is lexed, not just which keys exist.
         std::string_view line = stripTrailingSemicolon(truncateHash(rawLine));
         if (line.empty()) continue;
 
@@ -61,7 +62,6 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             out.spawnX = tokF(t, 1); out.spawnY = tokF(t, 2);
             out.spawnZ = tokF(t, 3); out.spawnYaw = tokF(t, 4);
         } else if (equalsCI(key, "SUN")) {
-            // SUN dir X Y Z color R G B lux L  -- read positionally after each keyword.
             out.hasSun = true;
             for (usize i = 1; i < t.size(); ++i) {
                 if (equalsCI(t[i], "dir") && i + 3 < t.size()) {
@@ -73,7 +73,6 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 }
             }
         } else if (equalsCI(key, "FOG")) {
-            // FOG exp density D color R G B
             out.hasFog = true;
             for (usize i = 1; i < t.size(); ++i) {
                 if (equalsCI(t[i], "density") && i + 1 < t.size()) out.fogDensity = parseF64(t[i+1]);
@@ -82,8 +81,6 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 }
             }
         } else if (equalsCI(key, "PLACE") || equalsCI(key, "PLACEG")) {
-            // PLACE  <asset> x y z yaw pitch roll [scale] [material] [nocollide]
-            // PLACEG <asset> x y z yaw pitch roll sx sy sz [material] [nocollide]
             const bool g = equalsCI(key, "PLACEG");
             OcWorldPlacement p;
             p.asset = t.size() > 1 ? std::string(t[1]) : std::string();
@@ -98,7 +95,6 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 p.sx = p.sy = p.sz = (s == 0.0 ? 1.0 : s);
                 next = 9;
             }
-            // Trailing optional tokens, order-independent so a hand-edited file is forgiving.
             for (usize i = next; i < t.size(); ++i) {
                 if (equalsCI(t[i], "nocollide")) p.collide = false;
                 else if (p.material.empty()) p.material = std::string(t[i]);
@@ -106,9 +102,6 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             p.objectId = fnv1a64(std::string_view(p.asset));
             out.placements.push_back(std::move(p));
         }
-        // Anything else -- LAYER, NODE, CELL, STREAM, GEOREF, TERRAIN, SURFACE, GROUND, KILLZ,
-        // DEFORM, CLIENT, ROOT -- is skipped rather than rejected, so a file written by a fuller
-        // implementation still loads here with the parts this engine understands.
     }
 
     if (!sawHeader) {
@@ -119,6 +112,7 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
     return true;
 }
 
+// Loads an .ocworld from disk.
 bool loadOcworld(const std::string& path, OcWorldData& out, std::string* err) {
     std::string text;
     if (!readFileText(path, text)) {
@@ -128,6 +122,7 @@ bool loadOcworld(const std::string& path, OcWorldData& out, std::string* err) {
     return parseOcworld(text, out, err);
 }
 
+// Serialises a world to the text form. PLACE for a uniform scale, PLACEG otherwise.
 std::string writeOcworld(const OcWorldData& w) {
     std::string s;
     s.reserve(256 + w.placements.size() * 96);
@@ -157,8 +152,6 @@ std::string writeOcworld(const OcWorldData& w) {
 
     s += "\n";
     for (const OcWorldPlacement& p : w.placements) {
-        // PLACE when the scale is uniform, PLACEG when it is not: writing the simpler record where it
-        // suffices keeps a level readable, and keeps a uniform-only world loadable by an .ocmap reader.
         if (p.uniform()) {
             s += "PLACE  " + p.asset + " " +
                  num(p.x) + " " + num(p.y) + " " + num(p.z) + " " +
@@ -176,6 +169,7 @@ std::string writeOcworld(const OcWorldData& w) {
     return s;
 }
 
+// Writes a world to disk, creating parent directories.
 bool saveOcworld(const std::string& path, const OcWorldData& w, std::string* err) {
     std::error_code ec;
     const std::filesystem::path p(path);

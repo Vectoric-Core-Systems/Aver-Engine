@@ -1,9 +1,4 @@
-// The atmosphere model, against brute force.
-//
-// Nothing here needs a GPU, and nothing here is decidable by looking at a screenshot: an airmass
-// that is 20% low still renders a blue sky, a transmittance that forgets ozone still reddens at
-// sunset, and a phase function missing its normalisation is just a slightly different exposure.
-// Each of those is checked against a numeric integral of the same physics instead.
+// The atmosphere model, checked against numeric integrals and closed forms of the same physics.
 #include "aver/rhi/Atmosphere.hpp"
 #include "aver/core/Log.hpp"
 
@@ -14,12 +9,14 @@ using namespace aver;
 
 static int g_failures = 0;
 
+// Records one assertion. Counts a failure and logs it when the condition is false.
 static void check(bool cond, const std::string& what) {
     if (cond) { AVER_INFO("  ok    {}", what); return; }
     ++g_failures;
     AVER_ERROR("  FAIL  {}", what);
 }
 
+// Records one assertion that `got` is within `relTol` relative error of `want`.
 static void checkNear(f64 got, f64 want, f64 relTol, const std::string& what) {
     const f64 err = std::fabs(got - want) / (std::fabs(want) > 1e-12 ? std::fabs(want) : 1.0);
     if (err <= relTol) { AVER_INFO("  ok    {} ({:.6g} vs {:.6g}, {:.3g} rel)", what, got, want, err); return; }
@@ -27,12 +24,10 @@ static void checkNear(f64 got, f64 want, f64 relTol, const std::string& what) {
     AVER_ERROR("  FAIL  {} ({:.6g} vs {:.6g}, {:.3g} rel > {:.3g})", what, got, want, err, relTol);
 }
 
-// exp(x*x) * erfc(x) in double, for x >= 0. The library's erfc underflows past about x = 27 and the
-// exp that would undo it overflows first, so the scaled form is computed directly out there.
+// Reference exp(x*x) * erfc(x) in double, for x >= 0. Asymptotic series past x = 6, where the
+// library's erfc underflows and the exp that would undo it overflows first.
 static f64 erfcxRef(f64 x) {
     if (x < 6.0) return std::exp(x * x) * std::erfc(x);
-    // Asymptotic series: 1/(x sqrt(pi)) * sum (-1)^n (2n-1)!! / (2x^2)^n. At x >= 6 the terms fall
-    // by a factor of 72 or better, so a dozen of them are past double precision.
     const f64 inv = 1.0 / (2.0 * x * x);
     f64 term = 1.0, sum = 1.0;
     for (int n = 1; n < 14; ++n) {
@@ -42,11 +37,11 @@ static f64 erfcxRef(f64 x) {
     return sum / (x * std::sqrt(3.14159265358979323846));
 }
 
-// The slant column along a ray divided by the vertical column where it starts -- the Chapman
-// function's definition, integrated rather than approximated.
+// Reference Chapman function: the slant column along a ray over the vertical column where it starts,
+// integrated numerically.
 static f64 chapmanRef(f64 planetR, f64 scaleH, f64 altitude, f64 cosZenith) {
     const f64 r0 = planetR + altitude;
-    const f64 farR = planetR + 400.0 * scaleH;      // Chapman assumes an unbounded atmosphere
+    const f64 farR = planetR + 400.0 * scaleH;
     const f64 b = r0 * cosZenith;
     const f64 disc = b * b - (r0 * r0 - farR * farR);
     if (disc <= 0.0) return 0.0;
@@ -63,8 +58,10 @@ static f64 chapmanRef(f64 planetR, f64 scaleH, f64 altitude, f64 cosZenith) {
     return sum / (scaleH * std::exp(-altitude / scaleH));
 }
 
+// Rec. 709 luminance of a linear RGB triple.
 static f32 lum(const f32 c[3]) { return 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2]; }
 
+// Runs every atmosphere check. Returns 1 if any failed.
 int main() {
     AVER_INFO("AtmosphereTest");
     const rhi::AtmosphereProfile air{};
@@ -76,7 +73,6 @@ int main() {
                   "erfcx(" + std::to_string(y) + ")");
 
     AVER_INFO("Chapman airmass against a numeric integral");
-    // The two scale heights the model actually uses, at the two altitudes it is evaluated at.
     for (f32 H : {8.0f, 1.2f}) {
         for (f32 alt : {0.0f, 10.0f}) {
             for (f32 zenithDeg : {0.0f, 30.0f, 60.0f, 80.0f, 88.0f, 90.0f}) {
@@ -96,9 +92,6 @@ int main() {
     checkNear(rhi::atmoChapman(air.planetRadiusKm / air.rayleighScaleKm, 0.0f),
               std::sqrt(3.14159265358979 * (air.planetRadiusKm / air.rayleighScaleKm) * 0.5), 1e-4,
               "horizontal is sqrt(pi x / 2)");
-    // Continuous across the branch, which is where a sign error would show and nowhere else. The
-    // two sides differ by 2*up*(1 - erfcx(eps)), so the offset has to be small for the claim to
-    // mean anything: at 1e-4 they are legitimately 0.45% apart.
     {
         const f32 x = (air.planetRadiusKm + 10.0f) / air.rayleighScaleKm;
         checkNear(rhi::atmoChapman(x, -1e-6f), rhi::atmoChapman(x, 1e-6f), 1e-3,
@@ -131,7 +124,6 @@ int main() {
               "a sun below the planet's edge delivers nothing");
     }
     {
-        // Altitude buys elevation: the sun clears the planet from higher up for longer.
         f32 ground[3], high[3];
         rhi::atmoSunTransmittance(air, 0.0f, -0.02f, sunRadius, ground);
         rhi::atmoSunTransmittance(air, 20.0f, -0.02f, sunRadius, high);
@@ -140,7 +132,7 @@ int main() {
 
     AVER_INFO("sky radiance");
     {
-        f32 sun[3] = {3.0f, 2.88f, 2.70f};   // the engine's default sun colour x intensity
+        f32 sun[3] = {3.0f, 2.88f, 2.70f};
         f32 zenith[3], horizon[3];
         rhi::atmoSkyRadiance(air, 0.0f, 1.0f, 1.0f, 1.0f, sun, sunRadius, zenith);
         rhi::atmoSkyRadiance(air, 0.0f, 0.0f, 1.0f, 0.0f, sun, sunRadius, horizon);
@@ -149,8 +141,6 @@ int main() {
         check(zenith[2] / zenith[0] > horizon[2] / horizon[0],
               "the horizon is paler than the zenith, which is what makes a sky read as depth");
 
-        // Sunset: the sky toward a 1-degree sun is redder than the same sky at noon. This is the
-        // property the whole model exists for -- nobody authored it.
         const f32 lowSun = std::sin(1.0f * 3.14159265f / 180.0f);
         f32 sunset[3];
         rhi::atmoSkyRadiance(air, 0.0f, 0.03f, lowSun, 0.999f, sun, sunRadius, sunset);
@@ -158,7 +148,6 @@ int main() {
               "the sunset horizon is more than 3x redder, relative to blue, than the midday zenith");
     }
     {
-        // Looking down closes the ray on the ground rather than leaving a hole in the dome.
         f32 sun[3] = {3.0f, 2.88f, 2.70f};
         f32 down[3];
         rhi::atmoSkyRadiance(air, 0.5f, -0.8f, 0.7f, -0.5f, sun, sunRadius, down);
@@ -167,8 +156,6 @@ int main() {
 
     AVER_INFO("the view march has converged at the shipped step count");
     {
-        // A step count too low does not look broken -- it looks like a slightly different sky, and
-        // there is nothing on screen to compare it against. So it is compared against itself.
         f32 sun[3] = {3.0f, 2.88f, 2.70f};
         rhi::AtmosphereProfile fine = air;
         fine.viewSteps = 512;
@@ -189,9 +176,6 @@ int main() {
 
     AVER_INFO("aerial perspective converges too, at its own much lower step count");
     {
-        // The aerial segment is kilometres rather than hundreds of kilometres, which is the whole
-        // reason it can afford four steps. That claim is checked, not assumed -- and it is checked
-        // through the same distance-bounded entry point the shader calls, not a stand-in.
         f32 sun[3] = {3.0f, 2.88f, 2.70f};
         rhi::AtmosphereProfile fine = air;
         fine.aerialSteps = 256;
@@ -209,14 +193,10 @@ int main() {
 
     AVER_INFO("single scattering matches its closed form");
     {
-        // With Mie, ozone and the multiple-scattering term all switched off, the zenith radiance of
-        // a pure Rayleigh atmosphere has an exact solution, and this is the check that says whether
-        // the whole march is right at the LEVEL of magnitude rather than only in shape.
-        //
-        // Substituting -dtau for beta*dh along a vertical view ray:
+        // With Mie, ozone and multiple scattering off, a vertical view ray has the exact solution
         //   L/E = P(cos) * (1 - exp(-tau0 * (1 + 1/mu0))) / (1 + 1/mu0)
-        // It is plane-parallel where the model is spherical, so it is only quoted for a sun well
-        // clear of the horizon, where Chapman and 1/mu0 agree to better than a tenth of a percent.
+        // which is plane-parallel where the model is spherical, so it is only quoted well clear of
+        // the horizon.
         rhi::AtmosphereProfile pure{};
         pure.mieScatter = 0.0f;
         pure.mieExtinction = 0.0f;
@@ -233,10 +213,6 @@ int main() {
                 const f32 tau0 = pure.rayleighScatter[c] * pure.rayleighScaleKm;
                 const f32 k = 1.0f + 1.0f / mu0;
                 const f32 want = phase * (1.0f - std::exp(-tau0 * k)) / k;
-                // 2%, because the two differ by more than discretisation: the model is spherical
-                // and stops at a 60 km shell, the closed form is plane-parallel and unbounded. Blue
-                // sits at 1.2-1.8% low for exactly that reason and red at 0.1%, which is the right
-                // way round -- the effect scales with optical depth.
                 checkNear(got[c], want, 0.02,
                           "pure Rayleigh zenith at " + std::to_string(int(elev)) + " deg, channel " +
                           std::to_string(c));
@@ -246,21 +222,11 @@ int main() {
 
     AVER_INFO("the fill light is calibrated against a measured clear sky");
     {
-        // THE ONE NUMBER THAT PINS multiScatterGain, which is otherwise a term with no scale of its
-        // own. Single scattering alone leaves a clear sky roughly half as bright as the real thing;
-        // the isotropic stand-in for every further bounce closes that, and this is what says by how
-        // much rather than leaving it to taste.
-        //
-        // Target: for a clear sky with the sun at 30-60 degrees, diffuse horizontal illuminance is
-        // 15-30% of direct horizontal. (Typical clear-day figures are ~15 klux diffuse against
-        // ~70 klux direct at 48 degrees; the photometric ratio runs higher than the radiometric one
-        // because skylight is blue-rich and blue carries more luminous efficacy.)
         f32 sun[3] = {3.0f, 2.88f, 2.70f};
         for (f32 elev : {30.0f, 48.0f, 60.0f}) {
             const f32 mu = std::sin(elev * 3.14159265f / 180.0f);
             rhi::AtmosphereDome d{};
             rhi::atmoFitDome(air, 0.0f, mu, sun, sunRadius, d);
-            // The dome's own hemispherical irradiance, from the exponent that was fitted to carry it.
             const f32 k = d.exponent;
             const f32 hp = std::pow(0.5f, k + 1.0f);
             const f32 I = 4.0f * (2.0f / (k + 2.0f) - 1.0f / (k + 1.0f) - hp / (k + 2.0f) + hp / (k + 1.0f));
@@ -278,19 +244,11 @@ int main() {
 
     AVER_INFO("and the sky it produces is the right COLOUR, not only the right brightness");
     {
-        // THE SECOND MEASUREMENT THAT PINS multiScatterGain, and the one that decides the term is
-        // spectrally FLAT. A real clear zenith runs about 15000-25000 K, which is a blue-to-red
-        // radiance ratio of roughly 2.9 to 4. Shaping the multiple-scattering term by sigma_s
-        // squared -- the formally tidier choice -- puts it at 7.2, a sky bluer than any real one.
-        //
-        // Brightness alone cannot catch that: the gain can always be retuned to hit the irradiance
-        // target while the hue goes wherever it likes. It takes both numbers to hold the term down.
         f32 sun[3] = {3.0f, 2.88f, 2.70f};
         for (f32 elev : {40.0f, 60.0f}) {
             f32 zen[3];
             const f32 mu = std::sin(elev * 3.14159265f / 180.0f);
             rhi::atmoSkyRadiance(air, 0.0f, 1.0f, mu, mu, sun, sunRadius, zen);
-            // Divided out of the sun's own colour, so this measures the AIR and not the light.
             const f32 br = (zen[2] / sun[2]) / (zen[0] / sun[0] + 1e-9f);
             AVER_INFO("  {:>4.0f} deg: zenith blue/red = {:.2f}", elev, br);
             check(br > 2.5f && br < 5.0f,
@@ -317,10 +275,8 @@ int main() {
                   "transmittance stays a fraction");
     }
     {
-        // The exponent is what every ambient term and every environment reflection reads, so it has
-        // to move SMOOTHLY as the sun does. Fitting it to a 45-degree sample did not -- it walked
-        // 0.22 to 2.46 non-monotonically across a sunset and the fill light breathed with it.
         f32 sun[3] = {3.0f, 2.88f, 2.70f};
+        // Fits the dome across an elevation range and reports the largest step in the exponent.
         auto sweep = [&](int from, int to, f32& worst, f32& worstAt) {
             worst = 0.0f; worstAt = 0.0f;
             f32 prev = -1.0f;
@@ -339,17 +295,12 @@ int main() {
         check(worst < 0.12f,
               "in daylight the exponent never jumps more than 0.12 across two degrees "
               "(worst " + std::to_string(worst) + " at " + std::to_string(int(worstAt)) + " deg)");
-        // The first few degrees are looser on purpose: the sky really does change fast there, and
-        // pretending otherwise would mean smoothing over a sunrise. The bound still has to hold,
-        // because the failure this guards against was a 2.2 swing, not a 0.2 one.
         sweep(0, 6, worst, worstAt);
         check(worst < 0.35f,
               "and through sunrise it never jumps more than 0.35 "
               "(worst " + std::to_string(worst) + " at " + std::to_string(int(worstAt)) + " deg)");
     }
 
-    // Not an assertion: the table a person reads when the sky looks wrong. Every number here is a
-    // consequence of one input, the elevation on the left.
     AVER_INFO("derived dome by sun elevation (linear radiance, sun irradiance 3.00/2.88/2.70)");
     {
         f32 sun[3] = {3.0f, 2.88f, 2.70f};

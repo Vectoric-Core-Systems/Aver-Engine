@@ -1,3 +1,4 @@
+// Mixer implementation: sound slots, the voice pool, and the block render.
 #include "aver/audio/Mixer.hpp"
 #include "aver/core/Log.hpp"
 
@@ -6,48 +7,43 @@
 namespace aver::audio {
 namespace {
 
-// How fast a voice's gain may move, as a fraction of a block. Gains are ramped rather than snapped
-// because a volume change applied instantly is a step discontinuity, and a step discontinuity is a
-// click -- the same reason a stop fades instead of cutting.
 constexpr f32 kMinGain = 1.0e-4f;   // below this a stopping voice is finished
 
+// Clamps v to [lo, hi].
 f32 clampf(f32 v, f32 lo, f32 hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+// Dot of a 3-element array with three scalars.
 f32 dot3(const f32 a[3], f32 x, f32 y, f32 z) { return a[0] * x + a[1] * y + a[2] * z; }
 
 } // namespace
 
+// Distance attenuation: 1 at or inside the inner radius, 0 at or beyond the outer.
 f32 attenuationAt(const Attenuation& a, f32 distanceCm) {
     const f32 inner = a.innerRadius > 0.0f ? a.innerRadius : 1.0f;
     const f32 outer = a.outerRadius > inner ? a.outerRadius : inner + 1.0f;
     if (distanceCm <= inner) return 1.0f;
     if (distanceCm >= outer) return 0.0f;
 
-    // Inverse distance, then remapped so the curve reaches EXACTLY zero at the outer radius instead
-    // of merely approaching it. Without the remap a sound is still audible at its own cutoff and
-    // pops the moment it is culled -- a bug that only ever appears while walking away from something.
-    const f32 raw   = inner / distanceCm;      // 1 at the inner radius
-    const f32 floor_ = inner / outer;          // what raw would be at the outer radius
+    const f32 raw   = inner / distanceCm;
+    const f32 floor_ = inner / outer;
     return (raw - floor_) / (1.0f - floor_);
 }
 
+// Constant-power pan. pan is -1 (left) to +1 (right); l*l + r*r == 1.
 void panGains(f32 pan, f32& outL, f32& outR) {
-    // -1..+1 mapped onto the first quadrant, so l^2 + r^2 == 1 for every pan. A linear law instead
-    // (l = 1-t, r = t) dips 3 dB in the middle: audible on anything that moves across the field, and
-    // perfectly reasonable-looking as arithmetic.
     const f32 t = (clampf(pan, -1.0f, 1.0f) + 1.0f) * 0.25f * 3.14159265358979f;
     outL = std::cos(t);
     outR = std::sin(t);
 }
 
+// Shuts the mixer down.
 Mixer::~Mixer() { shutdown(); }
 
+// Sizes the voice and sound pools and makes the mixer ready. False on bad arguments.
 bool Mixer::init(u32 sampleRate, u32 channels, u32 maxVoices, u32 maxSounds) {
     if (ready_) shutdown();
     if (sampleRate == 0) { AVER_ERROR("[Audio] init with a zero sample rate"); return false; }
     if (channels != 1 && channels != 2) {
-        // Refused rather than downmixed. A mixer that quietly folded 5.1 into stereo would be doing
-        // something nobody asked for, at a quality nobody chose.
         AVER_ERROR("[Audio] init with {} channels; only mono and stereo are supported", channels);
         return false;
     }
@@ -56,9 +52,6 @@ bool Mixer::init(u32 sampleRate, u32 channels, u32 maxVoices, u32 maxSounds) {
     sampleRate_ = sampleRate;
     channels_   = channels;
 
-    // Constructed at size and never resized. std::atomic is neither copyable nor movable, so the
-    // vector could not grow even if something wanted it to -- which is exactly the guarantee the
-    // audio thread needs, since it holds bare pointers into both of these across a mix.
     { std::vector<Voice>     v(maxVoices); voices_.swap(v); }
     { std::vector<SoundSlot> s(maxSounds); sounds_.swap(s); }
 
@@ -79,10 +72,8 @@ bool Mixer::init(u32 sampleRate, u32 channels, u32 maxVoices, u32 maxSounds) {
     return true;
 }
 
+// Releases the pools. The caller must have stopped the device first.
 void Mixer::shutdown() {
-    // The CALLER is responsible for having stopped the device first. Nothing here can make the audio
-    // thread stand down, and a mixer torn down under a live callback is a use-after-free however
-    // carefully this function is written -- so it does not pretend otherwise.
     ready_ = false;
     voices_.clear();
     sounds_.clear();
@@ -91,6 +82,7 @@ void Mixer::shutdown() {
 
 // ---------------------------------------------------------------- sounds
 
+// Takes ownership of decoded audio and returns its handle. 0 when the table is full.
 SoundHandle Mixer::addSound(SoundData&& data) {
     if (!ready_) return 0;
     if (!data.valid()) { AVER_ERROR("[Audio] addSound with empty or malformed data"); return 0; }
@@ -106,23 +98,26 @@ SoundHandle Mixer::addSound(SoundData&& data) {
     return 0;
 }
 
+// Marks a sound for release; the bytes go once no voice refers to them.
 void Mixer::removeSound(SoundHandle h) {
     if (!ready_ || h == 0 || h > sounds_.size()) return;
     sounds_[h - 1].retired.store(true, std::memory_order_release);
-    collect();   // free it now when nothing is playing it, which is the common case
+    collect();
 }
 
+// Frees retired sounds whose last voice has ended. Game thread only.
 void Mixer::collect() {
     if (!ready_) return;
     for (SoundSlot& s : sounds_) {
         if (!s.data) continue;
         if (!s.retired.load(std::memory_order_acquire)) continue;
-        if (s.refs.load(std::memory_order_acquire) != 0) continue;   // a voice is still reading it
+        if (s.refs.load(std::memory_order_acquire) != 0) continue;
         s.data.reset();
         s.retired.store(false, std::memory_order_release);
     }
 }
 
+// Number of loaded sounds.
 u32 Mixer::soundCount() const {
     u32 n = 0;
     for (const SoundSlot& s : sounds_) if (s.data) ++n;
@@ -131,13 +126,12 @@ u32 Mixer::soundCount() const {
 
 // ---------------------------------------------------------------- voices
 
+// Live voice for a handle, or nullptr when the handle is stale or free.
 Mixer::Voice* Mixer::resolve(VoiceHandle v) {
     if (!ready_ || v == 0) return nullptr;
     const u32 i = indexOf(v);
     if (i >= voices_.size()) return nullptr;
     Voice& vo = voices_[i];
-    // The generation is what makes a stale handle read as dead rather than as whoever got the slot
-    // next. At 64 voices a slot comes round again in seconds.
     if (vo.generation.load(std::memory_order_acquire) != generationOf(v)) return nullptr;
     if (vo.state.load(std::memory_order_acquire) == static_cast<u32>(State::Free)) return nullptr;
     return &vo;
@@ -147,10 +141,8 @@ const Mixer::Voice* Mixer::resolve(VoiceHandle v) const {
     return const_cast<Mixer*>(this)->resolve(v);
 }
 
+// Picks the quietest, then oldest, Active voice to steal. Returns 0xFFFFFFFF when there is none.
 u32 Mixer::stealSlot() {
-    // Quietest first, oldest as the tie-break. Stealing the oldest alone cuts the ambient bed that
-    // has been running since the level loaded; stealing the quietest alone can cut the same distant
-    // voice over and over. Together they take the one least likely to be noticed.
     u32 best = 0xFFFFFFFFu;
     f32 bestGain = 0.0f;
     u64 bestOrder = 0;
@@ -167,13 +159,12 @@ u32 Mixer::stealSlot() {
     return best;
 }
 
+// Starts a voice, stealing one if the pool is full. Returns its handle, or 0.
 VoiceHandle Mixer::play(const PlayDesc& desc) {
     if (!ready_) return 0;
     if (desc.sound == 0 || desc.sound > sounds_.size()) return 0;
     SoundSlot& slot = sounds_[desc.sound - 1];
     if (!slot.data) return 0;
-    // A retired sound may not start a NEW voice, or collect() would never see the reference count
-    // reach zero and the memory would never come back.
     if (slot.retired.load(std::memory_order_acquire)) return 0;
 
     auto claim = [&](u32 i) -> bool {
@@ -187,32 +178,21 @@ VoiceHandle Mixer::play(const PlayDesc& desc) {
     for (u32 i = 0; i < voices_.size(); ++i) if (claim(i)) { index = i; break; }
 
     if (index == 0xFFFFFFFFu) {
-        // Pool full: take one. The steal moves Active -> Pending, and the audio thread renders
-        // nothing for a Pending slot -- so the worst case is one block of silence from that voice,
-        // never a torn read of parameters being rewritten underneath it.
         const u32 victim = stealSlot();
         if (victim == 0xFFFFFFFFu) return 0;
         u32 expected = static_cast<u32>(State::Active);
         if (!voices_[victim].state.compare_exchange_strong(
                 expected, static_cast<u32>(State::Pending),
                 std::memory_order_acq_rel, std::memory_order_relaxed))
-            return 0;   // it ended on its own between the choice and the claim; the next play gets it
-        // The stolen voice was holding a reference to its sound; release it here, on the game
-        // thread, because the audio thread never got to finish it.
+            return 0;
         if (voices_[victim].soundHandle && voices_[victim].soundHandle <= sounds_.size())
             sounds_[voices_[victim].soundHandle - 1].refs.fetch_sub(1, std::memory_order_acq_rel);
-        // AND BUMP THE GENERATION, exactly as ending normally does. Without this the stolen voice's
-        // handle still matches the slot, so whoever started it goes on believing it is playing and
-        // silently drives the voice that REPLACED it -- the precise failure the generation exists to
-        // prevent, reintroduced on the one path that does not go through the audio thread.
         voices_[victim].generation.fetch_add(1, std::memory_order_acq_rel);
         index = victim;
         stolen_.fetch_add(1, std::memory_order_relaxed);
     }
 
     Voice& vo = voices_[index];
-    // Plain writes: the slot is Pending, and the audio thread never reads a Pending slot's
-    // parameters. The release store at the bottom is what publishes all of this.
     vo.sound       = slot.data.get();
     vo.soundHandle = desc.sound;
     vo.looping     = desc.looping;
@@ -237,13 +217,12 @@ VoiceHandle Mixer::play(const PlayDesc& desc) {
     return encode(index, gen);
 }
 
+// Flags a voice to fade out over one block. The audio thread frees the slot.
 void Mixer::stop(VoiceHandle v) {
-    // Flagged, not freed. The audio thread ramps the gain down over one block and releases the slot
-    // itself -- cutting a waveform mid-cycle is a click, and freeing a slot the audio thread is
-    // reading is worse than a click.
     if (Voice* vo = resolve(v)) vo->stopping.store(true, std::memory_order_release);
 }
 
+// Flags every active voice to fade out.
 void Mixer::stopAll() {
     if (!ready_) return;
     for (Voice& vo : voices_)
@@ -251,6 +230,7 @@ void Mixer::stopAll() {
             vo.stopping.store(true, std::memory_order_release);
 }
 
+// Whether the handle still names a live voice.
 bool Mixer::playing(VoiceHandle v) const {
     const Voice* vo = resolve(v);
     return vo && vo->state.load(std::memory_order_acquire) == static_cast<u32>(State::Active);
@@ -272,6 +252,7 @@ void Mixer::setVoicePosition(VoiceHandle v, f32 x, f32 y, f32 z) {
     }
 }
 
+// Moves the listener. Positions and axes in engine space.
 void Mixer::setListener(const Listener& l) {
     for (int i = 0; i < 3; ++i) {
         lisPos_[i].store(l.position[i], std::memory_order_relaxed);
@@ -291,6 +272,7 @@ f32 Mixer::busVolume(Bus b) const {
 void Mixer::setMasterVolume(f32 volume) { master_.store(volume < 0.0f ? 0.0f : volume, std::memory_order_relaxed); }
 f32  Mixer::masterVolume() const { return master_.load(std::memory_order_relaxed); }
 
+// Number of voices currently playing.
 u32 Mixer::activeVoices() const {
     u32 n = 0;
     for (const Voice& vo : voices_)
@@ -300,6 +282,7 @@ u32 Mixer::activeVoices() const {
 
 // ---------------------------------------------------------------- the audio thread
 
+// The left/right gains this voice contributes, after distance, pan, bus and master.
 void Mixer::voiceGains(const Voice& vo, f32& outL, f32& outR) const {
     f32 g = vo.volume.load(std::memory_order_relaxed)
           * buses_[static_cast<usize>(vo.bus)].load(std::memory_order_relaxed)
@@ -313,9 +296,6 @@ void Mixer::voiceGains(const Voice& vo, f32& outL, f32& outR) const {
     const f32 dist = std::sqrt(dx * dx + dy * dy + dz * dz);
     g *= attenuationAt(vo.attenuation, dist);
 
-    // Panned by where the source sits along the listener's RIGHT axis. At the listener's exact
-    // position there is no direction to speak of, so it plays centred rather than snapping to a side
-    // as the sign of a denominator flips.
     f32 pan = 0.0f;
     if (dist > 1.0e-3f) {
         const f32 rx = lisRight_[0].load(std::memory_order_relaxed);
@@ -326,14 +306,12 @@ void Mixer::voiceGains(const Voice& vo, f32& outL, f32& outR) const {
     }
     f32 pl = 0.0f, pr = 0.0f;
     panGains(pan, pl, pr);
-    // Normalised so a centred positional voice is as loud as a non-positional one: constant-power
-    // pan puts 0.707 in each ear at centre, and without this every 3D sound would sit 3 dB below
-    // every 2D one for no reason a mixer could explain.
     constexpr f32 kCentre = 1.41421356f;   // 1 / cos(45 degrees)
     outL = g * pl * kCentre;
     outR = g * pr * kCentre;
 }
 
+// Adds one voice into the output block. Returns false when the voice has ended.
 bool Mixer::renderVoice(Voice& vo, f32* out, u32 frames) {
     const SoundData* snd = vo.sound;
     if (!snd || frames == 0) return false;
@@ -342,8 +320,6 @@ bool Mixer::renderVoice(Voice& vo, f32* out, u32 frames) {
     if (srcFrames == 0) return false;
     const u32 srcCh = snd->channels;
 
-    // One read per output frame at this rate. Resampling and pitch are the same operation: both
-    // change how fast the cursor walks the source.
     const f64 step = (static_cast<f64>(snd->sampleRate) / static_cast<f64>(sampleRate_))
                    * static_cast<f64>(vo.pitch.load(std::memory_order_relaxed));
 
@@ -351,8 +327,6 @@ bool Mixer::renderVoice(Voice& vo, f32* out, u32 frames) {
     f32 targetL = 0.0f, targetR = 0.0f;
     if (!stopping) voiceGains(vo, targetL, targetR);
 
-    // The first block snaps rather than ramping, or every sound would fade in from silence over its
-    // first buffer -- audible on a short percussive one, which is most of them.
     if (!vo.primed) { vo.gainL = targetL; vo.gainR = targetR; vo.primed = true; }
 
     const f32 dL = (targetL - vo.gainL) / static_cast<f32>(frames);
@@ -365,9 +339,6 @@ bool Mixer::renderVoice(Voice& vo, f32* out, u32 frames) {
     for (u32 f = 0; f < frames; ++f) {
         if (vo.cursor >= static_cast<f64>(loopEnd)) {
             if (!vo.looping) { ended = true; break; }
-            // Wrapped by SUBTRACTING the loop length rather than assigning loopBegin, so a loop
-            // point that is not a whole number of output frames stays sample-exact instead of
-            // drifting a fraction of a frame every pass.
             const f64 len = static_cast<f64>(loopEnd - loopBegin);
             if (len <= 0.0) { ended = true; break; }
             while (vo.cursor >= static_cast<f64>(loopEnd)) vo.cursor -= len;
@@ -378,8 +349,6 @@ bool Mixer::renderVoice(Voice& vo, f32* out, u32 frames) {
         u32 i1 = i0 + 1;
         if (i1 >= loopEnd) i1 = vo.looping ? loopBegin : (loopEnd > 0 ? loopEnd - 1 : 0);
 
-        // Linear interpolation. Not the best resampler there is; it is the one whose cost is two
-        // reads and a multiply-add, which is what a per-sample inner loop can afford.
         f32 sl, sr;
         if (srcCh == 1) {
             const f32 a = snd->samples[i0], b = snd->samples[i1];
@@ -406,17 +375,15 @@ bool Mixer::renderVoice(Voice& vo, f32* out, u32 frames) {
     }
 
     if (ended) return false;
-    // A stopping voice is finished once its ramp has run out. One block, not an arbitrary timer.
     if (stopping && std::fabs(vo.gainL) < kMinGain && std::fabs(vo.gainR) < kMinGain) return false;
     return true;
 }
 
+// Renders frames of interleaved output, overwriting the buffer. Audio thread only.
 void Mixer::mix(f32* out, u32 frames) {
     if (!out || frames == 0) return;
     const u32 samples = frames * (channels_ ? channels_ : 1);
     if (!ready_) {
-        // Silence, not stale memory. An uninitialised mixer handing back whatever was in the buffer
-        // is full-scale noise at whatever volume the user had set.
         for (u32 i = 0; i < samples; ++i) out[i] = 0.0f;
         starved_.fetch_add(frames, std::memory_order_relaxed);
         return;
@@ -425,13 +392,9 @@ void Mixer::mix(f32* out, u32 frames) {
     for (u32 i = 0; i < samples; ++i) out[i] = 0.0f;
 
     for (Voice& vo : voices_) {
-        // Free and Pending are both skipped: Pending means the game thread is still writing this
-        // slot's parameters, and reading them now is the one race this design exists to prevent.
         if (vo.state.load(std::memory_order_acquire) != static_cast<u32>(State::Active)) continue;
 
         if (!renderVoice(vo, out, frames)) {
-            // Ended. Release the sound reference, bump the generation so the handle that started it
-            // reads dead, and only then publish the slot as free.
             if (vo.soundHandle && vo.soundHandle <= sounds_.size())
                 sounds_[vo.soundHandle - 1].refs.fetch_sub(1, std::memory_order_acq_rel);
             vo.sound = nullptr;
@@ -441,9 +404,6 @@ void Mixer::mix(f32* out, u32 frames) {
         }
     }
 
-    // Hard clip. Deliberately not a soft knee: a limiter changes the level of everything below the
-    // threshold too, so a mix that clips would sound quieter rather than distorted and the problem
-    // would go unnoticed. Clipping is meant to be unpleasant.
     for (u32 i = 0; i < samples; ++i) out[i] = clampf(out[i], -1.0f, 1.0f);
 }
 

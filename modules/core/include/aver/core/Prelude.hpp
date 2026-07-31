@@ -1,8 +1,7 @@
 #pragma once
+// Platform and compiler shims. Self-detects, so headers are usable outside the CMake build.
 #include "Types.hpp"
 
-// Platform / compiler shims. AVER_PLATFORM_WINDOWS is also defined by the build,
-// but we self-detect so headers are usable outside the CMake build too.
 #if defined(_WIN32) && !defined(AVER_PLATFORM_WINDOWS)
   #define AVER_PLATFORM_WINDOWS 1
 #endif

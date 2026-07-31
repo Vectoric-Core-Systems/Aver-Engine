@@ -1,14 +1,5 @@
-// The glTF importer.
-//
-// The tests build glTF documents BY HAND rather than shipping a binary fixture, so what each case
-// exercises is legible in the test itself and a failure names the field that broke. Both containers
-// are covered: .gltf with a base64 data URI, and .glb with a real binary chunk.
-//
-// The case that matters most is the coordinate change. glTF is right-handed, +Y up, metres; this
-// engine is left-handed, +Z up, centimetres. The basis change has determinant -1, so winding must be
-// reversed as well -- and the symptom of forgetting is a model that looks perfect until backface
-// culling is switched on, months later. So the winding is asserted directly, by computing a face
-// normal from the imported triangle and checking it points where the source said it did.
+// The glTF importer: .gltf with a base64 data URI, .glb with a binary chunk, the right-handed to
+// left-handed coordinate change, and what the importer refuses. Documents are built by hand here.
 #include "aver/formats/GltfImport.hpp"
 #include "aver/core/Log.hpp"
 
@@ -21,17 +12,19 @@ using namespace aver;
 
 static int g_failures = 0;
 
+// Logs one assertion and counts the failures.
 static void check(bool cond, const std::string& what) {
     if (cond) { AVER_INFO("  ok    {}", what); return; }
     ++g_failures;
     AVER_ERROR("  FAIL  {}", what);
 }
+// Asserts two floats agree within tol, reporting both values.
 static void checkNear(f32 got, f32 want, f32 tol, const std::string& what) {
     check(std::fabs(got - want) <= tol,
           what + "  (got " + std::to_string(got) + ", want " + std::to_string(want) + ")");
 }
 
-// Base64 of a byte blob, so a .gltf case can embed its buffer the way a single-file export does.
+// Base64-encodes a byte blob, so a .gltf case can embed its buffer as a data URI.
 static std::string b64(const std::vector<u8>& in) {
     static const char* T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string out;
@@ -46,23 +39,25 @@ static std::string b64(const std::vector<u8>& in) {
     return out;
 }
 
+// Appends n raw bytes.
 static void put(std::vector<u8>& b, const void* p, usize n) {
     const u8* s = static_cast<const u8*>(p);
     b.insert(b.end(), s, s + n);
 }
+// Appends a 32-bit float.
 static void putF(std::vector<u8>& b, f32 f) { put(b, &f, 4); }
+// Appends a 16-bit unsigned integer.
 static void putU16(std::vector<u8>& b, u16 v) { put(b, &v, 2); }
+// Appends a 32-bit unsigned integer.
 static void putU32(std::vector<u8>& b, u32 v) { put(b, &v, 4); }
 
-// ONE TRIANGLE in glTF space, wound counter-clockwise when seen from +Z -- so its normal is +Z,
-// which is glTF's "up". After conversion the engine must see that same face pointing along ENGINE
-// up, which is +Z here too, but reached by a different axis and only if the winding was reversed.
+// A glTF buffer holding one triangle, with the view ranges for its positions and indices.
 struct Tri { std::vector<u8> bin; usize posOff, posLen, idxOff, idxLen; };
+
+// Builds one triangle in glTF space, wound so its face points along glTF up (+Y).
 static Tri makeTriangleBuffer() {
     Tri t;
     t.posOff = 0;
-    // (0,0,0), (1,0,0), (0,0,-1): in glTF's right-handed frame with +Y up, these lie in the ground
-    // plane. Wound so the face points at +Y (glTF up).
     putF(t.bin, 0); putF(t.bin, 0); putF(t.bin, 0);
     putF(t.bin, 1); putF(t.bin, 0); putF(t.bin, 0);
     putF(t.bin, 0); putF(t.bin, 0); putF(t.bin, -1);
@@ -75,6 +70,7 @@ static Tri makeTriangleBuffer() {
     return t;
 }
 
+// Builds the glTF JSON for one triangle, with the buffer embedded or left external.
 static std::string triangleJson(usize posOff, usize posLen, usize idxOff, usize idxLen, bool embedded,
                                 const std::string& b64data) {
     std::string uri = embedded ? ("\"uri\":\"data:application/octet-stream;base64," + b64data + "\",") : "";
@@ -95,6 +91,7 @@ static std::string triangleJson(usize posOff, usize posLen, usize idxOff, usize 
       + "]}";
 }
 
+// Wraps JSON and binary into a GLB container.
 static std::vector<u8> makeGlb(const std::string& json, const std::vector<u8>& bin) {
     std::string j = json;
     while (j.size() % 4) j.push_back(' ');           // JSON chunk pads with spaces
@@ -114,7 +111,7 @@ static std::vector<u8> makeGlb(const std::string& json, const std::vector<u8>& b
     return g;
 }
 
-// The face normal of the first imported triangle, from its winding.
+// The normalised face normal of the first imported triangle, from its winding.
 static void faceNormal(const fmt::OcMeshData& m, f32 out[3]) {
     const u32 ia = m.indices[0], ib = m.indices[1], ic = m.indices[2];
     const f32* A = &m.positions[usize(ia)*3];
@@ -129,6 +126,7 @@ static void faceNormal(const fmt::OcMeshData& m, f32 out[3]) {
     if (len > 1e-12f) { out[0]/=len; out[1]/=len; out[2]/=len; }
 }
 
+// Runs every glTF import test. Returns 0 when they all pass.
 int main() {
     const Tri tri = makeTriangleBuffer();
 
@@ -165,18 +163,13 @@ int main() {
               "imports for the axis check");
         const fmt::OcMeshData& m = res.meshes[0];
 
-        // glTF (1,0,0) is one metre along ITS +X, which is the engine's +Y, and a metre is 100cm.
         checkNear(m.positions[3], 0.0f,   1e-4f, "glTF +X does not land on engine X");
         checkNear(m.positions[4], 100.0f, 1e-3f, "glTF +X becomes engine +Y, scaled to centimetres");
         checkNear(m.positions[5], 0.0f,   1e-4f, "glTF +X does not land on engine Z");
 
-        // glTF (0,0,-1) is one metre along its FORWARD, which is the engine's +X.
         checkNear(m.positions[6], 100.0f, 1e-3f, "glTF -Z (forward) becomes engine +X");
         checkNear(m.positions[7], 0.0f,   1e-4f, "and nothing on Y");
 
-        // THE WINDING. The source triangle faces glTF +Y (up). After conversion the engine must see
-        // it facing engine +Z (up). Getting the basis right but the winding wrong flips this sign,
-        // and nothing else in the import would notice.
         f32 n[3]; faceNormal(m, n);
         checkNear(n[2], 1.0f, 1e-3f, "the face still points UP after the handedness change (winding was reversed)");
     }
@@ -194,9 +187,6 @@ int main() {
 
     AVER_INFO("=== node transforms are applied ===");
     {
-        // The same triangle under a node translated 2 metres along glTF +X. It must arrive 200cm
-        // along ENGINE +Y, which proves the node transform is composed before the axis change and
-        // not after.
         std::string json = triangleJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, true, b64(tri.bin));
         const std::string from = "\"nodes\":[{\"mesh\":0}]";
         const std::string to   = "\"nodes\":[{\"mesh\":0,\"translation\":[2,0,0]}]";
@@ -216,7 +206,6 @@ int main() {
         fmt::GltfImportResult res; std::string why;
         check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
               "imports without a NORMAL attribute");
-        // Computed AFTER the winding fix, so they must agree with the face rather than oppose it.
         checkNear(res.meshes[0].normals[2], 1.0f, 1e-3f, "generated normal points up, agreeing with the winding");
     }
 
@@ -243,7 +232,6 @@ int main() {
         check(!fmt::importGltfFromMemory(reinterpret_cast<const u8*>(external.data()), external.size(), "", res, {}, &why),
               "refuses an external buffer with no directory context");
 
-        // A truncated GLB must be caught by the chunk walk rather than read past its end.
         std::vector<u8> shortGlb = makeGlb(triangleJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, false, ""), tri.bin);
         shortGlb.resize(shortGlb.size() / 2);
         check(!fmt::importGltfFromMemory(shortGlb.data(), shortGlb.size(), "", res, {}, &why),
@@ -252,8 +240,6 @@ int main() {
 
     AVER_INFO("=== what it could not carry is NAMED ===");
     {
-        // A half-imported asset that looks plausible is worse than a refused one, so anything
-        // dropped has to be reportable by name rather than as "some features were ignored".
         std::string json = triangleJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, true, b64(tri.bin));
         const std::string from = "\"meshes\":[";
         const usize at = json.find(from);

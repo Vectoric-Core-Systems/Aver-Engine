@@ -1,3 +1,4 @@
+// Field kinds, the field descriptor, and the builder that registers a component's field table.
 #pragma once
 #include "aver/core/Types.hpp"
 #include "aver/scene/Entity.hpp"
@@ -6,15 +7,12 @@ namespace aver::scene {
 
 class World;
 
-// Kinds are wider than any one consumer strictly needs, because growing them later is a v2 ABI
-// decision rather than a patch, and a Details panel that cannot show a toggle or a colour is not a
-// Details panel. The numeric values are pinned to the AVER_SCENE_KIND_* defines in scene_abi.h.
+// The type of one component field. Values are pinned to the AVER_SCENE_KIND_* defines in scene_abi.h.
 enum class FieldKind : u32 {
     F32 = 0, Vec3 = 1, Quat = 2, I32 = 3, Bool = 4, I64 = 5, Entity = 6, String = 7, Mat4 = 8
 };
 
-// Arity is floats-per-value for the float kinds and 0 for the rest, which is what the ABI's
-// aver_scene_field_arity reports and what a generic vector accessor sizes its buffer from.
+// Floats per value for the float kinds, 0 for the rest.
 inline constexpr u8 canonicalArity(FieldKind k) {
     switch (k) {
         case FieldKind::F32:  return 1;
@@ -25,9 +23,7 @@ inline constexpr u8 canonicalArity(FieldKind k) {
     }
 }
 
-// How many bytes of the component struct a field of this kind occupies. String is a slice into the
-// world's name blob — the same {offset, len} pair CName carries — because a std::string inside a
-// component would defeat the memcpy that snapshot/restore is.
+// How many bytes of the component struct a field of this kind occupies.
 inline constexpr usize fieldByteSize(FieldKind k) {
     switch (k) {
         case FieldKind::F32:
@@ -43,6 +39,7 @@ inline constexpr usize fieldByteSize(FieldKind k) {
     return 0;
 }
 
+// One registered field: its names, the component it belongs to, its kind, and where it sits.
 struct FieldDesc {
     const char* name      = "";   // unqualified, as declared
     const char* qualified = "";   // "CLocal.position"
@@ -50,41 +47,20 @@ struct FieldDesc {
     FieldKind   kind      = FieldKind::F32;
     u16         offset    = 0;    // byte offset into the component struct
     u8          arity     = 0;
-    // Internal bookkeeping — a name-blob cursor, derived world data, a hierarchy link. It stays in
-    // the table so verify()'s byte-coverage check still sees it, and it READS through the generic
-    // ABI, but a generic SET is rejected: these are managed by dedicated paths (set_parent, set_name,
-    // the propagation pass), and letting a script write one raw desyncs an invariant — at worst a
-    // blob cursor pointed out of range. Authored fields (position, mesh, colour) are writable.
-    bool        readOnly  = false;
+    bool        readOnly  = false;   // readable over the generic ABI, but a generic set is rejected
 };
 
-// Registration is hand-written next to the struct with offsetof — no codegen, so there is nothing to
-// keep in sync at build time. ONE table then serves the generic get/set ABI, scene save/load and the
-// editor's Details panel, so there is no second place to update and therefore no second place to
-// forget. The .verify(sizeof(T)) terminator catches drift where it happens rather than three layers
-// away.
+// Registers one component's field table. Sugar over World::addField and World::verifyComponent.
 class AVER_SCENE_API ComponentBuilder {
 public:
     ComponentBuilder() = default;
+    // Builds the table for component `typeId` in `world`.
     ComponentBuilder(World* world, u32 typeId) : world_(world), typeId_(typeId) {}
 
-    // `arity` is ignored for the non-float kinds; passing it is allowed so a registration reads the
-    // same whatever the kind is. `readOnly` marks an internal bookkeeping field (see FieldDesc).
+    // Declares one field. `arity` is ignored for the non-float kinds. Returns *this for chaining.
     ComponentBuilder& field(const char* name, FieldKind kind, u16 offset, u8 arity = 0, bool readOnly = false);
 
-    // False when the table does not account for the struct, having already logged which component
-    // and which byte range is unexplained. It returns rather than asserting because the failure has
-    // to be observable from a test in the same process — an abort proves nothing to a caller.
-    //
-    // WHAT IT CANNOT CATCH, by construction: this is a byte-COVERAGE check — offsets sorted, no gap,
-    // no overlap, sizes summing to the struct — and the offsets ARE the registration, so it has no
-    // independent ground truth for which name belongs at which offset. Two same-type members listed
-    // in the wrong order, or a field given a wrong kind of the same width (I32/F32/Bool/Entity all
-    // 4 bytes; I64/String both 8), leave coverage intact and pass. The eight built-ins are immune
-    // because they pass offsetof(T, member) directly, so an offset cannot drift from its name; the
-    // exposure is a SCRIPT-declared component whose fields arrive over the ABI, where a swapped or
-    // mis-kinded same-width field is published silently. Closing that needs a name↔offset oracle a
-    // coverage check does not have, so it is a documented limit rather than a bug to fix here.
+    // Checks the table covers the struct byte for byte. False on drift, having logged which bytes.
     bool verify(usize structBytes);
 
     u32 typeId() const { return typeId_; }

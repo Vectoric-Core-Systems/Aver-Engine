@@ -1,3 +1,5 @@
+// Reader and writer for .ocmat, the engine's line-based text material format.
+
 #include "aver/formats/OcMat.hpp"
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/core/Log.hpp"
@@ -13,18 +15,19 @@ using pbr::TextureSlot;
 
 namespace {
 
+// Reads token `i` as a float, or returns `dflt` when it is absent.
 f32 tokF(const std::vector<std::string_view>& t, usize i, f32 dflt = 0.0f) {
     return i < t.size() ? static_cast<f32>(parseF64(t[i], dflt)) : dflt;
 }
 
-// Round-trippable, and short: %.6g reproduces every value an editor slider can produce without
-// printing 1.0000000000000002 for a number the user typed as 1.
+// Formats a float short and round-trippable.
 std::string num(f32 v) {
     char buf[40];
     std::snprintf(buf, sizeof buf, "%.6g", static_cast<f64>(v));
     return buf;
 }
 
+// Looks up a texture slot by its name, case-insensitively.
 bool slotFromName(std::string_view name, TextureSlot& out) {
     for (u32 i = 0; i < pbr::kTextureSlotCount; ++i) {
         const auto s = static_cast<TextureSlot>(i);
@@ -33,17 +36,14 @@ bool slotFromName(std::string_view name, TextureSlot& out) {
     return false;
 }
 
-// A TEX reference is `{guid:0x…}` or `{path:…}`, and a path may contain spaces — so the braces are
-// found in the RAW line rather than in the whitespace split, which would have shredded such a path
-// into several tokens. A bare token with no braces is accepted as a path: that is what the editor's
-// own Details panel produces when someone types one in, and rejecting it would make the field the
-// editor writes unreadable by the loader that reads it back.
+// One parsed texture reference plus whatever followed it on the line.
 struct TexRefParse {
     pbr::TextureRef ref;
     std::string_view trailing;   // what followed the reference: uvN, colour space
     bool ok = false;
 };
 
+// Parses a texture reference: `{guid:0x…}`, `{path:…}`, `{…}`, or a bare unbraced path token.
 TexRefParse parseTexRef(std::string_view afterSlot) {
     TexRefParse r;
     const usize open = afterSlot.find('{');
@@ -57,13 +57,12 @@ TexRefParse parseTexRef(std::string_view afterSlot) {
         } else if (startsWithCI(inner, "path:")) {
             r.ref.path = std::string(trim(inner.substr(5)));
         } else {
-            r.ref.path = std::string(inner);   // `{Content/T/x.png}` — tolerate the unprefixed form
+            r.ref.path = std::string(inner);
         }
         r.ok = !r.ref.empty();
         return r;
     }
 
-    // Bare form: the reference is the first token, the rest is trailing.
     const std::string_view s = trim(afterSlot);
     if (s.empty()) return r;
     usize end = 0;
@@ -76,6 +75,7 @@ TexRefParse parseTexRef(std::string_view afterSlot) {
 
 } // namespace
 
+// The colour space a texture slot is always read in.
 const char* ocmatColorSpace(TextureSlot s) {
     switch (s) {
         case TextureSlot::BaseColor:
@@ -85,6 +85,7 @@ const char* ocmatColorSpace(TextureSlot s) {
     }
 }
 
+// Parses .ocmat text into a MaterialDesc. Returns false with `err` set. Unknown records are skipped.
 bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extras, std::string* err) {
     out = pbr::MaterialDesc{};
     OcMatExtras localExtras;
@@ -92,8 +93,6 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
     ex = OcMatExtras{};
 
     bool sawHeader = false;
-    // GRAPH{} is skipped by depth rather than by "until the next }", because the spec allows nested
-    // braces inside it and a first-} scan would resume parsing halfway through a node list.
     int graphDepth = 0;
 
     usize pos = 0;
@@ -118,9 +117,6 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
         const std::vector<std::string_view> t = splitWhitespace(line);
         if (t.empty()) continue;
         const std::string_view key = t[0];
-        // Offsets are taken from the token's own address rather than assumed to be zero, so that a
-        // record whose payload is the REST of the line (NAME, PARENT, TEX) stays correct if the
-        // lexing rule above ever stops left-trimming.
         const auto after = [&line](std::string_view tok) {
             return line.substr(static_cast<usize>(tok.data() - line.data()) + tok.size());
         };
@@ -133,9 +129,6 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
             }
             sawHeader = true;
         } else if (equalsCI(key, "NAME")) {
-            // An Aver addition: §7 leaves a material nameless and lets the filename carry it, but
-            // MaterialDesc has a name field and a round-trip that dropped it would rename every
-            // material the editor saved. A spec-conformant reader skips it as an unknown record.
             if (t.size() > 1) out.name = std::string(trim(after(key)));
         } else if (equalsCI(key, "SHADER")) {
             if (t.size() > 1) ex.shader = std::string(t[1]);
@@ -162,8 +155,6 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                 const bool on = parseI32(kv[1], 0) != 0;
                 if (equalsCI(kv[0], "twosided"))       out.twoSided = on;
                 else if (equalsCI(kv[0], "castshadow")) out.castShadow = on;
-                // An Aver addition; see pbr::UvMode. A flag rather than a `UV` record of its own so
-                // that a reader which does not know it skips one token instead of a whole line.
                 else if (equalsCI(kv[0], "worlduv"))    out.uvMode = on ? pbr::UvMode::WorldAligned
                                                                         : pbr::UvMode::Mesh;
             }
@@ -181,13 +172,10 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
             else if (equalsCI(p, "roughnessFactor"))      out.roughnessFactor   = tokF(t, 2, out.roughnessFactor);
             else if (equalsCI(p, "normalScale"))          out.normalScale       = tokF(t, 2, out.normalScale);
             else if (equalsCI(p, "occlusionStrength"))    out.occlusionStrength = tokF(t, 2, out.occlusionStrength);
-            // Aver additions. See MaterialDesc: 0.04 / 1.0 is one material, not a law, so a file has
-            // to be able to say otherwise. An external reader skips a PARAM it does not know.
             else if (equalsCI(p, "reflectance"))          out.reflectance       = tokF(t, 2, out.reflectance);
             else if (equalsCI(p, "f90"))                  out.f90               = tokF(t, 2, out.f90);
             else if (equalsCI(p, "alphaCutoff"))          out.alphaCutoff       = tokF(t, 2, out.alphaCutoff);
-            // World centimetres per tile. Ignored unless FLAGS worlduv=1, and a non-positive value
-            // is dropped rather than stored -- it would collapse the projection to a single texel.
+            // World centimetres per tile; a non-positive value is dropped.
             else if (equalsCI(p, "uvTiling")) {
                 const f32 v = tokF(t, 2, out.uvTiling);
                 if (v > 0.0f) out.uvTiling = v;
@@ -199,8 +187,6 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                 AVER_WARN("[ocmat] unknown texture slot '{}' — ignored", std::string(t[1]));
                 continue;
             }
-            // Skip past the keyword AND the slot name so a `{path:...}` containing either word is
-            // still found by its braces rather than by a substring search over the whole line.
             const TexRefParse p = parseTexRef(after(t[1]));
             if (!p.ok) continue;
             out.textures[static_cast<u32>(slot)] = p.ref;
@@ -209,10 +195,6 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                 if (startsWithCI(tok, "uv") && tok.size() > 2) {
                     ex.uvSet[static_cast<u32>(slot)] = static_cast<u32>(parseI32(tok.substr(2), 0));
                 } else if (!equalsCI(tok, ocmatColorSpace(slot))) {
-                    // The slot decides the colour space — the shading model reads base colour as
-                    // colour and roughness as data, and no file can change that without changing the
-                    // BRDF. Say so rather than obey, because obeying would mean two materials
-                    // sharing one texture could disagree about a single cached upload.
                     AVER_WARN("[ocmat] {} declares '{}' but that slot is always {} — using {}",
                               pbr::MaterialLibrary::textureSlotName(slot), std::string(tok),
                               ocmatColorSpace(slot), ocmatColorSpace(slot));
@@ -220,8 +202,7 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
             }
         } else if (startsWithCI(key, "GRAPH")) {
             ex.hasGraph = true;
-            // The `{` may be on this line (`GRAPH{`) or the next; count what is here and let the
-            // skip above take over. If neither, treat the record as opening one block.
+            // The `{` may be on this line (`GRAPH{`) or the next.
             int depth = 0;
             for (const char c : line) {
                 if (c == '{') ++depth;
@@ -229,7 +210,6 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
             }
             graphDepth = depth > 0 ? depth : 1;
         }
-        // Anything else: skipped, not failed. Forward compatibility is the whole point.
     }
 
     if (!sawHeader) {
@@ -243,6 +223,7 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
     return true;
 }
 
+// Reads an .ocmat file. The filename stem supplies the name when the file carries none.
 bool loadOcmat(const std::string& path, pbr::MaterialDesc& out, OcMatExtras* extras, std::string* err) {
     std::string text;
     if (!readFileText(path, text)) {
@@ -254,6 +235,7 @@ bool loadOcmat(const std::string& path, pbr::MaterialDesc& out, OcMatExtras* ext
     return true;
 }
 
+// Renders a material as .ocmat text.
 std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
     const OcMatExtras defaults{};
     const OcMatExtras& ex = extras ? *extras : defaults;
@@ -277,9 +259,7 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
     }
     s += "\n";
 
-    // twoSided is the authoritative field, so the CULL line is derived from it rather than echoed
-    // from `extras`. Emitting a stored `cull back` next to `twosided=1` would produce a file that
-    // contradicts itself and reads back differently depending on record order.
+    // Derived from twoSided, which is authoritative, rather than echoed from `extras`.
     s += "CULL "; s += d.twoSided ? "none" : (ex.cull == "front" ? "front" : "back"); s += "\n";
     s += "FLAGS twosided="; s += d.twoSided ? "1" : "0";
     s += " castshadow="; s += d.castShadow ? "1" : "0";
@@ -295,9 +275,6 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
     s += "PARAM occlusionStrength " + num(d.occlusionStrength) + "\n";
     s += "PARAM reflectance "       + num(d.reflectance)       + "\n";
     s += "PARAM f90 "               + num(d.f90)               + "\n";
-    // Written unconditionally, not only under worlduv=1: the value is part of the material either
-    // way, and omitting it would silently reset a surface's tiling every time somebody toggled the
-    // mode off, saved, and toggled it back on.
     s += "PARAM uvTiling "          + num(d.uvTiling)          + "\n";
 
     bool anyTex = false;
@@ -309,8 +286,7 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
         s += "TEX ";
         s += pbr::MaterialLibrary::textureSlotName(slot);
         s += " ";
-        // The id wins where set, matching MaterialSystem's cache key: a guid survives the file being
-        // moved and the path does not, so writing the path in preference would degrade the reference.
+        // The id wins where set, matching MaterialSystem's cache key.
         if (r.id) {
             char buf[32];
             std::snprintf(buf, sizeof buf, "{guid:0x%016llX}", static_cast<unsigned long long>(r.id));
@@ -342,6 +318,7 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
     return s;
 }
 
+// Writes a material to an .ocmat file, creating parent directories. Returns false with `err` set.
 bool saveOcmat(const std::string& path, const pbr::MaterialDesc& d, const OcMatExtras* extras,
                std::string* err) {
     std::error_code ec;

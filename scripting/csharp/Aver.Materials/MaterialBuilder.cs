@@ -1,25 +1,11 @@
+// Declares one material and emits the .ocmat text the engine reads.
 using System.Globalization;
 using System.Text;
 
 namespace Aver.Materials;
 
-/// <summary>
-/// Declares one material, and emits the <c>.ocmat</c> the engine reads.
-/// </summary>
-/// <remarks>
-/// <para>
-/// The C# class in <c>Content/Materials</c> is the SOURCE; the <c>.ocmat</c> under <c>Binaries</c> is
-/// the build output, and the engine only ever reads the latter. Editing the generated file is
-/// editing a build artefact — it is overwritten on the next compile, and the header it carries says so.
-/// </para>
-/// <para>
-/// This writes the format rather than calling into the engine to write it, which means the grammar
-/// has TWO writers: this one, and <c>modules/formats/src/OcMat.cpp</c>. That is a real cost and it is
-/// paid deliberately — the alternative is a native ABI on the build path, which would make baking a
-/// material require a loaded engine. The mitigation is that <c>MaterialCompilerTest</c> writes from
-/// here and reads with the C++ reader, so the two cannot drift without a test going red.
-/// </para>
-/// </remarks>
+/// <summary>Declares one material, and emits the <c>.ocmat</c> the engine reads.</summary>
+/// <remarks>The grammar has a second writer in <c>modules/formats/src/OcMat.cpp</c>; the two must agree.</remarks>
 public sealed class MaterialBuilder
 {
     private readonly string _name;
@@ -44,14 +30,10 @@ public sealed class MaterialBuilder
 
     private readonly Dictionary<Slot, string> _textures = new();
 
+    /// <summary>Starts a material bound to the given name.</summary>
     internal MaterialBuilder(string name) => _name = name;
 
     /// <summary>A line of explanation, written into the output above the parameters.</summary>
-    /// <remarks>
-    /// Carried through on purpose. The generated file is what somebody debugging a surface actually
-    /// opens, and a bare table of numbers with the reasoning left behind in a .cs file is exactly how
-    /// a value ends up mysterious.
-    /// </remarks>
     public MaterialBuilder Comment(string text) { _comments.Add(text); return this; }
 
     /// <summary>The shading model.</summary>
@@ -66,10 +48,7 @@ public sealed class MaterialBuilder
     /// <summary>Whether the surface casts shadows. On by default.</summary>
     public MaterialBuilder CastShadow(bool on) { _castShadow = on; return this; }
 
-    /// <summary>
-    /// Project texture coordinates from world space rather than the mesh's UVs, at
-    /// <see cref="Tiling"/> centimetres per tile. What untextured blockout geometry wants.
-    /// </summary>
+    /// <summary>Project texture coordinates from world space at <see cref="Tiling"/> centimetres per tile.</summary>
     public MaterialBuilder WorldUv(bool on) { _worldUv = on; return this; }
 
     /// <summary>Base colour multiplier, linear 0..1.</summary>
@@ -82,7 +61,7 @@ public sealed class MaterialBuilder
     /// <summary>Roughness multiplier. 1 means "whatever the metalRough texture says".</summary>
     public MaterialBuilder Roughness(float v) { _roughness = v; return this; }
 
-    /// <summary>Emission, linear. Not a colour multiplier — it is added, so it lights nothing but itself.</summary>
+    /// <summary>Emission, linear. Added rather than multiplied, so it lights nothing but itself.</summary>
     public MaterialBuilder Emissive(float r, float g, float b) { _emissive = new[] { r, g, b }; return this; }
 
     /// <summary>How strongly the normal map is applied. Above 1 exaggerates it.</summary>
@@ -100,27 +79,17 @@ public sealed class MaterialBuilder
     /// <summary>World centimetres per texture tile. Only meaningful with <see cref="WorldUv"/> on.</summary>
     public MaterialBuilder Tiling(float centimetres) { _uvTiling = centimetres; return this; }
 
-    /// <summary>
-    /// Bind a texture. The path is relative to the project's content root, using forward slashes.
-    /// </summary>
-    /// <remarks>
-    /// There is no colour-space argument, and that is deliberate: the space is a property of the SLOT
-    /// (base colour and emissive are sRGB, normal is a normal map, the rest are linear), so letting a
-    /// caller pass one would only let a caller pass the wrong one.
-    /// </remarks>
+    /// <summary>Binds a texture to a slot. The path is content-root relative, forward slashes.</summary>
     public MaterialBuilder Texture(Slot slot, string contentRelativePath)
     { _textures[slot] = contentRelativePath.Replace('\\', '/'); return this; }
 
-    // ---- emission ----
-
+    /// <summary>Formats a float round-trippably and culture-invariantly.</summary>
     private static string Num(float v)
     {
-        // Round-trippable and culture-invariant. "R" so a value survives write-read-write unchanged,
-        // and InvariantCulture so a machine set to a comma decimal separator does not emit
-        // "0,04" — which the reader would take as two tokens and get silently wrong.
         return v.ToString("R", CultureInfo.InvariantCulture);
     }
 
+    /// <summary>The token a slot is written as in a <c>TEX</c> line.</summary>
     private static string SlotName(Slot s) => s switch
     {
         Slot.BaseColor => "baseColor",
@@ -131,9 +100,7 @@ public sealed class MaterialBuilder
         _ => "?",
     };
 
-    // The colour space the reader expects for each slot. It VALIDATES this token rather than reading
-    // it, so a wrong one is a warning and a right one is silence — but writing the wrong one would
-    // still be writing something untrue into a file somebody reads.
+    /// <summary>The colour-space token the reader validates each slot against.</summary>
     private static string SlotColourSpace(Slot s) => s switch
     {
         Slot.BaseColor => "sRGB",
@@ -147,8 +114,6 @@ public sealed class MaterialBuilder
     {
         var s = new StringBuilder(1024);
         s.Append("OCMAT 1\n");
-        // Named as generated, and by WHAT, so somebody who opens it and starts editing finds out
-        // here rather than after losing the edit on the next build.
         s.Append("# GENERATED by the Aver material compiler from ").Append(sourceFile).Append(".\n");
         s.Append("# Edits here are overwritten. Change the C# source instead.\n");
         foreach (string c in _comments) s.Append("# ").Append(c).Append('\n');
@@ -166,9 +131,7 @@ public sealed class MaterialBuilder
         });
         s.Append('\n');
 
-        // twoSided is what the engine's own writer treats as authoritative, and CULL is derived from
-        // it. Mirrored here so a file from this compiler and one from the editor cannot disagree
-        // about which of the two lines wins.
+        // twoSided is authoritative and CULL is derived from it, matching the engine's own writer.
         bool twoSided = _cull == Cull.None;
         s.Append("CULL ").Append(twoSided ? "none" : (_cull == Cull.Front ? "front" : "back")).Append('\n');
         s.Append("FLAGS twosided=").Append(twoSided ? '1' : '0')
@@ -185,16 +148,12 @@ public sealed class MaterialBuilder
         s.Append("PARAM occlusionStrength ").Append(Num(_occlusionStrength)).Append('\n');
         s.Append("PARAM reflectance ").Append(Num(_reflectance)).Append('\n');
         s.Append("PARAM f90 ").Append(Num(_f90)).Append('\n');
-        // Written unconditionally, matching the engine's writer: the value is part of the material
-        // whether or not world UVs are on, and omitting it would reset a surface's tiling every time
-        // somebody toggled the mode off and back on.
         s.Append("PARAM uvTiling ").Append(Num(_uvTiling)).Append('\n');
 
         if (_textures.Count > 0)
         {
             s.Append('\n');
-            // Slot order, not insertion order, so the same declaration always produces the same
-            // bytes. A generated file that reorders itself between builds is a diff nobody can read.
+            // Slot order, not insertion order, so the same declaration always produces the same bytes.
             foreach (Slot slot in Enum.GetValues<Slot>())
             {
                 if (!_textures.TryGetValue(slot, out string? path)) continue;
@@ -207,10 +166,6 @@ public sealed class MaterialBuilder
     }
 
     /// <summary>Runs a material type's <c>Configure</c> and returns the builder it filled in.</summary>
-    /// <remarks>
-    /// Static rather than virtual, matching how <c>[AverClass]</c> types declare themselves: a
-    /// material is never instantiated, so there is no instance for a virtual call to dispatch on.
-    /// </remarks>
     public static MaterialBuilder Run(Type type, string boundName)
     {
         var b = new MaterialBuilder(boundName);

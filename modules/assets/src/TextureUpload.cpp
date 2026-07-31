@@ -1,9 +1,11 @@
+// Decodes an image file and creates the GPU texture for it.
 #include "aver/assets/TextureUpload.hpp"
 
 #include "aver/formats/Texture.hpp"
 
 namespace aver::assets {
 
+// Decodes `path` and uploads it. Returns 0 on failure, with the reason in `err`.
 rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& path,
                                  TextureUsage usage, std::string* err, TextureUploadInfo* info) {
     if (path.empty()) {
@@ -23,9 +25,7 @@ rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& 
         return 0;
     }
 
-    // One CPU pointer per mip, in level order, which is exactly the subresource order TextureDesc
-    // documents. Built into a local vector because the pixels live in separate ImageData allocations
-    // -- there is no single contiguous blob to hand over.
+    // One CPU pointer per mip, in level order, which is the subresource order TextureDesc documents.
     std::vector<const void*> levels;
     levels.reserve(tex.levels.size());
     usize bytes = 0;
@@ -38,10 +38,6 @@ rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& 
     d.width  = tex.width;
     d.height = tex.height;
     d.mips   = static_cast<u32>(levels.size());
-    // The sRGB decode is the VIEW's job, not the decoder's: the pixels stay as authored and the
-    // hardware linearises on every tap, including inside the filter. Decoding on the CPU instead
-    // would bake the curve into 8 bits and lose precision in the darks, where sRGB spends most of
-    // its codes.
     d.format = tex.srgb ? rhi::Format::RGBA8UnormSrgb : rhi::Format::RGBA8Unorm;
     d.bind   = rhi::ResourceBind::ShaderResource;
     d.initialState = rhi::ResourceState::ShaderResource;

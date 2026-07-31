@@ -1,29 +1,6 @@
 #pragma once
-// The actor preview: an actor's AUTHORED COMPOSITION, drawn into a texture of its own.
-//
-// What UE's Blueprint viewport shows, and for the same reason: an actor is a tree of placements in
-// LOCAL space, and until you can see that tree you are editing coordinates blind. It draws the rows
-// a `.Designer.cs` declares (see aver::fmt::parseActorScript), not entities -- no spawn, no world,
-// no bridge, no play state. What is on screen is what the source says, which is what makes editing
-// the source and dragging in the view the same operation.
-//
-// A FEATURE THAT OWNS ITS TARGETS, rather than a second viewport in the scene pass. The reasoning is
-// in docs/ACTOR_EDITOR.md §3 and it is not a preference: `IDevice::setCamera` writes a CPU-side
-// struct that is uploaded once at the top of beginFrame, so a second camera set after that is a
-// no-op FOR THE CURRENT FRAME -- two rects in the scene pass would both draw with the previous
-// frame's camera and present as a matrix bug. And exposure is one histogram over the whole target
-// reducing to one scalar, so two viewports cannot have different exposure; opening this tab would
-// make the LEVEL viewport ramp brightness for a second.
-//
-// THE CAMERA IS PUBLISHED AT b4, not b0. Slot 0 is the engine's per-frame block, the backend rebinds
-// it on every setPipeline, and RHIResources.hpp says outright that a feature must never observe it
-// unbound. Voxi's shadow pass publishes at kFeatureFrameConstantRegister and so does this. The
-// consequence is not just a register number: averSkyAbove reads the sky out of b0, so this writes
-// its own backdrop rather than sampling the level's atmosphere.
-//
-// WHAT IT DELIBERATELY IS NOT: fixed exposure, no bloom, no eye adaptation, no GI, no cascaded
-// shadows, no MSAA. It will not match the level viewport and is not trying to. That has to be said
-// in the panel as well as here, or it gets filed as a bug every month.
+// The actor preview: an actor's authored composition, drawn into a texture of its own.
+// A render feature that owns its colour and depth targets; the panel samples the colour one.
 #include "aver/rhi/RHI.hpp"
 
 #include <string>
@@ -31,75 +8,50 @@
 
 namespace aver::render::preview {
 
-// One placement to draw. Flat, and derived from a parsed source row rather than from an entity --
-// that is the whole design, and it is what lets the preview update from a text edit with no rebuild,
-// no reload and no play session.
+// One placement to draw, derived from a parsed designer-file row rather than from an entity.
 struct PreviewDraw {
     rhi::MeshHandle mesh = 0;
     f32 world[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};   // row-major, row-vector, cm
     f32 baseColor[4] = {0.8f, 0.8f, 0.82f, 1.0f};
-    // How far this mesh reaches from its own origin, in ITS units, before the world matrix. Framing
-    // needs it: a class-level mesh sits at the origin with no placement, so origins alone put every
-    // such actor at the same distance and a unit sphere arrives as one pixel.
-    f32 boundsRadius = 0.0f;
+    f32 boundsRadius = 0.0f;   // mesh's own units, before the world matrix
     f32 metallic = 0.0f;
     f32 roughness = 0.6f;
-    // Highlighted in the view, because a viewport you cannot tell the selection in is a viewport you
-    // cannot drag in.
     bool selected = false;
 };
 
-// Where the eye is. An ORBIT rather than a free camera: the subject is one object at the origin, the
-// only useful motions are around it and towards it, and a fly camera in a preview is a camera the
-// user gets lost in and then has to be given a "frame selection" button to escape.
+// The preview's orbit camera: yaw, pitch and distance about a pivot.
 struct PreviewCamera {
     f32 yawDeg = 35.0f;
     f32 pitchDeg = 20.0f;
     f32 distance = 400.0f;          // centimetres from the pivot
     f32 pivot[3] = {0.0f, 0.0f, 0.0f};
     f32 fovDeg = 45.0f;
-    // Clamped so the orbit cannot pass through the pole, where the up vector flips and the view
-    // rolls over with no hysteresis.
+    // Turns the orbit, clamping pitch short of the pole.
     void addOrbit(f32 dYaw, f32 dPitch);
+    // Scales the orbit distance by a factor.
     void addZoom(f32 factor);
 
-    // Slide the PIVOT across the view plane, in screen pixels, so the scene tracks the cursor. This is
-    // the third motion an orbit camera needs and the one it was missing: without it an actor whose
-    // interesting part is off the pivot -- a gun's muzzle, a character's head -- can only be brought
-    // to the middle of the frame by zooming out until it happens to be visible.
-    //
-    // IN PIXELS, and in the module rather than the caller, because getting from a mouse delta to a
-    // world offset needs the camera basis AND the projection: the basis is derived here from yaw and
-    // pitch exactly as buildViewProj derives the eye, and the scale is the pixel size at the pivot's
-    // depth, 2*distance*tan(fov/2)/viewportHeightPx. An editor that did this itself would be a second
-    // derivation of the same matrix, free to disagree with the one the picture was drawn with.
-    //
-    // `viewportHeightPx` is the RENDERED height, not the widget's -- they differ while a resize is
-    // still being debounced.
+    // Slides the pivot across the view plane by a mouse delta in screen pixels.
+    // `viewportHeightPx` is the RENDERED height, not the widget's.
     void panPixels(f32 dxPx, f32 dyPx, f32 viewportHeightPx);
 };
 
+// Draws a list of placements into its own targets, ahead of the scene pass.
 class ActorPreview final : public rhi::IRenderFeature {
 public:
-    // Returns null when the backend has no GPU support, which is how this declines instead of
-    // failing the editor -- the same contract every other feature here follows.
+    // Creates the feature. Returns null when the backend has no GPU support.
     static ActorPreview* create(rhi::IDevice& device, u32 width = 1024, u32 height = 0);
     ~ActorPreview() override;
 
     const char* name() const override { return "Aver.Render.ActorPreview"; }
 
-    // ---- the editor side ----
     void setDrawList(std::vector<PreviewDraw> draws) { draws_ = std::move(draws); }
     void setCamera(const PreviewCamera& c) { camera_ = c; }
     PreviewCamera& camera() { return camera_; }
-    // Frames the whole draw list. Called when a tab opens and when the model set changes, because an
-    // actor authored ten metres across and one authored ten centimetres across both have to arrive
-    // on screen without anybody scrolling.
+    // Points the camera at the whole draw list.
     void frameAll();
 
-    // The matrix the pass will use this frame. Exposed because a GIZMO has to project through the
-    // very same camera the picture was drawn with -- deriving it independently is how a handle ends
-    // up a few pixels off its object, and then a few more as the camera turns.
+    // The matrix the pass will use this frame, so a gizmo can project through the same camera.
     void viewProj(f32 out[16]) const { buildViewProj(out); }
 
     // The texture the panel draws. 0 before the first render.
@@ -107,32 +59,22 @@ public:
     u32 width() const { return width_; }
     u32 height() const { return height_; }
 
-    // Match the target to the panel it is drawn in.
-    //
-    // NOT PER FRAME, and the caller is responsible for that: destroying a texture the UI is sampling
-    // needs a waitIdle, and doing that on every frame of a splitter drag stalls the whole GPU once a
-    // frame. The editor debounces -- it asks only once a size has stopped changing -- which is what
-    // makes this affordable at all.
-    //
-    // It exists because the alternative is worse than a stall. A square target drawn in a wide panel
-    // letterboxes, and on a wide monitor that is most of the viewport spent on nothing; and the
-    // camera's aspect has to match the target or every actor is stretched.
-    //
-    // Returns false and keeps the old target if the new one could not be made, so a failure is a
-    // viewport that did not resize rather than a viewport that went black.
+    // Rebuilds the targets at a new size, keeping the old ones and returning false on failure.
+    // Costs a waitIdle, so the caller must debounce rather than call it per frame.
     bool resize(u32 width, u32 height);
 
     bool ready() const { return pipeline_ != 0; }
 
-    // ---- the frame ----
-    // prePass, not scenePass: this owns its targets and must run BEFORE the scene binds the
-    // backbuffer, or it would have to put back everything it changed.
+    // Draws the preview into its own targets, before the scene binds the backbuffer.
     void prePass(rhi::IRenderContext& ctx) override;
 
 private:
     ActorPreview() = default;
+    // Builds the targets, the shaders and the pipeline.
     bool init(rhi::IDevice& device, u32 width, u32 height);
+    // Creates a colour and depth target pair at a size.
     bool createTargets(u32 width, u32 height);
+    // Composes the orbit camera's view and projection.
     void buildViewProj(f32 out[16]) const;
 
     rhi::IDevice* device_ = nullptr;
@@ -143,16 +85,13 @@ private:
     rhi::ShaderHandle vs_ = 0, ps_ = 0;
     u64 uiTextureId_ = 0;
     u32 width_ = 0, height_ = 0;
-    // The colour target starts in ShaderResource because that is where every frame LEAVES it: the
-    // UI samples it after the pass. Tracking the state this way means the pass's first barrier is
-    // honest about where the resource actually is rather than about where it was created.
     bool everRendered_ = false;
 
     std::vector<PreviewDraw> draws_;
     PreviewCamera camera_{};
 };
 
-// The HLSL, exposed so a test can assert on what it declares rather than only on what it draws.
+// The preview's HLSL, appended to the shared prelude.
 const char* actorPreviewShaderSource();
 
 } // namespace aver::render::preview

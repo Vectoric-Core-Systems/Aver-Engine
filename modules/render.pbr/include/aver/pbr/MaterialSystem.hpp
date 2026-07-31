@@ -8,89 +8,73 @@
 #include <unordered_map>
 
 // The GPU residency of the material library: one binding set and one packed constant block per
-// material, plus the identity textures every unset slot falls back to.
-//
-// Part of Aver.Render.PBR.Materials, so it may name the GENERIC RHI and nothing below it. It is not
-// an rhi::IRenderFeature and never will be: a material is not a pass. A renderer asks this for the
-// set and the constants a draw needs and hands them to rhi::IDevice::setDrawBinding.
+// material, plus the identity textures every unset slot falls back to. Not an rhi::IRenderFeature —
+// a material is not a pass.
 namespace aver::pbr {
 
-// A material's SRV table is exactly the glTF metallic-roughness set, in TextureSlot order, so a
-// slot index IS its shader register offset and no separate mapping table can go stale.
+// A material's SRV table is the glTF metallic-roughness set in TextureSlot order, so a slot index
+// IS its shader register offset.
 inline constexpr u32 kMaterialSrvCount = kTextureSlotCount;
 static_assert(kMaterialSrvCount <= rhi::kMaxBindingSlots,
               "a material table must fit in one binding set");
 
+// Owns a binding set and a constant block per material, and keeps them current with the library.
 class MaterialSystem {
 public:
-    // A TextureRef is an authoring path or an opaque id, and resolving EITHER needs the asset
-    // system — which sits a tier above this target and must not be linked from it. So the host
-    // installs a resolver. Returning 0 means "not available", and the slot keeps its fallback,
-    // which is a complete and correct surface rather than a black one.
-    //
-    // The SLOT is passed because it is the only thing that says what the pixels MEAN, and nothing in
-    // an image file does: base colour and emissive are sRGB-encoded, metal-rough and occlusion are
-    // linear data, and a normal map is a vector field that must be filtered as one. A resolver given
-    // only the reference would have to guess, and guessing wrong is invisible — an sRGB-decoded
-    // roughness map is merely a bit shinier than intended, everywhere, forever.
-    //
-    // OWNERSHIP: the handle returned becomes this system's. It is destroyed at shutdown(), so a
-    // resolver must hand over a texture nothing else frees.
+    // Turns a texture reference into a GPU texture. The host installs it, because resolving either
+    // reference form needs the asset system. 0 means "not available" and the slot keeps its
+    // fallback. The slot is passed because only it says what the pixels MEAN (sRGB colour, linear
+    // data, a normal field). The handle returned becomes this system's and is destroyed at shutdown.
     using TextureResolver = rhi::TextureHandle (*)(const TextureRef& ref, TextureSlot slot, void* user);
 
-    // `tableBaseRegister` is the SRV count of the consuming pipeline's table 0, i.e. the register
-    // this table is based at. Carried on every set purely so the backend can catch a set bound at
-    // the wrong table index — see rhi::BindingSetDesc::srvBaseRegister.
+    // Creates the fallback textures and the fallback set. `tableBaseRegister` is the consuming
+    // pipeline's table-0 SRV count, carried on every set so the backend can catch a wrong table index.
     bool init(rhi::IDevice& device, u32 tableBaseRegister);
+    // Destroys every set, every cached texture and the fallbacks.
     void shutdown();
     bool ready() const { return res_ != nullptr; }
 
     void setTextureResolver(TextureResolver fn, void* user) { resolve_ = fn; resolveUser_ = user; }
 
-    // Drain MaterialLibrary::consumeDirty() and re-upload whatever changed. Once per frame, before
-    // any draw: a set rewritten mid-frame is a shader-visible descriptor an in-flight frame may
-    // still be reading.
+    // Drains MaterialLibrary::consumeDirty() and re-uploads whatever changed. Once per frame,
+    // before any draw.
     void update();
 
-    // The set and the block a draw of `h` binds. An unknown or stale handle gets the fallback
-    // material, because a draw with no valid material must still be a complete surface.
+    // The binding set a draw of `h` uses. An unknown or stale handle gets the fallback.
     rhi::BindingSetHandle bindingSet(MaterialHandle h);
+    // The constant block a draw of `h` uses. An unknown or stale handle gets the fallback.
     const MaterialConstants& constants(MaterialHandle h);
 
-    // The identity material: white base colour, flat normal, full roughness, no metal, no emission.
-    // This is what rhi::IDevice::setDefaultDrawBinding should be given, so a draw that names no
-    // material renders as an untextured surface rather than inheriting the previous draw's.
+    // The identity material's set: white base colour, flat normal, full roughness, no metal, no
+    // emission. This is what rhi::IDevice::setDefaultDrawBinding should be given.
     rhi::BindingSetHandle fallbackBindingSet() const { return fallbackSet_; }
     const MaterialConstants& fallbackConstants() const { return fallbackConstants_; }
 
     u32 textureCacheSize() const { return static_cast<u32>(cache_.size()); }
 
 private:
+    // One material's GPU residency.
     struct Entry {
         rhi::BindingSetHandle set = 0;
         MaterialConstants      constants{};
     };
 
+    // Creates the four 1x1 identity textures.
     bool createFallbackTextures();
-    // Fill EVERY slot: fallback where the material sets nothing. Never left to Tier 1 null-filling —
-    // a null descriptor gives a view of the right DIMENSION, so behaviour is defined, but it reads
-    // ZERO on most hardware and is nowhere contractually black. A material with no base-colour map
-    // would render black and one with no normal map would have N = (0,0,0), which normalize() turns
-    // into the NaN this project already has a TDR to its name for.
-    //
-    // Identity fallbacks also mean an untextured material is the SAME pipeline and the same
-    // branch-free shader as a fully textured one: no permutation, no dynamic branch.
+    // Writes every SRV of `set`, using the identity texture wherever the material sets nothing. A
+    // null descriptor reads zero on most hardware, which would give a black base colour and a
+    // zero-length normal that normalize() turns into NaN.
     void writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set);
+    // Resolves and caches one texture reference. 0 when there is no resolver or it declined.
     rhi::TextureHandle resolveTexture(const TextureRef& ref, TextureSlot slot);
+    // The entry for `h`, built on first use.
     Entry& entryFor(MaterialHandle h);
 
     rhi::IResourceFactory* res_ = nullptr;
     u32 tableBase_ = 0;
 
-    // 1x1, created BEFORE any material so no set can ever be built without them. The metal-rough
-    // one is (0,255,255,255) because glTF packs occlusion in R, roughness in G and metallic in B:
-    // that reads roughness 1 and metallic 1, both of which multiply through their factors
-    // unchanged, which is what makes "no map" and "factors only" the same code path.
+    // 1x1, created before any material. The metal-rough one is (0,255,255,255): glTF packs
+    // occlusion in R, roughness in G and metallic in B, so it reads roughness 1 and metallic 1.
     rhi::TextureHandle white_ = 0;       // base colour and occlusion
     rhi::TextureHandle flatNormal_ = 0;  // (128,128,255) — +Z in tangent space
     rhi::TextureHandle metalRough_ = 0;
@@ -100,8 +84,8 @@ private:
     MaterialConstants     fallbackConstants_{};
 
     std::unordered_map<MaterialHandle, Entry> entries_;
-    // Keyed by the REFERENCE, not by the resolved handle: two materials naming the same texture must
-    // share one upload, and the id and the path are two spellings of one key (id wins when set).
+    // Keyed by the reference, not the resolved handle, so two materials naming one texture share
+    // one upload. The id and the path are two spellings of one key; the id wins when set.
     std::unordered_map<std::string, rhi::TextureHandle> cache_;
 
     TextureResolver resolve_ = nullptr;

@@ -1,12 +1,4 @@
-// The actor preview, against a RECORDING DEVICE rather than a GPU.
-//
-// The preview is the piece of the actor editor that decides what an author SEES, and almost every
-// way it can be wrong is invisible in a still frame: a camera published at the wrong register works
-// until the next pipeline change; a transposed matrix puts every part in a plausible wrong place; a
-// missing barrier is a driver's problem to notice, not a picture's.
-//
-// Same shape as UiRenderTest, and possible for the same reason: this feature talks to the generic
-// RHI and never to a backend, so a test can be the device.
+// The actor preview, driven against a recording RHI device rather than a GPU.
 #include "aver/render/preview/ActorPreview.hpp"
 #include "aver/core/Log.hpp"
 
@@ -19,6 +11,7 @@ using namespace aver;
 
 static int g_failures = 0;
 
+// Records one assertion. Counts a failure and logs it when the condition is false.
 static void check(bool cond, const std::string& what) {
     if (cond) { AVER_INFO("  ok    {}", what); return; }
     ++g_failures;
@@ -27,6 +20,7 @@ static void check(bool cond, const std::string& what) {
 
 namespace {
 
+// Resource factory that records every descriptor it is handed and hands back sequential handles.
 struct MockFactory final : public rhi::IResourceFactory {
     std::vector<rhi::TextureDesc> textures;
     std::vector<rhi::ShaderDesc> shaders;
@@ -60,6 +54,7 @@ struct MockFactory final : public rhi::IResourceFactory {
     void waitIdle() override { ++waited; }
 };
 
+// One recorded render-context call: its kind, up to four scalars, and any constant payload.
 struct Call {
     enum class Kind { Pipeline, Viewport, Scissor, Targets, ClearDepth, Constants, ConstantBuffer,
                       DrawMesh, Barrier };
@@ -68,6 +63,7 @@ struct Call {
     std::vector<f32> payload;   // for Constants / ConstantBuffer
 };
 
+// Render context that records the call stream instead of submitting it.
 struct MockContext final : public rhi::IRenderContext {
     std::vector<Call> calls;
 
@@ -107,6 +103,7 @@ struct MockContext final : public rhi::IRenderContext {
     void uavBarrierTexture(rhi::TextureHandle) override {}
     void uavBarrierBuffer(rhi::BufferHandle) override {}
 
+    // Every recorded call of one kind, in order.
     std::vector<Call> ofKind(Call::Kind k) const {
         std::vector<Call> out;
         for (const Call& c : calls) if (c.kind == k) out.push_back(c);
@@ -115,6 +112,7 @@ struct MockContext final : public rhi::IRenderContext {
     usize count(Call::Kind k) const { return ofKind(k).size(); }
 };
 
+// Device that exposes the recording factory and hands out fresh UI texture ids.
 struct MockDevice final : public rhi::IDevice {
     MockFactory factory;
     u32 uiIds = 0;
@@ -127,7 +125,7 @@ struct MockDevice final : public rhi::IDevice {
     u64 uiTextureId(rhi::TextureHandle) override { return ++uiIds + 1000; }
 };
 
-// A device with no GPU support at all, to prove the feature declines rather than half-initialising.
+// Device with no resource factory at all, so the preview must decline.
 struct NullDevice final : public rhi::IDevice {
     rhi::Backend backend() const override { return rhi::Backend::Null; }
     const char* adapterName() const override { return "no gpu"; }
@@ -138,6 +136,7 @@ struct NullDevice final : public rhi::IDevice {
 
 } // namespace
 
+// Runs every actor preview check. Returns 1 if any failed.
 int main() {
     using namespace aver::render::preview;
 
@@ -157,8 +156,6 @@ int main() {
         const MockFactory& f = dev.factory;
         check(f.textures.size() == 2, "two targets: colour and depth");
         check(f.textures[0].width == 1024 && f.textures[0].height == 1024, "square, at the asked size");
-        // NOT sRGB: the pixel shader gamma-encodes itself, so an sRGB view would encode twice and
-        // wash the whole preview out -- which reads as "the preview lighting is wrong".
         check(f.textures[0].format == rhi::Format::RGBA8Unorm, "the colour target is UNORM, not sRGB");
         check(aver::rhi::any(f.textures[0].bind, rhi::ResourceBind::RenderTarget) &&
               aver::rhi::any(f.textures[0].bind, rhi::ResourceBind::ShaderResource),
@@ -176,9 +173,6 @@ int main() {
               "one target, matching what was created");
         check(gp.depthFormat == rhi::Format::D32Float, "and a depth format, or nothing would occlude");
 
-        // THE REGISTER DECISION, asserted rather than trusted. b0 is the engine's block and the
-        // backend rebinds it on every setPipeline, so a camera published there survives until the
-        // next pipeline change and then silently becomes the level's camera.
         check(gp.layout.constantDwords[rhi::kEngineFrameConstantRegister] == 0,
               "slot 0 is left to the BACKEND -- a feature must never observe b0 unbound");
         check(gp.layout.constantDwords[rhi::kFeatureFrameConstantRegister] == 0,
@@ -187,13 +181,11 @@ int main() {
               "and b1 declares exactly the per-draw block the shared prelude does");
 
         check(f.shaders.size() == 2, "a vertex and a pixel shader");
-        // Compiled as the TAIL of the shared prelude, so VSIn and the b0/b1 layouts have one owner.
         check(f.shaders[0].prelude != nullptr, "compiled against the shared prelude");
         const std::string hlsl = actorPreviewShaderSource();
         check(hlsl.find("register(b4)") != std::string::npos, "the camera cbuffer is at b4");
         check(hlsl.find("register(b0)") == std::string::npos,
               "and the preview declares nothing at b0");
-        // averSkyAbove reads the sky out of b0, so a b4 preview cannot use it and must not pretend to.
         check(hlsl.find("averSkyAbove") == std::string::npos,
               "it writes its own backdrop rather than sampling a sky it cannot reach");
 
@@ -206,8 +198,6 @@ int main() {
         MockContext ctx;
         p->setDrawList({});
         p->prePass(ctx);
-        // The pass still runs: it CLEARS. A preview that skipped the pass when the list was empty
-        // would leave the last actor's image on screen after you deleted its models.
         check(ctx.count(Call::Kind::DrawMesh) == 0, "nothing is drawn");
         check(ctx.count(Call::Kind::ClearDepth) == 1, "but the depth target is still cleared");
         check(ctx.count(Call::Kind::Targets) == 1, "and the targets are still bound");
@@ -225,9 +215,6 @@ int main() {
             draws.push_back(d);
         }
         draws[1].selected = true;
-        // An unresolved mesh: the row parsed, but nothing registered that path. It must draw NOTHING
-        // rather than a fallback cube, because a fallback shape in a preview reads as the actor
-        // actually having a cube in it.
         PreviewDraw missing;
         missing.mesh = 0;
         draws.push_back(missing);
@@ -241,14 +228,9 @@ int main() {
 
         const std::vector<Call> vp = ctx.ofKind(Call::Kind::Viewport);
         check(vp.size() == 1 && vp[0].c == 1024 && vp[0].d == 1024, "the viewport is the whole target");
-        // Set explicitly, not inherited: the editor leaves the scissor on its dock rect, which would
-        // silently clip this pass to wherever the 3D view happens to sit.
         const std::vector<Call> sc = ctx.ofKind(Call::Kind::Scissor);
         check(sc.size() == 1 && sc[0].c == 1024, "and the scissor is set rather than inherited");
 
-        // The per-draw block: the world matrix arrives with the translation in the LAST ROW. A
-        // transposed matrix would put every part in a plausible wrong place, and the picture would
-        // still look like an actor.
         const std::vector<Call> obj = ctx.ofKind(Call::Kind::Constants);
         check(obj.size() == 3, "one per-draw block per drawn mesh");
         if (obj.size() == 3) {
@@ -258,7 +240,6 @@ int main() {
                   "the translation is in row 3, per the engine's row-vector convention");
         }
 
-        // The camera block, republished per draw so the selection flag can change with it.
         const std::vector<Call> cam = ctx.ofKind(Call::Kind::ConstantBuffer);
         check(cam.size() == 3, "the camera block is published per draw");
         check(cam[0].a == rhi::kFeatureFrameConstantRegister, "at b4");
@@ -269,8 +250,6 @@ int main() {
             check(cam[2].payload[27] == 0.0f, "and it does not leak onto the next draw");
         }
 
-        // The barriers bracket the pass. Without the closing one the UI samples a render target,
-        // which is undefined and which no picture would show as wrong.
         const std::vector<Call> bar = ctx.ofKind(Call::Kind::Barrier);
         check(bar.size() == 2, "exactly two barriers: in and out");
         if (bar.size() == 2) {
@@ -287,46 +266,32 @@ int main() {
         PreviewCamera c;
         c.pitchDeg = 80.0f;
         c.addOrbit(0.0f, 40.0f);
-        // Short of the pole, where the up vector flips and the view rolls over with no hysteresis.
         check(c.pitchDeg <= 85.0f, "pitch is clamped short of the pole");
         c.addOrbit(0.0f, -400.0f);
         check(c.pitchDeg >= -85.0f, "at both ends");
 
-        // Multiplicative zoom, so a wheel notch moves the same PROPORTION at every scale: a step that
-        // frames a 5 cm bolt would otherwise put a 20 m vehicle in the next county.
         c.distance = 1000.0f;
         c.addZoom(0.5f);
         check(c.distance == 500.0f, "zoom is proportional");
         c.addZoom(0.0001f);
         check(c.distance >= 5.0f, "and clamped so it cannot reach the pivot");
 
-        // ---- pan ----
-        //
-        // Checked by PROPERTY rather than against hand-computed numbers, because the failure mode here
-        // is a mirrored or transposed basis, and those produce perfectly plausible-looking values. A
-        // pan that moved the pivot the wrong way would read as "the mouse is inverted", which people
-        // blame on themselves.
         {
             PreviewCamera p;
             p.yawDeg = 0.0f; p.pitchDeg = 0.0f; p.distance = 400.0f; p.fovDeg = 45.0f;
             p.pivot[0] = p.pivot[1] = p.pivot[2] = 0.0f;
 
-            // At yaw 0 the camera looks along +X, so its right is +Y. Dragging the cursor RIGHT must
-            // move the pivot towards -Y, because the scene follows the cursor.
             p.panPixels(100.0f, 0.0f, 1000.0f);
             check(p.pivot[1] < -1.0f, "drag right pans the pivot along -Y (scene follows the cursor)");
             check(std::fabs(p.pivot[2]) < 1e-3f, "a horizontal drag does not change height");
             check(std::fabs(p.pivot[0]) < 1e-3f, "and does not move along the view axis");
 
-            // Dragging DOWN must raise the pivot, for the same reason: screen +Y is down.
             PreviewCamera q;
             q.yawDeg = 0.0f; q.pitchDeg = 0.0f; q.distance = 400.0f; q.fovDeg = 45.0f;
             q.pivot[0] = q.pivot[1] = q.pivot[2] = 0.0f;
             q.panPixels(0.0f, 100.0f, 1000.0f);
             check(q.pivot[2] > 1.0f, "drag down pans the pivot UP (+Z), the engine's up axis");
 
-            // Scale must follow the orbit distance: a pan at 10x the distance covers 10x the world, or
-            // panning a large actor takes a hundred drags and panning a small one overshoots.
             PreviewCamera near_ = q, far_ = q;
             near_.pivot[2] = far_.pivot[2] = 0.0f;
             near_.distance = 100.0f; far_.distance = 1000.0f;
@@ -335,15 +300,12 @@ int main() {
             check(far_.pivot[2] > near_.pivot[2] * 9.0f,
                   "pan distance scales with the orbit distance");
 
-            // A degenerate viewport must be ignored rather than divided by.
             PreviewCamera z = q;
             const f32 before = z.pivot[2];
             z.panPixels(50.0f, 50.0f, 0.0f);
             check(z.pivot[2] == before, "a zero-height viewport pans nothing instead of dividing by it");
         }
 
-        // frameAll sizes to the placements, so an actor authored in centimetres and one authored in
-        // metres both arrive on screen without anybody scrolling.
         std::vector<PreviewDraw> wide;
         for (int i = 0; i < 2; ++i) {
             PreviewDraw d; d.mesh = 1;
@@ -360,11 +322,6 @@ int main() {
         check(p->camera().distance > 0.0f, "framing an empty list does not divide by zero");
     }
 
-    // ---- RESIZE, which juggles live GPU resources -------------------------------------------
-    //
-    // Every assertion here is about a use-after-free that no validation layer catches: the UI holds
-    // a descriptor for the colour target and samples it in a frame that may still be in flight, so
-    // the ORDER of drain, create, destroy and re-fetch is the whole correctness of this function.
     AVER_INFO("=== resize ===");
     {
         const u32 texBefore     = static_cast<u32>(dev.factory.textures.size());
@@ -377,12 +334,8 @@ int main() {
         check(dev.factory.waited > waitedBefore, "the GPU is DRAINED first -- the UI may still be sampling");
         check(dev.factory.textures.size() == texBefore + 2, "a new colour and depth pair is created");
         check(dev.factory.destroyedTextures == destroyBefore + 2, "and the old pair is released");
-        // A new texture is a new descriptor. Keeping the old id would leave ImGui sampling a
-        // destroyed resource -- the exact bug the drain above exists to prevent, one line later.
         check(p->uiTextureId() != idBefore, "the UI texture id is RE-FETCHED, not carried over");
 
-        // Non-square is the point of the change: a square target in a wide panel letterboxes, and
-        // the projection has to follow the target or every actor is stretched.
         const std::vector<rhi::TextureDesc>& tx = dev.factory.textures;
         check(tx[tx.size()-2].width == 1600 && tx[tx.size()-2].height == 900,
               "the new colour target is NON-SQUARE, at the asked size");
@@ -394,9 +347,6 @@ int main() {
         check(vp2.size() == 1 && vp2[0].c == 1600 && vp2[0].d == 900,
               "and the pass's viewport follows the new target rather than the old one");
 
-        // Idempotence matters: the editor calls this from a debounce that can fire with an unchanged
-        // size, and a resize that destroyed and recreated on every such call would stall the GPU for
-        // no reason at all.
         const u32 waitedIdem = dev.factory.waited;
         check(p->resize(1600, 900), "resizing to the SAME size succeeds");
         check(dev.factory.waited == waitedIdem, "and does nothing at all -- no drain, no reallocation");
@@ -409,8 +359,6 @@ int main() {
     {
         const u32 waitedBefore = dev.factory.waited;
         delete p;
-        // waitIdle BEFORE destroying a texture the UI could still be sampling. The validation layer
-        // does not catch this one; it is a use-after-free in somebody else's draw list.
         check(dev.factory.waited > waitedBefore, "the GPU is drained before the targets go");
         check(dev.factory.destroyedTextures >= 2, "and both targets are released");
     }

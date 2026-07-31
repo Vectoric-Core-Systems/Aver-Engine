@@ -1,5 +1,5 @@
 // The atmosphere model declared in Atmosphere.hpp. Mirrored, function for function, by the HLSL in
-// RHIShaders.cpp; the derivations and the accuracy budget are in docs/rendering/ATMOSPHERE.md.
+// RHIShaders.cpp.
 #include "aver/rhi/Atmosphere.hpp"
 
 #include <cmath>
@@ -13,17 +13,17 @@ constexpr f32 kPi = 3.14159265358979f;
 f32 clampf(f32 v, f32 lo, f32 hi) { return v < lo ? lo : (v > hi ? hi : v); }
 f32 sat(f32 v) { return clampf(v, 0.0f, 1.0f); }
 
-// sin of an angle given its cosine, guarded against a cosine that drifted outside [-1,1].
+// sin of an angle given its cosine, guarded against a cosine outside [-1,1].
 f32 sinFromCos(f32 c) { return std::sqrt(sat(1.0f - c * c)); }
 
-// Ozone lives in a tent centred on ozoneCentreKm; this is its unit-peak density at an altitude.
+// Unit-peak density of the ozone tent at an altitude.
 f32 ozoneDensity(const AtmosphereProfile& a, f32 altKm) {
     const f32 w = a.ozoneWidthKm > 1e-4f ? a.ozoneWidthKm : 1e-4f;
     const f32 d = std::fabs(altKm - a.ozoneCentreKm) / w;
     return d < 1.0f ? 1.0f - d : 0.0f;
 }
 
-// Vertical column of that tent from `altKm` upward, in kilometres. Piecewise-quadratic and exact.
+// Vertical column of that tent from `altKm` upward, in kilometres.
 f32 ozoneColumnAbove(const AtmosphereProfile& a, f32 altKm) {
     const f32 w = a.ozoneWidthKm > 1e-4f ? a.ozoneWidthKm : 1e-4f;
     const f32 c = a.ozoneCentreKm;
@@ -33,22 +33,20 @@ f32 ozoneColumnAbove(const AtmosphereProfile& a, f32 altKm) {
     return w;
 }
 
-// Slant factor for a thin shell at the ozone centre. The tent has no Chapman form, so the layer is
-// treated as a shell and the divergence at tangency is capped by the chord a ray really travels.
+// Slant factor for the ozone layer treated as a thin shell, capped at tangency.
 f32 ozoneAirmass(const AtmosphereProfile& a, f32 rKm, f32 cosZenith) {
     const f32 w  = a.ozoneWidthKm > 1e-4f ? a.ozoneWidthKm : 1e-4f;
     const f32 ro = a.planetRadiusKm + a.ozoneCentreKm;
     const f32 s  = rKm * sinFromCos(cosZenith) / ro;
     const f32 maxAir = 1.2f * std::sqrt(2.0f * ro * w) / w;
     const f32 capped = clampf(1.0f / std::sqrt(1.0f - clampf(s * s, 0.0f, 0.999999f)), 1.0f, maxAir);
-    // Downward and still escaping crosses the layer twice: the shape Chapman uses, applied here too.
     return cosZenith >= 0.0f ? capped : 2.0f * maxAir - capped;
 }
 
+// Rayleigh phase function.
 f32 phaseRayleigh(f32 cosTheta) { return 3.0f / (16.0f * kPi) * (1.0f + cosTheta * cosTheta); }
 
-// Cornette-Shanks: Henyey-Greenstein's forward lobe with the symmetry that keeps a Mie backscatter
-// from collapsing to nothing, which is what makes the sky opposite the sun still read as air.
+// Cornette-Shanks Mie phase function.
 f32 phaseMie(f32 cosTheta, f32 g) {
     const f32 g2 = g * g;
     const f32 denom = 1.0f + g2 - 2.0f * g * cosTheta;
@@ -69,6 +67,7 @@ f32 raySphere(f32 r0, f32 cosZenith, f32 rad, bool wantNear) {
 
 } // namespace
 
+// exp(y*y) * erfc(y) for y >= 0, from Numerical Recipes' Chebyshev fit.
 f32 atmoErfcx(f32 y) {
     const f32 z = y > 0.0f ? y : 0.0f;
     const f32 t = 2.0f / (2.0f + z);
@@ -78,18 +77,17 @@ f32 atmoErfcx(f32 y) {
     return t * std::exp(p);
 }
 
+// Chapman airmass: the slant column as a multiple of the vertical column at the same altitude.
 f32 atmoChapman(f32 xr, f32 cosZenith) {
     const f32 half = std::sqrt(xr * 0.5f);
     const f32 up   = std::sqrt(kPi * xr * 0.5f);
     if (cosZenith >= 0.0f) return up * atmoErfcx(cosZenith * half);
-    // Below the local horizon but still escaping: reflected about the tangent point. The exponential
-    // is bounded because the caller only reaches this branch when the ray misses the planet, which
-    // caps xr*(1-sinChi) at the altitude measured in scale heights.
     const f32 sinChi = sinFromCos(cosZenith);
     return 2.0f * std::sqrt(kPi * xr * sinChi * 0.5f) * std::exp(xr * (1.0f - sinChi)) -
            up * atmoErfcx(-cosZenith * half);
 }
 
+// Per-channel optical depth from an altitude out to space. Sets `hitsGround` when the planet blocks.
 void atmoOpticalDepthToSpace(const AtmosphereProfile& a, f32 altitudeKm, f32 cosZenith,
                              f32 outTau[3], bool* hitsGround) {
     const f32 z = altitudeKm > 0.0f ? altitudeKm : 0.0f;
@@ -108,14 +106,13 @@ void atmoOpticalDepthToSpace(const AtmosphereProfile& a, f32 altitudeKm, f32 cos
         outTau[i] = a.rayleighScatter[i] * colR + a.mieExtinction * colM + a.ozoneAbsorb[i] * colO;
 }
 
+// What the air leaves of the sun at an altitude. Zero in the planet's shadow, softened across the
+// sun's own angular radius.
 void atmoSunTransmittance(const AtmosphereProfile& a, f32 altitudeKm, f32 sunCosZenith,
                           f32 sunAngularRadiusRad, f32 outT[3]) {
     const f32 z = altitudeKm > 0.0f ? altitudeKm : 0.0f;
     const f32 ratio = a.planetRadiusKm / (a.planetRadiusKm + z);
-    // How far below level the sun still clears the planet, which is not zero once you have altitude.
     const f32 cosHorizon = -std::sqrt(sat(1.0f - ratio * ratio));
-    // Softened across the sun's own angular radius rather than switched: a point sun puts a hard
-    // edge on every marched ray and the terminator then bands.
     const f32 halfWidth = std::sin(sunAngularRadiusRad) + 1e-5f;
     const f32 c = sat((sunCosZenith - (cosHorizon - halfWidth)) / (2.0f * halfWidth));
     const f32 shadow = c * c * (3.0f - 2.0f * c);
@@ -126,6 +123,7 @@ void atmoSunTransmittance(const AtmosphereProfile& a, f32 altitudeKm, f32 sunCos
     for (int i = 0; i < 3; ++i) outT[i] = std::exp(-tau[i]) * shadow;
 }
 
+// The scattering integral along one bounded segment: in-scattered radiance and transmittance out.
 void atmoScatterSegment(const AtmosphereProfile& a, f32 r0,
                         f32 viewCosZenith, f32 sunCosZenith, f32 cosViewSun,
                         f32 spanKm, i32 steps, const f32 sunIrradiance[3], f32 sunAngularRadiusRad,
@@ -138,27 +136,7 @@ void atmoScatterSegment(const AtmosphereProfile& a, f32 r0,
     const f32 pR = phaseRayleigh(cosViewSun);
     const f32 pM = phaseMie(cosViewSun, a.miePhaseG);
 
-    // The multiple-scattering term below is sigma_s times a SPECTRALLY FLAT field, and that is a
-    // measured choice rather than a lazy one.
-    //
-    // Second-order scattering formally goes as sigma_s squared, so shaping the field by the column's
-    // own scattering optical depth looks more principled. It was tried and it is wrong here: it puts
-    // the zenith at a blue/red radiance ratio of 7.2 where a real clear zenith is 2.9 to 4, and it
-    // needs the gain at 3.7 to still carry the right fill light. Flat lands the ratio at 3.7 AND the
-    // fill light at a gain of 1.7. Two independent measurements agree on flat; AtmosphereTest holds
-    // both, so this cannot be quietly "improved" back.
-    //
-    // The reason is saturation: blue is optically thick, so its multiply-scattered field does not
-    // keep growing with sigma_s the way a thin-medium argument says it should.
-
-    // WHERE THE SAMPLES GO, which at these step counts matters more than how many there are.
-    //
-    // Density falls exponentially with altitude, so uniform steps spend most of their samples where
-    // there is nothing and skip the part that carries the light. How badly depends on the ray: a
-    // vertical one climbs a scale height in 8 km, a horizontal one takes 300, and at 32 uniform
-    // steps the vertical case was 7% off its own converged answer while the horizontal one was fine.
-    // Sampling t as u^p with p = 1 + |cos| interpolates between the two: uniform along the horizon,
-    // quadratic straight up.
+    // Samples are placed as u^p with p = 1 + |cos|: uniform along the horizon, quadratic straight up.
     const f32 p = 1.0f + std::fabs(viewCosZenith);
 
     for (i32 i = 0; i < n; ++i) {
@@ -170,8 +148,6 @@ void atmoScatterSegment(const AtmosphereProfile& a, f32 r0,
 
         const f32 r = std::sqrt(r0 * r0 + 2.0f * r0 * viewCosZenith * t + t * t);
         const f32 alt = r - a.planetRadiusKm > 0.0f ? r - a.planetRadiusKm : 0.0f;
-        // The sun's zenith angle where the sample IS, from the two cosines at the viewer: the
-        // sample's up is P/|P|, and P is the viewer plus t along the view ray.
         const f32 sunCosHere = (r0 * sunCosZenith + t * cosViewSun) / (r > 1e-4f ? r : 1e-4f);
 
         const f32 dR = std::exp(-alt / a.rayleighScaleKm);
@@ -185,7 +161,6 @@ void atmoScatterSegment(const AtmosphereProfile& a, f32 r0,
             const f32 scatR = a.rayleighScatter[c] * dR;
             const f32 scatM = a.mieScatter * dM;
             const f32 ext = scatR + a.mieExtinction * dM + a.ozoneAbsorb[c] * dO;
-            // Single scattering, plus one isotropic term standing in for every further bounce.
             const f32 source = ((scatR * pR + scatM * pM) +
                                 (scatR + scatM) * a.multiScatterGain / (4.0f * kPi)) *
                                sunT[c] * sunIrradiance[c];
@@ -197,6 +172,7 @@ void atmoScatterSegment(const AtmosphereProfile& a, f32 r0,
     }
 }
 
+// Sky radiance along one view ray, with the lit ground added when the ray hits the planet.
 void atmoSkyRadiance(const AtmosphereProfile& a, f32 altitudeKm,
                      f32 viewCosZenith, f32 sunCosZenith, f32 cosViewSun,
                      const f32 sunIrradiance[3], f32 sunAngularRadiusRad, f32 outRgb[3]) {
@@ -216,13 +192,7 @@ void atmoSkyRadiance(const AtmosphereProfile& a, f32 altitudeKm,
                        sunIrradiance, sunAngularRadiusRad, outRgb, transmit);
     if (!hitsGround) return;
 
-    // The lit ground closes the ray, so looking down is the planet seen through its own air rather
-    // than a hole in the dome.
-    //
-    // THE SHADER'S averSkyPhysical DELIBERATELY DOES NOT DO THIS, and the difference is not a
-    // divergence to repair. This is the model on its own, which is what atmoFitDome samples and
-    // what AtmosphereTest checks. The shader draws into a scene that brings its OWN ground, so a
-    // second horizon from this sphere would float above the floor as a hard-edged false one.
+    // The shader's averSkyPhysical deliberately omits this ground term; the scene brings its own.
     const f32 sunCosGround = clampf((r0 * sunCosZenith + tMax * cosViewSun) / a.planetRadiusKm, -1.0f, 1.0f);
     f32 groundT[3];
     atmoSunTransmittance(a, 0.0f, sunCosGround, sunAngularRadiusRad, groundT);
@@ -231,6 +201,7 @@ void atmoSkyRadiance(const AtmosphereProfile& a, f32 altitudeKm,
         outRgb[c] += transmit[c] * a.groundAlbedo / kPi * sunIrradiance[c] * groundT[c] * ndl;
 }
 
+// Aerial perspective: the same integral bounded by a surface `distanceKm` away.
 void atmoAerialPerspective(const AtmosphereProfile& a, f32 altitudeKm,
                            f32 viewCosZenith, f32 sunCosZenith, f32 cosViewSun, f32 distanceKm,
                            const f32 sunIrradiance[3], f32 sunAngularRadiusRad,
@@ -240,12 +211,12 @@ void atmoAerialPerspective(const AtmosphereProfile& a, f32 altitudeKm,
                        sunIrradiance, sunAngularRadiusRad, outInscatter, outTransmittance);
 }
 
+// Fits the two-colour dome and its exponent to the model at this sun elevation.
 void atmoFitDome(const AtmosphereProfile& a, f32 altitudeKm, f32 sunCosZenith,
                  const f32 sunIrradiance[3], f32 sunAngularRadiusRad, AtmosphereDome& out) {
     const f32 sunSin = sinFromCos(sunCosZenith);
 
-    // Averaged over four azimuths, because a two-colour dome has no azimuth and the sunward horizon
-    // differs from the one opposite it by more than the horizon differs from the zenith.
+    // Sky radiance at one view elevation, averaged over four azimuths.
     auto ring = [&](f32 viewCos, f32 rgb[3]) {
         const f32 viewSin = sinFromCos(viewCos);
         const f32 axial = sunCosZenith * viewCos;
@@ -265,17 +236,7 @@ void atmoFitDome(const AtmosphereProfile& a, f32 altitudeKm, f32 sunCosZenith,
 
     auto lum = [](const f32 c[3]) { return 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2]; };
 
-    // The exponent is chosen so the dome delivers the RIGHT AMOUNT OF FILL LIGHT, not so it passes
-    // through one more sample of the sky.
-    //
-    // Matching a 45-degree sample was the obvious thing and it was wrong: with the sun high the
-    // forward-scattered ring is brighter than both anchors, so no power curve passes through all
-    // three and the fit falls back. Sweeping the sun then walked the exponent 0.22 -> 2.46
-    // non-monotonically, and since this same curve is what every ambient and every environment
-    // reflection reads, the fill light would visibly breathe as the sun moved.
-    //
-    // Cosine-weighted hemispherical irradiance is monotone in k, has a closed form, and is the one
-    // property the dome exists to carry. E/pi for an up-facing surface is 2 * integral of L(z)*z.
+    // The exponent is fitted to cosine-weighted hemispherical irradiance, which is monotone in k.
     f32 modelE = 0.0f;
     const int kBands = 8;
     for (int i = 0; i < kBands; ++i) {
@@ -285,8 +246,7 @@ void atmoFitDome(const AtmosphereProfile& a, f32 altitudeKm, f32 sunCosZenith,
         modelE += 2.0f * lum(band) * z / static_cast<f32>(kBands);
     }
 
-    // I(k) = 2 * integral over z in [0,1] of ((1+z)/2)^k * z, in closed form. It falls from 1 at
-    // k = 0 (a dome that is all zenith colour) toward 0, so a bisection cannot miss.
+    // I(k) = 2 * integral over z in [0,1] of ((1+z)/2)^k * z, in closed form.
     auto domeI = [](f32 k) {
         const f32 hp = std::pow(0.5f, k + 1.0f);
         return 4.0f * (2.0f / (k + 2.0f) - 1.0f / (k + 1.0f) - hp / (k + 2.0f) + hp / (k + 1.0f));

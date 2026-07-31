@@ -1,3 +1,6 @@
+// Engine-side scaffolding: finds the engine source tree, lists its modules, and writes new C++
+// module and class skeletons into modules/.
+
 #include "EngineScaffold.hpp"
 #include "ProjectScaffold.hpp"
 
@@ -10,17 +13,14 @@
 namespace aver::editor {
 namespace {
 
-// "voxi" -> "Voxi". Only the first character: the folder names are single lowercase words per
-// dot-segment, and forcing the tail lowercase would turn a future "d3d12" into "D3d12".
+// Upper-cases the first character only. "voxi" -> "Voxi".
 std::string capitalise(const std::string& s) {
     std::string out = s;
     if (!out.empty() && out[0] >= 'a' && out[0] <= 'z') out[0] = static_cast<char>(out[0] - 'a' + 'A');
     return out;
 }
 
-// The namespace the files in `dir` open, e.g. "aver::voxi". Read rather than derived: the modules
-// do not all agree (`formats` is `aver::fmt`, `assets` is plain `aver`, `rhi.d3d12` is `aver::rhi`),
-// and a generated file that invents its own namespace would not link against the module it sits in.
+// Reads the namespace the files in `dir` open, e.g. "aver::voxi". Empty if none found.
 std::string namespaceIn(const std::filesystem::path& dir, const char* ext) {
     std::error_code ec;
     if (!std::filesystem::is_directory(dir, ec)) return {};
@@ -38,8 +38,6 @@ std::string namespaceIn(const std::filesystem::path& dir, const char* ext) {
             const usize brace = line.find('{');
             std::string ns = line.substr(10, (brace == std::string::npos ? line.size() : brace) - 10);
             while (!ns.empty() && (ns.back() == ' ' || ns.back() == '\r' || ns.back() == '\t')) ns.pop_back();
-            // `namespace aver::detail` is an implementation nook, not the module's public
-            // namespace, so it is not what a new public class should be dropped into.
             if (ns.find("detail") != std::string::npos) continue;
             return ns;
         }
@@ -57,14 +55,14 @@ std::string includeSubOf(const std::filesystem::path& moduleDir) {
     return {};
 }
 
-// Headers first, then sources: a module that publishes an include/ is describing its public
-// namespace there, and `rhi.d3d12` — which has no include/ at all — only says `aver::rhi` in a .cpp.
+// The namespace a module opens, taken from its headers first and its sources second.
 std::string namespaceOf(const std::filesystem::path& moduleDir, const std::string& includeSub) {
     std::string ns = namespaceIn(moduleDir / "include" / "aver" / includeSub, ".hpp");
     if (ns.empty()) ns = namespaceIn(moduleDir / "src", ".cpp");
     return ns;
 }
 
+// Builds the CMakeLists.txt text for a new module.
 std::string cmakeText(const std::string& target, const std::string& leafClass) {
     std::string s;
     s += "aver_add_module(" + target + "\n";
@@ -76,6 +74,7 @@ std::string cmakeText(const std::string& target, const std::string& leafClass) {
     return s;
 }
 
+// Builds the README.md text for a new module.
 std::string readmeText(const std::string& dir, const std::string& target,
                        const std::string& purpose) {
     std::string s;
@@ -91,6 +90,7 @@ std::string readmeText(const std::string& dir, const std::string& target,
     return s;
 }
 
+// Builds the .hpp text for a new engine class.
 std::string headerText(const std::string& cls, const std::string& ns, const std::string& target,
                        const char* origin) {
     std::string s;
@@ -118,6 +118,7 @@ std::string headerText(const std::string& cls, const std::string& ns, const std:
     return s;
 }
 
+// Builds the .cpp text for a new engine class.
 std::string sourceText(const std::string& cls, const std::string& ns, const std::string& includeSub) {
     std::string s;
     s += "#include \"aver/" + includeSub + "/" + cls + ".hpp\"\n";
@@ -141,11 +142,13 @@ std::string sourceText(const std::string& cls, const std::string& ns, const std:
 
 } // namespace
 
+// The last dot-segment of a module folder name. "render.voxi" -> "voxi".
 std::string moduleLeaf(const std::string& dir) {
     const usize dot = dir.find_last_of('.');
     return dot == std::string::npos ? dir : dir.substr(dot + 1);
 }
 
+// The CMake target name for a module folder. "render.voxi" -> "Aver.Render.Voxi".
 std::string moduleTargetName(const std::string& dir) {
     std::string out = "Aver";
     usize pos = 0;
@@ -158,15 +161,12 @@ std::string moduleTargetName(const std::string& dir) {
     return out;
 }
 
+// The engine source tree found by walking up from the executable. Empty if not found. Cached.
 std::string engineRoot() {
-    // Cached: the Tools menu asks every frame it is open to decide the C++ items' enabled state,
-    // and the answer is a property of where the executable sits, which does not change.
     static const std::string cached = [] {
         std::error_code ec;
         std::filesystem::path probe = std::filesystem::path(executableDir());
         for (int up = 0; up < 8 && !probe.empty(); ++up) {
-            // Both markers, not just modules/: a project folder could plausibly hold a "modules"
-            // directory, and writing an engine module into someone's game would be silent damage.
             if (std::filesystem::exists(probe / "cmake" / "AvModule.cmake", ec) &&
                 std::filesystem::is_directory(probe / "modules", ec))
                 return probe.string();
@@ -178,6 +178,7 @@ std::string engineRoot() {
     return cached;
 }
 
+// Every folder under modules/, with its namespace and include subfolder, sorted by folder name.
 std::vector<ModuleInfo> listModules() {
     std::vector<ModuleInfo> out;
     const std::string root = engineRoot();
@@ -199,6 +200,7 @@ std::vector<ModuleInfo> listModules() {
     return out;
 }
 
+// Checks a module folder name. Returns false and fills `err` with the reason.
 bool validateModuleName(const std::string& name, std::string* err) {
     auto fail = [&](const char* m) { if (err) *err = m; return false; };
     if (name.empty()) return fail("Enter a module name.");
@@ -216,6 +218,7 @@ bool validateModuleName(const std::string& name, std::string* err) {
     return true;
 }
 
+// Writes a new modules/<name>/ skeleton: CMakeLists, README and one class pair. False on failure.
 bool createCppModule(const std::string& name, const std::string& purpose,
                      std::vector<std::string>* outFiles, std::string* err) {
     if (!validateModuleName(name, err)) return false;
@@ -240,9 +243,6 @@ bool createCppModule(const std::string& name, const std::string& purpose,
         if (!createDirectories(d)) { if (err) *err = "Could not create " + d; return false; }
     }
 
-    // `aver_add_module` calls `add_library(<t> STATIC <sources>)`, which is an error with an empty
-    // source list — so the skeleton ships one compilable pair rather than a CMakeLists that fails
-    // to configure the moment someone wires it in.
     const struct { std::string path, text; } files[] = {
         { dir + "\\CMakeLists.txt", cmakeText(target, cls) },
         { dir + "\\README.md",      readmeText(name, target, purpose) },
@@ -258,6 +258,7 @@ bool createCppModule(const std::string& name, const std::string& purpose,
     return true;
 }
 
+// Writes a .hpp/.cpp pair into an existing module and reports the CMake SOURCES line to add.
 bool createCppClass(const ModuleInfo& mod, const std::string& name,
                     std::vector<std::string>* outFiles, std::string* outSourceLine,
                     std::string* err) {
@@ -278,8 +279,6 @@ bool createCppClass(const ModuleInfo& mod, const std::string& name,
 
     const std::string hpp = includeDir + "\\" + name + ".hpp";
     const std::string cpp = srcDir + "\\" + name + ".cpp";
-    // Both checked before either is written: half a class is worse than none, and the pair is
-    // what makes the CMake line the caller is told to add correct.
     if (fileExists(hpp)) { if (err) *err = name + ".hpp already exists in " + mod.dir + "."; return false; }
     if (fileExists(cpp)) { if (err) *err = name + ".cpp already exists in " + mod.dir + "."; return false; }
 

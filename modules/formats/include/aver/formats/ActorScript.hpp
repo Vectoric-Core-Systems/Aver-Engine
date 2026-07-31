@@ -1,37 +1,6 @@
 #pragma once
-// The actor designer's half of a `.Designer.cs`: reading the model rows out, and writing dragged
-// coordinates back in.
-//
-// This is what an actor editor's viewport DRAWS and what its gizmo SAVES.
-//
-// TWO BACKENDS, and which one runs is a choice rather than a compromise:
-//
-//   Builtin -- the scanner below. No dependency, always present, and sufficient BY CONSTRUCTION:
-//     docs/DESIGNER_REWRITE.md locks the placement statement to one exact token sequence and makes
-//     the three coordinate tuples the only rewritable payload, precisely so that reading and
-//     rewriting a designer-owned region needs no compiler. A designer-owned region is a region whose
-//     shape the designer chose.
-//
-//   Roslyn -- the `averdesign` tool (BUILT: scripting/csharp/Aver.Design, staged to bin/Tools, and
-//     invoked from Aver.Formats.Roslyn, which is a module above this one precisely so that this one
-//     keeps its no-dependency, no-process guarantee). It parses real C#, so it survives everything
-//     the locked grammar forbids: a named argument moved, an argument omitted, a coordinate written
-//     as an expression rather than a literal, a `#if` around a placement. The moment somebody hand
-//     edits inside the region -- which the header of every generated file tells them not to do, and
-//     which people will do -- the scanner declines and this does not.
-//
-// The scanner is tried first because it needs nothing and answers instantly. Roslyn is the fallback
-// for a file it declines, and the escalation is automatic: `Malformed` is exactly the signal that
-// the text has left the grammar the scanner was built for.
-//
-// So a machine with no .NET tooling still opens every conforming actor, and a machine with it opens
-// the rest too. Neither is a degraded mode; they cover different files.
-//
-// WHAT IT WILL NOT TOUCH, and the rules are the file format's, not this header's:
-//   - anything outside the two `// <aver-generated region="models" schema="1">` marker lines
-//   - the marker lines themselves, the usings, the namespace, the class header
-//   - the hand-written half of the actor (Car.cs), which the editor never even reads
-//   - any field of a placement other than pos / rot / scale
+// Reading and rewriting the C# an actor is written in: the model rows of a `.Designer.cs` generated
+// region, and the values a hand-written actor class declares. Never writes outside what it read.
 #include "aver/core/Types.hpp"
 
 #include <string>
@@ -40,13 +9,9 @@
 
 namespace aver::fmt {
 
-// One `b.Place(...)` row.
+// One `b.Place(...)` row: a mesh placed in an actor, and where its text lives.
 struct ActorModel {
-    // THE MATCH KEY. A placement is identified by this and never by its position in the file, so a
-    // reordered region, an inserted row or a renamed property all still find the right line -- and
-    // the same id is stamped onto the spawned child entity, which is how a gizmo in the viewport
-    // gets back to the text that put it there.
-    u64 objectId = 0;
+    u64 objectId = 0;       // the match key; also stamped onto the spawned child entity
 
     std::string property;   // the C# identifier the row assigns to
     std::string meshPath;   // as written in the source
@@ -56,25 +21,21 @@ struct ActorModel {
     f32 rot[3]   = {0.0f, 0.0f, 0.0f};   // degrees, (yaw, pitch, roll)
     f32 scale[3] = {1.0f, 1.0f, 1.0f};
 
-    // Byte range of the whole statement within the source, so a rewriter never has to find it twice.
-    usize begin = 0, end = 0;
+    usize begin = 0, end = 0;   // byte range of the whole statement in the source
 };
 
+// How reading a generated region ended.
 enum class ActorParseStatus {
     Ok,
-    NoRegion,        // no open marker: the file has no editor territory (not an error, per the spec)
-    UnknownSchema,   // a schema this build does not know; the file is left alone and reported
-    // A region that is there but has left the locked grammar. THE ESCALATION SIGNAL: this is the
-    // status a caller with `averdesign` available should retry through Roslyn, because it means the
-    // text is C# the scanner was not built for rather than C# that is wrong.
-    Malformed,
+    NoRegion,
+    UnknownSchema,
+    Malformed,      // in the region but outside the locked grammar; retry through Roslyn
 };
 
-// Which implementation produced a result. Recorded rather than inferred, so a log line or a panel
-// can say which one answered -- when the two ever disagree, knowing which ran is the whole debugging
-// story.
+// Which implementation produced a result.
 enum class ActorParserBackend { Builtin, Roslyn };
 
+// The result of reading a `.Designer.cs` generated region.
 struct ActorScript {
     ActorParseStatus status = ActorParseStatus::NoRegion;
     ActorParserBackend backend = ActorParserBackend::Builtin;
@@ -83,28 +44,9 @@ struct ActorScript {
     usize regionBegin = 0, regionEnd = 0;   // the span strictly between the marker lines
 };
 
-// What an actor declares ABOUT ITSELF, in `Configure(ClassBuilder b)`.
-//
-// The generated region is the MULTI-PART path: an actor assembled from several placed meshes. Most
-// actors in most games are not that. They are one mesh, declared with `b.Mesh(...)` in the class's
-// own Configure, and they have no designer file at all -- every actor in the SkyForge template is
-// this shape. A preview that only understood placements would show an empty view for all of them,
-// which is not a general-purpose actor editor.
-//
-// So this reads the hand-written half. READS. docs/DESIGNER_REWRITE.md says the editor never writes
-// a byte outside the generated region and that is unchanged and unchangeable; displaying what a
-// class declares is not writing it, and refusing to look would mean refusing to preview the common
-// case in order to honour a rule about a different operation.
-// What an actor IS, which decides whether a 3D view means anything for it.
-//
-// A GameMode is rules, a GameInstance is process-wide state, a PlayerController is input and a
-// camera possession policy. NONE of them has a transform, so a viewport showing one would be a
-// viewport showing nothing -- and an empty 3D view reads as a broken editor rather than as a
-// category that has no geometry. An Actor, a Pawn or a Character does have a place in the world, and
-// a Character has a capsule even when it has no mesh at all (first-person characters deliberately
-// have none: you are inside your own head).
+// What an actor is, which decides whether a 3D view means anything for it.
 enum class ActorKind {
-    Unknown,            // no recognised base: treated as spatial, since guessing the other way hides things
+    Unknown,
     Actor,
     Pawn,
     Character,
@@ -113,40 +55,31 @@ enum class ActorKind {
     GameInstance,
 };
 
+// Name of an actor kind, for display.
 const char* actorKindName(ActorKind k);
-// Whether a 3D preview is meaningful. False for the three that have no transform.
+// Whether a 3D preview is meaningful. False for the kinds that have no transform.
 bool actorKindHasViewport(ActorKind k);
 
-// Where a value LIVES in the source, so an edit can go back to the byte it came from.
-//
-// A span rather than a re-search, for the reason the placement rows carry one: finding the value
-// twice means the write can land somewhere the read did not, and the two searches drift the moment a
-// file has two classes that both set Height.
+// Where a value lives in the source, so an edit can go back to the bytes it came from.
 struct ActorValueSpan {
     usize begin = 0, end = 0;
     bool valid() const { return end > begin; }
 };
 
+// One actor class as declared in hand-written C#, with a span for every editable value.
 struct ActorClassInfo {
     std::string className;      // from [AverClass("BP_Thing")] / [AverGameMode(...)]
     std::string typeName;       // the C# class the attribute is on
     std::string baseType;       // the C# base it derives, verbatim
     ActorKind   kind = ActorKind::Unknown;
 
-    // A CHARACTER's capsule, in centimetres. Read from assignments anywhere in the class, not only
-    // from Configure: the framework's own template sets them in OnBeginPlay, which is where every
-    // real character sets them too. Zero means "not stated"; the caller substitutes a default rather
-    // than drawing a capsule of no height.
-    f32 capsuleHeight = 0.0f, capsuleRadius = 0.0f, eyeHeight = 0.0f;
+    f32 capsuleHeight = 0.0f, capsuleRadius = 0.0f, eyeHeight = 0.0f;   // centimetres; 0 = not stated
     ActorValueSpan capsuleHeightSpan{}, capsuleRadiusSpan{}, eyeHeightSpan{};
 
     bool hasMesh = false;
     std::string meshPath, material;
     ActorValueSpan meshPathSpan{}, materialSpan{};
 
-    // Declared but not drawn as geometry -- see ActorPreview. They are surfaced so the panel can say
-    // an actor HAS a camera or a light, because an actor that is only a light previews as nothing
-    // and "nothing" and "broken" look identical.
     bool hasCamera = false;
     f32  cameraFovDeg = 0.0f, cameraNearCm = 0.0f, cameraFarCm = 0.0f;
     ActorValueSpan cameraSpan[3]{};
@@ -156,61 +89,32 @@ struct ActorClassInfo {
 
     bool anything() const { return hasMesh || hasCamera || hasPointLight; }
     bool hasViewport() const { return actorKindHasViewport(kind); }
-    // Something to DRAW: geometry, or a character's capsule. A Pawn that declares nothing has a
-    // transform but no shape, and the panel says so rather than showing an empty box.
+    // Something to draw: geometry, or a character's capsule.
     bool drawable() const { return hasMesh || kind == ActorKind::Character; }
 };
 
-// Every actor a file declares, in the order they appear.
-//
-// A VECTOR, not one, and that is a correctness fix rather than a generalisation for its own sake: a
-// real project puts several actors in one file. SkyForge's FpsGameMode.cs declares a GameMode, a
-// PlayerController, a Block, a Crate and a GameInstance; its Gun.cs declares a GunPart and a Gun.
-// Returning the first found made the editor name the wrong class -- it reported Gun.cs as 'BP_GunPart'
-// -- and would have previewed the wrong mesh with nothing anywhere to say so.
-//
-// Each entry carries only what is declared between its own attribute and the next, so two actors in
-// one file cannot borrow each other's mesh.
+// Every actor a file declares, in source order. Each entry carries only what is declared between its
+// own attribute and the next.
 std::vector<ActorClassInfo> parseActorClasses(std::string_view csText);
 
-// The first actor a file declares, or an empty one. A convenience for the common single-actor file.
+// The first actor a file declares, or an empty one.
 ActorClassInfo parseActorClass(std::string_view csText);
 
-// Write an edited class's values back to the bytes they came from.
-//
-// ONLY the values that carry a span, and each one in place: the file's structure, its comments, its
-// formatting and every other class in it are untouched. This is not the generated-region rewriter --
-// there is no region here, and the values live in ordinary hand-written code -- so it edits the
-// smallest thing it can and refuses anything it did not read.
-//
-// `edited` must be an ActorClassInfo that came from parseActorClasses on THIS text, with values
-// changed but spans left alone. Returns false with `err` set when a span no longer matches what was
-// read there, which is the check that stops a stale parse writing into the wrong place.
+// Writes an edited class's values back over the spans they were read from. Returns false with `err`
+// set, and `out` untouched, when a span no longer matches what was read there.
 bool rewriteActorClass(std::string_view csText, const ActorClassInfo& edited,
                        std::string& out, std::string* err = nullptr);
 
-// Read the generated region. Never modifies anything.
+// Reads the generated region. Never modifies anything.
 ActorScript parseActorScript(std::string_view csText);
 
-// Rewrite the pos/rot/scale of the models in `edits`, matched BY OBJECT ID, leaving every other byte
-// of the file alone. Models the file does not contain are ignored rather than appended: adding a
-// placement is a different operation with different rules (it has to mint an id and declare a
-// property), and doing it silently from a coordinate save would be surprising.
-//
-// Returns false with `err` set when the file cannot be parsed, in which case `out` is untouched. A
-// rewriter that half-succeeds on a file it did not understand is worse than one that declines.
+// Rewrites the pos/rot/scale of the models in `edits`, matched by object id. Models the file does not
+// contain are ignored. Returns false with `err` set, and `out` untouched, on a parse failure.
 bool rewriteActorScript(std::string_view csText, const std::vector<ActorModel>& edits,
                         std::string& out, std::string* err = nullptr);
 
-// The canonical form of a mesh path as the engine's registry keys it: content-relative, forward
-// slashes, no `Content/` prefix.
-//
-// It exists because the two halves disagree, and the disagreement is silent. The engine registers
-// meshes under `fnv1a64("Meshes/cube.ocmesh")` while the one sample in the tree writes
-// `"Content/Meshes/CarBody.ocmesh"` into its Place call -- a different hash, so the placement
-// resolves to an id nothing holds and the child draws NOTHING, with the renderer's own comment
-// noting that an unresolved mesh id draws nothing rather than garbage. Normalising here means a
-// designer file written either way still finds its mesh.
+// The canonical form of a mesh path as the registry keys it: content-relative, forward slashes, no
+// `Content/` prefix.
 std::string canonicalMeshPath(std::string_view path);
 
 } // namespace aver::fmt

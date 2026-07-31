@@ -5,7 +5,7 @@
 #include "aver/formats/OcProject.hpp"
 #include "aver/assets/AssetId.hpp"
 #include "aver/core/Log.hpp"
-#include "aver/core/Hash.hpp"   // fnv1a64 — re-computed below to guard the offset-basis constant
+#include "aver/core/Hash.hpp"
 
 #include <cmath>
 #include <filesystem>
@@ -15,6 +15,7 @@ using namespace aver;
 
 static int g_failures = 0;
 
+// Logs one assertion and counts the failures.
 static void check(bool cond, const std::string& what) {
     if (cond) {
         AVER_INFO("   PASS  {}", what);
@@ -24,6 +25,7 @@ static void check(bool cond, const std::string& what) {
     }
 }
 
+// Loads one .ocbeam, prints what it holds, and checks it is non-empty and identified.
 static void testBeam(const std::string& path) {
     AVER_INFO("=== .ocbeam: {} ===", path);
     fmt::OcBeamData b;
@@ -44,10 +46,10 @@ static void testBeam(const std::string& path) {
     }
     check(!b.nodes.empty(), "has nodes");
     check(b.objectId != kInvalidObjectId, "objectId assigned");
-    // Every beam references node ids that exist (spot-check counts, not full graph).
     check(!b.beams.empty(), "has beams");
 }
 
+// Loads one .ocmap, prints its placements, and checks it has a collision source.
 static void testMap(const std::string& path) {
     AVER_INFO("=== .ocmap: {} ===", path);
     fmt::OcMapData m;
@@ -71,19 +73,12 @@ static void testMap(const std::string& path) {
     AVER_INFO("   server-valid={}{}", serverValid, serverValid ? "" : (" (" + why + ")"));
 
     check(!m.placements.empty() || m.hasGround, "has a collision source");
-    // Cross-check the id parsed OUT of the file against the known sample identity. The hash FUNCTION
-    // itself is exercised unconditionally in main() (checkFnv), because a machine without demoworld.ocmap
-    // would otherwise never recompute it — which is exactly how a dropped digit in the offset basis went
-    // unnoticed while this parsed-value check kept passing.
     if (m.name == "demoworld") {
         check(m.contentId == 0x376B85BC4D1A03BAull, "demoworld ID == 0x376B85BC4D1A03BA (parsed from file)");
     }
 }
 
-// Exercise the hash function directly, independent of any test file. This is the check whose absence let
-// a corrupted offset basis pass CI: the .ocmap loader parses its content id out of the file, so nothing
-// re-derived fnv1a64 from bytes until here. The three vectors are the documented OpenConstructor identity
-// plus the two-way boundary the C# side must agree with (Aver.Scene ObjectIdOf / the scripting bridge).
+// Recomputes fnv1a64 over three known vectors, independent of any test file.
 static void checkFnv() {
     AVER_INFO("=== fnv1a64 self-check ===");
     check(fnv1a64("demoworld") == 0x376B85BC4D1A03BAull, "fnv1a64(\"demoworld\") == 0x376B85BC4D1A03BA");
@@ -93,18 +88,12 @@ static void checkFnv() {
 }
 
 
-// ---------------------------------------------------------------------------------------------
-// .ocproject round trip
-// ---------------------------------------------------------------------------------------------
-//
-// This writer edits a file a TEAM shares and a person hand-edits. The two properties that matter are
-// not "does it parse" but "does it keep what it did not write" and "does an old manifest still
-// load" -- a serialiser that rebuilt the file from the struct would silently delete the comment
-// block every scaffolded project ships with.
+// Round-trips a .ocproject manifest: what the writer does not own must survive, and writing twice
+// must reproduce the file byte for byte.
 static void checkOcproject() {
     using namespace aver::fmt;
 
-    // Exactly what SkyForge's manifest looks like on disk, hand-edits and all.
+    // SkyForge's manifest as it looks on disk, hand-edits and all.
     const std::string original =
         "OCPROJECT 1\n"
         "# Created by the Aver Engine editor. This project lives OUTSIDE the engine tree and\n"
@@ -119,18 +108,15 @@ static void checkOcproject() {
     std::string err;
     check(parseOcproject(original, d, &err), "the existing manifest parses");
     check(d.name == "SkyForge", "with its name");
-    // An old manifest states no render settings, and must not be read as stating zero.
     check(!d.hasRenderSettings(), "and states no render settings at all");
     check(d.giQuality == -1, "an absent RENDER.GI is -1, not 0 -- 0 would mean 'GI off'");
 
-    // Set what the editor would set, and write it back.
     d.giQuality = 3;
     d.voxelResolution = 256;
     d.giIntensity = 1.25f;
     d.giMaxDistance = 3500.0f;
     const std::string written = writeOcproject(d, original);
 
-    // THE PROPERTY THAT MATTERS MOST: everything the writer does not own survived.
     check(written.find("# Created by the Aver Engine editor.") != std::string::npos,
           "the hand-written comment block survives a write");
     check(written.find("# references it; see the engine's docs/PROJECTS.md.") != std::string::npos,
@@ -147,13 +133,9 @@ static void checkOcproject() {
     check(std::fabs(back.giIntensity - 1.25f) < 1.0e-6f, "and the float ones, exactly");
     check(std::fabs(back.giMaxDistance - 3500.0f) < 1.0e-3f, "including the large one");
 
-    // IDEMPOTENT. Writing what was just written must not grow the file -- an editor that appended a
-    // duplicate key per save would corrupt a manifest over a working week rather than at once.
     const std::string again = writeOcproject(back, written);
     check(again == written, "writing an unchanged manifest reproduces it byte for byte");
 
-    // A key this build has never heard of must survive too: the format is documented
-    // forward-compatible, so a manifest written by a newer editor has to come back intact.
     const std::string future = written + "COOKTARGET WindowsClient\n";
     ProjectDesc f;
     check(parseOcproject(future, f, &err), "a manifest with an unknown key still parses");
@@ -161,7 +143,6 @@ static void checkOcproject() {
     check(refuture.find("COOKTARGET WindowsClient") != std::string::npos,
           "and the unknown key survives being written back");
 
-    // A fresh file, with no existing text, must still be loadable.
     ProjectDesc n;
     n.name = "Fresh";
     n.engineName = "Aver";
@@ -173,6 +154,7 @@ static void checkOcproject() {
     check(nb.name == "Fresh", "and carries its name");
 }
 
+// Runs the self-checks, then every file named on the command line. Returns the failure count.
 int main(int argc, char** argv) {
     checkFnv();
     checkOcproject();

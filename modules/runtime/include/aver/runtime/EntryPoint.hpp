@@ -1,8 +1,9 @@
+// Include this in exactly ONE translation unit of an application to generate main().
 #pragma once
 #include "Engine.hpp"
 #include "Application.hpp"
 
-// Include this in exactly ONE translation unit of an application to generate main().
+// Builds the application, runs the engine, and returns the process code.
 int main(int argc, char** argv) {
     aver::Application* app = aver::createApplication(argc, argv);
     if (!app) return 1;

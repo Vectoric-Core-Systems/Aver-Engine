@@ -1,19 +1,4 @@
-// DirectoryWatcher, against a real filesystem.
-//
-// This component shipped complete -- debouncing, coalescing, rename pairing, overflow signalling --
-// and with NO consumer and NO test. The editor now depends on it to notice a save made in Visual
-// Studio, so the properties below stopped being documentation and became load-bearing.
-//
-// It is a real-filesystem test rather than a mocked one on purpose. Every hard case here is the
-// operating system's behaviour, not the class's: Windows reports a safe save (write temp, replace
-// target, rename into place) as a rename with no removal record, it reports one logical write as
-// several records, and it collapses a rename pair into two records that only mean something
-// together. A fake backend would be a test of the fake.
-//
-// TIMING is the one thing a test like this can get wrong in a way that wastes a day. The rule
-// followed throughout: never assert that an event has NOT arrived yet -- that races the settle
-// timer and fails on a loaded machine. Assert only what has arrived after waiting longer than the
-// settle window, and use a generous window rather than a tight one.
+// DirectoryWatcher, exercised against a real filesystem in a temp directory.
 #include "aver/platform/DirectoryWatcher.hpp"
 #include "aver/core/Log.hpp"
 
@@ -24,9 +9,7 @@
 #include <thread>
 #include <vector>
 
-// For the process id only, which is what keeps two concurrent runs out of each other's temp
-// directory. Nothing else here is platform-specific -- the watcher's whole point is that its
-// interface is not.
+// This process's id, for a temp directory name two concurrent runs cannot share.
 #ifdef _WIN32
 #  include <process.h>
 #  define AVER_TEST_PID _getpid()
@@ -39,24 +22,23 @@ using namespace aver;
 
 static int g_failures = 0;
 
+// Records one assertion. Counts a failure and logs it when the condition is false.
 static void check(bool cond, const std::string& what) {
     if (cond) { AVER_INFO("  ok    {}", what); return; }
     ++g_failures;
     AVER_ERROR("  FAIL  {}", what);
 }
 
-// The settle window the watcher documents is 150 ms. Everything here waits WELL past it: a test that
-// waits 160 ms passes on an idle machine and fails under load, and a flaky test is worse than none
-// because it teaches people to re-run rather than to read.
+// How long every wait here runs. Well past the watcher's documented 150 ms settle window.
 static constexpr int kSettleWaitMs = 700;
 
+// Truncates a file and writes text into it.
 static void write(const std::filesystem::path& p, const std::string& text) {
     std::ofstream os(p, std::ios::binary | std::ios::trunc);
     os.write(text.data(), static_cast<std::streamsize>(text.size()));
 }
 
-// Drain until the watcher has been quiet for a full settle window. Returns false if the watcher
-// signalled overflow, which no case here should provoke.
+// Polls for a full settle window, appending events. False if the watcher signalled overflow.
 static bool drain(DirectoryWatcher& w, std::vector<FileEvent>& out, int waitMs = kSettleWaitMs) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(waitMs);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -66,24 +48,23 @@ static bool drain(DirectoryWatcher& w, std::vector<FileEvent>& out, int waitMs =
     return true;
 }
 
-// How many events name this path? One save must produce exactly one, which is the entire point of
-// the debounce and the one property a consumer's correctness rests on.
+// How many events name this path.
 static int countFor(const std::vector<FileEvent>& evs, const std::string& rel) {
     int n = 0;
     for (const FileEvent& e : evs) if (e.path == rel) ++n;
     return n;
 }
 
+// The first event naming this path, or null.
 static const FileEvent* findFor(const std::vector<FileEvent>& evs, const std::string& rel) {
     for (const FileEvent& e : evs) if (e.path == rel) return &e;
     return nullptr;
 }
 
+// Runs every directory watcher check. Returns 1 if any failed.
 int main() {
     AVER_INFO("=== DirectoryWatcher ===");
 
-    // A directory of our own under the system temp, removed at the end. Named with the process id so
-    // two runs on one machine cannot collide.
     std::error_code ec;
     const std::filesystem::path root =
         std::filesystem::temp_directory_path(ec) /
@@ -92,10 +73,6 @@ int main() {
     std::filesystem::create_directories(root, ec);
     if (ec) { AVER_ERROR("could not make a temp directory to watch"); return 1; }
 
-    // ---- it DECLINES cleanly ------------------------------------------------------------------
-    // The contract says a missing directory logs once and returns false, so the editor carries on
-    // with no watch exactly as it does with no project. A watcher that threw or aborted here would
-    // take the editor down on any project whose content folder had been moved.
     {
         DirectoryWatcher w;
         check(!w.start((root / "does-not-exist").string()), "start() on a missing directory returns false");
@@ -110,7 +87,6 @@ int main() {
     check(w.watching(), "watching() is true after a successful start");
     check(w.root() == root.string(), "root() is what was asked for");
 
-    // ---- a new file arrives -------------------------------------------------------------------
     {
         std::vector<FileEvent> evs;
         write(root / "one.cs", "// hello\n");
@@ -122,10 +98,6 @@ int main() {
         check(countFor(evs, "one.cs") == 1, "ONE event for one write, not the burst the OS emitted");
     }
 
-    // ---- a rewrite is Modified, and still exactly one event ------------------------------------
-    //
-    // The heart of it. An editor writing a file produces several OS records; a consumer that reloaded
-    // per record would re-read a half-written file, and this is the assertion that says it will not.
     {
         std::vector<FileEvent> evs;
         write(root / "one.cs", "// hello again, with more text than before\n");
@@ -136,11 +108,6 @@ int main() {
         check(countFor(evs, "one.cs") == 1, "still ONE event, however many records the OS emitted");
     }
 
-    // ---- a BURST of writes coalesces to one ----------------------------------------------------
-    //
-    // Five writes in quick succession is not a contrived case: it is what a formatter, a code
-    // generator or a save-all does. Five reloads of one file is five parses and five preview
-    // rebuilds for one user action.
     {
         std::vector<FileEvent> evs;
         for (int i = 0; i < 5; ++i) {
@@ -151,10 +118,6 @@ int main() {
         check(countFor(evs, "burst.cs") == 1, "five writes 10 ms apart coalesce into ONE event");
     }
 
-    // ---- a rename carries the OLD name ---------------------------------------------------------
-    //
-    // Without the pairing this is two unrelated records and a consumer sees a delete and an
-    // unrelated create -- which for an open editor tab means closing it and opening a different one.
     {
         std::vector<FileEvent> evs;
         std::filesystem::rename(root / "one.cs", root / "renamed.cs", ec);
@@ -168,7 +131,6 @@ int main() {
         }
     }
 
-    // ---- a delete is a delete ------------------------------------------------------------------
     {
         std::vector<FileEvent> evs;
         std::filesystem::remove(root / "burst.cs", ec);
@@ -179,10 +141,6 @@ int main() {
         if (e) check(e->kind == FileChange::Deleted, "with kind Deleted");
     }
 
-    // ---- SUBDIRECTORIES, because a project's scripts live in one -------------------------------
-    //
-    // recursive=true is what the editor passes, and Content/Scripts/Foo.cs is the only path anybody
-    // actually cares about. A watcher that only saw the root would be watching the wrong thing.
     {
         std::vector<FileEvent> evs;
         std::filesystem::create_directories(root / "Scripts", ec);
@@ -193,23 +151,16 @@ int main() {
         check(drain(w, evs), "a nested write does not overflow the watcher");
         const FileEvent* e = findFor(evs, "Scripts/Deep.cs");
         check(e != nullptr, "a file in a subdirectory is reported");
-        // The separator matters: the path is used as a map key and joined back onto the root, and
-        // the header promises forward slashes regardless of what the OS handed over.
         if (e) check(e->path.find('\\') == std::string::npos,
                      "and its path uses '/' separators, never the platform's");
     }
 
-    // ---- a quiet watcher reports nothing -------------------------------------------------------
-    //
-    // The frame loop calls poll() sixty times a second forever. If an idle watcher invented events,
-    // the editor would reload every open file continuously and nobody would be able to type.
     {
         std::vector<FileEvent> evs;
         check(drain(w, evs, 400), "an idle watcher does not overflow");
         check(evs.empty(), "an idle watcher reports NOTHING at all");
     }
 
-    // ---- stop() is final -----------------------------------------------------------------------
     {
         w.stop();
         check(!w.watching(), "watching() is false after stop()");

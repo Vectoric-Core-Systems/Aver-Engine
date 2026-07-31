@@ -1,4 +1,5 @@
 #pragma once
+// Timing: a monotonic clock and the per-frame timestep.
 #include "Types.hpp"
 
 namespace aver {

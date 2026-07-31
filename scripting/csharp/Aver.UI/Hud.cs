@@ -1,12 +1,7 @@
+// The game-facing UI: layers, colours, rectangles and the immediate-mode draw calls.
 namespace Aver.UI;
 
-/// <summary>Which band a widget composites in. Coarse and named on purpose.</summary>
-/// <remarks>
-/// A HUD, a pause menu and a tooltip are separate things that must layer predictably without any of
-/// them knowing the others exist. Sorting by a per-widget depth number is the alternative and it is
-/// worse: it makes every z decision global, so adding a tooltip means auditing every other widget's
-/// number. Order WITHIN a layer is the order you draw in.
-/// </remarks>
+/// <summary>Which band a widget composites in. Order within a layer is the order you draw in.</summary>
 public enum Layer
 {
     /// <summary>Backdrops and letterboxing — under everything.</summary>
@@ -21,19 +16,14 @@ public enum Layer
     Debug = 4,
 }
 
-/// <summary>A colour, in the spelling a person writes rather than the one a vertex holds.</summary>
-/// <remarks>
-/// The native vertex stores 0xAABBGGRR, which is what a R8G8B8A8_UNORM attribute reads on a
-/// little-endian machine and is not how anybody writes a colour. Everything here takes the familiar
-/// ARGB form and swizzles once, at the boundary, so a game never carries the packing around.
-/// </remarks>
+/// <summary>A colour written as ARGB. Stored as the 0xAABBGGRR the native vertex holds.</summary>
 public readonly struct Colour
 {
     private readonly uint _abgr;
 
     private Colour(uint abgr) => _abgr = abgr;
 
-    /// <summary>Native packing. Internal because the whole point is that a caller never sees it.</summary>
+    /// <summary>Native packing, for the P/Invoke layer only.</summary>
     internal uint Packed => _abgr;
 
     /// <summary>From bytes: <c>Colour.Rgb(232, 228, 220)</c>, opaque unless an alpha is given.</summary>
@@ -44,14 +34,14 @@ public readonly struct Colour
     public static Colour Argb(uint argb)
         => Rgb((byte)(argb >> 16), (byte)(argb >> 8), (byte)argb, (byte)(argb >> 24));
 
-    /// <summary>The same colour at a different opacity, 0..1. Clamped, because a HUD fades things.</summary>
+    /// <summary>The same colour at a different opacity, 0..1. Clamped.</summary>
     public Colour WithAlpha(float alpha)
     {
         float a = alpha < 0f ? 0f : (alpha > 1f ? 1f : alpha);
         return new((_abgr & 0x00FFFFFFu) | ((uint)(a * 255f + 0.5f) << 24));
     }
 
-    /// <summary>Linear blend, for a bar that changes colour as it empties.</summary>
+    /// <summary>Linear blend between two colours, <paramref name="t"/> clamped to 0..1.</summary>
     public static Colour Lerp(Colour from, Colour to, float t)
     {
         float k = t < 0f ? 0f : (t > 1f ? 1f : t);
@@ -64,23 +54,8 @@ public readonly struct Colour
     }
 }
 
-/// <summary>The game's UI: rectangles, in screen pixels, with a top-left origin.</summary>
-/// <remarks>
-/// <para>
-/// Draw from a tick. The HOST clears the list once per frame before anything ticks and submits it
-/// afterwards, so a game only ever draws — there is no Begin for a game to call, and that is
-/// deliberate: a game that cleared the list would erase whatever another system had contributed, and
-/// the last one to run would win with nothing anywhere to say so.
-/// </para>
-/// <para>
-/// Anchor to <see cref="Viewport"/>, never to the window. In the editor the game is drawn into a
-/// dockspace panel and the two differ; a HUD laid out against the window would sit partly under the
-/// editor's own chrome. In a shipped build they are the same and nothing changes.
-/// </para>
-/// <para>
-/// There is no text yet. That is not an omission here — nothing in the engine can rasterise a glyph.
-/// </para>
-/// </remarks>
+/// <summary>The game's UI: rectangles, in screen pixels, with a top-left origin. Draw from a tick;
+/// the host clears and submits the list around the frame.</summary>
 public static class Hud
 {
     private static readonly float[] s_viewport = new float[4];
@@ -110,11 +85,7 @@ public static class Hud
     public static void Box(Rect r, Colour colour)
         => Native.aver_ui_rect(r.X, r.Y, r.Width, r.Height, colour.Packed);
 
-    /// <summary>A rectangle with a border drawn inside its bounds, the way a HUD frame is drawn.</summary>
-    /// <remarks>
-    /// Inside, not outside: a frame that grew its own bounds would not fit the layout that positioned
-    /// it, and every caller would have to subtract the thickness back off by hand.
-    /// </remarks>
+    /// <summary>A rectangle with a border drawn inside its bounds.</summary>
     public static void Frame(Rect r, float thickness, Colour border, Colour fill)
     {
         Box(r, border);
@@ -136,10 +107,8 @@ public static class Hud
                              float u0 = 0f, float v0 = 0f, float u1 = 1f, float v1 = 1f)
         => Native.aver_ui_textured_rect(r.X, r.Y, r.Width, r.Height, texture, u0, v0, u1, v1, tint.Packed);
 
-    /// <summary>
-    /// Confine subsequent draws to <paramref name="r"/> until <see cref="PopClip"/>. Nested clips
-    /// INTERSECT, so a child can never escape its parent by pushing a larger rectangle.
-    /// </summary>
+    /// <summary>Confines subsequent draws to <paramref name="r"/> until <see cref="PopClip"/>. Nested
+    /// clips INTERSECT, so a child can never escape its parent.</summary>
     public static void PushClip(Rect r)
         => Native.aver_ui_push_clip((int)r.X, (int)r.Y, (int)(r.X + r.Width), (int)(r.Y + r.Height));
 
@@ -166,11 +135,6 @@ public readonly record struct Rect(float X, float Y, float Width, float Height)
     public Rect Inset(float by) => new(X + by, Y + by, Width - 2f * by, Height - 2f * by);
 
     /// <summary>A rectangle of this size placed relative to a container, by fractional anchor.</summary>
-    /// <remarks>
-    /// Anchoring rather than absolute placement, because a HUD outlives the resolution it was
-    /// authored at: an element pinned to the bottom-right by subtraction moves off-screen the moment
-    /// the window is smaller than the number that was subtracted.
-    /// </remarks>
     public static Rect Anchored(Rect container, float ax, float ay, float w, float h,
                                 float offsetX = 0f, float offsetY = 0f)
         => new(container.X + container.Width * ax - w * ax + offsetX,

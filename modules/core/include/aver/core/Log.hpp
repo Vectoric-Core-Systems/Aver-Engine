@@ -1,4 +1,5 @@
 #pragma once
+// The engine log: four levels, a formatting front end, and the AVER_* macros.
 #include "Prelude.hpp"
 #include <format>
 #include <string_view>
@@ -6,18 +7,20 @@
 
 namespace aver {
 
+// Log severity, lowest first.
 enum class LogLevel { Trace, Info, Warn, Error };
 
 namespace detail {
 void logWrite(LogLevel level, std::string_view message);
 }
 
-// A sink the application can install to mirror EVERY log line into its own surface (the editor's Output
-// Log). It is called under the log mutex, from whatever thread logged, so it must be quick and must NOT
-// itself log (that would re-enter the held mutex and deadlock). Installing {nullptr, nullptr} removes it.
+// A sink mirroring every log line into the application's own surface. Called under the log mutex,
+// from the logging thread, so it must be quick and must not itself log.
 using LogSinkFn = void (*)(void* ctx, LogLevel level, std::string_view message);
+// Installs the sink, or removes it with {nullptr, nullptr}.
 void setLogSink(LogSinkFn fn, void* ctx);
 
+// Formats and writes one log line.
 template <class... Args>
 void logMsg(LogLevel level, std::string_view fmt, Args&&... args) {
     detail::logWrite(level, std::vformat(fmt, std::make_format_args(args...)));

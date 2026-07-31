@@ -1,3 +1,4 @@
+// In-process CoreCLR host: loads hostfxr, binds the managed bridge, drives it.
 #include "aver/scripting/ScriptHost.hpp"
 #include "aver/scripting/scripting_abi.h"
 
@@ -15,17 +16,11 @@ namespace aver::scripting {
 #if defined(_WIN32)
 namespace {
 
-// ---------------------------------------------------------------- hostfxr, declared here
-//
-// These come from nethost.h / hostfxr.h / coreclr_delegates.h in the .NET *host pack*, which is
-// only present on a machine with the SDK installed. Declaring the four functions we use — instead
-// of including those headers — is what lets the engine BUILD on a machine with no .NET at all,
-// which is the same property the runtime path is required to have. The surface is tiny, it has
-// been stable since .NET Core 3.0, and getting it wrong fails loudly at the first call rather
-// than silently.
+// Declared here instead of included: must match nethost.h / hostfxr.h / coreclr_delegates.h.
 using char_t = wchar_t;
 using hostfxr_handle = void*;
 
+// Mirrors hostfxr.h's hostfxr_initialize_parameters field for field.
 struct hostfxr_initialize_parameters {
     size_t size;
     const char_t* host_path;
@@ -44,16 +39,13 @@ using load_assembly_and_get_function_pointer_fn =
 
 // coreclr_delegates.h: hdt_load_assembly_and_get_function_pointer.
 constexpr int32_t kHdtLoadAssemblyAndGetFunctionPointer = 5;
-// coreclr_delegates.h: the sentinel that says "the method carries [UnmanagedCallersOnly], so
-// there is no delegate type to name".
+// coreclr_delegates.h: the sentinel meaning the method carries [UnmanagedCallersOnly].
 const char_t* const kUnmanagedCallersOnly = reinterpret_cast<const char_t*>(-1);
 
-// hostfxr_initialize_for_runtime_config returns three distinct successes; everything else is a
-// failure HRESULT, which is negative when read as int32_t.
+// True for the three return codes hostfxr counts as success.
 constexpr bool hostfxrOk(int32_t rc) { return rc >= 0 && rc <= 2; }
 
-// The bridge's entry points. All five are [UnmanagedCallersOnly] on the managed side, so these
-// are raw function pointers with no delegate marshalling in the way.
+// The bridge's entry points, all [UnmanagedCallersOnly] on the managed side.
 using bootstrap_fn     = int32_t(__cdecl*)(const AverScriptHostApi* api);
 using loadScripts_fn   = int32_t(__cdecl*)(const char* utf8Dir);
 using unloadScripts_fn = int32_t(__cdecl*)(void);
@@ -63,6 +55,7 @@ using hud_count_fn     = int32_t(__cdecl*)(void);
 using hud_name_fn      = int32_t(__cdecl*)(int32_t, char*, int32_t);
 using hud_draw_fn      = int32_t(__cdecl*)(int32_t, float);
 
+// Converts UTF-8 to UTF-16.
 std::wstring widen(const std::string& s) {
     if (s.empty()) return {};
     const int n = ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
@@ -71,13 +64,13 @@ std::wstring widen(const std::string& s) {
     return out;
 }
 
+// True when the path names an existing file rather than a directory.
 bool fileThere(const std::wstring& path) {
     const DWORD a = ::GetFileAttributesW(path.c_str());
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-// The one function the managed side calls back into. Routed through the engine log rather than
-// Console: a GUI process has no console, and the editor's Output Log is where anyone will look.
+// Writes a managed log line into the engine log. Handed to the bridge at bootstrap.
 void __cdecl managedLog(int32_t level, const char* utf8Message) {
     const char* m = utf8Message ? utf8Message : "";
     switch (level) {
@@ -90,6 +83,7 @@ void __cdecl managedLog(int32_t level, const char* utf8Message) {
 
 } // namespace
 
+// The loaded runtime modules, the host context and the bound bridge entry points.
 struct ScriptHost::Impl {
     HMODULE nethost = nullptr;
     HMODULE hostfxr = nullptr;
@@ -106,18 +100,18 @@ struct ScriptHost::Impl {
 
 ScriptHost::ScriptHost() = default;
 
+// Shuts the runtime down and releases the implementation.
 ScriptHost::~ScriptHost() {
     shutdown();
     delete impl_;
     impl_ = nullptr;
 }
 
+// Starts the CLR, binds the bridge and loads the script directory. False, with a reason, on decline.
 bool ScriptHost::init(const HostDesc& desc) {
     if (ready_) return true;
     if (!impl_) impl_ = new Impl();
 
-    // Every failure below takes this shape: record a reason, log ONE line, return false. The
-    // caller is expected to carry on — an editor that cannot run scripts is still an editor.
     const auto decline = [this](std::string why) {
         declineReason_ = std::move(why);
         AVER_WARN("[Scripting] init declined: {}", declineReason_);
@@ -128,16 +122,11 @@ bool ScriptHost::init(const HostDesc& desc) {
     const std::wstring bridgeDll = bridgeDirW + L"\\Aver.Scripting.Bridge.dll";
     const std::wstring bridgeCfg = bridgeDirW + L"\\Aver.Scripting.Bridge.runtimeconfig.json";
 
-    // Checked before the runtime is touched: staging is a build-system fact, and starting a CLR
-    // only to discover there is nothing to run is a slower way to reach the same answer.
     if (!fileThere(bridgeDll) || !fileThere(bridgeCfg))
         return decline("the managed bridge was not staged next to the executable "
                        "(Aver.Scripting.Bridge.dll / .runtimeconfig.json) — build with the .NET SDK present");
 
-    // nethost is loaded DYNAMICALLY rather than linked, so a machine with no .NET runtime still
-    // starts the editor: a missing import in the executable's table would fail the process at
-    // load time, before any of this code could decline. LoadLibraryW with a bare name searches
-    // the executable's own directory first, which is where CMake stages it.
+    // Loaded dynamically, and by bare name: a machine with no .NET must still start the editor.
     impl_->nethost = ::LoadLibraryW(L"nethost.dll");
     if (!impl_->nethost)
         return decline("nethost.dll could not be loaded — the .NET runtime is unavailable");
@@ -168,8 +157,6 @@ bool ScriptHost::init(const HostDesc& desc) {
     int32_t rc = fxrInit(bridgeCfg.c_str(), nullptr, &impl_->ctx);
     if (!hostfxrOk(rc) || !impl_->ctx) {
         impl_->ctx = nullptr;
-        // 0x80008096 is FrameworkMissingFailure — the common one, and the one where the message
-        // has to name the framework rather than the error, or nobody knows what to install.
         return decline(std::format("hostfxr_initialize_for_runtime_config failed (0x{:08X}) — the "
                                    "framework the bridge targets is not installed",
                                    static_cast<uint32_t>(rc)));
@@ -201,10 +188,7 @@ bool ScriptHost::init(const HostDesc& desc) {
                        "points — it is from a different engine build");
     }
 
-    // The HUD three are bound SEPARATELY and are allowed to fail. A bridge that predates them is
-    // already refused by the contract check below, so a miss here means something stranger -- and a
-    // host that declined to start because an editor-facing entry point was absent would be refusing
-    // to run somebody's game over a preview feature.
+    // The HUD three are optional: a missing one costs the preview, not the host.
     if (!bind(L"HudCount", reinterpret_cast<void**>(&impl_->hudCount)) ||
         !bind(L"HudName",  reinterpret_cast<void**>(&impl_->hudName))  ||
         !bind(L"HudDraw",  reinterpret_cast<void**>(&impl_->hudDraw))) {
@@ -235,9 +219,6 @@ bool ScriptHost::init(const HostDesc& desc) {
     ready_ = true;
     declineReason_.clear();
 
-    // Loading user scripts is deliberately NOT a condition of readiness: a host with no scripts
-    // is the normal case for the editor, and a script that fails to load disables itself rather
-    // than taking the runtime down with it.
     behaviours_ = desc.scriptsDir.empty() ? 0 : impl_->load(desc.scriptsDir.c_str());
     if (behaviours_ < 0) behaviours_ = 0;
 
@@ -245,6 +226,7 @@ bool ScriptHost::init(const HostDesc& desc) {
     return true;
 }
 
+// Loads a directory of script assemblies. Returns the live behaviour count, or -1 when not ready.
 i32 ScriptHost::loadScripts(const std::string& dir) {
     if (!ready_ || !impl_ || !impl_->load) return -1;
     const int32_t n = impl_->load(dir.c_str());
@@ -252,6 +234,7 @@ i32 ScriptHost::loadScripts(const std::string& dir) {
     return behaviours_;
 }
 
+// Drains OnShutdown and unloads the collectible context. True when it was fully collected.
 bool ScriptHost::unloadScripts() {
     if (!ready_ || !impl_ || !impl_->unload) return false;
     const int32_t collected = impl_->unload();
@@ -259,10 +242,12 @@ bool ScriptHost::unloadScripts() {
     return collected != 0;
 }
 
+// How many [AverHud] classes the bridge found. Zero when unavailable.
 i32 ScriptHost::hudCount() const {
     return (ready_ && impl_ && impl_->hudCount) ? impl_->hudCount() : 0;
 }
 
+// The HUD's display name, or empty.
 std::string ScriptHost::hudName(i32 index) const {
     if (!ready_ || !impl_ || !impl_->hudName) return {};
     char buf[128] = {};
@@ -270,15 +255,18 @@ std::string ScriptHost::hudName(i32 index) const {
     return n > 0 ? std::string(buf, static_cast<usize>(n)) : std::string();
 }
 
+// Calls the HUD's Draw(dt). True if it ran.
 bool ScriptHost::hudDraw(i32 index, f32 dt) {
     return (ready_ && impl_ && impl_->hudDraw) && impl_->hudDraw(index, dt) == 1;
 }
 
+// Drives OnUpdate on every live behaviour.
 void ScriptHost::update(f32 dt) {
     if (!ready_ || !impl_ || !impl_->update) return;
     impl_->update(dt);
 }
 
+// Drains the behaviours, unloads the context and closes the host context. Safe twice.
 void ScriptHost::shutdown() {
     if (!impl_) return;
     if (ready_ && impl_->shutdown) impl_->shutdown();
@@ -290,21 +278,19 @@ void ScriptHost::shutdown() {
     impl_->shutdown = nullptr;
     if (impl_->ctx && impl_->close) impl_->close(impl_->ctx);
     impl_->ctx = nullptr;
-    // hostfxr is deliberately NOT freed. Closing the host context releases our handle on it, but
-    // the CLR itself stays loaded for the life of the process — that is how CoreCLR works, and
-    // FreeLibrary on a module with live runtime threads behind it is a crash, not a tidy-up.
+    // hostfxr is never freed: CoreCLR stays loaded for the life of the process.
     if (impl_->nethost) { ::FreeLibrary(impl_->nethost); impl_->nethost = nullptr; }
 }
 
 #else // !_WIN32
 
-// The scripting host is Win32-only today, exactly as Aver.Platform is. Declining is the same
-// contract the missing-runtime path uses, so a non-Windows build still links and runs.
+// No CLR host off Win32; every entry point declines the way the missing-runtime path does.
 struct ScriptHost::Impl {};
 
 ScriptHost::ScriptHost() = default;
 ScriptHost::~ScriptHost() { delete impl_; }
 
+// Always declines: the CLR host is Win32-only.
 bool ScriptHost::init(const HostDesc&) {
     declineReason_ = "the CLR host is implemented for Win32 only";
     AVER_WARN("[Scripting] init declined: {}", declineReason_);

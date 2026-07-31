@@ -1,3 +1,4 @@
+// Runs the `averdesign` tool as a process and turns its JSON into an ActorScript and class list.
 #include "aver/formats/AverDesign.hpp"
 
 #include "aver/core/Log.hpp"
@@ -18,6 +19,7 @@ std::string g_exePath;          // empty means "search the PATH"
 int  g_available = -1;          // -1 unknown, 0 no, 1 yes
 
 #ifdef _WIN32
+// UTF-8 to UTF-16.
 std::wstring widen(const std::string& s) {
     if (s.empty()) return {};
     const int len = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
@@ -26,10 +28,9 @@ std::wstring widen(const std::string& s) {
     return w;
 }
 
-// Run it and capture stdout. Modelled on the editor's own dotnet runner, and the two pipe hazards it
-// documents are real and are both handled here: the read end must NOT be inheritable or the child
-// holds it open and the drain never sees EOF, and stdin must be NUL rather than null or a child that
-// decides to read stdin blocks forever on a handle it cannot read.
+// Runs a command line and captures stdout and stderr. Two pipe hazards, both handled: the read end
+// must NOT be inheritable or the drain never sees EOF, and stdin must be NUL rather than null or a
+// child that reads stdin blocks forever.
 bool runCapture(const std::wstring& cmdline, std::string& out, int& exitCode) {
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof sa;
@@ -47,8 +48,6 @@ bool runCapture(const std::wstring& cmdline, std::string& out, int& exitCode) {
     si.cb = sizeof si;
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = wr;
-    // stderr goes to the pipe too. The tool writes diagnostics there and a caller that lost them
-    // would be left with "it failed" and no reason.
     si.hStdError = wr;
     si.hStdInput = nul;
 
@@ -75,21 +74,20 @@ bool runCapture(const std::wstring& cmdline, std::string& out, int& exitCode) {
     return true;
 }
 
-// A quoted argument. Paths carry spaces on Windows more often than not, and a project under
-// "Aver Projects" would otherwise arrive at the tool as two arguments.
+// A quoted command-line argument, so a path with spaces stays one argument.
 std::wstring quoted(const std::string& s) { return L"\"" + widen(s) + L"\""; }
 #endif
 
 const char* kToolName = "averdesign.exe";
 
+// The executable to launch: the configured path, or the bare name for a PATH search.
 std::string resolveExe() {
     return g_exePath.empty() ? std::string(kToolName) : g_exePath;
 }
 
+// Classifies a base type name by suffix. The SAME rule the built-in scanner uses; the two backends
+// must classify a file identically.
 ActorKind kindFromBase(std::string_view base) {
-    // The SAME suffix rule the built-in scanner uses, and it has to stay the same: a file read by
-    // one backend and rewritten after being read by the other must classify identically, or a tab
-    // would gain or lose its viewport depending on which parser happened to answer.
     auto endsWith = [&](std::string_view suf) {
         return base.size() >= suf.size() && base.compare(base.size() - suf.size(), suf.size(), suf) == 0;
     };
@@ -102,6 +100,7 @@ ActorKind kindFromBase(std::string_view base) {
     return ActorKind::Unknown;
 }
 
+// Reads a [begin, end] pair into a span, leaving it alone if the key is not one.
 void readSpan(const JsonValue& obj, std::string_view key, ActorValueSpan& into) {
     const JsonValue& a = obj[key];
     if (!a.isArray() || a.size() != 2) return;
@@ -109,6 +108,7 @@ void readSpan(const JsonValue& obj, std::string_view key, ActorValueSpan& into) 
     into.end   = static_cast<usize>(a[1].asInt());
 }
 
+// Reads a 3-element array into `into`, leaving it alone if the key is not one.
 void readVec3(const JsonValue& obj, std::string_view key, f32 into[3]) {
     const JsonValue& a = obj[key];
     if (!a.isArray() || a.size() != 3) return;
@@ -117,14 +117,17 @@ void readVec3(const JsonValue& obj, std::string_view key, f32 into[3]) {
 
 } // namespace
 
+// Sets where the tool is, and forgets the cached availability answer.
 void setAverDesignPath(std::string exePath) {
     if (exePath == g_exePath) return;
     g_exePath = std::move(exePath);
-    g_available = -1;   // a different binary is a different answer
+    g_available = -1;
 }
 
+// Where the tool is, as last set.
 const std::string& averDesignPath() { return g_exePath; }
 
+// True when the tool can run at all. Cached; `recheck` forces a fresh probe.
 bool averDesignAvailable(bool recheck) {
     if (!recheck && g_available >= 0) return g_available == 1;
 #ifdef _WIN32
@@ -140,14 +143,14 @@ bool averDesignAvailable(bool recheck) {
                   resolveExe(),
                   ran ? "did not answer as expected" : "could not be started");
 #else
-    // Not a decline to implement so much as a decline to guess: the tool runs anywhere .NET does,
-    // but the spawn below is Win32 and there is no other platform in this tree to test a posix one
-    // against. A backend that had never run is worse than one that says it is not here.
+    // The spawn above is Win32 and there is no other platform in this tree to test a posix one
+    // against, so this backend reports itself absent.
     g_available = 0;
 #endif
     return g_available == 1;
 }
 
+// Parses `csPath` through the tool. False with `err` set on any failure.
 bool parseActorFileRoslyn(const std::string& csPath, RoslynParse& out, std::string* err) {
     auto fail = [&](std::string why) { if (err) *err = std::move(why); return false; };
 #ifndef _WIN32
@@ -185,9 +188,8 @@ bool parseActorFileRoslyn(const std::string& csPath, RoslynParse& out, std::stri
     for (usize i = 0; i < models.size(); ++i) {
         const JsonValue& m = models[i];
         ActorModel a;
-        // The id crosses as a STRING. It is a u64 and JSON numbers are doubles: 0x9E1C6A4B7F0D2233
-        // needs 64 bits of mantissa and a double has 53, so a numeric round trip would silently
-        // change the one field every rewrite is matched by.
+        // The id crosses as a STRING: it is a u64 and JSON numbers are doubles, so a numeric round
+        // trip would change the one field every rewrite is matched by.
         const std::string_view idText = m["objectId"].asString("0");
         a.objectId = std::strtoull(std::string(idText).c_str(), nullptr, 10);
         a.property = std::string(m["property"].asString());
@@ -218,8 +220,8 @@ bool parseActorFileRoslyn(const std::string& csPath, RoslynParse& out, std::stri
         readSpan(c, "meshPathSpan", k.meshPathSpan);
         readSpan(c, "materialSpan", k.materialSpan);
 
-        // Absent means NOT STATED, and the tool omits the key rather than writing zero -- zero is a
-        // legal height. asFloat's fallback is what preserves that distinction on this side.
+        // An absent key means NOT STATED — zero is a legal height — which is what asFloat's
+        // fallback preserves.
         k.capsuleHeight = c["capsuleHeight"].asFloat(0.0f);
         k.capsuleRadius = c["capsuleRadius"].asFloat(0.0f);
         k.eyeHeight     = c["eyeHeight"].asFloat(0.0f);

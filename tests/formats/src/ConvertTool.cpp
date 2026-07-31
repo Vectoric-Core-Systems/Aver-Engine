@@ -1,11 +1,11 @@
-// Drives the real importer over a real file and writes a real .ocmesh, so the end-to-end path is
-// exercised outside the editor's UI. This is the step the editor's Import button performs.
+// Command-line tool: imports a glTF/GLB file, writes a .ocmesh, and reads it back.
 #include "aver/formats/GltfImport.hpp"
 #include "aver/formats/OcMesh.hpp"
 #include "aver/core/Log.hpp"
 
 using namespace aver;
 
+// Converts argv[1] to argv[2]. Returns 0 on success, 1 on a conversion error, 2 on bad usage.
 int main(int argc, char** argv) {
     if (argc < 3) { AVER_ERROR("usage: convert <in.glb> <out.ocmesh>"); return 2; }
     fmt::GltfImportResult res;
@@ -22,8 +22,6 @@ int main(int argc, char** argv) {
     if (!fmt::saveOcMesh(argv[2], m, &why)) { AVER_ERROR("save: {}", why); return 1; }
     AVER_INFO("wrote {}", argv[2]);
 
-    // Read it straight back, because "the writer did not crash" is not the same as "the file is
-    // loadable" -- which is precisely the distinction this whole chain exists to keep honest.
     fmt::OcMeshData back;
     if (!fmt::loadOcMesh(argv[2], back, &why)) { AVER_ERROR("reload: {}", why); return 1; }
     AVER_INFO("reloaded: {} verts, {} tris", back.vertexCount(), back.indices.size() / 3);

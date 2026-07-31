@@ -1,3 +1,5 @@
+// Win32 backend for Splash: a layered PNG window shown during startup.
+
 #include "aver/platform/Splash.hpp"
 #include "aver/platform/Image.hpp"
 #include "aver/core/Log.hpp"
@@ -10,6 +12,7 @@ static const wchar_t* kSplashClass = L"AverSplashWindow";
 
 Splash::~Splash() { close(0); }
 
+// Decodes the PNG and shows it centred and topmost. False if it cannot be loaded or created.
 bool Splash::show(const std::string& pngPath) {
     ImageData img;
     if (!decodeImage(pngPath, img)) { AVER_TRACE("[Splash] no splash image at {}", pngPath); return false; }
@@ -66,6 +69,7 @@ bool Splash::show(const std::string& pngPath) {
     return true;
 }
 
+// Drains the splash window's queued messages.
 void Splash::pump() {
     if (!hwnd_) return;
     MSG msg;
@@ -75,6 +79,7 @@ void Splash::pump() {
     }
 }
 
+// Waits out `minVisibleMs` since it was shown, then destroys the window and its GDI objects.
 void Splash::close(u32 minVisibleMs) {
     if (!hwnd_) return;
     while (GetTickCount64() - shownAtMs_ < minVisibleMs) { pump(); Sleep(10); }

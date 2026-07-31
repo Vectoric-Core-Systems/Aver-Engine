@@ -1,18 +1,16 @@
-// DirectX 12 backend for Aver.RHI — device, swapchain, depth buffer, a lit-mesh
-// pipeline (HLSL Lambert shading compiled at runtime), immediate draw path, an
-// offscreen GPU self-test, and a backbuffer capture for verification. Hand-rolled
-// D3D12 structs (no d3dx12.h). Falls back to nullptr if D3D12 is unavailable.
+// DirectX 12 backend for Aver.RHI: device, swapchain, scene pipelines, the camera post chain,
+// and the generic resource factory and render context. Hand-rolled D3D12 structs (no d3dx12.h).
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
-#include <dxcapi.h>      // DXC: shader model 6.x (mesh shaders, DXR RayQuery)
+#include <dxcapi.h>
 #include <string>
 #include <wrl/client.h>
 
-#include <cmath>     // the post chain's inverse tonemap and its adaptation curve
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -23,7 +21,6 @@
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
 #include "backends/imgui_impl_dx12.h"
-// The impl header intentionally leaves this for the app's WndProc TU to declare.
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 #endif
 
@@ -33,31 +30,17 @@ namespace aver::rhi {
 namespace {
 
 constexpr u32 kFrameCount = 2;
-constexpr u32 kDefaultSampleCount = 4; // MSAA default; runtime-adjustable via setSampleCount
+constexpr u32 kDefaultSampleCount = 4;
 constexpr DXGI_FORMAT kBackbufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
 
-// The SCENE target's format, which is no longer the backbuffer's.
-//
-// Everything the scene draws is linear radiance now, and the tonemap that turns it into a display
-// image is the last pass of the frame (see rhi::PostSettings). Eight bits of gamma-encoded colour
-// cannot carry that: the sun disk is worth ~14, a specular highlight several times white, and both
-// would clamp to 1 at the moment they were written -- taking with them exactly the range bloom and
-// eye adaptation exist to read.
-//
-// RGBA16F rather than R11G11B10F because the alpha channel is load-bearing (averOpacity), and
-// rather than RGBA32F because f16 already has more precision than the 8-bit backbuffer this
-// resolves into and costs half the bandwidth.
+// Scene target format: linear HDR radiance, which the post chain tonemaps into the backbuffer.
 constexpr DXGI_FORMAT kSceneColorFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
-// The bloom pyramid's depth cap. Six halvings from half resolution reaches a 32-pixel-wide level on
-// a 4K frame, which is already wider than any halo anybody wants; more levels would cost dispatches
-// to blur something the composite then samples at one texel.
+// Bloom pyramid depth cap.
 constexpr u32 kMaxBloomMips = 6;
-// Descriptor triples the post heap holds: prefilter, histogram, composite, then one per downsample
-// and one per upsample. Laid out as (t0,t1,t2) runs because a root descriptor TABLE has to be
-// contiguous, and building them all once at resize means no descriptor is ever written while a
-// previous frame might still be reading it.
+// Descriptor triples the post heap holds: prefilter, histogram, composite, then one per
+// downsample and one per upsample. Each triple is contiguous, as a root table must be.
 constexpr u32 kPostTripleCount = 3 + (kMaxBloomMips - 1) * 2;
 constexpr u32 kPostDescriptorCount = kPostTripleCount * 3 + 2;   // + the histogram/exposure UAVs
 // Which triple is which. The bloom ones are ranges based at these.
@@ -66,26 +49,20 @@ constexpr u32 kPostTripleHistogram = 1;
 constexpr u32 kPostTripleComposite = 2;
 constexpr u32 kPostTripleDownBase  = 3;
 constexpr u32 kPostTripleUpBase    = kPostTripleDownBase + (kMaxBloomMips - 1);
-// The luminance window the histogram bins over, in log2. -10 is starlight and +12 is a bright sky;
-// anything outside is clamped into the end bins, which is the correct behaviour for a statistic.
+// The luminance window the histogram bins over, in log2. Anything outside lands in the end bins.
 constexpr f32 kHistogramMinLogLum = -10.0f;
 constexpr f32 kHistogramMaxLogLum = 12.0f;
-// One thread per FOUR pixels each way. See CSHistogram.
+// One histogram thread per four pixels each way.
 constexpr u32 kHistogramDownscale = 4;
 
 // ---------------------------------------------------------------- shader compilation
-// DXC (DXIL, shader model 6.x) is required for mesh shaders and for DXR's RayQuery; FXC tops out
-// at SM 5.1. dxcompiler.dll is NOT part of Windows, so it is redistributed next to the exe (see
-// this module's CMakeLists). If it is missing we fall back to FXC and lose only the SM6-only
-// features - the engine still runs, which is why the fallback exists at all.
+// Compiles HLSL through DXC (shader model 6.x) when dxcompiler.dll is present, else FXC (SM 5.1).
 class ShaderCompiler {
 public:
+    // Loads DXC once, or settles on FXC.
     void init() {
         if (tried_) return;
         tried_ = true;
-        // `--force-caps no-dxc` has to be honoured HERE, not only in the reported caps: a device
-        // that claims no DXC while still compiling DXIL exercises nothing. This is the one place
-        // the override does more than subtract from a number, and it is still only a removal.
         if (capsOverride().active && capsOverride().noDxc) {
             AVER_INFO("[RHI.D3D12] shader compiler: FXC (SM 5.1) - DXC suppressed by --force-caps no-dxc");
             return;
@@ -104,17 +81,11 @@ public:
     }
     bool usingDxc() const { return compiler_ != nullptr; }
 
-    // `target51` is the FXC target, e.g. "vs_5_1"; the SM6 equivalent is derived from it.
-    // `sm6` overrides that (e.g. "ps_6_5" for RayQuery) and requires DXC, so a caller using it must
-    // have checked the device caps first. `define` is a semicolon-separated list of -D macros
-    // ("AVER_MS=1;AVER_RT=1") and does NOT: the material prelude tells every raster shader which
-    // registers its tables landed at, so a compiler that could not take macros could not build the
-    // scene at all. That is why FXC gets them too.
+    // Compiles one entry point to bytecode. `target51` is the FXC target and the SM6 one is derived
+    // from it; `sm6` overrides that and requires DXC. `define` is a semicolon-separated -D list.
     HRESULT compile(const char* src, const char* entry, const char* target51, ID3DBlob** out,
                     const char* sm6 = nullptr, const char* define = nullptr) {
         init();
-        // "A=1;B=2" -> the two shapes the two compilers want. Split once, here, so the macro list
-        // cannot drift between them.
         std::vector<std::string> defs;
         if (define) {
             const std::string all(define);
@@ -125,9 +96,7 @@ public:
             }
         }
         if (!usingDxc()) {
-            if (sm6) return E_NOTIMPL;   // SM6-only path; caller must fall back
-            // D3D_SHADER_MACRO wants name and value as separate pointers, so each "A=1" is split
-            // in place and both halves have to outlive the D3DCompile call.
+            if (sm6) return E_NOTIMPL;
             std::vector<std::string> names, values;
             names.reserve(defs.size()); values.reserve(defs.size());
             for (const std::string& d : defs) {
@@ -145,14 +114,12 @@ public:
             if (FAILED(hr) && err) AVER_ERROR("[RHI.D3D12] {} ({}): {}", entry, target51, static_cast<const char*>(err->GetBufferPointer()));
             return hr;
         }
-        // "vs_5_1" -> "vs_6_0". Stages that need a higher model pass it in explicitly.
         std::string t6(target51);
         const size_t us = t6.rfind("_5_1");
         if (us != std::string::npos) t6 = t6.substr(0, us) + "_6_0";
         if (sm6) t6 = sm6;
         const std::wstring wEntry(entry, entry + std::strlen(entry));
         const std::wstring wTarget(t6.begin(), t6.end());
-        // Keep each macro alive for the duration of the Compile call.
         std::vector<std::wstring> wDefines;
         for (const std::string& d : defs) wDefines.emplace_back(d.begin(), d.end());
 
@@ -160,7 +127,7 @@ public:
         std::vector<LPCWSTR> args = {
             L"-E", wEntry.c_str(),
             L"-T", wTarget.c_str(),
-            L"-Zpr",           // pack matrices row-major: the engine's convention
+            L"-Zpr",
             L"-HV", L"2021",
         };
         for (const std::wstring& d : wDefines) { args.push_back(L"-D"); args.push_back(d.c_str()); }
@@ -175,7 +142,6 @@ public:
         }
         ComPtr<IDxcBlob> obj;
         if (FAILED(result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&obj), nullptr)) || !obj) return E_FAIL;
-        // Repackage as ID3DBlob so every PSO call site stays unchanged.
         if (FAILED(D3DCreateBlob(obj->GetBufferSize(), out))) return E_FAIL;
         std::memcpy((*out)->GetBufferPointer(), obj->GetBufferPointer(), obj->GetBufferSize());
         return S_OK;
@@ -187,13 +153,16 @@ private:
     ComPtr<IDxcCompiler3> compiler_;
 };
 
+// The process-wide shader compiler.
 ShaderCompiler& shaderCompiler() { static ShaderCompiler c; return c; }
 
+// Logs and returns false on a failed HRESULT.
 bool hrOk(HRESULT hr, const char* what) {
     if (FAILED(hr)) { AVER_ERROR("[RHI.D3D12] {} failed (hr=0x{:08X})", what, static_cast<u32>(hr)); return false; }
     return true;
 }
 
+// A whole-resource transition barrier.
 D3D12_RESOURCE_BARRIER transition(ID3D12Resource* res, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
     D3D12_RESOURCE_BARRIER b{};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -204,6 +173,7 @@ D3D12_RESOURCE_BARRIER transition(ID3D12Resource* res, D3D12_RESOURCE_STATES bef
     return b;
 }
 
+// Single-node heap properties of the given type.
 D3D12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE type) {
     D3D12_HEAP_PROPERTIES p{};
     p.Type = type;
@@ -213,20 +183,17 @@ D3D12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE type) {
 }
 
 #if AVER_WITH_IMGUI
+// Feeds one window message to ImGui. True when ImGui consumed it.
 static bool imguiWndProc(void* hwnd, u32 msg, u64 w, i64 l) {
     return ImGui_ImplWin32_WndProcHandler(static_cast<HWND>(hwnd), static_cast<UINT>(msg),
                                           static_cast<WPARAM>(w), static_cast<LPARAM>(l)) != 0;
 }
 
-// ImGui 1.92 owns a *list* of atlas textures, not one. When the atlas is rebuilt -- because the
-// editor reloaded its font at a new DPI, or simply because enough new glyphs were baked on demand
-// to outgrow the current sheet -- the replacement is created while the outgoing texture is still
-// referenced by in-flight draw data, and only released a frame or two later. The backend's legacy
-// single-descriptor mode asserts on exactly that overlap, so the UI heap holds a small pool and
-// hands descriptors out through these callbacks instead.
+// Slots in the UI descriptor pool. ImGui 1.92 keeps several atlas textures alive at once.
 static constexpr u32 kUiSrvCount = 16;
 
 namespace {
+// The UI's shader-visible descriptor slots and which of them are in use.
 struct UiSrvPool {
     ID3D12DescriptorHeap* heap = nullptr;
     u64 cpuBase = 0;
@@ -237,6 +204,7 @@ struct UiSrvPool {
 UiSrvPool g_uiSrv;
 } // namespace
 
+// Hands ImGui a free descriptor from the UI pool.
 static void uiSrvAlloc(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* cpu,
                        D3D12_GPU_DESCRIPTOR_HANDLE* gpu) {
     for (u32 i = 0; i < kUiSrvCount; ++i) {
@@ -246,11 +214,11 @@ static void uiSrvAlloc(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* cp
         gpu->ptr = g_uiSrv.gpuBase + u64(i) * g_uiSrv.stride;
         return;
     }
-    // Never expected: ImGui keeps at most a couple of atlas textures alive at once.
     AVER_ERROR("[RHI.D3D12] UI SRV descriptor pool exhausted ({} in use)", kUiSrvCount);
     cpu->ptr = 0; gpu->ptr = 0;
 }
 
+// Returns a descriptor to the UI pool.
 static void uiSrvFree(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE cpu,
                       D3D12_GPU_DESCRIPTOR_HANDLE) {
     if (!g_uiSrv.stride || cpu.ptr < g_uiSrv.cpuBase) return;
@@ -259,13 +227,7 @@ static void uiSrvFree(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE cpu,
 }
 #endif
 
-// The tail of the per-draw b1 block: shading model, then its parameters. drawMesh has no material
-// to hand over yet, so both paths write the same defaults, and they write them from ONE place --
-// two copies that disagreed would shade the feature-overridden path differently from the backend's
-// own with nothing to report it.
-//
-// The defaults are the values the shading maths used to hardcode: 0.04 dielectric reflectance,
-// f90 = 1, no emission.
+// Writes the default shading model and its parameters into the tail of a per-draw b1 block.
 void writeShadingConstants(f32* block) {
     const u32 model = 0;   // AVER_MODEL_STANDARD in the material prelude
     std::memcpy(block + 24, &model, sizeof(model));   // a uint in the block, not a converted float
@@ -275,6 +237,7 @@ void writeShadingConstants(f32* block) {
     block[28] = block[29] = block[30] = block[31] = 0.0f;   // emissive
 }
 
+// Resource description for a linear buffer of `bytes`.
 D3D12_RESOURCE_DESC bufferDesc(u64 bytes) {
     D3D12_RESOURCE_DESC d{};
     d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -288,54 +251,33 @@ D3D12_RESOURCE_DESC bufferDesc(u64 bytes) {
 }
 
 const char* kShaderHLSL = R"(
-// ---- scene pixel shader ----
-// PSMainPlain, and only PSMainPlain: unshadowed, with no bounce. That is the whole of the shading
-// this backend owns, because sun visibility and indirect radiance are things the material contract
-// asks a RENDERER for rather than terms a material computes. A render feature that wants either
-// supplies its own pixel shader and its own pipeline; the backend keeping a second copy is what
-// step 11 of the refactor removed.
-//
-// It shades through plainShadeSurface, the prelude's FROZEN copy, and not through the Aver material
-// contract: linking Aver.Render.PBR.Materials from a backend would invert the layering, and this
-// path is unreachable in any build that has a render feature, so a substitute written here would
-// diverge with nothing to catch it.
+// Shades a scene surface: unshadowed, no bounce, through the prelude's FROZEN plainShadeSurface.
 float4 PSMainPlain(VSOut i) : SV_TARGET { return plainShadeSurface(i, 1.0, float3(0,0,0), 1.0); }
 
-// ---- procedural sky (fullscreen triangle via SV_VertexID) ----
+// Procedural sky for a fullscreen triangle. The only place the full scattering integral runs.
 float4 PSky(SkyOut i) : SV_TARGET {
     float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
     float3 ray = normalize(far.xyz / far.w - gCamPos.xyz);
     float3 L = normalize(gLightDir.xyz);
-    // THE ONLY PLACE THE FULL SCATTERING INTEGRAL RUNS. Everything else in the engine reads the
-    // two-colour dome, which the physical model fits on the CPU each frame -- so a physical sky
-    // costs one fullscreen march and nothing at all per shaded surface.
     float3 sky = averAtmoOn() ? averSkyPhysical(ray) : skyColor(ray);
     float sd = saturate(dot(ray, L));
     float3 sunC = srgbToLin(gLightColor.rgb) * gSkyParams.z;
-    // The DISK is a hard-edged test against the authored angular radius, not a power curve: half a
-    // degree is what the sun actually subtends, and a pow() large enough to look that tight is one
-    // that aliases into a flickering dot as the camera turns. The soft shoulder is the last term.
     float cosR = gSkyParams.w;
     float disk = smoothstep(cosR - 0.0004, cosR + 0.0002, sd);
     sky += sunC * disk * 14.0;
-    // The glow around it. Authored as a power curve, because the authored dome has no air in it to
-    // scatter; under the physical model the Mie forward lobe already IS that glow, and adding this
-    // on top would be counting the same light twice.
     if (!averAtmoOn()) sky += sunC * pow(sd, 12.0) * 0.30;
 
-    // Clouds LAST, so they occlude the sun disk and the glow rather than being lit through them.
-    // Costs nothing at all when the layer is off or the ray never enters it.
     float4 cloud = averCloudLayer(gCamPos.xyz, ray, L, sunC);
     sky = sky * cloud.a + cloud.rgb;
 
-    // Linear radiance; the post chain tonemaps. The sun disk in particular is worth far more than 1
-    // here, and clamping it to a display value at this point is exactly what would stop it blooming.
     return float4(sky, 1.0);
 }
 
-// ---- unlit coloured lines (grid / gizmo) ----
+// Line vertex as authored: position and display colour.
 struct LVSIn  { float3 pos : POSITION; float3 col : COLOR; };
+// Line vertex after transform.
 struct LVSOut { float4 pos : SV_POSITION; float3 col : COLOR; };
+// Transforms a line vertex into clip space.
 LVSOut VSLine(LVSIn i) {
     LVSOut o;
     float4 wp = mul(float4(i.pos, 1.0), gWorld);
@@ -343,26 +285,17 @@ LVSOut VSLine(LVSIn i) {
     o.col = i.col;
     return o;
 }
-// A line's colour is authored as the pixel it wants ON SCREEN — grid greys, gizmo axis colours — so
-// it is a DISPLAY value, not radiance. The scene target is HDR now and the frame is tonemapped at
-// the end, so the value written here is the pre-image of that colour under the whole chain: decode
-// the gamma the target no longer applies, then undo the tonemap that will be applied.
-//
-// It rides the camera's exposure with everything else rather than being divided back out. That
-// keeps the DEFAULT (exposure 1) exactly what it always was, which is what the pixel oracle
-// measures, and under eye adaptation an editor overlay that ignored exposure would be the one thing
-// in the viewport that did.
+// Writes a display-authored line colour as the scene radiance that tonemaps back to it.
 float4 PSLine(LVSOut i) : SV_TARGET { return float4(averInverseTonemap(srgbToLin(i.col)), 1.0); }
 )";
 
-// The shared prelude and this backend's own shaders form ONE translation unit; every entry point
-// below is compiled from the concatenation. Joined once and cached because the two halves are
-// immutable and the compile sites are scattered across pipeline creation.
+// The shared prelude and this backend's shaders joined into one translation unit, built once.
 const std::string& sceneShaderSource() {
     static const std::string src = std::string(sharedShaderPrelude()) + kShaderHLSL;
     return src;
 }
 
+// Per-frame constants. Mirrors `cbuffer PerFrame` in the shared shader prelude, field for field.
 struct PerFrameCB {
     f32 viewProj[16];
     f32 invViewProj[16];
@@ -373,14 +306,11 @@ struct PerFrameCB {
     f32 skyZenith[4];
     f32 skyHorizon[4];
     f32 fogColor[4];    // a = density at fogHeight
-    // ---- the authored atmosphere (rhi::SkyAtmosphere). MIRRORED in the shared prelude's
-    // `cbuffer PerFrame`, field for field, with the same no-compiler-behind-it warning as above.
     f32 skyParams[4];    // x atmosphere height, y sky-light intensity, z sun intensity, w cos(sun angular radius)
     f32 groundColor[4];  // rgb ground albedo below the horizon
     f32 fogParams[4];    // x height falloff, y fog height, z start distance, w max opacity
     f32 cloudParams[4];  // x coverage, y density, z layer bottom, w layer top
     f32 cloudMotion[4];  // xy wind offset in world units, z 1/feature size, w enabled
-    // ---- the physical atmosphere (rhi::AtmosphereProfile), mirrored in the prelude the same way.
     f32 atmoRayleigh[4]; // rgb scattering per km, w scale height km
     f32 atmoMie[4];      // x scatter, y extinction, z scale height km, w phase g
     f32 atmoOzone[4];    // rgb absorption per km, w tent half-width km
@@ -389,12 +319,8 @@ struct PerFrameCB {
     f32 atmoSunE0[4];    // rgb sun irradiance above the air, w ground albedo
 };
 
-// MIRRORS `cbuffer AverPost : register(b0)` in rhi::postShaderSource() FIELD FOR FIELD. Same
-// treatment as PerFrameCB above and for the same reason: there is no compiler behind this, and a
-// mismatch shades plausibly with the wrong parameters rather than failing.
-//
-// One block for the whole chain. A pass reads the fields it needs and ignores the rest, which is
-// what lets seven passes share one root signature and one suballocation each.
+// Constants for every post pass. Mirrors `cbuffer AverPost : register(b0)` in
+// rhi::postShaderSource(), field for field.
 struct PostCB {
     f32 tone[4];    // exposure, bloom intensity, bloom threshold, bloom knee
     f32 dst[4];     // destination width, height, 1/width, 1/height
@@ -405,14 +331,10 @@ struct PostCB {
 };
 static_assert(sizeof(PostCB) == 96, "the HLSL cbuffer mirrors this byte for byte");
 
-// Per-frame upload for the block above. Sixteen passes at 256-byte alignment is 4 KB; the ring is
-// sized well past that so a deeper pyramid never has to think about it.
+// Per-frame upload ring for the block above.
 constexpr u32 kPostConstantRingBytes = 16 * 1024;
 
-// The ONE description of rhi::MeshVertex to D3D12. Every pipeline that reads geometry through the
-// input assembler shares it -- the backend's scene pipelines and the generic factory's alike -- so
-// adding a field to MeshVertex is a single edit here rather than a hunt through five PSO builders
-// where a missed one fails at draw time with nothing naming the cause.
+// The one description of rhi::MeshVertex to D3D12; every input-assembler pipeline shares it.
 constexpr D3D12_INPUT_ELEMENT_DESC kMeshInputLayout[] = {
     {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -420,22 +342,17 @@ constexpr D3D12_INPUT_ELEMENT_DESC kMeshInputLayout[] = {
 };
 constexpr UINT kMeshInputLayoutCount = sizeof(kMeshInputLayout) / sizeof(kMeshInputLayout[0]);
 
-// Root parameter indices for the backend's own two signatures. Named because the recording side
-// passes them as bare integers to SetGraphicsRoot*, where a stale number binds the wrong parameter
-// instead of failing -- the failure mode that cost this project a debugging session already.
+// Root parameter indices for the backend's own two signatures.
 constexpr UINT kSceneFrameParam  = 0;   // b0, the engine per-frame block
 constexpr UINT kSceneObjectParam = 1;   // b1, kObjectConstantDwords root constants
-// The mesh-shader signature repeats those two and appends the geometry the input assembler would
-// otherwise have fetched. Only the PARAMETER indices live here; the registers come from the base
-// below, which is also what the prelude is told through -D, so the two cannot drift apart.
+// The mesh-shader signature repeats those two and appends the geometry the IA would have fetched.
 constexpr UINT kMeshVertexParam = 2;
 constexpr UINT kMeshIndexParam  = 3;
 constexpr UINT kMeshCountParam  = 4;    // b5, triangle count
-// This signature declares no SRV table at all, so any base is legal; it keeps its historical 3 so
-// the change that introduced the -D macros moved no bytecode. Vertices at t(base), indices at
-// t(base+1) — the same shape rootSignature() derives from layout.srvCount for feature pipelines.
+// FROZEN at 3: vertices at t(base), indices at t(base+1), and the prelude is told through -D.
 constexpr UINT kSceneMeshSrvBase = 3;
 
+// A mesh uploaded to the GPU, with the views the input assembler binds.
 struct GpuMesh {
     ComPtr<ID3D12Resource> vb;
     ComPtr<ID3D12Resource> ib;
@@ -444,6 +361,7 @@ struct GpuMesh {
     u32 indexCount = 0;
 };
 
+// A line list uploaded to the GPU.
 struct GpuLineMesh {
     ComPtr<ID3D12Resource> vb;
     D3D12_VERTEX_BUFFER_VIEW vbv{};
@@ -451,9 +369,8 @@ struct GpuLineMesh {
 };
 
 // ---------------------------------------------------------------- generic RHI mapping
-// Aver.RHI's own format/state vocabulary translated into D3D12's. Nothing in the existing frame
-// path speaks these enums; they exist for the generic resource factory further down.
 
+// Maps an RHI format to DXGI's.
 DXGI_FORMAT toDxgiFormat(Format f) {
     switch (f) {
         case Format::RGBA8Unorm:     return DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -478,20 +395,16 @@ DXGI_FORMAT toDxgiFormat(Format f) {
     return DXGI_FORMAT_UNKNOWN;
 }
 
-// A typeless depth resource is written through a DSV naming D32_FLOAT and read through an SRV
-// naming R32_FLOAT; naming the typeless format in either view is rejected outright. So the two
-// directions get their own mapping rather than one shared one.
+// The format a typeless or depth resource is SAMPLED through.
 DXGI_FORMAT toDxgiSrvFormat(Format f) {
     return (f == Format::R32Typeless || f == Format::D32Float) ? DXGI_FORMAT_R32_FLOAT : toDxgiFormat(f);
 }
+// The format a typeless or depth resource is bound as a DEPTH target through.
 DXGI_FORMAT toDxgiDsvFormat(Format f) {
     return (f == Format::R32Typeless || f == Format::D32Float) ? DXGI_FORMAT_D32_FLOAT : toDxgiFormat(f);
 }
 
-// A caller-declared vertex layout (GraphicsPipelineDesc::vertexLayout) to D3D12's input elements.
-// The semantic NAME is a string literal, so the pointer outlives the D3D12_INPUT_LAYOUT_DESC that
-// borrows it. The ELEMENT ARRAY does not, which is why it is an out parameter the caller keeps alive
-// across CreateGraphicsPipelineState rather than a temporary returned by value.
+// The semantic string for a vertex semantic. A literal, so it outlives the desc that borrows it.
 const char* semanticName(VertexSemantic s) {
     switch (s) {
         case VertexSemantic::Position: return "POSITION";
@@ -502,14 +415,13 @@ const char* semanticName(VertexSemantic s) {
     return "POSITION";
 }
 
+// Fills `out` with the input elements a caller-declared vertex layout names. Returns the count.
 UINT buildInputLayout(const VertexLayout& l, D3D12_INPUT_ELEMENT_DESC (&out)[kMaxVertexAttribs]) {
     UINT n = 0;
     for (u32 i = 0; i < l.attribCount && i < kMaxVertexAttribs; ++i) {
         const VertexAttrib& a = l.attribs[i];
         const DXGI_FORMAT f = toDxgiFormat(a.format);
         if (f == DXGI_FORMAT_UNKNOWN) {
-            // Dropped rather than passed through: D3D12 rejects UNKNOWN in an input element, and its
-            // rejection names the element index, not the attribute the caller actually wrote.
             AVER_ERROR("[RHI.D3D12] vertex attribute {} has no usable format", i);
             continue;
         }
@@ -525,6 +437,7 @@ UINT buildInputLayout(const VertexLayout& l, D3D12_INPUT_ELEMENT_DESC (&out)[kMa
     return n;
 }
 
+// Maps a DXGI format back to the RHI's own enum.
 Format fromDxgiFormat(DXGI_FORMAT f) {
     switch (f) {
         case DXGI_FORMAT_R8G8B8A8_UNORM:      return Format::RGBA8Unorm;
@@ -548,11 +461,10 @@ Format fromDxgiFormat(DXGI_FORMAT f) {
     }
 }
 
+// True for the formats a depth target uses.
 bool isDepthFormat(Format f) { return f == Format::D32Float || f == Format::R32Typeless; }
 
-// Bytes per texel, for interpreting the CALLER's rows only. The destination pitch is never computed
-// from this — GetCopyableFootprints is the only authority on that, and assuming the two match is the
-// classic texture-upload bug.
+// Bytes per texel, for interpreting the caller's rows only. Zero for block formats.
 u32 texelBytes(Format f) {
     switch (f) {
         case Format::RGBA16F:        return 8;
@@ -584,17 +496,14 @@ u32 blockBytes(Format f) {
     return 0;
 }
 
-// Tightly packed bytes in one source row of a surface this wide — which for a block format is one
-// row of BLOCKS covering four texel rows. The upload loop copies fp.Footprint row units, and those
-// units are block rows for a block format, so the source stride must be counted the same way or
-// every mip after the first is read from the wrong offset.
+// Tightly packed bytes in one source row of a surface this wide — one row of BLOCKS for a block
+// format, which is the unit the upload loop counts rows in.
 u64 packedRowPitch(Format f, u32 widthTexels) {
     if (const u32 bb = blockBytes(f)) return u64((widthTexels + 3) / 4) * bb;
     return u64(widthTexels) * texelBytes(f);
 }
 
-// AccelerationStructure maps here for completeness (a buffer is CREATED in it), but it is terminal:
-// the barrier entry points reject it before they ever get this far.
+// Maps an RHI resource state to D3D12's.
 D3D12_RESOURCE_STATES toResourceStates(ResourceState s) {
     switch (s) {
         case ResourceState::ShaderResource:         return D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -610,6 +519,7 @@ D3D12_RESOURCE_STATES toResourceStates(ResourceState s) {
     return D3D12_RESOURCE_STATE_COMMON;
 }
 
+// Maps an RHI comparison to D3D12's.
 D3D12_COMPARISON_FUNC toComparison(CompareOp op) {
     switch (op) {
         case CompareOp::Less:      return D3D12_COMPARISON_FUNC_LESS;
@@ -620,12 +530,11 @@ D3D12_COMPARISON_FUNC toComparison(CompareOp op) {
     return D3D12_COMPARISON_FUNC_NEVER;
 }
 
+// Maps an RHI filter to D3D12's.
 D3D12_FILTER toFilter(Filter f) {
     switch (f) {
         case Filter::Point:  return D3D12_FILTER_MIN_MAG_MIP_POINT;
         case Filter::Linear: return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        // Hardware PCF. Mip-point rather than mip-linear because a comparison sampler reads one
-        // level of a shadow map, and mip-linear would silently blend two of them.
         case Filter::ComparisonLinear: return D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
         case Filter::Anisotropic: return D3D12_FILTER_ANISOTROPIC;
     }

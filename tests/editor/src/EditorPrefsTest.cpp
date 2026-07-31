@@ -1,14 +1,5 @@
 // The editor's preferences store: write, restart, read back.
-//
-// It is small, and the reason it is tested anyway is that its failure mode is SILENT. A preference
-// that does not persist looks exactly like a preference the user never set, so nothing reports it
-// and nobody investigates it -- they just drag the column again, every session, forever.
-//
-// The store lives in the sandbox rather than in a module, because it is editor UI state and has no
-// business being reachable from the engine. This test therefore compiles that translation unit
-// directly rather than linking a library. That is deliberate: promoting it to a module purely to
-// make it testable would put editor preferences in the engine's dependency graph, which is a worse
-// trade than an unusual line in a CMakeLists.
+// Compiles the sandbox translation unit directly rather than linking a library.
 #include "../../../sandbox/src/EditorPrefs.hpp"
 
 #include "aver/core/Log.hpp"
@@ -21,19 +12,18 @@ using namespace aver;
 
 static int g_failures = 0;
 
+// Records one assertion and logs it.
 static void check(bool cond, const std::string& what) {
     if (cond) { AVER_INFO("  ok    {}", what); return; }
     ++g_failures;
     AVER_ERROR("  FAIL  {}", what);
 }
 
+// Exercises the preference store against its real on-disk location, restoring it afterwards.
 int main() {
     AVER_INFO("=== editor preferences ===");
 
-    // The store picks its own path from userDataDir. A test that wrote somewhere else would not be
-    // testing the thing that ships, so this uses the real location and puts back what it found.
     const std::string path = [] {
-        // Touch the store so it resolves its path before anything is read or written.
         (void)editor::prefFloat("aver.test.probe", 0.0f);
         return editor::editorPrefsPath();
     }();
@@ -44,7 +34,7 @@ int main() {
     }
     AVER_INFO("  store: {}", path);
 
-    // Preserve whatever is really there. This is a developer's own editor.ini.
+    // Preserve the developer's own editor.ini.
     std::string original;
     const bool hadFile = readFileText(path, original);
 
@@ -57,23 +47,16 @@ int main() {
         std::string text;
         check(readFileText(path, text), "and it can be read back");
         check(text.find("aver.test.width=") != std::string::npos, "the key is in it");
-        // The point of the plain-text format: a human can read and fix it.
         check(text.find('#') != std::string::npos, "with a comment header explaining what it is");
     }
 
     // ---- the value comes back, exactly -------------------------------------------------------
-    //
-    // Read through the store's own accessor rather than by parsing the file, because the accessor is
-    // what the editor uses and is where a locale-dependent parse would go wrong.
     {
         const f32 got = editor::prefFloat("aver.test.width", -1.0f);
         check(std::fabs(got - 237.5f) < 1.0e-6f, "a fractional value round-trips EXACTLY");
     }
 
     // ---- a missing key is the caller's fallback, not zero ------------------------------------
-    //
-    // Every read takes a fallback so a fresh machine gets a designed default rather than a collapsed
-    // column. Returning 0 for an absent key would make every first run look broken.
     {
         check(editor::prefFloat("aver.test.absent", 42.0f) == 42.0f,
               "an absent key returns the caller's fallback");
@@ -81,9 +64,6 @@ int main() {
     }
 
     // ---- bools read as words, and survive both spellings --------------------------------------
-    //
-    // Written as true/false because the file is meant to be read by a person; 1/0 is also accepted
-    // because somebody hand-editing it will write that, and refusing their edit would be pedantry.
     {
         editor::setPrefBool("aver.test.on", true);
         editor::setPrefBool("aver.test.off", false);
@@ -96,7 +76,6 @@ int main() {
         check(text.find("aver.test.on=true") != std::string::npos,
               "and it is stored as a WORD, not a 1");
         check(editor::prefBool("aver.test.missing", true), "an absent bool takes the fallback");
-        // A value that is neither is not a reason to invent one.
         editor::setPrefString("aver.test.nonsense", "maybe");
         check(editor::prefBool("aver.test.nonsense", true), "an unparseable bool takes the fallback");
     }
@@ -120,9 +99,6 @@ int main() {
         check(editor::prefString("aver.test.nothing", "fallback") == "fallback",
               "an absent string takes the fallback");
 
-        // A newline would split the entry across two lines and the tail would be read back as a line
-        // with no '=' and dropped -- so the value would come back TRUNCATED rather than absent, which
-        // is the worse of the two failures. It is refused instead.
         const std::string was = editor::prefString("aver.test.name", "");
         editor::setPrefString("aver.test.name", std::string("two") + '\n' + "lines");
         check(editor::prefString("aver.test.name", "") == was,
@@ -130,9 +106,6 @@ int main() {
     }
 
     // ---- a corrupt file degrades, it does not break -------------------------------------------
-    //
-    // This file is hand-editable by design, which means it will be hand-edited badly. Every one of
-    // these lines is something a person or a half-finished write could leave behind.
     {
         const std::string junk =
             "# a comment\n"
@@ -144,9 +117,6 @@ int main() {
             "=novalue\n";
         check(writeFileText(path, junk), "a deliberately malformed file is written");
 
-        // The store caches after its first read, so this exercises the parser by proving the file it
-        // writes NEXT still contains the good key -- a parser that threw or bailed on the bad lines
-        // would have lost it.
         editor::setPrefFloat("aver.test.after", 5.0f);
         editor::flushEditorPrefs();
         std::string text;
@@ -156,7 +126,7 @@ int main() {
 
     // ---- restore the developer's own file -----------------------------------------------------
     if (hadFile) writeFileText(path, original);
-    else         writeFileText(path, "");   // leave it empty rather than deleting: it was ours to make
+    else         writeFileText(path, "");
 
     if (g_failures == 0) AVER_INFO("=== all editor preference tests passed ===");
     else                 AVER_ERROR("=== {} editor preference check(s) FAILED ===", g_failures);

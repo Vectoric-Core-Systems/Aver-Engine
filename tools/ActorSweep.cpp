@@ -1,9 +1,5 @@
-// Sweeps a real project's scripts and reports what the actor editor would make of each file.
-//
-// Not a unit test: it runs against whatever is on this machine, so it asserts nothing and proves
-// nothing about a clean checkout. It exists to answer one question honestly -- "would this open the
-// actors people actually write?" -- which no fixture can answer, because a fixture is written by
-// the same person who wrote the parser.
+// Sweeps a project's .cs files and reports what the actor editor would make of each one.
+// Diagnostic only: it asserts nothing.
 #include "aver/formats/ActorScript.hpp"
 #include "aver/core/Log.hpp"
 
@@ -13,6 +9,7 @@
 
 using namespace aver;
 
+// Parses every script under the directory named on the command line and prints a verdict per file.
 int main(int argc, char** argv) {
     if (argc < 2) { AVER_ERROR("usage: ActorSweep <scripts-dir>"); return 2; }
     namespace fs = std::filesystem;

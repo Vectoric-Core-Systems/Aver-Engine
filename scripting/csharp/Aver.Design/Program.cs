@@ -1,39 +1,28 @@
-// averdesign — read an actor script with a real C# parser and print what it declares as JSON.
-//
-//   averdesign <path-to.cs>            -> JSON on stdout, exit 0
-//   averdesign --probe                 -> prints its own version, exit 0. The C++ side uses this to
-//                                         decide whether a Roslyn backend is available at all.
-//
-// Everything it emits mirrors, field for field, what the built-in scanner in modules/formats
-// produces, because the C++ side maps this straight onto the same structs. Where the two disagree
-// the scanner is the specification: this exists to read the files the scanner DECLINES, not to
-// reinterpret the ones it accepts.
+// averdesign — reads an actor script with Roslyn and prints what it declares as JSON.
+// Output mirrors, field for field, the built-in scanner in modules/formats; that scanner is the
+// specification. `averdesign <file.cs>` prints JSON; `averdesign --probe` prints its version.
 using System.Globalization;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
-using Microsoft.CodeAnalysis.Text;   // TextSpan: char offsets, converted to bytes before they leave
+using Microsoft.CodeAnalysis.Text;
 
 namespace Aver.Design;
 
+// The command line entry point and the whole of the reader.
 internal static class Program
 {
     private const string OpenMarkerPrefix = "<aver-generated region=\"models\" schema=\"";
     private const string CloseMarker = "</aver-generated>";
 
-    // The one schema this build understands. An unknown one is REPORTED rather than guessed at, for
-    // the same reason the scanner reports it: a future schema may mean the same tokens differently,
-    // and reading it with today's rules would silently produce wrong coordinates.
     private const int KnownSchema = 1;
 
+    // Parses the file named by args, or answers --probe. Exit codes: 0 ok, 2 usage, 3 unreadable.
     private static int Main(string[] args)
     {
         if (args.Length == 1 && args[0] == "--probe")
         {
-            // Deliberately trivial and deliberately not a parse: the caller is asking "can you run at
-            // all", and answering that by parsing something would conflate a missing runtime with a
-            // bad file.
             Console.Out.Write("averdesign 1\n");
             return 0;
         }
@@ -47,14 +36,7 @@ internal static class Program
         try { bytes = File.ReadAllBytes(args[0]); }
         catch (Exception ex) { Console.Error.Write($"cannot read: {ex.Message}\n"); return 3; }
 
-        // BYTES ARE THE UNIT, and this is the subtlest thing in the tool.
-        //
-        // Roslyn works in UTF-16 character offsets. The C++ side holds the file as UTF-8 bytes and
-        // every span it is given is used to slice that byte array. The two agree only while the file
-        // is pure ASCII; one accented letter, one em dash, one emoji in a comment above a placement
-        // shifts every subsequent span and the rewriter then writes coordinates into the middle of
-        // some other token. So every offset that leaves this program is converted, via the map built
-        // below, and none of them is a char index.
+        // Every offset that leaves this program is a UTF-8 BYTE offset, never a Roslyn char index.
         string text = DecodeUtf8(bytes, out int bomChars);
         var toByte = new ByteOffsets(text, bomChars);
 
@@ -74,17 +56,16 @@ internal static class Program
     // ---------------------------------------------------------------------------------------------
     // UTF-16 char offset -> UTF-8 byte offset
     // ---------------------------------------------------------------------------------------------
+    // Maps a UTF-16 char offset in the decoded text to a UTF-8 byte offset in the file.
     private sealed class ByteOffsets
     {
-        // prefix_[i] is the number of UTF-8 bytes in text[0..i). One entry per char plus a tail, so a
-        // lookup is an array index rather than a re-encode -- a file with two hundred spans would
-        // otherwise re-encode its own prefix two hundred times.
-        private readonly int[] prefix_;
+        private readonly int[] prefix_;   // prefix_[i] = UTF-8 bytes in text[0..i)
         private readonly int bomBytes_;
 
+        // Builds the prefix table for one decoded file.
         public ByteOffsets(string text, int bomChars)
         {
-            bomBytes_ = bomChars > 0 ? 3 : 0;   // a UTF-8 BOM is three bytes and zero characters of content
+            bomBytes_ = bomChars > 0 ? 3 : 0;
             prefix_ = new int[text.Length + 1];
             int n = 0;
             for (int i = 0; i < text.Length; ++i)
@@ -93,9 +74,6 @@ internal static class Program
                 char c = text[i];
                 if (char.IsHighSurrogate(c) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
                 {
-                    // A surrogate PAIR is four UTF-8 bytes across two chars. Credit them to the first
-                    // and give the second a zero-width step, so an offset landing between them (which
-                    // Roslyn never produces, but a hand-built one might) does not go backwards.
                     n += 4;
                     prefix_[i + 1] = n;
                     ++i;
@@ -111,6 +89,7 @@ internal static class Program
             prefix_[text.Length] = n;
         }
 
+        // Byte offset for a char offset, clamped to the file.
         public int Of(int charOffset)
         {
             if (charOffset <= 0) return bomBytes_;
@@ -119,12 +98,13 @@ internal static class Program
         }
     }
 
+    // Decodes the file as UTF-8. bomChars is nonzero when a BOM was skipped.
     private static string DecodeUtf8(byte[] bytes, out int bomChars)
     {
         bomChars = 0;
         if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
         {
-            bomChars = 1;   // signals "there was a BOM", not a character count in the decoded string
+            bomChars = 1;
             return Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
         }
         return Encoding.UTF8.GetString(bytes);
@@ -133,13 +113,10 @@ internal static class Program
     // ---------------------------------------------------------------------------------------------
     // The generated region, and the b.Place rows inside it
     // ---------------------------------------------------------------------------------------------
+    // Writes the generated region's status, byte bounds and every b.Place row inside it.
     private static void WriteRegionAndModels(StringBuilder sb, string text, CompilationUnitSyntax root,
                                              ByteOffsets toByte)
     {
-        // The markers are found in the TEXT, not in the syntax tree, and on purpose: they live inside
-        // comment trivia, the file format defines them as literal text, and modules/formats finds
-        // them the same way. Two implementations locating the same delimiter by two different rules
-        // is how they come to disagree about where a region starts.
         int open = text.IndexOf(OpenMarkerPrefix, StringComparison.Ordinal);
         if (open < 0)
         {
@@ -165,9 +142,7 @@ internal static class Program
             return;
         }
 
-        // The region body is what lies strictly BETWEEN the marker lines, matching the C++ side's
-        // regionBegin/regionEnd exactly -- a rewriter that disagreed by even one line would be able
-        // to write over a marker, and the markers are the one thing that must survive.
+        // The region body lies strictly between the marker lines, matching the C++ regionBegin/End.
         int afterOpenLine = text.IndexOf('\n', open);
         if (afterOpenLine < 0) afterOpenLine = open;
         else ++afterOpenLine;
@@ -179,8 +154,6 @@ internal static class Program
             sb.Append(",\"models\":[]");
             return;
         }
-        // Back up to the start of the line the close marker sits on, so the body excludes its
-        // leading comment slashes and indentation.
         int closeLineStart = text.LastIndexOf('\n', Math.Max(close - 1, 0));
         int bodyEnd = closeLineStart < afterOpenLine ? close : closeLineStart + 1;
 
@@ -198,9 +171,7 @@ internal static class Program
             var m = ReadPlace(inv);
             if (m is null) continue;
 
-            // The STATEMENT span, not the invocation's: the C++ rewriter replaces whole statements,
-            // and `Body = b.Place(...);` has an assignment and a semicolon around the call. Walking up
-            // to the enclosing statement is what makes the two agree.
+            // The STATEMENT span, not the invocation's: the C++ rewriter replaces whole statements.
             SyntaxNode stmt = inv;
             while (stmt.Parent is not null && stmt is not StatementSyntax) stmt = stmt.Parent;
 
@@ -220,6 +191,7 @@ internal static class Program
         sb.Append(']');
     }
 
+    // One b.Place row: what it places and where.
     private sealed class Placement
     {
         public ulong ObjectId;
@@ -230,13 +202,7 @@ internal static class Program
         public float[] Scale = { 1f, 1f, 1f };
     }
 
-    // The whole reason this tool exists: arguments are read BY NAME where they are named and by
-    // position where they are not, in either order, with any of them omitted.
-    //
-    // The locked grammar the scanner implements requires one exact token sequence. Roslyn has already
-    // done the work of knowing which argument is which, so honouring named arguments here is a few
-    // lines rather than a second parser -- and "somebody moved `material:` after `pos:`" is the most
-    // likely single reason a hand-edited region stops scanning.
+    // Reads one b.Place call, by argument name or by position, in any order. Null without id or mesh.
     private static Placement? ReadPlace(InvocationExpressionSyntax inv)
     {
         var p = new Placement();
@@ -249,9 +215,6 @@ internal static class Program
             string? name = a.NameColon?.Name.Identifier.ValueText;
             if (name is null)
             {
-                // Positional arguments follow Place's own signature: (objectId, meshPath, ...).
-                // Anything past the second unnamed argument is not something this understands, and is
-                // skipped rather than guessed at.
                 name = positional switch { 0 => "objectId", 1 => "meshPath", _ => null };
                 ++positional;
             }
@@ -273,16 +236,12 @@ internal static class Program
                 case "scale": TryReadVec3(a.Expression, p.Scale); break;
             }
         }
-        // An id and a mesh are what make a row a placement. Without the id there is nothing to match
-        // it by on a rewrite, and a row that cannot be matched must not be reported as one that can.
         return sawId && sawMesh ? p : null;
     }
 
+    // The name a placement is assigned to: `Body = b.Place(...)` -> "Body". Empty when unassigned.
     private static string PropertyNameOf(InvocationExpressionSyntax inv)
     {
-        // `Body = b.Place(...)` -> "Body". A placement not assigned to anything is legal C# and is
-        // reported with an empty property rather than skipped: it still draws, and the editor names
-        // it by its id.
         for (SyntaxNode? n = inv.Parent; n is not null; n = n.Parent)
         {
             if (n is AssignmentExpressionSyntax asg)
@@ -294,11 +253,10 @@ internal static class Program
         return "";
     }
 
+    // Reads an unsigned integer literal. False for anything that is not one.
     private static bool TryReadUlong(ExpressionSyntax e, out ulong v)
     {
         v = 0;
-        // `0x9E1C6A4B7F0D2233UL` arrives already converted by the lexer, which is exactly the sort of
-        // thing the hand-written scanner has to do itself and can get wrong at the top of the range.
         if (e is LiteralExpressionSyntax l)
         {
             switch (l.Token.Value)
@@ -312,10 +270,7 @@ internal static class Program
         return false;
     }
 
-    // `(0f, 0f, 45f)`, and also `(0, 0, 45)`, and also `(-120f, 80f, 20f)` where the minus is a unary
-    // operator rather than part of the literal. Anything that is not three constant numbers is left
-    // alone: a coordinate written as an expression is real C# and this reports the row without
-    // pretending to know its value, rather than dropping the row.
+    // Reads a three-element tuple of constant numbers into `into`. Leaves it alone if it is not one.
     private static void TryReadVec3(ExpressionSyntax e, float[] into)
     {
         if (e is not TupleExpressionSyntax t || t.Arguments.Count != 3) return;
@@ -327,6 +282,7 @@ internal static class Program
         Array.Copy(tmp, into, 3);
     }
 
+    // Reads a numeric literal, with an optional unary sign. False for anything else.
     private static bool TryReadFloat(ExpressionSyntax e, out float v)
     {
         v = 0f;
@@ -352,6 +308,7 @@ internal static class Program
     // ---------------------------------------------------------------------------------------------
     // What each class DECLARES about itself
     // ---------------------------------------------------------------------------------------------
+    // Writes one JSON object per actor class in the file.
     private static void WriteClasses(StringBuilder sb, CompilationUnitSyntax root, ByteOffsets toByte)
     {
         sb.Append("\"classes\":[");
@@ -376,8 +333,6 @@ internal static class Program
                         className = nm;
                 }
 
-            // A class with no marker attribute and no framework base is not an actor. Reporting every
-            // class in the file would fill the tab's picker with helpers and enums' companions.
             if (!marked && !LooksLikeActorBase(baseType)) continue;
 
             if (!first) sb.Append(',');
@@ -421,9 +376,7 @@ internal static class Program
         sb.Append(']');
     }
 
-    // Mirrors the C++ side's suffix match. A SUFFIX rather than an equality because a project's own
-    // intermediate base (`SkyForgeCharacter : AverCharacter`) is still a character, and the kind is
-    // what decides whether the tab shows a viewport at all.
+    // Whether a base type name ends in one of the framework actor kinds. Mirrors the C++ suffix match.
     private static bool LooksLikeActorBase(string b) =>
         b.EndsWith("Actor", StringComparison.Ordinal) ||
         b.EndsWith("Pawn", StringComparison.Ordinal) ||
@@ -432,6 +385,7 @@ internal static class Program
         b.EndsWith("GameMode", StringComparison.Ordinal) ||
         b.EndsWith("GameInstance", StringComparison.Ordinal);
 
+    // What one class declares about its mesh, capsule, camera and light, and where each was written.
     private sealed class ClassFacts
     {
         public bool HasMesh;
@@ -447,12 +401,9 @@ internal static class Program
         public TextSpan? LightIntensitySpan, LightRangeSpan;
     }
 
+    // Fills c from b.Mesh/b.Camera/b.PointLight calls and Height/Radius/EyeHeight assignments.
     private static void ReadClassBody(ClassDeclarationSyntax cls, ClassFacts c)
     {
-        // b.Mesh(...) / b.Camera(...) / b.PointLight(...) anywhere in the class. Anywhere rather than
-        // "inside Configure" because the C++ side reads them that way too, and because an actor is
-        // free to call them from a helper -- an editor that only looked in Configure would show an
-        // empty preview for a perfectly ordinary actor.
         foreach (InvocationExpressionSyntax inv in cls.DescendantNodes().OfType<InvocationExpressionSyntax>())
         {
             if (inv.Expression is not MemberAccessExpressionSyntax ma) continue;
@@ -485,11 +436,7 @@ internal static class Program
             }
         }
 
-        // Height / Radius / EyeHeight, wherever in the class they are set. The framework's own
-        // character template assigns them in OnBeginPlay, which is where real characters set them,
-        // so a reader that only looked at field initialisers would find nothing on the actors that
-        // matter most. Both forms are taken -- `public float Height = 180f;` and `Height = 180f;` --
-        // and the LAST one seen wins, matching a reader that walks the file top to bottom.
+        // Height / Radius / EyeHeight, wherever in the class they are set; the last one seen wins.
         foreach (SyntaxNode n in cls.DescendantNodes())
         {
             switch (n)
@@ -513,6 +460,7 @@ internal static class Program
         }
     }
 
+    // Records a capsule field if `name` is one and `value` is a constant number.
     private static void TakeNamed(string name, ExpressionSyntax value, ClassFacts c)
     {
         if (!TryReadFloat(value, out float f)) return;
@@ -524,6 +472,7 @@ internal static class Program
         }
     }
 
+    // Records argument i and its span when it is a constant number.
     private static void TakeArg(SeparatedSyntaxList<ArgumentSyntax> args, int i,
                                 ref float? into, ref TextSpan? span)
     {
@@ -537,9 +486,7 @@ internal static class Program
     // ---------------------------------------------------------------------------------------------
     // JSON, written by hand
     // ---------------------------------------------------------------------------------------------
-    // By hand rather than through System.Text.Json because the output is a handful of shapes, the
-    // reader on the other side is this repo's own parser, and a serialiser would mean a DTO layer
-    // whose only job is to be shaped like the C++ structs already are.
+    // Appends s as a quoted, escaped JSON string.
     private static void WriteJsonString(StringBuilder sb, string s)
     {
         sb.Append('"');
@@ -561,11 +508,11 @@ internal static class Program
         sb.Append('"');
     }
 
-    // "R" round-trips: the value the C++ side parses back is bit-for-bit the one Roslyn read, which
-    // matters because these numbers are compared against what the built-in scanner produced.
+    // Appends a float in round-trip form, so the C++ side parses back the same bits.
     private static void WriteFloat(StringBuilder sb, float f) =>
         sb.Append(f.ToString("R", CultureInfo.InvariantCulture));
 
+    // Appends a named three-element JSON array.
     private static void WriteVec(StringBuilder sb, string name, float[] v)
     {
         sb.Append(",\"").Append(name).Append("\":[");
@@ -574,9 +521,7 @@ internal static class Program
         WriteFloat(sb, v[2]); sb.Append(']');
     }
 
-    // An ABSENT value is omitted, not written as zero. Zero is a legal height and a legal fov, so a
-    // reader could not tell "not stated" from "stated as nothing" -- and the C++ side substitutes a
-    // default for the first and honours the second.
+    // Appends a named number. An absent value is omitted, never written as zero.
     private static void WriteNum(StringBuilder sb, string name, float? v)
     {
         if (v is null) return;
@@ -584,6 +529,7 @@ internal static class Program
         WriteFloat(sb, v.Value);
     }
 
+    // Appends a named [begin, end] byte-offset pair. An absent span is omitted.
     private static void WriteSpan(StringBuilder sb, string name, TextSpan? s, ByteOffsets toByte)
     {
         if (s is null) return;

@@ -1,25 +1,8 @@
+// AverPlayerController: the actor that possesses a pawn and drives it.
+
 namespace Aver.Framework;
 
-/// <summary>
-/// The will that drives a pawn — the translation of input (or an AI policy) into possession of a body.
-/// It adds possession CONTROL over <see cref="AverActor"/>: which pawn it holds, and the verbs to take
-/// and release one. Deriving this type sets the <c>CONTROLLER</c> flag, the half of the possess check the
-/// pawn's <c>PAWN</c> flag completes.
-/// </summary>
-/// <remarks>
-/// <para>
-/// <b>Not abstract, unlike the other four base types.</b> A great many games never subclass the
-/// controller — the default input-to-pawn plumbing is all they need, and a GameMode names
-/// <c>PlayerControllerClass = "PlayerController"</c> by string. So this type is directly instantiable and
-/// registers as a usable class in its own right; Actor, Pawn, GameMode and GameInstance are abstract
-/// because a bare one of those is never what you want.
-/// </para>
-/// <para>
-/// Possession state is read straight from the world, never cached: <see cref="Possessed"/> asks
-/// <c>aver_fw_controlled_pawn</c> each time, so it cannot disagree with the engine after a reparent,
-/// destroy or reload.
-/// </para>
-/// </remarks>
+/// <summary>The will that drives a pawn. Deriving it sets the CONTROLLER flag the possess check needs.</summary>
 public class AverPlayerController : AverActor
 {
     /// <summary>The pawn this controller currently drives, or <see cref="Entity.None"/> if none.</summary>
@@ -31,19 +14,12 @@ public class AverPlayerController : AverActor
     /// <summary>True while this controller drives a pawn.</summary>
     public bool HasPawn => Fw.aver_fw_controlled_pawn(Self.Handle) != 0;
 
-    /// <summary>
-    /// Take control of <paramref name="pawn"/>. Returns false only if the world rejected it — the target's
-    /// class does not carry the <c>PAWN</c> flag, this class is not a <c>CONTROLLER</c>, an entity is dead,
-    /// or the call was re-entered from inside a possession hook (retry next frame). A pawn already possessed
-    /// by ANOTHER controller is STOLEN (it gets <see cref="AverPawn.OnUnpossessed"/> then
-    /// <see cref="AverPawn.OnPossessed"/>); possessing the pawn this controller already drives is a no-op
-    /// that returns true.
-    /// </summary>
+    /// <summary>Takes control of <paramref name="pawn"/>, stealing it from another controller if need be.</summary>
     public bool Possess(Entity pawn) => Fw.aver_fw_possess(Self.Handle, pawn.Handle) != 0;
 
-    /// <summary>Take control of <paramref name="pawn"/> directly. Convenience over the entity overload.</summary>
+    /// <summary>Takes control of <paramref name="pawn"/> directly.</summary>
     public bool Possess(AverPawn pawn) => Possess(pawn.Self);
 
-    /// <summary>Release the currently possessed pawn, firing its <see cref="AverPawn.OnUnpossessed"/>. False if nothing was possessed.</summary>
+    /// <summary>Releases the currently possessed pawn. False if nothing was possessed.</summary>
     public bool Unpossess() => Fw.aver_fw_unpossess(Self.Handle) != 0;
 }

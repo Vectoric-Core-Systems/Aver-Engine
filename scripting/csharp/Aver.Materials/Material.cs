@@ -1,11 +1,7 @@
+// The material authoring surface: the marker attribute, the surface enums, and the base class.
 namespace Aver.Materials;
 
 /// <summary>Marks a class as a material source. The name is what a mesh binds to.</summary>
-/// <remarks>
-/// The name is given here rather than taken from the class name, for the same reason
-/// <c>[AverClass]</c> does it: a level references a material by name, and renaming a C# class should
-/// not silently unbind every mesh that used it.
-/// </remarks>
 [AttributeUsage(AttributeTargets.Class, Inherited = false)]
 public sealed class AverMaterialAttribute : Attribute
 {
@@ -47,11 +43,7 @@ public enum Cull
     None,
 }
 
-/// <summary>
-/// A texture slot. The COLOUR SPACE is not listed here on purpose: it is a property of the slot, not
-/// of the binding — base colour and emissive are always sRGB, normal is always a normal map, the
-/// rest are always linear. Letting a caller choose would let a caller choose wrong.
-/// </summary>
+/// <summary>A texture slot. The colour space is fixed per slot, not chosen at the binding.</summary>
 public enum Slot
 {
     /// <summary>Albedo. sRGB.</summary>
@@ -66,23 +58,9 @@ public enum Slot
     Emissive,
 }
 
-/// <summary>
-/// The base class a material source derives from. It carries nothing — the declaration is entirely in
-/// the <c>Configure</c> method — and exists so a material is findable by type rather than only by
-/// attribute, and so an editor can offer "new material" against something concrete.
-/// </summary>
-/// <remarks>
-/// A material class is never instantiated and never ticks. It is a description that the compiler runs
-/// once, at build time, to produce an <c>.ocmat</c>. Nothing about it exists at runtime.
-/// </remarks>
+/// <summary>The base class a material source derives from. Carries no state; never instantiated.</summary>
 public abstract class Material
 {
-    /// <summary>
-    /// Declare the surface. Called ONCE by the material compiler, at build time, never at runtime.
-    /// </summary>
-    /// <remarks>
-    /// Declared here for documentation only: the compiler finds it by reflection, because a static
-    /// method cannot be virtual. A material class without one produces nothing and is reported.
-    /// </remarks>
+    /// <summary>Declares the surface. Called once by the material compiler, at build time.</summary>
     public static void Configure(MaterialBuilder b) { }
 }

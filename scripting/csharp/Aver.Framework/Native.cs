@@ -1,34 +1,16 @@
+// P/Invoke declarations for the framework C ABI and the slice of the scene C ABI the framework calls.
+
 using System.Runtime.InteropServices;
 
 namespace Aver.Framework;
 
-/// <summary>
-/// The framework C ABI (framework_abi.h, the <c>aver_fw_*</c> exports). Same idiom as Aver.Scripting's
-/// Pbr/Voxi and Aver.Scene's Native: a private <see cref="Lib"/> const, exact export names, no
-/// EntryPoint/CharSet/CallingConvention (defaults to Winapi), blittable types only, the 1/0 setter
-/// convention read as <c>!= 0</c>.
-/// </summary>
-/// <remarks>
-/// <para>
-/// <b>Strings are UTF-8 both ways.</b> Class names, parent names and mesh paths marshal as
-/// <see cref="UnmanagedType.LPUTF8Str"/> and decode through <see cref="Str"/> with
-/// <c>PtrToStringUTF8</c>. This follows scene_abi.h/framework_abi.h, which mandate UTF-8 in both
-/// directions, and the reference binding in SCENE_FRAMEWORK.md §6.2. (The in-progress
-/// <c>Aver.Scene/Native.cs</c> currently uses ANSI <c>LPStr</c>; that is the defect, and it must be
-/// flipped to UTF-8 to match — see DESIGNER_REWRITE.md, contradiction ledger.)
-/// </para>
-/// <para>
-/// <b>Every handle is an <c>int</c>, 0 == invalid.</b> Class, entity, component and field all cross as
-/// <c>int32_t</c>; a live entity is guaranteed positive (bit 31 is reserved clear in Entity.hpp), so a
-/// default handle is invalid with no signedness argument.
-/// </para>
-/// </remarks>
+/// <summary>The framework C ABI (the <c>aver_fw_*</c> exports of framework_abi.h).</summary>
+/// <remarks>Strings are UTF-8 both ways; every handle is an int32 with 0 == invalid.</remarks>
 internal static class Fw
 {
     private const string Lib = "Aver.Framework";
 
-    // --- Class registry. declare() is IDEMPOTENT BY NAME: the same string returns the same handle for
-    //     the life of the process. That stable handle is the whole of hot-reload identity. ---
+    // class_declare is idempotent by name: the same string returns the same handle for the life of the process.
     [DllImport(Lib)] internal static extern int aver_fw_class_declare([MarshalAs(UnmanagedType.LPUTF8Str)] string name, [MarshalAs(UnmanagedType.LPUTF8Str)] string parentName);
     [DllImport(Lib)] internal static extern int aver_fw_class_find([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
     [DllImport(Lib)] internal static extern IntPtr aver_fw_class_name(int c);
@@ -40,34 +22,29 @@ internal static class Fw
     [DllImport(Lib)] internal static extern int aver_fw_class_set_tick(int c, int tickGroup, int tickOrder);
     [DllImport(Lib)] internal static extern int aver_fw_class_seal(int c);
 
-    // Class defaults, addressed by the SAME dense field id the scene resolves. FIVE setters, one per
-    // storable kind. There is no set_default_bool (bool rides i32) and no set_default_ref (an entity
-    // default is meaningless in an archetype — it is per-instance). The kind is validated by the ABI.
+    // Class defaults, addressed by the same dense field id the scene resolves. One setter per storable kind.
     [DllImport(Lib)] internal static extern int aver_fw_class_set_default_f32(int c, int f, float v);
     [DllImport(Lib)] internal static extern int aver_fw_class_set_default_i32(int c, int f, int v);
     [DllImport(Lib)] internal static extern int aver_fw_class_set_default_i64(int c, int f, long v);
     [DllImport(Lib)] internal static extern int aver_fw_class_set_default_vec(int c, int f, float[] v);
     [DllImport(Lib)] internal static extern int aver_fw_class_set_default_str(int c, int f, [MarshalAs(UnmanagedType.LPUTF8Str)] string v);
 
-    // GameMode wiring, resolved by class NAME at seal so two game classes never take a compile-time
-    // reference to one another.
+    // GameMode wiring, resolved by class name at seal.
     [DllImport(Lib)] internal static extern int aver_fw_class_set_default_pawn(int gameMode, [MarshalAs(UnmanagedType.LPUTF8Str)] string pawnClassName);
     [DllImport(Lib)] internal static extern int aver_fw_class_set_player_controller(int gameMode, [MarshalAs(UnmanagedType.LPUTF8Str)] string controllerClassName);
 
-    // --- Actors. rotation crosses as a QUATERNION (quat4) though the author writes degrees. A null
-    //     pos/quat/scale means "use the class default". ---
+    // Spawn: rotation crosses as a quaternion; a null pos/quat/scale means "use the class default".
     [DllImport(Lib)] internal static extern int aver_fw_spawn(int c, [MarshalAs(UnmanagedType.LPUTF8Str)] string? name, float[]? pos3, float[]? quat4, float[]? scale3);
     [DllImport(Lib)] internal static extern int aver_fw_destroy(int e);
     [DllImport(Lib)] internal static extern int aver_fw_class_of(int e);   // != 0 IS the definition of "actor"
 
-    // --- Possession. Rejected unless the two classes carry the PAWN / CONTROLLER flags — that flag
-    //     check is the whole of type safety here, which is why the base types set the flags for you. ---
+    // Possession is rejected unless the two classes carry the PAWN / CONTROLLER flags.
     [DllImport(Lib)] internal static extern int aver_fw_possess(int controller, int pawn);
     [DllImport(Lib)] internal static extern int aver_fw_unpossess(int controller);
     [DllImport(Lib)] internal static extern int aver_fw_controlled_pawn(int controller);
     [DllImport(Lib)] internal static extern int aver_fw_controller_of(int pawn);
 
-    // --- Session singletons. ---
+    // Session singletons.
     [DllImport(Lib)] internal static extern int aver_fw_game_instance();
     [DllImport(Lib)] internal static extern int aver_fw_game_mode();
     [DllImport(Lib)] internal static extern int aver_fw_player_controller(int playerIndex);
@@ -85,22 +62,11 @@ internal static class Fw
     [DllImport(Lib)] internal static extern void aver_fw_set_view_entity(int entity);
     [DllImport(Lib)] internal static extern int  aver_fw_view_entity();
 
-    /// <summary>Decode a UTF-8 string returned as a pointer; "?" if null. Duplicated per the tree idiom.</summary>
+    /// <summary>Decodes a UTF-8 string returned as a pointer; "?" if null.</summary>
     internal static string Str(IntPtr p) => Marshal.PtrToStringUTF8(p) ?? "?";
 }
 
-/// <summary>
-/// The small slice of the Aver.Scene C ABI the framework calls directly — transform read/write, name
-/// and persisted identity, and the child-entity plumbing a placed model needs. Declared here (against
-/// the same <c>Aver.Scene</c> native library) rather than reaching into <c>Aver.Scene.Native</c>, whose
-/// members are <c>internal</c>: duplicating a P/Invoke across assemblies is the established idiom, and it
-/// keeps this assembly's boundary explicit.
-/// </summary>
-/// <remarks>
-/// Field ids come from <see cref="Aver.Scene.SceneIds"/> (public), so a component/field index can never
-/// drift from the built registration. Strings are UTF-8, matching the header (see the note on
-/// <see cref="Fw"/>).
-/// </remarks>
+/// <summary>The slice of the Aver.Scene C ABI the framework calls directly.</summary>
 internal static class SceneNative
 {
     private const string Lib = "Aver.Scene";
@@ -111,7 +77,7 @@ internal static class SceneNative
     [DllImport(Lib)] internal static extern int aver_scene_has_component(int e, int component);
     [DllImport(Lib)] internal static extern int aver_scene_set_parent(int child, int parent);
 
-    // hierarchy queries + enumeration (the gameplay API's Entity.Parent/Children and Game.ForEachActor).
+    // Hierarchy queries and enumeration.
     [DllImport(Lib)] internal static extern int aver_scene_parent(int e);
     [DllImport(Lib)] internal static extern int aver_scene_first_child(int e);
     [DllImport(Lib)] internal static extern int aver_scene_next_sibling(int e);
@@ -119,9 +85,8 @@ internal static class SceneNative
     [DllImport(Lib)] internal static extern int aver_scene_count();
     [DllImport(Lib)] internal static extern int aver_scene_at(int index);
 
-    // Typed field get/set over the whole component surface — the generic field accessors and the typed
-    // component conveniences (Visible, Tags, Light, SetMesh...) are all built on these.
-    [DllImport(Lib)] internal static extern int aver_scene_field_arity(int f);   // guards Vec3 accessors vs Quat/Mat4
+    // Typed field get/set over the whole component surface.
+    [DllImport(Lib)] internal static extern int aver_scene_field_arity(int f);
     [DllImport(Lib)] internal static extern float aver_scene_get_f32(int e, int f);
     [DllImport(Lib)] internal static extern int aver_scene_set_f32(int e, int f, float v);
     [DllImport(Lib)] internal static extern int aver_scene_get_i32(int e, int f);
@@ -139,13 +104,10 @@ internal static class SceneNative
     [DllImport(Lib)] internal static extern IntPtr aver_scene_name(int e);
     [DllImport(Lib)] internal static extern int aver_scene_set_name(int e, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
-    // Query: resolve an entity by name (0 if none), and read the composed 4x4 world matrix into out16
-    // (row-major, translation in row 3). Both added for the gameplay-facing C# API (Game.Find, Entity
-    // world transforms).
+    // world_matrix writes a row-major 4x4 with the translation in row 3.
     [DllImport(Lib)] internal static extern int aver_scene_find([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
     [DllImport(Lib)] internal static extern int aver_scene_world_matrix(int e, float[] out16);
 
-    // A material NAME resolves to CMeshRenderer.material's i32 opaque handle here — never stored as a
-    // string in the field. name0 is the content-pack id (0 == the default/project pack).
+    // material: name0 is the content-pack id (0 == the default/project pack).
     [DllImport(Lib)] internal static extern int aver_scene_material(int name0, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 }

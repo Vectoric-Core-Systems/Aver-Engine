@@ -1,9 +1,11 @@
+// Clock, on std::chrono::steady_clock.
 #include "aver/core/Time.hpp"
 
 #include <chrono>
 
 namespace aver {
 
+// Steady-clock nanoseconds since its epoch.
 static u64 nowNs() {
     return static_cast<u64>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -11,12 +13,15 @@ static u64 nowNs() {
             .count());
 }
 
+// Starts the clock at now.
 Clock::Clock() : startNs_(nowNs()) {}
 
+// Seconds since construction or the last restart.
 f64 Clock::seconds() const {
     return static_cast<f64>(nowNs() - startNs_) * 1e-9;
 }
 
+// Returns the elapsed seconds and resets the clock to now.
 f64 Clock::restart() {
     const u64 t = nowNs();
     const f64 elapsed = static_cast<f64>(t - startNs_) * 1e-9;

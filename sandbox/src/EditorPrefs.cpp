@@ -1,3 +1,4 @@
+// Editor preference store: reads and writes the `key=value` editor.ini under the user data dir.
 #include "EditorPrefs.hpp"
 
 #include "aver/core/Log.hpp"
@@ -10,20 +11,17 @@
 namespace aver::editor {
 namespace {
 
-// std::map rather than unordered_map so the file writes in a STABLE ORDER. A settings file whose
-// lines shuffle between runs is one nobody can diff, and diffing it is most of what makes a
-// plain-text format worth having.
+// std::map, not unordered_map: the file must write in a stable, diffable order.
 std::map<std::string, std::string, std::less<>> g_values;
 std::string g_path;
 bool g_loaded = false;
 bool g_dirty  = false;
 
+// Reads editor.ini once. A failed read leaves an empty store and does not retry.
 void ensureLoaded() {
     if (g_loaded) return;
-    g_loaded = true;   // set FIRST: a failed read must not retry on every accessor
+    g_loaded = true;
 
-    // userDataDir is documented as the home for per-user, per-machine state that is neither project
-    // content nor engine content -- which is exactly this.
     const std::string dir = userDataDir();
     if (dir.empty()) {
         AVER_WARN("[Prefs] no user data directory; editor preferences will not persist this session");
@@ -32,7 +30,7 @@ void ensureLoaded() {
     g_path = dir + "/editor.ini";
 
     std::string text;
-    if (!readFileText(g_path, text)) return;   // absent on a first run, which is not a problem
+    if (!readFileText(g_path, text)) return;
 
     usize line = 0;
     while (line < text.size()) {
@@ -44,7 +42,7 @@ void ensureLoaded() {
         if (row.empty() || row.front() == '#') continue;
 
         const usize eq = row.find('=');
-        if (eq == std::string_view::npos) continue;   // a line without one is not a setting
+        if (eq == std::string_view::npos) continue;
         g_values.emplace(std::string(row.substr(0, eq)), std::string(row.substr(eq + 1)));
     }
     AVER_INFO("[Prefs] {} setting(s) from {}", g_values.size(), g_path);
@@ -52,34 +50,31 @@ void ensureLoaded() {
 
 } // namespace
 
+// Reads a float setting, or `fallback` when it is absent or not a number.
 f32 prefFloat(std::string_view key, f32 fallback) {
     ensureLoaded();
     const auto it = g_values.find(key);
     if (it == g_values.end()) return fallback;
 
-    // from_chars, not atof: it is locale-INDEPENDENT. strtof/atof read the decimal point from the C
-    // locale, so a machine set to a comma locale would write "230.5" and read back 230 -- a settings
-    // file that silently degrades on somebody else's machine and nowhere else.
+    // from_chars, not atof: locale-independent, so a comma-locale machine reads back what it wrote.
     f32 v = fallback;
     const char* first = it->second.data();
     const char* last  = first + it->second.size();
     const auto r = std::from_chars(first, last, v);
-    if (r.ec != std::errc{}) return fallback;   // a value that is not a number is a value we ignore
+    if (r.ec != std::errc{}) return fallback;
     return v;
 }
 
+// Stores a float, shortest round-trip.
 void setPrefFloat(std::string_view key, f32 value) {
     ensureLoaded();
-    // to_chars for the same locale reason as from_chars, and shortest round-trip so a value written
-    // and read back is bit-identical rather than nearly so.
     char buf[48];
     const auto r = std::to_chars(buf, buf + sizeof buf, value);
     if (r.ec != std::errc{}) return;
     setPrefString(key, std::string_view(buf, static_cast<usize>(r.ptr - buf)));
 }
 
-// Bools are "true"/"false" rather than 1/0. The file is meant to be read and edited by a person, and
-// a column of ones and zeros is a column nobody can interpret without the source open.
+// Reads a bool setting. Accepts "true"/"false" and "1"/"0".
 bool prefBool(std::string_view key, bool fallback) {
     ensureLoaded();
     const auto it = g_values.find(key);
@@ -89,10 +84,12 @@ bool prefBool(std::string_view key, bool fallback) {
     return fallback;
 }
 
+// Stores a bool as "true"/"false".
 void setPrefBool(std::string_view key, bool value) {
     setPrefString(key, value ? "true" : "false");
 }
 
+// Reads an int setting, or `fallback` when it is absent or not a number.
 i32 prefInt(std::string_view key, i32 fallback) {
     ensureLoaded();
     const auto it = g_values.find(key);
@@ -104,6 +101,7 @@ i32 prefInt(std::string_view key, i32 fallback) {
     return v;
 }
 
+// Stores an int.
 void setPrefInt(std::string_view key, i32 value) {
     char buf[24];
     const auto r = std::to_chars(buf, buf + sizeof buf, value);
@@ -111,33 +109,33 @@ void setPrefInt(std::string_view key, i32 value) {
     setPrefString(key, std::string_view(buf, static_cast<usize>(r.ptr - buf)));
 }
 
+// Reads a string setting, or `fallback` when it is absent.
 std::string prefString(std::string_view key, std::string_view fallback) {
     ensureLoaded();
     const auto it = g_values.find(key);
     return it == g_values.end() ? std::string(fallback) : it->second;
 }
 
+// Stores a string. Refuses a multi-line value, which the line format cannot hold.
 void setPrefString(std::string_view key, std::string_view value) {
     ensureLoaded();
-    // A newline would split the entry across two lines and silently lose the tail. Refused rather
-    // than escaped: see the header for why escaping is not worth a parser here.
     if (value.find('\n') != std::string_view::npos ||
         value.find('\r') != std::string_view::npos) {
         AVER_WARN("[Prefs] refusing to store a multi-line value for '{}'", key);
         return;
     }
     const auto it = g_values.find(key);
-    if (it != g_values.end() && it->second == value) return;   // unchanged: not a reason to rewrite
+    if (it != g_values.end() && it->second == value) return;
     g_values[std::string(key)] = std::string(value);
     g_dirty = true;
 }
 
+// Writes the file if anything changed since the last write.
 void flushEditorPrefs() {
     if (!g_dirty) return;
     g_dirty = false;
     if (g_path.empty()) return;
 
-    // The directory may not exist on a first run; userDataDir names it but does not promise it.
     const usize slash = g_path.find_last_of("/\\");
     if (slash != std::string::npos) createDirectories(g_path.substr(0, slash));
 
@@ -151,6 +149,7 @@ void flushEditorPrefs() {
         AVER_WARN("[Prefs] could not write {}", g_path);
 }
 
+// The settings file's path. Empty before the first access.
 const std::string& editorPrefsPath() { return g_path; }
 
 } // namespace aver::editor

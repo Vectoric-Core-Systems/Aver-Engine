@@ -1,3 +1,6 @@
+// Asset editor host: opens per-file editor windows, routes file-change notifications, and the
+// .ocmesh viewer.
+
 #include "AssetEditor.hpp"
 
 #include "aver/core/Log.hpp"
@@ -12,9 +15,8 @@
 
 namespace aver::editor {
 
+// Opens an editor for a path, or focuses the existing one. Returns false if no factory handles it.
 bool AssetEditorHost::open(const std::string& path) {
-    // Already open: focus rather than open a second copy. Two editors on one file would each hold
-    // their own dirty state and the last save would silently win.
     for (const auto& ed : editors_) {
         if (ed->path() == path) { focusRequest_ = path; return true; }
     }
@@ -26,28 +28,18 @@ bool AssetEditorHost::open(const std::string& path) {
             return true;
         }
     }
-    return false;   // the caller falls back to the shell
+    return false;
 }
 
+// True if any open editor has unsaved changes.
 bool AssetEditorHost::anyDirty() const {
     for (const auto& ed : editors_) if (ed->dirty()) return true;
     return false;
 }
 
 namespace {
-// Are these two strings the same file?
-//
-// `equivalent` FIRST, because it is the only answer that is actually right: it compares the
-// filesystem's own identity for the file rather than the spelling of the route taken to it, so a
-// junction, a substituted drive, a short 8.3 name and a long one all resolve together. It needs
-// both to exist, which on a delete or a safe-save-in-flight they may not.
-//
-// The string fallback is therefore not a shortcut but the case `equivalent` cannot serve.
-// weakly_canonical is used rather than a raw compare because the two sides arrive by different
-// routes -- the watcher builds its path from the watch root, the editor holds the one the content
-// browser opened -- so they differ in separators and in any `..` either side picked up, and on
-// Windows in case. lexically_normal is not enough on its own for the same reason it was not enough
-// for the project-reference check: it does not resolve a relative root.
+// True if two paths name the same file. Falls back to normalised string compare when either side
+// does not exist.
 bool samePath(const std::string& a, const std::string& b) {
     std::error_code ec;
     if (std::filesystem::equivalent(a, b, ec) && !ec) return true;
@@ -56,8 +48,6 @@ bool samePath(const std::string& a, const std::string& b) {
     const std::filesystem::path nb = std::filesystem::weakly_canonical(std::filesystem::path(b), ec);
     if (ec) return false;
 #ifdef _WIN32
-    // Windows paths are case-insensitive, and the watcher reports whatever case the writer used --
-    // which for a safe save is the temporary file's, not the one the user typed.
     std::string sa = na.string(), sb = nb.string();
     for (char& c : sa) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
     for (char& c : sb) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
@@ -68,6 +58,7 @@ bool samePath(const std::string& a, const std::string& b) {
 }
 } // namespace
 
+// Tells the editor holding this path that the file changed on disk. False if none does.
 bool AssetEditorHost::notifyFileChanged(const std::string& path) {
     for (const auto& ed : editors_) {
         if (samePath(ed->path(), path)) { ed->onFileChanged(); return true; }
@@ -75,10 +66,12 @@ bool AssetEditorHost::notifyFileChanged(const std::string& path) {
     return false;
 }
 
+// Tells every editor the file watcher died.
 void AssetEditorHost::notifyWatchLost() {
     for (const auto& ed : editors_) ed->onWatchLost();
 }
 
+// Draws every open editor window and destroys the ones the user closed. True if any remain.
 bool AssetEditorHost::draw(Engine& e, unsigned dockInto, float dpi) {
 #if AVER_WITH_IMGUI
     if (editors_.empty()) return false;
@@ -88,16 +81,10 @@ bool AssetEditorHost::draw(Engine& e, unsigned dockInto, float dpi) {
         AssetEditor& ed = *editors_[i];
         bool open = true;
 
-        // The path is the window ID, not the title: a title carries the dirty marker and changes as
-        // soon as something is edited, and an ImGui window whose ID changes loses its size, its
-        // position and its docking.
+        // Window ID is the path, not the title: a changing ImGui ID loses size, position and docking.
         const std::string label = ed.title() + "###assetEditor:" + ed.path();
         if (ed.path() == focusRequest_) { ImGui::SetNextWindowFocus(); focusRequest_.clear(); }
         ImGui::SetNextWindowSize(ImVec2(760.0f * dpi, 560.0f * dpi), ImGuiCond_FirstUseEver);
-        // Into the editor's central region on first appearance, so an asset editor arrives where the
-        // work is rather than as a small window over the menu bar. ImGui then supplies the tab bar,
-        // the drag-to-undock and the drag-back-to-dock -- all of which are its docking behaviour
-        // rather than anything this host implements.
         if (dockInto) ImGui::SetNextWindowDockID(static_cast<ImGuiID>(dockInto), ImGuiCond_FirstUseEver);
 
         if (ImGui::Begin(label.c_str(), &open, ed.dirty() ? ImGuiWindowFlags_UnsavedDocument : 0)) {
@@ -108,8 +95,7 @@ bool AssetEditorHost::draw(Engine& e, unsigned dockInto, float dpi) {
         if (!open) closing_.push_back(i);
     }
 
-    // Destroyed AFTER the loop. Erasing mid-iteration would free an editor whose ImGui window is
-    // still on the current frame's draw list, and the next widget would write through a dead this.
+    // Erase after the loop: an editor freed mid-iteration is still on this frame's ImGui draw list.
     for (usize k = closing_.size(); k-- > 0;) {
         AssetEditor& ed = *editors_[closing_[k]];
         if (ed.dirty())
@@ -127,18 +113,23 @@ bool AssetEditorHost::draw(Engine& e, unsigned dockInto, float dpi) {
 
 namespace {
 
+// Read-only viewer for one .ocmesh file: counts, bounds and submesh table.
 class MeshEditor final : public AssetEditor {
 public:
+    // Loads the mesh; a failed load is shown as an error page.
     explicit MeshEditor(std::string path) : path_(std::move(path)) {
         if (!fmt::loadOcMesh(path_, mesh_, &error_)) loaded_ = false;
         else                                        loaded_ = true;
     }
 
     const std::string& path() const override { return path_; }
+
+    // Window title: file name plus a kind tag.
     std::string title() const override {
         return std::filesystem::path(path_).filename().string() + "  [Mesh]";
     }
 
+    // Draws the mesh summary, or the load error.
     void draw(Engine&) override {
 #if AVER_WITH_IMGUI
         if (!loaded_) {
@@ -188,8 +179,6 @@ public:
         }
 
         ImGui::Separator();
-        // Said plainly rather than left to be discovered. A viewport here needs a render target and
-        // a preview camera, and claiming one is coming is the kind of thing this tree has too much of.
         ImGui::TextDisabled("Read-only. A 3D preview needs an offscreen render target and a preview");
         ImGui::TextDisabled("camera, neither of which exists yet.");
 #endif
@@ -204,6 +193,7 @@ private:
 
 } // namespace
 
+// Editor factory for .ocmesh. Returns null for any other extension.
 std::unique_ptr<AssetEditor> makeMeshEditor(const std::string& path) {
     std::string ext = std::filesystem::path(path).extension().string();
     for (char& c : ext) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');

@@ -1,3 +1,6 @@
+// The Tools menu and the toolbar's Compile C# split button: builds and reloads a project's C#,
+// bakes its materials, scaffolds new scripts/classes/modules, and reports build diagnostics.
+
 #include "ToolsMenu.hpp"
 
 #include "aver/platform/FileSystem.hpp"
@@ -21,6 +24,7 @@ namespace {
 
 #if defined(_WIN32)
 
+// UTF-8 to UTF-16.
 std::wstring widen(const std::string& s) {
     if (s.empty()) return {};
     const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
@@ -29,10 +33,7 @@ std::wstring widen(const std::string& s) {
     return w;
 }
 
-// Child-process bytes -> UTF-8, which is what ImGui will be asked to draw. `dotnet` writes UTF-8
-// when its output is redirected on current SDKs, but that is not contractual and a stray
-// mis-decoded byte renders as a black box for the rest of the line — so it is validated, and
-// anything that is not UTF-8 is re-read as the OEM code page rather than shown broken.
+// Child-process bytes to UTF-8, re-reading as the OEM code page when they are not already UTF-8.
 std::string toUtf8(const std::string& raw) {
     if (raw.empty()) return raw;
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, raw.c_str(),
@@ -51,9 +52,7 @@ std::string toUtf8(const std::string& raw) {
     return out;
 }
 
-// Run a command line with stdout AND stderr captured into `out`. Both go down one pipe on
-// purpose: MSBuild interleaves errors with the surrounding context, and two separately-drained
-// streams would show them in an order that never happened.
+// Runs a command line to completion, capturing stdout and stderr down one pipe into `out`.
 bool runCaptured(const std::wstring& cmdline, const std::wstring& cwd, std::string& out, int& exitCode) {
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof sa;
@@ -61,14 +60,8 @@ bool runCaptured(const std::wstring& cmdline, const std::wstring& cwd, std::stri
 
     HANDLE rd = nullptr, wr = nullptr;
     if (!CreatePipe(&rd, &wr, &sa, 0)) return false;
-    // Only the write end may be inherited; leaving the read end inheritable keeps a handle alive
-    // in the child and the drain loop below would never see EOF.
     SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
 
-    // STARTF_USESTDHANDLES means the child's stdin is whatever hStdInput says, and a null one is a
-    // handle it cannot read from. NUL gives an immediate EOF instead, which is the answer intended
-    // for a build nobody is sitting in front of — an MSBuild task that decided to read stdin would
-    // otherwise fail in whatever way its own error handling picked.
     HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
                              OPEN_EXISTING, 0, nullptr);
     if (nul == INVALID_HANDLE_VALUE) nul = nullptr;
@@ -81,11 +74,11 @@ bool runCaptured(const std::wstring& cmdline, const std::wstring& cwd, std::stri
     si.hStdInput = nul;
 
     PROCESS_INFORMATION pi{};
-    std::wstring mutableCmd = cmdline; // CreateProcessW may write into its command line
+    std::wstring mutableCmd = cmdline;   // CreateProcessW may write into its command line
     const BOOL ok = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, TRUE,
                                    CREATE_NO_WINDOW, nullptr, cwd.empty() ? nullptr : cwd.c_str(),
                                    &si, &pi);
-    CloseHandle(wr); // the parent's copy, or the child holds the pipe open forever
+    CloseHandle(wr);
     if (nul) CloseHandle(nul);
     if (!ok) { CloseHandle(rd); return false; }
 
@@ -106,19 +99,18 @@ bool runCaptured(const std::wstring& cmdline, const std::wstring& cwd, std::stri
     return true;
 }
 
+// True if an executable is on PATH.
 bool findOnPath(const wchar_t* exe) {
     wchar_t found[MAX_PATH];
     return SearchPathW(nullptr, exe, L".exe", MAX_PATH, found, nullptr) > 0;
 }
 
-// Hand a path to the shell. Used for the project folder (Explorer) and for Scripts.csproj
-// (whatever is registered for .csproj). Deliberately not a hard-coded devenv.exe: locating a
-// Visual Studio install needs vswhere, and the association is what the user has actually chosen.
+// Hands a path to the shell's default handler.
 bool shellOpen(const std::string& path) {
     const std::wstring w = widen(path);
     const auto r = reinterpret_cast<INT_PTR>(
         ShellExecuteW(nullptr, L"open", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
-    return r > 32; // ShellExecute's documented success threshold
+    return r > 32;   // ShellExecute's documented success threshold
 }
 
 #else // !_WIN32
@@ -129,13 +121,8 @@ bool shellOpen(const std::string&) { return false; }
 
 #endif
 
-// Bake every C# material in the assembly just built into .ocmat files the engine reads.
-//
-// `scriptsOutDir` is where dotnet put the assembly (…\Binaries\Scripts). The materials go beside it
-// under …\Binaries\Materials, because both are BUILD OUTPUT and neither is authored.
-//
-// Returns false when the tool is simply absent, which is not an error: a source build that has not
-// staged bin/Tools yet, or a stripped install, should compile scripts exactly as it did before.
+// Runs avermatc over the assembly in `scriptsOutDir`, writing .ocmat files beside it under
+// Binaries\Materials. False when the tool or the assembly is absent, which is not an error.
 bool bakeMaterials(const std::string& scriptsOutDir, std::string& log, int& exitCode) {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -148,7 +135,7 @@ bool bakeMaterials(const std::string& scriptsOutDir, std::string& log, int& exit
     wchar_t exe[MAX_PATH] = {};
     if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) return false;
     const fs::path tool = fs::path(exe).parent_path() / "Tools" / "avermatc.dll";
-    if (!fs::exists(tool, ec)) return false;   // not staged; nothing to say and nothing to do
+    if (!fs::exists(tool, ec)) return false;
 
     const fs::path outDir = binaries / "Materials";
     fs::create_directories(outDir, ec);
@@ -158,7 +145,7 @@ bool bakeMaterials(const std::string& scriptsOutDir, std::string& log, int& exit
     if (!runCaptured(cmd, fs::path(exe).parent_path().wstring(), log, exitCode)) {
         log = "could not start dotnet to bake materials";
         exitCode = -1;
-        return true;   // it was ATTEMPTED, so the caller reports it rather than staying silent
+        return true;
     }
     return true;
 #else
@@ -169,16 +156,13 @@ bool bakeMaterials(const std::string& scriptsOutDir, std::string& log, int& exit
 }
 
 #if AVER_WITH_IMGUI
-// A tooltip that also shows for a DISABLED item. ImGui's SetItemTooltip deliberately will not,
-// and a greyed-out row with no explanation is the exact thing this menu must not have.
+// A tooltip on the last item that shows even when that item is disabled.
 void tip(const char* text) {
     if (text && *text && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("%s", text);
 }
 
-// What a generated C# file will and will not be able to do, said in the modal AND in the file
-// header. It used to say "this will not run"; it now says what runs and what a script still
-// cannot reach, which is the same job — the thing someone must not discover an hour later.
+// Draws what a generated C# file can and cannot reach at runtime.
 void explainScriptReach(bool behaviour) {
     ImGui::PushTextWrapPos(0.0f);
     if (behaviour) {
@@ -201,8 +185,7 @@ void explainScriptReach(bool behaviour) {
 void showError(const std::string& e)  { if (!e.empty()) ImGui::TextColored(ImVec4(0.93f,0.42f,0.38f,1), "%s", e.c_str()); }
 void showResult(const std::string& r) { if (!r.empty()) ImGui::TextColored(ImVec4(0.45f,0.85f,0.45f,1), "%s", r.c_str()); }
 
-// The one build line the user must add by hand, with a button that puts it on the clipboard.
-// Retyping a path from a screenshot of a dialog is how a manual step becomes a typo.
+// Shows the one build line the user must add by hand, with a copy-to-clipboard button.
 void showCmakeHint(const char* what, const std::string& line, f32 dpi) {
     if (line.empty()) return;
     ImGui::Spacing();
@@ -214,12 +197,12 @@ void showCmakeHint(const char* what, const std::string& line, f32 dpi) {
 
 } // namespace
 
+// Joins any build thread still running.
 ToolsMenu::~ToolsMenu() {
-    // A build in flight owns a pipe and a process handle; blocking here is a shutdown that waits,
-    // which is preferable to a detached thread writing into a destroyed object.
     if (compileThread_.joinable()) compileThread_.join();
 }
 
+// Queues a modal to open next frame and clears the previous one's state.
 void ToolsMenu::open(Modal m) {
     pending_ = m;
     name_[0] = '\0';
@@ -229,6 +212,7 @@ void ToolsMenu::open(Modal m) {
     cmakeHint_.clear();
 }
 
+// True if `dotnet` is on PATH. Probed once and cached.
 bool ToolsMenu::haveDotnet() {
     if (dotnet_ < 0) dotnet_ = findOnPath(L"dotnet") ? 1 : 0;
     return dotnet_ == 1;
@@ -238,21 +222,16 @@ bool ToolsMenu::haveDotnet() {
 // the dropdown
 // ---------------------------------------------------------------------------------------------
 
+// Draws the Tools dropdown in the menu bar.
 void ToolsMenu::drawMenu(const fmt::ProjectDesc& project) {
 #if !AVER_WITH_IMGUI
     (void)project;
 #else
-    // --tools-menu (screenshot aid). Re-issued every frame rather than latched: the popup ID is
-    // derived from the menu-bar window, so this has to run with that window current, and there is
-    // no other way to photograph a dropdown in a run that cannot move the mouse.
+    // --tools-menu (screenshot aid). Re-issued every frame: the popup ID belongs to this window.
     if (armMenu_) ImGui::OpenPopup("Tools");
 
     if (!ImGui::BeginMenu("Tools")) return;
 
-    // Every item is drawn by drawScriptItems so that the Tools menu and the Compile C# button's
-    // dropdown cannot drift apart. They are the same actions with the same tooltips and the same
-    // disabled reasons, and one of them being subtly staler than the other is exactly the kind of
-    // difference nobody notices until it matters.
     drawScriptItems(project);
 
     ImGui::EndMenu();
@@ -263,18 +242,10 @@ void ToolsMenu::drawMenu(const fmt::ProjectDesc& project) {
 // modals
 // ---------------------------------------------------------------------------------------------
 
+// Reaps a finished build, starts IDE detection, and draws every modal this menu owns. Runs every
+// frame whether or not anything is open.
 void ToolsMenu::drawModals(const fmt::ProjectDesc& project, f32 dpi) {
-    // Outside the UI guard, and first: a finished build has a thread to join and possibly an
-    // assembly swap to perform, neither of which is a drawing concern. This is the one call that
-    // runs every frame whatever is open, so it is where the reap belongs.
     reapCompile();
-    // Starts the IDE scan on the first frame rather than on the first click. drawMenu only runs
-    // while the dropdown is actually open, so without this the first person to open Tools would
-    // get the shell fallback and then watch the item rename itself a few frames later.
-    //
-    // Logged once when it lands, from the MAIN thread rather than from the scan: what the editor
-    // decided is on this machine is the first thing anyone asks when a menu item names the wrong
-    // program, and a submenu is not something a bug report can paste.
     const std::vector<IdeInfo>& ides = detectedIdes();
     if (!idesLogged_ && ideDetectionFinished()) {
         idesLogged_ = true;
@@ -285,14 +256,10 @@ void ToolsMenu::drawModals(const fmt::ProjectDesc& project, f32 dpi) {
 #if !AVER_WITH_IMGUI
     (void)project; (void)dpi;
 #else
-    // --new-script, gated on the SAME predicate as the menu item, so a run with no project proves
-    // the item really is disabled rather than merely looking it — headless capture cannot open a
-    // menu and click.
+    // --new-script (screenshot aid), gated on the same predicate as the menu item.
     if (armScript_ > 0) { if (project.valid() && pending_ == Modal::None) open(Modal::CsScript); --armScript_; }
 
-    // --compile-scripts and --reload-scripts, same family and the same reasoning: gated on exactly
-    // what enables the menu item, so a run that produces no modal has demonstrated a real disabled
-    // state. Reload additionally needs a host, which is the one thing a screenshot cannot assert.
+    // --compile-scripts and --reload-scripts, gated on exactly what enables their menu items.
     const auto fireBuild = [&](int& arm, bool reload) {
         if (arm <= 0) return;
         const std::string csproj = project.valid() ? scriptsCsprojPath(project) : std::string();
@@ -328,8 +295,7 @@ void ToolsMenu::drawModals(const fmt::ProjectDesc& project, f32 dpi) {
 }
 
 #if AVER_WITH_IMGUI
-// Shared by New C# Script and New C# Class: same folder, same validation, same refusal to
-// overwrite, and the same honest warning. Only the template and the wording differ.
+// Draws the New C# Script / New C# Class modal, including the parent-class picker.
 void ToolsMenu::drawCsModal(const fmt::ProjectDesc& project, f32 dpi, CsKind kind) {
     const bool behaviour = kind == CsKind::Behaviour;
     const char* title = behaviour ? "New C# Script" : "New C# Class";
@@ -350,9 +316,7 @@ void ToolsMenu::drawCsModal(const fmt::ProjectDesc& project, f32 dpi, CsKind kin
     ImGui::PopItemWidth();
     ImGui::TextDisabled("Becomes a C# class, so: letters, digits and underscores only.");
 
-    // The parent-class picker, only on New C# Script. New C# Class is always a plain class, so it
-    // shows no picker. The order is deliberate: AverBehaviour first because it is the one that runs
-    // today, then the gameplay types top-down (Actor -> Pawn/Controller, then GameMode/Instance).
+    // One row of the parent-class picker.
     struct ParentOption { CsKind kind; const char* label; const char* blurb; };
     static const ParentOption kParents[] = {
         { CsKind::Behaviour,        "AverBehaviour",    "Raw hooks (OnStart/OnUpdate). The one that RUNS today." },
@@ -390,8 +354,6 @@ void ToolsMenu::drawCsModal(const fmt::ProjectDesc& project, f32 dpi, CsKind kin
     ImGui::Spacing();
     ImGui::Separator();
     if (csKindIsActor(effectiveKind)) {
-        // The one thing a scaffolded actor must not surprise anyone with: it compiles, but the
-        // runtime that would call its hooks is not built yet.
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.72f, 0.25f, 1));
         ImGui::TextWrapped("This compiles, but does NOT tick yet - the actor runtime (per-frame tick, "
                            "spawning, possession) is still being built. AverBehaviour scripts run today.");
@@ -410,9 +372,6 @@ void ToolsMenu::drawCsModal(const fmt::ProjectDesc& project, f32 dpi, CsKind kin
         error_.clear(); result_.clear();
         std::string path; bool madeCsproj = false;
         if (createScript(project, name_, effectiveKind, &path, &madeCsproj, &error_)) {
-            // Close on success: the file is made, and createScript logs the path to the Output Log,
-            // so keeping the modal up would just be a dialog the user has to dismiss by hand. A
-            // FAILURE keeps it open, because the error only shows here.
             name_[0] = '\0';
             ImGui::CloseCurrentPopup();
         }
@@ -422,6 +381,7 @@ void ToolsMenu::drawCsModal(const fmt::ProjectDesc& project, f32 dpi, CsKind kin
     ImGui::EndPopup();
 }
 
+// Draws the New C++ Module modal, which writes into the engine tree.
 void ToolsMenu::drawCppModuleModal(f32 dpi) {
     const ImGuiViewport* mv = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(mv->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
@@ -479,8 +439,6 @@ void ToolsMenu::drawCppModuleModal(f32 dpi) {
     if (ImGui::Button("Create Module", ImVec2(160.0f * dpi, 0))) {
         error_.clear(); result_.clear(); madeFiles_.clear(); cmakeHint_.clear();
         if (createCppModule(name_, purpose_, &madeFiles_, &error_)) {
-            // Log the CMake line before closing, so the one thing the user must still do by hand is
-            // in the Output Log rather than lost with the dialog.
             AVER_INFO("[Editor] new C++ module '{}': {} files. Add to the top-level CMakeLists: add_subdirectory(modules/{})",
                       name_, madeFiles_.size(), name_);
             name_[0] = '\0'; purpose_[0] = '\0';
@@ -492,6 +450,7 @@ void ToolsMenu::drawCppModuleModal(f32 dpi) {
     ImGui::EndPopup();
 }
 
+// Draws the New C++ Class modal: pick an engine module, get a .hpp/.cpp pair.
 void ToolsMenu::drawCppClassModal(f32 dpi) {
     const ImGuiViewport* mv = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(mv->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
@@ -515,8 +474,6 @@ void ToolsMenu::drawCppClassModal(f32 dpi) {
     if (ImGui::BeginCombo("##module", mod ? mod->dir.c_str() : "<no modules found>")) {
         for (int i = 0; i < (int)modules_.size(); ++i) {
             const ModuleInfo& m = modules_[static_cast<usize>(i)];
-            // The label carries the module's build state: a skeleton has no CMakeLists at all, so
-            // a class added there compiles nowhere until someone writes one.
             const std::string label = m.built ? m.dir : m.dir + "   (skeleton - no CMakeLists.txt)";
             if (ImGui::Selectable(label.c_str(), moduleSel_ == i)) moduleSel_ = i;
         }
@@ -564,8 +521,6 @@ void ToolsMenu::drawCppClassModal(f32 dpi) {
     if ((ImGui::Button("Create Class", ImVec2(150.0f * dpi, 0)) || submitted) && mod) {
         error_.clear(); result_.clear(); madeFiles_.clear(); cmakeHint_.clear();
         if (createCppClass(*mod, name_, &madeFiles_, &cmakeHint_, &error_)) {
-            // Close on success; if the module's CMakeLists needs a line added, log it so it is not
-            // lost with the dialog.
             if (!cmakeHint_.empty())
                 AVER_INFO("[Editor] new C++ class '{}' in {}. CMake: {}", name_, mod->dir, cmakeHint_);
             else
@@ -580,6 +535,7 @@ void ToolsMenu::drawCppClassModal(f32 dpi) {
     ImGui::EndPopup();
 }
 
+// Draws the Compile Scripts / Reload Scripts modal: status, the transcript, and clickable errors.
 void ToolsMenu::drawCompileModal(f32 dpi, bool reload) {
     const ImGuiViewport* mv = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(mv->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
@@ -602,9 +558,6 @@ void ToolsMenu::drawCompileModal(f32 dpi, bool reload) {
         else
             ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1), "Build FAILED (exit %d).", compile_->exitCode);
 
-        // The reload line is separate from the build line because they are separate outcomes: a
-        // build can succeed and the swap still find nothing to load, and reporting one number for
-        // both is how "it said it worked" becomes a bug report.
         if (compile_->reload && compile_->reloaded) {
             ImGui::TextColored(compile_->reloadOk ? ImVec4(0.45f, 0.85f, 0.45f, 1)
                                                   : ImVec4(0.93f, 0.42f, 0.38f, 1),
@@ -614,16 +567,8 @@ void ToolsMenu::drawCompileModal(f32 dpi, bool reload) {
         }
     }
 
-    // Which editor a click will actually reach. Asked once per frame rather than per line, and it
-    // is also what starts detection: the first Tools frame kicks off the scan and gets the shell
-    // fallback, so nothing here ever waits on vswhere.
-    //
-    // The GOTO preference, not the general one. Everything in this panel is a jump to a line, and
-    // the editor that opens a project best is not the one that lands a caret best.
     const IdeInfo& ide = preferredGotoIde();
     if (compile_ && !running && (compile_->errors > 0 || compile_->warnings > 0)) {
-        // Says which editor, and says plainly when that editor cannot be told a line — a click
-        // that opens the file at the top is a different promise from one that lands on the error.
         ImGui::TextDisabled(ide.canGoto
                                 ? "%d error(s), %d warning(s).  Click one to open it in %s, at that line."
                                 : "%d error(s), %d warning(s).  Click one to open it in %s - which has no "
@@ -632,34 +577,20 @@ void ToolsMenu::drawCompileModal(f32 dpi, bool reload) {
     }
 
     ImGui::Separator();
-    // The whole transcript, scrollable: an exit code alone cannot tell anyone which line of which
-    // file the compiler objected to, and that is the only thing a failed build is asked.
-    //
-    // No text wrapping, and a horizontal scrollbar instead. The clipper below can only skip rows it
-    // can predict the height of, and a wrapped line is however many rows the current width makes it
-    // — one long path would then throw off every scroll position under it. A terminal would have
-    // scrolled that line sideways too.
+    // No wrapping, horizontal scroll instead: the clipper needs a predictable row height.
     ImGui::BeginChild("##buildout", ImVec2(0, -46.0f * dpi), ImGuiChildFlags_Borders,
                       ImGuiWindowFlags_HorizontalScrollbar);
     if (compile_ && !compile_->lines.empty()) {
-        // Clipped, because each line is now its own item — a Selectable with an ID, a style push
-        // and a hover test, where the transcript used to be a single TextUnformatted. A build that
-        // restores packages runs to hundreds of lines and the panel shows about thirty of them.
         ImGuiListClipper clipper;
         clipper.Begin(static_cast<int>(compile_->lines.size()));
         while (clipper.Step()) {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
                 const BuildLine& bl = compile_->lines[static_cast<usize>(i)];
-                // Anything without a position — MSBuild's banners, its summary counts, and any line
-                // this failed to understand — is printed exactly as it arrived. Output that was not
-                // parsed is still output somebody has to be able to read.
                 if (!bl.hasPosition()) { ImGui::TextUnformatted(bl.raw.c_str()); continue; }
 
                 ImGui::PushID(i);
                 ImGui::PushStyleColor(ImGuiCol_Text, bl.isError ? ImVec4(0.93f, 0.42f, 0.38f, 1)
                                                                 : ImVec4(0.95f, 0.72f, 0.25f, 1));
-                // Selectable rather than Text: it gives the row a hover highlight, so a clickable
-                // line looks clickable before anyone discovers it by accident.
                 const bool clicked = ImGui::Selectable(bl.label.c_str());
                 ImGui::PopStyleColor();
                 if (ImGui::IsItemHovered())
@@ -691,10 +622,7 @@ void ToolsMenu::drawCompileModal(f32 dpi, bool reload) {
 
 namespace {
 
-// Newest write time among *.cs under `dir`, skipping obj/ and bin/. `dotnet build` drops generated
-// sources (AssemblyInfo, GlobalUsings) into obj\, and their mtime bumps on every build — counting
-// them would make the source look perpetually newer than itself. Returns false when the tree holds
-// no source at all, which the caller reads as "nothing to build".
+// Newest write time among *.cs under `dir`, skipping obj/ and bin/. False if there is no source.
 bool newestCsTime(const std::string& dir, std::filesystem::file_time_type& out) {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -718,9 +646,7 @@ bool newestCsTime(const std::string& dir, std::filesystem::file_time_type& out) 
     return any;
 }
 
-// Newest *.dll under `dir` — the built assembly's timestamp. Used ONLY across editor restarts, when
-// this session has not built anything yet: within a session the in-memory record is authoritative
-// because it alone knows a build failed.
+// Newest write time among *.dll directly in `dir`. False if there is none.
 bool newestDllTime(const std::string& dir, std::filesystem::file_time_type& out) {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -740,10 +666,7 @@ bool newestDllTime(const std::string& dir, std::filesystem::file_time_type& out)
 }
 
 
-// The newest .cs anywhere the project's assembly is built FROM, which since materials became C# is
-// two directories: Content\Scripts and Content\Materials. Scanning only the first made the
-// toolbar's "changed since the last build" light blind to every material edit -- it would sit green
-// while the surface on screen was a build behind.
+// Newest .cs across both directories the project's assembly is built from: Scripts and Materials.
 bool newestProjectCsTime(const std::string& scriptsDir, std::filesystem::file_time_type& out) {
     namespace fs = std::filesystem;
     const std::string materialsDir =
@@ -762,8 +685,7 @@ bool newestProjectCsTime(const std::string& scriptsDir, std::filesystem::file_ti
 
 } // namespace
 
-// Outside the ImGui guard: joining the build thread and swapping the assemblies are neither of
-// them UI, and a build must be reaped in a build with no editor chrome just the same.
+// Joins a finished build thread, records its result, and performs the assembly swap on a reload.
 void ToolsMenu::reapCompile() {
     if (!compile_ || !compile_->done.load() || !compileThread_.joinable()) return;
     compileThread_.join();
@@ -772,20 +694,13 @@ void ToolsMenu::reapCompile() {
     if (compile_->exitCode == 0) AVER_INFO("[Editor] {}: {} built cleanly", what, compile_->csproj);
     else AVER_ERROR("[Editor] {}: dotnet build exited {}", what, compile_->exitCode);
 
-    // The toolbar's Compile C# light reads this: a build stays failed (red) until a later one
-    // succeeds, and the toolbar path pops the errors on failure — Build Verse, but it shows what
-    // broke. The menu items open their own modal up front, so they never set openModalOnFail_.
     lastBuildFailed_ = compile_->exitCode != 0;
-    scanClock_ = -1.0;   // force the light to re-read now rather than up to a throttle-tick later
+    scanClock_ = -1.0;   // force the status light to re-read this frame
     if (openModalOnFail_) {
         openModalOnFail_ = false;
-        // Match the job's own modal so the title and footer read right; a failed reload never
-        // reloaded, so either variant shows only the build errors regardless.
         if (lastBuildFailed_) open(compile_->reload ? Modal::Reload : Modal::Compile);
     }
 
-    // A failed build must NOT unload: the editor would be left with no scripts at all because of a
-    // typo, which is a far worse outcome than carrying on with the previous ones.
     if (!compile_->reload || compile_->exitCode != 0 || compile_->reloaded) return;
 
     compile_->reloaded = true;
@@ -796,12 +711,11 @@ void ToolsMenu::reapCompile() {
     else AVER_ERROR("[Editor] Reload Scripts: {}", compile_->reloadStatus);
 }
 
+// Starts a background `dotnet build` of `csproj` into `outDir`, optionally reloading afterwards.
 void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDir, bool reload) {
-    if (compileThread_.joinable()) return; // the menu item is disabled meanwhile; belt and braces
+    if (compileThread_.joinable()) return;
 
-    // Record the source state we are about to build. It is the only thing that lets the toolbar
-    // light tell "edited since this build" (Stale) from "this build failed and nothing changed"
-    // (Failed) — file mtimes cannot express a failure, since a failed build leaves the old .dll.
+    // Record the source state being built: the status light needs it to tell Stale from Failed.
     {
         const std::string scriptsDir = std::filesystem::path(csproj).parent_path().string();
         std::filesystem::file_time_type stamp{};
@@ -815,15 +729,11 @@ void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDi
     job->reload = reload;
     compile_ = job;
 
-    // The working directory is the Scripts folder so relative paths in MSBuild's diagnostics read
-    // the way they do in a terminal opened there.
     const std::string dir = std::filesystem::path(csproj).parent_path().string();
     compileThread_ = std::thread([job, csproj, dir, outDir] {
         std::string out;
         int code = -1;
 #if defined(_WIN32)
-        // `-o` and not the .csproj's own OutputPath: the editor has to know this directory too,
-        // and a project scaffolded before that was true would otherwise build where nothing looks.
         const std::wstring cmd = L"dotnet build \"" + widen(csproj) + L"\" --nologo -o \"" +
                                  widen(outDir) + L"\"";
         if (!runCaptured(cmd, widen(dir), out, code)) {
@@ -834,24 +744,13 @@ void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDi
         (void)csproj; (void)dir; (void)outDir;
         out = "Compile Scripts is implemented for Windows only.";
 #endif
-        // Parsed HERE and not in the draw call. `dir` is the directory the build ran in, which is
-        // what MSBuild's relative paths are relative to — resolving them anywhere else would
-        // produce a path that opens nothing.
+        // Parsed here, where `dir` is known: MSBuild's relative paths are relative to it.
         job->lines = parseBuildOutput(out, dir);
         for (const BuildLine& bl : job->lines) {
             if (bl.isError) ++job->errors;
             else if (bl.isWarning) ++job->warnings;
         }
-        // ---- materials ----
-        // A .cs under Content\Materials is the SOURCE of a surface; avermatc runs its Configure and
-        // writes the .ocmat the engine actually reads. Done here, on the build thread, right after
-        // the compile that produced the assembly it reflects -- a separate button would be a button
-        // somebody forgets, and a surface a build behind looks like a material bug rather than a
-        // missing step.
-        //
-        // Its failure does NOT fail the compile. The C# built; the assembly is good; a material that
-        // could not bake is reported and the previous .ocmat stays. Turning a bad Configure into a
-        // red build light would make it read as a compile error, which it is not.
+        // ---- materials: baked here, and a bake failure does not fail the compile ----
         if (code == 0) {
             std::string bakeLog;
             int bakeCode = -1;
@@ -864,34 +763,32 @@ void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDi
 
         job->output = std::move(out);
         job->exitCode = code;
-        job->done.store(true); // last: the UI thread reads output/exitCode once this is set
+        job->done.store(true);   // last: the UI thread reads output/exitCode once this is set
     });
 }
 
+// Starts the build the toolbar's Compile C# button asks for: silent on success, errors on failure.
 void ToolsMenu::triggerToolbarCompile(const fmt::ProjectDesc& project) {
     if (compileThread_.joinable()) return;
     const std::string csproj = scriptsCsprojPath(project);
     if (csproj.empty() || !fileExists(csproj) || !haveDotnet()) return;
-    openModalOnFail_ = true;   // silent on success, the errors on failure — that is the whole button
-    // reload when a host is present: the button's promise is "make the new code live", which is the
-    // reload path. With no host it degrades to a plain compile and the light still tracks the result.
+    openModalOnFail_ = true;
     startCompile(csproj, scriptsBinaryDir(project), reload_ != nullptr);
 }
 
 #if AVER_WITH_IMGUI
+// Recomputes the toolbar status light: building, no project, stale, failed or up to date.
 void ToolsMenu::refreshScriptStatus(const fmt::ProjectDesc& project) {
     if (compileThread_.joinable()) { scriptStatus_ = ScriptStatus::Building;  return; }
     if (!project.valid())          { scriptStatus_ = ScriptStatus::NoProject; return; }
 
     const std::string csproj = scriptsCsprojPath(project);
     if (csproj.empty() || !fileExists(csproj)) {
-        // No scripts project yet: genuinely nothing to build, which the user asked to read as green.
         scriptStatus_ = ScriptStatus::UpToDate;
         return;
     }
 
-    // A directory walk every frame is waste; a script is not edited at 60 Hz. Keep the last verdict
-    // between scans, and let -1 force the first one.
+    // Throttled: a directory walk every frame is waste. -1 forces the next scan.
     const double now = ImGui::GetTime();
     if (scanClock_ >= 0.0 && now - scanClock_ < 0.5) return;
     scanClock_ = now;
@@ -901,34 +798,25 @@ void ToolsMenu::refreshScriptStatus(const fmt::ProjectDesc& project) {
     if (!newestProjectCsTime(scriptsDir, newestCs)) { scriptStatus_ = ScriptStatus::UpToDate; return; }
 
     if (haveBuiltStamp_) {
-        // Priority is the user's wording: unbuilt CHANGES win over a stale failure, so a fresh edit
-        // reads yellow even if the last build was red.
-        if (newestCs > builtStamp_)   scriptStatus_ = ScriptStatus::Stale;   // edited since we built
-        else if (lastBuildFailed_)    scriptStatus_ = ScriptStatus::Failed;  // known-broken, unchanged
+        if (newestCs > builtStamp_)   scriptStatus_ = ScriptStatus::Stale;
+        else if (lastBuildFailed_)    scriptStatus_ = ScriptStatus::Failed;
         else                          scriptStatus_ = ScriptStatus::UpToDate;
         return;
     }
 
-    // Nothing built this session: fall back to the assembly's own timestamp so the light is honest
-    // across restarts. Missing or older-than-source output means the changes are unbuilt.
+    // Nothing built this session: fall back to the assembly's own timestamp.
     std::filesystem::file_time_type newestDll{};
     const bool anyDll = newestDllTime(scriptsBinaryDir(project), newestDll);
     scriptStatus_ = (anyDll && newestDll >= newestCs) ? ScriptStatus::UpToDate : ScriptStatus::Stale;
 }
 
-// The build/reload/open items, drawn into WHATEVER menu or popup is currently open.
-//
-// Extracted from drawMenu so the Compile C# button's dropdown is not a second, quietly divergent
-// copy. The tooltips here carry the reasons an item is disabled, which is most of their value: a
-// greyed-out Compile with no explanation sends people hunting for a bug in their project.
+// Draws the build/reload/open items into whatever menu or popup is currently open. Shared by the
+// Tools menu and the Compile C# button's dropdown.
 void ToolsMenu::drawScriptItems(const fmt::ProjectDesc& project) {
     const bool haveProject = project.valid();
 
     const char* kNoProject = "Open or create a project first - C# lives in the\nproject's Content\\Scripts folder.";
 
-    // Creation (New C# Script/Class, New C++ Module/Class) now lives on the Content Browser's "+ Add"
-    // button — the same place UE keeps its Add menu — and opens the same modals drawn below. The Tools
-    // menu keeps the build/reload/open-project actions.
     ImGui::TextDisabled("New scripts & classes: Content Browser  >  + Add");
     ImGui::Separator();
     const std::string csproj = haveProject ? scriptsCsprojPath(project) : std::string();
@@ -946,9 +834,6 @@ void ToolsMenu::drawScriptItems(const fmt::ProjectDesc& project) {
         : compileThread_.joinable() ? "A build is already running."
         : "dotnet build into Binaries\\Scripts.\nThe editor keeps running whatever it loaded - use Reload Scripts to swap it in.");
 
-    // Reload is a SEPARATE item and not a checkbox on Compile: they fail differently and a user
-    // reaches for them at different moments. Compile answers "does it build"; Reload answers
-    // "does it do what I meant", and it swaps live behaviours out from under a running editor.
     if (ImGui::MenuItem("Reload Scripts", nullptr, false, canCompile && reload_ != nullptr)) {
         open(Modal::Reload);
         startCompile(csproj, binDir, true);
@@ -960,11 +845,6 @@ void ToolsMenu::drawScriptItems(const fmt::ProjectDesc& project) {
         : compileThread_.joinable() ? "A build is already running."
         : "Rebuild, then unload and reload the project's scripts in place.\nRunning behaviours get OnShutdown, the new ones get OnStart.\nNo editor restart, and no state is carried across.");
 
-    // AUTO-COMPILE ON SAVE. Beneath the two manual items because it is the same operation done for
-    // you: it runs exactly the Reload Scripts path, on a debounce, when a .cs under Content changes.
-    //
-    // Off until asked, because it spawns a compiler in response to somebody else's file write and
-    // swaps the script assembly under a running editor.
     if (autoCompile_) {
         const bool canAuto = haveProject && haveCsproj && dotnetOk;
         ImGui::BeginDisabled(!canAuto);
@@ -986,9 +866,6 @@ void ToolsMenu::drawScriptItems(const fmt::ProjectDesc& project) {
     tip(haveProject ? "Opens the project folder in Explorer."
                     : "Open or create a project first - there is no folder to show.");
 
-    // Named after what is actually installed rather than after Visual Studio in hope. The list is
-    // never empty — the shell fallback is always its last entry — so there is always exactly one
-    // item or exactly one submenu, and the no-project / no-csproj tooltips are unchanged.
     const std::vector<IdeInfo>& ides = detectedIdes();
     const char* kOpenBlocked = !haveProject ? kNoProject
         : "There is no Content\\Scripts\\Scripts.csproj to open yet.\nUse New C# Script or New C# Class to generate one.";
@@ -1023,6 +900,7 @@ void ToolsMenu::drawScriptItems(const fmt::ProjectDesc& project) {
     }
 }
 
+// Draws the toolbar's Compile C# split button: a status icon and label, plus a dropdown arrow.
 void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 iconTex) {
     (void)dpi;
     refreshScriptStatus(project);
@@ -1032,9 +910,7 @@ void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 
     const bool canCompile = !building && project.valid() && haveDotnet() &&
                             !csproj.empty() && fileExists(csproj);
 
-    // Which sprite tile the state shows. The sheet is three tiles: 0 built, 1 failed, 2 stale. There
-    // is NO spinner: while a build runs it stays on the stale (?) tile, per the request, and so does
-    // "no project" (nothing is known-built).
+    // The icon sheet is three tiles: 0 built, 1 failed, 2 stale. Building and no-project use stale.
     int tile = 2;
     if      (scriptStatus_ == ScriptStatus::UpToDate) tile = 0;
     else if (scriptStatus_ == ScriptStatus::Failed)   tile = 1;
@@ -1046,8 +922,6 @@ void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 
         : !haveDotnet()                            ? "dotnet was not found on PATH. Install the .NET SDK."
         :                                            "C# changed since the last build - click Compile C#.";
 
-    // One button carrying the icon AND the label, so the status icon is PART of the button rather
-    // than a pip beside it. Sized to fit the icon, an inner gap, and "Compile C#".
     ImGuiStyle& st = ImGui::GetStyle();
     const float ih = ImGui::GetFrameHeight() - st.FramePadding.y * 2.0f;   // icon square, inside padding
     const char* label = "Compile C#";
@@ -1055,15 +929,7 @@ void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 
     const float gap = st.ItemInnerSpacing.x;
     const ImVec2 btnSize(st.FramePadding.x * 2.0f + ih + gap + tsz.x, 0.0f);
 
-    // The two halves are pushed together with ItemSpacing 0 so they read as ONE control with a
-    // divider rather than as two buttons that happen to be adjacent.
-    //
-    // No PushID is needed even though this widget is now drawn in several places in the same frame --
-    // the menu bar and every open tab's toolbar. ImGui seeds the ID stack from the CURRENT WINDOW, so
-    // "##compilecs" in two different windows is already two different widgets, and the same holds for
-    // the popup below. It would only collide if one window drew the button twice, which no caller
-    // does. (An earlier attempt scoped it with GetCurrentWindow() -- that is imgui_internal.h, and it
-    // was solving a problem ImGui had already solved.)
+    // ItemSpacing 0 so the two halves read as one split control.
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, st.ItemSpacing.y));
 
     ImGui::BeginDisabled(!canCompile);
@@ -1077,7 +943,7 @@ void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 
     const ImVec2 rmax = ImGui::GetItemRectMax();
     const float  cy   = (rmin.y + rmax.y) * 0.5f;
     const float  ix   = rmin.x + st.FramePadding.x;
-    const bool   dim  = !canCompile;   // disabled: dim the icon and the text together
+    const bool   dim  = !canCompile;
     ImDrawList*  dl   = ImGui::GetWindowDrawList();
 
     if (iconTex) {
@@ -1087,7 +953,7 @@ void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 
         dl->AddImage(static_cast<ImTextureID>(iconTex),
                      ImVec2(ix, cy - ih * 0.5f), ImVec2(ix + ih, cy + ih * 0.5f), uv0, uv1, tint);
     } else {
-        // No texture staged: a small state-coloured dot so there is still a signal.
+        // No texture staged: a state-coloured dot instead.
         const ImU32 dot = tile == 0 ? IM_COL32(70,180,80,255)
                         : tile == 1 ? IM_COL32(205,55,50,255)
                                     : IM_COL32(225,195,45,255);
@@ -1096,22 +962,16 @@ void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 
     dl->AddText(ImVec2(ix + ih + gap, cy - tsz.y * 0.5f),
                 ImGui::GetColorU32(dim ? ImGuiCol_TextDisabled : ImGuiCol_Text), label);
 
-    // --- the dropdown half -------------------------------------------------------------------------
-    //
-    // NOT disabled with the face. The face needs dotnet, a project and a .csproj before it can do
-    // anything; the menu behind the arrow is where a user finds out WHY it cannot, and it also holds
-    // Open Scripts In, which is exactly what you want when there is no .csproj yet. An arrow that
-    // greys out alongside the button would hide the explanation at the only moment it is wanted.
+    // --- the dropdown half, never disabled with the face ---
     ImGui::SameLine();
-    const float aw = ImGui::GetFrameHeight() * 0.72f;    // narrow: an affordance, not a second button
+    const float aw = ImGui::GetFrameHeight() * 0.72f;
     const bool arrow = ImGui::Button("##compilecsmenu", ImVec2(aw, 0.0f));
     if (arrow) ImGui::OpenPopup("##compilecsitems");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reload, auto-compile on save, and open the scripts.");
 
     const ImVec2 amin = ImGui::GetItemRectMin();
     const ImVec2 amax = ImGui::GetItemRectMax();
-    // A hairline on the shared edge, so the pair reads as one split control. Drawn at the button's own
-    // frame colour rather than a border colour: this is a seam INSIDE a control, not around one.
+    // A hairline on the shared edge, so the pair reads as one split control.
     dl->AddLine(ImVec2(amin.x, amin.y + st.FramePadding.y),
                 ImVec2(amin.x, amax.y - st.FramePadding.y),
                 ImGui::GetColorU32(ImGuiCol_Separator));
@@ -1124,15 +984,10 @@ void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 
 
     ImGui::PopStyleVar();
 
-    // --arm-compile-menu (screenshot aid), re-issued every frame for the reason armMenu_ is: the
-    // popup ID belongs to this window, so it has to be opened with this window current.
+    // --arm-compile-menu (screenshot aid), re-issued every frame: the popup ID belongs to this window.
     if (armCompileMenu_) ImGui::OpenPopup("##compilecsitems");
 
-    // ANCHORED under the arrow, explicitly, rather than left to ImGui's default. A popup that was not
-    // opened by an item interaction is placed at the MOUSE, which for a --frames run with no cursor is
-    // (0,0): the first screenshot of this had the menu in the window's top-left corner, covering the
-    // very toolbar the button lives on. Setting it here is not just a fix for the headless case
-    // either -- a split button's menu belongs under its own arrow whether a mouse opened it or not.
+    // Anchored under the arrow: a popup not opened by an item interaction is placed at the mouse.
     ImGui::SetNextWindowPos(ImVec2(amin.x, amax.y), ImGuiCond_Always);
     if (ImGui::BeginPopup("##compilecsitems")) {
         drawScriptItems(project);

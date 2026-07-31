@@ -1,3 +1,5 @@
+// Reader and writer for .ocmesh: an AVR1 container holding one mesh's streams, indices and submeshes.
+
 #include "aver/formats/OcMesh.hpp"
 
 #include "aver/formats/Avr1.hpp"
@@ -19,12 +21,10 @@ constexpr u32 kChunkMADR = avrFourCC("MADR");
 constexpr u8 kSemPosition = 0, kSemTangentFrame = 1, kSemUV0 = 2;
 constexpr u8 kFmtR32G32B32F = 0, kFmtR16G16B16A16S = 1, kFmtR16G16F = 2;
 
+// Sets `why` and returns false.
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
 
-// ---- half floats ----
-// UV0 is R16G16_FLOAT per the canonical layout. Written by hand rather than with a library because
-// the engine vendors none, and because a UV needs only the ordinary path -- no NaN, no subnormal
-// input worth preserving.
+// Converts a float to IEEE half. No subnormal or NaN handling.
 u16 floatToHalf(f32 f) {
     u32 x; std::memcpy(&x, &f, 4);
     const u32 sign = (x >> 16) & 0x8000u;
@@ -34,6 +34,7 @@ u16 floatToHalf(f32 f) {
     if (exp >= 31) return u16(sign | 0x7C00u);            // overflow to infinity
     return u16(sign | (u32(exp) << 10) | (man >> 13));
 }
+// Converts an IEEE half back to a float.
 f32 halfToFloat(u16 h) {
     const u32 sign = u32(h & 0x8000u) << 16;
     const u32 exp  = (h >> 10) & 0x1Fu;
@@ -45,22 +46,15 @@ f32 halfToFloat(u16 h) {
     f32 f; std::memcpy(&f, &out, 4); return f;
 }
 
+// Clamps to [-1, 1] and encodes as signed-normalised 16-bit.
 inline i16 toSnorm16(f32 v) {
     v = v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v);
     return static_cast<i16>(std::lround(v * 32767.0f));
 }
 inline f32 fromSnorm16(i16 v) { const f32 f = static_cast<f32>(v) / 32767.0f; return f < -1.0f ? -1.0f : f; }
 
-// ---- QTangent (§5.4) ----
-// The whole tangent basis as one unit quaternion. This writer has only a NORMAL to encode -- the
-// importer does not yet compute tangents -- so it builds the shortest-arc rotation from +Z to the
-// normal, which reproduces the normal exactly on decode and yields SOME valid tangent. That is
-// honest for a format whose consumers currently derive tangents from screen-space derivatives
-// anyway (PbrShaders.cpp does exactly that), and it means adding real MikkTSpace tangents later
-// changes the writer without changing the format or the reader.
+// Encodes a normal as a QTangent (§5.4): the shortest-arc rotation from +Z to the normal.
 void normalToQTangent(const f32 n[3], i16 out[4]) {
-    // Shortest arc from +Z to n. The degenerate case is n == -Z, where the rotation is a half turn
-    // about any perpendicular axis; +X is chosen so the result is deterministic rather than a NaN.
     const f32 x = n[0], y = n[1], z = n[2];
     f32 qx, qy, qz, qw;
     const f32 d = z;                       // dot(+Z, n)
@@ -72,12 +66,12 @@ void normalToQTangent(const f32 n[3], i16 out[4]) {
         const f32 inv = len > 1e-20f ? 1.0f / len : 0.0f;
         qx *= inv; qy *= inv; qz *= inv; qw *= inv;
     }
-    // The spec folds the bitangent handedness into w's sign, so w must never be stored negative for
-    // the right-handed case; flip the whole quaternion (q and -q are the same rotation) if it is.
+    // The spec folds bitangent handedness into w's sign, so w is never stored negative here.
     if (qw < 0.0f) { qx = -qx; qy = -qy; qz = -qz; qw = -qw; }
     out[0] = toSnorm16(qx); out[1] = toSnorm16(qy); out[2] = toSnorm16(qz); out[3] = toSnorm16(qw);
 }
 
+// Recovers the normal from a QTangent.
 void qTangentToNormal(const i16 q[4], f32 n[3]) {
     f32 x = fromSnorm16(q[0]), y = fromSnorm16(q[1]), z = fromSnorm16(q[2]), w = fromSnorm16(q[3]);
     const f32 len = std::sqrt(x*x + y*y + z*z + w*w);
@@ -91,6 +85,7 @@ void qTangentToNormal(const i16 q[4], f32 n[3]) {
     if (nl > 1e-20f) { n[0] /= nl; n[1] /= nl; n[2] /= nl; } else { n[0] = 0; n[1] = 0; n[2] = 1; }
 }
 
+// Little-endian byte writer over a growing buffer.
 struct W {
     std::vector<u8>& b;
     void u8v (u8 v)  { b.push_back(v); }
@@ -102,6 +97,7 @@ struct W {
     void pad16()     { while (b.size() % 16) b.push_back(0); }
 };
 
+// Bounds-checked little-endian byte reader. `ok` goes false on the first short read.
 struct R {
     const u8* p; const u8* e; bool ok = true;
     bool need(usize n) { if (usize(e - p) < n) { ok = false; return false; } return true; }
@@ -115,6 +111,7 @@ struct R {
 
 } // namespace
 
+// Recomputes the axis-aligned bounds from the position stream.
 void OcMeshData::computeBounds() {
     if (positions.size() < 3) { boundsMin = boundsMax = Vec3{0, 0, 0}; return; }
     Vec3 lo{positions[0], positions[1], positions[2]}, hi = lo;
@@ -126,13 +123,14 @@ void OcMeshData::computeBounds() {
     boundsMin = lo; boundsMax = hi;
 }
 
+// Encodes a mesh into an .ocmesh container. Returns false with `why` set on invalid input.
 bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     if (!in.valid()) return fail(why, ".ocmesh: mesh has no vertices, no indices, or mismatched attribute counts");
     if (in.submeshes.empty()) return fail(why, ".ocmesh: at least one submesh is required");
     if (in.submeshes.size() > 255) return fail(why, ".ocmesh: more than 255 submeshes");
 
     OcMeshData m = in;
-    m.computeBounds();      // never trust the caller's bounds; a wrong AABB culls silently
+    m.computeBounds();
 
     const u32 vcount = m.vertexCount();
     const bool index32 = vcount > 0xFFFF;
@@ -142,9 +140,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     nameRefs.reserve(m.submeshes.size());
     for (const OcMeshSubmesh& s : m.submeshes) nameRefs.push_back(strt.add(s.name));
 
-    // ---- VTXS: the canonical stream grouping (§5.2) ----
-    // Slot 0 is position alone so a compute pass can alias it; slot 1 interleaves the tangent frame
-    // and UV0. Each block is 16-byte aligned, which is what the LodDesc offsets are measured against.
+    // ---- VTXS: slot 0 is position alone, slot 1 interleaves tangent frame and UV0 (§5.2) ----
     std::vector<u8> vtxs;
     {
         W w{vtxs};
@@ -192,7 +188,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         w.u8v(1);                                             // UVChannelCount
         w.f32v(m.boundsMin.x); w.f32v(m.boundsMin.y); w.f32v(m.boundsMin.z);
         w.f32v(m.boundsMax.x); w.f32v(m.boundsMax.y); w.f32v(m.boundsMax.z);
-        // BoundsSphere: centre + radius, derived rather than authored so it always agrees with the box.
+        // BoundsSphere: centre + radius, derived from the box.
         const Vec3 c{(m.boundsMin.x + m.boundsMax.x) * 0.5f, (m.boundsMin.y + m.boundsMax.y) * 0.5f,
                      (m.boundsMin.z + m.boundsMax.z) * 0.5f};
         const f32 rx = m.boundsMax.x - c.x, ry = m.boundsMax.y - c.y, rz = m.boundsMax.z - c.z;
@@ -204,9 +200,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         const u16 attrStride = 12;   // QTangent 8 + UV0 4
         w.u8v(kSemPosition);     w.u8v(kFmtR32G32B32F);   w.u8v(0); w.u8v(0); w.u16v(12);         w.u16v(0);
         w.u8v(kSemTangentFrame); w.u8v(kFmtR16G16B16A16S); w.u8v(1); w.u8v(1); w.u16v(attrStride); w.u16v(0);
-        // The UV0 stream shares bind slot 1; its descriptor is folded into the attribute stream's
-        // stride rather than declared separately, because StreamCount is 2 and the spec's grouping
-        // names slot 1 as one interleaved buffer. A reader uses OffsetInStride to find UV0 at +8.
+        // UV0 has no descriptor of its own: it lives inside slot 1's stride at offset +8.
 
         // LodDesc[1] (§5.5)
         const u64 posBytes  = u64(vcount) * 12;
@@ -241,8 +235,6 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     f.subtype = kAvrSubtypeMesh;
     f.contentVersion = 1;
     f.flags = kAvrFlagCooked;
-    // MHDR is the only Required chunk: without it nothing else can be interpreted. The rest are
-    // findable by id, so a future reader that wants only bounds can stop after MHDR.
     f.add(kChunkMHDR, std::move(mhdr), kAvrChunkRequired);
     f.add(kChunkSTRT, strt.bytes());
     f.add(kChunkVTXS, std::move(vtxs), kAvrChunkGpuUploadable);
@@ -251,6 +243,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     return writeAvr1(f, out, why);
 }
 
+// Decodes an .ocmesh container into `out`. Returns false with `why` set on a malformed file.
 bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why) {
     Avr1File f;
     if (!parseAvr1(bytes, size, f, why)) return false;
@@ -281,8 +274,7 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
     if (lodCount < 1) return fail(why, ".ocmesh: LODCount is 0");
     if (submeshCount < 1) return fail(why, ".ocmesh: SubmeshCount is 0");
 
-    // Stream table. Only position and the attribute stream are understood; anything else is skipped,
-    // which is how a file carrying vertex colour still loads without it.
+    // Stream table. Only position and the attribute stream are understood; anything else is skipped.
     u16 posStride = 12, attrStride = 12, uvOffset = 8;
     bool sawPosition = false, sawAttrs = false;
     for (u8 i = 0; i < streamCount; ++i) {
@@ -305,8 +297,7 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
     if (!r.ok) return fail(why, ".ocmesh: truncated stream table");
     if (!sawPosition || !sawAttrs) return fail(why, ".ocmesh: missing the position or tangent-frame stream");
 
-    // LodDesc[0] only. Later LODs are read past rather than parsed, so a multi-LOD file loads its
-    // highest-detail LOD instead of failing.
+    // LodDesc[0] only; later LODs are read past rather than parsed.
     const u32 vcount = r.u32v();
     const u32 icount = r.u32v();
     r.u64v(); r.u64v(); r.u64v(); r.u64v(); r.u64v(); r.u32v(); r.f32v();
@@ -383,10 +374,7 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
     return true;
 }
 
-// Straight through parseOcMesh, which runs the container's magic, CRC, size and per-chunk hash
-// checks before any mesh field is trusted. An earlier version round-tripped the container through
-// writeAvr1 to "validate" it, which validated nothing the parse had not already done and would have
-// silently rewritten chunk order on the way.
+// Reads an .ocmesh file from disk. Returns false with `why` set.
 bool loadOcMesh(const std::string& path, OcMeshData& out, std::string* why) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return fail(why, ".ocmesh: cannot open " + path);
@@ -399,6 +387,7 @@ bool loadOcMesh(const std::string& path, OcMeshData& out, std::string* why) {
     return parseOcMesh(bytes.data(), bytes.size(), out, why);
 }
 
+// Writes a mesh to an .ocmesh file. Returns false with `why` set.
 bool saveOcMesh(const std::string& path, const OcMeshData& in, std::string* why) {
     std::vector<u8> bytes;
     if (!writeOcMesh(in, bytes, why)) return false;

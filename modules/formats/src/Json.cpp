@@ -1,3 +1,4 @@
+// JSON reader: the recursive-descent parser behind parseJson, plus JsonValue's accessors.
 #include "aver/formats/Json.hpp"
 
 #include <cstdlib>
@@ -6,36 +7,34 @@
 namespace aver::fmt {
 namespace {
 
-// A shared empty value, so operator[] can return a reference for a missing key without allocating
-// and without the caller having to null-check. Reading it gives the fallbacks, which is what makes
-// `doc["a"]["b"][3].asInt(-1)` safe on a document that has none of those.
+// A shared empty value, returned for a missing key or index.
 const JsonValue& nullValue() { static const JsonValue v; return v; }
 
-// glTF nests shallowly -- document, arrays of objects, an array of numbers. A limit costs nothing
-// and turns a malicious or corrupt file from a stack overflow into an error message.
 constexpr int kMaxDepth = 64;
 
 } // namespace
 
+// Elements for an array, members for an object, 0 otherwise.
 usize JsonValue::size() const {
     if (type_ == Type::Array)  return arr_.size();
     if (type_ == Type::Object) return obj_.size();
     return 0;
 }
 
+// Array element, or the null value when out of range.
 const JsonValue& JsonValue::operator[](usize i) const {
     if (type_ != Type::Array || i >= arr_.size()) return nullValue();
     return arr_[i];
 }
 
+// Object member, or the null value when absent. Last duplicate key wins.
 const JsonValue& JsonValue::operator[](std::string_view key) const {
     if (type_ != Type::Object) return nullValue();
-    // LAST wins on a duplicate key, which is what JSON implementations converge on and what a
-    // reverse scan gives for free.
     for (usize i = obj_.size(); i-- > 0;) if (obj_[i].key == key) return obj_[i].value;
     return nullValue();
 }
 
+// True when the object has this key.
 bool JsonValue::has(std::string_view key) const {
     if (type_ != Type::Object) return false;
     for (const JsonMember& m : obj_) if (m.key == key) return true;
@@ -44,10 +43,13 @@ bool JsonValue::has(std::string_view key) const {
 
 const std::vector<JsonMember>& JsonValue::members() const { return obj_; }
 
+// Recursive-descent parser over one JSON document.
 class JsonParser {
 public:
+    // Parses `t`, reporting failures through `why`.
     JsonParser(std::string_view t, std::string* why) : t_(t), why_(why) {}
 
+    // Parses one top-level value and requires nothing after it.
     bool run(JsonValue& out) {
         skipWs();
         if (!parseValue(out, 0)) return false;
@@ -61,6 +63,7 @@ private:
     usize p_ = 0;
     std::string* why_;
 
+    // Records a message with the current byte offset and returns false.
     bool err(const std::string& msg) {
         if (why_) *why_ = "JSON: " + msg + " at byte " + std::to_string(p_);
         return false;
@@ -68,9 +71,8 @@ private:
     bool eof() const { return p_ >= t_.size(); }
     char cur() const { return t_[p_]; }
 
+    // Skips space, tab, newline and carriage return.
     void skipWs() {
-        // The four JSON whitespace characters and no others. A stray control byte is an error, not
-        // something to skip past.
         while (p_ < t_.size()) {
             const char c = t_[p_];
             if (c == ' ' || c == '\t' || c == '\n' || c == '\r') ++p_;
@@ -78,12 +80,14 @@ private:
         }
     }
 
+    // Consumes `lit` when it is next. Returns false without moving otherwise.
     bool literal(std::string_view lit) {
         if (t_.compare(p_, lit.size(), lit) != 0) return false;
         p_ += lit.size();
         return true;
     }
 
+    // Parses any value at the given nesting depth.
     bool parseValue(JsonValue& v, int depth) {
         if (depth > kMaxDepth) return err("nesting deeper than " + std::to_string(kMaxDepth));
         if (eof()) return err("unexpected end of input");
@@ -104,9 +108,10 @@ private:
         }
     }
 
+    // Parses an object body, cursor on the opening brace.
     bool parseObject(JsonValue& v, int depth) {
         v.type_ = JsonValue::Type::Object;
-        ++p_;                                  // '{'
+        ++p_;
         skipWs();
         if (!eof() && cur() == '}') { ++p_; return true; }
         for (;;) {
@@ -128,9 +133,10 @@ private:
         }
     }
 
+    // Parses an array body, cursor on the opening bracket.
     bool parseArray(JsonValue& v, int depth) {
         v.type_ = JsonValue::Type::Array;
-        ++p_;                                  // '['
+        ++p_;
         skipWs();
         if (!eof() && cur() == ']') { ++p_; return true; }
         for (;;) {
@@ -146,9 +152,7 @@ private:
         }
     }
 
-    // Appends the UTF-8 encoding of a code point. glTF names are usually ASCII, but a Blender export
-    // will happily put a non-ASCII bone name in, and truncating it would produce a name that no
-    // animation could match to its skeleton.
+    // Appends the UTF-8 encoding of a code point.
     static void appendUtf8(std::string& out, u32 cp) {
         if (cp < 0x80) out.push_back(char(cp));
         else if (cp < 0x800) {
@@ -166,6 +170,7 @@ private:
         }
     }
 
+    // Reads four hex digits into `out`.
     bool hex4(u32& out) {
         if (p_ + 4 > t_.size()) return err("truncated \\u escape");
         out = 0;
@@ -182,9 +187,10 @@ private:
         return true;
     }
 
+    // Parses a quoted string into `out`, decoding escapes and surrogate pairs.
     bool parseString(std::string& out) {
         out.clear();
-        ++p_;                                  // opening quote
+        ++p_;
         for (;;) {
             if (eof()) return err("unterminated string");
             const char c = t_[p_];
@@ -205,9 +211,6 @@ private:
                     case 'u': {
                         u32 cp;
                         if (!hex4(cp)) return false;
-                        // A surrogate PAIR is one code point in two escapes. Decoding the high half
-                        // alone would emit an invalid UTF-8 sequence that survives all the way to a
-                        // filename.
                         if (cp >= 0xD800 && cp <= 0xDBFF) {
                             if (p_ + 1 < t_.size() && t_[p_] == '\\' && t_[p_ + 1] == 'u') {
                                 p_ += 2;
@@ -226,21 +229,17 @@ private:
                 }
                 continue;
             }
-            // Raw control characters are illegal in a JSON string. Rejecting them is what catches a
-            // file that is actually binary being handed to the text parser.
             if (static_cast<unsigned char>(c) < 0x20) return err("raw control character in a string");
             out.push_back(c);
             ++p_;
         }
     }
 
+    // Parses a number in the strict JSON grammar into `v`.
     bool parseNumber(JsonValue& v) {
         const usize start = p_;
         if (!eof() && cur() == '-') ++p_;
         if (eof()) return err("truncated number");
-        // JSON forbids a leading zero followed by more digits, and forbids a leading '+' or '.'.
-        // Enforced rather than tolerated, because a number like 007 means the producer is not
-        // emitting JSON and the rest of the file is suspect.
         if (cur() == '0') { ++p_; }
         else if (cur() >= '1' && cur() <= '9') { while (!eof() && cur() >= '0' && cur() <= '9') ++p_; }
         else return err("expected a digit");
@@ -257,8 +256,6 @@ private:
             while (!eof() && cur() >= '0' && cur() <= '9') ++p_;
         }
 
-        // strtod on a NUL-terminated copy: the source is a string_view and may not be terminated,
-        // and strtod would otherwise read past the end of the token.
         const std::string tok(t_.substr(start, p_ - start));
         v.type_ = JsonValue::Type::Number;
         v.num_ = std::strtod(tok.c_str(), nullptr);
@@ -266,9 +263,8 @@ private:
     }
 };
 
+// Parses a whole document, skipping a leading UTF-8 BOM. Returns false with `why` set on failure.
 bool parseJson(std::string_view text, JsonValue& out, std::string* why) {
-    // A UTF-8 BOM is not valid JSON but exporters emit it, and refusing it would fail on files every
-    // other tool reads. Skipped rather than accepted anywhere else in the document.
     if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
         static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF)
         text.remove_prefix(3);

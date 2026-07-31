@@ -1,3 +1,5 @@
+// The actor editor tab: opens a C# actor file, previews it in 3D, and writes placements back.
+
 #include "ActorEditor.hpp"
 #include "ToolGlyphs.hpp"
 #include "EditorPrefs.hpp"
@@ -6,15 +8,12 @@
 #include "aver/core/Log.hpp"
 #include "aver/formats/ActorScript.hpp"
 #if AVER_HAVE_ROSLYN
-#  include "aver/formats/AverDesign.hpp"   // the Roslyn escalation, when the scanner declines
+#  include "aver/formats/AverDesign.hpp"
 #endif
 #include "aver/render/preview/ActorPreview.hpp"
 #include "aver/render/preview/PreviewMeshCache.hpp"
 #include "aver/runtime/Engine.hpp"
 
-// The LIVE view's two dependencies, and the only place this tab reaches past its own source text.
-// Guarded because a build without them still gets the whole parsed editor -- Live is the extra, not
-// the editor.
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
 #  include "aver/framework/framework_abi.h"
 #  include "aver/scene/scene_abi.h"
@@ -33,34 +32,23 @@
 namespace aver::editor {
 namespace {
 
-// ONE preview, shared by every open actor tab, and only the ACTIVE tab drives it.
-//
-// Not one per tab, and the reason is a hard limit rather than thrift: the UI descriptor heap holds
-// sixteen slots and the editor already spends five, so a target per tab exhausts it at about eleven
-// and the failure is a black image rather than an assert. A second tab shows its model list and its
-// numbers; it just does not get the 3D until it is focused.
+// State shared by every open actor tab.
 render::preview::ActorPreview* g_preview = nullptr;
 render::preview::PreviewMeshCache g_meshes;
 std::string g_contentRoot;
 bool g_previewTried = false;
-// Held so shutdown can unregister before the feature goes. A device that still holds a pointer to
-// a deleted feature calls prePass on freed memory, which is not an error anything reports.
 rhi::IDevice* g_device = nullptr;
 ActorEditorHooks g_hooks;
 bool g_liveDefault = false;
-// Column widths in PHYSICAL pixels, shared by every actor tab and seeded from the prefs file on
-// first use. Zero means "not seeded yet", which is why they are not simply defaulted here.
-f32 g_leftColW = 0.0f, g_rightColW = 0.0f;
-// The defaults, named once. Reset Layout and the first-use seed both need them, and two literals
-// that must agree are two literals that eventually will not.
+f32 g_leftColW = 0.0f, g_rightColW = 0.0f;   // physical pixels; 0 means not seeded yet
 constexpr f32 kDefaultLeftColumn  = 200.0f;
 constexpr f32 kDefaultRightColumn = 280.0f;
 constexpr const char* kPrefLeft  = "actorEditor.leftColumn";
 constexpr const char* kPrefRight = "actorEditor.rightColumn";
-// Bumped by the app when the script assembly is swapped. Never reset: a tab compares values rather
-// than testing a flag, so wrapping is the only failure and it takes 4 billion reloads.
+// Bumped when the script assembly is swapped. Never reset.
 u32 g_scriptGeneration = 1;
 
+// Reads a whole file into out. Returns false if it cannot be opened.
 bool readFile(const std::string& path, std::string& out) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return false;
@@ -71,34 +59,21 @@ bool readFile(const std::string& path, std::string& out) {
 }
 
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
-// ObjectId as the managed side mints it: aver::fnv1a64 over the path's bytes AS WRITTEN.
-//
-// core's, not a copy: FormatTest already pins fnv1a64 against Aver.Scene's ObjectIdOf by value, so
-// borrowing it means the agreement stays tested. A private FNV here would be a second constant pair
-// nothing checks, and it would drift silently the first time either side changed.
-//
-// AS WRITTEN matters and is not a detail. ObjectIdOf does not canonicalise, so a script that says
-// "Content/Meshes/Car.ocmesh" and one that says "Meshes/Car.ocmesh" produce different ids for the
-// same file. Reading an id back therefore cannot be undone by hashing the canonical form -- the
-// table below has to hold every spelling that could have produced it.
+// Hashes a mesh path to an ObjectId. Must match Aver.Scene's ObjectIdOf: fnv1a64 over the bytes as
+// written, with no canonicalisation.
 inline u64 objectIdOf(std::string_view path) { return aver::fnv1a64(path); }
 
-// id -> a path the mesh cache can open. Built once per content root, because a Live rebuild that
-// walked the content tree every time would stat the whole project on every toggle.
-//
-// Three sources, and all three are needed. The BUILT-INS are not files and no walk would find them,
-// yet nearly every template actor names one. The DISK WALK covers meshes the script names through a
-// variable or a constant, which no amount of reading this one file would recover. The SOURCE
-// LITERALS cover the reverse case -- a path written in this file for a mesh that has not been built
-// yet, where the id is real and the file is not.
+// Maps a mesh ObjectId back to a path the mesh cache can open.
 class MeshNameTable {
 public:
+    // Points the table at a content root, discarding what was built for the old one.
     void reset(std::string root) {
         if (root == root_ && built_) return;
         root_ = std::move(root);
         byId_.clear();
         built_ = false;
     }
+    // Builds the table once: the built-in meshes plus every .ocmesh under the content root.
     void ensure() {
         if (built_) return;
         built_ = true;
@@ -113,13 +88,10 @@ public:
             const std::string rel = std::filesystem::relative(it->path(), base, ec).generic_string();
             if (ec || rel.empty()) continue;
             add(rel);
-            // Both spellings, because a script may write either and they hash differently. The value
-            // stored is the same file either way, so the cache resolves the same mesh.
             add("Content/" + rel);
         }
     }
-    // Every string literal in the tab's own source that names a `.ocmesh`. Cheap, and it is what
-    // makes a freshly written Place call resolve before anything has been cooked.
+    // Adds every string literal in the given text that names a .ocmesh.
     void addLiteralsFrom(std::string_view text) {
         for (usize i = 0; i + 1 < text.size(); ++i) {
             if (text[i] != '"') continue;
@@ -130,6 +102,7 @@ public:
             i = end;
         }
     }
+    // Returns a path for an id, or null.
     const std::string* find(u64 id) const {
         const auto it = byId_.find(id);
         return it == byId_.end() ? nullptr : &it->second;
@@ -142,12 +115,13 @@ private:
 };
 MeshNameTable g_meshNames;
 
-// The scene field ids, resolved once. aver_scene_field is a lookup by qualified name and the ids are
-// stable for the process, so caching them keeps the per-entity walk to two integer reads.
+// The CMeshRenderer scene field ids.
 struct MeshFields {
     int32_t mesh = 0, flags = 0;
     bool ok() const { return mesh != 0 && flags != 0; }
 };
+
+// Resolves the CMeshRenderer field ids once and returns them.
 const MeshFields& meshFields() {
     static const MeshFields f = [] {
         MeshFields m;
@@ -159,30 +133,19 @@ const MeshFields& meshFields() {
 }
 #endif
 
-// WHAT TO CALL AN ACTOR ON SCREEN.
-//
-// One function because the rule was written out three times and each copy fell back to className --
-// so an actor whose C# type the parser could not read showed as "BP_Gun", and the Live panel said
-// "BP_Gun built nothing" even where the tab above it said "Gun". The BP_ prefix is a REGISTRY
-// convention: it is what a level file stores and what aver_fw_class_find resolves. It is not the
-// actor's name and it should never be presented as one.
-//
-// Preference order: the C# type, then the bound name with the template's prefix stripped, then the
-// file. Never empty, because a nameless row in a picker is a row nobody can choose deliberately.
+// Returns what to call an actor on screen: the C# type, else the bound name without its BP_ prefix,
+// else the file stem.
 std::string actorDisplayName(const fmt::ActorClassInfo& k, std::string_view fileStem = {}) {
     if (!k.typeName.empty()) return k.typeName;
     if (!k.className.empty()) {
-        // Only the prefix the templates actually use. Stripping any capitalised prefix would rename
-        // a class somebody deliberately called AIGuard.
         if (k.className.rfind("BP_", 0) == 0 && k.className.size() > 3) return k.className.substr(3);
         return k.className;
     }
     return std::string(fileStem);
 }
 
-// Degrees (yaw, pitch, roll) about +Z, +Y, +X and a scale, into the engine's row-vector matrix with
-// the translation in the LAST ROW. Written out rather than borrowed from the scene, because this
-// module must not depend on the world to draw something that is not in it.
+// Composes position, yaw/pitch/roll degrees and scale into a row-vector matrix with the translation
+// in the last row.
 void composeTransform(const f32 pos[3], const f32 rotDeg[3], const f32 scale[3], f32 out[16]) {
     constexpr f32 kPi = 3.14159265358979f;
     const f32 y = rotDeg[0] * kPi / 180.0f, p = rotDeg[1] * kPi / 180.0f, r = rotDeg[2] * kPi / 180.0f;
@@ -190,7 +153,7 @@ void composeTransform(const f32 pos[3], const f32 rotDeg[3], const f32 scale[3],
     const f32 cp = std::cos(p), sp = std::sin(p);
     const f32 cr = std::cos(r), sr = std::sin(r);
 
-    // Z (yaw) then Y (pitch) then X (roll), which is the order the framework applies them.
+    // Z then Y then X, the order the framework applies them.
     const f32 m00 = cy * cp,  m01 = sy * cp,  m02 = -sp;
     const f32 m10 = cy * sp * sr - sy * cr, m11 = sy * sp * sr + cy * cr, m12 = cp * sr;
     const f32 m20 = cy * sp * cr + sy * sr, m21 = sy * sp * cr - cy * sr, m22 = cp * cr;
@@ -202,22 +165,11 @@ void composeTransform(const f32 pos[3], const f32 rotDeg[3], const f32 scale[3],
 }
 
 // ---------------------------------------------------------------- the component tree
-//
-// WHAT AN ACTOR IS MADE OF, as a hierarchy -- UE's Components panel, and for the same reason. An
-// actor is not a flat list of meshes: it is a root with a transform and a tree of things attached to
-// it, some of which draw and some of which do not. Until you can see that tree you are editing an
-// actor by guessing which line in the file corresponds to the box you are looking at.
-//
-// It is built from BOTH sources and is the same shape either way, which is what lets the Live toggle
-// be a toggle rather than a different editor:
-//   * PARSED  -- the class's own declarations (mesh, capsule, camera, light) plus every b.Place row.
-//   * LIVE    -- the spawned subtree, walked, so nesting that BuildModels created is real here.
-//
-// A FLAT VECTOR with child INDICES rather than pointers or owned children. Nodes are appended while
-// walking, and a vector that reallocates would invalidate every pointer taken so far -- which is the
-// standard way this shape gets written and then subtly broken by the first actor with enough parts.
+
+// What one node in the component tree is.
 enum class ComponentKind { Root, StaticMesh, Capsule, Camera, PointLight };
 
+// Returns the display name of a component kind.
 const char* componentKindName(ComponentKind k) {
     switch (k) {
         case ComponentKind::Root:       return "Root";
@@ -229,29 +181,24 @@ const char* componentKindName(ComponentKind k) {
     return "Component";
 }
 
+// One node of an actor's component tree. Children are indices into the flat node vector.
 struct ComponentNode {
-    std::string name;                 // what the author called it, or the component's own kind
-    std::string detail;               // the mesh path, the capsule size -- the second line in the tree
+    std::string name;
+    std::string detail;
     ComponentKind kind = ComponentKind::StaticMesh;
 
-    // Which b.Place row this came from, or -1. It is what connects a click in the tree to the bytes
-    // the gizmo writes back, so a node without one is a node the gizmo must not offer to drag.
-    int modelIndex = -1;
+    int modelIndex = -1;              // index into script_.models, or -1
 
-    // Local, and the world it composes to. Both kept: the panel edits LOCAL (that is what the source
-    // stores) while the viewport and the gizmo need WORLD.
     f32 local[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     f32 world[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
 
     int parent = -1;
     std::vector<int> children;
 
-    // Does it put geometry on screen? A camera and a light do not, and the panel says so rather than
-    // leaving somebody hunting for a mesh that was never going to be there.
     bool drawsGeometry = false;
 };
 
-// row-vector, translation in the last row: world = local * parentWorld.
+// Row-vector 4x4 multiply: out = a * b.
 void multiply4x4(const f32 a[16], const f32 b[16], f32 out[16]) {
     f32 t[16];
     for (int r = 0; r < 4; ++r)
@@ -261,8 +208,10 @@ void multiply4x4(const f32 a[16], const f32 b[16], f32 out[16]) {
     for (int i = 0; i < 16; ++i) out[i] = t[i];
 }
 
+// An open actor tab: the parsed source, an optional live spawn, the 3D preview and the panels.
 class ActorEditor final : public AssetEditor {
 public:
+    // Opens a tab over an already-parsed actor file.
     ActorEditor(std::string path, fmt::ActorScript parsed,
                 std::vector<fmt::ActorClassInfo> classes, std::string source)
         : path_(std::move(path)), script_(std::move(parsed)), classes_(std::move(classes)),
@@ -276,24 +225,18 @@ public:
     std::string title() const override { return dirty_ ? title_ + " *" : title_; }
     bool dirty() const override { return dirty_; }
 
-    // The watcher saw it. Do NOT read the file here: this runs between frames, off the back of an
-    // OS notification, and the editor's whole reload path wants a device and a preview that only
-    // exist inside draw(). Latching a flag keeps every file read on the frame thread.
+    // Latches an external change; the file is re-read on the next draw.
     void onFileChanged() override { externalChange_ = true; }
 
+    // Draws the whole tab.
     void draw(Engine& e) override;
 
+    // Writes the edited class defaults and placements back to the file. Returns false with a reason.
     bool save(std::string* why) override {
         if (!dirty_) return true;
         std::string out = source_;
 
-        // CLASS DEFAULTS FIRST, then the generated region. Both rewrite the same text, and the
-        // region's spans were measured against the source as read -- so doing the class edits second
-        // would apply them to byte offsets the region rewrite has already moved.
-        //
-        // In practice a file has one or the other: a designer region is generated and its class
-        // values are not usually spanned. Ordering is stated because "in practice" is not a
-        // guarantee, and the failure would be an edit landing in the middle of a different line.
+        // Class defaults first: the region's spans were measured against the source as read.
         for (const fmt::ActorClassInfo& k : classes_) {
             std::string next;
             if (!fmt::rewriteActorClass(out, k, next, why)) return false;
@@ -308,8 +251,6 @@ public:
         if (!os) { if (why) *why = "could not open " + path_ + " for writing"; return false; }
         os.write(out.data(), static_cast<std::streamsize>(out.size()));
         if (!os) { if (why) *why = "the write failed part way through"; return false; }
-        // The in-memory source becomes what is now on disk, so a second save rewrites from the file
-        // as it stands rather than from the text this tab was opened with.
         source_ = std::move(out);
         dirty_ = false;
         AVER_INFO("[ActorEditor] wrote {} placement(s) back to {}", script_.models.size(), path_);
@@ -317,17 +258,10 @@ public:
     }
 
 private:
+    // Rebuilds the preview's draw list from the live snapshot or the parsed source.
     void buildDrawList(Engine& e);
 
-    // Ask the shared preview to match the panel, once the panel has stopped moving.
-    //
-    // DEBOUNCED, and that is the whole design rather than a refinement. Resizing the target destroys
-    // a texture the UI is sampling, which needs a waitIdle -- a whole-GPU stall. Doing that on every
-    // frame of a splitter drag is one stall per frame for as long as the drag lasts. Waiting for the
-    // size to settle costs one stall per gesture.
-    //
-    // The 24-pixel deadband is the second half of it: without one, a layout that oscillates by a
-    // pixel between frames (a scrollbar appearing and disappearing) would resize forever.
+    // Asks the shared preview to match the panel, debounced until the size settles.
     void requestPreviewSize(f32 w, f32 h) {
         if (!g_preview) return;
         const u32 want [2] = {static_cast<u32>(w), static_cast<u32>(h)};
@@ -337,7 +271,6 @@ private:
 
         const double now = ImGui::GetTime();
         if (previewResizeAt_ < 0.0 || far_(want[0], pendingPreviewW_) || far_(want[1], pendingPreviewH_)) {
-            // A NEW size restarts the timer, so a drag keeps deferring instead of firing mid-way.
             previewResizeAt_ = now + 0.25;
             pendingPreviewW_ = want[0];
             pendingPreviewH_ = want[1];
@@ -350,9 +283,7 @@ private:
     double previewResizeAt_ = -1.0;
     u32 pendingPreviewW_ = 0, pendingPreviewH_ = 0;
 
-    // Is the tree row currently selected THIS draw? Asked by kind rather than by index because the
-    // draw list and the tree are built from the same data by two walks, and matching them on
-    // position would break the first time either grew a row the other did not.
+    // Is the selected tree row this kind and model index?
     bool nodeSelected(ComponentKind kind, int modelIndex) const {
         if (selectedNode_ < 0 || selectedNode_ >= static_cast<int>(tree_.size())) return false;
         const ComponentNode& n = tree_[static_cast<usize>(selectedNode_)];
@@ -363,10 +294,9 @@ private:
     std::vector<ComponentNode> tree_;
     int selectedNode_ = -1;
 
+    // Appends a node under parent, composing its world matrix. Returns its index.
     int addNode(ComponentNode n, int parent) {
         n.parent = parent;
-        // Compose as we go. Every parent is appended before its children -- both builders walk
-        // top-down -- so the parent's world is always final by the time a child needs it.
         if (parent >= 0) multiply4x4(n.local, tree_[static_cast<usize>(parent)].world, n.world);
         else             for (int i = 0; i < 16; ++i) n.world[i] = n.local[i];
         tree_.push_back(std::move(n));
@@ -375,96 +305,69 @@ private:
         return idx;
     }
 
+    // Rebuilds the component tree from the live snapshot or the parsed source.
     void buildTree();
+    // Draws the COMPONENTS panel and the summary of the selected row.
     void drawComponentTree(bool ownColumn);
+    // Draws one tree row and its children.
     void drawTreeNode(int idx);
-    // Keep selected_ (an index into script_.models, which the gizmo and the rewriter use) in step
-    // with selectedNode_ (an index into the tree, which the panel uses). One is the source of truth
-    // for editing and the other for display; deriving rather than duplicating is what stops them
-    // disagreeing about which thing is selected.
+    // Points selected_ at the model index the selected tree node carries.
     void syncSelectionFromNode() {
         selected_ = (selectedNode_ >= 0 && selectedNode_ < static_cast<int>(tree_.size()))
                   ? tree_[static_cast<usize>(selectedNode_)].modelIndex : -1;
     }
 
     // ---- the gizmo ----
-    //
-    // A TRANSLATE gizmo, three axes, drawn as an ImGui overlay over the preview image rather than as
-    // geometry in the pass. Two reasons, and neither is laziness: the preview feature must stay
-    // drivable with no ImGui (that is what lets a test be the device), and a 3D gizmo has to be
-    // pickable at a constant SCREEN size, which means it cannot be part of a scene that scales.
-    //
-    // Projection goes through the preview's own camera, so what is drawn is where the handle
-    // actually points. Deriving it from anything else is how a gizmo ends up offset from its object.
+
+    // Projects a world point to image pixels. Returns false when it is behind the eye.
     bool projectToScreen(const f32 world[3], ImVec2 imageSize, ImVec2& out) const;
+    // Returns the gizmo axis under an image-local point, or -1.
     int  pickGizmoAxis(ImVec2 local, ImVec2 imageSize) const;
+    // Draws the three axis handles over the preview image.
     void drawGizmo(ImVec2 imageTopLeft, ImVec2 imageSize, const fmt::ActorModel& m) const;
-    // The components that have no mesh, drawn as wireframes over the image -- a camera's frustum and
-    // a light's reach. UE draws both in its Blueprint viewport and an actor that is only a camera is
-    // otherwise an empty box.
+    // Draws the components that have no mesh -- a camera's frustum, a light's reach -- as wireframes.
     void drawComponentWireframes(ImVec2 imageTopLeft, ImVec2 imageSize) const;
+    // Moves a placement along one axis by a mouse delta.
     void dragAlongAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVec2 imageSize) const;
-    // The rotate and scale halves of the same gesture, plus the projection all three share.
+    // Projects a mouse delta onto an axis handle. Returns false when the handle is edge-on.
     bool dragAlong(const fmt::ActorModel& m, int axis, ImVec2 delta, ImVec2 imageSize,
                    f32& outAlong) const;
+    // Rotates a placement about one axis by a mouse delta.
     void dragRotateAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVec2 imageSize) const;
+    // Scales a placement on one axis by a mouse delta.
     void dragScaleAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVec2 imageSize) const;
 
-    // Which transform the gizmo applies. The SAME four tools as the level viewport, selected the same
-    // way (the 1-4 keys) and drawn with the same icons out of ToolGlyphs.hpp -- an actor viewport whose
-    // tools were a different set, or looked different, would be a second editor to learn.
-    //
-    // Per-tab rather than shared with the level's tool: the two viewports hold different selections
-    // and a user switching tabs to nudge a placement does not expect the level's tool to change under
-    // them.
     int tool_ = ToolMove;
+    // Screen position of an axis handle's tip. Returns false when the axis points at the eye.
     bool axisTip(const fmt::ActorModel& m, int axis, ImVec2 imageSize, ImVec2& out) const;
 
-    // -1 when not dragging. Latched on mouse-down and held for the whole gesture.
-    int draggingAxis_ = -1;
+    int draggingAxis_ = -1;   // -1 when not dragging
 
-    // The file's last write time when this tab last read it. A watcher would be the general answer
-    // and this is the honest small one: an editor tab is polled every frame it is visible anyway, so
-    // a stat is cheaper than a thread, an OS handle and an overflow case to get wrong.
+    // Records the file's current write time.
     void stamp() {
         std::error_code ec;
         stamp_ = std::filesystem::last_write_time(path_, ec);
         haveStamp_ = !ec;
     }
-    // Re-read the file when it has changed underneath. Returns true if the view was rebuilt.
+    // Re-reads the file when it has changed underneath. Returns true if the view was rebuilt.
     bool reloadIfChanged();
 
     std::string path_, title_, source_;
     fmt::ActorScript script_;
-    // EVERY actor the file declares, not the first. A real project puts several in one file --
-    // SkyForge's FpsGameMode.cs declares five -- and previewing whichever happens to be first would
-    // show one class while the panel named another.
     std::vector<fmt::ActorClassInfo> classes_;
     int activeClass_ = -1;
 
+    // Picks the class to show: the one the file is named for, else the first that draws something.
     void pickFirstPreviewable() {
         activeClass_ = -1;
         if (classes_.empty()) return;
 
-        // THE FILE'S OWN NAME FIRST, and this is a fix rather than a preference.
-        //
-        // The rule was "the first class in FILE order that draws something". Gun.cs declares
-        // GunPart above Gun, and GunPart has a mesh -- so opening Gun.cs opened BP_GunPart, an
-        // eight-line helper, and named the tab after it. The principal actor in a file is almost
-        // always the one the file is named for; every actor in the SkyForge template follows that,
-        // and so does every one anybody writes, because that is what naming a file after a class
-        // means.
-        //
-        // Matched against typeName and className, and against the className with a BP_ prefix
-        // stripped, because a class is free to bind under a different name than its C# type.
         std::string stem = std::filesystem::path(path_).stem().string();
         if (stem.size() > 9 && stem.compare(stem.size() - 9, 9, ".Designer") == 0)
             stem.erase(stem.size() - 9);
         const auto namesFile = [&](const fmt::ActorClassInfo& k) {
             if (!stem.empty() && k.typeName == stem) return true;
             if (!stem.empty() && k.className == stem) return true;
-            // "BP_Gun" for Gun.cs. Only the prefix the templates use, not any prefix -- guessing
-            // more broadly would start matching classes that merely end with the file's name.
             if (!stem.empty() && k.className.rfind("BP_", 0) == 0 &&
                 k.className.compare(3, std::string::npos, stem) == 0) return true;
             return false;
@@ -472,16 +375,12 @@ private:
         for (int i = 0; i < static_cast<int>(classes_.size()); ++i)
             if (namesFile(classes_[static_cast<usize>(i)])) { activeClass_ = i; break; }
 
-        // Then something to LOOK at, because a file that declares a GameMode above three meshed
-        // actors should open on one of the meshes rather than on the rules object.
         if (activeClass_ < 0)
             for (int i = 0; i < static_cast<int>(classes_.size()); ++i)
                 if (classes_[static_cast<usize>(i)].drawable()) { activeClass_ = i; break; }
         if (activeClass_ < 0)
             for (int i = 0; i < static_cast<int>(classes_.size()); ++i)
                 if (classes_[static_cast<usize>(i)].anything()) { activeClass_ = i; break; }
-        // Nothing previewable but classes present: still name the first, so the panel says what the
-        // file HOLDS rather than looking empty.
         if (activeClass_ < 0) activeClass_ = 0;
     }
     fmt::ActorClassInfo* activeInfoMutable() {
@@ -493,36 +392,19 @@ private:
              ? &classes_[static_cast<usize>(activeClass_)] : nullptr;
     }
     std::filesystem::file_time_type stamp_{};
+
     // ---- the LIVE view ----
-    //
-    // What the class BUILDS, as against what the file SAYS. The parsed view is always available and
-    // needs nothing loaded; this one spawns the real class, lets its BuildModels run, reads the child
-    // transforms back out and destroys it. The two disagree exactly when BuildModels does something
-    // the parser cannot see -- a loop, a constant, a branch on a field -- which is precisely the case
-    // where an author needs to look rather than guess.
-    //
-    // It is NOT a play session and must never become one: aver_fw_spawn_preview withholds the BEGIN
-    // edge, so no OnBeginPlay runs, nothing is possessed and nothing ticks. See framework_abi.h.
     bool live_ = g_liveDefault;
     bool liveStale_ = true;             // rebuild on the next draw
     std::string liveWhy_;               // why it is off, or what the last rebuild found
     int liveUnnamed_ = 0;               // models whose mesh id resolved to no path this could open
-    bool liveCapsuleFromSource_ = false;   // the one figure in the live view that the spawn did not give
-    // The class built nothing and declares no placements: whatever it looks like in game is
-    // assembled by gameplay, which a construction-only preview cannot and must not show.
+    bool liveCapsuleFromSource_ = false;   // the capsule came from the source, not the spawn
     bool liveAssemblesAtPlayTime_ = false;
-    // The generation the current live snapshot was built against. Different from g_scriptGeneration
-    // means the class that produced it has since been unloaded, so the picture is of dead code.
-    u32 liveGeneration_ = 0;
+    u32 liveGeneration_ = 0;            // g_scriptGeneration the snapshot was built against
 
-    // Set by the host when the watcher saw this file change, cleared when the reload is done.
-    //
-    // Separate from the mtime stamp rather than folded into it: the stamp answers "has the file
-    // moved on since I read it", which a background tab cannot ask because it is not drawn. This
-    // answers "somebody told me it did", and the two agree in the common case and cost nothing when
-    // they do -- reloadIfChanged still re-stats, so a spurious notification reloads nothing.
-    bool externalChange_ = false;
+    bool externalChange_ = false;       // set by the watcher, cleared when the reload is done
     std::vector<render::preview::PreviewDraw> liveDraws_;
+    // Spawns the class, reads the models it built back out, and destroys it.
     void rebuildLive(Engine& e);
 
     bool haveStamp_ = false;
@@ -532,21 +414,9 @@ private:
     std::string status_;
 };
 
-// Source-to-view live sync. A file changed outside the editor -- by an IDE, by a Compile C#, by a
-// git checkout -- is re-read and the preview follows.
-//
-// AN UNSAVED EDIT WINS NOTHING. If this tab is dirty the reload is refused and the tab says so,
-// because silently replacing somebody's in-progress drag with what a background tool wrote is the
-// one behaviour a live-sync feature must never have. Saving, or closing without saving, resolves it.
+// Re-reads the file when it has changed on disk. Refused while the tab is dirty. Returns true if the
+// view was rebuilt.
 bool ActorEditor::reloadIfChanged() {
-    // The watcher's word, taken and cleared whatever happens below.
-    //
-    // It does not REPLACE the stamp check, it bypasses it. A safe save (write temp, replace target,
-    // rename) can leave a modification time this tab has already seen -- the writer preserves it, or
-    // the filesystem's resolution rounds two writes in the same tick to the same value -- and the
-    // stamp then says "nothing happened" about a file whose bytes are entirely different. That is
-    // the precise failure this whole watcher exists to fix, so an explicit notification has to win
-    // over the stamp rather than be filtered by it.
     const bool told = externalChange_;
     externalChange_ = false;
 
@@ -566,8 +436,6 @@ bool ActorEditor::reloadIfChanged() {
     if (!readFile(path_, text)) { status_ = "The file could not be re-read."; return false; }
 
     fmt::ActorScript parsed = fmt::parseActorScript(text);
-    // A file mid-write, or one an IDE has left in a state the grammar does not cover, must not blank
-    // the tab. The previous good parse is kept and the reason is shown.
     if (parsed.status != fmt::ActorParseStatus::Ok &&
         parsed.status != fmt::ActorParseStatus::NoRegion) {
         status_ = "Reloaded, but the region could not be read: " + parsed.error;
@@ -578,11 +446,7 @@ bool ActorEditor::reloadIfChanged() {
     classes_ = fmt::parseActorClasses(source_);
     pickFirstPreviewable();
     if (selected_ >= static_cast<int>(script_.models.size())) selected_ = -1;
-    // The tree is rebuilt from the new parse next frame, so an index into the old one names nothing.
     selectedNode_ = -1;
-    // The source changed, so the LIVE view is stale too -- but only against the class that is loaded
-    // now. A text edit does not reload C#, so the respawn shows the same thing until Compile C# runs;
-    // that is honest, and it is what the panel says.
     liveStale_ = true;
     status_ = "Reloaded from disk.";
     AVER_INFO("[ActorEditor] {} changed on disk; reloaded {} placement(s)",
@@ -592,20 +456,13 @@ bool ActorEditor::reloadIfChanged() {
 
 // ---------------------------------------------------------------- the component tree
 
+// Rebuilds the component tree: a root for the actor, then the live models or the parsed ones.
 void ActorEditor::buildTree() {
     tree_.clear();
     const fmt::ActorClassInfo* info = activeInfo();
 
-    // THE ROOT IS THE ACTOR ITSELF, always, even when it has nothing attached. UE shows it and so
-    // does this: the root carries the transform everything else is relative to, and an empty tree
-    // reads as "the editor failed" where a lone root reads as "this actor has no components yet",
-    // which is a true and actionable thing to say.
     ComponentNode root;
     root.kind = ComponentKind::Root;
-    // The class's own name where there is one. Falling back to the FILE means a `.Designer.cs`
-    // would show as "Car.Designer" -- the generated half's filename rather than the actor -- so the
-    // suffix comes off. A designer file's partial class carries no attribute and no base, so there
-    // is genuinely no ActorClassInfo for it and the filename is the only name available.
     if (info) {
         root.name = actorDisplayName(*info);
     } else {
@@ -617,12 +474,7 @@ void ActorEditor::buildTree() {
     if (info) root.detail = fmt::actorKindName(info->kind);
     const int rootIdx = addNode(std::move(root), -1);
 
-    // ---- LIVE: the spawned subtree, which is the assembled truth ----
-    //
-    // The live draws already carry WORLD matrices read off real entities, so nesting BuildModels
-    // created is preserved exactly. They are attached under the root as a flat set because the walk
-    // that produced them flattened the parentage -- the transforms are still right, which is what
-    // the viewport needs; recovering the shape as well is a job for the walk, not for this.
+    // ---- LIVE: the spawned subtree, flattened under the root ----
     if (live_) {
         for (usize i = 0; i < liveDraws_.size(); ++i) {
             ComponentNode n;
@@ -634,8 +486,7 @@ void ActorEditor::buildTree() {
             n.drawsGeometry = liveDraws_[i].mesh != 0;
             for (int k = 0; k < 16; ++k) n.local[k] = liveDraws_[i].world[k];
             const int idx = addNode(std::move(n), rootIdx);
-            // The live world matrix is already absolute in the actor's frame, so overwrite the
-            // composed one rather than letting it be multiplied by the root a second time.
+            // Already absolute in the actor's frame, so overwrite the composed matrix.
             for (int k = 0; k < 16; ++k) tree_[static_cast<usize>(idx)].world[k] = liveDraws_[i].world[k];
         }
         return;
@@ -663,9 +514,6 @@ void ActorEditor::buildTree() {
             n.drawsGeometry = true;
             addNode(std::move(n), rootIdx);
         }
-        // A CAMERA AND A LIGHT ARE COMPONENTS TOO, and they are the reason this panel exists rather
-        // than a list of meshes. An actor that is only a camera previewed as nothing at all, and
-        // "nothing" and "broken" are indistinguishable on screen. Here it has a row.
         if (info->hasCamera) {
             ComponentNode n;
             n.kind = ComponentKind::Camera;
@@ -673,9 +521,6 @@ void ActorEditor::buildTree() {
             char d[96];
             std::snprintf(d, sizeof d, "fov %.0f deg", static_cast<double>(info->cameraFovDeg));
             n.detail = d;
-            // The eye height is where the camera SITS on a character, so the row is drawn there
-            // rather than at the actor's feet -- a frustum at the origin of a 180 cm character is
-            // pointing out of its ankles.
             if (info->eyeHeight > 0.1f) n.local[14] = info->eyeHeight;
             addNode(std::move(n), rootIdx);
         }
@@ -708,9 +553,7 @@ void ActorEditor::buildTree() {
 // ---------------------------------------------------------------- the Components panel
 
 namespace {
-// A colour per kind, so the tree is scannable without reading it. UE tints its component icons for
-// exactly this reason: in a list of twenty rows the eye finds "the light" by colour long before it
-// finds it by name.
+// Returns the tint a component kind is drawn in.
 ImVec4 kindColour(ComponentKind k) {
     switch (k) {
         case ComponentKind::Root:       return ImVec4(0.95f, 0.80f, 0.45f, 1.0f);
@@ -721,8 +564,7 @@ ImVec4 kindColour(ComponentKind k) {
     }
     return ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
 }
-// A one-glyph stand-in for an icon. Deliberately ASCII: the editor ships no icon font for this panel
-// yet, and a missing glyph renders as a box that looks like a bug rather than like a placeholder.
+// Returns the one ASCII character standing in for a component kind's icon.
 const char* kindGlyph(ComponentKind k) {
     switch (k) {
         case ComponentKind::Root:       return "*";

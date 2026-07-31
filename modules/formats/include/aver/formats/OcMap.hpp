@@ -1,10 +1,6 @@
 #pragma once
-// .ocmap — the world container: identity + environment + a list of placements
-// (asset reference + transform). Faithful to the authoritative reader OcMap.cs, with
-// two deliberate Aver improvements per project direction:
-//   * positions/rotations stored as f64 (doubles) for large-world precision;
-//   * every placement resolves an ObjectId (explicit, else fnv1a64 of the asset name).
-// See docs/recon/ocmap-scene.md. Engine space: cm, X fwd / Y right / Z up.
+// .ocmap — the world container: identity + environment + a list of placements (asset reference plus
+// transform). See docs/recon/ocmap-scene.md. Engine space: cm, X fwd / Y right / Z up.
 #include "aver/core/Types.hpp"
 #include "aver/assets/AssetId.hpp"
 
@@ -15,12 +11,14 @@
 
 namespace aver::fmt {
 
+// One SURFACE row: the friction and bounce of a named surface type.
 struct OcSurface {
     i32 id = 0;
     std::string name;
     f64 grip = 1.0, roll = 0.0, restitution = 0.0;
 };
 
+// One PLACE or DEFORM row: an asset and where it sits.
 struct OcPlacement {
     std::string asset;              // asset reference (name or path)
     ObjectId objectId = kInvalidObjectId; // resolved reference id
@@ -32,6 +30,7 @@ struct OcPlacement {
     std::string material;           // deform material (else empty)
 };
 
+// A whole map: identity, ground and spawn, surfaces, and every placement.
 struct OcMapData {
     int version = 1;                // OCMAP <n>
     u64 contentId = 0;              // ID = FNV-1a-64(NAME)
@@ -55,16 +54,15 @@ struct OcMapData {
     u32 placeCount() const { return static_cast<u32>(placements.size()) - deformCount(); }
 };
 
-// Parse from memory. Returns true if the text parsed. Identity-invariant problems
-// (missing NAME/ID/ROOT, or no collision source) that OcMap.cs treats as fatal are
-// reported through `err` but do not fail the parse — callers gate on them as needed.
+// Parses a map from memory. Returns true if the text parsed; invariant failures (missing NAME/ID/ROOT
+// or no collision source) are reported through `err` without failing the parse.
 bool parseOcmap(std::string_view text, OcMapData& out, std::string* err = nullptr);
 
-// Load from disk (positions as doubles).
+// Loads a map from disk.
 bool loadOcmap(const std::string& path, OcMapData& out, std::string* err = nullptr);
 
-// True if the map satisfies OcMap.cs's load invariants (NAME, ID!=0, ROOT!=0,
-// and GROUND or >=1 placement) — i.e. the existing server would accept it.
+// True when the map satisfies the load invariants: NAME, ID != 0, ROOT != 0, and GROUND or at least
+// one placement.
 bool ocmapIsServerValid(const OcMapData& m, std::string* why = nullptr);
 
 } // namespace aver::fmt

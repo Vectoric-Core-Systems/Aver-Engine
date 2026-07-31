@@ -1,3 +1,5 @@
+// GPU residency of the material library: fallback textures, one binding set and one constant block
+// per material, and the per-frame drain that keeps them current.
 #include "aver/pbr/MaterialSystem.hpp"
 
 #include "aver/core/Log.hpp"
@@ -6,8 +8,7 @@ namespace aver::pbr {
 
 namespace {
 
-// A 1x1 texture whose four bytes ARE the identity value for its slot. Created with initialData so
-// the resource never exists in a state the caller has to reason about — see rhi::TextureDesc.
+// Creates a 1x1 texture whose four bytes are the identity value for its slot.
 rhi::TextureHandle makePixel(rhi::IResourceFactory& res, const u8 rgba[4], rhi::Format fmt,
                              const char* name) {
     rhi::TextureDesc d;
@@ -23,8 +24,7 @@ rhi::TextureHandle makePixel(rhi::IResourceFactory& res, const u8 rgba[4], rhi::
     return res.createTexture(d);
 }
 
-// One key for both spellings of a reference. The id wins where set, because it survives a file
-// being moved and the path does not.
+// One cache key for both spellings of a reference. The id wins where set.
 std::string cacheKey(const TextureRef& ref) {
     if (ref.id) return "#" + std::to_string(ref.id);
     return ref.path;
@@ -32,19 +32,17 @@ std::string cacheKey(const TextureRef& ref) {
 
 } // namespace
 
+// Creates the fallback textures and the fallback binding set. False when there is no GPU.
 bool MaterialSystem::init(rhi::IDevice& device, u32 tableBaseRegister) {
     rhi::IResourceFactory* res = device.resources();
-    // A null factory is how a backend without GPU support declines; that is not an error, it is the
-    // engine running headless, so say nothing and stay un-ready.
+    // A null factory is how a backend without GPU support declines: headless, not an error.
     if (!res) return false;
     res_ = res;
     tableBase_ = tableBaseRegister;
 
     if (!createFallbackTextures()) { res_ = nullptr; return false; }
 
-    // The fallback set is built from a default-constructed MaterialDesc, so it is the identity
-    // material by construction rather than by a second list of values that could drift from the
-    // defaults in Material.hpp.
+    // Built from a default-constructed MaterialDesc, so it is the identity material by construction.
     const MaterialDesc identity{};
     fallbackConstants_ = packMaterial(identity);
 
@@ -64,11 +62,10 @@ bool MaterialSystem::init(rhi::IDevice& device, u32 tableBaseRegister) {
     return true;
 }
 
+// Creates the four 1x1 identity textures.
 bool MaterialSystem::createFallbackTextures() {
-    // sRGB for base colour so the hardware decode applies on every tap exactly as it will for an
-    // authored map; linear for the rest, whose channels are data and not colour. White is 1.0 under
-    // either encoding, but the FORMAT still has to match or a real map would decode differently
-    // from the fallback it replaces.
+    // sRGB for base colour, linear for the rest. White is 1.0 under either encoding, but the FORMAT
+    // must match or a real map would decode differently from the fallback it replaces.
     const u8 white[4]  = {255, 255, 255, 255};
     const u8 normal[4] = {128, 128, 255, 255};
     const u8 mr[4]     = {0, 255, 255, 255};
@@ -83,11 +80,12 @@ bool MaterialSystem::createFallbackTextures() {
     return false;
 }
 
+// Destroys every set, every cached texture and the fallbacks.
 void MaterialSystem::shutdown() {
     if (!res_) return;
     for (auto& kv : entries_) if (kv.second.set) res_->destroyBindingSet(kv.second.set);
     entries_.clear();
-    // Cached textures are OWNED here: the resolver handed over a handle and nothing else holds it.
+    // Cached textures are owned here: the resolver handed the handle over.
     for (auto& kv : cache_) if (kv.second) res_->destroyTexture(kv.second);
     cache_.clear();
     if (fallbackSet_) res_->destroyBindingSet(fallbackSet_);
@@ -99,22 +97,20 @@ void MaterialSystem::shutdown() {
     res_ = nullptr;
 }
 
+// Resolves a reference through the host's resolver, caching the result. 0 when unavailable.
 rhi::TextureHandle MaterialSystem::resolveTexture(const TextureRef& ref, TextureSlot slot) {
     if (ref.empty() || !resolve_) return 0;
-    // The slot is NOT part of the key. One file bound to two slots is still one upload, and if a
-    // project really did bind the same image as both colour and data it would want the colour space
-    // it authored the file for -- so first use wins, which is at least stable, rather than whichever
-    // material happened to drain first.
+    // The slot is not part of the key: one file bound to two slots is still one upload, first use wins.
     const std::string key = cacheKey(ref);
     auto it = cache_.find(key);
     if (it != cache_.end()) return it->second;
     const rhi::TextureHandle t = resolve_(ref, slot, resolveUser_);
-    // A failed resolve is cached too, as 0. Otherwise a missing file is retried on every dirty
-    // drain, which on a hot-reloading editor is a disk hit per material per frame.
+    // A failed resolve is cached as 0, or a missing file is retried on every dirty drain.
     cache_.emplace(key, t);
     return t;
 }
 
+// Writes every SRV of `set`, using the identity texture wherever the material sets nothing.
 void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set) {
     const rhi::TextureHandle fallback[kTextureSlotCount] = {
         white_,       // BaseColor
@@ -129,6 +125,7 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
     }
 }
 
+// The entry for `h`, built and filled on first use.
 MaterialSystem::Entry& MaterialSystem::entryFor(MaterialHandle h) {
     auto it = entries_.find(h);
     if (it != entries_.end()) return it->second;
@@ -148,13 +145,13 @@ MaterialSystem::Entry& MaterialSystem::entryFor(MaterialHandle h) {
     return entries_.emplace(h, e).first->second;
 }
 
+// Re-uploads every dirty material and retires the sets of destroyed ones.
 void MaterialSystem::update() {
     if (!res_) return;
     MaterialLibrary& lib = MaterialLibrary::get();
 
-    // Reading the flag CLEARS it, so this is the one consumer and a change is drained exactly once.
-    // Driven off the library's own enumeration rather than off entries_, because a material created
-    // this frame has no entry yet and must still get one before anything draws with it.
+    // Reading the flag clears it, so this is the one consumer. Driven off the library's own
+    // enumeration, because a material created this frame has no entry yet.
     const u32 n = lib.count();
     for (u32 i = 0; i < n; ++i) {
         const MaterialHandle h = lib.at(i);
@@ -169,9 +166,7 @@ void MaterialSystem::update() {
         if (it->second.set) writeSlots(*d, it->second.set);
     }
 
-    // Retire the sets of materials the library no longer knows. Destruction is deferred by RHI
-    // contract, so doing it mid-frame is safe; leaking them is not, since a long editing session
-    // creates and destroys materials freely.
+    // Destruction is deferred by RHI contract, so retiring mid-frame is safe.
     for (auto it = entries_.begin(); it != entries_.end();) {
         if (lib.valid(it->first)) { ++it; continue; }
         if (it->second.set) res_->destroyBindingSet(it->second.set);
@@ -179,12 +174,14 @@ void MaterialSystem::update() {
     }
 }
 
+// The binding set a draw of `h` uses. Falls back for an unknown or stale handle.
 rhi::BindingSetHandle MaterialSystem::bindingSet(MaterialHandle h) {
     if (!res_ || !MaterialLibrary::get().valid(h)) return fallbackSet_;
     const rhi::BindingSetHandle s = entryFor(h).set;
     return s ? s : fallbackSet_;
 }
 
+// The constant block a draw of `h` uses. Falls back for an unknown or stale handle.
 const MaterialConstants& MaterialSystem::constants(MaterialHandle h) {
     if (!res_ || !MaterialLibrary::get().valid(h)) return fallbackConstants_;
     return entryFor(h).constants;

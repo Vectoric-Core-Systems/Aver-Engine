@@ -1,3 +1,5 @@
+// Redirects this assembly's P/Invokes to the native DLLs staged beside the executable.
+
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -5,26 +7,16 @@ using System.Runtime.InteropServices;
 
 namespace Aver.Scene;
 
-/// <summary>
-/// Redirects this assembly's P/Invokes into the native <c>Aver.Scene</c> DLL to the copy that sits next
-/// to the executable.
-/// </summary>
-/// <remarks>
-/// The managed contract assembly <c>Aver.Scene.dll</c> and the native world DLL it P/Invokes into share a
-/// FILE NAME. The managed one is staged in the scripting directory beside the bridge; the native one is
-/// staged next to <c>Sandbox.exe</c>. The default DllImport search probes the requesting assembly's OWN
-/// directory first, where it would find the managed <c>Aver.Scene.dll</c> (itself) and try to load it as
-/// a native library. A registered resolver runs before that search and loads the native DLL from the
-/// executable directory by full path instead. See <c>Aver.Framework/NativeResolver.cs</c> for the same
-/// reasoning applied to the framework DLL.
-/// </remarks>
+/// <summary>Loads the native <c>Aver.Scene</c> / <c>Aver.Framework</c> DLLs from the executable
+/// directory. The managed contract assembly shares a file name with the native one, so the default
+/// probe would find itself.</summary>
 internal static class NativeResolver
 {
     private static int s_installed;
 
-    // CA2255: registering a native-library resolver before this contract assembly's first P/Invoke is the
-    // "advanced" case the rule carves out; there is no earlier hook a hosted assembly can use. Suppressed.
+    // CA2255: there is no earlier hook a hosted assembly can use to register the resolver.
 #pragma warning disable CA2255
+    /// <summary>Registers the resolver, once.</summary>
     [ModuleInitializer]
     internal static void Install()
     {
@@ -33,6 +25,7 @@ internal static class NativeResolver
     }
 #pragma warning restore CA2255
 
+    /// <summary>Loads a known native library by full path. Zero for anything else.</summary>
     private static IntPtr Resolve(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
     {
         if (libraryName is not ("Aver.Scene" or "Aver.Framework"))
@@ -45,6 +38,7 @@ internal static class NativeResolver
         return NativeLibrary.TryLoad(candidate, out IntPtr handle) ? handle : IntPtr.Zero;
     }
 
+    /// <summary>The directory of the running executable, or null if it cannot be read.</summary>
     private static string? ExecutableDirectory()
     {
         try

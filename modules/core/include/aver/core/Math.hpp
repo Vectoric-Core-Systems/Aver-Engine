@@ -2,9 +2,8 @@
 #include "Types.hpp"
 #include <cmath>
 
-// Aver math. Engine space: centimeters, +Z up, +X forward, +Y right, LEFT-handed
-// (carried from OpenConstructor — see docs/recon/arch-conventions.md). Matrices are
-// row-major; vectors are treated as rows (v * M). Header-only, inline.
+// Aver math. Engine space: centimeters, +Z up, +X forward, +Y right, LEFT-handed.
+// Matrices are row-major; vectors are treated as rows (v * M). Header-only, inline.
 namespace aver {
 
 inline constexpr f32 kPi      = 3.14159265358979323846f;
@@ -12,10 +11,13 @@ inline constexpr f32 kTwoPi   = 6.28318530717958647692f;
 inline constexpr f32 kDegToRad = kPi / 180.0f;
 inline constexpr f32 kRadToDeg = 180.0f / kPi;
 
+// Degrees to radians.
 inline f32 radians(f32 deg) { return deg * kDegToRad; }
+// Radians to degrees.
 inline f32 degrees(f32 rad) { return rad * kRadToDeg; }
 
 // ---------------------------------------------------------------- Vec2
+// Two floats.
 struct Vec2 {
     f32 x = 0, y = 0;
     Vec2() = default;
@@ -26,6 +28,7 @@ struct Vec2 {
 };
 
 // ---------------------------------------------------------------- Vec3
+// Three floats, and the engine's position/direction type.
 struct Vec3 {
     f32 x = 0, y = 0, z = 0;
     Vec3() = default;
@@ -43,7 +46,7 @@ struct Vec3 {
     f32 sizeSquared() const { return x * x + y * y + z * z; }
     f32 size() const { return std::sqrt(sizeSquared()); }
 
-    // Mirrors oc::Vec3 helpers the solver relies on (docs/recon/softbody-solver.md).
+    // Unit vector, or zero when shorter than the tolerance.
     Vec3 getSafeNormal(f32 tolerance = 1e-8f) const {
         const f32 sq = sizeSquared();
         if (sq <= tolerance) return {0, 0, 0};
@@ -53,15 +56,21 @@ struct Vec3 {
 };
 
 inline Vec3 operator*(f32 s, const Vec3& v) { return v * s; }
+// Dot product.
 inline f32  dot(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+// Cross product.
 inline Vec3 cross(const Vec3& a, const Vec3& b) {
     return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
 }
+// Distance between two points.
 inline f32  dist(const Vec3& a, const Vec3& b) { return (a - b).size(); }
+// Squared distance between two points.
 inline f32  distSquared(const Vec3& a, const Vec3& b) { return (a - b).sizeSquared(); }
+// Linear interpolation from a to b.
 inline Vec3 lerp(const Vec3& a, const Vec3& b, f32 t) { return a + (b - a) * t; }
 
 // ---------------------------------------------------------------- Vec4
+// Four floats.
 struct Vec4 {
     f32 x = 0, y = 0, z = 0, w = 0;
     Vec4() = default;
@@ -70,13 +79,16 @@ struct Vec4 {
 };
 
 // ---------------------------------------------------------------- Quat (x,y,z,w)
+// A rotation, stored x, y, z, w.
 struct Quat {
     f32 x = 0, y = 0, z = 0, w = 1;
     Quat() = default;
     Quat(f32 x_, f32 y_, f32 z_, f32 w_) : x(x_), y(y_), z(z_), w(w_) {}
 
+    // The zero rotation.
     static Quat identity() { return {0, 0, 0, 1}; }
 
+    // Rotation of `radians_` about an axis.
     static Quat fromAxisAngle(const Vec3& axis, f32 radians_) {
         const Vec3 a = axis.getSafeNormal();
         const f32 h = radians_ * 0.5f;
@@ -92,6 +104,7 @@ struct Quat {
             w * b.w - x * b.x - y * b.y - z * b.z};
     }
 
+    // Unit quaternion, or identity when degenerate.
     Quat normalized() const {
         const f32 n = std::sqrt(x * x + y * y + z * z + w * w);
         if (n <= 1e-8f) return identity();
@@ -99,6 +112,7 @@ struct Quat {
         return {x * inv, y * inv, z * inv, w * inv};
     }
 
+    // Applies this rotation to a vector.
     Vec3 rotate(const Vec3& v) const {
         const Vec3 u{x, y, z};
         const Vec3 t = cross(u, v) * 2.0f;
@@ -107,21 +121,26 @@ struct Quat {
 };
 
 // ---------------------------------------------------------------- Mat4 (row-major)
+// A 4x4 row-major matrix. Vectors multiply on the left (v * M).
 struct Mat4 {
     f32 m[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}};
 
+    // The identity matrix.
     static Mat4 identity() { return {}; }
 
+    // Pure translation.
     static Mat4 translation(const Vec3& t) {
         Mat4 r;
         r.m[3][0] = t.x; r.m[3][1] = t.y; r.m[3][2] = t.z;
         return r;
     }
+    // Pure per-axis scale.
     static Mat4 scale(const Vec3& s) {
         Mat4 r;
         r.m[0][0] = s.x; r.m[1][1] = s.y; r.m[2][2] = s.z;
         return r;
     }
+    // Rotation matrix for a quaternion.
     static Mat4 fromQuat(const Quat& q) {
         const f32 xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
         const f32 xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;
@@ -142,6 +161,7 @@ struct Mat4 {
         return r;
     }
 
+    // The transpose.
     Mat4 transposed() const {
         Mat4 r;
         for (int i = 0; i < 4; ++i)
@@ -149,7 +169,7 @@ struct Mat4 {
         return r;
     }
 
-    // General 4x4 inverse (returns identity if singular). Used for sky ray reconstruction.
+    // General 4x4 inverse. Returns identity if singular.
     Mat4 inverse() const {
         const f32* a = &m[0][0];
         f32 inv[16], det;
@@ -188,7 +208,7 @@ struct Mat4 {
         return r;
     }
 
-    // Left-handed look-at (up defaults to +Z, engine's up axis).
+    // Left-handed look-at view matrix.
     static Mat4 lookAtLH(const Vec3& eye, const Vec3& target, const Vec3& up) {
         const Vec3 f = (target - eye).getSafeNormal();
         const Vec3 s = cross(up, f).getSafeNormal();
@@ -203,21 +223,25 @@ struct Mat4 {
 };
 
 // ---------------------------------------------------------------- Transform / AABB
+// Position, rotation and scale.
 struct Transform {
     Vec3 position{0, 0, 0};
     Quat rotation = Quat::identity();
     Vec3 scale{1, 1, 1};
 
+    // The combined scale-rotate-translate matrix.
     Mat4 toMatrix() const {
         return Mat4::scale(scale) * Mat4::fromQuat(rotation) * Mat4::translation(position);
     }
 };
 
+// An axis-aligned bounding box.
 struct AABB {
     Vec3 min{0, 0, 0};
     Vec3 max{0, 0, 0};
     Vec3 center() const { return (min + max) * 0.5f; }
     Vec3 extent() const { return (max - min) * 0.5f; }
+    // Grows the box to contain a point.
     void expand(const Vec3& p) {
         min.x = p.x < min.x ? p.x : min.x; min.y = p.y < min.y ? p.y : min.y; min.z = p.z < min.z ? p.z : min.z;
         max.x = p.x > max.x ? p.x : max.x; max.y = p.y > max.y ? p.y : max.y; max.z = p.z > max.z ? p.z : max.z;

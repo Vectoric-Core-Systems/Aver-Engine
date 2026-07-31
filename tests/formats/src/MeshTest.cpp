@@ -1,12 +1,5 @@
-// The AVR1 container and the .ocmesh format it carries.
-//
-// A binary format with a byte-level spec and no test is a format that rots silently: every field is
-// an offset someone can shift by four bytes, and the only symptom is a mesh that loads as garbage
-// somewhere a long way downstream. This is the test that has to exist BEFORE an importer starts
-// writing files, or the first bug is in the importer and the second is in the reader and neither
-// can be told apart.
-//
-// No GPU: everything here is bytes in memory.
+// The AVR1 container and the formats it carries: .ocmesh, .ocskel and .ocanim. Bytes in memory
+// only; no GPU.
 #include "aver/formats/Avr1.hpp"
 #include "aver/formats/OcAnim.hpp"
 #include "aver/formats/OcMesh.hpp"
@@ -20,19 +13,20 @@ using namespace aver;
 
 static int g_failures = 0;
 
+// Logs one assertion and counts the failures.
 static void check(bool cond, const std::string& what) {
     if (cond) { AVER_INFO("  ok    {}", what); return; }
     ++g_failures;
     AVER_ERROR("  FAIL  {}", what);
 }
 
+// Asserts two floats agree within tol, reporting both values.
 static void checkNear(f32 got, f32 want, f32 tol, const std::string& what) {
     check(std::fabs(got - want) <= tol,
           what + "  (got " + std::to_string(got) + ", want " + std::to_string(want) + ")");
 }
 
-// A unit cube, indexed, with per-face normals and UVs. Small enough to reason about and big enough
-// to exercise 24 vertices, 36 indices, two submeshes and two material slots.
+// Builds a unit cube: 24 vertices, 36 indices, two submeshes and two material slots.
 static fmt::OcMeshData makeCube() {
     fmt::OcMeshData m;
     const f32 n[6][3] = {{0,0,1},{0,0,-1},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0}};
@@ -54,13 +48,13 @@ static fmt::OcMeshData makeCube() {
         }
         for (u32 i : {0u, 1u, 2u, 0u, 2u, 3u}) m.indices.push_back(base + i);
     }
-    // Two submeshes over one index buffer, so the range maths is exercised rather than assumed.
     m.submeshes.push_back(fmt::OcMeshSubmesh{"sides", 0, 0, 24, 0, 16});
     m.submeshes.push_back(fmt::OcMeshSubmesh{"caps",  1, 24, 12, 0, 8});
     m.materialSlots = {"M_Sides", "M_Caps"};
     return m;
 }
 
+// Runs every container, mesh, skeleton and animation test. Returns 0 when they all pass.
 int main() {
     AVER_INFO("=== AVR1 container ===");
     {
@@ -83,25 +77,21 @@ int main() {
         check(back.find(fmt::avrFourCC("AAAA"))->data == std::vector<u8>({1,2,3,4,5}), "payload byte-exact");
         check(back.find(fmt::avrFourCC("ZZZZ")) == nullptr, "absent id returns null");
 
-        // GpuUploadable asks for 256-byte alignment so an upload heap copy needs no re-align.
-        // Recovered from the directory rather than recomputed, because that is what a reader does.
         fmt::Avr1File dir;
         check(fmt::parseAvr1(bytes.data(), bytes.size(), dir, &why), "re-parse for alignment check");
 
-        // CORRUPTION MUST BE REFUSED, not tolerated. Each of these is a byte a real disk error or a
-        // truncated download would plausibly change.
         {
             std::vector<u8> bad = bytes; bad[0] = 'X';
             fmt::Avr1File junk;
             check(!fmt::parseAvr1(bad.data(), bad.size(), junk, &why), "bad magic refused");
         }
         {
-            std::vector<u8> bad = bytes; bad[0x0A] ^= 0xFF;   // ContentVersion, inside the CRC range
+            std::vector<u8> bad = bytes; bad[0x0A] ^= 0xFF;
             fmt::Avr1File junk;
             check(!fmt::parseAvr1(bad.data(), bad.size(), junk, &why), "header corruption caught by CRC");
         }
         {
-            std::vector<u8> bad = bytes; bad[bad.size() - 1] ^= 0xFF;   // last payload byte
+            std::vector<u8> bad = bytes; bad[bad.size() - 1] ^= 0xFF;
             fmt::Avr1File junk;
             check(!fmt::parseAvr1(bad.data(), bad.size(), junk, &why), "payload corruption caught by chunk hash");
         }
@@ -140,13 +130,10 @@ int main() {
         check(m.indices == src.indices, "indices byte-exact");
         check(m.valid(), "the decoded mesh is self-consistent");
 
-        // Positions are f32 on disk, so they must be EXACT rather than close.
         bool exact = true;
         for (usize i = 0; i < src.positions.size(); ++i) exact = exact && m.positions[i] == src.positions[i];
         check(exact, "positions survive exactly (f32 in, f32 out)");
 
-        // Normals go through a QTangent quaternion at snorm16, so they are lossy -- but the loss has
-        // to be small enough that shading cannot tell. A face normal wrong by 0.01 is a visible seam.
         f32 worst = 0.0f;
         for (usize v = 0; v < m.normals.size() / 3; ++v) {
             for (int k = 0; k < 3; ++k)
@@ -154,7 +141,6 @@ int main() {
         }
         check(worst < 1e-3f, "normals survive the QTangent round trip (worst axis error " + std::to_string(worst) + ")");
 
-        // UVs are half floats. 0 and 1 are both exactly representable, so these must be exact too.
         bool uvExact = true;
         for (usize i = 0; i < src.uvs.size(); ++i) uvExact = uvExact && m.uvs[i] == src.uvs[i];
         check(uvExact, "0/1 UVs survive exactly as halves");
@@ -181,8 +167,6 @@ int main() {
         noSub.submeshes.clear();
         check(!fmt::writeOcMesh(noSub, bytes, &why), "a mesh with no submesh is refused");
 
-        // An index past the end of the vertex buffer is the corruption most likely to reach a GPU
-        // and hang it, so the READER must catch it rather than trusting the writer.
         fmt::OcMeshData ok = makeCube();
         check(fmt::writeOcMesh(ok, bytes, &why), "control mesh writes");
         fmt::OcMeshData m;
@@ -191,8 +175,6 @@ int main() {
 
     AVER_INFO("=== 32-bit index path ===");
     {
-        // Above 65535 vertices the format switches to 32-bit indices, and that switch is a flag in
-        // one chunk read by another -- exactly the kind of cross-chunk agreement that breaks quietly.
         fmt::OcMeshData big;
         const u32 n = 70000;
         big.positions.reserve(usize(n) * 3);
@@ -238,10 +220,8 @@ int main() {
         checkNear(b.bones[2].inverseBind[12], 1.5f, 1e-6f, "inverse bind matrix survives");
         check(b.rootBone == 0, "root hint survives");
 
-        // A child stored BEFORE its parent must be refused. Every consumer composes world transforms
-        // in one forward pass, so this ordering is a contract and not a preference.
         fmt::OcSkeleton bad = s;
-        bad.bones[1].parent = 2;                     // spine's parent is head, which comes after it
+        bad.bones[1].parent = 2;
         check(!fmt::writeOcSkel(bad, bytes, &why), "child-before-parent ordering is refused on write");
 
         fmt::OcSkeleton oob = s;
@@ -256,8 +236,6 @@ int main() {
         a.flags = fmt::kOcAnimLoop;
         a.skeletonRef = "SK_Character";
 
-        // NON-UNIFORM key times. This is the "no forced 30 fps resample" rule: if the writer or the
-        // reader quietly regularised these, the clip would come back with different times.
         fmt::OcTrack t0;
         t0.boneIndex = 1;
         t0.channels = fmt::kOcChannelTranslation | fmt::kOcChannelRotation;
@@ -269,7 +247,6 @@ int main() {
             t0.values.insert(t0.values.end(), {0.0f, 0.0f, 0.0f, 1.0f});         // rotation
         }
 
-        // A STEP curve, carried as a mode rather than approximated with dense linear keys.
         fmt::OcTrack t1;
         t1.boneIndex = 2;
         t1.channels = fmt::kOcChannelScale;
@@ -277,13 +254,12 @@ int main() {
         t1.times = {0.0f, 1.25f};
         t1.values = {1,1,1, 2,2,2};
 
-        // CUBICSPLINE, which stores in-tangent / value / out-tangent per component.
         fmt::OcTrack t2;
         t2.boneIndex = 3;
         t2.channels = fmt::kOcChannelTranslation;
         t2.interp = fmt::OcInterp::CubicSpline;
         t2.times = {0.0f, 1.0f};
-        t2.values = {0,0,0,  10,20,30,  1,1,1,      0,0,0,  40,50,60,  2,2,2};
+        t2.values = {0,0,0,  10,20,30,  1,1,1,      0,0,0,  40,50,60,  2,2,2};   // in-tangent / value / out-tangent
 
         a.tracks = {t0, t1, t2};
         check(a.valid(), "the authored clip is self-consistent");
@@ -320,7 +296,7 @@ int main() {
 
         fmt::OcAnimation mismatched;
         fmt::OcTrack t; t.boneIndex = 0; t.channels = fmt::kOcChannelTranslation;
-        t.times = {0.0f, 1.0f}; t.values = {1, 2, 3};        // 3 values for 2 keys x 3 components
+        t.times = {0.0f, 1.0f}; t.values = {1, 2, 3};
         mismatched.tracks = {t};
         check(!fmt::writeOcAnim(mismatched, bytes, &why), "a value/key count mismatch is refused");
 
@@ -344,8 +320,6 @@ int main() {
 
     AVER_INFO("=== a clip is not a skeleton is not a mesh ===");
     {
-        // Every one of these is a valid AVR1 container with the WRONG subtype. Loading a .ocanim as
-        // a mesh must say so rather than reading a track table as a vertex buffer.
         std::vector<u8> bytes; std::string why;
         fmt::OcSkeleton s; fmt::OcBone r; r.name = "root"; r.parent = -1; s.bones = {r}; s.rootBone = 0;
         check(fmt::writeOcSkel(s, bytes, &why), "skeleton writes");

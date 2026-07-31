@@ -1,23 +1,8 @@
+// The lifecycle enums the hooks carry, the tick groups, and the registry-row flag bits.
+
 namespace Aver.Framework;
 
-// The reason enums cross to the hooks so a script can tell "born" from "reloaded" without inspecting
-// global state. BeginReason/EndReason/PlayState belong to the play lifecycle (a later step): they feed
-// managed virtual hooks, not any exported aver_fw_* signature, and framework_abi.h defines no
-// AVER_FW_BEGIN_*/END_*/PLAY_STATE_* macros yet — their native pinning lands when the lifecycle entry
-// points stop being stubs. TickGroup, in contrast, IS pinned today to the AVER_FW_TICK_* #defines in
-// framework_abi.h. The C# names carry the meaning; the numbers carry the wire compatibility.
-
-/// <summary>
-/// Why <see cref="AverActor.OnBeginPlay"/> is running. The distinction exists because a script must
-/// initialise differently for a fresh spawn than for a hot reload of an actor that was already alive.
-/// </summary>
-/// <remarks>
-/// <b>Spawn</b> — the actor was just created (from a level load, an <see cref="AverActor.Spawn"/> call,
-/// or an editor drop) while the world is <i>not</i> playing yet. <b>Play</b> — the world transitioned
-/// into play and every already-placed actor begins. <b>Reload</b> — the same instance is coming back up
-/// after a code hot-reload; its native <c>[Editable]</c> state was parked and restored, so re-running
-/// spawn-time setup would be wrong. Pair this with <see cref="AverActor.OnRebound"/>.
-/// </remarks>
+/// <summary>Why <see cref="AverActor.OnBeginPlay"/> is running: a fresh spawn, a world start, or a hot reload.</summary>
 public enum BeginReason
 {
     Spawn = 0,
@@ -25,11 +10,7 @@ public enum BeginReason
     Reload = 2,
 }
 
-/// <summary>
-/// Why <see cref="AverActor.OnEndPlay"/> is running. <b>Reload</b> means the entity is <i>staying</i> —
-/// only the managed half is being torn down and rebuilt — so a script must not release shared world
-/// state it expects to see again.
-/// </summary>
+/// <summary>Why <see cref="AverActor.OnEndPlay"/> is running. Reload means the entity is staying.</summary>
 public enum EndReason
 {
     Destroy = 0,
@@ -38,11 +19,7 @@ public enum EndReason
     Travel = 3,
 }
 
-/// <summary>
-/// When in the frame an actor ticks, relative to physics. A class declares its group once via
-/// <see cref="ClassBuilder.Ticks"/>; the native tick loop walks the groups in order and calls the
-/// managed batch once per group. Values are pinned to the AVER_FW_TICK_* group ids.
-/// </summary>
+/// <summary>When in the frame an actor ticks, relative to physics. Pinned to the AVER_FW_TICK_* group ids.</summary>
 public enum TickGroup
 {
     PrePhysics = 0,
@@ -50,7 +27,7 @@ public enum TickGroup
     PostPhysics = 2,
 }
 
-/// <summary>The world's play state, as read from <c>aver_fw_play_state</c>. Editor is the authoring state.</summary>
+/// <summary>The world's play state, as read from <c>aver_fw_play_state</c>.</summary>
 public enum PlayState
 {
     Editor = 0,
@@ -58,12 +35,7 @@ public enum PlayState
     Paused = 2,
 }
 
-/// <summary>
-/// Registry-row flag bits (framework_abi.h AVER_FW_CLASS_*). A script never sets these by hand — the
-/// base type a class derives from and the builder calls it makes decide them, so the compiler, not a
-/// magic number, is what says "this is a Pawn". Exposed <c>internal</c> because the base-class plumbing
-/// and the discovery pass both need them; kept in one place so they cannot drift from the header.
-/// </summary>
+/// <summary>Registry-row flag bits. Mirrors the AVER_FW_CLASS_* values in framework_abi.h.</summary>
 internal static class ClassFlags
 {
     internal const int Ticks = 0x0001;

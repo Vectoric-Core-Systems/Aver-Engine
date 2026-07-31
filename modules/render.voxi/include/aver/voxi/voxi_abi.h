@@ -1,14 +1,8 @@
 #ifndef AVER_VOXI_ABI_H
 #define AVER_VOXI_ABI_H
 
-/* Voxi C ABI — the stable surface the C# scripting layer binds to via P/Invoke.
- *
- * Deliberately plain C: only int32_t / float / const char* cross the boundary, so the same
- * header works for C, C++, C# DllImport and any other FFI. Feature and quality values match
- * the aver::voxi enums one-for-one.
- *
- * Error convention: setters return 1 on success, 0 if the request was rejected (unsupported
- * feature or bad argument). Getters return the current value.
+/* Voxi C ABI: the stable C surface the C# scripting layer binds to via P/Invoke.
+ * Plain C only, so any FFI can use it. Setters return 1 on success, 0 if rejected.
  */
 
 #include <stdint.h>
@@ -27,7 +21,7 @@
 extern "C" {
 #endif
 
-/* Feature ids — must match aver::voxi::Feature */
+/* Must match aver::voxi::Feature. */
 #define AVER_VOXI_FEATURE_MSAA                0
 #define AVER_VOXI_FEATURE_GLOBAL_ILLUMINATION 1
 #define AVER_VOXI_FEATURE_RAY_TRACING         2
@@ -35,49 +29,64 @@ extern "C" {
 #define AVER_VOXI_FEATURE_MESH_SHADERS        4
 #define AVER_VOXI_FEATURE_COUNT               5
 
-/* Status ids — must match aver::voxi::Status */
+/* Must match aver::voxi::Status. */
 #define AVER_VOXI_STATUS_READY           0
 #define AVER_VOXI_STATUS_NOT_IMPLEMENTED 1
 #define AVER_VOXI_STATUS_UNSUPPORTED     2
 
-/* Quality ids — must match aver::voxi::Quality */
+/* Must match aver::voxi::Quality. */
 #define AVER_VOXI_QUALITY_OFF    0
 #define AVER_VOXI_QUALITY_LOW    1
 #define AVER_VOXI_QUALITY_MEDIUM 2
 #define AVER_VOXI_QUALITY_HIGH   3
 #define AVER_VOXI_QUALITY_EPIC   4
 
-/* ---- feature introspection ---- */
+/* Returns the number of features. */
 AVER_VOXI_ABI int32_t     aver_voxi_feature_count(void);
+/* Returns a feature's display name. */
 AVER_VOXI_ABI const char* aver_voxi_feature_name(int32_t feature);
+/* Returns a feature's status id. */
 AVER_VOXI_ABI int32_t     aver_voxi_feature_status(int32_t feature);
+/* Returns a feature's status as readable text. */
 AVER_VOXI_ABI const char* aver_voxi_feature_status_text(int32_t feature);
 
-/* ---- anti-aliasing ---- */
-AVER_VOXI_ABI int32_t aver_voxi_get_msaa(void);         /* sample count: 1,2,4,8 */
+/* Returns the current MSAA sample count: 1, 2, 4 or 8. */
+AVER_VOXI_ABI int32_t aver_voxi_get_msaa(void);
+/* Sets the MSAA sample count. */
 AVER_VOXI_ABI int32_t aver_voxi_set_msaa(int32_t samples);
-AVER_VOXI_ABI int32_t aver_voxi_msaa_mask(void);        /* bit N set => N samples supported */
+/* Returns the supported sample counts: bit N set => N samples supported. */
+AVER_VOXI_ABI int32_t aver_voxi_msaa_mask(void);
 
-/* ---- quality-ladder features (GI / ray tracing / path tracing) ---- */
+/* Returns a feature's quality level. */
 AVER_VOXI_ABI int32_t aver_voxi_get_quality(int32_t feature);
+/* Sets a feature's quality level. */
 AVER_VOXI_ABI int32_t aver_voxi_set_quality(int32_t feature, int32_t quality);
 
-/* ---- global illumination tunables ---- */
+/* Returns the cubic voxel grid edge. */
 AVER_VOXI_ABI int32_t aver_voxi_get_voxel_resolution(void);
+/* Sets the cubic voxel grid edge. */
 AVER_VOXI_ABI int32_t aver_voxi_set_voxel_resolution(int32_t res);
+/* Returns the indirect bounce multiplier. */
 AVER_VOXI_ABI float   aver_voxi_get_gi_intensity(void);
+/* Sets the indirect bounce multiplier. */
 AVER_VOXI_ABI int32_t aver_voxi_set_gi_intensity(float v);
+/* Returns the cone trace range in centimetres. */
 AVER_VOXI_ABI float   aver_voxi_get_gi_max_distance(void);
+/* Sets the cone trace range, in centimetres. */
 AVER_VOXI_ABI int32_t aver_voxi_set_gi_max_distance(float cm);
 
-/* ---- device capabilities (read-only mirror of what the GPU reports) ---- */
-AVER_VOXI_ABI int32_t aver_voxi_ray_tracing_tier(void);  /* 0 none, 10 DXR 1.0, 11 DXR 1.1 */
+/* Returns the device's ray tracing tier: 0 none, 10 DXR 1.0, 11 DXR 1.1. */
+AVER_VOXI_ABI int32_t aver_voxi_ray_tracing_tier(void);
+/* Returns the device's highest supported MSAA sample count. */
 AVER_VOXI_ABI int32_t aver_voxi_max_msaa(void);
-AVER_VOXI_ABI int32_t aver_voxi_mesh_shader_tier(void); /* 0 none, 1 Tier 1 */
-AVER_VOXI_ABI int32_t aver_voxi_shader_model(void);     /* 60 = SM 6.0, 65 = SM 6.5 */
+/* Returns the device's mesh shader tier: 0 none, 1 Tier 1. */
+AVER_VOXI_ABI int32_t aver_voxi_mesh_shader_tier(void);
+/* Returns the device's shader model: 60 = SM 6.0, 65 = SM 6.5. */
+AVER_VOXI_ABI int32_t aver_voxi_shader_model(void);
 
-/* ---- geometry submission path ---- */
+/* Returns 1 when the mesh shader submission path is on. */
 AVER_VOXI_ABI int32_t aver_voxi_get_mesh_shaders(void);
+/* Turns the mesh shader submission path on or off. */
 AVER_VOXI_ABI int32_t aver_voxi_set_mesh_shaders(int32_t on);
 
 #ifdef __cplusplus

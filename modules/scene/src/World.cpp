@@ -1,3 +1,5 @@
+// World: entity lifetime, the component and field registry, hierarchy links, and the world-matrix
+// propagation pass.
 #include "aver/scene/World.hpp"
 
 #include "aver/core/Assert.hpp"
@@ -14,17 +16,13 @@
 namespace aver::scene {
 namespace {
 
-// A revision never legally reads 0 once an entity exists, because 0 is the "this entity has no
-// parent" value CWorld::composedParentRev carries for a root. Wrapping past it would make a root
-// look freshly composed forever.
+// Advances a revision counter, skipping 0 (the "no parent" sentinel).
 inline void bumpRevision(u32& rev) {
     ++rev;
     if (rev == 0) rev = 1;
 }
 
-// Row-vector convention: the rotation rows are what Mat4::fromQuat writes, so the differences below
-// are 4w*axis rather than the column-vector form's negatives. Getting this backwards produces a
-// conjugated rotation that looks plausible until something is asymmetric.
+// Builds a quaternion from three normalised rotation ROWS, matching Mat4::fromQuat's convention.
 Quat quatFromRows(const Vec3& r0, const Vec3& r1, const Vec3& r2) {
     const f32 trace = r0.x + r1.y + r2.z;
     if (trace > 0.0f) {
@@ -43,9 +41,7 @@ Quat quatFromRows(const Vec3& r0, const Vec3& r1, const Vec3& r2) {
     return {(r2.x + r0.z) / s, (r2.y + r1.z) / s, 0.25f * s, (r0.y - r1.x) / s};
 }
 
-// Only used by the keepWorld path of setParent. A mirrored parent comes back with positive scales
-// and an absorbed flip, because row lengths cannot carry a sign — the alternative is a determinant
-// test that guesses WHICH axis was mirrored, and a guess is worse than a documented limit.
+// Splits a row-major matrix into position, rotation and scale. Scales always come back positive.
 Transform decomposeRowMajor(const Mat4& m) {
     Transform t;
     t.position = {m.m[3][0], m.m[3][1], m.m[3][2]};
@@ -66,7 +62,9 @@ const Mat4      kIdentityMatrix{};
 
 // ------------------------------------------------------------------------------------------------
 
+// Every array the world owns. Index 0 of each registry array is the reserved invalid slot.
 struct World::Impl {
+    // One registered component type: its layout and its field table.
     struct ComponentType {
         std::string      name;
         usize            stride = 0;
@@ -76,23 +74,18 @@ struct World::Impl {
         std::string      verifyError;
     };
 
-    // Index 0 of every registry array is the reserved invalid slot, so a 0 id can never be a valid
-    // subscript by accident — the same rule the handles are under, one level down.
     std::vector<ComponentType>                  types{ComponentType{}};
     std::vector<std::unique_ptr<ComponentPool>> pools;
     std::vector<FieldDesc>                      fields{FieldDesc{}};
-    // A deque, because a FieldDesc hands out a const char* and a vector's strings move when it grows.
+    // A deque, because a FieldDesc hands out a const char* into it.
     std::deque<std::string>                     nameStore;
     std::unordered_map<std::string, u32>        typeByName;
     std::unordered_map<std::string, u32>        fieldByName;
 
-    // --- identity. Index 0 exists so the arrays are indexable by entity index, and is never handed
-    // out, which is what makes a live handle non-zero.
+    // --- identity
     std::vector<u8>  generation{0};
     std::vector<u32> liveSlot{0};   // entity index -> position in `live` + 1
-    // 0 none, 1 queued by destroy(), 2 collected by the current flush. The third state exists
-    // because a queued entity can also be reached as the descendant of another queued entity.
-    std::vector<u8>  pending{0};
+    std::vector<u8>  pending{0};    // 0 none, 1 queued by destroy(), 2 collected by this flush
     std::deque<u32>  freeIndices;   // FIFO: an index gets maximum distance before it is reused
     std::vector<u32> retired;
 
@@ -105,22 +98,25 @@ struct World::Impl {
     std::vector<Entity> order;
     std::vector<Entity> stack;
     std::vector<Entity> chain;
-    std::vector<Entity> depthStack;   // scratch for refreshSubtreeDepth; kept off `stack` so a
-                                      // reparent's depth pass cannot alias an order rebuild
+    std::vector<Entity> depthStack;   // scratch for refreshSubtreeDepth, kept off `stack`
     bool                topoDirty = false;
 
-    // ---- component shortcuts. The built-ins are the only types this file knows the shape of.
+    // The entity's CHierarchy, or nullptr.
     CHierarchy* hier(Entity e) {
         return static_cast<CHierarchy*>(pools[kComponentHierarchy]->get(e));
     }
+    // The entity's CLocal, or nullptr.
     CLocal* loc(Entity e) { return static_cast<CLocal*>(pools[kComponentLocal]->get(e)); }
+    // The entity's CWorld, or nullptr.
     CWorld* wor(Entity e) { return static_cast<CWorld*>(pools[kComponentWorld]->get(e)); }
 
+    // The entity's parent, or kInvalidEntity.
     Entity parentOf(Entity e) {
         const CHierarchy* h = hier(e);
         return h ? h->parent : kInvalidEntity;
     }
 
+    // Detaches `e` from its parent's sibling chain and clears its links.
     void unlinkFromParent(Entity e) {
         CHierarchy* h = hier(e);
         if (!h) return;
@@ -137,6 +133,7 @@ struct World::Impl {
         h->nextSibling = kInvalidEntity;
     }
 
+    // Pushes `e` onto the front of `p`'s child list and sets its depth.
     void linkToParent(Entity e, Entity p) {
         CHierarchy* h  = hier(e);
         CHierarchy* ph = hier(p);
@@ -149,11 +146,7 @@ struct World::Impl {
         h->depth       = ph->depth + 1;
     }
 
-    // Rewrite depth over e and everything beneath it from e's current depth downward. linkToParent
-    // fixes only the node it moves, so without this a reparented subtree's descendants keep the
-    // depth they had under the old parent until the next rebuildOrder — and depth() would then hand
-    // a mid-frame reader a stale answer, the very thing worldMatrix() composes on demand to avoid.
-    // Bounded by the moved subtree, not the world, so a reparent stays cheap.
+    // Rewrites depth over everything beneath `root`, from root's current depth downward.
     void refreshSubtreeDepth(Entity root) {
         depthStack.clear();
         depthStack.push_back(root);
@@ -172,9 +165,8 @@ struct World::Impl {
         }
     }
 
-    // The one place world matrices are written. Dirt is a revision compare rather than a bitset walk,
-    // so a child's test reads a parent revision the same pass has already updated and dirt
-    // propagates downward for free.
+    // Recomposes `e`'s world matrix if its local or parent revision moved. True when it wrote one.
+    // The only place world matrices are written.
     bool composeIfStale(Entity e) {
         CWorld* w = wor(e);
         CLocal* l = loc(e);
@@ -185,8 +177,6 @@ struct World::Impl {
         const u32     parentRev = pw ? pw->rev : 0;
         if (w->composedLocalRev == l->rev && w->composedParentRev == parentRev) return false;
 
-        // v * (L * P): a child reaches world space through its own local matrix FIRST. There is no
-        // other correct order under the row-vector contract.
         w->m                 = pw ? (l->xf.toMatrix() * pw->m) : l->xf.toMatrix();
         w->composedLocalRev  = l->rev;
         w->composedParentRev = parentRev;
@@ -194,16 +184,14 @@ struct World::Impl {
         return true;
     }
 
-    // Composing every ancestor from the root down reaches the same fixed point as stopping at the
-    // nearest fresh one, because composeIfStale is a no-op on a fresh entity. Bounded by depth
-    // either way, and this form needs no second staleness predicate to keep in agreement with the
-    // first.
+    // Composes `e`'s whole ancestor chain, root first.
     void composeChain(Entity e) {
         chain.clear();
         for (Entity a = e; a != kInvalidEntity; a = parentOf(a)) chain.push_back(a);
         for (usize i = chain.size(); i-- > 0;) composeIfStale(chain[i]);
     }
 
+    // Rebuilds the topological order: a pre-order walk of every root, refreshing depth as it goes.
     void rebuildOrder() {
         order.clear();
         order.reserve(live.size());
@@ -212,9 +200,6 @@ struct World::Impl {
             if (rh && rh->parent != kInvalidEntity) continue;
             if (CHierarchy* mutableRoot = hier(root)) mutableRoot->depth = 0;
 
-            // Pre-order depth first: a parent is always emitted before its children, which is the
-            // whole requirement on this array. A Kahn sweep would produce the same property at the
-            // cost of an in-degree pass over links that are already a forest.
             stack.clear();
             stack.push_back(root);
             while (!stack.empty()) {
@@ -240,6 +225,7 @@ struct World::Impl {
         topoDirty = false;
     }
 
+    // Strips `e` of its components, drops it from the live array, and frees or retires its slot.
     void retireSlot(Entity e) {
         const u32 idx = entityIndex(e);
         for (auto& p : pools)
@@ -259,10 +245,6 @@ struct World::Impl {
 
         const u32 gen = generation[idx];
         if (gen >= kEntityMaxGen) {
-            // RETIRED rather than aliased. Handing this index back at generation 1 would make a
-            // handle from the slot's first life validate against its 128th occupant, and a stale
-            // handle that silently addresses the wrong entity is the failure this whole packing
-            // exists to prevent.
             retired.push_back(idx);
         } else {
             generation[idx] = static_cast<u8>(gen + 1);
@@ -270,10 +252,9 @@ struct World::Impl {
         }
     }
 
+    // Expands the destroy queue to whole subtrees, then unlinks and retires every entity in it.
     void collectAndRetire() {
         doomed.clear();
-        // Expand every queued entity to its whole subtree first: retiring a parent and leaving its
-        // children behind would leave a link pointing into a slot that is about to be reused.
         for (const Entity queued : destroyQueue) {
             stack.clear();
             stack.push_back(queued);
@@ -301,6 +282,7 @@ struct World::Impl {
 
 // ------------------------------------------------------------------------------------------------
 
+// Creates the world and registers the built-in components.
 World::World() : impl_(new Impl()) {
     impl_->pools.push_back(nullptr);   // parallel to types[0], the reserved invalid slot
     detail::registerBuiltinComponents(*this);
@@ -308,6 +290,7 @@ World::World() : impl_(new Impl()) {
 
 World::~World() { delete impl_; }
 
+// The process-global world.
 World& World::instance() {
     static World world;
     return world;
@@ -315,6 +298,7 @@ World& World::instance() {
 
 // ---- entity lifetime ---------------------------------------------------------------------------
 
+// Creates an entity carrying CName, CLocal, CWorld and CHierarchy. kInvalidEntity when exhausted.
 Entity World::create(std::string_view nm) {
     Impl& d = *impl_;
 
@@ -338,20 +322,18 @@ Entity World::create(std::string_view nm) {
     d.liveSlot[idx] = static_cast<u32>(d.live.size() + 1);
     d.live.push_back(e);
 
-    // addComponent zero-fills, which is the ABI's contract for a script-declared type but is wrong
-    // for these four: a revision of 0 is the root sentinel and a scale of 0 is a collapsed object.
+    // addComponent zero-fills; these four need their defaults instead.
     *static_cast<CName*>(addComponent(e, kComponentName))           = CName{};
     *static_cast<CLocal*>(addComponent(e, kComponentLocal))         = CLocal{};
     *static_cast<CWorld*>(addComponent(e, kComponentWorld))         = CWorld{};
     *static_cast<CHierarchy*>(addComponent(e, kComponentHierarchy)) = CHierarchy{};
 
     setName(e, nm);
-    // A new entity is always a root, and appending a root to the end of a topological order keeps it
-    // topological — which is why creation does not dirty the sort.
     d.order.push_back(e);
     return e;
 }
 
+// Creates an entity, gives it `local`, then parents it.
 Entity World::create(std::string_view nm, Entity parentEntity, const Transform& local) {
     const Entity e = create(nm);
     if (e == kInvalidEntity) return e;
@@ -360,6 +342,7 @@ Entity World::create(std::string_view nm, Entity parentEntity, const Transform& 
     return e;
 }
 
+// Queues `e` for destruction at the next flush(). Idempotent.
 bool World::destroy(Entity e) {
     if (!valid(e)) return false;
     Impl&     d   = *impl_;
@@ -370,18 +353,18 @@ bool World::destroy(Entity e) {
     return true;
 }
 
+// True once destroy() has queued `e`, until the flush that retires it.
 bool World::destroyPending(Entity e) const {
     const u32 idx = entityIndex(e);
     return idx < impl_->pending.size() && impl_->pending[idx] != 0;
 }
 
+// True when the handle addresses a live entity: right index, right generation, and a live slot.
 bool World::valid(Entity e) const {
     const Impl& d = *impl_;
     if (e == kInvalidEntity) return false;
     const u32 idx = entityIndex(e);
     if (idx == 0 || idx >= d.generation.size()) return false;
-    // The generation compare alone would accept a handle whose slot is free but not yet reissued,
-    // because a freed slot already carries the generation its next occupant will get.
     if (d.generation[idx] != entityGen(e)) return false;
     return d.liveSlot[idx] != 0;
 }
@@ -393,21 +376,17 @@ u32    World::freeSlotCount() const        { return static_cast<u32>(impl_->free
 
 // ---- identity ----------------------------------------------------------------------------------
 
+// The entity's name, or "" for a stale handle or an out-of-range blob cursor.
 const char* World::name(Entity e) const {
     const CName* n = component<CName>(e, kComponentName);
-    // offset is a slice cursor into the name blob, and the generic field ABI exposes CName.offset as a
-    // plain writable I32 (Builtins.cpp registers it). A script that writes an out-of-range offset must
-    // not turn this into a wild pointer walked by name()/PtrToStringUTF8 — bound the slice against the
-    // blob it indexes, so a desynced cursor reads as an empty name rather than out-of-bounds memory.
     return (n && n->offset < impl_->nameBlob.size()) ? impl_->nameBlob.c_str() + n->offset : "";
 }
 
+// Appends the name to the blob, repoints the entity's cursor, and rehashes its object id.
 bool World::setName(Entity e, std::string_view nm) {
     CName* n = component<CName>(e, kComponentName);
     if (!n) return false;
     Impl& d = *impl_;
-    // The blob only grows. Compaction would have to rewrite every CName offset, and a rename is a
-    // rare editor gesture — the memory this wastes is bounded by how often a human types.
     n->offset = static_cast<u32>(d.nameBlob.size());
     n->len    = static_cast<u32>(nm.size());
     d.nameBlob.append(nm);
@@ -416,11 +395,13 @@ bool World::setName(Entity e, std::string_view nm) {
     return true;
 }
 
+// The entity's persisted identity, or 0.
 u64 World::objectId(Entity e) const {
     const CName* n = component<CName>(e, kComponentName);
     return n ? n->objectId : 0;
 }
 
+// Overrides the persisted identity.
 bool World::setObjectId(Entity e, u64 id) {
     CName* n = component<CName>(e, kComponentName);
     if (!n) return false;
@@ -428,13 +409,12 @@ bool World::setObjectId(Entity e, u64 id) {
     return true;
 }
 
+// The first live entity with this name, or kInvalidEntity. A linear scan over the CName pool.
 Entity World::find(std::string_view nm) const {
     const ComponentPool* names = impl_->pools[kComponentName].get();
     const u64            want  = fnv1a64(nm);
     for (usize i = 0; i < names->size(); ++i) {
         const CName* n = static_cast<const CName*>(names->dataAt(i));
-        // The hash narrows it; the compare settles it, because a hash collision must not rename an
-        // entity the caller never asked for.
         if (n->objectId != want || n->len != nm.size()) continue;
         if (nm.compare(0, nm.size(), impl_->nameBlob.c_str() + n->offset, n->len) == 0)
             return names->entityAt(i);
@@ -444,6 +424,7 @@ Entity World::find(std::string_view nm) const {
 
 // ---- component registry ------------------------------------------------------------------------
 
+// Registers a component type by name, idempotently, and returns a builder for its field table.
 ComponentBuilder World::registerComponent(std::string_view nm, usize stride, usize align) {
     Impl&             d = *impl_;
     const std::string key(nm);
@@ -457,8 +438,6 @@ ComponentBuilder World::registerComponent(std::string_view nm, usize stride, usi
                        key, t.stride, t.align, stride, align);
             return ComponentBuilder(nullptr, 0);
         }
-        // Idempotent by name: the redeclaration rebuilds the table but keeps the type id and the
-        // pool, so a hot reload does not strand the entities that already carry this component.
         t.fields.clear();
         t.verified = false;
         t.verifyError.clear();
@@ -478,6 +457,7 @@ ComponentBuilder World::registerComponent(std::string_view nm, usize stride, usi
     return ComponentBuilder(this, id);
 }
 
+// The dense id of a registered component type, or 0.
 u32 World::componentId(std::string_view nm) const {
     const auto it = impl_->typeByName.find(std::string(nm));
     return it == impl_->typeByName.end() ? 0 : it->second;
@@ -485,26 +465,32 @@ u32 World::componentId(std::string_view nm) const {
 
 u32 World::componentCount() const { return static_cast<u32>(impl_->types.size()) - 1; }
 
+// The component type id at an enumeration index.
 u32 World::componentAt(u32 index) const {
     return index < componentCount() ? index + 1 : 0;   // dense ids start at 1
 }
 
+// The registered name of a component type.
 const char* World::componentName(u32 type) const {
     return (type > 0 && type < impl_->types.size()) ? impl_->types[type].name.c_str() : "";
 }
 
+// The byte stride of a component type.
 usize World::componentSize(u32 type) const {
     return (type > 0 && type < impl_->types.size()) ? impl_->types[type].stride : 0;
 }
 
+// True when the type's field table passed verification.
 bool World::componentVerified(u32 type) const {
     return type > 0 && type < impl_->types.size() && impl_->types[type].verified;
 }
 
+// Why verification failed, or "" when it did not.
 const char* World::componentVerifyError(u32 type) const {
     return (type > 0 && type < impl_->types.size()) ? impl_->types[type].verifyError.c_str() : "";
 }
 
+// Adds one field to a component's table. Returns the dense field id, 0 on rejection.
 u32 World::addField(u32 type, const char* fieldName, FieldKind kind, u16 offset, u8 arity, bool readOnly) {
     Impl& d = *impl_;
     if (type == 0 || type >= d.types.size() || !fieldName || !*fieldName) return 0;
@@ -519,8 +505,6 @@ u32 World::addField(u32 type, const char* fieldName, FieldKind kind, u16 offset,
 
     const std::string qualified = t.name + "." + fieldName;
     if (const auto it = d.fieldByName.find(qualified); it != d.fieldByName.end()) {
-        // A redeclaration keeps the dense id, so a class that cached this field id across a reload
-        // still addresses the same field.
         FieldDesc& f = d.fields[it->second];
         f.component  = type;
         f.kind       = kind;
@@ -543,6 +527,7 @@ u32 World::addField(u32 type, const char* fieldName, FieldKind kind, u16 offset,
     return id;
 }
 
+// Checks the type's field table covers `structBytes` with no gap and no overlap. Logs what is wrong.
 bool World::verifyComponent(u32 type, usize structBytes) {
     Impl& d = *impl_;
     if (type == 0 || type >= d.types.size()) return false;
@@ -586,9 +571,7 @@ bool World::verifyComponent(u32 type, usize structBytes) {
         }
     }
 
-    // Only trailing padding smaller than the struct's own alignment may be left unexplained. A gap
-    // of a whole alignment unit or more is a member the table never mentioned, which is exactly the
-    // drift this terminator exists to catch.
+    // Only trailing padding smaller than the struct's own alignment may be left unexplained.
     if (structBytes - cursor >= t.align) {
         return fail("the table covers " + std::to_string(cursor) + " of " +
                     std::to_string(structBytes) + " bytes - a member is missing from the table");
@@ -600,21 +583,25 @@ bool World::verifyComponent(u32 type, usize structBytes) {
 
 // ---- field lookup ------------------------------------------------------------------------------
 
+// Resolves "Component.field" to a dense field id, or 0.
 u32 World::fieldId(std::string_view qualifiedName) const {
     const auto it = impl_->fieldByName.find(std::string(qualifiedName));
     return it == impl_->fieldByName.end() ? 0 : it->second;
 }
 
+// The descriptor for a field id, or nullptr.
 const FieldDesc* World::field(u32 id) const {
     return (id > 0 && id < impl_->fields.size()) ? &impl_->fields[id] : nullptr;
 }
 
+// Number of fields declared on a component type.
 u32 World::fieldCount(u32 type) const {
     return (type > 0 && type < impl_->types.size())
                ? static_cast<u32>(impl_->types[type].fields.size())
                : 0;
 }
 
+// The field id at an index within a component's table.
 u32 World::fieldAt(u32 type, u32 index) const {
     if (type == 0 || type >= impl_->types.size()) return 0;
     const auto& f = impl_->types[type].fields;
@@ -623,15 +610,18 @@ u32 World::fieldAt(u32 type, u32 index) const {
 
 // ---- component storage -------------------------------------------------------------------------
 
+// The pool storing a component type, or nullptr.
 ComponentPool* World::pool(u32 type) {
     return (type > 0 && type < impl_->pools.size()) ? impl_->pools[type].get() : nullptr;
 }
 
+// Attaches zero-filled storage for `type` to `e`, or returns what it already has.
 void* World::addComponent(Entity e, u32 type) {
     ComponentPool* p = pool(type);
     return (p && valid(e)) ? p->add(e) : nullptr;
 }
 
+// The component bytes, or nullptr when absent or the handle is stale.
 void* World::getComponent(Entity e, u32 type) {
     ComponentPool* p = pool(type);
     return p ? p->get(e) : nullptr;
@@ -642,11 +632,13 @@ const void* World::getComponent(Entity e, u32 type) const {
     return p ? p->get(e) : nullptr;
 }
 
+// True when `e` carries this component.
 bool World::hasComponent(Entity e, u32 type) const {
     const ComponentPool* p = (type > 0 && type < impl_->pools.size()) ? impl_->pools[type].get() : nullptr;
     return p && p->has(e);
 }
 
+// Drops the component from `e`.
 bool World::removeComponent(Entity e, u32 type) {
     ComponentPool* p = pool(type);
     return p && p->remove(e);
@@ -654,21 +646,16 @@ bool World::removeComponent(Entity e, u32 type) {
 
 // ---- hierarchy ---------------------------------------------------------------------------------
 
+// Reparents `e`. Refuses a cycle, a self-parent, or a parent already queued for destruction.
+// keepWorld recomputes the local transform so `e` does not visibly move.
 bool World::setParent(Entity e, Entity newParent, bool keepWorld) {
     Impl& d = *impl_;
     if (!valid(e)) return false;
     if (newParent != kInvalidEntity && !valid(newParent)) return false;
     if (newParent == e) return false;
 
-    // A parent already queued for destruction still reads valid() this frame, because destroy is
-    // deferred to flush(). Attaching a live child to it would make flush() collect the child inside
-    // the doomed parent's subtree — silent loss of an entity the caller never asked to destroy.
-    // Refusing is the only signal available; valid() cannot carry it without breaking the
-    // destroyed-entity-survives-the-tick contract the deferral exists for.
     if (newParent != kInvalidEntity && destroyPending(newParent)) return false;
 
-    // A cycle would make the topological sort skip a whole subtree forever, so it is refused here
-    // rather than detected later where the symptom is a matrix that never updates.
     for (Entity a = newParent; a != kInvalidEntity; a = d.parentOf(a)) {
         if (a == e) return false;
     }
@@ -682,46 +669,45 @@ bool World::setParent(Entity e, Entity newParent, bool keepWorld) {
     } else if (CHierarchy* h = d.hier(e)) {
         h->depth = 0;
     }
-    // linkToParent set e's own depth; its descendants still carry the depth they had under the old
-    // parent until the next order rebuild, so refresh the subtree now to keep depth() honest for a
-    // reader between here and flush().
     d.refreshSubtreeDepth(e);
 
-    // Zeroing the composed local revision is what forces the recompose. Relying on the parent
-    // revision alone would miss a move between two parents whose revisions happen to be equal.
     if (CWorld* w = d.wor(e)) w->composedLocalRev = 0;
     d.topoDirty = true;
 
     if (keepWorld) {
         const Mat4 parentWorld =
             (newParent != kInvalidEntity) ? worldMatrix(newParent) : Mat4::identity();
-        // L * P = keep, so L = keep * P^-1 — the inverse goes on the RIGHT under v * M.
         setLocalTransform(e, decomposeRowMajor(keep * parentWorld.inverse()));
     }
     return true;
 }
 
+// The immediate parent, or kInvalidEntity for a root.
 Entity World::parent(Entity e) const {
     const CHierarchy* h = component<CHierarchy>(e, kComponentHierarchy);
     return h ? h->parent : kInvalidEntity;
 }
 
+// The first child, or kInvalidEntity.
 Entity World::firstChild(Entity e) const {
     const CHierarchy* h = component<CHierarchy>(e, kComponentHierarchy);
     return h ? h->firstChild : kInvalidEntity;
 }
 
+// The next sibling under the same parent, or kInvalidEntity.
 Entity World::nextSibling(Entity e) const {
     const CHierarchy* h = component<CHierarchy>(e, kComponentHierarchy);
     return h ? h->nextSibling : kInvalidEntity;
 }
 
+// Number of immediate children.
 u32 World::childCount(Entity e) const {
     u32 n = 0;
     for (Entity c = firstChild(e); c != kInvalidEntity; c = nextSibling(c)) ++n;
     return n;
 }
 
+// Distance from the root; 0 for a root.
 u32 World::depth(Entity e) const {
     const CHierarchy* h = component<CHierarchy>(e, kComponentHierarchy);
     return h ? h->depth : 0;
@@ -732,11 +718,13 @@ Entity World::topologicalAt(u32 index) const  { return index < impl_->order.size
 
 // ---- transforms --------------------------------------------------------------------------------
 
+// The entity's local transform, or identity for a stale handle.
 const Transform& World::localTransform(Entity e) const {
     const CLocal* l = component<CLocal>(e, kComponentLocal);
     return l ? l->xf : kIdentityTransform;
 }
 
+// Replaces the local transform and bumps its revision.
 bool World::setLocalTransform(Entity e, const Transform& xf) {
     CLocal* l = component<CLocal>(e, kComponentLocal);
     if (!l) return false;
@@ -745,6 +733,7 @@ bool World::setLocalTransform(Entity e, const Transform& xf) {
     return true;
 }
 
+// Sets local position and bumps the revision.
 bool World::setLocalPosition(Entity e, const Vec3& p) {
     CLocal* l = component<CLocal>(e, kComponentLocal);
     if (!l) return false;
@@ -753,6 +742,7 @@ bool World::setLocalPosition(Entity e, const Vec3& p) {
     return true;
 }
 
+// Sets local rotation and bumps the revision.
 bool World::setLocalRotation(Entity e, const Quat& q) {
     CLocal* l = component<CLocal>(e, kComponentLocal);
     if (!l) return false;
@@ -761,6 +751,7 @@ bool World::setLocalRotation(Entity e, const Quat& q) {
     return true;
 }
 
+// Sets local scale and bumps the revision.
 bool World::setLocalScale(Entity e, const Vec3& s) {
     CLocal* l = component<CLocal>(e, kComponentLocal);
     if (!l) return false;
@@ -769,6 +760,7 @@ bool World::setLocalScale(Entity e, const Vec3& s) {
     return true;
 }
 
+// Bumps CLocal::rev after a caller wrote the transform through the pool directly.
 bool World::touchLocal(Entity e) {
     CLocal* l = component<CLocal>(e, kComponentLocal);
     if (!l) return false;
@@ -776,6 +768,7 @@ bool World::touchLocal(Entity e) {
     return true;
 }
 
+// The entity's world matrix, composing its ancestor chain on demand. Identity for a stale handle.
 const Mat4& World::worldMatrix(Entity e) {
     Impl& d = *impl_;
     d.composeChain(e);
@@ -783,6 +776,7 @@ const Mat4& World::worldMatrix(Entity e) {
     return w ? w->m : kIdentityMatrix;
 }
 
+// The revision of the entity's composed world matrix.
 u32 World::worldRevision(Entity e) const {
     const CWorld* w = component<CWorld>(e, kComponentWorld);
     return w ? w->rev : 0;
@@ -790,6 +784,8 @@ u32 World::worldRevision(Entity e) const {
 
 // ---- frame -------------------------------------------------------------------------------------
 
+// Retires deferred destroys, rebuilds the order if needed, then recomposes stale world matrices.
+// Returns how many were recomposed.
 u32 World::flush() {
     Impl& d = *impl_;
     if (!d.destroyQueue.empty()) {

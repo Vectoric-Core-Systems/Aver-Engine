@@ -1,3 +1,4 @@
+// Implements the Aver.Audio C ABI over one process-wide device, mixer and sound table.
 #include "aver/audio/audio_abi.h"
 #include "aver/audio/AudioDevice.hpp"
 #include "aver/formats/OcAudio.hpp"
@@ -6,19 +7,16 @@
 #include <string>
 #include <unordered_map>
 
-// The ABI's state. One device, one mixer, one sound table -- there is one pair of speakers, and a
-// second mixer would be a second thing fighting for them.
 namespace {
 
 aver::audio::AudioDevice g_device;
 bool g_started = false;
 
-// Path -> handle, so the same file loaded from four call sites is decoded once and held once. The
-// alternative is four copies of a footstep in memory and four sound-table slots, and nothing at the
-// call site would ever say so.
+// Path <-> handle, so the same file loaded from several call sites is decoded and held once.
 std::unordered_map<std::string, aver::audio::SoundHandle> g_byPath;
 std::unordered_map<aver::audio::SoundHandle, std::string> g_paths;
 
+// Maps an AVER_AUDIO_BUS_* constant to a Bus. Anything unknown is Sfx.
 aver::audio::Bus busOf(int32_t b) {
     switch (b) {
         case AVER_AUDIO_BUS_MUSIC: return aver::audio::Bus::Music;
@@ -32,16 +30,15 @@ aver::audio::Bus busOf(int32_t b) {
 
 extern "C" {
 
+// Opens the default output and starts the mixer. 0 when there is no device, which is not an error.
 int32_t aver_audio_init(void) {
     if (g_started) return 1;
-    // A machine with no output device is a legitimate configuration, so this returns 0 and every
-    // call below then succeeds and does nothing. A game needs no special case for a silent machine,
-    // which is the only way that path ever gets exercised.
     g_started = g_device.start();
     if (!g_started) AVER_INFO("[Audio] running silent: no output device");
     return g_started ? 1 : 0;
 }
 
+// Stops everything, releases the device and forgets every loaded sound.
 void aver_audio_shutdown(void) {
     if (!g_started) return;
     g_device.mixer().stopAll();
@@ -56,18 +53,17 @@ int32_t aver_audio_sample_rate(void) { return g_started ? static_cast<int32_t>(g
 int32_t aver_audio_channels(void)    { return g_started ? static_cast<int32_t>(g_device.channels()) : 0; }
 int32_t aver_audio_underruns(void)   { return g_started ? static_cast<int32_t>(g_device.underruns()) : 0; }
 
+// Reclaims unloaded sounds whose last voice has ended.
 void aver_audio_collect(void) { if (g_started) g_device.mixer().collect(); }
 
+// Loads a sound and returns its handle, or 0. The same path yields the same handle.
 int32_t aver_audio_load(const char* utf8Path) {
     if (!g_started || !utf8Path || !*utf8Path) return 0;
     const std::string path = utf8Path;
     if (auto it = g_byPath.find(path); it != g_byPath.end()) return static_cast<int32_t>(it->second);
 
     aver::audio::SoundData data;
-    // .ocaudio is the ENGINE's format and the fast path: decoded interleaved float, ready to play,
-    // no decoder involved. Anything else is imported on the spot, which is a convenience for
-    // development -- pointing at a .wav or an .mp3 while iterating -- and is not what a shipped game
-    // should be doing when it opens a door.
+    // .ocaudio is the cooked fast path; anything else is imported on the spot.
     const bool cooked = path.size() > 8 &&
                         path.compare(path.size() - 8, 8, ".ocaudio") == 0;
     if (cooked) {
@@ -92,6 +88,7 @@ int32_t aver_audio_load(const char* utf8Path) {
     return static_cast<int32_t>(h);
 }
 
+// Releases a sound and forgets its path.
 void aver_audio_unload(int32_t sound) {
     if (!g_started || sound <= 0) return;
     const auto h = static_cast<aver::audio::SoundHandle>(sound);
@@ -102,6 +99,7 @@ void aver_audio_unload(int32_t sound) {
     }
 }
 
+// Starts a 2D voice. Returns the voice handle, or 0.
 int32_t aver_audio_play(int32_t sound, float volume, float pitch, int32_t looping, int32_t bus) {
     if (!g_started || sound <= 0) return 0;
     aver::audio::PlayDesc d;
@@ -113,6 +111,7 @@ int32_t aver_audio_play(int32_t sound, float volume, float pitch, int32_t loopin
     return static_cast<int32_t>(g_device.mixer().play(d));
 }
 
+// Starts a positional voice at a world point. Returns the voice handle, or 0.
 int32_t aver_audio_play_at(int32_t sound, float x, float y, float z,
                            float volume, float pitch, int32_t looping, int32_t bus,
                            float innerCm, float outerCm) {
@@ -140,6 +139,7 @@ void aver_audio_set_voice_position(int32_t v, float x, float y, float z) {
     if (g_started) g_device.mixer().setVoicePosition(static_cast<aver::audio::VoiceHandle>(v), x, y, z);
 }
 
+// Places the listener: position, forward and right, in engine units.
 void aver_audio_set_listener(float px, float py, float pz,
                              float fx, float fy, float fz,
                              float rx, float ry, float rz) {

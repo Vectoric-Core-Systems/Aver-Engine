@@ -1,34 +1,7 @@
 #pragma once
-// Aver.Mcp — a control channel into a RUNNING editor, so a tool can press its buttons.
-//
-// WHAT IT IS FOR. Every visual defect in this tree was found by a human opening the editor and looking.
-// The suites cannot do it: nine defects in one phase compiled, linked and passed everything
-// (docs/STATUS.md 4u). This lets an agent drive the real editor -- move the pointer, click a tool,
-// press a key -- and then look at what happened, which is the one kind of testing this repo has never
-// been able to automate.
-//
-// HOW IT CLICKS, and this is the load-bearing decision. It POSTS REAL WIN32 MESSAGES to the window:
-// WM_MOUSEMOVE, WM_LBUTTONDOWN/UP, WM_KEYDOWN/UP. The editor's input already arrives that way --
-// ImGui_ImplWin32_WndProcHandler, see D3D12Device.cpp:217 -- so a synthetic click travels the identical
-// path as a human one, through the same handler, in the same order, with no second code path to keep in
-// step. The alternative was calling ImGui's io.Add*Event directly, which would fight the Win32
-// backend's own NewFrame and would test a path no user ever takes.
-//
-// It also means THIS MODULE KNOWS NOTHING ABOUT IMGUI, or about the editor. It holds a window handle
-// and a queue. That is why it can be optional.
-//
-// ================================================================================================
-// THE EDITOR MUST WORK WITHOUT THIS MODULE, and that is a hard requirement rather than a nicety.
-//
-// Everything here is behind AVER_MODULE_MCP. With the switch off the target is not built, the header is
-// not included, no thread starts, no socket is opened, no port is bound, and the editor has no idea it
-// ever existed. A remote-control channel is exactly the kind of thing that must not be load-bearing:
-// nobody should ship a game editor whose UI depends on a listening socket.
-// ================================================================================================
-//
-// AND IT IS OFF BY DEFAULT EVEN WHEN BUILT. `start()` is called only when the app is asked to, because
-// a build that silently listens on a port is a build that has opened a hole in somebody's machine
-// without telling them. Loopback only, and it says on which port when it starts.
+// Aver.Mcp: a loopback control channel into a running editor, so a tool can press its buttons.
+// It posts real Win32 messages at the window, so a synthetic click takes the same path as a human
+// one. Built only under AVER_MODULE_MCP, and off until the app calls start().
 #include "aver/core/Types.hpp"
 
 #include <condition_variable>
@@ -40,7 +13,7 @@
 
 namespace aver::mcp {
 
-// One synthetic input, in the vocabulary the editor cares about rather than Win32's.
+// One synthetic input, in the editor's vocabulary rather than Win32's.
 struct InputEvent {
     enum class Kind { MouseMove, MouseDown, MouseUp, KeyDown, KeyUp, Text } kind = Kind::MouseMove;
     i32 x = 0, y = 0;          // client pixels, for the mouse kinds
@@ -49,17 +22,7 @@ struct InputEvent {
     std::string text;          // for Text
 };
 
-// A call into ONE MODULE'S ABI.
-//
-// THE ROUTING RULE. A client says which module it wants and the name of an entry point, and this goes
-// to that module's own plain-C seam -- Aver.Framework's request lands on framework_abi.h, Aver.Physics'
-// on physics_abi.h, and so on. Presented to a client as one surface, "the Aver ABI", but there is no
-// such single thing: it is the union of the seams where each module meets the engine core, and that is
-// deliberately what it is.
-//
-// Why it matters that this is a lookup and not a switch: a switch here would mean Aver.Mcp knew the
-// name of every module, and knowing them is one step from linking them. This target is Core-only, and
-// staying that way is what lets the editor be built without it.
+// A call into one module's ABI, routed by module name to that module's own plain-C seam.
 struct AbiCall {
     std::string module;        // "framework", "scene", "physics", "voxi", "ui", "audio", ...
     std::string fn;            // the entry point, without its module prefix: "spawn", not "aver_fw_spawn"
@@ -67,15 +30,7 @@ struct AbiCall {
     std::string text;          // one string argument, for the entries that take a name or a path
 };
 
-// Where an ABI call's answer is left for the socket thread to collect.
-//
-// EXISTS BECAUSE THE ACK USED TO LIE. A command was answered {"ok":true} the moment it was QUEUED, so
-// a client was told its call had succeeded before anything had tried it -- and a refusal reached only
-// the log. `nosuch::x` came back ok:true. An acknowledgement that cannot say no is not one.
-//
-// Request/response, therefore: the socket thread waits for the main thread to actually run the call.
-// It blocks for about a frame, which is the correct trade -- a client that asked a question is waiting
-// for the answer, and 16 ms is cheaper than a protocol where success is unknowable.
+// Where an ABI call's answer is left for the waiting socket thread to collect.
 struct PendingResult {
     std::mutex mutex;
     std::condition_variable cv;
@@ -91,18 +46,14 @@ struct Command {
     std::vector<InputEvent> events;    // already expanded: a click is a move, a down and an up
     std::string arg;                   // e.g. a screenshot path
     AbiCall abi;                       // filled when name == "abi"
-    // Non-null for a command whose caller is waiting on the outcome. See PendingResult.
-    std::shared_ptr<PendingResult> pending;
+    std::shared_ptr<PendingResult> pending;   // non-null when the caller waits on the outcome
     u64 id = 0;                        // echoed back, so a client can match reply to request
 };
 
-// How a module's ABI answers. Returns false and fills `why` when the entry point is unknown or the
-// arguments are wrong -- refused with a reason, never silently ignored.
-//
-// `result` is free-form text the client gets back, so an entry that returns a handle or a count can say
-// so without this module needing a type for it.
+// How a module's ABI answers. Returns false and fills `why` when the entry or arguments are wrong.
 using AbiDispatch = std::function<bool(const AbiCall& call, std::string& result, std::string& why)>;
 
+// The control channel: a listening socket, a command queue, and the per-module ABI registry.
 class McpBridge {
 public:
     McpBridge();
@@ -110,63 +61,36 @@ public:
     McpBridge(const McpBridge&) = delete;
     McpBridge& operator=(const McpBridge&) = delete;
 
-    // Begin listening on 127.0.0.1:`port`. Returns false and logs why on failure -- a bridge that
-    // could not bind must not look like one that did.
-    //
-    // LOOPBACK ONLY, hard-coded. This posts synthetic clicks into a running editor; it is not something
-    // that should ever be reachable from another machine, and making the address configurable would be
-    // offering that as an option.
+    // Begins listening on 127.0.0.1:`port`. Returns false and logs why on failure.
+    // Loopback only, hard-coded: this posts synthetic clicks into a running editor.
     bool start(u16 port = 45123);
+    // Closes the socket, releases every waiting caller and joins the worker thread.
     void stop();
     bool listening() const;
     u16  port() const;
 
-    // Drain whatever arrived and hand it to `apply`, which is expected to deliver the events to the
-    // window. Call ONCE PER FRAME from the thread that owns the window.
-    //
-    // On the main thread on purpose, even though PostMessage is thread-safe: a click has to straddle a
-    // frame to register -- press seen by one frame, release by the next -- so the pacing has to be
-    // frame-aware, and the socket thread has no idea when a frame is.
-    //
-    // Returns how many commands were applied, so a caller can log activity rather than guess at it.
+    // Delivers one queued input event to `apply` and returns how many commands were applied.
+    // Call once per frame from the thread that owns the window.
     u32 pump(const std::function<void(const Command&)>& apply);
 
-    // ---- the ABI registry -------------------------------------------------------------------------
-    //
-    // INVERSION OF CONTROL, and it is the whole reason this module can stay Core-only. Aver.Mcp does not
-    // call into Aver.Framework; the APP hands it a dispatcher for "framework" and Aver.Mcp forwards to
-    // it, exactly the arrangement ActorEditorHooks uses to keep an asset editor from reaching into the
-    // application.
-    //
-    // A pleasant consequence: the registry IS the build configuration. A module that was switched off
-    // registers nothing, so `modules()` reports what this binary can actually reach and a call to a
-    // missing one is refused with a reason instead of pretending.
+    // Registers (or replaces) the dispatcher a module's calls are routed to.
     void registerAbi(const std::string& module, AbiDispatch dispatch);
 
-    // Route a call. Refuses -- with a reason naming the module -- when nothing is registered under that
-    // name, so "AVER_MODULE_PHYSICS was off in this build" is a diagnosable answer rather than silence.
+    // Routes a call to its module's dispatcher. Refuses, naming the module, when none is registered.
     bool callAbi(const AbiCall& call, std::string& result, std::string& why) const;
 
-    // Every module name with an ABI registered, sorted. What a client should ask for first.
+    // Every module name with an ABI registered, sorted.
     std::vector<std::string> modules() const;
 
-    // ---- clicking by NAME -------------------------------------------------------------------------
-    //
-    // The editor knows where its widgets are; this module must not. So the app installs a resolver that
-    // turns a name into a point, and `{"cmd":"click","widget":"tool.rotate"}` is expanded into the same
-    // move/press/release a coordinate click produces. Coordinates never cross the wire, and the click
-    // still travels the ordinary input path -- so it tests the BUTTON, not the handler behind it.
-    //
-    // Resolved on the SOCKET THREAD, at queue time, which is why the registry behind it must be
-    // thread-safe. That buys an immediate, specific refusal for an unknown name instead of silence and
-    // a frame's wait -- "no widget named tool.rotor" is the single most useful thing a client can be
-    // told, and it is useless a frame late.
+    // Turns a widget name into a client-pixel point. Called on the socket thread, so it must be
+    // thread-safe.
     using WidgetResolver = std::function<bool(const std::string& name, f32& x, f32& y)>;
+    // Installs the resolver used to expand a click-by-name into a coordinate click.
     void setWidgetResolver(WidgetResolver fn);
 
-    // The names the resolver would accept, for `{"cmd":"widgets"}`. Supplied by the app for the same
-    // reason as above: this module has no idea what a widget is.
+    // Returns the names the resolver would accept, for `{"cmd":"widgets"}`.
     using WidgetLister = std::function<std::string()>;
+    // Installs the lister that answers a widgets request.
     void setWidgetLister(WidgetLister fn);
 
 private:
@@ -174,17 +98,13 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// Parse one line of the wire protocol into a Command. Exposed so it can be tested without a socket --
-// the parsing is where the bugs live, and it should not need a listening port to check.
-//
-// The protocol is one JSON object per line, deliberately minimal:
+// Parses one line of the wire protocol into a Command. Returns false and fills `why` if it will not
+// parse. The protocol is one JSON object per line:
 //   {"id":1,"cmd":"move","x":100,"y":200}
 //   {"id":2,"cmd":"click","x":100,"y":200,"button":"left"}
 //   {"id":3,"cmd":"key","key":"F"}
 //   {"id":4,"cmd":"text","text":"hello"}
 //   {"id":5,"cmd":"ping"}
-// Unknown commands are refused with a reason rather than ignored: a client that misspelled `click`
-// should be told, not left waiting for a button that was never pressed.
 bool parseCommand(const std::string& line, Command& out, std::string* why = nullptr);
 
 } // namespace aver::mcp

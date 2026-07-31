@@ -1,5 +1,4 @@
-// `.ocland` reader and writer. See OcLand.hpp for what the format holds and what it deliberately
-// leaves out.
+// `.ocland` reader and writer: the LHDR/HGHT chunks of a landscape section in an AVR1 container.
 #include "aver/formats/OcLand.hpp"
 
 #include <cmath>
@@ -9,10 +8,7 @@
 namespace aver::fmt {
 namespace {
 
-// LHDR is written and read FIELD BY FIELD through a byte cursor, never as a memcpy of a struct. A
-// struct written whole is a struct whose padding is part of the file format, and the day somebody adds
-// a field in the middle every asset already on disk becomes silently wrong. Same reasoning as
-// OcAudioInfo's, and it is worth repeating rather than cross-referencing.
+// Byte cursor over a chunk payload. Reads field by field; `ok` goes false on underrun.
 struct Cursor {
     const u8* p = nullptr;
     usize left = 0;
@@ -28,27 +24,26 @@ struct Cursor {
     }
 };
 
+// Appends the raw bytes of `v` to `b`.
 template <typename T> void put(std::vector<u8>& b, T v) {
     const usize at = b.size();
     b.resize(at + sizeof(T));
     std::memcpy(b.data() + at, &v, sizeof(T));
 }
 
+// Sets `why` and returns false.
 bool fail(std::string* why, const char* msg) {
     if (why) *why = msg;
     return false;
 }
 
-// LHDR's layout, in one place so the reader and the writer cannot disagree about it:
-//   u32 sampleCount
-//   f32 spacingCm
-//   f32 originCm[3]
-//   f32 heightBiasCm      the height a quantised 0 decodes to
-//   f32 heightScaleCm     the span a full-scale 65535 adds to the bias
+// LHDR layout, which the reader and writer must agree on:
+//   u32 sampleCount, f32 spacingCm, f32 originCm[3], f32 heightBiasCm, f32 heightScaleCm
 constexpr usize kLhdrBytes = sizeof(u32) + sizeof(f32) * 6;
 
 } // namespace
 
+// Parses an .ocland from memory, dequantising the heights and recomputing the bounds.
 bool parseOcLand(const u8* bytes, usize size, OcLandData& out, std::string* why) {
     Avr1File file;
     if (!parseAvr1(bytes, size, file, why)) return false;
@@ -69,8 +64,6 @@ bool parseOcLand(const u8* bytes, usize size, OcLandData& out, std::string* why)
     const f32 scale    = c.take<f32>();
     if (!c.ok) return fail(why, "LHDR ended early");
 
-    // Validated BEFORE anything is sized off it. `n * n` on an attacker-supplied u32 overflows, and a
-    // reader that reserved first and checked second would have already tried to allocate 16 exabytes.
     if (n < kOcLandMinSamples) return fail(why, "sampleCount below the minimum of 2");
     if (n > kOcLandMaxSamples) return fail(why, "sampleCount above the maximum of 4097");
     if (!(spacing > 0.0f) || !std::isfinite(spacing)) return fail(why, "spacingCm must be positive and finite");
@@ -93,9 +86,6 @@ bool parseOcLand(const u8* bytes, usize size, OcLandData& out, std::string* why)
     out.originCm[2] = origin[2];
     out.heights.resize(count);
 
-    // Decode. `heightCm = origin.z + bias + q/65535 * scale`, so a consumer never meets a quantised
-    // value. The divide is by 65535 and not 65536 because a full-scale 65535 must land exactly on the
-    // maximum -- off by one there and the tallest sample in every file is a fraction low.
     const f32 inv = scale / 65535.0f;
     for (usize i = 0; i < count; ++i) {
         u16 q = 0;
@@ -103,7 +93,6 @@ bool parseOcLand(const u8* bytes, usize size, OcLandData& out, std::string* why)
         out.heights[i] = origin[2] + bias + static_cast<f32>(q) * inv;
     }
 
-    // Bounds RECOMPUTED, never taken from the file. See the header.
     f32 lo = out.heights[0], hi = out.heights[0];
     for (f32 h : out.heights) { if (h < lo) lo = h; if (h > hi) hi = h; }
     out.boundsMin[0] = origin[0];
@@ -115,22 +104,20 @@ bool parseOcLand(const u8* bytes, usize size, OcLandData& out, std::string* why)
     return true;
 }
 
+// Loads an .ocland from disk.
 bool loadOcLand(const std::string& path, OcLandData& out, std::string* why) {
     Avr1File probe;
-    // Loaded through the container's own reader so the CRC and chunk-hash checks happen exactly once,
-    // in the code that owns them, rather than being half-repeated here.
     if (!loadAvr1(path, probe, why)) return false;
     std::vector<u8> bytes;
     if (!writeAvr1(probe, bytes, why)) return false;
     return parseOcLand(bytes.data(), bytes.size(), out, why);
 }
 
+// Encodes a section into AVR1 bytes, quantising the heights to u16 across their own range.
 bool writeOcLand(const OcLandData& in, std::vector<u8>& out, std::string* why) {
     if (!in.valid()) return fail(why, "OcLandData is not internally consistent");
     if (in.sampleCount > kOcLandMaxSamples) return fail(why, "sampleCount above the maximum of 4097");
 
-    // The quantisation range is the terrain's OWN relief, so the step is proportional to what the file
-    // actually contains. Heights are stored relative to origin.z, matching what the reader adds back.
     f32 lo = in.heights[0], hi = in.heights[0];
     for (f32 h : in.heights) {
         if (!std::isfinite(h)) return fail(why, "a height is not finite");
@@ -151,13 +138,9 @@ bool writeOcLand(const OcLandData& in, std::vector<u8>& out, std::string* why) {
     put<f32>(hdr, scale);
 
     std::vector<u8> hgt(in.heights.size() * sizeof(u16));
-    // A FLAT section has zero relief, and dividing by that span would put every sample at infinity.
-    // Encoding it as all-zero is exact: the reader adds bias and gets lo back for every sample.
     const f32 fwd = scale > 0.0f ? 65535.0f / scale : 0.0f;
     for (usize i = 0; i < in.heights.size(); ++i) {
         f32 t = (in.heights[i] - lo) * fwd;
-        // Rounded, not truncated, and clamped: rounding halves the worst-case error, and floating
-        // point can put the maximum a hair over 65535.
         if (t < 0.0f) t = 0.0f;
         if (t > 65535.0f) t = 65535.0f;
         const u16 q = static_cast<u16>(t + 0.5f);
@@ -166,15 +149,12 @@ bool writeOcLand(const OcLandData& in, std::vector<u8>& out, std::string* why) {
 
     Avr1File file;
     file.subtype = kAvrSubtypeLand;
-    // LHDR is the only Required chunk. Everything else this format may ever gain is additive, so an
-    // older reader meeting a newer file skips what it does not know and still produces a surface.
     file.add(kOcLandChunkHeader, std::move(hdr), kAvrChunkRequired);
-    // GpuUploadable so the container aligns the payload for a straight upload: a heightfield is the
-    // one chunk here big enough for that to matter.
     file.add(kOcLandChunkHeights, std::move(hgt), kAvrChunkGpuUploadable);
     return writeAvr1(file, out, why);
 }
 
+// Writes a section to disk.
 bool saveOcLand(const std::string& path, const OcLandData& in, std::string* why) {
     std::vector<u8> bytes;
     if (!writeOcLand(in, bytes, why)) return false;

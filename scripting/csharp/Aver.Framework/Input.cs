@@ -1,9 +1,10 @@
-using Aver.Scene;   // Vec3
+// Polled keyboard and mouse for gameplay, plus the key code enum.
+
+using Aver.Scene;
 
 namespace Aver.Framework;
 
-/// <summary>Keyboard/mouse codes, matching the framework's AVER_FW_KEY_* enum. A..Z = 0..25, D0..D9 =
-/// 26..35, then the named keys and mouse buttons.</summary>
+/// <summary>Keyboard and mouse codes. Matches the framework's AVER_FW_KEY_* enum.</summary>
 public enum Key
 {
     A = 0, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
@@ -12,12 +13,7 @@ public enum Key
     Left, Right, Up, Down, MouseLeft, MouseRight, MouseMiddle,
 }
 
-/// <summary>
-/// Polled keyboard and mouse, in the Unity idiom. The app pushes the frame's raw device state into the
-/// framework each tick (only when the game — not an editor text field — has focus); gameplay reads it here.
-/// State is per-frame: <see cref="GetKeyDown"/>/<see cref="GetKeyUp"/> are edges (this frame only), and the
-/// mouse deltas are this frame's movement. Read it from OnTick.
-/// </summary>
+/// <summary>Polled keyboard and mouse. State is per-frame; read it from OnTick.</summary>
 public static class Input
 {
     [ThreadStatic] private static float[]? s_mouse;
@@ -41,8 +37,7 @@ public static class Input
     /// <summary>This frame's mouse wheel notches.</summary>
     public static float MouseWheel { get { Fw.aver_fw_input_mouse(MouseBuf); return MouseBuf[2]; } }
 
-    /// <summary>WASD / arrow keys as a movement vector: X = forward (W/Up minus S/Down), Y = right
-    /// (D/Right minus A/Left), Z = 0. Not normalised — a diagonal is longer, so normalise if that matters.</summary>
+    /// <summary>WASD / arrows as a movement vector: X = forward, Y = right, Z = 0. Not normalised.</summary>
     public static Vec3 MoveAxis
     {
         get

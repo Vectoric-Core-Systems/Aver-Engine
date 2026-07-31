@@ -1,8 +1,5 @@
-// Aver.Physics — Jolt behind the engine's plain-C ABI.
-//
-// Everything Jolt-shaped is confined to this file and Convert.hpp. Callers work in centimetres on
-// left-handed +Z-up axes and never see a JPH:: type, which is what allows the physics backend to be
-// a decision rather than a dependency of the gameplay layer.
+// Aver.Physics — Jolt behind the engine's plain-C ABI. Everything Jolt-shaped is confined to this
+// file and Convert.hpp.
 #include "aver/physics/physics_abi.h"
 #include "Convert.hpp"   // src-local: it speaks Jolt, and Jolt is PRIVATE to this module
 
@@ -47,8 +44,7 @@ using namespace aver::physics;
 namespace {
 
 // ---- Layers ---------------------------------------------------------------------------------------
-// Two object layers is the whole scheme: things that never move, and things that do. Static bodies
-// are not tested against each other, which is most of what a broad-phase layer split buys.
+// Two object layers: things that never move, and things that do.
 namespace Layers {
 static constexpr JPH::ObjectLayer NON_MOVING = 0;
 static constexpr JPH::ObjectLayer MOVING     = 1;
@@ -60,8 +56,10 @@ static constexpr JPH::BroadPhaseLayer MOVING(1);
 static constexpr JPH::uint            NUM = 2;
 }
 
+// Maps each object layer onto its broad-phase layer.
 class BPLayerInterface final : public JPH::BroadPhaseLayerInterface {
 public:
+    // Builds the object-layer to broad-phase-layer table.
     BPLayerInterface() {
         m_[Layers::NON_MOVING] = BroadPhaseLayers::NON_MOVING;
         m_[Layers::MOVING]     = BroadPhaseLayers::MOVING;
@@ -77,23 +75,25 @@ private:
     JPH::BroadPhaseLayer m_[Layers::NUM];
 };
 
+// Decides which object layers are tested against which broad-phase layers.
 class ObjectVsBroadPhaseFilter final : public JPH::ObjectVsBroadPhaseLayerFilter {
 public:
+    // Static geometry only needs testing against things that move.
     bool ShouldCollide(JPH::ObjectLayer a, JPH::BroadPhaseLayer b) const override {
-        // Static geometry only needs testing against things that move.
         return a != Layers::NON_MOVING || b == BroadPhaseLayers::MOVING;
     }
 };
 
+// Decides which object layers collide with each other.
 class ObjectLayerPairFilter final : public JPH::ObjectLayerPairFilter {
 public:
+    // Static geometry is not tested against static geometry.
     bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override {
         return a != Layers::NON_MOVING || b == Layers::MOVING;
     }
 };
 
-// Route Jolt's diagnostics into the engine log rather than stdout, which nothing in a windowed
-// process reads.
+// Routes Jolt's diagnostics into the engine log.
 void traceImpl(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
@@ -104,6 +104,7 @@ void traceImpl(const char* fmt, ...) {
 }
 
 #ifdef JPH_ENABLE_ASSERTS
+// Logs a Jolt assertion and asks it to break into the debugger.
 bool assertFailedImpl(const char* expr, const char* msg, const char* file, JPH::uint line) {
     AVER_ERROR("[Physics] assert: {}:{} ({}) {}", file, line, expr, msg ? msg : "");
     return true;   // break into the debugger
@@ -111,12 +112,15 @@ bool assertFailedImpl(const char* expr, const char* msg, const char* file, JPH::
 #endif
 
 // ---- Events ---------------------------------------------------------------------------------------
-// What the listener records during a step, for the game to drain afterwards.
+
+// Two solid bodies that began touching, and where.
 struct ContactEvent { int32_t a = 0, b = 0; Vec3 point, normal; };
+// A body entering or leaving a sensor volume.
 struct OverlapEvent { int32_t sensor = 0, body = 0; int32_t entered = 0; };
 
 // ---- The world ------------------------------------------------------------------------------------
 
+// The whole simulation: Jolt's system, the handle tables, and the event queues.
 struct World {
     JPH::PhysicsSystem                       system;
     BPLayerInterface                         bpLayers;
@@ -125,22 +129,15 @@ struct World {
     std::unique_ptr<JPH::TempAllocatorImpl>  temp;
     std::unique_ptr<JPH::JobSystemThreadPool> jobs;
 
-    // Handles are dense int32 starting at 1, because 0 must stay invalid. Jolt's own BodyID is a
-    // packed index+generation that would satisfy that too, but exposing it would leak a Jolt type
-    // through an ABI whose entire point is that it does not.
+    // Handles are dense int32 starting at 1, because 0 must stay invalid.
     std::unordered_map<int32_t, JPH::BodyID> bodies;
     std::unordered_map<int32_t, JPH::Ref<JPH::CharacterVirtual>> characters;
     int32_t nextHandle = 1;
 
-    // Reverse lookup, so a contact reported as two BodyIDs can be handed back as the handles the
-    // caller actually knows. Kept in step with `bodies` on every add and remove.
-    std::unordered_map<JPH::BodyID, int32_t> byId;
-    // Which handles are sensors, so an overlap can be reported with the sensor named first however
-    // Jolt happened to order the pair.
-    std::unordered_map<int32_t, bool> sensors;
+    std::unordered_map<JPH::BodyID, int32_t> byId;   // reverse of `bodies`
+    std::unordered_map<int32_t, bool> sensors;       // which handles are sensors
 
-    // Event queues, written from Jolt's worker threads under the mutex and drained by the caller
-    // between steps. See the ABI header for why this is polled rather than called back.
+    // Written from Jolt's worker threads under the mutex, drained by the caller between steps.
     std::mutex                 eventMutex;
     std::vector<ContactEvent>  contacts;
     std::vector<OverlapEvent>  overlaps;
@@ -152,13 +149,10 @@ struct World {
 std::unique_ptr<World> g_world;
 
 // Records contacts and sensor overlaps as Jolt finds them.
-//
-// Every method here runs on a PHYSICS WORKER THREAD, possibly several at once, which is the entire
-// reason this records rather than dispatches: the only thing safe to do from here is append under a
-// lock. Anything that touched gameplay state, allocated through the managed heap, or called back
-// across the ABI would be doing it from a thread the CLR has never seen, in the middle of a step.
+// Every method here runs on a PHYSICS WORKER THREAD, possibly several at once.
 class EventListener final : public JPH::ContactListener {
 public:
+    // Appends a contact, or a sensor-enter overlap when either body is a sensor.
     void OnContactAdded(const JPH::Body& a, const JPH::Body& b,
                         const JPH::ContactManifold& manifold, JPH::ContactSettings&) override {
         if (!g_world) return;
@@ -173,23 +167,18 @@ public:
         }
         ContactEvent e;
         e.a = ha; e.b = hb;
-        // The manifold's base point, in engine space. One point per contact is what gameplay wants
-        // ("where did it hit"); the full manifold is a solver detail.
         e.point  = fromJolt(manifold.GetWorldSpaceContactPointOn1(0));
-        // fromJoltUnit, not fromJoltDir: the direction converters SCALE metres to centimetres, so a
-        // unit normal put through one comes back a hundred times too long. The raycast normal uses
-        // the same converter for the same reason.
+        // fromJoltUnit, not fromJoltDir: a unit normal must not be scaled.
         e.normal = fromJoltUnit(manifold.mWorldSpaceNormal);
         g_world->contacts.push_back(e);
     }
 
+    // Appends a sensor-exit overlap. Two solid bodies ceasing to touch is not reported.
     void OnContactRemoved(const JPH::SubShapeIDPair& pair) override {
         if (!g_world) return;
         const int32_t ha = handleOf(pair.GetBody1ID()), hb = handleOf(pair.GetBody2ID());
         if (!ha || !hb) return;
         std::lock_guard<std::mutex> lock(g_world->eventMutex);
-        // A removal is only interesting for SENSORS, where it is the "left the volume" edge. For two
-        // solid bodies, ceasing to touch is not an event gameplay has asked for.
         const auto sa = g_world->sensors.find(ha), sb = g_world->sensors.find(hb);
         const bool aIsSensor = sa != g_world->sensors.end() && sa->second;
         const bool bIsSensor = sb != g_world->sensors.end() && sb->second;
@@ -198,6 +187,7 @@ public:
     }
 
 private:
+    // Our handle for a Jolt body id, or 0.
     static int32_t handleOf(const JPH::BodyID& id) {
         const auto it = g_world->byId.find(id);
         return it == g_world->byId.end() ? 0 : it->second;
@@ -206,18 +196,17 @@ private:
 
 EventListener g_listener;
 
-// Jolt's global registration is process-wide, not per-world, so it is done once and never undone
-// while the process might still create another world.
+// Jolt's global registration is process-wide, not per-world, so it is done once and never undone.
 bool g_joltStarted = false;
 
+// Jolt's body interface for the live world.
 JPH::BodyInterface& bi() { return g_world->system.GetBodyInterface(); }
 
+// Creates a body from a shape, registers it in both handle tables, and returns its handle.
 int32_t addBody(const JPH::Shape* shape, const Vec3& centreCm, bool dynamic, float massKg,
                 bool sensor = false) {
     if (!g_world) return 0;
-    // A sensor sits in the MOVING layer even though it never moves: the layer pair filter skips
-    // NON_MOVING against NON_MOVING, so a static-layer sensor would never be told about the static
-    // world -- and, more to the point, a trigger that only notices moving things is what is wanted.
+    // A sensor sits in the MOVING layer even though it never moves, so it is told about the world.
     JPH::BodyCreationSettings s(shape, toJolt(centreCm), JPH::Quat::sIdentity(),
                                 dynamic ? JPH::EMotionType::Dynamic : JPH::EMotionType::Static,
                                 (dynamic || sensor) ? Layers::MOVING : Layers::NON_MOVING);
@@ -231,23 +220,26 @@ int32_t addBody(const JPH::Shape* shape, const Vec3& centreCm, bool dynamic, flo
     bi().AddBody(body->GetID(), dynamic ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
     const int32_t h = g_world->nextHandle++;
     g_world->bodies.emplace(h, body->GetID());
-    g_world->byId.emplace(body->GetID(), h);   // the contact listener maps back through this
+    g_world->byId.emplace(body->GetID(), h);
     if (sensor) g_world->sensors.emplace(h, true);
     return h;
 }
 
+// The Jolt body id behind a handle, or nullptr.
 const JPH::BodyID* findBody(int32_t h) {
     if (!g_world) return nullptr;
     auto it = g_world->bodies.find(h);
     return it == g_world->bodies.end() ? nullptr : &it->second;
 }
 
+// The character behind a handle, or nullptr.
 JPH::CharacterVirtual* findCharacter(int32_t h) {
     if (!g_world) return nullptr;
     auto it = g_world->characters.find(h);
     return it == g_world->characters.end() ? nullptr : it->second.GetPtr();
 }
 
+// Writes a vector into a caller-owned float[3].
 void writeVec(float* out, const Vec3& v) { out[0] = v.x; out[1] = v.y; out[2] = v.z; }
 
 } // namespace
@@ -256,6 +248,7 @@ void writeVec(float* out, const Vec3& v) { out[0] = v.x; out[1] = v.y; out[2] = 
 
 extern "C" {
 
+// Starts Jolt (once per process) and creates the world. Idempotent.
 int32_t aver_phys_init(void) {
     if (g_world) return 1;
 
@@ -269,8 +262,7 @@ int32_t aver_phys_init(void) {
     }
 
     g_world = std::make_unique<World>();
-    // 10 MB scratch for a frame's contacts, and one worker per core bar the main thread and one
-    // spare -- the same shape as the engine's other pools, so physics does not starve rendering.
+    // 10 MB scratch for a frame's contacts, and one worker per core bar the main thread and one spare.
     g_world->temp = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024);
     const int workers = static_cast<int>(std::thread::hardware_concurrency()) - 2;
     g_world->jobs = std::make_unique<JPH::JobSystemThreadPool>(
@@ -279,8 +271,7 @@ int32_t aver_phys_init(void) {
     g_world->system.Init(4096, 0, 8192, 2048,
                          g_world->bpLayers, g_world->objVsBp, g_world->objPair);
     g_world->system.SetContactListener(&g_listener);
-    // One g downward on the engine's up axis. Set through the converter rather than written as a
-    // Jolt vector, so the sign convention has exactly one definition.
+    // One g downward on the engine's up axis.
     g_world->system.SetGravity(toJoltDir(Vec3(0.0f, 0.0f, -980.0f)));
     AVER_INFO("[Physics] Jolt {}.{}.{} started ({} worker threads, {:.4f}s fixed step)",
               JPH_VERSION_MAJOR, JPH_VERSION_MINOR, JPH_VERSION_PATCH,
@@ -288,6 +279,7 @@ int32_t aver_phys_init(void) {
     return 1;
 }
 
+// Destroys every character and body, unhooks the listener, and drops the world.
 void aver_phys_shutdown(void) {
     if (!g_world) return;
     // Characters hold refs into the system; drop them before the system goes.
@@ -296,33 +288,33 @@ void aver_phys_shutdown(void) {
     g_world->bodies.clear();
     g_world->byId.clear();
     g_world->sensors.clear();
-    // Unhook the listener before the system goes: it holds a pointer to a file-scope object that
-    // outlives the world, and a step in flight must not find it half torn down.
     g_world->system.SetContactListener(nullptr);
     g_world.reset();
     AVER_INFO("[Physics] stopped");
 }
 
+// 1 while a world exists.
 int32_t aver_phys_ready(void) { return g_world ? 1 : 0; }
 
+// Sets gravity in cm/s^2 on engine axes.
 void aver_phys_set_gravity(float x, float y, float z) {
     if (g_world) g_world->system.SetGravity(toJoltDir(Vec3(x, y, z)));
 }
 
+// The fixed step in seconds.
 float aver_phys_fixed_step(void) { return g_world ? g_world->fixedStep : 1.0f / 60.0f; }
 
+// Changes the fixed step. Rejects anything outside (0, 0.5] seconds.
 int32_t aver_phys_set_fixed_step(float seconds) {
     if (!g_world || seconds <= 0.0f || seconds > 0.5f) return 0;
     g_world->fixedStep = seconds;
     return 1;
 }
 
+// Advances the simulation in fixed steps, clamping catch-up. Returns how many steps ran.
 int32_t aver_phys_step(float dt) {
     if (!g_world || dt <= 0.0f) return 0;
-    // Clamp the CATCH-UP, not the frame: a 5-second stall (a breakpoint, a shader compile) must not
-    // become 300 steps of simulation that look like the world exploded.
-    // Clear last call's events before anything can append to them, so what the caller drains after
-    // this returns describes exactly the steps this call ran -- and never a mix of two frames.
+    // Clear last call's events first, so what the caller drains describes only the steps run here.
     {
         std::lock_guard<std::mutex> lock(g_world->eventMutex);
         g_world->contacts.clear();
@@ -336,21 +328,15 @@ int32_t aver_phys_step(float dt) {
     while (g_world->accumulator >= g_world->fixedStep) {
         g_world->accumulator -= g_world->fixedStep;
         // Characters are integrated before the solver so their swept motion sees this step's world.
+        // CharacterVirtual does not integrate gravity itself, so only the vertical component of its
+        // velocity is managed here; the horizontal part belongs to whoever is driving it.
         for (auto& [h, ch] : g_world->characters) {
-            // CharacterVirtual does NOT integrate gravity itself -- it is a swept shape, not a rigid
-            // body, and its velocity is whatever the caller last set. Without this a character hangs
-            // in the air at its spawn height, which is exactly what PhysicsTest caught.
-            //
-            // Only the VERTICAL component is touched: horizontal velocity belongs to whoever is
-            // driving the character, and stamping on it here would make input feel like ice.
             const JPH::Vec3 up = ch->GetUp();
             JPH::Vec3 v = ch->GetLinearVelocity();
             const float vUp = v.Dot(up);
             const bool grounded = ch->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
             if (grounded && vUp <= 0.0f) {
-                // Supported: cancel the downward part instead of letting it accumulate, or a
-                // character standing still builds up a huge sink velocity that fires the moment it
-                // steps off a ledge.
+                // Supported: cancel the downward part instead of letting it accumulate.
                 v -= up * vUp;
             } else {
                 // Airborne, or moving upward under a jump: fall normally.
@@ -372,10 +358,10 @@ int32_t aver_phys_step(float dt) {
     return steps;
 }
 
+// Adds a box that never moves. Returns its handle, or 0.
 int32_t aver_phys_add_static_box(float cx, float cy, float cz, float hx, float hy, float hz) {
     if (!g_world) return 0;
-    // Half-extents are a SIZE, so the axis permutation applies but the sign flip is irrelevant --
-    // take absolutes so a mirrored extent cannot produce a degenerate shape Jolt will reject.
+    // Half-extents are a SIZE: the axis permutation applies but the sign flip does not.
     const Vec3 he = fromJoltUnit(toJoltUnit(Vec3(hx, hy, hz)));
     JPH::BoxShapeSettings shape(JPH::Vec3(std::abs(cmToM(he.y)), std::abs(cmToM(he.z)), std::abs(cmToM(he.x))));
     shape.SetEmbedded();
@@ -384,6 +370,7 @@ int32_t aver_phys_add_static_box(float cx, float cy, float cz, float hx, float h
     return addBody(res.Get(), Vec3(cx, cy, cz), false, 0.0f);
 }
 
+// Adds a box that falls and collides. Returns its handle, or 0.
 int32_t aver_phys_add_dynamic_box(float cx, float cy, float cz,
                                   float hx, float hy, float hz, float massKg) {
     if (!g_world) return 0;
@@ -394,6 +381,7 @@ int32_t aver_phys_add_dynamic_box(float cx, float cy, float cz,
     return addBody(res.Get(), Vec3(cx, cy, cz), true, massKg);
 }
 
+// Adds a sphere that falls and collides. Returns its handle, or 0.
 int32_t aver_phys_add_dynamic_sphere(float cx, float cy, float cz, float radius, float massKg) {
     if (!g_world) return 0;
     JPH::SphereShapeSettings shape(cmToM(radius));
@@ -403,20 +391,19 @@ int32_t aver_phys_add_dynamic_sphere(float cx, float cy, float cz, float radius,
     return addBody(res.Get(), Vec3(cx, cy, cz), true, massKg);
 }
 
+// Removes and destroys a body, and drops it from every handle table.
 int32_t aver_phys_remove_body(int32_t body) {
     const JPH::BodyID* id = findBody(body);
     if (!id) return 0;
     bi().RemoveBody(*id);
     bi().DestroyBody(*id);
-    // Every index that names this body has to go with it. Leaving byId behind would let a contact
-    // reported against a RECYCLED BodyID resolve to the dead handle -- a stale-handle bug that only
-    // appears once Jolt reuses the slot, which is exactly the kind that survives testing.
     g_world->byId.erase(*id);
     g_world->sensors.erase(body);
     g_world->bodies.erase(body);
     return 1;
 }
 
+// Writes a body's centre-of-mass position into outXyz.
 int32_t aver_phys_body_position(int32_t body, float* outXyz) {
     const JPH::BodyID* id = findBody(body);
     if (!id || !outXyz) return 0;
@@ -424,6 +411,7 @@ int32_t aver_phys_body_position(int32_t body, float* outXyz) {
     return 1;
 }
 
+// Writes a body's rotation into outQuat as xyzw.
 int32_t aver_phys_body_rotation(int32_t body, float* outQuat) {
     const JPH::BodyID* id = findBody(body);
     if (!id || !outQuat) return 0;
@@ -432,6 +420,7 @@ int32_t aver_phys_body_rotation(int32_t body, float* outQuat) {
     return 1;
 }
 
+// Writes a body's linear velocity into outXyz.
 int32_t aver_phys_body_velocity(int32_t body, float* outXyz) {
     const JPH::BodyID* id = findBody(body);
     if (!id || !outXyz) return 0;
@@ -439,6 +428,7 @@ int32_t aver_phys_body_velocity(int32_t body, float* outXyz) {
     return 1;
 }
 
+// Teleports a body and wakes it.
 int32_t aver_phys_body_set_position(int32_t body, float x, float y, float z) {
     const JPH::BodyID* id = findBody(body);
     if (!id) return 0;
@@ -446,6 +436,7 @@ int32_t aver_phys_body_set_position(int32_t body, float x, float y, float z) {
     return 1;
 }
 
+// Sets a body's linear velocity.
 int32_t aver_phys_body_set_velocity(int32_t body, float x, float y, float z) {
     const JPH::BodyID* id = findBody(body);
     if (!id) return 0;
@@ -453,12 +444,13 @@ int32_t aver_phys_body_set_velocity(int32_t body, float x, float y, float z) {
     return 1;
 }
 
+// How many bodies are live.
 int32_t aver_phys_body_count(void) { return g_world ? static_cast<int32_t>(g_world->bodies.size()) : 0; }
 
+// Creates a character capsule. `height` is the TOTAL height including both caps. 0 if too short.
 int32_t aver_phys_character_create(float radius, float height, float x, float y, float z) {
     if (!g_world) return 0;
-    // Jolt's capsule is described by the HALF height of its cylinder, so the caps have to come out of
-    // the total first. A total shorter than its own diameter is not a capsule.
+    // Jolt's capsule is described by the HALF height of its cylinder, so the caps come out first.
     const float rM = cmToM(radius);
     const float halfCyl = cmToM(height) * 0.5f - rM;
     if (halfCyl <= 0.0f) {
@@ -483,12 +475,14 @@ int32_t aver_phys_character_create(float radius, float height, float x, float y,
     return h;
 }
 
+// Destroys a character.
 int32_t aver_phys_character_destroy(int32_t ch) {
     if (!g_world || !g_world->characters.count(ch)) return 0;
     g_world->characters.erase(ch);
     return 1;
 }
 
+// Sets the velocity a character wants, cm/s on engine axes.
 int32_t aver_phys_character_set_velocity(int32_t ch, float vx, float vy, float vz) {
     JPH::CharacterVirtual* c = findCharacter(ch);
     if (!c) return 0;
@@ -496,6 +490,7 @@ int32_t aver_phys_character_set_velocity(int32_t ch, float vx, float vy, float v
     return 1;
 }
 
+// Writes a character's velocity into outXyz.
 int32_t aver_phys_character_velocity(int32_t ch, float* outXyz) {
     JPH::CharacterVirtual* c = findCharacter(ch);
     if (!c || !outXyz) return 0;
@@ -503,6 +498,7 @@ int32_t aver_phys_character_velocity(int32_t ch, float* outXyz) {
     return 1;
 }
 
+// Writes a character's position into outXyz.
 int32_t aver_phys_character_position(int32_t ch, float* outXyz) {
     JPH::CharacterVirtual* c = findCharacter(ch);
     if (!c || !outXyz) return 0;
@@ -510,6 +506,7 @@ int32_t aver_phys_character_position(int32_t ch, float* outXyz) {
     return 1;
 }
 
+// Teleports a character.
 int32_t aver_phys_character_set_position(int32_t ch, float x, float y, float z) {
     JPH::CharacterVirtual* c = findCharacter(ch);
     if (!c) return 0;
@@ -517,12 +514,14 @@ int32_t aver_phys_character_set_position(int32_t ch, float x, float y, float z) 
     return 1;
 }
 
+// 1 while a character is standing on ground steep enough to hold.
 int32_t aver_phys_character_grounded(int32_t ch) {
     JPH::CharacterVirtual* c = findCharacter(ch);
     if (!c) return 0;
     return c->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround ? 1 : 0;
 }
 
+// Casts a ray and returns the hit body handle, or 0 for a miss. Outputs are written only on a hit.
 int32_t aver_phys_raycast(float ox, float oy, float oz, float dx, float dy, float dz,
                           float maxDistCm, float* outPoint, float* outNormal) {
     if (!g_world) return 0;
@@ -536,8 +535,6 @@ int32_t aver_phys_raycast(float ox, float oy, float oz, float dx, float dy, floa
     JPH::RayCastResult hit;
     if (!g_world->system.GetNarrowPhaseQuery().CastRay(ray, hit)) return 0;
 
-    // Map the hit body back to OUR handle. Linear, but a raycast that hits is rare compared with the
-    // bodies it could have hit, and a second index would be another thing to keep in step.
     int32_t handle = 0;
     for (const auto& [h, id] : g_world->bodies) if (id == hit.mBodyID) { handle = h; break; }
 
@@ -557,6 +554,7 @@ int32_t aver_phys_raycast(float ox, float oy, float oz, float dx, float dy, floa
 
 // ---- Arbitrary collision geometry ------------------------------------------------------------------
 
+// Adds a convex hull wrapped around `count` points. Returns its handle, or 0.
 int32_t aver_phys_add_convex_hull(const float* pts, int32_t count, float cx, float cy, float cz,
                                   int32_t dynamic, float massKg) {
     if (!g_world || !pts || count < 4) return 0;   // fewer than four points has no volume
@@ -572,6 +570,7 @@ int32_t aver_phys_add_convex_hull(const float* pts, int32_t count, float cx, flo
     return addBody(res.Get(), Vec3(cx, cy, cz), dynamic != 0, massKg);
 }
 
+// Adds a static triangle mesh, skipping triangles with out-of-range indices. Returns its handle, or 0.
 int32_t aver_phys_add_mesh(const float* verts, int32_t vertexCount,
                            const int32_t* indices, int32_t indexCount,
                            float cx, float cy, float cz) {
@@ -596,10 +595,7 @@ int32_t aver_phys_add_mesh(const float* verts, int32_t vertexCount,
             AVER_WARN("[Physics] mesh: index out of range, triangle skipped");
             continue;
         }
-        // WINDING IS REVERSED. The axis map that takes the engine's left-handed space to Jolt's
-        // right-handed one has determinant -1, which mirrors the mesh -- so a triangle that faced
-        // outwards now faces in, and a mesh whose normals point inwards collides on the wrong side.
-        // Swapping two indices puts the winding back.
+        // Winding is reversed: the axis map has determinant -1, which mirrors the mesh.
         tris.push_back(JPH::IndexedTriangle(a, c, b));
     }
     if (tris.empty()) { AVER_WARN("[Physics] mesh: no usable triangles"); return 0; }
@@ -608,28 +604,16 @@ int32_t aver_phys_add_mesh(const float* verts, int32_t vertexCount,
     s.SetEmbedded();
     auto res = s.Create();
     if (res.HasError()) { AVER_WARN("[Physics] mesh: {}", res.GetError().c_str()); return 0; }
-    // Static only: a mesh has no interior, so nothing can resolve a penetration against it. Jolt
-    // rejects a dynamic one outright, and this is the clearer place to say why.
+    // Static only: a mesh has no interior, so nothing can resolve a penetration against it.
     return addBody(res.Get(), Vec3(cx, cy, cz), /*dynamic*/false, 0.0f);
 }
 
+// Adds a static heightfield from a row-major sampleCount x sampleCount grid. Returns its handle, or 0.
 int32_t aver_phys_add_heightfield(const float* samples, int32_t sampleCount, float spacingCm,
                                   float cx, float cy, float cz) {
     if (!g_world || !samples || sampleCount < 2 || spacingCm <= 0.0f) return 0;
-    // EVERY sample is passed through. This used to crop to a multiple of 8 on the belief that "Jolt
-    // requires the sample count to be a multiple of its block size", and that belief was wrong in the
-    // direction that loses data:
-    //
-    //   * HeightFieldShape.cpp:441 rounds the count UP to a block multiple, not down --
-    //     `mSampleCount(((mSampleCount + mBlockSize - 1) / mBlockSize) * mBlockSize)`.
-    //   * The quantise loop at :531-558 indexes only `inSettings.mSampleCount` in the CALLER's array
-    //     and pads the rounded-up remainder itself with `cNoCollisionValue16`, under its own comments
-    //     "Pad remaining columns with no collision" / "Pad remaining rows with no collision".
-    //
-    // So there was never a read past the end to protect against, and the crop silently threw away the
-    // caller's last rows and columns -- a 9x9 field became 8x8, and a 1025x1025 one lost exactly the
-    // shared edge that makes adjacent chunks meet. A collision surface smaller than the one asked for
-    // is the kind of defect that shows up as a character falling through a seam, a long way from here.
+    // Every sample is passed through: Jolt rounds the count UP to a block multiple and pads the
+    // remainder itself with no-collision.
     const int32_t n = sampleCount;
 
     JPH::Array<float> heights;
@@ -638,8 +622,7 @@ int32_t aver_phys_add_heightfield(const float* samples, int32_t sampleCount, flo
         for (int32_t x = 0; x < n; ++x)
             heights.push_back(cmToM(samples[static_cast<size_t>(y) * sampleCount + x]));
 
-    // A heightfield is Y-up in Jolt's own axes by construction, so it is built directly there rather
-    // than through the axis map -- the grid's rows are already a horizontal plane.
+    // Built directly in Jolt's Y-up axes rather than through the axis map.
     JPH::HeightFieldShapeSettings s(heights.data(), JPH::Vec3::sZero(),
                                     JPH::Vec3(cmToM(spacingCm), 1.0f, cmToM(spacingCm)),
                                     static_cast<JPH::uint32>(n));
@@ -651,11 +634,10 @@ int32_t aver_phys_add_heightfield(const float* samples, int32_t sampleCount, flo
 
 // ---- Sensors --------------------------------------------------------------------------------------
 
+// Adds a box-shaped trigger volume. Returns its handle, or 0.
 int32_t aver_phys_add_sensor_box(float cx, float cy, float cz, float hx, float hy, float hz) {
     if (!g_world) return 0;
-    // Same permutation and the same absolutes as aver_phys_add_static_box: half-extents are a SIZE,
-    // so the axis map applies but the sign flip does not, and a mirrored extent would otherwise make
-    // a degenerate shape Jolt rejects.
+    // Half-extents are a SIZE: the axis map applies but the sign flip does not.
     const Vec3 he = fromJoltUnit(toJoltUnit(Vec3(hx, hy, hz)));
     JPH::BoxShapeSettings box(JPH::Vec3(std::abs(cmToM(he.y)), std::abs(cmToM(he.z)), std::abs(cmToM(he.x))));
     box.SetEmbedded();
@@ -664,6 +646,7 @@ int32_t aver_phys_add_sensor_box(float cx, float cy, float cz, float hx, float h
     return addBody(res.Get(), Vec3(cx, cy, cz), /*dynamic*/false, 0.0f, /*sensor*/true);
 }
 
+// Adds a sphere-shaped trigger volume. Returns its handle, or 0.
 int32_t aver_phys_add_sensor_sphere(float cx, float cy, float cz, float radius) {
     if (!g_world || radius <= 0.0f) return 0;
     JPH::SphereShapeSettings sph(cmToM(radius));
@@ -675,12 +658,14 @@ int32_t aver_phys_add_sensor_sphere(float cx, float cy, float cz, float radius) 
 
 // ---- Event queues ---------------------------------------------------------------------------------
 
+// How many contacts began this step.
 int32_t aver_phys_contact_count(void) {
     if (!g_world) return 0;
     std::lock_guard<std::mutex> lock(g_world->eventMutex);
     return static_cast<int32_t>(g_world->contacts.size());
 }
 
+// Reads one contact. 0 for an out-of-range index.
 int32_t aver_phys_contact_get(int32_t index, int32_t* outA, int32_t* outB,
                               float* outPoint, float* outNormal) {
     if (!g_world || index < 0) return 0;
@@ -694,12 +679,14 @@ int32_t aver_phys_contact_get(int32_t index, int32_t* outA, int32_t* outB,
     return 1;
 }
 
+// How many sensor overlaps started or stopped this step.
 int32_t aver_phys_overlap_count(void) {
     if (!g_world) return 0;
     std::lock_guard<std::mutex> lock(g_world->eventMutex);
     return static_cast<int32_t>(g_world->overlaps.size());
 }
 
+// Reads one sensor overlap. 0 for an out-of-range index.
 int32_t aver_phys_overlap_get(int32_t index, int32_t* outSensor, int32_t* outBody, int32_t* outEntered) {
     if (!g_world || index < 0) return 0;
     std::lock_guard<std::mutex> lock(g_world->eventMutex);
@@ -713,6 +700,7 @@ int32_t aver_phys_overlap_get(int32_t index, int32_t* outSensor, int32_t* outBod
 
 // ---- Shape queries --------------------------------------------------------------------------------
 
+// Writes the handles of every body overlapping a sphere. Returns how many were written.
 int32_t aver_phys_overlap_sphere(float x, float y, float z, float radius,
                                  int32_t* outBodies, int32_t maxBodies) {
     if (!g_world || radius <= 0.0f || !outBodies || maxBodies <= 0) return 0;
@@ -727,13 +715,14 @@ int32_t aver_phys_overlap_sphere(float x, float y, float z, float radius,
 
     int32_t n = 0;
     for (const JPH::CollideShapeResult& hit : collector.mHits) {
-        if (n >= maxBodies) break;   // truncated: the caller compares n against maxBodies to notice
+        if (n >= maxBodies) break;   // truncated
         const auto it = g_world->byId.find(hit.mBodyID2);
         if (it != g_world->byId.end()) outBodies[n++] = it->second;
     }
     return n;
 }
 
+// Sweeps a sphere and returns the first body hit, or 0 for a clear sweep.
 int32_t aver_phys_sphere_cast(float ox, float oy, float oz, float dx, float dy, float dz,
                               float maxDistCm, float radius, float* outPoint, float* outNormal) {
     if (!g_world || radius <= 0.0f || maxDistCm <= 0.0f) return 0;

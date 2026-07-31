@@ -1,33 +1,21 @@
 #pragma once
+// The in-process CLR host's public interface.
 #include "aver/core/Types.hpp"
 
 #include <string>
 
 namespace aver::scripting {
 
-// Where the host looks for the two things it needs. Both are directories, not files, so a caller
-// never has to know the bridge assembly's name or the runtimeconfig's.
+// Where the host looks for the bridge and for user scripts. Both are directories.
 struct HostDesc {
-    // Directory holding Aver.Scripting.Bridge.dll + .runtimeconfig.json (and the managed contract
-    // assemblies it depends on). Step 11 stages these in <exe>/Scripting rather than the executable's
-    // own directory, because the managed Aver.Framework/Aver.Scene DLLs would otherwise collide by file
-    // name with the native DLLs beside the exe. nethost.dll is NOT here: it is loaded by bare name and
-    // so must sit next to the executable, which is where CMake stages it.
+    // Directory holding Aver.Scripting.Bridge.dll + .runtimeconfig.json and the managed contract
+    // assemblies. nethost.dll is NOT here: it is loaded by bare name, so it sits beside the exe.
     std::string bridgeDir;
-    // Directory scanned for user script assemblies. May be empty or may not exist: a host with
-    // no scripts is the normal case for the editor and must not be an error.
+    // Directory scanned for user script assemblies. May be empty or may not exist.
     std::string scriptsDir;
 };
 
-// In-process CLR host. One per process in practice — hostfxr will happily hand back an already
-// initialised runtime, but the bridge keeps a single collectible load context and a single
-// behaviour list, so a second ScriptHost would be talking to the first one's state.
-//
-// Posture: this subsystem DECLINES. If the .NET runtime is absent, if nethost or hostfxr cannot
-// be loaded, if the bridge assembly was not staged, or if the contract version disagrees, init()
-// logs once, records a reason and returns false — and the editor runs exactly as it does with no
-// scripting at all. Mirrors VoxiRenderer::init. This is not negotiable: the engine must never
-// fail to start because scripting is unavailable.
+// In-process CLR host. One per process. Declines rather than failing when .NET is unavailable.
 class ScriptHost {
 public:
     ScriptHost();
@@ -35,51 +23,34 @@ public:
     ScriptHost(const ScriptHost&) = delete;
     ScriptHost& operator=(const ScriptHost&) = delete;
 
-    // Starts the runtime, bootstraps the bridge and loads whatever is in `scriptsDir`.
-    // Returns false having logged exactly one line when scripting is unavailable.
+    // Starts the runtime, bootstraps the bridge and loads `scriptsDir`. False when unavailable.
     bool init(const HostDesc& desc);
 
-    // Loads (or re-loads) a directory of script assemblies into the collectible context and
-    // returns the number of live behaviours. Additive: it does NOT replace what is already
-    // loaded, so a caller swapping one set of scripts for another must unloadScripts() first.
-    // Returns -1 when the host is not ready, which is different from a directory with nothing
-    // in it — the editor surfaces the two differently.
+    // Loads a directory of script assemblies additively and returns the live behaviour count.
+    // Returns -1 when the host is not ready, which is distinct from an empty directory.
     i32 loadScripts(const std::string& dir);
 
-    // Drains OnShutdown on every live behaviour and unloads the collectible context, leaving the
-    // runtime up and the bridge bootstrapped. This is the drain half of hot reload; the caller
-    // rebuilds and calls loadScripts() again.
-    //
-    // Returns true when the old context was fully collected. FALSE IS NOT A FAILURE: unloading in
-    // .NET is a request satisfied only once every reference is dropped and a GC has run, so a
-    // false means the old assemblies are still resident, not that anything went wrong. Reloading
-    // works either way — assemblies are loaded from memory streams, so nothing on disk is locked.
+    // Drains OnShutdown and unloads the collectible context, leaving the runtime up.
+    // Returns true when the old context was fully collected; false is not a failure.
     bool unloadScripts();
 
-    // Drives OnUpdate on every live behaviour. Safe (and free) after a declined init.
+    // Drives OnUpdate on every live behaviour.
     void update(f32 dt);
 
-    // ---- HUDs ------------------------------------------------------------------------------
-    //
-    // A HUD is neither a behaviour nor an actor -- no lifecycle, no transform -- so it gets its own
-    // three entries rather than being squeezed into either. All three are safe to call on a host
-    // that is not ready or a bridge that predates them: the count is 0, the name is empty and the
-    // draw is a no-op, which is what lets the editor offer the feature without testing for it.
+    // How many [AverHud] classes the loaded scripts declare.
     i32 hudCount() const;
+    // The HUD's display name.
     std::string hudName(i32 index) const;
-    // Calls the HUD's Draw(dt). The caller is responsible for having set the UI frame's rect first:
-    // a HUD draws into whatever aver_ui_begin_frame last established, and drawing one into the
-    // previous frame's rect is how a preview lands on top of the level.
+    // Calls the HUD's Draw(dt) into whatever rect aver_ui_begin_frame last established.
     bool hudDraw(i32 index, f32 dt);
 
-    // Drives OnShutdown, unloads the collectible context and closes the host context.
-    // Safe after a declined init, and safe called twice.
+    // Drives OnShutdown, unloads the context and closes the host context. Safe called twice.
     void shutdown();
 
     bool ready() const { return ready_; }
     // Behaviours that were discovered, constructed and survived OnStart. Zero is normal.
     i32 behaviourCount() const { return behaviours_; }
-    // Why init() declined, for the editor to surface. Empty once ready.
+    // Why init() declined. Empty once ready.
     const std::string& declineReason() const { return declineReason_; }
 
 private:

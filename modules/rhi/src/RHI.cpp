@@ -1,3 +1,5 @@
+// RHI entry points: backend selection, device creation, the capability clamp, and UI message
+// routing.
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
 
@@ -8,6 +10,7 @@
 
 namespace aver::rhi {
 
+// Human-readable name for a backend.
 const char* backendName(Backend b) {
     switch (b) {
         case Backend::Null:   return "Null";
@@ -31,6 +34,7 @@ IDevice* createVulkanDevice(const DeviceDesc& desc);
 #endif
 } // namespace detail
 
+// Creates one backend, or nullptr when it is not compiled in.
 static IDevice* tryBackend(Backend b, const DeviceDesc& desc) {
     switch (b) {
         case Backend::Null: return detail::createNullDevice(desc);
@@ -56,6 +60,7 @@ static IDevice* tryBackend(Backend b, const DeviceDesc& desc) {
     return nullptr;
 }
 
+// Creates the first backend in the preference order that initialises, falling back to Null.
 IDevice* createDevice(const DeviceDesc& desc) {
     const u32 count = desc.preferredCount < 4 ? desc.preferredCount : 4;
     for (u32 i = 0; i < count; ++i) {
@@ -72,19 +77,21 @@ IDevice* createDevice(const DeviceDesc& desc) {
     return detail::createNullDevice(desc);
 }
 
+// Destroys a device created by createDevice.
 void destroyDevice(IDevice* device) { delete device; }
 
 // ----- Capability clamp ---------------------------------------------------------------------
 namespace {
 CapsOverride g_capsOverride;
 
-// The reported shader model is a two-digit code (51, 60, 65, 66), not a free integer, so an
-// arbitrary ceiling would describe a device that does not exist.
+// True for the two-digit shader-model codes this engine reports.
 bool validShaderModel(u32 sm) { return sm == 51 || sm == 60 || sm == 61 || sm == 65 || sm == 66; }
 }
 
+// The active capability override.
 const CapsOverride& capsOverride() { return g_capsOverride; }
 
+// Parses the --force-caps token list. Returns false and applies nothing on any bad token.
 bool setCapsOverride(const char* list) {
     if (!list || !*list) return true;
     CapsOverride o;
@@ -115,15 +122,13 @@ bool setCapsOverride(const char* list) {
             ok = false;
         }
     }
-    // A typo must not leave a half-applied clamp behind: the run would then quietly test a
-    // different device from the one the command line named, which is the one failure mode this
-    // whole facility exists to avoid.
     if (!ok) return false;
     g_capsOverride = o;
     AVER_INFO("[RHI] capability override active: {}", list);
     return true;
 }
 
+// Applies the active override to a queried device. Monotonically reducing.
 void clampCaps(DeviceCaps& c) {
     const CapsOverride& o = g_capsOverride;
     if (!o.active) return;
@@ -138,14 +143,11 @@ void clampCaps(DeviceCaps& c) {
     if (o.maxResourceBindingTier && c.resourceBindingTier > o.maxResourceBindingTier)
         c.resourceBindingTier = o.maxResourceBindingTier;
     if (o.maxMsaaSamples) {
-        // The mask is a set of sample counts, so clear the bits above the ceiling rather than
-        // just lowering the maximum — a consumer that reads the mask must see the same device.
+        // The mask is a set of sample counts, so bits above the ceiling are cleared, not lowered.
         for (u32 s : {2u, 4u, 8u}) if (s > o.maxMsaaSamples) c.msaaMask &= ~s;
         if (c.maxMsaaSamples > o.maxMsaaSamples) c.maxMsaaSamples = o.maxMsaaSamples;
     }
-    // Without DXC there is no DXIL, so SM 6.x is unreachable whatever the driver reports, and
-    // both SM6-only features go with it. Deriving this here rather than asking the caller to
-    // spell it out keeps the override honest: `no-dxc` alone describes a real machine.
+    // Without DXC there is no DXIL, so SM 6.x and both SM6-only features are unreachable.
     if (!c.dxcAvailable) {
         c.shaderModel = 51;
         c.meshShaderTier = 0;
@@ -153,7 +155,7 @@ void clampCaps(DeviceCaps& c) {
     }
     if (c.shaderModel < 65) { c.meshShaderTier = 0; c.rayTracingTier = 0; }
 
-    // Belt and braces on the one invariant that matters: an override may only ever subtract.
+    // An override may only ever subtract.
     if (c.rayTracingTier > hw.rayTracingTier)             c.rayTracingTier = hw.rayTracingTier;
     if (c.meshShaderTier > hw.meshShaderTier)             c.meshShaderTier = hw.meshShaderTier;
     if (c.shaderModel > hw.shaderModel)                   c.shaderModel = hw.shaderModel;
@@ -166,11 +168,13 @@ void clampCaps(DeviceCaps& c) {
     c.computeShaders     = c.computeShaders && hw.computeShaders;
 }
 
-// UI window-message routing registry (set by whichever backend hosts ImGui).
+// ----- UI window-message routing -------------------------------------------------------------
 namespace {
 UiWndProcFn g_uiWndProc = nullptr;
 }
+// Registers the handler a backend hosting ImGui wants raw window messages sent to.
 void registerUiWndProc(UiWndProcFn fn) { g_uiWndProc = fn; }
+// Forwards one window message to the registered handler. False when there is none.
 bool uiWndProc(void* hwnd, u32 msg, u64 wparam, i64 lparam) {
     return g_uiWndProc ? g_uiWndProc(hwnd, msg, wparam, lparam) : false;
 }

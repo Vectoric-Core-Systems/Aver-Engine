@@ -1,9 +1,5 @@
-// .ocaudio: the container round-trip, and the importer against whatever this machine actually has.
-//
-// The round-trip needs no decoder and no device, so it runs in the headless suite. The IMPORT half
-// needs real files, so it looks for them rather than shipping any -- Windows carries .wav files in
-// C:\Windows\Media, and if the machine has an .mp3 anywhere obvious that path gets exercised too.
-// A missing file is reported as "not exercised", never as a pass.
+// Headless test for the .ocaudio container round-trip, plus the importer against whatever audio
+// files this machine happens to have. A missing file is reported as "not exercised", never a pass.
 #include "aver/formats/OcAudio.hpp"
 #include "aver/formats/Wav.hpp"
 #include "aver/core/Log.hpp"
@@ -18,12 +14,14 @@ using namespace aver;
 static int g_failures = 0;
 static int g_skipped  = 0;
 
+// Logs one assertion and counts the failures.
 static void check(bool cond, const std::string& what) {
     if (cond) { AVER_INFO("  ok    {}", what); return; }
     ++g_failures;
     AVER_ERROR("  FAIL  {}", what);
 }
 
+// Builds interleaved test audio with a different waveform per channel.
 static audio::SoundData makeSound(u32 channels, u32 rate, u32 frames) {
     audio::SoundData d;
     d.channels = channels;
@@ -31,13 +29,12 @@ static audio::SoundData makeSound(u32 channels, u32 rate, u32 frames) {
     d.samples.resize(static_cast<usize>(frames) * channels);
     for (u32 f = 0; f < frames; ++f)
         for (u32 c = 0; c < channels; ++c)
-            // A different waveform per channel, so a writer that interleaves wrongly cannot pass by
-            // producing something that merely has the right length.
             d.samples[f * channels + c] =
                 std::sin(0.01f * static_cast<f32>(f) * static_cast<f32>(c + 1)) * 0.5f;
     return d;
 }
 
+// Runs the suite. An optional argv[1] names a compressed file to import. Returns 0 on success.
 int main(int argc, char** argv) {
     namespace fs = std::filesystem;
     const fs::path tmp = fs::temp_directory_path() / "aver-ocaudio-test";
@@ -62,8 +59,6 @@ int main(int argc, char** argv) {
         check(out.frames() == 5000, "the frame count survives");
         check(out.loopBegin == 1000 && out.loopEnd == 4000, "and so do the loop points");
 
-        // Bit-exact, not approximately. The payload is f32 in and f32 out with nothing in between,
-        // so anything less than exact means a conversion nobody asked for.
         bool exact = out.samples.size() == in.samples.size();
         if (exact)
             for (usize i = 0; i < in.samples.size(); ++i)
@@ -88,8 +83,6 @@ int main(int argc, char** argv) {
         const u8 junk[64] = {};
         check(!fmt::parseOcAudio(junk, sizeof(junk), out, &why), "a buffer of zeroes is not an .ocaudio");
 
-        // A container of the right shape but the WRONG SUBTYPE must be refused rather than read as
-        // audio -- the chunks would be missing and the header would be garbage.
         audio::SoundData ok = makeSound(1, 48000, 100);
         std::vector<u8> good;
         fmt::writeOcAudio(ok, "", good, &why);
@@ -97,7 +90,6 @@ int main(int argc, char** argv) {
         check(fmt::parseAvr1(good.data(), good.size(), f, &why), "the good file parses as a container");
         check(f.subtype == fmt::kAvrSubtypeAudio, "and is marked AUDI");
 
-        // Truncating the payload must be caught by the header/payload cross-check, not read past.
         std::vector<u8> chopped = good;
         chopped.resize(chopped.size() - 64);
         check(!fmt::parseOcAudio(chopped.data(), chopped.size(), out, &why), "a truncated file is refused");
@@ -113,16 +105,12 @@ int main(int argc, char** argv) {
 
         check(fmt::ocAudioPathFor("Content/Sounds/shot.wav") == "Content/Sounds/shot.ocaudio",
               "the output path keeps the stem and swaps the extension");
-        // A dot in a DIRECTORY name is not an extension. Getting this wrong writes the output into a
-        // truncated path, which fails somewhere unrelated.
         check(fmt::ocAudioPathFor("My.Game/Sounds/shot") == "My.Game/Sounds/shot.ocaudio",
               "a dot in a directory name is not treated as an extension");
     }
 
     AVER_INFO("=== importing what this machine has ===");
     {
-        // Windows ships these. Looked for rather than shipped, because a test that carries a media
-        // file is a test that carries somebody's licence with it.
         const char* candidates[] = {
             "C:/Windows/Media/Windows Background.wav",
             "C:/Windows/Media/Windows Notify System Generic.wav",
@@ -144,7 +132,6 @@ int main(int argc, char** argv) {
                 check(d.channels >= 1 && d.sampleRate >= 8000, "with a sane format");
                 check(d.frames() > 0, "and actual audio in it");
 
-                // The whole point of the chain: import once, then load the cooked asset.
                 const fs::path out = tmp / "system.ocaudio";
                 std::string why;
                 check(fmt::saveOcAudio(out.string(), d, found, &why), "and cooks to .ocaudio");
@@ -155,14 +142,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        // The Media Foundation path, exercised only against a file NAMED ON THE COMMAND LINE.
-        //
-        // An earlier version of this went looking through the user's Music and Documents folders for
-        // something compressed. It worked, and it was the wrong thing for a test to do: a suite that
-        // walks personal directories on every run is reading files it was never asked to read, and
-        // it makes the result depend on what happens to be lying about. Naming the file is explicit,
-        // repeatable, and somebody's decision.
-        //
+        // The Media Foundation path, exercised only against a file named on the command line:
         //     OcAudioTest.exe "C:/path/to/something.mp3"
         std::string compressed = argc > 1 ? argv[1] : std::string{};
         if (compressed.empty()) {

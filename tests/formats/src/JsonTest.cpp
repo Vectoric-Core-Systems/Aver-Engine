@@ -1,12 +1,5 @@
-// The JSON reader that the glTF importer stands on.
-//
-// This is the test that has to be thorough, because everything downstream trusts it silently: an
-// importer does not check whether the parser understood a number, it just reads accessor 4 and
-// believes the answer. A parser bug here would surface as a mesh with wrong vertices, several
-// modules away.
-//
-// Separate executable from MeshTest for the same reason MaterialTest is separate: a failure should
-// name the layer that broke.
+// The JSON reader the glTF importer stands on: scalars, escapes, containers, nesting limits and
+// the malformed input it must refuse.
 #include "aver/formats/Json.hpp"
 #include "aver/core/Log.hpp"
 
@@ -17,13 +10,14 @@ using namespace aver;
 
 static int g_failures = 0;
 
+// Logs one assertion and counts the failures.
 static void check(bool cond, const std::string& what) {
     if (cond) { AVER_INFO("  ok    {}", what); return; }
     ++g_failures;
     AVER_ERROR("  FAIL  {}", what);
 }
 
-// Must PARSE, and the caller then asserts on the value.
+// Parses text that must be accepted, and returns the value for the caller to assert on.
 static fmt::JsonValue mustParse(const std::string& text, const std::string& what) {
     fmt::JsonValue v;
     std::string why;
@@ -32,14 +26,14 @@ static fmt::JsonValue mustParse(const std::string& text, const std::string& what
     return v;
 }
 
-// Must be REJECTED. Every one of these is something a broken exporter or a corrupt file produces,
-// and accepting it silently is how bad data gets a foothold.
+// Asserts that text is rejected.
 static void mustReject(const std::string& text, const std::string& what) {
     fmt::JsonValue v;
     std::string why;
     check(!fmt::parseJson(text, v, &why), "rejects " + what);
 }
 
+// Runs every JSON test. Returns 0 when they all pass.
 int main() {
     AVER_INFO("=== scalars ===");
     {
@@ -51,8 +45,6 @@ int main() {
         check(std::fabs(mustParse("3.5", "fraction").asDouble() - 3.5) < 1e-12, "3.5");
         check(std::fabs(mustParse("1e3", "exponent").asDouble() - 1000.0) < 1e-9, "1e3");
         check(std::fabs(mustParse("-2.5e-3", "signed exponent").asDouble() + 0.0025) < 1e-12, "-2.5e-3");
-        // glTF accessor counts and byte offsets exceed 2^24, so a float would start losing integers.
-        // The parser stores a double for exactly this reason.
         check(mustParse("16777217", "large int").asInt() == 16777217, "16777217 survives (a float would not)");
     }
 
@@ -65,10 +57,7 @@ int main() {
         check(mustParse("\"a\\nb\"", "newline").asString() == "a\nb", "\\n");
         check(mustParse("\"a\\/b\"", "solidus").asString() == "a/b", "escaped solidus");
         check(mustParse("\"\\u0041\"", "ascii escape").asString() == "A", "\\u0041 is A");
-        // Two-byte UTF-8: a Blender rig with an accented bone name.
         check(mustParse("\"\\u00e9\"", "latin1 escape").asString() == "\xc3\xa9", "\\u00e9 encodes as two UTF-8 bytes");
-        // A surrogate PAIR is one code point in two escapes. Decoding only the high half emits
-        // invalid UTF-8 that would survive into a filename.
         check(mustParse("\"\\ud83d\\ude00\"", "surrogate pair").asString() == "\xf0\x9f\x98\x80",
               "a surrogate pair decodes to one 4-byte code point");
     }
@@ -91,8 +80,6 @@ int main() {
         check(mustParse("{}", "empty object").size() == 0, "empty object");
         check(mustParse("  { \"a\" : [ 1 , 2 ] } ", "whitespace").isObject(), "whitespace everywhere legal");
 
-        // The chained-access idiom the importer uses. It must be safe on a document that has none
-        // of these, or every read site needs a type check.
         const fmt::JsonValue doc = mustParse("{\"meshes\":[{\"name\":\"Cube\"}]}", "gltf-shaped");
         check(doc["meshes"][0]["name"].asString() == "Cube", "chained access reads");
         check(doc["nope"][3]["deep"].asInt(-1) == -1, "chained access on absent keys yields the fallback");
@@ -136,14 +123,11 @@ int main() {
         mustReject("\"\\udc00\"", "an unpaired low surrogate");
         mustReject("{} {}",       "trailing content after the top-level value");
         mustReject("[1] junk",    "trailing junk");
-        // A raw control byte is how a binary file handed to the text parser announces itself.
         mustReject(std::string("\"a\x01" "b\""), "a raw control character in a string");
     }
 
     AVER_INFO("=== a UTF-8 BOM is tolerated ===");
     {
-        // Not legal JSON, but exporters emit it and every other tool reads it. Refusing would fail
-        // on files that are otherwise perfectly good.
         const std::string bom = "\xEF\xBB\xBF{\"a\":1}";
         check(mustParse(bom, "BOM-prefixed document")["a"].asInt() == 1, "a leading BOM is skipped");
     }

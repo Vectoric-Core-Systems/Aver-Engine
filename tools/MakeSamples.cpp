@@ -1,19 +1,4 @@
-// Synthesise a few short sounds as .wav, so a template project has audio to play and the importer
-// has something real to chew on.
-//
-// SYNTHESISED, NOT SOURCED. A sample downloaded from anywhere carries somebody's licence into
-// whatever repository it lands in, and this tree has already made that call: OcAudioTest ships no
-// media and reports a SKIP rather than a pass, on exactly that reasoning. Generated audio has no
-// licence, is byte-identical on every machine, diffs as source rather than as a blob, and can be
-// retuned by editing a number instead of by finding a different file.
-//
-// It writes .WAV rather than .ocaudio on purpose. The point is to exercise the editor's IMPORT path
-// end to end -- decode, resample-free copy, container write -- and a generator that emitted the
-// engine's own format would test nothing but itself.
-//
-// The synthesis is deliberately plain: noise through a one-pole filter, a decaying sine, an
-// exponential envelope. Nobody should mistake these for finished sound design. They are placeholders
-// that are unmistakably placeholders, which is the honest thing for a template to ship.
+// Synthesises four short placeholder sounds as 16-bit mono .wav, for a template project to play.
 #include "aver/core/Log.hpp"
 #include "aver/core/Types.hpp"
 
@@ -29,18 +14,17 @@ namespace {
 
 constexpr u32 kRate = 44100;
 
-// A tiny deterministic PRNG. std::rand would make the output depend on the C library, and a sample
-// that differs between machines is one nobody can diff or check in with confidence.
+// A tiny xorshift PRNG, so the output is byte-identical on every machine.
 struct Rng {
     u32 s = 0x9E3779B9u;
+    // The next sample.
     f32 next() {   // -1..1
         s ^= s << 13; s ^= s >> 17; s ^= s << 5;
         return static_cast<f32>(static_cast<i32>(s >> 8)) / 8388608.0f - 1.0f;
     }
 };
 
-// 16-bit PCM mono WAV. Written by hand because the whole file is 44 bytes of header and the data:
-// pulling in a library to emit that would be more code than emitting it.
+// Writes mono samples as a 16-bit PCM WAV. False if the file could not be opened.
 bool writeWav(const std::string& path, const std::vector<f32>& mono, u32 rate) {
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) return false;
@@ -62,9 +46,8 @@ bool writeWav(const std::string& path, const std::vector<f32>& mono, u32 rate) {
     return true;
 }
 
+// A gunshot: filtered noise with a fast crack and a slower body.
 std::vector<f32> makeShot() {
-    // A crack and a body: filtered noise with a very fast attack and two decay rates, so it reads as
-    // a report rather than as a burst of static.
     const u32 n = kRate / 4;   // 250 ms
     std::vector<f32> out(n);
     Rng rng;
@@ -74,14 +57,14 @@ std::vector<f32> makeShot() {
         const f32 crack = std::exp(-t * 90.0f);
         const f32 body  = std::exp(-t * 14.0f);
         const f32 white = rng.next();
-        lp += (white - lp) * 0.35f;                 // one-pole low pass: the body
+        lp += (white - lp) * 0.35f;
         out[i] = 0.85f * (white * crack * 0.8f + lp * body * 0.6f);
     }
     return out;
 }
 
+// An impact: a sine that falls in pitch as it decays.
 std::vector<f32> makeImpact() {
-    // A pitched thud: a sine that falls in pitch as it decays, which is what a struck solid does.
     const u32 n = kRate / 5;   // 200 ms
     std::vector<f32> out(n);
     f32 phase = 0.0f;
@@ -94,8 +77,8 @@ std::vector<f32> makeImpact() {
     return out;
 }
 
+// A footstep: a short quiet scuff of band-limited noise.
 std::vector<f32> makeStep() {
-    // A short scuff: band-ish noise, quiet, gone in under a tenth of a second.
     const u32 n = kRate / 12;   // ~83 ms
     std::vector<f32> out(n);
     Rng rng{0x1234567u};
@@ -110,9 +93,8 @@ std::vector<f32> makeStep() {
     return out;
 }
 
+// A success sting: two notes, a rising fifth.
 std::vector<f32> makeCleared() {
-    // Two notes, a rising fifth. The one sound here that is meant to be heard as a statement rather
-    // than as an event.
     const u32 n = kRate * 3 / 4;   // 750 ms
     std::vector<f32> out(n);
     const f32 hzA = 440.0f, hzB = 659.25f;
@@ -130,6 +112,7 @@ std::vector<f32> makeCleared() {
 
 } // namespace
 
+// Writes every sample into the directory named on the command line. Returns the failure count.
 int main(int argc, char** argv) {
     if (argc < 2) {
         AVER_INFO("usage: MakeSamples <output-directory>");
@@ -140,6 +123,7 @@ int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
 
+    // One output file and the generator that fills it.
     struct Item { const char* name; std::vector<f32> (*make)(); };
     const Item items[] = {
         {"shot.wav",    &makeShot},

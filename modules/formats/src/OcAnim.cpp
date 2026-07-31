@@ -1,3 +1,5 @@
+// Readers and writers for .ocskel (skeletons) and .ocanim (animations), both AVR1 containers.
+
 #include "aver/formats/OcAnim.hpp"
 
 #include "aver/formats/Avr1.hpp"
@@ -13,8 +15,10 @@ constexpr u32 kChunkSTRT = avrFourCC("STRT");
 constexpr u32 kChunkAHDR = avrFourCC("AHDR");
 constexpr u32 kChunkTRKS = avrFourCC("TRKS");
 
+// Sets `why` and returns false.
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
 
+// Little-endian byte writer over a growing buffer.
 struct W {
     std::vector<u8>& b;
     void u8v (u8 v)  { b.push_back(v); }
@@ -25,6 +29,7 @@ struct W {
     void f32v(f32 v) { u32 x; std::memcpy(&x, &v, 4); u32v(x); }
 };
 
+// Bounds-checked little-endian byte reader. `ok` goes false on the first short read.
 struct R {
     const u8* p; const u8* e; bool ok = true;
     bool need(usize n) { if (usize(e - p) < n) { ok = false; return false; } return true; }
@@ -36,6 +41,7 @@ struct R {
     f32 f32v() { u32 x = u32v(); f32 f; std::memcpy(&f, &x, 4); return f; }
 };
 
+// Reads a whole file into `out`. `what` prefixes any error message.
 bool readWholeFile(const std::string& path, std::vector<u8>& out, std::string* why, const char* what) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return fail(why, std::string(what) + ": cannot open " + path);
@@ -48,6 +54,7 @@ bool readWholeFile(const std::string& path, std::vector<u8>& out, std::string* w
     return true;
 }
 
+// Writes `bytes` to a file, truncating it. `what` prefixes any error message.
 bool writeWholeFile(const std::string& path, const std::vector<u8>& bytes, std::string* why, const char* what) {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) return fail(why, std::string(what) + ": cannot write " + path);
@@ -60,20 +67,19 @@ bool writeWholeFile(const std::string& path, const std::vector<u8>& bytes, std::
 
 // ---------------------------------------------------------------- skeleton
 
+// True when every bone parent is in range and stored before its child.
 bool OcSkeleton::valid() const {
     if (bones.empty()) return false;
     for (usize i = 0; i < bones.size(); ++i) {
         const i32 p = bones[i].parent;
         if (p == kOcBoneNoParent) continue;
         if (p < 0 || usize(p) >= bones.size()) return false;
-        // PARENT BEFORE CHILD is required, not merely conventional: every consumer of a skeleton
-        // composes world transforms in one forward pass, and a child stored before its parent would
-        // compose against the previous frame's parent with nothing reporting it.
         if (usize(p) >= i) return false;
     }
     return true;
 }
 
+// Encodes a skeleton into an .ocskel container. Returns false with `why` set on invalid input.
 bool writeOcSkel(const OcSkeleton& in, std::vector<u8>& out, std::string* why) {
     if (in.bones.empty()) return fail(why, ".ocskel: no bones");
     if (in.bones.size() > 0xFFFF) return fail(why, ".ocskel: more than 65535 bones");
@@ -104,6 +110,7 @@ bool writeOcSkel(const OcSkeleton& in, std::vector<u8>& out, std::string* why) {
     return writeAvr1(f, out, why);
 }
 
+// Decodes an .ocskel container into `out`. Returns false with `why` set on a malformed file.
 bool parseOcSkel(const u8* bytes, usize size, OcSkeleton& out, std::string* why) {
     Avr1File f;
     if (!parseAvr1(bytes, size, f, why)) return false;
@@ -132,18 +139,18 @@ bool parseOcSkel(const u8* bytes, usize size, OcSkeleton& out, std::string* why)
         for (int k = 0; k < 16; ++k) b.inverseBind[k] = r.f32v();
     }
     if (!r.ok) return fail(why, ".ocskel: truncated bone table");
-    // Checked on READ as well as on write: a file can arrive from anywhere, and a bad parent index
-    // is a crash in whatever composes the pose rather than an error here.
     if (!out.valid()) return fail(why, ".ocskel: bone parents are out of range, cyclic, or not in parent-before-child order");
     return true;
 }
 
+// Reads an .ocskel file from disk. Returns false with `why` set.
 bool loadOcSkel(const std::string& path, OcSkeleton& out, std::string* why) {
     std::vector<u8> bytes;
     if (!readWholeFile(path, bytes, why, ".ocskel")) return false;
     return parseOcSkel(bytes.data(), bytes.size(), out, why);
 }
 
+// Writes a skeleton to an .ocskel file. Returns false with `why` set.
 bool saveOcSkel(const std::string& path, const OcSkeleton& in, std::string* why) {
     std::vector<u8> bytes;
     if (!writeOcSkel(in, bytes, why)) return false;
@@ -152,17 +159,16 @@ bool saveOcSkel(const std::string& path, const OcSkeleton& in, std::string* why)
 
 // ---------------------------------------------------------------- animation
 
+// Floats stored per key. CubicSpline triples it: in-tangent, value, out-tangent per component.
 u32 OcTrack::componentsPerKey() const {
     u32 n = 0;
     if (channels & kOcChannelTranslation) n += 3;
     if (channels & kOcChannelRotation)    n += 4;
     if (channels & kOcChannelScale)       n += 3;
-    // CUBICSPLINE stores in-tangent, value and out-tangent for every component (glTF's convention,
-    // which the spec adopts). Carried rather than collapsed, because collapsing is the fidelity loss
-    // §9 exists to prevent.
     return interp == OcInterp::CubicSpline ? n * 3 : n;
 }
 
+// True when the track has a channel mask, keys, a matching value count, and ascending times.
 bool OcTrack::valid() const {
     const u32 stride = componentsPerKey();
     if (stride == 0) return false;                                   // an empty channel mask animates nothing
@@ -172,6 +178,7 @@ bool OcTrack::valid() const {
     return true;
 }
 
+// True when the animation has tracks, a non-negative duration, and every track is valid.
 bool OcAnimation::valid() const {
     if (tracks.empty()) return false;
     if (!(duration >= 0.0f)) return false;                           // also rejects NaN
@@ -180,6 +187,7 @@ bool OcAnimation::valid() const {
     return true;
 }
 
+// Encodes an animation into an .ocanim container. Returns false with `why` set on invalid input.
 bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) {
     if (in.tracks.empty()) return fail(why, ".ocanim: no tracks");
     if (in.tracks.size() > 0xFFFFFFFFull) return fail(why, ".ocanim: too many tracks");
@@ -200,7 +208,7 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
     AvrStringTable strt;
     const u32 skelRef = strt.add(in.skeletonRef);
 
-    // TRKS first, so the offsets the header records are known before the header is built.
+    // TRKS first: the header records offsets into it.
     std::vector<u8> trks;
     std::vector<u64> keyOffsets(in.tracks.size());
     {
@@ -208,9 +216,7 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
         for (usize i = 0; i < in.tracks.size(); ++i) {
             const OcTrack& t = in.tracks[i];
             keyOffsets[i] = trks.size();
-            // Times then values, per track, rather than interleaved: a sampler binary-searches times
-            // and touches values only for the two keys it lands between, so keeping the times
-            // contiguous is what makes that search a cache-friendly walk.
+            // All times, then all values, per track. Never interleaved.
             for (const f32 v : t.times)  w.f32v(v);
             for (const f32 v : t.values) w.f32v(v);
         }
@@ -246,6 +252,7 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
     return writeAvr1(f, out, why);
 }
 
+// Decodes an .ocanim container into `out`. Returns false with `why` set on a malformed file.
 bool parseOcAnim(const u8* bytes, usize size, OcAnimation& out, std::string* why) {
     Avr1File f;
     if (!parseAvr1(bytes, size, f, why)) return false;
@@ -309,12 +316,14 @@ bool parseOcAnim(const u8* bytes, usize size, OcAnimation& out, std::string* why
     return true;
 }
 
+// Reads an .ocanim file from disk. Returns false with `why` set.
 bool loadOcAnim(const std::string& path, OcAnimation& out, std::string* why) {
     std::vector<u8> bytes;
     if (!readWholeFile(path, bytes, why, ".ocanim")) return false;
     return parseOcAnim(bytes.data(), bytes.size(), out, why);
 }
 
+// Writes an animation to an .ocanim file. Returns false with `why` set.
 bool saveOcAnim(const std::string& path, const OcAnimation& in, std::string* why) {
     std::vector<u8> bytes;
     if (!writeOcAnim(in, bytes, why)) return false;

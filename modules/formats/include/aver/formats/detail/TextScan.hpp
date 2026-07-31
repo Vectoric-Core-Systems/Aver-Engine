@@ -10,8 +10,10 @@
 
 namespace aver::fmt::detail {
 
+// True for space, tab, CR, LF, vertical tab and form feed.
 inline bool isSpace(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f'; }
 
+// The view with leading and trailing whitespace removed.
 inline std::string_view trim(std::string_view s) {
     usize b = 0, e = s.size();
     while (b < e && isSpace(s[b])) ++b;
@@ -19,19 +21,20 @@ inline std::string_view trim(std::string_view s) {
     return s.substr(b, e - b);
 }
 
-// One trailing ';' stripped, then re-trimmed (matches OcMap.cs / ParseOcbeam).
+// Trims, drops one trailing ';', and trims again.
 inline std::string_view stripTrailingSemicolon(std::string_view s) {
     s = trim(s);
     if (!s.empty() && s.back() == ';') s = trim(s.substr(0, s.size() - 1));
     return s;
 }
 
-// Truncate at first '#' (OcMap/.scene comment rule).
+// The view up to the first '#', which starts a comment.
 inline std::string_view truncateHash(std::string_view s) {
     const usize h = s.find('#');
     return h == std::string_view::npos ? s : s.substr(0, h);
 }
 
+// Splits on runs of whitespace, dropping empty fields.
 inline std::vector<std::string_view> splitWhitespace(std::string_view s) {
     std::vector<std::string_view> out;
     usize i = 0;
@@ -44,6 +47,7 @@ inline std::vector<std::string_view> splitWhitespace(std::string_view s) {
     return out;
 }
 
+// Splits on every occurrence of `delim`, keeping empty fields.
 inline std::vector<std::string_view> splitChar(std::string_view s, char delim) {
     std::vector<std::string_view> out;
     usize start = 0;
@@ -56,6 +60,7 @@ inline std::vector<std::string_view> splitChar(std::string_view s, char delim) {
     return out;
 }
 
+// Case-insensitive prefix test.
 inline bool startsWithCI(std::string_view s, std::string_view prefix) {
     if (s.size() < prefix.size()) return false;
     for (usize i = 0; i < prefix.size(); ++i) {
@@ -67,11 +72,12 @@ inline bool startsWithCI(std::string_view s, std::string_view prefix) {
     return true;
 }
 
+// Case-insensitive equality.
 inline bool equalsCI(std::string_view a, std::string_view b) {
     return a.size() == b.size() && startsWithCI(a, b);
 }
 
-// Parse helpers: return the fallback on any failure (mirrors the tolerant readers).
+// Parses a double, returning `fallback` on any failure.
 inline f64 parseF64(std::string_view s, f64 fallback = 0.0) {
     s = trim(s);
     f64 v{};
@@ -79,6 +85,7 @@ inline f64 parseF64(std::string_view s, f64 fallback = 0.0) {
     return r.ec == std::errc{} ? v : fallback;
 }
 
+// Parses a signed 32-bit integer, returning `fallback` on any failure.
 inline i32 parseI32(std::string_view s, i32 fallback = 0) {
     s = trim(s);
     i32 v{};
@@ -86,7 +93,7 @@ inline i32 parseI32(std::string_view s, i32 fallback = 0) {
     return r.ec == std::errc{} ? v : fallback;
 }
 
-// Accepts 0x-prefixed hex or decimal (matches OcMap.cs ParseU64).
+// Parses a u64 in decimal or 0x-prefixed hex, returning `fallback` on any failure.
 inline u64 parseU64(std::string_view s, u64 fallback = 0) {
     s = trim(s);
     int base = 10;

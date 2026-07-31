@@ -1,3 +1,4 @@
+// Texture asset loading and mip-chain generation.
 #include "aver/formats/Texture.hpp"
 #include "aver/assets/AssetId.hpp"
 #include "aver/core/Log.hpp"
@@ -8,22 +9,19 @@ namespace aver::fmt {
 
 namespace {
 
-// The EXACT sRGB transfer pair, not the pow(2.2) approximation the shaders use for sky gradients.
-// These mips are sampled through a *_UNORM_SRGB view, and the hardware's decode is the piecewise
-// curve; filtering with a different curve makes each mip level a slightly different colour from the
-// one above it, which reads as a texture that shifts hue as it recedes.
+// The exact sRGB transfer curve, matching a *_UNORM_SRGB view's hardware decode.
 f32 srgbToLinear(u8 v) {
     const f32 c = v * (1.0f / 255.0f);
     return c <= 0.04045f ? c * (1.0f / 12.92f) : std::pow((c + 0.055f) / 1.055f, 2.4f);
 }
+// The inverse: linear to an 8-bit sRGB-encoded value.
 u8 linearToSrgb(f32 c) {
     c = c < 0.0f ? 0.0f : (c > 1.0f ? 1.0f : c);
     const f32 s = c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
     return static_cast<u8>(s * 255.0f + 0.5f);
 }
 
-// One box-filter step. Odd extents clamp the second tap onto the last texel rather than dropping
-// it, so a 5-wide level still contributes its last column instead of losing it entirely.
+// One box-filter halving step. Filters in linear space for sRGB and as vectors for a normal map.
 ImageData downsample(const ImageData& src, bool srgb, bool normalMap) {
     ImageData dst;
     dst.width  = src.width  > 1 ? src.width  / 2 : 1;
@@ -48,8 +46,6 @@ ImageData downsample(const ImageData& src, bool srgb, bool normalMap) {
             f32 acc[4] = {0, 0, 0, 0};
             for (const usize t : tap) {
                 if (normalMap) {
-                    // Decode to a vector before averaging: the midpoint of two encoded normals is
-                    // not the encoding of their midpoint once they are renormalised.
                     for (int c = 0; c < 3; ++c) acc[c] += src.pixels[t + c] * (2.0f / 255.0f) - 1.0f;
                 } else if (srgb) {
                     for (int c = 0; c < 3; ++c) acc[c] += srgbToLinear(src.pixels[t + c]);
@@ -63,8 +59,6 @@ ImageData downsample(const ImageData& src, bool srgb, bool normalMap) {
             u8* o = &dst.pixels[(static_cast<usize>(y) * dst.width + x) * 4];
             if (normalMap) {
                 const f32 len = std::sqrt(acc[0] * acc[0] + acc[1] * acc[1] + acc[2] * acc[2]);
-                // A block of exactly opposed normals averages to zero, and normalising that is the
-                // NaN that reaches the cone trace as a hang. Fall back to the flat normal.
                 const f32 inv = len > 1e-6f ? 1.0f / len : 0.0f;
                 const f32 n[3] = {len > 1e-6f ? acc[0] * inv : 0.0f,
                                   len > 1e-6f ? acc[1] * inv : 0.0f,
@@ -90,6 +84,7 @@ ImageData downsample(const ImageData& src, bool srgb, bool normalMap) {
 
 } // namespace
 
+// Builds levels 1..N from levels[0], replacing anything already there.
 void generateMipChain(TextureData& t, bool normalMap) {
     if (!t.valid()) return;
     t.levels.resize(1);
@@ -98,10 +93,9 @@ void generateMipChain(TextureData& t, bool normalMap) {
     }
 }
 
+// Loads and decodes a texture asset, optionally generating its mip chain.
 bool loadTexture(const std::string& path, TextureData& out, const TextureLoadOptions& opt,
                  std::string* err) {
-    // Dispatch on the asset type rather than on the extension directly, so a .octex arriving later
-    // is a new case here and not a new string comparison somewhere else.
     const AssetType type = assetTypeFromPath(path);
     if (type != AssetType::Texture) {
         if (err) *err = "not a texture asset: " + path;
@@ -114,8 +108,6 @@ bool loadTexture(const std::string& path, TextureData& out, const TextureLoadOpt
     out = TextureData{};
     out.width = img.width;
     out.height = img.height;
-    // A normal map is data whatever the caller claimed; saying so once here means every downstream
-    // consumer reads one answer instead of re-deriving it from two flags.
     out.srgb = opt.srgb && !opt.normalMap;
     img.srgb = out.srgb;
     out.levels.push_back(std::move(img));

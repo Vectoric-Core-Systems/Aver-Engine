@@ -1,26 +1,15 @@
+// Generic GPU primitives — textures, buffers, shaders, pipelines, binding sets, barriers and
+// command recording — that render-feature modules build on. Carries no feature vocabulary.
+// BINDING MODEL: explicit descriptor tables, NOT bindless; see docs/MINIMUM_SPECS.md.
 #pragma once
 #include "aver/core/Types.hpp"
 
 #include <string>
-// Generic GPU primitives — the foundation layer that render-feature modules build on.
-//
-// This header is deliberately free of render-feature vocabulary. It knows about textures, buffers,
-// shaders, pipelines, barriers and command recording; it knows nothing about global illumination,
-// voxels, shadow maps or ray tracing. Feature modules (e.g. Aver.Render.Voxi) own those concepts
-// and express them in terms of what is here.
-//
-// Scope: this abstracts the operations feature modules actually perform, not the whole of D3D12.
-// It is expected to grow when a second feature module needs something — that is cheaper and more
-// honest than speculatively designing a universal RHI.
-//
-// BINDING MODEL: explicit descriptor tables, NOT bindless. This keeps Resource Binding Tier 1
-// hardware working (Kepler / Maxwell gen 1 / Haswell), which SM 6.6 dynamic resources would drop.
-// See docs/MINIMUM_SPECS.md before changing this.
 namespace aver::rhi {
 
 // ---------------------------------------------------------------- handles
-// All 0 = invalid. Distinct names, identical underlying type — so they can NEVER be distinguished
-// by overload resolution. Every API below that takes one says which kind it wants in its name.
+// All 0 = invalid. Distinct names, identical underlying type, so overload resolution can never
+// tell them apart; every API below names the kind it wants.
 using MeshHandle       = u32;
 using LineHandle       = u32;
 using TextureHandle    = u32;
@@ -33,21 +22,20 @@ using TlasHandle       = u32;
 
 // ---------------------------------------------------------------- formats & resources
 
+// Pixel and vertex-attribute formats this RHI exposes.
 enum class Format : u8 {
     Unknown,
     RGBA8Unorm,
-    RGBA8UnormSrgb,  // the hardware does the sRGB decode on every tap; base colour wants this
+    RGBA8UnormSrgb,  // the hardware does the sRGB decode on every tap
     RG8Unorm,
     R8Unorm,
     RGBA16F,      // radiance volumes, HDR targets
     R32Float,
-    RG32Float,    // two floats; a vertex position or texture coordinate, not a texture format here
+    RG32Float,    // two floats; a vertex attribute, not a texture format here
     R32Uint,      // the only typed format D3D12 guarantees UAV atomics on
     D32Float,     // depth-stencil view format
     R32Typeless,  // aliased depth: DSV sees D32Float, SRV sees R32Float
-    // Block-compressed, 4x4 texel blocks. Nothing emits these yet, but they are cheap to add now and
-    // expensive to retrofit once a material file carries a baked format field. BC5 is the correct
-    // tangent-space normal format (two channels, no sRGB variant); BC7 is universal on FL11_0.
+    // Block-compressed, 4x4 texel blocks.
     BC1Unorm,
     BC1UnormSrgb,
     BC3Unorm,
@@ -57,15 +45,15 @@ enum class Format : u8 {
     BC7UnormSrgb,
 };
 
-// A block format's extents are counted in 4x4 blocks, not texels, everywhere a pitch is computed —
-// which is why this is a question of its own rather than a zero returned from a bytes-per-texel
-// helper that a caller could multiply by anyway.
+// True for block-compressed formats, whose extents are counted in 4x4 blocks and not texels.
 inline bool isBlockFormat(Format f) {
     return f >= Format::BC1Unorm && f <= Format::BC7UnormSrgb;
 }
 
+// Texture dimensionality.
 enum class TextureDim : u8 { Tex2D, Tex3D };
 
+// What a resource may be bound as. Flags.
 enum class ResourceBind : u32 {
     None            = 0,
     ShaderResource  = 1u << 0,
@@ -76,10 +64,8 @@ enum class ResourceBind : u32 {
 inline ResourceBind operator|(ResourceBind a, ResourceBind b) { return static_cast<ResourceBind>(static_cast<u32>(a) | static_cast<u32>(b)); }
 inline bool         any(ResourceBind v, ResourceBind bit)     { return (static_cast<u32>(v) & static_cast<u32>(bit)) != 0; }
 
-// THE MODULE OWNS RESOURCE STATE. No IRenderContext method transitions implicitly: setRenderTargets
-// and clearDepth require the caller to have already placed the target. The backend performs no
-// promotion or decay on module-created resources. A resource is exactly in the state its desc or
-// its last barrier named, and that state CARRIES ACROSS FRAMES.
+// Resource states. THE MODULE OWNS RESOURCE STATE: nothing transitions implicitly, no promotion or
+// decay is performed, and a resource's state CARRIES ACROSS FRAMES.
 enum class ResourceState : u8 {
     Common,
     ShaderResource,          // readable by the pixel stage
@@ -89,11 +75,11 @@ enum class ResourceState : u8 {
     DepthWrite,
     CopySource,
     CopyDest,
-    // TERMINAL: set at creation, never a valid barrier argument in either direction. The underlying
-    // API rejects transitioning into or out of it; acceleration structures live here for life.
+    // TERMINAL: set at creation, never a valid barrier argument in either direction.
     AccelerationStructure,
 };
 
+// How to create a texture, including its initial state and optional initial contents.
 struct TextureDesc {
     TextureDim   dim    = TextureDim::Tex2D;
     u32          width  = 1;
@@ -102,52 +88,32 @@ struct TextureDesc {
     u32          mips   = 1;    // 0 = full chain; query the resolved count with textureInfo()
     Format       format = Format::RGBA8Unorm;
     ResourceBind bind   = ResourceBind::ShaderResource;
-    // The state the resource is created in. Pick the state the first barrier of frame 0 will
-    // transition FROM, or that first barrier is a lie and the debug layer will say so.
+    // The state the resource is created in, and the state the first barrier must transition FROM.
     ResourceState initialState = ResourceState::Common;
-    // A depth/render target created without a clear value that matches the value actually cleared
-    // to loses fast clear and warns every frame.
     bool        hasClearValue = false;
     f32         clearDepth    = 1.0f;
     f32         clearColor[4] = {};
     const char* debugName = nullptr;
 
     // ---- initial contents ----
-    // One CPU pointer per subresource (== per mip, since this interface exposes only single-slice
-    // textures). Supplying it does NOT change the contract above: the backend creates the resource
-    // in whatever copy state it needs, uploads, transitions to `initialState`, and seeds its state
-    // tracking from `initialState`. So a module never sees, names, or has to reason about a copy
-    // state, and the first barrier it writes is still checked against `initialState`.
-    //
-    // Carried on the desc rather than offered as a separate updateTexture() precisely to keep that
-    // invariant: a post-creation upload would have to move the resource out of `initialState` and
-    // back, which is a window in which the tracker and the resource disagree.
+    // One CPU pointer per subresource (== per mip). The backend uploads and then leaves the
+    // resource in `initialState`, so a module never names a copy state.
     const void* const* initialData = nullptr;
     u32                initialDataCount = 0;   // subresources supplied; the rest are left undefined
-    // Source bytes per row of subresource 0. Zero means tightly packed (width * texel size). The
-    // DESTINATION pitch is the hardware's and is generally larger, so the backend copies row by row.
-    // Subresources past the first are always taken as tightly packed for their own mip extent —
-    // which is what every decoder and mip generator produces.
+    // Source bytes per row of subresource 0. Zero means tightly packed (width * texel size).
+    // Subresources past the first are always taken as tightly packed for their own mip extent.
     u32                initialRowPitch = 0;
 };
 
+// Where a buffer's memory lives.
 enum class BufferKind : u8 {
     Default,         // GPU-local
     Upload,          // CPU-writable, GPU-readable
     AccelStructure,  // GPU-local, created in the terminal AccelerationStructure state
 };
 
-// NOTE there is no `initialState` here, and TextureDesc's has no counterpart on purpose.
-//
-// A buffer has no choice of initial state to give. D3D12 creates every buffer in Common whatever
-// is asked for (its debug layer says so outright, #1328 CREATERESOURCE_STATE_IGNORED), and Vulkan
-// has no image-layout equivalent for buffers either. A buffer is then implicitly promoted out of
-// Common by its first use and decays back to Common at the end of the command list, so Common is
-// not merely where it starts — it is where it is at the top of every frame.
-//
-// So the contract for a buffer is: it is Common, and the first barrier a module writes against one
-// must claim Common as its `from`. A field offering anything else would be a field the backend has
-// to ignore, and the tracking would then be seeded from a state the resource was never in.
+// How to create a buffer. There is deliberately no initial state: a buffer is always Common at the
+// top of a frame, so the first barrier a module writes must claim Common as its `from`.
 struct BufferDesc {
     u64           bytes = 0;
     BufferKind    kind  = BufferKind::Default;
@@ -158,39 +124,37 @@ struct BufferDesc {
 // ---------------------------------------------------------------- samplers
 // Static samplers declared on the pipeline, NOT as binding-set slots — the Tier-1-friendly choice.
 
+// Texture filtering mode.
 enum class Filter : u8 {
     Point,
     Linear,
-    // Depth comparison sampling (SampleCmpLevelZero). Substituting Linear here compiles, runs, and
-    // returns raw depth per tap — it reads as "shadows too weak", never as an error.
-    ComparisonLinear,
-    // Trilinear plus anisotropy, for surface maps read at a grazing angle. Reads maxAnisotropy.
-    Anisotropic,
+    ComparisonLinear,   // depth comparison sampling (SampleCmpLevelZero)
+    Anisotropic,        // trilinear plus anisotropy; reads maxAnisotropy
 };
+// How coordinates outside [0,1] are handled.
 enum class AddressMode : u8 { Clamp, Wrap };
+// Comparison used by depth tests and comparison samplers.
 enum class CompareOp : u8 { Never, Less, LessEqual, Always };
 
+// One static sampler on a pipeline.
 struct SamplerDesc {
     Filter      filter  = Filter::Linear;
     AddressMode address = AddressMode::Clamp;
     CompareOp   compare = CompareOp::Never;   // ComparisonLinear only
-    // Leave unclamped for anything that samples a mip chain at a fractional level: clamping this
-    // makes every level past the clamp unreachable.
-    f32         maxLod  = 3.402823466e+38f;
-    // Filter::Anisotropic only. Defaulted to 1 rather than 0 because D3D12 rejects a zero here, and
-    // a zeroed SamplerDesc must be a legal sampler whatever filter is later chosen.
-    u8          maxAnisotropy = 1;
+    f32         maxLod  = 3.402823466e+38f;   // clamping it makes higher mips unreachable
+    u8          maxAnisotropy = 1;            // Filter::Anisotropic only; D3D12 rejects zero
 };
 
 // ---------------------------------------------------------------- shaders & pipelines
 
+// Which programmable stage a shader is compiled for.
 enum class ShaderStage : u8 { Vertex, Pixel, Geometry, Compute, Mesh };
 
+// One HLSL shader to compile.
 struct ShaderDesc {
     const char* source = nullptr;   // HLSL text; the feature module owns its own shader source
     // Prepended verbatim before `source`. Use sharedShaderPrelude() so the shared cbuffer layouts
-    // and helpers have exactly ONE owner — duplicating them across modules is a silent cross-module
-    // ABI where reordering a field corrupts the other side with no compile error anywhere.
+    // have exactly ONE owner.
     const char* prelude = nullptr;
     const char* entry   = nullptr;
     ShaderStage stage   = ShaderStage::Vertex;
@@ -200,106 +164,72 @@ struct ShaderDesc {
     const char* defines = nullptr;  // semicolon-separated, e.g. "AVER_MS=1;AVER_RT=1"
 };
 
+// Which triangle facing is discarded.
 enum class CullMode : u8 { None, Back, Front };
 
 // How a pipeline's colour output combines with what is already in the render target.
-//
-// Three modes rather than a general blend-state struct. The general form -- per-channel source and
-// destination factors with a selectable op -- is more expressive and is also a surface on which
-// every combination is a pipeline somebody can get subtly wrong, for expressiveness a renderer
-// almost never spends. These are what is actually reached for; a fourth is an additive change.
 enum class BlendMode : u8 {
-    Opaque,        // no blending, all channels written. What every existing pipeline wants.
+    Opaque,        // no blending, all channels written
     // src.rgb * src.a + dst.rgb * (1 - src.a), and alpha as src.a + dst.a * (1 - src.a).
-    //
-    // The ALPHA channel matters even when nothing samples it: an offscreen target that is later
-    // composited needs correct coverage, and the naive src.a + dst.a saturates to white after two
-    // overlapping half-transparent draws. Correct alpha costs nothing here and is impossible to
-    // retrofit once content depends on the wrong one.
     AlphaBlend,
-    // src.rgb + dst.rgb * (1 - src.a), for colour that ALREADY has its alpha folded in.
-    //
-    // The distinction from AlphaBlend is not a preference and the two are not interchangeable.
-    // Multiplying by src.a is what AlphaBlend does; a source that premultiplied on the way in has had
-    // it done already, so AlphaBlend applies it a SECOND time. The error scales with how transparent
-    // the thing is and how bright: an opaque draw is unaffected, and a 38%-alpha white lands at 31/255
-    // instead of 83/255 -- less than half the intended brightness, on a surface that still looks like
-    // a plausible translucent panel. Nothing about the result says "wrong blend mode".
+    // src.rgb + dst.rgb * (1 - src.a), for colour that ALREADY has its alpha folded in. Not
+    // interchangeable with AlphaBlend, which would apply alpha a second time.
     PremultipliedAlpha,
     Additive,      // src.rgb + dst.rgb, for light, fire, and anything that only ever brightens
 };
+// Whether triangles are filled or drawn as wireframe.
 enum class FillMode : u8 { Solid, Wireframe };
 
+// Depth test and write configuration for a pipeline.
 struct DepthState {
     bool      test  = false;
     bool      write = false;
     CompareOp op    = CompareOp::Less;
 };
 
-// Logical constant slots, mapping one-to-one onto b0..b(n-1). The count reaches
-// kFeatureFrameConstantRegister INCLUSIVE: a feature declares its frame constants at that reserved
-// register, and a layout that could not describe it would leave every pipeline reading that cbuffer
-// impossible to create — the shader names a register the root signature never declared.
+// Logical constant slots, mapping one-to-one onto b0..b(n-1). Reaches
+// kFeatureFrameConstantRegister inclusive, so a feature can declare its frame constants.
 constexpr u32 kMaxConstantSlots = 5;
 
-// Every pipeline DECLARES its binding layout. The backend caches root signatures keyed by that
-// layout, so pipelines declaring identical shapes share one and switching between them does not
-// invalidate bindings — which is what lets a feature's binding set stay live across draws the
-// backend records itself (mandatory at Tier 1, where every declared table must be bound).
+// The binding layout a pipeline declares. The backend caches root signatures keyed by it, so
+// pipelines of identical shape share one and switching between them does not invalidate bindings.
 struct PipelineLayout {
     u32 srvCount = 0;             // table 0: t0..t(srvCount-1)
     u32 uavCount = 0;             // table 0: u0..u(uavCount-1)
     // A SECOND declarable table, based immediately above the first: t(srvCount).. and u(uavCount)..
-    // Zero counts declare no second table at all, which is what every existing pipeline gets.
-    //
-    // Two tables rather than one wider one because the two have different LIFETIMES. Table 0 holds
-    // descriptors a feature owns and reallocates (the voxel volume is recreated on a resolution
-    // change); table 1 is swapped per draw. Folding them together would mean either rewriting every
-    // per-draw set whenever the feature's resources move — while a frame in flight may still be
-    // reading them — or rewriting the feature's descriptors per draw. Both are the hazard the TLAS
-    // creation comment in VoxiRenderer already documents.
-    //
-    // Deliberately named "table 1" and not after any consumer: the RHI must not learn the word
-    // "material" (see the header preamble).
+    // Zero counts declare no second table at all. Table 0 holds descriptors a feature owns and
+    // reallocates; table 1 is swapped per draw.
     u32 srvCount1 = 0;
     u32 uavCount1 = 0;
     // Logical constant slot k maps to register b(k). A non-zero word count makes it ROOT CONSTANTS,
     // written with setConstants; zero makes it a ROOT CBV, written with setConstantBuffer. A slot
-    // cannot be both, and setConstants on a CBV slot (or the reverse) is a binding error.
+    // cannot be both.
     //
-    // Slot 0 is RESERVED for the engine per-frame block (kEngineFrameConstantRegister). It is a root
-    // CBV that the BACKEND binds on every setPipeline, because binding a root signature discards
-    // every root argument and a feature has no way to supply the engine's own frame data. Leave
-    // constantDwords[0] at zero; a feature must never be able to observe b0 unbound.
+    // Slot 0 is RESERVED for the engine per-frame block (kEngineFrameConstantRegister), which the
+    // backend binds on every setPipeline. Leave constantDwords[0] at zero.
     u32 constantDwords[kMaxConstantSlots] = {};
     SamplerDesc samplers[4] = {};
     u32 samplerCount = 0;         // s0..s(n-1)
 };
 
-// How many declarable descriptor tables a layout has. Tables are addressed by index at
-// setBindingSet, so this is the bound on that argument.
+// How many declarable descriptor tables a layout has, and so the bound on setBindingSet's index.
 constexpr u32 kBindingTableCount = 2;
 
-// The register a layout's SRV/UAV declarations run out to, ACROSS BOTH TABLES. Anything the backend
-// reserves above a layout must be placed with these, never with srvCount alone — table 1 now
-// occupies exactly the registers a lone srvCount would have pointed at.
+// The register a layout's SRV declarations run out to, ACROSS BOTH TABLES. Anything the backend
+// reserves above a layout must be placed with this, never with srvCount alone.
 inline u32 declaredSrvCount(const PipelineLayout& l) { return l.srvCount + l.srvCount1; }
+// The register a layout's UAV declarations run out to, across both tables.
 inline u32 declaredUavCount(const PipelineLayout& l) { return l.uavCount + l.uavCount1; }
 
 // ---------------------------------------------------------------- vertex layout
 //
-// For pipelines that draw geometry the CALLER owns, rather than geometry the backend owns. Every
-// draw in this engine used to be addressed by MeshHandle, so exactly one vertex format could reach
-// the input assembler and the backend was free to bake it in. That is still true of the scene, and
-// it stays true: this does not replace MeshHandle, it exists beside it.
-//
-// It exists because a UI vertex is not a MeshVertex and never can be. A screen-space quad has no
-// normal, no world position and no third coordinate; forcing it through the 32-byte scene vertex
-// would spend more than a third of every UI buffer on fields no UI shader reads, and would make the
-// engine's one vertex struct answer to two unrelated consumers -- which is how a struct ends up with
-// a union in it. A feature that owns its own geometry should own its own vertex format.
+// For pipelines that draw geometry the CALLER owns. This does not replace MeshHandle; it exists
+// beside it, so a feature building its own vertices per frame can own its own vertex format.
+
+// What a vertex attribute means to the input assembler.
 enum class VertexSemantic : u8 { Position, Normal, TexCoord, Color };
 
+// One attribute in a caller-owned vertex.
 struct VertexAttrib {
     VertexSemantic semantic = VertexSemantic::Position;
     u8             semanticIndex = 0;    // POSITION0, TEXCOORD1, ...
@@ -309,24 +239,23 @@ struct VertexAttrib {
 
 constexpr u32 kMaxVertexAttribs = 8;
 
+// A caller-owned vertex format: its attributes and its stride.
 struct VertexLayout {
     VertexAttrib attribs[kMaxVertexAttribs] = {};
     u32          attribCount = 0;
     // Bytes per vertex. Required whenever attribCount is non-zero and NOT derived from the
-    // attributes: a layout may legally leave padding at the end, and deriving it would silently
-    // repack every such vertex by a few bytes -- which reads as geometry that drifts as it goes.
+    // attributes, because a layout may legally leave padding at the end.
     u32          stride = 0;
 };
 
+// How to create a graphics pipeline.
 struct GraphicsPipelineDesc {
     // Either (vs[,gs]) or ms must be set. A mesh pipeline has no input assembler; the backend picks
     // the matching root-signature flavour automatically.
     ShaderHandle vs = 0, gs = 0, ms = 0, ps = 0;
 
-    // The vertex format this pipeline's input assembler reads. LEFT EMPTY, the backend uses the
-    // engine's own MeshVertex, which is what every scene pipeline wants and why there was no field
-    // here before. Ignored entirely by a mesh-shader pipeline, which has no input assembler, and by
-    // drawFullscreen, which binds no vertex buffer.
+    // The vertex format the input assembler reads. LEFT EMPTY, the backend uses the engine's own
+    // MeshVertex. Ignored by a mesh-shader pipeline and by drawFullscreen.
     VertexLayout vertexLayout{};
 
     PipelineLayout layout{};
@@ -337,7 +266,6 @@ struct GraphicsPipelineDesc {
     // Widens rasterisation so thin geometry still covers a pixel. Silently ignored where
     // unsupported — check DeviceCaps::conservativeRaster if it matters.
     bool     conservativeRaster = false;
-    // Depth bias is per-triangle and slope-dependent; a shader-side bias cannot substitute for it.
     // Constant bias is meaningless against a float depth buffer, so slope-scaled carries the load.
     f32      depthBias = 0.0f;
     f32      slopeScaledDepthBias = 0.0f;
@@ -350,21 +278,10 @@ struct GraphicsPipelineDesc {
     Format depthFormat       = Format::Unknown;
     u32    sampleCount       = 1;
 
-    // BLENDING. Off by default, which is what every existing pipeline in this engine wants and why
-    // there was no field here at all until now: opaque geometry blends nothing, and a bloom pass
-    // that adds does it with its own explicit pipeline.
-    //
-    // It exists now because nothing could be TRANSPARENT. A material authored translucent rendered
-    // fully opaque with no diagnostic, and glass, water, foliage cards, particles, decals and every
-    // UI element are all one flag away from possible and were all impossible. This is the flag.
-    //
-    // One mode rather than a full blend-state struct, deliberately. Separate src/dst factors per
-    // channel with a selectable op is the general answer and it is also a large surface where every
-    // combination is a pipeline someone can get subtly wrong. These three are what a renderer
-    // actually reaches for, and adding a fourth later is additive.
     BlendMode blend = BlendMode::Opaque;
 };
 
+// How to create a compute pipeline.
 struct ComputePipelineDesc {
     ShaderHandle   cs = 0;
     PipelineLayout layout{};
@@ -372,88 +289,64 @@ struct ComputePipelineDesc {
 
 // ---------------------------------------------------------------- binding sets
 //
-// A binding set is a contiguous run of shader-resource slots plus a contiguous run of
-// unordered-access slots. Tier 1 requires every declared slot to hold a valid descriptor, so the
-// backend null-fills any left unset with a view OF THE CORRECT DIMENSION. All sets suballocate from
-// one device-owned shader-visible heap, so binding one never costs a heap switch.
-// The KIND of view a slot holds. Null-filling needs this: a Tier 1 device reading a null descriptor
-// whose dimension does not match what the shader declared is undefined behaviour, not a warning —
-// and it cannot be reproduced on hardware that binds by descriptor heap. Counts alone are not
-// enough information for the backend to fill a slot correctly.
+// A binding set is a contiguous run of SRV slots plus a contiguous run of UAV slots. Tier 1
+// requires every declared slot to hold a valid descriptor, so the backend null-fills any left unset
+// with a view of the correct dimension. All sets suballocate from one shader-visible heap.
+
+// The KIND of view a slot holds. Needed for null-filling: a Tier 1 device reading a null descriptor
+// of the wrong dimension is undefined behaviour, not a warning.
 enum class SlotKind : u8 {
     Texture2D,
     Texture3D,
     AccelerationStructure,   // SRV slots only; bound with a null resource and an address
 };
 
-// Slots per range. Counts above this cannot declare a kind, so the backend could only guess exactly
-// the thing SlotKind exists to stop it guessing — the limit is therefore enforced, not advisory.
-// 16, not 8: a material set is roughly seven textures before anything exotic, and Resource Binding
-// Tier 1 permits 128 SRVs in a table, so the headroom is free.
+// Slots per range. Enforced, not advisory: counts above this cannot declare a kind.
 constexpr u32 kMaxBindingSlots = 16;
 
+// How to create a binding set.
 struct BindingSetDesc {
     u32 srvCount = 0;            // must be <= kMaxBindingSlots
     u32 uavCount = 0;            // must be <= kMaxBindingSlots
     SlotKind srvKinds[kMaxBindingSlots] = {};   // default-initialises to Texture2D
     SlotKind uavKinds[kMaxBindingSlots] = {};
-    // The first shader register this set is meant to cover. A set is a bare run of descriptors and
-    // carries no registers of its own, so these are NOT used to build anything — they are recorded
-    // so the backend can check, when the set is bound at a table index, that it was built for the
-    // run that table actually covers. Binding a table-1 set at table 0 is otherwise completely
-    // silent: the descriptors are valid, the count fits, and the shader simply reads the wrong
-    // textures.
+    // The first shader register this set is meant to cover. Recorded, not used to build anything,
+    // so the backend can check the set against the table it is bound at.
     u32 srvBaseRegister = 0;
     u32 uavBaseRegister = 0;
 };
 
-// Bind every mip of a texture as one view. Invalid for a UAV, which always targets one level.
+// Binds every mip of a texture as one view. Invalid for a UAV, which always targets one level.
 constexpr u32 kAllMips = 0xFFFFFFFFu;
 
-// A whole-resource transition requires EVERY subresource to already be in `from`. Mixing whole and
-// per-subresource transitions without first reconciling every subresource is invalid; the backend
-// validates `from` against its own tracking in debug builds and reports through the engine log.
-// For the single-slice Tex2D/Tex3D this interface supports, `subresource` is the mip index.
+// Transitions the whole resource, which requires EVERY subresource to already be in `from`. For the
+// single-slice Tex2D/Tex3D this interface supports, `subresource` is the mip index.
 constexpr u32 kAllSubresources = 0xFFFFFFFFu;
 
-// Triangles per mesh-shader thread group. One owner, because the group count at every dispatch site
-// is ceil(triangleCount / this) and the shader's own [numthreads] must agree.
+// Triangles per mesh-shader thread group. The group count at every dispatch site is
+// ceil(triangleCount / this) and the shader's own [numthreads] must agree.
 constexpr u32 kMeshShaderTrisPerGroup = 64;
 
 // ---------------------------------------------------------------- reserved registers
 //
-// dispatchMeshFor() binds geometry the mesh shader pulls itself. These registers are RESERVED by the
-// backend; a feature module must not declare anything at them. The declarations that match live in
-// sharedShaderPrelude(), so both sides are anchored to one owner rather than to a convention nobody
-// enforces.
-//   - vertices: t(declaredSrvCount), indices: t(declaredSrvCount + 1)  — placed after the declared
-//     SRVs of BOTH tables so they can never collide with a layout however many SRVs it declares.
-//     Because those two DEPEND on the layout, the prelude cannot write them as literals: it takes
-//     them as -D macros, which meshGeometryDefines() below computes from the very same fields the
-//     root signature uses.
+// dispatchMeshFor() binds geometry the mesh shader pulls itself. These registers are RESERVED by
+// the backend; a feature module must not declare anything at them, and the matching declarations
+// live in sharedShaderPrelude().
+//   - vertices: t(declaredSrvCount), indices: t(declaredSrvCount + 1). They depend on the layout,
+//     so the prelude takes them as -D macros from meshGeometryDefines() rather than as literals.
 //   - triangle count: 4 root constants at b(kMeshGeometryConstantRegister).
-// Logical constant slots 0..4 map to b0..b4, the top one being a feature's own frame constants, so
-// the mesh geometry block sits above both.
 constexpr u32 kMeshGeometryConstantRegister = 5;
 constexpr u32 kFeatureFrameConstantRegister = 4;
-// b1 is the per-draw block the shared prelude declares: the transform, then the shading constants
-// each draw carries. ONE owner for the size, because a root signature and a shader that disagree
-// about it is not a validation error — it is a GPU-side read of whatever the last draw left behind,
-// which looks like a plausible image with the wrong parameters. Every pipeline that draws geometry
-// declares exactly this many dwords at slot 1, and every draw writes exactly this many.
+// b1 is the per-draw block the shared prelude declares: the transform, then the shading constants.
+// One owner for the size; a root signature and a shader that disagree is not a validation error.
 constexpr u32 kObjectConstantRegister = 1;
 constexpr u32 kObjectConstantDwords = 32;
-// b2 is the constant block that travels WITH binding table 1, written as a root CBV rather than
-// root constants: the two are set together by setDrawBinding and are meaningless apart, and a root
-// CBV lets the block grow without every layout having to restate its size. Kept a reserved register
-// of its own so a feature declaring its own constants cannot land on it by accident.
+// b2 is the constant block that travels WITH binding table 1, written as a root CBV so it can grow
+// without every layout restating its size.
 constexpr u32 kDrawConstantRegister = 2;
-// Largest b2 block setDrawBinding will carry. The sticky state is COPIED, so this bounds a fixed
-// buffer rather than a heap allocation on a per-draw path; a longer block is rejected and reported
-// rather than truncated, because a truncated constant block reads as plausible wrong shading.
+// Largest b2 block setDrawBinding will carry. A longer block is rejected, not truncated.
 constexpr u32 kMaxDrawConstantBytes = 256;
-// b0 is the engine's PerFrame block (gViewProj, gCamPos, gLightDir, gLightColor, gAmbient, gSky*).
-// Owned and bound by the backend on every pipeline bind — see PipelineLayout::constantDwords.
+// b0 is the engine's PerFrame block, bound by the backend on every pipeline bind.
 constexpr u32 kEngineFrameConstantRegister = 0;
 static_assert(kFeatureFrameConstantRegister < kMaxConstantSlots,
               "a feature must be able to DECLARE the register it is told to put frame constants at");
@@ -461,11 +354,9 @@ static_assert(kMeshGeometryConstantRegister >= kMaxConstantSlots,
               "the backend's mesh geometry constants must sit above every declarable slot");
 
 // ---------------------------------------------------------------- acceleration structures
-//
-// Inline RayQuery (DXR 1.1) still needs built acceleration structures. The backend owns sizing,
-// scratch lifetime and instance packing: result/scratch sizes come from a driver-dependent prebuild
-// query, scratch must outlive the command list that consumed it, and the instance descriptor is a
-// backend-specific bit layout that Vulkan packs differently.
+
+// One instance in a top-level acceleration structure. The backend owns sizing, scratch lifetime
+// and instance packing.
 struct TlasInstance {
     f32         world[16];   // ENGINE convention: row-major/row-vector, cm, +Z up. The backend does
                              // any transpose the underlying API needs — do not pre-transpose.
@@ -474,20 +365,23 @@ struct TlasInstance {
 };
 
 // ---------------------------------------------------------------- resource factory
-//
-// Creation and destruction. Reached with IDevice::resources(), which returns nullptr on backends
-// without GPU support so a feature module can decline to initialise instead of failing the engine.
+
+// Creates and destroys GPU resources. Reached with IDevice::resources(), which returns nullptr on
+// backends without GPU support.
 class IResourceFactory {
 public:
     virtual ~IResourceFactory() = default;
 
+    // Creation. Each returns 0 when the resource could not be made.
     virtual TextureHandle    createTexture(const TextureDesc& d) = 0;
     virtual BufferHandle     createBuffer(const BufferDesc& d) = 0;
     virtual ShaderHandle     createShader(const ShaderDesc& d) = 0;
     virtual PipelineHandle   createGraphicsPipeline(const GraphicsPipelineDesc& d) = 0;
     virtual PipelineHandle   createComputePipeline(const ComputePipelineDesc& d) = 0;
     virtual BindingSetHandle createBindingSet(const BindingSetDesc& d) = 0;
+    // Builds the acceleration structure for one uploaded mesh.
     virtual BlasHandle       createBlas(MeshHandle mesh) = 0;
+    // Allocates a top-level acceleration structure sized for `maxInstances`.
     virtual TlasHandle       createTlas(u32 maxInstances) = 0;
 
     // Destruction is DEFERRED BY CONTRACT: the backend retires the resource once the GPU has passed
@@ -498,131 +392,112 @@ public:
     virtual void destroyPipeline(PipelineHandle h) = 0;
     virtual void destroyBindingSet(BindingSetHandle h) = 0;
 
-    // Populate a binding set. Slots left unset are null-filled.
+    // Populates a binding set. Slots left unset are null-filled.
     virtual void setSrv(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip = kAllMips) = 0;
     virtual void setUav(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip) = 0;
-    // Distinct name, not an overload: every handle type is the same underlying integer.
+    // Puts a TLAS in an SRV slot. Distinct name, not an overload: every handle is the same integer.
     virtual void setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle tlas) = 0;
 
-    // Write bytes into a BufferKind::Upload buffer. Rejected on any other kind, because a GPU-local
-    // buffer cannot be written without a staging copy and a barrier -- and quietly performing one
-    // here would hide a per-frame upload inside what reads like a memcpy.
-    //
-    // The write is IMMEDIATE and unsynchronised: the caller owns the N-buffering. A module that
-    // writes a buffer the GPU may still be reading corrupts the frame in flight, which is why the
-    // one consumer of this rotates a buffer per frame in flight rather than reusing one. There is
-    // deliberately no map()/unmap() pair -- a raw pointer into GPU-visible memory is the same hazard
-    // with nothing at the call site to say so.
+    // Writes bytes into a BufferKind::Upload buffer; rejected on any other kind. The write is
+    // IMMEDIATE and unsynchronised, so the caller owns the N-buffering.
     virtual bool writeBuffer(BufferHandle h, const void* src, u64 bytes, u64 offset = 0) = 0;
 
     // Resolved description, with `mips` filled in when the desc asked for a full chain. The module
-    // must not recompute the mip count: it drives the descriptor loop, the per-mip barrier sequence
-    // and the dispatch loop, and an off-by-one makes the closing whole-resource transition illegal.
+    // must not recompute the mip count.
     virtual bool textureInfo(TextureHandle h, TextureDesc& out) const = 0;
 
-    // Block until the GPU is idle. Required before destroying and recreating a resource that
+    // Blocks until the GPU is idle. Required before destroying and recreating a resource that
     // binding sets still point at.
     virtual void waitIdle() = 0;
 };
 
 // ---------------------------------------------------------------- command recording
-//
-// A feature module records into the frame's command stream through this interface rather than
-// touching a backend command list. It is handed one at defined points in the frame (see
-// IRenderFeature), so modules never own submission, allocators or fences.
+
+// How a feature module records into the frame's command stream. It is handed one at defined points
+// in the frame, so modules never own submission, allocators or fences.
 class IRenderContext {
 public:
     virtual ~IRenderContext() = default;
 
-    // setPipeline must precede setConstants / setBindingSet: it selects the pipeline's declared
-    // layout AND whether the graphics or compute binding point is used. Those are wholly
-    // independent state, and getting it backwards is silent corruption, not an error.
+    // Selects the pipeline, its declared layout and the graphics-or-compute binding point. Must
+    // precede setConstants / setBindingSet.
     virtual void setPipeline(PipelineHandle p) = 0;
 
     virtual void setViewport(u32 x, u32 y, u32 w, u32 h) = 0;
-    // The scissor is mandatory and is NOT derived from the viewport. A pass that binds zero render
-    // targets has no extent to fall back on, so it must set this or inherit whatever rectangle was
-    // last used — which silently clips the pass.
+    // Mandatory, and NOT derived from the viewport: a pass that binds zero render targets has no
+    // extent to fall back on and would otherwise inherit the last rectangle used.
     virtual void setScissor(u32 x, u32 y, u32 w, u32 h) = 0;
 
-    // The caller must already have transitioned these into RenderTarget / DepthWrite.
+    // Binds render targets. The caller must already have transitioned these into RenderTarget /
+    // DepthWrite.
     virtual void setRenderTargets(const TextureHandle* colors, u32 count, TextureHandle depth) = 0;
     virtual void clearDepth(TextureHandle depth, f32 value) = 0;
 
-    // Bind a set to one of the pipeline's declared tables. Tier 1 requires EVERY declared table to
-    // hold valid descriptors on every pass, so a pipeline declaring table 1 must have both bound
-    // before it draws — the backend cannot invent the second one.
+    // Binds a set to one of the pipeline's declared tables. Tier 1 requires EVERY declared table to
+    // hold valid descriptors on every pass.
     virtual void setBindingSet(BindingSetHandle set, u32 table = 0) = 0;
-    // Root constants at a logical slot. Always overwrites the whole declared block, so a partial
-    // write can never inherit the previous pass's values.
+    // Root constants at a logical slot. Always overwrites the whole declared block.
     virtual void setConstants(u32 slot, const void* data, u32 dwords) = 0;
     // Transient per-frame constants: suballocated from the frame's upload ring and bound as a root
-    // CBV. Backend-owned memory, fresh every call — a module cannot get the N-buffering wrong, and
-    // republishing mid-frame (once a pass has computed its own matrices) is free.
+    // CBV. Backend-owned memory, fresh every call.
     virtual void setConstantBuffer(u32 slot, const void* data, u32 bytes) = 0;
 
-    // Binding table 1 plus its b2 constant block, as ONE piece of sticky state consumed by every
-    // subsequent drawMesh / dispatchMeshFor. Sticky rather than an argument to drawMesh because the
-    // draw entry points stay narrow — setWireframe / setLineDepth / setViewportRect are the
-    // established idiom for exactly this per-draw mode. The value of this sticky binding IS forwarded
-    // to a feature, but through IRenderFeature::submitDraw rather than by widening drawMesh, so a
-    // feature can replay geometry into its own passes shaded from the same surface the lit draw uses.
-    //
-    // Silently ignored by a pipeline whose layout declares neither, which is what lets a pass that
-    // has no use for per-draw resources leave the state alone instead of clearing it.
+    // Sets binding table 1 plus its b2 constant block as one piece of sticky state, consumed by
+    // every subsequent drawMesh / dispatchMeshFor and forwarded to IRenderFeature::submitDraw.
+    // Silently ignored by a pipeline whose layout declares neither.
     virtual void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) {
         (void)set; (void)constants; (void)bytes;
     }
 
-    // Draws. Geometry is addressed by MeshHandle: the backend resolves vertex/index buffers, index
-    // count, triangle count, mesh-shader group count and root SRVs internally.
+    // Draws one backend-owned mesh; the backend resolves buffers, counts and root SRVs internally.
     virtual void drawMesh(MeshHandle mesh) = 0;
+    // Draws one backend-owned mesh through the mesh-shader path.
     virtual void dispatchMeshFor(MeshHandle mesh) = 0;
+    // Dispatches a compute pipeline.
     virtual void dispatch(u32 gx, u32 gy, u32 gz) = 0;
 
     // ---- geometry the CALLER owns ----
     //
-    // The counterpart to GraphicsPipelineDesc::vertexLayout, and the reason both exist: a feature
-    // that builds its own vertices per frame -- a UI, a particle system, a debug overlay -- cannot
-    // express that as a MeshHandle, which names an immutable upload.
-    //
-    // `stride` is passed at bind rather than taken from the pipeline because the two are checked
-    // against each other by nobody: a buffer of 20-byte vertices bound to a pipeline expecting 32
-    // draws garbage that still rasterises. Naming it here keeps the number beside the buffer it
-    // describes, which is the only place a reader can compare them.
+    // The counterpart to GraphicsPipelineDesc::vertexLayout, for a feature that builds its own
+    // vertices per frame and so cannot express them as a MeshHandle.
+
+    // Binds a caller-owned vertex buffer. `stride` is named here rather than taken from the
+    // pipeline, because nothing checks the two against each other.
     virtual void setVertexBuffer(BufferHandle b, u32 stride) = 0;
-    // Format must be R32Uint or R16Uint-equivalent; anything else is rejected rather than guessed.
+    // Binds a caller-owned index buffer. Format must be R32Uint or R16Uint-equivalent.
     virtual void setIndexBuffer(BufferHandle b, Format indexFormat) = 0;
     // Draws from the currently bound vertex and index buffers. `baseVertex` is ADDED to every index
-    // before the fetch, which is what lets many draws share one buffer without rewriting indices.
+    // before the fetch, which lets many draws share one buffer without rewriting indices.
     virtual void drawIndexed(u32 indexCount, u32 firstIndex = 0, i32 baseVertex = 0) = 0;
 
-    // 3-vertex fullscreen triangle. The pipeline supplies its OWN vertex shader generating the
-    // triangle from SV_VertexID — no backend vertex shader is implied.
+    // Draws a 3-vertex fullscreen triangle. The pipeline supplies its OWN vertex shader generating
+    // it from SV_VertexID.
     virtual void drawFullscreen() = 0;
 
-    // Acceleration-structure builds.
+    // Builds a bottom-level acceleration structure.
     virtual void buildBlas(BlasHandle blas) = 0;
+    // Builds a top-level acceleration structure over `instances`.
     virtual void buildTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) = 0;
 
-    // Synchronisation. Textures and buffers have distinct names because the handle types are
-    // indistinguishable to the compiler.
+    // Transitions a texture, or one of its mips, between states.
     virtual void textureBarrier(TextureHandle t, ResourceState from, ResourceState to,
                                 u32 subresource = kAllSubresources) = 0;
+    // Transitions a buffer between states.
     virtual void bufferBarrier(BufferHandle b, ResourceState from, ResourceState to) = 0;
+    // Orders UAV writes to a texture against later reads.
     virtual void uavBarrierTexture(TextureHandle t) = 0;
-    // The only synchronisation between an acceleration-structure write and the RayQuery reads that
-    // consume it later in the same command list.
+    // Orders UAV writes to a buffer against later reads; the only synchronisation between an
+    // acceleration-structure write and the RayQuery reads that consume it.
     virtual void uavBarrierBuffer(BufferHandle b) = 0;
 
-    // Debug markers. Without these a feature's whole pass chain is attributed to the backend in
-    // PIX / RenderDoc. No correctness impact; annoying to retrofit.
+    // Opens a named region in PIX / RenderDoc.
     virtual void pushMarker(const char* label) { (void)label; }
+    // Closes the innermost open marker region.
     virtual void popMarker() {}
 };
 
 // ---------------------------------------------------------------- feature modules
-//
+
 // The hook a render-feature module implements. The backend calls these at fixed points; it does not
 // know what the feature does, only when to call it. Registration is NON-owning.
 class IRenderFeature {
@@ -630,19 +505,10 @@ public:
     virtual ~IRenderFeature() = default;
     virtual const char* name() const = 0;
 
-    // Scene submission, forwarded by the backend so a feature can replay geometry into its own
-    // passes (shadow maps, volume rasterisation, acceleration structures).
+    // Starts a frame's scene submission, so a feature can replay geometry into its own passes.
     virtual void beginScene() {}
-    // The WHOLE per-draw shading state, forwarded together. baseColor/metallic/roughness are the b1
-    // block a draw carries; `drawBinding` and `drawConstants` are the sticky table-1 set and its b2
-    // block that the equivalent drawMesh consumes through setDrawBinding. A feature that replays
-    // geometry needs all of it, not just b1: a shadow or volume pass shading from baseColor alone
-    // lights its pass from a DIFFERENT surface than the lit pass, and the two disagree with no gate
-    // to say so — exactly the split this parameter closes. `drawConstants` is a BORROWED pointer,
-    // valid only for the duration of this call: a feature replaying a frame later must copy the
-    // bytes, never keep the pointer. Deliberately kept in the RHI's own vocabulary — a table and a
-    // constant block — because this header does not learn the word "material" (see the preamble);
-    // what a surface IS stays the feature's and the material system's business.
+    // One scene draw, with the WHOLE per-draw shading state: the b1 block, plus the sticky table-1
+    // set and its b2 block. `drawConstants` is BORROWED and valid only for this call.
     virtual void submitDraw(MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                             f32 metallic, f32 roughness, BindingSetHandle drawBinding,
                             const void* drawConstants, u32 drawConstantBytes) {
@@ -650,44 +516,35 @@ public:
         (void)drawBinding; (void)drawConstants; (void)drawConstantBytes;
     }
 
-    // Before the scene's render targets are bound — for passes that own their own targets.
+    // Runs before the scene's render targets are bound — for passes that own their own targets.
     virtual void prePass(IRenderContext& ctx) { (void)ctx; }
 
-    // Whether the scene must be drawn with this feature's pipelines. wireframe is passed because it
-    // has no mesh-shader variant, and a feature may fall back when a variant failed to build.
+    // Whether the scene must be drawn with this feature's pipelines.
     virtual bool           overridesScenePipeline() const { return false; }
+    // The pipeline to draw the scene with. wireframe is passed because it has no mesh-shader
+    // variant, and a feature may fall back when a variant failed to build.
     virtual PipelineHandle scenePipeline(bool meshShaders, bool wireframe) const {
         (void)meshShaders; (void)wireframe; return 0;
     }
     // Bindings and constants the feature's scene shaders need, applied by the BACKEND to every
-    // scene draw it records — including draws that read none of them, which Tier 1 requires anyway.
+    // scene draw it records.
     virtual BindingSetHandle sceneBindingSet() const { return 0; }
     virtual bool sceneConstants(const void** data, u32* bytes) const { (void)data; (void)bytes; return false; }
 
-    // Replace the scene entirely, after the colour target is bound (e.g. a debug visualisation).
-    // Suppression must cover line/overlay draws too, or they float over the replacement.
+    // Whether this feature replaces the scene entirely. Suppression covers line/overlay draws too.
     virtual bool suppressesScene() const { return false; }
+    // Draws the replacement scene, after the colour target is bound.
     virtual void scenePass(IRenderContext& ctx) { (void)ctx; }
 
-    // After the camera post chain, drawing onto the BACKBUFFER. This is the only hook downstream of
-    // the tonemap, and that is the whole point of it: a HUD is authored in display colours and must
-    // not be tonemapped, exposed or bloomed along with the world behind it. A feature that drew a
-    // white panel into the scene target would watch the eye adaptation stop down the entire frame
-    // because the UI is the brightest thing in it.
-    //
-    // The backbuffer is ALREADY BOUND as the sole render target with no depth, and the viewport and
-    // scissor are already the full backbuffer, whose extent is passed because a feature has no other
-    // way to ask -- the backbuffer is not a TextureHandle any module can name. A feature that
-    // narrows either must not assume the next one restores it.
-    //
-    // Runs BEFORE the editor's own UI is recorded, so editor chrome composites over a game HUD
-    // rather than under it. In a shipped build there is no editor UI and the distinction is moot.
+    // Draws onto the BACKBUFFER after the camera post chain, so a HUD authored in display colours
+    // is not tonemapped, exposed or bloomed with the world. The backbuffer is already bound as the
+    // sole render target with no depth, and the viewport and scissor are already its full extent.
+    // Runs BEFORE the editor's own UI is recorded.
     virtual void overlayPass(IRenderContext& ctx, u32 width, u32 height) {
         (void)ctx; (void)width; (void)height;
     }
 
-    // Pipelines that bake sample count or target formats must be rebuilt when those change.
-    // setSampleCount can only rebuild the ones the backend owns.
+    // Rebuilds pipelines that bake sample count or target formats when those change.
     virtual void onRenderTargetsChanged(u32 sampleCount, Format color, Format depth) {
         (void)sampleCount; (void)color; (void)depth;
     }
@@ -698,23 +555,12 @@ public:
 const char* sharedShaderPrelude();
 
 // The -D list pinning the prelude's reserved mesh-geometry registers to a layout's own SRV count,
-// e.g. "AVER_MS_VTX_REG=3;AVER_MS_IDX_REG=4" for a layout declaring three SRVs. Semicolon-separated,
-// so it appends straight onto ShaderDesc::defines.
-//
-// EVERY mesh-shader compile must pass this, and must pass it for the SAME layout the pipeline
-// declares. The prelude #errors without it rather than guessing, because the failure it prevents is
-// invisible: the shader would ask for a register the root signature has since moved a material SRV
-// into, which at best CreateRootSignature rejects and at worst reads a texture as a vertex buffer —
-// no compile error, no debug-layer message, and only on the mesh-shader path.
+// e.g. "AVER_MS_VTX_REG=3;AVER_MS_IDX_REG=4". Semicolon-separated, so it appends straight onto
+// ShaderDesc::defines. EVERY mesh-shader compile must pass it, for the layout its pipeline declares.
 std::string meshGeometryDefines(const PipelineLayout& layout);
 
 // The camera post chain's HLSL: bloom, eye adaptation, and the tonemap that ends the frame.
-//
-// It lives here rather than in a backend for the same reason the tonemap itself always has —
-// "camera / post" is the shared prelude's, so that a second backend gets one implementation rather
-// than a second opinion. Self-contained: it declares its own constant buffer and resources and does
-// NOT include the shared prelude, because it runs with a root signature of its own and naming the
-// scene's cbuffer registers would collide with it.
+// Self-contained — it declares its own constant buffer and does NOT include the shared prelude.
 //
 // Entry points, in the order a frame uses them:
 //   PostVS            fullscreen triangle from SV_VertexID, shared by every pixel entry below
@@ -725,10 +571,7 @@ std::string meshGeometryDefines(const PipelineLayout& layout);
 //   CSExposure        histogram -> one adapted exposure value, with temporal damping
 //   PSComposite       scene + bloom -> exposure -> ACES -> gamma -> backbuffer
 //
-// The composite takes two optional defines, AVER_POST_BLOOM and AVER_POST_AUTOEXPOSURE. They are
-// permutations rather than a uniform branch because this is the one pass that runs at full
-// resolution on every pixel of every frame, and because the alternative is sampling a bloom texture
-// that was never built.
+// The composite takes two optional defines, AVER_POST_BLOOM and AVER_POST_AUTOEXPOSURE.
 const char* postShaderSource();
 
 } // namespace aver::rhi

@@ -1,24 +1,6 @@
 #pragma once
-// A minimal, strict JSON reader. Written rather than vendored.
-//
-// WHY THIS EXISTS. glTF is the import format this engine needs -- it is open, and one file carries
-// meshes, skeletons and animations, which is exactly the set .ocmesh/.ocskel/.ocanim was built for.
-// glTF is JSON, and this tree vendors no JSON library: what IS vendored is imgui, stb and fonts
-// under third_party, and Jolt under modules/physics.jolt. Nothing that parses JSON.
-// The alternative was vendoring one, which needs a licence review and a file this machine cannot
-// download. glTF's JSON is a constrained subset -- no comments, no NaN, no trailing commas, nesting
-// a handful deep -- so a correct reader for it is a few hundred lines, and owning it outright is
-// worth more here than the generality a library would bring.
-//
-// STRICT ON PURPOSE. glTF is machine-generated: a trailing comma or an unquoted key means the
-// exporter is wrong, and accepting it quietly turns a reportable bug into a mesh that is subtly
-// missing data. Everything this rejects, it rejects with a byte offset.
-//
-// DOM, not a callback parser. An importer needs random access -- accessor 4 refers to bufferView 9
-// refers to buffer 0 -- and a streaming reader would mean either two passes or building this anyway.
-//
-// NOT A GENERAL-PURPOSE JSON LIBRARY, and not trying to be: no writer, no comments, no big integers
-// beyond what a double holds exactly, no duplicate-key policy beyond "last wins".
+// A minimal, strict JSON reader for glTF import. DOM, no writer, no comments, last duplicate key
+// wins, and every rejection carries a byte offset.
 #include "aver/core/Types.hpp"
 
 #include <string>
@@ -29,11 +11,9 @@ namespace aver::fmt {
 
 class JsonValue;
 
-// Objects keep INSERTION ORDER and are looked up linearly. glTF objects are small -- a primitive has
-// five keys, an accessor eight -- so a hash map would cost more in construction than it saves in
-// lookup, and order-preserving makes a failure message reproducible.
 struct JsonMember;
 
+// One parsed JSON value. Objects keep insertion order and are looked up linearly.
 class JsonValue {
 public:
     enum class Type : u8 { Null, Bool, Number, String, Array, Object };
@@ -48,9 +28,7 @@ public:
     bool isArray()  const { return type_ == Type::Array; }
     bool isObject() const { return type_ == Type::Object; }
 
-    // Accessors with a default. Every one is total: asking a string for its number gives the
-    // fallback rather than throwing, because an importer reading optional glTF fields would
-    // otherwise need a type check before every read.
+    // Total accessors: a type mismatch gives the fallback rather than throwing.
     bool        asBool  (bool fallback = false) const { return type_ == Type::Bool ? bool_ : fallback; }
     f64         asDouble(f64 fallback = 0.0)    const { return type_ == Type::Number ? num_ : fallback; }
     f32         asFloat (f32 fallback = 0.0f)   const { return type_ == Type::Number ? static_cast<f32>(num_) : fallback; }
@@ -62,6 +40,7 @@ public:
     usize size() const;                       // elements for an array, members for an object, else 0
     const JsonValue& operator[](usize i) const;          // array element; a null value if out of range
     const JsonValue& operator[](std::string_view key) const;  // object member; a null value if absent
+    // True when the object has this key.
     bool has(std::string_view key) const;
 
     const std::vector<JsonValue>& elements() const { return arr_; }
@@ -78,13 +57,13 @@ private:
     std::vector<JsonMember> obj_;
 };
 
+// One key/value pair of an object.
 struct JsonMember {
     std::string key;
     JsonValue   value;
 };
 
-// Parse a whole document. Returns false and sets `why` -- with a byte offset -- on anything
-// malformed. `out` is left in an unspecified state on failure and must not be read.
+// Parses a whole document. Returns false with `why` set, and `out` unspecified, on anything malformed.
 bool parseJson(std::string_view text, JsonValue& out, std::string* why = nullptr);
 
 } // namespace aver::fmt

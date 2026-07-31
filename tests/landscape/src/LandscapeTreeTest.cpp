@@ -20,6 +20,8 @@ using namespace aver;
 using namespace aver::landscape;
 
 static int g_checks = 0, g_failures = 0;
+
+// Records one assertion and logs it.
 static void check(bool cond, const std::string& what) {
     ++g_checks;
     if (cond) { AVER_INFO("  ok    {}", what); return; }
@@ -27,11 +29,7 @@ static void check(bool cond, const std::string& what) {
     ++g_failures;
 }
 
-// A section with REAL RELIEF. A flat or a linear field has zero geometric error at every level, which
-// would make the LOD metric trivially satisfied and prove nothing -- the error would be 0 everywhere
-// and any threshold would accept the root. Two sine ridges at different frequencies give a surface that
-// a coarse tessellation genuinely cannot represent, plus a sharp spike so the max-deviation path is
-// exercised rather than only the smooth one.
+// Builds an n x n test section: two sine ridges plus a one-sample spike.
 static fmt::OcLandData makeTerrain(u32 n, f32 spacing = 100.0f) {
     fmt::OcLandData d;
     d.sampleCount = n;
@@ -45,15 +43,16 @@ static fmt::OcLandData makeTerrain(u32 n, f32 spacing = 100.0f) {
             const f32 fx = static_cast<f32>(ix), fy = static_cast<f32>(iy);
             f32 h = 400.0f * std::sin(fx * 0.11f) + 250.0f * std::sin(fy * 0.27f)
                   + 60.0f * std::sin((fx + fy) * 0.9f);
-            if (ix == n / 3 && iy == n / 3) h += 1500.0f;      // a spike, deliberately one sample wide
+            if (ix == n / 3 && iy == n / 3) h += 1500.0f;      // a spike, one sample wide
             d.heights[static_cast<usize>(iy) * n + ix] = h;
         }
     }
     return d;
 }
 
+// Runs the suite. Returns the failure count.
 int main() {
-    const u32 N = 257;              // 4*64 + 1 -> 3 levels, 16+4+1 = 21 nodes. Small enough to be fast.
+    const u32 N = 257;              // 4*64 + 1 -> 3 levels, 16+4+1 = 21 nodes
     const fmt::OcLandData terrain = makeTerrain(N);
 
     AVER_INFO("=== the tree ===");
@@ -69,7 +68,6 @@ int main() {
               "the root is the coarsest node");
         check(tree.nodes()[tree.root()].leaf() == false, "and it has children");
 
-        // Sizes that must be rejected rather than half-handled.
         LandscapeTree bad;
         check(!bad.build(terrain, 63, &why), "a non-power-of-two nodeQuads is refused (" + why + ")");
         fmt::OcLandData odd = makeTerrain(200);
@@ -78,8 +76,6 @@ int main() {
 
     AVER_INFO("=== the LOD metric ===");
     {
-        // e_L is exactly 0 at level 0 -- every source sample IS a vertex there, so there is nothing to
-        // deviate from. This is the assertion that catches an off-by-one in the stride.
         f32 worstL0 = 0.0f;
         for (const LandscapeNode& n : tree.nodes())
             if (n.level == 0) worstL0 = std::fmax(worstL0, n.errorCm);
@@ -103,8 +99,6 @@ int main() {
         p.projScale = 540.0f;
         p.screenErrorPx = 2.0f;
 
-        // Standing ON the terrain must refine all the way: at distance 0 the projected error is
-        // unbounded, so nothing coarse can be accepted near the camera.
         const LandscapeNode& root = tree.nodes()[tree.root()];
         p.cameraCm[0] = root.centre[0];
         p.cameraCm[1] = root.centre[1];
@@ -117,7 +111,6 @@ int main() {
         check(allFinestNear, "a camera at the centre selects only level 0 (" +
                              std::to_string(near_.nodes.size()) + " nodes)");
 
-        // Far away, the whole section should collapse towards the root.
         p.cameraCm[0] = root.centre[0];
         p.cameraCm[1] = root.centre[1] - 200000.0f;      // 2 km out
         p.cameraCm[2] = root.centre[2] + 50000.0f;
@@ -128,9 +121,7 @@ int main() {
               "and far away selects fewer nodes (" + std::to_string(far_.nodes.size()) + " vs " +
               std::to_string(near_.nodes.size()) + ")");
 
-        // Every selected set must TILE the section exactly once -- no gaps, no overlaps. Measured by
-        // summing the covered source area, which catches both at once and is the property a renderer
-        // actually depends on.
+        // True when the selection covers the section exactly once, by summed source area.
         auto tiles = [&](const SelectResult& r) {
             u64 area = 0;
             for (u32 i : r.nodes) {
@@ -142,14 +133,10 @@ int main() {
         check(tiles(near_), "the near selection tiles the section exactly once");
         check(tiles(far_), "and so does the far one");
 
-        // HYSTERESIS: hovering on a boundary must not oscillate. Walk the camera in tiny steps across
-        // the distance where a level switches and count how many times the node count changes. Without
-        // the 0.8x gap this flips every step.
         tree.resetHysteresis();
         u32 flips = 0;
         usize last = 0;
         for (int step = 0; step < 40; ++step) {
-            // Back and forth over a 200 cm window, which is far narrower than the switch distance.
             const f32 wobble = (step % 2 == 0) ? 0.0f : 200.0f;
             p.cameraCm[1] = root.centre[1] - 60000.0f - wobble;
             SelectResult r;
@@ -160,7 +147,6 @@ int main() {
         check(flips <= 1, "a camera wobbling on a level boundary does not oscillate (" +
                           std::to_string(flips) + " changes over 40 frames)");
 
-        // The draw clamp is a CEILING, and it reports what it dropped rather than silently truncating.
         SelectParams clamped = p;
         clamped.cameraCm[0] = root.centre[0];
         clamped.cameraCm[1] = root.centre[1];
@@ -177,29 +163,20 @@ int main() {
 
     AVER_INFO("=== frustum ===");
     {
-        // Built from a REAL projection rather than hand-written planes, so the row-vector convention is
-        // actually exercised. A transposed extraction is the failure this guards, and it passes every
-        // hand-written test.
         const Mat4 proj = Mat4::perspectiveLH(1.0f, 1.6f, 10.0f, 100000.0f);
-        // Mat4 stores [4][4]; the frustum extractor takes a flat 16 in the same row-major order, which
-        // is what the engine's row-vector convention means by "row-major".
+        // Mat4 is [4][4]; the frustum extractor takes a flat 16 in the same row-major order.
         f32 m[16];
         for (int r = 0; r < 4; ++r)
             for (int c = 0; c < 4; ++c) m[r*4 + c] = proj.m[r][c];
         const Frustum f = Frustum::fromViewProj(m);
 
-        // With an identity view, the camera sits at the origin looking down +Z in clip terms. A point
-        // well in front is inside; the same distance BEHIND is not.
         const f32 inFront[3] = {0.0f, 0.0f, 5000.0f};
         const f32 behind[3]  = {0.0f, 0.0f, -5000.0f};
         check(f.intersectsSphere(inFront, 100.0f), "a sphere in front of the eye is kept");
         check(!f.intersectsSphere(behind, 100.0f), "one behind it is culled");
-        // A big sphere straddling the eye must be KEPT: culling is conservative, and a chunk the camera
-        // is standing inside must never disappear.
         check(f.intersectsSphere(behind, 20000.0f),
               "a sphere large enough to straddle the eye is kept (culling is conservative)");
 
-        // Wired into selection, culling must remove something and must not remove everything.
         SelectParams p;
         p.cameraCm[0] = tree.nodes()[tree.root()].centre[0];
         p.cameraCm[1] = tree.nodes()[tree.root()].centre[1];
@@ -223,8 +200,6 @@ int main() {
         check(c.surfaceVertices == 65 * 65, "65x65 surface vertices");
         check(c.vertices == 65 * 65 + 4 * 65, "plus four rims of 65");
 
-        // Built at EVERY level, because the stride arithmetic differs at each and a level-0 chunk is
-        // the only one where source sample and vertex coincide.
         bool allBuilt = true, allInRange = true, allInsideNode = true;
         u32 built = 0;
         for (u32 i = 0; i < tree.nodes().size(); ++i) {
@@ -236,9 +211,6 @@ int main() {
             for (u32 idx : mesh.indices)
                 if (idx >= mesh.vertices.size()) allInRange = false;
 
-            // Every SURFACE vertex must land inside the node's own footprint. This is what catches a
-            // stride or origin mistake: a chunk that sampled the wrong region would still produce
-            // valid-looking geometry, in the wrong place.
             const LandscapeNode& n = tree.nodes()[i];
             const f32 x0 = terrain.originCm[0] + static_cast<f32>(n.sampleX) * terrain.spacingCm;
             const f32 y0 = terrain.originCm[1] + static_cast<f32>(n.sampleY) * terrain.spacingCm;
@@ -254,8 +226,6 @@ int main() {
         check(allInRange, "and no index outside its own vertex array");
         check(allInsideNode, "every surface vertex lands inside its node's footprint");
 
-        // Normals must point generally UP. +Z is the engine's up, and a sign error in the gradient
-        // gives a landscape lit from underneath -- which looks like a broken light, not a broken normal.
         ChunkMesh m0;
         check(buildChunkMesh(terrain, tree, 0, m0, 1000.0f), "a level-0 chunk builds");
         f32 worstNz = 1.0f;
@@ -263,29 +233,20 @@ int main() {
         check(worstNz > 0.0f, "every surface normal has a positive +Z component (worst " +
                               std::to_string(worstNz) + ")");
 
-        // World-aligned UVs, so two chunks at different levels agree where they overlap. Checked by
-        // sampling the same world position from two different levels.
         check(std::fabs(m0.vertices[0].u - m0.vertices[0].px / 1000.0f) < 1e-6f,
               "uv is world-aligned, not per-node");
     }
 
     AVER_INFO("=== the crack-free gate ===");
     {
-        // THE ASSERTION THE WHOLE SKIRT DESIGN EXISTS FOR. Where a fine node abuts a coarser one, the
-        // coarse neighbour draws a chord across twice the spacing and its rim can sit BELOW the fine
-        // rim. If the skirt is shallower than that gap, sky shows through the seam.
-        //
-        // Checked against the ACTUAL deviation along each node's edges at the next coarser stride,
-        // rather than against the bound the implementation used -- otherwise this would only be
-        // checking the code against itself.
         f32 worstRatio = 1e30f;
         u32 checked = 0;
         for (const LandscapeNode& n : tree.nodes()) {
             if (n.level + 1 >= tree.levelCount()) continue;   // the root has no coarser neighbour
             const u32 coarse = n.stride * 2;
             f32 gap = 0.0f;
-            // Each of the four rims, in runs of the coarser stride.
             for (u32 s = 0; s + coarse <= n.spanQuads; s += coarse) {
+                // One rim run: a start sample and a step direction.
                 struct Run { u32 x, y, dx, dy; };
                 const Run runs[4] = {
                     {n.sampleX + s, n.sampleY,               1, 0},
@@ -300,8 +261,6 @@ int main() {
                         const f32 f = static_cast<f32>(t) / static_cast<f32>(coarse);
                         const f32 chord = h0 + (h1 - h0) * f;
                         const f32 fine = terrain.heightAt(r.x + r.dx * t, r.y + r.dy * t);
-                        // Only a chord BELOW the fine rim opens a hole; above it the coarse neighbour
-                        // simply overlaps and hides itself.
                         gap = std::fmax(gap, fine - chord);
                     }
                 }
@@ -319,16 +278,12 @@ int main() {
 
     AVER_INFO("=== the physics bridge ===");
     {
-        // A section with ONE sharp peak at a known, ASYMMETRIC sample. Asymmetric is the whole point:
-        // the render grid runs column->+X and row->+Y while a physics column runs +Y and a physics row
-        // runs -X, so the map between them is a transpose AND a row flip. A peak at (ix, iy) with
-        // ix == iy would survive a plain transpose and prove nothing.
         const u32 M = 33;                       // 32 quads: small, and a multiple of 8
-        const u32 peakIx = 7, peakIy = 22;
+        const u32 peakIx = 7, peakIy = 22;      // asymmetric, so a plain transpose cannot pass
         fmt::OcLandData d;
         d.sampleCount = M;
         d.spacingCm = 200.0f;
-        d.originCm[0] = 1000.0f;                // a non-zero origin, so an origin bug cannot hide
+        d.originCm[0] = 1000.0f;
         d.originCm[1] = -3000.0f;
         d.originCm[2] = 0.0f;
         d.heights.assign(static_cast<usize>(M) * M, 0.0f);
@@ -339,8 +294,6 @@ int main() {
         check(ph.sampleCount == M, "every sample is carried across, none cropped");
         check(ph.samples.size() == static_cast<usize>(M) * M, "and the array is the full square");
 
-        // The peak must land at the transposed-and-flipped index, checked directly on the array before
-        // any physics is involved -- so a failure here names the map rather than the simulation.
         const u32 px = peakIy, py = (M - 1) - peakIx;
         check(ph.samples[static_cast<usize>(py) * M + px] == 900.0f,
               "the peak sits at the transposed-and-row-flipped index");
@@ -350,9 +303,6 @@ int main() {
               "the corner is the field's +X end, not its minimum corner");
 
 #if AVER_LANDSCAPE_TEST_PHYSICS
-        // END TO END. Where the RENDER geometry puts the peak, a downward ray must hit it. This is the
-        // assertion the whole bridge exists to make true, and nothing short of running the simulation
-        // establishes it.
         f32 want[3];
         d.worldAt(peakIx, peakIy, want);
 
@@ -367,16 +317,11 @@ int main() {
         const int32_t got = aver_phys_raycast(want[0], want[1], 5000.0f, 0.0f, 0.0f, -1.0f,
                                               20000.0f, hit, nrm);
         check(got == body, "a ray dropped where the peak is DRAWN hits the collision field");
-        // Generous on height: Jolt quantises heights internally and a raycast lands on a triangle, not
-        // on the sample. The point is that it is near the peak and nowhere near the flat plain.
         check(hit[2] > 600.0f,
               "and lands on the peak rather than the surrounding flat (z=" + std::to_string(hit[2]) + ")");
 
-        // The control that makes the above mean something: the diagonally opposite sample is flat, so a
-        // ray there must NOT find the peak. Without this, a bridge that returned a peak everywhere
-        // would pass.
         f32 flat[3];
-        d.worldAt(peakIy, peakIx, flat);        // indices swapped -- where a plain transpose would put it
+        d.worldAt(peakIy, peakIx, flat);        // indices swapped: where a plain transpose would put it
         f32 hit2[3] = {0,0,0};
         const int32_t got2 = aver_phys_raycast(flat[0], flat[1], 5000.0f, 0.0f, 0.0f, -1.0f,
                                                20000.0f, hit2, nrm);
@@ -394,29 +339,24 @@ int main() {
 #if AVER_LANDSCAPE_TEST_RENDERER
     AVER_INFO("=== the renderer's residency ===");
     {
-        // A RECORDING DEVICE, not a real one. IDevice's methods are virtual with default no-op bodies,
-        // so a test can be the device -- the same trick tests/render.ui uses. That is what lets the
-        // residency and fallback logic, which is the only interesting part of the renderer half, be
-        // checked with no GPU at all.
+        // A stand-in device that counts mesh creations and records every draw.
         struct Recorder final : rhi::IDevice {
             u32 created = 0, draws = 0;
             std::vector<rhi::MeshHandle> drawn;
-            // IDevice's pure virtuals, satisfied the way tests/render.actorpreview's MockDevice does.
-            // Everything this test cares about has a default no-op body already, so only createMesh and
-            // drawMesh below are actually overridden for behaviour.
             rhi::Backend backend() const override { return rhi::Backend::Null; }
             const char* adapterName() const override { return "recording device"; }
             rhi::IResourceFactory* resources() override { return nullptr; }
             rhi::ISwapchain* createSwapchain(const rhi::SwapchainDesc&) override { return nullptr; }
             void beginFrame() override {}
             void endFrame() override {}
+            // Counts one upload and hands back a fresh handle. 0 for malformed geometry.
             rhi::MeshHandle createMesh(const rhi::MeshVertex* v, u32 vc,
                                        const u32* idx, u32 ic) override {
-                // Asserted here rather than trusted: this is the reinterpret_cast's only witness.
                 if (!v || !idx || vc == 0 || ic == 0) return 0;
                 ++created;
                 return static_cast<rhi::MeshHandle>(created);   // 0 stays invalid
             }
+            // Records one draw and which mesh it used.
             void drawMesh(rhi::MeshHandle m, const f32*, const f32*, f32, f32) override {
                 ++draws;
                 drawn.push_back(m);
@@ -446,30 +386,22 @@ int main() {
         check(r.stats().skipped == 0, "nothing is skipped -- a skipped node is a hole in the ground");
         check(dev.draws == r.stats().submitted, "the device saw the same number of draws");
 
-        // Drawn AGAIN with nothing changed: the cache must hold, so no new uploads.
         const u32 createdBefore = dev.created;
         r.draw(dev, terrain, tree, sel, identity, 1000.0f);
         check(dev.created == createdBefore, "a second identical frame uploads nothing new");
         check(r.stats().created == 0, "and reports zero creations");
 
-        // THE CAP. With room for one mesh only, every other selected node must fall back to a resident
-        // ancestor rather than vanish -- and the ancestor must be drawn ONCE however many defer to it.
         Recorder dev2;
         LandscapeRenderer tiny(1);
         tiny.draw(dev2, terrain, tree, sel, identity, 1000.0f);
-        // The ROOT takes the only slot, so every leaf falls back to it: one draw, complete coverage.
         check(dev2.created == 1, "a cache of 1 uploads exactly one mesh -- the root");
         check(tiny.stats().submitted >= 1, "and still submits geometry rather than nothing");
-        // Deduplication: no handle appears twice in a frame.
         bool unique = true;
         for (usize i = 0; i < dev2.drawn.size(); ++i)
             for (usize j = i + 1; j < dev2.drawn.size(); ++j)
                 if (dev2.drawn[i] == dev2.drawn[j]) unique = false;
         check(unique, "no mesh is drawn twice in one frame (" +
                       std::to_string(dev2.drawn.size()) + " draws)");
-// NOTHING IS EVER SKIPPED, which is the guarantee the reserved root exists to provide. Before it
-        // the leaves were the only resident nodes, a leaf is nobody's ancestor, and fifteen of sixteen
-        // selected nodes were dropped -- holes in the ground with no diagnostic beyond a counter.
         check(tiny.stats().skipped == 0,
               "at the cache cap nothing is skipped: everything falls back to the root (" +
               std::to_string(tiny.stats().substituted) + " substituted)");
@@ -481,10 +413,6 @@ int main() {
 
     AVER_INFO("=== a production-size section ===");
     {
-        // Every test above uses 257 samples / 21 nodes because it is fast. The size the design actually
-        // specifies is 1025, and its headline numbers -- 341 nodes, 5 levels, ~80 MiB fully resident --
-        // were arithmetic on paper until this block. A subdivision that is off by one level is invisible
-        // at 257 and wrong at 1025.
         const u32 P = 1025;                       // 16*64 + 1
         const fmt::OcLandData big = makeTerrain(P);
         LandscapeTree bigTree;
@@ -494,20 +422,16 @@ int main() {
         check(bigTree.nodes().size() == 341,
               "256+64+16+4+1 = 341 nodes (got " + std::to_string(bigTree.nodes().size()) + ")");
 
-        // The root must span the WHOLE section: 1024 quads. An off-by-one here means the last row of
-        // samples is never drawn by anything, which is exactly the row a neighbouring section shares.
         const LandscapeNode& r = bigTree.nodes()[bigTree.root()];
         check(r.spanQuads == 1024, "the root spans all 1024 quads (got " +
                                    std::to_string(r.spanQuads) + ")");
         check(r.stride == 16, "at stride 16");
 
-        // Level 0 must still be exact, at the real size.
         f32 worstL0 = 0.0f;
         for (const LandscapeNode& n : bigTree.nodes())
             if (n.level == 0) worstL0 = std::fmax(worstL0, n.errorCm);
         check(worstL0 == 0.0f, "geometric error is still exactly 0 at level 0");
 
-        // The per-node memory figure the draw budget was derived from.
         const ChunkCounts cc = chunkCounts(64);
         const usize perNode = cc.vertices * sizeof(LandVertex) + cc.indices * sizeof(u32);
         check(perNode > 240u * 1024u && perNode < 250u * 1024u,
@@ -516,7 +440,6 @@ int main() {
         check(fullTree > 75u * 1024u * 1024u && fullTree < 85u * 1024u * 1024u,
               "a fully resident section is ~80 MiB (" + std::to_string(fullTree / (1024*1024)) + " MiB)");
 
-        // And the selection still tiles 1024x1024 exactly, which is the property a renderer depends on.
         SelectParams sp;
         sp.cameraCm[0] = r.centre[0];
         sp.cameraCm[1] = r.centre[1] - 50000.0f;
@@ -534,14 +457,6 @@ int main() {
               "a mid-range selection tiles 1024x1024 exactly (" + std::to_string(sr.nodes.size()) +
               " nodes, area " + std::to_string(area) + ")");
 
-        // THE DRAW CLAMP AT THE REAL SIZE. 1025 samples can select far more than 192 nodes, which is
-        // the whole reason the clamp exists -- and this is the first test where it could actually be
-        // exceeded rather than being a rule about a 16-node tree.
-        //
-        // A camera low over the middle only selected 64 nodes, so `<= 192` passed without the clamp
-        // ever firing -- an assertion that cannot fail is not a test. Driving the threshold to 0.01 px
-        // forces every one of the 256 level-0 nodes to be selected, which is the first time in this
-        // suite that the ceiling is genuinely hit.
         SelectParams cp = sp;
         cp.cameraCm[1] = r.centre[1];
         cp.cameraCm[2] = r.centre[2] + 200.0f;
@@ -556,8 +471,6 @@ int main() {
               "and reports the 64 it dropped, rather than truncating quietly (" +
               std::to_string(cr.dropped) + ")");
 
-        // Unclamped, the same camera must select all 256 -- which is what proves the clamp above was
-        // the thing limiting it and not the selection running out of nodes.
         SelectParams uc = cp;
         uc.maxDraws = 0;
         SelectResult ur;

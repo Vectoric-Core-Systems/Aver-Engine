@@ -3,6 +3,7 @@
 
 namespace aver {
 
+// The kind of a window/input event.
 enum class EventType {
     None,
     WindowClose,
@@ -12,19 +13,17 @@ enum class EventType {
     MouseButton,
 };
 
+// One window or input event. Which fields are meaningful depends on `type`.
 struct Event {
     EventType type = EventType::None;
-    // WindowResize
     u32 width = 0, height = 0;
-    // Key: key = virtual key code; pressed = down/up
-    i32 key = 0;
+    i32 key = 0;              // virtual key code
     bool pressed = false;
-    // Mouse
     i32 mouseX = 0, mouseY = 0;
     i32 button = -1; // 0=L,1=R,2=M
 };
 
-// Lightweight callback (no std::function) — set on the window; called from pumpEvents.
+// Event sink, set on the window and called from pumpEvents.
 using EventCallback = void (*)(void* user, const Event&);
 
 } // namespace aver

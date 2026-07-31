@@ -1,17 +1,7 @@
-// Does audio actually come out of this machine?
-//
-// AudioTest checks the mixer with no hardware, which is the right way to check a mixer and cannot
-// say anything at all about a sound card. This is the other half: it opens the real default output,
-// plays procedurally generated tones through it, and reports what the device said it was and whether
-// the render thread met its deadline.
-//
-// NOT part of the headless suite, because it needs a device and it makes a noise. Run it by hand:
-//
+// Hand-run probe: opens the real default output device and plays generated tones through it.
+// Not part of the headless suite -- it needs a sound card and it makes a noise.
 //     AudioProbe.exe              a short arpeggio, then a pan sweep
-//     AudioProbe.exe --silent     the same run with the master at zero, for a machine in an office
-//
-// Every tone is generated here rather than loaded, so this depends on no asset and cannot fail for
-// want of one. Nothing generated is a model's output -- it is arithmetic.
+//     AudioProbe.exe --silent     the same run with the master at zero
 #include "aver/audio/AudioDevice.hpp"
 #include "aver/core/Log.hpp"
 
@@ -25,8 +15,7 @@ using namespace aver;
 
 namespace {
 
-// A tone with a short attack and a decay, because a bare sine gated on and off clicks at both ends
-// and the click is louder than the tone -- which would make this probe report a fault it caused.
+// Generates a mono tone with a short attack and an exponential decay.
 audio::SoundData tone(u32 rate, f32 hz, f32 seconds, f32 amplitude) {
     const u32 frames = static_cast<u32>(seconds * static_cast<f32>(rate));
     audio::SoundData d;
@@ -44,18 +33,18 @@ audio::SoundData tone(u32 rate, f32 hz, f32 seconds, f32 amplitude) {
     return d;
 }
 
+// Sleeps the calling thread for a number of milliseconds.
 void wait(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
 } // namespace
 
+// Runs the probe. Returns 0 unless the device reported an underrun.
 int main(int argc, char** argv) {
     bool silent = false;
     for (int i = 1; i < argc; ++i) if (!std::strcmp(argv[i], "--silent")) silent = true;
 
     audio::AudioDevice dev;
     if (!dev.start()) {
-        // Not a failure of this program. A machine with no output device is a legitimate
-        // configuration and the engine is meant to run silent on one, so say so and succeed.
         AVER_WARN("=== no output device on this machine; the engine would run silent ===");
         return 0;
     }
@@ -68,8 +57,7 @@ int main(int argc, char** argv) {
     audio::Mixer& mix = dev.mixer();
     if (silent) { mix.setMasterVolume(0.0f); AVER_INFO("master at zero: this run makes no sound"); }
 
-    // An arpeggio, so a listener can tell pitch is right and voices overlap rather than cutting each
-    // other off. A440, C#5, E5, A5 -- a major triad, which is unmistakably wrong if the resampler is.
+    // A440, C#5, E5, A5 -- a major triad.
     const f32 notes[4] = {440.0f, 554.37f, 659.26f, 880.0f};
     audio::SoundHandle handles[4] = {};
     for (int i = 0; i < 4; ++i) handles[i] = mix.addSound(tone(rate, notes[i], 0.9f, 0.35f));
@@ -83,9 +71,6 @@ int main(int argc, char** argv) {
     AVER_INFO("    {} voices active at the end of it", mix.activeVoices());
     wait(900);
 
-    // A pan sweep: one positional voice walked from the listener's far left to its far right. This
-    // is the part a person can check by ear that no headless test can -- if it moves the wrong way,
-    // the handedness is wrong somewhere between here and the speakers.
     AVER_INFO("--- pan sweep: left to right, 2 seconds ---");
     audio::SoundHandle drone = mix.addSound(tone(rate, 220.0f, 3.0f, 0.30f));
     audio::PlayDesc p;
@@ -102,7 +87,6 @@ int main(int argc, char** argv) {
     mix.stop(v);
     wait(200);
 
-    // A distance sweep, to hear the attenuation curve reach silence rather than snap to it.
     AVER_INFO("--- distance: near to the outer radius, 1.5 seconds ---");
     p.position[1] = 0.0f;
     const audio::VoiceHandle far = mix.play(p);
@@ -120,7 +104,5 @@ int main(int argc, char** argv) {
         AVER_WARN("an underrun is an audible gap. On an idle machine it is a bug, not load.");
 
     dev.stop();
-    // The underrun count is the only thing here that can FAIL, and it is a property of the machine as
-    // much as of the code -- so it is reported and returned, and a caller decides what to make of it.
     return under == 0 ? 0 : 1;
 }

@@ -1,90 +1,73 @@
+// The P/Invoke declarations for the Aver.Scene C ABI, plus asset-identity hashing.
+
 using System.Runtime.InteropServices;
 
 namespace Aver.Scene;
 
-/// <summary>
-/// The P/Invoke surface for the Aver.Scene C ABI. Same idiom as <c>Pbr</c>/<c>Voxi</c>: a private
-/// <see cref="Lib"/> const, exact export names, no <c>EntryPoint</c>/<c>CharSet</c>/<c>CallingConvention</c>
-/// (defaults to Winapi), blittable types only, strings in as <see cref="UnmanagedType.LPUTF8Str"/> and out
-/// as <see cref="System.IntPtr"/> decoded through <see cref="Str"/>.
-/// </summary>
-/// <remarks>
-/// <para>
-/// <b>Strings cross as UTF-8.</b> The world's name blob stores the raw <c>const char*</c> bytes it is
-/// handed (see <c>World::setName</c>), and the engine's identity hash is fnv1a64 of those UTF-8 bytes.
-/// So inbound strings marshal as <see cref="UnmanagedType.LPUTF8Str"/> and outbound pointers decode
-/// through <see cref="Marshal.PtrToStringUTF8"/> — <see cref="UnmanagedType.LPStr"/> would re-encode a
-/// non-ASCII name in the process ANSI code page, corrupting the bytes and the objectId derived from them.
-/// </para>
-/// <para>
-/// <b>The 1/0 setter convention.</b> Every setter returns <c>int32_t</c>: 1 on success, 0 on a rejected
-/// request (stale handle, wrong field kind, out of range). The managed facade reads that as
-/// <c>!= 0</c>. Getters return the value, or a documented neutral value for a stale handle.
-/// </para>
-/// <para>
-/// <b>Fields are addressed by a dense id, never by kind guesswork.</b> An <c>aver_field</c> resolved
-/// from a qualified name ("CLocal.position") carries the component, the byte offset AND the kind, so a
-/// set through the wrong-kind accessor is rejected by the ABI rather than silently mis-writing. This is
-/// why there is one accessor family per kind and no generic "set bytes".
-/// </para>
-/// </remarks>
+/// <summary>The P/Invoke surface for the Aver.Scene C ABI. Strings cross as UTF-8 in both
+/// directions; setters return 1 on success and 0 on a rejected request.</summary>
 internal static class Native
 {
     private const string Lib = "Aver.Scene";
 
-    // Field resolution — a dense id (component + offset + kind), 0 == unknown.
+    /// <summary>Resolves a dense field id from a qualified name. 0 == unknown.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_field([MarshalAs(UnmanagedType.LPUTF8Str)] string qualifiedName);
+    /// <summary>The field's kind.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_field_kind(int f);
+    /// <summary>The field's arity in floats.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_field_arity(int f);
 
-    // Set/get by kind. Note there is BOTH a set_i32 and a first-class set_ref: an entity reference is
-    // its own kind (Entity) with its own accessor, not an int32 in disguise. (See contradiction #2/#4.)
+    /// <summary>Reads an F32 field.</summary>
     [DllImport(Lib)] internal static extern float aver_scene_get_f32(int e, int f);
+    /// <summary>Writes an F32 field.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_set_f32(int e, int f, float v);
+    /// <summary>Reads a float-kind field into <paramref name="outv"/>.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_get_vec(int e, int f, float[] outv);
+    /// <summary>Writes a float-kind field.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_set_vec(int e, int f, float[] v);
+    /// <summary>Reads an I32 or Bool field.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_get_i32(int e, int f);          // also BOOL
+    /// <summary>Writes an I32 or Bool field.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_set_i32(int e, int f, int v);
+    /// <summary>Reads an I64 field.</summary>
     [DllImport(Lib)] internal static extern long aver_scene_get_i64(int e, int f);
+    /// <summary>Writes an I64 field.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_set_i64(int e, int f, long v);   // the ObjectId/mesh family
+    /// <summary>Reads an entity-reference field.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_get_ref(int e, int f);
+    /// <summary>Writes an entity-reference field.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_set_ref(int e, int f, int v);
+    /// <summary>Reads a String field as a UTF-8 pointer; decode it through <see cref="Str"/>.</summary>
     [DllImport(Lib)] internal static extern System.IntPtr aver_scene_get_str(int e, int f);
+    /// <summary>Writes a String field.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_set_str(int e, int f, [MarshalAs(UnmanagedType.LPUTF8Str)] string v);
 
-    // Entity lifetime + hierarchy. A model placed inside an actor is a plain child entity: it carries a
-    // mesh but NO class, so aver_fw_class_of(child) == 0 — it is data, not an actor.
+    /// <summary>Creates an entity.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_create();
+    /// <summary>Destroys an entity and its subtree.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_destroy(int e);
+    /// <summary>Attaches a component to an entity.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_add_component(int e, int component);
+    /// <summary>Reparents an entity.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_set_parent(int child, int parent);
 
-    // Persisted identity lives in CName.objectId (a u64 fnv1a64), reached via these — NOT a component
-    // field. This is the built shape (World::objectId/setObjectId); it is what a dragged gizmo keys on.
+    /// <summary>The entity's persisted identity, an fnv1a64 held in CName.objectId, not a field.</summary>
     [DllImport(Lib)] internal static extern long aver_scene_object_id(int e);
+    /// <summary>Sets the entity's persisted identity.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_set_object_id(int e, long objectId);
+    /// <summary>The entity's name as a UTF-8 pointer.</summary>
     [DllImport(Lib)] internal static extern System.IntPtr aver_scene_name(int e);
+    /// <summary>Sets the entity's name.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_set_name(int e, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
-    // Content resolution at bind time. CMeshRenderer.material is an i32 opaque handle (built), so a
-    // material NAME resolves to that handle here — it is never stored as a string in the field.
+    /// <summary>Resolves a material name to the opaque I32 handle CMeshRenderer.material stores.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_material(int name0, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
-    /// <summary>Decode a UTF-8 string returned as a pointer; "?" if null. The ABI hands out raw name-blob
-    /// bytes, which are UTF-8, so this must decode as UTF-8 — <see cref="Marshal.PtrToStringAnsi"/> would
-    /// mangle any non-ASCII name.</summary>
+    /// <summary>Decodes a UTF-8 string returned as a pointer; "?" if null.</summary>
     internal static string Str(System.IntPtr p) => Marshal.PtrToStringUTF8(p) ?? "?";
 }
 
-/// <summary>
-/// Asset identity. An <see cref="ObjectIdOf"/> is the same fnv1a64 the engine's Assets layer uses, so a
-/// mesh path hashed here equals the <c>u64</c> the content pipeline stamped on that asset.
-/// </summary>
-/// <remarks>
-/// This is why <c>Aver.Framework.ActorBuilder.Place</c> can take a readable path in the generated
-/// line yet store <c>CMeshRenderer.mesh</c> as an I64 ObjectId: the path is hashed in managed code, no
-/// native round-trip, and the value written crosses the ABI through <c>set_i64</c> — the correct kind.
-/// </remarks>
+/// <summary>Asset identity: the same fnv1a64 the engine's Assets layer stamps on an asset.</summary>
 public static class Assets
 {
     private const ulong FnvOffset = 0xcbf29ce484222325UL;
@@ -100,6 +83,6 @@ public static class Assets
             h ^= b;
             h *= FnvPrime;
         }
-        return unchecked((long)h);   // the field is I64; identity, not magnitude, so the reinterpret is fine
+        return unchecked((long)h);
     }
 }

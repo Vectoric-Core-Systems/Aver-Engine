@@ -1,12 +1,5 @@
-// The mixer, with no sound card.
-//
-// This is the test that justifies Aver.Audio being Core-only. Everything below is decidable from the
-// samples the mixer produces, and every one of these is wrong in a way NOBODY HEARS until a game
-// ships: a pan law that dips in the middle, an attenuation curve that is still audible at its own
-// cutoff, a loop point that drifts a fraction of a frame per pass, a stale handle that names
-// somebody else's sound.
-//
-// A screenshot cannot check any of it. Neither can a reader.
+// Headless test for the audio mixer: attenuation, pan, voices, looping, resampling, buses, limits.
+// Everything here is decidable from the samples the mixer produces, so it needs no sound card.
 #include "aver/audio/Mixer.hpp"
 #include "aver/core/Log.hpp"
 
@@ -18,12 +11,14 @@ using namespace aver;
 
 static int g_failures = 0;
 
+// Logs one assertion and counts the failures.
 static void check(bool cond, const std::string& what) {
     if (cond) { AVER_INFO("  ok    {}", what); return; }
     ++g_failures;
     AVER_ERROR("  FAIL  {}", what);
 }
 
+// True when two floats agree to within eps.
 static bool near(f32 a, f32 b, f32 eps = 1.0e-4f) { return std::fabs(a - b) <= eps; }
 
 // A mono sine at `hz`, `frames` long, at the mixer's own rate so nothing resamples it.
@@ -37,7 +32,7 @@ static audio::SoundData sine(u32 rate, u32 frames, f32 hz, f32 amplitude = 1.0f)
     return d;
 }
 
-// A mono constant, which is the easiest thing to assert gains against: whatever comes out IS the gain.
+// A mono constant, so whatever comes out of the mixer IS the gain.
 static audio::SoundData dc(u32 rate, u32 frames, f32 value) {
     audio::SoundData d;
     d.channels = 1;
@@ -46,36 +41,33 @@ static audio::SoundData dc(u32 rate, u32 frames, f32 value) {
     return d;
 }
 
+// The largest absolute sample on one interleaved channel.
 static f32 peak(const std::vector<f32>& v, u32 stride, u32 offset) {
     f32 m = 0.0f;
     for (usize i = offset; i < v.size(); i += stride) m = std::fmax(m, std::fabs(v[i]));
     return m;
 }
 
+// The root-mean-square of one interleaved channel.
 static f32 rms(const std::vector<f32>& v, u32 stride, u32 offset) {
     f64 sum = 0.0; u32 n = 0;
     for (usize i = offset; i < v.size(); i += stride) { sum += double(v[i]) * v[i]; ++n; }
     return n ? static_cast<f32>(std::sqrt(sum / n)) : 0.0f;
 }
 
+// Runs the suite. Returns 0 when every check passed.
 int main() {
     constexpr u32 kRate = 48000;
 
     AVER_INFO("=== attenuation ===");
     {
         audio::Attenuation a{100.0f, 2000.0f};
-        // EXACTLY 1 and EXACTLY 0 at the radii, not approximately. A curve that is still 2% audible
-        // at its cutoff pops the moment the voice is culled, which only ever shows up while walking
-        // away from something.
         check(attenuationAt(a, 0.0f) == 1.0f, "silent-close is full volume, exactly");
         check(attenuationAt(a, 100.0f) == 1.0f, "exactly 1.0 AT the inner radius");
         check(attenuationAt(a, 2000.0f) == 0.0f, "exactly 0.0 AT the outer radius");
         check(attenuationAt(a, 5000.0f) == 0.0f, "and beyond it");
 
-        // Monotone, with no step anywhere: a discontinuity is a click as the listener crosses it.
-        // Swept at 1 cm, because the curve is steepest right at the inner radius -- the slope there
-        // is 1/inner per centimetre -- and a coarser sweep cannot tell a genuine step from the
-        // honest steepness of an inverse-distance law.
+        // Swept at 1 cm, because the curve is steepest right at the inner radius.
         f32 prev = 1.0f, biggestStep = 0.0f;
         bool monotone = true;
         for (u32 d = 100; d <= 2000; ++d) {
@@ -88,7 +80,6 @@ int main() {
         check(biggestStep < 0.02f, "and never steps: the largest 1 cm change is under 2%");
         check(attenuationAt(a, 1050.0f) < 0.5f, "inverse-distance, not linear: half way out is under half volume");
 
-        // A degenerate authoring (outer <= inner) must not divide by zero or invert.
         audio::Attenuation bad{500.0f, 100.0f};
         const f32 g = attenuationAt(bad, 300.0f);
         check(g >= 0.0f && g <= 1.0f, "an outer radius inside the inner one still yields a sane gain");
@@ -106,16 +97,12 @@ int main() {
         audio::panGains(1.0f, l, r);
         check(near(l, 0.0f, 1.0e-3f) && near(r, 1.0f), "hard right is all right");
 
-        // THE POINT of a constant-power law. A linear pan dips about 3 dB in the middle -- clearly
-        // audible on anything that crosses the field, and it looks perfectly reasonable as
-        // arithmetic, which is why it needs a test rather than a reading.
         bool power = true;
         for (int i = -20; i <= 20; ++i) {
             audio::panGains(static_cast<f32>(i) / 20.0f, l, r);
             if (!near(l * l + r * r, 1.0f, 1.0e-3f)) power = false;
         }
         check(power, "power is constant across the whole sweep, not just at the ends");
-        // Out-of-range input is clamped, not wrapped: a pan of 2 must not come back round to centre.
         audio::panGains(9.0f, l, r);
         check(near(r, 1.0f), "a pan past hard right stays hard right");
     }
@@ -138,14 +125,11 @@ int main() {
         std::vector<f32> buf(512 * 2);
         m.mix(buf.data(), 512);
 
-        // A 440 Hz sine at amplitude 0.5 comes back as a 440 Hz sine at amplitude 0.5. RMS of a sine
-        // is amplitude/sqrt(2); asserting on RMS rather than peak means a wrong pan or a wrong gain
-        // shows up even when the block happens to miss the crest.
         check(near(peak(buf, 2, 0), 0.5f, 0.02f), "left peak is the authored amplitude");
         check(near(rms(buf, 2, 0), 0.5f / 1.41421356f, 0.02f), "and the RMS of a sine, not of a square");
         check(near(rms(buf, 2, 0), rms(buf, 2, 1)), "a non-positional voice is centred");
 
-        // Zero crossings: 440 Hz over 512 frames at 48 kHz is 4.69 cycles, so 9 or 10 crossings.
+        // 440 Hz over 512 frames at 48 kHz is 4.69 cycles, so 9 or 10 crossings.
         u32 crossings = 0;
         for (u32 i = 1; i < 512; ++i)
             if ((buf[(i - 1) * 2] < 0.0f) != (buf[i * 2] < 0.0f)) ++crossings;
@@ -166,14 +150,11 @@ int main() {
         check(!m.playing(v), "not playing after it ends");
         check(m.activeVoices() == 0, "the slot came back");
 
-        // The SAME slot is now reused. The old handle must read dead rather than naming the new
-        // sound -- at a few dozen voices a slot comes round again in seconds, and a game that polled
-        // a stale handle would silently control somebody else's voice.
         const audio::VoiceHandle v2 = m.play(d);
         check(v2 != 0 && v2 != v, "a reused slot issues a DIFFERENT handle");
         check(!m.playing(v), "and the old handle is still dead");
         check(m.playing(v2), "while the new one is live");
-        m.setVoiceVolume(v, 0.0f);   // must be a no-op, not a hijack
+        m.setVoiceVolume(v, 0.0f);
         check(m.playing(v2), "writing through a stale handle does not touch the live voice");
     }
 
@@ -181,8 +162,7 @@ int main() {
     {
         audio::Mixer m;
         m.init(kRate, 1, 4, 8);
-        // A 7-frame ramp, looped. Seven is deliberately coprime with every block size below, so a
-        // loop that resets to the start instead of subtracting the loop length drifts visibly.
+        // Seven is coprime with every block size below, so a loop that drifts shows up.
         audio::SoundData d;
         d.channels = 1; d.sampleRate = kRate;
         d.samples = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f};
@@ -200,8 +180,6 @@ int main() {
         check(exact, "ten passes of a 7-frame loop reproduce the source exactly");
         check(m.playing(v), "and it is still going");
 
-        // Across a block boundary that does NOT align with the loop, which is the case that catches
-        // a cursor reset instead of a subtract.
         std::vector<f32> b2(11);
         m.mix(b2.data(), 11);
         bool contiguous = true;
@@ -214,9 +192,7 @@ int main() {
     {
         audio::Mixer m;
         m.init(48000, 1, 4, 8);
-        // A 24 kHz source in a 48 kHz mixer: the cursor must advance at half speed, so a 100-frame
-        // source lasts 200 output frames. Getting this backwards is the classic "everything plays
-        // slightly fast" bug, which sounds like a stylistic choice until somebody measures it.
+        // A 24 kHz source in a 48 kHz mixer: 100 source frames must last 200 output frames.
         audio::SoundData d = dc(24000, 100, 1.0f);
         const audio::SoundHandle s = m.addSound(std::move(d));
         audio::PlayDesc p; p.sound = s;
@@ -229,7 +205,6 @@ int main() {
         m.mix(b2.data(), 80);
         check(!m.playing(v), "and has ended by 230, which is 200 plus a little");
 
-        // Pitch is the same mechanism. Double it and the same source lasts half as long.
         const audio::VoiceHandle v2 = m.play([&]{ audio::PlayDesc q; q.sound = s; q.pitch = 2.0f; return q; }());
         std::vector<f32> b3(120);
         m.mix(b3.data(), 120);
@@ -245,7 +220,6 @@ int main() {
         audio::Listener l;   // at the origin, +X forward, +Y right
         m.setListener(l);
 
-        // Directly to the listener's RIGHT (+Y), inside the inner radius so distance plays no part.
         audio::PlayDesc p;
         p.sound = s; p.positional = true; p.volume = 1.0f;
         p.position[1] = 50.0f;
@@ -258,8 +232,6 @@ int main() {
         m.stop(v);
         m.mix(buf.data(), 64);
 
-        // ...and to the left. This is the assertion that catches a handedness error, which otherwise
-        // reads as a bug in the pan law rather than as a sign three files away.
         p.position[1] = -50.0f;
         m.play(p);
         m.mix(buf.data(), 64);
@@ -267,7 +239,6 @@ int main() {
         m.stopAll();
         m.mix(buf.data(), 64);
 
-        // Beyond the outer radius: silent, and silent EXACTLY.
         p.position[1] = 0.0f;
         p.position[0] = 9000.0f;
         m.play(p);
@@ -309,8 +280,6 @@ int main() {
 
         m.stop(v);
         m.mix(buf.data(), 64);
-        // Ramped to zero across the block rather than cut. A cut mid-waveform is a step
-        // discontinuity, and a step discontinuity is a click.
         check(buf[0] > 0.5f, "a stopped voice is still audible at the start of its last block");
         check(std::fabs(buf[63]) < 0.05f, "and has ramped to silence by the end of it");
         check(!m.playing(v), "then the slot is released");
@@ -351,12 +320,8 @@ int main() {
 
         std::vector<f32> buf(32);
         m.mix(buf.data(), 32);
-        // Clamped, never wrapped. A wrap turns an overloud mix into full-scale noise, which is the
-        // difference between "too loud" and "destroyed".
         check(near(buf[31], 1.0f, 1.0e-6f), "four full-scale voices clamp to 1.0 rather than wrapping");
 
-        // An unready mixer must write SILENCE, not leave the caller's buffer alone: whatever was in
-        // it is full-scale noise at whatever volume the user had set.
         audio::Mixer dead;
         std::vector<f32> junk(32, 0.9f);
         dead.mix(junk.data(), 32);
@@ -373,9 +338,6 @@ int main() {
         const audio::VoiceHandle v = m.play(p);
         check(m.soundCount() == 1, "one sound registered");
 
-        // Retired WHILE a voice is reading it. The bytes must survive until that voice ends, or the
-        // audio thread reads freed memory -- and it may not free anything itself, so the game thread
-        // has to be the one that waits.
         m.removeSound(s);
         check(m.soundCount() == 1, "a retired sound is NOT freed while a voice still reads it");
         check(m.play(p) == 0, "and no new voice may start on it");
@@ -397,7 +359,7 @@ int main() {
         audio::PlayDesc p; p.sound = 999;
         check(m.play(p) == 0, "playing an unknown sound yields no voice");
         check(!m.playing(0), "handle 0 is never playing");
-        m.stop(0); m.setVoiceVolume(0, 1.0f);   // must not fault
+        m.stop(0); m.setVoiceVolume(0, 1.0f);
         check(true, "and the null handle is safe to pass to every setter");
     }
 

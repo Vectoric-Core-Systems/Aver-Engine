@@ -1,3 +1,4 @@
+// Windows shell verbs for a path: reveal it, open it, recycle it.
 #include "ShellIntegration.hpp"
 
 #include "aver/core/Log.hpp"
@@ -18,6 +19,7 @@ namespace aver::editor {
 namespace {
 
 #if defined(_WIN32)
+// UTF-8 to UTF-16.
 std::wstring widen(const std::string& s) {
     if (s.empty()) return {};
     const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
@@ -26,9 +28,8 @@ std::wstring widen(const std::string& s) {
     return w;
 }
 
-// The shell APIs below want a real, absolute, backslash-separated path. A path assembled from a
-// breadcrumb click can carry forward slashes, and SHFileOperation in particular silently does
-// nothing with one.
+// A wide, absolute, backslash-separated path. SHFileOperation silently does nothing with a forward
+// slash, so the shell APIs below only ever see this form.
 std::wstring nativeAbsolute(const std::string& path) {
     std::error_code ec;
     std::filesystem::path p = std::filesystem::absolute(path, ec);
@@ -39,13 +40,11 @@ std::wstring nativeAbsolute(const std::string& path) {
 
 } // namespace
 
+// Opens the file manager with `path` selected. A directory opens showing itself.
 bool revealInFileManager(const std::string& path) {
 #if defined(_WIN32)
     std::error_code ec;
     const std::filesystem::path p(path);
-    // A directory is shown by opening it; a file is shown by opening its parent with it selected.
-    // `explorer /select,` on a directory selects it inside its PARENT, which is not what "show me
-    // this folder" means when the user is already looking at the folder list.
     if (std::filesystem::is_directory(p, ec)) {
         const std::wstring w = nativeAbsolute(path);
         const auto r = reinterpret_cast<INT_PTR>(
@@ -64,6 +63,7 @@ bool revealInFileManager(const std::string& path) {
 #endif
 }
 
+// Hands `path` to whatever the shell has registered for its extension.
 bool openWithShell(const std::string& path) {
 #if defined(_WIN32)
     const std::wstring w = nativeAbsolute(path);
@@ -77,10 +77,10 @@ bool openWithShell(const std::string& path) {
 #endif
 }
 
+// Moves `path` to the recycle bin. Works on directories too.
 bool moveToRecycleBin(const std::string& path) {
 #if defined(_WIN32)
-    // pFrom is a DOUBLE-null-terminated list, not a plain string. Getting this wrong reads past the
-    // buffer, so the terminator is built explicitly rather than relying on a std::wstring's own.
+    // pFrom is a DOUBLE-null-terminated list, so the terminator is built explicitly.
     const std::wstring w = nativeAbsolute(path);
     if (w.empty()) return false;
     std::vector<wchar_t> from(w.begin(), w.end());
@@ -90,20 +90,8 @@ bool moveToRecycleBin(const std::string& path) {
     SHFILEOPSTRUCTW op{};
     op.wFunc  = FO_DELETE;
     op.pFrom  = from.data();
-    // ALLOWUNDO is the whole point: it is what makes this the recycle bin rather than an unlink.
-    // NOCONFIRMATION suppresses the SHELL's "are you sure" only — the editor has already asked.
-    //
-    // WANTNUKEWARNING is NOT optional, and its absence is a silent data-loss bug rather than a
-    // missing nicety. NOCONFIRMATION answers "Yes to All" to EVERY dialog, including the shell's
-    // "this cannot be recycled -- delete it permanently?". Without the override, an item the bin
-    // cannot take -- bigger than the volume's quota, a volume with the bin turned off, a network
-    // share or a removable drive -- is quietly unlinked and SHFileOperationW still returns 0, so the
-    // caller cheerfully reports that it went somewhere recoverable. WANTNUKEWARNING exists precisely
-    // to partially override NOCONFIRMATION for that one prompt, so the escalation from "recoverable"
-    // to "gone" is never silent and is always the user's decision.
-    //
-    // A local disk with a normal recycle bin is the one configuration where this gap cannot show,
-    // which is exactly why testing there was not enough to catch it.
+    // FOF_WANTNUKEWARNING is required: FOF_NOCONFIRMATION otherwise answers "Yes to All" to the
+    // shell's "cannot be recycled — delete permanently?" prompt and still returns 0.
     op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING |
                 FOF_NOERRORUI | FOF_SILENT | FOF_NOCONFIRMMKDIR;
 

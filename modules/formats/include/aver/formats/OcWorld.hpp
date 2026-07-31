@@ -1,19 +1,7 @@
 #pragma once
-// .ocworld — the NATIVE world format, and a strict superset of .ocmap (FORMAT_SPECS.md §11).
-//
-// Why this and not .ocmap: an .ocmap PLACE carries ONE uniform scale, and a blockout level is made of
-// boxes with three different half-extents each. .ocworld's PLACEG exists for exactly that (`scale3`),
-// and it is the format the spec designates as native, so a level authored here is not a legacy file
-// the engine happens to tolerate.
-//
-// Implemented here: the identity block, PLACE (read, for .ocmap compatibility), PLACEG, and the SUN /
-// FOG environment records. NOT implemented: LAYER / NODE / CELL / STREAM / GEOREF / TERRAIN, which
-// §11 marks engine-optional and nothing yet needs. A file using them still PARSES -- unknown records
-// are skipped rather than rejected, which is what keeps a partial implementation forwards-compatible
-// instead of a trap.
-//
-// Engine space throughout: centimetres, +X forward, +Y right, +Z up, left-handed. Positions are f64
-// for large-world precision, matching .ocmap.
+// .ocworld — the native world format, and a strict superset of .ocmap (FORMAT_SPECS.md §11).
+// Identity, SUN/FOG environment, and PLACE/PLACEG placements. Unknown records parse and are skipped.
+// Engine space: centimetres, +X forward, +Y right, +Z up, left-handed. Positions are f64.
 #include "aver/core/Types.hpp"
 #include "aver/assets/AssetId.hpp"
 
@@ -23,8 +11,7 @@
 
 namespace aver::fmt {
 
-// One placed thing. Covers both record forms: PLACE (asset name, uniform scale) and PLACEG
-// (non-uniform scale), because the difference is what was WRITTEN, not what a level means.
+// One placed thing. Covers both record forms: PLACE (uniform scale) and PLACEG (non-uniform).
 struct OcWorldPlacement {
     std::string asset;                     // asset reference (mesh path or name)
     ObjectId objectId = kInvalidObjectId;  // fnv1a64(asset) unless given explicitly
@@ -37,6 +24,7 @@ struct OcWorldPlacement {
     bool uniform() const { return sx == sy && sy == sz; }
 };
 
+// A whole world: identity, optional environment, and the placements.
 struct OcWorldData {
     int version = 1;
     u64 contentId = 0;                     // ID = FNV-1a-64(NAME)
@@ -44,24 +32,15 @@ struct OcWorldData {
     u32 build = 0;
     u32 algo = 3;
 
-    // Environment. Optional: a world that sets none inherits whatever the editor has.
     bool hasSun = false;
-    // POINTS TOWARD THE LIGHT, the same convention as rhi::SkyAtmosphere::sunDirection, and its
-    // default is the same sun. It was {-0.3, -0.4, -0.85} -- the exact negation of the engine's
-    // then-default -- so the field was either authored as a direction of TRAVEL or was a sign slip,
-    // and nothing consumes it yet to settle which. Nothing consuming it is precisely why this is
-    // worth pinning down now: the first code to read it would inherit a sun below the horizon and
-    // the bug would present as "the level is unlit", a long way from this line.
+    // Points TOWARD the light, matching rhi::SkyAtmosphere::sunDirection.
     f64 sunDir[3] = {-0.5481, 0.3838, 0.7431};
     f64 sunColor[3] = {1.0, 0.98, 0.92};
     f64 sunLux = 100000.0;
 
     bool hasFog = false;
-    // Per CENTIMETRE, so a level owns its own depth cue. 4e-6 is light haze (~10 km visibility by
-    // Koschmieder); it was 2e-4, which is 196 m and therefore fog by the WMO's definition.
-    f64 fogDensity = 4e-6;
-    // A TINT on the in-scattered sky rather than a replacement for it, so white is clear air.
-    f64 fogColor[3] = {1.0, 1.0, 1.0};
+    f64 fogDensity = 4e-6;                 // per cm
+    f64 fogColor[3] = {1.0, 1.0, 1.0};     // a tint on the in-scattered sky; white is clear air
 
     bool hasSpawn = false;
     f64 spawnX = 0, spawnY = 0, spawnZ = 0, spawnYaw = 0;
@@ -69,16 +48,16 @@ struct OcWorldData {
     std::vector<OcWorldPlacement> placements;
 };
 
-// Parse from memory. Unknown records are skipped, not failed -- see the header note.
+// Parses a world from memory. Unknown records are skipped, not failed.
 bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err = nullptr);
 
-// Load from disk.
+// Loads a world from disk.
 bool loadOcworld(const std::string& path, OcWorldData& out, std::string* err = nullptr);
 
-// Serialise to the text form. Round-trips through parseOcworld.
+// Serialises a world to the text form. Round-trips through parseOcworld.
 std::string writeOcworld(const OcWorldData& w);
 
-// Write to disk, creating parent directories. Returns false and fills `err` on failure.
+// Writes a world to disk, creating parent directories.
 bool saveOcworld(const std::string& path, const OcWorldData& w, std::string* err = nullptr);
 
 } // namespace aver::fmt

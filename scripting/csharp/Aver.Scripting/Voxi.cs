@@ -1,3 +1,4 @@
+// C# binding for the Voxi render settings module.
 using System.Runtime.InteropServices;
 
 namespace Aver.Scripting;
@@ -24,14 +25,10 @@ public enum VoxiStatus
     Unsupported = 2,
 }
 
+/// <summary>The quality ladder a Voxi feature is set on.</summary>
 public enum VoxiQuality { Off = 0, Low = 1, Medium = 2, High = 3, Epic = 4 }
 
-/// <summary>
-/// C# binding for the Voxi render module (<c>Aver.Render.Voxi.dll</c>, C ABI <c>aver_voxi_*</c>).
-///
-/// Setters are honest: assigning a feature the device or renderer cannot do leaves the value at
-/// Off. Check <see cref="StatusOf"/> before offering a setting to a user.
-/// </summary>
+/// <summary>Reads and writes the global Voxi render settings over the <c>aver_voxi_*</c> C ABI.</summary>
 public static class Voxi
 {
     private const string Lib = "Aver.Render.Voxi";
@@ -59,13 +56,18 @@ public static class Voxi
     [DllImport(Lib)] private static extern int aver_voxi_get_mesh_shaders();
     [DllImport(Lib)] private static extern int aver_voxi_set_mesh_shaders(int on);
 
+    /// <summary>Marshals a native string pointer, or "?" when it is null.</summary>
     private static string Str(IntPtr p) => Marshal.PtrToStringAnsi(p) ?? "?";
 
     // ---- feature introspection ----
     public static int FeatureCount => aver_voxi_feature_count();
+    /// <summary>The feature's display name.</summary>
     public static string NameOf(VoxiFeature f) => Str(aver_voxi_feature_name((int)f));
+    /// <summary>Whether the feature can be used on this machine.</summary>
     public static VoxiStatus StatusOf(VoxiFeature f) => (VoxiStatus)aver_voxi_feature_status((int)f);
+    /// <summary>One line explaining the feature's status.</summary>
     public static string StatusTextOf(VoxiFeature f) => Str(aver_voxi_feature_status_text((int)f));
+    /// <summary>True when the feature is Ready.</summary>
     public static bool IsAvailable(VoxiFeature f) => StatusOf(f) == VoxiStatus.Ready;
 
     // ---- anti-aliasing ----
@@ -90,6 +92,7 @@ public static class Voxi
     }
 
     // ---- quality-ladder features ----
+    /// <summary>The quality a ladder feature is set to.</summary>
     public static VoxiQuality GetQuality(VoxiFeature f) => (VoxiQuality)aver_voxi_get_quality((int)f);
     /// <summary>Returns true if the value was accepted (false when the feature is unavailable).</summary>
     public static bool SetQuality(VoxiFeature f, VoxiQuality q) => aver_voxi_set_quality((int)f, (int)q) != 0;

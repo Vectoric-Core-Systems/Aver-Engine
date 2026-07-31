@@ -1,3 +1,5 @@
+// Imports glTF 2.0 and GLB into engine meshes: accessors, node transforms and axis conversion.
+
 #include "aver/formats/GltfImport.hpp"
 
 #include "aver/formats/Json.hpp"
@@ -9,11 +11,13 @@
 namespace aver::fmt {
 namespace {
 
+// Sets `why` and returns false.
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
 
 // glTF component types (5.24 accessor.componentType).
 constexpr i64 kByte = 5120, kUByte = 5121, kShort = 5122, kUShort = 5123, kUInt = 5125, kFloat = 5126;
 
+// Size in bytes of one glTF component type. Zero when unknown.
 u32 componentBytes(i64 t) {
     switch (t) {
         case kByte: case kUByte:   return 1;
@@ -23,6 +27,7 @@ u32 componentBytes(i64 t) {
     }
 }
 
+// Component count of a glTF accessor type name. Zero when unknown.
 u32 typeComponents(std::string_view t) {
     if (t == "SCALAR") return 1;
     if (t == "VEC2")   return 2;
@@ -34,9 +39,7 @@ u32 typeComponents(std::string_view t) {
     return 0;
 }
 
-// ---- base64, for data: URIs ----
-// glTF embeds whole buffers this way, so this is not an edge case: a single-file .gltf export from
-// Blender puts the entire mesh here.
+// Decodes base64, as found in a data: URI. Returns false on an illegal character.
 bool base64Decode(std::string_view in, std::vector<u8>& out) {
     auto val = [](char c) -> int {
         if (c >= 'A' && c <= 'Z') return c - 'A';
@@ -60,23 +63,25 @@ bool base64Decode(std::string_view in, std::vector<u8>& out) {
     return true;
 }
 
+// Every glTF buffer, resolved to bytes.
 struct Buffers {
     std::vector<std::vector<u8>> data;
 };
 
-// One decoded accessor, always widened to f32 (or u32 for indices) so callers do not each repeat
-// the component-type switch.
+// One decoded accessor, widened to f32.
 struct AccessorF {
     std::vector<f32> v;
     u32 components = 0;
     u32 count = 0;
 };
 
+// Walks one glTF document and fills a GltfImportResult.
 class Gltf {
 public:
     Gltf(const JsonValue& doc, Buffers& bufs, const GltfImportOptions& opt, GltfImportResult& out)
         : d_(doc), b_(bufs), o_(opt), r_(out) {}
 
+    // Imports every mesh in the document. Returns false with `why` set.
     bool run(std::string* why);
 
 private:
@@ -85,12 +90,13 @@ private:
     const GltfImportOptions& o_;
     GltfImportResult& r_;
 
+    // Records an unsupported feature, once each.
     void note(const std::string& what) {
-        for (const std::string& s : r_.unsupported) if (s == what) return;   // once each, not per use
+        for (const std::string& s : r_.unsupported) if (s == what) return;
         r_.unsupported.push_back(what);
     }
 
-    // bufferView -> the bytes it names, with its stride.
+    // Resolves a bufferView to the bytes it names, with its stride.
     bool viewBytes(i64 viewIdx, const u8*& base, usize& len, u32& stride, std::string* why) const {
         const JsonValue& views = d_["bufferViews"];
         if (viewIdx < 0 || usize(viewIdx) >= views.size()) return fail(why, "glTF: bufferView index out of range");
@@ -107,6 +113,7 @@ private:
         return true;
     }
 
+    // Decodes an accessor to floats, applying `normalized`. Returns false with `why` set.
     bool readAccessor(i64 idx, AccessorF& out, std::string* why) const {
         const JsonValue& accs = d_["accessors"];
         if (idx < 0 || usize(idx) >= accs.size()) return fail(why, "glTF: accessor index out of range");
@@ -124,8 +131,7 @@ private:
         out.v.assign(usize(count) * nc, 0.0f);
         if (count == 0) return true;
 
-        // An accessor with no bufferView reads as zeros -- that is glTF's own rule, and it is how a
-        // sparse-only accessor is spelled. Handled rather than treated as an error.
+        // Per glTF, an accessor with no bufferView reads as zeros.
         if (!a.has("bufferView")) return true;
 
         const u8* base = nullptr; usize len = 0; u32 stride = 0;
@@ -159,19 +165,20 @@ private:
         return true;
     }
 
-    // glTF (right-handed, +Y up, -Z forward, metres) -> engine (left-handed, +Z up, +X forward,
-    // +Y right, centimetres). See the header: the determinant is -1, so winding is reversed too.
+    // Converts glTF space (right-handed, +Y up, metres) to engine space (left-handed, +Z up, cm).
     Vec3 toEngine(f32 x, f32 y, f32 z, bool isDirection) const {
         Vec3 v = o_.convertAxes ? Vec3{-z, x, y} : Vec3{x, y, z};
         if (!isDirection) { v.x *= o_.scale; v.y *= o_.scale; v.z *= o_.scale; }
         return v;
     }
 
+    // Appends one primitive to `m` as a submesh. Returns false with `why` set.
     bool importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData& m, std::string* why);
+    // Appends every primitive of a mesh to `m`. Returns false with `why` set.
     bool importMesh(const JsonValue& mesh, const f32 node[16], OcMeshData& m, std::string* why);
 };
 
-// Row-vector transform of a point / direction by a 4x4 row-major matrix.
+// Row-vector transform of a point or direction by a 4x4 row-major matrix.
 void xform(const f32 m[16], f32 x, f32 y, f32 z, bool point, f32 out[3]) {
     const f32 w = point ? 1.0f : 0.0f;
     out[0] = x*m[0] + y*m[4] + z*m[8]  + w*m[12];
@@ -180,8 +187,7 @@ void xform(const f32 m[16], f32 x, f32 y, f32 z, bool point, f32 out[3]) {
 }
 
 bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData& m, std::string* why) {
-    // Only triangles. glTF's other modes exist and none of them is a static mesh this renderer can
-    // draw, so they are named and skipped rather than silently producing an empty submesh.
+    // Only triangles; other modes are noted and skipped.
     const i64 mode = prim["mode"].asInt(4);
     if (mode != 4) { note("primitive mode " + std::to_string(mode) + " (only triangles are imported)"); return true; }
     if (prim.has("targets")) note("morph targets");
@@ -231,8 +237,7 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
             const u32 a = baseVertex + u32(idx.v[i + 0]);
             const u32 b = baseVertex + u32(idx.v[i + 1]);
             const u32 c = baseVertex + u32(idx.v[i + 2]);
-            // WINDING REVERSED with the handedness. Without this the mesh is inside out and looks
-            // perfect until something enables backface culling.
+            // Winding reverses with the handedness.
             if (o_.convertAxes) { m.indices.push_back(a); m.indices.push_back(c); m.indices.push_back(b); }
             else                { m.indices.push_back(a); m.indices.push_back(b); m.indices.push_back(c); }
         }
@@ -245,7 +250,7 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
         }
     }
 
-    // Flat normals where the source had none, computed AFTER the winding fix so they face outward.
+    // Flat normals where the source had none, computed after the winding fix so they face outward.
     if (!hasNrm && o_.generateMissingNormals) {
         for (usize i = first; i + 2 < m.indices.size(); i += 3) {
             const u32 ia = m.indices[i], ib = m.indices[i+1], ic = m.indices[i+2];
@@ -263,7 +268,7 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
         }
     }
 
-    // A submesh per primitive, which is what carries the material split.
+    // One submesh per primitive, carrying the material split.
     const i64 mat = prim["material"].asInt(-1);
     u32 slot = 0;
     if (mat >= 0) {
@@ -298,7 +303,7 @@ bool Gltf::importMesh(const JsonValue& mesh, const f32 node[16], OcMeshData& m, 
     return true;
 }
 
-// Node local transform: either a 16-float matrix, or TRS. Composed into the parent's.
+// A node's local transform: either its 16-float matrix, or its TRS composed.
 void nodeLocal(const JsonValue& n, f32 out[16]) {
     static const f32 kIdentity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     std::memcpy(out, kIdentity, sizeof(kIdentity));
@@ -320,6 +325,7 @@ void nodeLocal(const JsonValue& n, f32 out[16]) {
     out[12]= t[0]; out[13]= t[1]; out[14]= t[2]; out[15]= 1;
 }
 
+// Multiplies two 4x4 row-major matrices.
 void mul(const f32 a[16], const f32 b[16], f32 out[16]) {
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 4; ++c) {
@@ -338,9 +344,7 @@ bool Gltf::run(std::string* why) {
     const JsonValue& meshes = d_["meshes"];
     if (meshes.size() == 0) return fail(why, "glTF: the file contains no meshes");
 
-    // Walk the scene so a mesh parented under a rotated or offset node arrives where the author put
-    // it. A mesh referenced by no node is still imported, at identity, rather than dropped -- some
-    // exporters emit those and losing geometry silently is the worst outcome available.
+    // Walk the scene so a mesh under a transformed node arrives where the author put it.
     std::vector<u8> visited(meshes.size(), 0);
     r_.meshes.assign(meshes.size(), OcMeshData{});
     r_.meshNames.assign(meshes.size(), std::string());
@@ -366,8 +370,6 @@ bool Gltf::run(std::string* why) {
 
     usize guard = 0;
     while (!stack.empty()) {
-        // A cycle in the node graph is illegal glTF but a corrupt file can carry one, and an
-        // unbounded walk would hang the editor rather than report a bad asset.
         if (++guard > 1000000) return fail(why, "glTF: node hierarchy is cyclic or absurdly large");
         const Pending cur = stack.back();
         stack.pop_back();
@@ -401,7 +403,7 @@ bool Gltf::run(std::string* why) {
     return true;
 }
 
-// Resolve every buffer: the GLB BIN chunk, a base64 data URI, or a sibling file.
+// Resolves every buffer: the GLB BIN chunk, a base64 data URI, or a sibling file.
 bool loadBuffers(const JsonValue& d, const std::vector<u8>& glbBin, const std::string& baseDir,
                  Buffers& out, std::string* why) {
     const JsonValue& bufs = d["buffers"];
@@ -409,7 +411,6 @@ bool loadBuffers(const JsonValue& d, const std::vector<u8>& glbBin, const std::s
     for (usize i = 0; i < bufs.size(); ++i) {
         const JsonValue& b = bufs[i];
         if (!b.has("uri")) {
-            // No URI means the GLB binary chunk, and only buffer 0 may do that.
             if (i != 0 || glbBin.empty()) return fail(why, "glTF: a buffer has no uri and there is no GLB binary chunk");
             out.data[i] = glbBin;
             continue;
@@ -424,7 +425,7 @@ bool loadBuffers(const JsonValue& d, const std::vector<u8>& glbBin, const std::s
             continue;
         }
         if (baseDir.empty()) return fail(why, "glTF: the file references '" + uri + "' but no directory context was given");
-        // Percent-encoding is the only URI escaping an exporter reliably emits.
+        // Percent-decode the relative path.
         std::string rel;
         for (usize k = 0; k < uri.size(); ++k) {
             if (uri[k] == '%' && k + 2 < uri.size()) {
@@ -450,6 +451,7 @@ bool loadBuffers(const JsonValue& d, const std::vector<u8>& glbBin, const std::s
 
 } // namespace
 
+// Imports glTF or GLB from a byte range. `baseDir` resolves external buffers. False with `why` set.
 bool importGltfFromMemory(const u8* bytes, usize size, const std::string& baseDir,
                           GltfImportResult& out, const GltfImportOptions& opt, std::string* why) {
     if (!bytes || size < 4) return fail(why, "glTF: file is too small");
@@ -459,8 +461,7 @@ bool importGltfFromMemory(const u8* bytes, usize size, const std::string& baseDi
     std::vector<u8> glbBin;
     std::string jsonOwned;
 
-    // GLB is told from .gltf by MAGIC, not by extension: an extension is a claim, the magic is
-    // evidence, and exporters mislabel often enough to matter.
+    // GLB is told from .gltf by magic, not by extension.
     if (std::memcmp(bytes, "glTF", 4) == 0) {
         if (size < 12) return fail(why, "GLB: truncated header");
         u32 ver, total;
@@ -502,14 +503,14 @@ bool importGltfFromMemory(const u8* bytes, usize size, const std::string& baseDi
     return g.run(why);
 }
 
+// Imports a glTF or GLB file from disk. Returns false with `why` set.
 bool importGltf(const std::string& path, GltfImportResult& out,
                 const GltfImportOptions& opt, std::string* why) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return fail(why, "glTF: cannot open " + path);
     const std::streamoff n = f.tellg();
     if (n <= 0) return fail(why, "glTF: empty file " + path);
-    // static_cast, not usize(n): `std::vector<u8> bytes(usize(n));` is a function declaration --
-    // the most vexing parse -- and the error it produces points at the next line instead.
+    // static_cast, not usize(n): the latter is the most vexing parse.
     std::vector<u8> bytes(static_cast<usize>(n));
     f.seekg(0);
     f.read(reinterpret_cast<char*>(bytes.data()), n);

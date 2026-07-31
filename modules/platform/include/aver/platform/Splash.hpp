@@ -5,13 +5,16 @@
 
 namespace aver {
 
-// A borderless, centered, top-most splash window that shows a PNG during startup.
+// A borderless, centred, top-most splash window that shows a PNG during startup.
 class Splash {
 public:
     ~Splash();
-    bool show(const std::string& pngPath); // decode + display; false if it can't load
-    void pump();                            // keep it responsive
-    void close(u32 minVisibleMs = 900);     // ensure it showed for a bit, then destroy
+    // Decodes and displays the PNG. False if it cannot be loaded.
+    bool show(const std::string& pngPath);
+    // Drains the splash window's queued messages.
+    void pump();
+    // Waits out `minVisibleMs` since it was shown, then destroys it.
+    void close(u32 minVisibleMs = 900);
 private:
     void* hwnd_ = nullptr;   // HWND
     void* memDc_ = nullptr;  // HDC

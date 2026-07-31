@@ -1,8 +1,5 @@
 // Hand-run test for Aver.Scene: entity packing, component storage, world lifetime, the field
-// tables, and transform/hierarchy propagation. Exit code = failure count.
-//
-// Nothing runs this but a human, which is the precedent tests/formats sets and the reason each
-// section prints what it proved rather than only whether it passed.
+// tables, transform/hierarchy propagation and the exported C ABI. Exit code = failure count.
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
@@ -17,13 +14,13 @@
 using namespace aver;
 using namespace aver::scene;
 
-// A test/introspection hook exported by the DLL but kept out of scene_abi.h: the size of the string
-// intern table, so the set_str slot-reuse regression below can be checked directly.
+// Size of the DLL's string intern table. A test hook, deliberately kept out of scene_abi.h.
 extern "C" __declspec(dllimport) int64_t aver_scene_debug_string_pool_size(void);
 
 static int g_checks   = 0;
 static int g_failures = 0;
 
+// Counts one assertion, and logs it when it fails.
 static void check(bool cond, const std::string& what) {
     ++g_checks;
     if (cond) return;
@@ -31,7 +28,7 @@ static void check(bool cond, const std::string& what) {
     ++g_failures;
 }
 
-// Element for element, because a matrix compared with memcmp tells you only that something moved.
+// Compares two matrices element for element, naming the element that differs.
 static void checkMat(const Mat4& got, const Mat4& want, const std::string& what) {
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {
@@ -43,6 +40,7 @@ static void checkMat(const Mat4& got, const Mat4& want, const std::string& what)
     }
 }
 
+// Compares two matrices element for element within tol.
 static void checkMatNear(const Mat4& got, const Mat4& want, f32 tol, const std::string& what) {
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {
@@ -55,9 +53,8 @@ static void checkMatNear(const Mat4& got, const Mat4& want, f32 tol, const std::
     }
 }
 
-// A component whose table is deliberately incomplete in some of the cases below. Laid out so that
-// dropping the LAST member leaves eight unexplained bytes in a struct aligned to eight, which is
-// what makes a missing trailing member as visible as a missing interior one.
+// Test component for the field-table verify() cases. Laid out so a missing trailing member leaves
+// eight unaccounted bytes.
 struct CBroken {
     u64 a    = 0;
     f32 b[3] = {0, 0, 0};
@@ -67,6 +64,7 @@ struct CBroken {
 
 // ------------------------------------------------------------------------------------------ packing
 
+// Checks that makeEntity / entityIndex / entityGen round-trip and never encode 0.
 static void testEntityPacking() {
     AVER_INFO("=== entity packing ===");
 
@@ -76,9 +74,6 @@ static void testEntityPacking() {
     check(makeEntity(0, 0) == 0u, "the only encoding of 0 is the illegal (index 0, generation 0)");
     check(kEntityIndexBits + kEntityGenBits == 31u, "bit 31 is not part of either field");
 
-    // Every legal generation crossed with the low, high and boundary index ranges. The generation
-    // field alone guarantees a non-zero handle, so sampling the index space proves the claim without
-    // walking 2.1 billion pairs.
     bool     neverZero = true, bit31Clear = true, indexRoundTrip = true, genRoundTrip = true;
     unsigned pairs = 0;
     for (u32 gen = 1; gen <= kEntityMaxGen; ++gen) {
@@ -108,8 +103,8 @@ static void testEntityPacking() {
 
 // --------------------------------------------------------------------------------------- retirement
 
-// Runs FIRST, while the free list is empty, because a FIFO free list only returns the same index to
-// the next create when it is the ONLY index on it.
+// Walks one slot through every generation and checks it retires. Must run first, while the free
+// list is empty.
 static void testGenerationRetirement(World& world) {
     AVER_INFO("=== generation wrap retires the slot ===");
 
@@ -136,7 +131,6 @@ static void testGenerationRetirement(World& world) {
     check(world.freeSlotCount() == 0u, "a retired slot does not go back on the free list");
     check(world.count() == 0u, "nothing is left live");
 
-    // Eight fresh entities, kept alive so the free list stays empty for the section after this one.
     bool reused = false;
     for (int i = 0; i < 8; ++i) {
         const Entity fresh = world.create("after-retirement");
@@ -148,6 +142,7 @@ static void testGenerationRetirement(World& world) {
 
 // ------------------------------------------------------------------------------------------ lifetime
 
+// Checks create, name, deferred destroy, flush and slot reuse. Returns a live entity for testPools.
 static Entity testLifetime(World& world) {
     AVER_INFO("=== world lifetime ===");
 
@@ -193,6 +188,7 @@ static Entity testLifetime(World& world) {
 
 // --------------------------------------------------------------------------------------------- pools
 
+// Checks component add, get, remove, the swap-and-pop, and that stale handles address nothing.
 static void testPools(World& world, Entity y) {
     AVER_INFO("=== component pools ===");
 
@@ -215,8 +211,6 @@ static void testPools(World& world, Entity y) {
           "the stored bytes are the caller's");
     check(world.addComponent(y, kComponentTags) == t, "adding twice returns the existing component");
 
-    // Swap-and-pop has to leave every survivor addressable, which is the one thing a dense array can
-    // get wrong in a way that looks fine until the wrong entity is read.
     const Entity a = world.create("pool-a");
     const Entity b = world.create("pool-b");
     const Entity c = world.create("pool-c");
@@ -231,7 +225,6 @@ static void testPools(World& world, Entity y) {
     check(static_cast<CTags*>(world.getComponent(c, kComponentTags))->bits == 3u, "c survives the swap");
     check(!world.removeComponent(b, kComponentTags), "removing twice is refused");
 
-    // A stale handle must not address the live entity that inherited its index.
     const Entity doomed = world.create("pool-stale");
     static_cast<CTags*>(world.addComponent(doomed, kComponentTags))->bits = 9;
     world.destroy(doomed);
@@ -250,6 +243,7 @@ static void testPools(World& world, Entity y) {
 
 // -------------------------------------------------------------------------------------------- churn
 
+// Creates and destroys 100k entities twice, checking the counts and the FIFO free list.
 static void testChurn(World& world) {
     AVER_INFO("=== 100k create/destroy cycles ===");
 
@@ -273,7 +267,6 @@ static void testChurn(World& world) {
     check(world.count() == before + kN, "destroy is deferred, so the count has not moved yet");
     world.flush();
     check(world.count() == before, "the flush returns the live count to its starting value");
-    // The creates above drained whatever was already free, so the list now holds exactly these.
     check(world.freeSlotCount() == kN, "every index is back on the free list");
     check(world.retiredSlotCount() == retired, "none of them retired a slot");
 
@@ -283,8 +276,6 @@ static void testChurn(World& world) {
     }
     check(noneValid, "no destroyed handle validates");
 
-    // The second pass must consume the free list rather than growing the index space, which is the
-    // property that makes a FIFO free list worth having at all.
     std::vector<Entity> again;
     again.reserve(kN);
     for (u32 i = 0; i < kN; ++i) again.push_back(world.create("churn2"));
@@ -292,7 +283,6 @@ static void testChurn(World& world) {
 
     bool generationsAdvanced = true;
     for (u32 i = 0; i < kN; ++i) {
-        // FIFO: the i-th index freed is the i-th handed back, one generation on.
         if (entityIndex(again[i]) != entityIndex(made[i])) generationsAdvanced = false;
         if (entityGen(again[i]) != entityGen(made[i]) + 1u) generationsAdvanced = false;
     }
@@ -306,9 +296,11 @@ static void testChurn(World& world) {
 
 // ------------------------------------------------------------------------------------------- fields
 
+// Checks the component and field tables: ids, sizes, offsets, arities, and what verify() rejects.
 static void testFields(World& world) {
     AVER_INFO("=== field tables ===");
 
+    // One built-in component and the identity it must report.
     struct Expect {
         const char* name;
         u32         id;
@@ -335,6 +327,7 @@ static void testFields(World& world) {
     }
     check(world.componentId("CNotAThing") == 0u, "an unregistered name resolves to 0");
 
+    // One field and the descriptor it must report.
     struct FieldExpect {
         const char* qualified;
         u32         component;
@@ -379,7 +372,6 @@ static void testFields(World& world) {
     check(world.fieldId("CLocal.notAField") == 0u, "an unknown field resolves to 0");
     check(world.field(0) == nullptr, "field id 0 describes nothing");
 
-    // Every field of every registered component, walked the way the Details panel will walk it.
     u32  walked = 0;
     bool inBounds = true, lookupAgrees = true, arityAgrees = true;
     for (u32 i = 0; i < world.componentCount(); ++i) {
@@ -399,9 +391,9 @@ static void testFields(World& world) {
     check(lookupAgrees, "every field's qualified name resolves back to its own id");
     check(arityAgrees, "every field's arity is the one its kind implies");
 
-    // ---- the terminator, which is the whole reason the table is worth hand-writing
     AVER_INFO("--- verify() rejects a table that does not account for the struct ---");
 
+    // Registers CBroken with its c and d fields optionally omitted.
     auto brokenTable = [&world](bool withC, bool withD) {
         auto b = world.registerComponent<CBroken>("CBroken");
         b.field("a", FieldKind::I64, static_cast<u16>(offsetof(CBroken, a)))
@@ -421,14 +413,14 @@ static void testFields(World& world) {
     check(brokenType != 0u && fieldA != 0u, "the test component registered");
 
     {
-        auto b = brokenTable(false, true);   // an INTERIOR member missing
+        auto b = brokenTable(false, true);
         check(!b.verify(sizeof(CBroken)), "a table missing an interior member fails verify()");
         check(!world.componentVerified(brokenType), "the component is marked unverified");
         const std::string why = world.componentVerifyError(brokenType);
         check(why.find("CBroken") != std::string::npos, "the failure NAMES the component: " + why);
     }
     {
-        auto b = brokenTable(true, false);   // a TRAILING member missing
+        auto b = brokenTable(true, false);
         check(!b.verify(sizeof(CBroken)), "a table missing a trailing member fails verify()");
         const std::string why = world.componentVerifyError(brokenType);
         check(why.find("CBroken") != std::string::npos, "that failure names the component too: " + why);
@@ -436,7 +428,7 @@ static void testFields(World& world) {
     {
         auto b = world.registerComponent<CBroken>("CBroken");
         b.field("a", FieldKind::I64, static_cast<u16>(offsetof(CBroken, a)))
-            .field("b", FieldKind::Vec3, static_cast<u16>(offsetof(CBroken, a)));   // overlaps a
+            .field("b", FieldKind::Vec3, static_cast<u16>(offsetof(CBroken, a)));
         check(!b.verify(sizeof(CBroken)), "an overlapping field fails verify()");
     }
     {
@@ -457,6 +449,8 @@ static void testFields(World& world) {
 
 // ---------------------------------------------------------------------- transforms and hierarchy
 
+// Checks world-matrix composition, the topological order, cycle rejection, dirty propagation,
+// reparenting and subtree destruction.
 static void testHierarchy(World& world) {
     AVER_INFO("=== transforms, hierarchy and dirty propagation ===");
 
@@ -484,7 +478,7 @@ static void testHierarchy(World& world) {
 
     world.flush();
 
-    // Composed by hand, left to right, exactly as the contract says: v * (L * P).
+    // Composed by hand, left to right: v * (L * P).
     const Mat4 wantA = ta.toMatrix();
     const Mat4 wantB = tb.toMatrix() * wantA;
     const Mat4 wantC = tc.toMatrix() * wantB;
@@ -492,8 +486,6 @@ static void testHierarchy(World& world) {
     checkMat(world.worldMatrix(b), wantB, "depth-1 world matrix");
     checkMat(world.worldMatrix(c), wantC, "depth-2 world matrix");
 
-    // Translation in the LAST ROW is the single most likely silent defect in this module, so it is
-    // asserted on a transform whose rotation and scale cannot hide a transpose.
     Transform plain;
     plain.position     = {11.0f, 22.0f, 33.0f};
     const Entity flat  = world.create("last-row", kInvalidEntity, plain);
@@ -575,7 +567,7 @@ static void testHierarchy(World& world) {
 
     // ---- the on-demand path must agree with the batched one
     world.setLocalPosition(b, {77.0f, 0.0f, -3.0f});
-    const Mat4 midFrame    = world.worldMatrix(c);      // read BEFORE the frame's pass runs
+    const Mat4 midFrame    = world.worldMatrix(c);
     const u32  midRevision = world.worldRevision(c);
     check(world.flush() == 0u, "the on-demand path left nothing for the flush to do");
     checkMat(world.worldMatrix(c), midFrame, "worldMatrix() mid-frame equals what the flush produces");
@@ -601,10 +593,7 @@ static void testHierarchy(World& world) {
     world.flush();
     checkMat(world.worldMatrix(c), tc.toMatrix(), "a root's world matrix is its local matrix");
 
-    // keepWorld goes through a decomposition, so it is compared with a tolerance rather than
-    // exactly: a matrix that has been through a square root does not come back bit for bit. The
-    // parent here carries a UNIFORM scale on purpose — a non-uniformly scaled parent composes a
-    // shear that position/rotation/scale cannot represent at all, and no tolerance fixes that.
+    // ---- keepWorld reparent: compared within a tolerance, because it decomposes
     Transform keepParent;
     keepParent.position = {50.0f, -10.0f, 7.0f};
     keepParent.rotation = Quat::fromAxisAngle({0, 1, 0}, radians(20.0f));
@@ -637,9 +626,7 @@ static void testHierarchy(World& world) {
     check(world.count() == liveBefore - 4u, "the live count dropped by exactly four");
     check(world.topologicalCount() == world.count(), "the order was rebuilt over the survivors");
 
-    // ---- a pending-destroy parent must not become a reparent target.
-    // Regression: destroy is deferred, so a doomed parent still reads valid() this frame; without a
-    // guard, setParent onto it would let flush() collect a live child inside the doomed subtree.
+    // ---- a pending-destroy parent must not become a reparent target
     const Entity doomed    = world.create("doomed-parent");
     const Entity bystander = world.create("live-bystander");
     world.flush();
@@ -652,9 +639,7 @@ static void testHierarchy(World& world) {
     check(world.valid(bystander), "and survives the flush that collected the doomed parent");
     check(!world.valid(doomed), "which did collect the doomed parent");
 
-    // ---- depth() stays honest for a reparented subtree BEFORE the next flush.
-    // Regression: linkToParent fixed only the moved node, leaving descendants at their old depth
-    // until an order rebuild, so a mid-frame depth() read the stale value.
+    // ---- depth() stays honest for a reparented subtree BEFORE the next flush
     const Entity d0     = world.create("depth-root");
     const Entity d1     = world.create("depth-1", d0, Transform{});
     const Entity d2     = world.create("depth-2", d1, Transform{});         // d0>d1>d2 => 0,1,2
@@ -663,7 +648,6 @@ static void testHierarchy(World& world) {
     world.flush();
     check(world.depth(d2) == 2u, "the chain leaf starts at depth 2");
     check(world.setParent(d1, shelf1), "reparent the middle of the chain under a depth-1 node");
-    // Deliberately NO flush: this is exactly the mid-frame window the fix closes.
     check(world.depth(d1) == 2u, "the moved node's depth updates immediately");
     check(world.depth(d2) == 3u, "and its descendant's does too, without waiting for flush");
     world.flush();
@@ -672,16 +656,14 @@ static void testHierarchy(World& world) {
 
 // ----------------------------------------------------------------------------------------- the C ABI
 
-// Exercises the exported C ABI (scene_abi.h) end to end, through the same singleton World the C++
-// sections above drove — the whole point of the one-world design is that these address the same
-// entities. Nothing here reaches into World except flush(), which the ABI deliberately does not
-// expose (it is a frame boundary, not a per-call operation).
+// Exercises the exported C ABI (scene_abi.h) end to end, over the same singleton World the C++
+// sections above drove. Reaches into World only for flush(), which the ABI does not expose.
 static void testSceneAbi(World& world) {
     AVER_INFO("=== C ABI (scene_abi.h) ===");
 
     check(aver_scene_abi_version() == AVER_SCENE_ABI_VERSION, "the DLL reports the header's ABI version");
 
-    // ---- the KIND/COMP defines are the values the managed binding asserts against
+    // ---- the KIND/COMP defines the managed binding asserts against
     check(AVER_SCENE_KIND_VEC3 == static_cast<int>(FieldKind::Vec3), "KIND_VEC3 matches the enum");
     check(AVER_SCENE_KIND_I64 == static_cast<int>(FieldKind::I64), "KIND_I64 matches the enum");
     check(AVER_SCENE_COMP_MESH_RENDERER == static_cast<int>(kComponentMeshRenderer),
@@ -709,14 +691,13 @@ static void testSceneAbi(World& world) {
     check(aver_scene_field_kind(fPos) == AVER_SCENE_KIND_VEC3, "its kind is VEC3");
     check(aver_scene_field_arity(fPos) == 3, "its arity is 3");
 
-    // ---- set_vec then get_vec, bit for bit (values chosen to be exact in float)
+    // ---- set_vec then get_vec, bit for bit
     const float wantPos[3] = {1.5f, -2.25f, 100.0f};
     check(aver_scene_set_vec(e, fPos, wantPos) == 1, "set_vec writes CLocal.position");
     float gotPos[3] = {-1, -1, -1};
     check(aver_scene_get_vec(e, fPos, gotPos) == 1, "get_vec reads CLocal.position back");
     check(gotPos[0] == wantPos[0] && gotPos[1] == wantPos[1] && gotPos[2] == wantPos[2],
           "the vector round-trips bit for bit");
-    // The generic write must have bumped CLocal::rev, so the C++ transform view agrees.
     check(world.localTransform(e).position.x == 1.5f, "the C++ side sees the ABI's position write");
 
     const int32_t fRot = aver_scene_field("CLocal.rotation");
@@ -727,7 +708,7 @@ static void testSceneAbi(World& world) {
     aver_scene_get_vec(e, fRot, gotRot);
     check(gotRot[2] == 0.5f && gotRot[3] == 0.75f, "the Quat round-trips");
 
-    // ---- the mesh ObjectId via set_i64/get_i64 (needs CMeshRenderer attached first)
+    // ---- the mesh ObjectId via set_i64/get_i64
     check(aver_scene_add_component(e, AVER_SCENE_COMP_MESH_RENDERER) == 1, "add CMeshRenderer");
     const int32_t fMesh = aver_scene_field("CMeshRenderer.mesh");
     check(fMesh != 0, "CMeshRenderer.mesh resolves");
@@ -748,7 +729,7 @@ static void testSceneAbi(World& world) {
     check(aver_scene_set_i32(e, fMat, steel) == 1, "set_i32 writes the material handle");
     check(aver_scene_get_i32(e, fMat) == steel, "get_i32 reads the material handle back");
 
-    // ---- wrong-kind sets are REJECTED — the whole point of a typed field id
+    // ---- wrong-kind sets are REJECTED
     check(aver_scene_set_str(e, fPos, "nope") == 0, "set_str into a VEC field is rejected");
     check(aver_scene_set_f32(e, fPos, 1.0f) == 0, "set_f32 into a VEC field is rejected");
     check(aver_scene_set_i64(e, fPos, 1) == 0, "set_i64 into a VEC field is rejected");
@@ -757,11 +738,10 @@ static void testSceneAbi(World& world) {
     check(aver_scene_set_ref(e, fMesh, e) == 0, "set_ref into an I64 field is rejected");
     check(std::string(aver_scene_get_str(e, fPos)).empty(), "get_str on a VEC field yields \"\"");
     check(aver_scene_get_i64(e, fPos) == 0, "get_i64 on a VEC field yields 0");
-    // The rejected writes must not have corrupted the vector.
     aver_scene_get_vec(e, fPos, gotPos);
     check(gotPos[0] == 1.5f, "a rejected wrong-kind set left the field untouched");
 
-    // ---- ref is its own kind: CHierarchy.parent reads back the parent set_parent wrote
+    // ---- ref is its own kind
     const int32_t parent = aver_scene_create();
     check(aver_scene_set_parent(e, parent) == 1, "set_parent attaches the child");
     const int32_t fParent = aver_scene_field("CHierarchy.parent");
@@ -773,7 +753,6 @@ static void testSceneAbi(World& world) {
     const float childPos[3] = {10.0f, 0.0f, 0.0f};
     check(aver_scene_set_vec(e, fPos, childPos) == 1, "the child's local position is set over the ABI");
     world.flush();
-    // parent at origin, child at +10x local => child world x is 10.
     check(world.worldMatrix(e).m[3][0] == 10.0f, "the ABI-set child transform composed through its parent");
 
     // ---- a stale handle returns the neutral value everywhere
@@ -781,7 +760,7 @@ static void testSceneAbi(World& world) {
     const int32_t fdoom  = aver_scene_field("CLocal.position");
     check(aver_scene_set_vec(doomed, fdoom, wantPos) == 1, "the doomed entity accepts a write while live");
     check(aver_scene_destroy(doomed) == 1, "destroy accepts it");
-    world.flush();   // retire it: now the handle is stale
+    world.flush();   // retire it: the handle is now stale
     check(aver_scene_valid(doomed) == 0, "the stale handle fails valid()");
     float neutral[3] = {-9, -9, -9};
     check(aver_scene_get_vec(doomed, fdoom, neutral) == 0, "get_vec on a stale handle returns 0");
@@ -798,18 +777,13 @@ static void testSceneAbi(World& world) {
 
 // -------------------------------------------------------------- the C ABI, regression cases
 
-// Four defects an independent pass found in the generic field ABI, each reached entirely through the
-// public typed accessors. They live in their own section because each corrupts a memory invariant the
-// field ABI newly makes script-reachable, rather than testing an accessor's happy path.
+// Four memory invariants of the generic field ABI, each reached through the public typed accessors.
 static void testSceneAbiRepairs(World& world) {
     AVER_INFO("=== C ABI regression: field-ABI memory invariants ===");
 
-    // ---- (1) the ABI is byte-transparent for UTF-8 names. The C# binding marshals inbound names as
-    // LPUTF8Str and decodes the returned pointer as UTF-8; both rely on this DLL storing and returning
-    // the exact bytes it was handed. LPStr/PtrToStringAnsi on the managed side would re-encode a
-    // non-ASCII name through the ANSI code page, so this pins the contract those attributes depend on.
+    // ---- (1) the ABI is byte-transparent for UTF-8 names (the C# LPUTF8Str contract)
     const int32_t u = aver_scene_create();
-    // "Ω-日本-x" spelled as raw UTF-8 bytes so the assertion does not depend on the source file's encoding.
+    // "Ω-日本-x" as raw UTF-8 bytes, so the assertion does not depend on this file's encoding.
     const char* utf8Name = "\xCE\xA9-\xE6\x97\xA5\xE6\x9C\xAC-x";
     check(aver_scene_set_name(u, utf8Name) == 1, "set_name accepts a UTF-8 name over the ABI");
     check(std::string(aver_scene_name(u)) == std::string(utf8Name),
@@ -817,11 +791,7 @@ static void testSceneAbiRepairs(World& world) {
     check(aver_scene_object_id(u) == static_cast<int64_t>(fnv1a64(std::string_view(utf8Name))),
           "objectId is fnv1a64 of the UTF-8 bytes, so an ANSI re-encode would change identity");
 
-    // ---- (2) CName.offset/len are the world's name-blob cursor, managed by setName. They are now
-    // READ-ONLY over the generic ABI, so a script cannot write the cursor at all — and World::name
-    // additionally bounds the slice against the blob (defence in depth for any C++ writer). Before this,
-    // a correctly-typed set_i32 reached the cursor and name()/PtrToStringUTF8 walked a wild pointer
-    // (out-of-bounds read: crash / disclosure).
+    // ---- (2) CName.offset/len are the name-blob cursor, and are read-only over the generic ABI
     const int32_t nre = aver_scene_create();
     check(aver_scene_set_name(nre, "safe-name") == 1, "the entity gets a real name first");
     check(std::string(aver_scene_name(nre)) == "safe-name", "which resolves before tampering");
@@ -833,8 +803,7 @@ static void testSceneAbiRepairs(World& world) {
     check(std::string(aver_scene_name(nre)) == "safe-name",
           "so the name is untouched: no cursor corrupted, no out-of-bounds walk");
 
-    // ---- read-only is general, not just CName: derived (CWorld, CLocal.rev) and bookkeeping fields
-    // refuse a set while still READING. They stay in the table for verify()'s coverage.
+    // ---- read-only is general: derived and bookkeeping fields refuse a set while still reading
     const int32_t rw       = aver_scene_create();
     const int32_t fLocalRev = aver_scene_field("CLocal.rev");
     check(fLocalRev != 0 && aver_scene_set_i32(rw, fLocalRev, 99) == 0, "CLocal.rev (derived) rejects a set");
@@ -843,10 +812,8 @@ static void testSceneAbiRepairs(World& world) {
     check(fWorldMat != 0 && aver_scene_set_vec(rw, fWorldMat, m16) == 0, "CWorld.matrix (derived) rejects a set");
     check(aver_scene_get_vec(rw, fWorldMat, m16) == 1, "but a read of a read-only field still works");
 
-    // ---- (3) CHierarchy.parent is an Entity-kind field the ABI resolves, but its structural links are
-    // owned by setParent (which refuses cycles). set_ref must not write them raw: a single self-parent,
-    // or a 2-cycle, makes composeChain()/worldMatrix() loop unbounded (hang/bad_alloc). set_parent stays
-    // the only path; get_ref (a read) is unaffected.
+    // ---- (3) the structural parent link is owned by set_parent, which refuses cycles; set_ref
+    // must not write it raw
     const int32_t h1     = aver_scene_create();
     const int32_t fParent = aver_scene_field("CHierarchy.parent");
     check(aver_scene_field_kind(fParent) == AVER_SCENE_KIND_ENTITY, "CHierarchy.parent is Entity-kind");
@@ -857,13 +824,11 @@ static void testSceneAbiRepairs(World& world) {
     check(aver_scene_get_ref(h1, fParent) == 0, "the link stays unset after the refused edit");
     check(aver_scene_set_parent(h1, h2) == 1, "the guarded setter DOES attach the parent");
     check(aver_scene_get_ref(h1, fParent) == h2, "and get_ref now reads the parent it wrote");
-    // If a cycle had slipped through, composing this subtree would never return.
     world.worldMatrix(h1);
     check(world.flush() == world.flush() || true, "composing the (acyclic) hierarchy returns rather than hanging");
 
-    // ---- (4) set_str reuses the slot a field already owns instead of appending forever. Register a
-    // String-kind component (no built-in is String-kind) and write one field many times: the intern
-    // table must grow by exactly one, not once per write.
+    // ---- (4) set_str reuses the slot a field already owns instead of appending forever
+    // A String-kind component, because no built-in has a String field.
     struct CStr { int64_t s = 0; };
     {
         auto b = world.registerComponent<CStr>("CStr");
@@ -886,15 +851,13 @@ static void testSceneAbiRepairs(World& world) {
     check(poolAfter - poolBefore == 1,
           "five writes to one String field grew the intern pool by exactly one, not five");
 
-    // An empty write keeps the slot (does not abandon it), and a non-empty write after it does not
-    // allocate a second slot.
     check(aver_scene_set_str(se, fStr, "") == 1, "an empty set_str is accepted");
     check(std::string(aver_scene_get_str(se, fStr)).empty(), "and reads back as \"\"");
     check(aver_scene_set_str(se, fStr, "again") == 1, "a later non-empty write is accepted");
     check(aver_scene_debug_string_pool_size() - poolAfter == 0, "and reused the same slot, adding nothing");
 }
 
-// The query additions the C# gameplay API is built on: resolve-by-name and the composed world matrix.
+// Checks the ABI query surface: find, world_matrix, the hierarchy walk and the enumeration.
 static void testSceneAbiQuery(World& world) {
     AVER_INFO("=== C ABI query: aver_scene_find + aver_scene_world_matrix ===");
 
@@ -904,7 +867,7 @@ static void testSceneAbiQuery(World& world) {
     check(aver_scene_find("no-such-name") == 0, "find returns 0 for an unknown name");
     check(aver_scene_find(nullptr) == 0, "find tolerates a null name");
 
-    // world_matrix of a translated, unrotated root: identity basis, translation in row 3 (row-vector).
+    // A translated, unrotated root: identity basis, translation in row 3 (row-vector).
     const int32_t b     = aver_scene_create();
     const int32_t fPos  = aver_scene_field("CLocal.position");
     float pos[3] = {10.0f, 20.0f, 30.0f};
@@ -918,7 +881,7 @@ static void testSceneAbiQuery(World& world) {
     check(aver_scene_world_matrix(0, m) == 0, "world_matrix rejects an invalid handle");
     check(aver_scene_world_matrix(b, nullptr) == 0, "world_matrix rejects a null out buffer");
 
-    // hierarchy queries: parent / first_child / next_sibling / child_count.
+    // ---- hierarchy queries: parent / first_child / next_sibling / child_count
     const int32_t parent = aver_scene_create();
     const int32_t ch1 = aver_scene_create();
     const int32_t ch2 = aver_scene_create();
@@ -933,7 +896,7 @@ static void testSceneAbiQuery(World& world) {
     }
     check(seen == 2 && sawCh1 && sawCh2, "first_child + next_sibling enumerate every child exactly once");
 
-    // has_component + the enumeration surface count/at.
+    // ---- has_component, and the count/at enumeration surface
     const int32_t he = aver_scene_create();
     check(aver_scene_has_component(he, AVER_SCENE_COMP_LOCAL) == 1, "a fresh entity has CLocal");
     check(aver_scene_has_component(he, AVER_SCENE_COMP_MESH_RENDERER) == 0, "but not a mesh renderer yet");
@@ -950,6 +913,7 @@ static void testSceneAbiQuery(World& world) {
 
 // ---------------------------------------------------------------------------------------------- main
 
+// Runs every scene test in order. Returns the failure count.
 int main() {
     AVER_INFO("Aver.Scene test");
 

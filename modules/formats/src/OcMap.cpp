@@ -1,3 +1,4 @@
+// .ocmap reader: the text scanner behind parseOcmap, plus the server-side validity check.
 #include "aver/formats/OcMap.hpp"
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -7,7 +8,7 @@ using namespace aver::fmt::detail;
 
 namespace {
 
-// ROOT hex -> bytes (up to 32), matching OcMap.cs ParseHash.
+// Decodes a ROOT hex string into up to 32 bytes, zero-filling the rest.
 void parseRoot(std::string_view hex, std::array<u8, 32>& out) {
     hex = trim(hex);
     out.fill(0);
@@ -25,15 +26,18 @@ void parseRoot(std::string_view hex, std::array<u8, 32>& out) {
     }
 }
 
+// Token `i` as a double, or 0 when the line is shorter than that.
 f64 tokF(const std::vector<std::string_view>& t, usize i) {
     return i < t.size() ? parseF64(t[i]) : 0.0;
 }
+// Token `i` as a string, or empty when the line is shorter than that.
 std::string tokS(const std::vector<std::string_view>& t, usize i) {
     return i < t.size() ? std::string(t[i]) : std::string();
 }
 
 } // namespace
 
+// Parses an .ocmap from memory. Always succeeds; invariant failures are reported through `err`.
 bool parseOcmap(std::string_view text, OcMapData& out, std::string* err) {
     out = OcMapData{};
 
@@ -44,7 +48,6 @@ bool parseOcmap(std::string_view text, OcMapData& out, std::string* err) {
         std::string_view rawLine = text.substr(pos, nl - pos);
         pos = nl + 1;
 
-        // OcMap.cs StripComment: cut at first '#', trim, drop one trailing ';', trim.
         std::string_view line = stripTrailingSemicolon(truncateHash(rawLine));
         if (line.empty()) continue;
 
@@ -84,7 +87,6 @@ bool parseOcmap(std::string_view text, OcMapData& out, std::string* err) {
             s.restitution = t.size() > 5 ? tokF(t, 5) : 0.0;
             out.surfaces.push_back(std::move(s));
         } else if (equalsCI(key, "PLACE")) {
-            // PLACE <asset> <x y z> <yaw pitch roll> <scale> [surfaceId]
             OcPlacement p;
             p.asset = tokS(t, 1);
             p.x = tokF(t, 2); p.y = tokF(t, 3); p.z = tokF(t, 4);
@@ -95,7 +97,6 @@ bool parseOcmap(std::string_view text, OcMapData& out, std::string* err) {
             p.objectId = makeObjectId(p.asset);
             out.placements.push_back(std::move(p));
         } else if (equalsCI(key, "DEFORM")) {
-            // DEFORM <cageAsset> <x y z> <yaw pitch roll> <material>
             OcPlacement p;
             p.asset = tokS(t, 1);
             p.x = tokF(t, 2); p.y = tokF(t, 3); p.z = tokF(t, 4);
@@ -107,7 +108,6 @@ bool parseOcmap(std::string_view text, OcMapData& out, std::string* err) {
             p.objectId = makeObjectId(p.asset);
             out.placements.push_back(std::move(p));
         }
-        // Unknown keywords ignored (forward-compatible), matching the tolerant reader.
     }
 
     if (err) {
@@ -117,6 +117,7 @@ bool parseOcmap(std::string_view text, OcMapData& out, std::string* err) {
     return true;
 }
 
+// True when the map has NAME, a non-zero ID and ROOT, and a collision source.
 bool ocmapIsServerValid(const OcMapData& m, std::string* why) {
     if (m.name.empty()) { if (why) *why = "missing NAME"; return false; }
     if (m.contentId == 0) { if (why) *why = "missing or zero ID"; return false; }
@@ -127,6 +128,7 @@ bool ocmapIsServerValid(const OcMapData& m, std::string* why) {
     return true;
 }
 
+// Loads an .ocmap from disk.
 bool loadOcmap(const std::string& path, OcMapData& out, std::string* err) {
     std::string text;
     if (!readFileText(path, text)) {

@@ -1,14 +1,6 @@
 #pragma once
-// The four transform-tool icons, and the button chrome around them.
-//
-// Shared because the actor editor's viewport has the same tools as the level's and must therefore
-// have the same PICTURE of them. These were private to SandboxApp; a second set drawn by eye in the
-// actor tab would have been recognisably not-quite-the-same, and the two would have drifted every
-// time one was touched. Lifting them cost nothing: `drawToolGlyph` was already a const member that
-// read no state, taking its size, colour and DPI as arguments.
-//
-// Header-only and free functions rather than a class, because there is no state here at all -- an
-// icon is a pure function of a rectangle.
+// The four transform-tool icons and the button chrome around them, shared by the level viewport and
+// the actor editor's.
 #if AVER_WITH_IMGUI
 #include "imgui.h"
 
@@ -18,12 +10,10 @@
 
 namespace aver::editor {
 
-// The tool identities, in the order the toolbar draws them and the order the 1-4 keys select them.
-// A plain enum with an int value on purpose: it crosses to `drawToolGlyph`'s `kind` and is persisted
-// by EditorPrefs, and a scoped enum would need a cast at both ends for no benefit.
+// The tool identities, in toolbar order and in the order the 1-4 keys select them.
 enum ToolKind { ToolSelect = 0, ToolMove = 1, ToolRotate = 2, ToolScale = 3 };
 
-// A compact vector icon (kind: 0 Select, 1 Move, 2 Rotate, 3 Scale) drawn into a cell.
+// Draws a compact vector icon (kind: 0 Select, 1 Move, 2 Rotate, 3 Scale) into a cell.
 inline void drawToolGlyph(ImDrawList* dl, ImVec2 p, f32 sz, int kind, ImU32 fg, f32 dpi) {
     auto P = [&](f32 fx, f32 fy){ return ImVec2(p.x+fx*sz, p.y+fy*sz); };
     const f32 th = std::fmax(1.6f, 2.0f*dpi);
@@ -53,9 +43,7 @@ inline void drawToolGlyph(ImDrawList* dl, ImVec2 p, f32 sz, int kind, ImU32 fg, 
     }
 }
 
-// One tool button: an InvisibleButton with the icon and the active/hover fill painted on. Returns
-// true when clicked. The orange active fill is the editor's selection colour and is what makes the
-// current tool readable at a glance.
+// Draws one tool button with its icon and active/hover fill. Returns true when clicked.
 inline bool toolButton(const char* id, int kind, bool active, f32 icon, f32 dpi) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 p = ImGui::GetCursorScreenPos();
@@ -68,8 +56,7 @@ inline bool toolButton(const char* id, int kind, bool active, f32 icon, f32 dpi)
     return clk;
 }
 
-// The human name, for a tooltip or a status line. Kept beside the glyphs so a fifth tool cannot be
-// added to one and forgotten in the other.
+// The human name of a tool, for a tooltip or a status line.
 inline const char* toolName(int kind) {
     switch (kind) {
         case ToolSelect: return "Select";

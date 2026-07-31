@@ -1,3 +1,4 @@
+// The preview's mesh cache: built-in primitives, character capsules, and .ocmesh files off disk.
 #include "aver/render/preview/PreviewMeshCache.hpp"
 #include "aver/formats/ActorScript.hpp"
 #include "aver/formats/OcMesh.hpp"
@@ -12,13 +13,9 @@ namespace {
 
 constexpr f32 kPi = 3.14159265358979f;
 
-// A UNIT box: half-extent one, so a placement's scale is centimetres. Matching the engine's own
-// `Meshes/cube.ocmesh` exactly matters -- a level's PLACEG carries its scale as a half-extent
-// against this unit, and a preview built from a different size would show every part at the wrong
-// scale while the level showed it right.
+// Appends a unit box, half-extent one, per-face vertices. Must match the engine's Meshes/cube.ocmesh.
 void appendUnitBox(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx) {
     const f32 h = 1.0f;
-    // Per-face vertices, because a cube shared across faces has no correct normal at a corner.
     const f32 n[6][3] = {{0,0,1},{0,0,-1},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0}};
     const f32 c[6][4][3] = {
         {{-h,-h, h},{ h,-h, h},{ h, h, h},{-h, h, h}},
@@ -38,7 +35,7 @@ void appendUnitBox(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx) {
     }
 }
 
-// A UNIT sphere, same ring/sector construction and same +Z pole as the engine's own.
+// Appends a unit sphere. Same ring/sector construction and +Z pole as the engine's own.
 void appendUnitSphere(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, u32 rings, u32 sectors) {
     const u32 base = static_cast<u32>(v.size());
     for (u32 ring = 0; ring <= rings; ++ring) {
@@ -63,16 +60,16 @@ void appendUnitSphere(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, u3
 
 } // namespace
 
+// Sets the content root. Clears the cache when it changes.
 void PreviewMeshCache::setContentRoot(rhi::IDevice& device, std::string root) {
     if (root == root_) return;
-    // Cleared rather than merged. The same relative path under a different content root is a
-    // different file, and keeping the handle would draw the previous project's geometry here.
     clear(device);
     root_ = std::move(root);
 }
 
+// Forgets every cached mesh, radius and miss.
 void PreviewMeshCache::clear(rhi::IDevice& device) {
-    (void)device;   // meshes are owned by the device for its life; there is no destroyMesh to call
+    (void)device;   // meshes live for the device's lifetime; there is no destroyMesh
     meshes_.clear();
     radii_.clear();
     missing_.clear();
@@ -80,6 +77,7 @@ void PreviewMeshCache::clear(rhi::IDevice& device) {
 }
 
 namespace {
+// The distance from the origin to the furthest vertex.
 f32 maxRadius(const std::vector<rhi::MeshVertex>& v) {
     f32 r2 = 0.0f;
     for (const rhi::MeshVertex& x : v) {
@@ -89,21 +87,16 @@ f32 maxRadius(const std::vector<rhi::MeshVertex>& v) {
     return std::sqrt(r2);
 }
 
-// A capsule standing on Z = 0: two hemispheres and a cylinder, built as one ring-and-sector sweep so
-// the seam between cap and shaft carries no normal discontinuity.
+// Appends a capsule standing on Z = 0, as one ring-and-sector sweep. `height` is total, caps included.
 void appendCapsule(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
                    f32 height, f32 radius, u32 rings, u32 sectors) {
     const f32 pi = 3.14159265358979f;
-    // The framework's capsule is TOTAL height including both caps, so the cylinder is what is left
-    // after them. A capsule shorter than twice its radius is a sphere, not an error.
     const f32 half = std::fmax(height * 0.5f - radius, 0.0f);
     const f32 centreZ = height * 0.5f;
     const u32 base = static_cast<u32>(v.size());
     for (u32 ring = 0; ring <= rings; ++ring) {
         const f32 phi = pi * (static_cast<f32>(ring) / static_cast<f32>(rings));
         const f32 nz = std::cos(phi), rad = std::sin(phi);
-        // The offset is what turns a sphere into a capsule: the top half is pushed up and the bottom
-        // half down, and the ring normals are the sphere's throughout, which is why the seam is smooth.
         const f32 off = nz >= 0.0f ? half : -half;
         for (u32 sec = 0; sec <= sectors; ++sec) {
             const f32 th = 2.0f * pi * (static_cast<f32>(sec) / static_cast<f32>(sectors));
@@ -123,9 +116,8 @@ void appendCapsule(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
 }
 } // namespace
 
+// Builds or returns a character capsule, cached per (height, radius). Falls back to 180x34 cm.
 rhi::MeshHandle PreviewMeshCache::capsule(rhi::IDevice& device, f32 heightCm, f32 radiusCm, f32* outRadius) {
-    // Defaults are the framework's own person: 180 cm tall, 34 cm across. A character that states
-    // neither still gets a body rather than nothing.
     const f32 h = heightCm > 1.0f ? heightCm : 180.0f;
     const f32 r = radiusCm > 0.1f ? radiusCm : 34.0f;
     char key[64];
@@ -147,33 +139,24 @@ rhi::MeshHandle PreviewMeshCache::capsule(rhi::IDevice& device, f32 heightCm, f3
     return handle;
 }
 
+// The cached radius for a path, or 0 if it is not cached.
 f32 PreviewMeshCache::radiusOf(std::string_view meshPath) const {
     const auto it = radii_.find(fmt::canonicalMeshPath(meshPath));
     return it == radii_.end() ? 0.0f : it->second;
 }
 
+// Resolves a mesh path to a handle, loading it on the first ask. Returns 0 on failure, and caches
+// that miss as handle 0 so a bad path costs one disk touch rather than one per frame.
 rhi::MeshHandle PreviewMeshCache::resolve(rhi::IDevice& device, std::string_view meshPath, f32* outRadius) {
     if (meshPath.empty()) return 0;
     const std::string key = fmt::canonicalMeshPath(meshPath);
 
-    // Both a hit AND a cached miss come out here: a miss is stored as handle 0, so an actor naming a
-    // file that is not there costs one disk touch rather than one per frame.
     if (const auto it = meshes_.find(key); it != meshes_.end()) {
         if (outRadius) *outRadius = radiusOf(key);
         return it->second;
     }
 
-    // THE BUILT-IN PRIMITIVES, which are not files.
-    //
-    // `Meshes/cube.ocmesh` and `Meshes/sphere.ocmesh` are generated by the engine at startup and
-    // registered under the hash of those names; no such file exists in any project. They are also
-    // what nearly every actor in a template names -- every actor in SkyForge uses one of the two --
-    // so a cache that only reads disk resolves nothing for the common case and the tab opens onto an
-    // empty view. That is not a missing asset to report; it is a name this has to know.
-    //
-    // Generated HERE rather than borrowed from the editor, and to the same dimensions: a UNIT, so a
-    // placement's scale means centimetres exactly as it does in a level. Borrowing would mean
-    // reaching into the level editor's table, which is the seam this module exists not to cross.
+    // The built-in primitives, which are generated names rather than files on disk.
     if (key == "Meshes/cube.ocmesh" || key == "Meshes/sphere.ocmesh") {
         std::vector<rhi::MeshVertex> v;
         std::vector<u32> idx;
@@ -208,8 +191,7 @@ rhi::MeshHandle PreviewMeshCache::resolve(rhi::IDevice& device, std::string_view
         return 0;
     }
 
-    // Into the engine's interleaved 32-byte vertex. The FILE keeps the spec's stream layout; this is
-    // the conversion the .ocmesh reader exists to make cheap.
+    // Into the engine's interleaved 32-byte vertex; the file keeps the spec's stream layout.
     std::vector<rhi::MeshVertex> verts(md.vertexCount());
     for (u32 i = 0; i < md.vertexCount(); ++i) {
         rhi::MeshVertex& v = verts[i];

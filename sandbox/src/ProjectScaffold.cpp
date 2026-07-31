@@ -1,3 +1,6 @@
+// Project scaffolding: creates a new project tree, writes its manifest, Scripts.csproj, starter
+// material and C# script templates, and upgrades an older project's layout and references.
+
 #include "ProjectScaffold.hpp"
 
 #include "aver/platform/FileSystem.hpp"
@@ -13,12 +16,7 @@ namespace {
 constexpr const char* kCsprojName = "Scripts.csproj";
 
 // Relative MSBuild path from a project's Scripts folder to an engine C# project, or empty if the
-// engine tree could not be located from the executable.
-//
-// A project is a SIBLING of the engine, never inside it, so the reference has to reach back out of
-// the projects root. The engine root is found by walking up from the executable rather than assumed
-// to be two levels above bin/, because that only holds for the default build layout. `tail` is the
-// project file's path under the engine root.
+// engine tree could not be located from the executable. `tail` is the path under the engine root.
 std::string engineProjectReference(const std::string& scriptsDir, const std::filesystem::path& tail) {
     std::error_code ec;
     std::filesystem::path probe = std::filesystem::path(executableDir());
@@ -36,28 +34,27 @@ std::string engineProjectReference(const std::string& scriptsDir, const std::fil
     return {};
 }
 
+// Reference path to Aver.Scripting, which carries AverBehaviour.
 std::string scriptingProjectReference(const std::string& scriptsDir) {
     return engineProjectReference(scriptsDir, "scripting/csharp/Aver.Scripting/Aver.Scripting.csproj");
 }
 
-// Aver.Framework carries the actor types (and Aver.Scene transitively). Referenced alongside
-// Aver.Scripting so a project can hold both behaviours and actors without the author touching XML.
+// Reference path to Aver.Framework, which carries the actor types and Aver.Scene transitively.
 std::string frameworkProjectReference(const std::string& scriptsDir) {
     return engineProjectReference(scriptsDir, "scripting/csharp/Aver.Framework/Aver.Framework.csproj");
 }
 
-// Aver.UI is the game's HUD: layers, colours, rectangles. A leaf that references nothing.
+// Reference path to Aver.UI, the game's HUD.
 std::string uiProjectReference(const std::string& scriptsDir) {
     return engineProjectReference(scriptsDir, "scripting/csharp/Aver.UI/Aver.UI.csproj");
 }
 
-// Aver.Materials is the material authoring surface. Referenced by default even though a new project
-// has no materials yet, for the same reason Aver.Framework is: the alternative is an author who adds
-// their first material and gets a compile error naming an assembly they have never heard of.
+// Reference path to Aver.Materials, the material authoring surface.
 std::string materialsProjectReference(const std::string& scriptsDir) {
     return engineProjectReference(scriptsDir, "scripting/csharp/Aver.Materials/Aver.Materials.csproj");
 }
 
+// Builds the .ocproject manifest text.
 std::string manifestText(const std::string& name) {
     std::string s;
     s += "OCPROJECT 1\n";
@@ -66,21 +63,12 @@ std::string manifestText(const std::string& name) {
     s += "NAME " + name + "\n";
     s += "ENGINE " + std::string(kEngineName) + " " + std::string(kEngineVersion) + "\n";
     s += "CONTENT Content\n";
-    // The editor cannot author or save a map yet (docs/STATUS.md 4d), so this names where the
-    // start map WILL go rather than a file that exists. Loading is tolerant of the gap.
     s += "STARTMAP Maps/Default.ocmap\n";
-    // Left commented rather than written empty: the editor has no author field to fill it from,
-    // and `AUTHOR` with nothing after it reads as a value someone deleted.
     s += "# AUTHOR <your name>\n";
     return s;
 }
 
 // The four engine assemblies a project compiles against, in the order they are written.
-//
-// All four by default, and none of them optional, because the failure mode of "reference it when you
-// need it" is an author who writes their first HUD or their first material and gets a compile error
-// naming an assembly they have never heard of, in a file the editor generated and told them not to
-// worry about. The cost of an unused reference is nothing: an assembly nothing calls is not loaded.
 struct EngineRefs {
     std::string scripting;   // AverBehaviour
     std::string framework;   // Actor / Pawn / GameMode, and Aver.Scene behind it
@@ -89,6 +77,7 @@ struct EngineRefs {
     bool any() const { return !scripting.empty() || !framework.empty() || !ui.empty() || !materials.empty(); }
 };
 
+// Resolves all four engine references for a project's Scripts folder.
 EngineRefs engineRefs(const std::string& scriptsDir) {
     return EngineRefs{
         scriptingProjectReference(scriptsDir),
@@ -98,12 +87,7 @@ EngineRefs engineRefs(const std::string& scriptsDir) {
     };
 }
 
-// A working starter surface for a new project.
-//
-// It exists for the reason the actor templates do: the shape of a material is not guessable from an
-// empty folder, and "author it in C#" is a sentence somebody has to be shown once. Deliberately
-// COMPLETE and deliberately plain -- no textures, because a new project has none, and a material
-// naming files that do not exist would greet its author with four resolve warnings.
+// Builds the starter Content\Materials\Surfaces.cs text: one complete, plain material.
 std::string starterMaterialText(const std::string& projectName) {
     std::string s;
     s += "// " + projectName + "'s surfaces.\n";
@@ -130,6 +114,7 @@ std::string starterMaterialText(const std::string& projectName) {
     return s;
 }
 
+// Builds the Scripts.csproj text and checks the result for XML-illegal `--` inside its comments.
 std::string csprojText(const EngineRefs& refs) {
     std::string s;
     s += "<Project Sdk=\"Microsoft.NET.Sdk\">\n\n";
@@ -144,9 +129,7 @@ std::string csprojText(const EngineRefs& refs) {
     s += "\n";
     s += "       Four references: Aver.Scripting for behaviours, Aver.Framework for actors (which\n";
     s += "       pulls Aver.Scene in behind it), Aver.UI for the game's HUD, and Aver.Materials for\n";
-    // NO DOUBLE HYPHEN ANYWHERE BELOW. XML forbids `--` inside a comment outright, and the house
-    // style uses it as an em dash in every other generated file, so it reads as correct and produces
-    // an MSB4025 that names a column rather than a cause. This cost one build to find.
+    // No `--` in any string that lands inside an XML comment: XML forbids it, MSBuild says MSB4025.
     s += "       surfaces authored in C#. All four by default, because an unused reference costs\n";
     s += "       nothing and the alternative is a compile error naming an assembly the author has\n";
     s += "       never heard of, in a file the editor generated. -->\n";
@@ -170,13 +153,6 @@ std::string csprojText(const EngineRefs& refs) {
             if (!r->empty()) s += "    <ProjectReference Include=\"" + *r + "\" />\n";
         s += "  </ItemGroup>\n\n";
     }
-    // Materials live beside the content they describe rather than among the gameplay scripts, so
-    // they are compiled in from there. ONE assembly rather than two: avermatc reflects over whatever
-    // it is given, and a second .csproj would be a second build to keep in step for a separation
-    // nobody asked for.
-    //
-    // Written even when Content\Materials is empty. A glob that matches nothing is not an error, and
-    // adding it later is a file edit the author would have to be told about.
     s += "  <ItemGroup>\n";
     s += "    <!-- Surfaces authored in C#, under Content\\Materials. Compile C# runs avermatc over\n";
     s += "         the built assembly and writes the .ocmat files the engine loads into\n";
@@ -185,10 +161,7 @@ std::string csprojText(const EngineRefs& refs) {
     s += "  </ItemGroup>\n\n";
     s += "</Project>\n";
 
-    // Checked rather than trusted, because this exact mistake shipped once already: XML forbids `--`
-    // inside a comment, the house style uses it as an em dash in every other generated file, and the
-    // result is an MSB4025 that names a line and column in a file the author did not write and was
-    // told not to worry about. Six lines here against a project that cannot build at all.
+    // XML forbids `--` inside a comment; a project that contains one cannot load at all.
     {
         bool inComment = false;
         for (usize i = 0; i + 1 < s.size(); ++i) {
@@ -204,9 +177,7 @@ std::string csprojText(const EngineRefs& refs) {
     return s;
 }
 
-// The actor-kind templates. Each derives the right base and carries the [AverClass]/[AverGameMode]
-// attribute plus the starter overrides that make sense for that concept. They compile against
-// Aver.Framework; the header comment is honest that they do not tick yet.
+// Builds the .cs text for one actor-kind template: the right base type, attribute and overrides.
 std::string actorScriptText(const std::string& projectName, const std::string& scriptName, CsKind kind) {
     const char* base =
         kind == CsKind::Pawn             ? "AverPawn" :
@@ -233,8 +204,6 @@ std::string actorScriptText(const std::string& projectName, const std::string& s
     s += "namespace " + projectName + ";\n";
     s += "\n";
     if (kind == CsKind::GameMode) {
-        // [AverGameMode] names the pawn and controller it hands out, by string, so they can live in
-        // other assemblies. The defaults are "Pawn"/"PlayerController"; change them to your classes.
         s += "[AverGameMode(\"" + scriptName + "\")]\n";
     } else if (kind == CsKind::Actor) {
         s += "[AverClass(\"" + scriptName + "\")]\n";   // Parent defaults to "Actor"
@@ -291,6 +260,7 @@ std::string actorScriptText(const std::string& projectName, const std::string& s
     return s;
 }
 
+// Builds the .cs text for a new script of any kind.
 std::string scriptText(const std::string& projectName, const std::string& scriptName, CsKind kind) {
     if (csKindIsActor(kind)) return actorScriptText(projectName, scriptName, kind);
     const bool behaviour = kind == CsKind::Behaviour;
@@ -327,8 +297,6 @@ std::string scriptText(const std::string& projectName, const std::string& script
         s += "// hooks are special; the rest of the assembly is ordinary C#.\n";
     }
     s += "\n";
-    // Only where it is used: an unused `using` in a file that exists to be a starting point
-    // teaches the wrong habit, and the plain class deliberately touches no engine API.
     if (behaviour) s += "using Aver.Scripting;\n\n";
     s += "namespace " + projectName + ";\n";
     s += "\n";
@@ -372,8 +340,10 @@ std::string scriptText(const std::string& projectName, const std::string& script
 
 } // namespace
 
+// True for every kind the engine calls hooks on, i.e. everything but a plain class.
 bool csKindIsScript(CsKind kind) { return kind != CsKind::PlainClass; }
 
+// True for the kinds that derive from an Aver.Framework actor type.
 bool csKindIsActor(CsKind kind) {
     switch (kind) {
         case CsKind::Actor:
@@ -387,6 +357,7 @@ bool csKindIsActor(CsKind kind) {
     }
 }
 
+// The word for a kind, for logs and UI text.
 const char* csKindNoun(CsKind kind) {
     switch (kind) {
         case CsKind::Behaviour:        return "behaviour";
@@ -400,6 +371,7 @@ const char* csKindNoun(CsKind kind) {
     return "script";
 }
 
+// Checks a project name as a folder name. Returns false and fills `err` with the reason.
 bool validateProjectName(const std::string& name, std::string* err) {
     auto fail = [&](const char* m) { if (err) *err = m; return false; };
     if (name.empty()) return fail("Enter a project name.");
@@ -415,6 +387,7 @@ bool validateProjectName(const std::string& name, std::string* err) {
     return true;
 }
 
+// Checks a name that becomes a C# or C++ class name. Returns false and fills `err` with the reason.
 bool validateTypeName(const std::string& name, std::string* err) {
     auto fail = [&](const char* m) { if (err) *err = m; return false; };
     if (name.empty()) return fail("Enter a name.");
@@ -426,9 +399,7 @@ bool validateTypeName(const std::string& name, std::string* err) {
         const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
         if (!ok) return fail("Use letters, digits and underscores only - this becomes a class name.");
     }
-    // `class class` does not compile, and the file would look fine until someone built it. The
-    // list is the union of the C# and C++ keywords a generated `class <Name>` could collide with:
-    // one validator serves all four items, so it has to refuse names either language rejects.
+    // The union of the C# and C++ keywords a generated `class <Name>` could collide with.
     static const char* kReserved[] = {"class", "struct", "int", "float", "double", "bool", "string",
                                       "void", "public", "private", "protected", "static", "namespace",
                                       "using", "new", "delete", "this", "base", "null", "nullptr",
@@ -441,6 +412,7 @@ bool validateTypeName(const std::string& name, std::string* err) {
     return true;
 }
 
+// Writes a file, refusing to overwrite an existing one. False on failure, with the reason in `err`.
 bool writeNewFile(const std::string& path, const std::string& text, std::string* err) {
     if (fileExists(path)) {
         if (err) *err = path + " already exists.";
@@ -453,6 +425,7 @@ bool writeNewFile(const std::string& path, const std::string& text, std::string*
     return true;
 }
 
+// Creates a whole new project at location\name and loads its manifest into `out`.
 bool scaffoldProject(const std::string& location, const std::string& name,
                      fmt::ProjectDesc& out, std::string* err) {
     if (!validateProjectName(name, err)) return false;
@@ -465,13 +438,6 @@ bool scaffoldProject(const std::string& location, const std::string& name,
     }
 
     const std::string content = root + "\\Content";
-    // The layout docs/PROJECTS.md specifies; creating them up front is what makes the Content Browser
-    // and Tools > New C# Script have somewhere to point at once.
-    //
-    // Materials, Textures and Sounds joined the list when each became a thing a project actually
-    // holds. Materials in particular is not optional decoration: Scripts.csproj globs
-    // ..\Materials\**\*.cs, and while MSBuild is happy with a glob that matches nothing, an author
-    // told "put your material here" and finding no `here` will put it somewhere else.
     for (const std::string& d : {content + "\\Maps", content + "\\Meshes", content + "\\Materials",
                                  content + "\\Textures", content + "\\Sounds", content + "\\Scripts"}) {
         if (!createDirectories(d)) {
@@ -486,20 +452,12 @@ bool scaffoldProject(const std::string& location, const std::string& name,
         return false;
     }
 
-    // The csproj is written HERE rather than lazily on the first script, which is where it used to
-    // appear. A project without one cannot Compile C#, and Compile C# is what bakes materials -- so
-    // a project whose first authored thing was a material had no way to build it, and the button
-    // that would have told them so was disabled for want of the file it was about to create.
-    // createScript still writes it if absent, so an older project is not left without one.
     {
         const std::string scriptsDir = content + "\\Scripts";
         const std::string csproj = scriptsDir + "\\" + kCsprojName;
         if (!writeFileText(csproj, csprojText(engineRefs(scriptsDir))))
             AVER_WARN("[Editor] project created, but could not write {}", csproj);
     }
-    // A starter surface, for the same reason the actor templates exist: the shape of a material is
-    // not guessable, and an empty Materials folder teaches nothing. It is a complete, working
-    // material that the first Compile C# turns into an .ocmat.
     {
         const std::string starter = content + "\\Materials\\Surfaces.cs";
         if (!writeFileText(starter, starterMaterialText(name)))
@@ -511,15 +469,18 @@ bool scaffoldProject(const std::string& location, const std::string& name,
     return true;
 }
 
+// Path of a project's Scripts.csproj. Empty if the project has no scripts folder.
 std::string scriptsCsprojPath(const fmt::ProjectDesc& proj) {
     const std::string dir = proj.scriptsDir();
     return dir.empty() ? std::string() : dir + "\\" + kCsprojName;
 }
 
+// Where Compile C# puts the built script assembly.
 std::string scriptsBinaryDir(const fmt::ProjectDesc& proj) {
     return proj.dir.empty() ? std::string() : proj.dir + "\\Binaries\\Scripts";
 }
 
+// Writes a new .cs file into the project's Scripts folder, creating Scripts.csproj if absent.
 bool createScript(const fmt::ProjectDesc& proj, const std::string& name, CsKind kind,
                   std::string* outPath, bool* outCsproj, std::string* err) {
     if (outCsproj) *outCsproj = false;
@@ -533,8 +494,6 @@ bool createScript(const fmt::ProjectDesc& proj, const std::string& name, CsKind 
     }
 
     const std::string path = dir + "\\" + name + ".cs";
-    // Reported by leaf name rather than by full path: the folder is fixed and already on screen
-    // above the error, so the path would just be noise around the one word that matters.
     if (fileExists(path)) {
         if (err) *err = name + ".cs already exists in Content\\Scripts.";
         return false;
@@ -542,8 +501,6 @@ bool createScript(const fmt::ProjectDesc& proj, const std::string& name, CsKind 
     if (!writeNewFile(path, scriptText(proj.name, name, kind), err)) return false;
     if (outPath) *outPath = path;
 
-    // First file in the folder gets the project file, so an IDE opens it as a buildable project
-    // instead of a loose .cs with every Aver.Scripting symbol underlined red.
     const std::string csproj = dir + "\\" + kCsprojName;
     if (!fileExists(csproj)) {
         if (writeFileText(csproj, csprojText(engineRefs(dir)))) {
@@ -560,6 +517,7 @@ bool createScript(const fmt::ProjectDesc& proj, const std::string& name, CsKind 
 
 namespace {
 
+// One engine assembly a project should reference: its display label and its path under the engine.
 struct RefSpec { const char* label; const char* tail; };
 
 const RefSpec kEngineRefSpecs[] = {
@@ -587,6 +545,8 @@ std::vector<std::string> projectReferences(const std::string& xml) {
 
 } // namespace
 
+// Lists what an older project is missing: content folders, the csproj, engine references, dead
+// references and the materials glob.
 ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
     ProjectUpgrade up;
     if (!proj.valid()) return up;
@@ -594,8 +554,6 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
     const std::string content = proj.contentDir();
     const std::string scriptsDir = proj.scriptsDir();
 
-    // Reported one folder at a time, because "this project is out of date" tells an author nothing
-    // and a list of the paths about to appear tells them exactly what is being done to their disk.
     for (const char* d : {"Maps", "Meshes", "Materials", "Textures", "Sounds", "Scripts"}) {
         const std::string path = content + "\\" + d;
         if (!fileExists(path))
@@ -608,16 +566,14 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
     if (!fileExists(csproj)) {
         up.fixes.push_back({ProjectFix::Kind::CreateCsproj,
                             "Create Content\\Scripts\\Scripts.csproj", csproj});
-        return up;   // everything below edits a file that is about to be generated whole
+        return up;
     }
 
     std::string xml;
     if (!readFileText(csproj, xml)) return up;
 
     for (const RefSpec& r : kEngineRefSpecs) {
-        // Matched on the project file's LEAF name, not the whole path: a reference written by hand,
-        // by an older editor, or from a different directory depth spells the same target three
-        // different ways, and only the file name is stable across all of them.
+        // Matched on the project file's leaf name: only that is stable across spellings of the path.
         const std::string leaf = std::filesystem::path(r.tail).filename().string();
         if (xml.find(leaf) != std::string::npos) continue;
         const std::string ref = engineProjectReference(scriptsDir, r.tail);
@@ -625,19 +581,10 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
                             ref.empty() ? std::string("(engine tree not found from the editor)") : ref});
     }
 
-    // A reference whose target is not there. This is the one that bites hardest: MSBuild's error
-    // names a path and not a reason, and the path is often a build tree deleted months ago.
-    // Reported apart from a missing reference, because ADDING one is safe and REPOINTING one is a
-    // change to something the author wrote.
+    // ---- references whose target is not on disk ----
     for (const std::string& ref : projectReferences(xml)) {
         std::error_code ec;
-        // NORMALISED before the test. A reference is relative and full of `..`, and joining it to
-        // the Scripts directory produces a path that still carries every one of them -- which on a
-        // deep tree runs past MAX_PATH and comes back "does not exist" for a file that plainly does.
-        //
-        // The symptom was the prompt offering, on every single open, to repoint three references to
-        // exactly the paths they already had. An upgrade prompt that reappears after being satisfied
-        // is one people learn to dismiss without reading, which costs more than the bug it nags about.
+        // Normalised before the test: an unresolved `..` run can exceed MAX_PATH and report absent.
         const std::filesystem::path abs =
             (std::filesystem::path(scriptsDir) / ref).lexically_normal();
         if (std::filesystem::exists(abs, ec)) continue;
@@ -661,6 +608,7 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
     return up;
 }
 
+// Applies every fix inspectProject listed: creates folders, writes the csproj, and edits the XML.
 bool applyProjectUpgrade(const fmt::ProjectDesc& proj, const ProjectUpgrade& up, std::string* err) {
     if (!proj.valid()) { if (err) *err = "no project"; return false; }
     if (up.empty()) return true;
@@ -679,9 +627,7 @@ bool applyProjectUpgrade(const fmt::ProjectDesc& proj, const ProjectUpgrade& up,
         }
     }
 
-    // The .csproj edits, in ONE read-modify-write. Applying them one at a time would re-read a file
-    // this function has already changed, so the second edit would be computed against the first
-    // one's output rather than against what the author actually has.
+    // The .csproj edits, in one read-modify-write.
     std::string xml;
     if (!fileExists(csproj) || !readFileText(csproj, xml)) return true;
     bool touched = false;
@@ -692,7 +638,7 @@ bool applyProjectUpgrade(const fmt::ProjectDesc& proj, const ProjectUpgrade& up,
         if (arrow == std::string::npos) continue;
         const std::string from = f.detail.substr(0, arrow);
         const std::string to = f.detail.substr(arrow + 6);
-        if (to.empty() || to[0] == '(') continue;   // unresolvable; left for the author
+        if (to.empty() || to[0] == '(') continue;
         const usize at = xml.find(from);
         if (at == std::string::npos) continue;
         xml.replace(at, from.size(), to);
@@ -709,9 +655,6 @@ bool applyProjectUpgrade(const fmt::ProjectDesc& proj, const ProjectUpgrade& up,
         if (f.kind == ProjectFix::Kind::AddMaterialsGlob) wantGlob = true;
 
     if (!additions.empty() || wantGlob) {
-        // APPENDED as a new ItemGroup rather than merged into an existing one. MSBuild unions
-        // ItemGroups, so the result is identical -- and inserting into somebody's existing group
-        // means guessing at their formatting, where appending leaves every byte they wrote alone.
         std::string block;
         block += "\n  <!-- Added by the Aver Engine editor when this project was upgraded.\n";
         block += "       Everything above is as you left it. -->\n";

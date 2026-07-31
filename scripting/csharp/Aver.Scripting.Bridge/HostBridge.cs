@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using System.Text;
 
-using Aver.Framework;   // AverActor, ClassBuilder, ClassFlags, Fw, ManagedDispatch, Entity, the attributes
+using Aver.Framework;
 
 namespace Aver.Scripting.Bridge;
 
@@ -12,15 +12,6 @@ namespace Aver.Scripting.Bridge;
 /// The managed end of the engine's in-process CLR host. Everything the native side calls lives
 /// here, and nothing here may ever throw across that boundary.
 /// </summary>
-/// <remarks>
-/// The five host entry points (Bootstrap, LoadScripts, UnloadScripts, Update, Shutdown) plus the ten
-/// managed-dispatch thunks near the bottom of this file all carry <see cref="UnmanagedCallersOnlyAttribute"/>,
-/// so the host binds the entry points with <c>load_assembly_and_get_function_pointer</c> and
-/// <c>UNMANAGEDCALLERSONLY_METHOD</c> and the framework calls the thunks through a raw function-pointer
-/// table — no delegate marshalling in the way. That is also why every one of them is wrapped whole in a
-/// try/catch: a managed exception escaping an <c>[UnmanagedCallersOnly]</c> method does not become a C++
-/// exception the engine could catch, it terminates the process.
-/// </remarks>
 public static class HostBridge
 {
     // Must match AVER_SCRIPTING_CONTRACT_VERSION in modules/scripting/include/aver/scripting/scripting_abi.h.
@@ -31,6 +22,7 @@ public static class HostBridge
     private const int ErrContract = -1;
     private const int ErrManagedFault = -2;
 
+    // Mirrors AvScriptHostApi in scripting_abi.h field for field.
     [StructLayout(LayoutKind.Sequential)]
     private struct HostApi
     {
@@ -39,6 +31,7 @@ public static class HostBridge
         public IntPtr Log;
     }
 
+    // The native log sink.
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void LogFn(int level, IntPtr utf8Message);
 
@@ -47,6 +40,7 @@ public static class HostBridge
     private static ScriptLoadContext? s_context;
     private static readonly List<Live> s_live = new();
 
+    // One live AverBehaviour instance.
     private sealed class Live
     {
         public required AverBehaviour Instance;
@@ -54,24 +48,18 @@ public static class HostBridge
         public bool Disabled;
     }
 
-    // ------------------------------------------------------------------ actor state (step 11)
-    //
-    // The two discovery WORLDS are kept apart: AverBehaviour instances live in s_live above (driven by
-    // Update), AverActor instances live in the maps below (driven by the native managed dispatch through
-    // the thunks near the bottom of this file). One host, two lifecycles.
+    // ------------------------------------------------------------------ actor state
 
     private const int TickGroupCount = 3;   // PrePhysics, Physics, PostPhysics (framework_abi.h)
 
-    // A declared managed class: the C# type bind() constructs, plus the tick wiring the bridge captured
-    // from Configure so it can bucket the instance. Keyed by fnv1a64(registry name) — the same hash the
-    // native spawn hands bind(), so the reverse lookup is a dictionary hit, not a scan.
+    // A declared managed class: the C# type bind() constructs, plus the tick wiring Configure asked for.
     private sealed class ClassInfo
     {
         public required Type Type;
         public required bool Ticks;
         public required int TickGroup;
         public required string RegistryName;
-        public required int Handle;   // the native class handle, for the post-load re-seal pass
+        public required int Handle;   // the native class handle
     }
 
     // One live managed actor instance, bound to an entity.
@@ -85,6 +73,8 @@ public static class HostBridge
         public bool Disabled;
     }
 
+    // Every declared managed class, keyed by fnv1a64 of its registry name: the hash native spawn
+    // hands bind().
     private static readonly Dictionary<long, ClassInfo> s_classes = new();
 
     /// <summary>One discovered [AverHud]: its instance, its display name, and the Draw it promised.</summary>
@@ -93,13 +83,9 @@ public static class HostBridge
         public required object Instance;
         public required string Name;
         public required MethodInfo Draw;
-        public bool Disabled;   // it threw once; a HUD that faults every frame would flood the log
+        public bool Disabled;
     }
 
-    // A THIRD discovery world, kept apart from the other two for the same reason they are apart from
-    // each other: a HUD is neither a behaviour (no OnStart/OnUpdate lifecycle) nor an actor (no
-    // transform, no class row, nothing to spawn). Sharing a list would mean every consumer of that
-    // list testing what kind of thing it had before doing anything with it.
     private static readonly List<LiveHud> s_huds = new();
     private static readonly Dictionary<int, ActorLive> s_actorsByEntity = new();
     // Dense per-group lists tick_all walks; only ticking actors are added.
@@ -108,6 +94,7 @@ public static class HostBridge
 
     // ------------------------------------------------------------------ entry points
 
+    /// <summary>Takes the host's API table and brings the bridge online. Returns an AVER_SCRIPT_* code.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static int Bootstrap(IntPtr apiPtr)
     {
@@ -117,9 +104,8 @@ public static class HostBridge
                 return ErrContract;
 
             HostApi api = Marshal.PtrToStructure<HostApi>(apiPtr);
-            // Both halves of the contract are checked: the version says the shape was agreed, the
-            // size says the struct we are about to read really is that shape. A host built against
-            // an older header would otherwise have us read past the end of its struct.
+            // Version and size both: the version says the shape was agreed, the size says the struct
+            // really is that shape.
             if (api.ContractVersion != ContractVersion || api.StructBytes != Marshal.SizeOf<HostApi>())
                 return ErrContract;
             if (api.Log == IntPtr.Zero)
@@ -132,10 +118,6 @@ public static class HostBridge
                  $"[Scripting] managed bridge online (contract v{ContractVersion}, "
                  + $"{Environment.Version}, API v{typeof(AverBehaviour).Assembly.GetName().Version})");
 
-            // Wire the actor half (step 11): install the dispatch table so the framework can call up into
-            // managed actor code, and declare the framework base classes so a user class naming "Pawn" or
-            // "Actor" as its parent has a row to resolve at seal. Guarded on its own so a framework that is
-            // absent or refuses the table disables ACTORS only — AverBehaviour scripting keeps working.
             SetupManagedActors();
 
             return Ok;
@@ -156,24 +138,16 @@ public static class HostBridge
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
                 return 0;
 
-            // Parented to the context the bridge itself lives in, which is NOT the default one:
-            // hostfxr loads a component into its own isolated context. See ScriptLoadContext.Load.
+            // Parented to the context the bridge itself lives in, which is NOT the default one.
             s_context ??= new ScriptLoadContext(
                 AssemblyLoadContext.GetLoadContext(typeof(HostBridge).Assembly) ?? AssemblyLoadContext.Default);
 
-            // Ordered so a run is reproducible; the discovery order decides OnStart order and an
-            // unordered directory enumeration would make that vary between machines.
+            // Ordered so discovery order, and therefore OnStart order, is reproducible.
             foreach (string path in Directory.GetFiles(dir, "*.dll").OrderBy(p => p, StringComparer.Ordinal))
                 TryLoadAssembly(path);
 
-            // Re-seal every declared actor class now that ALL assemblies in this load have declared theirs.
-            // A class seals at declaration, but a GameMode's default pawn/controller — and a class's parent —
-            // is resolved BY NAME at seal, and seal SUCCEEDS on the parent alone: a pawn/controller name that
-            // points at a sibling GetTypes() returned later, or at a class in a later-loaded assembly, would
-            // otherwise seal with that reference permanently 0 and never re-resolve (the row is already
-            // sealed, so spawn's auto-seal never re-runs). Re-sealing once here, after the whole load, makes
-            // every name resolve regardless of GetTypes() or assembly order. Idempotent: seal re-runs flatten
-            // from scratch and re-resolves the wiring, so a class that already sealed cleanly is unchanged.
+            // Re-seal now every assembly has declared its classes, so parent and pawn/controller names
+            // resolve whatever order they were declared in. Idempotent.
             foreach (ClassInfo ci in s_classes.Values)
                 Fw.aver_fw_class_seal(ci.Handle);
 
@@ -187,13 +161,9 @@ public static class HostBridge
     }
 
     /// <summary>
-    /// Drains every live behaviour and unloads the collectible load context. The drain half of
-    /// hot reload; the host rebuilds and calls <see cref="LoadScripts"/> again afterwards.
+    /// Drains every live behaviour and unloads the collectible load context. Returns 1 when the old
+    /// context was fully collected, 0 when it is still finalising; both are success.
     /// </summary>
-    /// <returns>
-    /// 1 when the old context was fully collected, 0 when it is still finalising. Both are
-    /// success — see the note on UnloadScripts in scripting_abi.h.
-    /// </returns>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static int UnloadScripts()
     {
@@ -203,11 +173,7 @@ public static class HostBridge
             if (old is null)
                 return 1; // nothing was loaded; there is no context to wait for
 
-            // Bounded, and NOT a spin until it succeeds. A behaviour that parked a reference to
-            // one of its own types somewhere the engine still holds — a thread, a timer, a static
-            // in another context — keeps the old context alive forever, and blocking the editor's
-            // main thread on that would turn a leak into a hang. Two cycles is what a context with
-            // no stray references needs; anything more is a real reference and is reported.
+            // Bounded, never a spin: a stray reference would otherwise hang the editor's main thread.
             for (int i = 0; i < 2 && old.IsAlive; ++i)
             {
                 GC.Collect();
@@ -232,14 +198,8 @@ public static class HostBridge
 
     /// <summary>
     /// Calls OnShutdown on everything live, drops the behaviour list and unloads the context.
+    /// NoInlining is load-bearing: an inlined local would keep the context alive and fake a leak.
     /// </summary>
-    /// <remarks>
-    /// Its own <b>non-inlined</b> method, and that is load-bearing rather than tidy. The context
-    /// can only be collected once no stack frame holds a reference to it, and a JIT that inlined
-    /// this into the caller would leave the local alive for the whole of the calling frame — so
-    /// the collect below would report a leak that only the inlining had created. Returning a
-    /// WeakReference is the only thing that crosses back out.
-    /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static WeakReference? DrainAndUnload()
     {
@@ -256,16 +216,10 @@ public static class HostBridge
             }
         }
         s_live.Clear();
-        // HUD instances hold TYPES from the collectible context exactly as actor instances do, so they
-        // have to be dropped here or the ALC can never be collected. There is no shutdown hook to
-        // drain first: a HUD draws and holds state, it does not own anything that needs releasing.
         s_huds.Clear();
 
-        // The actor instances and the class map hold TYPES from the collectible context; dropping them
-        // here too is what lets the ALC actually collect. The native side keeps its entities (still flagged
-        // MANAGED) but tick_all now walks empty buckets and bind() no longer knows their class, so nothing
-        // is ticked or double-constructed. Rebinding those entities on the next load is the OnRebound
-        // follow-up (the hot-reload rebind path), out of scope here.
+        // HUDs, actor instances and the class map all hold types from the collectible context;
+        // dropping them is what lets the ALC collect.
         s_actorsByEntity.Clear();
         foreach (List<ActorLive> bucket in s_tickBuckets) bucket.Clear();
         s_classes.Clear();
@@ -288,13 +242,8 @@ public static class HostBridge
 
     /// <summary>
     /// Copies HUD <paramref name="index"/>'s display name into <paramref name="buffer"/> as UTF-8,
-    /// NUL-terminated. Returns the byte count written, or 0.
+    /// NUL-terminated and truncated to fit. Returns the byte count written, or 0.
     /// </summary>
-    /// <remarks>
-    /// The caller supplies the buffer, so nothing managed has to stay alive across the boundary and
-    /// there is no free() for the native side to forget. A name longer than the buffer is truncated
-    /// rather than refused: it is a label in a list, and half a label beats none.
-    /// </remarks>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static unsafe int HudName(int index, byte* buffer, int capacity)
     {
@@ -311,12 +260,10 @@ public static class HostBridge
         catch { return 0; }
     }
 
-    /// <summary>Calls HUD <paramref name="index"/>'s Draw. Returns 1 if it ran, 0 otherwise.</summary>
-    /// <remarks>
-    /// A HUD that throws is DISABLED rather than retried. Draw runs once a frame, so a faulting one
-    /// would otherwise write the same stack trace sixty times a second into the Output Log and bury
-    /// whatever the user was actually reading — the same rule Invoke applies to a behaviour's hooks.
-    /// </remarks>
+    /// <summary>
+    /// Calls HUD <paramref name="index"/>'s Draw. Returns 1 if it ran, 0 otherwise. A HUD that
+    /// throws is disabled rather than retried.
+    /// </summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static int HudDraw(int index, float dt)
     {
@@ -341,11 +288,11 @@ public static class HostBridge
         catch { return 0; }
     }
 
+    /// <summary>Calls OnUpdate on every live behaviour. One that throws is disabled, not retried.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void Update(float dt)
     {
-        // No try/catch around the loop as a whole on purpose — one behaviour throwing must not
-        // stop the ones after it in the list, so the guard is per behaviour, inside.
+        // The guard is per behaviour: one throwing must not stop the ones after it.
         for (int i = 0; i < s_live.Count; ++i)
         {
             Live b = s_live[i];
@@ -361,40 +308,33 @@ public static class HostBridge
         }
     }
 
+    /// <summary>Clears the native dispatch, drains everything live and drops the log sink.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void Shutdown()
     {
         try
         {
-            // Clear the native dispatch FIRST so a stray late tick_all/bind cannot reach a torn-down
-            // bridge, then drain. The framework stores the table by value, so this is a NULL store its
-            // call sites already guard — after it, spawn/tick/destroy fire no managed hook.
+            // Cleared first, so a stray late tick_all or bind cannot reach a torn-down bridge.
             ManagedDispatch.Clear();
 
-            // The same drain the reload path uses. Nothing here waits for the collection: a host
-            // shutting down has no reason to care whether the context went away a millisecond
-            // before the process did, and blocking on a GC would be strictly worse.
             DrainAndUnload();
             Log.SetSink(null);
         }
         catch
         {
-            // Swallowed deliberately. This is the last thing that runs; a throw here would take
-            // the process out during an orderly exit, which is strictly worse than a lost message.
         }
     }
 
     // ------------------------------------------------------------------ loading
 
+    // Loads one assembly and discovers its behaviours, actor classes and HUDs.
     private static void TryLoadAssembly(string path)
     {
         string file = Path.GetFileName(path);
         try
         {
-            // The engine's own assemblies, which a user's build output copies alongside their own
-            // DLL. Loading a second copy into the collectible context would give their types
-            // (AverBehaviour, AverActor, Entity) two identities and match nothing. Aver.Framework and
-            // Aver.Scene join the list now that scripts reference them for the actor types.
+            // The engine's own assemblies, copied alongside the user's build output. A second copy
+            // in the collectible context would give AverBehaviour/AverActor/Entity two identities.
             string simple = Path.GetFileNameWithoutExtension(path);
             if (simple is "Aver.Scripting" or "Aver.Scripting.Bridge" or "Aver.Framework" or "Aver.Scene")
                 return;
@@ -432,35 +372,22 @@ public static class HostBridge
 
             Emit((int)Log.Level.Info, $"[Scripting] loaded {file}: {found} behaviour(s)");
 
-            // The SECOND discovery world: gameplay actor classes. Declared, not instantiated — a managed
-            // actor instance is constructed later, by bind(), when the framework spawns one. Run per
-            // assembly right after the behaviour pass so both worlds are driven from the same load.
+            // Actor classes are declared, not instantiated: bind() constructs one when the framework
+            // spawns it.
             int actors = DeclareActors(asm, file);
             DiscoverHuds(asm, file);
 
-            // Only warn about near-misses when the assembly yielded NEITHER a behaviour nor an actor: an
-            // actor class is an intentional non-behaviour, not a class that forgot to derive AverBehaviour.
+            // An actor class is an intentional non-behaviour, so only warn when the assembly yielded
+            // neither.
             if (found == 0 && actors == 0) WarnAboutNearMisses(asm, file);
         }
         catch (Exception ex)
         {
-            // A DLL in the scripts folder that is not a managed assembly at all lands here, as does
-            // one built for a different architecture. Neither is worth stopping the editor for.
             Emit((int)Log.Level.Warn, $"[Scripting] {file} could not be loaded: {Describe(ex)}");
         }
     }
 
-    /// <summary>
-    /// Names types that look like a behaviour but are not one, when an assembly yielded none.
-    /// </summary>
-    /// <remarks>
-    /// Discovery is <c>IsAssignableFrom(AverBehaviour)</c>, so a class that merely declares
-    /// <c>OnStart</c> and <c>OnUpdate</c> without deriving from the base compiles cleanly and is
-    /// skipped in silence — which is the one failure mode this whole layer is meant not to have,
-    /// and is exactly what the editor's own script template produced before hosting existed. Only
-    /// runs when the assembly produced nothing at all: an assembly with behaviours in it may
-    /// legitimately also hold helper classes with a method of the same name.
-    /// </remarks>
+    /// <summary>Names types that look like a behaviour but are not one, when an assembly yielded none.</summary>
     private static void WarnAboutNearMisses(Assembly asm, string file)
     {
         foreach (Type type in asm.GetTypes())
@@ -471,10 +398,8 @@ public static class HostBridge
                 type.GetMethod("OnTick", new[] { typeof(float) }) is null)
                 continue;
 
-            // A gameplay class (Actor/Pawn/GameMode...) is an INTENTIONAL non-behaviour, not a
-            // near-miss, and it carries an Aver.Framework attribute. Checked by attribute NAME
-            // because the bridge does not, and must not, reference Aver.Framework — a name match
-            // over metadata needs no such reference and cannot pull the wrong assembly in.
+            // A gameplay class is an intentional non-behaviour. Matched by attribute NAME because
+            // the bridge must not reference the assembly that declares it.
             if (type.GetCustomAttributesData().Any(a =>
                     a.AttributeType.Name is "AverClassAttribute" or "AverGameModeAttribute"))
                 continue;
@@ -487,21 +412,11 @@ public static class HostBridge
     }
 
     /// <summary>
-    /// Rejects a user assembly built against a different Aver.Scripting than the one loaded.
+    /// True when an assembly references Aver.Scripting or Aver.Framework at a compatible version.
+    /// False both for a rejected version and for one that references neither.
     /// </summary>
-    /// <remarks>
-    /// The version is taken from the assembly's own reference table rather than from an attribute
-    /// the author has to remember to apply — a check nobody can forget to opt into is the only kind
-    /// that helps. An assembly that does not reference Aver.Scripting at all cannot contain a
-    /// behaviour, so it is skipped silently: a scripts folder legitimately holds support libraries.
-    /// </remarks>
     private static bool CheckApiVersion(Assembly asm, string file)
     {
-        // An assembly is a candidate if it references EITHER contract assembly: Aver.Scripting (a
-        // behaviour) or Aver.Framework (an actor). A pure-actor assembly need not touch Aver.Scripting at
-        // all, so gating solely on it would silently skip every actor-only script. An assembly that
-        // references neither cannot contain a behaviour or an actor, so it is skipped silently — a scripts
-        // folder legitimately holds support libraries.
         AssemblyName[] refs = asm.GetReferencedAssemblies();
         if (!VersionMatches(refs, "Aver.Scripting", typeof(AverBehaviour).Assembly, file, out bool sawScripting)
             && sawScripting)
@@ -513,9 +428,8 @@ public static class HostBridge
         return sawScripting || sawFramework;
     }
 
-    // True unless the assembly references <name> at an INCOMPATIBLE version (different major, or newer than
-    // the engine provides), in which case it logs and returns false. <saw> reports whether the reference
-    // was present at all, so an absent-but-otherwise-fine reference is not mistaken for a rejection.
+    // True unless the assembly references <name> at an incompatible version, which is logged. <saw>
+    // reports whether the reference was present at all.
     private static bool VersionMatches(AssemblyName[] refs, string name, Assembly engineAsm, string file, out bool saw)
     {
         AssemblyName? reference = refs.FirstOrDefault(a => a.Name == name);
@@ -534,6 +448,7 @@ public static class HostBridge
         return true;
     }
 
+    // Disables one behaviour and says which hook threw.
     private static void Disable(Live b, string hook, Exception ex)
     {
         b.Disabled = true;
@@ -541,16 +456,16 @@ public static class HostBridge
              $"[Scripting] {b.Name}.{hook} threw: {Describe(ex)} - the behaviour has been disabled");
     }
 
+    // Renders an exception as one log line.
     private static string Describe(Exception ex) =>
         $"{ex.GetType().Name}: {ex.Message}".ReplaceLineEndings(" ");
 
-    // ================================================================== actor integration (step 11)
+    // ================================================================== actor integration
 
-    /// <summary>Installs the managed dispatch table and declares the framework base classes.</summary>
-    /// <remarks>
-    /// Its own guarded step so a framework that is missing or refuses the table takes ACTORS down, never
-    /// AverBehaviour scripting. A failure here is logged and swallowed; the behaviour half is independent.
-    /// </remarks>
+    /// <summary>
+    /// Installs the managed dispatch table and declares the framework base classes. A failure here
+    /// disables actors only; behaviour scripting is unaffected.
+    /// </summary>
     private static void SetupManagedActors()
     {
         try
@@ -558,9 +473,7 @@ public static class HostBridge
             if (!InstallManagedDispatch())
                 return;   // logged inside; actors are disabled, behaviours are not
             DeclareBaseClasses();
-            // Let any script resolve an Entity back to its live managed instance (Actors.Get / Entity.As<T>
-            // / Game.ModeAs<T> / Spawn<T>). The host owns the table; the framework holds only this delegate,
-            // keeping the dependency one-way. Disabled instances (a script that threw) resolve to null.
+            // Resolves an Entity back to its live managed instance. Disabled instances resolve to null.
             Actors.Resolver = handle =>
                 s_actorsByEntity.TryGetValue(handle, out ActorLive? live) && !live.Disabled ? live.Instance : null;
         }
@@ -572,15 +485,12 @@ public static class HostBridge
         }
     }
 
-    // Build the dispatch table from function pointers to the [UnmanagedCallersOnly] thunks below and hand
-    // it to the framework. unsafe only for the `&Thunk` address-of; the thunks themselves are ordinary
-    // static methods the CLR never moves, so the pointers are stable for the life of the process.
+    // Hands the framework a dispatch table of function pointers to the thunks below. Returns false if
+    // the framework refused it.
     private static unsafe bool InstallManagedDispatch()
     {
         if (ManagedDispatch.Installed)
         {
-            // Only the executable wires this, once, right after bootstrap; a second live install is
-            // refused by the framework. Reaching here means a prior install was never cleared.
             Emit((int)Log.Level.Warn, "[Scripting] a managed dispatch is already installed; not re-installing");
             return true;
         }
@@ -606,14 +516,10 @@ public static class HostBridge
         return ok;
     }
 
-    // The framework class registry resolves a parent BY NAME at seal, so a user class whose parent is
-    // "Pawn" needs a "Pawn" row to exist. The five framework base types are abstract C# types the actor
-    // discovery pass never instantiates; declare them once here as the lineage roots. They carry their
-    // identifying flag but NOT MANAGED — they are never spawned, so nothing dispatches into them.
+    // Declares the five framework base types as lineage roots, so a user class naming one as its
+    // parent has a row to resolve at seal. Abstract, and never MANAGED: they are never spawned.
     private static void DeclareBaseClasses()
     {
-        // Abstract: these are lineage anchors, never spawned themselves. The flag keeps them out of
-        // aver_fw_find_class_with_flags, so "find the GameMode to start" lands on a user class, not this.
         DeclareBase("Actor", "", ClassFlags.Abstract);
         DeclareBase("Pawn", "Actor", ClassFlags.Pawn | ClassFlags.Abstract);
         DeclareBase("PlayerController", "Actor", ClassFlags.Controller | ClassFlags.Abstract);
@@ -621,6 +527,7 @@ public static class HostBridge
         DeclareBase("GameInstance", "Actor", ClassFlags.GameInstance | ClassFlags.Abstract);
     }
 
+    // Declares and seals one base class row.
     private static void DeclareBase(string name, string parent, int flags)
     {
         int c = Fw.aver_fw_class_declare(name, parent);
@@ -635,19 +542,9 @@ public static class HostBridge
     }
 
     /// <summary>
-    /// Finds every [AverHud] class in an assembly and constructs one of each.
+    /// Finds every [AverHud] class in an assembly and constructs one of each. The attribute is
+    /// matched by name, and Draw is located by signature.
     /// </summary>
-    /// <remarks>
-    /// The attribute is matched BY NAME rather than by type. The bridge would otherwise need a
-    /// project reference to Aver.UI purely to name one attribute, and the same name-matching is
-    /// already how WarnAboutNearMisses recognises the gameplay attributes — a HUD assembly resolves
-    /// Aver.UI out of its own load context, so a typed comparison would be comparing two Type objects
-    /// from different contexts anyway and would silently never match.
-    ///
-    /// Draw is located by SIGNATURE, not named by the attribute: an attribute carries data, never the
-    /// name of a hook, which is the rule Aver.Framework/Attributes.cs settles and explains. A marked
-    /// class without one is reported by name at load rather than left to never draw.
-    /// </remarks>
     private static void DiscoverHuds(Assembly asm, string file)
     {
         foreach (Type type in asm.GetTypes())
@@ -719,8 +616,8 @@ public static class HostBridge
         return declared;
     }
 
-    // Declare one class: register it, run its Configure recipe, set flags from the base type, resolve a
-    // GameMode's pawn/controller, seal, and record what bind() needs to construct and bucket an instance.
+    // Declares one class: registers it, runs its Configure recipe, sets flags from the base type,
+    // resolves a GameMode's pawn and controller, seals, and records what bind() needs.
     private static void DeclareActorClass(Type type)
     {
         (string name, string parent, int baseFlags) = ResolveClassIdentity(type);
@@ -732,8 +629,8 @@ public static class HostBridge
             return;
         }
 
-        // The archetype recipe, if any: static void Configure(ClassBuilder). The builder captures whether
-        // the class ticks and in which group so the bridge can bucket its instances without a native getter.
+        // The archetype recipe, if any: static void Configure(ClassBuilder). The builder captures
+        // whether the class ticks and in which group.
         var builder = new ClassBuilder(c);
         MethodInfo? configure = type.GetMethod(
             "Configure",
@@ -741,12 +638,11 @@ public static class HostBridge
             binder: null, types: new[] { typeof(ClassBuilder) }, modifiers: null);
         configure?.Invoke(null, new object[] { builder });
 
-        // The base type sets MANAGED (always — that flag is what makes native spawn/destroy dispatch up
-        // into this bridge) plus the identifying flag; Configure may already have OR'd in TICKS. set_flags
-        // OVERWRITES, so read-modify-write to keep whatever Configure set.
+        // MANAGED is what makes native spawn and destroy dispatch into this bridge. set_flags
+        // overwrites, so read-modify-write to keep whatever Configure set.
         Fw.aver_fw_class_set_flags(c, Fw.aver_fw_class_get_flags(c) | ClassFlags.Managed | baseFlags);
 
-        // A GameMode names its pawn and controller BY STRING; the framework resolves them by name at seal.
+        // A GameMode names its pawn and controller by string; the framework resolves them at seal.
         if (type.GetCustomAttribute<AverGameModeAttribute>(inherit: false) is { } gm)
         {
             Fw.aver_fw_class_set_default_pawn(c, gm.DefaultPawnClass);

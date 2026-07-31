@@ -1,3 +1,4 @@
+// Object ids and the extension-to-AssetType mapping.
 #include "aver/assets/AssetId.hpp"
 #include "aver/core/Hash.hpp"
 
@@ -5,10 +6,12 @@
 
 namespace aver {
 
+// Derives a stable ObjectId from an asset name.
 ObjectId makeObjectId(std::string_view name) {
     return fnv1a64(name);
 }
 
+// Returns the lowercased extension of a path, without the dot. Empty if there is none.
 static std::string extLower(std::string_view path) {
     const usize dot = path.find_last_of('.');
     if (dot == std::string_view::npos) return {};
@@ -17,14 +20,13 @@ static std::string extLower(std::string_view path) {
     return e;
 }
 
+// Maps a filename to its AssetType. Unknown when the extension is not recognised.
 AssetType assetTypeFromPath(std::string_view path) {
     const std::string e = extLower(path);
     if (e == "ocbeam") return AssetType::Beam;
     if (e == "ocmap")  return AssetType::Map;
     if (e == "ocmesh") return AssetType::Mesh;
     if (e == "octex")  return AssetType::Texture;
-    // Source images are textures too. Until an asset cooker exists to bake .octex, a material's
-    // maps ARE .png/.tga files, and the loader has to be able to say so.
     if (e == "png" || e == "jpg" || e == "jpeg" || e == "tga" || e == "bmp") return AssetType::Texture;
     if (e == "ocmat")  return AssetType::Material;
     if (e == "ocskel") return AssetType::Skeletal;
@@ -34,6 +36,7 @@ AssetType assetTypeFromPath(std::string_view path) {
     return AssetType::Unknown;
 }
 
+// Returns the display name of an AssetType.
 const char* assetTypeName(AssetType t) {
     switch (t) {
         case AssetType::Beam:     return "Beam";

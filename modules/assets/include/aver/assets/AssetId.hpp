@@ -1,24 +1,25 @@
 #pragma once
+// Asset identity: the 64-bit ObjectId every object carries, and the asset type behind a filename.
 #include "aver/core/Types.hpp"
 
 #include <string_view>
 
 namespace aver {
 
-// Every object/asset carries a unique 64-bit Object ID (the "1 param" added across
-// the format family). When a file doesn't declare one, it is derived stably from the
-// asset's name via FNV-1a-64 — the same hash the .ocmap ID uses — so name-references
-// and id-references are interchangeable.
+// A unique 64-bit id for an object or asset. Derived from the name via FNV-1a-64 when a file
+// declares none, so name-references and id-references are interchangeable.
 using ObjectId = u64;
 inline constexpr ObjectId kInvalidObjectId = 0;
 
+// Derives a stable ObjectId from an asset name.
 ObjectId makeObjectId(std::string_view name);
 
+// The kinds of asset, one per file extension.
 enum class AssetType : u32 {
     Unknown = 0,
-    Beam,     // .ocbeam  — breakable deformable skeletal/soft-body mesh
-    Map,      // .ocmap   — world container (references + positions)
-    Mesh,     // .ocmesh  — static mesh
+    Beam,     // .ocbeam
+    Map,      // .ocmap
+    Mesh,     // .ocmesh
     Texture,  // .octex
     Material, // .ocmat
     Skeletal, // .ocskel
@@ -27,8 +28,9 @@ enum class AssetType : u32 {
     Aero,     // .ocaero
 };
 
-// Map a filename/extension to an AssetType (case-insensitive on the extension).
+// Maps a filename to an AssetType. Case-insensitive on the extension.
 AssetType assetTypeFromPath(std::string_view path);
+// Returns the display name of an AssetType.
 const char* assetTypeName(AssetType t);
 
 } // namespace aver

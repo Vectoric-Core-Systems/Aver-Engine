@@ -8,6 +8,8 @@ using namespace aver;
 using namespace aver::mcp;
 
 static int g_checks = 0, g_failures = 0;
+
+// Records one assertion and logs it.
 static void check(bool cond, const std::string& what) {
     ++g_checks;
     if (cond) { AVER_INFO("  ok    {}", what); return; }
@@ -15,6 +17,7 @@ static void check(bool cond, const std::string& what) {
     ++g_failures;
 }
 
+// Runs the parser, bridge and ABI-registry checks. Returns the failure count.
 int main() {
     AVER_INFO("=== commands that should parse ===");
     {
@@ -30,8 +33,6 @@ int main() {
               "as one MouseMove");
         check(c.events[0].x == 120 && c.events[0].y == 340, "with the coordinates intact");
 
-        // A CLICK IS THREE EVENTS, expanded at parse time. ImGui registers a click only when one frame
-        // saw the press and a later frame saw the release, so they have to be separable.
         check(parseCommand(R"({"cmd":"click","x":50,"y":60})", c, &why), "click parses");
         check(c.events.size() == 3, "into three events: move, down, up (got " +
                                    std::to_string(c.events.size()) + ")");
@@ -45,8 +46,6 @@ int main() {
         check(parseCommand(R"({"cmd":"click","x":1,"y":2,"button":"middle"})", c, &why), "a middle click");
         check(c.events[1].button == 2, "carries button 2");
 
-        // Keys BY NAME, because "F" and "F1" are different keys and a caller should not have to know
-        // Win32's numbering to say either.
         check(parseCommand(R"({"cmd":"key","key":"F"})", c, &why), "a letter key parses");
         check(c.events.size() == 2 && c.events[0].key == 'F', "as down+up on the right code");
         check(parseCommand(R"({"cmd":"key","key":"f1"})", c, &why), "a named key parses");
@@ -57,21 +56,12 @@ int main() {
         check(parseCommand(R"({"cmd":"text","text":"hello"})", c, &why), "text parses");
         check(c.events.size() == 1 && c.events[0].text == "hello", "carrying the string");
 
-        // A forward-slash path is what a caller should send: Windows accepts it, and this session
-        // already learned the hard way that a literal backslash path in C++ can hide a control
-        // character -- "\\Tools\\averdesign.exe" contains \\a, a BELL, and became
-        // "binToolsverdesign.exe".
         check(parseCommand(R"({"cmd":"shot","path":"C:/tmp/a.png"})", c, &why), "shot parses");
         check(c.arg == "C:/tmp/a.png", "carrying the path (" + c.arg + ")");
 
-        // And the escaped form, so the one level of unescaping is covered. THIS FIXTURE CAUGHT A
-        // TEST BUG RATHER THAN A PARSER BUG: written through a shell heredoc it arrived with its
-        // doubled backslashes collapsed, so the JSON held \\t and \\a, the parser consumed them
-        // exactly as JSON says it should, and the expectation was simply wrong.
         check(parseCommand(R"({"cmd":"shot","path":"C:\\tmp\\a.png"})", c, &why), "an escaped path parses");
         check(c.arg == "C:\\tmp\\a.png", "with one level of escaping undone (" + c.arg + ")");
 
-        // Whitespace and key order must not matter -- a client is entitled to pretty-print.
         check(parseCommand("{ \"cmd\" : \"move\" , \"y\" : 9 , \"x\" : 8 }", c, &why),
               "spacing and key order do not matter");
         check(c.events[0].x == 8 && c.events[0].y == 9, "and the values are still right");
@@ -82,10 +72,9 @@ int main() {
 
     AVER_INFO("=== commands that should be REFUSED, not ignored ===");
     {
-        // Refused with a reason, in every case. A client that misspelled `click` should be told, not
-        // left waiting for a button that was never pressed.
         Command c;
         std::string why;
+        // One refusal fixture: the line to parse and what it is.
         struct Case { const char* line; const char* what; };
         const Case cases[] = {
             {R"({"cmd":"clik","x":1,"y":2})",   "a misspelled command"},
@@ -108,17 +97,12 @@ int main() {
 
     AVER_INFO("=== the bridge is inert until asked ===");
     {
-        // Constructed but never started: no thread, no socket, no port. This is what "the editor works
-        // without the control channel" looks like from the inside -- even when the module IS built, it
-        // does nothing at all until the app calls start().
         McpBridge bridge;
         check(!bridge.listening(), "a fresh bridge is not listening");
         check(bridge.port() == 0, "and has no port");
         u32 applied = 99;
         applied = bridge.pump([](const Command&) {});
         check(applied == 0, "pumping an unstarted bridge is a no-op");
-        // stop() on something never started must be safe, because the app's shutdown path does not know
-        // whether start() succeeded.
         bridge.stop();
         check(!bridge.listening(), "stop() on an unstarted bridge is harmless");
     }
@@ -129,8 +113,6 @@ int main() {
         Command c;
         std::string why;
 
-        // Parsing first: an abi call names a module and an entry point, and carries numbers and at most
-        // one string.
         check(parseCommand(R"({"id":11,"cmd":"abi","module":"framework","fn":"spawn","args":[1,2.5,-3]})",
                            c, &why), "an abi call parses (" + why + ")");
         check(c.abi.module == "framework", "the module is carried");
@@ -152,8 +134,6 @@ int main() {
         check(!parseCommand(R"({"cmd":"abi","module":"framework"})", c, &why),
               "and one with no fn (" + why + ")");
 
-        // ROUTING. This is the property the whole design exists for: a call for "framework" reaches the
-        // dispatcher registered for framework and nothing else.
         McpBridge bridge;
         check(bridge.modules().empty(), "a fresh bridge exposes NO ABI at all");
 
@@ -181,17 +161,12 @@ int main() {
         check(sawModule == "framework" && sawFn == "spawn", "which saw the module and entry point");
         check(result == "entity 42", "and its result comes back to the caller");
 
-        // A module's own refusal must survive the trip: the ABI, not the bridge, decides what its
-        // entry points are.
         err.clear();
         call.fn = "explode";
         check(!bridge.callAbi(call, result, err), "an unknown entry point is refused by the MODULE");
         check(err.find("aver_fw_explode") != std::string::npos,
               "in the module's own words (" + err + ")");
 
-        // AND THE CASE THAT MATTERS FOR AN OPTIONAL BUILD: a module that was never registered -- because
-        // it was switched off -- is refused with a reason that says so, rather than silently doing
-        // nothing.
         err.clear();
         AbiCall missing; missing.module = "voxi"; missing.fn = "setQuality";
         check(!bridge.callAbi(missing, result, err), "a call to an unregistered module is refused");

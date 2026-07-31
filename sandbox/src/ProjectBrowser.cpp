@@ -1,3 +1,6 @@
+// Project browser: the full-screen start screen with the recent project list, the open/new
+// actions and the New Project modal.
+
 #include "ProjectBrowser.hpp"
 #include "ProjectScaffold.hpp"
 
@@ -20,11 +23,12 @@ constexpr usize kMaxRecents = 10;
 
 std::string recentsPath() { return userDataDir() + "\\recent.txt"; }
 
-// "C:\...\OpenConstructor\OpenConstructor.ocproject" -> "OpenConstructor"
+// The name to show for a manifest path: the file stem.
 std::string displayName(const std::string& manifestPath) {
     return std::filesystem::path(manifestPath).stem().string();
 }
 
+// Copies a string into a fixed char buffer, truncating and always null-terminating.
 void setBuf(char* dst, usize cap, const std::string& s) {
     const usize n = s.size() < cap - 1 ? s.size() : cap - 1;
     std::memcpy(dst, s.data(), n);
@@ -33,6 +37,8 @@ void setBuf(char* dst, usize cap, const std::string& s) {
 
 } // namespace
 
+// Loads the recent project list, dropping entries whose file is gone, and seeds the new-project
+// location.
 void ProjectBrowser::init() {
     recents_.clear();
 
@@ -45,17 +51,14 @@ void ProjectBrowser::init() {
             std::string line = text.substr(pos, nl - pos);
             pos = nl + 1;
             while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
-            // A project the user moved or deleted is not a recent project, it is a dead row that
-            // errors when clicked, so it is dropped on read rather than shown and then refused.
             if (!line.empty() && fileExists(line)) recents_.push_back(line);
         }
     }
 
-    // Default the New Project location to the projects root beside the engine, per the
-    // engine-perpendicular-to-projects layout: projects are SIBLINGS of the engine, never inside.
     setBuf(locBuf_, sizeof locBuf_, documentsDir() + "\\Aver Projects");
 }
 
+// Writes the recent project list to disk.
 void ProjectBrowser::saveRecents() const {
     createDirectories(userDataDir());
     std::string text;
@@ -64,19 +67,19 @@ void ProjectBrowser::saveRecents() const {
         AVER_WARN("[Editor] could not write the recent project list to {}", recentsPath());
 }
 
+// Drops one path from the recent list.
 void ProjectBrowser::forget(const std::string& manifestPath) {
     for (usize i = 0; i < recents_.size(); ++i) {
         if (recents_[i] == manifestPath) { recents_.erase(recents_.begin() + static_cast<isize>(i)); return; }
     }
 }
 
+// Loads an .ocproject and moves it to the top of the recent list. False on failure.
 bool ProjectBrowser::open(const std::string& manifestPath, std::string* err) {
     fmt::ProjectDesc desc;
     if (!fmt::loadOcproject(manifestPath, desc, err)) return false;
     project_ = desc;
 
-    // Store the absolute path the loader resolved, so a project opened via a relative argument
-    // and the same project opened from the browser are one entry, not two.
     forget(project_.manifestPath);
     recents_.insert(recents_.begin(), project_.manifestPath);
     if (recents_.size() > kMaxRecents) recents_.resize(kMaxRecents);
@@ -86,6 +89,7 @@ bool ProjectBrowser::open(const std::string& manifestPath, std::string* err) {
     return true;
 }
 
+// Draws the browser for one frame and returns what the user asked for.
 BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 logoAspect) {
 #if !AVER_WITH_IMGUI
     (void)dpi; (void)medium; (void)logoTex; (void)logoAspect;
@@ -100,7 +104,6 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(30.0f * dpi, 24.0f * dpi));
-    // Fully opaque: the 3D scene is still rasterising behind this and must not show through.
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.086f, 0.086f, 0.094f, 1.0f));
     ImGui::Begin("##projectbrowser", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
@@ -109,15 +112,9 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
                  ImGuiWindowFlags_NoBringToFrontOnFocus);
 
     // ---- branding ----
-    // The real artwork, blitted. branding/logo.png is the project owner's own mark; approximating
-    // its isocube with draw-list primitives would put a redrawn, AI-authored logo in front of every
-    // user, which is exactly what branding/ASSETS.md exists to prevent. The vector badge below is
-    // only what is left when the file is missing -- a decoration must never stop the editor.
     {
         const f32 badge = 46.0f * dpi;
         if (logoTex) {
-            // Fitted inside the badge square rather than stretched to it, so artwork that is not
-            // 1:1 keeps its proportions and the text beside it stays put.
             const f32 w = logoAspect >= 1.0f ? badge : badge * logoAspect;
             const f32 h = logoAspect >= 1.0f ? badge / logoAspect : badge;
             ImGui::Image(static_cast<ImTextureID>(logoTex), ImVec2(w, h));
@@ -165,8 +162,6 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
     for (int i = 0; i < (int)recents_.size(); ++i) {
         ImGui::PushID(i);
         const std::string label = "  " + displayName(recents_[i]);
-        // Two lines of text in one row, so the row is sized for both and the name sits on the
-        // upper half rather than being vertically centred over the path.
         if (ImGui::Selectable(label.c_str(), recentSel_ == i,
                               ImGuiSelectableFlags_AllowDoubleClick, ImVec2(0, 40.0f * dpi))) {
             recentSel_ = i;
@@ -176,8 +171,6 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
                 else { error_ = err; forget(recents_[i]); saveRecents(); recentSel_ = -1; }
             }
         }
-        // The path under the name: two projects can share a name, and the folder is the only
-        // thing that tells them apart.
         const ImVec2 rmin = ImGui::GetItemRectMin();
         ImGui::GetWindowDrawList()->AddText(
             ImVec2(rmin.x + 12.0f * dpi, rmin.y + 20.0f * dpi),
@@ -245,7 +238,7 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
     if (ImGui::Button("Quit", ImVec2(90.0f * dpi, 0))) action = BrowserAction::Quit;
 
     // ---- New Project modal ----
-    // Opened here, inside the browser window's ID stack, so BeginPopupModal below finds it.
+    // Opened inside the browser window's ID stack so BeginPopupModal below finds it.
     if (openNewModal_) { ImGui::OpenPopup("New Project"); openNewModal_ = false; }
     ImGui::SetNextWindowSize(ImVec2(620.0f * dpi, 0), ImGuiCond_Always);
     if (ImGui::BeginPopupModal("New Project", nullptr, ImGuiWindowFlags_NoResize)) {
@@ -265,8 +258,6 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
         ImGui::PopItemWidth();
         ImGui::SameLine();
         if (ImGui::Button("Browse...", ImVec2(100.0f * dpi, 0))) {
-            // No folder picker in the platform layer, so this picks a manifest and takes the
-            // folder that CONTAINS its project folder - i.e. the projects root.
             std::string picked;
             if (openFileDialog("Pick any project in the target location", "Aver project (*.ocproject)",
                                "*.ocproject", std::string(locBuf_), picked)) {

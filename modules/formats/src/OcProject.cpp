@@ -1,3 +1,4 @@
+// .ocproject reader and writer: parses a project manifest and rewrites it in place.
 #include "aver/formats/OcProject.hpp"
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -13,8 +14,7 @@ using namespace aver::fmt::detail;
 
 namespace {
 
-// The rest of the line after the key, comment-stripped. AUTHOR and NAME are prose, so they must
-// not be split on whitespace the way a numeric row is.
+// The trimmed remainder of the line after the key, for prose values.
 std::string_view restOfLine(std::string_view line, std::string_view key) {
     std::string_view r = line.substr(key.size());
     return trim(r);
@@ -22,15 +22,13 @@ std::string_view restOfLine(std::string_view line, std::string_view key) {
 
 } // namespace
 
+// Parses a manifest from memory, preserving `dir` and `manifestPath`. Unknown keys are ignored.
 bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
-    const std::string dir = out.dir, manifest = out.manifestPath; // preserved across the reset
+    const std::string dir = out.dir, manifest = out.manifestPath;
     out = ProjectDesc{};
     out.dir = dir;
     out.manifestPath = manifest;
 
-    // A manifest is the one .oc* file people hand-author in a text editor, and Notepad and
-    // PowerShell's `Out-File -Encoding utf8` both prepend a UTF-8 BOM. Left in place it becomes
-    // part of the first token, so OCPROJECT stops matching and the file reads as "not a project".
     if (text.size() >= 3 && static_cast<u8>(text[0]) == 0xEF &&
         static_cast<u8>(text[1]) == 0xBB && static_cast<u8>(text[2]) == 0xBF)
         text = text.substr(3);
@@ -77,8 +75,6 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
         } else if (equalsCI(key, "RENDER.GIDISTANCE")) {
             if (t.size() > 1) out.giMaxDistance = static_cast<f32>(parseF64(t[1], -1.0));
         }
-        // Everything else is ignored on purpose — the format is forward-compatible, so a key this
-        // build has never heard of (dependencies, plugins, cook targets) must not fail the load.
     }
 
     if (!sawHeader) {
@@ -92,6 +88,7 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
     return true;
 }
 
+// Loads a manifest from disk and rejects one whose ENGINE line this build cannot honour.
 bool loadOcproject(const std::string& path, ProjectDesc& out, std::string* err) {
     std::string text;
     if (!readFileText(path, text)) {
@@ -107,9 +104,6 @@ bool loadOcproject(const std::string& path, ProjectDesc& out, std::string* err) 
 
     if (!parseOcproject(text, out, err)) return false;
 
-    // ENGINE is the compatibility gate. A project asking for a build we are not is a refusal, not
-    // a warning: loading it anyway would silently give the author an engine missing whatever they
-    // depended on, and the failure would surface later as broken content.
     if (!out.engineName.empty() && !equalsCI(out.engineName, kEngineName)) {
         if (err)
             *err = "project targets engine '" + out.engineName + "', this is " + std::string(kEngineName);
@@ -124,29 +118,22 @@ bool loadOcproject(const std::string& path, ProjectDesc& out, std::string* err) 
     return true;
 }
 
-// ---------------------------------------------------------------------------------------------
-// writeOcproject
-// ---------------------------------------------------------------------------------------------
-
 namespace {
 
-// One "KEY value" line, or nothing when the value is not stated.
+// Appends one "KEY value" line, or nothing when the value is negative.
 void appendKey(std::string& out, const char* key, int v) {
     if (v < 0) return;
     out += key; out += ' '; out += std::to_string(v); out += '\n';
 }
 void appendKey(std::string& out, const char* key, f32 v) {
     if (v < 0.0f) return;
-    // Shortest round-trip, and NOT %g: the OC dialect's own reader is from_chars, which does not
-    // accept an exponent-free locale-formatted number written by printf under a comma locale.
     char buf[48];
     const auto r = std::to_chars(buf, buf + sizeof buf, v);
     if (r.ec != std::errc{}) return;
     out += key; out += ' '; out.append(buf, static_cast<usize>(r.ptr - buf)); out += '\n';
 }
 
-// Is this line one of the keys writeOcproject owns? Only those are replaced; everything else --
-// comments, blank lines, and any key a newer build wrote -- passes through untouched.
+// True when the line's key is one writeOcproject owns and therefore replaces.
 bool isOwnedKey(std::string_view line) {
     const std::string_view l = trim(line);
     if (l.empty() || l[0] == '#') return false;
@@ -163,9 +150,8 @@ bool isOwnedKey(std::string_view line) {
 
 } // namespace
 
+// Serialises a manifest, copying every unowned line of `existing` through untouched.
 std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
-    // What the owned keys become. Built first so the rewrite below is a lookup rather than a
-    // second copy of the formatting rules.
     std::string owned;
     if (!d.name.empty())             { owned += "NAME "; owned += d.name; owned += '\n'; }
     if (!d.engineName.empty()) {
@@ -183,9 +169,6 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.GIINTENSITY", d.giIntensity);
     appendKey(owned, "RENDER.GIDISTANCE",  d.giMaxDistance);
 
-    // A FRESH file: header, then the keys. The header line is not optional -- parseOcproject
-    // refuses a file without it, so a writer that omitted it would produce a manifest the engine
-    // could not load.
     if (trim(existing).empty()) {
         std::string out = "OCPROJECT " + std::to_string(d.version > 0 ? d.version : 1) + "\n";
         out += "# Written by the Aver Engine editor.\n";
@@ -193,20 +176,10 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
         return out;
     }
 
-    // AN EXISTING file: copy it through, dropping the owned keys, and put the owned block where the
-    // FIRST of them was. Anchoring to the first rather than appending keeps a hand-arranged manifest
-    // recognisable -- SkyForge's has a comment block above NAME that would otherwise end up
-    // describing a file whose content had moved below it.
     std::string out;
     out.reserve(existing.size() + owned.size() + 64);
     bool placed = false;
     bool sawHeader = false;
-    // `pos < size`, NOT `<=`. A file that ends with a newline -- every one of them -- leaves pos
-    // exactly at size after its last real line, and a `<=` loop then processes one more, empty,
-    // segment and emits a newline for it. That is one blank line appended per save: the file grows
-    // every time somebody presses the button, which is the slow corruption this writer exists not to
-    // cause. Caught by the idempotence assertion in FormatTest, which is the only kind of test that
-    // finds it -- a single write looks perfect.
     usize pos = 0;
     while (pos < existing.size()) {
         usize nl = existing.find('\n', pos);
@@ -218,7 +191,6 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
         const std::vector<std::string_view> t = splitWhitespace(trim(truncateHash(raw)));
         if (!sawHeader && !t.empty() && equalsCI(t[0], "OCPROJECT")) {
             sawHeader = true;
-            // Rewritten rather than copied, so a version bump is expressible.
             out += "OCPROJECT "; out += std::to_string(d.version > 0 ? d.version : 1); out += '\n';
             if (last) break;
             continue;
@@ -226,14 +198,12 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
         if (isOwnedKey(raw)) {
             if (!placed) { placed = true; out += owned; }
             if (last) break;
-            continue;   // the old line is dropped; its value is already in `owned`
+            continue;
         }
         out += raw;
         out += '\n';
         if (last) break;
     }
-    // No owned key was in the file at all -- possible for a manifest that is only a header and
-    // comments. The block still has to land somewhere.
     if (!placed) out += owned;
     return out;
 }

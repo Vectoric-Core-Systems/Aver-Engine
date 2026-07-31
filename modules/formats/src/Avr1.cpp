@@ -1,3 +1,5 @@
+// The AVR1 chunked container: header, chunk directory, string table, CRC32C and xxHash64.
+
 #include "aver/formats/Avr1.hpp"
 
 #include "aver/core/Log.hpp"
@@ -8,9 +10,7 @@
 namespace aver::fmt {
 namespace {
 
-// ---- CRC32C (Castagnoli), for the 60-byte header check ----
-// Table-driven and built once. This is the spec's algorithm and it is cheap enough that there is no
-// argument for substituting anything: it covers 60 bytes, once, per file.
+// The CRC32C (Castagnoli) lookup table, built once.
 const u32* crcTable() {
     static const auto table = [] {
         static u32 t[256];
@@ -24,9 +24,7 @@ const u32* crcTable() {
     return table;
 }
 
-// ---- xxHash64 ----
-// See the header for why this is not xxHash3. Straight from the reference definition; the constants
-// are the algorithm's, not chosen here.
+// xxHash64 primes, from the reference definition.
 constexpr u64 kP1 = 11400714785074694791ULL, kP2 = 14029467366897019727ULL;
 constexpr u64 kP3 =  1609587929392839161ULL, kP4 =  9650029242287828579ULL;
 constexpr u64 kP5 =  2870177450012600261ULL;
@@ -37,10 +35,7 @@ inline u64 merge64(u64 acc, u64 v) { acc ^= round64(0, v); return acc * kP1 + kP
 inline u64 read64(const u8* p) { u64 v; std::memcpy(&v, p, 8); return v; }
 inline u32 read32(const u8* p) { u32 v; std::memcpy(&v, p, 4); return v; }
 
-// ---- little-endian cursors ----
-// Every field is written through these rather than by memcpy'ing a struct: a struct would carry the
-// compiler's padding into the file, and the whole point of a byte-level spec is that the layout is
-// the format's decision and not the compiler's.
+// Little-endian byte writer over a growing buffer.
 struct Writer {
     std::vector<u8>& b;
     void u8v (u8 v)  { b.push_back(v); }
@@ -51,6 +46,7 @@ struct Writer {
     void pad (usize to) { while (b.size() % to) b.push_back(0); }
 };
 
+// Bounds-checked little-endian byte reader. `ok` goes false on the first short read.
 struct Reader {
     const u8* p; const u8* end; bool ok = true;
     bool need(usize n) { if (usize(end - p) < n) { ok = false; return false; } return true; }
@@ -62,10 +58,12 @@ struct Reader {
     void skip(usize n) { if (need(n)) p += n; }
 };
 
+// Sets `why` and returns false.
 bool fail(std::string* why, std::string msg) { if (why) *why = std::move(msg); return false; }
 
 } // namespace
 
+// CRC32C (Castagnoli) over a byte range.
 u32 avrCrc32c(const void* data, usize size) {
     const u8* p = static_cast<const u8*>(data);
     const u32* t = crcTable();
@@ -74,6 +72,7 @@ u32 avrCrc32c(const void* data, usize size) {
     return c ^ 0xFFFFFFFFu;
 }
 
+// xxHash64 over a byte range, seed 0.
 u64 avrHash64(const void* data, usize size) {
     const u8* p = static_cast<const u8*>(data);
     const u8* const end = p + size;
@@ -100,25 +99,25 @@ u64 avrHash64(const void* data, usize size) {
     return h;
 }
 
+// The first chunk with this id, or nullptr.
 const AvrChunk* Avr1File::find(u32 chunkId) const {
     for (const AvrChunk& c : chunks) if (c.id == chunkId) return &c;
     return nullptr;
 }
 
+// Appends a chunk and returns a reference to it.
 AvrChunk& Avr1File::add(u32 chunkId, std::vector<u8> payload, u8 chunkFlags, u16 chunkVersion) {
     chunks.push_back(AvrChunk{chunkId, chunkVersion, 0, chunkFlags, std::move(payload)});
     return chunks.back();
 }
 
+// Starts the blob with the empty string, so offset 0 always means "".
 AvrStringTable::AvrStringTable() {
-    // Offset 0 is RESERVED to be the empty string, so a zero StringRef is meaningful rather than
-    // ambiguous. Every table starts with it whether or not anyone asks for "".
     blob_.push_back(0); blob_.push_back(0);
 }
 
+// Interns a string and returns its offset. An identical entry is reused.
 u32 AvrStringTable::add(std::string_view s) {
-    // Linear scan for an existing entry. A mesh has a handful of submesh names, so a map would cost
-    // more than it saves and would make the table's order depend on hashing.
     usize off = 0;
     while (off + 2 <= blob_.size()) {
         const u16 len = u16(blob_[off]) | u16(u16(blob_[off + 1]) << 8);
@@ -134,6 +133,7 @@ u32 AvrStringTable::add(std::string_view s) {
     return ref;
 }
 
+// The string at `ref`, or empty when the reference is null or out of range.
 std::string_view AvrStringTable::get(u32 ref) const {
     if (ref == kAvrStringNull || ref + 2 > blob_.size()) return {};
     const u16 len = u16(blob_[ref]) | u16(u16(blob_[ref + 1]) << 8);
@@ -141,6 +141,7 @@ std::string_view AvrStringTable::get(u32 ref) const {
     return std::string_view(reinterpret_cast<const char*>(blob_.data() + ref + 2), len);
 }
 
+// Serialises a container into `out`. Returns false with `why` set.
 bool writeAvr1(const Avr1File& in, std::vector<u8>& out, std::string* why) {
     if (in.subtype == 0) return fail(why, "AVR1: subtype is 0");
     const usize align = usize(1) << (in.alignLog2 ? in.alignLog2 : 4);
@@ -148,14 +149,12 @@ bool writeAvr1(const Avr1File& in, std::vector<u8>& out, std::string* why) {
     out.clear();
     Writer w{out};
 
-    // The header is written twice: once with placeholder offsets so the payloads can be laid out
-    // after it, then patched. Writing it once would need the sizes before they are known.
+    // Header and directory reserved first, patched once the payload offsets are known.
     out.resize(64, 0);
     const usize dirOffset = 64;
     out.resize(dirOffset + in.chunks.size() * 40, 0);
 
-    // Payloads, in directory order, each aligned. GpuUploadable gets 256 so a copy straight into an
-    // upload heap does not have to re-align it (§3.2).
+    // Payloads in directory order. GpuUploadable chunks align to 256 (§3.2).
     std::vector<u64> offsets(in.chunks.size()), sizes(in.chunks.size()), hashes(in.chunks.size());
     for (usize i = 0; i < in.chunks.size(); ++i) {
         const AvrChunk& c = in.chunks[i];
@@ -167,7 +166,7 @@ bool writeAvr1(const Avr1File& in, std::vector<u8>& out, std::string* why) {
         out.insert(out.end(), c.data.begin(), c.data.end());
     }
 
-    // The directory, now that every offset is known.
+    // The directory.
     {
         std::vector<u8> dir;
         Writer dw{dir};
@@ -202,13 +201,14 @@ bool writeAvr1(const Avr1File& in, std::vector<u8>& out, std::string* why) {
         hw.u64v(static_cast<u64>(out.size()));       // FileSize
         hw.raw(in.guid, 16);
         hw.u32v(in.flags);
-        // HeaderCrc covers 0x00..0x3B -- everything above, which is exactly what has been written.
+        // HeaderCrc covers 0x00..0x3B, which is exactly what has been written so far.
         hw.u32v(avrCrc32c(hdr.data(), hdr.size()));
         std::memcpy(out.data(), hdr.data(), 64);
     }
     return true;
 }
 
+// Parses a container, verifying the header CRC and every chunk hash. Returns false with `why` set.
 bool parseAvr1(const u8* bytes, usize size, Avr1File& out, std::string* why) {
     if (!bytes || size < 64) return fail(why, "AVR1: shorter than a header");
     Reader r{bytes, bytes + size};
@@ -232,8 +232,7 @@ bool parseAvr1(const u8* bytes, usize size, Avr1File& out, std::string* why) {
     if (!r.ok) return fail(why, "AVR1: truncated header");
 
     if (endian != 0) return fail(why, "AVR1: big-endian files are not defined in v1");
-    // Checked BEFORE anything is trusted: a header that fails its own CRC may have a chunk count
-    // that would make the directory read walk off the end.
+    // Before any other header field is trusted.
     if (avrCrc32c(bytes, 60) != storedCrc) return fail(why, "AVR1: header CRC mismatch (file corrupt)");
     if (out.minReaderVersion > kAvrContainerVersion)
         return fail(why, "AVR1: file needs container version " + std::to_string(out.minReaderVersion) +
@@ -273,6 +272,7 @@ bool parseAvr1(const u8* bytes, usize size, Avr1File& out, std::string* why) {
     return true;
 }
 
+// Reads and parses a container file. Returns false with `why` set.
 bool loadAvr1(const std::string& path, Avr1File& out, std::string* why) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return fail(why, "AVR1: cannot open " + path);
@@ -285,6 +285,7 @@ bool loadAvr1(const std::string& path, Avr1File& out, std::string* why) {
     return parseAvr1(bytes.data(), bytes.size(), out, why);
 }
 
+// Serialises a container and writes it to a file. Returns false with `why` set.
 bool saveAvr1(const std::string& path, const Avr1File& in, std::string* why) {
     std::vector<u8> bytes;
     if (!writeAvr1(in, bytes, why)) return false;

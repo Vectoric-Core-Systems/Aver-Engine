@@ -1,7 +1,5 @@
-// `.ocland`, the landscape heightfield. Exit code = failure count.
-//
-// Runs entirely on the CPU with no device, which is the property landscape stage 1 exists to establish:
-// the whole data model can be checked on a machine with no GPU before a single triangle is drawn.
+// `.ocland`, the landscape heightfield: round trip, corruption, forward compatibility and the
+// file-based save/load path. CPU only, no device. Exit code = failure count.
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcLand.hpp"
 
@@ -15,6 +13,7 @@ using namespace aver;
 
 static int g_checks = 0, g_failures = 0;
 
+// Logs one assertion and counts the checks and the failures.
 static void check(bool cond, const std::string& what) {
     ++g_checks;
     if (cond) { AVER_INFO("  ok    {}", what); return; }
@@ -22,11 +21,7 @@ static void check(bool cond, const std::string& what) {
     ++g_failures;
 }
 
-// A grid whose every sample is DISTINGUISHABLE and ASYMMETRIC in its two indices:
-//   height(ix, iy) = iy*1000 + ix
-// A transposed read swaps them, and 1000*ix + iy is a completely different surface -- so a row/column
-// mix-up fails loudly here instead of producing a plausible-looking landscape that is rotated ninety
-// degrees from what was authored. A symmetric fixture could not tell the two apart at all.
+// Builds an n x n grid where height(ix, iy) = iy*1000 + ix, so a transposed read is visible.
 static fmt::OcLandData makeGrid(u32 n, f32 spacing = 100.0f) {
     fmt::OcLandData d;
     d.sampleCount = n;
@@ -42,10 +37,11 @@ static fmt::OcLandData makeGrid(u32 n, f32 spacing = 100.0f) {
     return d;
 }
 
+// Runs every landscape format test. Returns the failure count.
 int main() {
     AVER_INFO("=== .ocland round trip ===");
     {
-        const u32 N = 9;                 // deliberately not a power of two and not a multiple of 8
+        const u32 N = 9;
         const fmt::OcLandData src = makeGrid(N);
 
         std::vector<u8> bytes;
@@ -61,9 +57,7 @@ int main() {
         check(back.originCm[0] == src.originCm[0] && back.originCm[1] == src.originCm[1],
               "origin survives");
 
-        // WITHIN ONE QUANTISATION STEP, not exactly: heights are u16 across the grid's own relief, so
-        // the step here is (8008 - 0) / 65535 = 0.122 cm. Asserting equality would be asserting that a
-        // lossy encoding is lossless.
+        // Heights are u16 across the grid's own relief, so one step here is 8008/65535 cm.
         const f32 step = 8008.0f / 65535.0f;
         f32 worst = 0.0f;
         for (u32 iy = 0; iy < N; ++iy) {
@@ -76,18 +70,14 @@ int main() {
               "every height is within one quantisation step (worst " + std::to_string(worst) +
               " cm, step " + std::to_string(step) + ")");
 
-        // THE TRANSPOSE TRAP. If rows and columns were swapped anywhere in the encode/decode, this
-        // sample would come back as 1*1000 + 7 rather than 7*1000 + 1.
         check(std::fabs(back.heightAt(1, 7) - 7001.0f) <= step,
               "sample (ix=1, iy=7) is 7001, not 1007 -- rows and columns are not transposed");
 
-        // Bounds are RECOMPUTED, so they must match the data rather than whatever was written.
         check(std::fabs(back.boundsMin[2] - 0.0f) <= step, "bounds min z recomputed from the heights");
         check(std::fabs(back.boundsMax[2] - 8008.0f) <= step, "bounds max z recomputed");
         check(std::fabs(back.boundsMax[0] - (src.originCm[0] + 800.0f)) < 0.01f,
               "footprint is (n-1) spacings wide, not n");
 
-        // The axis convention, asserted rather than left in a comment.
         f32 w[3];
         back.worldAt(2, 3, w);
         check(std::fabs(w[0] - (src.originCm[0] + 200.0f)) < 0.01f, "column ix runs along +X");
@@ -100,20 +90,12 @@ int main() {
         std::string why;
         fmt::OcLandData out;
 
-    // ORDER OF EVALUATION. Every message below is built from `why` in a statement SEPARATE from the
-    // call that fills it, and that is not style. C++ leaves the order of a function's argument
-    // evaluation unspecified, so `check(!parse(..., &why), "..." + why)` may build the string first --
-    // and it did: the first run of this test reported the flipped-magic case with an empty reason and
-    // the flipped-header case with "bad magic", each line carrying the PREVIOUS case's reason. The
-    // assertions were all correct and every refusal was real; only the diagnostics lied, which is the
-    // worst combination because nothing fails until somebody trusts them.
+    // Reports one refusal, reading `why` only after the call that filled it.
     auto refused = [&](bool didRefuse, const std::string& what) {
         check(didRefuse, what + " (" + why + ")");
     };
 
 
-        // A FLAT section: zero relief, which is the case that divides by the span. It must encode
-        // exactly, not produce infinities.
         fmt::OcLandData flat = makeGrid(4);
         for (f32& h : flat.heights) h = 1234.5f;
         std::vector<u8> flatBytes;
@@ -124,7 +106,6 @@ int main() {
         for (f32 h : out.heights) if (std::fabs(h - 1234.5f) > 0.01f) allFlat = false;
         check(allFlat, "every sample of a flat section decodes exactly (no divide by a zero span)");
 
-        // Refused rather than half-read. Each of these is a real way a file arrives broken.
         std::vector<u8> good;
         check(fmt::writeOcLand(makeGrid(8), good, &why), "a reference file for the corruption cases");
 
@@ -135,7 +116,7 @@ int main() {
           refused(r, "a flipped magic byte is refused"); }
 
         std::vector<u8> badHeader = good;
-        badHeader[0x0A] ^= 0x01;        // inside the range the header CRC32C covers
+        badHeader[0x0A] ^= 0x01;
         why.clear();
         { const bool r = !fmt::parseOcLand(badHeader.data(), badHeader.size(), out, &why);
           refused(r, "a flipped header byte is caught by the header CRC"); }
@@ -156,7 +137,6 @@ int main() {
           refused(r, "a file shorter than the header is refused"); }
         check(!fmt::parseOcLand(nullptr, 0, out, &why), "null input is refused rather than read");
 
-        // A grid too small to have a quad at all.
         fmt::OcLandData tiny;
         tiny.sampleCount = 1;
         tiny.spacingCm = 100.0f;
@@ -166,9 +146,8 @@ int main() {
         { const bool r = !fmt::writeOcLand(tiny, tinyBytes, &why);
           refused(r, "a 1x1 grid is refused -- one sample is a point, not a surface"); }
 
-        // Inconsistent input: a header that claims more samples than the payload holds.
         fmt::OcLandData lying = makeGrid(4);
-        lying.sampleCount = 5;          // heights still hold 16, not 25
+        lying.sampleCount = 5;
         std::vector<u8> lyingBytes;
         why.clear();
         { const bool r = !fmt::writeOcLand(lying, lyingBytes, &why);
@@ -177,9 +156,6 @@ int main() {
 
     AVER_INFO("=== forward compatibility ===");
     {
-        // The property the container's Required flag exists to give: a file written by a LATER writer,
-        // carrying a chunk this build has never heard of, must still load. Without this the first time
-        // splat weights are added, every older editor stops opening every landscape.
         std::string why;
         std::vector<u8> bytes;
         check(fmt::writeOcLand(makeGrid(8), bytes, &why), "a base file");
@@ -187,7 +163,7 @@ int main() {
         fmt::Avr1File file;
         check(fmt::parseAvr1(bytes.data(), bytes.size(), file, &why), "reopened as a container");
         std::vector<u8> future(64, 0xAB);
-        file.add(fmt::avrFourCC("LMSK"), std::move(future), /*flags*/0);   // NOT Required
+        file.add(fmt::avrFourCC("LMSK"), std::move(future), /*flags*/0);
         std::vector<u8> withFuture;
         check(fmt::writeAvr1(file, withFuture, &why), "rewritten with an unknown chunk added");
 
@@ -200,12 +176,8 @@ int main() {
 
     AVER_INFO("=== through a real file ===");
     {
-        // saveOcLand / loadOcLand had NO coverage at all until this block. The in-memory pair above is
-        // not a substitute: those two go through the container's file reader and writer, which do the
-        // CRC and chunk-hash work, and loadOcLand in particular takes a route worth exercising -- it
-        // reads the container, re-serialises it, and parses that.
         std::string why;
-        const fmt::OcLandData src = makeGrid(17);      // 16 quads: a valid section size
+        const fmt::OcLandData src = makeGrid(17);
 
         const std::filesystem::path dir =
             std::filesystem::temp_directory_path() / "aver-ocland-test";
@@ -226,19 +198,15 @@ int main() {
         check(back.spacingCm == src.spacingCm, "spacing survives");
         check(back.originCm[0] == src.originCm[0], "origin survives");
 
-        // The same transpose trap as the in-memory case, because the file path is separate code.
         const f32 step = 16016.0f / 65535.0f;
         check(std::fabs(back.heightAt(1, 7) - 7001.0f) <= step,
               "and the file path does not transpose either");
 
-        // A missing file must be refused with a reason, not read as an empty landscape.
         fmt::OcLandData missing;
         why.clear();
         const bool gone = fmt::loadOcLand((dir / "does-not-exist.ocland").string(), missing, &why);
         check(!gone, "a missing file is refused (" + why + ")");
 
-        // A file corrupted ON DISK, which is the case the container's own reader has to catch rather
-        // than the in-memory parser.
         {
             std::vector<u8> bytes;
             std::FILE* f = std::fopen(path.c_str(), "rb");

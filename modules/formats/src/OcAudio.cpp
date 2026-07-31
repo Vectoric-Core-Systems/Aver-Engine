@@ -1,3 +1,5 @@
+// The .ocaudio container, plus importing source audio through the platform's media stack.
+
 #include "aver/formats/OcAudio.hpp"
 #include "aver/formats/Wav.hpp"
 
@@ -15,12 +17,12 @@
 namespace aver::fmt {
 namespace {
 
-// Little-endian, field by field. The same discipline as every other writer here: a struct written
-// whole makes its padding part of the file format.
+// Appends one little-endian u32.
 void putU32(std::vector<u8>& v, u32 x) {
     v.push_back(static_cast<u8>(x)); v.push_back(static_cast<u8>(x >> 8));
     v.push_back(static_cast<u8>(x >> 16)); v.push_back(static_cast<u8>(x >> 24));
 }
+// Reads one little-endian u32 at `p` and advances it. Returns false past the end.
 bool getU32(const std::vector<u8>& v, usize& p, u32& out) {
     if (p + 4 > v.size()) return false;
     out = static_cast<u32>(v[p]) | (static_cast<u32>(v[p + 1]) << 8) |
@@ -29,8 +31,10 @@ bool getU32(const std::vector<u8>& v, usize& p, u32& out) {
     return true;
 }
 
+// Sets `why` and returns false.
 bool fail(std::string* why, const char* msg) { if (why) *why = msg; return false; }
 
+// The file extension including the dot, lowercased. Empty when there is none.
 std::string lowerExtension(const std::string& path) {
     const usize dot = path.find_last_of('.');
     if (dot == std::string::npos) return {};
@@ -41,11 +45,7 @@ std::string lowerExtension(const std::string& path) {
 
 #if defined(_WIN32)
 
-// Media Foundation, started once per process and never shut down.
-//
-// Deliberately not reference-counted: MFShutdown while another thread is mid-decode is a crash, and
-// the only thing a counter would buy is the ability to make that mistake. The cost of leaving it
-// started is one loaded DLL for the life of the process.
+// Starts Media Foundation once per process. Never shut down.
 bool mfStart() {
     static const bool started = [] {
         return SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET));
@@ -53,8 +53,10 @@ bool mfStart() {
     return started;
 }
 
+// Releases a COM pointer and nulls it.
 template <class T> void safeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
+// Decodes a file to interleaved 32-bit float PCM through Media Foundation.
 AudioImportResult mfDecode(const std::string& path, audio::SoundData& out) {
     AudioImportResult r; r.decoder = "media foundation";
     if (!mfStart()) { r.error = "Media Foundation would not start"; return r; }
@@ -70,9 +72,6 @@ AudioImportResult mfDecode(const std::string& path, audio::SoundData& out) {
         return r;
     }
 
-    // Ask for 32-bit float PCM and let Media Foundation insert whatever decoder and converter it
-    // needs. Asking for float rather than 16-bit integer costs nothing and skips a quantisation the
-    // mixer would only have to undo.
     IMFMediaType* want = nullptr;
     if (FAILED(MFCreateMediaType(&want))) { safeRelease(reader); r.error = "out of memory"; return r; }
     want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
@@ -86,9 +85,7 @@ AudioImportResult mfDecode(const std::string& path, audio::SoundData& out) {
         return r;
     }
 
-    // Read back what was actually negotiated. Asking for float does not fix the RATE or the CHANNEL
-    // COUNT -- those stay whatever the file has -- and assuming otherwise is how an import ends up
-    // half speed.
+    // The negotiated rate and channel count, which the float request does not pin.
     IMFMediaType* got = nullptr;
     UINT32 channels = 0, rate = 0;
     if (SUCCEEDED(reader->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), &got)) && got) {
@@ -116,8 +113,6 @@ AudioImportResult mfDecode(const std::string& path, audio::SoundData& out) {
             return r;
         }
         if (flags & MF_SOURCE_READERF_ENDOFSTREAM) { safeRelease(sample); break; }
-        // A format change mid-stream. Refused rather than absorbed: concatenating two different
-        // rates into one buffer produces something that plays but is wrong in the middle.
         if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
             safeRelease(sample); safeRelease(reader);
             r.error = "the stream changes format part way through";
@@ -142,8 +137,7 @@ AudioImportResult mfDecode(const std::string& path, audio::SoundData& out) {
 
     safeRelease(reader);
     if (out.samples.empty()) { r.error = "the file decoded to no audio at all"; return r; }
-    // A trailing partial frame would make frames() disagree with the buffer length, and the mixer
-    // indexes by frame.
+    // Drop a trailing partial frame.
     out.samples.resize((out.samples.size() / channels) * channels);
     r.ok = true;
     return r;
@@ -155,6 +149,7 @@ AudioImportResult mfDecode(const std::string& path, audio::SoundData& out) {
 
 // ---------------------------------------------------------------- the container
 
+// Encodes sound data into an .ocaudio container. Returns false with `why` set.
 bool writeOcAudio(const audio::SoundData& in, const std::string& sourceName, std::vector<u8>& out,
                   std::string* why) {
     if (!in.valid()) return fail(why, "the sound data is empty or malformed");
@@ -171,8 +166,6 @@ bool writeOcAudio(const audio::SoundData& in, const std::string& sourceName, std
     putU32(header, in.loopEnd);
     putU32(header, static_cast<u32>(sourceName.size()));
     header.insert(header.end(), sourceName.begin(), sourceName.end());
-    // REQUIRED: a reader that does not understand the header cannot pretend to have loaded the
-    // asset, because everything about how to interpret the samples is in it.
     f.add(kOcAudioChunkHeader, std::move(header), kAvrChunkRequired);
 
     std::vector<u8> pcm(in.samples.size() * sizeof(f32));
@@ -182,15 +175,17 @@ bool writeOcAudio(const audio::SoundData& in, const std::string& sourceName, std
     return writeAvr1(f, out, why);
 }
 
+// Writes sound data to an .ocaudio file. Returns false with `why` set.
 bool saveOcAudio(const std::string& path, const audio::SoundData& in, const std::string& sourceName,
                  std::string* why) {
     std::vector<u8> bytes;
     if (!writeOcAudio(in, sourceName, bytes, why)) return false;
     Avr1File f;
-    if (!parseAvr1(bytes.data(), bytes.size(), f, why)) return false;   // written, then read back
+    if (!parseAvr1(bytes.data(), bytes.size(), f, why)) return false;
     return saveAvr1(path, f, why);
 }
 
+// Decodes an .ocaudio container into `out`. Returns false with `why` set on a malformed file.
 bool parseOcAudio(const u8* bytes, usize size, audio::SoundData& out, std::string* why) {
     out = audio::SoundData{};
     Avr1File f;
@@ -210,9 +205,6 @@ bool parseOcAudio(const u8* bytes, usize size, audio::SoundData& out, std::strin
     if (channels == 0 || rate == 0) return fail(why, "the AHDR chunk has no channels or no rate");
 
     const usize expected = static_cast<usize>(frames) * channels * sizeof(f32);
-    // Checked rather than trusted. A payload that disagrees with the header is a file that was
-    // truncated or mislabelled, and reading `frames` frames out of a shorter buffer is a read past
-    // the end that would usually still produce sound.
     if (s->data.size() != expected) return fail(why, "the sample payload does not match the header");
 
     out.channels = channels;
@@ -224,6 +216,7 @@ bool parseOcAudio(const u8* bytes, usize size, audio::SoundData& out, std::strin
     return true;
 }
 
+// Reads an .ocaudio file from disk. Returns false with `why` set.
 bool loadOcAudio(const std::string& path, audio::SoundData& out, std::string* why) {
     Avr1File f;
     if (!loadAvr1(path, f, why)) return false;
@@ -234,15 +227,14 @@ bool loadOcAudio(const std::string& path, audio::SoundData& out, std::string* wh
 
 // ---------------------------------------------------------------- import
 
+// True for an extension the importer will attempt. Only .wav is guaranteed; the rest need a codec.
 bool isImportableAudio(const std::string& path) {
     const std::string e = lowerExtension(path);
-    // WAV is always readable, because this module reads it. The rest depend on the platform's media
-    // stack; they are listed anyway, so the browser offers them and the failure -- if a codec really
-    // is absent -- is a message naming the file rather than a file that never appears.
     return e == ".wav" || e == ".mp3" || e == ".m4a" || e == ".aac" ||
            e == ".wma" || e == ".flac" || e == ".ogg";
 }
 
+// The .ocaudio path a source file compiles to.
 std::string ocAudioPathFor(const std::string& sourcePath) {
     const usize dot = sourcePath.find_last_of('.');
     const usize slash = sourcePath.find_last_of("/\\");
@@ -251,12 +243,11 @@ std::string ocAudioPathFor(const std::string& sourcePath) {
     return sourcePath.substr(0, dot) + ".ocaudio";
 }
 
+// Decodes a source audio file: this module's WAV reader first, then the platform decoder.
 AudioImportResult audioImportFile(const std::string& path, audio::SoundData& out) {
     const std::string e = lowerExtension(path);
 
     if (e == ".wav") {
-        // Ours, and tried first even though Media Foundation would also read it: a reader in this
-        // tree can be fixed in this tree, and it works on a machine with no media stack at all.
         AudioImportResult r; r.decoder = "wav";
         const WavResult w = wavReadFile(path, out);
         r.ok = w.ok;
@@ -265,9 +256,6 @@ AudioImportResult audioImportFile(const std::string& path, audio::SoundData& out
 #if !defined(_WIN32)
         return r;
 #else
-        // A .wav this module refuses is usually a compressed one wearing a .wav extension, which the
-        // platform decoder handles. Falling through rather than failing is the difference between
-        // "we do not read that" and "nothing reads that".
         AudioImportResult mf = mfDecode(path, out);
         if (mf.ok) return mf;
         r.error += "; and the platform decoder also declined: " + mf.error;

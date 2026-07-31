@@ -1,21 +1,19 @@
-// See LandscapeRenderer.hpp -- in particular the residency note, which is why this class is a cache
-// with a fallback rather than a loop over the selection.
+// Landscape draw loop: keeps a capped mesh cache and submits the selected nodes. See LandscapeRenderer.hpp.
 #include "aver/landscape/LandscapeRenderer.hpp"
 
 #include "aver/core/Log.hpp"
 
 namespace aver::landscape {
 
+// Sets the one material the whole landscape is shaded with.
 void LandscapeRenderer::setSurface(const f32 baseColor[4], f32 metallic, f32 roughness) {
     for (int i = 0; i < 4; ++i) baseColor_[i] = baseColor[i];
     metallic_ = metallic;
     roughness_ = roughness;
 }
 
+// The nearest ancestor of `node` that already has a mesh, or kInvalidNode.
 u32 LandscapeRenderer::residentAncestor(const LandscapeTree& tree, u32 node) const {
-    // Walked by scanning for a parent rather than stored, because a node knows its children and not
-    // its parent, and a parent pointer would have to be kept correct through every rebuild for the
-    // sake of a path that only runs when the cache is full.
     u32 current = node;
     for (u32 guard = 0; guard < tree.levelCount() + 1; ++guard) {
         u32 parent = kInvalidNode;
@@ -32,22 +30,14 @@ u32 LandscapeRenderer::residentAncestor(const LandscapeTree& tree, u32 node) con
     return kInvalidNode;
 }
 
+// Draws one section's selected nodes, creating meshes lazily and substituting resident ancestors.
 void LandscapeRenderer::draw(rhi::IDevice& device, const fmt::OcLandData& data,
                              const LandscapeTree& tree, const SelectResult& selection,
                              const f32 world[16], f32 uvTilingCm) {
     stats_ = LandscapeRenderStats{};
     drawnThisFrame_.clear();
 
-    // THE ROOT IS ALWAYS RESIDENT, and it is claimed before anything else can take the last slot.
-    //
-    // This is what makes "no holes" an actual guarantee rather than a hope. The ancestor fallback below
-    // can only substitute a node that is already resident, and a first frame at the cache cap has only
-    // LEAVES resident -- a leaf is nobody's ancestor, so every other selected node had nowhere to fall
-    // back to and was skipped. The test caught exactly that: a cache of 1 submitted one draw and
-    // dropped fifteen nodes on the floor.
-    //
-    // Reserving the root costs one mesh, ~242 KiB, and buys a worst case that is "the whole section is
-    // drawn at its coarsest" instead of "most of the ground is missing".
+    // The root is claimed first so there is always one ancestor every other node can fall back to.
     const u32 rootIndex = tree.root();
     if (rootIndex != kInvalidNode && meshes_.find(rootIndex) == meshes_.end()) {
         ChunkMesh rootMesh;
@@ -68,9 +58,7 @@ void LandscapeRenderer::draw(rhi::IDevice& device, const fmt::OcLandData& data,
             if (meshes_.size() < maxResident_) {
                 ChunkMesh mesh;
                 if (buildChunkMesh(data, tree, nodeIndex, mesh, uvTilingCm)) {
-                    // Reinterpreted rather than copied. The static_asserts in the header are what make
-                    // this legal, and they are checked at compile time in this translation unit
-                    // precisely so it cannot silently become a lie.
+                    // Reinterpreted, not copied; the header's static_asserts are what make this legal.
                     const rhi::MeshHandle h = device.createMesh(
                         reinterpret_cast<const rhi::MeshVertex*>(mesh.vertices.data()),
                         static_cast<u32>(mesh.vertices.size()),
@@ -84,8 +72,7 @@ void LandscapeRenderer::draw(rhi::IDevice& device, const fmt::OcLandData& data,
                 }
             }
             if (it == meshes_.end()) {
-                // Not resident and not creatable. A SKIPPED node is a hole in the ground, so fall back
-                // to the nearest ancestor that is resident: coarser than asked for, but continuous.
+                // Not resident and not creatable: draw the nearest resident ancestor instead.
                 const u32 anc = residentAncestor(tree, nodeIndex);
                 if (anc == kInvalidNode) { ++stats_.skipped; continue; }
                 toDraw = anc;
@@ -93,23 +80,19 @@ void LandscapeRenderer::draw(rhi::IDevice& device, const fmt::OcLandData& data,
             }
         }
 
-        // Deduplicated, because several descendants can defer to the same ancestor and drawing it twice
-        // costs a full submitted draw -- about 2 KiB of the frame's 1 MiB constant ring -- for nothing.
+        // Deduplicated: several descendants can defer to the same ancestor.
         if (!drawnThisFrame_.insert(toDraw).second) continue;
 
         const auto mesh = meshes_.find(toDraw);
         if (mesh == meshes_.end()) { ++stats_.skipped; continue; }
 
-        // ONE binding for the whole landscape, and it is sticky, so it is set before the loop by the
-        // caller rather than per node. This function only submits geometry.
         device.drawMesh(mesh->second, world, baseColor_, metallic_, roughness_);
         ++stats_.submitted;
     }
 
     stats_.residentNodes = static_cast<u32>(meshes_.size());
 
-    // Said once, loudly, when the cache fills. Silent degradation to coarser terrain is exactly the
-    // kind of thing that gets reported as "the ground looks blurry" months later.
+    // Said once per session, not once per frame.
     if (stats_.substituted > 0 && !warnedFull_) {
         warnedFull_ = true;
         AVER_WARN("[Landscape] the mesh cache is full at {} nodes; {} node(s) fell back to a coarser "

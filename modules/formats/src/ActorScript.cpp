@@ -1,3 +1,5 @@
+// Reads and rewrites the generated region and actor declarations in a C# actor script.
+
 #include "aver/formats/ActorScript.hpp"
 
 #include <cstdio>
@@ -8,10 +10,7 @@
 namespace aver::fmt {
 namespace {
 
-// The marker lines, matched anchored and with leading whitespace ignored, exactly as
-// docs/DESIGNER_REWRITE.md specifies. Matched as TEXT and not as a `#region`, because that is what
-// the format uses: a line comment carries no nesting and no matching, so the open/close pairing is
-// this function's job rather than a parser's.
+// The generated region's open and close marker text.
 constexpr const char* kOpenA  = "<aver-generated region=\"models\" schema=\"";
 constexpr const char* kClose  = "</aver-generated>";
 
@@ -21,24 +20,24 @@ bool isIdent(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || isDigit(c) || c == '_';
 }
 
+// Returns the first index at or after `i` that is not whitespace.
 usize skipSpace(std::string_view t, usize i) {
     while (i < t.size() && isSpace(t[i])) ++i;
     return i;
 }
 
-// The start of the line containing `i`, so a marker's own line can be excluded from the region.
+// Returns the start of the line containing `i`.
 usize lineBegin(std::string_view t, usize i) {
     while (i > 0 && t[i - 1] != '\n') --i;
     return i;
 }
+// Returns the start of the line after the one containing `i`.
 usize lineEnd(std::string_view t, usize i) {
     while (i < t.size() && t[i] != '\n') ++i;
     return i < t.size() ? i + 1 : i;
 }
 
-// Is the text from `lineStart` a comment line carrying `needle`? Anchored: leading whitespace, then
-// `//`, then optional space, then the needle. A `needle` appearing anywhere else on a line -- inside
-// a string, say -- must not be mistaken for a marker.
+// True when the line at `lineStart` is a `//` comment carrying `needle`; reports where it sits.
 bool markerLineAt(std::string_view t, usize lineStart, const char* needle, usize& needleAt) {
     usize i = skipSpace(t, lineStart);
     if (i + 1 >= t.size() || t[i] != '/' || t[i + 1] != '/') return false;
@@ -49,13 +48,7 @@ bool markerLineAt(std::string_view t, usize lineStart, const char* needle, usize
     return true;
 }
 
-// A C# float literal per the locked grammar: -?[0-9]+(\.[0-9]+)?f
-//
-// The `f` is REQUIRED, and refusing a literal without one is deliberate rather than pedantic: `1` in
-// that position is an int, which would not bind to the float parameter, so a file containing one is
-// a file that does not compile and reading it as 1.0f would be inventing a value the compiler never
-// accepted. An exponent is likewise refused -- the grammar has none, and the material rewriter's
-// formatter can emit one, which is exactly the drift this check exists to catch.
+// Parses a C# float literal, -?[0-9]+(\.[0-9]+)?f. No exponent form; the `f` suffix is required.
 bool parseFloatLiteral(std::string_view t, usize& i, f32& out) {
     const usize start = i;
     if (i < t.size() && t[i] == '-') ++i;
@@ -75,7 +68,7 @@ bool parseFloatLiteral(std::string_view t, usize& i, f32& out) {
     return true;
 }
 
-// `(a, b, c)` of three float literals.
+// Parses `(a, b, c)` of three float literals.
 bool parseTuple(std::string_view t, usize& i, f32 out[3]) {
     i = skipSpace(t, i);
     if (i >= t.size() || t[i] != '(') return false;
@@ -91,7 +84,7 @@ bool parseTuple(std::string_view t, usize& i, f32 out[3]) {
     return true;
 }
 
-// A `"..."` literal, with the two escapes the writer produces unescaped.
+// Parses a `"..."` literal, unescaping the two sequences the writer produces.
 bool parseString(std::string_view t, usize& i, std::string& out) {
     i = skipSpace(t, i);
     if (i >= t.size() || t[i] != '"') return false;
@@ -105,9 +98,7 @@ bool parseString(std::string_view t, usize& i, std::string& out) {
     return false;
 }
 
-// A named argument: `name: `. Required by the grammar and checked rather than skipped, because a
-// file with the arguments reordered is one the SCANNER must decline -- that is precisely the case
-// the Roslyn backend exists to pick up, and silently accepting it here would take the wrong values.
+// Consumes the named argument `name: `. Returns false if it is not there.
 bool expectNamed(std::string_view t, usize& i, const char* name) {
     i = skipSpace(t, i);
     const usize n = std::strlen(name);
@@ -121,10 +112,10 @@ bool expectNamed(std::string_view t, usize& i, const char* name) {
 
 } // namespace
 
+// Normalises a mesh path to the registry's key: forward slashes, no "./" or "Content/" prefix.
 std::string canonicalMeshPath(std::string_view path) {
     std::string s(path);
     for (char& c : s) if (c == '\\') c = '/';
-    // Leading "./" and a leading "Content/" both name the same asset the registry keys without them.
     while (s.rfind("./", 0) == 0) s.erase(0, 2);
     if (s.size() > 8) {
         const bool prefixed =
@@ -136,13 +127,10 @@ std::string canonicalMeshPath(std::string_view path) {
 
 namespace {
 
-// Where each [AverClass("...")] / [AverGameMode("...")] / [AverActor("...")] sits, in FILE ORDER.
-//
-// File order, not attribute-kind order, and that is the whole fix: scanning for one attribute kind
-// and then the next finds whichever kind comes first in the SEARCH rather than in the FILE, which is
-// how FpsGameMode.cs came back named after the controller declared below its game mode.
+// Where one actor attribute sits and where its quoted name starts.
 struct AttrHit { usize at; usize nameAt; };
 
+// Every [AverClass] / [AverGameMode] / [AverActor] attribute in the text, sorted into file order.
 std::vector<AttrHit> actorAttributes(std::string_view t) {
     static const char* kAttrs[] = {"[AverClass(\"", "[AverGameMode(\"", "[AverActor(\""};
     std::vector<AttrHit> hits;
@@ -160,9 +148,7 @@ std::vector<AttrHit> actorAttributes(std::string_view t) {
     return hits;
 }
 
-// Numbers following a call, e.g. `.Camera(70f, 5f, 100000f)`. Returns true when the CALL is present
-// at all -- a value that is not a plain literal still means the feature is declared, and the number
-// is what could not be read rather than the fact.
+// Reads the numbers of a call such as `.Camera(70f, 5f, 100000f)`. Returns true when the call exists.
 bool numbersAfter(std::string_view t, const char* call, f32* out, int count, ActorValueSpan* spans) {
     const usize at = t.find(call);
     if (at == std::string_view::npos) return false;
@@ -173,10 +159,6 @@ bool numbersAfter(std::string_view t, const char* call, f32* out, int count, Act
         if (parseFloatLiteral(t, p, out[k])) {
             if (spans) { spans[k].begin = valueAt; spans[k].end = p; }
         } else {
-            // Not a literal -- a constant, an expression. The argument is still DECLARED, so the
-            // feature is real; it simply has no span and nothing will offer to edit it. Skip to the
-            // next comma rather than giving up on the call, so the literals AFTER it keep their
-            // spans: one non-literal argument must not make its neighbours uneditable.
             int depth = 0;
             while (p < t.size()) {
                 const char ch = t[p];
@@ -192,7 +174,7 @@ bool numbersAfter(std::string_view t, const char* call, f32* out, int count, Act
     return true;
 }
 
-// Rebase a slice-relative span onto the whole file, and drop one that was never set.
+// Shifts a slice-relative span onto the whole file. An unset span is left alone.
 void rebase(ActorValueSpan& sp, usize base) {
     if (!sp.valid()) return;
     sp.begin += base;
@@ -201,6 +183,7 @@ void rebase(ActorValueSpan& sp, usize base) {
 
 } // namespace
 
+// Returns a display name for an actor kind.
 const char* actorKindName(ActorKind k) {
     switch (k) {
         case ActorKind::Actor:            return "Actor";
@@ -213,10 +196,8 @@ const char* actorKindName(ActorKind k) {
     }
 }
 
+// True when a class of this kind is spatial and worth showing a 3D viewport for. Unknown counts as spatial.
 bool actorKindHasViewport(ActorKind k) {
-    // Unknown counts as spatial. Guessing the other way HIDES something: a class deriving a base
-    // this build has not heard of is far more likely to be an actor than a rules object, and the
-    // cost of being wrong is an empty viewport rather than a missing one.
     switch (k) {
         case ActorKind::PlayerController:
         case ActorKind::GameMode:
@@ -227,10 +208,8 @@ bool actorKindHasViewport(ActorKind k) {
 
 namespace {
 
+// Classifies a base type name by its suffix. Anything unrecognised is Unknown.
 ActorKind kindOfBase(std::string_view base) {
-    // Matched on a SUFFIX rather than equality, so a project's own intermediate base -- and
-    // MyGameCharacter is the first thing anybody writes -- still classifies. A class deriving
-    // something entirely its own falls to Unknown and keeps its viewport, per the note above.
     auto ends = [&](const char* x) {
         const usize n = std::strlen(x);
         return base.size() >= n && base.compare(base.size() - n, n, x) == 0;
@@ -245,9 +224,7 @@ ActorKind kindOfBase(std::string_view base) {
     return ActorKind::Unknown;
 }
 
-// `Field = 123f;` or `Field = 123;` anywhere in the class. Scanned rather than parsed to a method
-// because a character sets these in OnBeginPlay, not in Configure -- which is where the framework's
-// own template puts them and where every real character puts them too.
+// Finds `Field = 123f;` or `Field = 123;` anywhere in the class text and reads the number.
 bool assignedNumber(std::string_view t, const char* field, f32& out, ActorValueSpan* span = nullptr) {
     const usize n = std::strlen(field);
     usize i = 0;
@@ -265,8 +242,6 @@ bool assignedNumber(std::string_view t, const char* field, f32& out, ActorValueS
                     if (span) { span->begin = valueAt; span->end = p; }
                     return true;
                 }
-                // An int literal is legal here (`Health = 3;`) even though the coordinate grammar
-                // forbids one; this is ordinary C#, not the locked region.
                 const usize d = p;
                 while (p < t.size() && isDigit(t[p])) ++p;
                 if (p > d) {
@@ -283,10 +258,10 @@ bool assignedNumber(std::string_view t, const char* field, f32& out, ActorValueS
 
 } // namespace
 
-// Every `class <Ident>` in the text, with the position of the keyword. Used to find actors that
-// carry no attribute at all -- see parseActorClasses.
+// One `class <Ident> : <Base>` declaration and where its keyword sits.
 struct ClassDecl { usize at; std::string name; std::string base; };
 
+// Every class declaration in the text, in file order.
 std::vector<ClassDecl> classDeclarations(std::string_view t) {
     std::vector<ClassDecl> out;
     usize i = 0;
@@ -310,20 +285,11 @@ std::vector<ClassDecl> classDeclarations(std::string_view t) {
     return out;
 }
 
+// Every actor class in the text: one carrying an attribute, or one whose base has a known suffix.
 std::vector<ActorClassInfo> parseActorClasses(std::string_view t) {
     std::vector<ActorClassInfo> out;
     const std::vector<AttrHit> attrs = actorAttributes(t);
 
-    // WHERE EACH CLASS'S TEXT BEGINS.
-    //
-    // Attributes alone are not enough, and that gap was invisible for as long as the only project to
-    // hand attributed everything. The RUNTIME registers an unattributed class perfectly well --
-    // HostBridge.ResolveClassIdentity falls back to the C# type name and the base's own lineage --
-    // so a file the engine happily loads was a file the editor could not see a single actor in.
-    //
-    // So a class is a candidate if it carries an attribute OR its base has a recognised suffix. The
-    // suffix is what carries a kind across a project's own intermediate base: `Guard : SkyForgePawn`
-    // never mentions AverPawn, and matching on the tail is the only thing that classifies it.
     struct Start { usize at; usize nameAt; };   // nameAt == npos for an unattributed class
     std::vector<Start> starts;
     starts.reserve(attrs.size() + 4);
@@ -331,12 +297,9 @@ std::vector<ActorClassInfo> parseActorClasses(std::string_view t) {
 
     for (const ClassDecl& d : classDeclarations(t)) {
         if (kindOfBase(d.base) == ActorKind::Unknown) continue;   // not an actor by its base
-        // Already covered by an attribute? An attribute sits immediately above its class, so the
-        // nearest preceding start owns this declaration if nothing else intervenes.
         bool attributed = false;
         for (const AttrHit& a : attrs) {
             if (a.at >= d.at) continue;
-            // Nothing but whitespace, attributes and modifiers between them: no other class start.
             bool intervening = false;
             for (const ClassDecl& o : classDeclarations(t))
                 if (o.at > a.at && o.at < d.at) { intervening = true; break; }
@@ -354,22 +317,13 @@ std::vector<ActorClassInfo> parseActorClasses(std::string_view t) {
             usize p = starts[h].nameAt;
             while (p < t.size() && t[p] != '"') info.className += t[p++];
         }
-        // An unattributed class leaves className EMPTY. It is not invented from the type name: the
-        // registry name and the C# identifier are separate facts, and the bridge is what decides
-        // they coincide when no attribute says otherwise.
 
-        // Only the text belonging to THIS class: from its start up to the next one. Without the
-        // bound, two actors in one file borrow each other's mesh -- and the picture would be of a
-        // class the panel is not naming.
         const usize sliceEnd = (h + 1 < starts.size()) ? starts[h + 1].at : t.size();
         const std::string_view slice = t.substr(starts[h].at, sliceEnd - starts[h].at);
 
-        // The C# type the attribute is on, for the panel: `public sealed class Gun : AverActor`.
         if (const usize c = slice.find("class "); c != std::string_view::npos) {
             usize q = skipSpace(slice, c + 6);
             while (q < slice.size() && isIdent(slice[q])) info.typeName += slice[q++];
-            // The base, after the colon. It is what decides whether a viewport means anything: a
-            // GameMode has no transform, and a 3D view of one shows nothing while looking broken.
             q = skipSpace(slice, q);
             if (q < slice.size() && slice[q] == ':') {
                 q = skipSpace(slice, q + 1);
@@ -390,9 +344,7 @@ std::vector<ActorClassInfo> parseActorClasses(std::string_view t) {
             const usize meshAt = q;
             if (parseString(slice, q, info.meshPath)) {
                 info.hasMesh = true;
-                // The span is the literal's CONTENTS, quotes excluded, so a rewrite replaces the path
-                // and not the syntax around it.
-                info.meshPathSpan = {meshAt + 1, q - 1};
+                info.meshPathSpan = {meshAt + 1, q - 1};   // literal contents, quotes excluded
                 q = skipSpace(slice, q);
                 if (q < slice.size() && slice[q] == ',') {
                     ++q;
@@ -413,7 +365,6 @@ std::vector<ActorClassInfo> parseActorClasses(std::string_view t) {
             info.hasPointLight = true;
             info.lightIntensityLux = lit[0]; info.lightRangeCm = lit[1];
         }
-        // Every span was measured against the SLICE; the caller edits the whole file.
         const usize base = starts[h].at;
         rebase(info.meshPathSpan, base);
         rebase(info.materialSpan, base);
@@ -427,23 +378,20 @@ std::vector<ActorClassInfo> parseActorClasses(std::string_view t) {
     return out;
 }
 
+// The first actor class in the text, or a default-constructed one when there is none.
 ActorClassInfo parseActorClass(std::string_view t) {
     const std::vector<ActorClassInfo> all = parseActorClasses(t);
     return all.empty() ? ActorClassInfo{} : all.front();
 }
 
+// Writes `edited`'s values back into the class text. Returns false with `err` set on a bad parse.
 bool rewriteActorClass(std::string_view t, const ActorClassInfo& edited,
                        std::string& out, std::string* err) {
-    // Collected then applied BACK TO FRONT, so every span stays valid as the text shortens or grows
-    // under it. Applying forwards means the second edit is computed against the first one's output.
     struct Edit { usize begin, end; std::string text; };
     std::vector<Edit> edits;
 
     auto number = [](f32 v) {
-        // FIXED NOTATION, never exponent. %g switches to 1e+05 above five digits, and this rewriter
-        // edits ordinary hand-written code: a save that turned somebody's `100000f` into `1e+05f`
-        // would compile, mean the same thing, and rewrite a value they never touched. The test that
-        // an unedited save is byte-identical is what caught it.
+        // Fixed notation, never exponent: the parser's grammar has no exponent form.
         char buf[64];
         std::snprintf(buf, sizeof buf, "%.6f", static_cast<double>(v));
         std::string t(buf);
@@ -471,8 +419,6 @@ bool rewriteActorClass(std::string_view t, const ActorClassInfo& edited,
 
     if (edits.empty()) { out.assign(t); return true; }
 
-    // Overlapping spans mean the parse this came from does not describe this text. Refused rather
-    // than applied in some order, because the result would be a file nobody wrote.
     for (usize a = 0; a + 1 < edits.size(); ++a)
         for (usize c = a + 1; c < edits.size(); ++c)
             if (edits[a].begin < edits[c].end && edits[c].begin < edits[a].end) {
@@ -489,6 +435,7 @@ bool rewriteActorClass(std::string_view t, const ActorClassInfo& edited,
     return true;
 }
 
+// Parses the generated region and its b.Place placements out of an actor script.
 ActorScript parseActorScript(std::string_view t) {
     ActorScript out;
     out.backend = ActorParserBackend::Builtin;
@@ -505,8 +452,6 @@ ActorScript parseActorScript(std::string_view t) {
         return out;
     }
 
-    // The schema, read rather than assumed. An unknown one is left alone and surfaced: a newer
-    // editor's grammar read by an older one is how a file gets silently truncated.
     usize sv = openNeedle + std::strlen(kOpenA);
     std::string schema;
     while (sv < t.size() && t[sv] != '"') schema += t[sv++];
@@ -538,9 +483,7 @@ ActorScript parseActorScript(std::string_view t) {
     while ((i = region.find(needle, i)) != std::string_view::npos) {
         ActorModel m;
 
-        // Backwards to the property name and the '='. Done by scanning rather than by matching a
-        // whole statement, because the assignment target is the one part of the row whose spacing
-        // the grammar does not pin.
+        // Backwards to the property name and the '='.
         usize back = i;
         while (back > 0 && isSpace(region[back - 1])) --back;
         if (back == 0 || region[back - 1] != '=') { i += needle.size(); continue; }
@@ -623,8 +566,6 @@ ActorScript parseActorScript(std::string_view t) {
         i = p;
     }
 
-    // Duplicate ids are refused. The id IS the match key, so two rows sharing one makes every
-    // rewrite ambiguous -- and the failure would be a drag that moves the wrong model.
     for (usize a = 0; a < out.models.size(); ++a)
         for (usize b = a + 1; b < out.models.size(); ++b)
             if (out.models[a].objectId == out.models[b].objectId) {
@@ -640,15 +581,9 @@ ActorScript parseActorScript(std::string_view t) {
 
 namespace {
 
-// The locked numeric grammar: -?[0-9]+(\.[0-9]+)?f, and NO exponent form.
-//
-// %g would produce one for a large or tiny value, and the material rewriter's formatter does exactly
-// that -- which is why this is written here rather than shared. A literal this file cannot read back
-// is a literal it must not write.
+// Formats one coordinate in the locked grammar: -?[0-9]+(\.[0-9]+)?f, no exponent form.
 std::string coord(f32 v) {
     char buf[64];
-    // Enough places to round-trip a float, then trailing zeros trimmed so an authored 0 stays "0f"
-    // rather than becoming "0.000000f" on the first save.
     std::snprintf(buf, sizeof buf, "%.6f", static_cast<double>(v));
     std::string s = buf;
     if (s.find('.') != std::string::npos) {
@@ -659,12 +594,14 @@ std::string coord(f32 v) {
     return s + "f";
 }
 
+// Formats three coordinates as `(x, y, z)`.
 std::string tuple(const f32 v[3]) {
     return "(" + coord(v[0]) + ", " + coord(v[1]) + ", " + coord(v[2]) + ")";
 }
 
 } // namespace
 
+// Writes new pos/rot/scale into the placements matching `edits` by ObjectId. Only those three change.
 bool rewriteActorScript(std::string_view t, const std::vector<ActorModel>& edits,
                         std::string& out, std::string* err) {
     const ActorScript parsed = parseActorScript(t);
@@ -673,7 +610,6 @@ bool rewriteActorScript(std::string_view t, const std::vector<ActorModel>& edits
         return false;
     }
 
-    // Rebuilt back to front, so every recorded byte range stays valid as the text changes under it.
     out.assign(t);
     for (usize k = parsed.models.size(); k-- > 0;) {
         const ActorModel& have = parsed.models[k];
@@ -681,9 +617,6 @@ bool rewriteActorScript(std::string_view t, const std::vector<ActorModel>& edits
         for (const ActorModel& e : edits) if (e.objectId == have.objectId) { want = &e; break; }
         if (!want) continue;   // not edited; left exactly as written
 
-        // Only the three tuples are rewritten. The id, the mesh and the material are read-only to a
-        // coordinate save by the format's own rule -- changing a mesh is a different operation with
-        // different consequences, and doing it from a gizmo drag would be surprising.
         const std::string statement(t.substr(have.begin, have.end - have.begin));
         std::string rebuilt = statement;
 

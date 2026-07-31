@@ -1,3 +1,4 @@
+// What a failed AVER_ASSERT does.
 #include "aver/core/Assert.hpp"
 #include "aver/core/Log.hpp"
 
@@ -5,6 +6,7 @@
 
 namespace aver::detail {
 
+// Logs the failed expression and its site, breaks into the debugger, then aborts.
 void assertFail(const char* expr, const char* file, int line, std::string_view msg) {
     if (msg.empty()) {
         AVER_ERROR("ASSERT FAILED: ({}) at {}:{}", expr, file, line);

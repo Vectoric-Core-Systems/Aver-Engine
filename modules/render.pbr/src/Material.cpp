@@ -1,3 +1,4 @@
+// The material library's storage — slots, generations, sanitising — and the C ABI over it.
 #include "aver/pbr/Material.hpp"
 #include "aver/pbr/pbr_abi.h"
 
@@ -7,9 +8,9 @@
 
 namespace aver::pbr {
 
-// One slot per index ever handed out. Slots are recycled through a free list and their generation
-// bumped, so a handle to a destroyed material fails valid() instead of addressing its successor.
+// One slot per index ever handed out, recycled through a free list with the generation bumped.
 struct MaterialLibrary::Impl {
+    // One material's storage.
     struct Slot {
         MaterialDesc desc{};
         u32  generation = 1;   // never 0: that is what keeps a live handle non-zero
@@ -23,28 +24,24 @@ struct MaterialLibrary::Impl {
 
 namespace {
 
-// Every scalar the shading model divides by, or raises to a power, is clamped here rather than in
-// the renderer: a material is authored once and consumed by several passes, so a value that is only
-// legal in one of them is a bug waiting for the second consumer.
+// Clamps every scalar the shading model divides by or raises to a power.
 void sanitise(MaterialDesc& d) {
     for (f32& c : d.baseColorFactor) c = std::clamp(c, 0.0f, 1.0f);
     for (f32& c : d.emissiveFactor)  c = std::max(c, 0.0f);   // emissive is radiance, not a ratio
     d.metallicFactor    = std::clamp(d.metallicFactor, 0.0f, 1.0f);
-    // Not clamped to 0: a perfect mirror makes the GGX denominator collapse. The floor matches the
-    // one shadeSurface applies, so the authored value and the shaded value agree.
+    // Not clamped to 0: a perfect mirror collapses the GGX denominator. The floor matches
+    // shadeSurface's, so the authored value and the shaded value agree.
     d.roughnessFactor   = std::clamp(d.roughnessFactor, 0.045f, 1.0f);
     d.normalScale       = std::clamp(d.normalScale, 0.0f, 8.0f);
     d.occlusionStrength = std::clamp(d.occlusionStrength, 0.0f, 1.0f);
-    // Both are reflectances, so both are ratios in [0,1]. The upper bound matters more than it
-    // looks: F0 above 1 makes (f90 - F0) negative in the Schlick term, and the surface reflects
-    // NEGATIVE radiance at grazing angles, which the tonemap then clamps to black -- a dark rim on
-    // a bright material, with nothing in the image to suggest a reflectance was the cause.
+    // Both are reflectances. F0 above 1 makes (f90 - F0) negative in the Schlick term.
     d.reflectance       = std::clamp(d.reflectance, 0.0f, 1.0f);
     d.f90               = std::clamp(d.f90, 0.0f, 1.0f);
     d.alphaCutoff       = std::clamp(d.alphaCutoff, 0.0f, 1.0f);
     if (static_cast<u32>(d.alphaMode) > static_cast<u32>(AlphaMode::Blend)) d.alphaMode = AlphaMode::Opaque;
 }
 
+// Removes one handle from the live list.
 void eraseHandle(std::vector<MaterialHandle>& v, MaterialHandle h) {
     const auto it = std::find(v.begin(), v.end(), h);
     if (it != v.end()) v.erase(it);
@@ -55,11 +52,13 @@ void eraseHandle(std::vector<MaterialHandle>& v, MaterialHandle h) {
 MaterialLibrary::MaterialLibrary() : impl_(new Impl) {}
 MaterialLibrary::~MaterialLibrary() { delete impl_; }
 
+// The process-wide library.
 MaterialLibrary& MaterialLibrary::get() {
     static MaterialLibrary inst;
     return inst;
 }
 
+// Creates a material from a description. 0 when the index space is exhausted.
 MaterialHandle MaterialLibrary::create(const MaterialDesc& desc) {
     u32 index;
     if (!impl_->freeIndices.empty()) {
@@ -82,6 +81,7 @@ MaterialHandle MaterialLibrary::create(const MaterialDesc& desc) {
     return h;
 }
 
+// True while `h` still names a live material.
 bool MaterialLibrary::valid(MaterialHandle h) const {
     if (h == 0) return false;
     const u32 i = materialIndex(h);
@@ -90,13 +90,13 @@ bool MaterialLibrary::valid(MaterialHandle h) const {
     return s.live && s.generation == materialGeneration(h);
 }
 
+// Destroys a material and frees its slot for reuse.
 bool MaterialLibrary::destroy(MaterialHandle h) {
     if (!valid(h)) return false;
     Impl::Slot& s = impl_->slots[materialIndex(h)];
     s.live = false;
     s.desc = MaterialDesc{};
-    // Bump past the wrap rather than through zero: generation 0 would make the handle for index 0
-    // compare equal to the invalid handle.
+    // Skip generation 0: it would make the handle for index 0 equal the invalid handle.
     s.generation = (s.generation + 1) & kMaterialGenerationMask;
     if (s.generation == 0) s.generation = 1;
     impl_->freeIndices.push_back(materialIndex(h));
@@ -104,14 +104,17 @@ bool MaterialLibrary::destroy(MaterialHandle h) {
     return true;
 }
 
+// Reads a material, or nullptr for a stale handle.
 const MaterialDesc* MaterialLibrary::desc(MaterialHandle h) const {
     return valid(h) ? &impl_->slots[materialIndex(h)].desc : nullptr;
 }
 
+// A mutable material, or nullptr for a stale handle. The caller must call touch() afterwards.
 MaterialDesc* MaterialLibrary::mutableDesc(MaterialHandle h) {
     return valid(h) ? &impl_->slots[materialIndex(h)].desc : nullptr;
 }
 
+// Replaces the whole description and marks the material dirty.
 bool MaterialLibrary::update(MaterialHandle h, const MaterialDesc& d) {
     if (!valid(h)) return false;
     Impl::Slot& s = impl_->slots[materialIndex(h)];
@@ -121,6 +124,7 @@ bool MaterialLibrary::update(MaterialHandle h, const MaterialDesc& d) {
     return true;
 }
 
+// Sanitises a material edited in place and marks it dirty.
 void MaterialLibrary::touch(MaterialHandle h) {
     if (!valid(h)) return;
     Impl::Slot& s = impl_->slots[materialIndex(h)];
@@ -128,6 +132,7 @@ void MaterialLibrary::touch(MaterialHandle h) {
     s.dirty = true;
 }
 
+// True when this material still owes the GPU an upload. Reading it clears it.
 bool MaterialLibrary::consumeDirty(MaterialHandle h) {
     if (!valid(h)) return false;
     Impl::Slot& s = impl_->slots[materialIndex(h)];
@@ -136,19 +141,19 @@ bool MaterialLibrary::consumeDirty(MaterialHandle h) {
     return d;
 }
 
+// How many materials are live.
 u32 MaterialLibrary::count() const { return static_cast<u32>(impl_->liveHandles.size()); }
 
+// The handle at a live index, or 0.
 MaterialHandle MaterialLibrary::at(u32 i) const {
     return i < impl_->liveHandles.size() ? impl_->liveHandles[i] : 0;
 }
 
-// Nothing consumes a material on the GPU yet: this step stands the system up, and the renderer edge
-// lands with the Materials target. Reporting Ready here would be exactly the lie the status enum
-// exists to prevent — an editor would offer a texture slot that shades nothing.
+// How far along a feature is.
 Status MaterialLibrary::status(Feature f) {
     switch (f) {
-        // All seven are authored here AND consumed: averEvalMaterial() reads the b2 block, samples
-        // the five maps through the material table, and clips on the mask itself.
+        // Authored here and consumed: averEvalMaterial() reads the b2 block, samples the five maps
+        // through the material table, and clips on the mask itself.
         case Feature::Factors:
         case Feature::BaseColorMap:
         case Feature::MetalRoughMap:
@@ -157,9 +162,8 @@ Status MaterialLibrary::status(Feature f) {
         case Feature::EmissiveMap:
         case Feature::AlphaMask:
             return Status::Ready;
-        // Stored, and deliberately still not rendered. Alpha BLENDING is not a shading-model
-        // question: it needs a blend state on the pipeline and a back-to-front draw order, and both
-        // belong to the renderer. Reporting Ready here would promise a sort nothing performs.
+        // Stored, not rendered: blending needs a blend state and a back-to-front draw order, both
+        // of which belong to the renderer.
         case Feature::AlphaBlend:
             return Status::NotImplemented;
         default:
@@ -167,6 +171,7 @@ Status MaterialLibrary::status(Feature f) {
     }
 }
 
+// The human sentence for a feature's status.
 const char* MaterialLibrary::statusText(Feature f) {
     switch (status(f)) {
         case Status::Ready:          return "Ready";
@@ -176,6 +181,7 @@ const char* MaterialLibrary::statusText(Feature f) {
     }
 }
 
+// The human name of a feature.
 const char* MaterialLibrary::featureName(Feature f) {
     switch (f) {
         case Feature::Factors:        return "Factors";
@@ -190,7 +196,7 @@ const char* MaterialLibrary::featureName(Feature f) {
     }
 }
 
-// These spell the `.ocmat` TEX slot names, so what the editor shows and what the file says match.
+// The `.ocmat` TEX name of a slot.
 const char* MaterialLibrary::textureSlotName(TextureSlot s) {
     switch (s) {
         case TextureSlot::BaseColor:  return "baseColor";
@@ -202,6 +208,7 @@ const char* MaterialLibrary::textureSlotName(TextureSlot s) {
     }
 }
 
+// The `.ocmat` BLEND name of an alpha mode.
 const char* MaterialLibrary::alphaModeName(AlphaMode m) {
     switch (m) {
         case AlphaMode::Opaque: return "opaque";
@@ -223,25 +230,27 @@ using aver::pbr::TextureSlot;
 
 namespace {
 
+// True for a feature id the ABI declares.
 bool validFeature(int32_t f) { return f >= 0 && f < AVER_PBR_FEATURE_COUNT; }
+// True for a texture slot id the ABI declares.
 bool validSlot(int32_t s)    { return s >= 0 && s < AVER_PBR_TEX_COUNT; }
 
+// The library handle for an ABI handle. A negative one is rejected, not reinterpreted.
 MaterialHandle handleOf(int32_t m) {
-    // A negative handle can only come from a caller that stored an error code, so it is rejected
-    // rather than reinterpreted into some other material's index.
     return m > 0 ? static_cast<MaterialHandle>(m) : 0;
 }
 
 MaterialDesc* edit(int32_t m) { return MaterialLibrary::get().mutableDesc(handleOf(m)); }
 const MaterialDesc* read(int32_t m) { return MaterialLibrary::get().desc(handleOf(m)); }
 
-// Every setter ends the same way: sanitise and mark dirty exactly once.
+// How every setter ends: sanitise and mark dirty exactly once.
 int32_t commit(int32_t m) { MaterialLibrary::get().touch(handleOf(m)); return 1; }
 
 } // namespace
 
 extern "C" {
 
+// ---- feature introspection ----
 int32_t aver_pbr_feature_count(void) { return AVER_PBR_FEATURE_COUNT; }
 
 const char* aver_pbr_feature_name(int32_t f) {
@@ -262,6 +271,7 @@ const char* aver_pbr_alpha_mode_name(int32_t mode) {
                ? MaterialLibrary::alphaModeName(static_cast<AlphaMode>(mode)) : "?";
 }
 
+// ---- lifetime and enumeration ----
 aver_pbr_material aver_pbr_create(const char* name) {
     MaterialDesc d;
     if (name) d.name = name;
@@ -276,6 +286,7 @@ aver_pbr_material aver_pbr_at(int32_t index) {
     return index < 0 ? 0 : static_cast<aver_pbr_material>(MaterialLibrary::get().at(static_cast<aver::u32>(index)));
 }
 
+// ---- identity ----
 const char* aver_pbr_get_name(aver_pbr_material m) {
     const MaterialDesc* d = read(m);
     return d ? d->name.c_str() : "";
@@ -287,6 +298,7 @@ int32_t aver_pbr_set_name(aver_pbr_material m, const char* name) {
     return commit(m);
 }
 
+// ---- factors ----
 int32_t aver_pbr_get_base_color_factor(aver_pbr_material m, float* out4) {
     const MaterialDesc* d = read(m);
     if (!d || !out4) return 0;
@@ -349,6 +361,7 @@ int32_t aver_pbr_set_occlusion_strength(aver_pbr_material m, float v) {
     MaterialDesc* d = edit(m); if (!d) return 0; d->occlusionStrength = v; return commit(m);
 }
 
+// ---- blending and sidedness ----
 int32_t aver_pbr_get_alpha_mode(aver_pbr_material m) {
     const MaterialDesc* d = read(m); return d ? static_cast<int32_t>(d->alphaMode) : AVER_PBR_ALPHA_OPAQUE;
 }
@@ -377,9 +390,9 @@ int32_t aver_pbr_set_cast_shadow(aver_pbr_material m, int32_t on) {
     MaterialDesc* d = edit(m); if (!d) return 0; d->castShadow = on != 0; return commit(m);
 }
 
+// ---- texture mapping ----
 int32_t aver_pbr_get_uv_mode(aver_pbr_material m) {
     const MaterialDesc* d = read(m);
-    // A stale handle reads as Mesh, which is the default and the one that changes nothing.
     return d ? static_cast<int32_t>(d->uvMode) : AVER_PBR_UV_MESH;
 }
 int32_t aver_pbr_set_uv_mode(aver_pbr_material m, int32_t mode) {
@@ -392,11 +405,9 @@ float aver_pbr_get_uv_tiling(aver_pbr_material m) {
     const MaterialDesc* d = read(m);
     return d ? d->uvTiling : 0.0f;
 }
+// Sets world centimetres per tile. Zero or negative is rejected rather than clamped.
 int32_t aver_pbr_set_uv_tiling(aver_pbr_material m, float cmPerTile) {
     MaterialDesc* d = edit(m);
-    // Rejected rather than clamped: zero or negative centimetres per tile is not a value anybody
-    // means, and silently substituting one would hide the caller's unit mistake. packMaterial still
-    // defends against it, because a desc can also be set directly from C++.
     if (!d || !(cmPerTile > 0.0f)) return 0;
     d->uvTiling = cmPerTile;
     return commit(m);
@@ -409,6 +420,7 @@ const char* aver_pbr_uv_mode_name(int32_t mode) {
     }
 }
 
+// ---- texture references ----
 const char* aver_pbr_get_texture_path(aver_pbr_material m, int32_t slot) {
     const MaterialDesc* d = read(m);
     return (d && validSlot(slot)) ? d->textures[slot].path.c_str() : "";
@@ -436,6 +448,7 @@ int32_t aver_pbr_clear_texture(aver_pbr_material m, int32_t slot) {
     return commit(m);
 }
 
+// ---- upload bookkeeping ----
 int32_t aver_pbr_consume_dirty(aver_pbr_material m) {
     return MaterialLibrary::get().consumeDirty(handleOf(m)) ? 1 : 0;
 }

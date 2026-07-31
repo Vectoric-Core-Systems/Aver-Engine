@@ -1,3 +1,6 @@
+// SandboxApp: the Aver editor executable. Viewport, gizmos, panels, Content Browser,
+// and the frame loop that drives the runtime modules.
+
 #include "aver/runtime/EntryPoint.hpp"
 #include "aver/platform/Window.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -5,66 +8,63 @@
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
-#include "aver/core/Hash.hpp"          // fnv1a64: the mesh-path -> ObjectId hash the C# ClassBuilder uses
+#include "aver/core/Hash.hpp"
 #include "aver/core/Version.hpp"
 #include "aver/formats/OcBeam.hpp"
 #include "aver/formats/OcProject.hpp"
-#include "aver/formats/OcWorld.hpp"      // .ocworld: the level format the editor loads and saves
-#include "aver/formats/OcMesh.hpp"       // .ocmesh: the static mesh the Content Browser now loads
-#include "aver/formats/GltfImport.hpp"   // glTF/GLB -> .ocmesh, behind the Import button
+#include "aver/formats/OcWorld.hpp"
+#include "aver/formats/OcMesh.hpp"
+#include "aver/formats/GltfImport.hpp"
 #if AVER_HAVE_AUDIO_IMPORT
-#  include "aver/formats/OcAudio.hpp"    // .wav/.mp3/.m4a/.flac -> .ocaudio, behind the same button
+#  include "aver/formats/OcAudio.hpp"
 #endif
-#include "aver/ui/UiDrawList.hpp"        // the retained game UI: what a widget tree produces...
-#include "aver/render/ui/UiRenderer.hpp" // ...and the render feature that puts one on the backbuffer
-#include "aver/ui/ui_abi.h"              // ...reached through the same C seam a game's HUD uses
+#include "aver/ui/UiDrawList.hpp"
+#include "aver/render/ui/UiRenderer.hpp"
+#include "aver/ui/ui_abi.h"
 
 #include "ProjectBrowser.hpp"
-#include "ProjectScaffold.hpp"   // --new-project: scaffolding a project without a mouse
+#include "ProjectScaffold.hpp"
 #include "ToolsMenu.hpp"
 #include "UiRegistry.hpp"
 
-// The editor control channel. Behind its own macro AND its own include, so a build without the module
-// does not merely skip the calls -- it never sees the header. That is what "the editor works without
-// it" means in practice.
 #if AVER_MODULE_MCP
 #include "aver/mcp/McpBridge.hpp"
 #endif
 #include "ToolGlyphs.hpp"
 #include "AssetEditor.hpp"
-#include "ActorEditor.hpp"   // a .Designer.cs opened as an asset, with a 3D preview of what it declares
-#include "EditorPrefs.hpp"   // UI geometry that outlives a session
-#include "aver/platform/DirectoryWatcher.hpp"   // the editor notices an IDE writing behind its back
+#include "ActorEditor.hpp"
+#include "EditorPrefs.hpp"
+#include "aver/platform/DirectoryWatcher.hpp"
 #if AVER_HAVE_ROSLYN
-#  include "aver/formats/AverDesign.hpp"        // where averdesign is staged, told once at startup
+#  include "aver/formats/AverDesign.hpp"
 #endif
-#include "EngineScaffold.hpp"   // engineRoot(): where the Content Browser's "Engine" root is mounted from
-#include "IdeIntegration.hpp"   // detectedIdes()/openInIde: double-clicking a source file opens it
-#include "ShellIntegration.hpp" // reveal / shell-open / recycle, for the browser's context menu
+#include "EngineScaffold.hpp"
+#include "IdeIntegration.hpp"
+#include "ShellIntegration.hpp"
 
 #if AVER_MODULE_VOXI
-#include "aver/voxi/Voxi.hpp"          // optional render-feature module (AA / GI / RT / PT settings)
-#include "aver/voxi/VoxiRenderer.hpp"  // ...and its GPU side, registered as an rhi::IRenderFeature
+#include "aver/voxi/Voxi.hpp"
+#include "aver/voxi/VoxiRenderer.hpp"
 #endif
 
 #if AVER_MODULE_PBR
-#include "aver/pbr/Material.hpp"       // the authored surface, from the Core-only material DLL
-#include "aver/pbr/MaterialGpu.hpp"    // MaterialConstants: the block setDrawBinding carries
+#include "aver/pbr/Material.hpp"
+#include "aver/pbr/MaterialGpu.hpp"
 #include "aver/formats/OcMat.hpp"
-#include "aver/formats/MaterialScript.hpp" // the Details panel writes back to the C# source, not the .ocmat      // .ocmat: a surface is an ASSET now, not a hardcoded palette row
-#include "aver/assets/TextureUpload.hpp" // and the decode-to-GPU step behind the texture resolver
+#include "aver/formats/MaterialScript.hpp"
+#include "aver/assets/TextureUpload.hpp"
 #endif
 
 #if AVER_MODULE_SCRIPTING
-#include "aver/scripting/ScriptHost.hpp" // in-process CLR host; declines when .NET is absent
+#include "aver/scripting/ScriptHost.hpp"
 #endif
 
 #if AVER_MODULE_FRAMEWORK
 #if AVER_MODULE_PHYSICS
-#include "aver/physics/physics_abi.h"       // the simulation the frame loop steps between tick groups
+#include "aver/physics/physics_abi.h"
 #endif
-#include "aver/framework/framework_abi.h"   // aver_fw_class_find / aver_fw_spawn (the --spawn-test path)
-#include "aver/framework/framework_hooks.h" // aver_fw_tick — drive the managed tick groups per frame
+#include "aver/framework/framework_abi.h"
+#include "aver/framework/framework_hooks.h"
 #endif
 
 #if AVER_MODULE_SCENE
@@ -72,16 +72,16 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <windows.h>                  // cursor capture while a game has the mouse
+#include <windows.h>
 #endif
-#include "aver/scene/scene_abi.h"     // aver_scene_material: interning the names the surface palette keys on
-#include "aver/scene/World.hpp"       // the one world a spawned actor lives in — walked by the render pass
-#include "aver/scene/Components.hpp"  // CMeshRenderer / CWorld layout, read directly through the pools
+#include "aver/scene/scene_abi.h"
+#include "aver/scene/World.hpp"
+#include "aver/scene/Components.hpp"
 #endif
 
 #if AVER_WITH_IMGUI
 #include "imgui.h"
-#include "imgui_internal.h" // DockBuilder* (docking layout is built in code: IniFilename is null)
+#include "imgui_internal.h"
 #endif
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -106,19 +106,17 @@
 
 namespace aver {
 
-// Engine axis convention: +X forward, +Y right, +Z up (see Math.hpp). Gizmo colours
-// follow the usual X=red, Y=green, Z=blue mapping; highlight = amber.
+// Gizmo axis basis and colours: X red, Y green, Z blue, amber highlight.
 static const Vec3 kAxisDir[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
 static const Vec3 kAxisCol[3] = {{0.92f, 0.24f, 0.24f}, {0.36f, 0.82f, 0.30f}, {0.30f, 0.55f, 1.0f}};
 static const Vec3 kAxisHi = {1.0f, 0.80f, 0.15f};
 
+// Appends a cube centred at (cx,cy,cz) with half-extent h.
 static void appendBox(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, f32 cx, f32 cy, f32 cz, f32 h) {
     const f32 p[8][3] = {{-h,-h,-h},{h,-h,-h},{h,h,-h},{-h,h,-h},{-h,-h,h},{h,-h,h},{h,h,h},{-h,h,h}};
     struct Face { f32 n[3]; int c[4]; };
     const Face faces[6] = {{{1,0,0},{1,2,6,5}},{{-1,0,0},{0,4,7,3}},{{0,1,0},{3,7,6,2}},
                            {{0,-1,0},{0,1,5,4}},{{0,0,1},{4,5,6,7}},{{0,0,-1},{0,3,2,1}}};
-    // A box is six planar quads, so its UVs are exact rather than projected: each face's four
-    // corners are emitted in ring order, which is the unit square's corners in ring order.
     const f32 quadUV[4][2] = {{0,0},{1,0},{1,1},{0,1}};
     for (const Face& f : faces) {
         const u32 b = static_cast<u32>(v.size());
@@ -126,21 +124,18 @@ static void appendBox(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, f3
         idx.push_back(b); idx.push_back(b+1); idx.push_back(b+2); idx.push_back(b); idx.push_back(b+2); idx.push_back(b+3);
     }
 }
+// Appends a ground quad in the XY plane with half-extent s.
 static void appendGround(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, f32 s) {
     const u32 b = static_cast<u32>(v.size());
-    // Ground UV is world XY scaled by the quad's extent, so a tiling material keeps a constant
-    // texel density however large the ground is made.
     v.push_back({-s,-s,0,0,0,1,-0.5f,-0.5f}); v.push_back({s,-s,0,0,0,1,0.5f,-0.5f});
     v.push_back({s,s,0,0,0,1,0.5f,0.5f}); v.push_back({-s,s,0,0,0,1,-0.5f,0.5f});
     idx.push_back(b); idx.push_back(b+1); idx.push_back(b+2); idx.push_back(b); idx.push_back(b+2); idx.push_back(b+3);
 }
-// A UV sphere, +Z as the pole to match the engine's up axis. On a unit sphere the outward normal IS
-// the position, so nx/ny/nz reuse the vertex directly. Emitted as a grid of `rings` latitude bands by
-// `sectors` longitude columns; the seam column is duplicated so its U wraps 1.0 rather than back to 0.
+// Appends a UV sphere of radius r with +Z as the pole.
 static void appendSphere(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, f32 r, u32 rings, u32 sectors) {
     const u32 base = static_cast<u32>(v.size());
     for (u32 ring = 0; ring <= rings; ++ring) {
-        const f32 phi = kPi * (static_cast<f32>(ring) / static_cast<f32>(rings)); // 0 at +Z pole -> pi at -Z
+        const f32 phi = kPi * (static_cast<f32>(ring) / static_cast<f32>(rings));
         const f32 z = std::cos(phi), rad = std::sin(phi);
         for (u32 sec = 0; sec <= sectors; ++sec) {
             const f32 theta = 2.0f * kPi * (static_cast<f32>(sec) / static_cast<f32>(sectors));
@@ -159,22 +154,17 @@ static void appendSphere(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
         }
     }
 }
+// Builds a quaternion from (roll, pitch, yaw) degrees as Rz * Ry * Rx.
 static Quat quatFromEulerDeg(const Vec3& e) {
     return (Quat::fromAxisAngle({0,0,1}, radians(e.z)) * Quat::fromAxisAngle({0,1,0}, radians(e.y)) *
             Quat::fromAxisAngle({1,0,0}, radians(e.x))).normalized();
 }
-// The exact inverse of quatFromEulerDeg above, returning the same (roll, pitch, yaw) packing.
-//
-// It has to be the inverse of THAT composition specifically -- Rz(yaw) * Ry(pitch) * Rx(roll) -- and
-// not a generic euler extraction, or a level would not round-trip: save then load would rotate every
-// placement slightly, and the drift would compound with each save.
+// Exact inverse of quatFromEulerDeg. Returns (roll, pitch, yaw) degrees.
 static Vec3 eulerDegFromQuat(const Quat& q) {
     const f32 sinP = 2.0f * (q.w * q.y - q.z * q.x);
     const f32 pitch = std::asin(std::fmax(-1.0f, std::fmin(1.0f, sinP)));
     f32 roll, yaw;
     if (std::fabs(sinP) > 0.99999f) {
-        // Straight up or down: roll and yaw describe the same rotation, so pin roll and put all of it
-        // in yaw rather than letting the atan2s return an arbitrary split of it.
         roll = 0.0f;
         yaw  = std::atan2(-2.0f * (q.x * q.y - q.w * q.z), 1.0f - 2.0f * (q.y * q.y + q.z * q.z));
     } else {
@@ -184,19 +174,22 @@ static Vec3 eulerDegFromQuat(const Quat& q) {
     const f32 r2d = 180.0f / 3.14159265358979323846f;
     return Vec3{roll * r2d, pitch * r2d, yaw * r2d};
 }
+// Rounds v to the nearest multiple of step; returns v unchanged when step is zero.
 static f32 snapf(f32 v, f32 step) { return step > 0.0f ? std::round(v / step) * step : v; }
 
-// Row-vector transforms (v * M) for picking.
+// Transforms a point by the row-vector matrix m.
 static Vec3 xformPoint(const Mat4& m, const Vec3& p) {
     return { p.x*m.m[0][0]+p.y*m.m[1][0]+p.z*m.m[2][0]+m.m[3][0],
              p.x*m.m[0][1]+p.y*m.m[1][1]+p.z*m.m[2][1]+m.m[3][1],
              p.x*m.m[0][2]+p.y*m.m[1][2]+p.z*m.m[2][2]+m.m[3][2] };
 }
+// Transforms a direction by the row-vector matrix m, ignoring translation.
 static Vec3 xformVec(const Mat4& m, const Vec3& v) {
     return { v.x*m.m[0][0]+v.y*m.m[1][0]+v.z*m.m[2][0],
              v.x*m.m[0][1]+v.y*m.m[1][1]+v.z*m.m[2][1],
              v.x*m.m[0][2]+v.y*m.m[1][2]+v.z*m.m[2][2] };
 }
+// Intersects a ray with an AABB. Returns true and writes the entry distance to tHit.
 static bool rayAabb(const Vec3& o, const Vec3& d, const Vec3& mn, const Vec3& mx, f32& tHit) {
     f32 tmin = 0.0f, tmax = 1e30f;
     for (int a = 0; a < 3; ++a) {
@@ -211,11 +204,9 @@ static bool rayAabb(const Vec3& o, const Vec3& d, const Vec3& mn, const Vec3& mx
     }
     tHit = tmin; return true;
 }
+// Builds the floor grid line list out to extent ext with the given cell step.
 static void buildGrid(std::vector<rhi::LineVertex>& v, f32 ext, f32 step) {
     const f32 g = 0.26f;
-    // Lifted off the floor by a fraction of a CELL rather than by a fixed distance: the lift exists
-    // to stop the lines z-fighting the ground under them, and how far that has to be is a property
-    // of the scene's scale.
     const f32 lift = step * 0.02f;
     for (f32 x = -ext; x <= ext + step * 0.001f; x += step) {
         v.push_back({x, -ext, lift, g, g, g}); v.push_back({x, ext, lift, g, g, g});
@@ -224,22 +215,24 @@ static void buildGrid(std::vector<rhi::LineVertex>& v, f32 ext, f32 step) {
         v.push_back({-ext, y, lift, g, g, g}); v.push_back({ext, y, lift, g, g, g});
     }
     const f32 axisLift = lift * 1.5f;
-    v.push_back({0,0,axisLift, 0.80f,0.25f,0.25f}); v.push_back({ext,0,axisLift, 0.80f,0.25f,0.25f}); // +X (forward)
-    v.push_back({0,0,axisLift, 0.28f,0.72f,0.30f}); v.push_back({0,ext,axisLift, 0.28f,0.72f,0.30f}); // +Y (right)
+    v.push_back({0,0,axisLift, 0.80f,0.25f,0.25f}); v.push_back({ext,0,axisLift, 0.80f,0.25f,0.25f});
+    v.push_back({0,0,axisLift, 0.28f,0.72f,0.30f}); v.push_back({0,ext,axisLift, 0.28f,0.72f,0.30f});
 }
 
-// ---- per-mode gizmo geometry (unit-size, local space; scaled by the world matrix) ----
+// Appends one coloured line segment.
 static void gzLine(std::vector<rhi::LineVertex>& v, const Vec3& a, const Vec3& b, const Vec3& c) {
     v.push_back({a.x,a.y,a.z, c.x,c.y,c.z}); v.push_back({b.x,b.y,b.z, c.x,c.y,c.z});
 }
+// Builds the unit-length translate arrow for axis a.
 static std::vector<rhi::LineVertex> buildMoveAxis(int a, const Vec3& c) {
     std::vector<rhi::LineVertex> v;
     const Vec3 A = kAxisDir[a], P = kAxisDir[(a+1)%3], Q = kAxisDir[(a+2)%3];
-    gzLine(v, {0,0,0}, A, c);                                  // shaft
-    const Vec3 tip = A, base = A * 0.80f;                      // conical arrowhead
+    gzLine(v, {0,0,0}, A, c);
+    const Vec3 tip = A, base = A * 0.80f;
     for (int k = 0; k < 4; ++k) { f32 t = k * (kPi * 0.5f); Vec3 r = P*(std::cos(t)*0.07f) + Q*(std::sin(t)*0.07f); gzLine(v, base+r, tip, c); }
     return v;
 }
+// Builds the unit rotation ring perpendicular to axis a.
 static std::vector<rhi::LineVertex> buildRotRing(int a, const Vec3& c) {
     std::vector<rhi::LineVertex> v;
     const Vec3 P = kAxisDir[(a+1)%3], Q = kAxisDir[(a+2)%3];
@@ -247,11 +240,12 @@ static std::vector<rhi::LineVertex> buildRotRing(int a, const Vec3& c) {
     for (int k = 0; k <= N; ++k) { f32 t = k * (kTwoPi / N); Vec3 p = P*std::cos(t) + Q*std::sin(t); if (k > 0) gzLine(v, prev, p, c); prev = p; }
     return v;
 }
+// Builds the unit scale handle for axis a: a shaft with a box at the tip.
 static std::vector<rhi::LineVertex> buildScaleAxis(int a, const Vec3& c) {
     std::vector<rhi::LineVertex> v;
     const Vec3 A = kAxisDir[a], P = kAxisDir[(a+1)%3], Q = kAxisDir[(a+2)%3];
-    gzLine(v, {0,0,0}, A * 0.86f, c);                         // shaft
-    const Vec3 ctr = A * 0.93f; const f32 h = 0.07f;          // small box at the tip
+    gzLine(v, {0,0,0}, A * 0.86f, c);
+    const Vec3 ctr = A * 0.93f; const f32 h = 0.07f;
     Vec3 cor[8]; int i = 0;
     for (int sx = -1; sx <= 1; sx += 2) for (int sy = -1; sy <= 1; sy += 2) for (int sz = -1; sz <= 1; sz += 2)
         cor[i++] = ctr + A*(h*sx) + P*(h*sy) + Q*(h*sz);
@@ -260,11 +254,11 @@ static std::vector<rhi::LineVertex> buildScaleAxis(int a, const Vec3& c) {
     return v;
 }
 
+// The viewport manipulation mode.
 enum class Tool { Select, Move, Rotate, Scale };
 static const char* kToolNames[4] = {"Select", "Move", "Rotate", "Scale"};
 
-// Which bottom drawer is up. Only one at a time: they share the same strip of screen, and a drawer
-// that can be half-covered by its sibling is a layout, not a drawer.
+// Which bottom drawer is up. Only one at a time.
 enum class Drawer { None, Content, Log };
 
 #if AVER_WITH_IMGUI
@@ -274,41 +268,22 @@ static constexpr ImGuiWindowFlags kChromeFlags =
     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
 
-// The drawer differs from the chrome above in the one way that matters: it MAY come to the front,
-// because it overlays the viewport and has to sit above the dock host.
-//
-// It must NOT scroll. Its bodies scroll inside their own children, so the outer window has nothing to
-// scroll -- but its header is submitted before the body is size-gated, so mid-slide the content
-// briefly exceeds the window and ImGui would flash a scrollbar on every close. Worse, the resize grip
-// is positioned at content y=0, which is scroll-relative: one wheel tick would carry it above the top
-// edge and out of reach.
+// Bottom drawer window: like the chrome, but may come to the front, and never scrolls.
 static constexpr ImGuiWindowFlags kDrawerFlags =
     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings;
 #endif
 
-// THE EDITOR'S PLACEHOLDER SCENE, IN CENTIMETRES -- the engine's unit, and SkyForge's.
-//
-// It used to be authored at roughly a unit per METRE while the contract is centimetres, and that one
-// inconsistency caused three bugs in a row: fog tuned per-unit saturated a few metres into a real
-// level, the grid was a hundred times too fine beside a correctly-sized room, and the cascaded shadow
-// range had to be expressed as a multiple of the near plane because an absolute distance meant two
-// different things in the two scenes. Each was patched with a conditional; this removes the reason
-// for all three.
-inline constexpr f32 kEditorFloorHalf = 1000.0f;   // a 20 m square
-inline constexpr f32 kEditorCubeHalf  = 50.0f;     // a 1 m cube
-inline constexpr f32 kEditorGridCell  = 100.0f;    // 1 m cells
-// The grid is drawn OVER a loaded level as a floor reference, so its extent is a legibility decision
-// and not a scene one: eighty metres of one-metre lines at a grazing angle merges into a solid field
-// of moire that hides what is under it.
-inline constexpr f32 kEditorGridHalf  = 1000.0f;
-// How far in front of the camera Add places a new object. Four metres: far enough to be outside the
-// near plane and to be seen whole, close enough to land where the camera is looking rather than
-// somewhere across the level. It was 8 -- eight CENTIMETRES once the world became centimetres, which
-// put every added object inside the near plane.
-inline constexpr f32 kAddDistance     = 400.0f;
+// The editor's placeholder scene dimensions, in centimetres.
+inline constexpr f32 kEditorFloorHalf = 1000.0f;   // cm
+inline constexpr f32 kEditorCubeHalf  = 50.0f;     // cm
+inline constexpr f32 kEditorGridCell  = 100.0f;    // cm
+inline constexpr f32 kEditorGridHalf  = 1000.0f;   // cm
+// How far in front of the camera Add places a new object.
+inline constexpr f32 kAddDistance     = 400.0f;    // cm
 
+// One placed object in the editor scene: mesh, transform, and surface parameters.
 struct MeshObj {
     std::string name;
     rhi::MeshHandle mesh = 0;
@@ -317,20 +292,14 @@ struct MeshObj {
     f32 color[4] = {0.8f,0.4f,0.25f,1};
     f32 metallic = 0.0f, roughness = 0.5f;
 #if AVER_MODULE_PBR
-    // The actor's material. 0 until onInit creates one, and 0 is the handle the material system
-    // answers with the fallback for, so an actor added before the library exists still draws.
-    //
-    // metallic/roughness above are NOT dead while this is set: they are what reaches b1, and under
-    // AVER_MODULE_PBR they are pinned to 1 so the material's factors carry the authored value
-    // through the shader's factor * map product. Without the module they stay the authored values
-    // and the frozen no-material path reads them directly. See onRender.
     pbr::MaterialHandle material = 0;
 #endif
     bool visible = true;
-    Vec3 aabbMin{-1,-1,-1}, aabbMax{1,1,1}; // local-space bounds (for picking)
+    Vec3 aabbMin{-1,-1,-1}, aabbMax{1,1,1}; // local space
 };
 
 #if AVER_WITH_IMGUI
+// Applies the editor's dark ImGui colour scheme and metrics.
 static void applyUnrealStyle() {
     ImGuiStyle& s = ImGui::GetStyle();
     s.WindowRounding = 3; s.FrameRounding = 3; s.GrabRounding = 3; s.TabRounding = 3;
@@ -356,32 +325,27 @@ static void applyUnrealStyle() {
 // One captured log line for the Output Log panel.
 struct LogLine { LogLevel level; std::string text; };
 
-// One entry in a Content Browser listing, with everything the views need already derived. The
-// per-entry work (two wide->narrow path conversions, the extension fold, and the .cs classification's
-// 8 KB read) used to run per entry PER FRAME; deriving it once per refresh is what keeps a folder of a
-// few thousand files from costing more than the scene it sits under.
+// One entry in a Content Browser listing, with everything the views need already derived.
 struct DirEntry {
     std::filesystem::path path;
     std::string full, name;
     bool isDir  = false;
-    int  tile   = -1;      // file-type sprite tile, or -1 for "no icon for this type"
-    bool module = false;   // a folder that is engine content or a C++ module -> the Module folder icon
+    int  tile   = -1;      // sprite tile index, -1 for none
+    bool module = false;
 };
 
-// A throttled Content Browser directory listing, refreshed on a frame stamp. Folders sort first and
-// are counted, so a view can split them without re-partitioning.
+// A Content Browser directory listing, refreshed on a frame stamp. Folders sort first and are counted.
 struct DirListing { int stamp = -1000; std::vector<DirEntry> entries; usize dirCount = 0; };
 
+// The editor application: owns the scene, the panels, and the frame loop.
 class SandboxApp final : public Application {
 public:
     SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::string shot, Tool initialTool)
         : maxFrames_(maxFrames), headless_(headless), beamPath_(std::move(beamPath)), shot_(std::move(shot)), initialTool_(initialTool) {
-        // Mirror every engine log line into the Output Log from the moment the app exists.
         setLogSink(&SandboxApp::logSink, this);
     }
 
-    // Called (under the core log mutex, possibly off the UI thread) for every log line. Appends to a
-    // bounded buffer the Output Log panel drains. Must not itself log — that would re-enter the held lock.
+    // Appends one engine log line to the Output Log buffer. Must not itself log: the core log mutex is held.
     static void logSink(void* ctx, LogLevel level, std::string_view msg) {
         auto* self = static_cast<SandboxApp*>(ctx);
         std::lock_guard<std::mutex> lock(self->logMutex_);
@@ -389,29 +353,17 @@ public:
         if (self->logLines_.size() > kMaxLogLines) self->logLines_.pop_front();
     }
 
+    // Returns the boot configuration for the editor window.
     BootConfig config() const override {
         BootConfig c; c.windowTitle="Aver Engine \xE2\x80\x94 Editor"; c.windowWidth=1600; c.windowHeight=900;
         c.maxFrames=maxFrames_; c.headless=headless_; c.useWarp=useWarp_;
         c.enableDebugLayer=debugLayer_; return c;
     }
-    void setUseWarp(bool w) { useWarp_ = w; }  // --warp
-    void setDebugLayer(bool d) { debugLayer_ = d; }  // --debug-layer
+    void setUseWarp(bool w) { useWarp_ = w; }
+    void setDebugLayer(bool d) { debugLayer_ = d; }
 
 #if AVER_WITH_IMGUI
-    // Rebuild the style and the font atlas for `dpi`.
-    //
-    // The glyphs are rasterised at the physical size the display needs (16pt at 300% = 48px)
-    // rather than asked for at 16px and scaled up afterwards. Note that the old
-    // `io.FontGlobalScale = dpi` was NOT smearing a baked atlas: since 1.92 ImGui bakes glyphs on
-    // demand, so that only multiplied the requested size and ProggyClean was re-rasterised, sharp,
-    // at 39px. What made the editor look pixelated was purely that ProggyClean is a 13px pixel
-    // font -- its outlines are square steps, so enlarging it gives clean but blocky letterforms.
-    // Baking the size in is still the right shape for this: it is the supported spelling (the
-    // global scale is the obsolete alias of style.FontScaleMain, and ImGui asserts if both are
-    // used), and it keeps the size the atlas was built for explicit at the call site.
-    //
-    // ScaleAllSizes() is not idempotent, so the style is rebuilt from its unscaled base each time
-    // rather than scaled again on top of an already-scaled style.
+    // Rebuilds the ImGui style and font atlas for the given DPI scale.
     void applyDpi(f32 dpi) {
         dpi_ = dpi;
         applyUnrealStyle();
@@ -426,8 +378,6 @@ public:
         const std::string medium  = dir + "\\Roboto-Medium.ttf";
         const f32 px = 16.0f * dpi_;
 
-        // A missing font must never stop the editor coming up, so probe before asking ImGui to
-        // load: AddFontFromFileTTF() raises a user assert on a file it cannot open.
         ImFont* body = fileExists(regular) ? io.Fonts->AddFontFromFileTTF(regular.c_str(), px) : nullptr;
         if (!body) {
             AVER_WARN("[Sandbox] '{}' missing or unreadable -- falling back to the built-in bitmap font", regular);
@@ -438,13 +388,7 @@ public:
         if (fileExists(medium)) fontMedium_ = io.Fonts->AddFontFromFileTTF(medium.c_str(), px);
     }
 
-    // Upload branding/logo.png (staged next to the exe) for the start screen.
-    //
-    // Called ONLY when the start screen is armed. Automation never shows it, and a decode plus a
-    // megabyte of GPU upload is not a cost every --frames run should carry for a decoration.
-    //
-    // A missing or corrupt file is a warning, never a failure: the editor must still come up, and
-    // the browser falls back to its drawn badge when the handle stays zero.
+    // Uploads branding/logo.png for the start screen. A missing file is a warning, not a failure.
     void loadLogo(Engine& e) {
         rhi::IResourceFactory* res = e.device()->resources();
         if (!res) return;
@@ -469,7 +413,7 @@ public:
         const void* levels[1] = {img.pixels.data()};
         td.initialData = levels;
         td.initialDataCount = 1;
-        td.initialRowPitch = img.rowPitch();   // ImageData is tightly packed RGBA
+        td.initialRowPitch = img.rowPitch();
         logoTexture_ = res->createTexture(td);
 
         if (!logoTexture_) { AVER_WARN("[Sandbox] the start-screen mark could not be uploaded"); return; }
@@ -479,9 +423,7 @@ public:
         AVER_INFO("[Sandbox] start-screen mark decoded from {} ({}x{})", path, w, h);
     }
 
-    // The Compile C# button's status icon: the compile-status sprite sheet (three tiles - built,
-    // failed, stale) staged next to the exe. Loaded ALWAYS, unlike the logo, because the toolbar is
-    // always up. A miss is a warning; the button falls back to a drawn dot.
+    // Uploads the Compile C# button's three-tile status sprite sheet. A miss is a warning.
     void loadCompileIcon(Engine& e) {
         rhi::IResourceFactory* res = e.device()->resources();
         if (!res) return;
@@ -513,12 +455,7 @@ public:
         AVER_INFO("[Sandbox] Compile C# status icons decoded from {} ({}x{})", path, img.width, img.height);
     }
 
-    // Load one N-tile sprite sheet staged next to the exe. Shared by the Content Browser's file-type
-    // and folder sheets: they differ only in the file and the tile count.
-    //
-    // The tile ASPECT is measured from the decoded image rather than assumed. Hard-coding it means a
-    // sheet re-cut at another shape silently renders every icon stretched, which is the kind of fault
-    // that survives review because each icon still looks like itself.
+    // Uploads an N-tile sprite sheet staged next to the exe and measures its tile aspect. False on any miss.
     bool loadIconSheet(Engine& e, const char* file, int tiles, const char* debugName,
                        rhi::TextureHandle& outTex, u64& outId, f32& outAspect) {
         rhi::IResourceFactory* res = e.device()->resources();
@@ -552,36 +489,19 @@ public:
     }
 #endif
 
+    // Builds the editor: asset editors, MCP, physics, the placeholder scene, gizmos, and the render features.
     void onInit(Engine& e) override {
         AVER_INFO("[Sandbox] backend={} adapter='{}'", rhi::backendName(e.device()->backend()), e.device()->adapterName());
 
-        // Which asset types have an editor. Registration order is precedence -- the first factory
-        // that accepts a path wins -- so a future .ocmesh-specific editor would go before a generic
-        // binary viewer rather than after it.
+        // Registration order is precedence: the first factory that accepts a path wins.
         assetEditors_.registerFactory(&editor::makeMeshEditor);
-        // Ordering is registration order and the FIRST accepting factory wins. The actor editor
-        // declines anything that is not a .cs carrying a generated region, so it can sit
-        // anywhere; registered after the mesh editor only because that is reading order.
         assetEditors_.registerFactory(&editor::makeActorEditor);
-        // WHERE averdesign IS, told before any factory can run.
-        //
-        // Here rather than on project open, and that ordering is the whole point: the first thing an
-        // actor factory does with a file it cannot scan is ask whether Roslyn is available, and that
-        // answer is CACHED. Setting the path afterwards left the cache holding a "no" produced by a
-        // PATH search that was never going to find a tool staged in bin/Tools -- which is exactly how
-        // this shipped broken for one run. The location depends on the executable, not the project,
-        // so there was never a reason to wait for one.
+        // Must run before any actor factory: the "is Roslyn available" answer is cached on first ask.
         locateAverDesign();
-        // What the actor tab's toolbar does. Installed rather than reached for: an asset editor that
-        // knew how to find a compile job or the project's IDE could not be tested or reused.
         {
             editor::ActorEditorHooks hooks;
             hooks.compileScripts = [this] { tools_.triggerToolbarCompile(project_); };
             hooks.compileBusy    = [this] { return tools_.compiling(); };
-            // The same call the level toolbar makes, so both draw one control from one implementation
-            // rather than two that merely agree today. Captures `this` and reads project_ and the icon
-            // id at DRAW time, which matters: a project can be opened or closed while a tab is open,
-            // and a hook that had snapshotted them would keep showing the old project's build state.
             hooks.drawCompileButton = [this] {
                 tools_.drawCompileButton(project_, dpi_, compileIconUiId_);
             };
@@ -592,15 +512,11 @@ public:
             hooks.ideName = cbIde().name;
             editor::setActorEditorHooks(std::move(hooks));
         }
-        window_ = e.window();   // for the HWND the mouse capture needs
+        window_ = e.window();
 
 #if AVER_MODULE_MCP
-        // Started ONLY when asked. See McpBridge.hpp: a build that silently listens has opened a hole
-        // in somebody's machine without telling them.
         if (mcpPort_) {
             registerMcpAbis();
-            // How a NAME becomes a point. The bridge knows nothing about widgets; this is the whole of
-            // what it is told, and it is enough for {"cmd":"click","widget":"tool.rotate"}.
             mcp_.setWidgetResolver([this](const std::string& n, f32& x, f32& y) {
                 return uiReg_.centreOf(n, x, y);
             });
@@ -611,27 +527,11 @@ public:
         }
 #endif
 
-        // Always read the recent list, even when the start screen will not be shown: opening a
-        // project records it, and recording into a list that was never loaded would truncate the
-        // user's history to the one project the command line named.
         browser_.init();
 
 #if AVER_MODULE_PHYSICS
-        // Start the simulation BEFORE any project or level is opened.
-        //
-        // Ordering, not taste: loading a level builds a static body per colliding placement, and it
-        // can only do that if the world exists. With this after the project load the level rendered
-        // perfectly and had NO COLLISION -- shots passed through walls and the geometry was scenery.
-        // Nothing errored, because "no physics yet" and "this placement does not collide" are the
-        // same branch.
-        //
-        // Started here rather than under the UI branch: a headless --frames or --play-test run
-        // simulates exactly like an interactive one, which is what makes the play test evidence.
+        // Must start before any level loads: loading builds a static body per colliding placement.
         if (aver_phys_init()) {
-            // The floor is a static box on the z=0 plane, in the ABI's centimetres. Its extent is
-            // deliberately far larger than the visible grid: what matters for gameplay is that a
-            // character cannot walk off the edge of the world, and a plane the eye reads as infinite
-            // should behave that way.
             groundBody_ = aver_phys_add_static_box(0.0f, 0.0f, -kGroundHalfThickCm,
                                                    kGroundHalfExtentCm, kGroundHalfExtentCm,
                                                    kGroundHalfThickCm);
@@ -641,8 +541,6 @@ public:
             AVER_WARN("[Sandbox] physics failed to start - gameplay will not collide");
         }
 #endif
-        // A project named on the command line is loaded straight away and the start screen is
-        // skipped — see armBrowser() for why automation must never reach the browser.
         if (!projectPath_.empty()) {
             std::string err;
             if (browser_.open(projectPath_, &err)) applyProject(e);
@@ -656,9 +554,6 @@ public:
             loadCompileIcon(e);
             loadIconSheet(e, "file-icons.png",   4, "FileTypeIcons", fileIconsTexture_,   fileIconsUiId_,   fileIconAspect_);
             loadIconSheet(e, "folder-icons.png", 2, "FolderIcons",   folderIconsTexture_, folderIconsUiId_, folderIconAspect_);
-            // (physics is started below, outside the UI branch -- a headless run simulates too)
-            // The engine's C# classes, mounted as the Content Browser's second root. Absent from a
-            // shipped build, where there is no source tree to point at.
             if (const std::string er = editor::engineRoot(); !er.empty()) {
                 std::error_code ec;
                 const std::filesystem::path cs = std::filesystem::path(er) / "scripting" / "csharp";
@@ -668,21 +563,11 @@ public:
                       cbEngineRoot_.empty() ? "(none - shipped build)" : cbEngineRoot_.c_str());
         }
 #endif
-        // --- default "blank .ocmap": ground floor + cube + sun + sky + atmosphere ---
+        // Default blank map: ground floor + cube + sun + sky + atmosphere.
         std::vector<rhi::MeshVertex> gv, gi_v; std::vector<u32> gi, ci;
         appendGround(gv, gi, kEditorFloorHalf);
         rhi::MeshHandle ground = e.device()->createMesh(gv.data(), (u32)gv.size(), gi.data(), (u32)gi.size());
-        // TWO cubes, and the distinction is load-bearing.
-        //
-        // `unitCube` is half-extent ONE and is what Meshes/cube.ocmesh resolves to. A .ocworld PLACEG
-        // carries its scale as a HALF-EXTENT IN CENTIMETRES applied to that unit -- `PLACEG cube 0 0 -10
-        // 0 0 0 800 800 10` is a sixteen-metre floor -- so the mesh it multiplies must be a unit or
-        // every placement in every level is scaled by whatever the editor's own cube happens to be.
-        // Resizing this one to a metre made SkyForge's arena four hundred metres across and put the
-        // camera inside it, which reads as a lighting bug and is not one.
-        //
-        // `cube` is the EDITOR's placeholder actor and the toolbar's Add > Cube: a one-metre box,
-        // because that is a sensible thing to drop into a scene.
+        // FROZEN: unitCube stays half-extent 1 -- .ocworld PLACEG scales are half-extents in cm applied to it.
         appendBox(gi_v, ci, 0,0,0, kEditorCubeHalf);
         rhi::MeshHandle cube = e.device()->createMesh(gi_v.data(), (u32)gi_v.size(), ci.data(), (u32)ci.size());
         std::vector<rhi::MeshVertex> uv_; std::vector<u32> ui_;
@@ -690,36 +575,26 @@ public:
         rhi::MeshHandle unitCube = e.device()->createMesh(uv_.data(), (u32)uv_.size(), ui_.data(), (u32)ui_.size());
 
 #if AVER_MODULE_SCENE
-        // Register the built-in primitive meshes a SPAWNED actor's CMeshRenderer can name. A C# class
-        // authored with `ClassBuilder.Mesh("Meshes/sphere.ocmesh")` writes fnv1a64(path) into the
-        // component (Assets.ObjectIdOf); the scene-render pass in onRender resolves that same id back to
-        // the handle through this table. The sphere is procedural rather than a loaded .ocmesh for now:
-        // what step 7 needs is the id->handle RESOLUTION and the world walk, not an asset loader yet.
+        // Built-in primitive meshes, keyed by fnv1a64 of the path a CMeshRenderer names.
         {
             std::vector<rhi::MeshVertex> sv; std::vector<u32> si;
             appendSphere(sv, si, 1.0f, 24, 48);
             sceneMeshes_[fnv1a64(std::string_view("Meshes/sphere.ocmesh"))] =
                 e.device()->createMesh(sv.data(), (u32)sv.size(), si.data(), (u32)si.size());
-            // The unit cube, on the same terms as the sphere. A level blockout is boxes -- floors,
-            // walls, platforms, crates -- so with only a sphere registered a gameplay script could
-            // spawn actors but could not build anything to walk on or shoot at.
             sceneMeshes_[fnv1a64(std::string_view("Meshes/cube.ocmesh"))] = unitCube;
         }
 
-        // The named surfaces gameplay can ask for. Chosen to READ rather than to be pretty: a floor
-        // darker than its walls, warm crates against cool architecture, and one saturated accent kept
-        // for the things the player is meant to shoot. Value separation is what makes a blockout
-        // legible; hue on its own does not.
+        // The named surfaces gameplay can ask for.
         {
             auto look = [this](const char* name, f32 r, f32 g, f32 b, f32 metal, f32 rough) {
                 surfaceLooks_[aver_scene_material(0, name)] = SurfaceLook{{r, g, b}, metal, rough};
             };
-            look("M_Floor",  0.22f, 0.23f, 0.26f, 0.02f, 0.85f);   // dark, so everything reads against it
+            look("M_Floor",  0.22f, 0.23f, 0.26f, 0.02f, 0.85f);
             look("M_Wall",   0.48f, 0.50f, 0.55f, 0.03f, 0.72f);
-            look("M_Trim",   0.30f, 0.33f, 0.38f, 0.35f, 0.45f);   // edges and platforms
-            look("M_Crate",  0.62f, 0.44f, 0.22f, 0.02f, 0.78f);   // warm, against the cool room
-            look("M_Target", 0.86f, 0.20f, 0.16f, 0.05f, 0.40f);   // the one saturated thing
-            look("M_Metal",  0.55f, 0.57f, 0.60f, 0.85f, 0.28f);   // the gun
+            look("M_Trim",   0.30f, 0.33f, 0.38f, 0.35f, 0.45f);
+            look("M_Crate",  0.62f, 0.44f, 0.22f, 0.02f, 0.78f);
+            look("M_Target", 0.86f, 0.20f, 0.16f, 0.05f, 0.40f);
+            look("M_Metal",  0.55f, 0.57f, 0.60f, 0.85f, 0.28f);
             look("M_Accent", 0.95f, 0.66f, 0.15f, 0.30f, 0.35f);
         }
 #endif
@@ -730,7 +605,7 @@ public:
         floor.aabbMin=Vec3{-kEditorFloorHalf,-kEditorFloorHalf,-5.0f};
         floor.aabbMax=Vec3{ kEditorFloorHalf, kEditorFloorHalf, 5.0f};
         objects_.push_back(floor);
-        cubeMesh_ = cube; cubeTris_ = (u32)ci.size()/3; // reused by the toolbar's Add > Cube
+        cubeMesh_ = cube; cubeTris_ = (u32)ci.size()/3;
         MeshObj c; c.name="Cube"; c.mesh=cube; c.tris=(u32)ci.size()/3; c.pos=Vec3{0,0,kEditorCubeHalf};
         c.color[0]=0.85f; c.color[1]=0.36f; c.color[2]=0.22f;
         c.metallic=0.1f; c.roughness=0.35f;
@@ -751,10 +626,6 @@ public:
             }
         }
 
-        // Every actor gets a material. Done here, after the actor list is built, rather than inside
-        // each construction: makeMaterialFor() reads the authored metallic/roughness off the actor
-        // and then PINS the actor's own pair to 1, so running it twice on one actor would be
-        // harmless but running it on half the list would not be obvious from the image.
         for (MeshObj& o : objects_) makeMaterialFor(o);
 
         std::vector<rhi::LineVertex> gl; buildGrid(gl, kEditorGridHalf, kEditorGridCell);
@@ -782,11 +653,9 @@ public:
             di.dxcAvailable = c.dxcAvailable;
             voxi::Renderer::get().setDeviceInfo(di);
             voxi::Settings s = voxi::Renderer::get().settings();
-            s.msaa = static_cast<voxi::Msaa>(e.device()->sampleCount()); // adopt the live value
+            s.msaa = static_cast<voxi::Msaa>(e.device()->sampleCount());
             if (msaaOverride_) s.msaa = static_cast<voxi::Msaa>(msaaOverride_);
-            // --no-gi wins over --gi. GI is ON by default now, so "off" has to be REQUESTABLE:
-            // the pixel oracle measures both paths and, without a way to ask for the unlit one, ten
-            // of its seventeen gates would silently start measuring the same thing the other seven do.
+            // --no-gi wins over --gi.
             if (giForceOff_)     s.globalIllumination = voxi::Quality::Off;
             else if (giOverride_) s.globalIllumination = static_cast<voxi::Quality>(giOverride_);
             if (rtOverride_) s.rayTracing = static_cast<voxi::Quality>(rtOverride_);
@@ -794,64 +663,34 @@ public:
             voxi::Renderer::get().setSettings(s);
             AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", c.maxMsaaSamples, c.rayTracingTier, c.shaderModel, c.meshShaderTier);
 
-            // The render feature owns Voxi's GPU resources. Registration is non-owning, so the
-            // member must outlive the device — it is torn down in onShutdown below.
+            // Registration is non-owning: voxiRenderer_ must outlive the device, torn down in onShutdown.
             voxiRenderer_.setSettings(s);
             if (voxiRenderer_.init(*e.device())) {
                 e.device()->addRenderFeature(&voxiRenderer_);
                 voxiAttached_ = true;
-                // A project opened from the command line is adopted BEFORE the device attaches, so
-                // its render settings were deferred above. Now the caps are known, apply them.
                 if (projectRenderPending_) applyProjectRenderSettings();
-                // After the caps are known, so a seeded manifest states values this build actually
-                // declares rather than whatever was in the struct before setDeviceInfo ran.
                 if (saveProject_ && !saveProjectDone_) { saveProjectDone_ = true; seedAndSaveProject(); }
                 if (!importSrc_.empty() && !importDone_) {
                     importDone_ = true;
                     importAsset(importSrc_, importDst_);
                 }
 #if AVER_MODULE_PBR
-                // The last link in the material chain. MaterialSystem is built to resolve texture
-                // references through a host-installed callback and, until this line, nothing
-                // installed one -- so every slot in every material fell back to its 1x1 identity
-                // texture and every surface the engine drew was a flat colour. The whole texture
-                // path (decode, mip chain, sRGB view, upload) already existed on both sides of it.
                 textureFactory_ = e.device()->resources();
                 voxiRenderer_.materials().setTextureResolver(&SandboxApp::resolveMaterialTexture, this);
 #endif
             }
         }
 #endif
-        // The game UI's render feature. Unconditional, because Aver.UI and its renderer depend on no
-        // optional module -- and a create() that declines on a backend without a resource factory is
-        // the same "run without the feature" path Voxi takes above.
-        //
-        // Registered AFTER Voxi and it does not matter: this one implements overlayPass alone, which
-        // runs after the post chain, so no ordering against a scene feature is possible.
+        // The game UI's render feature: overlay pass only, so ordering against scene features is free.
         gameUi_ = aver::render::ui::UiRenderer::create(*e.device());
         if (gameUi_) e.device()->addRenderFeature(gameUi_);
 #if AVER_MODULE_SCRIPTING
-        // Scripting is started LAST, after every rendering subsystem is up. It touches none of
-        // them, so ordering is free -- and putting the one subsystem that may take a second to
-        // start behind the ones the first frame actually needs keeps startup honest.
-        //
-        // A declined init is not an error path: no .NET runtime, no staged bridge, or a stale
-        // bridge all end here with the editor running exactly as it does today. ScriptHost has
-        // already logged the reason.
         {
             scripting::HostDesc hd;
-            // The managed bridge is staged in bin/Scripting (step 11), not bin/: its managed Aver.Framework
-            // /Aver.Scene copies share a file name with the native DLLs beside the exe and would collide.
             hd.bridgeDir = executableDir() + "\\Scripting";
             hd.scriptsDir = resolveScriptsDir();
             scripts_.init(hd);
 
-            // How Tools > Reload Scripts reaches the host. A callback rather than a reference so
-            // ToolsMenu never includes the scripting module — see ToolsMenu::ReloadFn. Installed
-            // even when init declined: the host answers honestly either way, and a menu item that
-            // reports "the scripting host is not running" is better than one that is greyed out
-            // for a reason nobody can see.
-            // The menu's checkbox writes the app's flag directly; see setAutoCompileFlag.
             tools_.setAutoCompileFlag(autoCompileFlag());
             tools_.setReloader([this](const std::string& binDir, std::string* status) {
                 return reloadScripts(binDir, status);
@@ -859,11 +698,7 @@ public:
         }
 #endif
         tool_ = initialTool_;
-        sel_ = 1; // the Cube
-        // The default view frames the PLACEHOLDER scene. Skip it when a level was loaded above, which
-        // has already framed the camera on itself -- this runs after applyProject, so without the
-        // guard it silently puts the camera back inside a centimetre-scale level and the map looks
-        // like it never loaded.
+        sel_ = 1;
         bool framedByLevel = false;
 #if AVER_MODULE_SCENE
         framedByLevel = !levelEntities_.empty();
@@ -876,52 +711,30 @@ public:
         }
     }
 
+    // Advances one frame: MCP commands, camera, gameplay tick, physics, and the render state.
     void onUpdate(Engine& e, const Timestep& t) override {
 #if AVER_MODULE_MCP
-        // ONE EVENT PER FRAME, which is McpBridge's contract and not an economy: a click is a press and
-        // a release, and ImGui registers one only if a frame saw the press and a LATER frame saw the
-        // release. Called before the UI is built so an injected click is seen by this frame's widgets.
+        // One event per frame: a click needs a press frame and a later release frame to register.
         if (mcp_.listening()) mcp_.pump([this](const mcp::Command& c) { applyMcpCommand(c); });
 #endif
-        // Only while the layer is on, so a scene with no clouds accumulates no clock and a capture
-        // run of N frames is reproducible whatever the frame rate was.
         if (sky_.cloudsEnabled) cloudTime_ += t.dt;
-        // Only while the demo HUD is on, for the reason above: a value that keeps moving off-screen
-        // makes an otherwise identical frame differ from the one before it.
         if (showUiDemo_) {
-            // Animated so the path is proved to rebuild and re-upload every frame, not just once.
-            // A static HUD would look identical whether the vertex buffer were being written or the
-            // GPU were reading a stale one -- which is exactly the bug the triple buffer guards.
             uiDemoHealth_  = 0.5f + 0.5f * std::sin(uiDemoClock_ * 0.7f);
             uiDemoStamina_ = 0.5f + 0.5f * std::sin(uiDemoClock_ * 1.6f + 1.0f);
-            uiDemoScroll_  = std::fmod(uiDemoScroll_ + t.dt * 24.0f, 216.0f);   // 12 rows * 18 px
+            uiDemoScroll_  = std::fmod(uiDemoScroll_ + t.dt * 24.0f, 216.0f);   // px, wraps at 12 rows
             uiDemoClock_  += t.dt;
         }
 #if AVER_WITH_IMGUI
         if (e.device()->uiActive()) {
-            // Dragging the window to a monitor with a different scale changes the size the glyphs
-            // should have been rasterised at, so re-bake them. Safe here: onUpdate runs before
-            // uiNewFrame(), i.e. outside the ImGui frame, and the atlas may not be touched inside
-            // one. Win32Window latches the new scale from WM_DPICHANGED. Runs for the start screen
-            // too — it is drawn with the same atlas.
+            // Must stay outside the ImGui frame: the font atlas may not be touched inside one.
             const f32 dpi = e.window() ? e.window()->dpiScale() : dpi_;
             if (std::fabs(dpi - dpi_) > 0.01f) {
                 AVER_INFO("[Sandbox] DPI changed {:.2f} -> {:.2f}, re-rasterising the UI font", dpi_, dpi);
                 applyDpi(dpi);
             }
         }
-        // The camera must not fly and the viewport must not be dollied while the start screen is up,
-        // nor while the GAME owns the mouse -- see gameHasInput(). Right-drag is aim in most games and
-        // fly-look in the editor, and both reading it means the editor camera fights drivePlayCamera
-        // for the same fields every frame the player looks around.
         if (e.device()->uiActive() && !browserActive_ && !gameHasInput()) {
             const ImGuiIO& io = ImGui::GetIO();
-            // The central dock node is a transparent hole, so WantCaptureMouse is false over it
-            // AND over any empty dockspace gap — require the cursor to be inside the viewport too.
-            // MOUSE follows the CURSOR, not the focus. Requiring focus here meant the first right
-            // click over an unfocused viewport was spent focusing it -- levelFocused_ is read from
-            // the previous frame -- so fly mode needed two presses to start. Hovering is what the
-            // user is expressing when they put the pointer on the scene and press a button.
             const bool overUI = !levelHovered_ || !inViewport(io.MousePos.x, io.MousePos.y);
             if (inputProbe_ && (ImGui::GetFrameCount() % 30) == 0)
                 AVER_INFO("[input-probe] mouse=({},{}) wantCaptureMouse={} hovered={} inViewport={} "
@@ -931,17 +744,7 @@ public:
                           (int)levelFocused_, (int)overUI, (int)flying_,
                           camPos_.x, camPos_.y, camPos_.z, yaw_);
 
-            // Right mouse enters fly mode (look + WASD/QE), like Unreal's viewport.
-            //
-            // The cursor is hidden for the duration, as it is in Unreal: while the right button is
-            // held the pointer means nothing -- look is a DELTA -- and an arrow sliding around over
-            // the scene is just something to watch instead of the scene.
-            //
-            // Hidden, NOT warped. Re-centring would make the look delta wrong: ImGui measures against
-            // the position it last saw, so a warp in between reports the warp as movement and the
-            // camera lurches. Suppressing the DRAW is also why this uses ImGui's cursor state rather
-            // than Win32's ShowCursor, whose counter has to be paired exactly -- and pairing it to a
-            // mouse button being released is precisely how a cursor goes missing for good.
+            // Right mouse enters fly mode: look plus WASD/QE, cursor hidden but never warped.
             if (ImGui::IsMouseClicked(1) && !overUI) flying_ = true;
             if (!io.MouseDown[1]) flying_ = false;
             if (flying_) ImGui::SetMouseCursor(ImGuiMouseCursor_None);
@@ -969,69 +772,30 @@ public:
                 if (ImGui::IsKeyDown(ImGuiKey_E)) camPos_ += up * sp;
                 if (ImGui::IsKeyDown(ImGuiKey_Q)) camPos_ -= up * sp;
             } else if (!overUI) {
-                if (io.MouseWheel != 0.0f) camPos_ += fwd * io.MouseWheel * (flySpeed_ * 0.15f); // dolly
-                if (io.MouseDown[2]) { camPos_ -= right * io.MouseDelta.x * 0.02f; camPos_ += up * io.MouseDelta.y * 0.02f; } // MMB pan
+                if (io.MouseWheel != 0.0f) camPos_ += fwd * io.MouseWheel * (flySpeed_ * 0.15f);
+                if (io.MouseDown[2]) { camPos_ -= right * io.MouseDelta.x * 0.02f; camPos_ += up * io.MouseDelta.y * 0.02f; }
             }
-            // F FRAMES THE SELECTION, in either world, at a distance derived from its SIZE.
-            //
-            // It was `objects_[sel_].pos - fwd * 6.0f`, which did nothing at all for a level object
-            // (sel_ names a scene entity now, not an objects_ index) and put the camera six
-            // CENTIMETRES from the thing it framed when it did fire -- six units was a sensible
-            // several metres when the editor was authored at a unit per metre. Framing a 20 m wall
-            // and a 1 m crate from the same distance cannot both be right, so the distance follows
-            // the radius: far enough that the whole thing fits the vertical field of view, with a
-            // margin so it does not touch the frame edge.
-            // Focus, not hover: F is a keystroke, and an actor tab having focus must not mean F
-            // moves the LEVEL camera underneath it.
+            // F frames the selection at a distance derived from its radius.
             if (levelFocused_ && !io.WantCaptureKeyboard && ImGui::IsKeyPressed(ImGuiKey_F) && anySelected()) {
                 EditXform x;
                 if (selectedXform(x)) {
                     const f32 r = selectedRadius();
                     const f32 d = std::fmax(50.0f, r / std::tan(radians(30.0f)) * 1.6f);
                     camPos_ = x.pos - fwd * d;
-                    // The fly speed is per-frame centimetres, so crossing a level you just framed
-                    // should not take a different number of seconds than crossing one you loaded.
                     flySpeed_ = std::fmax(flySpeed_, r * 0.4f);
                 }
             }
         }
 #endif
 #if AVER_MODULE_SCRIPTING
-        // Gameplay runs before the frame's render state is composed, so anything a behaviour
-        // changes this frame is what gets drawn this frame rather than next. Free and silent when
-        // the host declined or when no scripts were found.
         scripts_.update(t.dt);
 #endif
 #if AVER_MODULE_FRAMEWORK
-        // Drive the managed ACTOR tick from the app frame loop, not from the scripting host. The tick
-        // GROUPS are a frame-structure concern (they bracket the physics step: PrePhysics -> Physics ->
-        // PostPhysics), which the app owns and the generic script host has no business knowing; and
-        // aver_fw_tick is a NATIVE framework export, distinct from the bridge's Update above. One call
-        // per group per frame, in order — the framework makes exactly one managed tick_all(group) per
-        // call, and the bridge walks its own dense list behind it. Harmless every frame with no actors
-        // spawned: with no managed dispatch installed, or empty tick buckets, this is a guarded no-op.
-        // Who owns the mouse. A running game takes it by default -- an FPS with a visible cursor
-        // drifting over the viewport is not playable -- and Shift+F1 gives it back, which is the
-        // shortcut Unreal uses and therefore the one people try first. Ending the session always
-        // returns it: leaving the cursor hidden after Stop would strand the user in an editor they
-        // cannot click.
-        // Never in an automated run. --frames and --play-test enter play exactly like a person would,
-        // and capturing there would hide and confine the REAL cursor of whoever is at the machine
-        // while a headless verification run happens to be going -- a test that reaches out and grabs
-        // the mouse is a bad neighbour, and the gate harness launches dozens of these back to back.
+        // Mouse capture is never taken in an automated run: it would grab the real cursor of whoever
+        // is at the machine.
         const bool interactive = maxFrames_ == 0 && !playTest_;
         if (e.device()->uiActive() && interactive) {
-            // CLICKING THE VIEWPORT PUTS YOU BACK IN THE GAME.
-            //
-            // Shift+F1 releases the mouse so the editor is usable mid-session, but nothing ever took
-            // it back -- the only way to resume was another Shift+F1, a chord you have to remember
-            // while the thing you were testing carries on without you. Clicking on the picture of the
-            // game is what everyone tries first, and it is what Unreal does.
-            //
-            // Tested BEFORE wantCapture is computed, so the click that asks for the game is the same
-            // frame the game gets it; a frame of lag here reads as the click not having registered.
-            // Guarded on the cursor being over the scene rather than over a panel, or clicking Stop
-            // would hand control back to a session you were trying to leave.
+            // Clicking the viewport puts the mouse back in the game. Tested before wantCapture below.
             {
                 const ImGuiIO& mio = ImGui::GetIO();
                 if (playSessionActive() && releasedByUser_ && ImGui::IsMouseClicked(0) &&
@@ -1041,24 +805,14 @@ public:
             const bool wantCapture = playSessionActive() && !releasedByUser_;
             if (ImGui::IsKeyPressed(ImGuiKey_F1, false) && ImGui::GetIO().KeyShift && playSessionActive())
                 releasedByUser_ = !releasedByUser_;
-            if (!playSessionActive()) releasedByUser_ = false;   // a fresh session starts captured again
+            if (!playSessionActive()) releasedByUser_ = false;
             setMouseCaptured(wantCapture && !ImGui::GetIO().WantTextInput);
         }
-        pollCapturedMouse();                 // measure and re-centre before the delta is published
-        pushInput(e.device()->uiActive());   // publish this frame's keyboard/mouse for gameplay before the tick
-        // The UI frame opens BEFORE gameplay ticks, because ticking is when a game draws its HUD.
-        // The HOST owns this call and a game must never make it: a game that cleared the list would
-        // erase whatever another system had contributed, and the last one to run would win silently.
-        //
-        // THE HUD PREVIEW takes the rect instead, when its tab is the one on screen. There is exactly
-        // one draw list -- the seam is a process-global -- so a preview cannot coexist with a running
-        // game's HUD, and it does not try to: it is refused while a session is playing. Setting the
-        // rect to the PANEL is what makes a HUD authored in viewport fractions land inside it, and it
-        // is why this needs no offscreen target at all.
+        pollCapturedMouse();
+        pushInput(e.device()->uiActive());
+        // The UI frame opens before gameplay ticks, because ticking is when a game draws its HUD.
 #if AVER_MODULE_SCRIPTING
-        // --hud-preview <n>: name every HUD once, then preview one over the level viewport. It is the
-        // only way to exercise discovery-through-draw without a tab, and it is what proves the seam
-        // before anything is built on top of it.
+        // --hud-preview <n>: name every HUD once, then preview one over the level viewport.
         if (hudTest_ >= 0 && !hudTestReported_ && scripts_.ready()) {
             hudTestReported_ = true;
             const i32 n = scripts_.hudCount();
@@ -1066,36 +820,20 @@ public:
             for (i32 i = 0; i < n; ++i) AVER_INFO("[HUD]   {}: '{}'", i, scripts_.hudName(i));
             if (hudTest_ >= n) AVER_WARN("[HUD] no HUD at index {}", hudTest_);
         }
-        // The RECT IS REFRESHED EVERY FRAME, not latched with the index. It was set once, on the
-        // frame scripts became ready -- which is before buildUI has run, so vpW_/vpH_ were still
-        // their constructed defaults and the HUD anchored its bottom-left panel against a 1600x900
-        // box that had nothing to do with the viewport. It drew, in the wrong place, which is the
-        // kind of wrong that reads as a HUD-authoring mistake.
         if (hudTest_ >= 0 && hudTest_ < scripts_.hudCount())
             setHudPreview(hudTest_, vpX_, vpY_, vpW_, vpH_);
 #endif
         if (hudPreviewActive()) aver_ui_begin_frame(hudRectX_, hudRectY_, hudRectW_, hudRectH_);
         else                    aver_ui_begin_frame(vpX_, vpY_, vpW_, vpH_);
 #if AVER_MODULE_SCRIPTING
-        // Drawn straight after the frame opens, so a HUD's own draw order is whatever it wrote and
-        // nothing of the editor's is interleaved with it.
         if (hudPreviewActive()) scripts_.hudDraw(hudPreviewIndex_, t.dt);
 #endif
-        maybeSpawnTestActor();   // one-shot --spawn-test, after scripts have declared their classes
-        maybePlayTest();         // one-shot --play-test: begin_play, tick a few frames, end_play
-        // Gate the actor tick on PLAYING: in EDITOR gameplay is frozen (like an unopened level), and a
-        // PAUSE freezes it without a teardown. The --spawn-test harness is exempt — it drives OnTick
-        // directly to prove the tick path without a GameMode. flush() below still runs every frame so an
-        // end_play teardown retires regardless of state.
+        maybeSpawnTestActor();
+        maybePlayTest();
+        // The tick groups bracket the physics step: PrePhysics -> Physics -> PostPhysics.
         if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
-            // The groups BRACKET the step, which is the whole reason they exist as three and not one:
-            // PrePhysics is where gameplay says what it wants to happen (a character sets its desired
-            // velocity), the step is where the world decides what actually happens, and PostPhysics is
-            // where gameplay reads the settled result (where the character ended up, what it hit).
             aver_fw_tick(AVER_FW_TICK_PRE_PHYSICS, t.dt);
 #if AVER_MODULE_PHYSICS
-            // Stepped with real frame time; the module carries the leftover and runs whole fixed steps
-            // internally, so this does NOT make the simulation a function of frame rate.
             aver_phys_step(t.dt);
 #endif
             aver_fw_tick(AVER_FW_TICK_PHYSICS, t.dt);
@@ -1103,34 +841,22 @@ public:
         }
 #endif
 #if AVER_MODULE_SCENE
-        // Drive the world's frame flush exactly once, AFTER gameplay has spawned/destroyed/moved for the
-        // frame and BEFORE onRender walks it: this retires the frame's deferred destroys and propagates
-        // world matrices in one linear pass, so the render walk reads settled transforms. Nothing else
-        // drives it, and without it a deferred destroy would never reclaim its slot. Gate-neutral: the
-        // gate scene populates objects_, not the world, so at gate time the world is empty and flush is
-        // a no-op.
+        // Retires deferred destroys and propagates world matrices once, after gameplay and before onRender.
         scene::World::instance().flush();
 #endif
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
-        drivePlayCamera();       // while playing, the view follows the possessed pawn (first/third person)
+        drivePlayCamera();
 #endif
-        // The geometry path is a DEVICE setting, not a feature's: it decides how every draw reaches
-        // the rasteriser. Pushed OUTSIDE the module guard, or a build without Voxi could never
-        // select it -- and an unreachable path is an untested one.
 #if AVER_MODULE_VOXI
         e.device()->setMeshShaders(voxi::Renderer::get().settings().meshShaders);
 #else
-        e.device()->setMeshShaders(msOverride_);   // --ms
+        e.device()->setMeshShaders(msOverride_);
 #endif
 #if AVER_MODULE_VOXI
         // Voxi owns the AA setting; push it to the device when it changes (rebuilds targets+PSOs).
         if (voxi::Renderer::get().consumeMsaaDirty())
             e.device()->setSampleCount(static_cast<u32>(voxi::Renderer::get().settings().msaa));
 
-        // Everything the feature owns — GI, the volume's placement in the world, shadows, ray
-        // tracing — goes to the feature directly. Routing any of it through IDevice would put
-        // feature vocabulary back into the generic interface, which is the whole point of the
-        // refactor.
         if (voxiAttached_) {
             const voxi::Settings& vs = voxi::Renderer::get().settings();
             const f32 c[3] = {giCenter_.x, giCenter_.y, giCenter_.z};
@@ -1148,46 +874,20 @@ public:
         const Vec3 fwd = camForward();
         const f32 aspect = viewAspect();
         const Mat4 view = Mat4::lookAtLH(camPos_, camPos_ + fwd, Vec3{0,0,1});
-        // Near/far are in WORLD units, and 0.05..5000 was chosen for the placeholder scene at roughly
-        // a unit per metre. Under the engine's centimetre contract that is 0.5mm to 50m, so anything
-        // past fifty metres is clipped away entirely -- a level only has to be a city block long
-        // before it starts disappearing at the far end for no visible reason.
-        //
-        // Widened only while a level is loaded, so the editor's own scene keeps the depth range it was
-        // tuned for and the pixel-exact gates see the projection they recorded. Near stays proportional
-        // too: pushing far out without moving near costs depth precision and brings back z-fighting.
-        // 2 cm to 2 km, unconditionally. This used to widen only while a level was loaded, because
-        // the editor's own scene was metre-scaled and 0.05..5000 was right for it. Both are
-        // centimetres now, so there is one range and no way for them to disagree.
-        const f32 zNear = 2.0f, zFar = 200000.0f;
+        const f32 zNear = 2.0f, zFar = 200000.0f;   // cm
         const Mat4 proj = Mat4::perspectiveLH(radians(60.0f), aspect, zNear, zFar);
         const Mat4 viewProj = view * proj;
         const Mat4 invVP = viewProj.inverse();
         e.device()->setCamera(&viewProj.m[0][0], &invVP.m[0][0], &camPos_.x);
         invVP_ = invVP; viewProj_ = viewProj; eye_ = camPos_;
 
-        // The sun and the sky are ONE authored thing now (rhi::SkyAtmosphere), so setLight is no
-        // longer called from here: it and setSky were two ways to say where the light was, and the
-        // pair only agreed because the same three variables fed both.
-        // Fog density is PER UNIT, and the editor's default is tuned for its own placeholder scene,
-        // which is authored at roughly a unit per metre. Gameplay is in CENTIMETRES, so the identical
-        // number saturates a few metres out: at the far wall of an 8m room, 1-exp(-0.014 * 1400) is
-        // indistinguishable from 1, which is why a correctly built arena rendered as flat white haze.
-        // This was the visual "scale mismatch" -- not the geometry, which was right all along.
-        //
-        // Scaled by the unit ratio while playing rather than changing the default, so the editor's
-        // scene keeps the look it was tuned for and the pixel-exact gates (which never enter play)
-        // are untouched.
-        // A loaded level's own FOG record wins outright: it is authored in the level's units and is
-        // the correct value whether or not a session is running. The play-scaled editor default is
-        // only the fallback for a world that has no level loaded.
+        // A loaded level's own FOG record wins over the editor default.
         f32 fog = fogDensity_;
 #if AVER_MODULE_SCENE
         if (hasLevelFog_) fog = levelFog_;
 #endif
-        // The authored atmosphere, assembled from the editor's own state. The direction is passed
-        // UNNORMALISED exactly as setLight received it: the shaders normalise, and normalising here
-        // too would change the last bits of a value the pixel oracle measures.
+        // FROZEN: sunDirection stays unnormalised here -- the shaders normalise, and doing it twice
+        // moves bits the pixel oracle measures.
         sky_.enabled = true;
         for (int i = 0; i < 3; ++i) {
             sky_.sunColor[i] = sunColor_[i];
@@ -1197,36 +897,15 @@ public:
         }
         sky_.skyLightIntensity = sunAmbient_;
         sky_.fogDensity = fog;
-        // Wind is integrated here because the app owns the clock; the device turns it into a
-        // world-space offset so the shader never sees a number that grows without bound.
         sky_.cloudTime = cloudTime_;
         e.device()->setSkyAtmosphere(sky_);
-        // Outside the viewport rect is editor chrome, not sky — clear to the dark panel colour.
+        // Outside the viewport rect is editor chrome, not sky.
         e.device()->setClearColor(0.055f, 0.055f, 0.062f, 1);
-        // Camera post. Pushed every frame beside the sky because it is the same kind of state, and
-        // because the adaptation is a per-frame feedback loop that has to see the current settings.
         e.device()->setPostProcess(post_);
     }
 
-    // Give one actor a material, and move the parameters the material now owns onto it.
-    //
-    // The shading model computes metallic as gMaterial.x * gMetallicFactor * map, so the authored
-    // value can live in EITHER the b1 per-draw block or the b2 material block, and putting it in
-    // both would square it. It goes in the material, and b1 is pinned to the identity 1 -- which is
-    // the whole point of the step: the Details panel edits a material from here on, not an actor.
-    //
-    // Base colour deliberately stays on the actor. The voxelisation pass shades with the material
-    // system's FALLBACK block, because rhi::IRenderFeature::submitDraw carries no material yet, so
-    // neutralising b1's colour would inject white albedo into the radiance volume and turn every
-    // bounce white. Base colour moves the day submitDraw carries a material and not before.
 #if AVER_MODULE_PBR
-    // Turn a material's texture reference into an uploaded GPU texture. Installed on the material
-    // system once, at init; without it every slot falls back to the 1x1 identity texture and every
-    // surface in the engine is a flat colour, which is exactly what it was before this existed.
-    //
-    // Static with a `user` pointer because pbr::MaterialSystem::TextureResolver is a plain function
-    // pointer: the material system is a Core+RHI target and must not carry a std::function, whose
-    // layout is a compiler-and-config-dependent thing to put on a module boundary.
+    // Uploads the texture a material reference names and returns its handle. 0 keeps the slot's fallback.
     static rhi::TextureHandle resolveMaterialTexture(const pbr::TextureRef& ref, pbr::TextureSlot slot,
                                                      void* user) {
         auto* self = static_cast<SandboxApp*>(user);
@@ -1234,18 +913,12 @@ public:
 
         const std::string path = self->resolveAssetPath(ref);
         if (path.empty()) {
-            // An id-only reference with nothing behind it. Named rather than silently ignored: the
-            // slot keeps its identity fallback, so the material still renders as a complete surface
-            // and the log is the only place the missing binding shows up.
             AVER_WARN("[Material] texture id 0x{:016X} is not in the content index; slot '{}' keeps "
                       "its fallback", ref.id, pbr::MaterialLibrary::textureSlotName(slot));
             return 0;
         }
 
-        // The SLOT decides what the pixels mean, and nothing in an image file does. Getting this
-        // wrong is invisible rather than broken -- an sRGB-decoded roughness map is merely a little
-        // shinier than authored, everywhere -- which is why it is derived here from the one thing
-        // that actually knows, and never guessed from a filename.
+        // The slot decides the colour space, never the filename.
         assets::TextureUsage usage = assets::TextureUsage::Data;
         switch (slot) {
             case pbr::TextureSlot::BaseColor:
@@ -1267,9 +940,7 @@ public:
         return h;
     }
 
-    // Where an asset reference points on this machine. A path is taken as-is when absolute, and
-    // otherwise resolved against the project's content root -- which is what makes an .ocmat
-    // portable: it names `Textures/floor_basecolor.png`, not somebody's Documents folder.
+    // Returns where an asset reference points on this machine, or empty when it cannot be resolved.
     std::string resolveAssetPath(const pbr::TextureRef& ref) const {
         if (!ref.path.empty()) {
             const std::string& p = ref.path;
@@ -1281,7 +952,6 @@ public:
                 std::error_code ec;
                 if (std::filesystem::exists(full, ec)) return full;
             }
-            // No project, or not under Content: let the path stand and let the decoder report it.
             return p;
         }
         if (ref.id) {
@@ -1291,10 +961,7 @@ public:
         return {};
     }
 
-    // Index every asset under the project's content root by fnv1a64 of its CONTENT-RELATIVE path, so
-    // a `{guid:...}` reference resolves without the file having to be found by name at every use.
-    // Rebuilt on project open rather than watched: an editor that rescans a content tree per frame is
-    // a disk hit per frame, and a file added mid-session is picked up by reopening the project.
+    // Indexes every asset under the project's content root by fnv1a64 of its content-relative path.
     void rebuildContentIndex() {
         contentIndex_.clear();
         const std::string content = project_.contentDir();
@@ -1306,18 +973,14 @@ public:
             if (!it->is_regular_file(ec)) continue;
             std::string rel = std::filesystem::relative(it->path(), content, ec).string();
             if (ec || rel.empty()) continue;
-            // The id is hashed over the FORWARD-slash spelling, because that is what an .ocmat
-            // authored on any platform writes and what Assets.ObjectIdOf hashes on the C# side. A
-            // backslash here would make the same file hash differently depending on who wrote it.
+            // FROZEN: the id hashes the forward-slash spelling, matching C# Assets.ObjectIdOf.
             for (char& c : rel) if (c == '\\') c = '/';
             contentIndex_[fnv1a64(std::string_view(rel))] = it->path().string();
         }
         AVER_INFO("[Content] indexed {} asset(s) under {}", contentIndex_.size(), content);
     }
 
-    // The material a level's surface token names, loaded from `<Content>/Materials/<name>.ocmat`.
-    // 0 when the project ships no such file, which is not an error: the caller then falls back to
-    // the built-in palette, so a blockout with no authored materials still reads as a place.
+    // Returns the material a surface token names, loading it on first use. 0 when the project has none.
     pbr::MaterialHandle materialForSurface(const std::string& name) {
         if (name.empty()) return 0;
         const auto cached = materialAssets_.find(name);
@@ -1326,17 +989,7 @@ public:
         pbr::MaterialHandle h = 0;
         const std::string content = project_.contentDir();
         if (!content.empty()) {
-            // Two spellings accepted: a bare token (`M_Floor`) that the convention places under
-            // Materials/, and an explicit content-relative path for a project that files them
-            // elsewhere. Both are one lookup, so neither is the slow path.
-            // ...and BINARIES is tried before either. A .cs under Content\Materials is the source of
-            // a surface; avermatc runs its Configure at build time and writes the .ocmat there. So a
-            // project that has adopted C# materials finds the BUILT file, and one that has not falls
-            // straight through to the hand-authored file, which still works exactly as it did.
-            //
-            // Binaries wins rather than merging, because the generated file is the newer of the two
-            // by construction -- it is rewritten from source on every build -- and a stale
-            // hand-authored file left beside the source must not shadow it.
+            // Built .ocmat under Binaries wins over a hand-authored one under Content.
             const std::string candidates[3] = {
                 project_.binariesDir() + "\\Materials\\" + name + ".ocmat",
                 content + "\\Materials\\" + name + ".ocmat",
@@ -1354,30 +1007,11 @@ public:
                 break;
             }
         }
-        // Cached even when 0, so a level of a thousand placements naming one absent material costs
-        // one stat() rather than a thousand.
         materialAssets_.emplace(name, h);
         return h;
     }
 
-    // Load every material the project ships, up front, and bind each to the surface TOKEN its file
-    // name interns to.
-    //
-    // Up front rather than on demand because a level is not the only thing that names a surface: a
-    // gameplay script spawning an actor at run time writes aver_scene_material(0, "M_Target") into
-    // its CMeshRenderer, and the render pass only ever sees that i32. Resolving lazily from there is
-    // impossible -- there is no way back from the token to the string -- so the mapping has to exist
-    // before anything spawns.
-    // Every .ocmesh under the project's Content, registered by the id a CMeshRenderer names.
-    //
-    // THE KEY IS THE CONTENT-RELATIVE PATH WITH FORWARD SLASHES, because that is the string every
-    // other producer of a mesh id hashes: a C# class written with Mesh("Meshes/rifle.ocmesh"), a
-    // .ocworld placement's asset field, and the two built-in primitives registered at startup all
-    // arrive at fnv1a64 of that exact spelling. Hash a Windows path with backslashes here and the id
-    // is a different number, the lookup misses, and the mesh silently draws nothing -- which is
-    // indistinguishable from the loader never having run.
-    //
-    // Recursive, because a project puts meshes in subfolders and the id includes them.
+    // Loads every .ocmesh under the project's Content, keyed by fnv1a64 of its forward-slash relative path.
     void loadProjectMeshes(Engine& e) {
 #if AVER_MODULE_SCENE
         const std::string dir = project_.contentDir();
@@ -1400,8 +1034,6 @@ public:
             std::string why;
             if (!fmt::loadOcMesh(full, md, &why)) { AVER_WARN("[Mesh] {}", why); ++failed; continue; }
 
-            // Into the engine's interleaved 32-byte vertex. The FILE keeps the spec's stream layout;
-            // this is the conversion the .ocmesh reader exists to make cheap. See OcMesh.hpp.
             std::vector<rhi::MeshVertex> verts(md.vertexCount());
             for (u32 i = 0; i < md.vertexCount(); ++i) {
                 rhi::MeshVertex& v = verts[i];
@@ -1427,13 +1059,13 @@ public:
 #endif
     }
 
-    // Dropped when the project changes. The two built-in primitives are NOT in projectMeshIds_, so
-    // they survive -- a level that names Meshes/cube.ocmesh must keep working after a project swap.
+    // Drops the project's meshes from the id table. The built-in primitives survive.
     void releaseProjectMeshes() {
         for (const u64 id : projectMeshIds_) sceneMeshes_.erase(id);
         projectMeshIds_.clear();
     }
 
+    // Loads every .ocmat under Content/Materials and binds each to the surface token its stem interns to.
     void loadProjectMaterials() {
 #if AVER_MODULE_SCENE
         const std::string dir = project_.contentDir();
@@ -1448,8 +1080,6 @@ public:
             if (!it->is_regular_file(ec)) continue;
             if (assetTypeFromPath(it->path().string()) != AssetType::Material) continue;
             const std::string stem = it->path().stem().string();
-            // Through materialForSurface so the two paths share one cache and one set of handles:
-            // a name loaded here must not be loaded a second time by a level that also names it.
             const pbr::MaterialHandle h = materialForSurface(stem);
             if (!h) continue;
             surfaceMaterials_[aver_scene_material(0, stem.c_str())] = h;
@@ -1459,10 +1089,7 @@ public:
 #endif
     }
 
-    // Destroy every material the project owns. MaterialSystem::update() sees the handles go invalid
-    // and retires their binding sets on its next drain; the TEXTURES behind them stay in its cache,
-    // so reopening the same project re-resolves to the same uploads rather than decoding every
-    // image again.
+    // Destroys every material the project owns. The texture cache behind them survives.
     void releaseProjectMaterials() {
         for (const auto& kv : materialAssets_) if (kv.second) pbr::MaterialLibrary::get().destroy(kv.second);
         materialAssets_.clear();
@@ -1470,6 +1097,7 @@ public:
     }
 #endif
 
+    // Creates one actor's material and pins the actor's own metallic/roughness to the identity 1.
     void makeMaterialFor(MeshObj& o) {
 #if AVER_MODULE_PBR
         pbr::MaterialDesc d;
@@ -1478,24 +1106,16 @@ public:
         d.roughnessFactor = o.roughness;
         o.material = pbr::MaterialLibrary::get().create(d);
         if (!o.material) { AVER_WARN("[Sandbox] no material for '{}'; it will draw with the fallback", o.name); return; }
-        o.metallic = o.roughness = 1.0f;   // identity in b1; the material carries the authored pair
+        o.metallic = o.roughness = 1.0f;
 #else
-        (void)o;   // no material system: b1 keeps the authored pair and the frozen path reads it
+        (void)o;
 #endif
     }
 
+    // Submits the frame: the editor scene, the level world, gizmos, and the overlays.
     void onRender(Engine& e) override {
         handleManip(e);
         e.device()->setWireframe(wireframe_);
-        // The editor's placeholder scene (the grey floor and the orange cube) is EDITOR furniture, not
-        // part of anyone's game. It is also authored at a different scale -- roughly a unit per metre,
-        // where gameplay is centimetres -- so during a play session it sits inside the level as an
-        // 80cm patch of floor with a cube on it, which reads as a bug in the game rather than as the
-        // editor's default scene. Hidden while playing; the game builds its own world.
-        //
-        // Gate-neutral: the oracle runs never enter play, so this is always false at gate time.
-        // Latched on the object so the outliner and picking list exactly what the renderer drew,
-        // rather than each deciding for itself and drifting.
         hideEditorScene_ = playSessionActive() || !levelEntities_.empty();
         const bool hideEditorScene = hideEditorScene_;
         for (int i=0;i<(int)objects_.size();++i) {
@@ -1503,18 +1123,9 @@ public:
             if (!o.visible || hideEditorScene) continue;
             Transform tr; tr.position=o.pos; tr.rotation=quatFromEulerDeg(o.rotDeg); tr.scale=o.scale;
             Mat4 w = tr.toMatrix();
-            // The selected actor is drawn with its OWN colour. It used to be brightened by 30% and
-            // lifted by 0.1, which says "this object is a slightly different colour" -- unreadable
-            // against a scene that already has colours in it, and actively misleading while tuning a
-            // material, because the surface being edited is not the surface being shown. The outline
-            // below is the whole of the selection feedback, which is what every other editor does.
             f32 col[4]={o.color[0],o.color[1],o.color[2],1};
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
-            // The actor's material, applied immediately before the draw it belongs to.
-            // setDrawBinding is STICKY and is reset every beginFrame to whatever Voxi registered as
-            // the default, so an actor whose material failed to create inherits the fallback rather
-            // than the previous actor's -- which is why this is unconditional and not guarded on a
-            // non-zero handle.
+            // setDrawBinding is sticky, so it is set unconditionally before every draw.
             if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready())
                 e.device()->setDrawBinding(ms.bindingSet(o.material), &ms.constants(o.material),
                                            sizeof(pbr::MaterialConstants));
@@ -1523,57 +1134,26 @@ public:
             if (i == sel_) selectionOutline_ = w, selectionMesh_ = o.mesh, hasSelection_ = true;
         }
 
-        // The selection outline, in Unreal's bright orange-yellow.
-        //
-        // Drawn as a WIREFRAME pass over the top rather than by tinting the surface: a tint says
-        // "this object is a slightly different colour", which is unreadable against a scene that
-        // already has colours in it, whereas an edge that follows the silhouette says "this one" at
-        // any distance and against any background.
-        //
-        // Slightly enlarged so the lines sit just outside the surface instead of fighting it for the
-        // same depth, which is what would otherwise make the outline stipple and shimmer as the camera
-        // moves. The surface draw above is deliberately left exactly as it was, so what a probe pixel
-        // in the middle of a face sees does not change.
-        // Interactive runs only. The outline is an editor AFFORDANCE, not part of the scene's shading,
-        // and the cube primitive is triangulated -- so a wireframe pass draws a diagonal across every
-        // face, not merely the silhouette. Enlarged, that diagonal lands in front of the face and
-        // straight over the pixel the centre gate probes, so the oracle stops measuring the BRDF and
-        // starts measuring the selection highlight. Re-recording would have hidden that rather than
-        // fixed it: a shading gate must not be able to pass or fail on editor chrome.
-        // The DRAW is below, after the scene-entity pass. It used to sit here, which meant only an
-        // objects_ entry could ever be outlined -- the pass that draws level geometry had not run yet,
-        // and hasSelection_ was cleared on the next line. It was also gated on !hideEditorScene, which
-        // is true exactly when a level is loaded, so selecting a wall lit up nothing twice over.
 #if AVER_MODULE_SCENE
-        // Scene-entity pass: draw every live entity carrying a CMeshRenderer. This is the bridge from a
-        // SPAWNED actor — which lives in the world, not in objects_ above — to the screen. It is additive
-        // and gate-neutral by construction: the editor's fixed scene is objects_, and the gate runs spawn
-        // no actors, so at gate time the world holds no CMeshRenderer and this loop draws nothing.
+        // Scene-entity pass: draws every live entity carrying a CMeshRenderer.
         {
             scene::World& w = scene::World::instance();
             int drawn = 0;
             const u32 n = w.count();
             for (u32 i = 0; i < n; ++i) {
                 const scene::Entity ent = w.at(i);
-                if (w.destroyPending(ent)) continue;   // a deferred-destroyed actor stops drawing at once
+                if (w.destroyPending(ent)) continue;
                 const scene::CMeshRenderer* mr =
                     w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
                 if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
                 const auto it = sceneMeshes_.find(mr->mesh);
-                if (it == sceneMeshes_.end()) continue; // an unresolved mesh id draws nothing, not garbage
+                if (it == sceneMeshes_.end()) continue;
                 const Mat4& wm = w.worldMatrix(ent);
                 const i32 mat = mr->material;
-                // material 0 == "no authored material": the fallback block carries no albedo/spec, so
-                // the authored pair rides b1 (a light dielectric, clearly visible). A real material pins
-                // b1 to identity and lets its own b2 govern, matching makeMaterialFor's rule for objects_.
                 f32 col[4] = {0.80f, 0.80f, 0.85f, 1.0f};
                 f32 metallic = 0.0f, roughness = 0.5f;
 
-                // An AUTHORED material, if the project shipped an .ocmat for this surface. 0 means
-                // there is none, and 0 is also the handle the material system answers with the
-                // fallback for, so one variable covers both cases at every use below.
-                // Typed u32 rather than pbr::MaterialHandle so this block still compiles with the
-                // material module switched off, which is the whole reason that guard exists.
+                // u32 rather than pbr::MaterialHandle so this compiles with the material module off.
                 u32 authored = 0;
 #if AVER_MODULE_PBR
                 if (const auto it2 = surfaceMaterials_.find(mat); it2 != surfaceMaterials_.end())

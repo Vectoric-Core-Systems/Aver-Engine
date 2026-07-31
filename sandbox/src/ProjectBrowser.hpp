@@ -1,13 +1,6 @@
 #pragma once
-// The start screen: recent projects, New Project, Open Project.
-//
-// It is an ImGui screen inside the editor's own window and ImGui host, not a launcher process.
-// The engine already owns a window, a swapchain and an ImGui host by the time this draws, so a
-// separate exe would duplicate all of it to show one list.
-//
-// It is deliberately NOT reachable from automation: the verification harness runs the editor with
-// --frames and reads one probe pixel, and a start screen in front of the viewport would break
-// every gate. SandboxApp decides whether to arm this; see createApplication().
+// The start screen: recent projects, New Project, Open Project. An ImGui screen inside the editor's
+// own window, not a launcher process.
 #include "aver/formats/OcProject.hpp"
 
 #include <string>
@@ -25,26 +18,25 @@ enum class BrowserAction {
     Quit,
 };
 
+// The start screen: the recent list, its modals, and the project it ends up opening.
 class ProjectBrowser {
 public:
-    void init();  // read the recent list from disk
+    // Reads the recent list from disk.
+    void init();
 
-    // One frame of the start screen. `medium` may be null when only the fallback font loaded.
-    //
-    // `logoTex` is the UI texture identifier of the engine mark (rhi::IDevice::uiTextureId), or 0
-    // when the caller could not load it. The image is passed in rather than loaded here so this
-    // stays a UI screen: the app owns asset paths, the device and the lifetime, and knows whether
-    // the screen is armed at all -- automation must not pay to upload a mark it never shows.
+    // Draws one frame of the start screen. `medium` may be null; `logoTex` is the engine mark's UI
+    // texture id, or 0 when the caller loaded none.
     BrowserAction draw(f32 dpi, ImFont* medium, u64 logoTex, f32 logoAspect);
 
     const fmt::ProjectDesc& project() const { return project_; }
 
-    // Load a manifest and, on success, move it to the head of the recent list. Used by the
-    // browser's own buttons and by the command line, so a project opened either way is recorded.
+    // Loads a manifest and, on success, moves it to the head of the recent list.
     bool open(const std::string& manifestPath, std::string* err);
 
 private:
+    // Writes the recent list back to disk.
     void saveRecents() const;
+    // Drops one manifest from the recent list.
     void forget(const std::string& manifestPath);
 
     fmt::ProjectDesc project_;

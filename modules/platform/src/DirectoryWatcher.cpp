@@ -1,5 +1,4 @@
-// DirectoryWatcher — the platform-neutral half: coalescing, rename pairing, and the frame-side
-// drain. Nothing in this file knows which OS it is running on; see src/win32/ for the backend.
+// DirectoryWatcher, platform-neutral half: coalescing, rename pairing, and the frame-side drain.
 
 #include "aver/platform/DirectoryWatcher.hpp"
 
@@ -19,29 +18,17 @@ using detail::WatchClock;
 constexpr u32 kDefaultSettleMs = 150;
 constexpr u32 kDefaultMaxHoldMs = 1000;
 
-// A burst that touches more distinct paths than this is not a burst, it is a bulk operation
-// (a branch checkout, an unzip). Reporting it path by path is both slow — this table is a linear
-// scan, deliberately, because a real burst holds a handful of entries — and useless to a caller
-// that will end up rebuilding its whole view anyway. Past this, say "rescan" instead.
-//
-// The bound is small on purpose. It was measured at 2048 first: creating 20,000 files under a
-// 60 Hz poll never reached it, and instead spent 21 ms inside a single poll — a dropped frame,
-// caused by the quadratic scan and by one existence check per path. 512 converts that same storm
-// into one rescan request in well under a millisecond, which is both cheaper and more useful.
+// Past this many distinct pending paths, poll() asks for a rescan instead of reporting each one.
 constexpr usize kMaxPending = 512;
 
-// One path's accumulated state during the debounce window. Deliberately flags rather than a
-// "latest action", because the whole point is that the actions are not independent: Removed
-// followed by RenamedTo is one save, not a delete and an arrival.
+// One path's accumulated state during the debounce window.
 struct Pending {
     std::string path;
     bool created = false;
     bool deleted = false;
     bool modified = false;
     bool renamedTo = false;
-    // True when the rename's source was itself created inside this same window — i.e. it was a
-    // temporary file, and this is an editor's atomic save rather than a user renaming something.
-    bool fromTemporary = false;
+    bool fromTemporary = false;   // the rename's source was created inside this same window
     std::string oldPath;
     WatchClock::time_point first{};
     WatchClock::time_point last{};
@@ -49,6 +36,7 @@ struct Pending {
 
 } // namespace
 
+// The watcher's state: backend, pending table, debounce settings and the held rename source.
 struct DirectoryWatcher::Impl {
     std::string root;
     std::unique_ptr<detail::IWatchBackend> backend;
@@ -57,12 +45,11 @@ struct DirectoryWatcher::Impl {
     u32 settleMs = kDefaultSettleMs;
     u32 maxHoldMs = kDefaultMaxHoldMs;
 
-    // A RenamedFrom is meaningless alone and the OS emits its RenamedTo next, so it is held here
-    // until the pair completes. It survives across drains because a pair can straddle two reads.
     bool haveRenameFrom = false;
     std::string renameFrom;
     WatchClock::time_point renameFromAt{};
 
+    // Returns the pending entry for `path`, creating it if new, and stamps its last-seen time.
     Pending& entryFor(const std::string& path, WatchClock::time_point at) {
         for (Pending& p : pending) {
             if (p.path == path) { p.last = at; return p; }
@@ -75,6 +62,7 @@ struct DirectoryWatcher::Impl {
         return p;
     }
 
+    // Removes `path` from the pending table, reporting whether it was created inside this window.
     void dropEntry(const std::string& path, bool& wasCreatedHere) {
         wasCreatedHere = false;
         for (usize i = 0; i < pending.size(); ++i) {
@@ -85,13 +73,14 @@ struct DirectoryWatcher::Impl {
         }
     }
 
-    // A RenamedFrom whose partner never arrived is just a disappearance.
+    // Turns a held RenamedFrom whose partner never arrived into a deletion.
     void settleOrphanRename() {
         if (!haveRenameFrom) return;
         haveRenameFrom = false;
         entryFor(renameFrom, renameFromAt).deleted = true;
     }
 
+    // Folds one raw record into the pending table.
     void fold(const RawFileEvent& e) {
         if (e.kind == RawChange::RenamedTo && haveRenameFrom) {
             haveRenameFrom = false;
@@ -104,7 +93,6 @@ struct DirectoryWatcher::Impl {
             return;
         }
 
-        // Anything else means the held RenamedFrom is not going to be paired.
         settleOrphanRename();
 
         switch (e.kind) {
@@ -117,22 +105,17 @@ struct DirectoryWatcher::Impl {
             case RawChange::Removed:    entryFor(e.path, e.at).deleted = true; return;
             case RawChange::Modified:   entryFor(e.path, e.at).modified = true; return;
             case RawChange::RenamedTo:
-                // No partner — treat it as an arrival, which is what it looks like from here.
                 entryFor(e.path, e.at).created = true;
                 return;
         }
     }
 
-    // Turns one path's accumulated flags into at most one event. Returns false when the net effect
-    // is nothing the caller ever needs to hear about.
+    // Turns one path's accumulated flags into at most one event. Returns false when there is none.
     bool resolve(const Pending& p, FileEvent& out) const {
         const std::string full = root + "/" + p.path;
         const bool exists = fileExists(full);
 
         if (!exists) {
-            // A file that appeared and vanished inside one window never existed as far as the
-            // caller is concerned — this is the editor's temporary file, and reporting a Deleted
-            // for a path nobody was ever told about is pure noise.
             if (p.created || p.fromTemporary) return false;
             out.kind = FileChange::Deleted;
             out.path = p.path;
@@ -147,7 +130,6 @@ struct DirectoryWatcher::Impl {
             return true;
         }
 
-        // Removed-then-back is a safe save: the file the caller knows about changed.
         if (p.deleted) {
             out.kind = FileChange::Modified;
             out.path = p.path;
@@ -155,8 +137,6 @@ struct DirectoryWatcher::Impl {
             return true;
         }
 
-        // Arrived and stayed — either directly, or via a temporary renamed into place. See the
-        // Created-vs-Modified note in the header for why this resolves towards Created.
         if (p.created || p.renamedTo) {
             out.kind = FileChange::Created;
             out.path = p.path;
@@ -174,6 +154,7 @@ struct DirectoryWatcher::Impl {
 DirectoryWatcher::DirectoryWatcher() : impl_(std::make_unique<Impl>()) {}
 DirectoryWatcher::~DirectoryWatcher() { stop(); }
 
+// Begins watching `root`. Returns false, having logged why, if it cannot be watched.
 bool DirectoryWatcher::start(const std::string& root, bool recursive) {
     stop();
 
@@ -183,13 +164,14 @@ bool DirectoryWatcher::start(const std::string& root, bool recursive) {
     }
 
     impl_->backend = detail::createWatchBackend(root, recursive);
-    if (!impl_->backend) return false;  // the backend has already said why
+    if (!impl_->backend) return false;
 
     impl_->root = root;
     AVER_INFO("[Watcher] watching '{}'{}", root, recursive ? " (recursive)" : "");
     return true;
 }
 
+// Stops the watch and clears all accumulated state.
 void DirectoryWatcher::stop() {
     if (impl_->backend) {
         impl_->backend.reset();
@@ -204,6 +186,7 @@ void DirectoryWatcher::stop() {
 bool DirectoryWatcher::watching() const { return impl_->backend != nullptr; }
 const std::string& DirectoryWatcher::root() const { return impl_->root; }
 
+// Sets the settle and maximum-hold windows, in milliseconds.
 void DirectoryWatcher::setDebounce(u32 settleMs, u32 maxHoldMs) {
     impl_->settleMs = settleMs;
     impl_->maxHoldMs = std::max(maxHoldMs, settleMs);
@@ -212,6 +195,7 @@ void DirectoryWatcher::setDebounce(u32 settleMs, u32 maxHoldMs) {
 u32 DirectoryWatcher::settleMs() const { return impl_->settleMs; }
 u32 DirectoryWatcher::maxHoldMs() const { return impl_->maxHoldMs; }
 
+// Appends every settled change to `out`. Returns true when the caller must rescan the tree itself.
 bool DirectoryWatcher::poll(std::vector<FileEvent>& out) {
     Impl& m = *impl_;
     if (!m.backend) return false;
@@ -220,19 +204,12 @@ bool DirectoryWatcher::poll(std::vector<FileEvent>& out) {
     bool rescan = m.backend->drain(m.raw);
 
     if (rescan) {
-        // No detail survives an overflow, so anything half-accumulated describes a world that may
-        // no longer exist. Drop it rather than emitting events the caller would have to unpick.
         m.pending.clear();
         m.haveRenameFrom = false;
         m.raw.clear();
         return true;
     }
 
-    // The cap is tested INSIDE the fold, not after it. Folding the whole batch first and then
-    // noticing it was too big is the expensive way to reach the same answer — the table is a
-    // linear scan, so a 5000-record batch spends milliseconds building a table it is about to
-    // throw away. Measured: 28 ms in one poll, i.e. a dropped frame, which is precisely the thing
-    // this class promises not to do.
     bool bulk = false;
     for (const RawFileEvent& e : m.raw) {
         if (m.pending.size() >= kMaxPending) { bulk = true; break; }
@@ -251,7 +228,6 @@ bool DirectoryWatcher::poll(std::vector<FileEvent>& out) {
     const auto settle = std::chrono::milliseconds(m.settleMs);
     const auto hold = std::chrono::milliseconds(m.maxHoldMs);
 
-    // An unpaired RenamedFrom that has gone quiet is a deletion, not a pending pair.
     if (m.haveRenameFrom && now - m.renameFromAt >= settle) m.settleOrphanRename();
 
     usize keep = 0;

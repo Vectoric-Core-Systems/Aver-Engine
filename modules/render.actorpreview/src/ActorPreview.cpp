@@ -1,3 +1,4 @@
+// The actor preview feature: orbit camera, its own targets, and the HLSL it draws with.
 #include "aver/render/preview/ActorPreview.hpp"
 #include "aver/core/Log.hpp"
 
@@ -11,8 +12,7 @@ constexpr f32 kPi = 3.14159265358979f;
 f32 rad(f32 deg) { return deg * kPi / 180.0f; }
 f32 clampf(f32 v, f32 lo, f32 hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-// Row-major, row-vector, translation in the LAST ROW -- the engine's convention, stated because a
-// preview that transposed here would put every model in a plausible wrong place.
+// Multiplies two 4x4 matrices. Row-major, row-vector, translation in the last row.
 void multiply(const f32 a[16], const f32 b[16], f32 out[16]) {
     f32 t[16];
     for (int r = 0; r < 4; ++r)
@@ -22,19 +22,15 @@ void multiply(const f32 a[16], const f32 b[16], f32 out[16]) {
     std::memcpy(out, t, sizeof t);
 }
 
-// LEFT-HANDED look-at, +Z up, matching the engine contract. A right-handed one compiles, runs, and
-// mirrors the actor -- which reads as the artist having modelled it backwards.
+// Builds a left-handed look-at view matrix, +Z up.
 void lookAt(const f32 eye[3], const f32 at[3], f32 out[16]) {
     f32 f[3] = {at[0] - eye[0], at[1] - eye[1], at[2] - eye[2]};
     const f32 fl = std::sqrt(f[0]*f[0] + f[1]*f[1] + f[2]*f[2]);
     for (int i = 0; i < 3; ++i) f[i] = fl > 1e-6f ? f[i] / fl : (i == 0 ? 1.0f : 0.0f);
 
     const f32 up[3] = {0.0f, 0.0f, 1.0f};
-    // right = up x forward, for a left-handed basis.
     f32 r[3] = {up[1]*f[2] - up[2]*f[1], up[2]*f[0] - up[0]*f[2], up[0]*f[1] - up[1]*f[0]};
     const f32 rl = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
-    // Looking straight down the pole leaves the cross product degenerate; the orbit clamp keeps the
-    // camera off it, and this is the belt to that pair of braces.
     if (rl < 1e-5f) { r[0] = 1.0f; r[1] = 0.0f; r[2] = 0.0f; }
     else for (int i = 0; i < 3; ++i) r[i] /= rl;
 
@@ -50,8 +46,7 @@ void lookAt(const f32 eye[3], const f32 at[3], f32 out[16]) {
     std::memcpy(out, m, sizeof m);
 }
 
-// REVERSED-Z is not used here: this target has its own depth buffer cleared to 1 and a Less test,
-// independent of whatever the scene does. Stated so nobody "fixes" it to match the scene later.
+// Builds a left-handed perspective projection. Not reversed-Z: this pass clears depth to 1 and tests Less.
 void perspective(f32 fovDeg, f32 aspect, f32 nearZ, f32 farZ, f32 out[16]) {
     const f32 h = 1.0f / std::tan(rad(fovDeg) * 0.5f);
     const f32 w = h / aspect;
@@ -66,54 +61,38 @@ void perspective(f32 fovDeg, f32 aspect, f32 nearZ, f32 farZ, f32 out[16]) {
 
 } // namespace
 
+// Turns the orbit, clamping pitch short of the pole.
 void PreviewCamera::addOrbit(f32 dYaw, f32 dPitch) {
     yawDeg += dYaw;
-    // Short of the pole, where the up vector flips and the view rolls over with no hysteresis --
-    // the same failure the level camera's basis has at |z| > 0.95.
     pitchDeg = clampf(pitchDeg + dPitch, -85.0f, 85.0f);
 }
 
+// Slides the pivot across the view plane by a mouse delta in screen pixels.
 void PreviewCamera::panPixels(f32 dxPx, f32 dyPx, f32 viewportHeightPx) {
     if (viewportHeightPx < 1.0f) return;
     const f32 cy = std::cos(rad(yawDeg)), sy = std::sin(rad(yawDeg));
     const f32 cp = std::cos(rad(pitchDeg)), sp = std::sin(rad(pitchDeg));
 
-    // The camera basis, derived the same way buildViewProj derives the eye. Forward is
-    // (cp*cy, cp*sy, -sp), so:
-    //   right = (-sy, cy, 0)              -- horizontal, perpendicular to the azimuth
-    //   up    = (cy*sp, sy*sp, cp)        -- which is -(right x forward)
-    // The sign on `up` is worth the check rather than the guess: right x forward comes out as
-    // (-cy*sp, -sy*sp, -cp), which at pitch 0 is (0,0,-1) -- straight DOWN. Negating it gives (0,0,1)
-    // at pitch 0, which is +Z up, the engine's up.
     const f32 right[3] = {-sy, cy, 0.0f};
     const f32 up[3]    = {cy * sp, sy * sp, cp};
 
-    // World centimetres per pixel at the pivot's depth. Uses HEIGHT for both axes on purpose: the
-    // projection is built from a vertical fov and an aspect, so a pixel is square in world terms and
-    // scaling x by the width would double-count the aspect.
+    // World centimetres per pixel at the pivot's depth.
     const f32 perPx = 2.0f * distance * std::tan(rad(fovDeg) * 0.5f) / viewportHeightPx;
 
-    // The scene follows the cursor, so the pivot moves AGAINST the drag. Screen +Y is down while the
-    // camera's up is up, hence dy is added rather than subtracted.
     const f32 dx = -dxPx * perPx;
     const f32 dy =  dyPx * perPx;
     for (int i = 0; i < 3; ++i) pivot[i] += right[i] * dx + up[i] * dy;
 }
 
+// Scales the orbit distance by a factor, clamped.
 void PreviewCamera::addZoom(f32 factor) {
-    // Multiplicative, so a wheel notch moves the same PROPORTION at every scale. An additive zoom is
-    // unusable across the range an actor can span -- a step that frames a 5 cm bolt puts a 20 m
-    // vehicle in the next county.
     distance = clampf(distance * factor, 5.0f, 500000.0f);
 }
 
+// The preview's HLSL, compiled as the tail of the shared prelude.
 const char* actorPreviewShaderSource() {
-    // Compiled as the TAIL of the shared prelude, so VSIn/VSOut and the b0/b1 layouts come from
-    // their one owner. What is added is a camera at b4 and a pair of entry points that read it.
     return R"(
-// The preview's own camera, at the register RHIResources.hpp reserves for a feature. NOT b0: the
-// backend rebinds slot 0 to the engine's block on every setPipeline, so a camera published there
-// would survive exactly until the next pipeline change.
+// The preview's own camera. Must be b4, the feature register: the backend rebinds b0 per setPipeline.
 cbuffer PreviewFrame : register(b4) {
     float4x4 gPreviewViewProj;
     float4   gPreviewEye;      // xyz = eye, w = unused
@@ -121,12 +100,14 @@ cbuffer PreviewFrame : register(b4) {
     float4   gPreviewAmbient;  // rgb = sky fill, w = selection highlight strength
 };
 
+// What the preview vertex shader hands the pixel shader.
 struct PreviewOut {
     float4 pos   : SV_POSITION;
     float3 nrmWS : NORMAL;
     float3 wpos  : TEXCOORD0;
 };
 
+// Transforms a vertex to clip space and its normal to world space.
 PreviewOut PreviewVS(VSIn i) {
     PreviewOut o;
     float4 wp = mul(float4(i.pos, 1.0), gWorld);
@@ -136,26 +117,19 @@ PreviewOut PreviewVS(VSIn i) {
     return o;
 }
 
+// Shades a pixel with one key light, a hemisphere fill and a selection rim.
 float4 PreviewPS(PreviewOut i) : SV_TARGET {
     float3 n = normalize(i.nrmWS);
     float3 l = normalize(gPreviewKey.xyz);
 
-    // A key light plus a hemisphere fill, and nothing else. This is a PREVIEW: it exists so an
-    // author can read the shape and the placement of a part, and every additional term is one more
-    // way for it to disagree with the level viewport it is already not trying to match.
     float ndl = saturate(dot(n, l));
     float3 base = gBaseColor.rgb;
 
-    // The fill leans on the world +Z, so an upward face reads as sky-lit and a downward face as
-    // ground-lit. Without it a shape's unlit side is flat black and its silhouette is unreadable,
-    // which defeats the point of the view.
     float up = n.z * 0.5 + 0.5;
     float3 fill = lerp(gPreviewAmbient.rgb * 0.35, gPreviewAmbient.rgb, up);
 
     float3 lit = base * (fill + ndl * gPreviewKey.w);
 
-    // A rim on the selection, added rather than replacing the colour: tinting the whole object hides
-    // the material the author is looking at, and a rim survives against any base colour.
     float rim = pow(1.0 - saturate(dot(n, normalize(gPreviewEye.xyz - i.wpos))), 3.0);
     lit += gPreviewAmbient.w * rim * float3(1.0, 0.62, 0.2);
 
@@ -164,16 +138,16 @@ float4 PreviewPS(PreviewOut i) : SV_TARGET {
 )";
 }
 
+// Creates the feature. Returns null when the backend has no GPU support.
 ActorPreview* ActorPreview::create(rhi::IDevice& device, u32 width, u32 height) {
     auto* p = new ActorPreview();
     if (!p->init(device, width, height)) { delete p; return nullptr; }
     return p;
 }
 
+// Waits for the GPU, then destroys the pipeline, shaders and targets.
 ActorPreview::~ActorPreview() {
     if (!res_) return;
-    // Everything the UI could still be sampling. waitIdle first, because destroying a texture an
-    // ImGui draw list still names is a use-after-free the validation layer does not see.
     res_->waitIdle();
     if (pipeline_) res_->destroyPipeline(pipeline_);
     if (vs_) res_->destroyShader(vs_);
@@ -182,8 +156,7 @@ ActorPreview::~ActorPreview() {
     if (depth_) res_->destroyTexture(depth_);
 }
 
-// The colour and depth targets, at a size. Split out of init so resize can make a NEW pair before
-// it destroys the old one -- see resize for why that order matters.
+// Creates a colour and depth target pair at a size. Returns false if either fails.
 bool ActorPreview::createTargets(u32 width, u32 height) {
     rhi::TextureDesc cd;
     cd.width = width;
@@ -211,12 +184,13 @@ bool ActorPreview::createTargets(u32 width, u32 height) {
     return true;
 }
 
+// Builds the targets, the shaders and the pipeline.
 bool ActorPreview::init(rhi::IDevice& device, u32 width, u32 height) {
     device_ = &device;
     res_ = device.resources();
-    if (!res_) return false;   // no GPU backend; the editor shows the panel without a 3D view
+    if (!res_) return false;
     if (width == 0) width = 1024;
-    if (height == 0) height = width;   // a lone argument still means "square, at that size"
+    if (height == 0) height = width;
     if (!createTargets(width, height)) return false;
 
     rhi::ShaderDesc vd;
@@ -240,10 +214,8 @@ bool ActorPreview::init(rhi::IDevice& device, u32 width, u32 height) {
     gp.renderTargetCount = 1;
     gp.renderTargets[0] = rhi::Format::RGBA8Unorm;
     gp.depthFormat = rhi::Format::D32Float;
-    gp.sampleCount = 1;   // never multisampled: this target is sampled by the UI, not resolved
-    // b1 is the per-draw block the shared prelude declares and drawMesh consumes; b4 is this
-    // feature's camera. Slot 0 is left at zero dwords so the BACKEND binds the engine block there,
-    // which is the contract -- a feature must never be able to observe b0 unbound.
+    gp.sampleCount = 1;
+    // Slot 0 stays at zero dwords so the backend binds the engine's per-frame block there.
     gp.layout.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
     gp.layout.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;   // a root CBV
     pipeline_ = res_->createGraphicsPipeline(gp);
@@ -254,14 +226,11 @@ bool ActorPreview::init(rhi::IDevice& device, u32 width, u32 height) {
     return true;
 }
 
+// Rebuilds the targets at a new size, keeping the old pair and returning false on failure.
 bool ActorPreview::resize(u32 width, u32 height) {
     if (!res_ || width == 0 || height == 0) return false;
     if (width == width_ && height == height_) return true;
 
-    // WAIT FIRST. The UI sampled the old colour target in a frame that may still be in flight, and
-    // destroying it underneath that is a use-after-free the validation layer does not catch because
-    // the handle is still nominally alive. This is the stall the class documents; the editor pays it
-    // once per resize gesture, not once per frame, which is the whole reason resize is debounced.
     res_->waitIdle();
 
     const rhi::TextureHandle oldColor = color_;
@@ -269,8 +238,6 @@ bool ActorPreview::resize(u32 width, u32 height) {
     color_ = 0;
     depth_ = 0;
     if (!createTargets(width, height)) {
-        // Put the old pair back rather than leaving the feature with no target at all: a viewport
-        // that did not resize is a far better failure than one that went black.
         color_ = oldColor;
         depth_ = oldDepth;
         AVER_WARN("[Preview] could not resize to {}x{}; keeping {}x{}", width, height, width_, height_);
@@ -279,26 +246,17 @@ bool ActorPreview::resize(u32 width, u32 height) {
     if (oldColor) res_->destroyTexture(oldColor);
     if (oldDepth) res_->destroyTexture(oldDepth);
 
-    // A NEW texture is a NEW descriptor, so the id the UI draws has to be re-fetched. Leaving the
-    // old one would have ImGui sampling a destroyed resource -- which is exactly the bug the waitIdle
-    // above exists to prevent, reintroduced one line later.
     uiTextureId_ = device_ ? device_->uiTextureId(color_) : 0;
-    everRendered_ = false;   // the new target has never been written, so its first barrier differs
+    everRendered_ = false;
     AVER_INFO("[Preview] target resized to {}x{}", width_, height_);
     return true;
 }
 
+// Points the camera at the whole draw list.
 void ActorPreview::frameAll() {
     if (draws_.empty()) { camera_.distance = 400.0f; camera_.pivot[0] = camera_.pivot[1] = camera_.pivot[2] = 0.0f; return; }
-    // Bounds of the placement ORIGINS, not of the geometry: the mesh extents are not known here (a
-    // MeshHandle is opaque), and an actor's parts are placed at the points that matter. A margin
-    // covers the geometry hanging off them.
     f32 lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
     for (const PreviewDraw& d : draws_) {
-        // The mesh's own reach, scaled by the row lengths of its world matrix. Framing from the
-        // translation alone put every class-level actor -- which has no placement, so its
-        // translation is the origin -- at one identical distance, and a unit sphere came out as a
-        // single white pixel. That is the bug this loop exists to not have.
         f32 sx = 0.0f, sy = 0.0f, sz = 0.0f;
         for (int k = 0; k < 3; ++k) {
             sx += d.world[0 + k] * d.world[0 + k];
@@ -318,11 +276,10 @@ void ActorPreview::frameAll() {
         camera_.pivot[i] = (lo[i] + hi[i]) * 0.5f;
         span = std::fmax(span, hi[i] - lo[i]);
     }
-    // Proportional to what is actually there, with a floor only for the degenerate case of a draw
-    // list whose every mesh failed to resolve and therefore has no extent at all.
     camera_.distance = clampf(std::fmax(span, 1.0f) * 1.8f, 2.0f, 500000.0f);
 }
 
+// Composes the orbit camera's view and projection into one matrix.
 void ActorPreview::buildViewProj(f32 out[16]) const {
     const f32 cy = std::cos(rad(camera_.yawDeg)), sy = std::sin(rad(camera_.yawDeg));
     const f32 cp = std::cos(rad(camera_.pitchDeg)), sp = std::sin(rad(camera_.pitchDeg));
@@ -333,11 +290,6 @@ void ActorPreview::buildViewProj(f32 out[16]) const {
     };
     f32 view[16], proj[16];
     lookAt(eye, camera_.pivot, view);
-    // Near and far derived from the orbit distance rather than fixed: an actor framed at 20 cm and
-    // one framed at 200 m cannot share a depth range without one of them z-fighting.
-    // THE TARGET'S OWN ASPECT. Hard-coding 1 was right only while the target was square; against a
-    // wide one it stretches every actor horizontally, which reads as a modelling mistake rather than
-    // as a projection one.
     const f32 aspect = (width_ > 0 && height_ > 0)
                      ? static_cast<f32>(width_) / static_cast<f32>(height_) : 1.0f;
     perspective(camera_.fovDeg, aspect, std::fmax(camera_.distance * 0.01f, 0.5f),
@@ -345,13 +297,12 @@ void ActorPreview::buildViewProj(f32 out[16]) const {
     multiply(view, proj, out);
 }
 
+// Draws the preview's targets: one barrier in, the draw list, one barrier back out for the UI.
 void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     if (!ready()) return;
 
     ctx.pushMarker("ActorPreview");
 
-    // Into RenderTarget from wherever the last frame left it. The FIRST frame comes from the
-    // creation state; every one after that from ShaderResource, because the UI sampled it.
     ctx.textureBarrier(color_, everRendered_ ? rhi::ResourceState::ShaderResource
                                              : rhi::ResourceState::ShaderResource,
                        rhi::ResourceState::RenderTarget);
@@ -359,13 +310,12 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     const rhi::TextureHandle targets[1] = {color_};
     ctx.setRenderTargets(targets, 1, depth_);
     ctx.setViewport(0, 0, width_, height_);
-    // Set explicitly and not inherited: the editor leaves the scissor on its dock rect, which would
-    // silently clip this pass to wherever the 3D view happens to be.
     ctx.setScissor(0, 0, width_, height_);
     ctx.clearDepth(depth_, 1.0f);
 
     ctx.setPipeline(pipeline_);
 
+    // Mirrors the PreviewFrame cbuffer field for field.
     struct Frame {
         f32 viewProj[16];
         f32 eye[4];
@@ -380,24 +330,18 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     frame.eye[1] = camera_.pivot[1] - camera_.distance * cp * sy;
     frame.eye[2] = camera_.pivot[2] + camera_.distance * sp;
 
-    // A FIXED three-quarter key, off the view axis. Fixed on purpose: a preview light that followed
-    // the camera would light every face equally from every angle, which is the flat-lighting failure
-    // the level's own sun default had -- an object needs a light it can turn relative to before its
-    // form reads at all.
+    // A fixed three-quarter key, off the view axis.
     frame.key[0] = -0.5481f; frame.key[1] = 0.3838f; frame.key[2] = 0.7431f; frame.key[3] = 1.6f;
     frame.ambient[0] = 0.26f; frame.ambient[1] = 0.30f; frame.ambient[2] = 0.36f;
     frame.ambient[3] = 0.0f;
 
     for (const PreviewDraw& d : draws_) {
-        if (!d.mesh) continue;   // an unresolved mesh draws nothing rather than a fallback shape
+        if (!d.mesh) continue;
 
         frame.ambient[3] = d.selected ? 0.9f : 0.0f;
-        // Republished per draw, which setConstantBuffer makes free: it suballocates from the frame
-        // ring, so this is a pointer bump rather than an upload.
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &frame, sizeof(frame));
 
-        // The b1 block the shared prelude declares. Written whole, because setConstants always
-        // overwrites the declared block and a partial write would inherit the previous draw's tail.
+        // The b1 block the shared prelude declares, written whole.
         f32 obj[rhi::kObjectConstantDwords] = {};
         std::memcpy(obj, d.world, sizeof(d.world));
         obj[16] = d.baseColor[0]; obj[17] = d.baseColor[1];
@@ -407,7 +351,6 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
         ctx.drawMesh(d.mesh);
     }
 
-    // Back to ShaderResource so the UI can sample it, and so the next frame's barrier is true.
     ctx.textureBarrier(color_, rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource);
     everRendered_ = true;
     ctx.popMarker();

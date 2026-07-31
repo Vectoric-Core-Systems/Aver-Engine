@@ -1,22 +1,6 @@
 #pragma once
-// Asset editors, the way Unreal separates them: the Level Editor is the main window, and every other
-// asset opens its OWN editor with its own tabs, its own selection and its own dirty state.
-//
-// WHAT THIS REPLACES. Double-clicking an asset in the Content Browser used to hand it to the shell --
-// a .ocmesh went to whatever Windows associates with the extension, which is nothing. There was no
-// notion that an asset HAS an editor, so every panel the editor grew had to live in the one main
-// dockspace and be about whatever happened to be selected in the level. That does not scale past two
-// asset types, and it is why Unreal separates them.
-//
-// TABS RATHER THAN OS WINDOWS, for now. Unreal docks Blueprint editors as tabs by default and lets
-// you tear them off; tearing off needs ImGuiConfigFlags_ViewportsEnable, which is NOT set here and
-// which would need this engine's own platform layer to grow multi-window support. The architecture
-// below does not change when that lands -- an editor draws into a window it does not own, so making
-// that window a real OS one is a flag and a backend, not a redesign.
-//
-// WHAT AN EDITOR OWNS: its asset, its dirty flag, its own panels. What it does NOT own: the device,
-// the project, or anything about the level. Those are passed in, so an editor cannot quietly become
-// a second place that knows how to load a world.
+// Asset editors: the interface one open asset implements, the host that owns them all, and the
+// factory for the first concrete one.
 #include "aver/core/Types.hpp"
 
 #include <memory>
@@ -34,47 +18,29 @@ class AssetEditor {
 public:
     virtual ~AssetEditor() = default;
 
-    // The absolute path of the asset being edited. Identity: the host refuses to open the same path
-    // twice and focuses the existing editor instead, which is what every editor with tabs does.
+    // The absolute path of the asset being edited. This is the editor's identity to the host.
     virtual const std::string& path() const = 0;
 
-    // What the tab says. Includes the dirty marker; the host does not decorate it, because only the
-    // editor knows whether an asterisk is meaningful for its asset type.
+    // What the tab says, including any dirty marker.
     virtual std::string title() const = 0;
 
-    // Unsaved changes. The host asks before closing, and asks again before the application exits.
+    // True when there are unsaved changes.
     virtual bool dirty() const { return false; }
 
-    // Draw the editor's contents. Called with a window already begun by the host, so an editor is a
-    // set of panels rather than a window -- which is what lets the host decide tabs versus windows
-    // without every editor caring.
+    // Draws the editor's contents into a window the host has already begun.
     virtual void draw(Engine& e) = 0;
 
-    // Write the asset back. Returns false and leaves `why` set if it could not.
+    // Writes the asset back. Returns false and sets `why` if it could not.
     virtual bool save(std::string* why) { (void)why; return true; }
 
-    // The host has SEEN this editor's asset change on disk, from a DirectoryWatcher event rather
-    // than from anything this editor did.
-    //
-    // It exists because an editor can only poll while it is being drawn, and a tab behind another
-    // tab is not drawn. Without this, editing a file in Visual Studio while its tab sat in the
-    // background left that tab showing the old content until it was clicked, re-polled, and only
-    // THEN caught up -- a visible lag exactly when the user has switched to it to look.
-    //
-    // Called from the main thread between frames. An editor that does not care may ignore it: the
-    // per-draw poll is still there and still correct, so this is a promptness fix, not a
-    // correctness one.
+    // The host saw this editor's asset change on disk. Called on the main thread between frames.
     virtual void onFileChanged() {}
 
-    // The watcher lost records and cannot say what changed (its buffer overflowed). Every editor
-    // must assume its asset is stale. Separate from onFileChanged because "something changed,
-    // possibly yours" is a different instruction from "yours changed", and an editor that treated
-    // them the same would reload every open file on every overflow.
+    // The watcher overflowed and cannot say what changed; assume the asset is stale.
     virtual void onWatchLost() { onFileChanged(); }
 };
 
-// Creates an editor for a path, or nullptr if this factory does not handle it. Registered by the
-// host; the FIRST factory that accepts a path wins, so ordering is registration order.
+// Creates an editor for a path, or nullptr if this factory does not handle it. First match wins.
 using AssetEditorFactory = std::unique_ptr<AssetEditor> (*)(const std::string& path);
 
 // Owns every open editor and decides what a double-click does.
@@ -82,43 +48,24 @@ class AssetEditorHost {
 public:
     void registerFactory(AssetEditorFactory f) { factories_.push_back(f); }
 
-    // Open (or focus) an editor for `path`. Returns false when no registered factory handles it,
-    // which is the caller's cue to fall back to the shell -- opening a .txt in a mesh editor would
-    // be worse than opening it in Notepad.
+    // Opens or focuses an editor for `path`. False when no factory handles it, so the caller can
+    // fall back to the shell.
     bool open(const std::string& path);
 
-    // Draw every open editor. Returns true if any is open, so the caller can tell whether the level
-    // viewport should still be taking input.
-    // `dockInto` is the dock node a NEWLY opened editor becomes a tab in -- the editor's central
-    // region, the same area the level viewport occupies. FirstUseEver, so it is a starting position
-    // and not a cage: drag the tab out and it stays out.
-    //
-    // Passed per frame rather than stored because editor windows do not exist at layout time (their
-    // ImGui names are built from their paths), so DockBuilderDockWindow cannot name them and the
-    // dock has to happen as each one first appears.
-    //
-    // `dpi` scales the fallback size for an UNDOCKED window. Without it the default is raw pixels:
-    // 720x520 on a 300% display is a window barely a fifth of the screen with its own toolbar
-    // clipped, which is exactly how this first shipped.
+    // Draws every open editor, docking a newly opened one into `dockInto`. Returns true if any is
+    // open. `dpi` scales the fallback size of an undocked window.
     bool draw(Engine& e, unsigned dockInto = 0, float dpi = 1.0f);
 
-    // Whether anything is open at all. The level's viewport overlay -- the Perspective/Lit/Show
-    // bar and the gizmo toolbar -- is hidden while an editor covers the central region, because it
-    // is drawn later and would otherwise sit on top of the tab's own toolbar. Which it did.
+    // True when any editor is open.
     bool anyOpen() const { return !editors_.empty(); }
 
     bool anyDirty() const;
     usize count() const { return editors_.size(); }
 
-    // Route a disk change to whichever editor owns that path. Returns true if one did.
-    //
-    // Path comparison is by std::filesystem::equivalent where both exist and by a normalised
-    // string otherwise, because the watcher hands back a path built from the watch root while an
-    // editor holds the one the content browser opened -- the same file reached two ways, differing
-    // in separators, case and any `..` either side picked up.
+    // Routes a disk change to whichever editor owns that path. Returns true if one did.
     bool notifyFileChanged(const std::string& path);
 
-    // The watcher overflowed. Tell every open editor, because nothing else can say who is affected.
+    // Tells every open editor the watcher overflowed.
     void notifyWatchLost();
 
 private:
@@ -128,12 +75,7 @@ private:
     std::vector<usize> closing_;        // deferred: an editor must not be destroyed mid-draw
 };
 
-// The first concrete editor: a .ocmesh inspector.
-//
-// Chosen deliberately as the one that proves the host. It is small, it needs nothing that does not
-// already exist, and it is immediately useful -- until now a .ocmesh was a file you could import and
-// never look at. A 3D preview needs a render target and a second camera, which is real work and is
-// not what the host needs proving.
+// Creates the .ocmesh inspector.
 std::unique_ptr<AssetEditor> makeMeshEditor(const std::string& path);
 
 } // namespace editor

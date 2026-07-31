@@ -1,3 +1,5 @@
+// File I/O, well-known directories and the native open-file dialog.
+
 #include "aver/platform/FileSystem.hpp"
 
 #include <cstdio>
@@ -15,6 +17,7 @@ namespace aver {
 #if defined(_WIN32)
 namespace {
 
+// Converts a wide string to UTF-8.
 std::string narrow(const std::wstring& w) {
     if (w.empty()) return {};
     const int len = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
@@ -23,6 +26,7 @@ std::string narrow(const std::wstring& w) {
     return s;
 }
 
+// Converts a UTF-8 string to a wide string.
 std::wstring widen(const std::string& s) {
     if (s.empty()) return {};
     const int len = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
@@ -31,6 +35,7 @@ std::wstring widen(const std::string& s) {
     return w;
 }
 
+// Asks the shell for a known folder's path. Empty on failure.
 std::string knownFolder(REFKNOWNFOLDERID id) {
     PWSTR raw = nullptr;
     if (FAILED(SHGetKnownFolderPath(id, 0, nullptr, &raw)) || !raw) return {};
@@ -42,6 +47,7 @@ std::string knownFolder(REFKNOWNFOLDERID id) {
 } // namespace
 #endif
 
+// The directory containing the running executable.
 std::string executableDir() {
 #if defined(_WIN32)
     wchar_t buf[MAX_PATH];
@@ -55,6 +61,7 @@ std::string executableDir() {
 #endif
 }
 
+// The per-user, per-machine state directory.
 std::string userDataDir() {
 #if defined(_WIN32)
     const std::string local = knownFolder(FOLDERID_LocalAppData);
@@ -63,6 +70,7 @@ std::string userDataDir() {
     return executableDir();
 }
 
+// The user's Documents folder.
 std::string documentsDir() {
 #if defined(_WIN32)
     const std::string docs = knownFolder(FOLDERID_Documents);
@@ -71,23 +79,26 @@ std::string documentsDir() {
     return executableDir();
 }
 
+// True if the path exists.
 bool fileExists(const std::string& path) {
     std::error_code ec;
     return std::filesystem::exists(path, ec) && !ec;
 }
 
+// True if the path exists and is a directory.
 bool directoryExists(const std::string& path) {
     std::error_code ec;
     return std::filesystem::is_directory(path, ec) && !ec;
 }
 
+// Creates the directory and every missing parent. True if it exists afterwards.
 bool createDirectories(const std::string& path) {
     std::error_code ec;
-    // create_directories reports false for an already-existing path, which is a success here.
     std::filesystem::create_directories(path, ec);
     return !ec && std::filesystem::is_directory(path, ec);
 }
 
+// Reads a whole file into `out`. False if it cannot be read.
 bool readFileBytes(const std::string& path, std::vector<u8>& out) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return false;
@@ -99,6 +110,7 @@ bool readFileBytes(const std::string& path, std::vector<u8>& out) {
     return true;
 }
 
+// Reads a whole file into `out` as text. False if it cannot be read.
 bool readFileText(const std::string& path, std::string& out) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return false;
@@ -110,6 +122,7 @@ bool readFileText(const std::string& path, std::string& out) {
     return true;
 }
 
+// Writes `size` bytes to the file, truncating it. False on failure.
 bool writeFileBytes(const std::string& path, const void* data, usize size) {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) return false;
@@ -117,15 +130,16 @@ bool writeFileBytes(const std::string& path, const void* data, usize size) {
     return static_cast<bool>(f);
 }
 
+// Writes `text` to the file, truncating it. False on failure.
 bool writeFileText(const std::string& path, const std::string& text) {
     return writeFileBytes(path, text.data(), text.size());
 }
 
+// Shows the shell's open-file dialog. False if cancelled or unavailable.
 bool openFileDialog(const std::string& title, const std::string& filterLabel,
                     const std::string& spec, const std::string& initialDir, std::string& out) {
 #if defined(_WIN32)
-    // The dialog is COM, and the engine thread has not initialised COM for itself. Do it per call
-    // and undo it, so nothing else in the process inherits an apartment it did not ask for.
+    // COM is initialised per call and undone, so nothing else inherits an apartment.
     const HRESULT ci = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     const bool weInitialised = SUCCEEDED(ci);
     if (ci == RPC_E_CHANGED_MODE) { /* someone else owns the apartment; the dialog still works */ }

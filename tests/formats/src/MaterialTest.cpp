@@ -1,19 +1,9 @@
-// Golden test for the material asset path: the .ocmat reader/writer and the mip filter behind
-// every texture the material system uploads.
-//
-// Separate from FormatTest because it is the only test that needs pbr::MaterialDesc, and dragging
-// the material DLL into the loader test would make a failure to load Aver.Render.PBR.dll look like
-// a broken .ocbeam parser.
-//
-// No GPU is touched: everything here is CPU-side, so it runs on a machine with no adapter at all.
-// The upload step itself (assets::uploadTexture) is the one part not covered, because it IS the RHI
-// call -- there is nothing left to test that createTexture does not do. packMaterial IS covered,
-// even though it lives in the RHI-linking half of the module: it is a hand-maintained byte layout
-// shared with a HLSL cbuffer, which is the single easiest thing here to get silently wrong.
+// Golden test for the material asset path: the .ocmat reader and writer, the packed GPU block,
+// the mip filter, and the C# material-script rewriter. CPU only; no GPU is touched.
 #include "aver/formats/OcMat.hpp"
 #include "aver/formats/MaterialScript.hpp"
 #include "aver/formats/Texture.hpp"
-#include "aver/pbr/MaterialGpu.hpp"   // packMaterial: the block the shader actually reads
+#include "aver/pbr/MaterialGpu.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
@@ -23,6 +13,7 @@ using namespace aver;
 
 static int g_failures = 0;
 
+// Logs one assertion and counts the failures.
 static void check(bool cond, const std::string& what) {
     if (cond) {
         AVER_INFO("   PASS  {}", what);
@@ -32,11 +23,10 @@ static void check(bool cond, const std::string& what) {
     }
 }
 
+// True when two floats are within eps.
 static bool near(f32 a, f32 b, f32 eps = 1e-5f) { return std::fabs(a - b) <= eps; }
 
-// A file that uses every record the reader claims to implement, plus two it must SKIP rather than
-// choke on. The spacing is deliberately irregular and one path contains a space: both are things a
-// hand-authored file does and a whitespace-token parser gets wrong.
+// A .ocmat using every implemented record, plus two the reader must skip.
 static const char* kFull = R"(OCMAT 1
 # a comment line
 NAME Scuffed Floor Tile
@@ -69,6 +59,7 @@ GRAPH{
 PARAM metallicFactor 0.9
 )";
 
+// Parses kFull and checks every record it carries.
 static void testFullParse() {
     AVER_INFO("=== .ocmat: every implemented record ===");
     pbr::MaterialDesc d;
@@ -107,12 +98,10 @@ static void testFullParse() {
     check(d.textures[static_cast<u32>(pbr::TextureSlot::Emissive)].empty(), "an unbound slot stays unset");
 
     check(ex.hasGraph, "GRAPH block detected");
-    // The one that actually matters: a nested brace inside GRAPH{} must not end the skip early, or
-    // the records after it get parsed as if they were graph nodes -- or worse, the graph's own nodes
-    // get parsed as records. The trailing PARAM proves the skip ended in the right place.
     check(near(d.metallicFactor, 0.9f), "GRAPH{} skip counts nested braces and resumes after it");
 }
 
+// Checks which malformed .ocmat files are refused and which are tolerated.
 static void testTolerance() {
     AVER_INFO("=== .ocmat: what must fail and what must not ===");
     pbr::MaterialDesc d;
@@ -125,8 +114,6 @@ static void testTolerance() {
     check(near(d.metallicFactor, 1.0f) && near(d.roughnessFactor, 1.0f),
           "...and those defaults are glTF's, not zero");
 
-    // Malformed input must not take a field with it. A TEX naming a slot that does not exist has to
-    // leave every real slot alone rather than landing in slot 0 by falling through a lookup.
     check(fmt::parseOcmat("OCMAT 1\nTEX notASlot {path:x.png}\n", d, nullptr, &err),
           "an unknown TEX slot is skipped, not fatal");
     check(d.textures[0].empty(), "...and does not spill into slot 0");
@@ -135,16 +122,12 @@ static void testTolerance() {
           "an unterminated {...} is skipped, not fatal");
     check(d.textures[0].empty(), "...and binds nothing");
 
-    // A tiling of zero would make the world-aligned projection read one texel across a whole
-    // surface. The reader drops it rather than storing it, so a typo cannot produce a material
-    // whose only symptom is a flat colour -- which is indistinguishable from having no texture.
     check(fmt::parseOcmat("OCMAT 1\nFLAGS worlduv=1\nPARAM uvTiling 0\n", d, nullptr, &err),
           "PARAM uvTiling 0 is tolerated");
     check(d.uvTiling > 0.0f, "...but not stored: the default survives");
 }
 
-// The GPU block is a cross-module ABI with no compiler behind it, so what packMaterial produces is
-// checked here rather than assumed. A wrong flag bit or a missing reciprocal shades plausibly.
+// Checks packMaterial: the 64-byte block the shader reads.
 static void testPack() {
     AVER_INFO("=== material: the packed GPU block ===");
     check(sizeof(pbr::MaterialConstants) == 64, "MaterialConstants is still 64 bytes");
@@ -160,15 +143,10 @@ static void testPack() {
     check((c.flags & pbr::MaterialFlag_WorldAlignedUv) != 0, "world-aligned sets its flag bit");
     check(near(c.uvTilesPerCm, 1.0f / 250.0f), "250 cm per tile -> 0.004 tiles per cm");
 
-    // A desc can be built in C++ without going through the ABI's validation, so the pack step has
-    // to defend itself: 1/0 is inf, and inf * a world position is the NaN UV that reaches the
-    // sampler. Zero tiles per cm reads one texel instead, which is wrong but finite.
     d.uvTiling = 0.0f;
     c = pbr::packMaterial(d);
     check(c.uvTilesPerCm == 0.0f, "a zero tiling packs to zero, never to inf");
 
-    // The texture flags are what tell a branch-free shader which maps are real, since it cannot see
-    // an unbound slot -- every one is null-filled with a valid view of the right dimension.
     pbr::MaterialDesc t;
     t.textures[static_cast<u32>(pbr::TextureSlot::Normal)].path = "n.png";
     t.textures[static_cast<u32>(pbr::TextureSlot::Emissive)].id = 7;
@@ -178,6 +156,7 @@ static void testPack() {
     check((c.flags & pbr::MaterialFlag_BaseColorMap) == 0, "an unbound slot does not");
 }
 
+// Writes a parsed material back out and re-parses it.
 static void testRoundTrip() {
     AVER_INFO("=== .ocmat: round trip ===");
     pbr::MaterialDesc a;
@@ -216,15 +195,13 @@ static void testRoundTrip() {
     }
     check(textures, "every TEX binding round-trips, id and path alike");
 
-    // CULL is DERIVED from twoSided on write, so a file that said `CULL none` and `twosided=1` must
-    // not come back as a file that says `CULL back` and `twosided=1`. The two can never disagree.
     check(text.find("CULL none") != std::string::npos, "CULL is written from twoSided, not echoed");
 
-    // The colour space a slot is written with is the slot's, not whatever the source file claimed.
     check(text.find("uv0 sRGB") != std::string::npos, "base colour is written sRGB");
     check(text.find("uv1 normal") != std::string::npos, "the normal slot is written 'normal'");
 }
 
+// Checks each BLEND mode through parse and write.
 static void testBlendModes() {
     AVER_INFO("=== .ocmat: BLEND ===");
     pbr::MaterialDesc d;
@@ -242,8 +219,7 @@ static void testBlendModes() {
           && d.alphaMode == pbr::AlphaMode::Opaque, "opaque -> Opaque");
 }
 
-// The mip filter is the other half of "a texture looks right": every material the system uploads
-// goes through it, and getting it wrong is a texture that shifts colour as it recedes.
+// Checks generateMipChain: sRGB filtering in linear light, and renormalised normal maps.
 static void testMipChain() {
     AVER_INFO("=== texture: mip chain ===");
 
@@ -265,13 +241,10 @@ static void testMipChain() {
     check(t.levels.size() == 3, "4x4 produces levels 4, 2, 1");
     check(t.levels[1].width == 2 && t.levels[2].width == 1, "each level halves");
 
-    // Half black and half white averaged in LINEAR light is 0.5 linear, which is 188 in sRGB -- not
-    // 128. A filter that averaged the encoded bytes would give 127/128 here, and that is exactly the
-    // bug that makes a checkerboard darken as it recedes.
     const u8 mid = t.levels[2].pixels[0];
     check(mid >= 186 && mid <= 190, "sRGB mips are filtered in linear light (got " + std::to_string(mid) + ", not ~128)");
 
-    // Build a 2x2 normal map from four explicit texels and filter it to 1x1.
+    // Builds a 2x2 normal map from four texels and filters it to 1x1.
     auto mip1of = [](std::initializer_list<u8> texels) {
         fmt::TextureData n;
         n.width = 2; n.height = 2; n.srgb = false;
@@ -283,10 +256,6 @@ static void testMipChain() {
         return n;
     };
 
-    // Two normals leaning hard in opposite directions along X, both with the strongly positive Z
-    // every real tangent-space normal has. X must cancel to flat, and the result must come back
-    // RENORMALISED -- averaging encoded bytes and stopping there is what makes a normal map lose
-    // its slope with distance instead of just its detail.
     const fmt::TextureData lean = mip1of({
         204, 128, 230, 255,   51, 128, 230, 255,    // (+0.6, 0, +0.8) and (-0.6, 0, +0.8)
         204, 128, 230, 255,   51, 128, 230, 255,
@@ -296,9 +265,6 @@ static void testMipChain() {
     check(avg[0] == 128, "opposed X cancels to the flat value");
     check(avg[2] >= 253, "the average is renormalised, so Z returns to ~1 (got " + std::to_string(avg[2]) + ")");
 
-    // The degenerate case the filter guards: four texels that cancel to the EXACT zero vector.
-    // Normalising that is a division by zero, and the NaN it produces reaches the cone trace as the
-    // GPU hang this project already has one of to its name.
     const fmt::TextureData cancel = mip1of({
         255, 128, 128, 255,     0, 127, 127, 255,
         255, 128, 128, 255,     0, 127, 127, 255,
@@ -309,13 +275,7 @@ static void testMipChain() {
 }
 
 
-// The .ocmat grammar has TWO writers now: modules/formats/src/OcMat.cpp, and the C# MaterialBuilder
-// that Aver.MaterialCompiler runs at build time. That is a real cost, paid so that baking a material
-// does not require a loaded engine -- and this is the test that stops the two drifting.
-//
-// The text below is EXACTLY what MaterialBuilder.Emit produces, pasted verbatim. If somebody changes
-// the C# emitter and not the C++ reader (or the reverse), this goes red rather than a project's
-// surfaces quietly losing a parameter.
+// Reads a .ocmat emitted by the C# material compiler, so the two writers cannot drift apart.
 static void testGeneratedByCsharp() {
     AVER_INFO("=== .ocmat written by the C# material compiler ===");
 
@@ -368,12 +328,8 @@ static void testGeneratedByCsharp() {
     const u32 oc = static_cast<u32>(pbr::TextureSlot::Occlusion);
     check(d.textures[bc].path == "Textures/T_Crate_BC.png", "the base colour path survives");
     check(d.textures[nm].path == "Textures/T_Crate_N.png", "and the normal map's");
-    // metalRough and occlusion deliberately share one texture in this material. A reader that keyed
-    // bindings by path rather than by slot would collapse them into one.
     check(d.textures[oc].path == "Textures/T_Crate_MR.png", "occlusion keeps its own binding to the shared texture");
 
-    // And back out through the C++ writer: what the two produce must PARSE THE SAME, even where the
-    // bytes differ (the C++ writer adds its own header comment and column alignment).
     const std::string rewritten = fmt::writeOcmat(d, &ex);
     pbr::MaterialDesc d2;
     check(fmt::parseOcmat(rewritten.c_str(), d2, nullptr, &err), "the C++ writer's output parses: " + err);
@@ -386,11 +342,7 @@ static void testGeneratedByCsharp() {
 }
 
 
-// Rewriting the C# SOURCE from an edited material.
-//
-// With C# as the source of a surface, the Details panel saving to the .ocmat would write a build
-// artefact the next compile overwrites -- a change that appears to work and then silently vanishes.
-// So it writes the .cs, and this is what stops that rewrite eating the file.
+// Checks the rewriter that writes an edited material back into its C# source.
 static void testScriptRewrite() {
     AVER_INFO("=== rewriting the C# source ===");
 
@@ -419,11 +371,11 @@ static void testScriptRewrite() {
     pbr::MaterialDesc d;
     d.name = "M_Crate";
     d.uvMode = pbr::UvMode::WorldAligned;
-    d.uvTiling = 75.0f;            // changed from 60
+    d.uvTiling = 75.0f;
     d.normalScale = 1.2f;
     d.reflectance = 0.035f;
     d.f90 = 0.6f;
-    d.roughnessFactor = 0.5f;      // newly set
+    d.roughnessFactor = 0.5f;
     d.textures[static_cast<u32>(pbr::TextureSlot::BaseColor)].path = "Textures/T_Crate_BC.png";
 
     std::string out, err;
@@ -434,29 +386,20 @@ static void testScriptRewrite() {
     check(out.find("60f") == std::string::npos, "and the old one is gone");
     check(out.find(".Roughness(0.5f)") != std::string::npos, "a newly-set value appears");
 
-    // The authored prose survives. Nothing in a MaterialDesc could reproduce it, so losing it would
-    // be losing the only part of the file that says WHY.
     check(out.find("Timber crates: warm, against a deliberately cool room.") != std::string::npos,
           "the .Comment prose is preserved");
 
-    // Everything outside Configure is byte-identical.
     check(out.find("using Aver.Materials;") != std::string::npos, "the usings survive");
     check(out.find("namespace SkyForge.Materials;") != std::string::npos, "the namespace survives");
     check(out.find("/// <summary>Timber crates.</summary>") != std::string::npos, "the doc comment survives");
     check(out.find("public sealed class Crate : Material") != std::string::npos, "the class declaration survives");
 
-    // THE OTHER MATERIAL IN THE SAME FILE IS UNTOUCHED. A rewriter that took the first Configure in
-    // the file would silently rewrite somebody else's material with these values.
     check(out.find("public static void Configure(MaterialBuilder b) => b.Roughness(0.25f);") != std::string::npos,
           "a second material in the same file is left exactly as it was");
 
-    // Defaults are NOT written back. Restating eighteen unchanged values is what makes a
-    // generated-then-edited file stop being worth editing.
     check(out.find(".Metallic(") == std::string::npos, "an unchanged default is not emitted");
     check(out.find(".OcclusionStrength(") == std::string::npos, "nor another");
 
-    // Idempotent: rewriting the result with the same values must produce the same bytes, or every
-    // save would show a diff whether or not anything changed.
     std::string twice;
     check(fmt::rewriteMaterialScript(out, "M_Crate", d, nullptr, twice, &err), "it rewrites its own output");
     check(twice == out, "and rewriting twice changes nothing");
@@ -468,8 +411,6 @@ static void testScriptRewrite() {
               "a name that is not in the file is refused");
         check(o.empty(), "and nothing is written on refusal");
 
-        // A Configure doing more than the chain cannot be preserved, so it is declined rather than
-        // truncated. Losing a loop or a local is not something a save should be able to do.
         static const char* kRich =
             "[AverMaterial(\"M_Rich\")]\n"
             "public sealed class Rich : Material\n"
@@ -483,7 +424,6 @@ static void testScriptRewrite() {
         check(!fmt::rewriteMaterialScript(kRich, "M_Rich", d, nullptr, o, &e),
               "a Configure with more than one statement is refused, not truncated");
 
-        // A brace inside a texture path must not be read as punctuation.
         static const char* kBrace =
             "[AverMaterial(\"M_Odd\")]\n"
             "public sealed class Odd : Material\n"
@@ -504,12 +444,9 @@ static void testScriptRewrite() {
         nd.roughnessFactor = 0.3f;
         const std::string src = fmt::newMaterialScript("M_Glass", "MyGame.Materials", nd, nullptr);
         check(src.find("[AverMaterial(\"M_Glass\")]") != std::string::npos, "it carries the bound name");
-        // The CLASS drops the M_ prefix; the BOUND name keeps it. `class M_Glass` reads as a C
-        // prefix in a language with namespaces, and the bound name is what a level references.
         check(src.find("class Glass : Material") != std::string::npos, "the class name drops the M_ prefix");
         check(src.find(".Roughness(0.3f)") != std::string::npos, "and the value is in it");
 
-        // And what it produces must be something the rewriter can then edit.
         std::string o, e;
         nd.roughnessFactor = 0.9f;
         check(fmt::rewriteMaterialScript(src, "M_Glass", nd, nullptr, o, &e),
@@ -518,6 +455,7 @@ static void testScriptRewrite() {
     }
 }
 
+// Runs every material test. Returns the failure count.
 int main() {
     testFullParse();
     testTolerance();

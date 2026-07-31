@@ -1,28 +1,12 @@
 #ifndef AVER_PBR_ABI_H
 #define AVER_PBR_ABI_H
 
-/* PBR C ABI — the stable surface the C# scripting layer binds to via P/Invoke.
+/* PBR C ABI — the stable surface the C# scripting layer binds to via P/Invoke. Materials are
+ * instances, so everything is by handle.
  *
- * Deliberately plain C, in the same idiom as voxi_abi.h: only int32_t / float / const char* cross
- * the boundary, so the same header works for C, C++, C# DllImport and any other FFI. Enum values
- * match the aver::pbr enums one-for-one.
- *
- * ONE deviation from that idiom, and it is deliberate: a texture's opaque asset id is int64_t. It
- * is forward-compatible with an ObjectId or an `.octex` GUID, neither of which fits in 32 bits, and
- * splitting it into halves would put the burden of reassembling an identifier on every binding.
- * int64_t is blittable in C# (long) exactly as int32_t is.
- *
- * Vectors are returned through a float* OUT-PARAM, never as a small struct by value: the
- * by-value-small-struct return convention differs between compilers and marshallers, and getting it
- * wrong corrupts the return register rather than failing to link.
- *
- * Materials are INSTANCES, so unlike Voxi's global-settings shape everything here is by HANDLE:
- * create/destroy, and set-by-handle.
- *
- * Error convention: setters return 1 on success, 0 if the request was rejected (stale handle, bad
- * slot, or a value out of range). Getters return the current value, or a documented neutral value
- * for a stale handle.
- */
+ * Convention: setters return 1 on success and 0 if the request was rejected; getters return the
+ * current value or a documented neutral value for a stale handle. Vectors come back through a
+ * float* out-param, never as a small struct by value. */
 
 #include <stdint.h>
 
@@ -111,8 +95,7 @@ AVER_PBR_ABI float   aver_pbr_get_normal_scale(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_normal_scale(aver_pbr_material m, float v);
 AVER_PBR_ABI float   aver_pbr_get_occlusion_strength(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_occlusion_strength(aver_pbr_material m, float v);
-/* Reflectance of the dielectric base (0.04 for most things, ~0.02 water, ~0.17 gemstone) and the
-   reflectance at grazing incidence. Both in [0,1]; see MaterialDesc for why a surface owns them. */
+/* Reflectance of the dielectric base and the reflectance at grazing incidence, both in [0,1]. */
 AVER_PBR_ABI float   aver_pbr_get_reflectance(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_reflectance(aver_pbr_material m, float v);
 AVER_PBR_ABI float   aver_pbr_get_f90(aver_pbr_material m);
@@ -128,18 +111,10 @@ AVER_PBR_ABI int32_t aver_pbr_set_two_sided(aver_pbr_material m, int32_t on);
 AVER_PBR_ABI int32_t aver_pbr_get_cast_shadow(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_cast_shadow(aver_pbr_material m, int32_t on);
 
-/* ---- texture mapping ----
- * AVER_PBR_UV_WORLD_ALIGNED projects position onto the dominant axis of the surface normal instead
- * of using the mesh's own UVs, which is what gives a blockout built from one scaled cube a constant
- * texel density. Tiling is in world CENTIMETRES per tile and is read only in that mode; a value <= 0
- * is rejected rather than stored, because it would collapse the projection.
- *
- * THE PROJECTION HAPPENS IN THE OBJECT'S FRAME, not the world's, despite the constant's name. In the
- * world's frame the texture is nailed to the world and the object slides through it, so anything that
- * moves swims -- most visibly on a held weapon, where turning the character crawls the pattern across
- * it. The name and this constant's value are unchanged on purpose: renaming would change the meaning
- * of an existing entry point, which is a MAJOR break by the rule in docs/ABI.md, and would invalidate
- * every .ocmat authored against the `worlduv` key. */
+/* ---- texture mapping. Tiling is world CENTIMETRES per tile and is read only under
+ * AVER_PBR_UV_WORLD_ALIGNED; a value <= 0 is rejected. That mode projects in the OBJECT's frame
+ * despite its name, and the name is FROZEN: renaming it is a major ABI break and would invalidate
+ * every .ocmat authored against the `worlduv` key. ---- */
 AVER_PBR_ABI int32_t aver_pbr_get_uv_mode(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_uv_mode(aver_pbr_material m, int32_t mode);
 AVER_PBR_ABI float   aver_pbr_get_uv_tiling(aver_pbr_material m);
@@ -154,8 +129,7 @@ AVER_PBR_ABI int32_t     aver_pbr_set_texture_id(aver_pbr_material m, int32_t sl
 AVER_PBR_ABI int32_t     aver_pbr_clear_texture(aver_pbr_material m, int32_t slot);
 
 /* ---- upload bookkeeping ---- */
-/* 1 when this material still owes the GPU an upload. READING IT CLEARS IT, so exactly one consumer
- * acts on each change — same contract as aver_voxi's msaa dirty flag. */
+/* 1 when this material still owes the GPU an upload. READING IT CLEARS IT. */
 AVER_PBR_ABI int32_t aver_pbr_consume_dirty(aver_pbr_material m);
 
 #ifdef __cplusplus

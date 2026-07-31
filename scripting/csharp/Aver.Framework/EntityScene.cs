@@ -1,80 +1,68 @@
+// The scene half of Entity: hierarchy, component management, generic field access, mesh and tags.
+
 using System.Collections.Generic;
-using Aver.Scene;   // Vec3, SceneIds, Assets
+using Aver.Scene;
 
 namespace Aver.Framework;
 
-// The scene-access half of Entity: the hierarchy, component management, tags, and the generic component
-// FIELD accessors the typed conveniences (Visible, SetMesh, Tags...) are built on. Kept in its own partial
-// so Entity.cs stays focused on identity and the transform. All of it reads/writes the live world through
-// the scene C ABI; a call on a stale handle is a harmless no-op returning a neutral value.
+// Entity, continued: everything that reads or writes the live world through the scene C ABI.
 public readonly partial struct Entity
 {
-    // ---- hierarchy ----
-
     /// <summary>Immediate parent, or <see cref="Entity.None"/> for a root or a stale handle.</summary>
     public Entity Parent => new(SceneNative.aver_scene_parent(Handle));
 
-    /// <summary>First child, or <see cref="Entity.None"/>. Prefer <see cref="Children"/> to walk them.</summary>
+    /// <summary>First child, or <see cref="Entity.None"/>.</summary>
     public Entity FirstChild => new(SceneNative.aver_scene_first_child(Handle));
 
-    /// <summary>Next sibling under the same parent, or <see cref="Entity.None"/> when this is the last.</summary>
+    /// <summary>Next sibling under the same parent, or <see cref="Entity.None"/>.</summary>
     public Entity NextSibling => new(SceneNative.aver_scene_next_sibling(Handle));
 
     /// <summary>Number of immediate children.</summary>
     public int ChildCount => SceneNative.aver_scene_child_count(Handle);
 
-    /// <summary>The immediate children, in link order. Snapshot the sequence before reparenting during it.</summary>
+    /// <summary>The immediate children, in link order.</summary>
     public IEnumerable<Entity> Children
     {
         get { for (Entity c = FirstChild; c.IsValid; c = c.NextSibling) yield return c; }
     }
 
-    /// <summary>Reparent under <paramref name="parent"/> (<see cref="Entity.None"/> makes this a root).
-    /// Refuses a cycle or a self-parent. False on rejection.</summary>
+    /// <summary>Reparents under <paramref name="parent"/>. False on rejection (a cycle or a self-parent).</summary>
     public bool SetParent(Entity parent) => SceneNative.aver_scene_set_parent(Handle, parent.Handle) != 0;
 
-    /// <summary>Detach from any parent, making this a root.</summary>
+    /// <summary>Detaches from any parent, making this a root.</summary>
     public bool Detach() => SceneNative.aver_scene_set_parent(Handle, 0) != 0;
-
-    // ---- component management ----
 
     /// <summary>True if this entity currently carries <paramref name="component"/>.</summary>
     public bool HasComponent(Component component) => SceneNative.aver_scene_has_component(Handle, (int)component) != 0;
 
-    /// <summary>Attach <paramref name="component"/> (idempotent). False if the type or handle is bad.</summary>
+    /// <summary>Attaches <paramref name="component"/> (idempotent). False if the type or handle is bad.</summary>
     public bool AddComponent(Component component) => SceneNative.aver_scene_add_component(Handle, (int)component) != 0;
 
-    // ---- generic component field access ----
-    // Read/write ANY component field by its qualified name ("CLight.intensityLux", an [Editable] field, ...).
-    // The name resolves to a dense id once and is cached (SceneIds.Field), so repeated access is cheap. A
-    // read of an unknown field or an absent component returns a neutral default; a write returns false.
-
-    /// <summary>Read a float field by qualified name, or 0 if absent.</summary>
+    /// <summary>Reads a float field by qualified name, or 0 if absent.</summary>
     public float GetFloat(string field) => SceneNative.aver_scene_get_f32(Handle, SceneIds.Field(field));
-    /// <summary>Write a float field. False if the field is unknown or the component is absent.</summary>
+    /// <summary>Writes a float field. False if the field is unknown or the component is absent.</summary>
     public bool SetFloat(string field, float value) => SceneNative.aver_scene_set_f32(Handle, SceneIds.Field(field), value) != 0;
 
-    /// <summary>Read an int (or bool) field, or 0 if absent.</summary>
+    /// <summary>Reads an int (or bool) field, or 0 if absent.</summary>
     public int GetInt(string field) => SceneNative.aver_scene_get_i32(Handle, SceneIds.Field(field));
-    /// <summary>Write an int (or bool) field. False if unknown/absent.</summary>
+    /// <summary>Writes an int (or bool) field. False if unknown or absent.</summary>
     public bool SetInt(string field, int value) => SceneNative.aver_scene_set_i32(Handle, SceneIds.Field(field), value) != 0;
 
-    /// <summary>Read a 64-bit field (an ObjectId/mesh id family), or 0 if absent.</summary>
+    /// <summary>Reads a 64-bit field, or 0 if absent.</summary>
     public long GetInt64(string field) => SceneNative.aver_scene_get_i64(Handle, SceneIds.Field(field));
-    /// <summary>Write a 64-bit field. False if unknown/absent.</summary>
+    /// <summary>Writes a 64-bit field. False if unknown or absent.</summary>
     public bool SetInt64(string field, long value) => SceneNative.aver_scene_set_i64(Handle, SceneIds.Field(field), value) != 0;
 
-    /// <summary>Read a Vec3 field, or <see cref="Vec3.Zero"/> if absent or not a Vec3.</summary>
+    /// <summary>Reads a Vec3 field, or <see cref="Vec3.Zero"/> if absent or not a Vec3.</summary>
     public Vec3 GetVec3(string field)
     {
         int id = SceneIds.Field(field);
-        // The native get_vec copies sizeof(float)*arity bytes; a Quat (4) or Mat4 (16) field would overrun
-        // the 3-float scratch. Only a Vec3 (arity 3) is safe here — reject anything else, don't corrupt.
+        // get_vec copies sizeof(float)*arity bytes, so a Quat or Mat4 field would overrun the 3-float scratch.
         if (SceneNative.aver_scene_field_arity(id) != 3) return Vec3.Zero;
         float[] o = Scratch3;
         return SceneNative.aver_scene_get_vec(Handle, id, o) != 0 ? new Vec3(o[0], o[1], o[2]) : Vec3.Zero;
     }
-    /// <summary>Write a Vec3 field. False if unknown, absent, or not a Vec3 (arity 3).</summary>
+    /// <summary>Writes a Vec3 field. False if unknown, absent, or not arity 3.</summary>
     public bool SetVec3(string field, Vec3 value)
     {
         int id = SceneIds.Field(field);
@@ -84,18 +72,14 @@ public readonly partial struct Entity
         return SceneNative.aver_scene_set_vec(Handle, id, s) != 0;
     }
 
-    /// <summary>Read a string field, or "" if absent.</summary>
+    /// <summary>Reads a string field, or "" if absent.</summary>
     public string GetString(string field) => Fw.Str(SceneNative.aver_scene_get_str(Handle, SceneIds.Field(field)));
-    /// <summary>Write a string field. False if unknown/absent.</summary>
+    /// <summary>Writes a string field. False if unknown or absent.</summary>
     public bool SetString(string field, string value) => SceneNative.aver_scene_set_str(Handle, SceneIds.Field(field), value) != 0;
-
-    // ---- typed component conveniences ----
 
     private const int MeshVisibleBit = 0x1;   // CMeshRenderer.flags bit 0 == kMeshRendererVisible
 
-    // Attach a mesh renderer if the entity has none, seeding the VISIBLE bit. aver_scene_add_component
-    // zero-fills the new component, but the real CMeshRenderer default is visible (the framework spawn
-    // path seeds it too) — so without this a SetMesh on a bare entity would set the mesh yet never draw it.
+    // Attaches a mesh renderer if the entity has none, seeding the visible bit that add_component zero-fills.
     private void EnsureMeshRenderer()
     {
         if (HasComponent(Component.MeshRenderer)) return;
@@ -103,11 +87,10 @@ public readonly partial struct Entity
         SetInt("CMeshRenderer.flags", MeshVisibleBit);
     }
 
-    /// <summary>Whether this entity's mesh is drawn (CMeshRenderer visible bit). False if it has no mesh.</summary>
+    /// <summary>Whether this entity's mesh is drawn. False if it has no mesh.</summary>
     public bool Visible => (GetInt("CMeshRenderer.flags") & MeshVisibleBit) != 0;
 
-    /// <summary>Show or hide the mesh. Adds a mesh renderer if the entity lacks one, so a bare entity can
-    /// be made drawable; combine with <see cref="SetMesh"/>.</summary>
+    /// <summary>Shows or hides the mesh, adding a mesh renderer if the entity lacks one.</summary>
     public bool SetVisible(bool visible)
     {
         EnsureMeshRenderer();
@@ -115,42 +98,39 @@ public readonly partial struct Entity
         return SetInt("CMeshRenderer.flags", visible ? (flags | MeshVisibleBit) : (flags & ~MeshVisibleBit));
     }
 
-    /// <summary>Set the drawn mesh by asset path (hashed to its ObjectId). Adds a mesh renderer if absent
-    /// (drawn by default).</summary>
+    /// <summary>Sets the drawn mesh by asset path, adding a mesh renderer if absent.</summary>
     public bool SetMesh(string meshPath)
     {
         EnsureMeshRenderer();
         return SetInt64("CMeshRenderer.mesh", Assets.ObjectIdOf(meshPath));
     }
 
-    /// <summary>Set the material by name (resolved to its opaque handle). Adds a mesh renderer if absent.</summary>
+    /// <summary>Sets the material by name, adding a mesh renderer if absent.</summary>
     public bool SetMaterial(string materialName)
     {
         EnsureMeshRenderer();
         return SetInt("CMeshRenderer.material", SceneNative.aver_scene_material(0, materialName));
     }
 
-    // ---- tags (CTags.bits, a 32-bit mask the gameplay layer gives meaning to) ----
-
-    /// <summary>The raw 32-bit tag mask, or 0 if the entity has no tags. Define your own bit constants.</summary>
+    /// <summary>The raw 32-bit tag mask (CTags.bits), or 0 if the entity has no tags.</summary>
     public uint Tags => unchecked((uint)GetInt("CTags.bits"));
 
-    /// <summary>Replace the whole tag mask. Adds a Tags component if the entity lacks one.</summary>
+    /// <summary>Replaces the whole tag mask, adding a Tags component if absent.</summary>
     public bool SetTags(uint mask)
     {
         AddComponent(Component.Tags);
         return SetInt("CTags.bits", unchecked((int)mask));
     }
 
-    /// <summary>True if EVERY bit in <paramref name="mask"/> is set (and the mask is non-zero).</summary>
+    /// <summary>True if every bit in <paramref name="mask"/> is set, and the mask is non-zero.</summary>
     public bool HasTag(uint mask) => mask != 0 && (Tags & mask) == mask;
 
-    /// <summary>True if ANY bit in <paramref name="mask"/> is set.</summary>
+    /// <summary>True if any bit in <paramref name="mask"/> is set.</summary>
     public bool HasAnyTag(uint mask) => (Tags & mask) != 0;
 
-    /// <summary>Set the bits in <paramref name="mask"/>.</summary>
+    /// <summary>Sets the bits in <paramref name="mask"/>.</summary>
     public bool AddTag(uint mask) => SetTags(Tags | mask);
 
-    /// <summary>Clear the bits in <paramref name="mask"/>.</summary>
+    /// <summary>Clears the bits in <paramref name="mask"/>.</summary>
     public bool RemoveTag(uint mask) => SetTags(Tags & ~mask);
 }
