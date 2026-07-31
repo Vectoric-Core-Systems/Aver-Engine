@@ -16,9 +16,14 @@ int Engine::run(Application* app) {
     BootConfig cfg = app->config();
     AVER_INFO("Aver Engine 0.1.0 starting (headless={}, maxFrames={})", cfg.headless, cfg.maxFrames);
 
+    // A CAPTURE RUN MUST NOT INTERRUPT ANYBODY. maxFrames > 0 means an automated run that exits on
+    // its own, so it gets no splash (the splash is WS_EX_TOPMOST and would cover whatever the
+    // machine's owner is looking at) and its window opens without taking focus.
+    const bool interactive = cfg.maxFrames == 0;
+
     // --- Splash (shown during startup) ---
     Splash splash;
-    if (!cfg.headless) splash.show(executableDir() + "\\splash.png");
+    if (!cfg.headless && interactive) splash.show(executableDir() + "\\splash.png");
 
     // --- Window (optional; fall back to headless on failure) ---
     if (!cfg.headless) {
@@ -27,6 +32,7 @@ int Engine::run(Application* app) {
         wd.title = cfg.windowTitle;
         wd.width = cfg.windowWidth;
         wd.height = cfg.windowHeight;
+        wd.activate = interactive;
         if (!window_->create(wd)) {
             AVER_WARN("[Engine] window creation failed — continuing headless");
             delete window_;

@@ -1,3 +1,5 @@
+// Win32 backend for Window: class registration, the window procedure, and the message pump.
+
 #include "aver/platform/Window.hpp"
 #include "aver/core/Log.hpp"
 
@@ -9,9 +11,7 @@ namespace aver {
 
 static const wchar_t* kClassName = L"AverEngineWindow";
 
-// Make the process per-monitor DPI aware (once) so the OS never bitmap-upscales our
-// window — that virtualisation is what makes a hi-DPI viewport look soft and feel
-// sluggish. Done dynamically so we still link/run on older Windows.
+// Makes the process per-monitor DPI aware, once. Resolved dynamically to still run on older Windows.
 static void enableDpiAwareness() {
     static bool done = false;
     if (done) return;
@@ -26,11 +26,10 @@ static void enableDpiAwareness() {
             return;
         }
     }
-    SetProcessDPIAware(); // legacy fallback (system-DPI aware)
+    SetProcessDPIAware();
 }
 
-// Query a window's DPI scale (1.0 == 96 DPI). GetDpiForWindow is Win10+; fall back to
-// the device-context DPI otherwise.
+// Returns a window's DPI scale (1.0 == 96 DPI).
 static f32 queryDpiScale(HWND hwnd) {
     if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
         using GetDpiFn = UINT(WINAPI*)(HWND);
@@ -46,6 +45,7 @@ static f32 queryDpiScale(HWND hwnd) {
     return dpi ? static_cast<f32>(dpi) / 96.0f : 1.0f;
 }
 
+// Converts a UTF-8 string to a wide string.
 static std::wstring utf8ToWide(const std::string& s) {
     if (s.empty()) return {};
     const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
@@ -54,6 +54,7 @@ static std::wstring utf8ToWide(const std::string& s) {
     return w;
 }
 
+// The window procedure: translates OS messages into Events and drives the modal-loop state.
 static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == WM_NCCREATE) {
         auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
@@ -64,7 +65,6 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     auto* self = reinterpret_cast<Window*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (!self) return DefWindowProcW(hwnd, msg, wParam, lParam);
 
-    // Let a UI (ImGui) inspect the raw message first; if it fully consumes it, stop.
     if (auto hook = self->messageHook()) {
         if (hook(hwnd, static_cast<u32>(msg), static_cast<u64>(wParam), static_cast<i64>(lParam))) {
             return 0;
@@ -82,25 +82,14 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             Event e; e.type = EventType::WindowResize;
             e.width = LOWORD(lParam); e.height = HIWORD(lParam);
             self->dispatch(e);
-            // A WM_SIZE inside a modal loop means the user is resizing (not moving): latch it
-            // so the engine stops presenting until the drag ends (Present mid-resize deadlocks
-            // the DWM). Do NOT render here either — rendering from inside a window-state-change
-            // message deadlocks the same way (this is the WM_SIZE a maximise sends).
+            // Present and ResizeBuffers deadlock the DWM mid-resize; do neither from here.
             if (self->inModalSize()) self->setModalResize(true);
             return 0;
         }
-        // A modal move/size loop runs its own message pump inside DefWindowProc, starving the
-        // engine's frame loop. Drive rendering from a timer for its duration so the viewport
-        // keeps updating live instead of freezing. The timer fires at an idle point in the
-        // modal loop (unlike WM_SIZE), so Present here does not deadlock with the DWM.
         case WM_NCLBUTTONDOWN: {
-            // Remember whether this grab is on a resize border/corner (vs the caption). We can
-            // render live during a move but must NOT present during a resize (DWM deadlock).
             const bool resize = (wParam >= HTLEFT && wParam <= HTBOTTOMRIGHT) || wParam == HTGROWBOX;
             self->setResizeGrab(resize);
-            // MUST hand this to DefWindowProc: every caption/border/caption-button interaction
-            // (move, resize, minimise, maximise, close) is driven from here. Swallowing it makes
-            // the window completely uninteractive.
+            // Must reach DefWindowProc: every caption/border interaction is driven from here.
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
         case WM_ENTERSIZEMOVE:
@@ -113,8 +102,6 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (wParam == 1) { self->onRenderTick(); return 0; }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         case WM_DPICHANGED: {
-            // Monitor changed / DPI changed: adopt the OS-suggested window rect and record
-            // the new scale so the UI rescales. A WM_SIZE follows and resizes the swapchain.
             self->setDpiScale(static_cast<f32>(HIWORD(wParam)) / 96.0f);
             const RECT* r = reinterpret_cast<const RECT*>(lParam);
             SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
@@ -142,16 +129,16 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         default:
             break;
     }
-    // Anything not fully handled above falls through to the OS. Note `break` inside the switch
-    // lands HERE, not on `default:` — a case that breaks without this would swallow the message.
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+// Records a resize into the cached size and forwards the event to the callback.
 void Window::dispatch(const Event& e) {
     if (e.type == EventType::WindowResize) { width_ = e.width; height_ = e.height; }
     if (callback_) callback_(callbackUser_, e);
 }
 
+// Registers the class and creates the window, DPI-scaled and centred. False on failure.
 bool Window::create(const WindowDesc& desc) {
     enableDpiAwareness(); // must precede any window creation
     HINSTANCE inst = GetModuleHandleW(nullptr);
@@ -165,7 +152,7 @@ bool Window::create(const WindowDesc& desc) {
     wc.lpszClassName = kClassName;
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));   // app icon resource (Sandbox.rc)
     wc.hIconSm = wc.hIcon;
-    RegisterClassExW(&wc); // ignore "already registered" on repeat
+    RegisterClassExW(&wc);
 
     DWORD style = desc.resizable ? WS_OVERLAPPEDWINDOW
                                  : (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX);
@@ -190,9 +177,7 @@ bool Window::create(const WindowDesc& desc) {
     height_ = desc.height;
     dpiScale_ = queryDpiScale(hwnd);
 
-    // The requested size is a logical (96-DPI) design size. Scale it to the display's DPI
-    // so the window opens at a sensible physical size, then clamp to the monitor work area
-    // and centre it (a 1600x900 physical window on a 300% display would be unusably small).
+    // desc.width/height are logical 96-DPI sizes: scale, clamp to the work area, centre.
     {
         int cw = static_cast<int>(desc.width * dpiScale_ + 0.5f);
         int ch = static_cast<int>(desc.height * dpiScale_ + 0.5f);
@@ -211,16 +196,18 @@ bool Window::create(const WindowDesc& desc) {
         }
     }
 
-    ShowWindow(hwnd, SW_SHOW);
+    ShowWindow(hwnd, desc.activate ? SW_SHOW : SW_SHOWNOACTIVATE);
     UpdateWindow(hwnd);
     AVER_INFO("[Platform] window '{}' {}x{} created", desc.title, desc.width, desc.height);
     return true;
 }
 
+// Retitles a live window.
 void Window::setTitle(const std::string& title) {
     if (nativeHandle_) SetWindowTextW(static_cast<HWND>(nativeHandle_), utf8ToWide(title).c_str());
 }
 
+// Drains every queued OS message without blocking.
 void Window::pumpEvents() {
     MSG msg;
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -230,6 +217,7 @@ void Window::pumpEvents() {
     }
 }
 
+// Destroys the OS window.
 void Window::destroy() {
     if (nativeHandle_) {
         DestroyWindow(static_cast<HWND>(nativeHandle_));

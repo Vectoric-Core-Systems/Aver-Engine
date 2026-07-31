@@ -6,15 +6,18 @@
 
 namespace aver {
 
+// How a window should be created.
 struct WindowDesc {
     std::string title = "Aver Engine";
     u32 width = 1280;
     u32 height = 720;
     bool resizable = true;
+    // False shows the window without taking focus. An automated capture run has no business
+    // stealing the keyboard from whatever the machine's owner is doing.
+    bool activate = true;
 };
 
-// Minimal OS window (Win32 backend). Returns false from create() on failure so the
-// engine can fall back to headless rather than aborting.
+// Minimal OS window (Win32 backend). create() returns false rather than aborting.
 class Window {
 public:
     Window() = default;
@@ -22,12 +25,14 @@ public:
     Window(const Window&) = delete;
     Window& operator=(const Window&) = delete;
 
+    // Creates the OS window. False on failure.
     bool create(const WindowDesc& desc);
+    // Destroys the OS window.
     void destroy();
+    // Drains every queued OS message without blocking.
     void pumpEvents();
 
-    // Retitle a live window. The project browser picks a project AFTER the window exists, so the
-    // title cannot come from WindowDesc alone.
+    // Retitles a live window.
     void setTitle(const std::string& title);
 
     bool shouldClose() const { return shouldClose_; }
@@ -35,38 +40,30 @@ public:
 
     u32 width() const { return width_; }
     u32 height() const { return height_; }
-    // Display scale factor for this window's monitor (1.0 = 96 DPI, 1.5 = 150%, ...).
-    // The process is per-monitor DPI aware, so width()/height() are physical pixels and
-    // UI should be scaled by this to stay a consistent physical size across displays.
+    // Display scale factor for this window's monitor (1.0 = 96 DPI). width()/height() are physical.
     f32 dpiScale() const { return dpiScale_; }
     void* nativeHandle() const { return nativeHandle_; } // HWND on Windows
     bool valid() const { return nativeHandle_ != nullptr; }
 
     void setEventCallback(EventCallback cb, void* user) { callback_ = cb; callbackUser_ = user; }
 
-    // Raw OS message hook (e.g. for Dear ImGui input). Returns true if the message was
-    // consumed. Kept as a plain fn-ptr so Platform needs no UI dependency.
+    // Raw OS message hook (e.g. Dear ImGui input). Returns true if the message was consumed.
     using MessageHook = bool (*)(void* hwnd, u32 msg, u64 wparam, i64 lparam);
     void setMessageHook(MessageHook h) { messageHook_ = h; }
     MessageHook messageHook() const { return messageHook_; }
 
-    // Render-tick callback: invoked while the OS is running a modal move/size loop (which
-    // otherwise blocks the engine's frame loop and freezes the viewport). Plain fn-ptr so
-    // Platform stays free of any Runtime dependency.
+    // Render-tick callback, invoked while the OS is running a modal move/size loop.
     using RenderTickFn = void (*)(void* user);
     void setRenderTick(RenderTickFn fn, void* user) { renderTick_ = fn; renderTickUser_ = user; }
     void onRenderTick() { if (renderTick_) renderTick_(renderTickUser_); }
 
-    // Modal move/size loop state (between WM_ENTERSIZEMOVE and WM_EXITSIZEMOVE). A move is
-    // safe to render live; an active resize is NOT — both Present and ResizeBuffers deadlock
-    // the DWM mid-resize — so the engine renders during a move and skips rendering during a
-    // resize (the view updates once the drag ends). `modalResize_` latches on the first
-    // WM_SIZE seen inside the loop, which is what distinguishes a resize from a move.
+    // Modal move/size loop state. A move is safe to render live; an active resize is not — both
+    // Present and ResizeBuffers deadlock the DWM mid-resize.
     bool inModalSize() const { return modalSize_; }
     bool inModalResize() const { return modalResize_; }
     bool isResizeGrab() const { return resizeGrab_; }
 
-    // Internal: invoked by the platform message handler.
+    // Forwards an event to the callback, caching a resize. Called by the platform message handler.
     void dispatch(const Event& e);
     void setDpiScale(f32 s) { dpiScale_ = s; }
     void setModalSize(bool b) { modalSize_ = b; modalResize_ = false; }
