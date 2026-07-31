@@ -1448,9 +1448,9 @@ public:
         sky_.cloudsEnabled = true;
         if (coverage >= 0.0f) sky_.cloudCoverage = coverage;
     }
-    // --sky-physical [elevation]. The model defaults to Authored so the pixel oracle stays exact,
-    // which means a capture run is the only way to see the derived sky at all -- and a sky that
-    // only a human clicking a combo box can produce is a sky nothing can regression-test.
+    // --sky-physical [elevation]. The model is the default now, so this exists to SWEEP the
+    // elevation: the claim is that one number produces noon, dusk and night, and a flag that could
+    // not move it would leave that untested.
     void setSkyPhysical(f32 elevationDeg) {
         sky_.model = rhi::SkyModel::Physical;
         if (elevationDeg > -90.0f) {
@@ -1459,6 +1459,9 @@ public:
             sky_.setSunAngles(elevationDeg, azim);
         }
     }
+    // --sky-authored. The two-colour dome is still there and still authorable; without a flag it
+    // would be reachable only by clicking a combo box, which is not something a gate can do.
+    void setSkyAuthored() { sky_.model = rhi::SkyModel::Authored; }
     void setPost(f32 exposure, f32 bloomIntensity, bool autoExposure) {
         post_.exposure = exposure;
         post_.bloomIntensity = bloomIntensity;
@@ -6061,7 +6064,7 @@ static bool isOcproject(const char* p) {
 
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and EXITS, touching no device.
         //
@@ -6198,6 +6201,8 @@ Application* createApplication(int argc, char** argv) {
             if (i+1 < argc && (argv[i+1][0] != '-' || (argv[i+1][1] >= '0' && argv[i+1][1] <= '9')))
                 skyElevation=static_cast<f32>(std::atof(argv[++i]));
         }
+        // The two-colour dome, which is no longer the default. Same reason --no-gi exists.
+        else if (!std::strcmp(argv[i],"--sky-authored")) skyAuthored=true;
         else if (!std::strcmp(argv[i],"--probe-rel") && i+2<argc) {
             probeU=static_cast<f32>(std::atof(argv[++i]));
             probeV=static_cast<f32>(std::atof(argv[++i]));
@@ -6220,6 +6225,7 @@ Application* createApplication(int argc, char** argv) {
     app->setGiForceOff(noGi);
     if (clouds) app->setClouds(cloudCover);
     if (skyPhysical) app->setSkyPhysical(skyElevation);
+    if (skyAuthored) app->setSkyAuthored();
     app->setVSyncOff(vsyncOff);
     app->setUiDemo(uiDemo);
     app->setOpenAsset(openAsset);

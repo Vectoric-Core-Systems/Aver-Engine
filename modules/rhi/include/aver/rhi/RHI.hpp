@@ -130,11 +130,13 @@ struct SkyAtmosphere {
     bool enabled = false;
 
     // ---- which model ----
-    SkyModel          model = SkyModel::Authored;
+    // Physical is the DEFAULT. The dome, its exponent and the sun's colour below are then derived
+    // from the sun's elevation and are inert as authored values; --sky-authored restores them.
+    SkyModel          model = SkyModel::Physical;
     AtmosphereProfile air{};   // only read when model is Physical
 
     // ---- the dome ----
-    f32 zenith[3]  = {0.24f, 0.45f, 0.85f};   // authored sRGB, decoded in the shader
+    f32 zenith[3]  = {0.24f, 0.45f, 0.85f};   // authored sRGB, decoded in the shader; Authored only
     f32 horizon[3] = {0.72f, 0.83f, 0.95f};
     f32 atmosphereHeight = 0.65f;   // exponent on the horizon-to-zenith blend
     // What the world below the horizon reflects back into the lower half of the dome.

@@ -2695,12 +2695,12 @@ scene fogged differently depending on which renderer drew it. Both now go throug
 `docs/rendering/ATMOSPHERE.md` is the full account: the derivations, every coefficient's source, and
 which claims are measured rather than asserted. The short version:
 
-- **`SkyAtmosphere::model` is `Authored` or `Physical`, and it DEFAULTS TO AUTHORED.** With the
-  default nothing in the new block is reachable and the engine renders exactly what it did before —
-  51/51 gates bit-exact across `baseline`, `no-rt` and `all-off`, zero corruption/error/warning.
-  That is deliberate: the baseline records 17 gates × 9 configurations, and a new sky that moved
-  them would report as a regression in all of them at once. `--sky-physical [elevation]` turns it on
-  for a capture run; the sun/sky Details panel has a `Sky Model` combo and an `Air` group.
+- **`SkyAtmosphere::model` is `Authored` or `Physical`.** It landed as `Authored` so the oracle could
+  be shown untouched — 51/51 gates bit-exact across `baseline`, `no-rt` and `all-off` — and then
+  **the default was flipped to `Physical` on the project owner's instruction**. `--sky-authored`
+  keeps the two-colour dome reachable (the same reason `--no-gi` exists), `--sky-physical
+  [elevation]` sweeps the sun, and the sun/sky Details panel has a `Sky Model` combo and an `Air`
+  group. **THE BASELINE IS STALE UNTIL RE-RECORDED** — see the table below.
 - **The sun ray is ANALYTIC, not marched.** The Chapman function gives the slant column in closed
   form, so a scattering integral has no inner loop. `atmoErfcx` is one exp and ten multiply-adds.
   Measured against a 2,000,000-step numeric integral: worst error 0.125%.
@@ -2724,6 +2724,41 @@ And one where the measurement overruled the eye: the multiple-scattering stand-i
 out, so it was reshaped as `σ_s²` — which is the formally tidier form. That put the zenith's blue/red
 at 7.2 against a real 2.9-4. The flat version was already right on colour AND on brightness. Both
 numbers are now assertions, so it cannot be "improved" back.
+
+### The default is Physical now, and the baseline is one step behind it
+
+**Every one of the 17 gates moved, and none of them is a defect.** Measured on `baseline`, read-only,
+each value identical across both reads, `0 corruption / 0 error / 0 warning`:
+
+| gate | authored | physical | |
+|---|---|---|---|
+| `centre` | `99,38,30` | `94,27,14` | |
+| `gi` | `92,28,22` | `87,20,11` | |
+| `gi-debug` | `103,39,30` | `98,27,14` | the radiance volume, so it moves with the light that filled it |
+| `shadow` | `23,40,86` | `22,26,31` | the big one — see below |
+| `shadow-gi` | `18,24,47` | `18,17,19` | |
+| `penumbra` | `54,67,105` | `52,51,51` | |
+| `sunlit` | `95,103,129` | `90,85,79` | |
+| `sunlit-gi` | `93,95,109` | `88,81,73` | |
+
+Every gate moves the SAME way — a little darker, and much less blue — which is the exact signature of
+the change and not of a bug. The authored dome's zenith is a blue/red radiance ratio of **15**; a
+real one measures **2.9-4**, and the model produces 4.1. So every surface that was being filled by a
+saturated blue dome is now filled by a sky the colour skies actually are. `shadow` shows it most
+plainly: a shadowed floor lit only by fill went from `23,40,86` (strongly blue) to `22,26,31`
+(near-neutral), and `sunlit` went from blue-tinted to warm-neutral, which is what a sunlit surface
+under a real sun does.
+
+Both stated invariants still hold: `shadow` is far darker than `sunlit`, and `penumbra` still
+differs from `penumbra-rt`.
+
+**The re-record is the project owner's to run** — it overwrites the only record of what the renderer
+used to do, so neither the agent nor the MCP server can do it:
+
+```powershell
+./scripts/record-gates.ps1              # ~25 min, WARP is most of it
+./scripts/record-gates.ps1 -Release     # needs a current build-release tree
+```
 
 ### Practical notes that will save an hour
 
