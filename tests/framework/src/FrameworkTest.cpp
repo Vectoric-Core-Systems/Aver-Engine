@@ -578,7 +578,7 @@ static void testDestroyReentrancy() {
     check(aver_fw_clear_managed_dispatch() == 1, "the re-entrant stand-in clears");
 }
 
-// ------------------------------------------------------- re-entrant possession (possess from OnPossessed)
+// Checks that a possession hook re-entering possess is refused rather than recursed to a crash.
 static void testPossessReentrancy() {
     AVER_INFO("=== a possession hook re-entering possession is refused, not recursed to a crash ===");
 
@@ -599,8 +599,7 @@ static void testPossessReentrancy() {
     const int32_t pawn2 = aver_fw_spawn(pawnC, "rp-pawn-2", nullptr, nullptr, nullptr);
     g_rpCtrl = ctrl; g_rpPawn2 = pawn2; g_rpDepth = 0; g_rpNestedResult = -1;
 
-    // The outer possess fires OnPossessed, which re-possesses the same controller onto pawn2. If the guard
-    // works the nested call is refused and control returns; if it did not, this line would never return.
+    // The outer possess fires OnPossessed, which re-possesses the same controller onto pawn2.
     check(aver_fw_possess(ctrl, pawn1) == 1, "the outer possess succeeds");
     check(g_rpDepth == 1, "the possessed hook fired exactly once — no recursion");
     check(g_rpNestedResult == 0, "the re-entrant possess was refused (returned 0)");
@@ -611,20 +610,17 @@ static void testPossessReentrancy() {
     check(aver_fw_clear_managed_dispatch() == 1, "clear the re-entrant possess table");
 }
 
-// --------------------------------------------------------------------------- play lifecycle (step 13)
-
+// Checks the play lifecycle: begin_play spawns the session singletons, pause flips state, end_play
+// tears the whole session down.
 static void testPlayLifecycle() {
     AVER_INFO("=== play lifecycle: begin_play spawns the session, end_play tears it down ===");
 
-    // In EDITOR the state is EDITOR(0) and every session singleton is 0 — the former "stub" contract,
-    // now the genuine cleared-state contract.
     check(aver_fw_play_state() == AVER_FW_PLAY_EDITOR, "play state starts in EDITOR");
     check(aver_fw_game_instance() == 0, "no GameInstance before begin_play");
     check(aver_fw_game_mode() == 0, "no GameMode before begin_play");
     check(aver_fw_player_controller(0) == 0, "no player controller before begin_play");
 
-    // The pawn, controller and GameInstance the GameMode will draw on, then the GameMode that names the
-    // pawn/controller by string (resolved at seal), plus an ABSTRACT GameMode base declared FIRST.
+    // Pawn, controller and GameInstance, an ABSTRACT GameMode base declared first, then the GameMode.
     const int32_t pawnC = aver_fw_class_declare("PlayPawn", "");
     aver_fw_class_set_flags(pawnC, AVER_FW_CLASS_PAWN);
     aver_fw_class_seal(pawnC);
@@ -689,10 +685,7 @@ static void testPlayLifecycle() {
     check(aver_fw_set_paused(1) == 0, "set_paused is refused outside a session");
     World::instance().flush();   // retire the deferred destroys the ended session left
 
-    // A session that spawns EXTRA actors mid-play (a GameMode/pawn calling Spawn() in a hook) must clear
-    // them ALL on Stop, not just the four roots — otherwise they leak: OnBeginPlay with no OnEndPlay, and
-    // still live in the world after EDITOR returns. (forgetClass runs inside destroyActor, so class_of
-    // reads 0 the instant an actor is torn down, before the deferred world flush.)
+    // end_play must clear actors spawned mid-session too, not just the four session roots.
     check(aver_fw_begin_play(giC, gmC) == 1, "begin_play starts a session (extra-actor case)");
     const int32_t extra = aver_fw_spawn(pawnC, "extra-play-actor", nullptr, nullptr, nullptr);
     check(extra != 0 && aver_fw_class_of(extra) == pawnC, "an extra actor spawns mid-session");
@@ -708,7 +701,7 @@ static void testPlayLifecycle() {
     World::instance().flush();
 }
 
-// ---------------------------------------------------------------------------------- input + play view
+// Checks input: key edges, out-of-range keys, mouse delta and its clearing, and the play-view request.
 static void testInput() {
     AVER_INFO("=== input: keys with edge detection, mouse delta, and the play-view request ===");
 
@@ -747,6 +740,7 @@ static void testInput() {
     check(mode == AVER_FW_VIEW_FIRST_PERSON && eye == 170.0f && boom == 500.0f, "the play-view request round-trips");
 }
 
+// Runs every framework test. Returns the failure count as the exit code.
 int main() {
     AVER_INFO("Aver.Framework test");
     check(aver_fw_scene_abi_matches() == 1, "the framework's scene ABI major matches the loaded scene DLL");

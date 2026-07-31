@@ -104,7 +104,7 @@ public static class Pbr
     /// <summary>Marshals a native string pointer, or "?" when it is null.</summary>
     private static string Str(IntPtr p) => Marshal.PtrToStringAnsi(p) ?? "?";
 
-    // ---- feature introspection ----
+    /// <summary>---- feature introspection ----</summary>
     public static int FeatureCount => aver_pbr_feature_count();
     /// <summary>The feature's display name.</summary>
     public static string NameOf(PbrFeature f) => Str(aver_pbr_feature_name((int)f));

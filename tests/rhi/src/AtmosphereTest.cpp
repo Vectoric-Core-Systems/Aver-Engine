@@ -24,8 +24,7 @@ static void checkNear(f64 got, f64 want, f64 relTol, const std::string& what) {
     AVER_ERROR("  FAIL  {} ({:.6g} vs {:.6g}, {:.3g} rel > {:.3g})", what, got, want, err, relTol);
 }
 
-// Reference exp(x*x) * erfc(x) in double, for x >= 0. Asymptotic series past x = 6, where the
-// library's erfc underflows and the exp that would undo it overflows first.
+// Reference exp(x*x) * erfc(x) in double, for x >= 0. Asymptotic series past x = 6.
 static f64 erfcxRef(f64 x) {
     if (x < 6.0) return std::exp(x * x) * std::erfc(x);
     const f64 inv = 1.0 / (2.0 * x * x);
@@ -193,10 +192,8 @@ int main() {
 
     AVER_INFO("single scattering matches its closed form");
     {
-        // With Mie, ozone and multiple scattering off, a vertical view ray has the exact solution
+        // Plane-parallel closed form with Mie, ozone and multiple scattering off:
         //   L/E = P(cos) * (1 - exp(-tau0 * (1 + 1/mu0))) / (1 + 1/mu0)
-        // which is plane-parallel where the model is spherical, so it is only quoted well clear of
-        // the horizon.
         rhi::AtmosphereProfile pure{};
         pure.mieScatter = 0.0f;
         pure.mieExtinction = 0.0f;

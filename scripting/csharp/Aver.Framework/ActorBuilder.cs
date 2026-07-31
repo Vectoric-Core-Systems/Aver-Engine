@@ -29,11 +29,8 @@ public sealed class ActorBuilder
     private readonly Entity _root;
     internal ActorBuilder(Entity root) => _root = root;
 
-    /// <summary>Places one model under the actor and returns its handle.</summary>
+    /// <summary>Places one model under the actor and returns its handle. Local pos in centimetres, rot in degrees (yaw, pitch, roll), scale as multipliers.</summary>
     /// <remarks>FROZEN call shape: the editor rewrites only the numeric literals in pos/rot/scale, matched by modelId.</remarks>
-    /// <param name="pos">Local position in centimetres.</param>
-    /// <param name="rot">Local rotation in degrees: (yaw, pitch, roll).</param>
-    /// <param name="scale">Local scale multipliers.</param>
     public ModelHandle Place(
         ulong modelId,
         string meshPath,

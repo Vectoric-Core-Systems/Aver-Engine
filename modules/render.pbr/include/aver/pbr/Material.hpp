@@ -24,18 +24,14 @@ enum class AlphaMode : u32 { Opaque = 0, Mask, Blend };
 // The glTF metallic-roughness texture set. Count is the slot count.
 enum class TextureSlot : u32 { BaseColor = 0, MetalRough, Normal, Occlusion, Emissive, Count };
 
-// Where a surface's texture coordinates come from: the mesh's own UVs, or a planar projection onto
-// the dominant axis of the normal at a fixed number of centimetres per tile.
-//
-// WorldAligned projects in the OBJECT's frame despite the name. The name, AVER_PBR_UV_WORLD_ALIGNED
-// and the `.ocmat` key `worlduv` are FROZEN: renaming any of them is a major ABI break.
+// Where a surface's texture coordinates come from: the mesh's own UVs, or a planar projection.
+// FROZEN: UvMode::WorldAligned, AVER_PBR_UV_WORLD_ALIGNED and the `.ocmat` key `worlduv`.
 enum class UvMode : u32 { Mesh = 0, WorldAligned };
 
 inline constexpr u32 kTextureSlotCount = static_cast<u32>(TextureSlot::Count);
 
-// Handle-with-generation, so a stale reference fails validation instead of addressing a recycled
-// slot. 0 is invalid. The generation lives in bits 20..30 and starts at 1, keeping a valid handle
-// non-zero and non-negative for the int32_t C ABI.
+// Handle-with-generation; 0 is invalid. The generation lives in bits 20..30 and starts at 1, so a
+// valid handle stays non-zero and non-negative for the int32_t C ABI.
 using MaterialHandle = u32;
 
 inline constexpr u32 kMaterialIndexBits = 20;
@@ -49,8 +45,7 @@ constexpr MaterialHandle makeMaterialHandle(u32 index, u32 generation) {
 constexpr u32 materialIndex(MaterialHandle h) { return h & kMaterialIndexMask; }
 constexpr u32 materialGeneration(MaterialHandle h) { return (h >> kMaterialIndexBits) & kMaterialGenerationMask; }
 
-// A texture reference, held as both an authoring path and an opaque 64-bit id. This module
-// interprets neither; resolving either one needs the asset system, a tier up.
+// A texture reference: an authoring path and an opaque 64-bit id, neither interpreted here.
 struct TextureRef {
     std::string path;   // empty = unset
     u64         id = 0; // 0 = unset
@@ -124,8 +119,7 @@ public:
     // Sanitises the description and marks it dirty.
     void touch(MaterialHandle h);
 
-    // True when the caller still owes the GPU an upload. Reading the flag clears it, so exactly one
-    // consumer acts on each change.
+    // True when the caller still owes the GPU an upload. Reading the flag clears it.
     bool consumeDirty(MaterialHandle h);
 
     // How many materials are live. Indices are dense over live materials and shift on destroy.

@@ -1,7 +1,6 @@
 // Hand-run probe: opens the real default output device and plays generated tones through it.
 // Not part of the headless suite -- it needs a sound card and it makes a noise.
-//     AudioProbe.exe              a short arpeggio, then a pan sweep
-//     AudioProbe.exe --silent     the same run with the master at zero
+// `--silent` runs the same sequence with the master volume at zero.
 #include "aver/audio/AudioDevice.hpp"
 #include "aver/core/Log.hpp"
 

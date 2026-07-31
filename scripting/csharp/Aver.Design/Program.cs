@@ -53,9 +53,6 @@ internal static class Program
         return 0;
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // UTF-16 char offset -> UTF-8 byte offset
-    // ---------------------------------------------------------------------------------------------
     // Maps a UTF-16 char offset in the decoded text to a UTF-8 byte offset in the file.
     private sealed class ByteOffsets
     {
@@ -110,9 +107,6 @@ internal static class Program
         return Encoding.UTF8.GetString(bytes);
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // The generated region, and the b.Place rows inside it
-    // ---------------------------------------------------------------------------------------------
     // Writes the generated region's status, byte bounds and every b.Place row inside it.
     private static void WriteRegionAndModels(StringBuilder sb, string text, CompilationUnitSyntax root,
                                              ByteOffsets toByte)
@@ -305,9 +299,6 @@ internal static class Program
         }
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // What each class DECLARES about itself
-    // ---------------------------------------------------------------------------------------------
     // Writes one JSON object per actor class in the file.
     private static void WriteClasses(StringBuilder sb, CompilationUnitSyntax root, ByteOffsets toByte)
     {
@@ -483,9 +474,6 @@ internal static class Program
         span = e.Span;
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // JSON, written by hand
-    // ---------------------------------------------------------------------------------------------
     // Appends s as a quoted, escaped JSON string.
     private static void WriteJsonString(StringBuilder sb, string s)
     {

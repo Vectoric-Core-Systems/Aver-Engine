@@ -119,11 +119,7 @@ public static class Hud
     public static int DrawCallCount => Native.aver_ui_command_count();
 }
 
-/// <summary>A rectangle in screen pixels, top-left origin.</summary>
-/// <param name="X">Left edge.</param>
-/// <param name="Y">Top edge.</param>
-/// <param name="Width">Extent along +X.</param>
-/// <param name="Height">Extent along +Y, which runs DOWN the screen.</param>
+/// <summary>A rectangle in screen pixels, top-left origin, with +Y running down the screen.</summary>
 public readonly record struct Rect(float X, float Y, float Width, float Height)
 {
     /// <summary>Right edge.</summary>

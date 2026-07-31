@@ -1,7 +1,6 @@
 // The one place Aver's coordinate contract is translated into Jolt's, and back.
-//
 // Aver: centimetres, +X forward, +Y right, +Z up, LEFT-handed. Jolt: metres, -Z forward, +X right,
-// +Y up, RIGHT-handed. The axis map is jolt = (aver.y, aver.z, -aver.x), determinant -1.
+// +Y up, RIGHT-handed.
 #pragma once
 #include "aver/core/Math.hpp"
 

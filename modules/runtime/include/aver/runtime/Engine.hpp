@@ -1,4 +1,5 @@
 #pragma once
+// Aver.Runtime: the Engine that owns the window, the RHI device and the frame loop.
 #include "aver/core/Types.hpp"
 #include "aver/core/Time.hpp"
 
@@ -26,10 +27,9 @@ public:
     const Timestep& time() const { return time_; }
 
 private:
-    // One frame: sync swapchain to the window size, update, render, present. Runs from the
-    // main loop AND from the window's modal-loop timer so the viewport keeps rendering while
-    // the OS is dragging/sizing/maximising the window (otherwise it appears frozen).
+    // One frame: sync swapchain to the window size, update, render, present.
     void frameStep();
+    // Window modal-loop timer callback; runs one frame.
     static void renderTickThunk(void* self);
 
     Window* window_ = nullptr;

@@ -5,7 +5,7 @@ using Aver.Scene;
 
 namespace Aver.Framework;
 
-// Entity, continued: everything that reads or writes the live world through the scene C ABI.
+/// <summary>Entity, continued: everything that reads or writes the live world through the scene C ABI.</summary>
 public readonly partial struct Entity
 {
     /// <summary>Immediate parent, or <see cref="Entity.None"/> for a root or a stale handle.</summary>

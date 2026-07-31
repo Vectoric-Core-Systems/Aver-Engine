@@ -1,7 +1,6 @@
 #pragma once
-// Aver.Mcp: a loopback control channel into a running editor, so a tool can press its buttons.
-// It posts real Win32 messages at the window, so a synthetic click takes the same path as a human
-// one. Built only under AVER_MODULE_MCP, and off until the app calls start().
+// Aver.Mcp: a loopback control channel into a running editor, driving it with real Win32 messages.
+// Built only under AVER_MODULE_MCP, and off until the app calls start().
 #include "aver/core/Types.hpp"
 
 #include <condition_variable>
@@ -61,8 +60,7 @@ public:
     McpBridge(const McpBridge&) = delete;
     McpBridge& operator=(const McpBridge&) = delete;
 
-    // Begins listening on 127.0.0.1:`port`. Returns false and logs why on failure.
-    // Loopback only, hard-coded: this posts synthetic clicks into a running editor.
+    // Begins listening on 127.0.0.1:`port`, loopback only. Returns false and logs why on failure.
     bool start(u16 port = 45123);
     // Closes the socket, releases every waiting caller and joins the worker thread.
     void stop();
@@ -70,7 +68,7 @@ public:
     u16  port() const;
 
     // Delivers one queued input event to `apply` and returns how many commands were applied.
-    // Call once per frame from the thread that owns the window.
+    // Call from the thread that owns the window.
     u32 pump(const std::function<void(const Command&)>& apply);
 
     // Registers (or replaces) the dispatcher a module's calls are routed to.
@@ -82,8 +80,7 @@ public:
     // Every module name with an ABI registered, sorted.
     std::vector<std::string> modules() const;
 
-    // Turns a widget name into a client-pixel point. Called on the socket thread, so it must be
-    // thread-safe.
+    // Turns a widget name into a client-pixel point. Called on the socket thread; must be thread-safe.
     using WidgetResolver = std::function<bool(const std::string& name, f32& x, f32& y)>;
     // Installs the resolver used to expand a click-by-name into a coordinate click.
     void setWidgetResolver(WidgetResolver fn);
@@ -99,12 +96,7 @@ private:
 };
 
 // Parses one line of the wire protocol into a Command. Returns false and fills `why` if it will not
-// parse. The protocol is one JSON object per line:
-//   {"id":1,"cmd":"move","x":100,"y":200}
-//   {"id":2,"cmd":"click","x":100,"y":200,"button":"left"}
-//   {"id":3,"cmd":"key","key":"F"}
-//   {"id":4,"cmd":"text","text":"hello"}
-//   {"id":5,"cmd":"ping"}
+// parse. The wire format is one JSON object per line: {"id":2,"cmd":"click","x":1,"y":2,"button":"left"}
 bool parseCommand(const std::string& line, Command& out, std::string* why = nullptr);
 
 } // namespace aver::mcp

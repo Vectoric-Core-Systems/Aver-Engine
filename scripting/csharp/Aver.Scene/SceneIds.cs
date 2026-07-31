@@ -6,7 +6,7 @@ namespace Aver.Scene;
 /// ids, and field ids resolved once by qualified name and cached. Names match Builtins.cpp.</summary>
 public static class SceneIds
 {
-    // Fixed component ids — constants because the built-ins register first (Components.hpp).
+    /// <summary>Fixed component ids — constants because the built-ins register first (Components.hpp).</summary>
     public const int CLocal = 1;
     public const int CWorld = 2;
     public const int CHierarchy = 3;

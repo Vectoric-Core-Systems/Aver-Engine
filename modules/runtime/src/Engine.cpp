@@ -1,3 +1,4 @@
+// Engine implementation: startup, the frame loop, and shutdown.
 #include "aver/runtime/Engine.hpp"
 #include "aver/runtime/Application.hpp"
 
@@ -12,13 +13,12 @@ namespace aver {
 Engine::Engine() = default;
 Engine::~Engine() = default;
 
+// Full lifecycle: init subsystems, run the loop, shut down. Returns the process code.
 int Engine::run(Application* app) {
     BootConfig cfg = app->config();
     AVER_INFO("Aver Engine 0.1.0 starting (headless={}, maxFrames={})", cfg.headless, cfg.maxFrames);
 
-    // A CAPTURE RUN MUST NOT INTERRUPT ANYBODY. maxFrames > 0 means an automated run that exits on
-    // its own, so it gets no splash (the splash is WS_EX_TOPMOST and would cover whatever the
-    // machine's owner is looking at) and its window opens without taking focus.
+    // maxFrames > 0 is an automated capture run: no splash, and the window opens without focus.
     const bool interactive = cfg.maxFrames == 0;
 
     // --- Splash (shown during startup) ---
@@ -43,8 +43,6 @@ int Engine::run(Application* app) {
 
     // --- RHI device (D3D12 -> D3D11 -> Vulkan -> Null, per stubs today -> Null) ---
     rhi::DeviceDesc dd;
-    // Opt-in (`--debug-layer`). It used to be unconditional, which meant every run — including
-    // every frame-rate measurement — paid for whole-API validation.
     dd.enableDebug = cfg.enableDebugLayer;
     dd.useWarp = cfg.useWarp;
     device_ = rhi::createDevice(dd);
@@ -64,9 +62,9 @@ int Engine::run(Application* app) {
 
     app_ = app;
     app->onInit(*this);
-    // Render one frame per modal-loop timer tick so drag/size/maximise doesn't freeze the view.
+    // Render one frame per modal-loop timer tick.
     if (window_) window_->setRenderTick(&Engine::renderTickThunk, this);
-    if (!cfg.headless) splash.close(1100); // keep the splash up briefly, then reveal the editor
+    if (!cfg.headless) splash.close(1100);
 
     // --- Frame loop ---
     frameClock_ = Clock{};
@@ -100,15 +98,14 @@ int Engine::run(Application* app) {
     return 0;
 }
 
+// One frame: sync swapchain to the window size, update, render, present.
 void Engine::frameStep() {
     if (!device_ || !app_ || inFrame_) return; // guard re-entrancy (timer tick vs main loop)
-    // While the user is actively resizing the window, presenting deadlocks the DWM; skip the
-    // whole frame (the view resumes the moment the drag ends). A plain move still renders.
+    // Presenting during a modal resize deadlocks the DWM.
     if (window_ && window_->inModalResize()) return;
     inFrame_ = true;
 
-    // Keep the swapchain matched to the window's client size (physical pixels). Skip while a
-    // modal move loop is active (resize is handled once it ends).
+    // Keep the swapchain matched to the window's client size in physical pixels.
     if (window_ && swapchain_ && !window_->inModalSize()) {
         const u32 w = window_->width(), h = window_->height();
         if (w != 0 && h != 0 && (w != swapchain_->width() || h != swapchain_->height()))
@@ -130,6 +127,7 @@ void Engine::frameStep() {
     inFrame_ = false;
 }
 
+// Window modal-loop timer callback; runs one frame.
 void Engine::renderTickThunk(void* self) {
     auto* e = static_cast<Engine*>(self);
     if (e && !e->exit_) e->frameStep();

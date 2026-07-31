@@ -1,3 +1,5 @@
+// The managed side of the CLR host: bootstrap, script loading, actor dispatch thunks and the log bridge.
+
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -8,14 +10,11 @@ using Aver.Framework;
 
 namespace Aver.Scripting.Bridge;
 
-/// <summary>
-/// The managed end of the engine's in-process CLR host. Everything the native side calls lives
-/// here, and nothing here may ever throw across that boundary.
-/// </summary>
+/// <summary>The managed end of the engine's in-process CLR host: everything the native side calls.</summary>
 public static class HostBridge
 {
     // Must match AVER_SCRIPTING_CONTRACT_VERSION in modules/scripting/include/aver/scripting/scripting_abi.h.
-    private const int ContractVersion = 3;   // v3: HudCount / HudName / HudDraw
+    private const int ContractVersion = 3;
 
     // Must match the AVER_SCRIPT_* codes in the same header.
     private const int Ok = 0;
@@ -35,7 +34,6 @@ public static class HostBridge
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void LogFn(int level, IntPtr utf8Message);
 
-    // Held in a static so the GC never collects the thunk the native side is holding.
     private static LogFn? s_log;
     private static ScriptLoadContext? s_context;
     private static readonly List<Live> s_live = new();
@@ -104,8 +102,6 @@ public static class HostBridge
                 return ErrContract;
 
             HostApi api = Marshal.PtrToStructure<HostApi>(apiPtr);
-            // Version and size both: the version says the shape was agreed, the size says the struct
-            // really is that shape.
             if (api.ContractVersion != ContractVersion || api.StructBytes != Marshal.SizeOf<HostApi>())
                 return ErrContract;
             if (api.Log == IntPtr.Zero)
@@ -138,16 +134,12 @@ public static class HostBridge
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
                 return 0;
 
-            // Parented to the context the bridge itself lives in, which is NOT the default one.
             s_context ??= new ScriptLoadContext(
                 AssemblyLoadContext.GetLoadContext(typeof(HostBridge).Assembly) ?? AssemblyLoadContext.Default);
 
-            // Ordered so discovery order, and therefore OnStart order, is reproducible.
             foreach (string path in Directory.GetFiles(dir, "*.dll").OrderBy(p => p, StringComparer.Ordinal))
                 TryLoadAssembly(path);
 
-            // Re-seal now every assembly has declared its classes, so parent and pawn/controller names
-            // resolve whatever order they were declared in. Idempotent.
             foreach (ClassInfo ci in s_classes.Values)
                 Fw.aver_fw_class_seal(ci.Handle);
 
@@ -160,10 +152,8 @@ public static class HostBridge
         }
     }
 
-    /// <summary>
-    /// Drains every live behaviour and unloads the collectible load context. Returns 1 when the old
-    /// context was fully collected, 0 when it is still finalising; both are success.
-    /// </summary>
+    /// <summary>Drains every live behaviour and unloads the collectible load context. Returns 1 when the
+    /// old context was fully collected, 0 when it is still finalising; both are success.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static int UnloadScripts()
     {
@@ -171,9 +161,8 @@ public static class HostBridge
         {
             WeakReference? old = DrainAndUnload();
             if (old is null)
-                return 1; // nothing was loaded; there is no context to wait for
+                return 1;
 
-            // Bounded, never a spin: a stray reference would otherwise hang the editor's main thread.
             for (int i = 0; i < 2 && old.IsAlive; ++i)
             {
                 GC.Collect();
@@ -196,10 +185,8 @@ public static class HostBridge
         }
     }
 
-    /// <summary>
-    /// Calls OnShutdown on everything live, drops the behaviour list and unloads the context.
-    /// NoInlining is load-bearing: an inlined local would keep the context alive and fake a leak.
-    /// </summary>
+    /// <summary>Calls OnShutdown on everything live, drops the behaviour list and unloads the context.</summary>
+    /// <remarks>NoInlining is load-bearing: an inlined local would keep the context alive and fake a leak.</remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static WeakReference? DrainAndUnload()
     {
@@ -218,8 +205,6 @@ public static class HostBridge
         s_live.Clear();
         s_huds.Clear();
 
-        // HUDs, actor instances and the class map all hold types from the collectible context;
-        // dropping them is what lets the ALC collect.
         s_actorsByEntity.Clear();
         foreach (List<ActorLive> bucket in s_tickBuckets) bucket.Clear();
         s_classes.Clear();
@@ -240,10 +225,8 @@ public static class HostBridge
         try { return s_huds.Count; } catch { return 0; }
     }
 
-    /// <summary>
-    /// Copies HUD <paramref name="index"/>'s display name into <paramref name="buffer"/> as UTF-8,
-    /// NUL-terminated and truncated to fit. Returns the byte count written, or 0.
-    /// </summary>
+    /// <summary>Copies HUD <paramref name="index"/>'s display name into <paramref name="buffer"/> as UTF-8,
+    /// NUL-terminated and truncated to fit. Returns the byte count written, or 0.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static unsafe int HudName(int index, byte* buffer, int capacity)
     {
@@ -260,10 +243,8 @@ public static class HostBridge
         catch { return 0; }
     }
 
-    /// <summary>
-    /// Calls HUD <paramref name="index"/>'s Draw. Returns 1 if it ran, 0 otherwise. A HUD that
-    /// throws is disabled rather than retried.
-    /// </summary>
+    /// <summary>Calls HUD <paramref name="index"/>'s Draw. Returns 1 if it ran, 0 otherwise. A HUD that
+    /// throws is disabled rather than retried.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static int HudDraw(int index, float dt)
     {
@@ -292,7 +273,6 @@ public static class HostBridge
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void Update(float dt)
     {
-        // The guard is per behaviour: one throwing must not stop the ones after it.
         for (int i = 0; i < s_live.Count; ++i)
         {
             Live b = s_live[i];
@@ -314,7 +294,6 @@ public static class HostBridge
     {
         try
         {
-            // Cleared first, so a stray late tick_all or bind cannot reach a torn-down bridge.
             ManagedDispatch.Clear();
 
             DrainAndUnload();
@@ -333,8 +312,6 @@ public static class HostBridge
         string file = Path.GetFileName(path);
         try
         {
-            // The engine's own assemblies, copied alongside the user's build output. A second copy
-            // in the collectible context would give AverBehaviour/AverActor/Entity two identities.
             string simple = Path.GetFileNameWithoutExtension(path);
             if (simple is "Aver.Scripting" or "Aver.Scripting.Bridge" or "Aver.Framework" or "Aver.Scene")
                 return;
@@ -372,13 +349,9 @@ public static class HostBridge
 
             Emit((int)Log.Level.Info, $"[Scripting] loaded {file}: {found} behaviour(s)");
 
-            // Actor classes are declared, not instantiated: bind() constructs one when the framework
-            // spawns it.
             int actors = DeclareActors(asm, file);
             DiscoverHuds(asm, file);
 
-            // An actor class is an intentional non-behaviour, so only warn when the assembly yielded
-            // neither.
             if (found == 0 && actors == 0) WarnAboutNearMisses(asm, file);
         }
         catch (Exception ex)
@@ -398,8 +371,6 @@ public static class HostBridge
                 type.GetMethod("OnTick", new[] { typeof(float) }) is null)
                 continue;
 
-            // A gameplay class is an intentional non-behaviour. Matched by attribute NAME because
-            // the bridge must not reference the assembly that declares it.
             if (type.GetCustomAttributesData().Any(a =>
                     a.AttributeType.Name is "AverClassAttribute" or "AverGameModeAttribute"))
                 continue;
@@ -411,19 +382,17 @@ public static class HostBridge
         }
     }
 
-    /// <summary>
-    /// True when an assembly references Aver.Scripting or Aver.Framework at a compatible version.
-    /// False both for a rejected version and for one that references neither.
-    /// </summary>
+    /// <summary>True when an assembly references Aver.Scripting or Aver.Framework at a compatible version.
+    /// False both for a rejected version and for one that references neither.</summary>
     private static bool CheckApiVersion(Assembly asm, string file)
     {
         AssemblyName[] refs = asm.GetReferencedAssemblies();
         if (!VersionMatches(refs, "Aver.Scripting", typeof(AverBehaviour).Assembly, file, out bool sawScripting)
             && sawScripting)
-            return false;   // referenced Aver.Scripting but at an incompatible version — already logged
+            return false;
         if (!VersionMatches(refs, "Aver.Framework", typeof(AverActor).Assembly, file, out bool sawFramework)
             && sawFramework)
-            return false;   // referenced Aver.Framework but at an incompatible version — already logged
+            return false;
 
         return sawScripting || sawFramework;
     }
@@ -462,16 +431,14 @@ public static class HostBridge
 
     // ================================================================== actor integration
 
-    /// <summary>
-    /// Installs the managed dispatch table and declares the framework base classes. A failure here
-    /// disables actors only; behaviour scripting is unaffected.
-    /// </summary>
+    /// <summary>Installs the managed dispatch table and declares the framework base classes. A failure here
+    /// disables actors only; behaviour scripting is unaffected.</summary>
     private static void SetupManagedActors()
     {
         try
         {
             if (!InstallManagedDispatch())
-                return;   // logged inside; actors are disabled, behaviours are not
+                return;
             DeclareBaseClasses();
             // Resolves an Entity back to its live managed instance. Disabled instances resolve to null.
             Actors.Resolver = handle =>
@@ -516,8 +483,7 @@ public static class HostBridge
         return ok;
     }
 
-    // Declares the five framework base types as lineage roots, so a user class naming one as its
-    // parent has a row to resolve at seal. Abstract, and never MANAGED: they are never spawned.
+    // Declares the five framework base types as lineage roots. Abstract, and never MANAGED.
     private static void DeclareBaseClasses()
     {
         DeclareBase("Actor", "", ClassFlags.Abstract);
@@ -541,10 +507,8 @@ public static class HostBridge
         Fw.aver_fw_class_seal(c);
     }
 
-    /// <summary>
-    /// Finds every [AverHud] class in an assembly and constructs one of each. The attribute is
-    /// matched by name, and Draw is located by signature.
-    /// </summary>
+    /// <summary>Finds every [AverHud] class in an assembly and constructs one of each. The attribute is
+    /// matched by name, and Draw is located by signature.</summary>
     private static void DiscoverHuds(Assembly asm, string file)
     {
         foreach (Type type in asm.GetTypes())
@@ -622,15 +586,13 @@ public static class HostBridge
     {
         (string name, string parent, int baseFlags) = ResolveClassIdentity(type);
 
-        int c = Fw.aver_fw_class_declare(name, parent);   // idempotent by name across a reload
+        int c = Fw.aver_fw_class_declare(name, parent);
         if (c == 0)
         {
             Emit((int)Log.Level.Error, $"[Scripting] could not declare class '{name}'");
             return;
         }
 
-        // The archetype recipe, if any: static void Configure(ClassBuilder). The builder captures
-        // whether the class ticks and in which group.
         var builder = new ClassBuilder(c);
         MethodInfo? configure = type.GetMethod(
             "Configure",
@@ -638,11 +600,8 @@ public static class HostBridge
             binder: null, types: new[] { typeof(ClassBuilder) }, modifiers: null);
         configure?.Invoke(null, new object[] { builder });
 
-        // MANAGED is what makes native spawn and destroy dispatch into this bridge. set_flags
-        // overwrites, so read-modify-write to keep whatever Configure set.
         Fw.aver_fw_class_set_flags(c, Fw.aver_fw_class_get_flags(c) | ClassFlags.Managed | baseFlags);
 
-        // A GameMode names its pawn and controller by string; the framework resolves them at seal.
         if (type.GetCustomAttribute<AverGameModeAttribute>(inherit: false) is { } gm)
         {
             Fw.aver_fw_class_set_default_pawn(c, gm.DefaultPawnClass);
@@ -653,22 +612,15 @@ public static class HostBridge
             Emit((int)Log.Level.Warn,
                  $"[Scripting] class '{name}' did not seal - check its parent '{parent}' is a declared class");
 
-        // Record it under the SAME hash the native spawn hands bind(): fnv1a64 of the registry name.
         s_classes[unchecked((long)Fnv1a64(name))] =
             new ClassInfo { Type = type, Ticks = builder.WantsTick, TickGroup = builder.TickGroupId, RegistryName = name, Handle = c };
     }
 
-    // The registry (name, parent, base-type flags) for a discovered actor type. [AverClass] and
-    // [AverGameMode] name the class and (for AverClass) its parent; without a marker attribute a class
-    // registers under its C# type name with the nearest framework base type as parent.
+    // The registry name, parent and base-type flags for a discovered actor type.
     private static (string name, string parent, int baseFlags) ResolveClassIdentity(Type type)
     {
         if (type.GetCustomAttribute<AverClassAttribute>(inherit: false) is { } cls)
         {
-            // If the author left Parent at its "Actor" default but the C# base is more specific
-            // (AverPawn, AverGameMode, ...), register under the REAL base's lineage — otherwise the
-            // lineage says "Actor" while BaseFlagsOf below stamps the PAWN/CONTROLLER flag, and the
-            // two disagree. An EXPLICIT Parent is always honoured.
             string parent = cls.Parent == "Actor" ? BaseRegistryName(type) : cls.Parent;
             return (cls.Name, parent, BaseFlagsOf(type));
         }
@@ -695,10 +647,7 @@ public static class HostBridge
         return "Actor";
     }
 
-    // FNV-1a 64-bit over the UTF-8 bytes of the name — byte-for-byte the native aver::fnv1a64 (Hash.cpp),
-    // so the hash the framework computes for bind() and the hash this bridge stores its classes under agree.
-    // The offset basis is the canonical 0xcbf29ce484222325; it once matched a native constant that had a
-    // dropped digit, and both were corrected together (Hash.hpp) so class dispatch keeps agreeing.
+    // FNV-1a 64-bit over the UTF-8 bytes: must stay byte-for-byte the native aver::fnv1a64 (Hash.hpp).
     private static ulong Fnv1a64(string s)
     {
         const ulong offset = 0xcbf29ce484222325UL;
@@ -712,6 +661,7 @@ public static class HostBridge
         return h;
     }
 
+    // Disables one actor and says which hook threw.
     private static void DisableActor(ActorLive a, string hook, Exception ex)
     {
         a.Disabled = true;
@@ -720,21 +670,19 @@ public static class HostBridge
     }
 
     // ------------------------------------------------------------------ dispatch thunks
-    //
-    // The ten entries of AvManagedDispatch. Each is a raw [UnmanagedCallersOnly] pointer the framework
-    // calls; each wraps its whole body so a managed exception can NEVER cross back into native code — it
-    // disables that one actor and returns, exactly as the AverBehaviour contract does for OnUpdate.
+    // The ten entries of AvManagedDispatch. No managed exception may cross back into native code.
 
+    // Constructs the managed instance for a spawned entity. Returns 1 when one was bound.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int DispBind(long classNameHash, int entity)
     {
         try
         {
             if (!s_classes.TryGetValue(classNameHash, out ClassInfo? info))
-                return 0;   // no such managed class known here; the framework fires no begin/build
+                return 0;
 
             var instance = (AverActor)Activator.CreateInstance(info.Type)!;
-            instance.Self = new Entity(entity);   // internal setter, reachable via InternalsVisibleTo
+            instance.Self = new Entity(entity);
 
             var live = new ActorLive
             {
@@ -747,7 +695,7 @@ public static class HostBridge
             s_actorsByEntity[entity] = live;
             if (live.Ticks && live.TickGroup >= 0 && live.TickGroup < TickGroupCount)
                 s_tickBuckets[live.TickGroup].Add(live);
-            return 1;   // an instance now exists and is bound to `entity`
+            return 1;
         }
         catch (Exception ex)
         {
@@ -756,6 +704,7 @@ public static class HostBridge
         }
     }
 
+    // Runs the actor's BuildModels recipe.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispBuildModels(int entity)
     {
@@ -764,6 +713,7 @@ public static class HostBridge
         catch (Exception ex) { DisableActor(live, "BuildModels", ex); }
     }
 
+    // Calls the actor's OnBeginPlay.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispBeginPlay(int entity, int reason)
     {
@@ -772,32 +722,18 @@ public static class HostBridge
         catch (Exception ex) { DisableActor(live, "OnBeginPlay", ex); }
     }
 
+    // Ticks every actor in one group, and refreshes the frame's input before the first group.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispTickAll(int group, float dt)
     {
         if (group < 0 || group >= TickGroupCount) return;
 
-        // Resolve the frame's input ONCE, before the first tick group, rather than letting each actor
-        // poll the device as it ticks. Two pawns polling separately can disagree about whether a key
-        // went down this frame purely because of the order they tick in, and a "was pressed" edge read
-        // twice in one frame is read wrongly at least once. Evaluating up front makes the frame's input
-        // a single fact that every actor in it shares.
         if (group == 0)
         {
             try { EnhancedInput.Update(); }
             catch (Exception ex) { Emit(3, $"[bridge] input update threw: {ex.Message}"); }
         }
-        // No try/catch around the whole loop on purpose — one actor throwing must not stop the ones after
-        // it in the group, so the guard is per actor, inside (the same rule Update uses for behaviours).
-        //
-        // Snapshot the bucket length BEFORE walking. An actor's OnTick is free to Spawn<T>() another actor,
-        // and a same-group spawn runs synchronously through native aver_fw_spawn -> DispBind, which appends
-        // the newborn to THIS very list mid-walk. Re-reading bucket.Count each iteration would then tick the
-        // just-born actor in the same frame it was spawned and — for a self-propagating spawner — never
-        // terminate inside a single tick_all call (a frame hang / unbounded allocation, not next-frame
-        // growth). Freezing the count honours the universal spawn-this-frame / tick-next-frame convention.
-        // The extra `i < bucket.Count` guard keeps the index in range should a future in-tick unbind ever
-        // shrink the list, so an IndexOutOfRange can never cross this [UnmanagedCallersOnly] boundary.
+        // The count is frozen before the walk: an actor spawned during OnTick ticks next frame, not this one.
         List<ActorLive> bucket = s_tickBuckets[group];
         int count = bucket.Count;
         for (int i = 0; i < count && i < bucket.Count; ++i)
@@ -809,6 +745,7 @@ public static class HostBridge
         }
     }
 
+    // Calls the actor's OnEndPlay.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispEndPlay(int entity, int reason)
     {
@@ -817,6 +754,7 @@ public static class HostBridge
         catch (Exception ex) { DisableActor(live, "OnEndPlay", ex); }
     }
 
+    // Calls the actor's OnRebound after a reload rebinds it.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispRebound(int entity)
     {
@@ -825,9 +763,7 @@ public static class HostBridge
         catch (Exception ex) { DisableActor(live, "OnRebound", ex); }
     }
 
-    // v2 possession/session hooks. Each targets a specific base type — a non-pawn possessed, or a
-    // non-GameMode post-login, cannot happen (the framework only calls these for the right flag), but the
-    // type test keeps the cast total and simply no-ops if it ever did.
+    // Calls the pawn's OnPossessed.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispPossessed(int pawnEntity, int controllerEntity)
     {
@@ -837,6 +773,7 @@ public static class HostBridge
         catch (Exception ex) { DisableActor(live, "OnPossessed", ex); }
     }
 
+    // Calls the pawn's OnUnpossessed.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispUnpossessed(int pawnEntity)
     {
@@ -846,6 +783,7 @@ public static class HostBridge
         catch (Exception ex) { DisableActor(live, "OnUnpossessed", ex); }
     }
 
+    // Calls the game mode's OnPostLogin.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispPostLogin(int gameModeEntity, int controllerEntity)
     {
@@ -855,27 +793,21 @@ public static class HostBridge
         catch (Exception ex) { DisableActor(live, "OnPostLogin", ex); }
     }
 
+    // Drops the instance from the entity map and its tick bucket, then calls its OnUnbound.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispUnbind(int entity)
     {
-        // Drop the instance from both the entity map and its tick bucket.
         if (!s_actorsByEntity.Remove(entity, out ActorLive? live)) return;
         if (live.Ticks && live.TickGroup >= 0 && live.TickGroup < TickGroupCount)
             s_tickBuckets[live.TickGroup].Remove(live);
 
-        // Then let the actor release anything NATIVE it owns. This is the framework's own hook, not a
-        // user one, and it runs however the actor left -- ended, destroyed, reloaded, or disabled after
-        // throwing -- which is exactly why a base type's native handle is freed here rather than in the
-        // public OnEndPlay a subclass can override and forget to chain.
-        //
-        // Guarded even so: a base type is still managed code, and an exception crossing back into the
-        // native unbind would take the process with it.
         try { live.Instance.OnUnbound(); }
         catch (Exception ex) { Emit(3, $"[bridge] OnUnbound threw for entity {entity}: {ex.Message}"); }
     }
 
     // ------------------------------------------------------------------ log marshalling
 
+    // Marshals one message to the native log sink as UTF-8.
     private static void Emit(int level, string message)
     {
         LogFn? log = s_log;
@@ -888,7 +820,6 @@ public static class HostBridge
         }
         catch
         {
-            // The log is the last thing that should be able to break scripting.
         }
         finally
         {

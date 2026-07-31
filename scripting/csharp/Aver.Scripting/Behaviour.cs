@@ -2,10 +2,6 @@
 namespace Aver.Scripting;
 
 /// <summary>Base class for a gameplay script. The scripting host finds derived types by reflection.</summary>
-/// <remarks>
-/// Needs a public parameterless constructor. All three hooks run on the engine's main thread inside
-/// the frame loop. A hook that throws is logged and that behaviour is disabled for the session.
-/// </remarks>
 public abstract class AverBehaviour
 {
     /// <summary>Called once, immediately after the behaviour is constructed.</summary>

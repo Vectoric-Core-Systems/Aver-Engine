@@ -1,9 +1,8 @@
 // The HLSL half of Aver.Render.PBR.Materials: the BRDF and the Aver* contract a renderer fills in.
-// Concatenated AFTER rhi::sharedShaderPrelude(), which owns the constant-buffer layouts, the vertex
-// structures and the colour-space helpers; nothing here may be duplicated there.
+// Concatenated AFTER rhi::sharedShaderPrelude(), which owns the shared layouts and helpers.
 #include "aver/pbr/PbrShaders.hpp"
 
-#include "aver/pbr/Material.hpp"   // kTextureSlotCount: one define per slot, and only that many
+#include "aver/pbr/Material.hpp"
 
 namespace aver::pbr {
 
@@ -13,8 +12,7 @@ const char* materialShaderPrelude() {
 #ifdef AVER_MATERIAL_SRV
 #define AVER_MAT_JOIN2(a, b) a##b
 #define AVER_MAT_JOIN(a, b) AVER_MAT_JOIN2(a, b)
-// Slot order is pbr::TextureSlot's, so a slot index IS its register offset. The registers come from
-// materialShaderDefines(), off the layout the root signature was built from.
+// Slot order is pbr::TextureSlot's, so a slot index IS its register offset.
 Texture2D gBaseColorMap  : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV));
 Texture2D gMetalRoughMap : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_1));
 Texture2D gNormalMap     : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_2));
@@ -59,21 +57,17 @@ float3 fresnelSchlick(float ct, float3 F0, float f90){ return F0 + (f90-F0)*pow(
 // GGX normal distribution. Takes alpha (rough*rough).
 float distGGX(float ndh, float a){ float a2=a*a; float d=ndh*ndh*(a2-1.0)+1.0; return a2/(PI*d*d+1e-6); }
 
-// Height-correlated Smith VISIBILITY, not a masking-shadowing term: the specular 4*NdotV*NdotL
-// denominator is folded in, so the caller multiplies D * V * F and divides by nothing. Takes ALPHA
-// (rough*rough), the same parameter distGGX takes, NOT a perceptual roughness.
+// Height-correlated Smith VISIBILITY: the specular 4*NdotV*NdotL denominator is folded in, so the
+// caller multiplies D * V * F. Takes ALPHA (rough*rough), not a perceptual roughness.
 float visSmithCorrelated(float ndv, float ndl, float a) {
     float a2 = a * a;
     float lv = ndl * sqrt(ndv * ndv * (1.0 - a2) + a2);
     float ll = ndv * sqrt(ndl * ndl * (1.0 - a2) + a2);
-    // max(), not an added epsilon: this only has to stop 0.5/0 producing an inf, and it biases
-    // nothing elsewhere.
     return 0.5 / max(lv + ll, 1e-7);
 }
 
 // ================= the Aver material contract =================
-// The material owns the BRDF; the renderer owns light transport and the camera. AverSurface is
-// OPAQUE to the renderer: no renderer may read a field of it, only call the functions below.
+// The material owns the BRDF; the renderer owns light transport. AverSurface is OPAQUE to it.
 
 // What the renderer knows about the point being shaded, and all it has to supply.
 struct AverVertex {
@@ -90,8 +84,7 @@ struct AverLight {
     float  visibility;  // 0 = fully occluded, 1 = fully lit
 };
 
-// Everything reaching the surface that did not come straight from a light. All of it is RAW
-// radiance: the diffuse response is applied by the material, never by the renderer.
+// Everything reaching the surface that did not come straight from a light, as RAW radiance.
 struct AverIndirect {
     float3 ambient;      // sky-hemisphere irradiance the renderer sampled for this surface
     float  ambientScale; // weight for `ambient`, applied after the diffuse response
@@ -126,8 +119,7 @@ struct AverSurface {
     float4 displayColor;
 };
 
-// The five maps at one point. Every value is the identity for its slot where no map is bound, so
-// there is no branch and no permutation.
+// The five maps at one point. Every value is the identity for its slot where no map is bound.
 struct AverMaps {
     float4 baseColor;   // linear rgb (sRGB VIEW, decoded by the texture unit) + alpha
     float2 metalRough;  // x = roughness (glTF G), y = metallic (glTF B)
@@ -136,14 +128,9 @@ struct AverMaps {
     float3 emissive;
 };
 
-// The texture coordinate this surface is sampled at: the mesh's own, or a planar projection onto
-// the dominant axis of the normal. The branch is on a material flag and is uniform per draw.
+// The texture coordinate this surface is sampled at: the mesh's own, or a planar projection.
 float2 averSurfaceUV(AverVertex v) {
     if (gMaterialFlags & AVER_MAT_WORLD_UV) {
-        // Projected in the OBJECT's own frame, not the world's. The axes are the world matrix's
-        // basis rows (row-vector convention, row 3 is the origin), normalised so texel density
-        // stays in world centimetres. Three dot products against an orthonormal basis IS the
-        // inverse rotation; HLSL has no matrix-inverse intrinsic and a TRS matrix has no shear.
         float3 ax = normalize(gWorld[0].xyz);
         float3 ay = normalize(gWorld[1].xyz);
         float3 az = normalize(gWorld[2].xyz);
@@ -152,8 +139,6 @@ float2 averSurfaceUV(AverVertex v) {
         float3 on = float3(dot(v.N, ax), dot(v.N, ay), dot(v.N, az)); // normal likewise
 
         float3 a = abs(on);
-        // The plane the surface most faces. Ties go to Z, then X — decided rather than left to
-        // floating-point luck, or adjacent pixels on a 45-degree face pick different planes.
         float2 p = (a.z >= a.x && a.z >= a.y) ? op.xy
                  : ((a.x >= a.y) ? op.yz : op.xz);
         return p * gUvTilesPerCm;
@@ -168,7 +153,6 @@ AverMaps averSampleMaps(float2 uv) {
     m.baseColor  = gBaseColorMap.Sample(gMaterialSampler, uv);
     float4 mr    = gMetalRoughMap.Sample(gMaterialSampler, uv);
     m.metalRough = float2(mr.g, mr.b);
-    // glTF scales only the tangential components; scaling z as well would tilt a flat normal.
     float3 n     = gNormalMap.Sample(gMaterialSampler, uv).xyz * 2.0 - 1.0;
     m.normalTS   = float3(n.xy * gNormalScale, n.z);
     m.occlusion  = gOcclusionMap.Sample(gMaterialSampler, uv).r;
@@ -183,8 +167,7 @@ AverMaps averSampleMaps(float2 uv) {
     return m;
 }
 
-// Applies a tangent-space normal, solving the tangent frame from screen-space derivatives
-// (Schuler's cotangent frame). Falls back to the geometric normal on a face with no uv gradient.
+// Applies a tangent-space normal, solving the tangent frame from screen-space derivatives.
 float3 averPerturbNormal(float3 N, float3 wpos, float2 uv, float3 nTS) {
     float3 dp1 = ddx(wpos), dp2 = ddy(wpos);
     float2 du1 = ddx(uv),   du2 = ddy(uv);
@@ -192,55 +175,42 @@ float3 averPerturbNormal(float3 N, float3 wpos, float2 uv, float3 nTS) {
     float3 dp1perp = cross(N, dp1);
     float3 T = dp2perp * du1.x + dp1perp * du2.x;
     float3 B = dp2perp * du1.y + dp1perp * du2.y;
-    // rsqrt(0) is +inf and the frame comes out NaN, which reaches the backbuffer.
     float m = max(dot(T, T), dot(B, B));
     if (m <= 0.0) return N;
     float invmax = rsqrt(m);
     return normalize(T * (nTS.x * invmax) + B * (nTS.y * invmax) + N * nTS.z);
 }
 
-// Evaluates the material at one point. The light is used only for the half vector; everything
-// derived from kdAlbedo is view-independent.
+// Evaluates the material at one point. The light is used only for the half vector.
 AverSurface averEvalMaterial(AverVertex v, AverLight l) {
-    // Resolved once and used for both the sampler and the tangent frame: the frame must be solved
-    // against the very coordinates the normal map was sampled at.
     float2 uv = averSurfaceUV(v);
     AverMaps map = averSampleMaps(uv);
 
-    // Nothing is decoded here: the map arrived linear because its view format is sRGB and the
-    // texture unit decoded it, and the authored factor arrived linear from packMaterial().
     float4 base = gBaseColorFactor * map.baseColor;
 
     AverSurface s;
     s.N = averPerturbNormal(v.N, v.wpos, uv, map.normalTS);
     s.V = v.V;
     s.H = normalize(v.V + l.direction);
-    // Factors MULTIPLY their maps, which is glTF's rule and what makes an unset map free.
     s.metallic = saturate(gMaterial.x * gMetallicFactor * map.metalRough.y);
     s.rough = clamp(gMaterial.y * gRoughnessFactor * map.metalRough.x, 0.045, 1.0);
     s.alpha = gBaseColor.a * base.a;
     s.model = gShadingModel;
     s.emissive = gEmissive.rgb + gEmissiveFactor * map.emissive;
-    // glTF's occlusion rule: strength 0 disables the map rather than zeroing the surface.
     s.occlusion = lerp(1.0, map.occlusion, gOcclusionStrength);
     s.f90 = gMatF90;
     s.display = gShadingModel == AVER_MODEL_UNLIT;
     s.displayColor = float4(gBaseColor.rgb, gBaseColor.a);
     s.albedo = srgbToLin(gBaseColor.rgb) * base.rgb;
-    // Masked blending is the material's rule, so the clip is here. The test is uniform per draw.
     if (gMaterialFlags & AVER_MAT_ALPHA_MASK) clip(s.alpha - gAlphaCutoff);
     s.ndv = saturate(dot(s.N, v.V));
-    // A metal has no dielectric base, which is why F0 lerps to the albedo.
     s.F0 = lerp(gMatReflectance.xxx, s.albedo, s.metallic);
     s.F = fresnelSchlick(saturate(dot(s.H, v.V)), s.F0, s.f90);
-    // The diffuse response is the non-metal fraction and nothing else; energy is conserved by the
-    // specular lobe being normalised, not by subtracting it from diffuse.
     s.kdAlbedo = (1.0 - s.metallic) * s.albedo;
     return s;
 }
 
 // True when the surface has an authored display colour that must reach the backbuffer untouched.
-// A renderer MUST honour this before shading.
 bool averDisplayColour(AverSurface s, out float4 rgba) {
     rgba = s.displayColor;
     return s.display;
@@ -249,7 +219,7 @@ bool averDisplayColour(AverSurface s, out float4 rgba) {
 // The material's opacity.
 float averOpacity(AverSurface s) { return s.alpha; }
 
-// The view-INDEPENDENT diffuse albedo. Contractual: anything with no camera shades with this.
+// The view-INDEPENDENT diffuse albedo.
 float3 averDiffuseAlbedo(AverSurface s) { return s.albedo; }
 
 // The SHADING normal, after normal mapping. A renderer builds its reflection vector from this.
@@ -265,17 +235,15 @@ float2 averEnvBRDF(float ndv, float rough) {
     return float2(-1.04, 1.04) * a004 + r.zw;
 }
 
-// Adds one light's direct contribution: Cook-Torrance GGX, with NdotL and visibility applied here.
-// Radiance accumulates rather than being summed by the caller, so the addition order is fixed.
+// Adds one light's direct contribution: Cook-Torrance GGX, with NdotL and visibility applied.
 float3 averShadeDirect(float3 radiance, AverSurface s, AverLight l) {
     switch (s.model) {
     case AVER_MODEL_UNLIT:
-        return radiance;   // an unlit surface receives nothing; it only emits, in averShadeIndirect
+        return radiance;
     default: {
         float a = s.rough * s.rough;
         float ndl = saturate(dot(s.N, l.direction));
         float D = distGGX(saturate(dot(s.N, s.H)), a);
-        // V already carries the 1/(4*ndv*ndl). Both D and V take the same alpha.
         float V = visSmithCorrelated(s.ndv, ndl, a);
         float3 spec = D * V * s.F;
         return radiance + (s.kdAlbedo / PI + spec) * l.radiance * ndl * l.visibility;
@@ -293,11 +261,7 @@ float3 averShadeIndirect(float3 radiance, AverSurface s, AverIndirect ind) {
         float2 dfg = averEnvBRDF(s.ndv, s.rough);
         float3 envSpec = ind.specular * (s.F0 * dfg.x + dfg.y);
         float3 indirect = s.kdAlbedo * ind.diffuse;
-        // Two occlusions, deliberately both: ind.occlusion is what the RENDERER resolved, and
-        // s.occlusion is what the MATERIAL authored into its map.
         ambient *= ind.occlusion * s.occlusion;
-        // The environment is occluded by the renderer's AO only: a baked crevice map describes
-        // diffuse self-shadowing, and a mirror in a crevice still reflects.
         radiance += ambient;
         radiance += indirect;
         radiance += envSpec * ind.occlusion;
@@ -310,8 +274,7 @@ float3 averShadeIndirect(float3 radiance, AverSurface s, AverIndirect ind) {
 }
 
 // The -D list pinning the material textures to the registers the root signature declared. One
-// define per slot rather than one base plus arithmetic: the HLSL preprocessor pastes tokens but
-// cannot evaluate `t##(base+1)`.
+// define per slot: the HLSL preprocessor pastes tokens but cannot evaluate `t##(base+1)`.
 std::string materialShaderDefines(u32 tableBaseRegister, u32 samplerRegister) {
     std::string s = "AVER_MATERIAL_SRV=" + std::to_string(tableBaseRegister);
     for (u32 i = 1; i < kTextureSlotCount; ++i)
