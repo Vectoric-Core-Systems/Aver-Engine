@@ -44,6 +44,14 @@ SamplerComparisonState    gShadowSamp : register(s1);
 // DXR 1.1 inline ray tracing: traced from the pixel shader, no state objects or binding tables.
 RaytracingAccelerationStructure gScene : register(t2);
 
+// The flat geometry a reflection ray reads after it hits something. Three descriptors for the whole
+// scene rather than one per mesh, because this RHI uses explicit descriptor tables and not bindless.
+struct RtVertex   { float3 pos; float3 nrm; float2 uv; };
+struct RtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo; uint pad; };
+StructuredBuffer<RtVertex>   gRtVerts     : register(t3);
+StructuredBuffer<uint>       gRtIndices   : register(t4);
+StructuredBuffer<RtInstance> gRtInstances : register(t5);
+
 // A hash of the pixel, for rotating each pixel's sample pattern.
 //
 // SPATIAL ONLY, and that is a hard requirement rather than a simplification: the gate oracle
@@ -122,6 +130,58 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel) {
         vis += q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
     }
     return vis / (float)n;
+}
+
+// Traces one reflection ray and shades what it hits.
+//
+// THIS IS WHAT MAKES REFLECTIONS GLOBAL. The cone tracer it replaces walks the voxel volume and
+// stops dead at its boundary -- `if (!insideVolume(uvw)) break;` -- so anything outside simply was
+// not reflected and the result fell back to sky. Objects popped in and out of reflections as they
+// crossed a boundary that has nothing to do with the scene. A ray has no such bound: it reaches
+// whatever the acceleration structure holds, at any distance.
+//
+// The shading is one bounce of Lambertian direct light plus sky ambient, with the hit surface's own
+// albedo from the instance table. No textures and no second bounce -- a reflected surface is
+// slightly flatter than the same surface seen directly, which is a stated approximation rather than
+// an accident.
+float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, out bool hit) {
+    hit = false;
+    RayDesc r;
+    const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
+    r.Origin    = wpos + N * bias;
+    r.Direction = R;
+    r.TMin      = bias;
+    r.TMax      = 100000.0;
+
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, r);
+    q.Proceed();
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return 0.0;
+
+    RtInstance inst = gRtInstances[q.CommittedInstanceID()];
+    uint tri = inst.firstIndex + q.CommittedPrimitiveIndex() * 3;
+    uint i0 = inst.firstVertex + gRtIndices[tri + 0];
+    uint i1 = inst.firstVertex + gRtIndices[tri + 1];
+    uint i2 = inst.firstVertex + gRtIndices[tri + 2];
+
+    float2 bary = q.CommittedTriangleBarycentrics();
+    float3 w = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
+    float3 nObj = normalize(gRtVerts[i0].nrm * w.x + gRtVerts[i1].nrm * w.y + gRtVerts[i2].nrm * w.z);
+    // Rotation only. The engine is row-vector, so a direction is the vector times the upper 3x3 --
+    // and a non-uniform scale would need the inverse transpose, which this deliberately does not
+    // carry: reflections here are of rigid instances.
+    float3 nWS = normalize(mul(float4(nObj, 0.0), inst.objectToWorld).xyz);
+    if (dot(nWS, R) > 0.0) nWS = -nWS;   // face the ray, so a back-facing hit is not lit from behind
+
+    float3 hitPos = wpos + R * q.CommittedRayT();
+    // Whether the SUN reaches the reflected surface. Without this every reflection is lit as if
+    // nothing could shadow it, which is what makes cheap reflections look like they glow.
+    float shadow = rtShadow(hitPos, nWS, L, hitPos.xy);
+
+    float3 direct = averSunRadiance() * saturate(dot(nWS, L)) * shadow;
+    float3 ambient = averSkyIrradiance(nWS) * gAmbient.r;
+    hit = true;
+    return inst.albedo * (direct + ambient);
 }
 #endif
 
@@ -254,6 +314,15 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     ind4.ambientScale = gAmbient.r;
     ind4.diffuse      = ind;
     ind4.occlusion    = ao;
+#if AVER_RT
+    // Ray traced when the acceleration structure and the geometry table are both there. Preferred
+    // over the cone trace unconditionally: the cone is bounded by the voxel volume and this is not.
+    if (gShadowParams.z > 0.5 && gRtParams.w > 0.5) {
+        bool specHit = false;
+        float3 refl = rtReflection(i.wpos, N, R, L, specHit);
+        ind4.specular = specHit ? refl : skyColor(R);
+    } else
+#endif
     if (gVoxelParams.w > 0.5) {
         float  specAperture = clamp(s.rough * 0.5 + 0.02, 0.02, 0.4);
         float4 sceneSpec    = traceCone(i.wpos, R, specAperture);

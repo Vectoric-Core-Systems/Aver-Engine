@@ -52,7 +52,10 @@ void giSamplers(rhi::PipelineLayout& l) {
 // Returns the pipeline layout every Voxi raster pipeline declares.
 rhi::PipelineLayout giLayout() {
     rhi::PipelineLayout l{};
-    l.srvCount = 3;              // t0 volume, t1 shadow map, t2 acceleration structure
+    // t0 volume, t1 shadow map, t2 acceleration structure, then the flat geometry a reflection
+    // ray reads after a hit: t3 vertices, t4 indices, t5 instances. The material table is BASED on
+    // this count rather than at a fixed register, so widening table 0 rebases it automatically.
+    l.srvCount = 6;
     l.uavCount = 2;              // u0 volume mip 0, u1 injection accumulator
     l.srvCount1 = pbr::kMaterialSrvCount;   // table 1: the material's textures, based at t3
     l.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
@@ -297,6 +300,8 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     ctx.pushMarker("Voxi acceleration structures");
     std::vector<rhi::TlasInstance> inst;
     inst.reserve(drawsPrev_.size());
+    rtInstanceData_.clear();
+    rtInstanceMesh_.clear();
     for (const Draw& d : drawsPrev_) {
         auto it = blas_.find(d.mesh);
         if (it == blas_.end()) {
@@ -325,11 +330,21 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         std::memcpy(i.world, d.world, sizeof(i.world));
         i.mask = 0xFF;
         i.blas = b;
-        // The MESH is what this renderer's shaders would want to know from a hit, and it is stable
-        // across a build that drops an instance -- unlike the instance's position in the list.
-        // Nothing reads it yet; shadows only ask whether something is there.
-        i.instanceId = static_cast<u32>(d.mesh) & rhi::kMaxTlasInstanceId;
+        // An index into rtInstanceData_, which a reflection ray reads to find the triangle it hit
+        // and the surface's albedo. Assigned HERE, in the same loop that decides which instances
+        // survive, so the two lists cannot drift -- an id assigned earlier would be wrong for every
+        // instance after one whose acceleration structure failed to build.
+        i.instanceId = static_cast<u32>(rtInstanceData_.size()) & rhi::kMaxTlasInstanceId;
         inst.push_back(i);
+
+        RtInstance ri;
+        std::memcpy(ri.objectToWorld, d.world, sizeof(ri.objectToWorld));
+        ri.albedo[0] = d.color[0]; ri.albedo[1] = d.color[1]; ri.albedo[2] = d.color[2];
+        // Filled in by buildGeometryTable, which is what knows where each mesh landed.
+        ri.firstIndex = 0;
+        ri.firstVertex = 0;
+        rtInstanceData_.push_back(ri);
+        rtInstanceMesh_.push_back(d.mesh);
     }
     if (inst.empty()) { ctx.popMarker(); return; }
 
@@ -347,7 +362,10 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // Base ray bias in centimetres, scaled by view distance in the shader. Small enough not to
     // detach a contact shadow, large enough that a surface does not intersect its own rays.
     cb_.rtParams[2] = 0.05f;
-    cb_.rtParams[3] = 0.0f;
+    // w > 0.5 tells the lit pass it may trace a reflection ray. It is only true when the flat
+    // geometry table is actually there, because a reflection that hits geometry it cannot look up
+    // would read a neighbour's triangle rather than fail visibly.
+    cb_.rtParams[3] = buildGeometryTable(ctx) ? 1.0f : 0.0f;
     if (!rtLogged_) {
         AVER_INFO("[Voxi] RayQuery active ({} instances, {} bottom-level structures)",
                   static_cast<u32>(inst.size()), static_cast<u32>(blas_.size()));
@@ -486,6 +504,106 @@ u32 VoxiRenderer::fitCascades() {
         sliceNear = sliceFar;
     }
     return kShadowCascades;
+}
+
+// Concatenates every referenced mesh's vertices and indices into two flat buffers, and writes the
+// per-instance table that says where each mesh's data starts.
+//
+// REBUILT ONLY WHEN THE MESH SET CHANGES. Copying every mesh every frame would cost more than the
+// reflections it enables, and the geometry itself does not move -- an instance's TRANSFORM changes
+// per frame and lives in the instance record, which is rewritten every frame because it is small.
+bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
+    if (!res_ || !dev_ || rtInstanceData_.empty()) return false;
+
+    // What the table is built from: the ordered list of meshes. A cheap order-sensitive mix, so a
+    // reordered draw list rebuilds rather than silently keeping offsets that no longer match.
+    u64 key = 1469598103934665603ull;
+    for (rhi::MeshHandle h : rtInstanceMesh_) {
+        key ^= static_cast<u64>(h);
+        key *= 1099511628211ull;
+    }
+
+    u32 totalVerts = 0, totalIndices = 0;
+    for (usize i = 0; i < rtInstanceMesh_.size(); ++i) {
+        rhi::BufferHandle vb = 0, ib = 0;
+        u32 vc = 0, ic = 0;
+        if (!dev_->meshGeometry(rtInstanceMesh_[i], &vb, &ib, &vc, &ic)) return false;
+        rtInstanceData_[i].firstVertex = totalVerts;
+        rtInstanceData_[i].firstIndex  = totalIndices;
+        totalVerts   += vc;
+        totalIndices += ic;
+    }
+    if (totalVerts == 0 || totalIndices == 0) return false;
+
+    // The instance table is rewritten every frame -- transforms move -- so it is an upload buffer.
+    if (rtInstanceCapacity_ < rtInstanceData_.size()) {
+        if (rtInstances_) res_->destroyBuffer(rtInstances_);
+        rhi::BufferDesc d;
+        d.bytes = sizeof(RtInstance) * rtInstanceData_.size();
+        d.kind  = rhi::BufferKind::Upload;
+        d.debugName = "rt instances";
+        rtInstances_ = res_->createBuffer(d);
+        rtInstanceCapacity_ = rtInstances_ ? static_cast<u32>(rtInstanceData_.size()) : 0;
+    }
+    if (!rtInstances_) return false;
+    res_->writeBuffer(rtInstances_, rtInstanceData_.data(),
+                      sizeof(RtInstance) * rtInstanceData_.size(), 0);
+    res_->setSrvBuffer(bindings_, 5, rtInstances_, sizeof(RtInstance),
+                       static_cast<u32>(rtInstanceData_.size()), 0);
+
+    if (key == rtGeometryKey_ && rtGeometryReady_) return true;
+
+    // The geometry itself. Default-heap, because it is written once by copy and then read by every
+    // reflection ray for as long as the mesh set holds.
+    if (rtVertCapacity_ < totalVerts) {
+        if (rtVerts_) res_->destroyBuffer(rtVerts_);
+        rhi::BufferDesc d;
+        d.bytes = static_cast<u64>(totalVerts) * sizeof(rhi::MeshVertex);
+        d.kind  = rhi::BufferKind::Default;
+        d.debugName = "rt vertices";
+        rtVerts_ = res_->createBuffer(d);
+        rtVertCapacity_ = rtVerts_ ? totalVerts : 0;
+    }
+    if (rtIndexCapacity_ < totalIndices) {
+        if (rtIndices_) res_->destroyBuffer(rtIndices_);
+        rhi::BufferDesc d;
+        d.bytes = static_cast<u64>(totalIndices) * sizeof(u32);
+        d.kind  = rhi::BufferKind::Default;
+        d.debugName = "rt indices";
+        rtIndices_ = res_->createBuffer(d);
+        rtIndexCapacity_ = rtIndices_ ? totalIndices : 0;
+    }
+    if (!rtVerts_ || !rtIndices_) return false;
+
+    // BOTH transitions are explicit. D3D12 would promote a Common buffer to CopyDest by itself, but
+    // the RHI tracks buffer state to catch exactly this class of mistake, and it does not model
+    // promotion -- so an implicit promotion followed by an explicit walk-back is a barrier claiming
+    // a state the tracker never saw it enter. Being explicit at both ends keeps the two in step.
+    //
+    // The walk-back matters on its own account too: the promotion lasts the rest of the COMMAND
+    // LIST, so a reflection ray reading this later in the same frame would be reading a resource
+    // the runtime still considers a copy destination.
+    ctx.bufferBarrier(rtVerts_,   rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
+    ctx.bufferBarrier(rtIndices_, rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
+    for (usize i = 0; i < rtInstanceMesh_.size(); ++i) {
+        rhi::BufferHandle vb = 0, ib = 0;
+        u32 vc = 0, ic = 0;
+        if (!dev_->meshGeometry(rtInstanceMesh_[i], &vb, &ib, &vc, &ic)) return false;
+        ctx.copyBuffer(rtVerts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
+                       static_cast<u64>(rtInstanceData_[i].firstVertex) * sizeof(rhi::MeshVertex), 0);
+        ctx.copyBuffer(rtIndices_, ib, static_cast<u64>(ic) * sizeof(u32),
+                       static_cast<u64>(rtInstanceData_[i].firstIndex) * sizeof(u32), 0);
+    }
+    ctx.bufferBarrier(rtVerts_,   rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
+    ctx.bufferBarrier(rtIndices_, rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
+
+    rtGeometryKey_ = key;
+    rtGeometryReady_ = true;
+    res_->setSrvBuffer(bindings_, 3, rtVerts_, sizeof(rhi::MeshVertex), totalVerts, 0);
+    res_->setSrvBuffer(bindings_, 4, rtIndices_, sizeof(u32), totalIndices, 0);
+    AVER_INFO("[Voxi] ray-traced reflection table: {} instances, {} vertices, {} indices",
+              rtInstanceData_.size(), totalVerts, totalIndices);
+    return true;
 }
 
 // Renders the replayed draw list into each cascade's quadrant of the shadow atlas, depth only.
@@ -701,11 +819,16 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
 
     // Main table. Each slot declares its kind because Tier 1 hardware null-fills by dimension.
     rhi::BindingSetDesc bd;
-    bd.srvCount = 3;
+    bd.srvCount = 6;
     bd.uavCount = 2;
     bd.srvKinds[0] = rhi::SlotKind::Texture3D;              // t0 volume, whole chain
     bd.srvKinds[1] = rhi::SlotKind::Texture2D;              // t1 shadow map
     bd.srvKinds[2] = rhi::SlotKind::AccelerationStructure;  // t2 TLAS, filled once one exists
+    // Null-filled until the table exists. Tier 1 requires a valid descriptor of the right KIND in
+    // every declared slot, so these must be declared as structured buffers even while empty.
+    bd.srvKinds[3] = rhi::SlotKind::StructuredBuffer;       // t3 flat vertices
+    bd.srvKinds[4] = rhi::SlotKind::StructuredBuffer;       // t4 flat indices
+    bd.srvKinds[5] = rhi::SlotKind::StructuredBuffer;       // t5 per-instance records
     bd.uavKinds[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
     bd.uavKinds[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
     bindings_ = res_->createBindingSet(bd);

@@ -129,6 +129,37 @@ private:
     // tracing ever starts costing frames. There is a recorded TDR history on this machine, so it
     // deliberately does not default high.
     u32 rtShadowRays_ = 4;
+
+    // ---- the flat geometry table a reflection ray reads after it hits something ----
+    //
+    // A hit gives back an instance id, a primitive index and barycentrics. Turning that into a
+    // shaded colour needs the triangle, so every referenced mesh's vertices and indices are
+    // concatenated into two buffers and a per-instance record says where each mesh starts. This is
+    // the shape a non-bindless RHI can express: three descriptors total, not one per mesh.
+    struct RtInstance {
+        f32 objectToWorld[16];   // engine row-vector, matching TlasInstance::world
+        u32 firstIndex = 0;      // where this mesh's indices start in the flat table
+        u32 firstVertex = 0;     // and its vertices
+        f32 albedo[3] = {1, 1, 1};
+        u32 pad = 0;
+    };
+    // 64 + 4 + 4 + 12 + 4. A structured buffer packs tightly with natural alignment, so this is the
+    // same 88 bytes on both sides -- and the stride handed to setSrvBuffer must agree with it or
+    // every instance after the first reads the middle of its neighbour.
+    static_assert(sizeof(RtInstance) == 88, "RtInstance is the HLSL RtInstance ABI");
+
+    rhi::BufferHandle rtVerts_ = 0, rtIndices_ = 0, rtInstances_ = 0;
+    u32  rtVertCapacity_ = 0, rtIndexCapacity_ = 0, rtInstanceCapacity_ = 0;
+    // What the table was built from. Rebuilt only when this changes, because concatenating every
+    // mesh every frame would cost more than the reflections do.
+    u64  rtGeometryKey_ = 0;
+    bool rtGeometryReady_ = false;
+    std::vector<RtInstance> rtInstanceData_;
+    std::vector<rhi::MeshHandle> rtInstanceMesh_;   // parallel: which mesh each instance draws
+
+    // Builds or refreshes the flat table for this frame's draw list. Returns false when it could
+    // not be made, which is the signal to fall back to cone-traced reflections.
+    bool buildGeometryTable(rhi::IRenderContext& ctx);
     bool rtLogged_ = false;
 
     // One replayed draw: its transform, its legacy colour parameters and its captured material.
