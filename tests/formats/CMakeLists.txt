@@ -51,11 +51,24 @@ if(TARGET Aver.Formats.Material)
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
-# ConvertTool -- drives the importer over a real file and writes a real .ocmesh. Not a test: a small
-# harness so the end-to-end path can be exercised without the editor's UI.
+# ConvertTool -- drives the importer over a real file and writes the whole .oc* triple. Not a test:
+# a small harness so the end-to-end path can be exercised without the editor's UI.
 add_executable(ConvertTool src/ConvertTool.cpp)
 target_link_libraries(ConvertTool PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(ConvertTool PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# MakeRig -- writes content/dev/Rig.gltf, the tree's ONLY skinned asset source. Registered here for
+# ConvertTool's reason rather than because it is a test: this is where Aver.Formats is already linked.
+#
+# It emits glTF and NOT the .oc* triple, on purpose: a generator that wrote the engine's own
+# container would be testing only itself, and would become a second source of truth for the skin
+# stream's interleave and for the weight quantisation. Going through the importer instead exercises
+# the metre-to-centimetre scale, the determinant -1 basis change and the child-first joint reorder,
+# which is what a real asset hits. It also links Aver.Anim, because the one thing a static check
+# cannot tell you about a rig is whether its clip actually moves it.
+add_executable(MakeRig ${CMAKE_SOURCE_DIR}/tools/MakeRig.cpp)
+target_link_libraries(MakeRig PRIVATE Aver.Formats Aver.Anim Aver.Core Aver.Platform)
+set_target_properties(MakeRig PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # ActorScriptTest — reading and rewriting the actor designer's generated region.
 #
