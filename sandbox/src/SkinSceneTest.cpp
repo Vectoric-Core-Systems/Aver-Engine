@@ -75,6 +75,8 @@ bool SkinSceneTest::setup(Engine& e, const std::string& dir,
 
     // Ids the host will register against the three files. Arbitrary and distinct; what matters is
     // that the same id reaches sceneMeshes_, contentIndex_ and the components.
+    restMin_ = md.boundsMin;
+    restMax_ = md.boundsMax;
     *outMesh = h;
     *outMeshId = 0x5C1'0001ull;
     *outSkelId = 0x5C1'0002ull;
@@ -124,6 +126,19 @@ bool SkinSceneTest::setup(Engine& e, const std::string& dir,
     w.setLocalTransform(c, tc);
     w.flush();
 
+    // A THIRD entity, parked a kilometre behind the camera. It exists so the frustum culler has
+    // something it must reject: without it "0 culled" is indistinguishable from a culler that never
+    // rejects anything, and a culler that never rejects anything passes every other check here.
+    const scene::Entity off = w.create("SkinOffscreen");
+    {
+        auto* mr = static_cast<scene::CMeshRenderer*>(w.addComponent(off, scene::kComponentMeshRenderer));
+        mr->mesh = *outMeshId;
+        mr->flags = scene::kMeshRendererVisible;
+    }
+    Transform to{}; to.position = Vec3{0.0f, 0.0f, -100000.0f}; to.scale = Vec3{1,1,1};
+    w.setLocalTransform(off, to);
+    offscreen_ = off;
+
     subject_ = a;
     reference_ = c;
 
@@ -139,8 +154,9 @@ bool SkinSceneTest::setup(Engine& e, const std::string& dir,
     return true;
 }
 
-void SkinSceneTest::tick(Engine& e, f32 vpX, f32 vpY, f32 vpW, f32 vpH) {
+void SkinSceneTest::tick(Engine& e, f32 vpX, f32 vpY, f32 vpW, f32 vpH, u32 culledThisFrame) {
     if (done_) return;
+    if (culledThisFrame > maxCulled_) maxCulled_ = culledThisFrame;
 
     scene::World& w = scene::World::instance();
     const scene::Entity subj = static_cast<scene::Entity>(subject_);
@@ -155,6 +171,13 @@ void SkinSceneTest::tick(Engine& e, f32 vpX, f32 vpY, f32 vpW, f32 vpH) {
     const u32 t = step_ - kSettle;
     const u32 slot = t / 2;
     if (slot >= kProbes) {
+        // The subject's PUBLISHED bounds for this phase, read off the component the culler and the
+        // picker read. Sampled here rather than in setup because they are rewritten every frame.
+        if (const auto* mr = w.component<scene::CMeshRenderer>(subj, scene::kComponentMeshRenderer)) {
+            boundsLo_[phase_] = Vec3{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
+            boundsHi_[phase_] = Vec3{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
+            haveBounds_[phase_] = true;
+        }
         if (phase_ + 1 < kPhases) { ++phase_; step_ = 0; return; }
         report();
         done_ = true;
@@ -255,6 +278,63 @@ void SkinSceneTest::report() {
                    "stream being overwritten by the posed one",
                    kTimes[2], onSubject - subjectReturned, onSubject, worstReturn);
         return;
+    }
+
+    // ---- CULLING: the frustum rejected the entity that is a kilometre away ----
+    if (maxCulled_ == 0) {
+        AVER_ERROR("[Skin] scene test FAIL (culling): an entity parked 1 km behind the camera was "
+                   "never frustum-culled in any frame. Bounds that follow the pose are worth nothing "
+                   "if nothing rejects anything -- the culler is a no-op");
+        return;
+    }
+    AVER_INFO("[Skin] scene test CULL PASS: the off-screen entity was rejected (up to {} in a frame), "
+              "so the frustum test is live and the bounds below are actually consumed", maxCulled_);
+
+    // ---- BOUNDS: the box the culler and the picker read must follow the pose ----
+    if (haveBounds_[0] && haveBounds_[1] && haveBounds_[2]) {
+        const auto span = [](const Vec3& lo, const Vec3& hi) {
+            return std::fmax(hi.x - lo.x, std::fmax(hi.y - lo.y, hi.z - lo.z));
+        };
+        const f32 restSpan = span(restMin_, restMax_);
+        AVER_INFO("[Skin] scene test: bounds  rest ({:.0f},{:.0f},{:.0f})..({:.0f},{:.0f},{:.0f})  "
+                  "posed ({:.0f},{:.0f},{:.0f})..({:.0f},{:.0f},{:.0f})",
+                  boundsLo_[0].x, boundsLo_[0].y, boundsLo_[0].z,
+                  boundsHi_[0].x, boundsHi_[0].y, boundsHi_[0].z,
+                  boundsLo_[1].x, boundsLo_[1].y, boundsLo_[1].z,
+                  boundsHi_[1].x, boundsHi_[1].y, boundsHi_[1].z);
+
+        // It must CONTAIN the rest extent in every phase -- the bound is conservative by
+        // construction and a box that has shrunk inside the mesh would cull a visible character.
+        bool containsRest = true;
+        for (u32 ph = 0; ph < kPhases; ++ph)
+            if (boundsLo_[ph].z > restMin_.z + 1e-2f || boundsHi_[ph].z < restMax_.z - 1e-2f)
+                containsRest = false;
+        if (!containsRest) {
+            AVER_ERROR("[Skin] scene test FAIL (bounds): the published box does not contain the rest "
+                       "extent, so a visible character can be culled or missed by a click");
+            return;
+        }
+
+        // And it must MOVE. A box that is identical at t=0 and t=0.5 is the bind-pose box, which is
+        // the whole defect: the character bends out of it and pops at the screen edge.
+        f32 moved = 0.0f;
+        for (u32 i = 0; i < 3; ++i) {
+            const f32* a0 = &boundsLo_[0].x; const f32* a1 = &boundsLo_[1].x;
+            const f32* b0 = &boundsHi_[0].x; const f32* b1 = &boundsHi_[1].x;
+            moved = std::fmax(moved, std::fabs(a0[i] - a1[i]));
+            moved = std::fmax(moved, std::fabs(b0[i] - b1[i]));
+        }
+        if (moved < 1.0f) {
+            AVER_ERROR("[Skin] scene test FAIL (bounds): the box moved {:.3f} cm when the pose "
+                       "changed, on a rig spanning {:.0f} cm. That is the bind-pose box, so a bent "
+                       "limb is culled and picked against geometry that is not there", moved, restSpan);
+            return;
+        }
+        AVER_INFO("[Skin] scene test BOUNDS PASS: the published box contains the rest extent and "
+                  "moved {:.1f} cm with the pose, so culling and picking follow the character", moved);
+    } else {
+        AVER_WARN("[Skin] scene test: the subject's bounds were not sampled; the culling half did "
+                  "NOT run and the result below covers only what is drawn");
     }
 
     ok_ = true;

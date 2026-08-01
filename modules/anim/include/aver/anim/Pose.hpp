@@ -61,4 +61,39 @@ void skinVertices(const std::vector<Mat4>& skin,
                   const std::vector<u16>& joints, const std::vector<f32>& weights,
                   std::vector<f32>& outPositions, std::vector<f32>& outNormals);
 
+// One rest-space box per bone: the extent of the vertices that bone meaningfully influences.
+//
+// Computed ONCE per mesh, so that the posed bounds can then be found in O(bones) instead of
+// O(vertices) every frame. A bone no vertex reaches gets an EMPTY box, flagged by outUsed, because
+// a bone with no geometry must contribute nothing rather than a degenerate point at its origin --
+// a rig's unweighted leaf bones would otherwise drag the bounds around for free.
+//
+// `minWeight` is the influence below which a vertex is not counted for that bone. ZERO is the safe
+// value and the one callers should pass: at zero this counts exactly the influences skinVertices
+// counts, so the resulting bound provably contains every posed vertex. A HIGHER threshold buys
+// tighter boxes -- a 0.001 weight on a distant bone barely moves the vertex, and counting it ties
+// that bone's box to geometry on the other side of the character -- but it does so by giving up the
+// guarantee, because the skinning still applies the weight this dropped. Raise it only where a
+// slightly wrong bound is cheaper than a loose one, and never for culling something expensive.
+void boneRestBounds(const std::vector<f32>& restPositions,
+                    const std::vector<u16>& joints, const std::vector<f32>& weights,
+                    u32 boneCount, f32 minWeight,
+                    std::vector<Vec3>& outMin, std::vector<Vec3>& outMax, std::vector<u8>& outUsed);
+
+// The posed bounding box, from those rest boxes and this frame's skinning matrices.
+//
+// CONSERVATIVE BY CONSTRUCTION, and the argument is worth stating because it is what makes an
+// O(bones) answer legitimate: each bone's box is transformed and the AABB of all of them is taken.
+// A skinned vertex is a weighted sum of its influences' transformed positions, each of which lies
+// in its own transformed box; the AABB of the union is CONVEX, so it contains any such combination.
+// The union of the boxes itself would not be -- it is not convex, and a blended vertex can sit in
+// the gap between two of them.
+//
+// `restMin`/`restMax` are folded in as well, because a vertex whose weights do not sum to one is
+// NOT a convex combination -- the contract skips zero weights and out-of-range indices rather than
+// renormalising -- and a fully unweighted vertex stays at its rest position by the same rule.
+void posedBounds(const std::vector<Vec3>& boneMin, const std::vector<Vec3>& boneMax,
+                 const std::vector<u8>& used, const Mat4* skin, u32 boneCount,
+                 const Vec3& restMin, const Vec3& restMax, Vec3& outMin, Vec3& outMax);
+
 } // namespace aver::anim

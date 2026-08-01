@@ -1,6 +1,7 @@
 // The scene join: walk the world, give every skinned entity its own posed mesh, dispatch, release.
 #include "aver/render/SkinnedScene.hpp"
 #include "aver/scene/Components.hpp"
+#include "aver/anim/Pose.hpp"
 #include "aver/core/Log.hpp"
 
 namespace aver::render {
@@ -39,6 +40,7 @@ void SkinnedScene::shutdown() {
     pass_.shutdown();
     ready_ = false;
     posedLastFrame_ = 0;
+    boundsLastFrame_ = 0;
 }
 
 void SkinnedScene::retire(scene::Entity e) {
@@ -121,6 +123,16 @@ SkinnedScene::Resident* SkinnedScene::acquire(scene::World& world, anim::AnimSys
         return nullptr;
     }
     if (!pass_.createMesh(dit->second, bones, r.gpu, r.vertices)) return nullptr;
+
+    // The per-bone rest boxes, once. minWeight ZERO on purpose: at zero this counts exactly the
+    // influences the skinning counts, which is what makes the per-frame bound provably contain
+    // every posed vertex rather than merely usually contain it.
+    const fmt::OcMeshData& md = dit->second;
+    anim::boneRestBounds(md.positions, md.joints, md.weights, bones, 0.0f,
+                         r.boneMin, r.boneMax, r.boneUsed);
+    r.restMin = md.boundsMin;
+    r.restMax = md.boundsMax;
+
     r.meshId = meshId;
     r.boneCount = bones;
     // Its buffer was seeded with the source mesh's vertices, so it IS at rest already.
@@ -145,6 +157,7 @@ void SkinnedScene::update(scene::World& world, anim::AnimSystem& anim, rhi::IDev
 
     // ---- reconcile the living ----
     posedLastFrame_ = 0;
+    boundsLastFrame_ = 0;
     const u32 n = world.count();
     for (u32 i = 0; i < n; ++i) {
         const scene::Entity e = world.at(i);
@@ -158,6 +171,29 @@ void SkinnedScene::update(scene::World& world, anim::AnimSystem& anim, rhi::IDev
 
         Resident* r = acquire(world, anim, dev, e, mr->mesh);
         if (!r) continue;
+
+        // The POSED bounds, written back onto the component every frame. Culling and picking read
+        // CMeshRenderer's box, and a rig's rest box is the wrong shape the moment a limb leaves it:
+        // the character pops out at the screen edge, or the cursor misses it. O(bones), so this is
+        // affordable on every skinned entity every frame.
+        u32 boneN = 0;
+        if (const Mat4* bones = anim.skinning(e, boneN); bones && boneN > 0) {
+            auto* mw = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+            Vec3 lo, hi;
+            anim::posedBounds(r->boneMin, r->boneMax, r->boneUsed, bones, boneN,
+                              r->restMin, r->restMax, lo, hi);
+            if (mw) {
+                mw->aabbMin[0] = lo.x; mw->aabbMin[1] = lo.y; mw->aabbMin[2] = lo.z;
+                mw->aabbMax[0] = hi.x; mw->aabbMax[1] = hi.y; mw->aabbMax[2] = hi.z;
+                ++boundsLastFrame_;
+            }
+        } else if (auto* mw = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer)) {
+            // Unposed: the rest extent, which is the truth for a mesh drawn at rest and is still an
+            // improvement on whatever placeholder the spawn path left there.
+            mw->aabbMin[0] = r->restMin.x; mw->aabbMin[1] = r->restMin.y; mw->aabbMin[2] = r->restMin.z;
+            mw->aabbMax[0] = r->restMax.x; mw->aabbMax[1] = r->restMax.y; mw->aabbMax[2] = r->restMax.z;
+            ++boundsLastFrame_;
+        }
 
         u32 count = 0;
         const Mat4* skin = anim.skinning(e, count);

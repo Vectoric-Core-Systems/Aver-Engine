@@ -141,4 +141,72 @@ void skinVertices(const std::vector<Mat4>& skin,
     }
 }
 
+void boneRestBounds(const std::vector<f32>& restPositions,
+                    const std::vector<u16>& joints, const std::vector<f32>& weights,
+                    u32 boneCount, f32 minWeight,
+                    std::vector<Vec3>& outMin, std::vector<Vec3>& outMax, std::vector<u8>& outUsed) {
+    outMin.assign(boneCount, Vec3{0, 0, 0});
+    outMax.assign(boneCount, Vec3{0, 0, 0});
+    outUsed.assign(boneCount, 0);
+
+    const usize n = restPositions.size() / 3;
+    const usize k = fmt::kOcMeshInfluences;
+    if (boneCount == 0 || n == 0 || joints.size() != n * k || weights.size() != n * k) return;
+
+    for (usize v = 0; v < n; ++v) {
+        const Vec3 p{restPositions[v * 3 + 0], restPositions[v * 3 + 1], restPositions[v * 3 + 2]};
+        for (usize i = 0; i < k; ++i) {
+            const f32 w = weights[v * k + i];
+            const u32 j = joints[v * k + i];
+            // A ZERO weight is skipped unconditionally, not merely when it falls under the
+            // threshold: that is skinVertices' own rule, and the two must agree exactly or a box
+            // built here can exclude a vertex the skinning still moves. With minWeight at zero the
+            // two predicates are then identical, which is what makes the bound provably safe.
+            if (w <= 0.0f || w < minWeight || j >= boneCount) continue;
+            if (!outUsed[j]) { outMin[j] = p; outMax[j] = p; outUsed[j] = 1; continue; }
+            outMin[j].x = outMin[j].x < p.x ? outMin[j].x : p.x;
+            outMin[j].y = outMin[j].y < p.y ? outMin[j].y : p.y;
+            outMin[j].z = outMin[j].z < p.z ? outMin[j].z : p.z;
+            outMax[j].x = outMax[j].x > p.x ? outMax[j].x : p.x;
+            outMax[j].y = outMax[j].y > p.y ? outMax[j].y : p.y;
+            outMax[j].z = outMax[j].z > p.z ? outMax[j].z : p.z;
+        }
+    }
+}
+
+void posedBounds(const std::vector<Vec3>& boneMin, const std::vector<Vec3>& boneMax,
+                 const std::vector<u8>& used, const Mat4* skin, u32 boneCount,
+                 const Vec3& restMin, const Vec3& restMax, Vec3& outMin, Vec3& outMax) {
+    // Seeded with the REST box rather than with infinities. A vertex whose weights do not sum to
+    // one is not a convex combination of its influences, and a fully unweighted one stays exactly
+    // at its rest position -- both are covered by keeping the rest extent in the union.
+    outMin = restMin;
+    outMax = restMax;
+    if (!skin || boneCount == 0) return;
+
+    const u32 bones = boneCount < static_cast<u32>(boneMin.size())
+                    ? boneCount : static_cast<u32>(boneMin.size());
+    for (u32 b = 0; b < bones; ++b) {
+        if (b >= used.size() || !used[b]) continue;
+        const Mat4& m = skin[b];
+        const Vec3& lo = boneMin[b];
+        const Vec3& hi = boneMax[b];
+
+        // All eight corners, because a rotation turns a box into something whose extent is not
+        // recoverable from two transformed corners.
+        for (u32 c = 0; c < 8; ++c) {
+            const Vec3 p{(c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y, (c & 4) ? hi.z : lo.z};
+            const Vec3 t{p.x * m.m[0][0] + p.y * m.m[1][0] + p.z * m.m[2][0] + m.m[3][0],
+                         p.x * m.m[0][1] + p.y * m.m[1][1] + p.z * m.m[2][1] + m.m[3][1],
+                         p.x * m.m[0][2] + p.y * m.m[1][2] + p.z * m.m[2][2] + m.m[3][2]};
+            outMin.x = outMin.x < t.x ? outMin.x : t.x;
+            outMin.y = outMin.y < t.y ? outMin.y : t.y;
+            outMin.z = outMin.z < t.z ? outMin.z : t.z;
+            outMax.x = outMax.x > t.x ? outMax.x : t.x;
+            outMax.y = outMax.y > t.y ? outMax.y : t.y;
+            outMax.z = outMax.z > t.z ? outMax.z : t.z;
+        }
+    }
+}
+
 } // namespace aver::anim

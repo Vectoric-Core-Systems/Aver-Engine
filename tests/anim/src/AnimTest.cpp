@@ -355,6 +355,89 @@ int main() {
         check(op.empty() && on.empty(), "a mis-sized weight stream is refused, not indexed into");
     }
 
+    AVER_INFO("posed bounds: conservative in O(bones), checked against every posed vertex");
+    {
+        // A two-bone strip. Bone 0 holds the low half, bone 1 the high half, with a blended band in
+        // between -- the same shape as a real limb, and the band is what a naive per-bone union gets
+        // wrong, because a blended vertex sits in the gap between two boxes.
+        const u32 kV = 41;
+        std::vector<f32> pos(kV * 3), nrm(kV * 3, 0.0f);
+        std::vector<u16> j(kV * 4, 0);
+        std::vector<f32> wt(kV * 4, 0.0f);
+        for (u32 v = 0; v < kV; ++v) {
+            const f32 t = static_cast<f32>(v) / static_cast<f32>(kV - 1);
+            pos[v*3+0] = (v % 2) ? 5.0f : -5.0f;
+            pos[v*3+1] = 0.0f;
+            pos[v*3+2] = t * 100.0f;
+            nrm[v*3+2] = 1.0f;
+            const f32 w1 = t < 0.35f ? 0.0f : (t > 0.65f ? 1.0f : (t - 0.35f) / 0.30f);
+            j[v*4+0] = 0; wt[v*4+0] = 1.0f - w1;
+            j[v*4+1] = 1; wt[v*4+1] = w1;
+        }
+
+        // minWeight ZERO, matching skinVertices' rule exactly: it counts every non-zero weight, so
+        // a box built with a higher threshold would exclude a vertex the skinning still moves.
+        std::vector<Vec3> bmin, bmax; std::vector<u8> used;
+        anim::boneRestBounds(pos, j, wt, 2, 0.0f, bmin, bmax, used);
+        check(used.size() == 2 && used[0] && used[1], "both bones own geometry");
+        check(bmax[0].z < 100.0f && bmin[1].z > 0.0f,
+              "and each bone's box covers ITS end of the strip, not the whole thing");
+
+        Vec3 restMin{-5, 0, 0}, restMax{5, 0, 100};
+
+        // Several poses, including one that throws bone 1 a long way out -- which is exactly the
+        // case a rest-pose box gets wrong and the whole point of the exercise.
+        const f32 angles[4] = {0.0f, 0.6f, 1.5f, 2.9f};
+        const f32 lifts[4]  = {0.0f, 40.0f, 300.0f, -220.0f};
+        for (u32 c = 0; c < 4; ++c) {
+            std::vector<Mat4> skin(2, Mat4::identity());
+            const f32 ca = std::cos(angles[c]), sa = std::sin(angles[c]);
+            skin[1].m[1][1] = ca;  skin[1].m[1][2] = sa;
+            skin[1].m[2][1] = -sa; skin[1].m[2][2] = ca;
+            skin[1].m[3][2] = lifts[c];
+            skin[0].m[3][0] = lifts[c] * 0.25f;
+
+            Vec3 lo, hi;
+            anim::posedBounds(bmin, bmax, used, skin.data(), 2, restMin, restMax, lo, hi);
+
+            // The ground truth: skin every vertex and take its extent. O(vertices), which is what
+            // posedBounds exists to avoid -- so this is the reference, not the implementation.
+            std::vector<f32> op, on;
+            anim::skinVertices(skin, pos, nrm, j, wt, op, on);
+            Vec3 tlo{1e30f, 1e30f, 1e30f}, thi{-1e30f, -1e30f, -1e30f};
+            for (u32 v = 0; v < kV; ++v) {
+                tlo.x = std::fmin(tlo.x, op[v*3+0]); thi.x = std::fmax(thi.x, op[v*3+0]);
+                tlo.y = std::fmin(tlo.y, op[v*3+1]); thi.y = std::fmax(thi.y, op[v*3+1]);
+                tlo.z = std::fmin(tlo.z, op[v*3+2]); thi.z = std::fmax(thi.z, op[v*3+2]);
+            }
+
+            const bool contains = lo.x <= tlo.x + 1e-3f && lo.y <= tlo.y + 1e-3f && lo.z <= tlo.z + 1e-3f &&
+                                  hi.x >= thi.x - 1e-3f && hi.y >= thi.y - 1e-3f && hi.z >= thi.z - 1e-3f;
+            check(contains, "pose " + std::to_string(c) + ": the O(bones) box CONTAINS every posed vertex");
+            if (!contains)
+                AVER_ERROR("    box ({:.1f},{:.1f},{:.1f})..({:.1f},{:.1f},{:.1f}) vs verts "
+                           "({:.1f},{:.1f},{:.1f})..({:.1f},{:.1f},{:.1f})",
+                           lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, tlo.x, tlo.y, tlo.z, thi.x, thi.y, thi.z);
+
+            // Conservative is necessary and not sufficient: an infinite box contains everything and
+            // culls nothing. The bound must also be TIGHT enough to be worth computing.
+            const f32 vol = (hi.x-lo.x) * (hi.y-lo.y+1.0f) * (hi.z-lo.z);
+            const f32 tvol = (thi.x-tlo.x) * (thi.y-tlo.y+1.0f) * (thi.z-tlo.z);
+            check(tvol <= 1e-4f || vol <= tvol * 12.0f,
+                  "pose " + std::to_string(c) + ": and is within 12x the true volume, so it still culls");
+        }
+
+        // A bone no vertex touches must not drag the bounds around. This is what `used` is for.
+        std::vector<Vec3> bmin3, bmax3; std::vector<u8> used3;
+        anim::boneRestBounds(pos, j, wt, 3, 0.0f, bmin3, bmax3, used3);
+        check(used3.size() == 3 && !used3[2], "a bone with no geometry is marked unused");
+        std::vector<Mat4> skin3(3, Mat4::identity());
+        skin3[2].m[3][0] = 100000.0f;    // flung to the far side of the world
+        Vec3 lo3, hi3;
+        anim::posedBounds(bmin3, bmax3, used3, skin3.data(), 3, restMin, restMax, lo3, hi3);
+        check(hi3.x < 1000.0f, "and contributes NOTHING even when its matrix is enormous");
+    }
+
     AVER_INFO(g_failures ? "AnimTest: {} FAILURES" : "AnimTest: all checks passed ({})", g_failures);
     return g_failures ? 1 : 0;
 }

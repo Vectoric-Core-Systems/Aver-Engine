@@ -58,6 +58,9 @@ public:
 
     u32 residentCount() const { return static_cast<u32>(live_.size()); }
     u32 posedLastFrame() const { return posedLastFrame_; }
+    // Entities whose CMeshRenderer bounds were rewritten this frame, so a caller can tell that
+    // culling is being fed something other than the rest box.
+    u32 boundsUpdatedLastFrame() const { return boundsLastFrame_; }
 
 private:
     // One skinned entity's GPU residency.
@@ -69,6 +72,13 @@ private:
         u32  boneCount = 0;
         std::vector<Mat4> staged;         // this frame's matrices: written in update, read in prePass
         bool atRest = false;              // `out` currently holds the rest pose; do not re-dispatch
+
+        // One rest-space box per bone, and the mesh's own rest extent. Built ONCE at acquire, so
+        // the posed bounds cost O(bones) per frame instead of O(vertices) -- see anim::posedBounds
+        // for why an O(bones) answer is still guaranteed to contain every posed vertex.
+        std::vector<Vec3> boneMin, boneMax;
+        std::vector<u8>   boneUsed;
+        Vec3 restMin{0, 0, 0}, restMax{0, 0, 0};
     };
 
     Resident* acquire(scene::World& world, anim::AnimSystem& anim, rhi::IDevice& dev,
@@ -92,6 +102,7 @@ private:
     void*        user_ = nullptr;
     bool         ready_ = false;
     u32          posedLastFrame_ = 0;
+    u32          boundsLastFrame_ = 0;
 
     // Decoded meshes, cached by mesh id rather than per entity: the joints and weights are needed to
     // build residency and the host discards its OcMeshData after upload.

@@ -674,6 +674,7 @@ public:
                 // resolves through the SAME table. Registering here is what makes a spawned
                 // entity actually reach a draw call without a project having been opened.
                 sceneMeshes_[meshId] = meshHandle;
+                skinScene_->restBounds(meshBounds_[meshId].first, meshBounds_[meshId].second);
                 // The three ids the entities name, pointed at the cooked files. contentIndex_ is
                 // what AnimSystem and SkinnedScene both resolve through, so registering here is
                 // what makes the rig reachable without a project.
@@ -1187,6 +1188,7 @@ public:
 
             const u64 id = fnv1a64(std::string_view(rel));
             sceneMeshes_[id] = h;
+            meshBounds_[id] = {md.boundsMin, md.boundsMax};
             projectMeshIds_.push_back(id);
             ++loaded;
             AVER_INFO("[Mesh] '{}' -> {} verts, {} indices", rel, verts.size(), md.indices.size());
@@ -1278,7 +1280,24 @@ public:
         // Scene-entity pass: draws every live entity carrying a CMeshRenderer.
         {
             scene::World& w = scene::World::instance();
-            int drawn = 0;
+            int drawn = 0, culled = 0;
+
+            // The six frustum planes, from the camera's viewProj. ENGINE convention: row-vector, so
+            // a clip coordinate is a dot with a COLUMN, and each plane is a sum or difference of two
+            // columns. Derived per frame rather than cached: it is two dozen adds, and a stale
+            // frustum culls things that are on screen.
+            f32 pl[6][4];
+            {
+                const Mat4& m = viewProj_;
+                for (int i = 0; i < 4; ++i) {
+                    pl[0][i] = m.m[i][3] + m.m[i][0];   // left
+                    pl[1][i] = m.m[i][3] - m.m[i][0];   // right
+                    pl[2][i] = m.m[i][3] + m.m[i][1];   // bottom
+                    pl[3][i] = m.m[i][3] - m.m[i][1];   // top
+                    pl[4][i] = m.m[i][2];               // near
+                    pl[5][i] = m.m[i][3] - m.m[i][2];   // far
+                }
+            }
             const u32 n = w.count();
             for (u32 i = 0; i < n; ++i) {
                 const scene::Entity ent = w.at(i);
@@ -1289,6 +1308,49 @@ public:
                 const auto it = sceneMeshes_.find(mr->mesh);
                 if (it == sceneMeshes_.end()) continue;
                 const Mat4& wm = w.worldMatrix(ent);
+
+                // A STATIC entity gets its bounds from the asset. A skinned one already had them
+                // written this frame by SkinnedScene from its ACTUAL POSE, so leave those alone --
+                // overwriting with the rest box is exactly the popping this exists to stop.
+                const bool skinned = skinnedScene_ && skinnedScene_->drawHandle(ent) != 0;
+                if (!skinned)
+                    if (const auto bit = meshBounds_.find(mr->mesh); bit != meshBounds_.end()) {
+                        auto* mw = const_cast<scene::CMeshRenderer*>(mr);
+                        mw->aabbMin[0] = bit->second.first.x;  mw->aabbMin[1] = bit->second.first.y;
+                        mw->aabbMin[2] = bit->second.first.z;
+                        mw->aabbMax[0] = bit->second.second.x; mw->aabbMax[1] = bit->second.second.y;
+                        mw->aabbMax[2] = bit->second.second.z;
+                    }
+
+                // Frustum cull on the world-space extent of the entity's own box. A DEGENERATE box
+                // is drawn rather than culled: an entity whose bounds were never filled in must not
+                // vanish, and being conservative costs a draw call where being wrong costs a
+                // character.
+                {
+                    const Vec3 lo{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
+                    const Vec3 hi{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
+                    if (hi.x > lo.x && hi.y > lo.y && hi.z > lo.z) {
+                        Vec3 wlo{1e30f, 1e30f, 1e30f}, whi{-1e30f, -1e30f, -1e30f};
+                        for (u32 c = 0; c < 8; ++c) {
+                            const Vec3 p{(c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y, (c & 4) ? hi.z : lo.z};
+                            const Vec3 t = xformPoint(wm, p);
+                            wlo.x = std::fmin(wlo.x, t.x); whi.x = std::fmax(whi.x, t.x);
+                            wlo.y = std::fmin(wlo.y, t.y); whi.y = std::fmax(whi.y, t.y);
+                            wlo.z = std::fmin(wlo.z, t.z); whi.z = std::fmax(whi.z, t.z);
+                        }
+                        bool outside = false;
+                        for (u32 pi = 0; pi < 6 && !outside; ++pi) {
+                            // The corner FURTHEST along the plane normal. If even that one is behind,
+                            // every corner is, and only then is the box definitely out.
+                            const f32 d = pl[pi][0] * (pl[pi][0] > 0 ? whi.x : wlo.x)
+                                        + pl[pi][1] * (pl[pi][1] > 0 ? whi.y : wlo.y)
+                                        + pl[pi][2] * (pl[pi][2] > 0 ? whi.z : wlo.z)
+                                        + pl[pi][3];
+                            if (d < 0.0f) outside = true;
+                        }
+                        if (outside) { ++culled; continue; }
+                    }
+                }
                 const i32 mat = mr->material;
                 f32 col[4] = {0.80f, 0.80f, 0.85f, 1.0f};
                 f32 metallic = 0.0f, roughness = 0.5f;
@@ -1331,10 +1393,11 @@ public:
                     selectionOutline_ = wm, selectionMesh_ = mesh, hasSelection_ = true;
                 ++drawn;
             }
-            if (drawn != lastSceneDrawn_) {
-                AVER_INFO("[Sandbox] scene-render: {} spawned CMeshRenderer entit{} drawn",
-                          drawn, drawn == 1 ? "y" : "ies");
+            if (drawn != lastSceneDrawn_ || culled != lastSceneCulled_) {
+                AVER_INFO("[Sandbox] scene-render: {} spawned CMeshRenderer entit{} drawn, {} frustum-culled",
+                          drawn, drawn == 1 ? "y" : "ies", culled);
                 lastSceneDrawn_ = drawn;
+                lastSceneCulled_ = culled;
             }
         }
 #endif
@@ -1364,7 +1427,8 @@ public:
         // Before captureCheck, because both use the device's single capture slot and the draw test
         // finishes inside the first dozen frames while the ordinary probe fires near the last.
         skinDrawCheck(e);
-        if (skinScene_ && !skinScene_->finished()) skinScene_->tick(e, vpX_, vpY_, vpW_, vpH_);
+        if (skinScene_ && !skinScene_->finished())
+            skinScene_->tick(e, vpX_, vpY_, vpW_, vpH_, static_cast<u32>(lastSceneCulled_ < 0 ? 0 : lastSceneCulled_));
         captureCheck(e);
     }
 
@@ -5329,7 +5393,13 @@ private:
 #if AVER_MODULE_SCENE
     // fnv1a64(asset path) -> mesh handle, for the scene-render pass.
     std::unordered_map<u64, rhi::MeshHandle> sceneMeshes_;
+    // Rest bounds per mesh id, in mesh space. Kept beside sceneMeshes_ because CMeshRenderer's own
+    // aabb was written as a hardcoded UNIT CUBE at every spawn site and never from the asset -- so
+    // picking a 100 cm character meant hitting a 2 cm box at its origin, and culling could not have
+    // worked at all. Skinned entities have theirs overwritten per frame by SkinnedScene.
+    std::unordered_map<u64, std::pair<Vec3, Vec3>> meshBounds_;
     int lastSceneDrawn_=-1;           // last scene-entity draw count, so the log line fires only on change
+    int lastSceneCulled_=-1;          // and the cull count, so a frustum bug shows as a number rather than a gap
 #endif
     Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };

@@ -36,8 +36,14 @@ public:
     bool setup(Engine& e, const std::string& dir,
                u64* outMeshId, u64* outSkelId, u64* outClipId, u32* outMesh);
 
+    // The rig's rest extent, so the host can register it the way it registers a project mesh's.
+    void restBounds(Vec3& lo, Vec3& hi) const { lo = restMin_; hi = restMax_; }
+
     // Advances the schedule and samples the next probe. Once per frame, from the app.
-    void tick(Engine& e, f32 vpX, f32 vpY, f32 vpW, f32 vpH);
+    // `culledThisFrame` is what the host's scene pass just rejected on the frustum. Passed in
+    // rather than inferred, because "nothing was culled" and "the culler does not work" look
+    // identical from outside and only one of them is acceptable.
+    void tick(Engine& e, f32 vpX, f32 vpY, f32 vpW, f32 vpH, u32 culledThisFrame);
 
     bool finished() const { return done_; }
 
@@ -71,6 +77,13 @@ private:
     u64   subject_ = 0;      // the animated entity, as a scene::Entity widened
     u64   reference_ = 0;    // the same mesh, no CSkeletalMesh, never posed
     u64   clipId_ = 0;
+    Vec3  restMin_{0, 0, 0}, restMax_{0, 0, 0};
+    u64   offscreen_ = 0;        // a third entity, parked far outside the frustum
+    u32   maxCulled_ = 0;        // the most the host culled in any one frame of the run
+    // The subject's published bounds, sampled once per phase. The pose is what should move them; a
+    // box that never changes is a character culled and picked against its bind pose.
+    Vec3  boundsLo_[kPhases], boundsHi_[kPhases];
+    bool  haveBounds_[kPhases] = {};
     u32   step_ = 0;
     u32   phase_ = 0;
     bool  done_ = false;
