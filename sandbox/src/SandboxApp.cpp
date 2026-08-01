@@ -552,8 +552,9 @@ public:
             AVER_INFO("[Sandbox] DPI scale {:.2f}, UI font rasterised at {:.0f}px", dpi_, 16.0f * dpi_);
             if (browserActive_) loadLogo(e);
             loadCompileIcon(e);
-            loadIconSheet(e, "file-icons.png",   4, "FileTypeIcons", fileIconsTexture_,   fileIconsUiId_,   fileIconAspect_);
-            loadIconSheet(e, "folder-icons.png", 2, "FolderIcons",   folderIconsTexture_, folderIconsUiId_, folderIconAspect_);
+            loadIconSheet(e, "file-icons.png",   kFileIconTiles, "FileTypeIcons", fileIconsTexture_,   fileIconsUiId_,   fileIconAspect_);
+            loadIconSheet(e, "folder-icons.png", kFolderIconTiles, "FolderIcons",  folderIconsTexture_, folderIconsUiId_, folderIconAspect_);
+            loadIconSheet(e, "asset-icons.png",  kAssetIconTiles,  "AssetTypeIcons", assetIconsTexture_,  assetIconsUiId_,  assetIconAspect_);
             if (const std::string er = editor::engineRoot(); !er.empty()) {
                 std::error_code ec;
                 const std::filesystem::path cs = std::filesystem::path(er) / "scripting" / "csharp";
@@ -3277,9 +3278,23 @@ private:
         }
     }
 
-    // Returns a file's sprite tile: 0 C# Script, 1 C# Class, 2 C++ Class, 3 C++ Module, -1 none.
-    // A .cs is classified by peeking at its head and cached against the file's modification time.
+    // Returns an ASSET sheet tile for an engine asset extension, or -1. Separate from the source-file
+    // sheet because the two are different textures with different provenance -- see branding/ASSETS.md.
+    static int assetIconTile(const std::string& ext) {
+        if (ext == ".ocanim") return 0;
+        if (ext == ".ocskel") return 1;
+        if (ext == ".ocmesh") return 2;
+        return -1;
+    }
+
+    // Returns a file's sprite tile. 0..3 index the file sheet (C# Script / C# Class / C++ Class /
+    // C++ Module); kAssetTileBase + n indexes the asset sheet; -1 is neither. A .cs is classified by
+    // peeking at its head and cached against the file's modification time.
+    //
+    // THE ASSET CHECK COMES FIRST, and has to. Below it sits `if (ext != ".cs") return -1;`, so an
+    // extension arm added after that line compiles, reads correctly, and never runs.
     int fileIconTile(const std::string& path, const std::string& name, const std::string& ext) {
+        if (const int a = assetIconTile(ext); a >= 0) return kAssetTileBase + a;
         if (name == "CMakeLists.txt") return 3;
         if (ext == ".cpp" || ext == ".cxx" || ext == ".cc" || ext == ".hpp" || ext == ".hxx" || ext == ".h")
             return 2;
@@ -3343,7 +3358,14 @@ private:
             else                  folderGlyph(dl, centre, s, IM_COL32(232, 187, 92, 255));
             return;
         }
-        if (tile >= 0 && fileIconsUiId_) { blitTile(dl, fileIconsUiId_, centre, s, fileIconAspect_, tile, 4); return; }
+        if (tile >= kAssetTileBase && assetIconsUiId_) {
+            blitTile(dl, assetIconsUiId_, centre, s, assetIconAspect_, tile - kAssetTileBase, kAssetIconTiles);
+            return;
+        }
+        if (tile >= 0 && tile < kAssetTileBase && fileIconsUiId_) {
+            blitTile(dl, fileIconsUiId_, centre, s, fileIconAspect_, tile, kFileIconTiles);
+            return;
+        }
         fileGlyph(dl, centre, s, IM_COL32(150, 154, 162, 255));
     }
 
@@ -3597,11 +3619,61 @@ private:
             ++written;
         }
 
-        if (written == 0) { cbStatus_ = "Import produced nothing - see the Output Log"; return; }
-        cbStatus_ = "Imported " + std::to_string(written) + " mesh(es) from " +
+        // The RIG. This used to drop res.skeletons and res.animations on the floor, so glTF could
+        // produce a skeleton and a clip that nothing ever wrote and no project could ever contain --
+        // and loadOcSkel/loadOcAnim had no caller in the engine's history.
+        u32 rigs = 0, clips = 0;
+        for (usize i = 0; i < res.skeletons.size(); ++i) {
+            std::string base = i < res.skeletonNames.size() && !res.skeletonNames[i].empty()
+                             ? res.skeletonNames[i] : stem;
+            if (res.skeletons.size() > 1) base += "_" + std::to_string(i);
+            sanitiseAssetName(base);
+            const std::string out = destDir + "\\" + base + ".ocskel";
+            if (std::filesystem::exists(out, ec)) {
+                AVER_WARN("[Import] '{}.ocskel' already exists - not overwritten", base);
+            } else if (!fmt::saveOcSkel(out, res.skeletons[i], &why)) {
+                AVER_WARN("[Import] {}", why);
+            } else {
+                AVER_INFO("[Import] {} -> {} ({} bone(s))", std::filesystem::path(src).filename().string(),
+                          base + ".ocskel", res.skeletons[i].bones.size());
+                ++rigs;
+            }
+        }
+        for (usize i = 0; i < res.animations.size(); ++i) {
+            std::string base = i < res.animationNames.size() && !res.animationNames[i].empty()
+                             ? res.animationNames[i] : (stem + "_clip" + std::to_string(i));
+            sanitiseAssetName(base);
+            const std::string out = destDir + "\\" + base + ".ocanim";
+            if (std::filesystem::exists(out, ec)) {
+                AVER_WARN("[Import] '{}.ocanim' already exists - not overwritten", base);
+            } else if (!fmt::saveOcAnim(out, res.animations[i], &why)) {
+                AVER_WARN("[Import] {}", why);
+            } else {
+                AVER_INFO("[Import] {} -> {} ({:.2f}s, {} track(s))",
+                          std::filesystem::path(src).filename().string(), base + ".ocanim",
+                          res.animations[i].duration, res.animations[i].tracks.size());
+                ++clips;
+            }
+        }
+
+        if (written == 0 && rigs == 0 && clips == 0) {
+            cbStatus_ = "Import produced nothing - see the Output Log";
+            return;
+        }
+        cbStatus_ = "Imported " + std::to_string(written) + " mesh(es), " + std::to_string(rigs) +
+                    " skeleton(s) and " + std::to_string(clips) + " clip(s) from " +
                     std::filesystem::path(src).filename().string();
         cbInvalidate(destDir);
         wantMeshReload_ = true;
+    }
+
+    // Replaces the characters Windows refuses in a file name. Asset names come from a glTF, so they
+    // are whatever the authoring tool allowed.
+    static void sanitiseAssetName(std::string& s) {
+        for (char& c : s)
+            if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
+                c == '"' || c == '<' || c == '>' || c == '|') c = '_';
+        if (s.empty()) s = "unnamed";
     }
 
     // Writes an edited material back to the .cs under Content\Materials that declares it, found by
@@ -4550,6 +4622,18 @@ private:
     rhi::TextureHandle folderIconsTexture_=0;   // the folder sheet (2 tiles: plain, module)
     u64 folderIconsUiId_=0;
     f32 folderIconAspect_=1.24f;
+    rhi::TextureHandle assetIconsTexture_=0;    // the generated asset sheet (anim, skeleton, mesh)
+    u64 assetIconsUiId_=0;
+    f32 assetIconAspect_=0.74f;
+    // The tile counts, named once each. They used to be two unconnected literal 4s -- one at the
+    // load call and one at the blit -- so changing either alone sampled the wrong UV window and
+    // every icon silently shifted.
+    static constexpr int kFileIconTiles   = 4;
+    static constexpr int kFolderIconTiles = 2;
+    static constexpr int kAssetIconTiles  = 3;
+    // Tiles are packed into one int so a cached DirListing entry stays one field: below the base is
+    // the file sheet, at or above it the asset sheet.
+    static constexpr int kAssetTileBase   = 100;
     std::unordered_map<std::string, std::pair<std::filesystem::file_time_type, int>> fileIconCache_;
     std::unordered_map<std::string, DirListing> dirCache_;
     int frameNo_ = 0;                                      // bumped once per UI frame; the cache freshness clock

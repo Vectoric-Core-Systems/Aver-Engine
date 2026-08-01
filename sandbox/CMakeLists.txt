@@ -148,6 +148,20 @@ add_custom_target(Sandbox.FolderIcons DEPENDS ${CMAKE_BINARY_DIR}/bin/folder-ico
 add_dependencies(Sandbox Sandbox.FolderIcons)
 set_target_properties(Sandbox.FolderIcons PROPERTIES FOLDER "sandbox")
 
+# The generated asset-type sheet (anim / skeleton / mesh). Staged the same way and for the same
+# reason as the others: POST_BUILD would not re-copy a sheet that changed without the exe relinking.
+# Drawn by scripts/make-asset-icons.py, NOT hand-authored -- see branding/ASSETS.md.
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/bin/asset-icons.png
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/branding/asset-icons.png ${CMAKE_BINARY_DIR}/bin/asset-icons.png
+  DEPENDS ${CMAKE_SOURCE_DIR}/branding/asset-icons.png
+  COMMENT "Staging asset-icons.png"
+)
+add_custom_target(Sandbox.AssetIcons DEPENDS ${CMAKE_BINARY_DIR}/bin/asset-icons.png)
+add_dependencies(Sandbox Sandbox.AssetIcons)
+set_target_properties(Sandbox.AssetIcons PROPERTIES FOLDER "sandbox")
+
 # Ship the editor UI typeface next to the executable. Same OUTPUT/DEPENDS rule as the splash, and
 # for the same reason -- POST_BUILD would not re-copy a font that changed without the exe relinking.
 set(AVER_UI_FONTS Roboto-Regular.ttf Roboto-Medium.ttf)

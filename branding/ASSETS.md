@@ -34,6 +34,26 @@ The transparent marks are keyed by flood-filling from the corners, **not** by re
 background colour globally: the cube's own outline is near-black and close enough to the #262626
 banner that a global replace punches holes through it.
 
+## Generated — drawn by a script, and it ships
+
+One sheet, and it is listed apart from the human artwork above deliberately. The rule this file
+exists for is that anything shipped be traceable to its author; the honest way to add an icon nobody
+had drawn was to draw a **new sheet** rather than a fifth tile inside `file-icons.png`, which would
+have quietly mixed machine-drawn art into the project owner's own.
+
+| File | Slot | Consumed by |
+|------|------|-------------|
+| `asset-icons.png` | 963×432 RGBA, 3 **portrait** tiles (321×432) — ANIM / SKELETON / MESH | The Content Browser's icons for `.ocanim`, `.ocskel` and `.ocmesh`, which previously fell back to the C# script tile. **Machine-drawn by `scripts/make-asset-icons.py`** — a running figure with motion streaks, a bone chain, an isometric cube. Requested by the project owner ("make some running look for it"). |
+
+The house style is **matched from measurements of `file-icons.png`, not guessed** — page `#999999`,
+banner `#262626` showing through a folded corner at (232,0)–(320,0)–(320,88) with a `#4D4D4D` crease,
+a pointy-top hexagon badge 245×265 centred at (159,215), and a Roboto Medium caption centred on
+y=398. Everything is drawn at 4× and downsampled, which is where the antialiasing comes from. Rerun
+the script to change it; do not hand-edit the sheet.
+
+The badge hues are new on purpose — amber, teal and green against the human sheet's purple (C#) and
+blue (C++) — so an asset type is distinguishable from a source file at a glance in a mixed folder.
+
 ## AI-generated — `ai-generated/`
 
 Written by Claude before the human artwork existed. **None is referenced by the build or by any

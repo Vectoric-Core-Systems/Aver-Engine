@@ -63,6 +63,7 @@ logo.png
 compile-status.png
 file-icons.png
 folder-icons.png
+asset-icons.png
 
 # The managed bridge and the C# contract assemblies. This subdirectory -- not bin\ -- is the live
 # copy: SandboxApp.cpp sets hd.bridgeDir = executableDir() + "\\Scripting", and ScriptHost.cpp
