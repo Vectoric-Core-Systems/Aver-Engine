@@ -20,6 +20,7 @@
 #endif
 #include "aver/ui/UiDrawList.hpp"
 #include "aver/render/ui/UiRenderer.hpp"
+#include "aver/render/SkinSelfTest.hpp"
 #include "aver/ui/ui_abi.h"
 
 #include "ProjectBrowser.hpp"
@@ -688,6 +689,16 @@ public:
         // The game UI's render feature: overlay pass only, so ordering against scene features is free.
         gameUi_ = aver::render::ui::UiRenderer::create(*e.device());
         if (gameUi_) e.device()->addRenderFeature(gameUi_);
+
+        // --skin-test: the GPU skinning pass against its CPU reference, on this machine's real
+        // device. Registered only when asked for, because it costs a waitIdle and exists to be run
+        // deliberately -- typically alongside --debug-layer, which is what catches a malformed
+        // descriptor as opposed to a wrong number.
+        if (skinTest_) {
+            skinSelfTest_ = std::make_unique<aver::render::SkinSelfTest>();
+            if (skinSelfTest_->init(*e.device())) e.device()->addRenderFeature(skinSelfTest_.get());
+            else { AVER_ERROR("[Skin] self-test unavailable on this device"); skinSelfTest_.reset(); }
+        }
 #if AVER_MODULE_SCRIPTING
         {
             scripting::HostDesc hd;
@@ -1326,6 +1337,10 @@ public:
             delete gameUi_;
             gameUi_ = nullptr;
         }
+        if (skinSelfTest_) {
+            e.device()->removeRenderFeature(skinSelfTest_.get());
+            skinSelfTest_.reset();
+        }
 #if AVER_MODULE_VOXI
         if (voxiAttached_) { e.device()->removeRenderFeature(&voxiRenderer_); voxiAttached_ = false; }
         voxiRenderer_.shutdown();
@@ -1390,6 +1405,7 @@ public:
 #if AVER_MODULE_MCP
     void setMcpPort(u16 p) { mcpPort_ = p; }
 #endif
+    void setSkinTest() { skinTest_ = true; }                                       // --skin-test
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
@@ -4675,6 +4691,8 @@ private:
 #endif
     // The retained game UI's renderer. Heap-owned because create() may decline.
     aver::render::ui::UiRenderer* gameUi_ = nullptr;
+    bool skinTest_ = false;       // --skin-test: GPU skinning against its CPU reference, then exit
+    std::unique_ptr<aver::render::SkinSelfTest> skinSelfTest_;
     bool showUiDemo_ = false;
     std::string matSaveStatus_;   // what the last 'Save to C#' did
     unsigned centralDock_ = 0;    // the dock node an opened asset editor lands in
@@ -5161,7 +5179,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -5241,6 +5259,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--scripts") && i+1<argc) scriptsDir=argv[++i];
         else if (!std::strcmp(argv[i],"--spawn-test") && i+1<argc) spawnTest=argv[++i];
         else if (!std::strcmp(argv[i],"--play-test")) playTest=true;
+        else if (!std::strcmp(argv[i],"--skin-test")) skinTest=true;
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
         else if (!std::strcmp(argv[i],"--bloom") && i+1<argc) bloom=static_cast<f32>(std::atof(argv[++i]));
@@ -5319,6 +5338,7 @@ Application* createApplication(int argc, char** argv) {
     app->setScriptsDir(scriptsDir);
     app->setSpawnTest(spawnTest);
     if (playTest) app->setPlayTest();
+    if (skinTest) app->setSkinTest();
     return app;
 }
 

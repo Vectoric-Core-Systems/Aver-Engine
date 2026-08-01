@@ -1,6 +1,8 @@
 // Pose arithmetic: rest, hierarchy resolve, skinning matrices, and the two blends.
 #include "aver/anim/Pose.hpp"
 
+#include <cmath>
+
 namespace aver::anim {
 
 namespace {
@@ -87,6 +89,55 @@ void addPose(const Pose& base, const Pose& additive, const Pose& additiveRest, f
         const Quat invRest{-rf.rotation.x, -rf.rotation.y, -rf.rotation.z, rf.rotation.w};
         const Quat delta = (invRest * ad.rotation).normalized();
         out.local[i].rotation = (bs.rotation * Quat::slerp(Quat::identity(), delta, w)).normalized();
+    }
+}
+
+void skinVertices(const std::vector<Mat4>& skin,
+                  const std::vector<f32>& restPositions, const std::vector<f32>& restNormals,
+                  const std::vector<u16>& joints, const std::vector<f32>& weights,
+                  std::vector<f32>& outPositions, std::vector<f32>& outNormals) {
+    outPositions.clear();
+    outNormals.clear();
+
+    const usize n = restPositions.size() / 3;
+    const usize k = fmt::kOcMeshInfluences;
+    if (n == 0 || restPositions.size() != n * 3 || restNormals.size() != n * 3) return;
+    if (joints.size() != n * k || weights.size() != n * k) return;
+
+    outPositions.resize(n * 3);
+    outNormals.resize(n * 3);
+    const u32 bones = static_cast<u32>(skin.size());
+
+    for (usize v = 0; v < n; ++v) {
+        const Vec3 rp{restPositions[v * 3 + 0], restPositions[v * 3 + 1], restPositions[v * 3 + 2]};
+        const Vec3 rn{restNormals[v * 3 + 0], restNormals[v * 3 + 1], restNormals[v * 3 + 2]};
+
+        Vec3 p{0, 0, 0}, nrm{0, 0, 0};
+        f32  used = 0.0f;
+        for (usize i = 0; i < k; ++i) {
+            const f32 w = weights[v * k + i];
+            const u32 j = joints[v * k + i];
+            if (w == 0.0f || j >= bones) continue;
+            const Mat4& m = skin[j];
+
+            p.x += w * (rp.x * m.m[0][0] + rp.y * m.m[1][0] + rp.z * m.m[2][0] + m.m[3][0]);
+            p.y += w * (rp.x * m.m[0][1] + rp.y * m.m[1][1] + rp.z * m.m[2][1] + m.m[3][1]);
+            p.z += w * (rp.x * m.m[0][2] + rp.y * m.m[1][2] + rp.z * m.m[2][2] + m.m[3][2]);
+
+            nrm.x += w * (rn.x * m.m[0][0] + rn.y * m.m[1][0] + rn.z * m.m[2][0]);
+            nrm.y += w * (rn.x * m.m[0][1] + rn.y * m.m[1][1] + rn.z * m.m[2][1]);
+            nrm.z += w * (rn.x * m.m[0][2] + rn.y * m.m[1][2] + rn.z * m.m[2][2]);
+            used += w;
+        }
+
+        // No surviving influence means the vertex is unrigged, not at the origin.
+        if (used == 0.0f) { p = rp; nrm = rn; }
+
+        const f32 len = std::sqrt(nrm.x * nrm.x + nrm.y * nrm.y + nrm.z * nrm.z);
+        if (len > 1e-8f) nrm = nrm * (1.0f / len);
+
+        outPositions[v * 3 + 0] = p.x; outPositions[v * 3 + 1] = p.y; outPositions[v * 3 + 2] = p.z;
+        outNormals[v * 3 + 0] = nrm.x; outNormals[v * 3 + 1] = nrm.y; outNormals[v * 3 + 2] = nrm.z;
     }
 }
 

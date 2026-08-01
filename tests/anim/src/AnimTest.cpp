@@ -277,6 +277,84 @@ int main() {
         check(!pl.fading(), "and starts no fade");
     }
 
+    AVER_INFO("CPU linear-blend skinning, which is the contract the GPU pass must match");
+    {
+        // One bone, a pure translation of +10 cm in x. Every vertex must move by exactly that,
+        // which is the simplest statement of "the translation row is read at all".
+        std::vector<Mat4> skin(1, Mat4::identity());
+        skin[0].m[3][0] = 10.0f;
+
+        std::vector<f32> pos{1.0f, 2.0f, 3.0f};
+        std::vector<f32> nrm{0.0f, 0.0f, 1.0f};
+        std::vector<u16> j{0, 0, 0, 0};
+        std::vector<f32> w{1.0f, 0.0f, 0.0f, 0.0f};
+        std::vector<f32> op, on;
+
+        anim::skinVertices(skin, pos, nrm, j, w, op, on);
+        check(op.size() == 3 && on.size() == 3, "one vertex in, one vertex out");
+        checkNear(op[0], 11.0f, 1e-5f, "the translation row reaches the position");
+        checkNear(op[1], 2.0f, 1e-5f, "and only the row it belongs to");
+        checkNear(on[2], 1.0f, 1e-5f, "a normal takes the rotation and NOT the translation");
+
+        // Two bones at half weight each: the result is the midpoint, not either endpoint. This is
+        // what separates linear BLEND skinning from picking the heaviest influence.
+        skin.push_back(Mat4::identity());
+        skin[1].m[3][0] = 30.0f;
+        j = {0, 1, 0, 0};
+        w = {0.5f, 0.5f, 0.0f, 0.0f};
+        anim::skinVertices(skin, pos, nrm, j, w, op, on);
+        checkNear(op[0], 21.0f, 1e-5f, "two influences blend, they do not compete");
+
+        // An out-of-range bone index and a zero weight are the same case: no influence. Both are
+        // skipped, and the surviving weights are used AS AUTHORED rather than renormalised -- so
+        // half a vertex's weight going missing halves its displacement.
+        j = {0, 99, 0, 0};
+        w = {0.5f, 0.5f, 0.0f, 0.0f};
+        anim::skinVertices(skin, pos, nrm, j, w, op, on);
+        checkNear(op[0], 0.5f * 11.0f, 1e-5f, "an out-of-range bone contributes nothing at all");
+
+        // No surviving influence leaves the vertex where it was, rather than at the origin.
+        w = {0.0f, 0.0f, 0.0f, 0.0f};
+        anim::skinVertices(skin, pos, nrm, j, w, op, on);
+        checkNear(op[0], 1.0f, 1e-5f, "an unrigged vertex keeps its rest position");
+        checkNear(op[2], 3.0f, 1e-5f, "in every component");
+        checkNear(on[2], 1.0f, 1e-5f, "and its rest normal");
+
+        // Skinning by a rest pose's own matrices is the identity: poseToSkinning's inverse-bind is
+        // what makes that true, and it is the property every rig depends on at frame zero.
+        //
+        // chain() leaves inverseBind at whatever OcBone defaults to, which is fine for the sampling
+        // checks above and useless here -- an inverse bind that is not the inverse of the rest
+        // model makes the rest pose a transform rather than the identity. So this fixture spells
+        // the inverses out: the chain is pure translation, so each is the negation of the bone's
+        // accumulated offset.
+        fmt::OcSkeleton sk = chain();
+        const f32 restZ[3] = {0.0f, 40.0f, 100.0f};
+        for (usize b = 0; b < sk.bones.size(); ++b) {
+            f32* ib = sk.bones[b].inverseBind;
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c) ib[r * 4 + c] = (r == c) ? 1.0f : 0.0f;
+            ib[3 * 4 + 2] = -restZ[b];
+        }
+        anim::Pose rest;
+        anim::restPose(sk, rest);
+        std::vector<Mat4> restSkin;
+        anim::poseToSkinning(sk, rest, restSkin);
+        std::vector<f32> rp{5.0f, -7.0f, 60.0f};
+        std::vector<f32> rn{0.0f, 1.0f, 0.0f};
+        std::vector<u16> rj{1, 0, 0, 0};
+        std::vector<f32> rw{1.0f, 0.0f, 0.0f, 0.0f};
+        anim::skinVertices(restSkin, rp, rn, rj, rw, op, on);
+        checkNear(op[0], 5.0f, 1e-3f, "a rest pose skins a vertex to exactly where it started (x)");
+        checkNear(op[1], -7.0f, 1e-3f, "(y)");
+        checkNear(op[2], 60.0f, 1e-3f, "(z)");
+
+        // Mis-sized inputs are rejected rather than read past their end.
+        std::vector<f32> shortWeights{1.0f, 0.0f};
+        anim::skinVertices(skin, pos, nrm, j, shortWeights, op, on);
+        check(op.empty() && on.empty(), "a mis-sized weight stream is refused, not indexed into");
+    }
+
     AVER_INFO(g_failures ? "AnimTest: {} FAILURES" : "AnimTest: all checks passed ({})", g_failures);
     return g_failures ? 1 : 0;
 }

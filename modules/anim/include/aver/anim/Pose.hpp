@@ -6,6 +6,7 @@
 
 #include "aver/core/Math.hpp"
 #include "aver/formats/OcAnim.hpp"
+#include "aver/formats/OcMesh.hpp"   // kOcMeshInfluences: the influence width skinVertices reads
 
 #include <vector>
 
@@ -40,5 +41,24 @@ void blendPose(const Pose& a, const Pose& b, f32 t, Pose& out);
 // gets applied, scaled by `weight`. That is what makes an additive lean or breathe compose with
 // whatever the base is doing instead of replacing it.
 void addPose(const Pose& base, const Pose& additive, const Pose& additiveRest, f32 weight, Pose& out);
+
+// Linear-blend skinning on the CPU, and the PARITY CONTRACT the GPU compute pass in
+// Aver.Render.Skin matches term for term:
+//
+//   out = sum over the four influences of  w_i * (v * skin[j_i])
+//
+// with the weights taken AS AUTHORED -- the .ocmesh writer is what normalises them, so nothing here
+// re-divides -- an influence whose weight is zero or whose bone index is out of range skipped, and
+// a vertex with no surviving influence left at its rest position rather than collapsing to the
+// origin. Normals are transformed by the same matrix as positions and renormalised, NOT by the
+// inverse transpose: an approximation, shared deliberately by both sides, because a divergence
+// here would be a parity bug rather than a visible improvement.
+//
+// `joints` and `weights` are four per vertex, as OcMeshData stores them. Mis-sized inputs leave
+// the outputs empty.
+void skinVertices(const std::vector<Mat4>& skin,
+                  const std::vector<f32>& restPositions, const std::vector<f32>& restNormals,
+                  const std::vector<u16>& joints, const std::vector<f32>& weights,
+                  std::vector<f32>& outPositions, std::vector<f32>& outNormals);
 
 } // namespace aver::anim

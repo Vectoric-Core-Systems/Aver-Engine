@@ -173,6 +173,9 @@ add_subdirectory(modules/ui.abi)
 # The actor editor's preview. Talks to the generic RHI and never to a backend, so it exists in
 # every configuration and declines at create() where there is no GPU.
 add_subdirectory(modules/render.actorpreview)
+# GPU skinning. Down here rather than beside modules/anim because it needs the RHI, and generic
+# enough to exist in every configuration for the same reason the preview does.
+add_subdirectory(modules/render.skin)
 # The audio seam. Added down HERE rather than beside the mixer because it links the WAV reader,
 # which is a target inside modules/formats and so does not exist until that has been added.
 add_subdirectory(modules/audio.abi)

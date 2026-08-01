@@ -38,6 +38,9 @@ target_link_libraries(Sandbox PRIVATE Aver.UI.Abi)
 # The actor editor's preview. Its own mesh registry, deliberately: an asset editor that reached
 # into the level editor's table could not exist or be tested without one.
 target_link_libraries(Sandbox PRIVATE Aver.Render.ActorPreview)
+# GPU skinning, for --skin-test. The pass has no other consumer yet -- the mesh draw path cannot
+# take a substituted position stream -- so this link line is what keeps it compiled and checkable.
+target_link_libraries(Sandbox PRIVATE Aver.Render.Skin)
 if(TARGET Aver.Render.Voxi)
   # Settings DLL (brings AVER_MODULE_VOXI=1) + the static render feature that drives the RHI.
   target_link_libraries(Sandbox PRIVATE Aver.Render.Voxi Aver.Render.Voxi.Renderer)
