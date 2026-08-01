@@ -84,6 +84,44 @@ null and fall through to Default" implementation produced
 executable. Delegating also guarantees `AverBehaviour` has exactly one runtime identity; a second
 copy would leave the discovery test matching nothing, silently.
 
+### …and then probes the scripts directory, for a script's own dependencies
+
+The bridge's context resolves only what the bridge itself shipped with, and a hosted component cannot
+reach the default context. So until this existed, **a script assembly could not have any private
+dependency at all**. Found by the F# work (`scripting/fsharp/README.md`), with `FSharp.Core.dll`
+sitting in the same folder as the assembly that needed it:
+
+```
+[ERROR] [FSharp] the round trip could not run: FileNotFoundException: Could not load file or assembly
+        'FSharp.Core, Version=10.1.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.
+```
+
+`LoadScripts` registers its directory with `AddProbeDirectory` and `Load` falls back to it. Three
+things about that are load-bearing:
+
+- **The host context is still tried first.** `dotnet build -o` copies `Aver.Scripting.dll` into the
+  scripts folder whatever the `.csproj` asks for, so a directory-first probe hands `AverBehaviour` the
+  second runtime identity the paragraph above exists to prevent. Measured by running the two statements
+  in the other order:
+
+  ```
+  [INFO ] [Scripting] loaded Aver.Scripting.SampleFSharp.dll: 0 behaviour(s)
+  [WARN ] [Scripting] ...FSharpRoundTripBehaviour has lifecycle-shaped methods but does not derive from
+          AverBehaviour, so nothing will call them.
+  ```
+
+  about a class declared `: AverBehaviour`. Discovery does not degrade, it stops.
+- **The directory is registered before the load enumeration, not after.** A dependency is resolved
+  lazily, at the first call into the code that needs it, and `OnStart` runs *inside* that enumeration.
+- **A probed assembly goes into the collectible context**, so a reload still unloads it. `LoadFromFileCopy`
+  caches by full path to skip a redundant multi-megabyte file read — **not** to keep the identity single.
+  The runtime already does that: two `LoadFromStream` calls with the same image into one context return
+  the *same* `Assembly` object, `ReferenceEquals` true. That was measured after the first version of this
+  comment claimed otherwise.
+
+The sample reports the two contexts at load:
+`load contexts: this assembly in 'AverScripts', Aver.Scripting in 'IsolatedComponentLoadContext(...)'`.
+
 ## Lifecycle — a base class, not an attribute
 
 ```csharp
@@ -273,6 +311,21 @@ not run unasked in the product:
 [INFO ] [GiSwitch] leaving global illumination at High
 [INFO ] [HelloBehaviour] OnShutdown after 40 update(s)
 ```
+
+And the F# round trip, which proves the host is not C#-only:
+
+```
+build\bin\Sandbox.exe --headless --frames 30 --scripts FSharpScripts
+```
+
+```
+[INFO ] [FSharp] Aver.FSharp.Sample v1.0.0.0 (F#-compiled) bound to FSharp.Core v10.1.0.0
+[INFO ] [FSharp] round trip OK: RoundTrip.Checksum(20260801, 64) returned 442573848 (0x1A612418) and the separately compiled C# mirror agrees
+```
+
+`scripting/fsharp/README.md` has the whole of it. The short version: F# needed **no new compile
+mechanism** — `dotnet build` already picks the language from the project extension — and the only
+engine change it required was the load-context probe described above.
 
 Every one of those lines originates in managed code and reaches the console through the engine's own
 log, which is what makes it proof rather than a claim. **The probe in the middle is the strongest

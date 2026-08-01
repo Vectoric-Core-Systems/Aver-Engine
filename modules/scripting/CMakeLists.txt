@@ -215,3 +215,49 @@ add_custom_command(
 add_custom_target(Aver.Design DEPENDS ${AVER_DESIGN_OUTPUTS})
 set_target_properties(Aver.Design PROPERTIES FOLDER "modules")
 add_dependencies(Aver.Scripting.Host Aver.Design)
+
+# ---------------------------------------------------------------------------------------------------
+# The F# round trip, staged to bin/FSharpScripts/.
+#
+# F# NEEDS NO NEW COMPILE MECHANISM. The engine's script compile path is `dotnet build` on a project
+# file — here at build time, and ToolsMenu::startCompile at run time — and MSBuild picks the language
+# from the project extension. So an .fsproj is driven by the machinery that already exists, and this
+# block is the same OUTPUT/DEPENDS shape as the C# samples above for the same POST_BUILD reason.
+# (Microsoft.CodeAnalysis, the only Roslyn in this tree, is averdesign's C#-specific READER; it never
+# compiled a script, so there was nothing F#-shaped to replace there.)
+#
+# Only the C# project is named on the command line: it ProjectReferences the .fsproj, so `dotnet build`
+# builds both and stages Aver.FSharp.Sample.dll and FSharp.Core.dll alongside it.
+#
+# bin/FSharpScripts/ rather than bin/Scripts/, for the reason the behaviour and actor samples give: a
+# default editor run must not load a demo, and no oracle gate can be made to pick this up.
+set(AVER_FSHARP_DIR ${CMAKE_SOURCE_DIR}/scripting/fsharp)
+set(AVER_FSHARP_PROJ ${AVER_FSHARP_DIR}/Aver.Scripting.SampleFSharp/Aver.Scripting.SampleFSharp.csproj)
+set(AVER_FSHARP_OUT_DIR ${CMAKE_BINARY_DIR}/bin/FSharpScripts)
+
+file(GLOB AVER_FSHARP_SOURCES CONFIGURE_DEPENDS
+  ${AVER_FSHARP_DIR}/Aver.FSharp.Sample/*.fs
+  ${AVER_FSHARP_DIR}/Aver.FSharp.Sample/*.fsproj
+  ${AVER_FSHARP_DIR}/Aver.Scripting.SampleFSharp/*.cs
+  ${AVER_FSHARP_DIR}/Aver.Scripting.SampleFSharp/*.csproj)
+
+# FSharp.Core.dll is listed as an OUTPUT deliberately. A library project does NOT copy package assets
+# to its output directory by default, so it is possible to get a green build whose scripts folder is
+# missing the F# runtime entirely — a failure that only shows up at the first call into F# code.
+# Naming it here makes the build itself the thing that notices.
+set(AVER_FSHARP_OUTPUTS
+  ${AVER_FSHARP_OUT_DIR}/Aver.Scripting.SampleFSharp.dll
+  ${AVER_FSHARP_OUT_DIR}/Aver.FSharp.Sample.dll
+  ${AVER_FSHARP_OUT_DIR}/FSharp.Core.dll)
+
+add_custom_command(
+  OUTPUT ${AVER_FSHARP_OUTPUTS}
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_FSHARP_PROJ} -c Release --nologo -v quiet
+          -o ${AVER_FSHARP_OUT_DIR}
+  DEPENDS ${AVER_FSHARP_SOURCES}
+          ${AVER_BRIDGE_OUTPUTS}
+  COMMENT "Building the F# round-trip sample (staged to bin/FSharpScripts)"
+  VERBATIM)
+add_custom_target(Aver.FSharp.Sample DEPENDS ${AVER_FSHARP_OUTPUTS})
+set_target_properties(Aver.FSharp.Sample PROPERTIES FOLDER "modules")
+add_dependencies(Aver.Scripting.Host Aver.FSharp.Sample)

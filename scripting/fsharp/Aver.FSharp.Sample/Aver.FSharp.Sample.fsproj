@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The first F# assembly in the tree. It exists to answer one question: can the engine's existing
+       in-process CLR host load and run F#-compiled IL at all? Everything F# is meant to do later
+       (PCG generation, orchestration) is worthless if this seam does not hold, so it is proved first
+       and on its own.
+
+       HOW F# COMPILES HERE: `dotnet build` on this .fsproj, which is the same command the engine
+       already runs for every C# script — modules/scripting/CMakeLists.txt at build time, and
+       ToolsMenu::startCompile, which shells out to `dotnet build` on the project, at run time. MSBuild
+       picks the language from the project extension, so F# needs no new compile mechanism, no second
+       toolchain and no code change on the native side. The alternative, FSharp.Compiler.Service, was
+       rejected on two checked grounds: this machine's NuGet cache holds exactly one F# package
+       (fsharp.core) and the SDK's offline library-packs folder holds exactly one .nupkg, so FCS would
+       make the first build of this tree need the network; and hosting a compiler inside a process
+       whose job is to draw frames is the thing Aver.Design.csproj already argued against for Roslyn.
+       Nothing about F# changes either argument.
+
+       LICENCE: FSharp.Core is MIT. It is not a new third-party dependency either — the .NET SDK
+       carries it at sdk/<version>/FSharp/library-packs/FSharp.Core.<v>.nupkg, so the restore below
+       resolves offline from the machine, exactly like Microsoft.CodeAnalysis does for averdesign.
+
+       NO reference to Aver.Scripting. This assembly is a pure library: the bridge's CheckApiVersion
+       skips an assembly that references neither Aver.Scripting nor Aver.Framework, which is the
+       documented behaviour for a support library sitting in a scripts folder. The C# behaviour next
+       door is what the host discovers; this is what that behaviour calls. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Aver.FSharp.Sample</AssemblyName>
+    <RootNamespace>Aver.FSharp.Sample</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <!-- The round trip has to prove F# ran, so warnings that would let a silently-wrong function
+         through are errors here. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- MEASURED, not assumed. The SDK defaults this to false for a LIBRARY, so a plain
+         `dotnet build` of an .fsproj emits Aver.FSharp.Sample.dll with no FSharp.Core.dll beside it —
+         the first build here did exactly that. The scripts folder is the host's only source for a
+         script's private dependencies, so without this the assembly loads and then dies at the first
+         call into it, which is the worst possible place to find out. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <!-- FSharp.Core ships thirteen localised resource assemblies. Left alone they arrive as thirteen
+         subdirectories inside the scripts folder, which is a folder a user is expected to look at. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="RoundTrip.fs" />
+  </ItemGroup>
+
+</Project>
