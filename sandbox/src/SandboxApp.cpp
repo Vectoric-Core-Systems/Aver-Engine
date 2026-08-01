@@ -1088,6 +1088,7 @@ public:
             voxiRenderer_.setDebugView(giDebugView_);
             const Vec3 sd = Vec3{sky_.sunDirection[0], sky_.sunDirection[1],
                                  sky_.sunDirection[2]}.getSafeNormal();
+            if (sunAngle_ > 0.0f) sky_.sunAngularDiameterDeg = sunAngle_;
             voxiRenderer_.setSun(&sd.x, sunColor_, sunAmbient_);
         }
 #endif
@@ -1759,6 +1760,11 @@ public:
     void setReflTest() { reflTest_ = true; }                                       // --refl-test
     void setFurnaceTest() { furnaceTest_ = true; }                                 // --furnace-test
     void setFurnaceSun() { furnaceTest_ = true; furnaceSun_ = true; }              // --furnace-sun
+    // --sun-angle DEG: the sun's ANGULAR DIAMETER. Not a look control -- it is what sets how wide
+    // a ray-traced penumbra is, and at the real 0.545 degrees that penumbra is narrower than a
+    // pixel at contact distances. A gate that wants to sample a partially-occluded ray-traced
+    // pixel has to widen the source until the transition is several pixels across.
+    void setSunAngle(f32 deg) { sunAngle_ = deg; }
     // --pt-furnace: the furnace measured through the PATH TRACER rather than through the raster
     // shading model. It implies --furnace-test because the furnace is a property of the SKY, and
     // that is where the flag puts it -- the tracer reads the same averFurnaceL() every other
@@ -5069,6 +5075,7 @@ private:
     bool reflTest_ = false;       // --refl-test: are ray-traced reflections global?
     bool furnaceTest_ = false;    // --furnace-test: does the shading model conserve energy?
     bool furnaceSun_ = false;     // --furnace-sun: the variant where only the DIRECT term is lit
+    f32  sunAngle_ = -1.0f;       // --sun-angle: negative leaves the sky's own value alone
     bool ptFurnaceTest_ = false;  // --pt-furnace: the same question asked of the path tracer
     std::unique_ptr<aver::pt::PtFurnaceTest> ptFurnace_;
     std::unique_ptr<aver::editor::ReflTest> refl_;
@@ -5566,7 +5573,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -5656,6 +5663,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--refl-test")) reflTest=true;
         else if (!std::strcmp(argv[i],"--furnace-test")) furnaceTest=true;
         else if (!std::strcmp(argv[i],"--furnace-sun")) furnaceSun=true;
+        else if (!std::strcmp(argv[i],"--sun-angle") && i+1<argc) sunAngle=(f32)std::atof(argv[++i]);
         else if (!std::strcmp(argv[i],"--pt-furnace")) ptFurnace=true;
         else if (!std::strcmp(argv[i],"--skin-scene-test") && i+1<argc) skinSceneDir=argv[++i];
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
@@ -5744,6 +5752,7 @@ Application* createApplication(int argc, char** argv) {
     if (reflTest) app->setReflTest();
     if (furnaceTest) app->setFurnaceTest();
     if (furnaceSun) app->setFurnaceSun();
+    if (sunAngle > 0.0f) app->setSunAngle(sunAngle);
     if (ptFurnace) app->setPtFurnaceTest();
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
     return app;

@@ -203,7 +203,32 @@ $Gates = @(
     @{ name = 'penumbra';      args = @('--no-gi','--probe-rel','0.57545','0.50610') },
     @{ name = 'penumbra-rt';   args = @('--no-gi','--rt','--probe-rel','0.57545','0.50610') },
     @{ name = 'sunlit';        args = @('--no-gi','--probe-rel','0.42636','0.48536') },
-    @{ name = 'sunlit-gi';     args = @('--gi','--probe-rel','0.42636','0.48536') }
+    @{ name = 'sunlit-gi';     args = @('--gi','--probe-rel','0.42636','0.48536') },
+
+    # rt-penumbra -- the only gate that samples a PARTIALLY OCCLUDED ray-traced pixel.
+    #
+    # Every other ray-traced probe here is fully lit or fully shadowed, `penumbra-rt` included: it
+    # reads 22,26,31, bit-identical to `shadow`. That is not an accident of where it was placed. It
+    # was chosen as the pixel of largest DISAGREEMENT between the PCF cascade and RayQuery, which by
+    # construction lands where the cascade is soft and the ray is not. So the oracle has been blind
+    # to ray-traced soft-shadow quality entirely -- a change to the disc sampling moved 532 pixels
+    # along shadow silhouettes and not one gate probe noticed.
+    #
+    # The reason no such pixel existed to sample: the sun's angular RADIUS is about a quarter of a
+    # degree, so at these distances the true penumbra is narrower than a pixel. --sun-angle widens
+    # the source until the transition is several pixels across. That is not cheating the test, it is
+    # the only way to put a partially-occluded pixel on screen at all, and the width of a penumbra
+    # is a property of the light rather than of the renderer.
+    #
+    # MEASURED at this probe: 22,26,31 at the real 0.545 degrees (fully occluded) against 43,43,45
+    # at 8 degrees -- strictly between umbra and the ~90 of lit ground, so it is genuinely partial.
+    # Bit-identical over three runs, under --ms, and on WARP, which is a second and independent
+    # D3D12 implementation running on the CPU.
+    #
+    # The probe is expressed at a PIXEL CENTRE (1510.5/2750, 856.5/1639) rather than at the pixel
+    # index. vpW*u truncates, so 0.54909 lands on 1509 and reads the umbra -- one pixel away and the
+    # gate silently measures the wrong thing, which cost a full diagnosis to notice.
+    @{ name = 'rt-penumbra';   args = @('--no-gi','--rt','--sun-angle','8.0','--probe-rel','0.5492727','0.5225747') }
 )
 
 # Each configuration is a device this machine can be made to look like. `--force-caps` is
