@@ -75,6 +75,7 @@
 #include <windows.h>
 #endif
 #include "aver/scene/scene_abi.h"
+#include "aver/anim/AnimSystem.hpp"
 #include "aver/scene/World.hpp"
 #include "aver/scene/Components.hpp"
 #endif
@@ -841,6 +842,10 @@ public:
 #endif
 #if AVER_MODULE_SCENE
         // Retires deferred destroys and propagates world matrices once, after gameplay and before onRender.
+        // The animation clock, UNCONDITIONALLY and not from the gameplay tick above. Those tick
+        // groups are gated on PLAYING, so hanging this off them would freeze every preview the
+        // moment the editor was not in play -- which is exactly when somebody is looking at one.
+        anim::animSystem().tick(scene::World::instance(), t.dt);
         scene::World::instance().flush();
 #endif
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
@@ -976,6 +981,19 @@ public:
             contentIndex_[fnv1a64(std::string_view(rel))] = it->path().string();
         }
         AVER_INFO("[Content] indexed {} asset(s) under {}", contentIndex_.size(), content);
+        // The anim system does its own file discovery through this, and caches by id -- so a
+        // re-index has to drop what it cached or a moved asset keeps resolving to the old path.
+        anim::animSystem().clear();
+        anim::animSystem().setResolver(&SandboxApp::resolveAnimAsset, this);
+    }
+
+    // Maps an asset ObjectId to a path for aver::anim::AnimSystem. A plain function pointer because
+    // that is what the system takes: asset discovery is the host's business, not the sampler's.
+    static std::string resolveAnimAsset(u64 id, void* user) {
+        auto* self = static_cast<SandboxApp*>(user);
+        if (!self) return {};
+        const auto it = self->contentIndex_.find(id);
+        return it == self->contentIndex_.end() ? std::string() : it->second;
     }
 
     // Returns the material a surface token names, loading it on first use. 0 when the project has none.

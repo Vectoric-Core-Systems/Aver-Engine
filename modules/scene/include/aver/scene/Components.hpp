@@ -15,7 +15,9 @@ inline constexpr u32 kComponentTags         = 5;
 inline constexpr u32 kComponentMeshRenderer = 6;
 inline constexpr u32 kComponentLight        = 7;
 inline constexpr u32 kComponentCamera       = 8;
-inline constexpr u32 kComponentBuiltinMax   = 8;
+inline constexpr u32 kComponentSkeletalMesh = 9;
+inline constexpr u32 kComponentAnimator     = 10;
+inline constexpr u32 kComponentBuiltinMax   = 10;
 
 // Authored local transform, plus the revision the world-matrix pass compares against.
 struct CLocal {
@@ -82,10 +84,45 @@ struct CCamera {
     i32 priority = 0;
 };
 
+// Binds a skeleton to whatever this entity already draws, rather than being a second kind of mesh
+// renderer: a skinned actor carries CMeshRenderer for the geometry and this for the rig.
+//
+// The ids are OPAQUE, exactly as CMeshRenderer::mesh is. Aver.Scene links Core and Assets and may
+// not gain a Formats edge -- resolving one to a loaded .ocskel is a job for the tier above.
+struct CSkeletalMesh {
+    u64 skeleton  = 0;   // .ocskel ObjectId
+    u32 boneCount = 0;   // filled in when the asset resolves; 0 until then
+    u32 dirty     = 1;
+};
+
+// THE FLAGS ARE NEGATIVE, and that is not a style choice. World::addComponent hands back ZERO-FILLED
+// storage, so a struct's default member initialisers never run for a component attached directly --
+// only the framework's spawn path memcpys defaults over. A positive kAnimatorPlaying therefore meant
+// an animator you attached and then watched do nothing. CMeshRenderer's visible bit has already cost
+// this codebase that exact bug once. Zero now means playing, looping, at full weight.
+inline constexpr u32 kAnimatorPaused = 0x1;
+inline constexpr u32 kAnimatorOnce   = 0x2;   // clear = loop
+
+// A clip and the clock running it. The clock is DATA rather than a hidden player object, so a script
+// can scrub it, a save can restore it, and the editor can drive it without owning a second timeline.
+struct CAnimator {
+    u64 clip        = 0;      // .ocanim ObjectId
+    f32 time        = 0.0f;   // seconds into the clip
+    f32 speed       = 1.0f;   // 0 is read as 1; see AnimSystem::tick
+    f32 blendWeight = 1.0f;   // 0 is read as 1, for the same reason
+    u32 flags       = 0;
+};
+
+// Field order is chosen so neither struct gets padding: World::verifyComponent is byte-exact and
+// turns a mismatch into an abort inside World's constructor, so a padded component kills the editor
+// at startup rather than failing a test.
+static_assert(sizeof(CSkeletalMesh) == 16, "CSkeletalMesh must be padding-free");
+static_assert(sizeof(CAnimator) == 24, "CAnimator must be padding-free");
+
 class World;
 
 namespace detail {
-// Registers the eight built-ins. Called once by World's constructor.
+// Registers the ten built-ins. Called once by World's constructor.
 void registerBuiltinComponents(World& world);
 } // namespace detail
 

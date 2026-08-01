@@ -36,6 +36,8 @@ static_assert(AVER_SCENE_COMP_TAGS          == kComponentTags,         "COMP_TAG
 static_assert(AVER_SCENE_COMP_MESH_RENDERER == kComponentMeshRenderer, "COMP_MESH_RENDERER drift");
 static_assert(AVER_SCENE_COMP_LIGHT         == kComponentLight,        "COMP_LIGHT drift");
 static_assert(AVER_SCENE_COMP_CAMERA        == kComponentCamera,       "COMP_CAMERA drift");
+static_assert(AVER_SCENE_COMP_SKELETAL_MESH == kComponentSkeletalMesh, "COMP_SKELETAL_MESH drift");
+static_assert(AVER_SCENE_COMP_ANIMATOR      == kComponentAnimator,     "COMP_ANIMATOR drift");
 
 // The single process-global world.
 World& world() { return World::instance(); }

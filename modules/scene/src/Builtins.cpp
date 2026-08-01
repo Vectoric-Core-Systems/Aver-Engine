@@ -1,4 +1,4 @@
-// Registers the eight built-in components and their field tables, through the same public API a
+// Registers the ten built-in components and their field tables, through the same public API a
 // script-declared component uses.
 #include "aver/scene/Components.hpp"
 
@@ -90,6 +90,25 @@ void registerBuiltinComponents(World& world) {
             .field("farCm", FieldKind::F32, static_cast<u16>(offsetof(CCamera, farCm)))
             .field("priority", FieldKind::I32, static_cast<u16>(offsetof(CCamera, priority)));
         expect(b.verify(sizeof(CCamera)), b.typeId(), kComponentCamera, "CCamera");
+    }
+    // APPENDED, never inserted. Dense ids are registration order, so adding one anywhere but the end
+    // shifts every id after it -- expect() aborts on the first mismatch, and anything that persisted
+    // an id would silently address the wrong component.
+    {
+        auto b = world.registerComponent<CSkeletalMesh>("CSkeletalMesh");
+        b.field("skeleton", FieldKind::I64, static_cast<u16>(offsetof(CSkeletalMesh, skeleton)))
+            .field("boneCount", FieldKind::I32, static_cast<u16>(offsetof(CSkeletalMesh, boneCount)), 0, /*readOnly*/ true)
+            .field("dirty", FieldKind::I32, static_cast<u16>(offsetof(CSkeletalMesh, dirty)), 0, true);
+        expect(b.verify(sizeof(CSkeletalMesh)), b.typeId(), kComponentSkeletalMesh, "CSkeletalMesh");
+    }
+    {
+        auto b = world.registerComponent<CAnimator>("CAnimator");
+        b.field("clip", FieldKind::I64, static_cast<u16>(offsetof(CAnimator, clip)))
+            .field("time", FieldKind::F32, static_cast<u16>(offsetof(CAnimator, time)))
+            .field("speed", FieldKind::F32, static_cast<u16>(offsetof(CAnimator, speed)))
+            .field("blendWeight", FieldKind::F32, static_cast<u16>(offsetof(CAnimator, blendWeight)))
+            .field("flags", FieldKind::I32, static_cast<u16>(offsetof(CAnimator, flags)));
+        expect(b.verify(sizeof(CAnimator)), b.typeId(), kComponentAnimator, "CAnimator");
     }
 }
 

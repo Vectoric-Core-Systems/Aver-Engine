@@ -60,6 +60,11 @@ if(TARGET Aver.Scene)
   # or not anything else in the link already does.
   target_link_libraries(Sandbox PRIVATE Aver.Scene)
 endif()
+if(TARGET Aver.Anim.Scene)
+  # The scene/animation join. Named here because the app owns the frame loop, and the frame loop is
+  # what decides when the animation clock advances.
+  target_link_libraries(Sandbox PRIVATE Aver.Anim.Scene)
+endif()
 if(TARGET Aver.Physics)
   # The simulation (brings AVER_MODULE_PHYSICS=1). Named on the executable for the same reason the
   # scene and material systems are: the app owns the frame loop, and the frame loop is what decides

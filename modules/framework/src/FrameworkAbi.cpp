@@ -42,6 +42,8 @@ void componentDefaultBytes(u32 type, u8* out, usize n) {
         case kComponentMeshRenderer: { CMeshRenderer d{}; put(&d, sizeof d); break; }
         case kComponentLight:        { CLight d{};        put(&d, sizeof d); break; }
         case kComponentCamera:       { CCamera d{};       put(&d, sizeof d); break; }
+        case kComponentSkeletalMesh: { CSkeletalMesh d{}; put(&d, sizeof d); break; }
+        case kComponentAnimator:     { CAnimator d{};     put(&d, sizeof d); break; }
         default: break;
     }
 }

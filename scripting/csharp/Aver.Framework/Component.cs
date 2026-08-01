@@ -21,4 +21,8 @@ public enum Component
     Light = 7,
     /// <summary>A camera.</summary>
     Camera = 8,
+    /// <summary>Binds a skeleton to whatever this entity draws, so its mesh can be posed.</summary>
+    SkeletalMesh = 9,
+    /// <summary>A clip and the clock running it.</summary>
+    Animator = 10,
 }

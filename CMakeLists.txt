@@ -151,6 +151,9 @@ if(AVER_MODULE_FRAMEWORK AND NOT AVER_MODULE_SCENE)
 endif()
 if(AVER_MODULE_SCENE)
   add_subdirectory(modules/scene)         # optional: the entity/component world + C ABI for C#
+  # The scene/animation join. Guarded on BOTH, because it is the edge between them and neither owns
+  # it; a build with either switched off simply does not have the join.
+  add_subdirectory(modules/anim.scene)
 endif()
 if(AVER_MODULE_FRAMEWORK)
   add_subdirectory(modules/framework)     # optional: gameplay vocabulary over the world
@@ -227,6 +230,7 @@ if(AVER_BUILD_TESTS)
   endif()
   if(AVER_MODULE_SCENE)
     add_subdirectory(tests/scene)
+    add_subdirectory(tests/anim.scene)
   endif()
   if(AVER_MODULE_FRAMEWORK)
     add_subdirectory(tests/framework)

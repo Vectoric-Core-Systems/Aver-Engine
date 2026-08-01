@@ -43,7 +43,7 @@ AVER_SCENE_ABI int32_t aver_scene_abi_version(void);
 #define AVER_SCENE_KIND_MAT4   8
 
 /* FIXED COMPONENT IDS — pinned to aver::scene::kComponent* in Components.hpp. Script-declared
- * components take ids above AVER_SCENE_COMP_CAMERA. */
+ * components take ids above AVER_SCENE_COMP_ANIMATOR. */
 #define AVER_SCENE_COMP_LOCAL         1
 #define AVER_SCENE_COMP_WORLD         2
 #define AVER_SCENE_COMP_HIERARCHY     3
@@ -52,6 +52,8 @@ AVER_SCENE_ABI int32_t aver_scene_abi_version(void);
 #define AVER_SCENE_COMP_MESH_RENDERER 6
 #define AVER_SCENE_COMP_LIGHT         7
 #define AVER_SCENE_COMP_CAMERA        8
+#define AVER_SCENE_COMP_SKELETAL_MESH 9
+#define AVER_SCENE_COMP_ANIMATOR      10
 
 /* Every entry point below acts on the single process-global World; no world handle crosses.
  * Strings are UTF-8 both ways, and an OUT pointer is owned by the world and must NOT be freed.
