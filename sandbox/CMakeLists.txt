@@ -4,6 +4,7 @@ add_executable(Sandbox
   src/ActorEditor.cpp
   src/AnimEditor.cpp
   src/SkinDrawTest.cpp
+  src/SkinSceneTest.cpp
   src/ProjectBrowser.cpp
   src/ProjectScaffold.cpp
   src/EditorPrefs.cpp

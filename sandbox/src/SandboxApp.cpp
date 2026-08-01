@@ -22,6 +22,10 @@
 #include "aver/render/ui/UiRenderer.hpp"
 #include "aver/render/SkinSelfTest.hpp"
 #include "SkinDrawTest.hpp"
+#include "SkinSceneTest.hpp"
+#if AVER_MODULE_SCENE
+#include "aver/render/SkinnedScene.hpp"
+#endif
 #include "aver/ui/ui_abi.h"
 
 #include "ProjectBrowser.hpp"
@@ -647,6 +651,48 @@ public:
             auto sh=buildScaleAxis(a,kAxisHi);      gzScaleHi_[a]=e.device()->createLineMesh(sh.data(),(u32)sh.size());
         }
 
+#if AVER_MODULE_SCENE
+        // The scene join. Registered HERE, before the Voxi renderer, for the reason spelled out
+        // below: features run prePass in registration order and Voxi reads vertex buffers in its.
+        skinnedScene_ = std::make_unique<aver::render::SkinnedScene>();
+        if (skinnedScene_->init(*e.device())) {
+            skinnedScene_->setResolvers(&SandboxApp::resolveAnimAsset, &SandboxApp::resolveSceneMesh, this);
+            e.device()->addRenderFeature(skinnedScene_.get());
+        } else {
+            skinnedScene_.reset();   // init already said why; skinned entities draw at rest
+        }
+
+        // --skin-scene-test <dir>: the same question as --skin-draw-test but through the WHOLE
+        // chain -- a real .ocmesh with skin streams, a real .ocskel, a real .ocanim, AnimSystem,
+        // SkinnedScene's per-entity target, and the substituted draw handle.
+        if (!skinSceneDir_.empty() && skinnedScene_) {
+            skinScene_ = std::make_unique<aver::editor::SkinSceneTest>();
+            u64 meshId = 0, skelId = 0, clipId = 0;
+            u32 meshHandle = 0;
+            if (skinScene_->setup(e, skinSceneDir_, &meshId, &skelId, &clipId, &meshHandle)) {
+                // The draw pass looks the entity's mesh up in sceneMeshes_, and SkinnedScene
+                // resolves through the SAME table. Registering here is what makes a spawned
+                // entity actually reach a draw call without a project having been opened.
+                sceneMeshes_[meshId] = meshHandle;
+                // The three ids the entities name, pointed at the cooked files. contentIndex_ is
+                // what AnimSystem and SkinnedScene both resolve through, so registering here is
+                // what makes the rig reachable without a project.
+                std::string d = skinSceneDir_;
+                while (!d.empty() && (d.back() == 92 || d.back() == '/')) d.pop_back();
+                contentIndex_[meshId] = d + "/Rig.ocmesh";
+                contentIndex_[skelId] = d + "/Rig.ocskel";
+                contentIndex_[clipId] = d + "/Rig_Bend.ocanim";
+                anim::animSystem().setResolver(&SandboxApp::resolveAnimAsset, this);
+                objects_.clear();   // nothing unrelated on screen; the probes classify by colour
+                sel_ = -1;
+            } else {
+                skinScene_.reset();
+            }
+        } else if (!skinSceneDir_.empty()) {
+            AVER_ERROR("[Skin] --skin-scene-test needs the scene join, which did not initialise");
+        }
+#endif
+
         // --skin-draw-test: the same question one level up -- does anything DRAW the skinned buffer.
         //
         // THIS BLOCK'S POSITION IS THE CONTRACT. addRenderFeature is a plain push_back and prePass
@@ -909,6 +955,11 @@ public:
         // groups are gated on PLAYING, so hanging this off them would freeze every preview the
         // moment the editor was not in play -- which is exactly when somebody is looking at one.
         anim::animSystem().tick(scene::World::instance(), t.dt);
+        // AFTER the tick and BEFORE anything draws: update() is what creates the per-entity skin
+        // targets the draw pass is about to ask for, and what copies this frame's matrices out of
+        // the AnimSystem -- whose skinning() is only valid until the next tick.
+        if (skinnedScene_)
+            skinnedScene_->update(scene::World::instance(), anim::animSystem(), *e.device());
         scene::World::instance().flush();
 #endif
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
@@ -1057,6 +1108,16 @@ public:
         if (!self) return {};
         const auto it = self->contentIndex_.find(id);
         return it == self->contentIndex_.end() ? std::string() : it->second;
+    }
+
+    // Maps a mesh ObjectId to the handle the scene pass would draw, for aver::render::SkinnedScene.
+    // The SAME table the draw pass uses, deliberately: a skin target built from a different upload
+    // than the one on screen would be a rig skinning geometry nobody can see.
+    static rhi::MeshHandle resolveSceneMesh(u64 id, void* user) {
+        auto* self = static_cast<SandboxApp*>(user);
+        if (!self) return 0;
+        const auto it = self->sceneMeshes_.find(id);
+        return it == self->sceneMeshes_.end() ? 0 : it->second;
     }
 
     // Returns the material a surface token names, loading it on first use. 0 when the project has none.
@@ -1249,9 +1310,25 @@ public:
                     e.device()->setDrawBinding(ms.bindingSet(authored), &ms.constants(authored),
                                                sizeof(pbr::MaterialConstants));
 #endif
-                e.device()->drawMesh(it->second, &wm.m[0][0], col, metallic, roughness);
+                // The scene test paints its two entities so a probe can tell which it is looking
+                // at. Only ever active behind --skin-scene-test.
+                if (skinScene_) {
+                    if (ent == static_cast<scene::Entity>(skinScene_->subjectEntity()))
+                        aver::editor::SkinSceneTest::subjectColor(col);
+                    else if (ent == static_cast<scene::Entity>(skinScene_->referenceEntity()))
+                        aver::editor::SkinSceneTest::referenceColor(col);
+                }
+
+                // THE SEAM, and it is one line because the design made it one. A skinned entity's
+                // posed vertices live in a DIFFERENT MeshHandle sharing this one's index buffer, so
+                // substituting the handle reaches every pass at once. Zero means "not skinned",
+                // never "not drawn" -- a character that fails to skin must still appear.
+                rhi::MeshHandle mesh = it->second;
+                if (skinnedScene_)
+                    if (const rhi::MeshHandle sk = skinnedScene_->drawHandle(ent)) mesh = sk;
+                e.device()->drawMesh(mesh, &wm.m[0][0], col, metallic, roughness);
                 if (sel_ == kSelScene && ent == selEntity_)
-                    selectionOutline_ = wm, selectionMesh_ = it->second, hasSelection_ = true;
+                    selectionOutline_ = wm, selectionMesh_ = mesh, hasSelection_ = true;
                 ++drawn;
             }
             if (drawn != lastSceneDrawn_) {
@@ -1287,6 +1364,7 @@ public:
         // Before captureCheck, because both use the device's single capture slot and the draw test
         // finishes inside the first dozen frames while the ordinary probe fires near the last.
         skinDrawCheck(e);
+        if (skinScene_ && !skinScene_->finished()) skinScene_->tick(e, vpX_, vpY_, vpW_, vpH_);
         captureCheck(e);
     }
 
@@ -1420,6 +1498,10 @@ public:
             e.device()->removeRenderFeature(skinDraw_.get());
             skinDraw_.reset();
         }
+        if (skinnedScene_) {
+            e.device()->removeRenderFeature(skinnedScene_.get());
+            skinnedScene_.reset();
+        }
 #if AVER_MODULE_VOXI
         if (voxiAttached_) { e.device()->removeRenderFeature(&voxiRenderer_); voxiAttached_ = false; }
         voxiRenderer_.shutdown();
@@ -1486,6 +1568,7 @@ public:
 #endif
     void setSkinTest() { skinTest_ = true; }                                       // --skin-test
     void setSkinDrawTest() { skinDrawTest_ = true; }                               // --skin-draw-test
+    void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
@@ -4775,6 +4858,13 @@ private:
     std::unique_ptr<aver::render::SkinSelfTest> skinSelfTest_;
     bool skinDrawTest_ = false;   // --skin-draw-test: does the RASTERISER read the skinned buffer
     std::unique_ptr<aver::editor::SkinDrawTest> skinDraw_;
+#if AVER_MODULE_SCENE
+    // The scene join: gives every entity with a CSkeletalMesh its own posed mesh. Null when the
+    // skinning shader would not compile, in which case skinned entities simply draw at rest.
+    std::unique_ptr<aver::render::SkinnedScene> skinnedScene_;
+#endif
+    std::string skinSceneDir_;    // --skin-scene-test <dir>: where the cooked rig lives
+    std::unique_ptr<aver::editor::SkinSceneTest> skinScene_;
     bool showUiDemo_ = false;
     std::string matSaveStatus_;   // what the last 'Save to C#' did
     unsigned centralDock_ = 0;    // the dock node an opened asset editor lands in
@@ -5261,7 +5351,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -5343,6 +5433,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--play-test")) playTest=true;
         else if (!std::strcmp(argv[i],"--skin-test")) skinTest=true;
         else if (!std::strcmp(argv[i],"--skin-draw-test")) skinDrawTest=true;
+        else if (!std::strcmp(argv[i],"--skin-scene-test") && i+1<argc) skinSceneDir=argv[++i];
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
         else if (!std::strcmp(argv[i],"--bloom") && i+1<argc) bloom=static_cast<f32>(std::atof(argv[++i]));
@@ -5423,6 +5514,7 @@ Application* createApplication(int argc, char** argv) {
     if (playTest) app->setPlayTest();
     if (skinTest) app->setSkinTest();
     if (skinDrawTest) app->setSkinDrawTest();
+    if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
     return app;
 }
 
