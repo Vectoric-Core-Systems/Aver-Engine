@@ -370,6 +370,12 @@ struct GpuMesh {
     // resources with no RhiBuffer entry at all, so no descriptor could ever name them.
     BufferHandle ibBuffer = 0;
     u32 vertexCount = 0;
+    // Whether a COMPUTE PASS writes these vertices, as opposed to them merely living in an RHI
+    // buffer. The distinction stopped being free the moment createMesh started routing through the
+    // factory: every mesh then had a vbBuffer, so meshVertexBuffer -- whose contract is "zero for
+    // every ordinary mesh" -- began answering non-zero for all of them, and the renderer rebuilt
+    // every static mesh's acceleration structure every frame. Set only by createSkinTargetMesh.
+    bool computeWritten = false;
 };
 
 // A line list uploaded to the GPU.
@@ -692,7 +698,12 @@ public:
     MeshHandle createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override;
     MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) override;
     BufferHandle meshVertexBuffer(MeshHandle mesh) const override {
-        return (mesh && mesh <= meshes_.size()) ? meshes_[mesh - 1].vbBuffer : 0;
+        if (!mesh || mesh > meshes_.size()) return 0;
+        const GpuMesh& m = meshes_[mesh - 1];
+        // Gated on computeWritten, NOT on vbBuffer being present. Every mesh has an RHI vertex
+        // buffer now; only a skin target has one somebody DISPATCHES into, and that is the question
+        // this answers.
+        return m.computeWritten ? m.vbBuffer : 0;
     }
     bool meshGeometry(MeshHandle mesh, BufferHandle* vb, BufferHandle* ib,
                       u32* vertexCount, u32* indexCount) const override {
@@ -1945,6 +1956,7 @@ MeshHandle D3D12Device::createSkinTargetMesh(MeshHandle source, BufferHandle* ou
     m.ibv = src.ibv;
     m.indexCount = src.indexCount;
     m.vbBuffer = vh;
+    m.computeWritten = true;   // the whole point of this entry point
     m.vbv.BufferLocation = rb->res->GetGPUVirtualAddress();
     m.vbv.SizeInBytes = src.vbv.SizeInBytes;
     // From sizeof(MeshVertex) via the source, not re-derived: two independently-written strides is
