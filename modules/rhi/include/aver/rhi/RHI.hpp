@@ -283,6 +283,20 @@ public:
     // means a skinned character's ray-traced shadow keeps the silhouette it had when the structure
     // was first built. The character moves; its shadow does not.
     virtual BufferHandle meshVertexBuffer(MeshHandle mesh) const { (void)mesh; return 0; }
+
+    // A mesh's geometry as BUFFERS a shader can be given descriptors over, plus its element counts.
+    // False when the backend cannot express it, which is the signal to fall back rather than to
+    // read nothing.
+    //
+    // This is what a RAY needs and a raster draw never did. A hit gives back a primitive index and
+    // barycentrics, and nothing else -- reconstructing the position, normal and uv of the triangle
+    // that was hit means indexing the mesh's own index and vertex streams from the shader. Until
+    // these existed, ray tracing here could answer "is something there" and nothing more, which is
+    // exactly as much as a shadow needs and not enough for a reflection.
+    virtual bool meshGeometry(MeshHandle mesh, BufferHandle* vb, BufferHandle* ib,
+                              u32* vertexCount, u32* indexCount) const {
+        (void)mesh; (void)vb; (void)ib; (void)vertexCount; (void)indexCount; return false;
+    }
     // Per-frame camera (row-major, row-vector viewProj = view*proj). invViewProj reconstructs
     // world-space rays for the procedural sky.
     virtual void setCamera(const f32 viewProj[16], const f32 invViewProj[16], const f32 cameraPos[3]) {

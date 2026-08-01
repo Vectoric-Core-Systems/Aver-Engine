@@ -363,6 +363,12 @@ struct GpuMesh {
     // upload this device performed -- see IDevice::createSkinTargetMesh. `vb` still points at the
     // same resource, so every draw path reads it identically; this only records WHO writes it.
     BufferHandle vbBuffer = 0;
+    // The index buffer as an RHI buffer, and the vertex count. Both exist so a SHADER can read this
+    // mesh's geometry: a ray that hits a triangle has only an index into it, and reconstructing the
+    // triangle needs descriptors over both streams. createMesh used to allocate raw committed
+    // resources with no RhiBuffer entry at all, so no descriptor could ever name them.
+    BufferHandle ibBuffer = 0;
+    u32 vertexCount = 0;
 };
 
 // A line list uploaded to the GPU.
@@ -686,6 +692,17 @@ public:
     MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) override;
     BufferHandle meshVertexBuffer(MeshHandle mesh) const override {
         return (mesh && mesh <= meshes_.size()) ? meshes_[mesh - 1].vbBuffer : 0;
+    }
+    bool meshGeometry(MeshHandle mesh, BufferHandle* vb, BufferHandle* ib,
+                      u32* vertexCount, u32* indexCount) const override {
+        if (!mesh || mesh > meshes_.size()) return false;
+        const GpuMesh& m = meshes_[mesh - 1];
+        if (!m.vbBuffer || !m.ibBuffer) return false;
+        if (vb) *vb = m.vbBuffer;
+        if (ib) *ib = m.ibBuffer;
+        if (vertexCount) *vertexCount = m.vertexCount;
+        if (indexCount) *indexCount = m.indexCount;
+        return true;
     }
     void drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) override;
     LineHandle createLineMesh(const LineVertex* verts, u32 count) override;
@@ -1149,7 +1166,8 @@ public:
     void drawMesh(MeshHandle mesh) override;
     void dispatchMeshFor(MeshHandle mesh) override;
     void dispatch(u32 gx, u32 gy, u32 gz) override;
-    void copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes) override;
+    void copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes,
+                    u64 dstOffset, u64 srcOffset) override;
     void drawFullscreen() override;
     void setVertexBuffer(BufferHandle b, u32 stride) override;
     void setIndexBuffer(BufferHandle b, Format indexFormat) override;
@@ -1847,22 +1865,41 @@ void D3D12Device::reconcileClearValue() {
 
 // Uploads a mesh to the GPU and returns its handle.
 MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) {
-    if (!device_ || vcount == 0 || icount == 0) return 0;
+    if (!device_ || !rhiFactory_ || vcount == 0 || icount == 0) return 0;
     GpuMesh m;
     m.indexCount = icount;
+    m.vertexCount = vcount;
     const u64 vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
     const u64 ibytes = static_cast<u64>(icount) * sizeof(u32);
-    auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
 
-    auto vd = bufferDesc(vbytes);
-    if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &vd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m.vb)), "mesh VB")) return 0;
-    auto id = bufferDesc(ibytes);
-    if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &id, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m.ib)), "mesh IB")) return 0;
+    // THROUGH THE FACTORY, not CreateCommittedResource. Same upload heap and same contents as
+    // before -- but a factory buffer has an RhiBuffer entry, and only those can be given a
+    // descriptor. Without that a shader could never read a mesh's own geometry, which is what a
+    // ray needs the moment it wants to do anything more than ask whether something is there.
+    BufferDesc vd;
+    vd.bytes = vbytes;
+    vd.kind = BufferKind::Upload;
+    vd.debugName = "mesh vertices";
+    m.vbBuffer = rhiFactory_->createBuffer(vd);
 
-    void* p = nullptr;
-    D3D12_RANGE none{0, 0};
-    m.vb->Map(0, &none, &p); std::memcpy(p, verts, vbytes); m.vb->Unmap(0, nullptr);
-    m.ib->Map(0, &none, &p); std::memcpy(p, indices, ibytes); m.ib->Unmap(0, nullptr);
+    BufferDesc idd;
+    idd.bytes = ibytes;
+    idd.kind = BufferKind::Upload;
+    idd.debugName = "mesh indices";
+    m.ibBuffer = rhiFactory_->createBuffer(idd);
+
+    RhiBuffer* vrb = rhiFactory_->buffer(m.vbBuffer);
+    RhiBuffer* irb = rhiFactory_->buffer(m.ibBuffer);
+    if (!vrb || !vrb->res || !irb || !irb->res) {
+        AVER_ERROR("[RHI.D3D12] createMesh could not allocate its buffers");
+        if (m.vbBuffer) rhiFactory_->destroyBuffer(m.vbBuffer);
+        if (m.ibBuffer) rhiFactory_->destroyBuffer(m.ibBuffer);
+        return 0;
+    }
+    m.vb = vrb->res;
+    m.ib = irb->res;
+    rhiFactory_->writeBuffer(m.vbBuffer, verts, vbytes, 0);
+    rhiFactory_->writeBuffer(m.ibBuffer, indices, ibytes, 0);
 
     m.vbv.BufferLocation = m.vb->GetGPUVirtualAddress();
     m.vbv.SizeInBytes = static_cast<UINT>(vbytes);
@@ -4464,12 +4501,13 @@ void D3D12RenderContext::dispatch(u32 gx, u32 gy, u32 gz) {
 }
 
 // Copies whole bytes between two buffers. Both must already be in the right state.
-void D3D12RenderContext::copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes) {
+void D3D12RenderContext::copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes,
+                                    u64 dstOffset, u64 srcOffset) {
     if (!dev_->cmdList_ || !res_) return;
     ID3D12Resource* d = res_->bufferResource(dst);
     ID3D12Resource* s = res_->bufferResource(src);
     if (!d || !s) { AVER_ERROR("[RHI.D3D12] copyBuffer with an invalid handle"); return; }
-    dev_->cmdList_->CopyBufferRegion(d, 0, s, 0, bytes);
+    dev_->cmdList_->CopyBufferRegion(d, dstOffset, s, srcOffset, bytes);
 }
 
 

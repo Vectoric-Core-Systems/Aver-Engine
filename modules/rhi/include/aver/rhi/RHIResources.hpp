@@ -448,7 +448,12 @@ public:
     // Dispatches a compute pipeline.
     virtual void dispatch(u32 gx, u32 gy, u32 gz) = 0;
     // Copies whole bytes between buffers. Both must already be in CopySource / CopyDest.
-    virtual void copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes) = 0;
+    // Copies a range between buffers. The offsets are what let several sources be CONCATENATED
+    // into one destination -- which is how a set of separate meshes becomes the single flat table
+    // a shader can index after a ray hit. Without them this could only ever copy a whole buffer to
+    // the start of another.
+    virtual void copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes,
+                            u64 dstOffset = 0, u64 srcOffset = 0) = 0;
 
     // ---- geometry the CALLER owns ----
     // The counterpart to GraphicsPipelineDesc::vertexLayout, for vertices a feature builds itself.
