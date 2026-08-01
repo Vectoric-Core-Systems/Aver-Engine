@@ -21,6 +21,7 @@
 #include "aver/ui/UiDrawList.hpp"
 #include "aver/render/ui/UiRenderer.hpp"
 #include "aver/render/SkinSelfTest.hpp"
+#include "aver/pt/PtFurnaceTest.hpp"
 #include "SkinDrawTest.hpp"
 #include "SkinSceneTest.hpp"
 #include "ReflTest.hpp"
@@ -896,6 +897,15 @@ public:
             else { AVER_ERROR("[Skin] self-test unavailable on this device"); skinSelfTest_.reset(); }
         }
 
+        // --pt-furnace: does the PATH TRACER conserve energy? It brings its own geometry, its own
+        // acceleration structures and its own accumulators, so all the editor supplies is the
+        // furnace itself -- setFurnaceTest above is what put SkyAtmosphere::furnaceRadiance on, and
+        // the shader reads the environment through the engine's own skyColor().
+        if (ptFurnaceTest_) {
+            ptFurnace_ = std::make_unique<aver::pt::PtFurnaceTest>();
+            if (ptFurnace_->init(*e.device())) e.device()->addRenderFeature(ptFurnace_.get());
+            else { AVER_ERROR("[PT] furnace unavailable on this device"); ptFurnace_.reset(); }
+        }
 
             tools_.setAutoCompileFlag(autoCompileFlag());
             tools_.setReloader([this](const std::string& binDir, std::string* status) {
@@ -1668,6 +1678,10 @@ public:
             e.device()->removeRenderFeature(skinSelfTest_.get());
             skinSelfTest_.reset();
         }
+        if (ptFurnace_) {
+            e.device()->removeRenderFeature(ptFurnace_.get());
+            ptFurnace_.reset();
+        }
         if (skinDraw_) {
             e.device()->removeRenderFeature(skinDraw_.get());
             skinDraw_.reset();
@@ -1745,6 +1759,11 @@ public:
     void setReflTest() { reflTest_ = true; }                                       // --refl-test
     void setFurnaceTest() { furnaceTest_ = true; }                                 // --furnace-test
     void setFurnaceSun() { furnaceTest_ = true; furnaceSun_ = true; }              // --furnace-sun
+    // --pt-furnace: the furnace measured through the PATH TRACER rather than through the raster
+    // shading model. It implies --furnace-test because the furnace is a property of the SKY, and
+    // that is where the flag puts it -- the tracer reads the same averFurnaceL() every other
+    // shading path does.
+    void setPtFurnaceTest() { furnaceTest_ = true; ptFurnaceTest_ = true; }        // --pt-furnace
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
@@ -5050,6 +5069,8 @@ private:
     bool reflTest_ = false;       // --refl-test: are ray-traced reflections global?
     bool furnaceTest_ = false;    // --furnace-test: does the shading model conserve energy?
     bool furnaceSun_ = false;     // --furnace-sun: the variant where only the DIRECT term is lit
+    bool ptFurnaceTest_ = false;  // --pt-furnace: the same question asked of the path tracer
+    std::unique_ptr<aver::pt::PtFurnaceTest> ptFurnace_;
     std::unique_ptr<aver::editor::ReflTest> refl_;
     int  reflBeaconIndex_ = -1;   // which objects_ entry the schedule shows and hides
     rhi::MeshHandle unitCubeMesh_ = 0;   // the editor's own unit cube, half-extent 1
@@ -5545,7 +5566,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -5635,6 +5656,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--refl-test")) reflTest=true;
         else if (!std::strcmp(argv[i],"--furnace-test")) furnaceTest=true;
         else if (!std::strcmp(argv[i],"--furnace-sun")) furnaceSun=true;
+        else if (!std::strcmp(argv[i],"--pt-furnace")) ptFurnace=true;
         else if (!std::strcmp(argv[i],"--skin-scene-test") && i+1<argc) skinSceneDir=argv[++i];
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
@@ -5722,6 +5744,7 @@ Application* createApplication(int argc, char** argv) {
     if (reflTest) app->setReflTest();
     if (furnaceTest) app->setFurnaceTest();
     if (furnaceSun) app->setFurnaceSun();
+    if (ptFurnace) app->setPtFurnaceTest();
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
     return app;
 }

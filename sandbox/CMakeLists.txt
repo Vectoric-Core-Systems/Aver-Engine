@@ -44,6 +44,10 @@ target_link_libraries(Sandbox PRIVATE Aver.Render.ActorPreview)
 # GPU skinning, for --skin-test. The pass has no other consumer yet -- the mesh draw path cannot
 # take a substituted position stream -- so this link line is what keeps it compiled and checkable.
 target_link_libraries(Sandbox PRIVATE Aver.Render.Skin)
+# The path tracer, for --pt-furnace. Linked here for the same reason skinning is: the editor is the
+# only host that drives it, and this link line is what keeps its shader compiled and its energy
+# oracle runnable on a real device.
+target_link_libraries(Sandbox PRIVATE Aver.Render.PathTracer)
 if(TARGET Aver.Render.Voxi)
   # Settings DLL (brings AVER_MODULE_VOXI=1) + the static render feature that drives the RHI.
   target_link_libraries(Sandbox PRIVATE Aver.Render.Voxi Aver.Render.Voxi.Renderer)

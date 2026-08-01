@@ -176,6 +176,10 @@ add_subdirectory(modules/render.actorpreview)
 # GPU skinning. Down here rather than beside modules/anim because it needs the RHI, and generic
 # enough to exist in every configuration for the same reason the preview does.
 add_subdirectory(modules/render.skin)
+# The path tracer and its white-furnace oracle. Unconditional and RHI-only, like the two above: it
+# owns its own geometry and scenes, so there is no world, material system or render feature it could
+# depend on, and it declines at init() on a device without DXR 1.1.
+add_subdirectory(modules/render.pt)
 # The audio seam. Added down HERE rather than beside the mixer because it links the WAV reader,
 # which is a target inside modules/formats and so does not exist until that has been added.
 add_subdirectory(modules/audio.abi)
