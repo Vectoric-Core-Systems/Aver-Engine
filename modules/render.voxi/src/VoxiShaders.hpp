@@ -76,7 +76,14 @@ float rtHash(float2 p) {
 // The bias scales with distance from the camera. A fixed 0.02 cm offset is roughly 300 float ulp
 // at 1000 cm from the origin and under 3 at 100000 cm, so distant geometry self-intersects and
 // speckles -- acne that looks like flickering rather than like a bias problem.
-float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel) {
+// `dpx`/`dpy` are the receiver's screen-space footprint, PASSED IN rather than taken here.
+//
+// They used to be ddx/ddy(wpos) computed inside. That is correct for a primary surface, where wpos
+// varies smoothly across the quad, and WRONG for a reflected hit: neighbouring pixels' rays land on
+// different triangles metres apart, so the "footprint" becomes a wild vector and the shadow rays
+// scatter across the scene. A derivative taken inside divergent flow is undefined in HLSL as well.
+// A reflected caller passes zero and gets a point sample, which is what it wants.
+float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy) {
     const uint  n    = (uint)max(gRtParams.y, 1.0);
     const float tanR = max(gRtParams.x, 0.0);
     const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
@@ -98,9 +105,6 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel) {
     // Jittering the ray ORIGIN across the footprint turns the per-pixel test into an area estimate,
     // which is antialiasing the shadow rather than blurring it: the result converges to the exact
     // fraction of the pixel that is occluded.
-    float3 dpx = ddx(wpos);
-    float3 dpy = ddy(wpos);
-
     const float ang0 = rtHash(pixel) * 6.2831853;
     float vis = 0.0;
 
@@ -144,7 +148,7 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel) {
 // albedo from the instance table. No textures and no second bounce -- a reflected surface is
 // slightly flatter than the same surface seen directly, which is a stated approximation rather than
 // an accident.
-float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, out bool hit) {
+float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, out bool hit) {
     hit = false;
     RayDesc r;
     const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
@@ -176,9 +180,28 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, out bool hit) {
     float3 hitPos = wpos + R * q.CommittedRayT();
     // Whether the SUN reaches the reflected surface. Without this every reflection is lit as if
     // nothing could shadow it, which is what makes cheap reflections look like they glow.
-    float shadow = rtShadow(hitPos, nWS, L, hitPos.xy);
+    // Seeded from the PIXEL, and with NO footprint. Seeding from hitPos.xy -- a world float derived
+    // from CommittedRayT -- makes the sample pattern depend on a ray distance, which is exactly the
+    // value most likely to differ between a hardware adapter and WARP, and the gate oracle compares
+    // nine configurations bit-exactly.
+    float shadow = rtShadow(hitPos, nWS, L, pixel, float3(0,0,0), float3(0,0,0));
 
-    float3 direct = averSunRadiance() * saturate(dot(nWS, L)) * shadow;
+    // LAMBERTIAN EXITANT RADIANCE, and the /PI is the whole point. averGroundRadiance is the
+    // engine's own reference for this and reads:
+    //
+    //     E = sunIrradiance*ndl + PI*skyRadiance*ambient;   return albedo * E / PI;
+    //
+    // so the sun's contribution to outgoing RADIANCE is albedo*sunIrradiance*ndl/PI, while the
+    // sky's is albedo*skyRadiance*ambient with the PI cancelling. The first version of this
+    // function omitted the divide on the direct term only, which made every SUNLIT reflection
+    // 3.14x too bright while leaving shaded ones correct -- brightness that looks like an exposure
+    // problem rather than a units one, and which pushed the lit ray-traced gates from 94,27,14 to
+    // 131,58,40.
+    //
+    // THE WHITE FURNACE DOES NOT CATCH THIS, and that is worth knowing about the oracle: it turns
+    // the sun OFF, so the direct term is zero and only the ambient half -- which was already right
+    // -- is under test. A furnace with a sun is a second mode worth having.
+    float3 direct = averSunRadiance() * saturate(dot(nWS, L)) * shadow / PI;
     float3 ambient = averSkyIrradiance(nWS) * gAmbient.r;
     hit = true;
     return inst.albedo * (direct + ambient);
@@ -288,7 +311,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     float ndl = saturate(dot(N, L));
 #if AVER_RT
     float sunVis;
-    if (gShadowParams.z > 0.5) sunVis = rtShadow(i.wpos, N, L, i.pos.xy);
+    if (gShadowParams.z > 0.5) sunVis = rtShadow(i.wpos, N, L, i.pos.xy, ddx(i.wpos), ddy(i.wpos));
     else                       sunVis = shadowFactor(i.wpos, N, ndl);
 #else
     const float sunVis = shadowFactor(i.wpos, N, ndl);
@@ -317,10 +340,18 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 #if AVER_RT
     // Ray traced when the acceleration structure and the geometry table are both there. Preferred
     // over the cone trace unconditionally: the cone is bounded by the voxel volume and this is not.
-    if (gShadowParams.z > 0.5 && gRtParams.w > 0.5) {
+    // A MIRROR RAY IS ONLY RIGHT FOR A SMOOTH SURFACE. The cone path it replaced widened its
+    // aperture with roughness; a single ray has no aperture at all, so applying it to a rough
+    // surface hands back a sharp reflection where a blurred one belongs -- brighter than the truth
+    // and visibly wrong. Above the cutoff the sky term is used, which is what a very rough surface
+    // reflects anyway.
+    if (gShadowParams.z > 0.5 && gRtParams.w > 0.5 && s.rough <= 0.5) {
         bool specHit = false;
-        float3 refl = rtReflection(i.wpos, N, R, L, specHit);
-        ind4.specular = specHit ? refl : skyColor(R);
+        float3 refl = rtReflection(i.wpos, N, R, L, i.pos.xy, specHit);
+        // Faded out toward the cutoff so a surface does not pop between the two models as its
+        // roughness crosses a threshold.
+        ind4.specular = lerp(specHit ? refl : skyColor(R), skyColor(R),
+                             saturate(s.rough * 2.0));
     } else
 #endif
     if (gVoxelParams.w > 0.5) {
