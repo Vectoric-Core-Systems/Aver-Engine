@@ -47,6 +47,7 @@ option(AVER_MODULE_PHYSICS "Physics module: rigid bodies, characters and raycast
 # Landscape: the chunked heightfield terrain. CPU-only at this stage -- the quadtree, the LOD metric,
 # culling and chunk geometry -- so it depends on nothing optional and costs nothing to leave on.
 option(AVER_MODULE_LANDSCAPE "Landscape module: chunked heightfield terrain, LOD and chunk geometry" ON)
+option(AVER_MODULE_DEFORM "Sub-bone vertex deformation: a cage finer than the skeleton" ON)
 # The editor control channel, so a tool can press the editor's own buttons and then look at the result.
 # OFF BY DEFAULT: it is a debugging aid, the editor must work without it, and nobody should ship an
 # editor that can be driven over a socket unless they asked for it. Even built, it listens only when the
@@ -87,6 +88,14 @@ add_subdirectory(modules/formats)  # Phase 2 (.ocbeam / .ocmap loaders)
 # module keeps its no-dependency, no-process guarantee. See its CMakeLists for the full argument --
 # including why it is guarded on Aver.Formats.Material rather than on a switch of its own.
 add_subdirectory(modules/formats.roslyn)
+# Animation sampling, above formats because it reads .ocskel/.ocanim through it and below anything
+# that draws. Posing a skeleton is arithmetic, so this needs no RHI and never will.
+add_subdirectory(modules/anim)
+# Sub-bone vertex deformation, above anim because a cage is generated against a skeleton's rest
+# pose. Optional: a game that only needs bone skinning does not link it.
+if(AVER_MODULE_DEFORM)
+  add_subdirectory(modules/deform)
+endif()
 # Landscape, above formats because it reads .ocland through it and below anything that draws. The
 # renderer half is a separate target and is not built yet, which is why this needs no RHI.
 # Physics: the backend first, then the module that fronts it. Two directories rather than one for
@@ -190,6 +199,13 @@ if(AVER_BUILD_TESTS)
   # is now derived rather than authored -- an airmass that is quietly 20% low still renders a blue
   # sky, so the only thing that can catch it is a numeric integral of the same physics.
   add_subdirectory(tests/rhi)
+  # The animation sampler. Unconditional, like its module: a slerp that takes the long way round or
+  # a cubic tangent scaled by the wrong interval is invisible until a character is on screen and
+  # slightly wrong, and is decidable here by arithmetic.
+  add_subdirectory(tests/anim)
+  if(AVER_MODULE_DEFORM)
+    add_subdirectory(tests/deform)
+  endif()
   # The directory watcher. Unconditional because Aver.Platform always exists, and needed because the
   # editor's live sync now rests on it -- it shipped with no consumer and no test, and the first
   # thing that depended on it should not also be the first thing that exercised it.

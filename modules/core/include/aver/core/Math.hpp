@@ -118,6 +118,25 @@ struct Quat {
         const Vec3 t = cross(u, v) * 2.0f;
         return v + t * w + cross(u, t);
     }
+
+    // Shortest-arc spherical interpolation. Falls back to a normalised lerp when the two are nearly
+    // parallel, where the sine denominator loses all its precision.
+    static Quat slerp(const Quat& a, const Quat& b, f32 t) {
+        f32 d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+        // q and -q are the same rotation, so flip to take the short way round.
+        Quat e = b;
+        if (d < 0.0f) { e = {-b.x, -b.y, -b.z, -b.w}; d = -d; }
+        if (d > 0.9995f) {
+            return Quat{a.x + (e.x - a.x) * t, a.y + (e.y - a.y) * t,
+                        a.z + (e.z - a.z) * t, a.w + (e.w - a.w) * t}.normalized();
+        }
+        const f32 theta = std::acos(d < -1.0f ? -1.0f : (d > 1.0f ? 1.0f : d));
+        const f32 s = std::sin(theta);
+        const f32 wa = std::sin((1.0f - t) * theta) / s;
+        const f32 wb = std::sin(t * theta) / s;
+        return {a.x * wa + e.x * wb, a.y * wa + e.y * wb,
+                a.z * wa + e.z * wb, a.w * wa + e.w * wb};
+    }
 };
 
 // ---------------------------------------------------------------- Mat4 (row-major)
