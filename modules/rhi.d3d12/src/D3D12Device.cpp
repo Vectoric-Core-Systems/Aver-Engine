@@ -317,6 +317,7 @@ struct PerFrameCB {
     f32 atmoPlanet[4];   // x planet radius km, y atmosphere top radius km, z world->km, w on/off
     f32 atmoTune[4];     // x ozone centre km, y multi-scatter gain, z view steps, w aerial steps
     f32 atmoSunE0[4];    // rgb sun irradiance above the air, w ground albedo
+    f32 furnace[4];      // x on, y radiance -- the white-furnace energy oracle
 };
 
 // Constants for every post pass. Mirrors `cbuffer AverPost : register(b0)` in
@@ -2228,6 +2229,14 @@ void D3D12Device::packAtmosphere(const SkyAtmosphere& s) {
     frameCB_.atmoTune[1] = a.multiScatterGain;
     frameCB_.atmoTune[2] = static_cast<f32>(a.viewSteps > 1 ? a.viewSteps : 1);
     frameCB_.atmoTune[3] = static_cast<f32>(a.aerialSteps > 1 ? a.aerialSteps : 1);
+
+    // BEFORE the early-out: with the atmosphere off this function returns without touching the
+    // tail, and an unwritten furnace row is whatever the last frame left there. A shading model
+    // that silently enters furnace mode would be far harder to diagnose than one that never does.
+    frameCB_.furnace[0] = s.furnaceRadiance > 0.0f ? 1.0f : 0.0f;
+    frameCB_.furnace[1] = s.furnaceRadiance;
+    frameCB_.furnace[2] = 0.0f;
+    frameCB_.furnace[3] = 0.0f;
 
     if (!on) {
         for (int i = 0; i < 4; ++i) frameCB_.atmoSunE0[i] = 0.0f;

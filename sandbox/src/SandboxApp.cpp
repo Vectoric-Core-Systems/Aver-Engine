@@ -700,6 +700,41 @@ public:
         }
 #endif
 
+        // --furnace-test: does the shading model CONSERVE ENERGY? A uniform environment of
+        // radiance L and surfaces of albedo 1 -- every one must read the same, whatever its
+        // orientation and whatever surrounds it.
+        if (furnaceTest_) {
+            objects_.clear();
+            sel_ = -1;
+            sky_.furnaceRadiance = 0.25f;
+            sunAmbient_ = 1.0f;
+
+            // Albedo ONE, fully rough, non-metallic: the furnace's premise is a perfect Lambertian
+            // white, and any of those three wrong makes the answer legitimately not L.
+            const auto white = [&](const char* nm, Vec3 pos, Vec3 scale) {
+                MeshObj o;
+                o.name = nm;
+                o.mesh = unitCubeMesh_;
+                o.pos = pos; o.scale = scale;
+                o.color[0] = o.color[1] = o.color[2] = 1.0f;
+                o.metallic = 0.0f; o.roughness = 1.0f;
+                o.aabbMin = Vec3{-scale.x*1.1f, -scale.y*1.1f, -scale.z*1.1f};
+                o.aabbMax = Vec3{ scale.x*1.1f,  scale.y*1.1f,  scale.z*1.1f};
+                objects_.push_back(o);
+            };
+            // A flat slab, and a tall one. Different faces point in different directions, so the
+            // probes across them sample several orientations of the same white surface.
+            white("FurnaceFloor", Vec3{0, 0, -30}, Vec3{900.0f, 900.0f, 20.0f});
+            white("FurnaceTall",  Vec3{0, 0, 200}, Vec3{160.0f, 160.0f, 220.0f});
+            // THE ONE THAT MATTERS: a box open only toward the camera, so the surface at its back
+            // is occluded from most of the hemisphere. In a furnace it must STILL read L, because
+            // the walls occluding it are emitting L too. This is where an occlusion term that
+            // forgets the occluder is also a light source shows up.
+            white("FurnaceCaveBack",  Vec3{-520, -520, 160}, Vec3{20.0f, 200.0f, 200.0f});
+            white("FurnaceCaveLeft",  Vec3{-330, -700, 160}, Vec3{200.0f, 20.0f, 200.0f});
+            white("FurnaceCaveTop",   Vec3{-330, -520, 350}, Vec3{200.0f, 200.0f, 20.0f});
+        }
+
         // --refl-test: are ray-traced reflections GLOBAL? A mirror, and a beacon parked on its
         // reflection vector far outside the voxel volume, run past both tracers.
         if (reflTest_) {
@@ -1696,6 +1731,7 @@ public:
     void setSkinTest() { skinTest_ = true; }                                       // --skin-test
     void setSkinDrawTest() { skinDrawTest_ = true; }                               // --skin-draw-test
     void setReflTest() { reflTest_ = true; }                                       // --refl-test
+    void setFurnaceTest() { furnaceTest_ = true; }                                 // --furnace-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
@@ -4995,6 +5031,7 @@ private:
     std::string skinSceneDir_;    // --skin-scene-test <dir>: where the cooked rig lives
     std::unique_ptr<aver::editor::SkinSceneTest> skinScene_;
     bool reflTest_ = false;       // --refl-test: are ray-traced reflections global?
+    bool furnaceTest_ = false;    // --furnace-test: does the shading model conserve energy?
     std::unique_ptr<aver::editor::ReflTest> refl_;
     int  reflBeaconIndex_ = -1;   // which objects_ entry the schedule shows and hides
     rhi::MeshHandle unitCubeMesh_ = 0;   // the editor's own unit cube, half-extent 1
@@ -5490,7 +5527,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -5574,6 +5611,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--skin-test")) skinTest=true;
         else if (!std::strcmp(argv[i],"--skin-draw-test")) skinDrawTest=true;
         else if (!std::strcmp(argv[i],"--refl-test")) reflTest=true;
+        else if (!std::strcmp(argv[i],"--furnace-test")) furnaceTest=true;
         else if (!std::strcmp(argv[i],"--skin-scene-test") && i+1<argc) skinSceneDir=argv[++i];
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
@@ -5657,6 +5695,7 @@ Application* createApplication(int argc, char** argv) {
     if (skinTest) app->setSkinTest();
     if (skinDrawTest) app->setSkinDrawTest();
     if (reflTest) app->setReflTest();
+    if (furnaceTest) app->setFurnaceTest();
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
     return app;
 }

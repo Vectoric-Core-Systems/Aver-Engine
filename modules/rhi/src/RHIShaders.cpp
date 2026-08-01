@@ -119,6 +119,10 @@ cbuffer PerFrame : register(b0) {
     float4   gAtmoPlanet;   // x planet radius km, y atmosphere top radius km, z world->km, w on/off
     float4   gAtmoTune;     // x ozone centre km, y multi-scatter gain, z view steps, w aerial steps
     float4   gAtmoSunE0;    // rgb sun irradiance ABOVE the air, w ground albedo
+    // x > 0.5 puts the shading model in a WHITE FURNACE: every direction carries radiance y, the
+    // ground carries it too, and the sun is off. It is a measuring instrument, not a look --
+    // see averFurnaceOn.
+    float4   gFurnace;
 };
 // The per-draw block: transform plus shading constants. 32 dwords, matching kObjectConstantDwords.
 cbuffer PerObject : register(b1) {
@@ -136,7 +140,24 @@ cbuffer PerObject : register(b1) {
 static const float PI = 3.14159265;
 
 // The sun's radiance: the authored colour, decoded, times the authored intensity.
-float3 averSunRadiance() { return srgbToLin(gLightColor.rgb) * gSkyParams.z; }
+// Whether the shading model is in furnace mode, and the radiance every direction then carries.
+//
+// A WHITE FURNACE is the standard energy oracle: put a surface of albedo 1 inside a uniform
+// environment of radiance L and its outgoing radiance must be exactly L, from every direction, at
+// every orientation, and -- the part that makes it sharp -- REGARDLESS OF GEOMETRY. A surface
+// enclosed by other surfaces must still read L, because the enclosure is emitting L as well. Any
+// missing or double-counted factor shows up as a ratio: dropping 1/PI reads PI*L, dropping the
+// cosine reads 2L, applying an occlusion term that forgets the occluder is also a light source
+// reads darker.
+bool  averFurnaceOn() { return gFurnace.x > 0.5; }
+float averFurnaceL()  { return gFurnace.y; }
+
+// The sun is OFF in a furnace: a directional source is not part of the uniform environment, and
+// leaving it on would swamp the very thing being measured.
+float3 averSunRadiance() {
+    if (averFurnaceOn()) return 0.0;
+    return srgbToLin(gLightColor.rgb) * gSkyParams.z;
+}
 
 // ---- the physical atmosphere -----------------------------------------------------------------
 // MIRRORS modules/rhi/src/Atmosphere.cpp function for function.
@@ -285,6 +306,10 @@ float3 averSkyAbove(float3 dir) {
 
 // What the ground below the horizon radiates: albedo times the sun and sky falling on it.
 float3 averGroundRadiance() {
+    // The ground is part of the environment, so in a furnace it carries L like everything else.
+    // Leaving it physical would make the lower hemisphere darker and every downward-facing probe
+    // fail for a reason that has nothing to do with the shading model.
+    if (averFurnaceOn()) return averFurnaceL();
     float3 albedo = srgbToLin(gGroundColor.rgb);
     float  ndl    = saturate(normalize(gLightDir.xyz).z);
     float3 E = averSunRadiance() * ndl + PI * averSkyAbove(float3(0, 0, 0.5)) * gAmbient.r;
@@ -299,7 +324,10 @@ float3 skyColorFull(float3 dir)
     return lerp(above, averGroundRadiance(), g);
 }
 // The dome, as every shading path names it.
-float3 skyColor(float3 dir){ return skyColorFull(dir); }
+float3 skyColor(float3 dir){
+    if (averFurnaceOn()) return averFurnaceL();
+    return skyColorFull(dir);
+}
 
 // The sky along one view ray, marched through the physical model.
 float3 averSkyPhysical(float3 dir) {
@@ -362,6 +390,7 @@ float3 averApplyFog(float3 color, float3 wpos) {
 
 // The sky as light: the cosine-weighted average radiance over the hemisphere about N.
 float3 averSkyIrradiance(float3 N) {
+    if (averFurnaceOn()) return averFurnaceL();
     float meanZ = N.z * 0.5;
     float3 dome = skyColorFull(float3(0.0, 0.0, meanZ));
     float belowFraction = saturate(0.5 - N.z * 0.5) * gGroundColor.a;

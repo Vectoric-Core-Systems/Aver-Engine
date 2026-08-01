@@ -169,6 +169,14 @@ struct SkyAtmosphere {
     f32 sunTemperatureK = 0.0f;   // Kelvin; 0 means use sunColor as authored
     f32 sunAngularDiameterDeg = 0.545f;   // disk size, and how fast a shadow edge softens
 
+    // WHITE FURNACE radiance. Zero is off, and off is the only value any content should ever use.
+    // Non-zero replaces the whole sky, the ground and the sun with a uniform environment of this
+    // radiance, which is the standard way to measure whether a shading model conserves energy: a
+    // surface of albedo 1 inside it must read exactly this, whatever its orientation and whatever
+    // is around it. It lives on the sky rather than in a debug flag because it IS a statement about
+    // the environment, and because every path that asks the sky for radiance then gets it for free.
+    f32 furnaceRadiance = 0.0f;
+
     // ---- the air ----
     f32 fogColor[3] = {1.0f, 1.0f, 1.0f};   // a TINT on the in-scattered sky, not a replacement
     f32 fogDensity = 4e-6f;     // extinction per world unit (cm), at fogHeight
