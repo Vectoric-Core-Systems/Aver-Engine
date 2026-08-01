@@ -72,7 +72,7 @@ struct SkinnedMeshGpu {
 // Transitions a skinned instance's output buffer and keeps SkinnedMeshGpu::outState in step.
 //
 // A FRAME MUST END WITH THE BUFFER BACK IN Common. D3D12 decays every buffer to the common state
-// when a command list finishes, so a barrier next frame claiming VertexBuffer would be claiming a
+// when a command list finishes, so a barrier next frame claiming GeometryRead would be claiming a
 // state the hardware no longer holds -- which is a validation error, not a stale-data bug, and so
 // is silent until someone runs with the debug layer.
 void skinTransition(rhi::IRenderContext& ctx, SkinnedMeshGpu& m, rhi::ResourceState to);
@@ -108,8 +108,10 @@ public:
     // vertex referencing one of them falls back to its rest position -- the same rule the CPU
     // applies to an out-of-range index, so the two still agree about a rig this cannot hold.
     //
-    // On return the output buffer is left in ResourceState::VertexBuffer, which is the state a
-    // raster pass wants of it. The CALLER is what must return it to Common before the frame ends.
+    // On return the output buffer is left in ResourceState::GeometryRead -- readable by the input
+    // assembler, by a shader fetching vertices by hand, and by an acceleration-structure build, all
+    // three of which a skinned mesh really does meet in one frame. The CALLER is what must return
+    // it to Common before the frame ends.
     void dispatch(rhi::IRenderContext& ctx, SkinnedMeshGpu& m, const Mat4* skin, u32 boneCount);
 
 private:

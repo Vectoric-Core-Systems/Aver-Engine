@@ -290,7 +290,7 @@ void SkinningPass::dispatch(rhi::IRenderContext& ctx, SkinnedMeshGpu& m,
     ctx.setConstants(kSkinConstantSlot, params, 4);
     ctx.dispatch((m.vertexCount + kSkinGroupSize - 1) / kSkinGroupSize, 1, 1);
 
-    skinTransition(ctx, m, rhi::ResourceState::VertexBuffer);
+    skinTransition(ctx, m, rhi::ResourceState::GeometryRead);
     ctx.popMarker();
 }
 

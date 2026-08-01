@@ -359,6 +359,10 @@ struct GpuMesh {
     D3D12_VERTEX_BUFFER_VIEW vbv{};
     D3D12_INDEX_BUFFER_VIEW ibv{};
     u32 indexCount = 0;
+    // Non-zero when this mesh's vertices are an RHI buffer a compute pass writes rather than an
+    // upload this device performed -- see IDevice::createSkinTargetMesh. `vb` still points at the
+    // same resource, so every draw path reads it identically; this only records WHO writes it.
+    BufferHandle vbBuffer = 0;
 };
 
 // A line list uploaded to the GPU.
@@ -514,6 +518,10 @@ D3D12_RESOURCE_STATES toResourceStates(ResourceState s) {
         case ResourceState::CopySource:             return D3D12_RESOURCE_STATE_COPY_SOURCE;
         case ResourceState::CopyDest:               return D3D12_RESOURCE_STATE_COPY_DEST;
         case ResourceState::VertexBuffer:           return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+        // Every geometry reader at once. NON_PIXEL_SHADER_RESOURCE is the bit a BLAS build demands
+        // of its vertex data, and it is not implied by VERTEX_AND_CONSTANT_BUFFER.
+        case ResourceState::GeometryRead:           return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
+                                                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         case ResourceState::AccelerationStructure:  return D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
         case ResourceState::Common:                 break;
     }
@@ -675,6 +683,7 @@ public:
     PostSettings postProcess() const override { return post_; }
 
     MeshHandle createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override;
+    MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) override;
     void drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) override;
     LineHandle createLineMesh(const LineVertex* verts, u32 count) override;
     void drawLines(LineHandle mesh, const f32 world[16]) override;
@@ -844,6 +853,11 @@ private:
     bool uiActive_ = false;
 
     std::vector<GpuMesh> meshes_;
+    // Skin-target meshes created outside a frame and still holding uninitialised memory. Drained at
+    // the top of the next frame; see seedSkinTargets.
+    struct SkinSeed { MeshHandle dst; MeshHandle src; };
+    std::vector<SkinSeed> skinSeeds_;
+    void seedSkinTargets();
     PerFrameCB frameCB_{};
     u32 width_ = 0, height_ = 0;
     u32 vpX_ = 0, vpY_ = 0, vpW_ = 0, vpH_ = 0; // scene sub-rect; w/h == 0 means full backbuffer
@@ -1858,6 +1872,82 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
     return static_cast<MeshHandle>(meshes_.size());
 }
 
+// Creates a mesh that shares `source`'s indices but owns a Default-heap, UAV-capable vertex buffer
+// for a compute pass to write. See IDevice::createSkinTargetMesh for why this is a creation entry
+// point and not a per-draw modifier.
+MeshHandle D3D12Device::createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) {
+    if (!device_ || !rhiFactory_) return 0;
+    if (source == 0 || source > meshes_.size()) {
+        AVER_ERROR("[RHI.D3D12] createSkinTargetMesh with an invalid source handle");
+        return 0;
+    }
+    const GpuMesh& src = meshes_[source - 1];
+    if (!src.vb || !src.ib || src.vbv.SizeInBytes == 0) return 0;
+
+    // The vertex buffer goes through the RHI factory rather than being another committed resource
+    // created here, because the skinning pass must be able to name it as a UAV -- and a UAV needs a
+    // descriptor, which only the factory allocates.
+    BufferDesc bd;
+    bd.bytes = src.vbv.SizeInBytes;
+    bd.kind  = BufferKind::Default;
+    bd.allowUnorderedAccess = true;
+    bd.debugName = "skin target vertices";
+    const BufferHandle vh = rhiFactory_->createBuffer(bd);
+    if (!vh) { AVER_ERROR("[RHI.D3D12] createSkinTargetMesh could not allocate its vertex buffer"); return 0; }
+
+    RhiBuffer* rb = rhiFactory_->buffer(vh);
+    if (!rb || !rb->res) { rhiFactory_->destroyBuffer(vh); return 0; }
+
+    GpuMesh m;
+    m.vb = rb->res;
+    m.ib = src.ib;                 // SHARED: skinning moves vertices and never renumbers triangles
+    m.ibv = src.ibv;
+    m.indexCount = src.indexCount;
+    m.vbBuffer = vh;
+    m.vbv.BufferLocation = rb->res->GetGPUVirtualAddress();
+    m.vbv.SizeInBytes = src.vbv.SizeInBytes;
+    // From sizeof(MeshVertex) via the source, not re-derived: two independently-written strides is
+    // exactly how a vertex buffer comes to be read at the wrong pitch.
+    m.vbv.StrideInBytes = src.vbv.StrideInBytes;
+
+    meshes_.push_back(std::move(m));
+    const MeshHandle h = static_cast<MeshHandle>(meshes_.size());
+
+    // Seed it with the rest pose. Queued rather than done here because a copy needs an open command
+    // list and this may well be called outside a frame -- and the point of seeding at all is that a
+    // mesh drawn before anything poses it must show the bind pose rather than uninitialised memory.
+    skinSeeds_.push_back({h, source});
+    if (outVertices) *outVertices = vh;
+    return h;
+}
+
+// Drains the queue of skin-target meshes awaiting their rest-pose seed. Runs at the top of a frame,
+// where the command list is open and nothing has drawn yet.
+void D3D12Device::seedSkinTargets() {
+    if (skinSeeds_.empty() || !cmdList_) return;
+    for (const SkinSeed& sd : skinSeeds_) {
+        if (sd.dst == 0 || sd.dst > meshes_.size() || sd.src == 0 || sd.src > meshes_.size()) continue;
+        GpuMesh& d = meshes_[sd.dst - 1];
+        const GpuMesh& s = meshes_[sd.src - 1];
+        if (!d.vb || !s.vb) continue;
+        // The destination is a fresh Default-heap buffer in COMMON, so it PROMOTES to COPY_DEST
+        // implicitly and needs no barrier to get there; the source is an upload-heap resource
+        // permanently in GENERIC_READ and needs none either.
+        cmdList_->CopyBufferRegion(d.vb.Get(), 0, s.vb.Get(), 0, d.vbv.SizeInBytes);
+
+        // But the promotion LASTS FOR THE REST OF THE COMMAND LIST -- decay happens at submit, not
+        // at the end of the copy. Without this the skinning pass's first barrier, in this same
+        // list, claims Common on a resource the runtime knows is in COPY_DEST, and the debug layer
+        // reports it once per frame forever. It is the promotion that is easy to reason about and
+        // its lifetime that is not.
+        auto back = transition(d.vb.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                               D3D12_RESOURCE_STATE_COMMON);
+        cmdList_->ResourceBarrier(1, &back);
+        AVER_TRACE("[RHI.D3D12] skin target {} seeded with the rest pose of mesh {}", sd.dst, sd.src);
+    }
+    skinSeeds_.clear();
+}
+
 // Opens the frame: waits out the current backbuffer's last frame, resets recording, clears targets.
 void D3D12Device::beginFrame() {
     if (!hasSwapchain_) return;
@@ -1870,6 +1960,9 @@ void D3D12Device::beginFrame() {
     boundRootSig_ = nullptr;
     postCBUsed_ = 0;
     drawBinding_ = defaultDrawBinding_;
+    // Before any feature's prePass and before any draw: a skin target must never be read in the
+    // frame it was created, and this is the only point where that is guaranteed.
+    seedSkinTargets();
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = msaaRtvHeap_->GetCPUDescriptorHandleForHeapStart();
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = dsvHeap_->GetCPUDescriptorHandleForHeapStart();

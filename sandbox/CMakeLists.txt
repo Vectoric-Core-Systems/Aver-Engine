@@ -3,6 +3,7 @@ add_executable(Sandbox
   src/AssetEditor.cpp
   src/ActorEditor.cpp
   src/AnimEditor.cpp
+  src/SkinDrawTest.cpp
   src/ProjectBrowser.cpp
   src/ProjectScaffold.cpp
   src/EditorPrefs.cpp

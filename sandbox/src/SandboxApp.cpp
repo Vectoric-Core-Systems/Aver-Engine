@@ -21,6 +21,7 @@
 #include "aver/ui/UiDrawList.hpp"
 #include "aver/render/ui/UiRenderer.hpp"
 #include "aver/render/SkinSelfTest.hpp"
+#include "SkinDrawTest.hpp"
 #include "aver/ui/ui_abi.h"
 
 #include "ProjectBrowser.hpp"
@@ -646,6 +647,42 @@ public:
             auto sh=buildScaleAxis(a,kAxisHi);      gzScaleHi_[a]=e.device()->createLineMesh(sh.data(),(u32)sh.size());
         }
 
+        // --skin-draw-test: the same question one level up -- does anything DRAW the skinned buffer.
+        //
+        // THIS BLOCK'S POSITION IS THE CONTRACT. addRenderFeature is a plain push_back and prePass
+        // runs features in registration order, so a skinning dispatch must be registered BEFORE the
+        // scene renderer -- Voxi replays the shadow and voxelise passes in ITS prePass, and those
+        // read the vertex buffer. Registered after, they read it every frame before it is written:
+        // a pose-behind shadow, and a barrier claiming Common on a resource the runtime has already
+        // seen bound as a vertex buffer. The debug layer is what said so, once per frame.
+        if (skinDrawTest_) {
+            skinDraw_ = std::make_unique<aver::editor::SkinDrawTest>();
+            if (skinDraw_->init(*e.device())) {
+                e.device()->addRenderFeature(skinDraw_.get());
+                // The scene becomes exactly one object, so the probe reads the box or the sky and
+                // never an unrelated mesh that happens to sit behind it.
+                objects_.clear();
+                sel_ = -1;
+                MeshObj o;
+                o.name = "SkinDrawTest";
+                o.mesh = skinDraw_->mesh();
+                o.color[0] = 0.9f; o.color[1] = 0.15f; o.color[2] = 0.9f;   // magenta: unlike the sky in every channel
+                o.roughness = 0.6f;
+                o.aabbMin = Vec3{-260, -260, -260};
+                o.aabbMax = Vec3{ 260,  260,  260};
+                objects_.push_back(o);
+            } else {
+                AVER_ERROR("[Skin] draw test unavailable on this device");
+                skinDraw_.reset();
+            }
+        }
+#if AVER_MODULE_SCRIPTING
+        {
+            scripting::HostDesc hd;
+            hd.bridgeDir = executableDir() + "\\Scripting";
+            hd.scriptsDir = resolveScriptsDir();
+            scripts_.init(hd);
+
 #if AVER_MODULE_VOXI
         // Hand the GPU's real capabilities to Voxi so its settings reflect this hardware.
         {
@@ -699,12 +736,7 @@ public:
             if (skinSelfTest_->init(*e.device())) e.device()->addRenderFeature(skinSelfTest_.get());
             else { AVER_ERROR("[Skin] self-test unavailable on this device"); skinSelfTest_.reset(); }
         }
-#if AVER_MODULE_SCRIPTING
-        {
-            scripting::HostDesc hd;
-            hd.bridgeDir = executableDir() + "\\Scripting";
-            hd.scriptsDir = resolveScriptsDir();
-            scripts_.init(hd);
+
 
             tools_.setAutoCompileFlag(autoCompileFlag());
             tools_.setReloader([this](const std::string& binDir, std::string* status) {
@@ -1234,7 +1266,20 @@ public:
         buildUI(e);
         uiReg_.endFrame();
         submitGameUi(e);
+        // Before captureCheck, because both use the device's single capture slot and the draw test
+        // finishes inside the first dozen frames while the ordinary probe fires near the last.
+        skinDrawCheck(e);
         captureCheck(e);
+    }
+
+    // Drives --skin-draw-test, giving it the probe pixel expressed against the LIVE viewport rect.
+    // The centre is used because the editor's default camera looks at the origin, which is where the
+    // box sits -- and because a relation between two frames does not need the pixel to be special.
+    void skinDrawCheck(Engine& e) {
+        if (!skinDraw_ || skinDraw_->finished()) return;
+        const u32 px = static_cast<u32>(vpX_ + vpW_ * 0.5f);
+        const u32 py = static_cast<u32>(vpY_ + vpH_ * 0.5f);
+        skinDraw_->tick(*e.device(), px, py);
     }
 
     // Hands the ABI's retained UI draw list to the game UI render feature, once per frame.
@@ -1341,6 +1386,10 @@ public:
             e.device()->removeRenderFeature(skinSelfTest_.get());
             skinSelfTest_.reset();
         }
+        if (skinDraw_) {
+            e.device()->removeRenderFeature(skinDraw_.get());
+            skinDraw_.reset();
+        }
 #if AVER_MODULE_VOXI
         if (voxiAttached_) { e.device()->removeRenderFeature(&voxiRenderer_); voxiAttached_ = false; }
         voxiRenderer_.shutdown();
@@ -1406,6 +1455,7 @@ public:
     void setMcpPort(u16 p) { mcpPort_ = p; }
 #endif
     void setSkinTest() { skinTest_ = true; }                                       // --skin-test
+    void setSkinDrawTest() { skinDrawTest_ = true; }                               // --skin-draw-test
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
@@ -4693,6 +4743,8 @@ private:
     aver::render::ui::UiRenderer* gameUi_ = nullptr;
     bool skinTest_ = false;       // --skin-test: GPU skinning against its CPU reference, then exit
     std::unique_ptr<aver::render::SkinSelfTest> skinSelfTest_;
+    bool skinDrawTest_ = false;   // --skin-draw-test: does the RASTERISER read the skinned buffer
+    std::unique_ptr<aver::editor::SkinDrawTest> skinDraw_;
     bool showUiDemo_ = false;
     std::string matSaveStatus_;   // what the last 'Save to C#' did
     unsigned centralDock_ = 0;    // the dock node an opened asset editor lands in
@@ -5179,7 +5231,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -5260,6 +5312,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--spawn-test") && i+1<argc) spawnTest=argv[++i];
         else if (!std::strcmp(argv[i],"--play-test")) playTest=true;
         else if (!std::strcmp(argv[i],"--skin-test")) skinTest=true;
+        else if (!std::strcmp(argv[i],"--skin-draw-test")) skinDrawTest=true;
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
         else if (!std::strcmp(argv[i],"--bloom") && i+1<argc) bloom=static_cast<f32>(std::atof(argv[++i]));
@@ -5339,6 +5392,7 @@ Application* createApplication(int argc, char** argv) {
     app->setSpawnTest(spawnTest);
     if (playTest) app->setPlayTest();
     if (skinTest) app->setSkinTest();
+    if (skinDrawTest) app->setSkinDrawTest();
     return app;
 }
 

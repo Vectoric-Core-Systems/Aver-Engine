@@ -77,6 +77,15 @@ enum class ResourceState : u8 {
     // hand them to a draw: RENDERING.md 7.3 specifies exactly this transition, and it could not be
     // expressed before.
     VertexBuffer,
+    // A buffer read as GEOMETRY BY EVERY CONSUMER AT ONCE -- the input assembler, a shader doing
+    // manual vertex fetch, and an acceleration-structure build.
+    //
+    // It is a combined state rather than three separate ones because a skinned vertex buffer is
+    // genuinely read all three ways in a single frame, and there is no point in it between them at
+    // which a transition could be inserted. VertexBuffer alone is what a BLAS build rejects: it
+    // wants NON_PIXEL_SHADER_RESOURCE, and the debug layer is what says so. Being a read state it
+    // cannot also be a UAV, so re-skinning mid-frame must pass back through UnorderedAccess.
+    GeometryRead,
     // TERMINAL: set at creation, never a valid barrier argument in either direction.
     AccelerationStructure,
 };

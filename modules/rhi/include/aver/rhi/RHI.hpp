@@ -240,6 +240,25 @@ public:
                                   const u32* indices, u32 indexCount) {
         (void)verts; (void)vertexCount; (void)indices; (void)indexCount; return 0;
     }
+
+    // Creates a mesh whose VERTEX BUFFER IS A COMPUTE TARGET, sharing `source`'s index buffer.
+    //
+    // This is how skinning reaches the rasteriser, and it is deliberately a creation entry point
+    // rather than a modifier on a draw. The alternative -- carrying a substitute stream alongside
+    // the MeshHandle -- would have to be threaded through IRenderFeature::submitDraw, the feature's
+    // own draw record, each of its replay passes and both backend draw verbs, and ONE MISSED SITE
+    // IS A REST-POSE SHADOW BESIDE A POSED CHARACTER. Substituting the handle instead leaves every
+    // one of those untouched, and gives each instance its own acceleration structure for free,
+    // which a shared MeshHandle could never do.
+    //
+    // The returned buffer is where a compute pass writes rhi::MeshVertex elements. It is SEEDED
+    // WITH `source`'S VERTICES, so a mesh drawn before anything has posed it shows the bind pose
+    // rather than uninitialised GPU memory -- which would be plausible-looking garbage, not a crash.
+    //
+    // Zero on failure, and `outVertices` is then untouched.
+    virtual MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) {
+        (void)source; (void)outVertices; return 0;
+    }
     // Per-frame camera (row-major, row-vector viewProj = view*proj). invViewProj reconstructs
     // world-space rays for the procedural sky.
     virtual void setCamera(const f32 viewProj[16], const f32 invViewProj[16], const f32 cameraPos[3]) {
