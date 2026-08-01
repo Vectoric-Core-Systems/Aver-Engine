@@ -172,6 +172,49 @@ int main() {
         w.flush();
     }
 
+    AVER_INFO("a recycled entity slot does not inherit the dead entity's pose");
+    {
+        sys.clear();
+        sys.setResolver(&resolvePath, nullptr);
+
+        // Pose an entity, then destroy it. The World reissues its INDEX with a bumped generation,
+        // so the next entity created very likely occupies the same slot.
+        const scene::Entity dead = w.create("dead");
+        {
+            auto* sm = static_cast<scene::CSkeletalMesh*>(w.addComponent(dead, scene::kComponentSkeletalMesh));
+            auto* a  = static_cast<scene::CAnimator*>(w.addComponent(dead, scene::kComponentAnimator));
+            sm->skeleton = kSkelId;
+            a->clip = kClipId;
+        }
+        sys.tick(w, 0.25f);
+        u32 n = 0;
+        check(sys.skinning(dead, n) != nullptr && n > 0, "the first entity is posed");
+
+        w.destroy(dead);
+        w.flush();
+
+        // A FRESH entity, carrying a skeletal mesh but NO animator, so nothing should ever pose it.
+        const scene::Entity reborn = w.create("reborn");
+        {
+            auto* sm = static_cast<scene::CSkeletalMesh*>(w.addComponent(reborn, scene::kComponentSkeletalMesh));
+            sm->skeleton = kSkelId;
+        }
+        check(scene::entityIndex(reborn) == scene::entityIndex(dead),
+              "the slot really was recycled, so this case tests what it claims to");
+        check(reborn != dead, "but the handle differs, because the generation moved");
+
+        sys.tick(w, 0.25f);
+        n = 0;
+        check(sys.skinning(reborn, n) == nullptr,
+              "an entity with NO animator has NO skinning matrices -- inheriting the dead "
+              "entity's would put a new character in a stranger's pose");
+        check(sys.pose(reborn) == nullptr, "nor a pose");
+        check(sys.skinning(dead, n) == nullptr, "and the dead handle resolves to nothing at all");
+
+        w.destroy(reborn);
+        w.flush();
+    }
+
     std::filesystem::remove_all(g_dir, ec);
     AVER_INFO(g_failures ? "AnimSystemTest: {} FAILURES" : "AnimSystemTest: all checks passed ({})",
               g_failures);

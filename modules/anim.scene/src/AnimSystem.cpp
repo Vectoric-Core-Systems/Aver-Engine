@@ -57,6 +57,14 @@ void AnimSystem::clear() {
 }
 
 void AnimSystem::tick(scene::World& world, f32 dt) {
+    // Retire poses whose entity is gone. Without this the map only ever grows, and a long-running
+    // session pays for every character it has ever spawned -- the generational key stops a recycled
+    // slot INHERITING a pose, but it cannot stop the dead entry sitting there forever.
+    for (auto it = posed_.begin(); it != posed_.end(); ) {
+        if (world.valid(it->first) && !world.destroyPending(it->first)) ++it;
+        else it = posed_.erase(it);
+    }
+
     scene::ComponentPool* animators = world.pool(scene::kComponentAnimator);
     if (!animators) return;
 
@@ -86,7 +94,7 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
             w->dirty = 0;
         }
 
-        Posed& p = posed_[scene::entityIndex(e)];
+        Posed& p = posed_[e];
         restPose(*skel, p.pose);
 
         if (const fmt::OcAnimation* c = clip(a->clip)) {
@@ -118,14 +126,14 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
 
 const Mat4* AnimSystem::skinning(scene::Entity e, u32& outCount) const {
     outCount = 0;
-    auto it = posed_.find(scene::entityIndex(e));
+    auto it = posed_.find(e);
     if (it == posed_.end() || it->second.skin.empty()) return nullptr;
     outCount = static_cast<u32>(it->second.skin.size());
     return it->second.skin.data();
 }
 
 const Pose* AnimSystem::pose(scene::Entity e) const {
-    auto it = posed_.find(scene::entityIndex(e));
+    auto it = posed_.find(e);
     return it == posed_.end() ? nullptr : &it->second.pose;
 }
 

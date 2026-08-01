@@ -63,7 +63,14 @@ private:
     // frame for the life of the session.
     std::unordered_map<u64, std::unique_ptr<fmt::OcSkeleton>>  skeletons_;
     std::unordered_map<u64, std::unique_ptr<fmt::OcAnimation>> clips_;
-    std::unordered_map<u32, Posed> posed_;   // keyed by entity index
+    // KEYED BY THE FULL ENTITY HANDLE -- index AND generation -- and pruned every tick.
+    //
+    // It was keyed by entityIndex() alone and never erased, which meant a destroyed entity's pose
+    // outlived it and the next entity to be handed that index inherited it. A fresh character with
+    // no animator at all came up wearing a stranger's pose, and anything downstream keyed the same
+    // way would have inherited its GPU buffers with it. The generation is in the handle precisely
+    // so a recycled slot is a different key.
+    std::unordered_map<scene::Entity, Posed> posed_;
     AssetPathFn resolve_ = nullptr;
     void* user_ = nullptr;
 };
