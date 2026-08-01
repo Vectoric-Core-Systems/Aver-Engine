@@ -1,4 +1,4 @@
-// The on-device skinning check: one synthetic rig, skinned on both sides, compared number by number.
+// The on-device skinning check: three synthetic rigs, skinned on both sides, compared number by number.
 #include "aver/render/SkinSelfTest.hpp"
 #include "aver/anim/Pose.hpp"
 #include "aver/core/Log.hpp"
@@ -9,13 +9,12 @@ namespace aver::render {
 
 namespace {
 
-// Vertices in the synthetic mesh. Deliberately not a multiple of the group size, so the shader's
+// Vertices per instance. Deliberately not a multiple of the group size, so the shader's
 // out-of-range early-out is exercised rather than assumed.
 constexpr u32 kTestVerts = 501;
-constexpr u32 kTestBones = 5;
 
-// Positions are centimetres and the rig spans a metre, so a tolerance in absolute cm is the honest
-// unit. Anything larger than this is a transposed matrix or a wrong stride, not float noise.
+// Positions are centimetres and each rig spans a metre or two, so a tolerance in absolute cm is the
+// honest unit. Anything larger than this is a transposed matrix or a wrong stride, not float noise.
 constexpr f32 kPosTolerance = 1e-3f;
 constexpr f32 kNrmTolerance = 1e-4f;
 
@@ -41,19 +40,16 @@ Mat4 rotX(f32 a) {
 
 SkinSelfTest::~SkinSelfTest() { shutdown(); }
 
-bool SkinSelfTest::init(rhi::IDevice& dev) {
-    shutdown();
-    dev_ = &dev;
-    res_ = dev.resources();
-    if (!res_ || !pass_.init(dev)) return false;
+// Builds one instance: its rig, its mesh, its CPU answer and its GPU residency. `index` varies the
+// seed and the bone count so no two instances can produce the same numbers -- which is what makes a
+// crossed dispatch show up as a wrong answer rather than a coincidentally right one.
+bool SkinSelfTest::buildCase(u32 index, u32 bones, Case& c) {
+    Lcg rng{0x5EED1234u + index * 0x9E3779B9u};
 
-    // --- the rig. Built as skinning matrices directly rather than posed from an .ocskel: what is
-    // under test is the dispatch, and poseToSkinning has its own arithmetic test. Every matrix here
-    // has translation, rotation and non-uniform scale, because a shader that reads the matrix
-    // transposed still gets a pure rotation right. ---
-    skin_.resize(kTestBones);
-    Lcg rng{0x5EED1234u};
-    for (u32 b = 0; b < kTestBones; ++b) {
+    // Every matrix carries translation, rotation AND non-uniform scale, because a shader that reads
+    // the matrix transposed still gets a pure rotation right.
+    c.skin.resize(bones);
+    for (u32 b = 0; b < bones; ++b) {
         Mat4 m = rotX(rng.next() * 2.0f - 1.0f);
         m.m[0][0] *= 0.8f + rng.next();
         m.m[1][1] *= 0.8f + rng.next();
@@ -61,14 +57,13 @@ bool SkinSelfTest::init(rhi::IDevice& dev) {
         m.m[3][0] = (rng.next() - 0.5f) * 200.0f;
         m.m[3][1] = (rng.next() - 0.5f) * 200.0f;
         m.m[3][2] = (rng.next() - 0.5f) * 200.0f;
-        skin_[b] = m;
+        c.skin[b] = m;
     }
 
-    // --- the mesh. ---
     fmt::OcMeshData mesh;
     mesh.positions.resize(static_cast<usize>(kTestVerts) * 3);
     mesh.normals.resize(static_cast<usize>(kTestVerts) * 3);
-    mesh.uvs.resize(static_cast<usize>(kTestVerts) * 2, 0.0f);
+    mesh.uvs.resize(static_cast<usize>(kTestVerts) * 2);
     mesh.joints.resize(static_cast<usize>(kTestVerts) * 4);
     mesh.weights.resize(static_cast<usize>(kTestVerts) * 4);
     mesh.indices.assign(3, 0);
@@ -85,11 +80,17 @@ bool SkinSelfTest::init(rhi::IDevice& dev) {
         mesh.normals[v * 3 + 1] = ny / len;
         mesh.normals[v * 3 + 2] = nz / len;
 
+        // NON-ZERO AND NON-CONSTANT, per vertex and per instance. The uv is the instrument that
+        // proves C++ and DXC agree about the element stride, and a zero fill or a constant would
+        // let a shifted read pass by accident.
+        mesh.uvs[v * 2 + 0] = static_cast<f32>(v) / static_cast<f32>(kTestVerts) + static_cast<f32>(index);
+        mesh.uvs[v * 2 + 1] = std::fmod(static_cast<f32>(v) * 0.6180339887f, 1.0f) + 1.0f;
+
         f32 w[4];
         f32 sum = 0.0f;
         for (u32 i = 0; i < 4; ++i) { w[i] = rng.next(); sum += w[i]; }
         for (u32 i = 0; i < 4; ++i) {
-            mesh.joints[v * 4 + i] = static_cast<u16>((v + i) % kTestBones);
+            mesh.joints[v * 4 + i] = static_cast<u16>((v + i) % bones);
             mesh.weights[v * 4 + i] = w[i] / sum;
         }
 
@@ -97,38 +98,52 @@ bool SkinSelfTest::init(rhi::IDevice& dev) {
         // an influence with zero weight, an index past the bound rig, and a vertex with no
         // surviving influence at all. Both sides must fall back the same way.
         if (v % 10 == 3) mesh.weights[v * 4 + 2] = 0.0f;
-        if (v % 10 == 7) mesh.joints[v * 4 + 1] = static_cast<u16>(kTestBones + 4);
+        if (v % 10 == 7) mesh.joints[v * 4 + 1] = static_cast<u16>(bones + 4);
         if (v % 97 == 11) for (u32 i = 0; i < 4; ++i) mesh.weights[v * 4 + i] = 0.0f;
     }
 
-    anim::skinVertices(skin_, mesh.positions, mesh.normals, mesh.joints, mesh.weights,
-                       cpuPositions_, cpuNormals_);
-    if (cpuPositions_.size() != static_cast<usize>(kTestVerts) * 3) {
+    anim::skinVertices(c.skin, mesh.positions, mesh.normals, mesh.joints, mesh.weights,
+                       c.cpuPositions, c.cpuNormals);
+    if (c.cpuPositions.size() != static_cast<usize>(kTestVerts) * 3) {
         AVER_ERROR("[Skin] self-test: the CPU reference rejected its own inputs");
-        shutdown();
         return false;
     }
+    c.uvs = mesh.uvs;
+    c.vertexCount = kTestVerts;
 
-    if (!pass_.createMesh(mesh, mesh_)) { shutdown(); return false; }
+    if (!pass_.createMesh(mesh, bones, c.gpu)) return false;
 
     rhi::BufferDesc rb;
     rb.bytes = static_cast<u64>(kTestVerts) * kSkinVertexStride;
     rb.kind  = rhi::BufferKind::Readback;
     rb.debugName = "skin self-test readback";
-    readback_ = res_->createBuffer(rb);
-    if (!readback_) { shutdown(); return false; }
+    c.readback = res_->createBuffer(rb);
+    return c.readback != 0;
+}
 
+bool SkinSelfTest::init(rhi::IDevice& dev) {
+    shutdown();
+    dev_ = &dev;
+    res_ = dev.resources();
+    if (!res_ || !pass_.init(dev)) return false;
+
+    // Different bone counts as well as different seeds: an instance that read another's bone buffer
+    // would then also be reading the wrong NUMBER of bones, which the out-of-range fallback turns
+    // into a visibly different answer.
+    const u32 boneCounts[kCases] = {5, 9, 7};
+    for (u32 i = 0; i < kCases; ++i) {
+        if (!buildCase(i, boneCounts[i], cases_[i])) { shutdown(); return false; }
+    }
     return true;
 }
 
 void SkinSelfTest::shutdown() {
-    if (res_ && readback_) res_->destroyBuffer(readback_);
-    readback_ = 0;
-    pass_.destroyMesh(mesh_);
+    for (Case& c : cases_) {
+        if (res_ && c.readback) res_->destroyBuffer(c.readback);
+        pass_.destroyMesh(c.gpu);
+        c = {};
+    }
     pass_.shutdown();
-    skin_.clear();
-    cpuPositions_.clear();
-    cpuNormals_.clear();
     stage_ = 0;
     dev_ = nullptr;
     res_ = nullptr;
@@ -136,22 +151,25 @@ void SkinSelfTest::shutdown() {
 
 void SkinSelfTest::prePass(rhi::IRenderContext& ctx) {
     if (stage_ == 0) {
-        if (!mesh_.valid() || !readback_) { stage_ = 2; return; }
+        // ALL THREE IN ONE FRAME, interleaved as a real scene would submit them. Dispatching them
+        // across separate frames would restore exactly the blind spot this test exists to remove.
+        for (Case& c : cases_) {
+            if (!c.gpu.valid() || !c.readback) { stage_ = 2; return; }
+            pass_.dispatch(ctx, c.gpu, c.skin.data(), static_cast<u32>(c.skin.size()));
 
-        pass_.dispatch(ctx, mesh_, skin_.data(), static_cast<u32>(skin_.size()));
-
-        // dispatch left it in VertexBuffer, which is where a raster consumer wants it. The copy
-        // needs CopySource, and the frame must END in Common because a buffer's state does not
-        // survive the command list.
-        skinTransition(ctx, mesh_, rhi::ResourceState::CopySource);
-        ctx.copyBuffer(readback_, mesh_.out, static_cast<u64>(mesh_.vertexCount) * kSkinVertexStride);
-        skinTransition(ctx, mesh_, rhi::ResourceState::Common);
-
+            // dispatch left it in VertexBuffer, which is where a raster consumer wants it. The copy
+            // needs CopySource, and the frame must END in Common because a buffer's state does not
+            // survive the command list.
+            skinTransition(ctx, c.gpu, rhi::ResourceState::CopySource);
+            ctx.copyBuffer(c.readback, c.gpu.out,
+                           static_cast<u64>(c.gpu.vertexCount) * kSkinVertexStride);
+            skinTransition(ctx, c.gpu, rhi::ResourceState::Common);
+        }
         stage_ = 1;
         return;
     }
     if (stage_ == 1) {
-        // The copy was recorded LAST frame, and that frame has been submitted. waitIdle is what
+        // The copies were recorded LAST frame, and that frame has been submitted. waitIdle is what
         // makes the readback mean anything: readBuffer synchronises nothing by contract.
         res_->waitIdle();
         compare();
@@ -160,33 +178,59 @@ void SkinSelfTest::prePass(rhi::IRenderContext& ctx) {
 }
 
 void SkinSelfTest::compare() {
-    std::vector<f32> gpu(static_cast<usize>(mesh_.vertexCount) * 6);
-    if (!res_->readBuffer(readback_, gpu.data(), gpu.size() * sizeof(f32))) {
-        AVER_ERROR("[Skin] self-test: readback failed");
-        return;
-    }
+    const u32 stride = kSkinVertexStride / sizeof(f32);   // 8 floats: pos3, nrm3, uv2
+    u32 worstVert = 0, worstCase = 0;
+    bool readOk = true;
 
-    u32 worstVert = 0;
-    for (u32 v = 0; v < mesh_.vertexCount; ++v) {
-        for (u32 c = 0; c < 3; ++c) {
-            const f32 dp = std::fabs(gpu[v * 6 + c]     - cpuPositions_[v * 3 + c]);
-            const f32 dn = std::fabs(gpu[v * 6 + 3 + c] - cpuNormals_[v * 3 + c]);
-            if (dp > worstPos_) { worstPos_ = dp; worstVert = v; }
-            if (dn > worstNrm_) worstNrm_ = dn;
+    for (u32 ci = 0; ci < kCases; ++ci) {
+        Case& c = cases_[ci];
+        std::vector<f32> gpu(static_cast<usize>(c.vertexCount) * stride);
+        if (!res_->readBuffer(c.readback, gpu.data(), gpu.size() * sizeof(f32))) {
+            AVER_ERROR("[Skin] self-test: readback failed for instance {}", ci);
+            readOk = false;
+            continue;
+        }
+
+        for (u32 v = 0; v < c.vertexCount; ++v) {
+            const f32* g = &gpu[static_cast<usize>(v) * stride];
+            for (u32 k = 0; k < 3; ++k) {
+                const f32 dp = std::fabs(g[k]     - c.cpuPositions[v * 3 + k]);
+                const f32 dn = std::fabs(g[3 + k] - c.cpuNormals[v * 3 + k]);
+                if (dp > worstPos_) { worstPos_ = dp; worstVert = v; worstCase = ci; }
+                if (dn > worstNrm_) worstNrm_ = dn;
+            }
+            // BIT-EXACT, not tolerant. The shader copies this field and never computes with it, so
+            // any difference at all means the two sides disagree about where the field IS.
+            if (g[6] != c.uvs[v * 2 + 0] || g[7] != c.uvs[v * 2 + 1]) ++uvMismatches_;
         }
     }
 
-    passed_ = worstPos_ <= kPosTolerance && worstNrm_ <= kNrmTolerance;
+    passed_ = readOk && uvMismatches_ == 0 && worstPos_ <= kPosTolerance && worstNrm_ <= kNrmTolerance;
     if (passed_) {
-        AVER_INFO("[Skin] self-test PASS: {} vertices, {} bones, worst position {:.6f} cm, worst normal {:.6f}",
-                  mesh_.vertexCount, skin_.size(), worstPos_, worstNrm_);
-    } else {
-        AVER_ERROR("[Skin] self-test FAIL: worst position {:.6f} cm at vertex {} (tolerance {}), worst normal {:.6f} (tolerance {})",
-                   worstPos_, worstVert, kPosTolerance, worstNrm_, kNrmTolerance);
-        AVER_ERROR("[Skin]   vertex {}: gpu ({:.4f}, {:.4f}, {:.4f})  cpu ({:.4f}, {:.4f}, {:.4f})",
-                   worstVert, gpu[worstVert * 6 + 0], gpu[worstVert * 6 + 1], gpu[worstVert * 6 + 2],
-                   cpuPositions_[worstVert * 3 + 0], cpuPositions_[worstVert * 3 + 1],
-                   cpuPositions_[worstVert * 3 + 2]);
+        AVER_INFO("[Skin] self-test PASS: {} instances x {} vertices, worst position {:.6f} cm, "
+                  "worst normal {:.6f}, uv carried through bit-exact",
+                  kCases, kTestVerts, worstPos_, worstNrm_);
+        return;
+    }
+
+    if (uvMismatches_)
+        // Two causes reach here and the count tells them apart: a stride disagreement between
+        // C++ and DXC corrupts uvs SPREAD ACROSS every instance, while a whole instance's worth
+        // means that instance's output buffer was never written -- two dispatches crossed.
+        AVER_ERROR("[Skin] self-test FAIL: {} of {} uvs came back changed. The shader only copies "
+                   "this field, so either C++ and DXC disagree about the {}-byte element stride, or "
+                   "an instance's output was never written; a count that is a clean multiple of {} "
+                   "means the latter",
+                   uvMismatches_, kCases * kTestVerts, kSkinVertexStride, kTestVerts);
+    if (worstPos_ > kPosTolerance || worstNrm_ > kNrmTolerance) {
+        const Case& c = cases_[worstCase];
+        AVER_ERROR("[Skin] self-test FAIL: worst position {:.6f} cm at instance {} vertex {} "
+                   "(tolerance {}), worst normal {:.6f} (tolerance {})",
+                   worstPos_, worstCase, worstVert, kPosTolerance, worstNrm_, kNrmTolerance);
+        AVER_ERROR("[Skin]   cpu ({:.4f}, {:.4f}, {:.4f}) -- a WRONG INSTANCE's answer here means "
+                   "two dispatches shared a bone buffer or a binding set",
+                   c.cpuPositions[worstVert * 3 + 0], c.cpuPositions[worstVert * 3 + 1],
+                   c.cpuPositions[worstVert * 3 + 2]);
     }
 }
 

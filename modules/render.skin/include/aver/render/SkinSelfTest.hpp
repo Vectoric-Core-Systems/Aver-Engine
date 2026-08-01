@@ -10,6 +10,13 @@
 // It is a render feature so that it gets an open command list from the frame it is registered in,
 // and it draws nothing: no target is bound, no scene state is read, no pipeline the scene uses is
 // touched. Registering it changes the frame's pixels not at all.
+//
+// THREE INSTANCES, NOT ONE, AND EACH WITH ITS OWN RIG. The first version dispatched a single mesh
+// per frame, and that is exactly why it missed a real bug: the bone ring lived on the PASS and
+// advanced per dispatch, so instances one and three shared a slot and the third overwrote the
+// descriptors the first's already-recorded dispatch would read. One instance can never see it.
+// Three is the smallest number that can, and each carries a DIFFERENT rig so a crossed instance
+// produces a wrong answer rather than a coincidentally identical one.
 #include "aver/render/SkinningPass.hpp"
 
 namespace aver::render {
@@ -39,20 +46,33 @@ public:
     f32  worstNormal() const { return worstNrm_; }
 
 private:
+    // One skinned instance under test: its GPU residency, its own rig, and the CPU answer it is
+    // measured against.
+    struct Case {
+        SkinnedMeshGpu    gpu{};
+        rhi::BufferHandle readback = 0;
+        std::vector<Mat4> skin;                 // this instance's rig, as poseToSkinning hands it over
+        std::vector<f32>  cpuPositions, cpuNormals;
+        std::vector<f32>  uvs;                  // what the shader must carry through unchanged
+        u32               vertexCount = 0;
+    };
+
+    bool buildCase(u32 index, u32 bones, Case& c);
     void compare();
 
+    // Three, for the reason in this class's comment. Raising it is free; lowering it below three
+    // removes the only thing that can see a cross-instance collision.
+    static constexpr u32 kCases = 3;
+
     SkinningPass       pass_;
-    SkinnedMeshGpu     mesh_{};
+    Case               cases_[kCases];
     rhi::IDevice*      dev_ = nullptr;
     rhi::IResourceFactory* res_ = nullptr;
-    rhi::BufferHandle  readback_ = 0;
-
-    std::vector<Mat4> skin_;          // the rig, as poseToSkinning would hand it over
-    std::vector<f32>  cpuPositions_, cpuNormals_;
 
     u32  stage_ = 0;                  // 0 record, 1 compare, 2 done
     bool passed_ = false;
     f32  worstPos_ = 0.0f, worstNrm_ = 0.0f;
+    u32  uvMismatches_ = 0;           // uv is carried through, so anything but zero is a stride bug
 };
 
 } // namespace aver::render
