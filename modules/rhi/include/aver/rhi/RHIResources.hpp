@@ -73,6 +73,10 @@ enum class ResourceState : u8 {
     DepthWrite,
     CopySource,
     CopyDest,
+    // A buffer being read by the input assembler. Needed so a compute pass that WRITES vertices can
+    // hand them to a draw: RENDERING.md 7.3 specifies exactly this transition, and it could not be
+    // expressed before.
+    VertexBuffer,
     // TERMINAL: set at creation, never a valid barrier argument in either direction.
     AccelerationStructure,
 };
@@ -106,6 +110,7 @@ enum class BufferKind : u8 {
     Default,         // GPU-local
     Upload,          // CPU-writable, GPU-readable
     AccelStructure,  // GPU-local, created in the terminal AccelerationStructure state
+    Readback,        // GPU-writable by copy, CPU-readable; how a compute result is checked
 };
 
 // How to create a buffer. A buffer is always Common at the top of a frame.
@@ -272,6 +277,9 @@ enum class SlotKind : u8 {
     Texture2D,
     Texture3D,
     AccelerationStructure,   // SRV slots only; bound with a null resource and an address
+    // A StructuredBuffer<T> / RWStructuredBuffer<T>. The element stride is given at BIND time
+    // rather than declared here, because one slot serves whatever the pass puts in it.
+    StructuredBuffer,
 };
 
 // Slots per range. Enforced: counts above this cannot declare a kind.
@@ -357,9 +365,19 @@ public:
     virtual void setUav(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip) = 0;
     // Puts a TLAS in an SRV slot.
     virtual void setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle tlas) = 0;
+    // Puts a buffer in a SlotKind::StructuredBuffer slot. `stride` is the element size in bytes,
+    // `count` the number of elements, `firstElement` the offset into it.
+    virtual void setSrvBuffer(BindingSetHandle set, u32 slot, BufferHandle b,
+                              u32 stride, u32 count, u32 firstElement = 0) = 0;
+    virtual void setUavBuffer(BindingSetHandle set, u32 slot, BufferHandle b,
+                              u32 stride, u32 count, u32 firstElement = 0) = 0;
 
     // Writes bytes into a BufferKind::Upload buffer; IMMEDIATE and unsynchronised.
     virtual bool writeBuffer(BufferHandle h, const void* src, u64 bytes, u64 offset = 0) = 0;
+
+    // Reads bytes out of a BufferKind::Readback buffer. Does NO synchronisation: the caller is
+    // responsible for the GPU having finished writing what it is about to read.
+    virtual bool readBuffer(BufferHandle h, void* dst, u64 bytes, u64 offset = 0) = 0;
 
     // Resolved description, with `mips` filled in when the desc asked for a full chain.
     virtual bool textureInfo(TextureHandle h, TextureDesc& out) const = 0;
@@ -404,6 +422,8 @@ public:
     virtual void dispatchMeshFor(MeshHandle mesh) = 0;
     // Dispatches a compute pipeline.
     virtual void dispatch(u32 gx, u32 gy, u32 gz) = 0;
+    // Copies whole bytes between buffers. Both must already be in CopySource / CopyDest.
+    virtual void copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes) = 0;
 
     // ---- geometry the CALLER owns ----
     // The counterpart to GraphicsPipelineDesc::vertexLayout, for vertices a feature builds itself.

@@ -513,6 +513,7 @@ D3D12_RESOURCE_STATES toResourceStates(ResourceState s) {
         case ResourceState::DepthWrite:             return D3D12_RESOURCE_STATE_DEPTH_WRITE;
         case ResourceState::CopySource:             return D3D12_RESOURCE_STATE_COPY_SOURCE;
         case ResourceState::CopyDest:               return D3D12_RESOURCE_STATE_COPY_DEST;
+        case ResourceState::VertexBuffer:           return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
         case ResourceState::AccelerationStructure:  return D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
         case ResourceState::Common:                 break;
     }
@@ -1046,8 +1047,15 @@ public:
     void setSrv(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip) override;
     void setUav(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip) override;
     void setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle tlas) override;
+    void setSrvBuffer(BindingSetHandle set, u32 slot, BufferHandle b, u32 stride, u32 count, u32 firstElement) override;
+    // The underlying resource, for the context's copy and barrier paths. Null on a bad handle.
+    ID3D12Resource* bufferResource(BufferHandle h) {
+        return (h == 0 || h > buffers_.size()) ? nullptr : buffers_[h - 1].res.Get();
+    }
+    void setUavBuffer(BindingSetHandle set, u32 slot, BufferHandle b, u32 stride, u32 count, u32 firstElement) override;
 
     bool writeBuffer(BufferHandle h, const void* src, u64 bytes, u64 offset) override;
+    bool readBuffer(BufferHandle h, void* dst, u64 bytes, u64 offset) override;
     bool textureInfo(TextureHandle h, TextureDesc& out) const override;
     void waitIdle() override;
 
@@ -1124,6 +1132,7 @@ public:
     void drawMesh(MeshHandle mesh) override;
     void dispatchMeshFor(MeshHandle mesh) override;
     void dispatch(u32 gx, u32 gy, u32 gz) override;
+    void copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes) override;
     void drawFullscreen() override;
     void setVertexBuffer(BufferHandle b, u32 stride) override;
     void setIndexBuffer(BufferHandle b, Format indexFormat) override;
@@ -3037,6 +3046,12 @@ void D3D12ResourceFactory::nullFill(const RhiBindingSet& s) {
                 sv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
                 sv.RaytracingAccelerationStructure.Location = 0;
             }
+        } else if (kind == SlotKind::StructuredBuffer) {
+            // A null structured-buffer view needs a stride, or Tier 1 validation rejects it.
+            sv.Format = DXGI_FORMAT_UNKNOWN;
+            sv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            sv.Buffer.NumElements = 0;
+            sv.Buffer.StructureByteStride = 4;
         } else if (kind == SlotKind::Texture3D) {
             sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
             sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
@@ -3056,7 +3071,12 @@ void D3D12ResourceFactory::nullFill(const RhiBindingSet& s) {
             kind = SlotKind::Texture2D;
         }
         D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
-        if (kind == SlotKind::Texture3D) {
+        if (kind == SlotKind::StructuredBuffer) {
+            uv.Format = DXGI_FORMAT_UNKNOWN;
+            uv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            uv.Buffer.NumElements = 0;
+            uv.Buffer.StructureByteStride = 4;
+        } else if (kind == SlotKind::Texture3D) {
             uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
             uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
             uv.Texture3D.WSize = 1;
@@ -3416,16 +3436,20 @@ BufferHandle D3D12ResourceFactory::createBuffer(const BufferDesc& d) {
         rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
     const bool upload = d.kind == BufferKind::Upload;
+    const bool readback = d.kind == BufferKind::Readback;
+    // A readback buffer is created in COPY_DEST and stays there: it is only ever a copy target.
     const D3D12_RESOURCE_STATES state =
-        upload ? D3D12_RESOURCE_STATE_GENERIC_READ
+        upload   ? D3D12_RESOURCE_STATE_GENERIC_READ
+      : readback ? D3D12_RESOURCE_STATE_COPY_DEST
                : (d.kind == BufferKind::AccelStructure ? D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE
                                                        : D3D12_RESOURCE_STATE_COMMON);
     RhiBuffer b;
-    auto hp = heapProps(upload ? D3D12_HEAP_TYPE_UPLOAD : D3D12_HEAP_TYPE_DEFAULT);
+    auto hp = heapProps(upload ? D3D12_HEAP_TYPE_UPLOAD
+                      : readback ? D3D12_HEAP_TYPE_READBACK : D3D12_HEAP_TYPE_DEFAULT);
     if (!hrOk(dev_->device_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr,
               IID_PPV_ARGS(&b.res)), "rhi buffer")) return 0;
     setDebugName(b.res.Get(), d.debugName);
-    if (upload) {
+    if (upload || readback) {
         D3D12_RANGE none{0, 0};
         b.res->Map(0, &none, reinterpret_cast<void**>(&b.mapped));
     }
@@ -3879,6 +3903,65 @@ void D3D12ResourceFactory::setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle
     dev_->device_->CreateShaderResourceView(nullptr, &sv, cpuSlot(s->heapBase + slot));
 }
 
+// Puts a structured-buffer SRV in a slot.
+void D3D12ResourceFactory::setSrvBuffer(BindingSetHandle set, u32 slot, BufferHandle bh,
+                                        u32 stride, u32 count, u32 firstElement) {
+    RhiBindingSet* s = bindingSet(set);
+    if (!s || bh == 0 || bh > buffers_.size()) { AVER_ERROR("[RHI.D3D12] setSrvBuffer with an invalid handle"); return; }
+    if (slot >= s->srvCount) { AVER_ERROR("[RHI.D3D12] setSrvBuffer slot {} past the {} declared", slot, s->srvCount); return; }
+    if (s->srvKinds[slot] != SlotKind::StructuredBuffer) {
+        AVER_ERROR("[RHI.D3D12] setSrvBuffer on slot {}, which was declared as a texture", slot);
+        return;
+    }
+    if (stride == 0) { AVER_ERROR("[RHI.D3D12] setSrvBuffer with a zero stride"); return; }
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = DXGI_FORMAT_UNKNOWN;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Buffer.FirstElement = firstElement;
+    sv.Buffer.NumElements = count;
+    sv.Buffer.StructureByteStride = stride;
+    dev_->device_->CreateShaderResourceView(buffers_[bh - 1].res.Get(), &sv, cpuSlot(s->heapBase + slot));
+}
+
+// Puts a structured-buffer UAV in a slot.
+void D3D12ResourceFactory::setUavBuffer(BindingSetHandle set, u32 slot, BufferHandle bh,
+                                        u32 stride, u32 count, u32 firstElement) {
+    RhiBindingSet* s = bindingSet(set);
+    if (!s || bh == 0 || bh > buffers_.size()) { AVER_ERROR("[RHI.D3D12] setUavBuffer with an invalid handle"); return; }
+    if (slot >= s->uavCount) { AVER_ERROR("[RHI.D3D12] setUavBuffer slot {} past the {} declared", slot, s->uavCount); return; }
+    if (s->uavKinds[slot] != SlotKind::StructuredBuffer) {
+        AVER_ERROR("[RHI.D3D12] setUavBuffer on slot {}, which was declared as a texture", slot);
+        return;
+    }
+    if (stride == 0) { AVER_ERROR("[RHI.D3D12] setUavBuffer with a zero stride"); return; }
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
+    uv.Format = DXGI_FORMAT_UNKNOWN;
+    uv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    uv.Buffer.FirstElement = firstElement;
+    uv.Buffer.NumElements = count;
+    uv.Buffer.StructureByteStride = stride;
+    dev_->device_->CreateUnorderedAccessView(buffers_[bh - 1].res.Get(), nullptr, &uv,
+                                             cpuSlot(s->heapBase + s->srvCount + slot));
+}
+
+// Copies `bytes` out of a readback buffer. Does no synchronisation; see the interface.
+bool D3D12ResourceFactory::readBuffer(BufferHandle h, void* dst, u64 bytes, u64 offset) {
+    if (h == 0 || h > buffers_.size()) { AVER_ERROR("[RHI.D3D12] readBuffer with an invalid handle"); return false; }
+    RhiBuffer& b = buffers_[h - 1];
+    if (b.desc.kind != BufferKind::Readback || !b.mapped) {
+        AVER_ERROR("[RHI.D3D12] readBuffer on a buffer that is not BufferKind::Readback");
+        return false;
+    }
+    if (!dst || bytes == 0) return true;
+    if (offset + bytes > b.desc.bytes) {
+        AVER_ERROR("[RHI.D3D12] readBuffer of {} bytes at {} overruns a {}-byte buffer", bytes, offset, b.desc.bytes);
+        return false;
+    }
+    std::memcpy(dst, b.mapped + offset, static_cast<usize>(bytes));
+    return true;
+}
+
 // Copies `bytes` into an upload buffer at `offset`. False for a non-upload buffer or an overrun.
 bool D3D12ResourceFactory::writeBuffer(BufferHandle h, const void* src, u64 bytes, u64 offset) {
     if (h == 0 || h > buffers_.size()) { AVER_ERROR("[RHI.D3D12] writeBuffer with an invalid handle"); return false; }
@@ -4003,6 +4086,46 @@ void D3D12ResourceFactory::selfTest() {
               heldBack ? "ok" : "FAILED");
 
     destroyBindingSet(early);
+
+    // ---- buffer views, which is what a compute skinning pass needs and what did not exist ----
+    //
+    // The DESCRIPTOR half is what this checks: a Tier 1 null descriptor of the wrong dimension is
+    // undefined, and a structured-buffer view with no stride is rejected outright -- both of which
+    // the debug layer catches here rather than in a shader that silently reads zeros. The dispatch
+    // half cannot be checked from here: this runs at init, and there is no open command list.
+    BufferDesc sd2{};
+    sd2.bytes = 4096;
+    sd2.kind = BufferKind::Default;
+    sd2.allowUnorderedAccess = true;
+    sd2.debugName = "AverRhiSelfTestStructured";
+    const BufferHandle sbuf = createBuffer(sd2);
+
+    BufferDesc rb{};
+    rb.bytes = 4096;
+    rb.kind = BufferKind::Readback;
+    rb.debugName = "AverRhiSelfTestReadback";
+    const BufferHandle rbuf = createBuffer(rb);
+
+    BindingSetDesc bufSet{};
+    bufSet.srvCount = 1;
+    bufSet.uavCount = 1;
+    bufSet.srvKinds[0] = SlotKind::StructuredBuffer;
+    bufSet.uavKinds[0] = SlotKind::StructuredBuffer;
+    const BindingSetHandle bset = createBindingSet(bufSet);   // null-filled on creation
+    if (bset && sbuf) {
+        setSrvBuffer(bset, 0, sbuf, 16, 256, 0);
+        setUavBuffer(bset, 0, sbuf, 16, 256, 0);
+    }
+    // A readback buffer must be readable, and an unwritten one reads as whatever the heap held --
+    // so this checks the CALL succeeds, not the contents.
+    u8 probe[16] = {};
+    const bool readOk = rbuf && readBuffer(rbuf, probe, sizeof probe, 0);
+    AVER_INFO("[RHI.D3D12] factory self-test: buffer views {} (structured SRV+UAV, readback {})",
+              (sbuf && rbuf && bset) ? "ok" : "FAILED", readOk ? "ok" : "FAILED");
+
+    destroyBindingSet(bset);
+    destroyBuffer(rbuf);
+    destroyBuffer(sbuf);
     destroyPipeline(pipe);
     destroyShader(cs);
     destroyBuffer(buf);
@@ -4243,6 +4366,16 @@ void D3D12RenderContext::dispatch(u32 gx, u32 gy, u32 gz) {
     if (!pipe_ || !pipe_->compute) { AVER_ERROR("[RHI.D3D12] dispatch without a compute pipeline"); return; }
     if (dev_->cmdList_) dev_->cmdList_->Dispatch(gx, gy, gz);
 }
+
+// Copies whole bytes between two buffers. Both must already be in the right state.
+void D3D12RenderContext::copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes) {
+    if (!dev_->cmdList_ || !res_) return;
+    ID3D12Resource* d = res_->bufferResource(dst);
+    ID3D12Resource* s = res_->bufferResource(src);
+    if (!d || !s) { AVER_ERROR("[RHI.D3D12] copyBuffer with an invalid handle"); return; }
+    dev_->cmdList_->CopyBufferRegion(d, 0, s, 0, bytes);
+}
+
 
 // Draws a fullscreen triangle; the vertex shader builds it from SV_VertexID.
 void D3D12RenderContext::drawFullscreen() {

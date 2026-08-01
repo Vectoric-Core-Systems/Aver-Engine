@@ -49,7 +49,10 @@ struct MockFactory final : public rhi::IResourceFactory {
     void setSrv(rhi::BindingSetHandle, u32, rhi::TextureHandle, u32) override {}
     void setUav(rhi::BindingSetHandle, u32, rhi::TextureHandle, u32) override {}
     void setSrvTlas(rhi::BindingSetHandle, u32, rhi::TlasHandle) override {}
+    void setSrvBuffer(rhi::BindingSetHandle, u32, rhi::BufferHandle, u32, u32, u32) override {}
+    void setUavBuffer(rhi::BindingSetHandle, u32, rhi::BufferHandle, u32, u32, u32) override {}
     bool writeBuffer(rhi::BufferHandle, const void*, u64, u64) override { return true; }
+    bool readBuffer(rhi::BufferHandle, void*, u64, u64) override { return true; }
     bool textureInfo(rhi::TextureHandle, rhi::TextureDesc&) const override { return false; }
     void waitIdle() override { ++waited; }
 };
@@ -90,6 +93,7 @@ struct MockContext final : public rhi::IRenderContext {
     void drawMesh(rhi::MeshHandle m) override { calls.push_back({Call::Kind::DrawMesh, m}); }
     void dispatchMeshFor(rhi::MeshHandle) override {}
     void dispatch(u32, u32, u32) override {}
+    void copyBuffer(rhi::BufferHandle, rhi::BufferHandle, u64) override {}
     void drawFullscreen() override {}
     void setVertexBuffer(rhi::BufferHandle, u32) override {}
     void setIndexBuffer(rhi::BufferHandle, rhi::Format) override {}

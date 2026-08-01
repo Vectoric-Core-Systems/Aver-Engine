@@ -75,6 +75,9 @@ struct MockFactory final : public rhi::IResourceFactory {
     }
     void setUav(rhi::BindingSetHandle, u32, rhi::TextureHandle, u32) override {}
     void setSrvTlas(rhi::BindingSetHandle, u32, rhi::TlasHandle) override {}
+    void setSrvBuffer(rhi::BindingSetHandle, u32, rhi::BufferHandle, u32, u32, u32) override {}
+    void setUavBuffer(rhi::BindingSetHandle, u32, rhi::BufferHandle, u32, u32, u32) override {}
+    bool readBuffer(rhi::BufferHandle, void*, u64, u64) override { return true; }
 
     bool writeBuffer(rhi::BufferHandle h, const void* src, u64 bytes, u64 offset) override {
         if (h == 0 || h > buffers.size()) return false;
@@ -111,6 +114,7 @@ struct MockContext final : public rhi::IRenderContext {
     void drawMesh(rhi::MeshHandle) override {}
     void dispatchMeshFor(rhi::MeshHandle) override {}
     void dispatch(u32, u32, u32) override {}
+    void copyBuffer(rhi::BufferHandle, rhi::BufferHandle, u64) override {}
     void drawFullscreen() override {}
     void setVertexBuffer(rhi::BufferHandle b, u32 stride) override { calls.push_back({Call::Kind::VertexBuffer, b, stride}); }
     void setIndexBuffer(rhi::BufferHandle b, rhi::Format f) override {
