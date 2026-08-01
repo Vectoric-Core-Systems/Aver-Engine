@@ -663,14 +663,32 @@ public:
                 // never an unrelated mesh that happens to sit behind it.
                 objects_.clear();
                 sel_ = -1;
+                // The ground first, so it is behind the box in submission order as well as in
+                // depth. Pale and rough, because the assertion is about how much light reaches it.
+                MeshObj g;
+                g.name = "SkinDrawTest.Ground";
+                g.mesh = skinDraw_->ground();
+                g.color[0] = 0.75f; g.color[1] = 0.75f; g.color[2] = 0.72f;
+                g.roughness = 0.9f;
+                g.aabbMin = Vec3{-1700, -1700, -300};
+                g.aabbMax = Vec3{ 1700,  1700, -160};
+                objects_.push_back(g);
+
                 MeshObj o;
                 o.name = "SkinDrawTest";
                 o.mesh = skinDraw_->mesh();
-                o.color[0] = 0.9f; o.color[1] = 0.15f; o.color[2] = 0.9f;   // magenta: unlike the sky in every channel
+                o.color[0] = 0.9f; o.color[1] = 0.15f; o.color[2] = 0.9f;   // magenta: unlike ground and sky in every channel
                 o.roughness = 0.6f;
                 o.aabbMin = Vec3{-260, -260, -260};
                 o.aabbMax = Vec3{ 260,  260,  260};
                 objects_.push_back(o);
+
+                // The ground probe is only an acceleration-structure test when ray tracing is what
+                // draws the shadow. Told rather than guessed, so the report can say which of the
+                // two questions it actually answered.
+                // The structure half needs a device that can ray-trace. Whether it is ON is the
+                // test's own schedule to drive, not a launch flag: the experiment IS the toggle.
+                skinDraw_->setRayTracingAvailable(e.device()->caps().rayTracingTier >= 11);
             } else {
                 AVER_ERROR("[Skin] draw test unavailable on this device");
                 skinDraw_.reset();
@@ -1272,14 +1290,26 @@ public:
         captureCheck(e);
     }
 
-    // Drives --skin-draw-test, giving it the probe pixel expressed against the LIVE viewport rect.
-    // The centre is used because the editor's default camera looks at the origin, which is where the
-    // box sits -- and because a relation between two frames does not need the pixel to be special.
+    // Drives --skin-draw-test, handing it the LIVE viewport rect so its probes can be expressed as
+    // fractions of it. Fractions rather than pixels because the rect depends on the DPI and on which
+    // panels are open, and a probe that lands on editor chrome reads chrome and reports it as
+    // shading -- a trap this repo has already been caught by once.
     void skinDrawCheck(Engine& e) {
         if (!skinDraw_ || skinDraw_->finished()) return;
-        const u32 px = static_cast<u32>(vpX_ + vpW_ * 0.5f);
-        const u32 py = static_cast<u32>(vpY_ + vpH_ * 0.5f);
-        skinDraw_->tick(*e.device(), px, py);
+#if AVER_MODULE_VOXI
+        // The test's second experiment holds the pose still and toggles ray tracing instead, because
+        // the sun cascade is rasterised from the same posed vertices and so moves with the pose
+        // whether or not the acceleration structure was rebuilt -- measured, not assumed.
+        const bool want = skinDraw_->wantRayTracing();
+        voxi::Settings s = voxi::Renderer::get().settings();
+        const auto q = want ? voxi::Quality::High : voxi::Quality::Off;
+        if (s.rayTracing != q) {
+            s.rayTracing = q;
+            voxi::Renderer::get().setSettings(s);
+            voxiRenderer_.setSettings(s);
+        }
+#endif
+        skinDraw_->tick(*e.device(), vpX_, vpY_, vpW_, vpH_);
     }
 
     // Hands the ABI's retained UI draw list to the game UI render feature, once per frame.

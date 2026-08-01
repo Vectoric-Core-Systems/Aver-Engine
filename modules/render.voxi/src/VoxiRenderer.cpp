@@ -304,6 +304,19 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
             if (nb) ctx.buildBlas(nb);
             // A zero is recorded too, so a mesh that cannot produce a BLAS is not retried each frame.
             it = blas_.emplace(d.mesh, nb).first;
+        } else if (it->second && dev_->meshVertexBuffer(d.mesh)) {
+            // A mesh whose vertices are written by compute invalidates its own structure every
+            // frame. Memoising it -- which is exactly right for static geometry -- gives a skinned
+            // character a ray-traced shadow with the silhouette it had when the structure was first
+            // built: the character moves and the shadow does not, and nothing in the raster image
+            // shows it. The skinning dispatch has already left the buffer in GeometryRead by now,
+            // because a skinning feature is registered BEFORE this one.
+            ctx.buildBlas(it->second);
+            if (!dynamicBlasLogged_) {
+                AVER_INFO("[Voxi] mesh {} has compute-written vertices; its bottom-level structure "
+                          "is rebuilt every frame rather than cached", d.mesh);
+                dynamicBlasLogged_ = true;
+            }
         }
         const rhi::BlasHandle b = it->second;
         if (!b) continue;

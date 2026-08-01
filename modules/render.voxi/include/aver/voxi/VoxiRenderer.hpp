@@ -116,8 +116,14 @@ private:
     rhi::PipelineHandle scenePso_ = 0, sceneMsPso_ = 0, sceneRtPso_ = 0, sceneMsRtPso_ = 0;
 
     rhi::TlasHandle tlas_ = 0;
-    // One bottom-level structure per referenced mesh, built once and kept for the run.
+    // One bottom-level structure per referenced mesh. Built once and kept for the run, EXCEPT for a
+    // mesh whose vertices are written by compute -- IDevice::meshVertexBuffer is what says which --
+    // where the cache expires every frame and the structure is rebuilt. That rebuild is a full
+    // PREFER_FAST_TRACE build rather than a refit, because the RHI has no update verb: correct, and
+    // the most expensive build mode there is. It is the first thing to look at when ray tracing
+    // plus several skinned characters stops being free.
     std::unordered_map<rhi::MeshHandle, rhi::BlasHandle> blas_;
+    bool dynamicBlasLogged_ = false;   // the per-frame rebuild is announced once, not every frame
     bool rtLogged_ = false;
 
     // One replayed draw: its transform, its legacy colour parameters and its captured material.

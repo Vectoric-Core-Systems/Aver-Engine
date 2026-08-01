@@ -684,6 +684,9 @@ public:
 
     MeshHandle createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override;
     MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) override;
+    BufferHandle meshVertexBuffer(MeshHandle mesh) const override {
+        return (mesh && mesh <= meshes_.size()) ? meshes_[mesh - 1].vbBuffer : 0;
+    }
     void drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) override;
     LineHandle createLineMesh(const LineVertex* verts, u32 count) override;
     void drawLines(LineHandle mesh, const f32 world[16]) override;

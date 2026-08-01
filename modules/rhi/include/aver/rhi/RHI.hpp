@@ -259,6 +259,16 @@ public:
     virtual MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) {
         (void)source; (void)outVertices; return 0;
     }
+
+    // Non-zero when a mesh's vertices are WRITTEN BY COMPUTE rather than uploaded once, and the
+    // buffer they live in. Zero for every ordinary mesh.
+    //
+    // This exists so that a consumer which CACHES something derived from the vertices can tell that
+    // its cache expires every frame. An acceleration structure is the case that forced it: the
+    // renderer memoises one per mesh and never rebuilds it, which is right for static geometry and
+    // means a skinned character's ray-traced shadow keeps the silhouette it had when the structure
+    // was first built. The character moves; its shadow does not.
+    virtual BufferHandle meshVertexBuffer(MeshHandle mesh) const { (void)mesh; return 0; }
     // Per-frame camera (row-major, row-vector viewProj = view*proj). invViewProj reconstructs
     // world-space rays for the procedural sky.
     virtual void setCamera(const f32 viewProj[16], const f32 invViewProj[16], const f32 cameraPos[3]) {
