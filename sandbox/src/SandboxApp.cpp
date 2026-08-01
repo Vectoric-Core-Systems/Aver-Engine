@@ -365,9 +365,12 @@ public:
     BootConfig config() const override {
         BootConfig c; c.windowTitle="Aver Engine \xE2\x80\x94 Editor"; c.windowWidth=1600; c.windowHeight=900;
         c.maxFrames=maxFrames_; c.headless=headless_; c.useWarp=useWarp_;
-        c.enableDebugLayer=debugLayer_; return c;
+        c.enableDebugLayer=debugLayer_;
+        c.backend = backendName_.empty() ? nullptr : backendName_.c_str();
+        return c;
     }
     void setUseWarp(bool w) { useWarp_ = w; }
+    void setBackend(std::string b) { backendName_ = std::move(b); }   // --backend <name>
     void setDebugLayer(bool d) { debugLayer_ = d; }
 
 #if AVER_WITH_IMGUI
@@ -4866,6 +4869,7 @@ private:
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
     f32  probeU_=-1.0f, probeV_=-1.0f;   // --probe-rel U V: a FRACTION of the viewport rect
     bool useWarp_=false;             // --warp: run on the D3D12 software rasteriser
+    std::string backendName_;   // --backend: which RHI backend to ask for first
     bool debugLayer_=false;          // --debug-layer: validate every graphics call (a real per-call tax)
     std::string scriptsDir_;         // --scripts <dir>: where to look for user script assemblies
     std::string spawnTestClass_;     // --spawn-test <ClassName>: headless actor-loop test trigger
@@ -5421,7 +5425,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -5497,6 +5501,7 @@ Application* createApplication(int argc, char** argv) {
         // --force-caps clamps what the device reports; it can never raise a capability.
         else if (!std::strcmp(argv[i],"--force-caps") && i+1<argc) forceCaps=argv[++i];
         else if (!std::strcmp(argv[i],"--warp")) warp=true;
+        else if (!std::strcmp(argv[i],"--backend") && i+1<argc) backendName=argv[++i];
         else if (!std::strcmp(argv[i],"--debug-layer")) debugLayer=true;
         else if (!std::strcmp(argv[i],"--scripts") && i+1<argc) scriptsDir=argv[++i];
         else if (!std::strcmp(argv[i],"--spawn-test") && i+1<argc) spawnTest=argv[++i];
@@ -5556,6 +5561,7 @@ Application* createApplication(int argc, char** argv) {
     app->setSaveProject(saveProject);
     app->setImportOnce(importSrc, importDst);
     app->setUseWarp(warp);
+    if (!backendName.empty()) app->setBackend(backendName);
     app->setDebugLayer(debugLayer);
     app->setProjectPath(project);
     // The start screen: interactive launches with no project, or --start-screen. Never in a capture run.

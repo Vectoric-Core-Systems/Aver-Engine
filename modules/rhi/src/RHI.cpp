@@ -60,13 +60,31 @@ static IDevice* tryBackend(Backend b, const DeviceDesc& desc) {
     return nullptr;
 }
 
+// Parses a backend name. Case-insensitive, and the spellings match what backendName() prints, so a
+// log line can be pasted straight back in as a flag.
+bool parseBackendName(const char* name, Backend& out) {
+    if (!name) return false;
+    std::string s;
+    for (const char* p = name; *p; ++p) s.push_back(static_cast<char>(*p >= 'A' && *p <= 'Z' ? *p + 32 : *p));
+    if (s == "d3d12" || s == "dx12") { out = Backend::D3D12;  return true; }
+    if (s == "d3d11" || s == "dx11") { out = Backend::D3D11;  return true; }
+    if (s == "vulkan" || s == "vk")  { out = Backend::Vulkan; return true; }
+    if (s == "null")                 { out = Backend::Null;   return true; }
+    return false;
+}
+
 // Creates the first backend in the preference order that initialises, falling back to Null.
 IDevice* createDevice(const DeviceDesc& desc) {
     const u32 count = desc.preferredCount < 4 ? desc.preferredCount : 4;
     for (u32 i = 0; i < count; ++i) {
         const Backend b = desc.preferred[i];
         if (IDevice* dev = tryBackend(b, desc)) {
-            AVER_INFO("[RHI] device created (backend={})", backendName(dev->backend()));
+            // Says which was ASKED FOR first as well as which was got, because a silent fall
+            // through to D3D12 is exactly how a Vulkan run gets mistaken for a Vulkan run.
+            if (i == 0) AVER_INFO("[RHI] device created (backend={})", backendName(dev->backend()));
+            else        AVER_WARN("[RHI] device created (backend={}), but {} was preferred and was "
+                                  "unavailable -- this run is NOT using the backend that was asked for",
+                                  backendName(dev->backend()), backendName(desc.preferred[0]));
             return dev;
         }
         if (b != Backend::Null) {

@@ -16,6 +16,11 @@ struct BootConfig {
     bool headless = false; // skip window creation entirely
     bool useWarp = false;  // ask the RHI for the software rasteriser
     bool enableDebugLayer = false;   // opt-in in every build type; `--debug-layer`
+    // Which RHI backend to ASK FOR first: "d3d12", "d3d11", "vulkan", "null", or empty for the
+    // compiled-in default order. The engine still falls back if it is unavailable, and says loudly
+    // that it did -- a run that silently used a different backend than the one requested is worse
+    // than a run that refused to start.
+    const char* backend = nullptr;
 };
 
 // Applications subclass this. The engine owns the loop and calls these hooks.

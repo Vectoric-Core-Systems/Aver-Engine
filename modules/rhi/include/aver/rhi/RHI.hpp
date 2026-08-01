@@ -15,6 +15,11 @@ enum class Backend { Null, D3D12, D3D11, Vulkan };
 // Human-readable name for a backend.
 const char* backendName(Backend b);
 
+// Parses a backend name -- "d3d12", "d3d11", "vulkan", "null", case-insensitively. False when the
+// name is not one of those, leaving `out` untouched, so a typo is a diagnosable error rather than a
+// silent fallback to whatever happened to be first.
+bool parseBackendName(const char* name, Backend& out);
+
 // How to create a swapchain for a native window.
 struct SwapchainDesc {
     void* windowHandle = nullptr; // HWND
@@ -54,6 +59,15 @@ struct LineVertex {
 };
 
 // How to create a device: backend preference order and development switches.
+//
+// THE PREFERENCE ORDER IS THE SELECTION MECHANISM, and until now nothing ever wrote it. Every
+// caller took the default, so which backend ran was decided entirely by which ones were COMPILED
+// IN -- a `#if` in RHI.cpp, not a choice. Principle P7 in ARCHITECTURE.md claims backends are
+// "selected at runtime from the compiled-in set", and that was not true of any build.
+//
+// It matters more than it looks: a second backend that cannot be ASKED FOR cannot be exercised
+// either, so it cannot be developed against. Everything written for it would be unreachable code
+// that compiles.
 struct DeviceDesc {
     Backend preferred[4] = {Backend::D3D12, Backend::D3D11, Backend::Vulkan, Backend::Null};
     u32 preferredCount = 4;

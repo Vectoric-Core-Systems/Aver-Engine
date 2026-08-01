@@ -41,10 +41,26 @@ int Engine::run(Application* app) {
         }
     }
 
-    // --- RHI device (D3D12 -> D3D11 -> Vulkan -> Null, per stubs today -> Null) ---
+    // --- RHI device. Default order is D3D12 -> D3D11 -> Vulkan -> Null; D3D11 and Vulkan are
+    //     13-line stubs that return nullptr today, so the default order really means D3D12 or Null.
     rhi::DeviceDesc dd;
     dd.enableDebug = cfg.enableDebugLayer;
     dd.useWarp = cfg.useWarp;
+    if (cfg.backend && *cfg.backend) {
+        rhi::Backend want{};
+        if (rhi::parseBackendName(cfg.backend, want)) {
+            // Requested FIRST, with the default order kept behind it: an explicit request is a
+            // preference, not a demand, and the RHI warns when it has to fall past it.
+            dd.preferred[0] = want;
+            dd.preferred[1] = rhi::Backend::D3D12;
+            dd.preferred[2] = rhi::Backend::Vulkan;
+            dd.preferred[3] = rhi::Backend::Null;
+            AVER_INFO("[Engine] backend '{}' requested", cfg.backend);
+        } else {
+            AVER_ERROR("[Engine] '{}' is not a backend name (d3d12, d3d11, vulkan, null); using the "
+                       "default order", cfg.backend);
+        }
+    }
     device_ = rhi::createDevice(dd);
 
     if (window_) {
