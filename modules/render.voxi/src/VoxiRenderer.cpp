@@ -6,7 +6,9 @@
 
 #include "VoxiShaders.hpp"
 
+#include <algorithm>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -189,6 +191,7 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
 
 // Destroys every resource and returns the feature to its uninitialised state.
 void VoxiRenderer::shutdown() {
+    reportFrameTime("run total");
     materials_.shutdown();
     if (!res_) { dev_ = nullptr; return; }
     for (rhi::BindingSetHandle s : mipBindings_) if (s) res_->destroyBindingSet(s);
@@ -218,6 +221,11 @@ void VoxiRenderer::shutdown() {
     giReady_ = rtSupported_ = rtActive_ = rtLogged_ = false;
     draws_.clear();
     drawsPrev_.clear();
+    rebuiltThisFrame_.clear();
+    lastBlasRebuilds_ = 0xFFFFFFFFu;
+    frameTimeMs_.clear();
+    frameTimeLastNs_ = 0;
+    frameTimeSeen_ = 0;
     res_ = nullptr;
     dev_ = nullptr;
 }
@@ -240,6 +248,40 @@ void VoxiRenderer::setSun(const f32 dirToLight[3], const f32 color[3], f32 ambie
 }
 
 void VoxiRenderer::setDebugView(bool on) { debugView_ = on; }
+
+// Sets the occlusion rays per pixel, clamped rather than refused: a caller asking for 0 wants the
+// cheapest shadow, not no shadow at all, and rtShadow divides by this.
+void VoxiRenderer::setShadowRays(u32 n) {
+    const u32 clamped = n < 1 ? 1 : (n > kMaxShadowRays ? kMaxShadowRays : n);
+    if (clamped != n)
+        AVER_WARN("[Voxi] {} shadow rays per pixel clamped to {}", n, clamped);
+    if (clamped == rtShadowRays_) return;
+    rtShadowRays_ = clamped;
+    AVER_INFO("[Voxi] sun occlusion rays per pixel: {}", rtShadowRays_);
+}
+
+// Prints what the run's frames cost. The MEDIAN leads because a frame period is a heavy-tailed
+// distribution -- one alt-tab or one shader compile drags a mean and leaves a median alone -- and
+// the minimum is printed beside it because the gap between them is what says whether the machine
+// was quiet enough for the reading to mean anything.
+void VoxiRenderer::reportFrameTime(const char* when) {
+    if (!frameTimeReport_) return;
+    if (frameTimeMs_.empty()) {
+        AVER_INFO("[Voxi] frame period ({}): no samples past the {}-frame warm-up", when, kFrameTimeWarmup);
+        return;
+    }
+    std::vector<f32> s = frameTimeMs_;
+    std::sort(s.begin(), s.end());
+    const usize n = s.size();
+    const f32 med = s[n / 2];
+    const f32 p90 = s[(n * 9) / 10 < n ? (n * 9) / 10 : n - 1];
+    f32 sum = 0.0f;
+    for (f32 v : s) sum += v;
+    AVER_INFO("[Voxi] frame period ({}): {} frames, median {:.3f} ms, mean {:.3f} ms, min {:.3f} ms, "
+              "p90 {:.3f} ms -- WHOLE frame, CPU, {} sun ray(s)/pixel, rt {}",
+              when, static_cast<u32>(n), med, sum / static_cast<f32>(n), s.front(), p90,
+              rtShadowRays_, rtActive_ ? "active" : "off");
+}
 
 // ---------------------------------------------------------------- scene submission
 
@@ -271,6 +313,19 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
 // Runs Voxi's frame: acceleration structures, shadow map, then voxelise and filter the volume.
 void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     if (!giReady_) return;
+    // Sampled at the TOP of the feature's frame, so consecutive readings are one frame apart
+    // whatever the passes below do. The first sample after the warm-up is discarded with the rest.
+    if (frameTimeReport_) {
+        const u64 now = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        if (frameTimeLastNs_ != 0 && frameTimeSeen_ >= kFrameTimeWarmup)
+            frameTimeMs_.push_back(static_cast<f32>(now - frameTimeLastNs_) * 1e-6f);
+        frameTimeLastNs_ = now;
+        ++frameTimeSeen_;
+        // Reported as the run goes as well as at shutdown, so a run that is killed or that never
+        // reaches shutdown still leaves a number behind.
+        if (frameTimeMs_.size() && frameTimeMs_.size() % 120 == 0) reportFrameTime("running");
+    }
     materials_.update();
     const f32 size = extent_ * 2.0f;
     cb_.voxelOrigin[0] = center_[0] - extent_;
@@ -302,11 +357,13 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     inst.reserve(drawsPrev_.size());
     rtInstanceData_.clear();
     rtInstanceMesh_.clear();
+    rebuiltThisFrame_.clear();
+    u32 firstBuilds = 0;
     for (const Draw& d : drawsPrev_) {
         auto it = blas_.find(d.mesh);
         if (it == blas_.end()) {
             const rhi::BlasHandle nb = res_->createBlas(d.mesh);
-            if (nb) ctx.buildBlas(nb);
+            if (nb) { ctx.buildBlas(nb); ++firstBuilds; }
             // A zero is recorded too, so a mesh that cannot produce a BLAS is not retried each frame.
             it = blas_.emplace(d.mesh, nb).first;
         } else if (it->second && dev_->meshVertexBuffer(d.mesh)) {
@@ -316,7 +373,17 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
             // built: the character moves and the shadow does not, and nothing in the raster image
             // shows it. The skinning dispatch has already left the buffer in GeometryRead by now,
             // because a skinning feature is registered BEFORE this one.
-            ctx.buildBlas(it->second);
+            //
+            // ONCE PER MESH PER FRAME, not once per DRAW. The draw list holds one entry per
+            // instance, so a mesh drawn twice used to be rebuilt twice: the second build recomputes
+            // the identical structure over the identical vertices and overwrites the first with it,
+            // for a full PREFER_FAST_TRACE build and a UAV barrier of pure waste. The linear scan is
+            // over the DISTINCT dynamic meshes in one frame, which is a handful.
+            if (std::find(rebuiltThisFrame_.begin(), rebuiltThisFrame_.end(), d.mesh) ==
+                rebuiltThisFrame_.end()) {
+                ctx.buildBlas(it->second);
+                rebuiltThisFrame_.push_back(d.mesh);
+            }
             if (!dynamicBlasLogged_) {
                 AVER_INFO("[Voxi] mesh {} has compute-written vertices; its bottom-level structure "
                           "is rebuilt every frame rather than cached", d.mesh);
@@ -370,6 +437,28 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         AVER_INFO("[Voxi] RayQuery active ({} instances, {} bottom-level structures)",
                   static_cast<u32>(inst.size()), static_cast<u32>(blas_.size()));
         rtLogged_ = true;
+    }
+    // WHAT THE ACCELERATION STRUCTURES COST THIS FRAME, as a count rather than an impression. Every
+    // one of these is a full PREFER_FAST_TRACE build -- the most expensive mode there is -- because
+    // the RHI has no refit verb, so this number IS the bill.
+    //
+    // It is also the only way to see a predicate go wrong. The rebuild branch is taken when
+    // IDevice::meshVertexBuffer is non-zero, which its contract says means "vertices written by
+    // compute, zero for every ordinary mesh"; if that ever stops being true, a static scene starts
+    // rebuilding everything every frame and looks exactly the same on screen. Printed only when the
+    // count changes, so a steady frame is silent.
+    //
+    // Keyed on BOTH halves rather than on their sum, because the interesting frame is the second
+    // one: two first-time builds becoming two rebuilds is the same total and a completely different
+    // statement about the cache.
+    const u32 rebuilds = (static_cast<u32>(rebuiltThisFrame_.size()) << 16) | (firstBuilds & 0xFFFFu);
+    if (rebuilds != lastBlasRebuilds_) {
+        AVER_INFO("[Voxi] bottom-level builds this frame: {} ({} first-time, {} rebuilt) over {} "
+                  "draws of {} distinct meshes",
+                  firstBuilds + static_cast<u32>(rebuiltThisFrame_.size()), firstBuilds,
+                  static_cast<u32>(rebuiltThisFrame_.size()), static_cast<u32>(drawsPrev_.size()),
+                  static_cast<u32>(blas_.size()));
+        lastBlasRebuilds_ = rebuilds;
     }
     ctx.popMarker();
 }

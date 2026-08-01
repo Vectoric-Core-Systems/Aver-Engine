@@ -30,6 +30,23 @@ public:
     // Replaces the scene with a raymarch of the volume.
     void setDebugView(bool on);
 
+    // Sets the occlusion rays traced per pixel toward the sun's disc, clamped to [1, kMaxShadowRays].
+    //
+    // A KNOB RATHER THAN A CONSTANT because the cost of ray-traced shadows was a feeling and had to
+    // become a number: it is linear in this, and nothing could measure that slope while it was a 4
+    // compiled into the renderer. The sequence rtShadow walks is nested, so raising this ADDS
+    // samples between the ones already there rather than moving them -- which is what makes a sweep
+    // over 1, 2, 4, 8 a convergence series instead of four unrelated images.
+    void setShadowRays(u32 n);
+    u32 shadowRays() const { return rtShadowRays_; }
+
+    // Turns on the frame-period report. See rtShadowRays_ for what it is for and what it is not.
+    void setFrameTimeReport(bool on) { frameTimeReport_ = on; }
+
+    // The largest ray count accepted. Not a hardware limit: there is a recorded TDR history on this
+    // machine, and 64 rays per pixel at 8x MSAA is how a knob turns into a device removal.
+    static constexpr u32 kMaxShadowRays = 32;
+
     // Starts a new frame's draw list; the passes replay the previous one.
     void beginScene() override;
     // Records one draw into this frame's list.
@@ -118,17 +135,59 @@ private:
     rhi::TlasHandle tlas_ = 0;
     // One bottom-level structure per referenced mesh. Built once and kept for the run, EXCEPT for a
     // mesh whose vertices are written by compute -- IDevice::meshVertexBuffer is what says which --
-    // where the cache expires every frame and the structure is rebuilt. That rebuild is a full
-    // PREFER_FAST_TRACE build rather than a refit, because the RHI has no update verb: correct, and
-    // the most expensive build mode there is. It is the first thing to look at when ray tracing
-    // plus several skinned characters stops being free.
+    // where the cache expires every frame and the structure is rebuilt.
+    //
+    // THAT PREDICATE IS CURRENTLY TRUE OF EVERY MESH, which is measured and not suspected: the
+    // editor's placeholder scene has no skinned geometry at all and still logs
+    // `mesh 1 has compute-written vertices`, then two rebuilds a frame forever. meshVertexBuffer is
+    // contracted to be "non-zero when a mesh's vertices are WRITTEN BY COMPUTE ... zero for every
+    // ordinary mesh", and the D3D12 backend returns GpuMesh::vbBuffer, which createMesh has filled
+    // in for every mesh since a3022e0 gave a shader the ability to read a mesh's geometry. The
+    // backend needs a flag set only by createSkinTargetMesh; this side cannot tell the difference
+    // and must not guess. Priced at 0.071 ms/frame for this scene's two 14-vertex meshes -- almost
+    // all of it fixed per-build overhead, so it grows with mesh COUNT before it grows with triangles.
+    //
+    // Either way the rebuild is a full PREFER_FAST_TRACE build rather than a refit, because the RHI
+    // has no update verb. See the module README for the two verbs it would take; do not reach for
+    // PERFORM_UPDATE against a structure that was not built with ALLOW_UPDATE.
     std::unordered_map<rhi::MeshHandle, rhi::BlasHandle> blas_;
     bool dynamicBlasLogged_ = false;   // the per-frame rebuild is announced once, not every frame
+    // The meshes already rebuilt during THIS frame's pass over the draw list.
+    //
+    // The draw list holds one entry per INSTANCE, so a mesh drawn twice used to be handed to
+    // buildBlas twice -- two full builds of one structure, the second overwriting the first with the
+    // identical answer, plus a second UAV barrier. Kept as a member so the allocation is made once
+    // rather than every frame.
+    std::vector<rhi::MeshHandle> rebuiltThisFrame_;
+    // What the last frame's pass over the draw list actually cost, in structures. Logged only when
+    // it CHANGES: a number this important should be visible, and a line every frame is noise.
+    u32 lastBlasRebuilds_ = 0xFFFFFFFFu;
     // Occlusion rays per pixel toward the sun's disc. FOUR by default: one gives the hard aliased
     // edge this replaced, and the cost is linear, so this is the knob to turn down first if ray
     // tracing ever starts costing frames. There is a recorded TDR history on this machine, so it
-    // deliberately does not default high.
+    // deliberately does not default high. setShadowRays and --rt-rays move it.
     u32 rtShadowRays_ = 4;
+
+    // ---- the frame-period sampler ----
+    //
+    // WHAT IT MEASURES, stated because the number is easy to over-read: the wall-clock period
+    // between successive prePass calls. That is the WHOLE frame -- editor UI, the voxelise pass, the
+    // post chain -- and not Voxi's share of it, and it is a CPU period, so it only tracks GPU cost
+    // while the GPU is the thing being waited on. Run it with --no-vsync or every reading is the
+    // refresh interval.
+    //
+    // It exists because "the cost is linear in the ray count" was an assertion with no instrument
+    // behind it. Changing exactly one thing and re-reading the same number is a measurement; a
+    // profiler capture that cannot be checked into the repository is not.
+    bool frameTimeReport_ = false;
+    u64  frameTimeLastNs_ = 0;          // steady_clock, nanoseconds; 0 = no previous frame
+    u32  frameTimeSeen_ = 0;            // frames sampled, including the discarded warm-up
+    std::vector<f32> frameTimeMs_;      // one period per frame past the warm-up
+    // Frames discarded before sampling starts. Pipeline creation, the first shader compiles and the
+    // first uploads all land in the first handful of frames and are not what is being priced.
+    static constexpr u32 kFrameTimeWarmup = 30;
+    // Reports the collected periods, and clears nothing: the run's whole population is the sample.
+    void reportFrameTime(const char* when);
 
     // ---- the flat geometry table a reflection ray reads after it hits something ----
     //

@@ -225,6 +225,12 @@ if(AVER_BUILD_TESTS)
   if(AVER_MODULE_LANDSCAPE)
     add_subdirectory(tests/landscape)
   endif()
+  if(AVER_MODULE_VOXI)
+    # Voxi's ray-traced sun-disc sampling. Guarded by the module because it reads the module's own
+    # shader source, and CPU-only because the property it decides -- that raising the ray count adds
+    # samples instead of moving them -- is arithmetic no screenshot can settle.
+    add_subdirectory(tests/render.voxi)
+  endif()
   if(AVER_MODULE_MCP AND WIN32)
     add_subdirectory(tests/mcp)
   endif()

@@ -64,6 +64,41 @@ float rtHash(float2 p) {
     return frac((q.x + q.y) * q.z);
 }
 
+// The radical inverse of `i` in base 2 -- its bits reflected about the binary point -- in [0,1).
+//
+// THIS IS WHAT MAKES THE SAMPLE SEQUENCE NESTED, and the radius it replaced was not. `sqrt((k+0.5)/n)`
+// puts sample k at a radius that depends on the TOTAL ray count, so asking for more rays MOVES every
+// sample rather than adding to them: n=2 and n=4 are then two unrelated estimators of the same
+// integral, each its own oracle, and no comparison between two ray counts is a refinement of the
+// first. phi(k) depends on k alone, so the first m samples of an n-sample set ARE the m-sample set --
+// raising the count keeps every ray already traced and fills in between them. That is what lets a
+// ray-count sweep be read as convergence, and what lets one baseline serve every count.
+//
+// EXACT ON EVERY ADAPTER, which the sun disc's other option -- a hash -- is not. reversebits is
+// integer bit manipulation, the uint-to-float conversion is IEEE round-to-nearest, and 2^-32 is a
+// power of two so the multiply is exact. The gate oracle compares nine configurations bit-exactly,
+// WARP among them, and a divide by a per-call ray count was one more thing that did not have to be.
+float rtRadicalInverse2(uint i) {
+    return (float)reversebits(i) * 2.3283064365386963e-10;   // 1 / 2^32
+}
+
+// Sample `k` of the disc sequence the shadow loop walks, as a point in the unit disc. `ang0` turns
+// the whole pattern by a per-pixel angle so neighbouring pixels do not share one set of directions.
+//
+// THE SIGNATURE IS THE PROPERTY. There is no ray count in it, and there cannot be one: a sample is a
+// function of its index alone, which is what "nested" means and what the version this replaced --
+// sqrt((k + 0.5) / n) -- could not say. Kept as its own function rather than inlined into the loop
+// so that the claim is checkable in one place rather than argued about in a loop body.
+//
+// The golden angle around and the radical inverse outward, with sqrt to map the radial coordinate
+// onto AREA rather than radius -- without it the samples crowd the centre and every estimate is
+// biased toward the middle of the sun.
+float2 rtDiscSample(uint k, float ang0) {
+    float rad = sqrt(rtRadicalInverse2(k + 1));
+    float a   = ang0 + (float)k * 2.39996323;
+    return float2(cos(a), sin(a)) * rad;
+}
+
 // Traces occlusion rays toward the sun's DISC and returns the fraction that reached it: 0 fully
 // shadowed, 1 fully lit, and everything between is a real penumbra.
 //
@@ -109,12 +144,11 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3
     float vis = 0.0;
 
     [loop] for (uint k = 0; k < n; ++k) {
-        // Concentric disc sampling by the golden angle: even coverage for any n, with no table and
-        // none of the centre clumping a naive polar mapping gives. The same rotated pattern serves
-        // both the disc and the footprint, so one hash covers both.
-        float rad = sqrt((k + 0.5) / (float)n);
-        float a   = ang0 + (float)k * 2.39996323;
-        float2 disc = float2(cos(a), sin(a)) * rad;
+        // The sample the loop is at. NOTHING HERE DEPENDS ON n, which is the whole design: sample k
+        // sits in the same place whatever the ray count, so raising the count refines the estimate
+        // instead of replacing it with an unrelated one. The same rotated pattern serves both the
+        // sun disc and the pixel footprint, so one sample covers both.
+        float2 disc = rtDiscSample(k, ang0);
 
         float3 dir = normalize(L + (T * disc.x + B * disc.y) * tanR);
         // Half the footprint, so samples stay inside the pixel they are estimating.

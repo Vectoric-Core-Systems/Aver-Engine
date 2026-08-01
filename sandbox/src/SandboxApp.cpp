@@ -855,6 +855,17 @@ public:
 
             // Registration is non-owning: voxiRenderer_ must outlive the device, torn down in onShutdown.
             voxiRenderer_.setSettings(s);
+            // Applied here rather than at parse time: the feature has no state to set until it is
+            // about to be initialised, and both of these are read every frame afterwards.
+            //
+            // A NEGATIVE COUNT IS REPORTED rather than cast to a huge unsigned one and clamped: the
+            // warning that came out of that read "4294967291 shadow rays clamped to 32", which
+            // describes the cast and not the typo that caused it.
+            if (rtRaysOverride_ > 0) voxiRenderer_.setShadowRays(static_cast<u32>(rtRaysOverride_));
+            else if (rtRaysOverride_ < 0)
+                AVER_WARN("[Sandbox] --rt-rays {} is not a ray count; the default of {} stands",
+                          rtRaysOverride_, voxiRenderer_.shadowRays());
+            if (frameTimeReport_) voxiRenderer_.setFrameTimeReport(true);
             if (voxiRenderer_.init(*e.device())) {
                 e.device()->addRenderFeature(&voxiRenderer_);
                 voxiAttached_ = true;
@@ -1741,6 +1752,8 @@ public:
     void setGiOverride(int q, bool dbg) { giOverride_ = q; giDebugView_ = dbg; } // --gi / --gi-debug
     void setGiForceOff(bool off) { giForceOff_ = off; }                        // --no-gi
     void setRtOverride(int q) { rtOverride_ = q; }                              // --rt
+    void setRtRays(int n) { rtRaysOverride_ = n; }                              // --rt-rays N
+    void setFrameTimeReport(bool on) { frameTimeReport_ = on; }                 // --frame-time
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
     void setProbeRel(f32 u, f32 v) { probeU_ = u; probeV_ = v; }                 // --probe-rel U V
@@ -4964,6 +4977,8 @@ private:
     int  giOverride_=0;              // --gi: GI quality to apply at startup
     bool giForceOff_=false;          // --no-gi: force it off, whatever the default is
     int  rtOverride_=0;              // --rt: ray tracing quality at startup
+    int  rtRaysOverride_=0;          // --rt-rays N: sun occlusion rays per pixel (0 = flag not given)
+    bool frameTimeReport_=false;     // --frame-time: report the frame period, to price the above
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
     f32  probeU_=-1.0f, probeV_=-1.0f;   // --probe-rel U V: a FRACTION of the viewport rect
@@ -5530,7 +5545,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -5601,6 +5616,10 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--no-gi")) noGi=true;
         else if (!std::strcmp(argv[i],"--gi-debug")) { gi=3; giDbg=true; }
         else if (!std::strcmp(argv[i],"--rt")) rt=3;
+        // The sun occlusion rays per pixel, so the cost of ray-traced shadows can be MEASURED
+        // instead of asserted: the sequence is nested, so 1, 2, 4, 8 is one converging series.
+        else if (!std::strcmp(argv[i],"--rt-rays") && i+1<argc) rtRays=std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i],"--frame-time")) frameTime=true;
         else if (!std::strcmp(argv[i],"--ms")) ms=true;
         else if (!std::strcmp(argv[i],"--probe") && i+2<argc) { probeX=(u32)std::atoi(argv[++i]); probeY=(u32)std::atoi(argv[++i]); }
         // --force-caps clamps what the device reports; it can never raise a capability.
@@ -5690,6 +5709,8 @@ Application* createApplication(int argc, char** argv) {
     app->setMsaaOverride(msaa);
     app->setGiOverride(gi, giDbg);
     app->setRtOverride(rt);
+    app->setRtRays(rtRays);
+    app->setFrameTimeReport(frameTime);
     app->setMsOverride(ms);
     app->setProbe(probeX, probeY);
     if (probeU >= 0.0f) app->setProbeRel(probeU, probeV);
