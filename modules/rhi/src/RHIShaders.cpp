@@ -119,9 +119,10 @@ cbuffer PerFrame : register(b0) {
     float4   gAtmoPlanet;   // x planet radius km, y atmosphere top radius km, z world->km, w on/off
     float4   gAtmoTune;     // x ozone centre km, y multi-scatter gain, z view steps, w aerial steps
     float4   gAtmoSunE0;    // rgb sun irradiance ABOVE the air, w ground albedo
-    // x > 0.5 puts the shading model in a WHITE FURNACE: every direction carries radiance y, the
-    // ground carries it too, and the sun is off. It is a measuring instrument, not a look --
-    // see averFurnaceOn.
+    // x > 0.5 puts the shading model in a WHITE FURNACE: every direction carries radiance y and the
+    // ground carries it too. z > 0.5 is the SUN-ON variant: the environment drops to zero and the
+    // sun stays lit, which is the only configuration in which the direct term is under test at all.
+    // A measuring instrument, not a look -- see averFurnaceOn.
     float4   gFurnace;
 };
 // The per-draw block: transform plus shading constants. 32 dwords, matching kObjectConstantDwords.
@@ -150,12 +151,19 @@ static const float PI = 3.14159265;
 // cosine reads 2L, applying an occlusion term that forgets the occluder is also a light source
 // reads darker.
 bool  averFurnaceOn() { return gFurnace.x > 0.5; }
-float averFurnaceL()  { return gFurnace.y; }
+// Declared HERE rather than beside averSunRadiance where it is conceptually at home, because
+// averFurnaceL calls it and HLSL has no forward declarations -- a use-before-declaration compiles
+// in C++ and fails in DXC, at RUNTIME, on a build that reported success.
+bool  averFurnaceSun() { return gFurnace.z > 0.5; }
+// Zero in the sun-on variant: an environment carrying radiance would add an ambient term and
+// the direct term would no longer be alone in the answer.
+float averFurnaceL()  { return averFurnaceSun() ? 0.0 : gFurnace.y; }
 
-// The sun is OFF in a furnace: a directional source is not part of the uniform environment, and
-// leaving it on would swamp the very thing being measured.
+// The sun is OFF in the plain furnace: a directional source is not part of a uniform environment,
+// and leaving it lit would swamp the very thing being measured. In the SUN-ON variant it is the
+// only thing lit.
 float3 averSunRadiance() {
-    if (averFurnaceOn()) return 0.0;
+    if (averFurnaceOn() && !averFurnaceSun()) return 0.0;
     return srgbToLin(gLightColor.rgb) * gSkyParams.z;
 }
 

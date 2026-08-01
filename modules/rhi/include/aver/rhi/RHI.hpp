@@ -177,6 +177,19 @@ struct SkyAtmosphere {
     // the environment, and because every path that asks the sky for radiance then gets it for free.
     f32 furnaceRadiance = 0.0f;
 
+    // Keeps the SUN ON inside the furnace, with the uniform environment at zero.
+    //
+    // A SEPARATE MODE because the two halves of the shading model fail differently and the plain
+    // furnace can only see one of them. With the sun off, only the ambient term is exercised -- and
+    // that term was already correct when a missing /PI made every SUNLIT reflection 3.14x too
+    // bright. The oracle was blind to the exact bug it was built to find.
+    //
+    // Here an albedo-1 Lambertian surface at angle theta to the sun must have exitant radiance
+    // E*cos(theta)/PI, where E is the sun's irradiance. That is an ABSOLUTE claim, and it has to
+    // be: a missing 1/PI is a GLOBAL SCALE, so no ratio between two surfaces and no equality
+    // between two configurations can see it. Only a comparison against a known number can.
+    bool furnaceSun = false;
+
     // ---- the air ----
     f32 fogColor[3] = {1.0f, 1.0f, 1.0f};   // a TINT on the in-scattered sky, not a replacement
     f32 fogDensity = 4e-6f;     // extinction per world unit (cm), at fogHeight

@@ -2235,7 +2235,7 @@ void D3D12Device::packAtmosphere(const SkyAtmosphere& s) {
     // that silently enters furnace mode would be far harder to diagnose than one that never does.
     frameCB_.furnace[0] = s.furnaceRadiance > 0.0f ? 1.0f : 0.0f;
     frameCB_.furnace[1] = s.furnaceRadiance;
-    frameCB_.furnace[2] = 0.0f;
+    frameCB_.furnace[2] = s.furnaceSun ? 1.0f : 0.0f;
     frameCB_.furnace[3] = 0.0f;
 
     if (!on) {
