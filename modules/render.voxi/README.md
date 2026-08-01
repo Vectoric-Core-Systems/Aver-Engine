@@ -168,8 +168,14 @@ pixel-identical.
 Ray-traced sun shadows via `RayQuery` traced straight from the pixel shader - no state objects,
 no shader binding tables, no `DispatchRays`, so it drops into the existing raster pipeline.
 
-- One BLAS per mesh, built lazily on first use (meshes are static). A mesh that cannot produce one
-  is remembered as a zero, so a failure is not retried and re-logged every frame.
+- One BLAS per mesh, built lazily on first use, and rebuilt every frame for a mesh whose vertices
+  are written by compute. A mesh that cannot produce one is remembered as a zero, so a failure is
+  not retried and re-logged every frame. **Once per mesh per frame, not once per draw**: the draw
+  list holds one entry per instance, so a mesh drawn twice used to be rebuilt twice — the second
+  build recomputing the identical structure over the identical vertices.
+- `[Voxi] bottom-level builds this frame: ...` is printed whenever that count changes. It is the
+  only place the cost is visible, and the only place a wrong "is this mesh dynamic" answer shows up
+  at all: a static scene that quietly rebuilds everything every frame looks identical on screen.
 - TLAS rebuilt each frame from the same replayed draw list the shadow and voxel passes use. It is
   CREATED up front, sized for the draw-list cap, so its descriptor can be written into `t2` before
   any frame is recorded — a shader-visible descriptor an in-flight frame may be reading must not be
@@ -192,6 +198,47 @@ ray somewhere else, which only a cast-shadow probe can see.
 Also note: `IResourceFactory` has `createBlas`/`createTlas` but no matching destroy, so
 acceleration structures are released only when the factory is. Harmless while meshes are static;
 it needs an answer before geometry becomes dynamic.
+
+### Sun shadow rays: nested, and priced
+
+`--rt-rays N` (1..32, default 4) sets the occlusion rays per pixel. The sample sequence is
+**nested** — sample *k* is at the same place whatever *N* is — so a sweep over ray counts is one
+converging series rather than a set of unrelated images. `tests/render.voxi` decides that property
+by arithmetic, and keeps the sequence it replaced around as a negative control so the check is seen
+firing on every run.
+
+Measured on this machine (RX 7800 XT, Debug tree, editor scene at 2750x1639, `--no-vsync`,
+`--frame-time`, median of 370 frames, three runs per point spread ≤ 0.03 ms):
+
+| rays | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|
+| frame | 4.510 | 4.591 | 4.693 | 4.914 | 5.386 | 6.265 ms |
+
+Linear at **~0.056 ms per ray per frame**, so the default 4 rays cost 0.22 ms of a 4.69 ms frame
+and ray tracing as a whole costs 0.45 ms over the cascade-shadow path's 4.24 ms. `--frame-time`
+measures the WHOLE frame's CPU period, not Voxi's share of it, and means nothing without
+`--no-vsync` — with vsync on every reading is the refresh interval.
+
+### Refit: what the RHI would need
+
+Every build here is a full `PREFER_FAST_TRACE` build, the most expensive mode there is, and a
+compute-skinned mesh pays it every frame. DXR can refit instead, at a fraction of the cost, and the
+RHI cannot express it. Two verbs would be needed, and neither is a wrapper over what exists:
+
+1. **`createBlas(MeshHandle, BlasUsage)`** — `ALLOW_UPDATE` has to be in the flags of the *prebuild
+   query* and of the first build. It cannot be added later: it changes `ResultDataMaxSizeInBytes`,
+   and the scratch buffer must then be sized by `max(ScratchDataSizeInBytes,
+   UpdateScratchDataSizeInBytes)`. A refit against a structure built without it is invalid.
+2. **`IRenderContext::refitBlas(BlasHandle)`** — records a build with `PERFORM_UPDATE` set and
+   `SourceAccelerationStructureData = DestAccelerationStructureData` (DXR permits the in-place
+   form), same geometry desc, same UAV barrier after.
+
+With the contract stated rather than implied: a refit is only valid while the topology is
+unchanged — same index buffer, same counts, same geometry flags — which is exactly the
+compute-skinning case, and its quality degrades as the pose drifts from the one it was built at, so
+a caller must still rebuild fully from time to time. Faking either verb by simply passing
+`PERFORM_UPDATE` to today's `buildBlas` would produce a debug-layer error at best and a silently
+wrong structure at worst.
 
 **DXR 1.1 inline ray tracing (`RayQuery`) only.** AMD has never shipped a
 Tier-1.0-only GPU (it entered at 1.1 with RDNA 2), Intel entered at 1.1 with Arc, and every
