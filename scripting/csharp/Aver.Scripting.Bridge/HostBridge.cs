@@ -137,6 +137,12 @@ public static class HostBridge
             s_context ??= new ScriptLoadContext(
                 AssemblyLoadContext.GetLoadContext(typeof(HostBridge).Assembly) ?? AssemblyLoadContext.Default);
 
+            // Registered BEFORE the enumeration below: a script's private dependency is resolved lazily, at
+            // the first call into the code that needs it, and OnStart runs inside that enumeration. An F#
+            // script assembly sorts ahead of its own FSharp.Core.dll, so a probe list filled afterwards
+            // would be empty at exactly the moment it is needed.
+            s_context.AddProbeDirectory(dir);
+
             foreach (string path in Directory.GetFiles(dir, "*.dll").OrderBy(p => p, StringComparer.Ordinal))
                 TryLoadAssembly(path);
 
