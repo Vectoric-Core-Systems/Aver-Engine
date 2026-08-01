@@ -18,6 +18,9 @@ cbuffer VoxiFrame : register(b4) {
     float4   gCascadeSplit[AVER_SHADOW_CASCADES];
     float4   gShadowParams; // x = 1/atlasSize, y = enabled, z = accel structure built, w = cascades
     float4   gShadowDraw;   // x = the cascade the depth-only pass is filling right now
+    // x = tan of the sun's ANGULAR RADIUS, which is what sets how fast a shadow edge softens;
+    // y = occlusion rays per pixel; z = ray bias in world units at the near plane; w unused.
+    float4   gRtParams;
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -41,17 +44,84 @@ SamplerComparisonState    gShadowSamp : register(s1);
 // DXR 1.1 inline ray tracing: traced from the pixel shader, no state objects or binding tables.
 RaytracingAccelerationStructure gScene : register(t2);
 
-// Traces one occlusion ray toward the sun. Returns 0 when occluded, 1 when lit.
-float rtShadow(float3 wpos, float3 N, float3 L) {
-    RayDesc r;
-    r.Origin    = wpos + N * 0.02;
-    r.Direction = L;
-    r.TMin      = 0.001;
-    r.TMax      = 100000.0;
-    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, r);
-    q.Proceed();
-    return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
+// A hash of the pixel, for rotating each pixel's sample pattern.
+//
+// SPATIAL ONLY, and that is a hard requirement rather than a simplification: the gate oracle
+// compares 8-bit probe codes BIT-EXACTLY, and two of its gates deliberately sample a penumbra. A
+// seed that varied per frame would make those a coin flip run to run, and the engine's whole
+// verification story rests on flat-neighbourhood probes being reproducible.
+float rtHash(float2 p) {
+    float3 q = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
+    q += dot(q, q.yzx + 33.33);
+    return frac((q.x + q.y) * q.z);
+}
+
+// Traces occlusion rays toward the sun's DISC and returns the fraction that reached it: 0 fully
+// shadowed, 1 fully lit, and everything between is a real penumbra.
+//
+// The single ray this replaced returned exactly 0.0 or 1.0, so a ray-traced shadow had a hard
+// aliased edge while the cascade path beside it did a 3x3 comparison filter -- turning ray tracing
+// ON made shadows look worse, which is the wrong way round. The sun is not a point: it subtends
+// about half a degree, and that angle is what sets how fast an edge softens. gRtParams.x carries
+// its tangent so the softening is the SUN's property rather than a tuned constant.
+//
+// The bias scales with distance from the camera. A fixed 0.02 cm offset is roughly 300 float ulp
+// at 1000 cm from the origin and under 3 at 100000 cm, so distant geometry self-intersects and
+// speckles -- acne that looks like flickering rather than like a bias problem.
+float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel) {
+    const uint  n    = (uint)max(gRtParams.y, 1.0);
+    const float tanR = max(gRtParams.x, 0.0);
+    const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
+
+    // A frame around the light direction, to spread samples across the disc.
+    float3 up = abs(L.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
+    float3 T  = normalize(cross(up, L));
+    float3 B  = cross(L, T);
+
+    // THE PIXEL'S OWN FOOTPRINT ON THE SURFACE, from the screen-space derivatives of the world
+    // position. This is what actually fixes the jagged edge, and the sun's disc is not:
+    //
+    // the sun's angular RADIUS is about a quarter of a degree, so at contact distances the true
+    // penumbra is far narrower than a pixel -- spreading rays across the disc alone gives the same
+    // binary answer as one ray did, everywhere except a single edge pixel. Meanwhile the shadow
+    // term is computed ONCE PER PIXEL while the geometry beside it is resolved at 8x MSAA, so the
+    // shadow boundary stair-steps against smooth silhouettes. That mismatch is the visible defect.
+    //
+    // Jittering the ray ORIGIN across the footprint turns the per-pixel test into an area estimate,
+    // which is antialiasing the shadow rather than blurring it: the result converges to the exact
+    // fraction of the pixel that is occluded.
+    float3 dpx = ddx(wpos);
+    float3 dpy = ddy(wpos);
+
+    const float ang0 = rtHash(pixel) * 6.2831853;
+    float vis = 0.0;
+
+    [loop] for (uint k = 0; k < n; ++k) {
+        // Concentric disc sampling by the golden angle: even coverage for any n, with no table and
+        // none of the centre clumping a naive polar mapping gives. The same rotated pattern serves
+        // both the disc and the footprint, so one hash covers both.
+        float rad = sqrt((k + 0.5) / (float)n);
+        float a   = ang0 + (float)k * 2.39996323;
+        float2 disc = float2(cos(a), sin(a)) * rad;
+
+        float3 dir = normalize(L + (T * disc.x + B * disc.y) * tanR);
+        // Half the footprint, so samples stay inside the pixel they are estimating.
+        float3 org = wpos + (dpx * disc.x + dpy * disc.y) * 0.5;
+
+        RayDesc r;
+        // Offset along the NORMAL and along the ray. The normal alone leaves acne at grazing
+        // angles, where the surface is nearly parallel to the ray and the offset barely separates
+        // them.
+        r.Origin    = org + N * bias + dir * bias;
+        r.Direction = dir;
+        r.TMin      = bias;
+        r.TMax      = 100000.0;
+        RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+        q.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, r);
+        q.Proceed();
+        vis += q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
+    }
+    return vis / (float)n;
 }
 #endif
 
@@ -158,7 +228,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     float ndl = saturate(dot(N, L));
 #if AVER_RT
     float sunVis;
-    if (gShadowParams.z > 0.5) sunVis = rtShadow(i.wpos, N, L);
+    if (gShadowParams.z > 0.5) sunVis = rtShadow(i.wpos, N, L, i.pos.xy);
     else                       sunVis = shadowFactor(i.wpos, N, ndl);
 #else
     const float sunVis = shadowFactor(i.wpos, N, ndl);

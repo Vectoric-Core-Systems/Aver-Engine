@@ -336,6 +336,18 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     ctx.buildTlas(tlas_, inst.data(), static_cast<u32>(inst.size()));
     rtActive_ = true;
     cb_.shadowParams[2] = 1.0f;
+
+    // How fast a ray-traced shadow edge softens is the SUN's angular size, not a tuned constant --
+    // the disc subtends about half a degree, and rtShadow spreads its rays across exactly that.
+    // Taken from the sky model rather than duplicated, so a scene that moves the sun or widens the
+    // disc gets penumbrae that agree with its own sky.
+    const f32 halfAngle = dev_->skyAtmosphere().sunAngularDiameterDeg * 0.5f * 0.01745329252f;
+    cb_.rtParams[0] = std::tan(halfAngle);
+    cb_.rtParams[1] = static_cast<f32>(rtShadowRays_);
+    // Base ray bias in centimetres, scaled by view distance in the shader. Small enough not to
+    // detach a contact shadow, large enough that a surface does not intersect its own rays.
+    cb_.rtParams[2] = 0.05f;
+    cb_.rtParams[3] = 0.0f;
     if (!rtLogged_) {
         AVER_INFO("[Voxi] RayQuery active ({} instances, {} bottom-level structures)",
                   static_cast<u32>(inst.size()), static_cast<u32>(blas_.size()));

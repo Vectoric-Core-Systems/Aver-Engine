@@ -124,6 +124,11 @@ private:
     // plus several skinned characters stops being free.
     std::unordered_map<rhi::MeshHandle, rhi::BlasHandle> blas_;
     bool dynamicBlasLogged_ = false;   // the per-frame rebuild is announced once, not every frame
+    // Occlusion rays per pixel toward the sun's disc. FOUR by default: one gives the hard aliased
+    // edge this replaced, and the cost is linear, so this is the knob to turn down first if ray
+    // tracing ever starts costing frames. There is a recorded TDR history on this machine, so it
+    // deliberately does not default high.
+    u32 rtShadowRays_ = 4;
     bool rtLogged_ = false;
 
     // One replayed draw: its transform, its legacy colour parameters and its captured material.
@@ -153,6 +158,8 @@ private:
         f32 shadowParams[4] = {};
         // x = the cascade the depth-only shadow pass is currently filling
         f32 shadowDraw[4] = {};
+        // x = tan of the sun's angular radius, y = occlusion rays per pixel, z = base ray bias.
+        f32 rtParams[4] = {};
     } cb_;
 
     // Builds this frame's cascade matrices and splits. Returns the usable cascade count, 0 if none.
