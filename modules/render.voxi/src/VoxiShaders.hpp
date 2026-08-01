@@ -118,8 +118,12 @@ float2 rtDiscSample(uint k, float ang0) {
 // different triangles metres apart, so the "footprint" becomes a wild vector and the shadow rays
 // scatter across the scene. A derivative taken inside divergent flow is undefined in HLSL as well.
 // A reflected caller passes zero and gets a point sample, which is what it wants.
-float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy) {
-    const uint  n    = (uint)max(gRtParams.y, 1.0);
+// `rays` is explicit rather than read from the constant buffer, so a SECONDARY ray can ask for
+// fewer than a primary one. A reflection is already an approximation -- one bounce, no roughness
+// lobe -- and spending a full disc sweep on the shadow of something seen IN a reflection buys
+// detail nobody can resolve. Primary shading still passes the full count.
+float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays) {
+    const uint  n    = max(rays, 1u);
     const float tanR = max(gRtParams.x, 0.0);
     const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
 
@@ -218,7 +222,11 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, out
     // from CommittedRayT -- makes the sample pattern depend on a ray distance, which is exactly the
     // value most likely to differ between a hardware adapter and WARP, and the gate oracle compares
     // nine configurations bit-exactly.
-    float shadow = rtShadow(hitPos, nWS, L, pixel, float3(0,0,0), float3(0,0,0));
+    // ONE ray, not the full disc. This is the single largest saving available in the ray path:
+    // a reflective pixel was firing one reflection ray plus a four-ray disc from its hit, so five
+    // rays where two do. The penumbra of a reflected shadow is not resolvable in a one-bounce
+    // mirror image.
+    float shadow = rtShadow(hitPos, nWS, L, pixel, float3(0,0,0), float3(0,0,0), 1u);
 
     // LAMBERTIAN EXITANT RADIANCE, and the /PI is the whole point. averGroundRadiance is the
     // engine's own reference for this and reads:
@@ -345,7 +353,9 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     float ndl = saturate(dot(N, L));
 #if AVER_RT
     float sunVis;
-    if (gShadowParams.z > 0.5) sunVis = rtShadow(i.wpos, N, L, i.pos.xy, ddx(i.wpos), ddy(i.wpos));
+    if (gShadowParams.z > 0.5)
+        sunVis = rtShadow(i.wpos, N, L, i.pos.xy, ddx(i.wpos), ddy(i.wpos),
+                          (uint)max(gRtParams.y, 1.0));
     else                       sunVis = shadowFactor(i.wpos, N, ndl);
 #else
     const float sunVis = shadowFactor(i.wpos, N, ndl);
