@@ -4563,6 +4563,15 @@ void D3D12RenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, 
             id.Transform[r][3] = instances[i].world[12 + r];
         }
         id.InstanceMask = instances[i].mask;
+        // Rejected rather than truncated: InstanceID is a 24-bit bitfield, so a larger value would
+        // silently alias onto another instance's id and a hit would resolve to the wrong geometry.
+        if (instances[i].instanceId > kMaxTlasInstanceId) {
+            AVER_ERROR("[RHI.D3D12] buildTlas: instance {} has id {} which does not fit in 24 bits; "
+                       "it is dropped rather than aliased onto another instance",
+                       i, instances[i].instanceId);
+            continue;
+        }
+        id.InstanceID = instances[i].instanceId;
         id.AccelerationStructure = b->as->GetGPUVirtualAddress();
         dst[written++] = id;
     }

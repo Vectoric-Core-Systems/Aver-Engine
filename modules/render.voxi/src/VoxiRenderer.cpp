@@ -325,6 +325,10 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         std::memcpy(i.world, d.world, sizeof(i.world));
         i.mask = 0xFF;
         i.blas = b;
+        // The MESH is what this renderer's shaders would want to know from a hit, and it is stable
+        // across a build that drops an instance -- unlike the instance's position in the list.
+        // Nothing reads it yet; shadows only ask whether something is there.
+        i.instanceId = static_cast<u32>(d.mesh) & rhi::kMaxTlasInstanceId;
         inst.push_back(i);
     }
     if (inst.empty()) { ctx.popMarker(); return; }

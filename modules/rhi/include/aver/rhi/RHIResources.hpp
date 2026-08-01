@@ -340,7 +340,23 @@ struct TlasInstance {
     f32         world[16];   // ENGINE: row-major/row-vector, cm, +Z up; do not pre-transpose.
     u32         mask = 0xFF;
     BlasHandle  blas = 0;
+    // The caller's own id for this instance, readable from a hit as HLSL's CommittedInstanceID().
+    //
+    // THE ONLY WAY A HIT CAN SAY WHAT IT HIT. Everything a shader needs after an intersection --
+    // which mesh, where its vertices start, which material -- is looked up from this. Without it,
+    // ray tracing can answer "is something there" and nothing else, which is why shadows were all
+    // the engine could do with it.
+    //
+    // Do NOT use CommittedInstanceIndex() for that job. It is a position in the built structure,
+    // and buildTlas SKIPS instances naming an invalid acceleration structure, so one failure
+    // silently shifts every later index by one and every subsequent lookup reads its neighbour's
+    // geometry. This field survives that compaction; the index does not.
+    //
+    // 24 BITS: DXR declares it as a bitfield, so a larger value is rejected rather than truncated.
+    u32         instanceId = 0;
 };
+// The largest value TlasInstance::instanceId can carry.
+constexpr u32 kMaxTlasInstanceId = 0xFFFFFFu;
 
 // ---------------------------------------------------------------- resource factory
 
