@@ -28,6 +28,9 @@ struct OcMeshSubmesh {
 };
 
 // A decoded mesh: one vertex array and one index array, as rhi::IDevice::createMesh takes them.
+// Bone influences per vertex. Four is the spec's JOINTS/WEIGHTS width (5.3) and the GPU stride.
+inline constexpr u32 kOcMeshInfluences = 4;
+
 struct OcMeshData {
     std::vector<f32> positions;      // 3 per vertex
     std::vector<f32> normals;        // 3 per vertex
@@ -36,14 +39,30 @@ struct OcMeshData {
     std::vector<OcMeshSubmesh> submeshes;
     std::vector<std::string>   materialSlots;   // slot index -> surface name
 
+    // Skinning, present only when kOcMeshHasSkin is set. Four per vertex each.
+    //
+    // WEIGHTS ARE STORED AS R8G8B8A8_UNORM on disk per FORMAT_SPECS.md 5.3, so a round trip
+    // quantises them to 1/255. The writer spends the rounding remainder on the largest influence,
+    // so what comes back still sums to exactly one -- which is what skinning needs from them.
+    std::vector<u16> joints;         // bone index into the .ocskel this mesh is bound to
+    std::vector<f32> weights;        // normalised; the writer renormalises if they are not
+
     Vec3 boundsMin{0, 0, 0}, boundsMax{0, 0, 0};
     u32  flags = 0;
 
     u32  vertexCount() const { return static_cast<u32>(positions.size() / 3); }
+    // True when the skin streams are present and correctly sized for the vertex count.
+    bool hasSkin() const {
+        const usize v = positions.size() / 3;
+        return v > 0 && joints.size() == v * kOcMeshInfluences && weights.size() == v * kOcMeshInfluences;
+    }
     // True when the streams are non-empty and the same length.
     bool valid() const {
         const usize v = positions.size() / 3;
-        return v > 0 && !indices.empty() && normals.size() == v * 3 && uvs.size() == v * 2;
+        if (!(v > 0 && !indices.empty() && normals.size() == v * 3 && uvs.size() == v * 2)) return false;
+        // Half a skin is worse than none: it would write a stream the reader then mis-sizes.
+        if (!joints.empty() || !weights.empty()) return hasSkin();
+        return true;
     }
     // Recomputes boundsMin/boundsMax from positions.
     void computeBounds();

@@ -18,8 +18,12 @@ constexpr u32 kChunkIDXS = avrFourCC("IDXS");
 constexpr u32 kChunkMADR = avrFourCC("MADR");
 
 // Stream semantics and formats (§5.2, §5.3).
-constexpr u8 kSemPosition = 0, kSemTangentFrame = 1, kSemUV0 = 2;
+constexpr u8 kSemPosition = 0, kSemTangentFrame = 1, kSemUV0 = 2, kSemJoints = 5, kSemWeights = 6;
 constexpr u8 kFmtR32G32B32F = 0, kFmtR16G16B16A16S = 1, kFmtR16G16F = 2;
+constexpr u8 kFmtR8G8B8A8Unorm = 4, kFmtR16G16B16A16Uint = 7;
+
+// JOINTS (4xu16) then WEIGHTS (4xu8) share one slot, the way UV0 rides inside the attribute slot.
+constexpr u16 kSkinStride = 12, kSkinWeightOffset = 8;
 
 // Sets `why` and returns false.
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
@@ -134,6 +138,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
 
     const u32 vcount = m.vertexCount();
     const bool index32 = vcount > 0xFFFF;
+    const bool skinned = m.hasSkin();
 
     AvrStringTable strt;
     std::vector<u32> nameRefs;
@@ -157,6 +162,37 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
             w.u16v(floatToHalf(m.uvs[i * 2 + 1]));
         }
         w.pad16();
+
+        // ---- slot 2: JOINTS then WEIGHTS, when the mesh is skinned (5.2/5.3) ----
+        if (skinned) {
+            for (u32 i = 0; i < vcount; ++i) {
+                for (u32 k = 0; k < kOcMeshInfluences; ++k) w.u16v(m.joints[i * kOcMeshInfluences + k]);
+
+                // Quantise to 8 bits, then SPEND THE REMAINDER ON THE LARGEST influence so the four
+                // still sum to exactly 255. Rounding each independently loses up to 2/255 of a
+                // vertex's weight, which reads as a skinned mesh that quietly shrinks at the joints.
+                f32 sum = 0.0f;
+                for (u32 k = 0; k < kOcMeshInfluences; ++k) sum += m.weights[i * kOcMeshInfluences + k];
+                const f32 inv = sum > 1e-8f ? 1.0f / sum : 0.0f;
+
+                u32 q[kOcMeshInfluences] = {};
+                u32 total = 0, biggest = 0;
+                for (u32 k = 0; k < kOcMeshInfluences; ++k) {
+                    const f32 wn = m.weights[i * kOcMeshInfluences + k] * inv;
+                    q[k] = static_cast<u32>(std::lround(wn * 255.0f));
+                    if (q[k] > 255u) q[k] = 255u;
+                    total += q[k];
+                    if (q[k] > q[biggest]) biggest = k;
+                }
+                if (sum <= 1e-8f) { q[0] = 255; total = 255; biggest = 0; }   // an unweighted vertex
+                const i32 slack = 255 - static_cast<i32>(total);
+                const i32 fixed = static_cast<i32>(q[biggest]) + slack;
+                q[biggest] = static_cast<u32>(fixed < 0 ? 0 : (fixed > 255 ? 255 : fixed));
+
+                for (u32 k = 0; k < kOcMeshInfluences; ++k) w.u8v(static_cast<u8>(q[k]));
+            }
+            w.pad16();
+        }
     }
 
     // ---- IDXS ----
@@ -181,10 +217,11 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         W w{mhdr};
         u32 flags = m.flags & ~(kOcMeshIndex32 | kOcMeshMeshlets | kOcMeshHasColor | kOcMeshHasUV1 | kOcMeshHasSkin);
         if (index32) flags |= kOcMeshIndex32;
+        if (skinned) flags |= kOcMeshHasSkin;
         w.u32v(flags);
         w.u8v(1);                                             // LODCount
         w.u8v(static_cast<u8>(m.submeshes.size()));            // SubmeshCount
-        w.u8v(2);                                             // StreamCount: position + attributes
+        w.u8v(skinned ? 4 : 2);                               // StreamCount: +JOINTS +WEIGHTS
         w.u8v(1);                                             // UVChannelCount
         w.f32v(m.boundsMin.x); w.f32v(m.boundsMin.y); w.f32v(m.boundsMin.z);
         w.f32v(m.boundsMax.x); w.f32v(m.boundsMax.y); w.f32v(m.boundsMax.z);
@@ -201,6 +238,12 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         w.u8v(kSemPosition);     w.u8v(kFmtR32G32B32F);   w.u8v(0); w.u8v(0); w.u16v(12);         w.u16v(0);
         w.u8v(kSemTangentFrame); w.u8v(kFmtR16G16B16A16S); w.u8v(1); w.u8v(1); w.u16v(attrStride); w.u16v(0);
         // UV0 has no descriptor of its own: it lives inside slot 1's stride at offset +8.
+        if (skinned) {
+            w.u8v(kSemJoints);  w.u8v(kFmtR16G16B16A16Uint); w.u8v(2); w.u8v(3);
+            w.u16v(kSkinStride); w.u16v(0);
+            w.u8v(kSemWeights); w.u8v(kFmtR8G8B8A8Unorm);    w.u8v(2); w.u8v(4);
+            w.u16v(kSkinStride); w.u16v(kSkinWeightOffset);
+        }
 
         // LodDesc[1] (§5.5)
         const u64 posBytes  = u64(vcount) * 12;
@@ -276,7 +319,8 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
 
     // Stream table. Only position and the attribute stream are understood; anything else is skipped.
     u16 posStride = 12, attrStride = 12, uvOffset = 8;
-    bool sawPosition = false, sawAttrs = false;
+    u16 skinStride = kSkinStride, jointOffset = 0, weightOffset = kSkinWeightOffset;
+    bool sawPosition = false, sawAttrs = false, sawJoints = false, sawWeights = false;
     for (u8 i = 0; i < streamCount; ++i) {
         const u8 sem = r.u8v(); const u8 fmtv = r.u8v(); r.u8v(); r.u8v();
         const u16 stride = r.u16v(); const u16 offInStride = r.u16v();
@@ -292,8 +336,19 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
             if (fmtv != kFmtR16G16F)
                 return fail(why, ".ocmesh: UV0 is not R16G16_FLOAT");
             uvOffset = offInStride;
+        } else if (sem == kSemJoints) {
+            if (fmtv != kFmtR16G16B16A16Uint)
+                return fail(why, ".ocmesh: JOINTS is not R16G16B16A16_UINT");
+            skinStride = stride ? stride : kSkinStride; jointOffset = offInStride; sawJoints = true;
+        } else if (sem == kSemWeights) {
+            if (fmtv != kFmtR8G8B8A8Unorm)
+                return fail(why, ".ocmesh: WEIGHTS is not R8G8B8A8_UNORM");
+            skinStride = stride ? stride : kSkinStride; weightOffset = offInStride; sawWeights = true;
         }
     }
+    // One without the other would size the skin block wrong and read past it.
+    if (sawJoints != sawWeights)
+        return fail(why, ".ocmesh: JOINTS and WEIGHTS must both be present or both absent");
     if (!r.ok) return fail(why, ".ocmesh: truncated stream table");
     if (!sawPosition || !sawAttrs) return fail(why, ".ocmesh: missing the position or tangent-frame stream");
 
@@ -348,6 +403,25 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
         u16 hu, hv; std::memcpy(&hu, a + uvOffset, 2); std::memcpy(&hv, a + uvOffset + 2, 2);
         out.uvs[usize(i) * 2 + 0] = halfToFloat(hu);
         out.uvs[usize(i) * 2 + 1] = halfToFloat(hv);
+    }
+
+    // ---- skin, when the file carries it ----
+    if (sawJoints) {
+        const u64 attrPadded = (posPadded + u64(vcount) * attrStride + 15) & ~u64(15);
+        if (attrPadded + u64(vcount) * skinStride > vtxs->data.size())
+            return fail(why, ".ocmesh: VTXS is smaller than the skin streams require");
+
+        out.joints.resize(usize(vcount) * kOcMeshInfluences);
+        out.weights.resize(usize(vcount) * kOcMeshInfluences);
+        for (u32 i = 0; i < vcount; ++i) {
+            const u8* s = vtxs->data.data() + attrPadded + usize(i) * skinStride;
+            for (u32 k = 0; k < kOcMeshInfluences; ++k) {
+                u16 j; std::memcpy(&j, s + jointOffset + k * 2, 2);
+                out.joints[usize(i) * kOcMeshInfluences + k] = j;
+                out.weights[usize(i) * kOcMeshInfluences + k] =
+                    static_cast<f32>(s[weightOffset + k]) / 255.0f;
+            }
+        }
     }
 
     // ---- indices ----

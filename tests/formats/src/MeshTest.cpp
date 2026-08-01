@@ -197,6 +197,66 @@ int main() {
         check(m.indices.size() == 3 && m.indices[2] == 69999, "a 32-bit index survives");
     }
 
+    AVER_INFO("=== .ocmesh skin streams ===");
+    {
+        // JOINTS/WEIGHTS had a MeshFlags bit and nowhere to put the data. These are the first
+        // vertices in the engine's history with a bone influence on them.
+        fmt::OcMeshData src = makeCube();
+        const u32 n = src.vertexCount();
+        for (u32 v = 0; v < n; ++v) {
+            src.joints.insert(src.joints.end(),
+                              {static_cast<u16>(v % 4), static_cast<u16>((v + 1) % 4), 300, 0});
+            // Deliberately NOT normalised, and deliberately including a zero: the writer has to
+            // renormalise, and a zero influence has to survive as a zero rather than as noise.
+            src.weights.insert(src.weights.end(), {0.5f, 0.25f, 0.25f, 0.0f});
+        }
+        check(src.hasSkin(), "the fixture reports itself skinned");
+        check(src.valid(), "and is still a valid mesh");
+
+        std::vector<u8> bytes; std::string why;
+        check(fmt::writeOcMesh(src, bytes, &why), "a skinned mesh writes: " + why);
+        fmt::OcMeshData m;
+        check(fmt::parseOcMesh(bytes.data(), bytes.size(), m, &why), "and reads back: " + why);
+        check((m.flags & fmt::kOcMeshHasSkin) != 0, "the HasSkin flag is set by the writer, not the caller");
+        check(m.hasSkin(), "the streams come back the right size");
+        check(m.vertexCount() == n, "with every vertex");
+
+        bool joints = true, sums = true, zeroKept = true;
+        f32 worst = 0.0f;
+        for (u32 v = 0; v < n; ++v) {
+            for (u32 k = 0; k < fmt::kOcMeshInfluences; ++k) {
+                const usize i = usize(v) * fmt::kOcMeshInfluences + k;
+                if (m.joints[i] != src.joints[i]) joints = false;
+                worst = std::fmax(worst, std::fabs(m.weights[i] - src.weights[i]));
+            }
+            if (m.weights[usize(v) * fmt::kOcMeshInfluences + 3] != 0.0f) zeroKept = false;
+            f32 s = 0.0f;
+            for (u32 k = 0; k < fmt::kOcMeshInfluences; ++k)
+                s += m.weights[usize(v) * fmt::kOcMeshInfluences + k];
+            if (std::fabs(s - 1.0f) > 1.0e-6f) sums = false;
+        }
+        check(joints, "every joint index survives exactly, including one above 255");
+        check(zeroKept, "a zero influence stays exactly zero");
+        checkNear(worst, 0.0f, 1.0f / 255.0f + 1e-6f,
+                  "weights round-trip to within one 255th, which is what R8G8B8A8_UNORM buys");
+        check(sums, "and still sum to EXACTLY one -- the writer spends the rounding remainder");
+
+        // An unskinned mesh must not grow a stream, or every static mesh in the project pays for it.
+        fmt::OcMeshData plain = makeCube();
+        std::vector<u8> plainBytes;
+        check(fmt::writeOcMesh(plain, plainBytes, &why), "an unskinned mesh still writes");
+        fmt::OcMeshData pm;
+        check(fmt::parseOcMesh(plainBytes.data(), plainBytes.size(), pm, &why), "and reads");
+        check(!pm.hasSkin() && pm.joints.empty(), "with no skin streams at all");
+        check((pm.flags & fmt::kOcMeshHasSkin) == 0, "and no HasSkin flag");
+        check(plainBytes.size() < bytes.size(), "and it is genuinely smaller on disk");
+
+        // Half a skin is worse than none.
+        fmt::OcMeshData half = makeCube();
+        half.joints.assign(usize(half.vertexCount()) * fmt::kOcMeshInfluences, 0);
+        check(!half.valid(), "joints without weights is refused rather than half-written");
+    }
+
     AVER_INFO("=== .ocskel round trip ===");
     {
         fmt::OcSkeleton s;

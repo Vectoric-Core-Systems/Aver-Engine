@@ -2,6 +2,7 @@
 // glTF 2.0 / GLB import into the engine's own formats. glTF is right-handed, +Y up, -Z forward, in
 // metres; this engine is left-handed, +Z up, +X forward, in centimetres, so positions, normals and
 // rotations are rebased, lengths scaled, and triangle winding reversed (the basis change has det -1).
+#include "aver/formats/OcAnim.hpp"
 #include "aver/formats/OcMesh.hpp"
 
 #include <string>
@@ -13,6 +14,16 @@ namespace aver::fmt {
 struct GltfImportResult {
     std::vector<OcMeshData> meshes;          // one per glTF mesh, submeshes per primitive
     std::vector<std::string> meshNames;      // parallel to `meshes`; "" where the source had none
+
+    // One per glTF skin. Bone order IS the skin's joint order, which is what a mesh's JOINTS_0
+    // indices refer to, so the two are usable together without a remap.
+    std::vector<OcSkeleton>  skeletons;
+    std::vector<std::string> skeletonNames;
+
+    // Clips, in the file's own order. Bone indices address `skeletons[0]`.
+    std::vector<OcAnimation> animations;
+    std::vector<std::string> animationNames;
+
     std::vector<std::string> unsupported;    // features the file used and this importer cannot carry
 };
 

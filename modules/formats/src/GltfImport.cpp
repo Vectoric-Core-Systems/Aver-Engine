@@ -89,6 +89,9 @@ private:
     Buffers& b_;
     const GltfImportOptions& o_;
     GltfImportResult& r_;
+    // Old joint index -> new, from the parents-before-children sort of skin 0. Meshes and animation
+    // channels both address joints by the FILE's order, so both have to be rewritten through this.
+    std::vector<i32> jointRemap_;
 
     // Records an unsupported feature, once each.
     void note(const std::string& what) {
@@ -172,10 +175,26 @@ private:
         return v;
     }
 
+    // A rotation through the same basis change. NOT the obvious component shuffle: the map has
+    // determinant -1, so conjugating a rotation by it flips the sense of the turn. The axis is a
+    // pseudovector, so it picks up a sign the position vectors do not, and the angle is unchanged --
+    // which is why the vector part negates and w does not.
+    Quat toEngineQuat(f32 x, f32 y, f32 z, f32 w) const {
+        return o_.convertAxes ? Quat{z, -x, -y, w} : Quat{x, y, z, w};
+    }
+    // Scale is dimensionless, so it permutes with the axes and takes neither sign nor unit change.
+    Vec3 toEngineScale(f32 x, f32 y, f32 z) const {
+        return o_.convertAxes ? Vec3{z, x, y} : Vec3{x, y, z};
+    }
+
     // Appends one primitive to `m` as a submesh. Returns false with `why` set.
     bool importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData& m, std::string* why);
     // Appends every primitive of a mesh to `m`. Returns false with `why` set.
     bool importMesh(const JsonValue& mesh, const f32 node[16], OcMeshData& m, std::string* why);
+    // Builds one OcSkeleton per glTF skin, in the skin's own joint order.
+    bool importSkins(std::string* why);
+    // Builds one OcAnimation per glTF animation, addressing skin 0's bones.
+    bool importAnimations(std::string* why);
 };
 
 // Row-vector transform of a point or direction by a 4x4 row-major matrix.
@@ -201,10 +220,29 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
     if (pos.components != 3) return fail(why, "glTF: POSITION is not VEC3");
     const bool hasNrm = attrs.has("NORMAL") && readAccessor(attrs["NORMAL"].asInt(-1), nrm, why) && nrm.components == 3;
     const bool hasUv  = attrs.has("TEXCOORD_0") && readAccessor(attrs["TEXCOORD_0"].asInt(-1), uv, why) && uv.components == 2;
-    if (attrs.has("JOINTS_0")) note("skinning (JOINTS/WEIGHTS)");
     if (attrs.has("COLOR_0"))  note("vertex colour");
+    if (attrs.has("JOINTS_1")) note("a second set of bone influences (only JOINTS_0 is carried)");
+
+    // Skinning. Both must be present: joints with no weights move nothing, weights with no joints
+    // have nothing to move.
+    AccessorF joints, weights;
+    const bool hasSkin = attrs.has("JOINTS_0") && attrs.has("WEIGHTS_0")
+                      && readAccessor(attrs["JOINTS_0"].asInt(-1), joints, why)
+                      && readAccessor(attrs["WEIGHTS_0"].asInt(-1), weights, why)
+                      && joints.components == 4 && weights.components == 4
+                      && joints.count == pos.count && weights.count == pos.count;
+    if (!hasSkin && attrs.has("JOINTS_0"))
+        note("skinning on a primitive whose JOINTS_0/WEIGHTS_0 do not match its POSITION");
 
     const u32 baseVertex = m.vertexCount();
+    // A skinned primitive after an unskinned one: back-fill the earlier vertices so the streams stay
+    // 1:1 with the positions. Binding them all to bone 0 leaves them rigid, which is what they were.
+    if (hasSkin && m.joints.size() < usize(baseVertex) * kOcMeshInfluences) {
+        while (m.joints.size() < usize(baseVertex) * kOcMeshInfluences) {
+            m.joints.push_back(0);
+            m.weights.push_back(m.weights.size() % kOcMeshInfluences == 0 ? 1.0f : 0.0f);
+        }
+    }
     for (u32 i = 0; i < pos.count; ++i) {
         f32 t[3];
         xform(node, pos.v[usize(i)*3+0], pos.v[usize(i)*3+1], pos.v[usize(i)*3+2], true, t);
@@ -224,6 +262,24 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
 
         if (hasUv && i < uv.count) m.uvs.insert(m.uvs.end(), {uv.v[usize(i)*2+0], uv.v[usize(i)*2+1]});
         else                        m.uvs.insert(m.uvs.end(), {0.0f, 0.0f});
+
+        // Bone influences pass through UNCONVERTED: they index a skin's joint list and weight it,
+        // and neither is a direction, so the basis change does not touch them.
+        if (hasSkin) {
+            for (u32 k = 0; k < kOcMeshInfluences; ++k) {
+                m.joints.push_back(static_cast<u16>(joints.v[usize(i)*4 + k]));
+                m.weights.push_back(weights.v[usize(i)*4 + k]);
+            }
+        }
+    }
+    // A mesh whose primitives disagree about skinning would leave the streams the wrong length, so
+    // an unskinned primitive after a skinned one is padded to keep them 1:1 with the vertices.
+    if (!hasSkin && !m.joints.empty()) {
+        for (u32 i = 0; i < pos.count; ++i)
+            for (u32 k = 0; k < kOcMeshInfluences; ++k) {
+                m.joints.push_back(0);
+                m.weights.push_back(k == 0 ? 1.0f : 0.0f);
+            }
     }
 
     // Indices. glTF allows a primitive with none, meaning "draw the vertices in order".
@@ -335,9 +391,233 @@ void mul(const f32 a[16], const f32 b[16], f32 out[16]) {
         }
 }
 
+// One OcSkeleton per glTF skin. Bone order IS the skin's joint order, so a mesh's JOINTS_0 indices
+// address the result directly with no remap.
+bool Gltf::importSkins(std::string* why) {
+    const JsonValue& skins = d_["skins"];
+    const JsonValue& nodes = d_["nodes"];
+    if (skins.size() == 0) return true;
+
+    for (usize s = 0; s < skins.size(); ++s) {
+        const JsonValue& skin = skins[s];
+        const JsonValue& joints = skin["joints"];
+        if (joints.size() == 0) { note("a skin with no joints"); continue; }
+
+        // node index -> bone index, so a parent can be found by walking the node tree.
+        std::vector<i32> boneOfNode(nodes.size(), -1);
+        for (usize j = 0; j < joints.size(); ++j) {
+            const i64 n = joints[j].asInt(-1);
+            if (n >= 0 && usize(n) < nodes.size()) boneOfNode[usize(n)] = static_cast<i32>(j);
+        }
+        // The reverse edge glTF does not store: a node lists its children, never its parent.
+        std::vector<i32> parentOfNode(nodes.size(), -1);
+        for (usize n = 0; n < nodes.size(); ++n) {
+            const JsonValue& kids = nodes[n]["children"];
+            for (usize k = 0; k < kids.size(); ++k) {
+                const i64 c = kids[k].asInt(-1);
+                if (c >= 0 && usize(c) < nodes.size()) parentOfNode[usize(c)] = static_cast<i32>(n);
+            }
+        }
+
+        OcSkeleton sk;
+        sk.bones.resize(joints.size());
+        for (usize j = 0; j < joints.size(); ++j) {
+            const i64 ni = joints[j].asInt(-1);
+            OcBone& b = sk.bones[j];
+            if (ni < 0 || usize(ni) >= nodes.size()) continue;
+            const JsonValue& n = nodes[usize(ni)];
+            if (n.has("name")) b.name = std::string(n["name"].asString());
+
+            // A joint's parent is its nearest ANCESTOR that is also in this skin. glTF allows
+            // non-joint nodes in between, and treating those as roots would break the chain.
+            i32 p = parentOfNode[usize(ni)];
+            while (p >= 0 && boneOfNode[usize(p)] < 0) p = parentOfNode[usize(p)];
+            b.parent = p >= 0 ? boneOfNode[usize(p)] : kOcBoneNoParent;
+
+            if (n.has("matrix")) {
+                note("a joint whose transform is a matrix rather than TRS (rest pose taken as identity)");
+            } else {
+                f32 t[3] = {0,0,0}, r[4] = {0,0,0,1}, sc[3] = {1,1,1};
+                if (n.has("translation")) for (int i = 0; i < 3; ++i) t[i] = n["translation"][usize(i)].asFloat();
+                if (n.has("rotation"))    for (int i = 0; i < 4; ++i) r[i] = n["rotation"][usize(i)].asFloat();
+                if (n.has("scale"))       for (int i = 0; i < 3; ++i) sc[i] = n["scale"][usize(i)].asFloat(1.0f);
+                b.translation = toEngine(t[0], t[1], t[2], false);
+                b.rotation    = toEngineQuat(r[0], r[1], r[2], r[3]);
+                b.scale       = toEngineScale(sc[0], sc[1], sc[2]);
+            }
+        }
+
+        // PARENTS BEFORE CHILDREN is a contract of the format, and glTF does not promise it. Sort
+        // topologically and rewrite every parent index, or OcSkeleton::valid() rejects the result
+        // and poseToModel would read a parent that has not been resolved yet.
+        std::vector<i32> order;
+        order.reserve(sk.bones.size());
+        std::vector<u8> placed(sk.bones.size(), 0);
+        bool progress = true;
+        while (order.size() < sk.bones.size() && progress) {
+            progress = false;
+            for (usize i = 0; i < sk.bones.size(); ++i) {
+                if (placed[i]) continue;
+                const i32 p = sk.bones[i].parent;
+                if (p == kOcBoneNoParent || placed[usize(p)]) {
+                    order.push_back(static_cast<i32>(i));
+                    placed[i] = 1;
+                    progress = true;
+                }
+            }
+        }
+        if (order.size() != sk.bones.size()) {
+            note("a skin whose joint hierarchy has a cycle");
+            continue;
+        }
+        std::vector<i32> newIndexOf(sk.bones.size(), -1);
+        for (usize i = 0; i < order.size(); ++i) newIndexOf[usize(order[i])] = static_cast<i32>(i);
+
+        OcSkeleton sorted;
+        sorted.bones.reserve(sk.bones.size());
+        for (const i32 old : order) {
+            OcBone b = sk.bones[usize(old)];
+            if (b.parent != kOcBoneNoParent) b.parent = newIndexOf[usize(b.parent)];
+            sorted.bones.push_back(std::move(b));
+        }
+        sorted.rootBone = 0;
+
+        // THE INVERSE BIND IS RE-DERIVED from the rest pose rather than read from the file.
+        // glTF supplies inverseBindMatrices, but converting a matrix through a determinant -1 basis
+        // change is a second, independent chance to get the handedness wrong -- and the value is
+        // definitionally the inverse of the bone's model-space rest transform, which this importer
+        // has just built. Deriving it makes a bind-pose skeleton skin to the identity by
+        // construction. A file whose bind pose genuinely differs from its node rest pose is noted.
+        if (skin.has("inverseBindMatrices"))
+            note("inverseBindMatrices (re-derived from the rest pose, which is equivalent unless the "
+                 "file's bind pose differs from its node transforms)");
+
+        std::vector<Mat4> model(sorted.bones.size(), Mat4::identity());
+        for (usize i = 0; i < sorted.bones.size(); ++i) {
+            Transform x;
+            x.position = sorted.bones[i].translation;
+            x.rotation = sorted.bones[i].rotation;
+            x.scale    = sorted.bones[i].scale;
+            const Mat4 local = x.toMatrix();
+            const i32 p = sorted.bones[i].parent;
+            model[i] = (p >= 0 && usize(p) < i) ? local * model[usize(p)] : local;
+            const Mat4 inv = model[i].inverse();
+            for (int rr = 0; rr < 4; ++rr)
+                for (int cc = 0; cc < 4; ++cc) sorted.bones[i].inverseBind[rr * 4 + cc] = inv.m[rr][cc];
+        }
+
+        // The joint reorder has to reach the meshes too, or every JOINTS_0 index now names the
+        // wrong bone. Only skin 0's meshes are remapped, which is the case the result documents.
+        if (s == 0) {
+            for (OcMeshData& m : r_.meshes)
+                for (u16& j : m.joints)
+                    if (usize(j) < newIndexOf.size() && newIndexOf[j] >= 0)
+                        j = static_cast<u16>(newIndexOf[j]);
+            jointRemap_ = newIndexOf;
+        }
+
+        r_.skeletons.push_back(std::move(sorted));
+        r_.skeletonNames.push_back(skin.has("name") ? std::string(skin["name"].asString()) : std::string());
+    }
+    (void)why;
+    return true;
+}
+
+// One OcAnimation per glTF animation. One OcTrack PER CHANNEL rather than per bone: glTF gives each
+// channel its own time accessor, and merging two channels that do not share a timeline would mean
+// resampling one of them and losing exactly the fidelity .ocanim exists to keep.
+bool Gltf::importAnimations(std::string* why) {
+    const JsonValue& anims = d_["animations"];
+    if (anims.size() == 0) return true;
+    if (r_.skeletons.empty()) { note("animations on a file with no skin"); return true; }
+
+    const JsonValue& skins = d_["skins"];
+    const JsonValue& joints = skins[0]["joints"];
+    const JsonValue& nodes = d_["nodes"];
+    std::vector<i32> boneOfNode(nodes.size(), -1);
+    for (usize j = 0; j < joints.size(); ++j) {
+        const i64 n = joints[j].asInt(-1);
+        if (n >= 0 && usize(n) < nodes.size()) {
+            const i32 pre = static_cast<i32>(j);
+            boneOfNode[usize(n)] = (usize(pre) < jointRemap_.size() && jointRemap_[usize(pre)] >= 0)
+                                 ? jointRemap_[usize(pre)] : pre;
+        }
+    }
+
+    for (usize a = 0; a < anims.size(); ++a) {
+        const JsonValue& an = anims[a];
+        const JsonValue& channels = an["channels"];
+        const JsonValue& samplers = an["samplers"];
+        OcAnimation clip;
+        clip.storage = OcAnimStorage::Keyframed;
+        clip.skeletonRef = r_.skeletonNames.empty() ? std::string() : r_.skeletonNames[0];
+
+        for (usize c = 0; c < channels.size(); ++c) {
+            const JsonValue& ch = channels[c];
+            const JsonValue& target = ch["target"];
+            const i64 nodeIdx = target["node"].asInt(-1);
+            const std::string path(target["path"].asString());
+            if (path == "weights") { note("morph-target animation"); continue; }
+            if (nodeIdx < 0 || usize(nodeIdx) >= boneOfNode.size() || boneOfNode[usize(nodeIdx)] < 0) {
+                note("an animation channel targeting a node that is not a joint of skin 0");
+                continue;
+            }
+            const i64 si = ch["sampler"].asInt(-1);
+            if (si < 0 || usize(si) >= samplers.size()) { note("an animation channel with no sampler"); continue; }
+            const JsonValue& sm = samplers[usize(si)];
+
+            AccessorF in, outv;
+            if (!readAccessor(sm["input"].asInt(-1), in, why)) return false;
+            if (!readAccessor(sm["output"].asInt(-1), outv, why)) return false;
+            if (in.components != 1 || in.count == 0) { note("an animation sampler whose input is not scalar"); continue; }
+
+            const std::string interp(sm["interpolation"].asString("LINEAR"));
+            OcTrack t;
+            t.boneIndex = static_cast<u16>(boneOfNode[usize(nodeIdx)]);
+            t.interp = interp == "STEP" ? OcInterp::Step
+                     : interp == "CUBICSPLINE" ? OcInterp::CubicSpline : OcInterp::Linear;
+            t.channels = path == "translation" ? kOcChannelTranslation
+                       : path == "rotation"    ? kOcChannelRotation
+                       : path == "scale"       ? kOcChannelScale : 0;
+            if (t.channels == 0) { note("an animation channel with an unknown path '" + path + "'"); continue; }
+
+            const u32 width = t.channels == kOcChannelRotation ? 4u : 3u;
+            const u32 slots = t.interp == OcInterp::CubicSpline ? 3u : 1u;
+            if (outv.components != width || outv.count != in.count * slots) {
+                note("an animation sampler whose output does not match its input");
+                continue;
+            }
+
+            t.times.assign(in.v.begin(), in.v.begin() + in.count);
+            t.values.reserve(usize(in.count) * width * slots);
+            // Cubic stores in-tangent, value and out-tangent per key, and all three convert the same
+            // way: a tangent of a position is a position per second, a tangent of a rotation a
+            // quaternion per second, and the basis change is linear.
+            for (u32 k = 0; k < in.count * slots; ++k) {
+                const f32* v = &outv.v[usize(k) * width];
+                if (t.channels == kOcChannelTranslation) {
+                    const Vec3 p = toEngine(v[0], v[1], v[2], false);
+                    t.values.insert(t.values.end(), {p.x, p.y, p.z});
+                } else if (t.channels == kOcChannelRotation) {
+                    const Quat q = toEngineQuat(v[0], v[1], v[2], v[3]);
+                    t.values.insert(t.values.end(), {q.x, q.y, q.z, q.w});
+                } else {
+                    const Vec3 sv = toEngineScale(v[0], v[1], v[2]);
+                    t.values.insert(t.values.end(), {sv.x, sv.y, sv.z});
+                }
+            }
+            for (const f32 tt : t.times) if (tt > clip.duration) clip.duration = tt;
+            clip.tracks.push_back(std::move(t));
+        }
+
+        if (clip.tracks.empty()) { note("an animation with no usable channels"); continue; }
+        r_.animations.push_back(std::move(clip));
+        r_.animationNames.push_back(an.has("name") ? std::string(an["name"].asString()) : std::string());
+    }
+    return true;
+}
+
 bool Gltf::run(std::string* why) {
-    if (d_.has("skins"))       note("skins (the .ocskel format exists; extraction does not yet)");
-    if (d_.has("animations"))  note("animations (the .ocanim format exists; extraction does not yet)");
     if (d_.has("materials"))   note("material definitions (names are kept as slots; parameters are not)");
     if (d_.has("images") || d_.has("textures")) note("textures");
 
@@ -400,6 +680,11 @@ bool Gltf::run(std::string* why) {
         }
         r_.meshes[i].computeBounds();
     }
+
+    // Skins before animations: a clip addresses bones, and the bone order is not settled until the
+    // skin has been sorted parents-before-children.
+    if (!importSkins(why)) return false;
+    if (!importAnimations(why)) return false;
     return true;
 }
 
