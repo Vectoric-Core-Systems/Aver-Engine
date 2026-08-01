@@ -4,6 +4,7 @@
 #include "aver/core/Hash.hpp"
 #include "aver/platform/FileSystem.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -63,13 +64,45 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             out.spawnZ = tokF(t, 3); out.spawnYaw = tokF(t, 4);
         } else if (equalsCI(key, "SUN")) {
             out.hasSun = true;
+            // `dir` and `elev`/`azim` are alternative spellings of the same field; the later token
+            // wins. Degrees exist because the physical sky makes elevation the only input that
+            // matters, and nobody authors a time of day as a unit vector.
+            f64 elevDeg = 0.0, azimDeg = 0.0;
+            bool sawElev = false, sawAzim = false;
             for (usize i = 1; i < t.size(); ++i) {
                 if (equalsCI(t[i], "dir") && i + 3 < t.size()) {
                     out.sunDir[0] = parseF64(t[i+1]); out.sunDir[1] = parseF64(t[i+2]); out.sunDir[2] = parseF64(t[i+3]);
+                    sawElev = sawAzim = false;
+                } else if (equalsCI(t[i], "elev") && i + 1 < t.size()) {
+                    elevDeg = parseF64(t[i+1]); sawElev = true;
+                } else if (equalsCI(t[i], "azim") && i + 1 < t.size()) {
+                    azimDeg = parseF64(t[i+1]); sawAzim = true;
                 } else if (equalsCI(t[i], "color") && i + 3 < t.size()) {
                     out.sunColor[0] = parseF64(t[i+1]); out.sunColor[1] = parseF64(t[i+2]); out.sunColor[2] = parseF64(t[i+3]);
                 } else if (equalsCI(t[i], "lux") && i + 1 < t.size()) {
                     out.sunLux = parseF64(t[i+1]);
+                }
+            }
+            if (sawElev || sawAzim) {
+                const f64 kDeg = 3.14159265358979 / 180.0;
+                const f64 ce = std::cos(elevDeg * kDeg);
+                out.sunDir[0] = ce * std::cos(azimDeg * kDeg);
+                out.sunDir[1] = ce * std::sin(azimDeg * kDeg);
+                out.sunDir[2] = std::sin(elevDeg * kDeg);
+            }
+        } else if (equalsCI(key, "SKY")) {
+            out.hasSky = true;
+            for (usize i = 1; i < t.size(); ++i) {
+                if (equalsCI(t[i], "model") && i + 1 < t.size()) {
+                    out.skyPhysical = !equalsCI(t[i+1], "authored");
+                } else if (equalsCI(t[i], "mie") && i + 1 < t.size()) {
+                    out.skyMieScatter = parseF64(t[i+1]);
+                } else if (equalsCI(t[i], "multiscatter") && i + 1 < t.size()) {
+                    out.skyMultiScatter = parseF64(t[i+1]);
+                } else if (equalsCI(t[i], "steps") && i + 1 < t.size()) {
+                    out.skyViewSteps = parseI32(t[i+1], 0);
+                } else if (equalsCI(t[i], "aerial") && i + 1 < t.size()) {
+                    out.skyAerialSteps = parseI32(t[i+1], 0);
                 }
             }
         } else if (equalsCI(key, "FOG")) {
@@ -141,9 +174,26 @@ std::string writeOcworld(const OcWorldData& w) {
         s += "SPAWN " + num(w.spawnX) + " " + num(w.spawnY) + " " + num(w.spawnZ) + " " + num(w.spawnYaw) + "\n";
     }
     if (w.hasSun) {
+        // The VECTOR is written, because it round-trips exactly where degrees do not. The elevation
+        // rides along as a trailing comment so the line is still readable by a person -- the parser
+        // truncates at '#', so it cannot be read back and drift.
+        const f64 len = std::sqrt(w.sunDir[0]*w.sunDir[0] + w.sunDir[1]*w.sunDir[1] + w.sunDir[2]*w.sunDir[2]);
+        const f64 kRad = 180.0 / 3.14159265358979;
+        const f64 elev = len > 1e-9 ? std::asin(w.sunDir[2] / len) * kRad : 0.0;
+        const f64 azim = std::atan2(w.sunDir[1], w.sunDir[0]) * kRad;
         s += "SUN dir " + num(w.sunDir[0]) + " " + num(w.sunDir[1]) + " " + num(w.sunDir[2]) +
              " color " + num(w.sunColor[0]) + " " + num(w.sunColor[1]) + " " + num(w.sunColor[2]) +
-             " lux " + num(w.sunLux) + "\n";
+             " lux " + num(w.sunLux) +
+             "   # elev " + num(elev) + " azim " + num(azim) + "\n";
+    }
+    if (w.hasSky) {
+        s += "SKY model ";
+        s += w.skyPhysical ? "physical" : "authored";
+        if (w.skyMieScatter   >= 0.0) s += " mie " + num(w.skyMieScatter);
+        if (w.skyMultiScatter >= 0.0) s += " multiscatter " + num(w.skyMultiScatter);
+        if (w.skyViewSteps    >  0)   s += " steps " + std::to_string(w.skyViewSteps);
+        if (w.skyAerialSteps  >  0)   s += " aerial " + std::to_string(w.skyAerialSteps);
+        s += "\n";
     }
     if (w.hasFog) {
         s += "FOG exp density " + num(w.fogDensity) +

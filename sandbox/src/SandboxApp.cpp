@@ -4647,6 +4647,7 @@ private:
             fogColor_[2] = static_cast<f32>(w.fogColor[2]);
             hasLevelFog_ = true;
         }
+        applyLevelSky(w);
         levelPath_ = path;
         levelName_ = w.name;
 
@@ -4656,6 +4657,38 @@ private:
         if (!w.placements.empty()) frameCameraOn(w);
 
         AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
+    }
+
+    // Applies a level's SUN and SKY records to the live atmosphere.
+    //
+    // The SUN half is NEW BEHAVIOUR: OcWorld has always parsed sunDir/sunColor/sunLux and nothing
+    // has ever read them, so every level in existence has been lit by the editor's default sun
+    // while its own record sat there looking authoritative.
+    void applyLevelSky(const fmt::OcWorldData& w) {
+        if (w.hasSun) {
+            for (int i = 0; i < 3; ++i) {
+                sky_.sunDirection[i] = static_cast<f32>(w.sunDir[i]);
+                sunColor_[i] = static_cast<f32>(w.sunColor[i]);
+            }
+            // A sun below the horizon is legal -- the physical model renders night -- but under the
+            // authored dome it silently lit everything from underneath, so no level was ever told.
+            // Say it out loud rather than clamping: only the author knows if they meant it.
+            f32 elev = 0.0f, azim = 0.0f;
+            sky_.sunAngles(elev, azim);
+            if (elev < 0.0f)
+                AVER_WARN("[Level] SUN is {:.1f} degrees BELOW the horizon (dir {:.3f} {:.3f} {:.3f}). "
+                          "The physical sky renders that as night; --sky-authored lights from below "
+                          "as it always did.", elev, w.sunDir[0], w.sunDir[1], w.sunDir[2]);
+            hasLevelSun_ = true;
+        }
+        if (w.hasSky) {
+            sky_.model = w.skyPhysical ? rhi::SkyModel::Physical : rhi::SkyModel::Authored;
+            if (w.skyMieScatter   >= 0.0) sky_.air.mieScatter       = static_cast<f32>(w.skyMieScatter);
+            if (w.skyMultiScatter >= 0.0) sky_.air.multiScatterGain = static_cast<f32>(w.skyMultiScatter);
+            if (w.skyViewSteps    >  0)   sky_.air.viewSteps        = w.skyViewSteps;
+            if (w.skyAerialSteps  >  0)   sky_.air.aerialSteps      = w.skyAerialSteps;
+            hasLevelSky_ = true;
+        }
     }
 
     // Puts the editor camera where the whole level is visible, and fits the fly speed and the GI
@@ -4720,6 +4753,8 @@ private:
         levelBodies_.clear();
 #endif
         hasLevelFog_ = false;
+        hasLevelSun_ = false;
+        hasLevelSky_ = false;
         levelPath_.clear();
     }
 
@@ -4731,6 +4766,20 @@ private:
         w.hasFog = hasLevelFog_;
         w.fogDensity = levelFog_;
         w.fogColor[0] = fogColor_[0]; w.fogColor[1] = fogColor_[1]; w.fogColor[2] = fogColor_[2];
+
+        // The sun and the sky go back out whenever the level carried them, so an edit in the
+        // Details panel survives a save rather than being silently dropped on the next load.
+        w.hasSun = hasLevelSun_;
+        w.hasSky = hasLevelSky_;
+        for (int i = 0; i < 3; ++i) {
+            w.sunDir[i] = sky_.sunDirection[i];
+            w.sunColor[i] = sunColor_[i];
+        }
+        w.skyPhysical     = sky_.model == rhi::SkyModel::Physical;
+        w.skyMieScatter   = sky_.air.mieScatter;
+        w.skyMultiScatter = sky_.air.multiScatterGain;
+        w.skyViewSteps    = sky_.air.viewSteps;
+        w.skyAerialSteps  = sky_.air.aerialSteps;
 
         for (const scene::Entity e : levelEntities_) {
             if (!world.valid(e)) continue;
@@ -4756,6 +4805,8 @@ private:
 
     std::vector<scene::Entity> levelEntities_;
     std::string levelPath_, levelName_;
+    bool hasLevelSun_ = false;
+    bool hasLevelSky_ = false;
     bool hasLevelFog_ = false;
     f32  levelFog_ = 0.0002f;
 #if AVER_MODULE_PHYSICS

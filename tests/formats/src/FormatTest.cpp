@@ -3,6 +3,7 @@
 #include "aver/formats/OcBeam.hpp"
 #include "aver/formats/OcMap.hpp"
 #include "aver/formats/OcProject.hpp"
+#include "aver/formats/OcWorld.hpp"
 #include "aver/assets/AssetId.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Hash.hpp"
@@ -154,10 +155,72 @@ static void checkOcproject() {
     check(nb.name == "Fresh", "and carries its name");
 }
 
+// Checks the .ocworld environment records: SUN in both spellings, the new SKY record, and the
+// round trip. The reader and the writer had NO coverage at all before this.
+static void checkOcworld() {
+    AVER_INFO("=== .ocworld environment records ===");
+    using namespace fmt;
+    std::string err;
+
+    {
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "SUN dir -0.3 -0.4 -0.85 color 1 0.98 0.92 lux 90000\n"
+                           "SKY model physical mie 0.008 multiscatter 1.4 steps 24 aerial 6\n"
+                           "FOG exp density 0.00014 color 0.7 0.78 0.88\n", w, &err),
+              "a world with SUN, SKY and FOG parses");
+        check(w.hasSun && w.hasSky && w.hasFog, "and reports all three present");
+        check(std::fabs(w.sunDir[2] + 0.85) < 1e-9, "the sun vector is taken verbatim");
+        check(w.sunLux == 90000.0, "including its lux");
+        check(w.skyPhysical, "the sky model reads as physical");
+        check(std::fabs(w.skyMieScatter - 0.008) < 1e-12, "the Mie override survives");
+        check(w.skyViewSteps == 24 && w.skyAerialSteps == 6, "and both step counts");
+    }
+    {
+        // Degrees are the form a person authors a time of day in, so they must reach the vector.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\nSUN elev 30 azim 90\n", w, &err),
+              "SUN accepts elevation and azimuth instead of a vector");
+        check(std::fabs(w.sunDir[2] - 0.5) < 1e-6, "30 degrees of elevation puts z at sin(30)");
+        check(std::fabs(w.sunDir[0]) < 1e-6 && std::fabs(w.sunDir[1] - std::cos(30.0 * 3.14159265358979 / 180.0)) < 1e-6,
+              "and a 90-degree bearing puts the rest on +Y");
+    }
+    {
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\nSKY model authored\n", w, &err), "an authored sky parses");
+        check(!w.skyPhysical, "and selects the two-colour dome");
+    }
+    {
+        // The record is optional and must stay so: every level written before it existed has none.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\nPLACE m.ocmesh 0 0 0 0 0 0 1\n", w, &err),
+              "a world with no SUN or SKY still parses");
+        check(!w.hasSun && !w.hasSky, "and says so rather than inventing defaults as authored values");
+    }
+    {
+        OcWorldData w;
+        w.name = "RoundTrip";
+        w.hasSun = true;  w.sunDir[0] = -0.5481; w.sunDir[1] = 0.3838; w.sunDir[2] = 0.7431;
+        w.hasSky = true;  w.skyPhysical = true; w.skyMieScatter = 0.004; w.skyViewSteps = 32;
+        w.hasFog = true;  w.fogDensity = 4e-6;
+        const std::string text = writeOcworld(w);
+        OcWorldData b;
+        check(parseOcworld(text, b, &err), "what the writer produced parses again");
+        check(b.hasSun && b.hasSky, "with both records still present");
+        for (int i = 0; i < 3; ++i)
+            check(std::fabs(b.sunDir[i] - w.sunDir[i]) < 1e-9, "the sun vector round-trips exactly");
+        check(b.skyPhysical && b.skyViewSteps == 32, "and so does the sky model");
+        // The elevation rides along as a comment for a reader; it must not be read back as data.
+        check(text.find("# elev") != std::string::npos, "the written SUN line carries a readable elevation");
+        check(writeOcworld(b) == text, "and a second write reproduces the first byte for byte");
+    }
+}
+
 // Runs the self-checks, then every file named on the command line. Returns the failure count.
 int main(int argc, char** argv) {
     checkFnv();
     checkOcproject();
+    checkOcworld();
     if (argc < 2) {
         AVER_INFO("usage: FormatTest <file.ocbeam|file.ocmap> [more...]");
         return g_failures;

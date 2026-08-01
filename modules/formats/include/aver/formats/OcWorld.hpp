@@ -42,6 +42,16 @@ struct OcWorldData {
     f64 fogDensity = 4e-6;                 // per cm
     f64 fogColor[3] = {1.0, 1.0, 1.0};     // a tint on the in-scattered sky; white is clear air
 
+    // SKY: which sky model, and the few air parameters worth authoring per level. Kept as plain
+    // numbers rather than an rhi::AtmosphereProfile because this module depends on Core alone.
+    // A negative or zero override means "leave the engine's default alone".
+    bool hasSky = false;
+    bool skyPhysical = true;               // false selects the authored two-colour dome
+    f64 skyMieScatter = -1.0;              // per km; raise for haze, dust or a coastal day
+    f64 skyMultiScatter = -1.0;            // isotropic multiple-scattering gain
+    i32 skyViewSteps = 0;                  // samples along a sky ray
+    i32 skyAerialSteps = 0;                // samples along the air between camera and surface
+
     bool hasSpawn = false;
     f64 spawnX = 0, spawnY = 0, spawnZ = 0, spawnYaw = 0;
 
