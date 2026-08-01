@@ -1,0 +1,335 @@
+// The path-tracing compute pass: scenes in, linear radiance out.
+#include "aver/pt/PathTracer.hpp"
+#include "aver/core/Log.hpp"
+#include "PtShaders.hpp"
+
+#include <cstring>
+
+namespace aver::pt {
+
+namespace {
+
+// t0 acceleration structure, t1 vertices, t2 indices, t3 instances.
+constexpr u32 kSrvCount = 4;
+// u0 the accumulator.
+constexpr u32 kUavCount = 1;
+// The shader's [numthreads(8,8,1)].
+constexpr u32 kGroup = 8;
+
+// RayQuery is SM 6.5, and DXR 1.1 is what makes it available from a compute shader with no state
+// object and no shader table.
+constexpr u32 kShaderModel = 65;
+constexpr u32 kRayTracingTier = 11;
+
+// MIRRORS cbuffer PtFrame in kPathTracerHLSL, field for field. Nothing checks this across the
+// C++/HLSL boundary, and a shifted field here reads a camera basis as a sample count.
+struct FrameCB {
+    f32 origin[4];
+    f32 forward[4];
+    f32 right[4];
+    f32 up[4];
+    u32 image[4];
+    u32 sample[4];
+    f32 trace[4];
+};
+
+} // namespace
+
+PathTracer::~PathTracer() { shutdown(); }
+
+bool PathTracer::init(rhi::IDevice& dev) {
+    shutdown();
+    dev_ = &dev;
+    res_ = dev.resources();
+    if (!res_) return false;
+
+    const rhi::DeviceCaps caps = dev.caps();
+    if (caps.rayTracingTier < kRayTracingTier || caps.shaderModel < kShaderModel ||
+        !caps.dxcAvailable || !caps.computeShaders) {
+        AVER_INFO("[PT] unavailable on this device: RT tier {}, SM {}, DXC {} (needs tier {}, SM {})",
+                  caps.rayTracingTier, caps.shaderModel, caps.dxcAvailable, kRayTracingTier,
+                  kShaderModel);
+        shutdown();
+        return false;
+    }
+
+    rhi::ShaderDesc sd;
+    sd.source  = kPathTracerHLSL;
+    // The engine's own declarations, which is where PI, skyColor and the averFurnace* contract come
+    // from. Taking the environment from the shipped prelude rather than a private constant is what
+    // makes the furnace a measurement of the engine and not of a test rig.
+    sd.prelude = rhi::sharedShaderPrelude();
+    sd.entry   = "CSPathTrace";
+    sd.stage   = rhi::ShaderStage::Compute;
+    sd.minShaderModel = kShaderModel;
+    cs_ = res_->createShader(sd);
+    if (!cs_) {
+        // HLSL is compiled at RUNTIME by DXC, so this is the only place a shader error can surface.
+        AVER_ERROR("[PT] the integrator would not compile");
+        shutdown();
+        return false;
+    }
+
+    rhi::ComputePipelineDesc pd;
+    pd.cs = cs_;
+    pd.layout.srvCount = kSrvCount;
+    pd.layout.uavCount = kUavCount;
+    // b4 stays a ROOT CBV (zero dwords): the block is 112 bytes, which is more than root constants
+    // should carry, and setConstantBuffer suballocates it from the frame's upload ring.
+    pd.layout.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;
+    pipeline_ = res_->createComputePipeline(pd);
+    if (!pipeline_) { AVER_ERROR("[PT] integrator pipeline unavailable"); shutdown(); return false; }
+
+    AVER_INFO("[PT] path tracer ready (RayQuery, SM {}, {}x{} threads per group)",
+              kShaderModel, kGroup, kGroup);
+    return true;
+}
+
+void PathTracer::shutdown() {
+    if (res_) {
+        // Acceleration structures are released with the factory itself, as Voxi's do: the RHI has
+        // no destroyBlas/destroyTlas, so only the handles are dropped here.
+        if (verts_)       res_->destroyBuffer(verts_);
+        if (indices_)     res_->destroyBuffer(indices_);
+        if (instanceBuf_) res_->destroyBuffer(instanceBuf_);
+        if (pipeline_)    res_->destroyPipeline(pipeline_);
+        if (cs_)          res_->destroyShader(cs_);
+    }
+    verts_ = indices_ = instanceBuf_ = 0;
+    pipeline_ = 0;
+    cs_ = 0;
+    surfaces_.clear();
+    instances_.clear();
+    scenes_.clear();
+    blas_.clear();
+    totalVerts_ = totalIndices_ = 0;
+    prepared_ = false;
+    built_ = false;
+    dev_ = nullptr;
+    res_ = nullptr;
+}
+
+u32 PathTracer::addSurface(const PtSurface& s) {
+    surfaces_.push_back(s);
+    return static_cast<u32>(surfaces_.size() - 1);
+}
+
+u32 PathTracer::addScene(const u32* surfaceIds, u32 count) {
+    Scene s;
+    s.surfaces.assign(surfaceIds, surfaceIds + count);
+    if (res_) s.tlas = res_->createTlas(count ? count : 1);
+    scenes_.push_back(std::move(s));
+    return static_cast<u32>(scenes_.size() - 1);
+}
+
+bool PathTracer::prepare() {
+    if (!res_ || !dev_ || surfaces_.empty()) return false;
+    if (prepared_) return true;
+
+    // Where each surface's geometry lands in the flat table. Per SURFACE and not per mesh: two
+    // surfaces may share a mesh (the same quad with two albedos is exactly that case), and giving
+    // them separate rows costs a few vertices and removes a deduplication that could go wrong.
+    instances_.resize(surfaces_.size());
+    totalVerts_ = totalIndices_ = 0;
+    for (usize i = 0; i < surfaces_.size(); ++i) {
+        rhi::BufferHandle vb = 0, ib = 0;
+        u32 vc = 0, ic = 0;
+        if (!dev_->meshGeometry(surfaces_[i].mesh, &vb, &ib, &vc, &ic)) {
+            AVER_ERROR("[PT] surface {} has no readable geometry; the backend cannot express it", i);
+            return false;
+        }
+        Instance& inst = instances_[i];
+        std::memcpy(inst.objectToWorld, surfaces_[i].world, sizeof(inst.objectToWorld));
+        std::memcpy(inst.albedo, surfaces_[i].albedo, sizeof(inst.albedo));
+        inst.firstVertex = totalVerts_;
+        inst.firstIndex  = totalIndices_;
+        totalVerts_   += vc;
+        totalIndices_ += ic;
+    }
+    if (totalVerts_ == 0 || totalIndices_ == 0) return false;
+
+    rhi::BufferDesc vd;
+    vd.bytes = static_cast<u64>(totalVerts_) * sizeof(rhi::MeshVertex);
+    vd.kind  = rhi::BufferKind::Default;
+    vd.debugName = "pt vertices";
+    verts_ = res_->createBuffer(vd);
+
+    rhi::BufferDesc id;
+    id.bytes = static_cast<u64>(totalIndices_) * sizeof(u32);
+    id.kind  = rhi::BufferKind::Default;
+    id.debugName = "pt indices";
+    indices_ = res_->createBuffer(id);
+
+    // Upload rather than Default: it is written once from the CPU and never by the GPU, so there is
+    // no copy to schedule and no state to walk.
+    rhi::BufferDesc nd;
+    nd.bytes = sizeof(Instance) * instances_.size();
+    nd.kind  = rhi::BufferKind::Upload;
+    nd.debugName = "pt instances";
+    instanceBuf_ = res_->createBuffer(nd);
+
+    if (!verts_ || !indices_ || !instanceBuf_) {
+        AVER_ERROR("[PT] could not allocate the flat geometry table");
+        return false;
+    }
+    res_->writeBuffer(instanceBuf_, instances_.data(), nd.bytes);
+
+    // One bottom-level structure per SURFACE. Two surfaces on one mesh build it twice, which is a
+    // few microseconds and removes a cache whose invalidation rule would otherwise have to be right.
+    blas_.assign(surfaces_.size(), 0);
+    for (usize i = 0; i < surfaces_.size(); ++i) {
+        blas_[i] = res_->createBlas(surfaces_[i].mesh);
+        if (!blas_[i]) { AVER_ERROR("[PT] no bottom-level structure for surface {}", i); return false; }
+    }
+    for (const Scene& s : scenes_) if (!s.tlas) {
+        AVER_ERROR("[PT] a scene has no top-level structure");
+        return false;
+    }
+
+    prepared_ = true;
+    return true;
+}
+
+bool PathTracer::buildScenes(rhi::IRenderContext& ctx) {
+    if (!prepared_ || built_) return built_;
+
+    ctx.pushMarker("Aver.PathTracer build");
+    for (rhi::BlasHandle b : blas_) ctx.buildBlas(b);
+
+    // BOTH transitions are explicit. D3D12 would promote a Common buffer to CopyDest by itself, but
+    // the RHI tracks buffer state to catch exactly this class of mistake and does not model
+    // promotion, so an implicit promotion followed by an explicit walk-back is a barrier claiming a
+    // state the tracker never saw it enter.
+    ctx.bufferBarrier(verts_,   rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
+    ctx.bufferBarrier(indices_, rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
+    for (usize i = 0; i < surfaces_.size(); ++i) {
+        rhi::BufferHandle vb = 0, ib = 0;
+        u32 vc = 0, ic = 0;
+        if (!dev_->meshGeometry(surfaces_[i].mesh, &vb, &ib, &vc, &ic)) { ctx.popMarker(); return false; }
+        ctx.copyBuffer(verts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
+                       static_cast<u64>(instances_[i].firstVertex) * sizeof(rhi::MeshVertex), 0);
+        ctx.copyBuffer(indices_, ib, static_cast<u64>(ic) * sizeof(u32),
+                       static_cast<u64>(instances_[i].firstIndex) * sizeof(u32), 0);
+    }
+    ctx.bufferBarrier(verts_,   rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
+    ctx.bufferBarrier(indices_, rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
+
+    for (const Scene& s : scenes_) {
+        std::vector<rhi::TlasInstance> inst;
+        inst.reserve(s.surfaces.size());
+        for (u32 id : s.surfaces) {
+            if (id >= surfaces_.size() || !blas_[id]) continue;
+            rhi::TlasInstance i;
+            std::memcpy(i.world, surfaces_[id].world, sizeof(i.world));
+            i.mask = 0xFF;
+            i.blas = blas_[id];
+            // The id a hit reads back. It indexes the SHARED instance table, so a scene holding a
+            // subset of the surfaces still resolves each hit to the right geometry and albedo --
+            // which CommittedInstanceIndex, a position inside this one structure, could not do.
+            i.instanceId = id & rhi::kMaxTlasInstanceId;
+            inst.push_back(i);
+        }
+        if (inst.empty()) { ctx.popMarker(); return false; }
+        ctx.buildTlas(s.tlas, inst.data(), static_cast<u32>(inst.size()));
+    }
+    ctx.popMarker();
+
+    built_ = true;
+    AVER_INFO("[PT] {} surfaces, {} scenes, {} vertices and {} indices in the flat table",
+              surfaces_.size(), scenes_.size(), totalVerts_, totalIndices_);
+    return true;
+}
+
+bool PathTracer::createTarget(u32 scene, u32 width, u32 height, PtTarget& out) {
+    out = {};
+    if (!res_ || !prepared_ || scene >= scenes_.size() || width == 0 || height == 0) return false;
+
+    rhi::BufferDesc ad;
+    ad.bytes = static_cast<u64>(width) * height * kPtAccumElementsPerPixel * kPtAccumStride;
+    ad.kind  = rhi::BufferKind::Default;
+    ad.allowUnorderedAccess = true;
+    ad.debugName = "pt accumulator";
+    out.accum = res_->createBuffer(ad);
+
+    rhi::BindingSetDesc bd;
+    bd.srvCount = kSrvCount;
+    bd.uavCount = kUavCount;
+    bd.srvKinds[0] = rhi::SlotKind::AccelerationStructure;
+    bd.srvKinds[1] = bd.srvKinds[2] = bd.srvKinds[3] = rhi::SlotKind::StructuredBuffer;
+    bd.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
+    out.set = res_->createBindingSet(bd);
+
+    if (!out.accum || !out.set) {
+        AVER_ERROR("[PT] could not allocate an accumulation target");
+        destroyTarget(out);
+        return false;
+    }
+
+    // ONE BINDING SET PER TARGET, and never one shared set rebound between dispatches: a descriptor
+    // table is read when the command EXECUTES, so rewriting a shared set between two recorded
+    // dispatches would give both of them the last scene written.
+    res_->setSrvTlas(out.set, 0, scenes_[scene].tlas);
+    res_->setSrvBuffer(out.set, 1, verts_, sizeof(rhi::MeshVertex), totalVerts_, 0);
+    res_->setSrvBuffer(out.set, 2, indices_, sizeof(u32), totalIndices_, 0);
+    res_->setSrvBuffer(out.set, 3, instanceBuf_, sizeof(Instance),
+                       static_cast<u32>(instances_.size()), 0);
+    res_->setUavBuffer(out.set, 0, out.accum, kPtAccumStride,
+                       width * height * kPtAccumElementsPerPixel, 0);
+
+    out.width = width;
+    out.height = height;
+    out.scene = scene;
+    return true;
+}
+
+void PathTracer::destroyTarget(PtTarget& t) {
+    if (res_) {
+        if (t.accum) res_->destroyBuffer(t.accum);
+        if (t.set)   res_->destroyBindingSet(t.set);
+    }
+    t = {};
+}
+
+void PathTracer::accumulate(rhi::IRenderContext& ctx, const PtTarget& t, const PtCamera& cam,
+                            const PtDispatch& d) {
+    if (!pipeline_ || !built_ || !t.valid()) return;
+
+    FrameCB cb{};
+    for (u32 i = 0; i < 3; ++i) {
+        cb.origin[i]  = cam.origin[i];
+        cb.forward[i] = cam.forward[i];
+        cb.right[i]   = cam.right[i];
+        cb.up[i]      = cam.up[i];
+    }
+    cb.origin[3]  = cam.tanHalfFov;
+    cb.forward[3] = cam.aspect;
+    cb.image[0] = t.width;
+    cb.image[1] = t.height;
+    cb.image[2] = d.maxBounces;
+    cb.image[3] = static_cast<u32>(d.defect);
+    cb.sample[0] = d.firstSample;
+    cb.sample[1] = d.samples;
+    cb.sample[2] = d.reset ? 1u : 0u;
+    cb.trace[0] = d.rayBias;
+    cb.trace[1] = d.tMax;
+
+    ctx.pushMarker("Aver.PathTracer");
+    ctx.bufferBarrier(t.accum, rhi::ResourceState::Common, rhi::ResourceState::UnorderedAccess);
+    ctx.setPipeline(pipeline_);
+    ctx.setBindingSet(t.set);
+    ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb, sizeof(cb));
+    ctx.dispatch((t.width + kGroup - 1) / kGroup, (t.height + kGroup - 1) / kGroup, 1);
+    // Back to Common before the frame ends: a buffer's state does not survive the command list.
+    ctx.bufferBarrier(t.accum, rhi::ResourceState::UnorderedAccess, rhi::ResourceState::Common);
+    ctx.popMarker();
+}
+
+void PathTracer::copyForReadback(rhi::IRenderContext& ctx, const PtTarget& t,
+                                 rhi::BufferHandle readback, u64 dstOffset) {
+    if (!t.valid() || !readback) return;
+    ctx.bufferBarrier(t.accum, rhi::ResourceState::Common, rhi::ResourceState::CopySource);
+    ctx.copyBuffer(readback, t.accum, t.bytes(), dstOffset, 0);
+    ctx.bufferBarrier(t.accum, rhi::ResourceState::CopySource, rhi::ResourceState::Common);
+}
+
+} // namespace aver::pt
