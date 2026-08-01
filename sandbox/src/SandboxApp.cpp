@@ -23,6 +23,7 @@
 #include "aver/render/SkinSelfTest.hpp"
 #include "SkinDrawTest.hpp"
 #include "SkinSceneTest.hpp"
+#include "ReflTest.hpp"
 #if AVER_MODULE_SCENE
 #include "aver/render/SkinnedScene.hpp"
 #endif
@@ -595,6 +596,8 @@ public:
             sceneMeshes_[fnv1a64(std::string_view("Meshes/sphere.ocmesh"))] =
                 e.device()->createMesh(sv.data(), (u32)sv.size(), si.data(), (u32)si.size());
             sceneMeshes_[fnv1a64(std::string_view("Meshes/cube.ocmesh"))] = unitCube;
+            // Kept so a dev check can build geometry of its own without re-uploading a cube.
+            unitCubeMesh_ = unitCube;
         }
 
         // The named surfaces gameplay can ask for.
@@ -696,6 +699,47 @@ public:
             AVER_ERROR("[Skin] --skin-scene-test needs the scene join, which did not initialise");
         }
 #endif
+
+        // --refl-test: are ray-traced reflections GLOBAL? A mirror, and a beacon parked on its
+        // reflection vector far outside the voxel volume, run past both tracers.
+        if (reflTest_) {
+            refl_ = std::make_unique<aver::editor::ReflTest>();
+            objects_.clear();
+            sel_ = -1;
+
+            // The mirror: a large flat quad at z=0, fully metallic and almost perfectly smooth, so
+            // what it shows is almost entirely the reflection rather than its own colour.
+            MeshObj m;
+            m.name = "ReflMirror";
+            m.mesh = unitCubeMesh_;
+            m.pos = Vec3{0, 0, -20.0f};
+            // HALF-EXTENTS IN CENTIMETRES: the unit cube is half-extent 1, so this is an 1800 cm
+            // mirror. The first version used 18 and made a 36 cm slab that every probe missed.
+            m.scale = Vec3{1800.0f, 1800.0f, 20.0f};
+            m.color[0] = 0.02f; m.color[1] = 0.02f; m.color[2] = 0.02f;
+            m.metallic = 1.0f; m.roughness = 0.03f;
+            m.aabbMin = Vec3{-1900, -1900, -60}; m.aabbMax = Vec3{1900, 1900, 20};
+            objects_.push_back(m);
+
+            const Vec3 bp = aver::editor::ReflTest::beaconPosition(camPos_, Vec3{0, 0, 0});
+            MeshObj bcn;
+            bcn.name = "ReflBeacon";
+            bcn.mesh = unitCubeMesh_;
+            bcn.pos = bp;
+            // Big enough to subtend several degrees from 5200 cm away, or the reflection of it
+            // lands between probes.
+            bcn.scale = Vec3{700.0f, 700.0f, 700.0f};
+            // Emissive-bright green: nothing else in this scene is green, so a probe that turns
+            // green can only be showing the beacon.
+            bcn.color[0] = 0.02f; bcn.color[1] = 0.95f; bcn.color[2] = 0.05f;
+            bcn.roughness = 1.0f;
+            bcn.aabbMin = Vec3{-950, -950, -950}; bcn.aabbMax = Vec3{950, 950, 950};
+            objects_.push_back(bcn);
+            reflBeaconIndex_ = static_cast<int>(objects_.size()) - 1;
+
+            refl_->setBeaconPosition(bp);
+            refl_->setVolumeExtent(giExtent_);
+        }
 
         // --skin-draw-test: the same question one level up -- does anything DRAW the skinned buffer.
         //
@@ -1430,6 +1474,22 @@ public:
         // Before captureCheck, because both use the device's single capture slot and the draw test
         // finishes inside the first dozen frames while the ordinary probe fires near the last.
         skinDrawCheck(e);
+        if (refl_ && !refl_->finished()) {
+#if AVER_MODULE_VOXI
+            // The schedule owns both switches, because the experiment IS the pair of them: the same
+            // world change has to be run past the ray tracer and past the cone tracer.
+            voxi::Settings vs = voxi::Renderer::get().settings();
+            const auto want = refl_->wantRayTracing() ? voxi::Quality::High : voxi::Quality::Off;
+            if (vs.rayTracing != want) {
+                vs.rayTracing = want;
+                voxi::Renderer::get().setSettings(vs);
+                voxiRenderer_.setSettings(vs);
+            }
+#endif
+            if (reflBeaconIndex_ >= 0 && reflBeaconIndex_ < (int)objects_.size())
+                objects_[reflBeaconIndex_].visible = refl_->beaconVisible();
+            refl_->tick(e, vpX_, vpY_, vpW_, vpH_);
+        }
         if (skinScene_ && !skinScene_->finished())
             skinScene_->tick(e, vpX_, vpY_, vpW_, vpH_, static_cast<u32>(lastSceneCulled_ < 0 ? 0 : lastSceneCulled_));
         captureCheck(e);
@@ -1635,6 +1695,7 @@ public:
 #endif
     void setSkinTest() { skinTest_ = true; }                                       // --skin-test
     void setSkinDrawTest() { skinDrawTest_ = true; }                               // --skin-draw-test
+    void setReflTest() { reflTest_ = true; }                                       // --refl-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
@@ -4933,6 +4994,10 @@ private:
 #endif
     std::string skinSceneDir_;    // --skin-scene-test <dir>: where the cooked rig lives
     std::unique_ptr<aver::editor::SkinSceneTest> skinScene_;
+    bool reflTest_ = false;       // --refl-test: are ray-traced reflections global?
+    std::unique_ptr<aver::editor::ReflTest> refl_;
+    int  reflBeaconIndex_ = -1;   // which objects_ entry the schedule shows and hides
+    rhi::MeshHandle unitCubeMesh_ = 0;   // the editor's own unit cube, half-extent 1
     bool showUiDemo_ = false;
     std::string matSaveStatus_;   // what the last 'Save to C#' did
     unsigned centralDock_ = 0;    // the dock node an opened asset editor lands in
@@ -5425,7 +5490,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -5508,6 +5573,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--play-test")) playTest=true;
         else if (!std::strcmp(argv[i],"--skin-test")) skinTest=true;
         else if (!std::strcmp(argv[i],"--skin-draw-test")) skinDrawTest=true;
+        else if (!std::strcmp(argv[i],"--refl-test")) reflTest=true;
         else if (!std::strcmp(argv[i],"--skin-scene-test") && i+1<argc) skinSceneDir=argv[++i];
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
@@ -5590,6 +5656,7 @@ Application* createApplication(int argc, char** argv) {
     if (playTest) app->setPlayTest();
     if (skinTest) app->setSkinTest();
     if (skinDrawTest) app->setSkinDrawTest();
+    if (reflTest) app->setReflTest();
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
     return app;
 }
