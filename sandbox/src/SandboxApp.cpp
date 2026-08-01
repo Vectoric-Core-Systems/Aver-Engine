@@ -33,6 +33,7 @@
 #include "ToolGlyphs.hpp"
 #include "AssetEditor.hpp"
 #include "ActorEditor.hpp"
+#include "AnimEditor.hpp"
 #include "EditorPrefs.hpp"
 #include "aver/platform/DirectoryWatcher.hpp"
 #if AVER_HAVE_ROSLYN
@@ -497,6 +498,7 @@ public:
         // Registration order is precedence: the first factory that accepts a path wins.
         assetEditors_.registerFactory(&editor::makeMeshEditor);
         assetEditors_.registerFactory(&editor::makeActorEditor);
+        assetEditors_.registerFactory(&editor::makeAnimEditor);
         // Must run before any actor factory: the "is Roslyn available" answer is cached on first ask.
         locateAverDesign();
         {
@@ -1408,6 +1410,8 @@ private:
     void applyProject(Engine& e) {
         project_ = browser_.project();
         editor::setActorEditorContentRoot(project_.contentDir());
+
+        editor::setAnimEditorContentRoot(project_.contentDir());
         applyProjectRenderSettings();
         startContentWatch();
         pendingUpgrade_ = editor::inspectProject(project_);

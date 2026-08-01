@@ -1020,17 +1020,7 @@ void ActorEditor::dragScaleAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVe
 // Draws the whole tab.
 void ActorEditor::draw(Engine& e) {
 #if AVER_WITH_IMGUI
-    if (!g_previewTried && e.device()) {
-        g_previewTried = true;
-        g_preview = render::preview::ActorPreview::create(*e.device(), 1024);
-        if (g_preview) {
-            // Registered non-owning; shutdownActorEditors removes it before deleting.
-            g_device = e.device();
-            g_device->addRenderFeature(g_preview);
-        } else {
-            AVER_WARN("[ActorEditor] no preview on this backend; the tab shows numbers only");
-        }
-    }
+    sharedPreview(e);
 
     reloadIfChanged();
 
@@ -1384,6 +1374,25 @@ void ActorEditor::draw(Engine& e) {
 }
 
 } // namespace
+
+// Creates the shared preview on first ask, and hands it back thereafter.
+render::preview::ActorPreview* sharedPreview(Engine& e) {
+    if (!g_previewTried && e.device()) {
+        g_previewTried = true;
+        g_preview = render::preview::ActorPreview::create(*e.device(), 1024);
+        if (g_preview) {
+            // Registered non-owning; shutdownActorEditors removes it before deleting.
+            g_device = e.device();
+            g_device->addRenderFeature(g_preview);
+        } else {
+            AVER_WARN("[AssetEditor] no preview on this backend; the tab shows numbers only");
+        }
+    }
+    return g_preview;
+}
+
+render::preview::PreviewMeshCache& sharedPreviewMeshes() { return g_meshes; }
+
 
 // Sets the content root that mesh paths in a designer file are relative to.
 void setActorEditorContentRoot(std::string root) {

@@ -7,7 +7,19 @@
 #include <memory>
 #include <string>
 
+namespace aver { class Engine; namespace render::preview { class ActorPreview; class PreviewMeshCache; } }
+
 namespace aver::editor {
+
+// THE ONE PREVIEW FEATURE EVERY ASSET TAB SHARES, created lazily by whichever tab draws first.
+//
+// One, not one each: a second feature would be registered alongside this one in the device's list
+// and both would draw every frame, into each other's target. Only the ACTIVE dock tab draws, so
+// whichever tab is in front owns the draw list for that frame and there is nothing to arbitrate.
+// Null when the backend has no GPU support, which is how a tab degrades to numbers only.
+render::preview::ActorPreview* sharedPreview(Engine& e);
+// The mesh registry that preview shares, for the same reason.
+render::preview::PreviewMeshCache& sharedPreviewMeshes();
 
 // Creates an actor editor for a `.Designer.cs` that carries a generated region, else nullptr.
 std::unique_ptr<AssetEditor> makeActorEditor(const std::string& path);
