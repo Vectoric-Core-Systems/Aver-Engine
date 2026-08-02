@@ -33,6 +33,11 @@ public:
     // Draws the Tools dropdown. Called from inside BeginMainMenuBar; owns its own BeginMenu.
     void drawMenu(const fmt::ProjectDesc& project);
 
+    // Opens the packaging modal from the File menu. The MENU IS NOT THE ONLY PATH -- everything it
+    // does is scripts/stage-game.ps1, which a human or CI runs directly. A check that can only be
+    // run by clicking is not a check.
+    void openPackageProject() { open(Modal::Package); }
+
     // Opens a creation modal from outside the Tools menu; drawModals draws it as usual.
     void openNewCsScript()  { open(Modal::CsScript); }
     void openNewCsClass()   { open(Modal::CsClass); }
@@ -65,7 +70,7 @@ public:
 
 private:
     // Which popup drawModals should show.
-    enum class Modal { None, CsScript, CsClass, CppModule, CppClass, Compile, Reload };
+    enum class Modal { None, CsScript, CsClass, CppModule, CppClass, Compile, Reload, Package };
 
     void open(Modal m);
     void drawCsModal(const fmt::ProjectDesc& project, f32 dpi, CsKind kind);
@@ -75,6 +80,13 @@ private:
     void drawCompileModal(f32 dpi, bool reload);
     // Reaps a finished build on the main thread: logs it, and runs the reload if this was one.
     void reapCompile();
+
+    // Packaging, which reuses the compile machinery's shape but not its thread: a package takes
+    // minutes and must not block the frame, and running it on compileThread_ would mean a build
+    // and a package could not be queued independently.
+    void drawPackageModal(const fmt::ProjectDesc& project, f32 dpi);
+    void startPackage(const fmt::ProjectDesc& project, const std::string& outDir, bool verify);
+    void reapPackage();
 
     // True when `dotnet` is on PATH. Resolved once.
     bool haveDotnet();
@@ -130,6 +142,21 @@ private:
     };
     std::shared_ptr<Compile> compile_;
     std::thread compileThread_;
+
+    struct Package {
+        std::atomic<bool> done{false};
+        std::string output;
+        int exitCode = -1;
+        std::string outDir;
+        bool verify = false;
+        bool verified = false;
+        int verifyCode = -1;
+        std::string verifyOutput;
+    };
+    std::shared_ptr<Package> package_;
+    std::thread packageThread_;
+    std::string packageOut_;        // the output directory the modal edits
+    bool packageVerify_ = true;     // verifying by default: an unverified package is a guess
     int dotnet_ = -1;               // -1 unknown, 0 absent, 1 present
 };
 
