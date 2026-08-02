@@ -138,6 +138,9 @@ endif()
 if(AVER_MODULE_VOXI)
   add_subdirectory(modules/render.voxi)   # optional: render feature settings + C ABI for C#
 endif()
+# PCG's GPU half. Needs only the RHI, so it is unconditional like the UI: there is no combination of
+# switches in which the RHI exists and a compute shader that writes a 3D texture does not.
+add_subdirectory(modules/render.pcg)
 # Scripting sits beside the render modules rather than under them: it needs Core and Platform and
 # nothing else, and in particular not the RHI. Added after them only because that is reading order.
 if(AVER_MODULE_SCRIPTING)
@@ -214,6 +217,7 @@ if(AVER_BUILD_TESTS)
   if(AVER_BUILD_GAME AND TARGET Aver.Framework)
     add_subdirectory(tests/game)
   endif()
+  add_subdirectory(tests/pcg)
   add_subdirectory(tests/formats)
   # Unconditional, like the module: Aver.UI depends on nothing optional, so there is no combination
   # of switches in which it exists and its test does not.
