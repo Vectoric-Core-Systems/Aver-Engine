@@ -5,6 +5,10 @@
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Log.hpp"
 
+#if AVER_MODULE_SCENE
+#  include "aver/scene/World.hpp"
+#endif
+
 #include <cstdlib>
 #include <cstring>
 
@@ -143,6 +147,7 @@ void GameApp::openProject(Engine& e) {
         content_.registerBuiltins(*dev);
         content_.loadProjectMeshes(*dev);
     }
+    level_.loadStartMap(project_, content_);
 #endif
 }
 
@@ -171,6 +176,13 @@ void GameApp::onInit(Engine& e) {
 void GameApp::onUpdate(Engine&, const Timestep&) {
     ++frames_;
     // Input is READ here, never rolled here. See onRender for why.
+#if AVER_MODULE_SCENE
+    // Retires deferred destroys, rebuilds the topological order and recomposes stale world
+    // matrices. Without it World::worldMatrix reads uncomposed matrices and the draw walk in C7
+    // would place everything at the origin -- which looks like a broken transform pipeline and is
+    // really a missing flush.
+    scene::World::instance().flush();
+#endif
 }
 
 void GameApp::onRender(Engine&) {

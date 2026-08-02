@@ -4,6 +4,7 @@
 #include "aver/platform/InputState.hpp"
 #include "aver/formats/OcProject.hpp"
 #include "aver/game/GameContent.hpp"
+#include "aver/game/GameLevel.hpp"
 
 #include <string>
 
@@ -55,6 +56,9 @@ public:
     // The project's asset index.
     const GameContent& content() const { return content_; }
 
+    // The loaded level.
+    const GameLevel& level() const { return level_; }
+
 private:
     // Loads cfg_.projectPath. Logs and leaves project_ invalid on failure rather than aborting: a
     // game with no world is a diagnosable state, and a process that dies before its first frame
@@ -65,6 +69,7 @@ private:
     InputState input_;
     fmt::ProjectDesc project_;
     GameContent content_;
+    GameLevel level_;
     u64 frames_ = 0;
 };
 
