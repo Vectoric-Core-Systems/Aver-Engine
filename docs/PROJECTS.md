@@ -63,8 +63,12 @@ target in the manifest, so a project has nowhere to put C++. Until that changes,
 the engine — the Tools items are labelled `(engine)` and their modals say it outright.
 
 C# is the reverse: `Content/Scripts/` is plain content, `Scripts.csproj` is generated beside it,
-and **Tools ▸ Compile Scripts** runs `dotnet build` on it without the engine being touched. Note
-that compiling is all it does — nothing executes those scripts yet (`docs/STATUS.md` §4d).
+and **Tools ▸ Compile Scripts** runs `dotnet build` on it without the engine being touched.
+Compiled scripts now *run*: `spawnActor` dispatches `OnBeginPlay`
+(`modules/framework/src/FrameworkAbi.cpp:530`) and the Play lifecycle spawns
+GameInstance/GameMode/Controller/Pawn. One deliberate exception — the Actor Editor's **Live**
+preview spawns the class, runs `BuildModels` and destroys it the same frame, so no `OnBeginPlay`
+and no ticking there; its tooltip says so.
 
 Neither CMakeLists is edited automatically. Wiring a module into the top-level build is a
 deliberate act — every skeleton under `modules/` is deliberately unwired — and `aver_add_module`
@@ -81,7 +85,7 @@ OCPROJECT 1
 NAME OpenConstructor
 ENGINE Aver 0.1.0            # engine name + minimum version this project needs
 CONTENT Content             # content root, relative to this file
-STARTMAP Maps/demoworld.ocmap
+STARTMAP Maps/Default.ocmap
 AUTHOR OpenConstructor Team
 ```
 
