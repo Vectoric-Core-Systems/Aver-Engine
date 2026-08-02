@@ -35,6 +35,26 @@ struct VolumeSpec {
     f32 coverageBias  = 1.0f;
 };
 
+// A density field with NO BOUNDS, sampled by world position. Mirrors Aver.Pcg's InfiniteSpec.
+struct InfiniteSpec {
+    i32 seed = 0;
+    u32 layerCount = 1;
+    NoiseLayer layers[kMaxLayers]{};
+    // World centimetres spanned by one lattice cell.
+    f32 cellSizeCm = 1600.0f;
+    f32 coverageFloor = 0.0f;
+    f32 coverageBias  = 1.0f;
+};
+
+// Samples an infinite field at a WORLD position, in centimetres.
+//
+// FLOOR, NOT TRUNCATION, and it is the one line where this differs from the bounded sampler. A
+// bounded volume indexes from 0 up, where the two agree. An infinite field is sampled at negative
+// coordinates too, and there a cast toward zero puts -0.5 and +0.5 in the same cell -- one
+// double-width cell straddling the origin, which is a visible seam at world zero and nowhere else.
+// The F# mirror does the same, for the same reason.
+f32 sampleInfinite(const InfiniteSpec& spec, f32 wx, f32 wy, f32 wz);
+
 // THE CPU REFERENCE, and the reason this header exists at all.
 //
 // Mirrors the HLSL in PcgShaders.hpp function for function, exactly as the atmosphere model is

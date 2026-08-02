@@ -3,6 +3,7 @@
 #include "aver/core/Types.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/formats/OcProject.hpp"
+#include "aver/pcg/PcgVolume.hpp"
 
 #include <string>
 #include <vector>
@@ -41,6 +42,21 @@ public:
     const std::string& name() const { return levelName_; }
     const std::string& path() const { return levelPath_; }
     bool hasFog() const { return hasLevelFog_; }
+
+    // A density field the level declared, resolved to something samplable. `bounded` carries the
+    // spec a VolumeBuilder can fill; `infinite` is sampled directly by world position.
+    struct PcgField {
+        std::string name;
+        bool infinite = true;
+        pcg::InfiniteSpec infiniteSpec{};
+        pcg::VolumeSpec   boundedSpec{};
+        Vec3 boundsMin{}, boundsMax{};
+    };
+    const std::vector<PcgField>& pcgFields() const { return pcgFields_; }
+
+    // The field of that name, or null. By NAME because a level may declare several and picking
+    // "the first one" is how the wrong field gets sampled without anything saying so.
+    const PcgField* pcgField(const std::string& name) const;
     f32 fogDensity() const { return levelFog_; }
     const f32* fogColor() const { return fogColor_; }
 #endif
@@ -53,6 +69,7 @@ private:
     bool hasLevelFog_ = false;
     f32  levelFog_ = 0.0002f;
     f32  fogColor_[3] = {0.55f, 0.60f, 0.68f};
+    std::vector<PcgField> pcgFields_;
 #  if AVER_MODULE_PHYSICS
     std::vector<int32_t> levelBodies_;
 #  endif

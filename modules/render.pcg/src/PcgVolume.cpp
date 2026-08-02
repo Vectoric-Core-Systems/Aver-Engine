@@ -64,6 +64,34 @@ f32 sampleDensity(const VolumeSpec& spec, u32 x, u32 y, u32 z) {
     return std::pow(remapped, spec.coverageBias);
 }
 
+f32 sampleInfinite(const InfiniteSpec& spec, f32 wx, f32 wy, f32 wz) {
+    const f32 cell = spec.cellSizeCm > 0.0f ? spec.cellSizeCm : 1.0f;
+    f32 total = 0.0f, norm = 0.0f;
+    const u32 layers = spec.layerCount < kMaxLayers ? spec.layerCount : kMaxLayers;
+    for (u32 l = 0; l < layers; ++l) {
+        const NoiseLayer& ly = spec.layers[l];
+        f32 amp = ly.amplitude;
+        f32 freq = ly.frequency;
+        const i32 octaves = ly.octaves > 1 ? ly.octaves : 1;
+        for (i32 o = 0; o < octaves; ++o) {
+            const f32 s = freq / cell;
+            const i32 cx = static_cast<i32>(std::floor(wx * s));
+            const i32 cy = static_cast<i32>(std::floor(wy * s));
+            const i32 cz = static_cast<i32>(std::floor(wz * s));
+            const f32 v = float01(hash3(spec.seed + ly.seedOffset, cx, cy, cz));
+            total += v * amp;
+            norm  += amp;
+            amp  *= ly.gain;
+            freq *= ly.lacunarity;
+        }
+    }
+    if (norm <= 0.0f) return 0.0f;
+    const f32 d = total / norm;
+    if (d < spec.coverageFloor) return 0.0f;
+    const f32 remapped = (d - spec.coverageFloor) / std::fmax(1e-6f, 1.0f - spec.coverageFloor);
+    return std::pow(remapped, spec.coverageBias);
+}
+
 bool VolumeBuilder::init(rhi::IDevice& dev) {
     res_ = dev.resources();
     if (!res_) return false;   // a GPU-less backend declines here, as designed
