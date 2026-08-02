@@ -86,6 +86,18 @@ private:
     // with no Voxi feature has no material system and draws every surface with its fallback.
     void attachVoxi(Engine&);
 
+    // Starts the physics world. MUST run before any level loads: loading builds a static body per
+    // colliding placement, gated on aver_phys_ready(), so a level loaded first silently gets no
+    // collision and the player falls through the floor.
+    void initPhysics();
+
+    // Runs the gameplay tick groups around the physics step, when a session is playing.
+    void tickGameplay(f32 dt);
+
+    // Drives the camera from the possessed pawn. Must run AFTER World::flush and BEFORE the view
+    // matrix is built, or the camera trails the pawn by one frame.
+    void drivePlayCamera();
+
     // Pushes the camera, sky, fog and post settings to the device for this frame.
     void pushFrame(Engine&);
 
@@ -118,6 +130,15 @@ private:
     voxi::VoxiRenderer voxiRenderer_;
     bool voxiAttached_ = false;
 #endif
+#if AVER_MODULE_PHYSICS
+    int32_t groundBody_ = 0;
+    // The world's floor: a 100 m square, 10 cm thick, centred so its top face sits on z = 0.
+    static constexpr f32 kGroundHalfExtentCm = 5000.0f;
+    static constexpr f32 kGroundHalfThickCm  = 5.0f;
+#endif
+    // Counted so "did physics step at all" is answerable from a log rather than a debugger.
+    u64 physSteps_ = 0;
+    u64 lastReportedSteps_ = 0;
     fmt::ProjectDesc project_;
     GameContent content_;
     GameLevel level_;

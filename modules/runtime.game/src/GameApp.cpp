@@ -7,9 +7,17 @@
 
 #if AVER_MODULE_SCENE
 #  include "aver/scene/World.hpp"
+#  include "aver/anim/AnimSystem.hpp"
 #endif
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/Voxi.hpp"
+#endif
+#if AVER_MODULE_PHYSICS
+#  include "aver/physics/physics_abi.h"
+#endif
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_abi.h"
+#  include "aver/framework/framework_hooks.h"
 #endif
 
 #include <cmath>
@@ -113,6 +121,87 @@ BootConfig GameApp::config() const {
     b.enableDebugLayer = cfg_.debugLayer;
     b.backend          = cfg_.backend.empty() ? nullptr : cfg_.backend.c_str();
     return b;
+}
+
+void GameApp::initPhysics() {
+#if AVER_MODULE_PHYSICS
+    if (aver_phys_init()) {
+        groundBody_ = aver_phys_add_static_box(0.0f, 0.0f, -kGroundHalfThickCm,
+                                               kGroundHalfExtentCm, kGroundHalfExtentCm,
+                                               kGroundHalfThickCm);
+        AVER_INFO("[Game] physics started, ground body={} (fixed step {:.4f}s)",
+                  groundBody_, aver_phys_fixed_step());
+    } else {
+        AVER_WARN("[Game] physics failed to start - gameplay will not collide");
+    }
+#endif
+}
+
+void GameApp::tickGameplay(f32 dt) {
+#if AVER_MODULE_FRAMEWORK
+    // GATED ON PLAYING, and only PLAYING. playSessionActive() counts PAUSED as active, which is the
+    // right answer for "is a session open" and the wrong one for "should the world advance".
+    //
+    // The editor widens this gate with a --spawn-test term; that is a CLI harness and has no place
+    // in a game.
+    if (aver_fw_play_state() != AVER_FW_PLAY_PLAYING) return;
+
+    // ORDER COPIED FROM THE CODE, NOT FROM THE COMMENT ABOVE IT. SandboxApp.cpp:1049 says the tick
+    // groups "bracket the physics step: PrePhysics -> Physics -> PostPhysics", which describes the
+    // GROUPS and not where the step lands. The step actually sits between PRE_PHYSICS and PHYSICS,
+    // so PHYSICS-group ticks observe the results of this frame's simulation. Reordering to match
+    // the sentence would make every PHYSICS-group actor read last frame's transforms.
+    aver_fw_tick(AVER_FW_TICK_PRE_PHYSICS, dt);
+#if AVER_MODULE_PHYSICS
+    aver_phys_step(dt);
+    ++physSteps_;
+#endif
+    aver_fw_tick(AVER_FW_TICK_PHYSICS, dt);
+    aver_fw_tick(AVER_FW_TICK_POST_PHYSICS, dt);
+#else
+    (void)dt;
+#endif
+}
+
+void GameApp::drivePlayCamera() {
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
+    if (aver_fw_play_state() != AVER_FW_PLAY_PLAYING) return;
+    const int32_t pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+    if (pawn == 0) return;
+    const scene::Entity ent = static_cast<scene::Entity>(static_cast<uint32_t>(pawn));
+    scene::World& w = scene::World::instance();
+    if (!w.valid(ent)) return;
+
+    int32_t mode = AVER_FW_VIEW_THIRD_PERSON; float eye = 160.0f, boom = 450.0f;
+    aver_fw_view(&mode, &eye, &boom);
+
+    // Prefer the view node; fall back to the pawn if it has not published one.
+    const int32_t viewId = aver_fw_view_entity();
+    const scene::Entity ve = static_cast<scene::Entity>(static_cast<uint32_t>(viewId));
+    const bool haveView = viewId != 0 && w.valid(ve);
+    const Mat4& vm = haveView ? w.worldMatrix(ve) : w.worldMatrix(ent);
+    const Mat4& pm = w.worldMatrix(ent);
+
+    const Vec3 headPos{vm.m[3][0], vm.m[3][1], vm.m[3][2]};
+    const Vec3 headFwd = Vec3{vm.m[0][0], vm.m[0][1], vm.m[0][2]}.getSafeNormal();
+    const Vec3 pawnPos{pm.m[3][0], pm.m[3][1], pm.m[3][2]};
+    const Vec3 pawnFwd = Vec3{pm.m[0][0], pm.m[0][1], pm.m[0][2]}.getSafeNormal();
+    const Vec3 up{0, 0, 1};
+
+    Vec3 look;
+    if (mode == AVER_FW_VIEW_FIRST_PERSON) {
+        camPos_ = haveView ? headPos : pawnPos + up * eye;
+        look    = headFwd;
+    } else {
+        const Vec3 pivot  = haveView ? headPos : pawnPos + up * eye;
+        const Vec3 armDir = haveView ? headFwd : pawnFwd;
+        camPos_ = pivot - armDir * boom;
+        look    = (pivot - camPos_).getSafeNormal();
+    }
+    // camForward() composes {cosP cosY, cosP sinY, sinP}; invert the look direction to yaw/pitch.
+    yaw_   = std::atan2(look.y, look.x);
+    pitch_ = std::asin(std::fmax(-1.0f, std::fmin(1.0f, look.z)));
+#endif
 }
 
 void GameApp::attachVoxi(Engine& e) {
@@ -280,20 +369,39 @@ void GameApp::onInit(Engine& e) {
               AVER_MODULE_PBR, AVER_MODULE_SCENE, AVER_MODULE_VOXI,
               AVER_MODULE_PHYSICS, AVER_MODULE_FRAMEWORK, AVER_MODULE_SCRIPTING);
     attachVoxi(e);
+    initPhysics();      // BEFORE openProject: level load builds a static body per colliding placement
     openProject(e);
     AVER_INFO("[Game] ready");
 }
 
-void GameApp::onUpdate(Engine&, const Timestep&) {
+void GameApp::onUpdate(Engine& e, const Timestep& t) {
     ++frames_;
     // Input is READ here, never rolled here. See onRender for why.
+    (void)e;
+
+    tickGameplay(t.dt);
+
 #if AVER_MODULE_SCENE
+    // The animation clock ticks UNCONDITIONALLY, not from the gameplay groups above. Those are
+    // gated on PLAYING, and hanging animation off them would freeze every animated thing the moment
+    // a session was not running. Deliberate asymmetry, copied from the editor.
+    anim::animSystem().tick(scene::World::instance(), t.dt);
     // Retires deferred destroys, rebuilds the topological order and recomposes stale world
     // matrices. Without it World::worldMatrix reads uncomposed matrices and the draw walk in C7
     // would place everything at the origin -- which looks like a broken transform pipeline and is
     // really a missing flush.
     scene::World::instance().flush();
 #endif
+
+    // AFTER flush, BEFORE the view matrix is built in onRender. Reading pawn transforms before the
+    // flush would give last frame's, so the camera would trail the player by a frame -- which reads
+    // as input lag rather than as an ordering bug.
+    drivePlayCamera();
+
+    if (physSteps_ != lastReportedSteps_ && (physSteps_ <= 1 || physSteps_ % 600 == 0)) {
+        AVER_INFO("[Game] physics: {} step(s) taken", physSteps_);
+        lastReportedSteps_ = physSteps_;
+    }
 }
 
 void GameApp::onRender(Engine& e) {
@@ -328,7 +436,10 @@ void GameApp::onRender(Engine& e) {
 }
 
 void GameApp::onShutdown(Engine&) {
-    AVER_INFO("[Game] shutdown after {} frame(s)", frames_);
+    // Reported unconditionally, including when it is zero. A silent zero is indistinguishable from
+    // a broken counter, and "did the world simulate at all" is the first question asked when
+    // gameplay does not move.
+    AVER_INFO("[Game] shutdown after {} frame(s), {} physics step(s)", frames_, physSteps_);
 }
 
 } // namespace aver::game

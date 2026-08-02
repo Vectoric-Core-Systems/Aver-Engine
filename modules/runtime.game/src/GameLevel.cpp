@@ -96,6 +96,14 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     levelPath_ = path;
     levelName_ = w.name;
     AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
+#if AVER_MODULE_PHYSICS
+    // One static body per COLLIDING placement, so this is checkable against the map file itself:
+    // it must equal the count of PLACE lines without `nocollide`. Reported even when zero, because
+    // zero bodies with colliding placements means physics was not ready at load time -- the exact
+    // ordering bug initPhysics-before-openProject exists to prevent.
+    AVER_INFO("[Level] {} static physics body(ies) from {} placement(s)",
+              levelBodies_.size(), w.placements.size());
+#endif
 }
 
 void GameLevel::loadStartMap(const fmt::ProjectDesc& project, GameContent& content) {
