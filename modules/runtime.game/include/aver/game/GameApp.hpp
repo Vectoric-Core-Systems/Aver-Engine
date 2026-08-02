@@ -3,6 +3,7 @@
 #include "aver/runtime/Application.hpp"
 #include "aver/platform/InputState.hpp"
 #include "aver/formats/OcProject.hpp"
+#include "aver/game/GameContent.hpp"
 
 #include <string>
 
@@ -51,6 +52,9 @@ public:
     // The open project. Invalid until openProject succeeds.
     const fmt::ProjectDesc& project() const { return project_; }
 
+    // The project's asset index.
+    const GameContent& content() const { return content_; }
+
 private:
     // Loads cfg_.projectPath. Logs and leaves project_ invalid on failure rather than aborting: a
     // game with no world is a diagnosable state, and a process that dies before its first frame
@@ -60,6 +64,7 @@ private:
     GameConfig cfg_;
     InputState input_;
     fmt::ProjectDesc project_;
+    GameContent content_;
     u64 frames_ = 0;
 };
 

@@ -134,6 +134,7 @@ void GameApp::openProject(Engine&) {
     if (project_.startMap.empty()) {
         AVER_WARN("[Game] the manifest names no STARTMAP, so there is no level to open");
     }
+    content_.adopt(project_);
 }
 
 void GameApp::onInit(Engine& e) {
