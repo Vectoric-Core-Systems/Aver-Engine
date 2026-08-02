@@ -68,6 +68,46 @@ std::string manifestText(const std::string& name) {
     return s;
 }
 
+// The starting level a new project opens.
+//
+// WHY THIS EXISTS AT ALL: until now the manifest named STARTMAP Maps/Default.ocmap and NOTHING
+// WROTE ONE, so every new project opened to an empty world and a log line explaining that the start
+// map did not exist. A first impression of "nothing happened" is a bad one when the engine is in
+// fact working perfectly.
+//
+// Every number below is authored rather than inherited, because the engine's own defaults are tuned
+// for the sandbox's test scene and not for somebody's first level.
+std::string startLevelText(const std::string& name) {
+    std::string s;
+    s += "OCMAP 1\n";
+    s += "# The level a new project opens. Everything here is editable: these are starting values,\n";
+    s += "# not engine defaults, and changing them changes only this level.\n";
+    s += "NAME " + name + "\n\n";
+    // A LATE-AFTERNOON SUN, about 48 degrees up. Deliberately not noon: an overhead sun flattens
+    // every surface it lights, hides the shadow work entirely, and makes a new level look worse
+    // than the engine actually is. A low sun shows normal maps, shadow softness and the
+    // atmosphere's forward scattering all at once.
+    s += "SUN dir -0.55 0.38 0.74 color 1 0.96 0.9 lux 100000\n";
+    // PHYSICAL sky, which is the engine's real model: Rayleigh, Cornette-Shanks Mie, an ozone tent
+    // and a Chapman-function transmittance. The two overrides are the ones worth authoring per
+    // level: slightly more Mie than clean air, for visible haze and a warmer horizon; and the
+    // multiple-scattering gain, without which the sky goes flat and dark away from the sun.
+    s += "SKY model physical mie 6 multiscatter 1.7\n";
+    // Fog thin enough to read as air rather than as weather. 4e-6 per centimetre is roughly a
+    // 2.5 km visual range, which gives a landscape depth without hiding it.
+    s += "FOG exp density 4e-06 color 0.62 0.7 0.82\n\n";
+    // The sky as a PCG field, so a new project has a working example of the record and a seed to
+    // change. INFINITE because a sky has no bounds; 1600 cm cells because that is one chunk.
+    s += "PCGVOLUME name Sky seed 1 cell 1600 octaves 4 floor 0.4 bias 1.6 infinite\n\n";
+    s += "# A ground plane and two shapes, so the sun, the shadows and the fog have something to\n";
+    s += "# fall on. Delete them once your own content is in.\n";
+    s += "PLACEG Meshes/cube.ocmesh 0 0 -10 0 0 0 4000 4000 10 M_Floor\n";
+    s += "PLACE  Meshes/cube.ocmesh 0 300 100 0 0 0 100 M_Wall\n";
+    s += "PLACE  Meshes/sphere.ocmesh 400 -200 120 0 0 0 120 M_Metal\n";
+    return s;
+}
+
+
 // The four engine assemblies a project compiles against, in the order they are written.
 struct EngineRefs {
     std::string scripting;   // AverBehaviour
@@ -469,6 +509,19 @@ bool scaffoldProject(const std::string& location, const std::string& name,
     if (!writeFileText(manifest, manifestText(name))) {
         if (err) *err = "Could not write " + manifest;
         return false;
+    }
+
+    // The start map the manifest names. Until this existed, STARTMAP pointed at a file nothing
+    // wrote, so every new project opened to an empty world and a log line saying the map did not
+    // exist yet -- a first impression of "nothing happened" from an engine that was working.
+    //
+    // A WARNING AND NOT A FAILURE if it cannot be written: the project itself is valid without a
+    // level, and refusing to create it over a missing starter map would be losing the whole thing
+    // over the least important part of it.
+    {
+        const std::string startMap = content + "\\Maps\\Default.ocmap";
+        if (!writeFileText(startMap, startLevelText(name)))
+            AVER_WARN("[Editor] project created, but could not write {} - it will open empty", startMap);
     }
 
     {
