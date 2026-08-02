@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The C# half of the worked PCG example: it APPLIES what the F# rules decided.
+       Nothing here is F#-aware beyond one ProjectReference. Building this project builds the rules
+       and Aver.Pcg with it, because MSBuild picks a compiler from each referenced project's
+       extension. That is the same property the editor's Compile .NET button relies on.
+
+       Private="false" on Aver.Scripting, matching the sibling F# sample: AverBehaviour must resolve
+       to the ONE copy the host already loaded, outside the collectible script context. A private
+       copy would give the script's context a second AverBehaviour type and the behaviour would stop
+       being discovered. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Scripting.SamplePcg</AssemblyName>
+    <RootNamespace>Aver.Scripting.SamplePcg</RootNamespace>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\csharp\Aver.Scripting\Aver.Scripting.csproj" Private="false" />
+    <ProjectReference Include="..\..\csharp\Aver.Pcg.Apply\Aver.Pcg.Apply.csproj" />
+    <ProjectReference Include="..\Aver.Pcg.SampleRules\Aver.Pcg.SampleRules.fsproj" />
+  </ItemGroup>
+
+</Project>

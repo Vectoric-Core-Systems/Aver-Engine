@@ -306,3 +306,45 @@ add_custom_command(
 add_custom_target(Aver.Pcg DEPENDS ${AVER_PCG_OUTPUTS})
 set_target_properties(Aver.Pcg PROPERTIES FOLDER "modules")
 add_dependencies(Aver.Scripting.Host Aver.Pcg)
+
+# ---------------------------------------------------------------------------------------------------
+# The worked PCG example, staged to bin/PcgScripts/.
+#
+# bin/PcgScripts/ and NOT bin/Scripts/, for the same reason the other samples give: a default editor
+# run must not load a demo, and no oracle gate can be made to pick this up. Run it deliberately with
+#   Sandbox.exe --scripts PcgScripts
+#
+# Only the C# project is named. It ProjectReferences the F# rules, which reference Aver.Pcg, so one
+# `dotnet build` compiles all three -- the property that let F# into this engine without a second
+# compile path anywhere.
+set(AVER_PCGSAMPLE_PROJ ${AVER_FSHARP_DIR}/Aver.Scripting.SamplePcg/Aver.Scripting.SamplePcg.csproj)
+set(AVER_PCGSAMPLE_OUT_DIR ${CMAKE_BINARY_DIR}/bin/PcgScripts)
+
+file(GLOB AVER_PCGSAMPLE_SOURCES CONFIGURE_DEPENDS
+  ${AVER_FSHARP_DIR}/Aver.Scripting.SamplePcg/*.cs
+  ${AVER_FSHARP_DIR}/Aver.Scripting.SamplePcg/*.csproj
+  ${AVER_FSHARP_DIR}/Aver.Pcg.SampleRules/*.fs
+  ${AVER_FSHARP_DIR}/Aver.Pcg.SampleRules/*.fsproj
+  ${AVER_FSHARP_DIR}/Aver.Pcg/*.fs)
+
+# FSharp.Core.dll is an OUTPUT for the reason the other F# block gives: a library project does not
+# copy package assets by default, so a green build can leave the scripts folder with no F# runtime
+# and the failure appears at the first call into F# rather than at load.
+set(AVER_PCGSAMPLE_OUTPUTS
+  ${AVER_PCGSAMPLE_OUT_DIR}/Aver.Scripting.SamplePcg.dll
+  ${AVER_PCGSAMPLE_OUT_DIR}/Aver.Pcg.SampleRules.dll
+  ${AVER_PCGSAMPLE_OUT_DIR}/Aver.Pcg.dll
+  ${AVER_PCGSAMPLE_OUT_DIR}/FSharp.Core.dll)
+
+add_custom_command(
+  OUTPUT ${AVER_PCGSAMPLE_OUTPUTS}
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_PCGSAMPLE_PROJ} -c Release --nologo -v quiet
+          -o ${AVER_PCGSAMPLE_OUT_DIR}
+  DEPENDS ${AVER_PCGSAMPLE_SOURCES}
+          ${AVER_BRIDGE_OUTPUTS}
+          ${AVER_PCG_OUTPUTS}
+  COMMENT "Building the worked PCG example (staged to bin/PcgScripts)"
+  VERBATIM)
+add_custom_target(Aver.Pcg.Sample DEPENDS ${AVER_PCGSAMPLE_OUTPUTS})
+set_target_properties(Aver.Pcg.Sample PROPERTIES FOLDER "modules")
+add_dependencies(Aver.Scripting.Host Aver.Pcg.Sample)
