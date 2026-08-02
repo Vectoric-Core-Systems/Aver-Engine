@@ -8,6 +8,10 @@
 
 #if AVER_MODULE_SCENE
 #  include "aver/anim/AnimSystem.hpp"
+#  include "aver/assets/AssetId.hpp"
+#  include "aver/formats/OcMesh.hpp"
+#  include "aver/scene/scene_abi.h"
+#  include "GameMath.hpp"
 #endif
 
 namespace aver::game {
@@ -63,5 +67,112 @@ std::string GameContent::resolveAnimAsset(u64 id, void* user) {
     auto* self = static_cast<GameContent*>(user);
     return self ? self->pathFor(id) : std::string();
 }
+
+#if AVER_MODULE_SCENE
+
+void GameContent::registerBuiltins(rhi::IDevice& device) {
+    // FROZEN: the unit cube stays half-extent 1. A .ocworld PLACEG scale is a half-extent in
+    // centimetres applied to this mesh, so changing it silently resizes every placed box in every
+    // level ever authored. The same constant is frozen in SandboxApp.cpp with the same note.
+    {
+        std::vector<rhi::MeshVertex> v; std::vector<u32> i;
+        appendSphere(v, i, 1.0f, 24, 48);
+        sceneMeshes_[fnv1a64(std::string_view("Meshes/sphere.ocmesh"))] =
+            device.createMesh(v.data(), (u32)v.size(), i.data(), (u32)i.size());
+    }
+    {
+        std::vector<rhi::MeshVertex> v; std::vector<u32> i;
+        appendBox(v, i, 0, 0, 0, 1.0f);
+        sceneMeshes_[fnv1a64(std::string_view("Meshes/cube.ocmesh"))] =
+            device.createMesh(v.data(), (u32)v.size(), i.data(), (u32)i.size());
+    }
+
+    // The named surfaces gameplay can ask for, with the editor's exact values.
+    auto look = [this](const char* name, f32 r, f32 g, f32 b, f32 metal, f32 rough) {
+        surfaceLooks_[aver_scene_material(0, name)] = SurfaceLook{{r, g, b}, metal, rough};
+    };
+    look("M_Floor",  0.22f, 0.23f, 0.26f, 0.02f, 0.85f);
+    look("M_Wall",   0.48f, 0.50f, 0.55f, 0.03f, 0.72f);
+    look("M_Trim",   0.30f, 0.33f, 0.38f, 0.35f, 0.45f);
+    look("M_Crate",  0.62f, 0.44f, 0.22f, 0.02f, 0.78f);
+    look("M_Target", 0.86f, 0.20f, 0.16f, 0.05f, 0.40f);
+    look("M_Metal",  0.55f, 0.57f, 0.60f, 0.85f, 0.28f);
+    look("M_Accent", 0.95f, 0.66f, 0.15f, 0.30f, 0.35f);
+
+    AVER_INFO("[Mesh] {} built-in primitive(s), {} named surface(s)", sceneMeshes_.size(), surfaceLooks_.size());
+}
+
+void GameContent::loadProjectMeshes(rhi::IDevice& device) {
+    const std::string dir = project_.contentDir();
+    if (dir.empty()) return;
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec)) return;
+
+    u32 loaded = 0, failed = 0;
+    for (std::filesystem::recursive_directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec)) continue;
+        const std::string full = it->path().string();
+        if (assetTypeFromPath(full) != AssetType::Mesh) continue;
+
+        std::string rel = std::filesystem::relative(it->path(), dir, ec).string();
+        if (ec) continue;
+        for (char& c : rel) if (c == '\\') c = '/';
+
+        fmt::OcMeshData md;
+        std::string why;
+        if (!fmt::loadOcMesh(full, md, &why)) { AVER_WARN("[Mesh] {}", why); ++failed; continue; }
+
+        // Position, normal and uv ONLY. rhi::MeshVertex is 32 bytes and has nowhere to put joints
+        // or weights, so a skinned asset arrives here as static geometry -- correct, because the
+        // skinning path uploads its own target mesh and resolves through resolveSceneMesh.
+        std::vector<rhi::MeshVertex> verts(md.vertexCount());
+        for (u32 i = 0; i < md.vertexCount(); ++i) {
+            rhi::MeshVertex& v = verts[i];
+            v.px = md.positions[usize(i)*3+0]; v.py = md.positions[usize(i)*3+1]; v.pz = md.positions[usize(i)*3+2];
+            v.nx = md.normals[usize(i)*3+0];   v.ny = md.normals[usize(i)*3+1];   v.nz = md.normals[usize(i)*3+2];
+            v.u  = md.uvs[usize(i)*2+0];       v.v  = md.uvs[usize(i)*2+1];
+        }
+        const rhi::MeshHandle h = device.createMesh(verts.data(), (u32)verts.size(),
+                                                   md.indices.data(), (u32)md.indices.size());
+        if (!h) { AVER_WARN("[Mesh] the device refused '{}'", rel); ++failed; continue; }
+
+        const u64 id = fnv1a64(std::string_view(rel));
+        sceneMeshes_[id] = h;
+        meshBounds_[id] = {md.boundsMin, md.boundsMax};
+        projectMeshIds_.push_back(id);
+        ++loaded;
+    }
+    if (loaded || failed)
+        AVER_INFO("[Mesh] {} project mesh(es) loaded from {}{}", loaded, dir,
+                  failed ? (", " + std::to_string(failed) + " failed") : "");
+}
+
+void GameContent::releaseProjectMeshes() {
+    for (const u64 id : projectMeshIds_) { sceneMeshes_.erase(id); meshBounds_.erase(id); }
+    projectMeshIds_.clear();
+}
+
+rhi::MeshHandle GameContent::meshFor(u64 id) const {
+    const auto it = sceneMeshes_.find(id);
+    return it == sceneMeshes_.end() ? 0 : it->second;
+}
+
+const std::pair<Vec3, Vec3>* GameContent::boundsFor(u64 id) const {
+    const auto it = meshBounds_.find(id);
+    return it == meshBounds_.end() ? nullptr : &it->second;
+}
+
+rhi::MeshHandle GameContent::resolveSceneMesh(u64 id, void* user) {
+    auto* self = static_cast<GameContent*>(user);
+    return self ? self->meshFor(id) : 0;
+}
+
+const GameContent::SurfaceLook* GameContent::lookFor(i32 material) const {
+    const auto it = surfaceLooks_.find(material);
+    return it == surfaceLooks_.end() ? nullptr : &it->second;
+}
+
+#endif // AVER_MODULE_SCENE
 
 } // namespace aver::game

@@ -107,7 +107,7 @@ BootConfig GameApp::config() const {
     return b;
 }
 
-void GameApp::openProject(Engine&) {
+void GameApp::openProject(Engine& e) {
     // A PACKAGED GAME IS LAUNCHED WITH NO ARGUMENTS. stage-game.ps1 writes Game.ocproject beside
     // AverGame.exe, so when nothing was named on the command line, look there -- and look beside the
     // EXECUTABLE, never in the working directory. A player's shortcut, a store client and a
@@ -134,7 +134,16 @@ void GameApp::openProject(Engine&) {
     if (project_.startMap.empty()) {
         AVER_WARN("[Game] the manifest names no STARTMAP, so there is no level to open");
     }
+    // ORDER IS LOAD-BEARING, and it is the same order applyProject uses: the index must precede
+    // the meshes because the mesh walk resolves through it, and the meshes must precede any level
+    // because a CMeshRenderer's mesh id is resolved through the mesh table.
     content_.adopt(project_);
+#if AVER_MODULE_SCENE
+    if (rhi::IDevice* dev = e.device()) {
+        content_.registerBuiltins(*dev);
+        content_.loadProjectMeshes(*dev);
+    }
+#endif
 }
 
 void GameApp::onInit(Engine& e) {

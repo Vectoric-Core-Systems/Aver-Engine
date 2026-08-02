@@ -1,10 +1,14 @@
 // GameContent: the project's asset index, and the resolvers that read it.
 #pragma once
 #include "aver/core/Types.hpp"
+#include "aver/core/Math.hpp"
 #include "aver/formats/OcProject.hpp"
+#include "aver/rhi/RHI.hpp"
 
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace aver::game {
 
@@ -38,9 +42,48 @@ public:
     // the host's business, not the sampler's. `user` is a GameContent*.
     static std::string resolveAnimAsset(u64 id, void* user);
 
+#if AVER_MODULE_SCENE
+    // Uploads the built-in primitives a .ocworld may name. Call once, before any project meshes.
+    void registerBuiltins(rhi::IDevice& device);
+
+    // Uploads every .ocmesh under the project's content root.
+    //
+    // Takes an IDevice and not an Engine: the editor's version takes Engine& and uses it for
+    // nothing but e.device()->createMesh, and a content cache with a handle on the whole engine is
+    // how the SandboxApp god object started.
+    void loadProjectMeshes(rhi::IDevice& device);
+
+    // Drops the project's meshes from the id table. The built-in primitives survive, which is why
+    // they are tracked separately.
+    void releaseProjectMeshes();
+
+    rhi::MeshHandle meshFor(u64 id) const;
+    usize meshCount() const { return sceneMeshes_.size(); }
+    usize projectMeshCount() const { return projectMeshIds_.size(); }
+
+    // Bounds as loaded from the .ocmesh, or nullptr. Used by the draw walk to cull.
+    const std::pair<Vec3, Vec3>* boundsFor(u64 id) const;
+
+    // Resolver for aver::render::SkinnedScene. Deliberately the SAME table the draw pass reads: a
+    // skin target built from a different upload than the one on screen would be a rig skinning
+    // geometry nobody can see.
+    static rhi::MeshHandle resolveSceneMesh(u64 id, void* user);
+
+    // The named surfaces gameplay can ask for, by interned material token.
+    struct SurfaceLook { f32 col[3]; f32 metallic; f32 roughness; };
+    const SurfaceLook* lookFor(i32 material) const;
+#endif
+
 private:
     fmt::ProjectDesc project_;
     std::unordered_map<u64, std::string> contentIndex_;
+
+#if AVER_MODULE_SCENE
+    std::unordered_map<u64, rhi::MeshHandle>       sceneMeshes_;
+    std::unordered_map<u64, std::pair<Vec3, Vec3>> meshBounds_;
+    std::vector<u64>                               projectMeshIds_;
+    std::unordered_map<i32, SurfaceLook>           surfaceLooks_;
+#endif
 };
 
 } // namespace aver::game
