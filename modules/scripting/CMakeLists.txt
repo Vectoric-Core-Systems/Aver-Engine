@@ -261,3 +261,48 @@ add_custom_command(
 add_custom_target(Aver.FSharp.Sample DEPENDS ${AVER_FSHARP_OUTPUTS})
 set_target_properties(Aver.FSharp.Sample PROPERTIES FOLDER "modules")
 add_dependencies(Aver.Scripting.Host Aver.FSharp.Sample)
+
+# ---------------------------------------------------------------------------------------------------
+# The PCG API, staged to bin/Scripting/ beside the bridge.
+#
+# bin/Scripting/ AND NOT bin/Scripts/, which is the distinction that matters here. bin/Scripts is
+# loaded: anything in it is discovered and run. bin/Scripting holds the CONTRACT assemblies a script
+# compiles against and the host resolves at load. Aver.Pcg is the second kind -- a library a project
+# references when it wants procedural generation, not a behaviour that runs on its own.
+#
+# Only the C# project is named. It ProjectReferences the .fsproj, so `dotnet build` compiles the F#
+# too and stages Aver.Pcg.dll and FSharp.Core.dll alongside -- the same one-command, two-languages
+# property the editor's Compile .NET button relies on.
+#
+# FSharp.Core.dll is named as an OUTPUT for the reason the sample block gives: a library project does
+# not copy package assets to its output by default, so it is possible to get a green build whose
+# staging folder has no F# runtime in it at all, and the failure then appears at the first call into
+# F# rather than at load.
+#
+# DEPENDS on the bridge outputs, and that is ordering rather than a real dependency: both commands
+# write into the same directory, and Aver.Pcg.Apply references Aver.Framework, so letting Ninja run
+# the two in parallel would have them writing Aver.Framework.dll at the same time.
+set(AVER_PCG_PROJ ${AVER_CSHARP_DIR}/Aver.Pcg.Apply/Aver.Pcg.Apply.csproj)
+
+file(GLOB AVER_PCG_SOURCES CONFIGURE_DEPENDS
+  ${AVER_CSHARP_DIR}/Aver.Pcg.Apply/*.cs
+  ${AVER_CSHARP_DIR}/Aver.Pcg.Apply/*.csproj
+  ${CMAKE_SOURCE_DIR}/scripting/fsharp/Aver.Pcg/*.fs
+  ${CMAKE_SOURCE_DIR}/scripting/fsharp/Aver.Pcg/*.fsproj)
+
+set(AVER_PCG_OUTPUTS
+  ${AVER_BRIDGE_DIR}/Aver.Pcg.Apply.dll
+  ${AVER_BRIDGE_DIR}/Aver.Pcg.dll
+  ${AVER_BRIDGE_DIR}/FSharp.Core.dll)
+
+add_custom_command(
+  OUTPUT ${AVER_PCG_OUTPUTS}
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_PCG_PROJ} -c Release --nologo -v quiet
+          -o ${AVER_BRIDGE_DIR}
+  DEPENDS ${AVER_PCG_SOURCES}
+          ${AVER_BRIDGE_OUTPUTS}
+  COMMENT "Building the PCG API, F# + C# (staged to bin/Scripting)"
+  VERBATIM)
+add_custom_target(Aver.Pcg DEPENDS ${AVER_PCG_OUTPUTS})
+set_target_properties(Aver.Pcg PROPERTIES FOLDER "modules")
+add_dependencies(Aver.Scripting.Host Aver.Pcg)
