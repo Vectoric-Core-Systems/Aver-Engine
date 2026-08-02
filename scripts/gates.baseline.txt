@@ -7,9 +7,20 @@
 # A value here moving is either an announced, understood, oracle-moving change or a regression. There
 # is no third case. Whichever it is belongs in the commit message and in docs/STATUS.md.
 #
-# RE-RECORDED 2026-07-30 by ./scripts/record-gates.ps1, and VERIFIED: all 153 gates were re-measured,
-# 153 values moved, none were added or dropped, and the immediate read-back sweep reported ALL GATES
-# PASS. The oracle is a working regression check again. 33 minutes, nine configurations, WARP included.
+# RE-RECORDED 2026-08-02 by ./scripts/record-gates.ps1 -Only Both, and VERIFIED: 162 gates across
+# nine configurations (18 gates x 9, up from 17 x 9), 15 values moved, 9 added, none dropped, and the
+# immediate read-back sweep reported ALL GATES PASS.
+#
+# WHY 15 MOVED, when the tree had not changed since the last Release recording: this file was stale.
+# It was last written at 79f6f04, BEFORE the reflection energy correction; gates.baseline.release.txt
+# was re-recorded after it at 2d4e1a1 and this one was not carried along. The pair had been torn ever
+# since, disagreeing on the 15 RT-affected rows across the five RT-capable configurations. Recording
+# only one half is what creates that state, which is why -Only Both is the default and why both files
+# belong in the same commit. Release moved 0 values in this same run, which is the confirmation:
+# Release was already right, Debug was the stale half.
+#
+# THE 9 ADDED are rt-penumbra x nine configurations -- the gate added by ae47a2f, which had never
+# been recorded and so had been scoring NO-BASELINE (counted as a failure) since it was written.
 #
 # Verifying straight after recording is the step that makes this trustworthy rather than merely
 # written down: numbers measured minutes earlier that then fail to reproduce would be non-determinism,
@@ -50,11 +61,11 @@
 # renderer does.
 baseline | centre | 94,27,14
 baseline | ms | 94,27,14
-baseline | rt | 94,27,14
-baseline | ms-rt | 94,27,14
+baseline | rt | 99,31,17
+baseline | ms-rt | 99,31,17
 baseline | gi | 87,20,11
 baseline | ms-gi | 87,20,11
-baseline | ms-rt-gi | 87,20,11
+baseline | ms-rt-gi | 89,22,13
 baseline | gi-debug | 98,27,14
 baseline | ms-gi-debug | 98,27,14
 baseline | shadow | 22,26,31
@@ -65,6 +76,7 @@ baseline | penumbra | 52,51,51
 baseline | penumbra-rt | 22,26,31
 baseline | sunlit | 90,85,79
 baseline | sunlit-gi | 88,81,73
+baseline | rt-penumbra | 43,43,45
 no-rt | centre | 94,27,14
 no-rt | ms | 94,27,14
 no-rt | rt | 94,27,14
@@ -82,13 +94,14 @@ no-rt | penumbra | 52,51,51
 no-rt | penumbra-rt | 52,51,51
 no-rt | sunlit | 90,85,79
 no-rt | sunlit-gi | 88,81,73
+no-rt | rt-penumbra | 22,26,31
 no-ms | centre | 94,27,14
 no-ms | ms | 94,27,14
-no-ms | rt | 94,27,14
-no-ms | ms-rt | 94,27,14
+no-ms | rt | 99,31,17
+no-ms | ms-rt | 99,31,17
 no-ms | gi | 87,20,11
 no-ms | ms-gi | 87,20,11
-no-ms | ms-rt-gi | 87,20,11
+no-ms | ms-rt-gi | 89,22,13
 no-ms | gi-debug | 98,27,14
 no-ms | ms-gi-debug | 98,27,14
 no-ms | shadow | 22,26,31
@@ -99,6 +112,7 @@ no-ms | penumbra | 52,51,51
 no-ms | penumbra-rt | 22,26,31
 no-ms | sunlit | 90,85,79
 no-ms | sunlit-gi | 88,81,73
+no-ms | rt-penumbra | 43,43,45
 sm60 | centre | 94,27,14
 sm60 | ms | 94,27,14
 sm60 | rt | 94,27,14
@@ -116,13 +130,14 @@ sm60 | penumbra | 52,51,51
 sm60 | penumbra-rt | 52,51,51
 sm60 | sunlit | 90,85,79
 sm60 | sunlit-gi | 88,81,73
+sm60 | rt-penumbra | 22,26,31
 tier1-no-typed-uav | centre | 94,27,14
 tier1-no-typed-uav | ms | 94,27,14
-tier1-no-typed-uav | rt | 94,27,14
-tier1-no-typed-uav | ms-rt | 94,27,14
+tier1-no-typed-uav | rt | 99,31,17
+tier1-no-typed-uav | ms-rt | 99,31,17
 tier1-no-typed-uav | gi | 87,20,11
 tier1-no-typed-uav | ms-gi | 87,20,11
-tier1-no-typed-uav | ms-rt-gi | 87,20,11
+tier1-no-typed-uav | ms-rt-gi | 89,22,13
 tier1-no-typed-uav | gi-debug | 98,27,14
 tier1-no-typed-uav | ms-gi-debug | 98,27,14
 tier1-no-typed-uav | shadow | 22,26,31
@@ -133,13 +148,14 @@ tier1-no-typed-uav | penumbra | 52,51,51
 tier1-no-typed-uav | penumbra-rt | 22,26,31
 tier1-no-typed-uav | sunlit | 90,85,79
 tier1-no-typed-uav | sunlit-gi | 88,81,73
+tier1-no-typed-uav | rt-penumbra | 43,43,45
 no-cons-raster | centre | 94,27,14
 no-cons-raster | ms | 94,27,14
-no-cons-raster | rt | 94,27,14
-no-cons-raster | ms-rt | 94,27,14
+no-cons-raster | rt | 99,31,17
+no-cons-raster | ms-rt | 99,31,17
 no-cons-raster | gi | 91,21,11
 no-cons-raster | ms-gi | 91,21,11
-no-cons-raster | ms-rt-gi | 91,21,11
+no-cons-raster | ms-rt-gi | 93,23,13
 no-cons-raster | gi-debug | 98,27,14
 no-cons-raster | ms-gi-debug | 98,27,14
 no-cons-raster | shadow | 22,26,31
@@ -150,6 +166,7 @@ no-cons-raster | penumbra | 52,51,51
 no-cons-raster | penumbra-rt | 22,26,31
 no-cons-raster | sunlit | 90,85,79
 no-cons-raster | sunlit-gi | 88,81,73
+no-cons-raster | rt-penumbra | 43,43,45
 all-off | centre | 94,27,14
 all-off | ms | 94,27,14
 all-off | rt | 94,27,14
@@ -167,6 +184,7 @@ all-off | penumbra | 52,51,51
 all-off | penumbra-rt | 52,51,51
 all-off | sunlit | 90,85,79
 all-off | sunlit-gi | 88,81,73
+all-off | rt-penumbra | 22,26,31
 no-dxc | centre | 94,27,14
 no-dxc | ms | 94,27,14
 no-dxc | rt | 94,27,14
@@ -184,13 +202,14 @@ no-dxc | penumbra | 52,51,51
 no-dxc | penumbra-rt | 52,51,51
 no-dxc | sunlit | 90,85,79
 no-dxc | sunlit-gi | 88,81,73
+no-dxc | rt-penumbra | 22,26,31
 warp | centre | 94,27,14
 warp | ms | 94,27,14
-warp | rt | 94,27,14
-warp | ms-rt | 94,27,14
+warp | rt | 99,31,17
+warp | ms-rt | 99,31,17
 warp | gi | 87,20,11
 warp | ms-gi | 91,21,11
-warp | ms-rt-gi | 91,21,11
+warp | ms-rt-gi | 93,23,13
 warp | gi-debug | 98,27,14
 warp | ms-gi-debug | 98,27,14
 warp | shadow | 22,26,31
@@ -201,3 +220,4 @@ warp | penumbra | 52,51,51
 warp | penumbra-rt | 22,26,31
 warp | sunlit | 90,85,79
 warp | sunlit-gi | 88,81,73
+warp | rt-penumbra | 43,43,45
