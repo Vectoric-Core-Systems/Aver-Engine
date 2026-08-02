@@ -49,6 +49,7 @@
     <!-- Order matters in F#: a file may only use what precedes it. -->
     <Compile Include="Types.fs" />
     <Compile Include="Pcg.fs" />
+    <Compile Include="Primitives.fs" />
   </ItemGroup>
 
 </Project>
