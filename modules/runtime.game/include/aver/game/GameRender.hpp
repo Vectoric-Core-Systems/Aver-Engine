@@ -5,6 +5,7 @@
 
 namespace aver::rhi { class IDevice; }
 namespace aver::pbr { class MaterialSystem; }
+namespace aver::render { class SkinnedScene; }
 
 namespace aver::game {
 
@@ -27,8 +28,11 @@ struct SceneDrawStats {
 // from it per frame.
 // `materials` may be null: a game with no Voxi feature has no material system, and every
 // surface then draws with its named-surface look or the neutral fallback.
+// `skinning` may be null: init compiles HLSL at runtime and can fail on a machine where the build
+// was green, and a null feature means skinned entities draw at their REST POSE rather than not at
+// all. A character that fails to skin must still appear.
 void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content, SceneDrawStats& stats,
-               pbr::MaterialSystem* materials);
+               pbr::MaterialSystem* materials, render::SkinnedScene* skinning);
 #endif
 
 } // namespace aver::game

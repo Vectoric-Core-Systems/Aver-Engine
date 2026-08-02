@@ -215,6 +215,31 @@ void GameApp::drivePlayCamera() {
 #endif
 }
 
+void GameApp::attachSkinning(Engine& e) {
+#if AVER_MODULE_SCENE
+    rhi::IDevice* dev = e.device();
+    if (!dev) return;
+
+    auto scene = std::make_unique<render::SkinnedScene>();
+    // init compiles HLSL AT RUNTIME, so this can fail on a machine where the build was perfectly
+    // green. A failure leaves skinnedScene_ null, which is a legal state the draw walk handles:
+    // skinned entities draw at their REST POSE rather than not at all. A character that fails to
+    // skin must still appear.
+    if (!scene->init(*dev)) {
+        AVER_WARN("[Game] skinning unavailable; skinned entities will draw at rest");
+        return;
+    }
+    // The SAME tables the draw walk reads, deliberately. A skin target built from a different
+    // upload than the one on screen would be a rig skinning geometry nobody can see.
+    scene->setResolvers(&GameContent::resolveAnimAsset, &GameContent::resolveSceneMesh, &content_);
+    dev->addRenderFeature(scene.get());
+    skinnedScene_ = std::move(scene);
+    AVER_INFO("[Game] skinning attached");
+#else
+    (void)e;
+#endif
+}
+
 void GameApp::attachVoxi(Engine& e) {
 #if AVER_MODULE_VOXI
     rhi::IDevice* dev = e.device();
@@ -386,6 +411,9 @@ void GameApp::onInit(Engine& e) {
     AVER_INFO("[Game] modules: PBR={} SCENE={} VOXI={} PHYSICS={} FRAMEWORK={} SCRIPTING={}",
               AVER_MODULE_PBR, AVER_MODULE_SCENE, AVER_MODULE_VOXI,
               AVER_MODULE_PHYSICS, AVER_MODULE_FRAMEWORK, AVER_MODULE_SCRIPTING);
+    // FIRST of the render features. Its prePass stages this frame's bone matrices, and the scene
+    // pass then asks drawHandle() for a posed handle that must already exist.
+    attachSkinning(e);
     attachVoxi(e);
     initPhysics();      // BEFORE openProject: level load builds a static body per colliding placement
     openProject(e);
@@ -417,6 +445,17 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // matrices. Without it World::worldMatrix reads uncomposed matrices and the draw walk in C7
     // would place everything at the origin -- which looks like a broken transform pipeline and is
     // really a missing flush.
+    // AFTER the animation tick and BEFORE anything draws: update() creates the per-entity skin
+    // targets the draw pass is about to ask for, and COPIES this frame's matrices out of the
+    // AnimSystem, whose skinning() is valid only until the next tick.
+    //
+    // BEFORE World::flush, which is what the editor does. SkinnedScene.hpp's own comment says
+    // "AFTER AnimSystem::tick and World::flush"; the code has always called it before. Copying the
+    // code rather than the comment, and noting the disagreement rather than silently picking a
+    // side -- if the header is right, both hosts have the same bug and it should be fixed in one
+    // place.
+    if (skinnedScene_) skinnedScene_->update(scene::World::instance(), anim::animSystem(), *e.device());
+
     scene::World::instance().flush();
 #endif
 
@@ -443,7 +482,7 @@ void GameApp::onRender(Engine& e) {
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
         if (voxiAttached_) ms = &voxiRenderer_.materials();
 #endif
-        drawWorld(*dev, viewProj_, content_, drawStats_, ms);
+        drawWorld(*dev, viewProj_, content_, drawStats_, ms, skinnedScene_.get());
     }
 #endif
     // Nothing drawn yet: Engine::frameStep() already does beginFrame/endFrame around this, so the
@@ -469,6 +508,11 @@ void GameApp::onShutdown(Engine& e) {
     // exactly this reason -- it must outlive the device, which it does by construction, but only if
     // it is unregistered before the device goes.
     rhi::IDevice* dev = e.device();
+#if AVER_MODULE_SCENE
+    // Reverse registration order: skinning went in FIRST, so it comes out LAST of the two.
+    // Removed before the device goes, because the device holds a bare pointer to it.
+    if (dev && skinnedScene_) dev->removeRenderFeature(skinnedScene_.get());
+#endif
 #if AVER_MODULE_VOXI
     if (dev && voxiAttached_) {
         dev->removeRenderFeature(&voxiRenderer_);
@@ -484,6 +528,7 @@ void GameApp::onShutdown(Engine& e) {
     content_.setTextureFactory(nullptr);
 #endif
 #if AVER_MODULE_SCENE
+    skinnedScene_.reset();
     // Before physics: unloading destroys entities AND removes their static bodies, and removing a
     // body from a shut-down physics world is the wrong order.
     level_.unload();

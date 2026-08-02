@@ -8,11 +8,15 @@
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/VoxiRenderer.hpp"
 #endif
+#if AVER_MODULE_SCENE
+#  include "aver/render/SkinnedScene.hpp"
+#endif
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
 #include "aver/game/GameRender.hpp"
 #include "aver/game/GameInput.hpp"
 
+#include <memory>
 #include <string>
 
 namespace aver::game {
@@ -91,6 +95,10 @@ private:
     // with no Voxi feature has no material system and draws every surface with its fallback.
     void attachVoxi(Engine&);
 
+    // Creates and registers the skinning feature. Registered FIRST of all render features, so its
+    // prePass stages this frame's bone matrices before anything asks for a posed handle.
+    void attachSkinning(Engine&);
+
     // Starts the physics world. MUST run before any level loads: loading builds a static body per
     // colliding placement, gated on aver_phys_ready(), so a level loaded first silently gets no
     // collision and the player falls through the floor.
@@ -134,6 +142,12 @@ private:
     // onShutdown rather than being a local or a unique_ptr handed away.
     voxi::VoxiRenderer voxiRenderer_;
     bool voxiAttached_ = false;
+#endif
+#if AVER_MODULE_SCENE
+    // OWNED, unlike voxiRenderer_ which is a member by value -- SkinnedScene is created only if
+    // init succeeds, and a failed init must leave nothing registered rather than an inert member.
+    // Null is a LEGAL state: skinned entities then draw at their rest pose rather than not at all.
+    std::unique_ptr<render::SkinnedScene> skinnedScene_;
 #endif
 #if AVER_MODULE_PHYSICS
     int32_t groundBody_ = 0;

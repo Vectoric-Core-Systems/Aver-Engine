@@ -14,6 +14,7 @@
 #if AVER_MODULE_PBR
 #  include "aver/pbr/MaterialSystem.hpp"
 #endif
+#include "aver/render/SkinnedScene.hpp"
 #include "aver/scene/World.hpp"
 #include "aver/scene/scene_abi.h"
 #include "GameMath.hpp"
@@ -23,7 +24,7 @@
 namespace aver::game {
 
 void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content, SceneDrawStats& stats,
-               pbr::MaterialSystem* materials) {
+               pbr::MaterialSystem* materials, render::SkinnedScene* skinning) {
     scene::World& w = scene::World::instance();
     int drawn = 0, culled = 0;
 
@@ -58,11 +59,12 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // worldMatrix is non-const on World, which is why this takes a non-const World&.
         const Mat4& wm = w.worldMatrix(ent);
 
-        // A STATIC entity gets its bounds from the asset. A skinned one would already have had them
-        // written this frame by SkinnedScene from its ACTUAL POSE -- overwriting those with the rest
-        // box is exactly the popping the posed-bounds work exists to stop. Skinning is not wired
-        // into the game yet, so every entity here is static; the guard is written now so that
-        // turning skinning on later cannot silently reintroduce the bug.
+        // A STATIC entity gets its bounds from the asset. A SKINNED one already had them written
+        // this frame by SkinnedScene from its ACTUAL POSE, so leave those alone -- overwriting with
+        // the rest box is exactly the popping the posed-bounds work exists to stop. The guard was
+        // written before skinning was wired; it is live now.
+        const bool skinned = skinning && skinning->drawHandle(ent) != 0;
+        if (!skinned)
         if (const auto* b = content.boundsFor(mr->mesh)) {
             auto* mw = const_cast<scene::CMeshRenderer*>(mr);
             mw->aabbMin[0] = b->first.x;  mw->aabbMin[1] = b->first.y;  mw->aabbMin[2] = b->first.z;
@@ -132,7 +134,14 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         (void)materials;
 #endif
 
-        device.drawMesh(handle, &wm.m[0][0], col, metallic, roughness);
+        // THE SEAM, and it is one line because the design made it one. A skinned entity's posed
+        // vertices live in a DIFFERENT MeshHandle sharing this one's index buffer, so substituting
+        // the handle reaches every pass at once. Zero means "not skinned", never "not drawn".
+        rhi::MeshHandle drawHandle = handle;
+        if (skinning) {
+            if (const rhi::MeshHandle sk = skinning->drawHandle(ent)) drawHandle = sk;
+        }
+        device.drawMesh(drawHandle, &wm.m[0][0], col, metallic, roughness);
         ++drawn;
     }
 
