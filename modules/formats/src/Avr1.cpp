@@ -5,6 +5,8 @@
 #include "aver/core/Log.hpp"
 
 #include <cstring>
+#include "aver/platform/FileSystem.hpp"
+
 #include <fstream>
 
 namespace aver::fmt {
@@ -274,6 +276,11 @@ bool parseAvr1(const u8* bytes, usize size, Avr1File& out, std::string* why) {
 
 // Reads and parses a container file. Returns false with `why` set.
 bool loadAvr1(const std::string& path, Avr1File& out, std::string* why) {
+    // Traced like the text loaders are. These open their own ifstream rather than going
+    // through platform::readFileBytes, so without this line a .ocmesh/.ocanim/AVR1 read from
+    // OUTSIDE a package would not appear in --trace-opens and verify-game.ps1 would pass a
+    // package that reaches into the dev tree for its geometry.
+    aver::traceFileOpen(path);
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return fail(why, "AVR1: cannot open " + path);
     const std::streamoff n = f.tellg();

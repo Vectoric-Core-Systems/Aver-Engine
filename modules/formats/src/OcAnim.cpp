@@ -5,6 +5,8 @@
 #include "aver/formats/Avr1.hpp"
 
 #include <cstring>
+#include "aver/platform/FileSystem.hpp"
+
 #include <fstream>
 
 namespace aver::fmt {
@@ -43,6 +45,11 @@ struct R {
 
 // Reads a whole file into `out`. `what` prefixes any error message.
 bool readWholeFile(const std::string& path, std::vector<u8>& out, std::string* why, const char* what) {
+    // Traced like the text loaders are. These open their own ifstream rather than going
+    // through platform::readFileBytes, so without this line a .ocmesh/.ocanim/AVR1 read from
+    // OUTSIDE a package would not appear in --trace-opens and verify-game.ps1 would pass a
+    // package that reaches into the dev tree for its geometry.
+    aver::traceFileOpen(path);
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return fail(why, std::string(what) + ": cannot open " + path);
     const std::streamoff n = f.tellg();

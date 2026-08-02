@@ -65,6 +65,15 @@ u32 parseU32(const char* s, u32 fallback) {
     return static_cast<u32>(v);
 }
 
+// Logs one line per file the engine opens. Installed only under --trace-opens.
+//
+// The prefix is machine-readable on purpose: verify-game.ps1 greps for it and asserts every path is
+// under the package root. A packaged game that falls back to a dev-tree asset runs perfectly on the
+// machine that built it and fails everywhere else, and nothing but this says so.
+void onFileOpen(const char* path, void*) {
+    AVER_INFO("[open] {}", path ? path : "(null)");
+}
+
 // The one event sink the game installs. Everything the window produces lands in InputState.
 void onWindowEvent(void* user, const Event& e) {
     static_cast<InputState*>(user)->onEvent(e);
@@ -100,6 +109,7 @@ GameConfig parseArgs(int argc, char** argv) {
         else if (std::strcmp(a, "--debug-layer") == 0) { c.debugLayer = true; }
         else if (std::strcmp(a, "--project") == 0)     { c.projectPath = valueAfter(argc, argv, i, ""); ++i; }
         else if (std::strcmp(a, "--input-echo") == 0)  { c.inputEcho = true; }
+        else if (std::strcmp(a, "--trace-opens") == 0) { c.traceOpens = true; }
         // A bare path ending .ocproject is the project, so double-clicking one or dropping it on the
         // exe works. A packaged game is launched with no arguments at all and finds its manifest in
         // its own directory instead -- see openProject.
@@ -352,6 +362,13 @@ void GameApp::pushFrame(Engine& e) {
 }
 
 void GameApp::onInit(Engine& e) {
+    // FIRST, before anything reads a file. Installing it later would miss the project manifest and
+    // the content walk, which are the two most likely places a package reaches outside itself.
+    if (cfg_.traceOpens) {
+        setFileTrace(&onFileOpen, nullptr);
+        AVER_INFO("[Game] --trace-opens: every engine file read is logged with an [open] prefix");
+    }
+
     // The whole point of the platform-side InputState: a game reads the window's own event stream,
     // with no ImGui anywhere. SandboxApp cannot do this -- its input path is inside
     // `#if AVER_WITH_IMGUI` and reads ImGui::IsKeyDown -- which is why a game executable was not
@@ -479,6 +496,7 @@ void GameApp::onShutdown(Engine& e) {
     // Reported unconditionally, including when it is zero. A silent zero is indistinguishable from
     // a broken counter, and "did the world simulate at all" is the first question asked when
     // gameplay does not move.
+    setFileTrace(nullptr, nullptr);
     AVER_INFO("[Game] shutdown after {} frame(s), {} physics step(s)", frames_, physSteps_);
     (void)dev;
 }

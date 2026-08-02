@@ -6,6 +6,8 @@
 
 #include <cmath>
 #include <cstring>
+#include "aver/platform/FileSystem.hpp"
+
 #include <fstream>
 
 namespace aver::fmt {
@@ -450,6 +452,11 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
 
 // Reads an .ocmesh file from disk. Returns false with `why` set.
 bool loadOcMesh(const std::string& path, OcMeshData& out, std::string* why) {
+    // Traced like the text loaders are. These open their own ifstream rather than going
+    // through platform::readFileBytes, so without this line a .ocmesh/.ocanim/AVR1 read from
+    // OUTSIDE a package would not appear in --trace-opens and verify-game.ps1 would pass a
+    // package that reaches into the dev tree for its geometry.
+    aver::traceFileOpen(path);
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return fail(why, ".ocmesh: cannot open " + path);
     const std::streamoff n = f.tellg();

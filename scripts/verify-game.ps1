@@ -17,12 +17,25 @@
       - A working directory that is not the package root exposes any relative path the runtime
         resolves against cwd instead of against its own location.
 
-    WHAT THIS DOES NOT YET CHECK, stated plainly rather than implied. The design calls for a
-    --trace-opens flag on AverGame that logs every path through platform::readFileBytes /
-    readFileText and lets this script assert that all of them are under the package root. That flag
-    is not implemented, so today this proves the package RUNS in isolation, not that it opened
-    nothing outside itself. The difference matters: a package that falls back to a dev-tree asset
-    and carries on would pass this script and fail on a player's machine.
+    THE ISOLATION ASSERTION, implemented 2026-08-02. The run passes --trace-opens and this script
+    asserts every [open] path is inside the scratch copy. A relative path counts as outside by
+    definition, because the working directory is C:\.
+
+    WHAT THE TRACE COVERS, measured rather than assumed. The first version of this hooked only
+    platform::readFileBytes/readFileText and was described as "the whole engine file API". It is
+    not: the TEXT loaders (OcProject, OcWorld, OcMap, OcMat, OcBeam) go through those, but the
+    BINARY ones (Avr1, OcMesh, OcAnim) open their own ifstream. A packaged game reported exactly
+    2 traced opens -- the manifest and the level -- and would have passed while loading every mesh
+    from the dev tree. Those three loaders now call aver::traceFileOpen explicitly.
+
+    That distinction is the entire point. A package that falls back to a dev-tree asset RUNS
+    PERFECTLY on the machine that built it: exit 0, device created, frames drawn. Only the list of
+    what it actually opened tells the two apart, and a run that logs no [open] lines at all is
+    treated as a FAILURE rather than a pass, because it means the flag is not wired and this script
+    proved nothing.
+
+    Its limits, stated rather than implied: the trace does NOT cover LoadLibraryW (dxcompiler, dxil,
+    nethost, hostfxr), the CLR's own assembly probing, or stbi_load's internal fopen.
 
     TWO LIMITS MEASURED RATHER THAN GUESSED, both found by deliberately breaking a good package and
     watching this script pass anyway:
@@ -128,7 +141,7 @@ $exe = Join-Path $scratch 'AverGame.exe'
 if (-not (Test-Path -LiteralPath $exe)) {
     Fail 'AverGame.exe is missing from the scratch copy'
 } else {
-    $args = @('--frames', "$Frames")
+    $args = @('--frames', "$Frames", '--trace-opens')
     if (-not $Windowed) { $args += '--headless' }
 
     # cwd = C:\, deliberately. See the description: it is the working directory rather than the copy
@@ -153,6 +166,38 @@ if (-not (Test-Path -LiteralPath $exe)) {
     # failed to initialise and gave up quietly would otherwise read as a pass.
     if ($out -notmatch '\[RHI\] device created') { Fail 'the run never reported creating an RHI device' }
     if ($out -match 'ImGui')                     { Fail 'the packaged game initialised ImGui -- it was staged from a UI tree' }
+
+    # ------------------------------------------------------------------------------------------
+    # THE ISOLATION ASSERTION. --trace-opens logs one [open] line per path the engine reads through
+    # platform::readFileBytes/readFileText, which is the WHOLE engine file API. Every one must be
+    # inside the scratch copy.
+    #
+    # This is the check the rest of this script only approximates. A package that falls back to a
+    # dev-tree asset RUNS PERFECTLY on the machine that built it, exits 0, creates a device and
+    # draws -- and fails on every other machine. Nothing but the list of what it actually opened
+    # distinguishes the two.
+    #
+    # Its limits, stated rather than implied: it does NOT cover LoadLibraryW (dxcompiler, dxil,
+    # nethost, hostfxr), the CLR's own assembly probing, or stbi_load's internal fopen.
+    # ------------------------------------------------------------------------------------------
+    $opened = [regex]::Matches($out, '(?m)^\[INFO\s*\]\s*\[open\]\s*(.+?)\s*$') |
+              ForEach-Object { $_.Groups[1].Value }
+    if ($opened.Count -eq 0) {
+        Fail 'the run logged no [open] lines at all -- --trace-opens is not wired, so this script proved nothing about isolation'
+    } else {
+        $outside = @()
+        foreach ($path in $opened) {
+            # Relative paths are resolved against the process working directory, which this script
+            # deliberately sets to C:\ -- so a relative path is BY DEFINITION outside the package.
+            if (-not [System.IO.Path]::IsPathRooted($path)) { $outside += $path; continue }
+            $full = [System.IO.Path]::GetFullPath($path)
+            if (-not $full.StartsWith($scratch, [StringComparison]::OrdinalIgnoreCase)) { $outside += $full }
+        }
+        Note "traced $($opened.Count) file open(s), $($outside.Count) outside the package"
+        foreach ($p in ($outside | Select-Object -Unique)) {
+            Fail "the packaged game opened '$p', which is outside the package"
+        }
+    }
 }
 
 if (-not $KeepScratch -and (Test-Path -LiteralPath $scratch)) {

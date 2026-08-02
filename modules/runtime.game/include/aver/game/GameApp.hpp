@@ -31,6 +31,8 @@ struct GameConfig {
     std::string projectPath;
     // Logs the held-key set on every change. Proves the ImGui-free input path without a debugger.
     bool inputEcho = false;
+    // Logs every path the engine opens, so verify-game.ps1 can assert none is outside the package.
+    bool traceOpens = false;
 };
 
 // Parses the arguments a game executable accepts. Unknown arguments are ignored rather than fatal:

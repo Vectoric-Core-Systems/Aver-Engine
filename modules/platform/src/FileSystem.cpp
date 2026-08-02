@@ -99,7 +99,17 @@ bool createDirectories(const std::string& path) {
 }
 
 // Reads a whole file into `out`. False if it cannot be read.
+namespace {
+FileTraceFn g_trace = nullptr;
+void* g_traceUser = nullptr;
+}
+
+void setFileTrace(FileTraceFn fn, void* user) { g_trace = fn; g_traceUser = user; }
+
+void traceFileOpen(const std::string& path) { if (g_trace) g_trace(path.c_str(), g_traceUser); }
+
 bool readFileBytes(const std::string& path, std::vector<u8>& out) {
+    if (g_trace) g_trace(path.c_str(), g_traceUser);
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return false;
     const std::streamoff size = f.tellg();
@@ -112,6 +122,10 @@ bool readFileBytes(const std::string& path, std::vector<u8>& out) {
 
 // Reads a whole file into `out` as text. False if it cannot be read.
 bool readFileText(const std::string& path, std::string& out) {
+    // Traced on ENTRY, before the open is attempted, so a path that fails to open is still
+    // reported. A fallback that misses is exactly as informative as one that hits: it says the
+    // package looked outside itself.
+    if (g_trace) g_trace(path.c_str(), g_traceUser);
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return false;
     const std::streamoff size = f.tellg();

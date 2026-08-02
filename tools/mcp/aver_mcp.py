@@ -265,6 +265,58 @@ def tool_gates(args):
     }
 
 
+def tool_package(args):
+    """Stage a project into a runnable game directory, and optionally verify it.
+
+    STAGING IS NOT DESTRUCTIVE to the repo -- it copies into an output directory the caller names --
+    but it DOES overwrite that directory when -Force is passed, so `force` is opt-in here rather
+    than implied. The two scripts are separate on purpose: staging produces a package, verifying
+    proves the package runs somewhere else, and a tool that always did both would make it awkward to
+    inspect the output between the two.
+    """
+    project = args.get("project") or ""
+    out = args.get("out") or ""
+    if not project or not out:
+        return {"ok": False, "error": "both 'project' (a .ocproject) and 'out' are required"}
+    if not project.lower().endswith(".ocproject"):
+        return {"ok": False, "error": "'project' must be a .ocproject manifest"}
+    for label, value in (("project", project), ("out", out)):
+        if '"' in value or "`" in value or ";" in value:
+            return {"ok": False, "error": "suspicious character in '%s'" % label}
+
+    # build-game by default, not build-release. stage-game.ps1 REFUSES a tree configured
+    # AVER_ENABLE_UI=ON, because its AverGame.exe links Dear ImGui and must not ship; defaulting to
+    # the editor tree here would make every call fail with a message about a flag the caller never
+    # passed.
+    build_dir = args.get("build_dir") or "build-game"
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", build_dir):
+        return {"ok": False, "error": "suspicious build_dir"}
+
+    cmd = './scripts/stage-game.ps1 -Project "%s" -Out "%s" -BuildDir %s' % (project, out, build_dir)
+    if args.get("config") in ("Debug", "Release"):
+        cmd += " -Config %s" % args["config"]
+    if args.get("force"):
+        cmd += " -Force"
+    code, out_text = run_powershell(cmd, timeout=900)
+    lines = [l.strip() for l in out_text.splitlines() if l.strip().startswith("[game]")]
+    result = {
+        "ok": code == 0,
+        "errors": code,
+        "stage": lines,
+        "verdict": next((l for l in reversed(lines) if "OK ->" in l or "FAILED" in l), ""),
+    }
+    if code != 0 or not args.get("verify"):
+        return result
+
+    vcode, vtext = run_powershell('./scripts/verify-game.ps1 -Package "%s"' % out, timeout=900)
+    vlines = [l.strip() for l in vtext.splitlines() if l.strip().startswith("[verify]")]
+    result["ok"] = vcode == 0
+    result["verify"] = vlines
+    result["verify_errors"] = vcode
+    result["verify_verdict"] = next((l for l in reversed(vlines) if "OK --" in l or "FAILED" in l), "")
+    return result
+
+
 def tool_flags(args):
     """The engine's CLI flags, read out of the source so this cannot go stale."""
     src = os.path.join(ROOT, "sandbox", "src", "SandboxApp.cpp")
@@ -341,6 +393,23 @@ TOOLS = [
             "release": {"type": "boolean"},
         }},
         "fn": tool_gates,
+    },
+    {
+        "name": "aver_package",
+        "description": "Package a project into a standalone, runnable game directory with "
+                       "./scripts/stage-game.ps1, and optionally prove it runs outside the tree "
+                       "that built it with ./scripts/verify-game.ps1. Defaults to the build-game "
+                       "tree: staging REFUSES a tree configured AVER_ENABLE_UI=ON, because its "
+                       "AverGame.exe links Dear ImGui and is not shippable.",
+        "inputSchema": {"type": "object", "properties": {
+            "project": {"type": "string", "description": "path to the project's .ocproject manifest"},
+            "out": {"type": "string", "description": "output directory for the package"},
+            "build_dir": {"type": "string", "description": "build tree to stage from (default build-game)"},
+            "config": {"type": "string", "description": "Debug or Release"},
+            "force": {"type": "boolean", "description": "replace a non-empty output directory"},
+            "verify": {"type": "boolean", "description": "also run verify-game.ps1 on the result"},
+        }, "required": ["project", "out"]},
+        "fn": tool_package,
     },
     {
         "name": "aver_flags",
