@@ -38,7 +38,7 @@ aver_add_module(Aver.Runtime.Game
 # only symptom would have been a game that draws an empty world.
 #
 # Aver.RHI is deliberately absent: it is already PUBLIC through Aver.Runtime.
-target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Formats Aver.Render.Skin)
+target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Formats Aver.Render.Skin Aver.Render.Pcg)
 
 if(TARGET Aver.Render.PBR)
   target_link_libraries(Aver.Runtime.Game PUBLIC

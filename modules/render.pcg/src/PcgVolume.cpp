@@ -4,6 +4,7 @@
 #include "PcgShaders.hpp"
 
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 namespace aver::pcg {
@@ -91,12 +92,126 @@ bool VolumeBuilder::init(rhi::IDevice& dev) {
 
 void VolumeBuilder::shutdown() {
     if (res_) {
+        if (set_)      res_->destroyBindingSet(set_);
+        if (readback_) res_->destroyBuffer(readback_);
+        if (out_)      res_->destroyBuffer(out_);
         if (pipeline_) res_->destroyPipeline(pipeline_);
         if (cs_)       res_->destroyShader(cs_);
     }
-    pipeline_ = 0;
-    cs_ = 0;
+    set_ = 0; readback_ = 0; out_ = 0; pipeline_ = 0; cs_ = 0;
+    bytes_ = 0;
+    state_ = State::Idle;
     res_ = nullptr;
+}
+
+VolumeBuilder::~VolumeBuilder() { shutdown(); }
+
+bool VolumeBuilder::request(const VolumeSpec& spec) {
+    if (!pipeline_ || !res_) return false;
+    const u64 voxels = u64(spec.resX) * spec.resY * spec.resZ;
+    if (voxels == 0) return false;
+
+    const u64 bytes = voxels * sizeof(f32);
+    // Reallocated only when the size actually changes: a caller regenerating the same field every
+    // time a seed slider moves would otherwise churn two GPU buffers and a descriptor per keypress.
+    if (bytes != bytes_) {
+        if (set_)      { res_->destroyBindingSet(set_); set_ = 0; }
+        if (readback_) { res_->destroyBuffer(readback_); readback_ = 0; }
+        if (out_)      { res_->destroyBuffer(out_); out_ = 0; }
+
+        rhi::BufferDesc od;
+        od.bytes = bytes;
+        od.kind = rhi::BufferKind::Default;
+        od.allowUnorderedAccess = true;
+        od.debugName = "Pcg.Volume";
+        out_ = res_->createBuffer(od);
+
+        rhi::BufferDesc rd;
+        rd.bytes = bytes;
+        rd.kind = rhi::BufferKind::Readback;
+        rd.debugName = "Pcg.Volume.Readback";
+        readback_ = res_->createBuffer(rd);
+
+        rhi::BindingSetDesc sd;
+        sd.uavCount = 1;
+        sd.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
+        set_ = res_->createBindingSet(sd);
+
+        if (!out_ || !readback_ || !set_) {
+            AVER_ERROR("[PCG] could not allocate a {}-voxel volume", voxels);
+            shutdown();
+            return false;
+        }
+        bytes_ = bytes;
+        outState_ = rhi::ResourceState::Common;   // freshly created
+    }
+
+    spec_ = spec;
+    host_.assign(static_cast<usize>(voxels), 0.0f);
+    state_ = State::Dispatch;
+    return true;
+}
+
+bool VolumeBuilder::read(f32* out, usize count) const {
+    if (state_ != State::Done || !out) return false;
+    if (count != host_.size()) return false;
+    std::memcpy(out, host_.data(), count * sizeof(f32));
+    return true;
+}
+
+void VolumeBuilder::prePass(rhi::IRenderContext& ctx) {
+    if (!pipeline_ || !res_) return;
+
+    if (state_ == State::Dispatch) {
+        const u64 voxels = u64(spec_.resX) * spec_.resY * spec_.resZ;
+
+        VolumeCB cb{};
+        cb.res[0] = spec_.resX; cb.res[1] = spec_.resY; cb.res[2] = spec_.resZ;
+        cb.res[3] = spec_.layerCount < kMaxLayers ? spec_.layerCount : kMaxLayers;
+        cb.seedFloor[0] = spec_.seed;
+        cb.coverage[0] = spec_.coverageFloor;
+        cb.coverage[1] = spec_.coverageBias;
+        for (u32 l = 0; l < kMaxLayers; ++l) {
+            const NoiseLayer& ly = spec_.layers[l];
+            cb.layerA[l][0] = ly.frequency;  cb.layerA[l][1] = ly.amplitude;
+            cb.layerA[l][2] = ly.lacunarity; cb.layerA[l][3] = ly.gain;
+            cb.layerB[l][0] = ly.octaves;    cb.layerB[l][1] = ly.seedOffset;
+        }
+
+        res_->setUavBuffer(set_, 0, out_, sizeof(f32), static_cast<u32>(voxels), 0);
+
+        ctx.pushMarker("Aver.Pcg.Volume");
+        if (outState_ != rhi::ResourceState::UnorderedAccess) {
+            ctx.bufferBarrier(out_, outState_, rhi::ResourceState::UnorderedAccess);
+            outState_ = rhi::ResourceState::UnorderedAccess;
+        }
+        ctx.setPipeline(pipeline_);
+        ctx.setBindingSet(set_);
+        ctx.setConstants(0, &cb, sizeof(VolumeCB) / 4);
+        // Ceil-divided against the shader's [numthreads(4,4,4)]. The shader bounds-checks, so an
+        // odd resolution costs a few idle threads rather than a write past the buffer.
+        ctx.dispatch((spec_.resX + 3) / 4, (spec_.resY + 3) / 4, (spec_.resZ + 3) / 4);
+        // CopySource before the copy: nothing transitions implicitly in this RHI.
+        ctx.bufferBarrier(out_, outState_, rhi::ResourceState::CopySource);
+        outState_ = rhi::ResourceState::CopySource;
+        ctx.copyBuffer(readback_, out_, bytes_);
+        ctx.popMarker();
+        state_ = State::Copy;
+        return;
+    }
+
+    if (state_ == State::Copy) {
+        // ONE FRAME LATER, and this wait is the whole reason the state machine exists. readBuffer
+        // does no synchronisation of its own -- reading in the same frame the copy was RECORDED
+        // returns whatever the buffer held before, which looks like a shader that computed
+        // garbage rather than like a read that happened too early.
+        if (res_->readBuffer(readback_, host_.data(), bytes_)) {
+            state_ = State::Done;
+        } else {
+            AVER_ERROR("[PCG] the volume readback failed");
+            state_ = State::Idle;
+        }
+    }
 }
 
 } // namespace aver::pcg

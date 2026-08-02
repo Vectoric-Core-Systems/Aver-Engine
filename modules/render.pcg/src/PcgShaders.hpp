@@ -2,12 +2,18 @@
 //
 // MIRRORED FUNCTION FOR FUNCTION by PcgVolume.cpp, and by Aver.Pcg's sampleDensity in F#. Three
 // implementations of one function is two too many to keep in step by hope, which is why
-// PcgVolumeTest compares this against the C++ one voxel by voxel and fails on a single differing
-// bit. The atmosphere model in this repo is kept honest the same way.
+// --pcg-volume-test compares this against the C++ one voxel by voxel, every voxel, every run.
+// The atmosphere model in this repo is kept honest the same way.
+//
+// THEY AGREE TO ONE ULP, NOT BIT-EXACTLY, and that was measured rather than assumed. On a 32^3
+// two-layer field, 8234 of 32768 voxels match bit for bit and the rest differ by at most
+// 1.79e-07 -- 2^-23. They still differ with coverageBias at 1.0, which rules out pow() and leaves
+// floating-point CONTRACTION: DXC fuses multiply-add in the fBm accumulation where MSVC under
+// /fp:precise does not. The integer hash below agrees exactly; only the float tail moves.
 //
 // EVERY INTEGER OPERATION HERE IS 32-BIT UNSIGNED AND WRAPS. That is true in HLSL, in C++ and in F#
-// for uint32, which is what makes a bit-exact comparison between them possible at all -- and it is
-// why the hash is splitmix32 written out rather than anything from a library.
+// for uint32, and it is why the HASH half of this agrees exactly across all three -- and why the
+// hash is splitmix32 written out rather than anything from a library.
 #pragma once
 
 namespace aver::pcg {
@@ -23,7 +29,12 @@ cbuffer PcgVolumeCB : register(b0) {
     int4   gLayerB[4];
 };
 
-RWTexture3D<float> gVolume : register(u0);
+// A STRUCTURED BUFFER and not an RWTexture3D, and the reason is testability rather than taste: the
+// RHI has copyBuffer but no copyTexture, so a Tex3D result cannot be read back and compared against
+// the CPU mirror at all. A field nobody can check against its reference is the exact thing this
+// module exists to avoid. A Tex3D variant, for hardware-filtered sampling in a raymarch, wants a
+// texture copy path the RHI does not have yet.
+RWStructuredBuffer<float> gVolume : register(u0);
 
 // splitmix32. The literals are the contract: change one and the F#, C++ and HLSL sides diverge
 // silently, producing three different worlds from one seed.
@@ -75,7 +86,10 @@ void CSVolume(uint3 tid : SV_DispatchThreadID) {
     // Guarded: a resolution that is not a multiple of the group size dispatches extra threads, and
     // an unguarded write past the texture is undefined rather than merely wasted.
     if (tid.x >= gRes.x || tid.y >= gRes.y || tid.z >= gRes.z) return;
-    gVolume[tid] = pcgDensity(tid);
+    // x-major, matching the CPU mirror's index arithmetic exactly. Transposing this is the classic
+    // way to get a field that is "obviously noise" and disagrees everywhere.
+    uint idx = tid.z * gRes.y * gRes.x + tid.y * gRes.x + tid.x;
+    gVolume[idx] = pcgDensity(tid);
 }
 )HLSL";
 

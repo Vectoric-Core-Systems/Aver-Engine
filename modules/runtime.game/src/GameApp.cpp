@@ -21,6 +21,7 @@
 #endif
 
 #include <cmath>
+#include <vector>
 #include <cstdlib>
 #include <cstring>
 
@@ -110,6 +111,7 @@ GameConfig parseArgs(int argc, char** argv) {
         else if (std::strcmp(a, "--project") == 0)     { c.projectPath = valueAfter(argc, argv, i, ""); ++i; }
         else if (std::strcmp(a, "--input-echo") == 0)  { c.inputEcho = true; }
         else if (std::strcmp(a, "--trace-opens") == 0) { c.traceOpens = true; }
+        else if (std::strcmp(a, "--pcg-volume-test") == 0) { c.pcgVolumeTest = true; }
         // A bare path ending .ocproject is the project, so double-clicking one or dropping it on the
         // exe works. A packaged game is launched with no arguments at all and finds its manifest in
         // its own directory instead -- see openProject.
@@ -213,6 +215,78 @@ void GameApp::drivePlayCamera() {
     yaw_   = std::atan2(look.y, look.x);
     pitch_ = std::asin(std::fmax(-1.0f, std::fmin(1.0f, look.z)));
 #endif
+}
+
+void GameApp::attachPcgTest(Engine& e) {
+    rhi::IDevice* dev = e.device();
+    if (!dev) return;
+    if (!pcgVolume_.init(*dev)) {
+        AVER_ERROR("[PCG] the volume shader would not compile - the HLSL and the C++ mirror cannot "
+                   "be compared, so this run proves nothing");
+        return;
+    }
+    dev->addRenderFeature(&pcgVolume_);
+    pcgAttached_ = true;
+
+    // The SAME spec PcgMirrorTest uses, so the C++/F#/HLSL comparison is over one set of numbers
+    // rather than three sets that happen to look similar.
+    pcgSpec_.resX = pcgSpec_.resY = pcgSpec_.resZ = 32;
+    pcgSpec_.seed = 20260802;
+    pcgSpec_.layerCount = 2;
+    pcgSpec_.layers[0] = { 4.0f,  1.0f, 4, 2.0f, 0.5f, 7919 };
+    pcgSpec_.layers[1] = { 11.0f, 0.5f, 3, 2.0f, 0.5f, 104729 };
+    pcgSpec_.coverageFloor = 0.35f;
+    pcgSpec_.coverageBias  = 1.7f;
+    if (!pcgVolume_.request(pcgSpec_)) AVER_ERROR("[PCG] could not queue the volume build");
+}
+
+bool GameApp::checkPcgVolume() {
+    if (!pcgAttached_ || pcgChecked_ || !pcgVolume_.done()) return false;
+    pcgChecked_ = true;
+
+    const usize n = usize(pcgSpec_.resX) * pcgSpec_.resY * pcgSpec_.resZ;
+    std::vector<f32> gpu(n, 0.0f);
+    if (!pcgVolume_.read(gpu.data(), n)) { AVER_ERROR("[PCG] could not read the volume back"); return true; }
+
+    // EVERY voxel, not a sample. 32768 comparisons cost nothing and a sampled check would miss a
+    // shader that is right on the diagonal and wrong off it.
+    //
+    // THE TOLERANCE, and why it is not a cop-out. Measured: the GPU and the CPU agree to within
+    // 1.19e-07 -- exactly 2^-23, one ULP -- on every voxel that differs at all, and they still
+    // differ with coverageBias set to 1.0, which rules out pow() and leaves floating-point
+    // CONTRACTION: DXC fuses multiply-add in the fBm accumulation where MSVC under /fp:precise does
+    // not. The integer hash agrees bit-for-bit; only the float tail moves.
+    //
+    // 1e-5 is four orders of magnitude above that and four below any logic error worth the name: a
+    // transposed axis, a wrong seed offset or a dropped octave moves a density by 0.1 to 1.0, not by
+    // 0.0000001. So this catches everything it is meant to and tolerates only the thing it cannot
+    // fix. The worst observed difference is reported every run so the number cannot quietly grow.
+    constexpr f32 kTolerance = 1e-5f;
+    usize differing = 0;
+    usize exact = 0;
+    f32 worst = 0.0f;
+    usize worstAt = 0;
+    for (u32 z = 0; z < pcgSpec_.resZ; ++z)
+        for (u32 y = 0; y < pcgSpec_.resY; ++y)
+            for (u32 x = 0; x < pcgSpec_.resX; ++x) {
+                const usize i = usize(z) * pcgSpec_.resY * pcgSpec_.resX + usize(y) * pcgSpec_.resX + x;
+                const f32 cpu = pcg::sampleDensity(pcgSpec_, x, y, z);
+                const f32 d = std::fabs(cpu - gpu[i]);
+                if (d == 0.0f) ++exact;
+                if (d > kTolerance) { ++differing; }
+                if (d > worst) { worst = d; worstAt = i; }
+            }
+
+    if (differing == 0) {
+        AVER_INFO("[PCG] volume mirror PASS: {} of {} voxels agree with the C++ reference to within "
+                  "{}, of which {} are bit-identical; worst difference {} at index {}",
+                  n, n, kTolerance, exact, worst, worstAt);
+    } else {
+        AVER_ERROR("[PCG] volume mirror FAIL: {} of {} voxels differ by more than {}, worst {} at "
+                   "index {} - that is far above float contraction and means the HLSL and the C++ "
+                   "reference have genuinely diverged", differing, n, kTolerance, worst, worstAt);
+    }
+    return true;
 }
 
 void GameApp::attachSkinning(Engine& e) {
@@ -415,6 +489,7 @@ void GameApp::onInit(Engine& e) {
     // pass then asks drawHandle() for a posed handle that must already exist.
     attachSkinning(e);
     attachVoxi(e);
+    if (cfg_.pcgVolumeTest) attachPcgTest(e);
     initPhysics();      // BEFORE openProject: level load builds a static body per colliding placement
     openProject(e);
     AVER_INFO("[Game] ready");
@@ -464,6 +539,10 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // as input lag rather than as an ordering bug.
     drivePlayCamera();
 
+    // Polled after the feature has had its prePass. The build takes three frames by design; a
+    // --pcg-volume-test run should be given at least that many.
+    if (cfg_.pcgVolumeTest) checkPcgVolume();
+
     if (physSteps_ != lastReportedSteps_ && (physSteps_ <= 1 || physSteps_ % 600 == 0)) {
         AVER_INFO("[Game] physics: {} step(s) taken", physSteps_);
         lastReportedSteps_ = physSteps_;
@@ -508,6 +587,8 @@ void GameApp::onShutdown(Engine& e) {
     // exactly this reason -- it must outlive the device, which it does by construction, but only if
     // it is unregistered before the device goes.
     rhi::IDevice* dev = e.device();
+    if (dev && pcgAttached_) { dev->removeRenderFeature(&pcgVolume_); pcgAttached_ = false; }
+    pcgVolume_.shutdown();
 #if AVER_MODULE_SCENE
     // Reverse registration order: skinning went in FIRST, so it comes out LAST of the two.
     // Removed before the device goes, because the device holds a bare pointer to it.

@@ -3,6 +3,8 @@
 #include "aver/core/Types.hpp"
 #include "aver/rhi/RHI.hpp"
 
+#include <vector>
+
 namespace aver::pcg {
 
 // The most layers a volume may have. Fixed because the parameters ride in root constants, and a
@@ -43,28 +45,59 @@ struct VolumeSpec {
 // Not for filling volumes. Calling this per voxel is precisely the cost the design avoids.
 f32 sampleDensity(const VolumeSpec& spec, u32 x, u32 y, u32 z);
 
-// Owns the density-volume shader and pipeline.
+// Fills a density field on the GPU.
 //
-// init compiles HLSL at RUNTIME, so a green C++ build proves nothing about whether this works --
-// which is exactly why init() existing and being tested is worth having before the dispatch does.
+// A RENDER FEATURE, because that is the only place an IRenderContext exists: the RHI hands one to
+// prePass/scenePass/overlayPass and offers no immediate or one-shot submit. Following that rather
+// than working around it also puts the dispatch where SkinningPass's is, which is where anyone
+// looking for a compute pass will look.
+//
+// init compiles HLSL at RUNTIME, so a green C++ build proves nothing about whether this works.
 // False leaves the object inert rather than broken.
-//
-// WHAT IS NOT HERE YET, stated rather than stubbed: build() and buildAndRead(), which would create
-// the Tex3D, bind it as a UAV, dispatch, and read the result back for comparison against
-// sampleDensity above. Declaring them now and leaving them unimplemented would be the same
-// "declared with no implementation" pattern this repo's own dead-code sweep flags, so they are
-// absent until they work. The shader they would dispatch is written, compiled and mirrored; the
-// dispatch is the remaining piece.
-class VolumeBuilder {
+class VolumeBuilder final : public rhi::IRenderFeature {
 public:
+    ~VolumeBuilder() override;
+
+    // Named for the frame-marker and any feature listing. IRenderFeature's only pure virtual.
+    const char* name() const override { return "Aver.Pcg.Volume"; }
+
     bool init(rhi::IDevice& dev);
     void shutdown();
     bool ready() const { return pipeline_ != 0; }
 
+    // Queues a build. Takes effect on the next prePass; the result is readable a frame later, once
+    // the GPU has actually run it. False when the builder is not ready or the spec is empty.
+    bool request(const VolumeSpec& spec);
+
+    // True once a requested build has been read back. Stays true until the next request().
+    bool done() const { return state_ == State::Done; }
+
+    // Copies the finished field out. `count` must be resX*resY*resZ. False before done().
+    bool read(f32* out, usize count) const;
+
+    // The dispatch, and the copy that makes the result readable.
+    void prePass(rhi::IRenderContext& ctx) override;
+
 private:
+    // A build takes three frames, and each is a real wait rather than caution: the dispatch is
+    // recorded in one, the copy to a readback buffer cannot be read until the GPU has passed it,
+    // and reading before that returns whatever the buffer held before.
+    enum class State { Idle, Dispatch, Copy, Done };
+
     rhi::IResourceFactory* res_ = nullptr;
-    rhi::ShaderHandle   cs_ = 0;
-    rhi::PipelineHandle pipeline_ = 0;
+    rhi::ShaderHandle      cs_ = 0;
+    rhi::PipelineHandle    pipeline_ = 0;
+    rhi::BufferHandle      out_ = 0;        // Default, UAV-writable: what the shader fills
+    rhi::BufferHandle      readback_ = 0;   // Readback: what the CPU reads
+    rhi::BindingSetHandle  set_ = 0;
+    u64                    bytes_ = 0;
+    VolumeSpec             spec_{};
+    // Tracked by hand, because bufferBarrier takes an explicit FROM state: nothing in this RHI
+    // transitions implicitly, and a barrier whose from-state is wrong is undefined rather than
+    // merely slow.
+    rhi::ResourceState     outState_ = rhi::ResourceState::Common;
+    State                  state_ = State::Idle;
+    mutable std::vector<f32> host_;
 };
 
 } // namespace aver::pcg

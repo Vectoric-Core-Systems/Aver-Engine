@@ -4,6 +4,7 @@
 #include "aver/platform/InputState.hpp"
 #include "aver/formats/OcProject.hpp"
 #include "aver/rhi/RHI.hpp"
+#include "aver/pcg/PcgVolume.hpp"
 
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/VoxiRenderer.hpp"
@@ -37,6 +38,10 @@ struct GameConfig {
     bool inputEcho = false;
     // Logs every path the engine opens, so verify-game.ps1 can assert none is outside the package.
     bool traceOpens = false;
+    // Fills a density volume on the GPU and compares every voxel against the CPU mirror, then
+    // exits. The only way to check the HLSL against its reference: HLSL compiles at RUNTIME, so a
+    // green build says nothing about whether the shader agrees with anything.
+    bool pcgVolumeTest = false;
 };
 
 // Parses the arguments a game executable accepts. Unknown arguments are ignored rather than fatal:
@@ -99,6 +104,12 @@ private:
     // prePass stages this frame's bone matrices before anything asks for a posed handle.
     void attachSkinning(Engine&);
 
+    // Attaches the density-volume builder and queues a build. --pcg-volume-test only.
+    void attachPcgTest(Engine&);
+    // Compares the finished GPU field against pcg::sampleDensity and reports. Returns true when the
+    // comparison has run, so the caller can stop.
+    bool checkPcgVolume();
+
     // Starts the physics world. MUST run before any level loads: loading builds a static body per
     // colliding placement, gated on aver_phys_ready(), so a level loaded first silently gets no
     // collision and the player falls through the floor.
@@ -148,6 +159,10 @@ private:
     // init succeeds, and a failed init must leave nothing registered rather than an inert member.
     // Null is a LEGAL state: skinned entities then draw at their rest pose rather than not at all.
     std::unique_ptr<render::SkinnedScene> skinnedScene_;
+    pcg::VolumeBuilder pcgVolume_;
+    pcg::VolumeSpec    pcgSpec_{};
+    bool               pcgAttached_ = false;
+    bool               pcgChecked_ = false;
 #endif
 #if AVER_MODULE_PHYSICS
     int32_t groundBody_ = 0;
