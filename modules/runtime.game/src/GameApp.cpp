@@ -253,6 +253,13 @@ void GameApp::onUpdate(Engine&, const Timestep&) {
 
 void GameApp::onRender(Engine& e) {
     pushFrame(e);
+
+#if AVER_MODULE_SCENE
+    // FIRST PIXELS. pushFrame set the camera, so viewProj_ is this frame's; the frustum is derived
+    // from it inside drawWorld rather than cached, because a stale frustum culls things that are on
+    // screen.
+    if (rhi::IDevice* dev = e.device()) drawWorld(*dev, viewProj_, content_, drawStats_);
+#endif
     // Nothing drawn yet: Engine::frameStep() already does beginFrame/endFrame around this, so the
     // swapchain is cleared and presented. The world draw walk lands here in a later slice.
 

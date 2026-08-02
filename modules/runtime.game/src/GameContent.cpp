@@ -74,17 +74,29 @@ void GameContent::registerBuiltins(rhi::IDevice& device) {
     // FROZEN: the unit cube stays half-extent 1. A .ocworld PLACEG scale is a half-extent in
     // centimetres applied to this mesh, so changing it silently resizes every placed box in every
     // level ever authored. The same constant is frozen in SandboxApp.cpp with the same note.
+    // BOUNDS ARE RECORDED FOR THE BUILT-INS, which SandboxApp does not do. Both are generated at
+    // radius/half-extent 1, so the box is exactly known and costs nothing to write down.
+    //
+    // This is not tidiness. A CMeshRenderer whose bounds were never filled in presents a DEGENERATE
+    // box, and the draw walk deliberately draws a degenerate box rather than culling it -- an entity
+    // whose bounds are unknown must not vanish. The consequence in the editor is that every entity
+    // using a built-in primitive is exempt from frustum culling entirely, including ones directly
+    // behind the camera. Measured here: a five-placement level reported "5 drawn, 0 culled" from
+    // every camera angle until these two lines existed.
+    const std::pair<Vec3, Vec3> unitBounds{Vec3{-1.0f, -1.0f, -1.0f}, Vec3{1.0f, 1.0f, 1.0f}};
     {
         std::vector<rhi::MeshVertex> v; std::vector<u32> i;
         appendSphere(v, i, 1.0f, 24, 48);
-        sceneMeshes_[fnv1a64(std::string_view("Meshes/sphere.ocmesh"))] =
-            device.createMesh(v.data(), (u32)v.size(), i.data(), (u32)i.size());
+        const u64 id = fnv1a64(std::string_view("Meshes/sphere.ocmesh"));
+        sceneMeshes_[id] = device.createMesh(v.data(), (u32)v.size(), i.data(), (u32)i.size());
+        meshBounds_[id]  = unitBounds;
     }
     {
         std::vector<rhi::MeshVertex> v; std::vector<u32> i;
         appendBox(v, i, 0, 0, 0, 1.0f);
-        sceneMeshes_[fnv1a64(std::string_view("Meshes/cube.ocmesh"))] =
-            device.createMesh(v.data(), (u32)v.size(), i.data(), (u32)i.size());
+        const u64 id = fnv1a64(std::string_view("Meshes/cube.ocmesh"));
+        sceneMeshes_[id] = device.createMesh(v.data(), (u32)v.size(), i.data(), (u32)i.size());
+        meshBounds_[id]  = unitBounds;
     }
 
     // The named surfaces gameplay can ask for, with the editor's exact values.

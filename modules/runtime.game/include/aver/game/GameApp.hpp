@@ -6,6 +6,7 @@
 #include "aver/rhi/RHI.hpp"
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
+#include "aver/game/GameRender.hpp"
 
 #include <string>
 
@@ -98,6 +99,8 @@ private:
     f32 fogColor_[3]  = {1.0f, 1.0f, 1.0f};
     f32 fogDensity_   = 4e-6f;
     f32 cloudTime_    = 0.0f;
+
+    SceneDrawStats drawStats_;
     fmt::ProjectDesc project_;
     GameContent content_;
     GameLevel level_;
