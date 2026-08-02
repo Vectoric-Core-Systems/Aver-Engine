@@ -591,14 +591,32 @@ public:
 
 #if AVER_MODULE_SCENE
         // Built-in primitive meshes, keyed by fnv1a64 of the path a CMeshRenderer names.
+        //
+        // BOUNDS ARE RECORDED HERE TOO, and until 2026-08-02 they were not. Both primitives are
+        // generated at radius/half-extent 1, so the box is exactly known -- but with meshBounds_
+        // unset, every entity using one presented a DEGENERATE box to the frustum test at :1432,
+        // which deliberately DRAWS a degenerate box rather than culling it (an entity whose bounds
+        // were never filled in must not vanish). The consequence was that every primitive-using
+        // entity was exempt from frustum culling entirely, including ones directly behind the
+        // camera. Found while lifting this walk into Aver.Runtime.Game, where a five-placement
+        // level reported "5 drawn, 0 culled" from every angle until these two lines existed.
         {
+            const std::pair<Vec3, Vec3> unitBounds{Vec3{-1.0f, -1.0f, -1.0f}, Vec3{1.0f, 1.0f, 1.0f}};
             std::vector<rhi::MeshVertex> sv; std::vector<u32> si;
             appendSphere(sv, si, 1.0f, 24, 48);
-            sceneMeshes_[fnv1a64(std::string_view("Meshes/sphere.ocmesh"))] =
-                e.device()->createMesh(sv.data(), (u32)sv.size(), si.data(), (u32)si.size());
-            sceneMeshes_[fnv1a64(std::string_view("Meshes/cube.ocmesh"))] = unitCube;
+            const u64 sphereId = fnv1a64(std::string_view("Meshes/sphere.ocmesh"));
+            const u64 cubeId   = fnv1a64(std::string_view("Meshes/cube.ocmesh"));
+            sceneMeshes_[sphereId] = e.device()->createMesh(sv.data(), (u32)sv.size(), si.data(), (u32)si.size());
+            sceneMeshes_[cubeId]   = unitCube;
+            meshBounds_[sphereId]  = unitBounds;
+            meshBounds_[cubeId]    = unitBounds;
             // Kept so a dev check can build geometry of its own without re-uploading a cube.
             unitCubeMesh_ = unitCube;
+            // Reported so the bounds above are OBSERVABLE rather than merely written. The editor
+            // frames the camera on the whole level at load (frameCameraOn), so a headless run can
+            // never show a primitive being culled -- everything is legitimately on screen. Without
+            // this line the only way to tell the bounds exist is to read the source.
+            AVER_INFO("[Mesh] {} built-in primitive(s), {} with bounds", sceneMeshes_.size(), meshBounds_.size());
         }
 
         // The named surfaces gameplay can ask for.
