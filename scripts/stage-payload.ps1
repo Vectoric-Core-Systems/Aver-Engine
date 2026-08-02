@@ -60,6 +60,81 @@ $failures = New-Object System.Collections.Generic.List[string]
 function Fail([string] $msg) { $script:failures.Add($msg); Write-Host "[stage] ERROR $msg" -ForegroundColor Red }
 function Note([string] $msg) { Write-Host "[stage] $msg" }
 
+# Read a PE's import directory. Defined up here rather than beside its first check because the
+# staging step below needs it too: what the CRT step must copy is decided by what the binaries
+# actually import, not by a hardcoded list of filenames that goes stale the next toolset bump.
+#
+# A real import-directory walk, not a string search: the CRT names appear as plain ASCII all over a
+# PE for unrelated reasons (debug paths, embedded manifests), so a grep both false-positives and
+# gives no way to tell an import from a mention.
+function Get-PeImports {
+    param([string] $Path)
+    $b = [System.IO.File]::ReadAllBytes($Path)
+    if ($b.Length -lt 0x40 -or $b[0] -ne 0x4D -or $b[1] -ne 0x5A) { return @() }   # 'MZ'
+    $peOff = [BitConverter]::ToInt32($b, 0x3C)
+    if ($peOff -le 0 -or $peOff + 0x18 -ge $b.Length) { return @() }
+    if ([BitConverter]::ToUInt32($b, $peOff) -ne 0x00004550) { return @() }        # 'PE\0\0'
+
+    $nSections  = [BitConverter]::ToUInt16($b, $peOff + 6)
+    $optSize    = [BitConverter]::ToUInt16($b, $peOff + 20)
+    $optOff     = $peOff + 24
+    $magic      = [BitConverter]::ToUInt16($b, $optOff)
+    # The data directory sits after the optional header's fixed part: 96 bytes for PE32, 112 for PE32+.
+    $dirOff     = $optOff + $(if ($magic -eq 0x20B) { 112 } else { 96 })
+    $importRva  = [BitConverter]::ToUInt32($b, $dirOff + 8)      # directory entry 1 = import
+    if ($importRva -eq 0) { return @() }
+
+    $sections = @()
+    $secOff = $optOff + $optSize
+    for ($i = 0; $i -lt $nSections; $i++) {
+        $s = $secOff + ($i * 40)
+        if ($s + 40 -gt $b.Length) { break }
+        $sections += [pscustomobject]@{
+            VirtualSize = [BitConverter]::ToUInt32($b, $s + 8)
+            VirtualAddr = [BitConverter]::ToUInt32($b, $s + 12)
+            RawSize     = [BitConverter]::ToUInt32($b, $s + 16)
+            RawPtr      = [BitConverter]::ToUInt32($b, $s + 20)
+        }
+    }
+    function ToOffset([uint32] $rva) {
+        foreach ($s in $sections) {
+            $span = [Math]::Max($s.VirtualSize, $s.RawSize)
+            if ($rva -ge $s.VirtualAddr -and $rva -lt $s.VirtualAddr + $span) {
+                return [int]($s.RawPtr + ($rva - $s.VirtualAddr))
+            }
+        }
+        return -1
+    }
+
+    $names = @()
+    $desc = ToOffset $importRva
+    if ($desc -lt 0) { return @() }
+    while ($desc + 20 -le $b.Length) {
+        $nameRva = [BitConverter]::ToUInt32($b, $desc + 12)
+        if ($nameRva -eq 0) { break }                            # null terminator descriptor
+        $n = ToOffset $nameRva
+        if ($n -lt 0) { break }
+        $end = $n; while ($end -lt $b.Length -and $b[$end] -ne 0) { $end++ }
+        $names += [System.Text.Encoding]::ASCII.GetString($b, $n, $end - $n)
+        $desc += 20
+    }
+    ,$names
+}
+
+# DLLs Windows itself provides, so they are imports a payload may leave unresolved.
+#
+# Grounded in an actual scan of all 69 native binaries in build-release\bin, not assembled from
+# memory. 'api-ms-win-*' are the UCRT and API sets, part of Windows 10 and later. NOTE mfplat and
+# mfreadwrite (Media Foundation) are present on desktop SKUs but NOT on 'N' editions without the
+# Media Feature Pack -- they are not ours to redistribute, so they stay on this list, but that is a
+# support note rather than a staging obligation.
+$osProvided = @(
+    'advapi32.dll', 'avrt.dll', 'd3d11.dll', 'd3d12.dll', 'd3dcompiler_47.dll', 'dxgi.dll',
+    'gdi32.dll', 'imm32.dll', 'kernel32.dll', 'mfplat.dll', 'mfreadwrite.dll', 'mscoree.dll',
+    'ole32.dll', 'oleaut32.dll', 'shell32.dll', 'shlwapi.dll', 'user32.dll', 'version.dll',
+    'ws2_32.dll', 'ucrtbase.dll'
+)
+
 if (-not (Test-Path -LiteralPath $bin)) {
     throw "[stage] no build tree at $bin -- run ./scripts/build.ps1 $(if ($Config -ne 'Debug') {'-Release'}) first"
 }
@@ -271,6 +346,102 @@ foreach ($dest in $plan.Keys) {
 Note "copied $($plan.Count) files -> $outFull"
 
 # ---------------------------------------------------------------------------------------------
+# 4b. Stage the Visual C++ runtime, app-local.
+#
+#     MSVCP140.dll / VCRUNTIME140.dll / VCRUNTIME140_1.dll ship with Visual Studio, NOT with
+#     Windows -- only the UCRT (api-ms-win-crt-*) is part of the OS. 36 of the 69 native binaries
+#     in a Release tree import them, so a payload without them does not start on a clean machine;
+#     it fails at load with a dialog naming a DLL the user has never heard of.
+#
+#     App-local deployment of these is the sanctioned alternative to making the user run
+#     vc_redist.x64.exe first, and "run this installer before the game works" is not a shippable
+#     product. Copied next to the binaries that import them.
+#
+#     Which files get copied is decided by the import tables, not by a hardcoded list, so a
+#     toolset bump that adds (say) msvcp140_atomic_wait.dll is picked up rather than silently
+#     dropped. If the redist cannot be located we FAIL: a payload that will not start is worse
+#     than no payload, and the whole point of this script is to not find that out later.
+# ---------------------------------------------------------------------------------------------
+$vcRuntimePattern = '(?i)^(msvcp140.*|vcruntime140.*|concrt140|vccorlib140)\.dll$'
+$wantCrt = @{}
+foreach ($f in (Get-ChildItem -LiteralPath $outFull -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll' })) {
+    foreach ($imp in (Get-PeImports -Path $f.FullName)) {
+        if ($imp -match $vcRuntimePattern) { $wantCrt[$imp.ToLower()] = $true }
+    }
+}
+
+$stagedCrt = @()
+if ($wantCrt.Count -eq 0) {
+    Note 'no Visual C++ runtime imports found -- nothing to stage'
+} else {
+    # $env:VCToolsRedistDir is set inside a VS developer prompt and unset in a plain shell, which is
+    # how this script is normally run, so vswhere is the path that actually gets used.
+    $redistRoots = @()
+    if ($env:VCToolsRedistDir) { $redistRoots += $env:VCToolsRedistDir }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path -LiteralPath $vswhere) {
+        # This script runs under $ErrorActionPreference = 'Stop', and vswhere is badly behaved:
+        # measured on this machine it returns EXIT CODE -1 while succeeding -- correct path on
+        # stdout, $? still true. That alone does not throw, but under 'Stop' any stderr output from
+        # a native command raises NativeCommandError and would abort the whole staging run over a
+        # tool that merely had something to mutter. Drop to 'Continue' across the call and treat any
+        # failure as "vswhere told us nothing"; the $crtDir check below is what actually decides.
+        # Deliberately do NOT test $LASTEXITCODE here -- it is -1 on success.
+        $prevEap = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $vsPath = & $vswhere -latest -products * -property installationPath | Select-Object -First 1
+        } catch {
+            $vsPath = $null
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+        if ($vsPath) { $redistRoots += (Join-Path $vsPath 'VC\Redist\MSVC') }
+    }
+
+    # Highest version wins. The VC14x ABI keeps the '140' filenames across toolsets, so a newer
+    # redist still contains the names an older toolset's output imports, and is the one to prefer.
+    #
+    # Sorted on a parsed [version], not on the string: '14.9' must lose to '14.44', and as text it
+    # wins. A directory whose name does not parse sorts to the bottom rather than throwing -- under
+    # 'Stop' a bad cast inside the sort key would take the whole script down.
+    $crtDirs = @()
+    foreach ($r in $redistRoots) {
+        if (-not (Test-Path -LiteralPath $r)) { continue }
+        $crtDirs += Get-ChildItem -LiteralPath $r -Recurse -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match '^Microsoft\.VC\d+\.CRT$' -and $_.FullName -match '\\x64\\' -and $_.FullName -notmatch 'debug_nonredist|onecore' }
+    }
+    $crtDir = $crtDirs |
+        Sort-Object -Property @{ Expression = {
+            $v = [version]'0.0'
+            if ($_.FullName -match '\\MSVC\\(\d+(\.\d+)+)\\') { [void][version]::TryParse($Matches[1], [ref]$v) }
+            $v
+        } } |
+        Select-Object -Last 1
+
+    if (-not $crtDir) {
+        Fail ('cannot locate the Visual C++ redistributable DLLs (' + (($wantCrt.Keys | Sort-Object) -join ', ') +
+              '). Looked in $env:VCToolsRedistDir and vswhere''s VC\Redist\MSVC. Install the ' +
+              '"MSVC v143 - VS 2022 C++ x64/x86 build tools" component, or stage from a VS developer prompt.')
+    } else {
+        $binOut = Join-Path $outFull 'bin'
+        if (-not (Test-Path -LiteralPath $binOut)) { New-Item -ItemType Directory -Path $binOut -Force | Out-Null }
+        foreach ($name in ($wantCrt.Keys | Sort-Object)) {
+            $src = Get-ChildItem -LiteralPath $crtDir.FullName -File | Where-Object { $_.Name.ToLower() -eq $name } | Select-Object -First 1
+            if (-not $src) {
+                Fail "the Visual C++ redist at $($crtDir.FullName) does not contain '$name', which staged binaries import"
+                continue
+            }
+            Copy-Item -LiteralPath $src.FullName -Destination (Join-Path $binOut $src.Name) -Force
+            $stagedCrt += $src.Name
+        }
+        if ($stagedCrt.Count -gt 0) {
+            Note ("staged Visual C++ runtime from $($crtDir.FullName): " + ($stagedCrt -join ', '))
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------------------------
 # 5. THIRD-PARTY-NOTICES.txt.
 #
 #    Required, and not discharged by whatever licence the binaries themselves ship under: Roboto is
@@ -318,84 +489,75 @@ foreach ($c in $components) {
 [void]$notices.AppendLine('')
 [void]$notices.AppendLine('Redistributed from the Microsoft.NETCore.App host pack under the .NET Library')
 [void]$notices.AppendLine('licence terms.')
+if ($stagedCrt.Count -gt 0) {
+    [void]$notices.AppendLine('')
+    [void]$notices.AppendLine('Microsoft Visual C++ Runtime - ' + ($stagedCrt -join ', '))
+    [void]$notices.AppendLine('')
+    [void]$notices.AppendLine('Redistributed under the Distributable Code terms of the Microsoft Visual Studio')
+    [void]$notices.AppendLine('licence. Deployed application-local, as those terms permit. These are required at')
+    [void]$notices.AppendLine('run time and are not part of Windows.')
+}
 Set-Content -LiteralPath (Join-Path $outFull 'THIRD-PARTY-NOTICES.txt') -Value $notices.ToString() -Encoding utf8
 Note 'wrote THIRD-PARTY-NOTICES.txt'
 
 # ---------------------------------------------------------------------------------------------
-# 6. Verify no staged binary imports the debug CRT.
+# 6. Two import-table checks over the STAGED tree.
 #
-#    A real import-directory walk, not a string search: the CRT names appear as plain ASCII all over
-#    a PE for unrelated reasons (debug paths, embedded manifests), so a grep both false-positives
-#    and gives no way to tell an import from a mention.
+#    (a) No binary imports the debug CRT. That one ships with Visual Studio and may not be
+#        redistributed at all, so it is a licensing failure, not a runtime one.
+#
+#    (b) IMPORT CLOSURE: every DLL any staged binary imports is either provided by Windows or
+#        present in the payload. This is the check that (a) alone could never be: for a week this
+#        script rejected the debug CRT with a real PE walk while saying nothing about 36 of 69
+#        binaries importing the RELEASE CRT, which is equally absent from Windows. A payload can
+#        be perfectly licence-clean and still not start.
+#
+#    (b) is deliberately a closure check rather than three more filenames. The failure mode here is
+#        not "we forgot MSVCP140" -- it is "a dependency was added and nobody thought about
+#        staging", and only a closure check catches the next one.
 # ---------------------------------------------------------------------------------------------
-function Get-PeImports {
-    param([string] $Path)
-    $b = [System.IO.File]::ReadAllBytes($Path)
-    if ($b.Length -lt 0x40 -or $b[0] -ne 0x4D -or $b[1] -ne 0x5A) { return @() }   # 'MZ'
-    $peOff = [BitConverter]::ToInt32($b, 0x3C)
-    if ($peOff -le 0 -or $peOff + 0x18 -ge $b.Length) { return @() }
-    if ([BitConverter]::ToUInt32($b, $peOff) -ne 0x00004550) { return @() }        # 'PE\0\0'
-
-    $nSections  = [BitConverter]::ToUInt16($b, $peOff + 6)
-    $optSize    = [BitConverter]::ToUInt16($b, $peOff + 20)
-    $optOff     = $peOff + 24
-    $magic      = [BitConverter]::ToUInt16($b, $optOff)
-    # The data directory sits after the optional header's fixed part: 96 bytes for PE32, 112 for PE32+.
-    $dirOff     = $optOff + $(if ($magic -eq 0x20B) { 112 } else { 96 })
-    $importRva  = [BitConverter]::ToUInt32($b, $dirOff + 8)      # directory entry 1 = import
-    if ($importRva -eq 0) { return @() }
-
-    $sections = @()
-    $secOff = $optOff + $optSize
-    for ($i = 0; $i -lt $nSections; $i++) {
-        $s = $secOff + ($i * 40)
-        if ($s + 40 -gt $b.Length) { break }
-        $sections += [pscustomobject]@{
-            VirtualSize = [BitConverter]::ToUInt32($b, $s + 8)
-            VirtualAddr = [BitConverter]::ToUInt32($b, $s + 12)
-            RawSize     = [BitConverter]::ToUInt32($b, $s + 16)
-            RawPtr      = [BitConverter]::ToUInt32($b, $s + 20)
-        }
-    }
-    function ToOffset([uint32] $rva) {
-        foreach ($s in $sections) {
-            $span = [Math]::Max($s.VirtualSize, $s.RawSize)
-            if ($rva -ge $s.VirtualAddr -and $rva -lt $s.VirtualAddr + $span) {
-                return [int]($s.RawPtr + ($rva - $s.VirtualAddr))
-            }
-        }
-        return -1
-    }
-
-    $names = @()
-    $desc = ToOffset $importRva
-    if ($desc -lt 0) { return @() }
-    while ($desc + 20 -le $b.Length) {
-        $nameRva = [BitConverter]::ToUInt32($b, $desc + 12)
-        if ($nameRva -eq 0) { break }                            # null terminator descriptor
-        $n = ToOffset $nameRva
-        if ($n -lt 0) { break }
-        $end = $n; while ($end -lt $b.Length -and $b[$end] -ne 0) { $end++ }
-        $names += [System.Text.Encoding]::ASCII.GetString($b, $n, $end - $n)
-        $desc += 20
-    }
-    ,$names
-}
-
 $debugCrt = '(?i)^(msvcp\d+d|vcruntime\d+(_\d+)?d|ucrtbased|msvcr\d+d)\.dll$'
 $pes = Get-ChildItem -LiteralPath $outFull -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll' }
+
+# Anything staged anywhere in the payload satisfies an import; the loader's search path is not
+# this simple, but a name present in the tree is at least not a name that is missing from it.
+$stagedNames = @{}
+foreach ($f in $pes) { $stagedNames[$f.Name.ToLower()] = $true }
+
 $checked = 0
+$unresolved = @{}
 foreach ($pe in $pes) {
     $imports = Get-PeImports -Path $pe.FullName
     if ($imports.Count -eq 0) { continue }   # managed assemblies have no classic import table
     $checked++
     foreach ($imp in $imports) {
         if ($imp -match $debugCrt) {
-            Fail "$($pe.FullName.Substring($outFull.Length+1)) imports the debug CRT '$imp' -- this payload cannot be redistributed"
+            # -AllowDebugCrt is documented as "for a local-only tree", but this check used to fire
+            # unconditionally, so passing the switch still failed the run and the flag did nothing.
+            # Honour it here, loudly: the tree is still undistributable, it is just not an error.
+            if ($AllowDebugCrt) {
+                Note "$($pe.FullName.Substring($outFull.Length+1)) imports the debug CRT '$imp' -- LOCAL USE ONLY, not redistributable (-AllowDebugCrt)"
+            } else {
+                Fail "$($pe.FullName.Substring($outFull.Length+1)) imports the debug CRT '$imp' -- this payload cannot be redistributed"
+            }
+            continue
         }
+        $lower = $imp.ToLower()
+        if ($lower -like 'api-ms-win-*') { continue }
+        if ($osProvided -contains $lower) { continue }
+        if ($stagedNames.ContainsKey($lower)) { continue }
+        if (-not $unresolved.ContainsKey($lower)) { $unresolved[$lower] = New-Object System.Collections.Generic.List[string] }
+        $unresolved[$lower].Add($pe.FullName.Substring($outFull.Length + 1))
     }
 }
 Note "import table checked on $checked of $($pes.Count) binaries (managed assemblies have none)"
+
+foreach ($miss in ($unresolved.Keys | Sort-Object)) {
+    $by = $unresolved[$miss]
+    $eg = if ($by.Count -gt 3) { "$($by[0]), $($by[1]), $($by[2]) and $($by.Count - 3) more" } else { $by -join ', ' }
+    Fail "'$miss' is imported by $($by.Count) staged binary(ies) but is neither an OS DLL nor staged -- the payload will not start without it. Imported by: $eg"
+}
+if ($unresolved.Count -eq 0) { Note 'import closure OK -- every imported DLL is OS-provided or staged' }
 
 # ---------------------------------------------------------------------------------------------
 # 7. payload.json -- what averdist reads to build the feed manifest.
