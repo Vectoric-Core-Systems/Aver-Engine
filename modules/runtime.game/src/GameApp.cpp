@@ -7,6 +7,30 @@
 #include <cstdlib>
 #include <cstring>
 
+// The module macros are PUBLIC compile definitions on the module targets (AVER_MODULE_PBR=1 on
+// Aver.Render.PBR, SCENE=1 on Aver.Scene, and so on), so they reach this translation unit ONLY
+// through Aver.Runtime.Game's link interface. Defaulting them to 0 here is not a convenience: it is
+// what makes the report below able to say "off" rather than fail to compile, so a missing link
+// interface shows up as a printed 0 instead of as lifted code silently compiling to nothing.
+#ifndef AVER_MODULE_PBR
+#  define AVER_MODULE_PBR 0
+#endif
+#ifndef AVER_MODULE_SCENE
+#  define AVER_MODULE_SCENE 0
+#endif
+#ifndef AVER_MODULE_VOXI
+#  define AVER_MODULE_VOXI 0
+#endif
+#ifndef AVER_MODULE_PHYSICS
+#  define AVER_MODULE_PHYSICS 0
+#endif
+#ifndef AVER_MODULE_FRAMEWORK
+#  define AVER_MODULE_FRAMEWORK 0
+#endif
+#ifndef AVER_MODULE_SCRIPTING
+#  define AVER_MODULE_SCRIPTING 0
+#endif
+
 namespace aver::game {
 namespace {
 
@@ -74,6 +98,13 @@ void GameApp::onInit(Engine& e) {
     } else {
         AVER_INFO("[Game] headless: no window, no input");
     }
+    // This line is the oracle for the link interface, and it is worth a log line every run. Every
+    // subsystem lifted out of SandboxApp is wrapped in one of these #ifs; if the link interface is
+    // wrong they are all false, the lifted code compiles to nothing, and the only symptom is a game
+    // that draws an empty world -- which looks exactly like a broken renderer.
+    AVER_INFO("[Game] modules: PBR={} SCENE={} VOXI={} PHYSICS={} FRAMEWORK={} SCRIPTING={}",
+              AVER_MODULE_PBR, AVER_MODULE_SCENE, AVER_MODULE_VOXI,
+              AVER_MODULE_PHYSICS, AVER_MODULE_FRAMEWORK, AVER_MODULE_SCRIPTING);
     AVER_INFO("[Game] ready");
 }
 

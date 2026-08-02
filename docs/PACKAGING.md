@@ -61,7 +61,14 @@ Two new directories:
 
 **`modules/runtime.game/`** → static lib **`Aver.Runtime.Game`**, via `aver_add_module`:
 - `src/GameApp.cpp` — the `aver::Application` subclass: `config()`, `onInit`, `onUpdate`, `onRender`, `onShutdown`.
-- `src/ContentIndex.cpp` — `rebuildContentIndex`, `resolveAssetPath`, `resolveAnimAsset`, `resolveSceneMesh`, `materialForSurface`, `loadProjectMeshes`, `loadProjectMaterials`, lifted verbatim. This simultaneously fixes a bug: all of that currently sits inside `#if AVER_MODULE_PBR` (block opens `SandboxApp.cpp:1130`, closes `:1345`), so a `PBR=OFF, SCENE=ON` build resolves no assets by id and hands the anim system no resolver. That is an accident of where the code was written.
+- `src/ContentIndex.cpp` — `rebuildContentIndex`, `resolveAssetPath`, `resolveAnimAsset`, `resolveSceneMesh`, `materialForSurface`, `loadProjectMeshes`, `loadProjectMaterials`. All of that currently sits inside `#if AVER_MODULE_PBR`, so a `PBR=OFF, SCENE=ON` build resolves no assets by id and hands the anim system no resolver.
+
+  > **CORRECTED 2026-08-02, twice.** The block opens at `SandboxApp.cpp:1132` and closes at `:1347`,
+  > not the 1130/1345 written here — this section was authored against `ae47a2f` despite the header
+  > claiming `5714ba3`. And the claim that relocating the code "fixes a bug" is **wrong**: a verbatim
+  > lift inherits the defect. Only re-guarding each symbol at the destination fixes it, which is what
+  > [GAME-LIFT.md](GAME-LIFT.md) specifies per-symbol. Moving code does not change which `#if` it is
+  > written under.
 - `src/LevelLoad.cpp` — `loadLevel` / `loadStartMap` / `applyLevelSky`, lifted.
 - `src/WorldRender.cpp` — the `AVER_MODULE_SCENE` block of `onRender`: six frustum planes, `CMeshRenderer` walk, cull, skin-handle substitution, `drawMesh`.
 - `src/PlayLoop.cpp` — `startPlay`, the `PrePhysics → aver_phys_step → Physics → PostPhysics` ordering, `anim::animSystem().tick`, `skinnedScene_->update`, `World::flush()`, `drivePlayCamera`.
