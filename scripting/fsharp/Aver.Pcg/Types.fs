@@ -75,7 +75,34 @@ type NoiseLayer =
       /// Per-layer seed offset, so two layers of one field never correlate.
       SeedOffset: int }
 
-/// <summary>The full recipe for a density volume, ready to hand to a compute shader.</summary>
+/// <summary>A density field with NO BOUNDS: defined everywhere, forever.</summary>
+/// <remarks>
+/// THE INFINITE CASE IS THE NATURAL ONE, and the bounded VolumeSpec below is the special case.
+/// Hash noise is a pure function of a lattice coordinate, so it already has a value at every
+/// integer cell in every direction; a region only exists to map voxel INDICES onto world space.
+/// Drop that mapping and sample world position directly and the field is simply infinite -- the
+/// sky, the ocean, a cave system, weather. Nothing is generated until something asks.
+///
+/// It is also what makes seeded chunk generation work. Because the value at a world position
+/// depends on NOTHING but the seed and that position, a chunk can be generated alone, out of order,
+/// on another thread or a year later, and agree with every neighbour it has never met. A field that
+/// needed its region to be evaluated could not do that, which is why streaming systems that bolt
+/// bounds onto noise end up with seams.
+///
+/// CellSizeCm is the only extra parameter: how much world distance one lattice cell spans. It plays
+/// the part Res played for a bounded volume, and it is in CENTIMETRES like everything else.
+/// </remarks>
+[<CLIMutable>]
+type InfiniteSpec =
+    { /// Master seed. Same seed and same layers give the same infinite field, always.
+      Seed: int
+      Layers: NoiseLayer[]
+      /// World centimetres spanned by one lattice cell.
+      CellSizeCm: float32
+      CoverageFloor: float32
+      CoverageBias: float32 }
+
+/// <summary>The full recipe for a BOUNDED density volume, ready to hand to a compute shader.</summary>
 [<CLIMutable>]
 type VolumeSpec =
     { /// The volume's world extent, in centimetres.

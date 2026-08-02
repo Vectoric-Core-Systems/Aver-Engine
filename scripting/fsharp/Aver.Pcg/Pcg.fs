@@ -202,3 +202,52 @@ module Pcg =
             else
                 let remapped = (d - spec.CoverageFloor) / max 1e-6f (1.0f - spec.CoverageFloor)
                 remapped ** spec.CoverageBias
+
+    /// <summary>Samples an INFINITE field at a world position, in centimetres.</summary>
+    /// <remarks>
+    /// The whole of "infinite expanse" is this function. It takes no region and no resolution: the
+    /// lattice coordinate is world position divided by cell size, which is defined for every input
+    /// including negative ones, so the field exists everywhere without anything being allocated.
+    ///
+    /// FLOOR, NOT TRUNCATION, and this is the one line where the infinite case genuinely differs
+    /// from the bounded one. A bounded volume indexes from 0 upward, where int() and floor() agree.
+    /// An infinite field is sampled at negative coordinates too, and there int() rounds TOWARD ZERO
+    /// -- so cells -0.5 and +0.5 would both map to 0, making a lattice cell of double width
+    /// straddling the origin. That is a visible seam at world zero and nowhere else, which is a
+    /// wonderful bug to be handed with no explanation.
+    /// </remarks>
+    [<CompiledName("SampleInfinite")>]
+    let sampleInfinite (spec: InfiniteSpec) (wx: float32) (wy: float32) (wz: float32) : float32 =
+        let cell = if spec.CellSizeCm > 0.0f then spec.CellSizeCm else 1.0f
+        let mutable total = 0.0f
+        let mutable norm = 0.0f
+        for layer in spec.Layers do
+            let mutable amp = layer.Amplitude
+            let mutable freq = layer.Frequency
+            for _octave in 1 .. max 1 layer.Octaves do
+                let s = freq / cell
+                let cx = int (floor (wx * s))
+                let cy = int (floor (wy * s))
+                let cz = int (floor (wz * s))
+                let v = Rand.float01 (Rand.hash3 (spec.Seed + layer.SeedOffset) cx cy cz)
+                total <- total + v * amp
+                norm <- norm + amp
+                amp <- amp * layer.Gain
+                freq <- freq * layer.Lacunarity
+
+        if norm <= 0.0f then 0.0f
+        else
+            let d = total / norm
+            if d < spec.CoverageFloor then 0.0f
+            else
+                let remapped = (d - spec.CoverageFloor) / max 1e-6f (1.0f - spec.CoverageFloor)
+                remapped ** spec.CoverageBias
+
+    /// <summary>An infinite field from a seed, with sensible fBm layers.</summary>
+    [<CompiledName("InfiniteExpanse")>]
+    let infiniteExpanse (seed: int) (cellSizeCm: float32) (octaveCount: int) : InfiniteSpec =
+        { Seed = seed
+          Layers = fbmLayers octaveCount 1.0f
+          CellSizeCm = if cellSizeCm > 0.0f then cellSizeCm else 100.0f
+          CoverageFloor = 0.0f
+          CoverageBias = 1.0f }
