@@ -3,6 +3,7 @@
 #include "aver/runtime/Application.hpp"
 #include "aver/platform/InputState.hpp"
 #include "aver/formats/OcProject.hpp"
+#include "aver/rhi/RHI.hpp"
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
 
@@ -59,14 +60,44 @@ public:
     // The loaded level.
     const GameLevel& level() const { return level_; }
 
+    // The camera's forward axis, built from yaw and pitch.
+    Vec3 camForward() const;
+
+    // THE ASPECT FIX. The editor divides its DOCKSPACE CENTRAL NODE (vpW_/vpH_, latched by buildUI
+    // the previous frame) because its 3D view is one panel among many. A game has no dockspace and
+    // no panels: its scene is the whole backbuffer, so the aspect is the swapchain's. This is the
+    // one thing in the entire lift that cannot be copied verbatim -- copying it would need
+    // members that only exist because ImGui does.
+    f32 viewAspect(const Engine&) const;
+
 private:
     // Loads cfg_.projectPath. Logs and leaves project_ invalid on failure rather than aborting: a
     // game with no world is a diagnosable state, and a process that dies before its first frame
     // tells the player nothing.
     void openProject(Engine&);
 
+    // Pushes the camera, sky, fog and post settings to the device for this frame.
+    void pushFrame(Engine&);
+
     GameConfig cfg_;
     InputState input_;
+
+    // --- camera ---
+    Vec3 camPos_{7.0f, 7.0f, 4.5f};
+    f32  yaw_ = 0.0f, pitch_ = 0.0f;
+    Mat4 invVP_, viewProj_;
+    Vec3 eye_{0, 0, 0};
+
+    // --- environment ---
+    rhi::SkyAtmosphere sky_;
+    rhi::PostSettings  post_;
+    f32 sunColor_[3]  = {1.0f, 0.96f, 0.90f};
+    f32 sunAmbient_   = 1.0f;
+    f32 skyZenith_[3] = {0.24f, 0.45f, 0.85f};
+    f32 skyHorizon_[3]= {0.72f, 0.83f, 0.95f};
+    f32 fogColor_[3]  = {1.0f, 1.0f, 1.0f};
+    f32 fogDensity_   = 4e-6f;
+    f32 cloudTime_    = 0.0f;
     fmt::ProjectDesc project_;
     GameContent content_;
     GameLevel level_;

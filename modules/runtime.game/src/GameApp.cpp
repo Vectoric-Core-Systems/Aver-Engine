@@ -9,6 +9,7 @@
 #  include "aver/scene/World.hpp"
 #endif
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
@@ -151,6 +152,71 @@ void GameApp::openProject(Engine& e) {
 #endif
 }
 
+Vec3 GameApp::camForward() const {
+    return Vec3{ std::cos(pitch_) * std::cos(yaw_), std::cos(pitch_) * std::sin(yaw_), std::sin(pitch_) };
+}
+
+f32 GameApp::viewAspect(const Engine& e) const {
+    // FROM THE SWAPCHAIN, not from a viewport rect. SandboxApp::viewAspect divides vpW_/vpH_, the
+    // dockspace's central node, because the editor's 3D view is one panel among many and is latched
+    // by buildUI a frame earlier. A game's scene IS the backbuffer. Copying the editor's formula
+    // would have required members that exist only because ImGui does, and would have produced a
+    // game whose projection silently used last frame's panel size.
+    if (const Window* w = e.window()) {
+        const u32 h = w->height();
+        if (h > 0) return static_cast<f32>(w->width()) / static_cast<f32>(h);
+    }
+    return 16.0f / 9.0f;   // headless: no window to ask
+}
+
+void GameApp::pushFrame(Engine& e) {
+    rhi::IDevice* dev = e.device();
+    if (!dev) return;
+
+    // NO setViewportRect. The editor confines the scene to the dockspace's central node; a game
+    // renders to the whole backbuffer, so leaving the rect alone is the correct behaviour and not
+    // an omission.
+    const Vec3 fwd    = camForward();
+    const f32  aspect = viewAspect(e);
+    const Mat4 view   = Mat4::lookAtLH(camPos_, camPos_ + fwd, Vec3{0, 0, 1});
+    const f32  zNear = 2.0f, zFar = 200000.0f;   // centimetres
+    const Mat4 proj = Mat4::perspectiveLH(radians(60.0f), aspect, zNear, zFar);
+    const Mat4 viewProj = view * proj;           // row-vector: v * M, so view then proj
+    const Mat4 invVP = viewProj.inverse();
+    dev->setCamera(&viewProj.m[0][0], &invVP.m[0][0], &camPos_.x);
+    invVP_ = invVP; viewProj_ = viewProj; eye_ = camPos_;
+
+    // Logged once, and it is this commit's oracle. A game asked for 800x600 must report 1.333 and
+    // one asked for 1600x900 must report 1.778; the editor's dockspace formula cannot produce
+    // either, because it divides a panel that does not exist here. Cheap enough to leave in.
+    if (frames_ <= 1) {
+        AVER_INFO("[Game] camera: aspect={:.3f} fov=60deg near={} far={} (from the swapchain, not a viewport rect)",
+                  aspect, zNear, zFar);
+    }
+
+    f32 fog = fogDensity_;
+#if AVER_MODULE_SCENE
+    if (level_.hasFog()) fog = level_.fogDensity();
+#endif
+    // FROZEN: sunDirection stays unnormalised here -- the shaders normalise it.
+    sky_.enabled = true;
+    for (int i = 0; i < 3; ++i) {
+        sky_.sunColor[i] = sunColor_[i];
+        sky_.zenith[i]   = skyZenith_[i];
+        sky_.horizon[i]  = skyHorizon_[i];
+        sky_.fogColor[i] = fogColor_[i];
+    }
+    sky_.skyLightIntensity = sunAmbient_;
+    sky_.fogDensity        = fog;
+    sky_.cloudTime         = cloudTime_;
+    dev->setSkyAtmosphere(sky_);
+    // NOT the editor's 0.055 chrome grey. Nothing outside a game's viewport is chrome, because a
+    // game has no outside -- anything the sky does not cover is a bug the player should see as
+    // black, not as a colour that looks deliberate.
+    dev->setClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    dev->setPostProcess(post_);
+}
+
 void GameApp::onInit(Engine& e) {
     // The whole point of the platform-side InputState: a game reads the window's own event stream,
     // with no ImGui anywhere. SandboxApp cannot do this -- its input path is inside
@@ -185,7 +251,8 @@ void GameApp::onUpdate(Engine&, const Timestep&) {
 #endif
 }
 
-void GameApp::onRender(Engine&) {
+void GameApp::onRender(Engine& e) {
+    pushFrame(e);
     // Nothing drawn yet: Engine::frameStep() already does beginFrame/endFrame around this, so the
     // swapchain is cleared and presented. The world draw walk lands here in a later slice.
 
