@@ -2,6 +2,7 @@
 #pragma once
 #include "aver/runtime/Application.hpp"
 #include "aver/platform/InputState.hpp"
+#include "aver/formats/OcProject.hpp"
 
 #include <string>
 
@@ -17,6 +18,8 @@ struct GameConfig {
     bool useWarp = false;
     bool debugLayer = false;
     std::string backend;    // empty = the compiled-in default order
+    // The .ocproject to open. A packaged game passes Game.ocproject; empty means no world.
+    std::string projectPath;
 };
 
 // Parses the arguments a game executable accepts. Unknown arguments are ignored rather than fatal:
@@ -45,9 +48,18 @@ public:
     // The accumulated keyboard and mouse state for this frame.
     const InputState& input() const { return input_; }
 
+    // The open project. Invalid until openProject succeeds.
+    const fmt::ProjectDesc& project() const { return project_; }
+
 private:
+    // Loads cfg_.projectPath. Logs and leaves project_ invalid on failure rather than aborting: a
+    // game with no world is a diagnosable state, and a process that dies before its first frame
+    // tells the player nothing.
+    void openProject(Engine&);
+
     GameConfig cfg_;
     InputState input_;
+    fmt::ProjectDesc project_;
     u64 frames_ = 0;
 };
 
