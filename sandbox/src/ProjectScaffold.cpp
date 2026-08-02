@@ -154,10 +154,29 @@ std::string csprojText(const EngineRefs& refs) {
         s += "  </ItemGroup>\n\n";
     }
     s += "  <ItemGroup>\n";
-    s += "    <!-- Surfaces authored in C#, under Content\\Materials. Compile C# runs avermatc over\n";
+    s += "    <!-- Surfaces authored in C#, under Content\\Materials. Compile .NET runs avermatc over\n";
     s += "         the built assembly and writes the .ocmat files the engine loads into\n";
     s += "         <project>\\Binaries\\Materials. -->\n";
     s += "    <Compile Include=\"..\\Materials\\**\\*.cs\" />\n";
+    s += "  </ItemGroup>\n\n";
+    s += "  <ItemGroup>\n";
+    s += "    <!-- F#, if this project has any. The editor builds THIS project by name, and MSBuild\n";
+    s += "         picks a compiler from each project's extension, so a sibling .fsproj is built by\n";
+    s += "         the same command and the same button with no editor change at all.\n";
+    s += "\n";
+    s += "         Conditional so the reference is inert until the file exists: an unconditional\n";
+    s += "         reference to a missing project fails the build for every author who never writes\n";
+    s += "         a line of F#. This is what makes the Compile .NET button's name true rather than\n";
+    s += "         aspirational.\n";
+    s += "\n";
+    s += "         NAMED Scripts.FSharp, NOT Scripts.fsproj, and the difference is not cosmetic.\n";
+    s += "         Both projects live in this directory and both default AssemblyName to their own\n";
+    s += "         filename, so a Scripts.fsproj would emit a second Scripts.dll into the same output\n";
+    s += "         folder and one would overwrite the other. It still COMPILES -- the reference\n";
+    s += "         resolves at build time -- and then fails at load, which is the worst place to find\n";
+    s += "         out. Measured, not guessed. -->\n";
+    s += "    <ProjectReference Include=\"Scripts.FSharp.fsproj\"\n";
+    s += "                      Condition=\"Exists('$(MSBuildThisFileDirectory)Scripts.FSharp.fsproj')\" />\n";
     s += "  </ItemGroup>\n\n";
     s += "</Project>\n";
 

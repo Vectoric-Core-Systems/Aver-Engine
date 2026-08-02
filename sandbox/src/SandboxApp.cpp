@@ -835,13 +835,15 @@ public:
 #if AVER_MODULE_VOXI
         // Hand the GPU's real capabilities to Voxi so its settings reflect this hardware.
         {
-            const rhi::DeviceCaps c = e.device()->caps();
+            // `caps`, not `c`: a MeshObj named `c` is still in scope from the editor-cube setup
+            // two hundred lines up, and shadowing it warned (C4456).
+            const rhi::DeviceCaps caps = e.device()->caps();
             voxi::DeviceInfo di;
-            di.msaaMask = c.msaaMask; di.maxMsaaSamples = c.maxMsaaSamples;
-            di.rayTracingTier = c.rayTracingTier; di.computeShaders = c.computeShaders;
-            di.typedUavLoads = c.typedUavLoads; di.conservativeRaster = c.conservativeRaster;
-            di.shaderModel = c.shaderModel; di.meshShaderTier = c.meshShaderTier;
-            di.dxcAvailable = c.dxcAvailable;
+            di.msaaMask = caps.msaaMask; di.maxMsaaSamples = caps.maxMsaaSamples;
+            di.rayTracingTier = caps.rayTracingTier; di.computeShaders = caps.computeShaders;
+            di.typedUavLoads = caps.typedUavLoads; di.conservativeRaster = caps.conservativeRaster;
+            di.shaderModel = caps.shaderModel; di.meshShaderTier = caps.meshShaderTier;
+            di.dxcAvailable = caps.dxcAvailable;
             voxi::Renderer::get().setDeviceInfo(di);
             voxi::Settings s = voxi::Renderer::get().settings();
             s.msaa = static_cast<voxi::Msaa>(e.device()->sampleCount());
@@ -852,7 +854,7 @@ public:
             if (rtOverride_) s.rayTracing = static_cast<voxi::Quality>(rtOverride_);
             if (msOverride_) s.meshShaders = true;
             voxi::Renderer::get().setSettings(s);
-            AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", c.maxMsaaSamples, c.rayTracingTier, c.shaderModel, c.meshShaderTier);
+            AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
 
             // Registration is non-owning: voxiRenderer_ must outlive the device, torn down in onShutdown.
             voxiRenderer_.setSettings(s);

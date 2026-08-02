@@ -675,7 +675,7 @@ void ActorEditor::rebuildLive(Engine& e) {
     if (!c && !info->typeName.empty() && info->typeName != reg)
         c = aver_fw_class_find(info->typeName.c_str());
     if (!c) {
-        liveWhy_ = "'" + shown + "' is not loaded. Compile C#, then start the project's scripts.";
+        liveWhy_ = "'" + shown + "' is not loaded. Compile .NET, then start the project's scripts.";
         live_ = false;
         return;
     }
@@ -1033,7 +1033,7 @@ void ActorEditor::draw(Engine& e) {
         } else {
             const bool busy = g_hooks.compileBusy && g_hooks.compileBusy();
             ImGui::BeginDisabled(!g_hooks.compileScripts || busy);
-            if (ImGui::Button(busy ? "Compiling..." : "Compile C#")) g_hooks.compileScripts();
+            if (ImGui::Button(busy ? "Compiling..." : "Compile .NET")) g_hooks.compileScripts();
             ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 ImGui::SetTooltip(g_hooks.compileScripts
@@ -1093,7 +1093,7 @@ void ActorEditor::draw(Engine& e) {
             ImGui::SameLine();
             if (ImGui::Button("Refresh")) { liveStale_ = true; framed_ = false; }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Spawn it again. Do this after a Compile C#, which replaces the class.");
+                ImGui::SetTooltip("Spawn it again. Do this after a Compile .NET, which replaces the class.");
         }
 
         ImGui::SameLine();

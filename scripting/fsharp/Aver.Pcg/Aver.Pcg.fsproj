@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The engine's procedural-generation API, in F#.
+       See docs and the sibling Aver.FSharp.Sample for why F# compiles here at all: `dotnet build`
+       on the project, the same command already used for every C# script, with MSBuild picking the
+       language from the extension. No second toolchain, no native change.
+
+       WHY THIS IS A SEPARATE PROJECT from Aver.FSharp.Sample. That one exists to prove the host can
+       load and run F#-compiled IL, and it should stay the smallest thing that can prove it. This is
+       the real API and it will grow. Keeping the proof and the product in one assembly would mean
+       the proof stops being a proof the first time the product breaks the build.
+
+       DELIBERATELY GENERAL. Volumetric clouds are the first consumer of this API, not its shape.
+       Nothing in here mentions clouds, weather or sky: scatter places things, densityVolume
+       describes a field, and clouds are one caller of the second. An API written clouds-first would
+       have produced one that only does clouds.
+
+       WHAT THIS ASSEMBLY MAY NOT DO. It has no reference to Aver.Scripting or Aver.Framework and it
+       must keep it that way: it is a pure library, so the bridge's CheckApiVersion skips it, which
+       is the documented behaviour for a support library in a scripts folder. It also does no I/O,
+       touches no engine handles and holds no mutable global state. Every entry point is a pure
+       function of its arguments, which is what makes "same seed, same output" testable on CPU with
+       no GPU and no engine running.
+
+       LICENCE: FSharp.Core is MIT and ships inside the .NET SDK's offline library-packs, so this
+       adds no new third-party dependency and needs no network to restore. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Aver.Pcg</AssemblyName>
+    <RootNamespace>Aver.Pcg</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <!-- A generator that silently returns the wrong numbers is the failure mode here, so anything
+         the compiler is unsure about is an error. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- MEASURED on the sibling project, not assumed: the SDK defaults this to false for a LIBRARY,
+         so a plain `dotnet build` emits the assembly with no FSharp.Core.dll beside it. The scripts
+         folder is the host's only source for a script's private dependencies, so without this the
+         assembly loads and then dies at the first call into it. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <!-- FSharp.Core ships thirteen localised resource assemblies; left alone they arrive as thirteen
+         subdirectories in a folder the user is expected to look at. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Order matters in F#: a file may only use what precedes it. -->
+    <Compile Include="Types.fs" />
+    <Compile Include="Pcg.fs" />
+  </ItemGroup>
+
+</Project>

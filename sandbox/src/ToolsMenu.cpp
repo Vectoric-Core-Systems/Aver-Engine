@@ -914,17 +914,21 @@ void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 
     int tile = 2;
     if      (scriptStatus_ == ScriptStatus::UpToDate) tile = 0;
     else if (scriptStatus_ == ScriptStatus::Failed)   tile = 1;
+    // ".NET" rather than "C#" because the build is no longer C#-only: `dotnet build` picks the
+    // compiler from each project's extension, so a Scripts.fsproj beside Scripts.csproj is built by
+    // the same command and the same button. Naming the language was always naming the wrong thing --
+    // what this builds is a project, and the project decides its language.
     const char* tip =
-          scriptStatus_ == ScriptStatus::UpToDate ? "C# is built and live."
-        : scriptStatus_ == ScriptStatus::Failed   ? "The last C# build failed - click to see the errors."
-        : scriptStatus_ == ScriptStatus::Building ? "Compiling C#..."
-        : scriptStatus_ == ScriptStatus::NoProject ? "Open a project to compile its C# scripts."
+          scriptStatus_ == ScriptStatus::UpToDate ? "Scripts are built and live."
+        : scriptStatus_ == ScriptStatus::Failed   ? "The last script build failed - click to see the errors."
+        : scriptStatus_ == ScriptStatus::Building ? "Compiling..."
+        : scriptStatus_ == ScriptStatus::NoProject ? "Open a project to compile its scripts."
         : !haveDotnet()                            ? "dotnet was not found on PATH. Install the .NET SDK."
-        :                                            "C# changed since the last build - click Compile C#.";
+        :                                            "Scripts changed since the last build - click Compile .NET.";
 
     ImGuiStyle& st = ImGui::GetStyle();
     const float ih = ImGui::GetFrameHeight() - st.FramePadding.y * 2.0f;   // icon square, inside padding
-    const char* label = "Compile C#";
+    const char* label = "Compile .NET";
     const ImVec2 tsz = ImGui::CalcTextSize(label);
     const float gap = st.ItemInnerSpacing.x;
     const ImVec2 btnSize(st.FramePadding.x * 2.0f + ih + gap + tsz.x, 0.0f);

@@ -29,12 +29,12 @@ void setActorEditorContentRoot(std::string root);
 
 // What the tab's toolbar does. Any hook may be left empty; its button is then disabled.
 struct ActorEditorHooks {
-    std::function<void()> compileScripts;              // Tools > Compile C#
+    std::function<void()> compileScripts;              // Tools > Compile .NET
     std::function<void(const std::string&)> openInIde; // the project's chosen IDE
     std::function<bool()> compileBusy;                 // true while a build is running
     std::string ideName;                               // for the button's label
 
-    // Draws the app's own Compile C# split button at the current cursor. Empty falls back to a
+    // Draws the app's own Compile .NET split button at the current cursor. Empty falls back to a
     // plain button.
     std::function<void()> drawCompileButton;
 };
