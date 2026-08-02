@@ -63,6 +63,11 @@ public:
     bool inModalResize() const { return modalResize_; }
     bool isResizeGrab() const { return resizeGrab_; }
 
+    // Depth of the mouse-button capture, owned by the platform message handler. A COUNT and not a
+    // flag: pressing left, then right, then releasing left must not drop the capture while a
+    // button is still down. Exposed as a reference because the Win32 handler is the only writer.
+    i32& mouseCapture() { return mouseCapture_; }
+
     // Forwards an event to the callback, caching a resize. Called by the platform message handler.
     void dispatch(const Event& e);
     void setDpiScale(f32 s) { dpiScale_ = s; }
@@ -84,6 +89,7 @@ private:
     bool modalSize_ = false;
     bool modalResize_ = false;
     bool resizeGrab_ = false;
+    i32 mouseCapture_ = 0;
 };
 
 } // namespace aver

@@ -7,3 +7,11 @@
 add_executable(WatcherTest src/WatcherTest.cpp)
 target_link_libraries(WatcherTest PRIVATE Aver.Platform Aver.Core)
 set_target_properties(WatcherTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# InputStateTest -- the opposite case to WatcherTest above. Nothing here is the operating system's
+# behaviour: it is all edge detection, auto-repeat suppression and focus-loss clearing, which are
+# the accumulator's own logic. So it is driven by synthetic events with no window at all, and runs
+# in milliseconds with no scheduling noise.
+add_executable(InputStateTest src/InputStateTest.cpp)
+target_link_libraries(InputStateTest PRIVATE Aver.Platform Aver.Core)
+set_target_properties(InputStateTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
