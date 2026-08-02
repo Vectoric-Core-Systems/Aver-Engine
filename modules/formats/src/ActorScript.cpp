@@ -26,11 +26,6 @@ usize skipSpace(std::string_view t, usize i) {
     return i;
 }
 
-// Returns the start of the line containing `i`.
-usize lineBegin(std::string_view t, usize i) {
-    while (i > 0 && t[i - 1] != '\n') --i;
-    return i;
-}
 // Returns the start of the line after the one containing `i`.
 usize lineEnd(std::string_view t, usize i) {
     while (i < t.size() && t[i] != '\n') ++i;

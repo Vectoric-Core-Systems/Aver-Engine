@@ -30,7 +30,5 @@ enum class AssetType : u32 {
 
 // Maps a filename to an AssetType. Case-insensitive on the extension.
 AssetType assetTypeFromPath(std::string_view path);
-// Returns the display name of an AssetType.
-const char* assetTypeName(AssetType t);
 
 } // namespace aver

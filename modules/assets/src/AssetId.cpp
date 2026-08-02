@@ -36,21 +36,4 @@ AssetType assetTypeFromPath(std::string_view path) {
     return AssetType::Unknown;
 }
 
-// Returns the display name of an AssetType.
-const char* assetTypeName(AssetType t) {
-    switch (t) {
-        case AssetType::Beam:     return "Beam";
-        case AssetType::Map:      return "Map";
-        case AssetType::Mesh:     return "Mesh";
-        case AssetType::Texture:  return "Texture";
-        case AssetType::Material: return "Material";
-        case AssetType::Skeletal: return "Skeletal";
-        case AssetType::Anim:     return "Anim";
-        case AssetType::Prefab:   return "Prefab";
-        case AssetType::Aero:     return "Aero";
-        case AssetType::Unknown:  return "Unknown";
-    }
-    return "Unknown";
-}
-
 } // namespace aver

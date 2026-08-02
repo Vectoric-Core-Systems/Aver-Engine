@@ -8,7 +8,6 @@ namespace aver {
 class Clock {
 public:
     Clock();
-    f64 seconds() const;   // elapsed since construction / last restart
     f64 restart();         // returns elapsed, then resets to now
 private:
     u64 startNs_;

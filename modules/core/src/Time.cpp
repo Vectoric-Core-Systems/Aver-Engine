@@ -16,11 +16,6 @@ static u64 nowNs() {
 // Starts the clock at now.
 Clock::Clock() : startNs_(nowNs()) {}
 
-// Seconds since construction or the last restart.
-f64 Clock::seconds() const {
-    return static_cast<f64>(nowNs() - startNs_) * 1e-9;
-}
-
 // Returns the elapsed seconds and resets the clock to now.
 f64 Clock::restart() {
     const u64 t = nowNs();

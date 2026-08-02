@@ -82,11 +82,6 @@ public:
     // The GPU residency of the material library, so the app can ask for a draw's binding set.
     pbr::MaterialSystem& materials() { return materials_; }
 
-    // True when the GI path initialised.
-    bool giReady() const { return giReady_; }
-    // True when an acceleration structure was built for this frame.
-    bool rayTracingActive() const { return rtActive_; }
-
 private:
     // Creates the cascaded shadow atlas.
     bool createShadowResources();
