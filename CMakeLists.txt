@@ -29,6 +29,7 @@ option(AVER_RHI_D3D12  "DirectX 12 backend (primary)" ON)
 option(AVER_RHI_D3D11  "DirectX 11 backend"           ON)
 option(AVER_RHI_VULKAN "Vulkan backend (needs Vulkan SDK)" OFF)
 option(AVER_BUILD_SANDBOX "Build the sandbox sample app" ON)
+option(AVER_BUILD_GAME "Build the standalone game runtime (AverGame.exe)" ON)
 option(AVER_BUILD_TESTS "Build test executables" ON)
 option(AVER_ENABLE_UI "In-window editor UI (Dear ImGui)" ON)
 
@@ -188,9 +189,24 @@ if(AVER_MODULE_MCP AND WIN32)
   add_subdirectory(modules/mcp)
 endif()
 add_subdirectory(modules/runtime)
+# After modules/runtime: it links Aver.Runtime, and this is a plain subdirectory order dependency.
+if(AVER_BUILD_GAME)
+  add_subdirectory(modules/runtime.game)
+endif()
 
 if(AVER_BUILD_SANDBOX)
   add_subdirectory(sandbox)
+endif()
+
+# The standalone game runtime. Separate from the sandbox switch because they are opposites: one is
+# the editor, one is what a shipped game runs, and a tree may reasonably want either alone.
+#
+# NOTE FOR PACKAGING: an AverGame.exe built from a tree with AVER_ENABLE_UI=ON has ImGui linked into
+# it, because Aver.RHI.D3D12 links imgui PUBLIC and Aver.Runtime links that backend PUBLIC. Such a
+# binary is fine to run and must NOT be shipped; the staging script reads AVER_ENABLE_UI out of
+# CMakeCache.txt and refuses it. Making the exclusion structural is the ImGui/RHI split, later.
+if(AVER_BUILD_GAME)
+  add_subdirectory(game)
 endif()
 
 if(AVER_BUILD_TESTS)
