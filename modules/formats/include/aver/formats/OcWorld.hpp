@@ -25,6 +25,31 @@ struct OcWorldPlacement {
 };
 
 // A whole world: identity, optional environment, and the placements.
+// A procedural density field the level declares. Authored, not generated: this is the RECIPE, and
+// what fills it is the GPU (a bounded one) or a sampling call (an infinite one).
+//
+// NAMED, because a level may declare several -- a sky, a cave mask, a moisture field -- and a script
+// asking for "the PCG volume" when there are three is how the wrong one gets used silently.
+//
+// INFINITE IS THE DEFAULT, and that is deliberate rather than lazy. Hash noise has a value at every
+// lattice cell in every direction; bounds are an extra restriction, not a prerequisite. An infinite
+// field also generates identically per chunk, in any order, which is the property a streamed world
+// needs and a bounded one cannot offer.
+struct OcPcgVolume {
+    std::string name;
+    i32 seed = 0;
+    // World centimetres spanned by one lattice cell. Defaults to 1600 -- one 16 m chunk per cell,
+    // the chunk size docs/CHUNKS.md specifies.
+    f64 cellSizeCm = 1600.0;
+    i32 octaves = 4;
+    f64 coverageFloor = 0.0;
+    f64 coverageBias  = 1.0;
+    // False means boundsMin/Max are meaningful. True means the field is everywhere.
+    bool infinite = true;
+    f64 boundsMin[3] = {0, 0, 0};
+    f64 boundsMax[3] = {0, 0, 0};
+};
+
 struct OcWorldData {
     int version = 1;
     u64 contentId = 0;                     // ID = FNV-1a-64(NAME)
@@ -54,6 +79,10 @@ struct OcWorldData {
 
     bool hasSpawn = false;
     f64 spawnX = 0, spawnY = 0, spawnZ = 0, spawnYaw = 0;
+
+    // Declared density fields. Order is the file's order, so a level that declares two with the
+    // same name keeps both rather than silently losing one -- the reader reports it instead.
+    std::vector<OcPcgVolume> pcgVolumes;
 
     std::vector<OcWorldPlacement> placements;
 };

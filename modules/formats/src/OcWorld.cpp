@@ -113,6 +113,30 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                     out.fogColor[0] = parseF64(t[i+1]); out.fogColor[1] = parseF64(t[i+2]); out.fogColor[2] = parseF64(t[i+3]);
                 }
             }
+        } else if (equalsCI(key, "PCGVOLUME")) {
+            OcPcgVolume v;
+            for (usize i = 1; i < t.size(); ++i) {
+                if      (equalsCI(t[i], "name")    && i + 1 < t.size()) v.name          = std::string(t[++i]);
+                else if (equalsCI(t[i], "seed")    && i + 1 < t.size()) v.seed          = static_cast<i32>(parseF64(t[++i]));
+                else if (equalsCI(t[i], "cell")    && i + 1 < t.size()) v.cellSizeCm    = parseF64(t[++i]);
+                else if (equalsCI(t[i], "octaves") && i + 1 < t.size()) v.octaves       = static_cast<i32>(parseF64(t[++i]));
+                else if (equalsCI(t[i], "floor")   && i + 1 < t.size()) v.coverageFloor = parseF64(t[++i]);
+                else if (equalsCI(t[i], "bias")    && i + 1 < t.size()) v.coverageBias  = parseF64(t[++i]);
+                // A BARE TOKEN, not `infinite 1`. It is a statement about what the field IS rather
+                // than a value it carries, and it reads that way in the file.
+                else if (equalsCI(t[i], "infinite")) v.infinite = true;
+                else if (equalsCI(t[i], "bounds") && i + 6 < t.size()) {
+                    v.infinite = false;
+                    v.boundsMin[0] = parseF64(t[i+1]); v.boundsMin[1] = parseF64(t[i+2]); v.boundsMin[2] = parseF64(t[i+3]);
+                    v.boundsMax[0] = parseF64(t[i+4]); v.boundsMax[1] = parseF64(t[i+5]); v.boundsMax[2] = parseF64(t[i+6]);
+                    i += 6;
+                }
+            }
+            // Guarded rather than trusted: a cell size of zero divides by zero in every sampler
+            // that reads this, and the file is authored by hand.
+            if (v.cellSizeCm <= 0.0) v.cellSizeCm = 1600.0;
+            if (v.octaves < 1) v.octaves = 1;
+            out.pcgVolumes.push_back(std::move(v));
         } else if (equalsCI(key, "PLACE") || equalsCI(key, "PLACEG")) {
             const bool g = equalsCI(key, "PLACEG");
             OcWorldPlacement p;
@@ -198,6 +222,28 @@ std::string writeOcworld(const OcWorldData& w) {
     if (w.hasFog) {
         s += "FOG exp density " + num(w.fogDensity) +
              " color " + num(w.fogColor[0]) + " " + num(w.fogColor[1]) + " " + num(w.fogColor[2]) + "\n";
+    }
+
+    if (!w.pcgVolumes.empty()) {
+        s += "\n";
+        for (const OcPcgVolume& v : w.pcgVolumes) {
+            s += "PCGVOLUME name " + (v.name.empty() ? std::string("unnamed") : v.name) +
+                 " seed " + std::to_string(v.seed) +
+                 " cell " + num(v.cellSizeCm) +
+                 " octaves " + std::to_string(v.octaves) +
+                 " floor " + num(v.coverageFloor) +
+                 " bias " + num(v.coverageBias);
+            // The bounds token LAST, because parsing `bounds` consumes the six numbers after it and
+            // anything following them would have to be re-found. Writing it last means the reader
+            // never has to.
+            if (v.infinite) {
+                s += " infinite";
+            } else {
+                s += " bounds " + num(v.boundsMin[0]) + " " + num(v.boundsMin[1]) + " " + num(v.boundsMin[2]) +
+                     " " + num(v.boundsMax[0]) + " " + num(v.boundsMax[1]) + " " + num(v.boundsMax[2]);
+            }
+            s += "\n";
+        }
     }
 
     s += "\n";
