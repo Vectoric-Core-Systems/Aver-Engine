@@ -33,14 +33,17 @@
          missing CRT cannot be caught here at all -- the static import-closure check in
          stage-game.ps1 is the thing that catches it, and that one is proven to bite.
 
-      2. DELETING AN ENGINE DLL DOES NOT FAIL THE RUN either, and the reason is temporary but worth
-         knowing: AverGame.exe's import table names no Aver.*.dll at all. It links Aver.Runtime.Game,
-         Aver.Runtime, Aver.Platform and Aver.Core, which are STATIC libraries; the engine DLLs are
-         staged for a game that loads levels and draws a world, and the code that does that has not
-         been lifted out of SandboxApp yet. This check's power is proportional to what the game
-         actually does, and today it does very little. Re-run these two sabotages after the content
-         and level-load lifts land -- the second one should start failing, and if it does not, the
-         package is shipping DLLs nothing uses.
+      2. DELETING AN ENGINE DLL used to pass too, and no longer does. RESOLVED 2026-08-02 by the
+         C1-C11 lift. When this note was first written AverGame.exe's import table named no
+         Aver.*.dll at all -- it linked only static libraries, and the engine DLLs were staged for a
+         game that could not yet load a level or draw a world. The instruction left here was to
+         re-run the sabotage once those lifts landed, and to treat a still-passing run as proof the
+         package was shipping DLLs nothing used.
+
+         Re-run after C11: deleting Aver.Scene.dll now fails with exit -1073741515
+         (0xC0000135, STATUS_DLL_NOT_FOUND). The check has teeth because the game finally uses what
+         it ships. Keep this paragraph: the next person to add a staged DLL should ask the same
+         question about it.
 
 .PARAMETER Package
     The directory produced by stage-game.ps1.

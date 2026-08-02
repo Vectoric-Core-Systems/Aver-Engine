@@ -1,10 +1,19 @@
 # Packaging an Aver project into a shippable game
 
-> **STATUS: PLAN ONLY. Nothing below is built.** Produced 2026-08-02 by a planning workflow reading
-> the tree at `5714ba3`. Load-bearing claims carry a `file:line` that was read rather than assumed;
-> re-check before relying on one. The two structural findings (ImGui linked PUBLIC from the D3D12
-> backend, and asset resolution living inside `#if AVER_MODULE_PBR`) are engine facts that outlive
-> this document.
+> **STATUS: SLICE 1 IS BUILT, as of 2026-08-02.** `AverGame.exe`, `modules/runtime.game`,
+> `scripts/game.allowlist`, `scripts/stage-game.ps1` and `scripts/verify-game.ps1` all exist. A
+> project packages, runs from a scratch directory with the working directory outside the tree, and
+> **fails correctly when a staged DLL is deleted** (`0xC0000135`). The game half of `SandboxApp` was
+> lifted in eleven commits, C1–C11 — see [GAME-LIFT.md](GAME-LIFT.md). Slices 2 onward are still
+> plan.
+>
+> Produced by a planning workflow reading the tree at **`ae47a2f`**, not the `5714ba3` this header
+> originally claimed — which is why its line numbers ran two low against HEAD. Load-bearing claims
+> carry a `file:line` that was read rather than assumed; re-check before relying on one. The two
+> structural findings (ImGui linked PUBLIC from the D3D12 backend, and asset resolution living
+> inside `#if AVER_MODULE_PBR`) are engine facts that outlive this document — and the second was
+> fixed by **re-guarding each symbol at the destination**, not by relocating the code, because
+> moving code does not change which `#if` it sits under.
 
 ---
 

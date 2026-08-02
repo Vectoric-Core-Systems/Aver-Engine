@@ -258,8 +258,8 @@ pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
         // because the built one is what avermatc produced from the C# source and is therefore the
         // one the ids in the level refer to.
         const std::string candidates[3] = {
-            project_.binariesDir() + "\Materials\\" + name + ".ocmat",
-            content + "\Materials\\" + name + ".ocmat",
+            project_.binariesDir() + "\\Materials\\" + name + ".ocmat",
+            content + "\\Materials\\" + name + ".ocmat",
             content + "\\" + name,
         };
         for (const std::string& path : candidates) {
@@ -285,7 +285,7 @@ pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
 void GameContent::loadProjectMaterials() {
     const std::string dir = project_.contentDir();
     if (dir.empty()) return;
-    const std::string matDir = dir + "\Materials";
+    const std::string matDir = dir + "\\Materials";
     std::error_code ec;
     if (!std::filesystem::exists(matDir, ec)) return;
 

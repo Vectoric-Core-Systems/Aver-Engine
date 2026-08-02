@@ -445,11 +445,42 @@ void GameApp::onRender(Engine& e) {
     input_.newFrame();
 }
 
-void GameApp::onShutdown(Engine&) {
+void GameApp::onShutdown(Engine& e) {
+    // EXACT REVERSE REGISTRATION ORDER. The device holds bare pointers to every render feature, so
+    // a feature that outlives its removal is a dangling call and one removed out of order can be
+    // torn down while another still references it. voxiRenderer_ is a MEMBER held by value for
+    // exactly this reason -- it must outlive the device, which it does by construction, but only if
+    // it is unregistered before the device goes.
+    rhi::IDevice* dev = e.device();
+#if AVER_MODULE_VOXI
+    if (dev && voxiAttached_) {
+        dev->removeRenderFeature(&voxiRenderer_);
+        voxiAttached_ = false;
+    }
+    voxiRenderer_.shutdown();
+#endif
+#if AVER_MODULE_PBR
+    // AFTER the Voxi teardown: the material system lives inside VoxiRenderer, and dropping the
+    // materials it holds handles to while it is still registered would leave the render feature
+    // pointing at freed textures for however many frames remain.
+    content_.releaseProjectMaterials();
+    content_.setTextureFactory(nullptr);
+#endif
+#if AVER_MODULE_SCENE
+    // Before physics: unloading destroys entities AND removes their static bodies, and removing a
+    // body from a shut-down physics world is the wrong order.
+    level_.unload();
+#endif
+#if AVER_MODULE_PHYSICS
+    aver_phys_shutdown();
+    groundBody_ = 0;
+#endif
+
     // Reported unconditionally, including when it is zero. A silent zero is indistinguishable from
     // a broken counter, and "did the world simulate at all" is the first question asked when
     // gameplay does not move.
     AVER_INFO("[Game] shutdown after {} frame(s), {} physics step(s)", frames_, physSteps_);
+    (void)dev;
 }
 
 } // namespace aver::game
