@@ -6,6 +6,11 @@
 #include <filesystem>
 #include <system_error>
 
+#if AVER_MODULE_PBR
+#  include "aver/assets/TextureUpload.hpp"
+#  include "aver/formats/OcMat.hpp"
+#endif
+
 #if AVER_MODULE_SCENE
 #  include "aver/anim/AnimSystem.hpp"
 #  include "aver/assets/AssetId.hpp"
@@ -186,5 +191,129 @@ const GameContent::SurfaceLook* GameContent::lookFor(i32 material) const {
 }
 
 #endif // AVER_MODULE_SCENE
+
+#if AVER_MODULE_PBR
+
+std::string GameContent::resolveAssetPath(const pbr::TextureRef& ref) const {
+    if (!ref.path.empty()) {
+        const std::string& p = ref.path;
+        const bool absolute = p.size() > 1 && (p[1] == ':' || p[0] == '\\' || p[0] == '/');
+        if (absolute) return p;
+        const std::string content = project_.contentDir();
+        if (!content.empty()) {
+            const std::string full = content + "\\" + p;
+            std::error_code ec;
+            if (std::filesystem::exists(full, ec)) return full;
+        }
+        return p;
+    }
+    if (ref.id) return pathFor(ref.id);
+    return {};
+}
+
+rhi::TextureHandle GameContent::resolveMaterialTexture(const pbr::TextureRef& ref, pbr::TextureSlot slot,
+                                                       void* user) {
+    auto* self = static_cast<GameContent*>(user);
+    if (!self || !self->textureFactory_) return 0;
+
+    const std::string path = self->resolveAssetPath(ref);
+    if (path.empty()) {
+        AVER_WARN("[Material] texture id 0x{:016X} is not in the content index; slot '{}' keeps its fallback",
+                  ref.id, pbr::MaterialLibrary::textureSlotName(slot));
+        return 0;
+    }
+
+    // THE SLOT DECIDES THE COLOUR SPACE, NEVER THE FILENAME. A normal map read as sRGB is a subtly
+    // wrong lighting response that looks like a shading bug rather than a decode bug.
+    assets::TextureUsage usage = assets::TextureUsage::Data;
+    switch (slot) {
+        case pbr::TextureSlot::BaseColor:
+        case pbr::TextureSlot::Emissive:  usage = assets::TextureUsage::Colour;    break;
+        case pbr::TextureSlot::Normal:    usage = assets::TextureUsage::NormalMap; break;
+        default:                          usage = assets::TextureUsage::Data;      break;
+    }
+
+    std::string err;
+    assets::TextureUploadInfo info;
+    const rhi::TextureHandle h = assets::uploadTexture(*self->textureFactory_, path, usage, &err, &info);
+    if (!h) {
+        AVER_WARN("[Material] {} - slot '{}' keeps its fallback", err,
+                  pbr::MaterialLibrary::textureSlotName(slot));
+        return 0;
+    }
+    AVER_INFO("[Material] {} -> {}x{}, {} mips ({} KB) for slot '{}'", path, info.width, info.height,
+              info.mips, info.bytes / 1024, pbr::MaterialLibrary::textureSlotName(slot));
+    return h;
+}
+
+pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
+    if (name.empty()) return 0;
+    const auto cached = materialAssets_.find(name);
+    if (cached != materialAssets_.end()) return cached->second;
+
+    pbr::MaterialHandle h = 0;
+    const std::string content = project_.contentDir();
+    if (!content.empty()) {
+        // ORDER MATTERS: a BUILT .ocmat under Binaries wins over a hand-authored one under Content,
+        // because the built one is what avermatc produced from the C# source and is therefore the
+        // one the ids in the level refer to.
+        const std::string candidates[3] = {
+            project_.binariesDir() + "\Materials\\" + name + ".ocmat",
+            content + "\Materials\\" + name + ".ocmat",
+            content + "\\" + name,
+        };
+        for (const std::string& path : candidates) {
+            std::error_code ec;
+            if (!std::filesystem::exists(path, ec)) continue;
+            pbr::MaterialDesc d;
+            fmt::OcMatExtras extras;
+            std::string err;
+            // A parse failure BREAKS rather than falling through to the next candidate: a corrupt
+            // built material must not be silently replaced by a stale hand-authored one.
+            if (!fmt::loadOcmat(path, d, &extras, &err)) { AVER_WARN("[Material] {}", err); break; }
+            h = pbr::MaterialLibrary::get().create(d);
+            if (h) AVER_INFO("[Material] '{}' loaded from {}", d.name, path);
+            break;
+        }
+    }
+    // Caches 0 as a negative result and never retries. Deliberate: a project with fifty unauthored
+    // surfaces would otherwise stat three paths per surface per level load.
+    materialAssets_.emplace(name, h);
+    return h;
+}
+
+void GameContent::loadProjectMaterials() {
+    const std::string dir = project_.contentDir();
+    if (dir.empty()) return;
+    const std::string matDir = dir + "\Materials";
+    std::error_code ec;
+    if (!std::filesystem::exists(matDir, ec)) return;
+
+    u32 n = 0;
+    // NON-RECURSIVE, matching the editor: Content\Materials only, not every .ocmat in the tree.
+    for (std::filesystem::directory_iterator it(matDir, ec), end; it != end; it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec)) continue;
+        if (assetTypeFromPath(it->path().string()) != AssetType::Material) continue;
+        if (materialForSurface(it->path().stem().string())) ++n;
+    }
+    if (n) AVER_INFO("[Material] {} project material(s) loaded from {}", n, matDir);
+}
+
+void GameContent::releaseProjectMaterials() {
+    materialAssets_.clear();
+#if AVER_MODULE_SCENE
+    surfaceMaterials_.clear();
+#endif
+}
+
+#endif // AVER_MODULE_PBR
+
+#if AVER_MODULE_PBR && AVER_MODULE_SCENE
+pbr::MaterialHandle GameContent::authoredFor(i32 token) const {
+    const auto it = surfaceMaterials_.find(token);
+    return it == surfaceMaterials_.end() ? 0 : it->second;
+}
+#endif
 
 } // namespace aver::game

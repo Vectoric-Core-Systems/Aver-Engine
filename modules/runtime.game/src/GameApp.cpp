@@ -8,6 +8,9 @@
 #if AVER_MODULE_SCENE
 #  include "aver/scene/World.hpp"
 #endif
+#if AVER_MODULE_VOXI
+#  include "aver/voxi/Voxi.hpp"
+#endif
 
 #include <cmath>
 #include <cstdlib>
@@ -110,6 +113,47 @@ BootConfig GameApp::config() const {
     b.enableDebugLayer = cfg_.debugLayer;
     b.backend          = cfg_.backend.empty() ? nullptr : cfg_.backend.c_str();
     return b;
+}
+
+void GameApp::attachVoxi(Engine& e) {
+#if AVER_MODULE_VOXI
+    rhi::IDevice* dev = e.device();
+    if (!dev) return;
+
+    // Hand the GPU's real capabilities to Voxi so its settings reflect this hardware.
+    const rhi::DeviceCaps caps = dev->caps();
+    voxi::DeviceInfo di;
+    di.msaaMask = caps.msaaMask; di.maxMsaaSamples = caps.maxMsaaSamples;
+    di.rayTracingTier = caps.rayTracingTier; di.computeShaders = caps.computeShaders;
+    di.typedUavLoads = caps.typedUavLoads; di.conservativeRaster = caps.conservativeRaster;
+    di.shaderModel = caps.shaderModel; di.meshShaderTier = caps.meshShaderTier;
+    di.dxcAvailable = caps.dxcAvailable;
+    voxi::Renderer::get().setDeviceInfo(di);
+
+    voxi::Settings s = voxi::Renderer::get().settings();
+    s.msaa = static_cast<voxi::Msaa>(dev->sampleCount());
+    voxi::Renderer::get().setSettings(s);
+    voxiRenderer_.setSettings(s);
+
+    if (voxiRenderer_.init(*dev)) {
+        dev->addRenderFeature(&voxiRenderer_);
+        voxiAttached_ = true;
+#if AVER_MODULE_PBR
+        // THESE TWO LINES STAY ADJACENT, exactly as SandboxApp has them. The resolver is installed
+        // in the same breath as the factory it depends on, which is what makes the !textureFactory_
+        // guard inside resolveMaterialTexture unreachable rather than merely unlikely. Separating
+        // them would open a window in which a material resolves to a silent zero.
+        content_.setTextureFactory(dev->resources());
+        voxiRenderer_.materials().setTextureResolver(&GameContent::resolveMaterialTexture, &content_);
+#endif
+        AVER_INFO("[Game] Voxi attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}",
+                  caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
+    } else {
+        AVER_WARN("[Game] Voxi failed to initialise; the world draws untextured");
+    }
+#else
+    (void)e;
+#endif
 }
 
 void GameApp::openProject(Engine& e) {
@@ -235,6 +279,7 @@ void GameApp::onInit(Engine& e) {
     AVER_INFO("[Game] modules: PBR={} SCENE={} VOXI={} PHYSICS={} FRAMEWORK={} SCRIPTING={}",
               AVER_MODULE_PBR, AVER_MODULE_SCENE, AVER_MODULE_VOXI,
               AVER_MODULE_PHYSICS, AVER_MODULE_FRAMEWORK, AVER_MODULE_SCRIPTING);
+    attachVoxi(e);
     openProject(e);
     AVER_INFO("[Game] ready");
 }
@@ -258,7 +303,13 @@ void GameApp::onRender(Engine& e) {
     // FIRST PIXELS. pushFrame set the camera, so viewProj_ is this frame's; the frustum is derived
     // from it inside drawWorld rather than cached, because a stale frustum culls things that are on
     // screen.
-    if (rhi::IDevice* dev = e.device()) drawWorld(*dev, viewProj_, content_, drawStats_);
+    if (rhi::IDevice* dev = e.device()) {
+        pbr::MaterialSystem* ms = nullptr;
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+        if (voxiAttached_) ms = &voxiRenderer_.materials();
+#endif
+        drawWorld(*dev, viewProj_, content_, drawStats_, ms);
+    }
 #endif
     // Nothing drawn yet: Engine::frameStep() already does beginFrame/endFrame around this, so the
     // swapchain is cleared and presented. The world draw walk lands here in a later slice.

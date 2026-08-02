@@ -5,6 +5,10 @@
 #include "aver/formats/OcProject.hpp"
 #include "aver/rhi/RHI.hpp"
 
+#if AVER_MODULE_PBR
+#  include "aver/pbr/Material.hpp"
+#endif
+
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -41,6 +45,34 @@ public:
     // Resolver for aver::anim::AnimSystem, which takes a plain function pointer: asset discovery is
     // the host's business, not the sampler's. `user` is a GameContent*.
     static std::string resolveAnimAsset(u64 id, void* user);
+
+#if AVER_MODULE_PBR
+    // The factory textures are uploaded through. Set once the device exists.
+    void setTextureFactory(rhi::IResourceFactory* f) { textureFactory_ = f; }
+
+    // Uploads the texture a material reference names. 0 keeps the slot's fallback.
+    //
+    // A plain function pointer with a void* because that is what MaterialSystem's resolver takes.
+    // `user` is a GameContent*.
+    static rhi::TextureHandle resolveMaterialTexture(const pbr::TextureRef& ref, pbr::TextureSlot slot,
+                                                     void* user);
+
+    // Where an asset reference points on this machine, or empty.
+    std::string resolveAssetPath(const pbr::TextureRef& ref) const;
+
+    // The material a surface token names, loading it on first use. 0 when the project has none.
+    pbr::MaterialHandle materialForSurface(const std::string& name);
+
+    // Loads every .ocmat under Content\Materials. NON-RECURSIVE, matching the editor.
+    void loadProjectMaterials();
+    void releaseProjectMaterials();
+#endif
+
+#if AVER_MODULE_PBR && AVER_MODULE_SCENE
+    // Remembers that an interned surface token has an authored material behind it.
+    void bindSurfaceMaterial(i32 token, pbr::MaterialHandle h) { surfaceMaterials_[token] = h; }
+    pbr::MaterialHandle authoredFor(i32 token) const;
+#endif
 
 #if AVER_MODULE_SCENE
     // Uploads the built-in primitives a .ocworld may name. Call once, before any project meshes.
@@ -83,6 +115,14 @@ private:
     std::unordered_map<u64, std::pair<Vec3, Vec3>> meshBounds_;
     std::vector<u64>                               projectMeshIds_;
     std::unordered_map<i32, SurfaceLook>           surfaceLooks_;
+#endif
+
+#if AVER_MODULE_PBR
+    rhi::IResourceFactory* textureFactory_ = nullptr;
+    std::unordered_map<std::string, pbr::MaterialHandle> materialAssets_;
+#endif
+#if AVER_MODULE_PBR && AVER_MODULE_SCENE
+    std::unordered_map<i32, pbr::MaterialHandle> surfaceMaterials_;
 #endif
 };
 

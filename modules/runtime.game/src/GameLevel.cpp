@@ -33,7 +33,7 @@ Quat quatFromEulerDeg(const Vec3& e) {
 
 } // namespace
 
-void GameLevel::load(const std::string& path, GameContent&) {
+void GameLevel::load(const std::string& path, GameContent& content) {
     unload();
 
     fmt::OcWorldData w;
@@ -59,9 +59,15 @@ void GameLevel::load(const std::string& path, GameContent&) {
             mr->mesh = p.objectId;
             mr->material = p.material.empty() ? 0 : aver_scene_material(0, p.material.c_str());
             mr->flags |= scene::kMeshRendererVisible;
-            // The PBR materialForSurface call the editor makes here is deferred to C8: it needs the
-            // texture factory, which the game does not own yet. mr->material is still interned, so
-            // the draw walk can already find the surface look.
+#if AVER_MODULE_PBR
+            // Bind the authored material, if the project has one for this surface token. Done at
+            // load rather than per draw because materialForSurface stats up to three paths on a
+            // miss and caches the negative -- per frame that would be a filesystem hit per entity.
+            if (mr->material) {
+                const pbr::MaterialHandle h = content.materialForSurface(p.material);
+                if (h) content.bindSurfaceMaterial(mr->material, h);
+            }
+#endif
         }
         levelEntities_.push_back(e);
 

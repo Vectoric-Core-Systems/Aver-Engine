@@ -11,6 +11,9 @@
 #include "aver/game/GameContent.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/rhi/RHI.hpp"
+#if AVER_MODULE_PBR
+#  include "aver/pbr/MaterialSystem.hpp"
+#endif
 #include "aver/scene/World.hpp"
 #include "aver/scene/scene_abi.h"
 #include "GameMath.hpp"
@@ -19,7 +22,8 @@
 
 namespace aver::game {
 
-void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content, SceneDrawStats& stats) {
+void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content, SceneDrawStats& stats,
+               pbr::MaterialSystem* materials) {
     scene::World& w = scene::World::instance();
     int drawn = 0, culled = 0;
 
@@ -99,10 +103,34 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // render with the colours the editor gives them.
         f32 col[4] = {0.80f, 0.80f, 0.85f, 1.0f};
         f32 metallic = 0.0f, roughness = 0.5f;
-        if (const GameContent::SurfaceLook* look = content.lookFor(mr->material)) {
+
+        u32 authored = 0;
+#if AVER_MODULE_PBR && AVER_MODULE_SCENE
+        authored = content.authoredFor(mr->material);
+#endif
+        if (authored) {
+            // An AUTHORED material supplies its own colour and its own metal/rough through the
+            // binding set below, so the per-draw values are neutralised to 1 rather than left as
+            // the fallback. Multiplying an authored albedo by 0.8 grey is the classic way to get a
+            // world that looks correct but uniformly dingy.
+            col[0] = col[1] = col[2] = 1.0f;
+            metallic = roughness = 1.0f;
+        } else if (const GameContent::SurfaceLook* look = content.lookFor(mr->material)) {
             col[0] = look->col[0]; col[1] = look->col[1]; col[2] = look->col[2];
             metallic = look->metallic; roughness = look->roughness;
         }
+
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+        // Guarded on ready(): binding a descriptor table the material system has not built is not a
+        // wrong colour on this renderer, it is a GPU hang. This project has already lost a session
+        // to an unbound root CBV that presented as "slow geometry shaders".
+        if (materials && materials->ready()) {
+            device.setDrawBinding(materials->bindingSet(authored), &materials->constants(authored),
+                                  sizeof(pbr::MaterialConstants));
+        }
+#else
+        (void)materials;
+#endif
 
         device.drawMesh(handle, &wm.m[0][0], col, metallic, roughness);
         ++drawn;

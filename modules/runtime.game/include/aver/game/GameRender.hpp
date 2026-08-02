@@ -4,6 +4,7 @@
 #include "aver/core/Math.hpp"
 
 namespace aver::rhi { class IDevice; }
+namespace aver::pbr { class MaterialSystem; }
 
 namespace aver::game {
 
@@ -24,7 +25,10 @@ struct SceneDrawStats {
 // Takes the device and the content rather than the app: the walk needs a mesh table and somewhere
 // to send triangles, and nothing else. Takes viewProj by value-ref because the frustum is derived
 // from it per frame.
-void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content, SceneDrawStats& stats);
+// `materials` may be null: a game with no Voxi feature has no material system, and every
+// surface then draws with its named-surface look or the neutral fallback.
+void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content, SceneDrawStats& stats,
+               pbr::MaterialSystem* materials);
 #endif
 
 } // namespace aver::game

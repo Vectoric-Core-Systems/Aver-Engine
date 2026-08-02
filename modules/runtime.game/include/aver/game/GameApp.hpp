@@ -4,6 +4,10 @@
 #include "aver/platform/InputState.hpp"
 #include "aver/formats/OcProject.hpp"
 #include "aver/rhi/RHI.hpp"
+
+#if AVER_MODULE_VOXI
+#  include "aver/voxi/VoxiRenderer.hpp"
+#endif
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
 #include "aver/game/GameRender.hpp"
@@ -77,6 +81,11 @@ private:
     // tells the player nothing.
     void openProject(Engine&);
 
+    // Initialises and registers the Voxi renderer. Also what makes pbr::MaterialSystem exist:
+    // it is a MEMBER of VoxiRenderer and is initialised only inside VoxiRenderer::init, so a game
+    // with no Voxi feature has no material system and draws every surface with its fallback.
+    void attachVoxi(Engine&);
+
     // Pushes the camera, sky, fog and post settings to the device for this frame.
     void pushFrame(Engine&);
 
@@ -101,6 +110,14 @@ private:
     f32 cloudTime_    = 0.0f;
 
     SceneDrawStats drawStats_;
+
+#if AVER_MODULE_VOXI
+    // BY VALUE, and registered NON-OWNING with addRenderFeature. The device holds a bare pointer to
+    // it, so it must outlive the device -- which is why it is a member here and torn down in
+    // onShutdown rather than being a local or a unique_ptr handed away.
+    voxi::VoxiRenderer voxiRenderer_;
+    bool voxiAttached_ = false;
+#endif
     fmt::ProjectDesc project_;
     GameContent content_;
     GameLevel level_;
