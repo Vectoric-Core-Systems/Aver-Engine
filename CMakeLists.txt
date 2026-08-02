@@ -210,6 +210,10 @@ if(AVER_BUILD_GAME)
 endif()
 
 if(AVER_BUILD_TESTS)
+  # Needs Aver.Runtime.Game, so it only exists when the game runtime is built.
+  if(AVER_BUILD_GAME AND TARGET Aver.Framework)
+    add_subdirectory(tests/game)
+  endif()
   add_subdirectory(tests/formats)
   # Unconditional, like the module: Aver.UI depends on nothing optional, so there is no combination
   # of switches in which it exists and its test does not.

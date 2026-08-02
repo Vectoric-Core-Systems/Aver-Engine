@@ -11,6 +11,7 @@
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
 #include "aver/game/GameRender.hpp"
+#include "aver/game/GameInput.hpp"
 
 #include <string>
 
@@ -28,6 +29,8 @@ struct GameConfig {
     std::string backend;    // empty = the compiled-in default order
     // The .ocproject to open. A packaged game passes Game.ocproject; empty means no world.
     std::string projectPath;
+    // Logs the held-key set on every change. Proves the ImGui-free input path without a debugger.
+    bool inputEcho = false;
 };
 
 // Parses the arguments a game executable accepts. Unknown arguments are ignored rather than fatal:
@@ -139,6 +142,7 @@ private:
     // Counted so "did physics step at all" is answerable from a log rather than a debugger.
     u64 physSteps_ = 0;
     u64 lastReportedSteps_ = 0;
+    std::string echoHeld_, echoLast_;
     fmt::ProjectDesc project_;
     GameContent content_;
     GameLevel level_;

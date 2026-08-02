@@ -16,6 +16,7 @@ aver_add_module(Aver.Runtime.Game
     src/GameContent.cpp
     src/GameLevel.cpp
     src/GameRender.cpp
+    src/GameInput.cpp
   DEPS
     Aver.Runtime
     Aver.Platform

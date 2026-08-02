@@ -99,6 +99,7 @@ GameConfig parseArgs(int argc, char** argv) {
         else if (std::strcmp(a, "--warp") == 0)        { c.useWarp = true; }
         else if (std::strcmp(a, "--debug-layer") == 0) { c.debugLayer = true; }
         else if (std::strcmp(a, "--project") == 0)     { c.projectPath = valueAfter(argc, argv, i, ""); ++i; }
+        else if (std::strcmp(a, "--input-echo") == 0)  { c.inputEcho = true; }
         // A bare path ending .ocproject is the project, so double-clicking one or dropping it on the
         // exe works. A packaged game is launched with no arguments at all and finds its manifest in
         // its own directory instead -- see openProject.
@@ -377,7 +378,16 @@ void GameApp::onInit(Engine& e) {
 void GameApp::onUpdate(Engine& e, const Timestep& t) {
     ++frames_;
     // Input is READ here, never rolled here. See onRender for why.
-    (void)e;
+#if AVER_MODULE_FRAMEWORK
+    // BEFORE the gameplay tick, so a PrePhysics actor reads THIS frame's input rather than last
+    // frame's. Publishing after the tick would give every input one frame of latency, which is the
+    // kind of thing that gets blamed on the display.
+    publishInput(input_, e.window() != nullptr, cfg_.inputEcho ? &echoHeld_ : nullptr);
+    if (cfg_.inputEcho && echoHeld_ != echoLast_) {
+        AVER_INFO("[Game] input: {}", echoHeld_);
+        echoLast_ = echoHeld_;
+    }
+#endif
 
     tickGameplay(t.dt);
 
