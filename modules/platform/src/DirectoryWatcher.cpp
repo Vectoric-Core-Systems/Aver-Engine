@@ -183,7 +183,12 @@ void DirectoryWatcher::stop() {
     impl_->haveRenameFrom = false;
 }
 
-bool DirectoryWatcher::watching() const { return impl_->backend != nullptr; }
+// A watcher whose worker has died is NOT watching, whatever the backend pointer says. Callers use
+// this to decide whether hot reload is live, and answering "yes" for a dead watch is how a stale
+// editor session convinces someone their file did not save.
+bool DirectoryWatcher::watching() const {
+    return impl_->backend != nullptr && !impl_->backend->died();
+}
 const std::string& DirectoryWatcher::root() const { return impl_->root; }
 
 // Sets the settle and maximum-hold windows, in milliseconds.

@@ -94,6 +94,13 @@ ActorKind kindFromBase(std::string_view base) {
     if (endsWith("GameInstance"))     return ActorKind::GameInstance;
     if (endsWith("GameMode"))         return ActorKind::GameMode;
     if (endsWith("PlayerController")) return ActorKind::PlayerController;
+    // "Controller" on its own, which this backend was MISSING while ActorScript.cpp:215 has it.
+    // The comment above promises the two backends classify a file identically, and they did not:
+    // a class named `FpsController` came back PlayerController from the built-in scanner and
+    // Unknown from the Roslyn one, so which tools recognised it depended on which backend the
+    // project happened to use. Kept BELOW the PlayerController line, since that is the longer
+    // suffix and must win.
+    if (endsWith("Controller"))       return ActorKind::PlayerController;
     if (endsWith("Character"))        return ActorKind::Character;
     if (endsWith("Pawn"))             return ActorKind::Pawn;
     if (endsWith("Actor"))            return ActorKind::Actor;

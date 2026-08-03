@@ -169,10 +169,23 @@ public abstract class AverCharacter : AverPawn
     }
 
     // Writes yaw to the body and pitch to the head.
+    //
+    // THE PITCH IS NEGATED, and that is the fix rather than a quirk. Rot.ToQuat builds pitch as
+    // FromAxisAngle(Vec3.Right = (0,1,0), pitch), and rotating Forward = (1,0,0) about +Y by a
+    // POSITIVE angle sends it to (cos, 0, -sin) -- toward -Z, which in this engine's +Z-up basis is
+    // DOWNWARD.
+    //
+    // Everything else in this class means the opposite by positive pitch. LookDirection returns
+    // z = sin(_pitch), so positive is up. DriveWithInput passes -Input.MouseDeltaY so that pushing
+    // the mouse forward raises _pitch. PitchMin/PitchMax are written as if positive were up too.
+    //
+    // So the view entity pitched the wrong way: mouse-look was vertically inverted, and worse,
+    // LookDirection -- which is what aiming, traces and any "what am I pointing at" code uses --
+    // disagreed with where the camera actually pointed. Two wrongs that did NOT cancel.
     private void ApplyLookRotation()
     {
         Self.SetLocalRotation(new Rot(_yaw, 0f, 0f).ToQuat());
-        if (_view.IsAlive) _view.SetLocalRotation(new Rot(0f, _pitch, 0f).ToQuat());
+        if (_view.IsAlive) _view.SetLocalRotation(new Rot(0f, -_pitch, 0f).ToQuat());
     }
 
     /// <summary>Moves the character and its capsule to a feet position, clearing velocity.</summary>

@@ -739,13 +739,28 @@ public static class HostBridge
             try { EnhancedInput.Update(); }
             catch (Exception ex) { Emit(3, $"[bridge] input update threw: {ex.Message}"); }
         }
-        // The count is frozen before the walk: an actor spawned during OnTick ticks next frame, not this one.
-        List<ActorLive> bucket = s_tickBuckets[group];
-        int count = bucket.Count;
-        for (int i = 0; i < count && i < bucket.Count; ++i)
+        // A SNAPSHOT, not the live list. The walk used to index s_tickBuckets[group] directly, and
+        // DispUnbind REMOVES from that same list (:808) -- so an actor destroying an actor during
+        // OnTick shifted every later element down one, and the next ++i stepped straight over
+        // whichever actor slid into the vacated slot. It lost a whole frame, silently, and only when
+        // something else had just been destroyed, which is exactly the kind of intermittent that
+        // never gets reported as a bug.
+        //
+        // The `i < bucket.Count` guard the old loop carried prevented the out-of-range read at the
+        // end but did nothing about the skip in the middle.
+        //
+        // Copying also preserves the property the old comment claimed: an actor spawned during
+        // OnTick is not in the snapshot, so it ticks next frame rather than this one.
+        ActorLive[] snapshot = s_tickBuckets[group].ToArray();
+        foreach (ActorLive live in snapshot)
         {
-            ActorLive live = bucket[i];
             if (live.Disabled) continue;
+            // Destroyed earlier in THIS walk. DispUnbind drops it from s_actorsByEntity, so absence
+            // there is the liveness test. Reference equality rather than mere presence, because an
+            // entity id can be reused by a spawn within the same tick and the new actor is not the
+            // one this slot is holding.
+            if (!s_actorsByEntity.TryGetValue(live.Entity, out ActorLive? cur) || !ReferenceEquals(cur, live))
+                continue;
             try { live.Instance.OnTick(dt); }
             catch (Exception ex) { DisableActor(live, "OnTick", ex); }
         }

@@ -50,6 +50,14 @@ std::wstring widen(const std::string& s) {
 // Watches one directory tree with ReadDirectoryChangesW and queues raw records for the frame side.
 class Win32WatchBackend final : public IWatchBackend {
 public:
+    // Set by the worker when it leaves its loop for a reason other than the stop event. Read from
+    // the frame thread, so it is atomic rather than a plain bool.
+    bool died() const override { return died_.load(std::memory_order_acquire); }
+
+private:
+    std::atomic<bool> died_{false};
+
+public:
     ~Win32WatchBackend() override { shutdown(); }
 
     // Opens the directory and starts the worker thread. Returns false if the watch cannot be made.
@@ -146,6 +154,7 @@ private:
                 }
                 if (err != ERROR_OPERATION_ABORTED)
                     AVER_WARN("[Watcher] ReadDirectoryChangesW failed ({}); watch stopped", (u32)err);
+                died_.store(true, std::memory_order_release);
                 arm();
                 break;
             }

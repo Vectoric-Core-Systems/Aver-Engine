@@ -36,6 +36,15 @@ public:
     // Appends everything queued since the last call to `out` without blocking. Returns true if the
     // OS dropped records, in which case the whole tree must be assumed changed.
     virtual bool drain(std::vector<RawFileEvent>& out) = 0;
+
+    // True once the backend's worker has stopped for a reason other than being asked to.
+    //
+    // WITHOUT THIS A DEAD WATCHER IS INDISTINGUISHABLE FROM A QUIET ONE. The Win32 worker exits its
+    // loop on several failure paths, and none of them used to record anything the frame side could
+    // see: DirectoryWatcher::watching() tests only whether the backend OBJECT exists, which it
+    // still does, and drain() keeps returning false with an empty queue. Hot reload simply stopped
+    // working, silently, for the rest of the session.
+    virtual bool died() const { return false; }
 };
 
 // Creates a started backend for `root`, or nullptr if it cannot be watched, having logged why.

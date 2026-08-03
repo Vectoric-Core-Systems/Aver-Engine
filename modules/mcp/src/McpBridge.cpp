@@ -231,6 +231,11 @@ struct McpBridge::Impl {
     WidgetLister lister;
 #if defined(_WIN32)
     SOCKET listener = INVALID_SOCKET;
+    // The ACCEPTED connection, published so stop() can reach it. Closing the listener only unblocks
+    // accept(); a worker already inside recv() on a live client never noticed, and stop()'s join()
+    // then waited for the client to disconnect on its own -- an editor that would not close while an
+    // MCP client held the socket open. Atomic because stop() runs on the main thread.
+    std::atomic<SOCKET> client{INVALID_SOCKET};
     bool wsaUp = false;
 #endif
 };
@@ -344,6 +349,7 @@ bool McpBridge::start(u16 port) {
         while (impl->running.load()) {
             const SOCKET client = ::accept(impl->listener, nullptr, nullptr);
             if (client == INVALID_SOCKET) break;          // closed by stop()
+            impl->client.store(client, std::memory_order_release);
             std::string buffer;
             char chunk[1024];
             while (impl->running.load()) {
@@ -446,7 +452,9 @@ bool McpBridge::start(u16 port) {
                     ::send(client, reply.c_str(), static_cast<int>(reply.size()), 0);
                 }
             }
-            ::closesocket(client);
+            // Taken back before closing, so stop() cannot close the same socket a second time.
+            if (impl->client.exchange(INVALID_SOCKET, std::memory_order_acq_rel) != INVALID_SOCKET)
+                ::closesocket(client);
         }
     });
 
@@ -463,6 +471,12 @@ void McpBridge::stop() {
         // Closed before joining, so the blocking accept() returns.
         ::closesocket(impl_->listener);
         impl_->listener = INVALID_SOCKET;
+    }
+    // And the live connection, so a worker blocked in recv() returns too. Without this the join
+    // below waited on a thread that would not wake until the client chose to disconnect.
+    {
+        const SOCKET c = impl_->client.exchange(INVALID_SOCKET, std::memory_order_acq_rel);
+        if (c != INVALID_SOCKET) ::closesocket(c);
     }
     // Waiting ABI callers are released before the join, or they would sit out the full timeout.
     {
@@ -525,7 +539,13 @@ u32 McpBridge::pump(const std::function<void(const Command&)>& apply) {
             }
             single.pending->cv.notify_all();
         }
-        apply(single);
+        // NOT handed to apply() as well. The host's callback has its own `if (c.name == "abi")`
+        // branch that calls callAbi on the SAME AbiCall, so every abi request ran its dispatcher
+        // twice -- once here and once there -- while the reply the client already received
+        // described only the first. A dispatcher with any side effect ran them both.
+        //
+        // The waiter has been released with this call's result above, so there is nothing left for
+        // the host to do with it.
         return 1;
     }
 
