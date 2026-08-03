@@ -449,8 +449,34 @@ void GameApp::pushFrame(Engine& e) {
         sky_.horizon[i]  = skyHorizon_[i];
         sky_.fogColor[i] = fogColor_[i];
     }
+#if AVER_MODULE_SCENE
+    // THE LEVEL'S DECLARED SKY FIELD, reaching the renderer. A PCGVOLUME named "Sky" drives the
+    // cloud layer: its seed picks which sky this is, and its coverage floor becomes cloud cover.
+    //
+    // BY NAME, not "the first field": a level may declare a cave mask and a moisture field too, and
+    // sampling one of those as the sky would look like a rendering bug rather than a lookup one.
+    //
+    // The floor is INVERTED into coverage on purpose. A density floor is the threshold below which
+    // the field is empty, so a HIGH floor means less material survives -- which is less cloud, not
+    // more. Passing it through unchanged would make the sky clear exactly when the author asked for
+    // overcast.
+    if (const GameLevel::PcgField* skyField = level_.pcgField("Sky")) {
+        sky_.cloudsEnabled = true;
+        sky_.cloudSeed     = skyField->infinite ? skyField->infiniteSpec.seed
+                                                : skyField->boundedSpec.seed;
+        const f32 floorV = skyField->infinite ? skyField->infiniteSpec.coverageFloor
+                                              : skyField->boundedSpec.coverageFloor;
+        sky_.cloudCoverage = 1.0f - (floorV < 0.0f ? 0.0f : (floorV > 1.0f ? 1.0f : floorV));
+        if (frames_ <= 1)
+            AVER_INFO("[PCG] sky field '{}' drives the cloud layer: seed {}, coverage {:.2f}",
+                      skyField->name, sky_.cloudSeed, sky_.cloudCoverage);
+    }
+#endif
     sky_.skyLightIntensity = sunAmbient_;
     sky_.fogDensity        = fog;
+    // The cloud clock, advanced by real time so wind moves. Owned here because the RHI's comment
+    // says the app owns it, and a clock that never advances gives a sky that is procedural and
+    // completely static, which reads as a painted backdrop.
     sky_.cloudTime         = cloudTime_;
     dev->setSkyAtmosphere(sky_);
     // NOT the editor's 0.055 chrome grey. Nothing outside a game's viewport is chrome, because a
@@ -497,6 +523,7 @@ void GameApp::onInit(Engine& e) {
 
 void GameApp::onUpdate(Engine& e, const Timestep& t) {
     ++frames_;
+    cloudTime_ += t.dt;
     // Input is READ here, never rolled here. See onRender for why.
 #if AVER_MODULE_FRAMEWORK
     // BEFORE the gameplay tick, so a PrePhysics actor reads THIS frame's input rather than last

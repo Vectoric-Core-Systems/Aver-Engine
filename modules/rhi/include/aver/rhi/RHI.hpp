@@ -207,6 +207,13 @@ struct SkyAtmosphere {
     f32  cloudScale    = 0.00002f;    // 1 / the width of one noise feature, in world units
     f32  cloudWind[2]  = {900.0f, 260.0f};   // world units per second
     f32  cloudTime     = 0.0f;               // accumulated seconds; the app owns the clock
+    // Which sky this is. Two levels with different seeds get different cloud fields from the same
+    // settings, which is what makes a PCGVOLUME's seed reach the sky.
+    //
+    // ZERO IS THE UNSEEDED FIELD AND REPRODUCES THE PREVIOUS OUTPUT EXACTLY. That is deliberate
+    // rather than incidental: it is what lets this land without moving a single recorded gate probe,
+    // and what lets anyone bisect a sky change without wondering whether the seed did it.
+    i32  cloudSeed     = 0;
 
     // Writes sunDirection from an elevation above the horizon and an azimuth bearing about +Z
     // from +X, both in degrees.

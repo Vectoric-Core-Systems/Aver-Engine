@@ -2209,8 +2209,30 @@ void D3D12Device::setSkyAtmosphere(const SkyAtmosphere& s) {
     frameCB_.cloudParams[1] = s.cloudDensity;
     frameCB_.cloudParams[2] = s.cloudBottom;
     frameCB_.cloudParams[3] = s.cloudTop > s.cloudBottom ? s.cloudTop : s.cloudBottom + 1.0f;
-    frameCB_.cloudMotion[0] = s.cloudWind[0] * s.cloudTime;
-    frameCB_.cloudMotion[1] = s.cloudWind[1] * s.cloudTime;
+    // THE SEED IS AN OFFSET IN THE NOISE DOMAIN, which needs no shader change: the cloud density
+    // function already samples at (wpos + cloudMotion.xy) * scale, and translating a noise field far
+    // enough is indistinguishable from a different field. Reusing the wind offset costs no constant
+    // -- the buffer is full -- and keeps the seed on exactly the axis the noise already varies on.
+    //
+    // Seed 0 adds nothing at all, so an unseeded sky is bit-identical to the sky before this
+    // existed. The offsets are large and irrational-ish so two nearby seeds do not land in
+    // neighbouring cells of the same feature.
+    if (s.cloudSeed == 0) {
+        // THE UNSEEDED PATH IS THE ORIGINAL EXPRESSION, not the seeded one with a zero added. That
+        // is not superstition: x + 0.0f is bit-identical to x for every float EXCEPT negative zero,
+        // which -0.0f + 0.0f turns into +0.0f. Nothing downstream can see that difference, but
+        // "provably the same instruction" is worth more here than "numerically equivalent" -- the
+        // recorded gate baselines are bit-exact codes, and this is how a change stays outside them.
+        frameCB_.cloudMotion[0] = s.cloudWind[0] * s.cloudTime;
+        frameCB_.cloudMotion[1] = s.cloudWind[1] * s.cloudTime;
+    } else {
+        u32 h = static_cast<u32>(s.cloudSeed) + 0x9E3779B9u;
+        h = (h ^ (h >> 16)) * 0x21F0AAADu;
+        h = (h ^ (h >> 15)) * 0x735A2D97u;
+        h ^= h >> 15;
+        frameCB_.cloudMotion[0] = s.cloudWind[0] * s.cloudTime + static_cast<f32>(h & 0xFFFFu) * 977.0f;
+        frameCB_.cloudMotion[1] = s.cloudWind[1] * s.cloudTime + static_cast<f32>(h >> 16)     * 1361.0f;
+    }
     frameCB_.cloudMotion[2] = s.cloudScale;
     frameCB_.cloudMotion[3] = s.cloudsEnabled ? 1.0f : 0.0f;
 
