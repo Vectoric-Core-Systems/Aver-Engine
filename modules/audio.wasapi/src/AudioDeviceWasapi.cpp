@@ -58,15 +58,24 @@ bool AudioDevice::start(u32 maxVoices, u32 maxSounds) {
     maxSounds_  = maxSounds;
     thread_ = std::thread([this] { threadMain(); });
 
-    WaitForSingleObject(ready, 5000);
-    CloseHandle(ready);
-    readyEvent_ = nullptr;
+    const DWORD waited = WaitForSingleObject(ready, 5000);
 
-    if (!running_.load(std::memory_order_acquire)) {
+    // THE THREAD IS JOINED BEFORE THE HANDLE IS CLOSED. On the timeout path the old order closed
+    // `ready` while the render thread was still starting up and might yet SetEvent(readyEvent_) --
+    // signalling a closed handle, or worse a handle value the OS had already reused for something
+    // else. It only happened when start-up took longer than five seconds, which is exactly when a
+    // machine is least able to survive it.
+    if (waited != WAIT_OBJECT_0 || !running_.load(std::memory_order_acquire)) {
         quit_.store(true, std::memory_order_release);
         if (thread_.joinable()) thread_.join();
+        readyEvent_ = nullptr;
+        CloseHandle(ready);
         return false;
     }
+
+    // Success: the thread has signalled and is past its start-up, so the handle is finished with.
+    readyEvent_ = nullptr;
+    CloseHandle(ready);
     return true;
 }
 

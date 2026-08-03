@@ -148,7 +148,7 @@ u32 Mixer::stealSlot() {
     u64 bestOrder = 0;
     for (u32 i = 0; i < voices_.size(); ++i) {
         Voice& vo = voices_[i];
-        if (vo.state.load(std::memory_order_acquire) != static_cast<u32>(State::Active)) continue;
+        if (!isLiveState(vo.state.load(std::memory_order_acquire))) continue;
         f32 l = 0.0f, r = 0.0f;
         voiceGains(vo, l, r);
         const f32 g = l > r ? l : r;
@@ -178,18 +178,27 @@ VoiceHandle Mixer::play(const PlayDesc& desc) {
     for (u32 i = 0; i < voices_.size(); ++i) if (claim(i)) { index = i; break; }
 
     if (index == 0xFFFFFFFFu) {
-        const u32 victim = stealSlot();
-        if (victim == 0xFFFFFFFFu) return 0;
-        u32 expected = static_cast<u32>(State::Active);
-        if (!voices_[victim].state.compare_exchange_strong(
-                expected, static_cast<u32>(State::Pending),
-                std::memory_order_acq_rel, std::memory_order_relaxed))
-            return 0;
-        if (voices_[victim].soundHandle && voices_[victim].soundHandle <= sounds_.size())
-            sounds_[voices_[victim].soundHandle - 1].refs.fetch_sub(1, std::memory_order_acq_rel);
-        voices_[victim].generation.fetch_add(1, std::memory_order_acq_rel);
-        index = victim;
-        stolen_.fetch_add(1, std::memory_order_relaxed);
+        // RETRIED, because a failed CAS here no longer means "someone else took it". It now also
+        // means "the audio thread is inside this voice right now" (State::Rendering), which is a
+        // transient the caller should not be punished for -- returning 0 there would drop a sound
+        // for the duration of one audio block, at random, only under load. A few attempts is
+        // enough: the render claim lasts one callback.
+        for (u32 attempt = 0; attempt < 4 && index == 0xFFFFFFFFu; ++attempt) {
+            const u32 victim = stealSlot();
+            if (victim == 0xFFFFFFFFu) return 0;
+            u32 expected = static_cast<u32>(State::Active);
+            if (!voices_[victim].state.compare_exchange_strong(
+                    expected, static_cast<u32>(State::Pending),
+                    std::memory_order_acq_rel, std::memory_order_relaxed))
+                continue;
+            // Won it. From here the voice is Pending, so the audio thread will not enter it.
+            if (voices_[victim].soundHandle && voices_[victim].soundHandle <= sounds_.size())
+                sounds_[voices_[victim].soundHandle - 1].refs.fetch_sub(1, std::memory_order_acq_rel);
+            voices_[victim].generation.fetch_add(1, std::memory_order_acq_rel);
+            index = victim;
+            stolen_.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (index == 0xFFFFFFFFu) return 0;
     }
 
     Voice& vo = voices_[index];
@@ -226,14 +235,14 @@ void Mixer::stop(VoiceHandle v) {
 void Mixer::stopAll() {
     if (!ready_) return;
     for (Voice& vo : voices_)
-        if (vo.state.load(std::memory_order_acquire) == static_cast<u32>(State::Active))
+        if (isLiveState(vo.state.load(std::memory_order_acquire)))
             vo.stopping.store(true, std::memory_order_release);
 }
 
 // Whether the handle still names a live voice.
 bool Mixer::playing(VoiceHandle v) const {
     const Voice* vo = resolve(v);
-    return vo && vo->state.load(std::memory_order_acquire) == static_cast<u32>(State::Active);
+    return vo && isLiveState(vo->state.load(std::memory_order_acquire));
 }
 
 void Mixer::setVoiceVolume(VoiceHandle v, f32 volume) {
@@ -276,7 +285,7 @@ f32  Mixer::masterVolume() const { return master_.load(std::memory_order_relaxed
 u32 Mixer::activeVoices() const {
     u32 n = 0;
     for (const Voice& vo : voices_)
-        if (vo.state.load(std::memory_order_acquire) == static_cast<u32>(State::Active)) ++n;
+        if (isLiveState(vo.state.load(std::memory_order_acquire))) ++n;
     return n;
 }
 
@@ -408,9 +417,20 @@ void Mixer::mix(f32* out, u32 frames) {
     for (u32 i = 0; i < samples; ++i) out[i] = 0.0f;
 
     for (Voice& vo : voices_) {
-        if (vo.state.load(std::memory_order_acquire) != static_cast<u32>(State::Active)) continue;
+        // CLAIMED FOR THE DURATION OF THE BLOCK. Reading the state and then rendering left the
+        // voice Active throughout, which is the window play()'s stealing CAS used to walk into --
+        // dropping the sound's refcount and rewriting vo.sound while this thread was reading them.
+        // Taking it out of Active makes that CAS fail instead.
+        u32 expected = static_cast<u32>(State::Active);
+        if (!vo.state.compare_exchange_strong(expected, static_cast<u32>(State::Rendering),
+                                              std::memory_order_acq_rel, std::memory_order_acquire))
+            continue;
 
-        if (!renderVoice(vo, out, frames)) {
+        if (renderVoice(vo, out, frames)) {
+            // Still sounding: hand it back. A plain store is right -- this thread owns the voice
+            // while it is Rendering, so nothing else can have changed the state under it.
+            vo.state.store(static_cast<u32>(State::Active), std::memory_order_release);
+        } else {
             if (vo.soundHandle && vo.soundHandle <= sounds_.size())
                 sounds_[vo.soundHandle - 1].refs.fetch_sub(1, std::memory_order_acq_rel);
             vo.sound = nullptr;

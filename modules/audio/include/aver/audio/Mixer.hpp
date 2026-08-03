@@ -99,7 +99,24 @@ public:
 private:
     // A voice slot's state. Free -> Pending (game thread claims), Pending -> Active (parameters
     // written), Active -> Free (audio thread finished). A Pending slot's parameters are never read.
-    enum class State : u32 { Free = 0, Pending, Active };
+    // Free -> Pending -> Active is the control thread's sequence; Active <-> Rendering is the audio
+    // thread's claim.
+    //
+    // RENDERING EXISTS TO CLOSE A USE-AFTER-FREE. The audio thread used to render a voice while it
+    // stayed Active for the whole block, so play()'s voice-stealing CAS on Active succeeded
+    // MID-RENDER: it then dropped the sound's refcount -- freeing samples the audio thread was still
+    // reading -- and overwrote vo.sound and vo.cursor underneath it. The audio thread now takes the
+    // voice out of Active for the duration, so that CAS fails and the stealer moves on.
+    //
+    // ANYTHING ASKING "IS THIS VOICE PLAYING" MUST ACCEPT BOTH. A voice being rendered is playing;
+    // treating Rendering as not-Active makes playing() and voiceCount() flicker with the audio
+    // callback. Use isLiveState().
+    enum class State : u32 { Free = 0, Pending, Active, Rendering };
+
+    // True for a voice that is sounding, whether or not the audio thread is inside it right now.
+    static bool isLiveState(u32 s) {
+        return s == static_cast<u32>(State::Active) || s == static_cast<u32>(State::Rendering);
+    }
 
     // One playing sound: its published parameters and the audio thread's cursor.
     struct Voice {
