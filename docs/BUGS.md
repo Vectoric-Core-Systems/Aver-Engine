@@ -140,6 +140,32 @@ buffer.
 
 ---
 
+## Found while cutting the release, not by the sweep
+
+### The editor's viewport is not settled when a capture run samples it — MEDIUM
+
+Observed directly, twice, on the **same binary**:
+
+```
+run 1:  ms-gi-debug FAIL [BAD-PROBE tiny-rect 0,270 45x24]   shadow FAIL [BAD-PROBE ...]
+run 2:  ms FAIL, rt FAIL, gi FAIL   /   ms-gi-debug PASS, shadow PASS
+        ms-rt  FLAKY  first=rect 60,132 96x24  /  retry=rect 0,270 2750x1639
+```
+
+A different set of gates fails each time, and the FLAKY lines print the two rects side by side: the
+probe sometimes lands while the ImGui dockspace still reports a 45×24 or 96×24 central node instead
+of 2750×1639. The pixel returned is the window background, which is why every affected gate returns
+the identical `14,14,16`.
+
+`gates.ps1` already detects this (`BAD-PROBE`) and retries, so the oracle is not lying — but it means
+a capture run's frame budget is not reliably enough for the layout to settle, and any tool comparing
+raw probe codes between two runs will see phantom differences. `verify-payload.ps1` did exactly that
+and blocked a release over it.
+
+**The fix belongs in the editor, not in the tooling**: a capture run should not sample until the
+dockspace has produced a plausible viewport, or `--frames` should not begin counting until it has.
+Skipping disowned probes, which is what the tooling does now, treats the symptom.
+
 ## Themes worth acting on rather than patching case by case
 
 **Parser bounds arithmetic overflows.** Five of the confirmed bugs are the same mistake in five

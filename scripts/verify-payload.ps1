@@ -126,7 +126,16 @@ function Read-Probes {
             # Skipping them narrows what this script can see, and that is the honest trade: a probe
             # nobody sampled proves nothing either way. The count of skipped probes is reported so a
             # run that skipped most of them cannot look like a clean pass.
-            if ($line -match 'BAD-PROBE') { $script:badProbes++; continue }
+            # RECORDED BY KEY, not just counted. A probe the oracle disowned in ONE run but not
+            # the other must be dropped from BOTH sides, or the comparison reports it as EXTRA or
+            # MISSING -- which is the same false "the payload is not the tree" verdict in a new
+            # costume. The rects are degenerate independently on each run, so the asymmetric case is
+            # the common one, not the corner case.
+            if ($line -match 'BAD-PROBE') {
+                $script:badProbes++
+                $script:badKeys["$section/$($Matches[1])"] = $true
+                continue
+            }
             $probes["$section/$($Matches[1])"] = $Matches[2].Trim()
         }
     }
@@ -137,6 +146,7 @@ $treeOut   = Join-Path $WorkDir 'gates-tree.txt'
 $stagedOut = Join-Path $WorkDir 'gates-staged.txt'
 
 $script:badProbes = 0
+$script:badKeys  = @{}
 Write-Host '[verify] running gates against the build tree...'
 $treeExit = Invoke-Gates -Exe $treeExe -OutFile $treeOut
 Write-Host "[verify]   gates.ps1 exit=$treeExit (vs its baseline; not the question here)"
@@ -148,6 +158,12 @@ Write-Host ''
 
 $a = Read-Probes $treeOut
 $b = Read-Probes $stagedOut
+
+# Drop every disowned key from BOTH sides before comparing.
+foreach ($k in @($script:badKeys.Keys)) {
+    if ($a.Contains($k)) { $a.Remove($k) }
+    if ($b.Contains($k)) { $b.Remove($k) }
+}
 
 if ($script:badProbes -gt 0) {
     Write-Host ("[verify] {0} probe sample(s) skipped: the oracle marked them BAD-PROBE (degenerate viewport), so they say nothing about staging" -f $script:badProbes) -ForegroundColor Yellow
