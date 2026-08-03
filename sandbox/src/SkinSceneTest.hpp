@@ -58,6 +58,13 @@ public:
     static void subjectColor(f32 out[3]) { out[0] = 0.90f; out[1] = 0.06f; out[2] = 0.90f; }
     static void referenceColor(f32 out[3]) { out[0] = 0.06f; out[1] = 0.85f; out[2] = 0.90f; }
 
+    // True only when report() reached its PASS. Every failure path returns before setting it, so
+    // "not passed" covers a real failure and a run that never got far enough to judge.
+    //
+    // READ BY SandboxApp::exitCode. Before that existed this flag was set and never looked at, so
+    // --skin-scene-test printed FAIL to the log and exited 0, and any script driving it saw success.
+    bool passed() const { return ok_; }
+
 private:
     void report();
 

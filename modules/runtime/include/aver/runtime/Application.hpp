@@ -32,6 +32,15 @@ public:
     virtual void onUpdate(Engine&, const Timestep&) {}
     virtual void onRender(Engine&) {}
     virtual void onShutdown(Engine&) {}
+
+    // The process exit code, read once after onShutdown. Zero means success.
+    //
+    // THIS EXISTS SO A TEST MODE CAN FAIL. The editor has half a dozen of them -- --skin-scene-test,
+    // --skin-draw-test, --furnace-test, --refl-test, --spawn-test, --play-test -- and every one of
+    // them reported its verdict only to the log while the process exited 0 regardless. A test a
+    // script cannot check is not a test: CI would have gone green with the renderer broken. The
+    // default keeps every ordinary application exiting 0 without knowing this hook is here.
+    virtual int exitCode() const { return 0; }
 };
 
 // Defined by the application. The entry point calls this.

@@ -110,8 +110,13 @@ int Engine::run(Application* app) {
         window_ = nullptr;
     }
 
-    AVER_INFO("Aver Engine stopped after {} frame(s)", time_.frame);
-    return 0;
+    // The application's verdict, not a constant. See Application::exitCode.
+    const int code = app->exitCode();
+    if (code != 0)
+        AVER_ERROR("Aver Engine stopped after {} frame(s) with exit code {}", time_.frame, code);
+    else
+        AVER_INFO("Aver Engine stopped after {} frame(s)", time_.frame);
+    return code;
 }
 
 // One frame: sync swapchain to the window size, update, render, present.
