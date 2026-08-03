@@ -104,6 +104,15 @@ private:
     // and reading before that returns whatever the buffer held before.
     enum class State { Idle, Dispatch, Copy, Done };
 
+    // How many prePasses to let go by between recording the readback copy and reading it.
+    //
+    // The RHI's readBuffer synchronises nothing, and the device is double buffered: at frame N+1
+    // the GPU is only guaranteed to have finished frame N-1, so a copy recorded in frame N can
+    // still be in flight. Three covers double buffering with a frame to spare. Raise it if the
+    // device ever triple buffers; never lower it.
+    static constexpr u32 kReadbackFrames = 3;
+    u32 copyWaited_ = 0;
+
     rhi::IResourceFactory* res_ = nullptr;
     rhi::ShaderHandle      cs_ = 0;
     rhi::PipelineHandle    pipeline_ = 0;

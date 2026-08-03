@@ -1956,6 +1956,14 @@ MeshHandle D3D12Device::createSkinTargetMesh(MeshHandle source, BufferHandle* ou
     m.ibv = src.ibv;
     m.indexCount = src.indexCount;
     m.vbBuffer = vh;
+    // THE INDEX BUFFER'S HANDLE COMES ACROSS TOO, not just its raw pointer. meshGeometry() refuses
+    // on `!m.vbBuffer || !m.ibBuffer` (:712), and ibBuffer defaulted to 0 here -- so every skin
+    // target reported "no readable geometry" even though its indices are the source mesh's and are
+    // perfectly readable. The visible consequence was that one skinned entity switched ray-traced
+    // reflections off for the whole scene, because the BLAS build could not see its geometry.
+    m.ibBuffer = src.ibBuffer;
+    // Likewise vertexCount, which stayed 0 and is what a geometry consumer sizes its read by.
+    m.vertexCount = src.vertexCount;
     m.computeWritten = true;   // the whole point of this entry point
     m.vbv.BufferLocation = rb->res->GetGPUVirtualAddress();
     m.vbv.SizeInBytes = src.vbv.SizeInBytes;

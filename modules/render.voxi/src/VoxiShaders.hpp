@@ -440,7 +440,7 @@ VoxOut VSVoxel(VSIn i) {
     VoxOut o;
     float4 wp = mul(float4(i.pos, 1.0), gWorld);
     o.wpos = wp.xyz;
-    o.nrm  = mul(float4(i.nrm, 0.0), gWorld).xyz;
+    o.nrm  = averTransformNormal(i.nrm, gWorld);
     o.uv   = i.uv;
     o.pos  = wp;
     return o;

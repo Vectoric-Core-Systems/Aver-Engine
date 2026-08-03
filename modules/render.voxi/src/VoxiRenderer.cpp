@@ -624,19 +624,27 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
     if (totalVerts == 0 || totalIndices == 0) return false;
 
     // The instance table is rewritten every frame -- transforms move -- so it is an upload buffer.
+    // Grown as a set: every slot in the ring has to hold the largest table, or rotating onto a
+    // smaller one next frame would truncate it.
     if (rtInstanceCapacity_ < rtInstanceData_.size()) {
-        if (rtInstances_) res_->destroyBuffer(rtInstances_);
-        rhi::BufferDesc d;
-        d.bytes = sizeof(RtInstance) * rtInstanceData_.size();
-        d.kind  = rhi::BufferKind::Upload;
-        d.debugName = "rt instances";
-        rtInstances_ = res_->createBuffer(d);
-        rtInstanceCapacity_ = rtInstances_ ? static_cast<u32>(rtInstanceData_.size()) : 0;
+        for (u32 i = 0; i < kRtInstanceRing; ++i) {
+            if (rtInstances_[i]) res_->destroyBuffer(rtInstances_[i]);
+            rhi::BufferDesc d;
+            d.bytes = sizeof(RtInstance) * rtInstanceData_.size();
+            d.kind  = rhi::BufferKind::Upload;
+            d.debugName = "rt instances";
+            rtInstances_[i] = res_->createBuffer(d);
+            if (!rtInstances_[i]) { rtInstanceCapacity_ = 0; return false; }
+        }
+        rtInstanceCapacity_ = static_cast<u32>(rtInstanceData_.size());
     }
-    if (!rtInstances_) return false;
-    res_->writeBuffer(rtInstances_, rtInstanceData_.data(),
+    // Rotate BEFORE writing, so this frame never touches the buffer the previous one bound.
+    rtInstanceSlot_ = (rtInstanceSlot_ + 1) % kRtInstanceRing;
+    const rhi::BufferHandle inst = rtInstances_[rtInstanceSlot_];
+    if (!inst) return false;
+    res_->writeBuffer(inst, rtInstanceData_.data(),
                       sizeof(RtInstance) * rtInstanceData_.size(), 0);
-    res_->setSrvBuffer(bindings_, 5, rtInstances_, sizeof(RtInstance),
+    res_->setSrvBuffer(bindings_, 5, inst, sizeof(RtInstance),
                        static_cast<u32>(rtInstanceData_.size()), 0);
 
     if (key == rtGeometryKey_ && rtGeometryReady_) return true;

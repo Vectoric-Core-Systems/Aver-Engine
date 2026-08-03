@@ -44,11 +44,22 @@ bool buildChunkMesh(const fmt::OcLandData& d, const LandscapeTree& tree, u32 nod
             d.worldAt(sx, sy, w);
 
             // Normal from central differences at the NODE's stride, not the source spacing.
+            //
+            // BOTH SIDES ARE CLAMPED. The low side always was; the high side was not, and
+            // heightAt returns 0.0f for an out-of-range index (OcLand.hpp:42) while the stored
+            // heights are ABSOLUTE world Z with originCm[2] folded in. So on the last sample row
+            // and column, hr and hu were not neighbouring heights at all -- they were literal world
+            // zero, and the gradient came out as the section's own altitude. On terrain 300 m up
+            // that is a normal pointing almost sideways, on every section edge, which reads as a
+            // hard lighting seam along a grid the user cannot see.
             const f32 step = d.spacingCm * static_cast<f32>(stride);
+            const u32 last = d.sampleCount ? d.sampleCount - 1 : 0;
+            const u32 xhi = sx + stride < last ? sx + stride : last;
+            const u32 yhi = sy + stride < last ? sy + stride : last;
             const f32 hl = d.heightAt(sx >= stride ? sx - stride : 0, sy);
-            const f32 hr = d.heightAt(sx + stride, sy);
+            const f32 hr = d.heightAt(xhi, sy);
             const f32 hd = d.heightAt(sx, sy >= stride ? sy - stride : 0);
-            const f32 hu = d.heightAt(sx, sy + stride);
+            const f32 hu = d.heightAt(sx, yhi);
             // +Z up: the gradient goes in x and y, the up component is the step.
             f32 nx = -(hr - hl), ny = -(hu - hd), nz = 2.0f * step;
             const f32 len = std::sqrt(nx*nx + ny*ny + nz*nz);

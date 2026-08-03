@@ -113,7 +113,7 @@ PreviewOut PreviewVS(VSIn i) {
     float4 wp = mul(float4(i.pos, 1.0), gWorld);
     o.wpos  = wp.xyz;
     o.pos   = mul(wp, gPreviewViewProj);
-    o.nrmWS = normalize(mul(float4(i.nrm, 0.0), gWorld).xyz);
+    o.nrmWS = normalize(averTransformNormal(i.nrm, gWorld));
     return o;
 }
 

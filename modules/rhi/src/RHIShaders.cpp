@@ -397,6 +397,32 @@ float3 averApplyFog(float3 color, float3 wpos) {
 
 
 // The sky as light: the cosine-weighted average radiance over the hemisphere about N.
+// Transforms a NORMAL by a world matrix. Not the same operation as transforming a direction.
+//
+// A normal must go through the inverse transpose of the upper 3x3, not the matrix itself. Under
+// rotation and UNIFORM scale the two agree once you normalise, which is why `mul(float4(n,0), w)`
+// looked correct everywhere for so long -- and it stays correct for an axis-aligned box under any
+// scale, because a box's normals lie along the principal axes and a diagonal scale only lengthens
+// them. It is wrong for every normal with components on more than one axis: a sphere, a cone, a
+// tree canopy, anything rotated, once the entity's scale is non-uniform. Steeper scales tilt the
+// shading further, and it reads as a lighting bug rather than a transform one.
+//
+// This uses the COFACTOR matrix rather than a real inverse. cofactor(M) == det(M) * inverse(M)^T,
+// and the caller normalises, so the det factor divides straight back out -- no determinant, no
+// division, no singular case to guard. A mirrored transform has det < 0 and flips the normal, which
+// is what a mirrored mesh should do.
+//
+// Row-vector convention throughout: a tangent goes t' = t * M, so a normal goes n' = n * (M^-1)^T,
+// and (M^-1)^T is cofactor(M) up to that scale.
+float3 averTransformNormal(float3 n, float4x4 w) {
+    float3 c0 = float3(w[0][0], w[0][1], w[0][2]);
+    float3 c1 = float3(w[1][0], w[1][1], w[1][2]);
+    float3 c2 = float3(w[2][0], w[2][1], w[2][2]);
+    // Rows of the cofactor matrix are the cross products of the other two rows.
+    float3x3 cof = float3x3(cross(c1, c2), cross(c2, c0), cross(c0, c1));
+    return mul(n, cof);
+}
+
 float3 averSkyIrradiance(float3 N) {
     if (averFurnaceOn()) return averFurnaceL();
     float meanZ = N.z * 0.5;
@@ -417,7 +443,7 @@ VSOut VSMain(VSIn i) {
     float4 wp = mul(float4(i.pos, 1.0), gWorld);
     o.wpos = wp.xyz;
     o.pos = mul(wp, gViewProj);
-    o.nrmWS = mul(float4(i.nrm, 0.0), gWorld).xyz;
+    o.nrmWS = averTransformNormal(i.nrm, gWorld);
     o.uv = i.uv;
     return o;
 }
@@ -634,7 +660,7 @@ void MSMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
         VSOut ov;
         ov.wpos  = wp.xyz;
         ov.pos   = mul(wp, gViewProj);
-        ov.nrmWS = mul(float4(v.nrm, 0.0), gWorld).xyz;
+        ov.nrmWS = averTransformNormal(v.nrm, gWorld);
         ov.uv    = v.uv;
         verts[o + k] = ov;
     }

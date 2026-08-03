@@ -210,8 +210,21 @@ private:
     // every instance after the first reads the middle of its neighbour.
     static_assert(sizeof(RtInstance) == 88, "RtInstance is the HLSL RtInstance ABI");
 
-    rhi::BufferHandle rtVerts_ = 0, rtIndices_ = 0, rtInstances_ = 0;
+    rhi::BufferHandle rtVerts_ = 0, rtIndices_ = 0;
     u32  rtVertCapacity_ = 0, rtIndexCapacity_ = 0, rtInstanceCapacity_ = 0;
+
+    // THE INSTANCE TABLE IS A RING, not one buffer. It lives on the UPLOAD heap and is rewritten
+    // every frame from the CPU, while the GPU is still reading the previous frame's copy of it out
+    // of the same memory -- writeBuffer is a memcpy into a persistently mapped allocation, not a
+    // queued copy, so nothing serialises the two. The symptom is a reflection sampling a transform
+    // that belongs to the frame being built rather than the one being drawn: instances smeared
+    // between two positions during camera motion, and only while ray tracing is on.
+    //
+    // One buffer per frame in flight breaks the overlap. Three, matching PcgVolume's readback
+    // window, so this does not have to be re-derived if the device ever triple buffers.
+    static constexpr u32 kRtInstanceRing = 3;
+    rhi::BufferHandle rtInstances_[kRtInstanceRing] = {};
+    u32               rtInstanceSlot_ = 0;
     // What the table was built from. Rebuilt only when this changes, because concatenating every
     // mesh every frame would cost more than the reflections do.
     u64  rtGeometryKey_ = 0;

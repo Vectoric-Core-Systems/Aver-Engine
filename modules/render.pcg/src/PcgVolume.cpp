@@ -225,14 +225,22 @@ void VolumeBuilder::prePass(rhi::IRenderContext& ctx) {
         ctx.copyBuffer(readback_, out_, bytes_);
         ctx.popMarker();
         state_ = State::Copy;
+        copyWaited_ = 0;
         return;
     }
 
     if (state_ == State::Copy) {
-        // ONE FRAME LATER, and this wait is the whole reason the state machine exists. readBuffer
-        // does no synchronisation of its own -- reading in the same frame the copy was RECORDED
-        // returns whatever the buffer held before, which looks like a shader that computed
-        // garbage rather than like a read that happened too early.
+        // ONE FRAME WAS NOT ENOUGH. readBuffer does no synchronisation of its own, and the device is
+        // DOUBLE buffered: beginFrame waits on the fence of frame N-kFrameCount, so at frame N+1 the
+        // GPU is only known to have finished frame N-1 -- the copy recorded in frame N may still be
+        // in flight. Reading then returns whatever the buffer held before, which looks like a shader
+        // that computed garbage rather than a read that happened too early, and it would appear only
+        // under load.
+        //
+        // kReadbackFrames is 3 rather than the device's 2 on purpose: this module cannot see
+        // kFrameCount, and one spare frame costs nothing on a one-shot build while a wrong guess
+        // costs a silent wrong answer. Raise it, never lower it, if the device ever triple buffers.
+        if (++copyWaited_ < kReadbackFrames) return;
         if (res_->readBuffer(readback_, host_.data(), bytes_)) {
             state_ = State::Done;
         } else {
