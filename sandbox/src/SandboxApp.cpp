@@ -1975,17 +1975,47 @@ private:
         if (contentWatch_.poll(watchEvents_)) {
             AVER_WARN("[Editor] the watcher lost records; every open editor is being told to re-read");
             assetEditors_.notifyWatchLost();
+#if AVER_MODULE_PBR
+            // Records were lost, so a texture may have arrived unseen. Forgetting the failed
+            // resolves is cheap and the alternative is a material stuck on its fallback forever.
+            voxiRenderer_.materials().forgetFailedResolves();
+#endif
             if (autoCompile_) scheduleAutoCompile("the watcher lost records");
             return;
         }
+        bool sawImage = false;
         for (const FileEvent& ev : watchEvents_) {
             if (ev.kind == FileChange::Deleted) continue;
             const std::string full = (std::filesystem::path(contentWatch_.root()) / ev.path).string();
             if (assetEditors_.notifyFileChanged(full))
                 AVER_TRACE("[Editor] '{}' changed on disk; its tab was told", ev.path);
             if (autoCompile_ && isScriptSource(ev.path)) scheduleAutoCompile(ev.path);
+            if (isTextureSource(ev.path)) sawImage = true;
         }
+#if AVER_MODULE_PBR
+        // AN IMAGE APPEARED OR CHANGED UNDER THE CONTENT ROOT, which is the one moment a texture
+        // that failed to resolve might now succeed. The material system remembers failures so a
+        // material naming a missing file does not re-hit the filesystem every drain; without this
+        // call that memory outlives the fix, and dropping a PNG into the project would do nothing
+        // until the editor restarted.
+        if (sawImage) voxiRenderer_.materials().forgetFailedResolves();
+#else
+        (void)sawImage;
+#endif
         serviceAutoCompile();
+    }
+
+    // True for an image the texture loader can actually decode. Kept in step with
+    // modules/platform/src/Image.cpp, which is stb_image: a format listed here that stb cannot read
+    // costs one wasted retry, and one it CAN read that is missing here never triggers a retry.
+    static bool isTextureSource(const std::string& rel) {
+        const usize dot = rel.find_last_of('.');
+        if (dot == std::string::npos) return false;
+        std::string ext = rel.substr(dot + 1);
+        for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "tga" || ext == "bmp" ||
+               ext == "psd" || ext == "gif" || ext == "hdr" || ext == "pic" || ext == "ppm" ||
+               ext == "pgm" || ext == "octex";
     }
 
     // True for a hand-written .cs under the content root. Excludes bin/ and obj/ path segments.

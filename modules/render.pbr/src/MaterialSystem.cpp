@@ -24,6 +24,23 @@ rhi::TextureHandle makePixel(rhi::IResourceFactory& res, const u8 rgba[4], rhi::
     return res.createTexture(d);
 }
 
+// How a slot's pixels are DECODED, which is the only reason two bindings of one file may not share
+// an upload. Three classes, mirroring the switch every resolver makes -- SandboxApp.cpp:1167 and
+// GameContent.cpp:229 both map base colour and emissive to Colour, normal to NormalMap, and
+// everything else to Data. Anything coarser than this merges two colour spaces; anything finer
+// uploads the same pixels twice for no gain.
+//
+// KEEP THIS IN STEP WITH THOSE TWO SWITCHES. A resolver that classified differently would make this
+// key split on a distinction the upload does not actually make.
+char colourClass(TextureSlot slot) {
+    switch (slot) {
+        case TextureSlot::BaseColor:
+        case TextureSlot::Emissive:  return 'c';   // sRGB
+        case TextureSlot::Normal:    return 'n';   // linear, and never sRGB whatever the options say
+        default:                     return 'd';   // linear data: metal-rough, occlusion
+    }
+}
+
 // One cache key for both spellings of a reference. The id wins where set.
 std::string cacheKey(const TextureRef& ref) {
     if (ref.id) return "#" + std::to_string(ref.id);
@@ -98,20 +115,48 @@ void MaterialSystem::shutdown() {
 }
 
 // Resolves a reference through the host's resolver, caching the result. 0 when unavailable.
-rhi::TextureHandle MaterialSystem::resolveTexture(const TextureRef& ref, TextureSlot slot) {
+rhi::TextureHandle MaterialSystem::resolveTexture(const TextureRef& ref, TextureSlot slot,
+                                                  bool retryFailed) {
     if (ref.empty() || !resolve_) return 0;
-    // The slot is not part of the key: one file bound to two slots is still one upload, first use wins.
-    const std::string key = cacheKey(ref);
+    // THE COLOUR CLASS IS PART OF THE KEY. One file bound to two slots is still one upload when both
+    // read it the same way -- but a PNG bound to BOTH base colour and occlusion is decoded sRGB for
+    // one and linear for the other, and a key that ignored that would hand the second slot whichever
+    // encoding happened to be resolved first. That failure is invisible per pixel and wrong
+    // everywhere, which is the worst shape a rendering bug can have.
+    const std::string key = cacheKey(ref) + "|" + colourClass(slot);
     auto it = cache_.find(key);
-    if (it != cache_.end()) return it->second;
+    if (it != cache_.end()) {
+        if (it->second || !retryFailed) return it->second;
+        // A remembered failure, and the caller has reason to think it may have been fixed.
+        cache_.erase(it);
+        if (failedResolves_) --failedResolves_;
+    }
     const rhi::TextureHandle t = resolve_(ref, slot, resolveUser_);
-    // A failed resolve is cached as 0, or a missing file is retried on every dirty drain.
+    // A FAILURE IS REMEMBERED, BUT NOT FOREVER. Caching the 0 is deliberate: without it a material
+    // naming a texture that does not exist re-hits the filesystem on every dirty drain. But holding
+    // it for the process lifetime means a texture dropped into the project after startup never
+    // appears, and "restart the editor" is not an acceptable answer to "I added a PNG". So the
+    // negatives are counted, and forgetFailedResolves() drops them when content changes.
     cache_.emplace(key, t);
+    if (!t) ++failedResolves_;
     return t;
 }
 
+// Drops every remembered failure. The 0s are not GPU resources, so nothing is destroyed here.
+u32 MaterialSystem::forgetFailedResolves() {
+    u32 dropped = 0;
+    for (auto it = cache_.begin(); it != cache_.end();) {
+        if (it->second) { ++it; continue; }
+        it = cache_.erase(it);
+        ++dropped;
+    }
+    failedResolves_ = 0;
+    if (dropped) AVER_INFO("[PBR] {} failed texture resolve(s) forgotten; they will be retried", dropped);
+    return dropped;
+}
+
 // Writes every SRV of `set`, using the identity texture wherever the material sets nothing.
-void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set) {
+void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set, bool retryFailed) {
     const rhi::TextureHandle fallback[kTextureSlotCount] = {
         white_,       // BaseColor
         metalRough_,  // MetalRough
@@ -120,7 +165,7 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
         black_,       // Emissive
     };
     for (u32 i = 0; i < kTextureSlotCount; ++i) {
-        const rhi::TextureHandle t = resolveTexture(d.textures[i], static_cast<TextureSlot>(i));
+        const rhi::TextureHandle t = resolveTexture(d.textures[i], static_cast<TextureSlot>(i), retryFailed);
         res_->setSrv(set, i, t ? t : fallback[i]);
     }
 }
@@ -163,7 +208,9 @@ void MaterialSystem::update() {
         const MaterialDesc* d = lib.desc(h);
         if (!d) continue;
         it->second.constants = packMaterial(*d);
-        if (it->second.set) writeSlots(*d, it->second.set);
+        // retryFailed: this material CHANGED, which is exactly when a texture it names that was
+        // missing before may now exist -- a fresh import, a file copied in, a corrected path.
+        if (it->second.set) writeSlots(*d, it->second.set, true);
     }
 
     // Destruction is deferred by RHI contract, so retiring mid-frame is safe.

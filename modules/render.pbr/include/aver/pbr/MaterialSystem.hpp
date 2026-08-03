@@ -45,6 +45,16 @@ public:
     const MaterialConstants& fallbackConstants() const { return fallbackConstants_; }
 
     u32 textureCacheSize() const { return static_cast<u32>(cache_.size()); }
+    // How many cache entries are remembered FAILURES rather than textures.
+    u32 failedResolveCount() const { return failedResolves_; }
+
+    // Drops every remembered failure so the next resolve tries the filesystem again. Call this when
+    // the project's content has changed underneath the running process -- a texture dropped into the
+    // folder, an import finishing, a hot reload. Returns how many were dropped.
+    //
+    // Separate from update() on purpose: update() runs every frame, and retrying a missing file every
+    // frame is the cost the negative cache exists to avoid.
+    u32 forgetFailedResolves();
 
 private:
     // One material's GPU residency.
@@ -56,9 +66,12 @@ private:
     // Creates the four 1x1 identity textures.
     bool createFallbackTextures();
     // Writes every SRV of `set`, using the identity texture wherever the material sets nothing.
-    void writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set);
+    // `retryFailed` re-resolves references whose last attempt failed, instead of trusting the
+    // remembered 0. Set when a material is REDRAWN because it changed, which is the moment the
+    // texture it names may finally exist.
+    void writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set, bool retryFailed = false);
     // Resolves and caches one texture reference. 0 when there is no resolver or it declined.
-    rhi::TextureHandle resolveTexture(const TextureRef& ref, TextureSlot slot);
+    rhi::TextureHandle resolveTexture(const TextureRef& ref, TextureSlot slot, bool retryFailed = false);
     // The entry for `h`, built on first use.
     Entry& entryFor(MaterialHandle h);
 
@@ -76,8 +89,11 @@ private:
     MaterialConstants     fallbackConstants_{};
 
     std::unordered_map<MaterialHandle, Entry> entries_;
-    // Keyed by the reference — the id when set, else the path — so one texture uploads once.
+    // Keyed by the reference — the id when set, else the path — PLUS the slot's colour class, so one
+    // texture uploads once per way of decoding it. See colourClass() in the .cpp for why the second
+    // half of the key is not optional.
     std::unordered_map<std::string, rhi::TextureHandle> cache_;
+    u32 failedResolves_ = 0;
 
     TextureResolver resolve_ = nullptr;
     void*           resolveUser_ = nullptr;
