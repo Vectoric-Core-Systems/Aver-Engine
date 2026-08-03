@@ -73,10 +73,31 @@ Write-Host ''
 function Invoke-Gates {
     param([string] $Exe, [string] $OutFile)
     $gates = Join-Path $PSScriptRoot 'gates.ps1'
-    if ($useRelease) {
-        & $gates -Release -Config $Config -Exe $Exe *>&1 | Out-File -LiteralPath $OutFile -Encoding utf8
-    } else {
-        & $gates -Config $Config -Exe $Exe *>&1 | Out-File -LiteralPath $OutFile -Encoding utf8
+
+    # EAP DROPS TO Continue FOR THIS CALL, and that is a bug fix rather than a loosening.
+    #
+    # gates.ps1 runs `& $exe ... 2>&1`. In Windows PowerShell, redirecting a NATIVE command's stderr
+    # wraps every line it writes in an ErrorRecord (NativeCommandError); under the script-scope
+    # 'Stop' set above, the first such line becomes terminating and kills this script even though
+    # Sandbox.exe exited 0.
+    #
+    # That made this script UNABLE TO SUCCEED WITH ITS OWN DEFAULTS: two of the three default
+    # configs are `no-rt` and `no-dxc`, which pass --force-caps, which always logs
+    # "caps CLAMPED by --force-caps" to stderr. The verifier that decides whether a release is
+    # shippable fell over on a benign warning from the very configs it was written to exercise.
+    #
+    # The exit code is still checked by the caller, and the real verdict is the probe comparison
+    # below, so nothing is being swallowed here except PowerShell's misreading of stderr as failure.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if ($useRelease) {
+            & $gates -Release -Config $Config -Exe $Exe *>&1 | Out-File -LiteralPath $OutFile -Encoding utf8
+        } else {
+            & $gates -Config $Config -Exe $Exe *>&1 | Out-File -LiteralPath $OutFile -Encoding utf8
+        }
+    } finally {
+        $ErrorActionPreference = $prev
     }
     return $LASTEXITCODE
 }

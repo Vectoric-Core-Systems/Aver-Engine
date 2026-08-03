@@ -49,7 +49,7 @@ These cannot be defended as API surface. Each one means a feature silently does 
 
 | Location | What it means |
 |---|---|
-| `modules/render.voxi/include/aver/voxi/VoxiRenderer.hpp:259` | `ambient_` is assigned at `VoxiRenderer.cpp:247` and never read. **`setSun()`'s ambient argument does nothing.** |
+| `modules/render.voxi/include/aver/voxi/VoxiRenderer.hpp:259` | `ambient_` assigned at `VoxiRenderer.cpp:247`, never read — **and so is `sunColor_`, which the sweep missed**. Investigating it corrected the claim: the ambient is *not* broken. `gAmbient` and `gSunColor` come from the device's frame constants via `setSkyAtmosphere` (`D3D12Device.cpp:2181`, `:2191`), and `SandboxApp.cpp:1136,1141` sets the same values there. `setSun`'s colour and ambient were pure redundancy — a second place the sun appeared configurable that changed nothing. **Fixed by narrowing the API to `setSunDirection`**, not by wiring a second source of truth. |
 | `sandbox/src/SandboxApp.cpp:5135` | `upgradeStatus_` takes four status messages ("Project upgraded…", "Upgrade failed: …") and is **never displayed**. The project-upgrade flow reports nothing to the user. |
 | `sandbox/src/SandboxApp.cpp:5093` | `worldSpace_` affects nothing but the label of the button that toggles it. The gizmo coordinate-space switch is inert. |
 | `modules/audio/include/aver/audio/Mixer.hpp:167` | `lisFwd_` — the listener's forward vector is stored per set and never used, so **listener orientation does not affect panning**. |
@@ -85,8 +85,13 @@ These are the ones the API-surface contradiction applies to.
 
 A few are more clearly stale and worth a look regardless:
 
-- `modules/formats/src/OcMat.cpp:322` — `saveOcmat()` fully implemented, **zero callers**: the
-  `.ocmat` writer is unreachable
+- `modules/formats/src/OcMat.cpp:322` — `saveOcmat()` has zero callers. **The original wording here
+  said "the `.ocmat` writer is unreachable", and that was wrong.** `writeOcmat()` — the actual
+  serialiser — is used and asserted three times in `MaterialTest.cpp` (`:167`, `:216`, `:333`). Only
+  the ten-line wrapper that adds `create_directories` and an `ofstream` is uncalled, because
+  `.ocmat` files are produced by `avermatc`, a **C#** tool. Left in place: deleting the file-writing
+  half of a tested load/save pair to satisfy a metric is worse than leaving it, and any headless C++
+  tool that ever writes a material wants exactly this function.
 - `modules/platform/src/DirectoryWatcher.cpp:190` — `setDebounce()` implemented, never called
 - `modules/landscape/src/LandscapeRenderer.cpp:9` — `setSurface()` implemented, never called
 - `modules/rhi.d3d12/src/D3D12Device.cpp:482` — file-local `isDepthFormat()` never called in its
