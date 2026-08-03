@@ -303,6 +303,22 @@ void Mixer::voiceGains(const Voice& vo, f32& outL, f32& outR) const {
         const f32 rz = lisRight_[2].load(std::memory_order_relaxed);
         const f32 right[3] = {rx, ry, rz};
         pan = clampf(dot3(right, dx, dy, dz) / dist, -1.0f, 1.0f);
+
+        // FRONT AND BACK, which panning alone cannot express. A source directly ahead and one
+        // directly behind both give dot(right, d) == 0 and pan dead centre, so without this the
+        // mixer is physically unable to tell you something is behind you -- and the listener's
+        // `forward` vector, which every caller supplies, was stored and never read.
+        //
+        // A flat gain cut rather than a filter: a real head shadows the far ear and dulls the high
+        // end, and that needs per-voice filter state this mixer does not keep. 3 dB directly behind
+        // is the conventional stand-in, audible as a cue without sounding like a volume bug.
+        const f32 fx = lisFwd_[0].load(std::memory_order_relaxed);
+        const f32 fy = lisFwd_[1].load(std::memory_order_relaxed);
+        const f32 fz = lisFwd_[2].load(std::memory_order_relaxed);
+        const f32 fwd[3] = {fx, fy, fz};
+        const f32 ahead = clampf(dot3(fwd, dx, dy, dz) / dist, -1.0f, 1.0f);
+        constexpr f32 kBackAttenuation = 0.30f;      // directly behind keeps 0.70 -> about -3.1 dB
+        if (ahead < 0.0f) g *= 1.0f + kBackAttenuation * ahead;
     }
     f32 pl = 0.0f, pr = 0.0f;
     panGains(pan, pl, pr);

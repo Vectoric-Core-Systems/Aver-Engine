@@ -25,8 +25,16 @@ public:
     void setSettings(const Settings& s);
     // Places the GI volume: centre in world units, half-edge extent.
     void setVolume(const f32 center[3], f32 extent);
-    // Sets the directional light the shadow pass and the injection use.
-    void setSun(const f32 dirToLight[3], const f32 color[3], f32 ambient);
+    // Sets the sun DIRECTION, which is all this renderer needs: it fits the shadow cascades to the
+    // light axis and nothing else here depends on the sun.
+    //
+    // IT DOES NOT TAKE A COLOUR OR AN AMBIENT, and that is the correction rather than an omission.
+    // It used to take both, store them, and never read them -- the shaders get `gSunColor` and
+    // `gAmbient` from the DEVICE's frame constant buffer, which `IDevice::setSkyAtmosphere` fills
+    // (D3D12Device.cpp:2181, :2191). Accepting them here made this look like a second place the sun
+    // could be configured, so anyone changing them expected a visual result and got nothing.
+    // One source of truth for what the sun looks like; this one owns only where it points.
+    void setSunDirection(const f32 dirToLight[3]);
     // Replaces the scene with a raymarch of the volume.
     void setDebugView(bool on);
 
@@ -253,10 +261,7 @@ private:
     f32 sunDir_[3]   = {rhi::SkyAtmosphere{}.sunDirection[0],
                         rhi::SkyAtmosphere{}.sunDirection[1],
                         rhi::SkyAtmosphere{}.sunDirection[2]};
-    f32 sunColor_[3] = {rhi::SkyAtmosphere{}.sunColor[0],
-                        rhi::SkyAtmosphere{}.sunColor[1],
-                        rhi::SkyAtmosphere{}.sunColor[2]};
-    f32 ambient_     = rhi::SkyAtmosphere{}.skyLightIntensity;
+    // No sunColor_ and no ambient_ here on purpose. See setSunDirection.
 
     u32  voxelMips_ = 0, voxelResBuilt_ = 0;
     bool giReady_ = false, rtSupported_ = false, rtActive_ = false, debugView_ = false;

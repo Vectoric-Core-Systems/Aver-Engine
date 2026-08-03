@@ -240,11 +240,10 @@ void VoxiRenderer::setVolume(const f32 center[3], f32 extent) {
     extent_ = extent;
 }
 
-// Sets the directional light the shadow pass and the light injection use.
-void VoxiRenderer::setSun(const f32 dirToLight[3], const f32 color[3], f32 ambient) {
+// Sets the light axis the shadow cascades are fitted to. Colour and intensity are the device's, not
+// this renderer's -- see the header.
+void VoxiRenderer::setSunDirection(const f32 dirToLight[3]) {
     sunDir_[0] = dirToLight[0]; sunDir_[1] = dirToLight[1]; sunDir_[2] = dirToLight[2];
-    sunColor_[0] = color[0]; sunColor_[1] = color[1]; sunColor_[2] = color[2];
-    ambient_ = ambient;
 }
 
 void VoxiRenderer::setDebugView(bool on) { debugView_ = on; }

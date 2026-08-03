@@ -239,6 +239,29 @@ int main() {
         m.stopAll();
         m.mix(buf.data(), 64);
 
+        // FRONT VS BACK at the same distance. Both pan dead centre -- dot(right, d) is zero for
+        // each -- so if the listener's forward vector were ignored these two would be identical,
+        // which is what they used to be.
+        m.stopAll();
+        m.mix(buf.data(), 64);
+        p.position[1] = 0.0f;
+        p.position[0] = 300.0f;              // straight ahead: +X is the listener's forward
+        m.play(p);
+        m.mix(buf.data(), 64);
+        const f32 front = rms(buf, 2, 0) + rms(buf, 2, 1);
+        m.stopAll();
+        m.mix(buf.data(), 64);
+        p.position[0] = -300.0f;             // straight behind, same distance
+        m.play(p);
+        m.mix(buf.data(), 64);
+        const f32 back = rms(buf, 2, 0) + rms(buf, 2, 1);
+        check(front > back * 1.2f,
+              "a source BEHIND the listener is quieter than the same source in front");
+        check(back > front * 0.5f,
+              "but only by a cue, not by a wall - behind is attenuated, not muted");
+
+        m.stopAll();
+        m.mix(buf.data(), 64);
         p.position[1] = 0.0f;
         p.position[0] = 9000.0f;
         m.play(p);
