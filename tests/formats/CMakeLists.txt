@@ -21,6 +21,15 @@ target_link_libraries(GltfTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(GltfTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ImportTest — the OBJ and USDA importers. Alongside GltfTest rather than inside it because the
+# three formats share nothing but the destination struct: a glTF failure and an OBJ failure have no
+# common cause, and one binary that reported both would make the shared basis-change code look like
+# the suspect every time either moved.
+add_executable(ImportTest src/ImportTest.cpp)
+target_link_libraries(ImportTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(ImportTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(MeshTest src/MeshTest.cpp)
 target_link_libraries(MeshTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(MeshTest PROPERTIES
@@ -108,6 +117,19 @@ endif()
 # generator that wrote the engine's own container would be testing only itself.
 #
 #     MakeSamples.exe "<project>\Content\Audio\Source"
+# MakeFoliage -- a GENERATOR, like MakeRig and MakeSamples, not a test. It synthesises the tree and
+# bush meshes a forest needs, because this engine has no mesh authoring and marketplace foliage
+# cannot be committed here on licence grounds. It also writes each mesh as .obj, which gives
+# ImportTest's format a real multi-thousand-triangle input rather than only hand-written ones.
+#
+#     MakeFoliage.exe "<project>\Content\Meshes"
+add_executable(MakeFoliage ${CMAKE_SOURCE_DIR}/tools/MakeFoliage.cpp)
+target_link_libraries(MakeFoliage PRIVATE Aver.Formats Aver.Core Aver.Platform)
+# stb_image_write, for the PNG texture set. A SECOND STB_IMAGE_WRITE_IMPLEMENTATION relative to
+# Sandbox is fine: they are separate executables, so there is no duplicate symbol to collide.
+target_include_directories(MakeFoliage PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
+set_target_properties(MakeFoliage PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(MakeSamples ${CMAKE_SOURCE_DIR}/tools/MakeSamples.cpp)
 target_link_libraries(MakeSamples PRIVATE Aver.Core)
 set_target_properties(MakeSamples PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

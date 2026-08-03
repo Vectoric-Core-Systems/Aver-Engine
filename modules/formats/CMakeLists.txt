@@ -8,6 +8,10 @@ aver_add_module(Aver.Formats
     src/OcMap.cpp
     src/OcMesh.cpp
     src/OcWorld.cpp
+    # The mesh importers. All three are dependency-free by construction: OBJ and USDA are text
+    # formats this tree parses itself, and neither pulls a licence question into the build.
+    src/ObjImport.cpp
+    src/UsdImport.cpp
     # .ocland, the landscape heightfield. In the BASE target rather than a fifth one because it needs
     # nothing beyond Core/Platform/Assets -- it is the AVR1 container and arithmetic, no process, no
     # device, no .NET. That is what lets the landscape tests run on a machine with none of those.
