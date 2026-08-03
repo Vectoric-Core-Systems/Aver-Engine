@@ -15,8 +15,12 @@ Unlike the stale-code sweep, there is no ambiguity band here: these are not "unu
 "is it dead?" is a judgement call. Each confirmed entry is code that runs and does the wrong thing,
 with the triggering input stated.
 
-**Fixed so far: 4 of 24.** The rest are recorded below with enough detail to act on. Nothing here is
-speculative — the twelve that could not be positively confirmed were dropped, not downgraded.
+**ALL 24 ARE NOW FIXED**, plus the viewport-settling flake found while cutting the release. Nothing
+here was speculative — the twelve that could not be positively confirmed were dropped, not
+downgraded.
+
+Each fix is described at its entry. Where a fix changed an interface or a state machine rather than
+one expression, the reasoning is in the code at the site, not only here.
 
 ---
 
@@ -85,58 +89,78 @@ buffer.
 
 ---
 
-## Confirmed, not yet fixed
+## The other twenty, and what each fix did
 
 ### HIGH
 
-- **`scripting/csharp/Aver.Framework/Character.cs:175`** — `AverCharacter` applies view pitch with
-  the wrong sign, so mouse-look is vertically inverted and `LookDirection` disagrees with where the
-  camera actually points. Affects every game built on the supplied character.
-- **`modules/audio/src/Mixer.cpp:181`** — voice stealing drives a voice `Active → Pending` under the
-  audio thread, freeing sound data it is still reading. A use-after-free on the realtime thread.
-- **`scripting/csharp/Aver.Scripting.Bridge/HostBridge.cs:745`** — an actor destroying an actor
-  during `OnTick` makes `DispTickAll` skip the next actor in the bucket. Classic
-  mutate-while-iterating; the skipped actor silently loses a frame.
+- **`Aver.Framework/Character.cs:175`** — view pitch was applied with the wrong sign. `Rot.ToQuat`
+  builds pitch about `Vec3.Right = (0,1,0)`, and rotating forward `(1,0,0)` about +Y by a *positive*
+  angle sends it to `(cos, 0, −sin)` — toward −Z, which is **down**. But `LookDirection` returns
+  `z = sin(pitch)` (up), `DriveWithInput` passes `−MouseDeltaY` to match, and `PitchMin/PitchMax` are
+  written the same way. So mouse-look was inverted *and* `LookDirection` — what aiming and traces use
+  — disagreed with where the camera pointed. Two wrongs that did not cancel. **Negated at the one
+  site that was the odd one out.**
+- **`Mixer.cpp:181` / `:196`** — voice stealing raced the audio thread. The state stayed `Active` for
+  the whole of `renderVoice`, so `play()`'s `Active → Pending` CAS succeeded *mid-render*, dropped the
+  sound's refcount — freeing samples being read — and overwrote `vo.sound` and `vo.cursor` underneath
+  it. **Fixed with a fourth state:** the audio thread CASes `Active → Rendering` for the duration, so
+  the stealing CAS fails and moves on. Stealing now retries a few times, because a failed CAS no
+  longer means "taken" but may mean "being rendered", and every "is it playing" query accepts both
+  states or `playing()` would flicker with the audio callback.
+- **`HostBridge.cs:745`** — `DispTickAll` indexed the live bucket while `DispUnbind` removes from it,
+  so an actor destroying an actor shifted the list and `++i` stepped over whoever slid into the gap.
+  **Now walks a snapshot**, skipping actors that left during the walk — identified by reference, not
+  just by entity id, since an id can be reused by a spawn in the same tick.
 
 ### MEDIUM
 
-- `modules/rhi/src/RHIShaders.cpp:420` — every raster path transforms normals by the plain world
-  matrix, so **non-uniform entity scale mis-shades**. Worth noting the USD importer documents the
-  same limitation for its own path.
-- `modules/formats/src/OcMesh.cpp:405` — stream-descriptor byte offsets used outside the bounds
-  check, which only covered the strides.
-- `modules/formats/src/OcAnim.cpp:310` — track offset overflows its own bounds check, giving a wild
-  pointer to `memcpy`.
-- `modules/formats/src/GltfImport.cpp:112` — negative `byteOffset`/`byteLength` wrap to huge `u64`
-  and defeat the bufferView bounds check. Same family as the two fixed above.
-- `modules/audio/src/Mixer.cpp:196` — voice stealing rewrites a voice mid-render and drops the
-  sound's refcount underneath the audio thread.
-- `modules/render.pcg/src/PcgVolume.cpp:236` — `VolumeBuilder` reads its readback buffer one frame
-  after recording the copy with **no fence wait**; the copy may not have executed.
-- `modules/render.voxi/src/VoxiRenderer.cpp:637` — the ray-tracing instance table is a single upload
-  buffer rewritten every frame while the previous frame may still be reading it.
-- `modules/rhi.d3d12/src/D3D12Device.cpp:1953` — `createSkinTargetMesh` leaves `ibBuffer` and
-  `vertexCount` unset, so `meshGeometry()` denies a skinned mesh and one skinned entity turns off
-  ray-traced reflections.
-- `modules/landscape/src/ChunkMesh.cpp:49` — chunk normals read world-Z zero past the section's
-  +X/+Y rim instead of clamping, so every section edge has a wrong normal seam.
-- `modules/platform/src/win32/Win32DirectoryWatcher.cpp:148` — the watcher thread dies but
-  `watching()` keeps returning true and `poll()` reports nothing. Hot reload silently stops working.
-- `modules/mcp/src/McpBridge.cpp:528` — every MCP abi command is dispatched **twice**, once by
-  `pump()` and once by the apply callback.
-- `modules/mcp/src/McpBridge.cpp:482` — `stop()` joins a worker that can block forever in `recv()`
-  on a client socket it never closes.
-- `modules/formats.roslyn/src/AverDesign.cpp:96` — the Roslyn actor backend drops the `Controller`
-  base-name rule the built-in scanner has, so the two disagree about what is an actor.
-- `scripting/csharp/Sample.Game/SampleHud.cs:33` — the reference HUD ignores the viewport origin and
-  draws relative to the window.
+- **`RHIShaders.cpp:420`** (and the Voxi and actor-preview vertex shaders) — normals went through the
+  world matrix instead of its inverse transpose. **Fixed with one `averTransformNormal` in the shared
+  prelude**, using the cofactor matrix: `cofactor(M) == det(M)·inverse(M)ᵀ`, and since the caller
+  normalises, the determinant divides out — no inverse, no division, no singular case. Moved **zero**
+  gate probes, as predicted: the gate scene's only non-uniform object is an axis-aligned box, whose
+  normals lie along principal axes and survive a diagonal scale.
+- **`OcMesh.cpp:405`, `OcAnim.cpp:310`, `GltfImport.cpp:112` (+ the accessor offset beside it),
+  `Avr1.cpp:140`** — the `a + b > limit` overflow family, all rearranged to `a > limit || b > limit − a`.
+  glTF additionally **rejects negative** `byteOffset`/`byteLength` before the cast to `u64`, which is
+  how they became near-2⁶⁴ in the first place. `OcMesh` gained the check it never had: the UV, joint
+  and weight *offsets* come from the file and were added to a cursor bounded only by the *strides*.
+- **`PcgVolume.cpp:236`** — read back one frame after recording the copy, but the device is double
+  buffered, so at frame N+1 only frame N−1 is known complete. **Waits three frames now**, with the
+  constant named and documented rather than left as a magic 1.
+- **`VoxiRenderer.cpp:637`** — the ray-tracing instance table was one upload buffer rewritten every
+  frame while the GPU read the previous frame's copy from the same memory. **Now a 3-deep ring**,
+  rotated before writing.
+- **`D3D12Device.cpp:1953`** — `createSkinTargetMesh` left `ibBuffer` and `vertexCount` at 0, so
+  `meshGeometry()` refused every skin target and one skinned entity switched ray-traced reflections
+  off scene-wide. **Both now carried across from the source mesh.**
+- **`ChunkMesh.cpp:49`** — the central-difference normal clamped the low side but not the high, and
+  `heightAt` returns 0 out of range while heights are *absolute world Z*. On the last row and column
+  the gradient was computed against sea level, so terrain 300 m up got near-sideways normals along
+  every section edge. **Both sides clamped.**
+- **`Win32DirectoryWatcher.cpp:148`** — the worker exited on three failure paths without recording
+  anything, and `watching()` tests only that the backend object exists. Hot reload stopped silently
+  for the rest of the session. **The backend now reports `died()` and `watching()` honours it.**
+- **`McpBridge.cpp:528`** — every `abi` command ran its dispatcher twice, once in `pump()` and again
+  in the host's apply callback, while the reply described only the first. **No longer forwarded.**
+- **`McpBridge.cpp:482`** — `stop()` closed the listener but not the accepted connection, which was a
+  local in the worker, so a worker inside `recv()` never woke and `join()` waited for the client to
+  disconnect. **The client socket is published and closed too**, with an atomic exchange so it cannot
+  be closed twice.
+- **`AverDesign.cpp:96`** — the Roslyn backend lacked the plain `Controller` suffix rule the built-in
+  scanner has, directly under a comment promising the two classify identically. `FpsController` was a
+  PlayerController to one and Unknown to the other. **Added, below `PlayerController` so the longer
+  suffix still wins.**
+- **`SampleHud.cs:33`** — the reference HUD used the viewport's size but not its origin, so it drew
+  relative to the window: in the editor the health bar sat under the Content Browser and the
+  crosshair missed the middle of the image. **Every coordinate now offset by `vp.X`/`vp.Y`** — and
+  this is the file every project copies its HUD from.
 
 ### LOW
 
-- `modules/formats/src/Avr1.cpp:140` — `AvrStringTable::get` computes its range check in 32-bit, so
-  one ref value indexes ~4 GB out of bounds.
-- `modules/audio.wasapi/src/AudioDeviceWasapi.cpp:62` — on the 5 s start-handshake timeout the main
-  thread closes `readyEvent_` while the render thread may still `SetEvent` it.
+- **`AudioDeviceWasapi.cpp:62`** — on the 5 s start-up timeout the main thread closed `readyEvent_`
+  while the render thread might still `SetEvent` it. **The thread is joined before the handle is
+  closed**, which only matters when start-up is already slow — exactly when it is least survivable.
 
 ---
 

@@ -95,8 +95,17 @@ $bad = 0; $totalPass = 0
 foreach ($e in $exes) {
     $o = & $e.FullName 2>&1 | Out-String
     $code = $LASTEXITCODE
+    # TWO REPORTING STYLES, both counted. Most suites print a line per assertion; some print only a
+    # trailing "=== N assertions, M failed ===". Counting only the first style reported the second
+    # as EMPTY -- a false alarm on suites with 228, 49 and 538 assertions, and a check that cries
+    # wolf is a check that gets ignored, which is the opposite of what EMPTY is for.
     $p = ([regex]::Matches($o, '  ok    |   PASS  |  PASS  ')).Count
     $f = ([regex]::Matches($o, '  FAIL  ')).Count
+    $summary = [regex]::Match($o, '===\s*(\d+)\s+assertions?,\s*(\d+)\s+failed')
+    if ($summary.Success) {
+        $p += [int]$summary.Groups[1].Value
+        $f += [int]$summary.Groups[2].Value
+    }
     $totalPass += $p
     # A suite that exits 0 having asserted NOTHING is reported, not counted as a pass. That shape --
     # a test binary that cannot fail -- has been found in this tree twice.
