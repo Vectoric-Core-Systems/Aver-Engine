@@ -107,9 +107,18 @@ private:
         const i64 bufIdx = bv["buffer"].asInt(-1);
         if (bufIdx < 0 || usize(bufIdx) >= b_.data.size()) return fail(why, "glTF: buffer index out of range");
         const std::vector<u8>& buf = b_.data[usize(bufIdx)];
-        const u64 off = u64(bv["byteOffset"].asInt(0));
-        const u64 n   = u64(bv["byteLength"].asInt(0));
-        if (off + n > buf.size()) return fail(why, "glTF: bufferView runs past the end of its buffer");
+        // NEGATIVES ARE REJECTED BEFORE THE CAST, and the bound is checked by subtraction.
+        // asInt returns a SIGNED i64 straight from the JSON, so a file writing byteOffset -1 became
+        // 2^64-1 on the cast; `off + n > size` then wrapped back into range, passed, and
+        // `buf.data() + off` was a pointer arbitrarily far from the buffer.
+        const i64 offRaw = bv["byteOffset"].asInt(0);
+        const i64 nRaw   = bv["byteLength"].asInt(0);
+        if (offRaw < 0 || nRaw < 0) return fail(why, "glTF: bufferView has a negative byteOffset or byteLength");
+        const u64 off = u64(offRaw);
+        const u64 n   = u64(nRaw);
+        const u64 size = u64(buf.size());
+        if (off > size || n > size - off)
+            return fail(why, "glTF: bufferView runs past the end of its buffer");
         base = buf.data() + off;
         len = usize(n);
         stride = u32(bv["byteStride"].asInt(0));
@@ -139,10 +148,15 @@ private:
 
         const u8* base = nullptr; usize len = 0; u32 stride = 0;
         if (!viewBytes(a["bufferView"].asInt(-1), base, len, stride, why)) return false;
-        const u64 accOff = u64(a["byteOffset"].asInt(0));
+        // Same family as viewBytes above: a signed JSON integer, and a bound built by addition.
+        // The span is (count-1) strides plus one element, and every term of it comes from the file.
+        const i64 accOffRaw = a["byteOffset"].asInt(0);
+        if (accOffRaw < 0) return fail(why, "glTF: accessor has a negative byteOffset");
+        const u64 accOff = u64(accOffRaw);
         const u32 elemSize = cb * nc;
         if (stride == 0) stride = elemSize;
-        if (accOff + u64(stride) * (count - 1) + elemSize > len)
+        const u64 span = u64(stride) * u64(count - 1) + u64(elemSize);
+        if (accOff > u64(len) || span > u64(len) - accOff)
             return fail(why, "glTF: accessor runs past the end of its bufferView");
 
         const bool normalized = a["normalized"].asBool(false);

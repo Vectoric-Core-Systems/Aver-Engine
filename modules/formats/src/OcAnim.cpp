@@ -307,7 +307,12 @@ bool parseOcAnim(const u8* bytes, usize size, OcAnimation& out, std::string* why
         const u32 stride = t.componentsPerKey();
         if (stride == 0) return fail(why, ".ocanim: track " + std::to_string(i) + " has an empty channel mask");
         const u64 need = (u64(counts[i]) + u64(counts[i]) * stride) * 4ull;
-        if (offsets[i] + need > trks->data.size())
+        // SUBTRACTION, NOT ADDITION. `offsets[i]` is a u64 read straight from the file, so
+        // `offsets[i] + need > size` wraps: a huge offset with a small need sums back into range,
+        // passes, and `trks->data.data() + offsets[i]` becomes an arbitrary pointer that the two
+        // memcpys below then read through.
+        const u64 avail = u64(trks->data.size());
+        if (offsets[i] > avail || need > avail - offsets[i])
             return fail(why, ".ocanim: track " + std::to_string(i) + " runs past the end of TRKS");
 
         const u8* p = trks->data.data() + offsets[i];

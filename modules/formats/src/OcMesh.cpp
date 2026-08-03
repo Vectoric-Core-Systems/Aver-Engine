@@ -384,8 +384,19 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
     // ---- vertices ----
     const u64 posBytes = u64(vcount) * posStride;
     const u64 posPadded = (posBytes + 15) & ~u64(15);
-    if (posPadded + u64(vcount) * attrStride > vtxs->data.size())
+    const u64 vtxsSize  = u64(vtxs->data.size());
+    if (posPadded > vtxsSize || u64(vcount) * attrStride > vtxsSize - posPadded)
         return fail(why, ".ocmesh: VTXS is smaller than the LOD's vertex count requires");
+
+    // THE OFFSETS HAVE TO BE CHECKED, NOT JUST THE STRIDES. uvOffset, jointOffset and weightOffset
+    // come verbatim from the file's stream table, and the per-vertex reads below add them to the
+    // stride-sized cursor -- so a file declaring a stride that fits and an offset that does not
+    // pushed every read up to 64 KB past the end of the chunk while passing the check above.
+    //
+    // Each attribute is bounded against ITS OWN stride, because that is what the last vertex's read
+    // actually runs off the end of: the last element sits at (vcount-1)*stride + offset + width.
+    if (u64(uvOffset) + 4 > u64(attrStride))
+        return fail(why, ".ocmesh: the UV stream's offset falls outside the attribute stride");
 
     out.positions.resize(usize(vcount) * 3);
     out.normals.resize(usize(vcount) * 3);
@@ -410,8 +421,12 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
     // ---- skin, when the file carries it ----
     if (sawJoints) {
         const u64 attrPadded = (posPadded + u64(vcount) * attrStride + 15) & ~u64(15);
-        if (attrPadded + u64(vcount) * skinStride > vtxs->data.size())
+        if (attrPadded > vtxsSize || u64(vcount) * skinStride > vtxsSize - attrPadded)
             return fail(why, ".ocmesh: VTXS is smaller than the skin streams require");
+        // As above: the joint and weight offsets are the file's, and the reads below add them.
+        if (u64(jointOffset) + u64(kOcMeshInfluences) * 2 > u64(skinStride) ||
+            u64(weightOffset) + u64(kOcMeshInfluences) > u64(skinStride))
+            return fail(why, ".ocmesh: a skin stream's offset falls outside the skin stride");
 
         out.joints.resize(usize(vcount) * kOcMeshInfluences);
         out.weights.resize(usize(vcount) * kOcMeshInfluences);

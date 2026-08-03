@@ -137,9 +137,15 @@ u32 AvrStringTable::add(std::string_view s) {
 
 // The string at `ref`, or empty when the reference is null or out of range.
 std::string_view AvrStringTable::get(u32 ref) const {
-    if (ref == kAvrStringNull || ref + 2 > blob_.size()) return {};
+    // EVERY COMPARISON SUBTRACTS FROM THE SIZE instead of adding to the offset. `ref` is u32 and the
+    // literals are int, so `ref + 2 > blob_.size()` was evaluated in 32 bits: ref = 0xFFFFFFFE wraps
+    // the sum to 0, passes the guard, and blob_[0xFFFFFFFE] is read. The length check two lines
+    // below had the same shape, with `len` able to push it over as well.
+    if (ref == kAvrStringNull) return {};
+    const usize size = blob_.size();
+    if (ref > size || size - ref < 2) return {};
     const u16 len = u16(blob_[ref]) | u16(u16(blob_[ref + 1]) << 8);
-    if (ref + 2 + len > blob_.size()) return {};
+    if (size - ref - 2 < len) return {};
     return std::string_view(reinterpret_cast<const char*>(blob_.data() + ref + 2), len);
 }
 
