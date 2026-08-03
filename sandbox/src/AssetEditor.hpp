@@ -62,6 +62,16 @@ public:
     bool anyDirty() const;
     usize count() const { return editors_.size(); }
 
+    // The titles of every editor with unsaved changes, so a prompt can NAME them. "You have unsaved
+    // changes" without saying which file is a dialog the user cannot act on.
+    std::vector<std::string> dirtyTitles() const;
+
+    // Saves every dirty editor. Returns how many FAILED, appending each reason to `why`. Carries on
+    // after a failure rather than stopping at the first: a user who asked to save everything wants
+    // the nine that can be saved written, not eight of them abandoned because the tenth is
+    // read-only.
+    usize saveAllDirty(std::string* why);
+
     // Routes a disk change to whichever editor owns that path. Returns true if one did.
     bool notifyFileChanged(const std::string& path);
 

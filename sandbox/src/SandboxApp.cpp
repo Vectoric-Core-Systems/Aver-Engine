@@ -1109,7 +1109,10 @@ public:
             const Vec3 sd = Vec3{sky_.sunDirection[0], sky_.sunDirection[1],
                                  sky_.sunDirection[2]}.getSafeNormal();
             if (sunAngle_ > 0.0f) sky_.sunAngularDiameterDeg = sunAngle_;
-            voxiRenderer_.setSun(&sd.x, sunColor_, sunAmbient_);
+            // Direction only. sunColor_ and sunAmbient_ reach the shaders through sky_ below
+            // (:1136, :1141) and the device's frame constants -- passing them here as well was
+            // storing a second copy nothing read.
+            voxiRenderer_.setSunDirection(&sd.x);
         }
 #endif
         // Confine the scene to the dockspace's central node (latched by buildUI last frame).
@@ -1659,6 +1662,24 @@ public:
     }
 
     // Tears the editor down: MCP, prefs, physics, UI textures, materials, render features, scripts.
+    // The process exit code. Non-zero when a test mode that was ASKED FOR did not pass.
+    //
+    // Only modes the command line requested are judged: an ordinary editor session must exit 0, and
+    // a test that was never started is not a failure. A requested test that never finished IS one --
+    // the window being closed early, or a crash-free hang, is exactly the case a script needs to
+    // catch, and silence would read as success.
+    int exitCode() const override {
+        if (skinScene_) {
+            if (!skinScene_->finished()) {
+                AVER_ERROR("[Skin] --skin-scene-test did not finish; reporting failure rather than "
+                           "letting an unfinished run look like a pass");
+                return 2;
+            }
+            if (!skinScene_->passed()) return 1;
+        }
+        return 0;
+    }
+
     void onShutdown(Engine& e) override {
 #if AVER_MODULE_MCP
         mcp_.stop();
@@ -2602,14 +2623,30 @@ private:
         return std::sqrt((px-cx)*(px-cx)+(py-cy)*(py-cy));
     }
 
+    // The gizmo's three axes IN WORLD SPACE, for the current tool and the World/Local button.
+    //
+    // SCALE IS ALWAYS LOCAL, whatever the button says, and that is not an inconsistency. applyScale
+    // writes o.scale.x/y/z, which ARE the object's own axes -- there is no other thing it could
+    // write. Drawing that handle along a world axis on a rotated object meant the arrow you dragged
+    // and the number that changed pointed in different directions. UE hides the world option on the
+    // scale tool for the same reason; this keeps the button and just ignores it there.
+    void gizmoBasis(const EditXform& o, Vec3 ax[3]) const {
+        if (worldSpace_ && tool_ != Tool::Scale) {
+            for (int a = 0; a < 3; ++a) ax[a] = kAxisDir[a];
+            return;
+        }
+        const Quat q = quatFromEulerDeg(o.rotDeg);
+        for (int a = 0; a < 3; ++a) ax[a] = q.rotate(kAxisDir[a]).getSafeNormal();
+    }
+
     // Returns which gizmo handle is under the cursor: 0..2 axis, 3 = centre, -1 = none.
-    int pickAxis(const Vec3& origin, f32 L, f32 mx, f32 my) const {
+    int pickAxis(const Vec3& origin, const Vec3 ax[3], f32 L, f32 mx, f32 my) const {
         f32 ox, oy; if (!project(origin, ox, oy)) return -1;
         const f32 thr = 16.0f * dpi_;
         if (tool_ == Tool::Rotate) {
             int best=-1; f32 bestD=thr;
             for (int a=0;a<3;++a) {
-                const Vec3 P=kAxisDir[(a+1)%3], Q=kAxisDir[(a+2)%3];
+                const Vec3 P=ax[(a+1)%3], Q=ax[(a+2)%3];
                 f32 pxx=0, pyy=0; bool havePrev=false, first=true; f32 dmin=1e9f;
                 const int N=48;
                 for (int k=0;k<=N;++k) {
@@ -2625,7 +2662,7 @@ private:
         if (std::sqrt((mx-ox)*(mx-ox)+(my-oy)*(my-oy)) < 13.0f*dpi_) return 3;
         int best=-1; f32 bestD=thr;
         for (int a=0;a<3;++a) {
-            f32 tx, ty; if (!project(origin + kAxisDir[a]*L, tx, ty)) continue;
+            f32 tx, ty; if (!project(origin + ax[a]*L, tx, ty)) continue;
             const f32 d=distToSeg(mx,my,ox,oy,tx,ty);
             if (d<bestD) { bestD=d; best=a; }
         }
@@ -2641,13 +2678,17 @@ private:
             const f32 wpp = 2.0f * std::tan(radians(30.0f)) * dist(eye_, o.pos) / (vpH_ > 1 ? vpH_ : 900.0f);
             o.pos += s * (dx * wpp) + u * (-dy * wpp);
         } else {
-            const Vec3 A = kAxisDir[activeAxis_];
+            Vec3 ax[3]; gizmoBasis(o, ax);
+            const Vec3 A = ax[activeAxis_];
             f32 s0x,s0y,s1x,s1y;
             if (project(o.pos, s0x, s0y) && project(o.pos + A, s1x, s1y)) {
                 const f32 px=s1x-s0x, py=s1y-s0y, pl2=px*px+py*py;
                 if (pl2 > 1e-4f) o.pos += A * ((dx*px + dy*py) / pl2);
             }
         }
+        // Grid snap stays in WORLD space even for a local-axis drag. A grid the object is not
+        // aligned to is still the grid the level is built on, and snapping to the object's own
+        // rotated lattice would put nothing on round numbers.
         if (snapMove_) for (int k=0;k<3;++k) (&o.pos.x)[k] = snapf((&o.pos.x)[k], moveSnap_);
     }
     // Scales the transform by a mouse delta in pixels, along the active axis or uniformly.
@@ -2655,7 +2696,8 @@ private:
         auto bump = [&](int a, f32 amt){ f32& c=(&o.scale.x)[a]; c += amt; if (c<0.02f) c=0.02f; };
         if (activeAxis_ == 3) { const f32 amt=(dx - dy)/80.0f; for (int a=0;a<3;++a) bump(a, amt); }
         else {
-            const Vec3 A = kAxisDir[activeAxis_];
+            Vec3 ax[3]; gizmoBasis(o, ax);
+            const Vec3 A = ax[activeAxis_];
             f32 s0x,s0y,s1x,s1y;
             if (project(o.pos, s0x, s0y) && project(o.pos + A, s1x, s1y)) {
                 const f32 px=s1x-s0x, py=s1y-s0y, pl=std::sqrt(px*px+py*py);
@@ -2664,15 +2706,40 @@ private:
         }
         if (snapScale_) for (int k=0;k<3;++k) (&o.scale.x)[k] = std::fmax(0.02f, snapf((&o.scale.x)[k], scaleSnap_));
     }
-    // Rotates the transform about the active axis by the angle the cursor swept around the ring.
+    // Rotates the transform about the active gizmo axis by the angle the cursor swept around the
+    // ring.
+    //
+    // BY QUATERNION COMPOSITION, not by adding to an Euler component. The old version did
+    // `rotDeg[axis] += angle`, which is only the requested rotation when the other two components
+    // are zero -- on an already-rotated object, dragging the ring you can SEE produced a rotation
+    // about a different axis. Composition is exact in both spaces, and it is what lets the World
+    // and Local buttons mean anything for this tool.
+    //
+    // The order is `dq * q`: this Quat's operator* is the Hamilton product and rotate() applies
+    // q v q^-1, so composing "q first, then dq" is dq on the LEFT. Getting it backwards rotates
+    // about the object's axes when you asked for the world's, and the two agree only at identity,
+    // so it looks correct until the first time it matters. gizmoBasis already returns the axis in
+    // WORLD space for both settings, so one order serves both.
     void applyRotate(EditXform& o, f32 px, f32 py, f32 mx, f32 my) {
         f32 ox, oy; if (!project(o.pos, ox, oy)) return;
         const f32 a0=std::atan2(py-oy, px-ox), a1=std::atan2(my-oy, mx-ox);
         f32 da=a1-a0; while (da> kPi) da-=kTwoPi; while (da< -kPi) da+=kTwoPi;
-        const f32 s = dot(kAxisDir[activeAxis_], camForward()) >= 0.0f ? -1.0f : 1.0f;
-        f32& comp = (&o.rotDeg.x)[activeAxis_];
-        comp += degrees(da) * s;
-        if (snapRot_) comp = snapf(comp, rotSnap_);
+
+        Vec3 ax[3]; gizmoBasis(o, ax);
+        const Vec3 A = ax[activeAxis_];
+        // Which way the ring turns on screen depends on which side of it the camera is.
+        const f32 sgn = dot(A, camForward()) >= 0.0f ? -1.0f : 1.0f;
+
+        rotDragDeg_ += degrees(da) * sgn;
+        // SNAPPING IS ON THE ACCUMULATED ANGLE, not the per-frame delta. Snapping each frame's
+        // delta would round most of them to zero and the object would never turn.
+        const f32 target = snapRot_ ? snapf(rotDragDeg_, rotSnap_) : rotDragDeg_;
+        const f32 step = target - rotAppliedDeg_;
+        if (std::fabs(step) < 1e-5f) return;
+        rotAppliedDeg_ = target;
+
+        const Quat dq = Quat::fromAxisAngle(A, radians(step));
+        o.rotDeg = eulerDegFromQuat((dq * quatFromEulerDeg(o.rotDeg)).normalized());
     }
 
     // Runs the tool keys, picking, and the gizmo drag for one frame.
@@ -2694,15 +2761,18 @@ private:
         hoverAxis_ = -1;
         EditXform gx;
         const bool haveGizmo = tool_!=Tool::Select && anySelected() && selectedXform(gx);
+        Vec3 gaxis[3];
+        if (haveGizmo) gizmoBasis(gx, gaxis);
         if (haveGizmo && !dragging_ && overScene)
-            hoverAxis_ = pickAxis(gx.pos, gizmoLen(gx.pos), mx, my);
+            hoverAxis_ = pickAxis(gx.pos, gaxis, gizmoLen(gx.pos), mx, my);
 
         if (ImGui::IsMouseClicked(0) && overScene) {
             int ax = -1;
             if (haveGizmo)
-                ax = pickAxis(gx.pos, gizmoLen(gx.pos), mx, my);
+                ax = pickAxis(gx.pos, gaxis, gizmoLen(gx.pos), mx, my);
             if (ax >= 0) {
                 dragging_=true; activeAxis_=ax; prevMouseX_=mx; prevMouseY_=my;
+                rotDragDeg_=0.0f; rotAppliedDeg_=0.0f;   // see applyRotate
                 beginTransformEdit();
             }
             else pick(e, io);
@@ -2743,7 +2813,13 @@ private:
         if (!selectedXform(x)) return;
         const Vec3 O = x.pos;
         const f32 L = gizmoLen(O);
-        const Mat4 w = Mat4::scale(Vec3{L,L,L}) * Mat4::translation(O);
+        // The handles are drawn along the SAME axes pickAxis tests and applyMove drags. The line
+        // meshes are built along the world axes, so local space rotates them here. Row-vector
+        // order, matching Transform::matrix(): scale, then rotate, then translate.
+        const bool localGizmo = !worldSpace_ || tool_ == Tool::Scale;
+        const Mat4 w = localGizmo
+            ? Mat4::scale(Vec3{L,L,L}) * Mat4::fromQuat(quatFromEulerDeg(x.rotDeg)) * Mat4::translation(O)
+            : Mat4::scale(Vec3{L,L,L}) * Mat4::translation(O);
         const rhi::LineHandle* nrm = tool_==Tool::Move ? gzMove_ : tool_==Tool::Rotate ? gzRot_ : gzScale_;
         const rhi::LineHandle* hi  = tool_==Tool::Move ? gzMoveHi_ : tool_==Tool::Rotate ? gzRotHi_ : gzScaleHi_;
         e.device()->setLineDepth(false);
@@ -2838,6 +2914,86 @@ private:
 
 #endif
 
+    // Records the outcome of an upgrade decision and restarts its time on screen.
+    //
+    // THROUGH A SETTER so the timer cannot be forgotten at one of the three call sites. The string
+    // used to be assigned and never displayed anywhere: the user clicked Upgrade, the modal closed,
+    // and whether it had worked was reported only to the log.
+    void setUpgradeStatus(std::string msg) {
+        upgradeStatus_ = std::move(msg);
+        upgradeStatusAge_ = 0.0f;
+    }
+
+    // Exit, unless something is unsaved -- in which case ASK first.
+    //
+    // Every exit used to call requestExit() straight through. AssetEditorHost::anyDirty() existed
+    // for exactly this check and had no callers, so the prompt it was written to drive never
+    // appeared and closing the editor with an unsaved material silently discarded it.
+    void requestExitChecked(Engine& e) {
+#if AVER_WITH_IMGUI
+        if (assetEditors_.anyDirty()) { exitPrompt_ = true; return; }
+#endif
+        e.requestExit();
+    }
+
+    // The unsaved-changes modal. Names the files, because "you have unsaved changes" is not
+    // something a user can act on.
+    void drawExitPrompt(Engine& e) {
+#if AVER_WITH_IMGUI
+        if (!exitPrompt_) return;
+        constexpr const char* kTitle = "Unsaved changes";
+        if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
+        const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(480.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+        if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+        const std::vector<std::string> dirty = assetEditors_.dirtyTitles();
+        ImGui::TextWrapped("%zu open editor%s ha%s unsaved changes:",
+                           dirty.size(), dirty.size() == 1 ? "" : "s", dirty.size() == 1 ? "s" : "ve");
+        ImGui::Spacing();
+        for (const std::string& t : dirty) ImGui::BulletText("%s", t.c_str());
+        if (!exitPromptError_.empty()) {
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.40f, 1.0f), "%s", exitPromptError_.c_str());
+        }
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        if (ImGui::Button("Save all and exit", ImVec2(150.0f * dpi_, 0.0f))) {
+            std::string why;
+            const usize failed = assetEditors_.saveAllDirty(&why);
+            if (failed == 0) {
+                ImGui::CloseCurrentPopup();
+                exitPrompt_ = false;
+                e.requestExit();
+            } else {
+                // STAY OPEN on a failed save. Exiting anyway would discard exactly the work the
+                // user just asked to keep.
+                exitPromptError_ = why;
+                AVER_ERROR("[Editor] {} editor(s) could not be saved; the exit was cancelled: {}",
+                           failed, why);
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Discard and exit", ImVec2(150.0f * dpi_, 0.0f))) {
+            AVER_WARN("[Editor] exiting with {} unsaved editor(s); the changes are gone", dirty.size());
+            ImGui::CloseCurrentPopup();
+            exitPrompt_ = false;
+            e.requestExit();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(110.0f * dpi_, 0.0f))) {
+            ImGui::CloseCurrentPopup();
+            exitPrompt_ = false;
+            exitPromptError_.clear();
+        }
+        ImGui::EndPopup();
+#else
+        (void)e;
+#endif
+    }
+
     // Draws the modal offering to add the project files this project is missing, listing each fix.
     void drawUpgradePrompt() {
 #if AVER_WITH_IMGUI
@@ -2874,10 +3030,10 @@ private:
         if (ImGui::Button("Upgrade", ImVec2(120.0f * dpi_, 0.0f))) {
             std::string err;
             if (editor::applyProjectUpgrade(project_, pendingUpgrade_, &err)) {
-                upgradeStatus_ = "Project upgraded - Compile C# to rebuild.";
+                setUpgradeStatus("Project upgraded - Compile C# to rebuild.");
                 AVER_INFO("[Editor] '{}' upgraded", project_.name);
             } else {
-                upgradeStatus_ = "Upgrade failed: " + err;
+                setUpgradeStatus("Upgrade failed: " + err);
                 AVER_ERROR("[Editor] upgrade of '{}' failed: {}", project_.name, err);
             }
             pendingUpgrade_ = {};
@@ -2887,7 +3043,7 @@ private:
         ImGui::SameLine();
         if (ImGui::Button("Not now", ImVec2(120.0f * dpi_, 0.0f))) {
             upgradeAsked_ = true;
-            upgradeStatus_ = "Project left as it is.";
+            setUpgradeStatus("Project left as it is.");
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -2921,7 +3077,7 @@ private:
             switch (browser_.draw(dpi_, fontMedium_, logoUiId_, logoAspect_)) {
                 case editor::BrowserAction::Open: applyProject(e); browserActive_ = false; break;
                 case editor::BrowserAction::Skip: browserActive_ = false; break;
-                case editor::BrowserAction::Quit: e.requestExit(); break;
+                case editor::BrowserAction::Quit: requestExitChecked(e); break;
                 case editor::BrowserAction::Stay: break;
             }
             return;
@@ -2980,7 +3136,7 @@ private:
                         else                         ImGui::SetTooltip("Stage this project into a standalone, runnable game directory.\nRuns scripts/stage-game.ps1, which you can also run from a shell.");
                     }
                 }
-                ImGui::Separator(); if(ImGui::MenuItem("Exit")) e.requestExit(); ImGui::EndMenu(); }
+                ImGui::Separator(); if(ImGui::MenuItem("Exit")) requestExitChecked(e); ImGui::EndMenu(); }
                         const bool open_edit = ImGui::BeginMenu("Edit");
             uiReg_.track("menu.edit");
             if (open_edit){
@@ -3185,6 +3341,7 @@ private:
         assetEditors_.draw(e, centralDock_, dpi_);
         tools_.drawModals(project_, dpi_);
         drawUpgradePrompt();
+        drawExitPrompt(e);
 
         // ---------------- status bar ----------------
         ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH));
@@ -3199,6 +3356,25 @@ private:
                     rhi::backendName(e.device()->backend()), e.device()->adapterName(), dpi_*100.f,
                     dt>1e-6f?1.f/dt:0.f, dt*1000.f, objects_.size(),
                     selectionLabel().c_str());
+
+        // The upgrade outcome, for a while. Twelve seconds is long enough to read after clicking a
+        // button and short enough that it does not become permanent furniture. A FAILURE is drawn in
+        // the error colour, because "Upgrade failed: ..." sliding past in the same grey as the frame
+        // rate is how a user concludes it worked.
+        if (!upgradeStatus_.empty()) {
+            upgradeStatusAge_ += dt;
+            if (upgradeStatusAge_ > 12.0f) {
+                upgradeStatus_.clear();
+            } else {
+                ImGui::SameLine();
+                ImGui::TextUnformatted("  |  ");
+                ImGui::SameLine();
+                const bool bad = upgradeStatus_.rfind("Upgrade failed", 0) == 0;
+                ImGui::TextColored(bad ? ImVec4(1.0f, 0.45f, 0.40f, 1.0f)
+                                       : ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
+                                   "%s", upgradeStatus_.c_str());
+            }
+        }
 
         auto drawerButton = [&](const char* label, Drawer d, const char* tip) {
             const bool on = drawer_ == d;
@@ -5052,6 +5228,9 @@ private:
     bool showGrid_=true, wireframe_=false;
     // gizmo interaction
     bool dragging_=false; int activeAxis_=-1, hoverAxis_=-1;
+    // Rotation drag accumulators, so rotation snap works on the total swept angle
+    // rather than on a per-frame delta that would round to nothing. See applyRotate.
+    f32 rotDragDeg_=0.0f, rotAppliedDeg_=0.0f;
     f32 prevMouseX_=0, prevMouseY_=0;
     // snapping (off by default; toggled from the toolbar carets)
     bool snapMove_=false, snapRot_=false, snapScale_=false;
@@ -5120,7 +5299,9 @@ private:
     u64 logoUiId_=0;
     f32 logoAspect_=1.0f;
     editor::ToolsMenu tools_;
-    bool worldSpace_=true;   // gizmo coordinate space toggle (display only for now)
+    // Gizmo coordinate space. Honoured by drawGizmo, pickAxis, applyMove and applyRotate; the SCALE
+    // tool ignores it and is always local, because o.scale is per-object-axis by definition.
+    bool worldSpace_=true;
     bool giDebugView_=false; Vec3 giCenter_{0,0,300}; f32 giExtent_=1200.0f;   // cm
 #if AVER_MODULE_VOXI
     voxi::VoxiRenderer voxiRenderer_;
@@ -5162,7 +5343,10 @@ private:
 
     editor::ProjectUpgrade pendingUpgrade_;
     bool        upgradeAsked_ = false;
+    bool        exitPrompt_ = false;      // the unsaved-changes modal is up
+    std::string exitPromptError_;         // why a "Save all" attempt failed
     std::string upgradeStatus_;
+    f32         upgradeStatusAge_ = 0.0f;   // seconds since it was set; see setUpgradeStatus
     f32  uiDemoHealth_ = 0.72f, uiDemoStamina_ = 0.44f, uiDemoScroll_ = 0.0f, uiDemoClock_ = 0.0f;
 
     rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;

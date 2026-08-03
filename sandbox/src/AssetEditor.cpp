@@ -37,6 +37,29 @@ bool AssetEditorHost::anyDirty() const {
     return false;
 }
 
+// The titles of every editor with unsaved changes.
+std::vector<std::string> AssetEditorHost::dirtyTitles() const {
+    std::vector<std::string> out;
+    for (const auto& ed : editors_) if (ed->dirty()) out.push_back(ed->title());
+    return out;
+}
+
+// Saves every dirty editor, counting the failures.
+usize AssetEditorHost::saveAllDirty(std::string* why) {
+    usize failed = 0;
+    for (const auto& ed : editors_) {
+        if (!ed->dirty()) continue;
+        std::string one;
+        if (ed->save(&one)) continue;
+        ++failed;
+        if (why) {
+            if (!why->empty()) *why += "\n";
+            *why += ed->title() + ": " + (one.empty() ? "save failed" : one);
+        }
+    }
+    return failed;
+}
+
 namespace {
 // True if two paths name the same file. Falls back to normalised string compare when either side
 // does not exist.
