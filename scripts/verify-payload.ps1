@@ -112,6 +112,21 @@ function Read-Probes {
     foreach ($line in Get-Content -LiteralPath $File) {
         if ($line -match '^===\s+(\S+)') { $section = $Matches[1]; continue }
         if ($line -match '^\s{2}(\S+)\s+raw\(([^)]*)\)') {
+            # BAD-PROBE MEANS THE ORACLE DISOWNED THE SAMPLE, so it is not evidence about the
+            # payload. gates.ps1 emits it when the viewport it sampled was degenerate -- the
+            # editor's dockspace has not finished laying out, and the probe rect comes back as
+            # something like 45x24 instead of 2750x1639. The pixel it returns is the window
+            # background, identical for every gate that hits it.
+            #
+            # Counting those as differences made this script report "the staged payload is not the
+            # tree it came from" for a reason that has nothing to do with staging: two consecutive
+            # runs of the SAME binary disagreed, and the gate list that failed changed between them.
+            # gates.ps1 already retries and labels the survivors FLAKY.
+            #
+            # Skipping them narrows what this script can see, and that is the honest trade: a probe
+            # nobody sampled proves nothing either way. The count of skipped probes is reported so a
+            # run that skipped most of them cannot look like a clean pass.
+            if ($line -match 'BAD-PROBE') { $script:badProbes++; continue }
             $probes["$section/$($Matches[1])"] = $Matches[2].Trim()
         }
     }
@@ -121,6 +136,7 @@ function Read-Probes {
 $treeOut   = Join-Path $WorkDir 'gates-tree.txt'
 $stagedOut = Join-Path $WorkDir 'gates-staged.txt'
 
+$script:badProbes = 0
 Write-Host '[verify] running gates against the build tree...'
 $treeExit = Invoke-Gates -Exe $treeExe -OutFile $treeOut
 Write-Host "[verify]   gates.ps1 exit=$treeExit (vs its baseline; not the question here)"
@@ -133,7 +149,15 @@ Write-Host ''
 $a = Read-Probes $treeOut
 $b = Read-Probes $stagedOut
 
+if ($script:badProbes -gt 0) {
+    Write-Host ("[verify] {0} probe sample(s) skipped: the oracle marked them BAD-PROBE (degenerate viewport), so they say nothing about staging" -f $script:badProbes) -ForegroundColor Yellow
+}
 if ($a.Count -eq 0) { Write-Host '[verify] ERROR parsed no probes from the build-tree run' -ForegroundColor Red; exit 1 }
+# A run that skipped most of its probes has not verified much, and must not read as a clean pass.
+if ($script:badProbes -ge $a.Count) {
+    Write-Host ("[verify] ERROR {0} probes were skipped against only {1} usable - too little was actually compared to conclude anything" -f $script:badProbes, $a.Count) -ForegroundColor Red
+    exit 1
+}
 
 $diffs = 0
 $missing = 0
