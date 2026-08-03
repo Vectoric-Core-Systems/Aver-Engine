@@ -574,15 +574,32 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
         AVER_INFO("[Game] physics: {} step(s) taken", physSteps_);
         lastReportedSteps_ = physSteps_;
     }
+
+    // THE LAST THING onUpdate DOES, AND IT HAS TO BE IN onUpdate. Engine::frameStep runs
+    //
+    //     onUpdate -> beginFrame -> onRender -> endFrame
+    //
+    // and beginFrame takes the ONE snapshot of PerFrameCB into the GPU-visible buffer
+    // (D3D12Device.cpp:2022 is the sole write to frameCBPtr_). setCamera, setLight and
+    // setSkyAtmosphere only touch the CPU-side shadow copy.
+    //
+    // This used to be the first line of onRender, which is AFTER beginFrame -- so every pixel of
+    // frame N was rasterised with frame N-1's gViewProj, camera position, sky, fog and cloud
+    // constants. Worse than a uniform one-frame lag: viewProj_ is also what drawWorld culls
+    // against, so culling used THIS frame's matrix while the GPU drew with the previous one, and
+    // the two disagreed by exactly one frame of camera motion.
+    //
+    // The editor never had this bug -- SandboxApp sets its camera in onUpdate (SandboxApp.cpp:1115)
+    // -- which is why it never showed up in the gates.
+    pushFrame(e);
 }
 
 void GameApp::onRender(Engine& e) {
-    pushFrame(e);
-
 #if AVER_MODULE_SCENE
-    // FIRST PIXELS. pushFrame set the camera, so viewProj_ is this frame's; the frustum is derived
-    // from it inside drawWorld rather than cached, because a stale frustum culls things that are on
-    // screen.
+    // FIRST PIXELS. onUpdate's pushFrame set the camera before beginFrame uploaded the frame
+    // constants, so viewProj_ is this frame's AND the GPU has the matching matrix. The frustum is
+    // derived from it inside drawWorld rather than cached, because a stale frustum culls things
+    // that are on screen.
     if (rhi::IDevice* dev = e.device()) {
         pbr::MaterialSystem* ms = nullptr;
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI

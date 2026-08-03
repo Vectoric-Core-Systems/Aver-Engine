@@ -260,7 +260,12 @@ bool parseAvr1(const u8* bytes, usize size, Avr1File& out, std::string* why) {
         const u64 raw   = d.u64v();
         const u64 hash  = d.u64v();
         if (!d.ok) return fail(why, "AVR1: truncated chunk directory entry");
-        if (off + onDisk > size) return fail(why, "AVR1: chunk payload runs past the end");
+        // SUBTRACTION, NOT ADDITION. `off` and `onDisk` are u64 read straight out of the file, so
+        // `off + onDisk > size` WRAPS: off = 2^64-1 with onDisk = 2 sums to 1, sails past the check,
+        // and the assign below then reads from `bytes + 2^64-1`. Rearranged so neither side can
+        // overflow, both operands are compared against a bound that is known good.
+        if (off > size || onDisk > size - off)
+            return fail(why, "AVR1: chunk payload runs past the end");
         if (c.compression != 0)
             return fail(why, "AVR1: chunk is compressed and no decompressor is built in");
         if (onDisk != raw)

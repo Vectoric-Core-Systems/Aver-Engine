@@ -306,6 +306,23 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
         }
     }
 
+    // EVERY INDEX IS CHECKED BEFORE ANY OF THEM IS USED. The values came out of the file and were
+    // trusted: the normal loop below indexes m.positions and m.normals with them directly, so a
+    // glTF naming vertex 40000 in a 12-vertex primitive wrote three floats a long way outside both
+    // vectors. That is a heap corruption reachable by opening a downloaded model.
+    //
+    // Refused rather than clamped. An index past the end is not a mesh with one bad triangle, it is
+    // a mesh whose index buffer does not describe its vertex buffer, and drawing the rest would be
+    // guessing at what the author meant.
+    {
+        const u32 vcount = static_cast<u32>(m.positions.size() / 3);
+        for (usize i = first; i < m.indices.size(); ++i) {
+            if (m.indices[i] < vcount) continue;
+            return fail(why, "glTF: primitive index " + std::to_string(m.indices[i]) +
+                             " is past the end of its " + std::to_string(vcount) + "-vertex buffer");
+        }
+    }
+
     // Flat normals where the source had none, computed after the winding fix so they face outward.
     if (!hasNrm && o_.generateMissingNormals) {
         for (usize i = first; i + 2 < m.indices.size(); i += 3) {

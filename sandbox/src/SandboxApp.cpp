@@ -42,6 +42,7 @@
 #include "AssetEditor.hpp"
 #include "ActorEditor.hpp"
 #include "AnimEditor.hpp"
+#include "EditorEuler.hpp"
 #include "EditorPrefs.hpp"
 #include "aver/platform/DirectoryWatcher.hpp"
 #if AVER_HAVE_ROSLYN
@@ -164,26 +165,12 @@ static void appendSphere(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
         }
     }
 }
-// Builds a quaternion from (roll, pitch, yaw) degrees as Rz * Ry * Rx.
-static Quat quatFromEulerDeg(const Vec3& e) {
-    return (Quat::fromAxisAngle({0,0,1}, radians(e.z)) * Quat::fromAxisAngle({0,1,0}, radians(e.y)) *
-            Quat::fromAxisAngle({1,0,0}, radians(e.x))).normalized();
-}
-// Exact inverse of quatFromEulerDeg. Returns (roll, pitch, yaw) degrees.
-static Vec3 eulerDegFromQuat(const Quat& q) {
-    const f32 sinP = 2.0f * (q.w * q.y - q.z * q.x);
-    const f32 pitch = std::asin(std::fmax(-1.0f, std::fmin(1.0f, sinP)));
-    f32 roll, yaw;
-    if (std::fabs(sinP) > 0.99999f) {
-        roll = 0.0f;
-        yaw  = std::atan2(-2.0f * (q.x * q.y - q.w * q.z), 1.0f - 2.0f * (q.y * q.y + q.z * q.z));
-    } else {
-        roll = std::atan2(2.0f * (q.w * q.x + q.y * q.z), 1.0f - 2.0f * (q.x * q.x + q.y * q.y));
-        yaw  = std::atan2(2.0f * (q.w * q.z + q.x * q.y), 1.0f - 2.0f * (q.y * q.y + q.z * q.z));
-    }
-    const f32 r2d = 180.0f / 3.14159265358979323846f;
-    return Vec3{roll * r2d, pitch * r2d, yaw * r2d};
-}
+// The Euler <-> quaternion pair now lives in EditorEuler.hpp so it can be tested. It was two static
+// functions here, unreachable from any test, and eulerDegFromQuat's gimbal branch was wrong in a way
+// that wrote corrupted rotations into saved levels.
+using aver::editor::quatFromEulerDeg;
+using aver::editor::eulerDegFromQuat;
+
 // Rounds v to the nearest multiple of step; returns v unchanged when step is zero.
 static f32 snapf(f32 v, f32 step) { return step > 0.0f ? std::round(v / step) * step : v; }
 
