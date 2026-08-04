@@ -379,23 +379,27 @@ float averFogFactor(float3 wpos) {
     return saturate(1.0 - exp(-tau)) * gFogParams.w;
 }
 
-// The fog's in-scatter target: the sky along the view ray.
+// The fog's in-scatter target: the sky above the clouds.
 //
-// UNDER A PHYSICAL SKY this is averSkyPhysical(dir) -- the SAME atmosphere the dome itself is
-// drawn with -- rather than skyColorFull's authored horizon/zenith gradient tinted by the level's
-// FOG color. Those two used to disagree: the visible sky came from the physical Rayleigh/Mie model,
-// but the ground-level haze and the horizon where distant geometry fades into it came from a
-// separate hand-authored gradient multiplied by an independently-authored fog colour, so the
-// bottom of the world could read a noticeably different blue than the sky directly overhead. This
-// is what UE's "Sky Atmosphere affects fog inscattering colour" does: the height fog inherits the
-// real atmosphere's colour instead of carrying its own, so ground haze and horizon match the dome
-// they sit under exactly, at every sun angle, with nothing to keep in sync by hand.
+// UNDER A PHYSICAL SKY this is averSkyPhysical, the SAME atmosphere the dome itself is drawn with,
+// rather than skyColorFull's authored horizon/zenith gradient tinted by the level's FOG color --
+// see the history below. It is sampled straight up (0,0,1), NOT along the view ray toward wpos.
+// averSkyPhysical clamps its view direction to the upper hemisphere (cosV = max(dir.z, 0)), which
+// is correct for painting the actual sky dome -- you are always looking up at it -- but wrong for
+// fog, which sits at or below the horizon: every fogged pixel was pinned to the SAME grazing,
+// edge-on-through-the-whole-atmosphere path, the longest and haziest sample the model has, with a
+// hard seam exactly at the horizon where the clamp engages. That grazing path's own Mie forward-
+// scatter toward the sun read as a flat brown-to-white band, not the ground haze it was meant to
+// be. That glow is a real effect only at kilometre-scale viewing distance -- an actual distant
+// horizon -- not at room or arena scale, where the fog and the ground under it sit metres away, and
+// UE does not let fog inscattering pick it up at this scale either. Sampling zenith instead sidesteps
+// the clamp entirely and gives the flat, stable blue the fog and horizon are supposed to match.
 //
-// Under an AUTHORED sky there is no physical atmosphere to derive from, so the level's own FOG
-// color still tints the authored dome, unchanged from before.
+// UNDER AN AUTHORED sky there is no physical atmosphere to derive from, so the level's own FOG
+// color still tints skyColorFull's authored gradient along the true view ray, unchanged from before.
 float3 averFogInscatter(float3 wpos) {
+    if (averAtmoOn()) return averSkyPhysical(float3(0, 0, 1));
     float3 dir = normalize(wpos - gCamPos.xyz);
-    if (averAtmoOn()) return averSkyPhysical(dir);
     return skyColorFull(dir) * srgbToLin(gFogColor.rgb);
 }
 
