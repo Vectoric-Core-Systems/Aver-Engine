@@ -261,14 +261,19 @@ if ($AverLauncherCli) {
     if (-not (Test-Path -LiteralPath $installedExe)) { $installedExe = Join-Path $installRoot "$Edition\$version\bin\Sandbox.exe" }
     if (-not (Test-Path -LiteralPath $installedExe)) { Fail "install reported success but $installedExe does not exist. Nothing uploaded." }
 
-    # NO 2>&1 HERE. PowerShell 5.1 wraps a native command's stderr lines in NativeCommandErrorRecord
-    # and clears $?, and with $ErrorActionPreference = 'Stop' (set at the top of this script) that is
-    # a TERMINATING error -- an ordinary WARN line from the engine (e.g. "createTlas without
-    # ray-tracing support" on a GPU without it) would abort this script and report a false failure on
-    # a perfectly good install. The one line being checked for is INFO-level and lands on stdout
-    # already; nothing here needs stderr merged in.
+    # THROUGH cmd /c, NOT `& $installedExe` DIRECTLY. Capturing a native command's output into a
+    # variable is enough on its own -- with no explicit 2>&1 anywhere -- for PowerShell 5.1 to wrap
+    # any stderr line the process writes in a NativeCommandErrorRecord. With $ErrorActionPreference =
+    # 'Stop' (set at the top of this script) that promotes to a TERMINATING error, so an entirely
+    # ordinary WARN line from the engine (createTlas without ray-tracing support, on a GPU lacking it)
+    # aborted this exact call the first time it was tried -- caught only because it was run for real
+    # against the actual 0.1.1 payload, not just the -WhatIf rehearsal against a stand-in that
+    # happened not to hit that code path. Routing through cmd, the same way gh auth status and gh
+    # release view already do above, sidesteps PowerShell's native-stderr handling entirely: cmd's
+    # own 2>&1 merges the streams before PowerShell ever sees them, so what comes back is ordinary
+    # text, not ErrorRecords.
     Say 'booting the installed binary headlessly ...'
-    $bootLog = & $installedExe --headless --frames 5
+    $bootLog = cmd /c "`"$installedExe`" --headless --frames 5 2>&1"
     $bootExit = $LASTEXITCODE
     if ($bootExit -ne 0) {
         Fail "installed Sandbox.exe exited $bootExit - the install is bad. Nothing uploaded. Output:`n$($bootLog -join "`n")"
