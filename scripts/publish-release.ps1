@@ -354,21 +354,40 @@ if ($LASTEXITCODE -eq 0) {
 # ---- 10. prove the feed is actually live ------------------------------------------------------------
 # The upload succeeding says the assets exist. This says the launcher can find them, which is a
 # different claim and the one that matters.
+#
+# RETRIED, NOT A SINGLE SHOT. releases/latest/download/<asset> is a redirect GitHub resolves against
+# whichever release is currently "latest", and that pointer does not always flip the instant
+# gh release create returns -- the first version of this step fired one request immediately after
+# and got back the PREVIOUS release's index (an empty edition where 0.1.1 was expected), even though
+# the upload itself had fully succeeded and a plain curl moments later resolved correctly. A single
+# failed attempt here used to end the whole script on exit 1 for a release that had, in fact,
+# published fine -- worse than not checking at all, since it reported failure on success. Retried a
+# few times with a short wait between attempts before treating it as a real problem.
 Write-Host ''
 Say 'resolving the published feed ...'
 $feedUrl = "https://github.com/$Repo/releases/latest/download/index.json"
-try {
-    $r = Invoke-WebRequest -Uri $feedUrl -MaximumRedirection 10 -TimeoutSec 30 -UseBasicParsing
-    $live = ($r.Content | ConvertFrom-Json)
-    $latest = ($live.editions.PSObject.Properties | ForEach-Object { $_.Value.latest } | Sort-Object -Unique | Select-Object -Last 1)
-    if ($latest -ne $version) {
-        Write-Host "            served index advertises $latest, expected $version" -ForegroundColor Yellow
-    } else {
-        Write-Host "            $($r.StatusCode)  feed advertises $latest" -ForegroundColor Green
+$resolved = $false
+for ($attempt = 1; $attempt -le 5; $attempt++) {
+    try {
+        $r = Invoke-WebRequest -Uri $feedUrl -MaximumRedirection 10 -TimeoutSec 30 -UseBasicParsing
+        $live = ($r.Content | ConvertFrom-Json)
+        $latest = ($live.editions.PSObject.Properties | ForEach-Object { $_.Value.latest } | Sort-Object -Unique | Select-Object -Last 1)
+        if ($latest -eq $version) {
+            Write-Host "            $($r.StatusCode)  feed advertises $latest" -ForegroundColor Green
+            $resolved = $true
+            break
+        }
+        Write-Host "            attempt $attempt/5: served index advertises '$latest', expected $version -- GitHub's latest-release pointer may still be propagating" -ForegroundColor Yellow
+    } catch {
+        Write-Host "            attempt $attempt/5: FAILED to fetch $feedUrl" -ForegroundColor Yellow
     }
-} catch {
-    Write-Host "            FAILED to fetch $feedUrl" -ForegroundColor Red
-    Write-Host '            If this 404s the release was probably marked prerelease.' -ForegroundColor Yellow
+    if ($attempt -lt 5) { Start-Sleep -Seconds 5 }
+}
+if (-not $resolved) {
+    Write-Host "            the feed did not resolve to $version after 5 attempts over ~20s." -ForegroundColor Red
+    Write-Host '            The upload itself succeeded (see the release URL above) -- this is a propagation check failing,' -ForegroundColor Red
+    Write-Host '            not evidence the release is broken. Verify by hand: gh release view' "$tag --repo $Repo" -ForegroundColor Red
+    Write-Host '            or curl the feed URL directly. If it still will not resolve, the release may be prerelease.' -ForegroundColor Red
     exit 1
 }
 
