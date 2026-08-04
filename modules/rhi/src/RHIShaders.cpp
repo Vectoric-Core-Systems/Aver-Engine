@@ -290,7 +290,15 @@ float3 averAtmoScatter(float r0, float cosV, float cosS, float cosVS, float tMax
 }
 
 // The camera's altitude in kilometres.
-float averAtmoCamAlt()    { return max(gCamPos.z * gAtmoPlanet.z, 0.0); }
+//
+// FLOORED AT A METRE RATHER THAN AT ZERO. At exactly zero the camera sits ON the planet surface, and
+// the geometry below the horizon degenerates: the ray-sphere near root is t = 0 for EVERY downward
+// direction, so nothing registers as hitting the ground, and the march instead runs the full
+// atmosphere-shell length straight down THROUGH the planet, at a density clamped to sea level the
+// whole way. That is what turned the lower half of the view into a bright, speckled field the moment
+// a character fell past z = 0 -- which only became reachable when the implicit ground came out. A
+// metre of standoff costs nothing above ground and keeps the intersection well-posed below it.
+float averAtmoCamAlt()    { return max(gCamPos.z * gAtmoPlanet.z, 1e-3); }
 // The camera's radius from the planet centre, in kilometres.
 float averAtmoCamRadius() { return gAtmoPlanet.x + averAtmoCamAlt(); }
 
@@ -310,6 +318,18 @@ float3 averAtmoAerial(float3 wpos, out float3 transmittance) {
 float3 averSkyAbove(float3 dir) {
     return lerp(srgbToLin(gSkyHorizon.rgb), srgbToLin(gSkyZenith.rgb),
                 pow(saturate(dir.z * 0.5 + 0.5), gSkyParams.x));
+}
+
+// The reference sky colour that the fog and the dome's lower half both resolve to: the atmosphere
+// straight up, which is the sky above the clouds. Marched directly rather than by asking
+// averSkyPhysical for (0,0,1) so that both callers can use it without either having to call a
+// function defined after itself -- the same answer either way, since a zenith ray meets no ground.
+// A zenith ray's far root is exactly (atmosphere top - r0), so no intersection is needed.
+float3 averFogInscatterRef() {
+    float3 L  = normalize(gLightDir.xyz);
+    float  r0 = averAtmoCamRadius();
+    float3 T;
+    return averAtmoScatter(r0, 1.0, L.z, L.z, gAtmoPlanet.y - r0, (int)gAtmoTune.z, T);
 }
 
 // What the ground below the horizon radiates: albedo times the sun and sky falling on it.
@@ -335,50 +355,6 @@ float3 skyColorFull(float3 dir)
 float3 skyColor(float3 dir){
     if (averFurnaceOn()) return averFurnaceL();
     return skyColorFull(dir);
-}
-
-// ---- fog ---------------------------------------------------------------------------------------
-//
-// averFogFactor sits HERE, above the sky rather than with the rest of the fog below it, because
-// averSkyPhysical needs it: the dome's ground has to be fogged by the distance it actually sits at.
-// HLSL has no forward declarations, so this ordering IS the dependency.
-
-// Exponential height fog opacity at a world point, solved analytically along the view ray.
-float averFogFactor(float3 wpos) {
-    float3 a = gCamPos.xyz;
-    float3 v = wpos - a;
-    float len = length(v);
-    float start = gFogParams.z;
-    if (len <= start) return 0.0;
-
-    float k  = gFogParams.x;
-    float d0 = gFogColor.a;
-    float tau;
-    if (k <= 1e-8) {
-        tau = d0 * (len - start);
-    } else {
-        float3 dir = v / max(len, 1e-6);
-        a += dir * start;
-        float seg = len - start;
-        float dz = dir.z * seg;
-        float kdz = k * dz;
-        float f = abs(kdz) > 1e-4 ? (1.0 - exp(-kdz)) / kdz : 1.0;
-        tau = d0 * exp(-(a.z - gFogParams.y) * k) * seg * f;
-    }
-    return saturate(1.0 - exp(-tau)) * gFogParams.w;
-}
-
-// The reference sky colour that the fog and the dome's ground both converge to: the atmosphere
-// straight up, which is the sky above the clouds. Marched directly here rather than by asking
-// averSkyPhysical for (0,0,1) so that averSkyPhysical can use it without calling a function defined
-// after itself -- the same result either way, since a zenith ray meets no ground.
-float3 averFogInscatterRef() {
-    float3 L  = normalize(gLightDir.xyz);
-    float  r0 = averAtmoCamRadius();
-    float  disc = r0 * r0 - (r0 * r0 - gAtmoPlanet.y * gAtmoPlanet.y);
-    if (disc < 0.0) return 0.0;
-    float3 T;
-    return averAtmoScatter(r0, 1.0, L.z, L.z, -r0 + sqrt(disc), (int)gAtmoTune.z, T);
 }
 
 // The sky along one view ray, marched through the physical model.
@@ -407,18 +383,32 @@ float3 averFogInscatterRef() {
 // dir.z; the old ground crossfade evaluated to zero there too. Only dir.z < 0 changes, which is why
 // the fog's zenith sample and every probe that shades a surface are untouched.
 float3 averSkyPhysical(float3 dir) {
-    float3 L  = normalize(gLightDir.xyz);
-    float  r0 = averAtmoCamRadius();
-    float  b  = r0 * dir.z;
+    float3 L   = normalize(gLightDir.xyz);
+    float  alt = averAtmoCamAlt();
+    float  r0  = gAtmoPlanet.x + alt;
+    float  b   = r0 * dir.z;
 
     // Where the ray stops: the planet if it meets it, otherwise the top of the air.
-    float discP   = b * b - (r0 * r0 - gAtmoPlanet.x * gAtmoPlanet.x);
-    float tGround = (dir.z < 0.0 && discP >= 0.0) ? -b - sqrt(discP) : -1.0;
+    //
+    // THE RADIUS TERMS ARE FACTORED, NEVER SQUARED AND SUBTRACTED. r0 and the planet radius are both
+    // about 6360 km, so r0*r0 is ~4.05e7 and one float32 ulp up there is about 4 km^2 -- BIGGER than
+    // the quantity being asked for, which is only 25 km^2 for a camera two metres up and 2.5 km^2 at
+    // twenty centimetres. Computed as (r0*r0 - R*R) the result is mostly rounding error, and that
+    // error, amplified by the near-root subtraction below, is what dithered the entire lower
+    // hemisphere into speckle and concentric arcs at eye height. (r0-R)(r0+R) cannot cancel: the
+    // first factor IS the altitude, already known exactly.
+    float cP    = alt * (r0 + gAtmoPlanet.x);
+    float discP = b * b - cP;
+    // Vieta's form for the near root: t_near = c / (-b + sqrt(disc)). The textbook -b - sqrt(disc)
+    // subtracts two nearly equal positives and discards most of the mantissa precisely when the
+    // ground is close, which is whenever a camera is near it.
+    float tGround = (dir.z < 0.0 && discP >= 0.0) ? cP / max(-b + sqrt(discP), 1e-9) : -1.0;
     bool  hitsGround = tGround > 0.0;
 
     float tMax = tGround;
     if (!hitsGround) {
-        float discA = b * b - (r0 * r0 - gAtmoPlanet.y * gAtmoPlanet.y);
+        float cA    = (r0 - gAtmoPlanet.y) * (r0 + gAtmoPlanet.y);
+        float discA = b * b - cA;
         if (discA < 0.0) return 0.0;
         tMax = -b + sqrt(discA);
     }
@@ -426,21 +416,51 @@ float3 averSkyPhysical(float3 dir) {
     float3 T;
     float3 sky = averAtmoScatter(r0, dir.z, L.z, dot(dir, L), tMax, (int)gAtmoTune.z, T);
 
-    // THE GROUND IS FOGGED BY HOW FAR AWAY IT ACTUALLY IS. The dome is drawn as background, so
-    // averApplyFog -- which fogs every ordinary surface -- never reaches it, and the ground disc was
-    // the one thing in the frame exempt from the level's own air. That is what was left of the brown:
-    // a strip below the horizon holding its raw albedo while the terrain right next to it, at the same
-    // distance, had faded into the haze. tMax is the distance to that ground in kilometres, so the
-    // world-space hit point is known exactly and the same height fog every surface gets can be applied
-    // over the same distance. Far ground -- a horizon tens of kilometres out -- fogs to full opacity
-    // and becomes the fog's own colour, which is the sky above the clouds; ground close enough for the
-    // fog to be thin keeps its albedo, and at that range a level's own floor is drawn over it anyway.
-    if (hitsGround) {
-        float3 hit = gCamPos.xyz + dir * (tGround / max(gAtmoPlanet.z, 1e-12));
-        float3 ground = lerp(averGroundRadiance(), averFogInscatterRef(), averFogFactor(hit));
-        sky += ground * T * gGroundColor.a;
-    }
+    // BELOW THE HORIZON YOU SEE THE SKY, VEILED BY WHATEVER AIR IS IN THE WAY -- not a lit ground
+    // disc. That disc is what stayed brown through every fog fix, and it was never the fog colouring
+    // it: averGroundRadiance is an authored-sky construct, the raw warm sun at full strength with no
+    // air in front of it, and a neutral 0.24 albedo under a 1.0/0.98/0.92 sun at 100k lux lands on
+    // warm cream no matter what the haze around it does.
+    //
+    // It is also the wrong thing to draw at this scale. The ground you actually see in a game is the
+    // level's own geometry; the dome's ground only means anything zoomed far enough out for the
+    // planet to be a planet, and the authored sky (skyColorFull) still draws it there from the same
+    // GROUND record. So the physical dome returns the sky's own colour instead, attenuated by the
+    // transmittance over the distance to where the ground would have been. That falls out right at
+    // both ends with nothing to tune: looking steeply down the path is metres, T is ~1, and it reads
+    // as the zenith blue the fog uses; looking just under the horizon the path is tens of kilometres,
+    // T goes to zero and the marched inscatter already in `sky` takes over as the horizon's own
+    // colour. Continuous between the two, no band, no seam, and blue all the way down -- including
+    // below z = 0, where there is no right answer to draw but there is certainly a wrong one.
+    if (hitsGround) sky += averFogInscatterRef() * T;
     return sky;
+}
+
+// ---- fog ---------------------------------------------------------------------------------------
+
+// Exponential height fog opacity at a world point, solved analytically along the view ray.
+float averFogFactor(float3 wpos) {
+    float3 a = gCamPos.xyz;
+    float3 v = wpos - a;
+    float len = length(v);
+    float start = gFogParams.z;
+    if (len <= start) return 0.0;
+
+    float k  = gFogParams.x;
+    float d0 = gFogColor.a;
+    float tau;
+    if (k <= 1e-8) {
+        tau = d0 * (len - start);
+    } else {
+        float3 dir = v / max(len, 1e-6);
+        a += dir * start;
+        float seg = len - start;
+        float dz = dir.z * seg;
+        float kdz = k * dz;
+        float f = abs(kdz) > 1e-4 ? (1.0 - exp(-kdz)) / kdz : 1.0;
+        tau = d0 * exp(-(a.z - gFogParams.y) * k) * seg * f;
+    }
+    return saturate(1.0 - exp(-tau)) * gFogParams.w;
 }
 
 // The fog's in-scatter target: the sky above the clouds.
