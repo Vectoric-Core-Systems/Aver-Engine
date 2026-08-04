@@ -60,6 +60,11 @@ internal static class Fw
     [DllImport(Lib)] internal static extern void aver_fw_input_mouse(float[] out3);
     [DllImport(Lib)] internal static extern void aver_fw_set_view(int mode, float eyeHeight, float boomLength);
     [DllImport(Lib)] internal static extern void aver_fw_set_view_entity(int entity);
+
+    [DllImport(Lib)] internal static extern void aver_fw_set_sky_clouds(
+        int seed, float coverage, float density, float bottomCm, float topCm,
+        float featureScale, float windXCmPerSec, float windYCmPerSec);
+    [DllImport(Lib)] internal static extern void aver_fw_clear_sky_clouds();
     [DllImport(Lib)] internal static extern int  aver_fw_view_entity();
 
     /// <summary>Decodes a UTF-8 string returned as a pointer; "?" if null.</summary>

@@ -130,6 +130,121 @@ std::string startLevelText(const std::string& name) {
 }
 
 
+// The project's own F# project, holding its PCG rules.
+//
+// WHY THIS IS SCAFFOLDED AND NOT LEFT TO THE USER: Scripts.csproj already carries a CONDITIONAL
+// reference to Scripts.FSharp.fsproj, guarded by Exists(), and nothing ever created the file it
+// points at. The hook existed with nothing on the end of it.
+//
+// NAMED Scripts.FSharp.fsproj, NOT Scripts.fsproj, and that is load-bearing: both projects sit in
+// this directory and both default AssemblyName to their own filename, so a Scripts.fsproj would
+// emit a second Scripts.dll into the same output folder and one would overwrite the other.
+//
+// RAW STRING LITERALS THROUGHOUT. The generated text is XML and F#, both full of characters that
+// need escaping in a quoted C++ string, and this file has already shipped one bug from exactly that
+// -- a `--` inside an XML comment that made every generated .csproj unloadable. A raw literal has
+// no escapes to get wrong and reads as the file it produces.
+std::string fsprojText(const std::string& scriptsDir) {
+    const std::string pcg = engineProjectReference(scriptsDir, "scripting/fsharp/Aver.Pcg/Aver.Pcg.fsproj");
+    const std::string fw  = frameworkProjectReference(scriptsDir);
+
+    std::string s = R"FS(<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- This project's PCG rules, in F#.
+
+       Referenced by Scripts.csproj only when this file EXISTS, so deleting it is a supported way
+       to opt out and the C# still builds.
+
+       File order below is significant in F#: a file may only use what is compiled before it. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Scripts.FSharp</AssemblyName>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Sky.fs" />
+  </ItemGroup>
+
+)FS";
+    if (!pcg.empty() || !fw.empty()) {
+        s += "  <ItemGroup>\n";
+        if (!pcg.empty()) s += "    <ProjectReference Include=\"" + pcg + "\" />\n";
+        if (!fw.empty())  s += "    <ProjectReference Include=\"" + fw  + "\" />\n";
+        s += "  </ItemGroup>\n\n";
+    }
+    s += "</Project>\n";
+    return s;
+}
+
+// The project's sky, as a PCG graph. Every number is authored here rather than in the level, which
+// is the point: the sky becomes code the project owns instead of literals typed into an .ocworld.
+std::string skyScriptText(const std::string& projectName) {
+    std::string s = "module " + projectName + ".Sky\n\n";
+    s += R"FS(// This project's sky, as a PCG graph.
+//
+// The sky is an INFINITE density field -- a sky has no bounds -- built from the same Aver.Pcg types
+// the rest of the PCG library uses. Change the numbers in `spec` and the sky changes: the coverage
+// the engine renders at is MEASURED from the field rather than declared, so the knobs really drive
+// it rather than sitting beside it.
+//
+// WHAT THE ENGINE DOES WITH THIS, stated plainly, because the gap matters. The cloud raymarch has
+// its own noise and does not evaluate this field per sample. What crosses the boundary is the SEED,
+// hashed into a translation of the renderer's noise domain so two seeds give two skies, and the
+// coverage measured below. So this graph PARAMETERISES the sky rather than replacing the renderer's
+// noise -- worth knowing before you tune octaves expecting to watch them appear.
+//
+// Call Apply() once, from your game mode's OnBeginPlay. Until something calls it, the engine renders
+// whatever the level authored.
+
+open Aver.Pcg
+
+/// How this project's sky is shaped.
+let spec =
+    {| Seed = 3                 // which sky this is; change it for a different one
+       CellSizeCm = 1600.0f     // world size of one lattice cell; 1600 is one chunk
+       Octaves = 4              // more octaves, finer structure
+       CoverageFloor = 0.45f    // a DENSITY floor, so HIGHER means LESS cloud
+       BottomCm = 150000.0f
+       TopCm = 280000.0f
+       WindXCmPerSec = 900.0f
+       WindYCmPerSec = 260.0f |}
+
+/// The infinite density field this sky is.
+let field () : InfiniteSpec =
+    let baseField = Pcg.infiniteExpanse spec.Seed spec.CellSizeCm spec.Octaves
+    { baseField with CoverageFloor = spec.CoverageFloor; CoverageBias = 1.6f }
+
+/// The fraction of the field that clears its floor, on a coarse 16x16 lattice.
+/// Coarse on purpose: this runs once at level load and feeds a single scalar.
+let measureCoverage () =
+    let f = field ()
+    let span = spec.CellSizeCm * 16.0f
+    let z = (spec.BottomCm + spec.TopCm) * 0.5f
+    let mutable hits = 0
+    for iy in 0 .. 15 do
+        for ix in 0 .. 15 do
+            let x = float32 ix / 16.0f * span
+            let y = float32 iy / 16.0f * span
+            if Pcg.sampleInfinite f x y z > 0.0f then hits <- hits + 1
+    float32 hits / 256.0f
+
+/// Publishes this sky to the engine. Call once from OnBeginPlay.
+let Apply () =
+    Aver.Framework.Sky.SetClouds(
+        spec.Seed,
+        measureCoverage (),
+        1.0f,
+        spec.BottomCm,
+        spec.TopCm,
+        0.00002f,
+        spec.WindXCmPerSec,
+        spec.WindYCmPerSec)
+)FS";
+    return s;
+}
+
 // The four engine assemblies a project compiles against, in the order they are written.
 struct EngineRefs {
     std::string scripting;   // AverBehaviour
@@ -570,6 +685,17 @@ bool scaffoldProject(const std::string& location, const std::string& name,
         const std::string csproj = scriptsDir + "\\" + kCsprojName;
         if (!writeFileText(csproj, csprojText(engineRefs(scriptsDir))))
             AVER_WARN("[Editor] project created, but could not write {}", csproj);
+    }
+    // The F# side. A WARNING AND NOT A FAILURE for the starter map's reason: a project with no F#
+    // is perfectly valid, and Scripts.csproj references it only when the file exists.
+    {
+        const std::string scriptsDir = content + "\\Scripts";
+        const std::string fsproj = scriptsDir + "\\Scripts.FSharp.fsproj";
+        if (!writeFileText(fsproj, fsprojText(scriptsDir)))
+            AVER_WARN("[Editor] project created, but could not write {}", fsproj);
+        const std::string sky = scriptsDir + "\\Sky.fs";
+        if (!writeFileText(sky, skyScriptText(name)))
+            AVER_WARN("[Editor] project created, but could not write {}", sky);
     }
     {
         const std::string starter = content + "\\Materials\\Surfaces.cs";

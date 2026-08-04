@@ -896,4 +896,68 @@ void    aver_fw_set_view_entity(int32_t entity) { viewRequest().entity = entity;
 // The published view entity, or 0.
 int32_t aver_fw_view_entity(void)               { return viewRequest().entity; }
 
+// ---- the sky's cloud layer, published by a script -------------------------------------------
+//
+// SAME SHAPE AS ViewRequest, and here for the same reason: it is app-facing state a script wants to
+// set and the host reads once a frame. There is no other route -- nothing under modules/scripting
+// or modules/framework mentions PCG at all, so a project's sky could only ever be numbers typed
+// into its .ocworld.
+//
+// A REQUEST, NOT THE TRUTH. `set` is what the host applies; until a script calls it, `has` is 0 and
+// the host keeps whatever the level authored. That ordering matters: a project with no sky script
+// must render exactly as it did before this existed.
+struct SkyRequest {
+    int32_t has = 0;
+    int32_t seed = 0;
+    float coverage = 0.45f;
+    float density  = 1.0f;
+    float bottom   = 150000.0f;
+    float top      = 280000.0f;
+    float scale    = 0.00002f;
+    float windX    = 900.0f;
+    float windY    = 260.0f;
+};
+SkyRequest& skyRequest() { static SkyRequest s; return s; }
+
+// Publishes the cloud layer a script wants. Any later call replaces the whole request.
+void aver_fw_set_sky_clouds(int32_t seed, float coverage, float density,
+                            float bottomCm, float topCm, float featureScale,
+                            float windXCmPerSec, float windYCmPerSec) {
+    SkyRequest& s = skyRequest();
+    s.has = 1;
+    s.seed = seed;
+    // Clamped here rather than trusted: this is the one point a script's arithmetic reaches the
+    // renderer, and a NaN coverage from a bad F# expression would take the whole cloud layer with
+    // it. `top <= bottom` is left to the device, which already substitutes bottom + 1.
+    s.coverage = coverage < 0.0f ? 0.0f : (coverage > 1.0f ? 1.0f : coverage);
+    s.density  = density  < 0.0f ? 0.0f : density;
+    s.bottom   = bottomCm;
+    s.top      = topCm;
+    s.scale    = featureScale > 0.0f ? featureScale : 0.00002f;
+    s.windX    = windXCmPerSec;
+    s.windY    = windYCmPerSec;
+}
+
+// Reads the published cloud layer. Returns 1 when a script has published one, 0 otherwise, and
+// writes nothing through the out pointers when it returns 0.
+int32_t aver_fw_sky_clouds(int32_t* outSeed, float* outCoverage, float* outDensity,
+                           float* outBottomCm, float* outTopCm, float* outFeatureScale,
+                           float* outWindX, float* outWindY) {
+    const SkyRequest& s = skyRequest();
+    if (!s.has) return 0;
+    if (outSeed)         *outSeed         = s.seed;
+    if (outCoverage)     *outCoverage     = s.coverage;
+    if (outDensity)      *outDensity      = s.density;
+    if (outBottomCm)     *outBottomCm     = s.bottom;
+    if (outTopCm)        *outTopCm        = s.top;
+    if (outFeatureScale) *outFeatureScale = s.scale;
+    if (outWindX)        *outWindX        = s.windX;
+    if (outWindY)        *outWindY        = s.windY;
+    return 1;
+}
+
+// Drops the request, so the level's own sky takes over again. Called when a level unloads, or a
+// script can call it to hand the sky back.
+void aver_fw_clear_sky_clouds(void) { skyRequest() = SkyRequest{}; }
+
 }  // extern "C"

@@ -144,6 +144,9 @@ private:
     f32 fogColor_[3]  = {1.0f, 1.0f, 1.0f};
     f32 fogDensity_   = 4e-6f;
     f32 cloudTime_    = 0.0f;
+    // Whether a script currently owns the sky. Only so the handover is logged ONCE each way rather
+    // than every frame; nothing reads it to decide anything.
+    bool scriptSkyReported_ = false;
 
     SceneDrawStats drawStats_;
 

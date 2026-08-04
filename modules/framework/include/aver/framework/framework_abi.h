@@ -26,8 +26,10 @@ extern "C" {
 
 /* ABI version, as (major << 16) | minor. Versioned independently of AVER_SCENE_ABI_VERSION. */
 #define AVER_FW_ABI_VERSION_MAJOR 1
-/* 1: added aver_fw_set_view_entity / aver_fw_view_entity. Additive only. */
-#define AVER_FW_ABI_VERSION_MINOR 1
+/* 1: added aver_fw_set_view_entity / aver_fw_view_entity. Additive only.
+ * 2: added aver_fw_set_sky_clouds / aver_fw_sky_clouds / aver_fw_clear_sky_clouds. Additive only,
+ *    so a host built against minor 1 links and runs unchanged against this header. */
+#define AVER_FW_ABI_VERSION_MINOR 2
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -204,6 +206,26 @@ AVER_FW_ABI void aver_fw_view(int32_t* outMode, float* outEyeHeight, float* outB
 AVER_FW_ABI void    aver_fw_set_view_entity(int32_t entity);
 /* The published view entity, or 0. Valid only while the scene says it is. */
 AVER_FW_ABI int32_t aver_fw_view_entity(void);
+
+/* ---- the sky's cloud layer, published by a script ------------------------------------------
+ *
+ * A REQUEST, NOT THE TRUTH: until a script calls the setter, aver_fw_sky_clouds returns 0 and the
+ * host keeps whatever the level authored, so a project with no sky script renders exactly as it
+ * did before these entry points existed.
+ *
+ * Lengths are CENTIMETRES and wind is centimetres per second, like everything else in this engine.
+ * featureScale is 1 / the width of one noise feature in world units.
+ */
+AVER_FW_ABI void aver_fw_set_sky_clouds(int32_t seed, float coverage, float density,
+                                        float bottomCm, float topCm, float featureScale,
+                                        float windXCmPerSec, float windYCmPerSec);
+/* Reads the published cloud layer. Returns 1 when one has been published, 0 otherwise, and writes
+ * nothing through the out pointers when it returns 0. Every pointer may be NULL. */
+AVER_FW_ABI int32_t aver_fw_sky_clouds(int32_t* outSeed, float* outCoverage, float* outDensity,
+                                       float* outBottomCm, float* outTopCm, float* outFeatureScale,
+                                       float* outWindX, float* outWindY);
+/* Drops the request, handing the sky back to the level. */
+AVER_FW_ABI void aver_fw_clear_sky_clouds(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

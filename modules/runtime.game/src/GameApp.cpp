@@ -468,8 +468,40 @@ void GameApp::pushFrame(Engine& e) {
                                               : skyField->boundedSpec.coverageFloor;
         sky_.cloudCoverage = 1.0f - (floorV < 0.0f ? 0.0f : (floorV > 1.0f ? 1.0f : floorV));
         if (frames_ <= 1)
-            AVER_INFO("[PCG] sky field '{}' drives the cloud layer: seed {}, coverage {:.2f}",
+            AVER_INFO("[PCG] sky field '{}' parameterises the cloud layer: seed {}, coverage {:.2f}",
                       skyField->name, sky_.cloudSeed, sky_.cloudCoverage);
+    }
+#endif
+#if AVER_MODULE_FRAMEWORK
+    // A SCRIPT'S SKY WINS OVER THE LEVEL'S, and only when there is one. aver_fw_sky_clouds returns
+    // 0 until something has published, so a project with no sky script keeps exactly the sky its
+    // .ocworld authored -- which is what makes this additive rather than a behaviour change.
+    //
+    // Read every frame rather than latched at load, so editing the F# and hot-reloading moves the
+    // sky without restarting. That is the point of putting the sky in a script at all.
+    {
+        i32 seed = 0;
+        f32 coverage = 0.0f, density = 0.0f, bottom = 0.0f, top = 0.0f, scale = 0.0f;
+        f32 windX = 0.0f, windY = 0.0f;
+        if (aver_fw_sky_clouds(&seed, &coverage, &density, &bottom, &top, &scale, &windX, &windY)) {
+            sky_.cloudsEnabled = true;
+            sky_.cloudSeed     = seed;
+            sky_.cloudCoverage = coverage;
+            sky_.cloudDensity  = density;
+            sky_.cloudBottom   = bottom;
+            sky_.cloudTop      = top;
+            sky_.cloudScale    = scale;
+            sky_.cloudWind[0]  = windX;
+            sky_.cloudWind[1]  = windY;
+            if (!scriptSkyReported_) {
+                scriptSkyReported_ = true;
+                AVER_INFO("[Sky] a script owns the cloud layer: seed {}, coverage {:.2f}, "
+                          "{:.0f}..{:.0f} cm", seed, coverage, bottom, top);
+            }
+        } else if (scriptSkyReported_) {
+            scriptSkyReported_ = false;
+            AVER_INFO("[Sky] the script released the cloud layer; the level's sky is back");
+        }
     }
 #endif
     sky_.skyLightIntensity = sunAmbient_;

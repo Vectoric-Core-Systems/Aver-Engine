@@ -16,7 +16,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Order is significant in F#: a file may only use what is compiled before it. Sky and Forest
+         are independent, so this order is alphabetical rather than meaningful. -->
     <Compile Include="Forest.fs" />
+    <Compile Include="Sky.fs" />
   </ItemGroup>
 
   <ItemGroup>
