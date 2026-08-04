@@ -5332,6 +5332,8 @@ private:
     bool        upgradeAsked_ = false;
     bool        exitPrompt_ = false;      // the unsaved-changes modal is up
     std::string exitPromptError_;         // why a "Save all" attempt failed
+    // Every PCGVOLUME the loaded level carried, kept verbatim so a save cannot drop them.
+    std::vector<fmt::OcPcgVolume> levelPcgVolumes_;
     std::string upgradeStatus_;
     f32         upgradeStatusAge_ = 0.0f;   // seconds since it was set; see setUpgradeStatus
     f32  uiDemoHealth_ = 0.72f, uiDemoStamina_ = 0.44f, uiDemoScroll_ = 0.0f, uiDemoClock_ = 0.0f;
@@ -5356,6 +5358,19 @@ private:
         fmt::OcWorldData w;
         std::string why;
         if (!fmt::loadOcworld(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
+
+        // CARRIED, NOT UNDERSTOOD. The editor has no UI for a PCGVOLUME and does not need one, but
+        // saveLevel builds a fresh OcWorldData from the editor's own state -- so anything the editor
+        // does not hold is GONE on the next save. That silently deleted every PCGVOLUME in the
+        // level, including the one a new project is scaffolded with and the one the forest
+        // generator writes: open, save, and the sky's field record no longer exists.
+        //
+        // The same reasoning as the project manifest keeping unknown keys: a tool that rewrites a
+        // file it only partly understands must preserve the rest verbatim.
+        levelPcgVolumes_ = w.pcgVolumes;
+        if (!levelPcgVolumes_.empty())
+            AVER_INFO("[Level] carrying {} PCGVOLUME record(s) through the editor unchanged",
+                      levelPcgVolumes_.size());
 
         scene::World& world = scene::World::instance();
         for (const fmt::OcWorldPlacement& p : w.placements) {
@@ -5495,6 +5510,9 @@ private:
         entityLabels_.clear();
         labelCounts_.clear();
         entityBodies_.clear();
+        // Cleared with the rest of the level's state: carrying one level's PCG records into the
+        // next would write them into a file that never had them.
+        levelPcgVolumes_.clear();
         undoStack_.clear();
         redoStack_.clear();
         editToEntity_.clear();
@@ -5528,6 +5546,8 @@ private:
             w.sunDir[i] = sky_.sunDirection[i];
             w.sunColor[i] = sunColor_[i];
         }
+        // Straight back out, in the order they were read. See loadLevel.
+        w.pcgVolumes      = levelPcgVolumes_;
         w.skyPhysical     = sky_.model == rhi::SkyModel::Physical;
         w.skyMieScatter   = sky_.air.mieScatter;
         w.skyMultiScatter = sky_.air.multiScatterGain;
