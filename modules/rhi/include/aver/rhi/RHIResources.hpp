@@ -428,6 +428,8 @@ public:
     // Binds render targets; the caller must already have transitioned them.
     virtual void setRenderTargets(const TextureHandle* colors, u32 count, TextureHandle depth) = 0;
     virtual void clearDepth(TextureHandle depth, f32 value) = 0;
+    // Clears a colour target to an RGBA value. `color` is 4 floats.
+    virtual void clearColor(TextureHandle target, const f32 color[4]) = 0;
 
     // Binds a set to one of the pipeline's declared tables.
     virtual void setBindingSet(BindingSetHandle set, u32 table = 0) = 0;

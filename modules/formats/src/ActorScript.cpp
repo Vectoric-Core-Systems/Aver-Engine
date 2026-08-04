@@ -379,45 +379,69 @@ ActorClassInfo parseActorClass(std::string_view t) {
     return all.empty() ? ActorClassInfo{} : all.front();
 }
 
-// Writes `edited`'s values back into the class text. Returns false with `err` set on a bad parse.
-bool rewriteActorClass(std::string_view t, const ActorClassInfo& edited,
-                       std::string& out, std::string* err) {
-    struct Edit { usize begin, end; std::string text; };
-    std::vector<Edit> edits;
+namespace {
 
-    auto number = [](f32 v) {
-        // Fixed notation, never exponent: the parser's grammar has no exponent form.
-        char buf[64];
-        std::snprintf(buf, sizeof buf, "%.6f", static_cast<double>(v));
-        std::string t(buf);
-        if (t.find('.') != std::string::npos) {
-            while (!t.empty() && t.back() == '0') t.pop_back();
-            if (!t.empty() && t.back() == '.') t.pop_back();
-        }
-        if (t.empty() || t == "-") t = "0";
-        return t + "f";
-    };
+// One planned replacement: text at [begin,end) in the ORIGINAL string becomes `text`.
+struct ClassEdit { usize begin, end; std::string text; };
+
+// Fixed notation, never exponent: the parser's grammar has no exponent form.
+std::string numberLiteral(f32 v) {
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%.6f", static_cast<double>(v));
+    std::string t(buf);
+    if (t.find('.') != std::string::npos) {
+        while (!t.empty() && t.back() == '0') t.pop_back();
+        if (!t.empty() && t.back() == '.') t.pop_back();
+    }
+    if (t.empty() || t == "-") t = "0";
+    return t + "f";
+}
+
+// The exact inverse of parseString's decoder, which is `\X` -> literal X for whatever X follows the
+// backslash. Round-trips only what that decoder understands -- a backslash and a double quote -- but
+// that is everything a mesh path or material name can legally contain in this grammar.
+//
+// WITHOUT THIS, A DECODED PATH WAS WRITTEN BACK RAW. meshPathSpan and materialSpan cover the
+// ORIGINAL, ESCAPED bytes of the string literal, while edited.meshPath / edited.material hold the
+// DECODED value parseString produced. Splicing the decoded value back over the escaped span meant a
+// path containing a backslash -- a plain Windows path, or any path copied out of Explorer -- wrote an
+// invalid escape into the C# and could desync the compiler's idea of where the string literal ends.
+std::string escapeForClassLiteral(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (const char c : s) {
+        if (c == '\\' || c == '"') out.push_back('\\');
+        out.push_back(c);
+    }
+    return out;
+}
+
+// Appends every valid, in-bounds span of one class as a planned edit against `t`.
+void collectClassEdits(std::string_view t, const ActorClassInfo& edited, std::vector<ClassEdit>& edits) {
     auto put = [&](const ActorValueSpan& sp, std::string text) {
         if (!sp.valid() || sp.end > t.size()) return;
         edits.push_back({sp.begin, sp.end, std::move(text)});
     };
-
-    put(edited.meshPathSpan, edited.meshPath);
-    put(edited.materialSpan, edited.material);
-    put(edited.capsuleHeightSpan, number(edited.capsuleHeight));
-    put(edited.capsuleRadiusSpan, number(edited.capsuleRadius));
-    put(edited.eyeHeightSpan, number(edited.eyeHeight));
+    put(edited.meshPathSpan, escapeForClassLiteral(edited.meshPath));
+    put(edited.materialSpan, escapeForClassLiteral(edited.material));
+    put(edited.capsuleHeightSpan, numberLiteral(edited.capsuleHeight));
+    put(edited.capsuleRadiusSpan, numberLiteral(edited.capsuleRadius));
+    put(edited.eyeHeightSpan, numberLiteral(edited.eyeHeight));
     const f32 cam[3] = {edited.cameraFovDeg, edited.cameraNearCm, edited.cameraFarCm};
-    for (int i = 0; i < 3; ++i) put(edited.cameraSpan[i], number(cam[i]));
+    for (int i = 0; i < 3; ++i) put(edited.cameraSpan[i], numberLiteral(cam[i]));
     const f32 lit[2] = {edited.lightIntensityLux, edited.lightRangeCm};
-    for (int i = 0; i < 2; ++i) put(edited.lightSpan[i], number(lit[i]));
+    for (int i = 0; i < 2; ++i) put(edited.lightSpan[i], numberLiteral(lit[i]));
+}
 
+// Checks for any two edits touching the same bytes, sorts descending by start so applying them
+// left-to-right never invalidates a later edit's still-unapplied span, and applies them.
+bool applyClassEdits(std::string_view t, std::vector<ClassEdit>& edits, std::string& out, std::string* err) {
     if (edits.empty()) { out.assign(t); return true; }
 
     for (usize a = 0; a + 1 < edits.size(); ++a)
         for (usize c = a + 1; c < edits.size(); ++c)
             if (edits[a].begin < edits[c].end && edits[c].begin < edits[a].end) {
-                if (err) *err = "the class's value spans overlap; re-read the file before saving";
+                if (err) *err = "two edited value spans overlap; re-read the file before saving";
                 return false;
             }
 
@@ -426,8 +450,35 @@ bool rewriteActorClass(std::string_view t, const ActorClassInfo& edited,
             if (edits[c].begin > edits[a].begin) std::swap(edits[a], edits[c]);
 
     out.assign(t);
-    for (const Edit& e : edits) out.replace(e.begin, e.end - e.begin, e.text);
+    for (const ClassEdit& e : edits) out.replace(e.begin, e.end - e.begin, e.text);
     return true;
+}
+
+} // namespace
+
+// Writes `edited`'s values back into the class text. Returns false with `err` set on a bad parse.
+bool rewriteActorClass(std::string_view t, const ActorClassInfo& edited,
+                       std::string& out, std::string* err) {
+    std::vector<ClassEdit> edits;
+    collectClassEdits(t, edited, edits);
+    return applyClassEdits(t, edits, out, err);
+}
+
+// Writes every class's values back into the text IN ONE PASS.
+//
+// THIS IS NOT rewriteActorClass CALLED IN A LOOP, and the difference is the whole point. Every
+// class's spans were measured against the SAME original `t` when the file was parsed. Chaining --
+// feeding class N's rewrite the output of class N-1's -- keeps class N's spans pointing at the
+// offsets they had in the ORIGINAL text, which are wrong as soon as class N-1's edit changes the
+// text's length: a save that only touched class 0 could splice class 1's values into the middle of
+// an unrelated string literal. Collecting every class's edits into one list and applying them
+// together, in the same descending-offset order a single class already used, means every span is
+// resolved against the text it was actually measured from.
+bool rewriteActorClasses(std::string_view t, const std::vector<ActorClassInfo>& edited,
+                         std::string& out, std::string* err) {
+    std::vector<ClassEdit> edits;
+    for (const ActorClassInfo& k : edited) collectClassEdits(t, k, edits);
+    return applyClassEdits(t, edits, out, err);
 }
 
 // Parses the generated region and its b.Place placements out of an actor script.

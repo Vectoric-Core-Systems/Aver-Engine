@@ -105,6 +105,15 @@ ActorClassInfo parseActorClass(std::string_view csText);
 bool rewriteActorClass(std::string_view csText, const ActorClassInfo& edited,
                        std::string& out, std::string* err = nullptr);
 
+// The same, for every class in one file at once. NOT equivalent to calling rewriteActorClass in a
+// loop and chaining the output: every span here is checked and applied against the SAME original
+// `csText` in one pass, ordered so an earlier edit can never invalidate a later one's span. Chaining
+// instead -- feeding class N's rewrite the output of class N-1's -- leaves class N's spans pointing
+// at the offsets they had in the ORIGINAL text, which are wrong as soon as an earlier class's edit
+// changes the text's length. Use this whenever more than one class in a file may have been edited.
+bool rewriteActorClasses(std::string_view csText, const std::vector<ActorClassInfo>& edited,
+                         std::string& out, std::string* err = nullptr);
+
 // Reads the generated region. Never modifies anything.
 ActorScript parseActorScript(std::string_view csText);
 

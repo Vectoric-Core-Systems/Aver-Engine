@@ -162,6 +162,21 @@ void composeTransform(const f32 pos[3], const f32 rotDeg[3], const f32 scale[3],
     out[12] = pos[0];         out[13] = pos[1];         out[14] = pos[2];         out[15] = 1.0f;
 }
 
+// The world-space direction of the placement's own local axis 0/1/2 (X/Y/Z). Deliberately the exact
+// same rotation arithmetic as composeTransform's row0/row1/row2 -- that is what "local axis" means
+// here, and there must be only one place that answers the question or the gizmo and the mesh it is
+// drawn over can disagree again the way the rotate handle used to.
+void localAxisWorldDir(const f32 rotDeg[3], int axis, f32 out[3]) {
+    constexpr f32 kPi = 3.14159265358979f;
+    const f32 y = rotDeg[0] * kPi / 180.0f, p = rotDeg[1] * kPi / 180.0f, r = rotDeg[2] * kPi / 180.0f;
+    const f32 cy = std::cos(y), sy = std::sin(y);
+    const f32 cp = std::cos(p), sp = std::sin(p);
+    const f32 cr = std::cos(r), sr = std::sin(r);
+    if (axis == 0)      { out[0] = cy * cp;                out[1] = sy * cp;                out[2] = -sp; }
+    else if (axis == 1) { out[0] = cy*sp*sr - sy*cr;        out[1] = sy*sp*sr + cy*cr;        out[2] = cp*sr; }
+    else                { out[0] = cy*sp*cr + sy*sr;        out[1] = sy*sp*cr - cy*sr;        out[2] = cp*cr; }
+}
+
 // ---------------------------------------------------------------- the component tree
 
 // What one node in the component tree is.
@@ -234,9 +249,14 @@ public:
         if (!dirty_) return true;
         std::string out = source_;
 
-        for (const fmt::ActorClassInfo& k : classes_) {
+        // ONE PASS OVER EVERY CLASS, not a loop chaining rewriteActorClass. Each class's spans are
+        // byte offsets into source_ as it was last parsed; feeding class N's rewrite the ALREADY
+        // rewritten output of class N-1 left class N's spans pointing at the wrong bytes the moment
+        // an earlier class's edit changed the text's length -- a save touching only the first class
+        // could splice the second class's values into an unrelated string literal.
+        if (!classes_.empty()) {
             std::string next;
-            if (!fmt::rewriteActorClass(out, k, next, why)) return false;
+            if (!fmt::rewriteActorClasses(out, classes_, next, why)) return false;
             out = std::move(next);
         }
         if (!script_.models.empty()) {
@@ -857,7 +877,20 @@ bool ActorEditor::axisTip(const fmt::ActorModel& m, int axis, ImVec2 imageSize, 
     if (!projectToScreen(m.pos, imageSize, origin)) return false;
     // A world offset whose screen length is kGizmoPixels, found by projecting a unit step.
     f32 probe[3] = {m.pos[0], m.pos[1], m.pos[2]};
-    probe[axis] += 1.0f;
+    if (tool_ == ToolScale) {
+        // SCALE IS ALWAYS LOCAL, whatever the placement's rotation. composeTransform multiplies
+        // row `axis` of the rotation matrix by scale[axis], so scale[axis] stretches along the
+        // OBJECT'S OWN axis, not the world one. Drawing and picking along the world axis let the
+        // arrow you dragged and the direction that actually stretched be different lines on any
+        // rotated placement -- confirmed: yaw 90 degrees and the red (X) handle stretched the
+        // model along world Y instead. Reusing this same function for picking (pickGizmoAxis) and
+        // for the drag measurement (dragAlong) fixes all three at once, because they all call here.
+        f32 dir[3];
+        localAxisWorldDir(m.rot, axis, dir);
+        probe[0] += dir[0]; probe[1] += dir[1]; probe[2] += dir[2];
+    } else {
+        probe[axis] += 1.0f;
+    }
     ImVec2 unit;
     if (!projectToScreen(probe, imageSize, unit)) return false;
     const f32 dx = unit.x - origin.x, dy = unit.y - origin.y;

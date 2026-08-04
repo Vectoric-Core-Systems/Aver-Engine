@@ -312,6 +312,13 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     ctx.setViewport(0, 0, width_, height_);
     ctx.setScissor(0, 0, width_, height_);
     ctx.clearDepth(depth_, 1.0f);
+    // THE COLOUR TARGET WAS NEVER CLEARED. Only depth was, so whatever the mesh did not cover kept
+    // every previous frame's pixels -- an actor with holes, or one that got smaller as its scale was
+    // dragged down, composited its own trail forever instead of showing background there. Same
+    // chrome grey as the level viewport (SandboxApp.cpp:1136), since this is the same kind of
+    // editor surface.
+    const f32 kChromeGrey[4] = {0.055f, 0.055f, 0.062f, 1.0f};
+    ctx.clearColor(color_, kChromeGrey);
 
     ctx.setPipeline(pipeline_);
 

@@ -1171,6 +1171,7 @@ public:
     void setScissor(u32 x, u32 y, u32 w, u32 h) override;
     void setRenderTargets(const TextureHandle* colors, u32 count, TextureHandle depth) override;
     void clearDepth(TextureHandle depth, f32 value) override;
+    void clearColor(TextureHandle target, const f32 color[4]) override;
     void setBindingSet(BindingSetHandle set, u32 table) override;
     void setConstants(u32 slot, const void* data, u32 dwords) override;
     void setConstantBuffer(u32 slot, const void* data, u32 bytes) override;
@@ -4410,6 +4411,16 @@ void D3D12RenderContext::clearDepth(TextureHandle depth, f32 value) {
     if (!t || !t->dsvHeap || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] clearDepth on a non-depth texture"); return; }
     dev_->cmdList_->ClearDepthStencilView(t->dsvHeap->GetCPUDescriptorHandleForHeapStart(),
                                           D3D12_CLEAR_FLAG_DEPTH, value, 0, 0, nullptr);
+}
+
+// Clears a colour target to `color`. Added because a render feature with an off-screen colour
+// target and no full-screen background pass -- ActorPreview is the first one -- had no way to clear
+// it at all: this RHI's only clear entry point was clearDepth. Without it the target kept every
+// previous frame's pixels wherever the current frame did not draw over them, compositing forever.
+void D3D12RenderContext::clearColor(TextureHandle target, const f32 color[4]) {
+    RhiTexture* t = res_->texture(target);
+    if (!t || !t->rtvHeap || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] clearColor on a non-render-target texture"); return; }
+    dev_->cmdList_->ClearRenderTargetView(t->rtvHeap->GetCPUDescriptorHandleForHeapStart(), color, 0, nullptr);
 }
 
 // Binds a binding set's descriptors at the given table index of the current pipeline.

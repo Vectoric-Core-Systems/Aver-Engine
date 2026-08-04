@@ -207,6 +207,73 @@ static void testClassDefaultsRewrite() {
     }
 }
 
+// rewriteActorClasses: every class rewritten in one pass, and mesh/material paths re-escaped.
+static void testMultiClassRewriteAndEscaping() {
+    AVER_INFO("=== rewriting every class at once ===");
+
+    static const char* kTwo =
+        "using Aver.Framework;\n"
+        "namespace Game;\n"
+        "\n"
+        "[AverClass(\"Hero\")]\n"
+        "public sealed class Hero : AverCharacter\n"
+        "{\n"
+        "    public static void Configure(ClassBuilder b) => b.Camera(70f, 5f, 100000f);\n"
+        "    public override void OnBeginPlay(BeginReason r) { Height = 180f; }\n"
+        "}\n"
+        "\n"
+        "[AverClass(\"Prop\")]\n"
+        "public sealed class Prop : AverActor\n"
+        "{\n"
+        "    public static void Configure(ClassBuilder b) => b.Mesh(\"Meshes/crate.ocmesh\", \"M_Wood\");\n"
+        "}\n";
+
+    std::vector<fmt::ActorClassInfo> all = fmt::parseActorClasses(kTwo);
+    check(all.size() == 2, "two classes");
+    if (all.size() != 2) return;
+
+    // THE REGRESSION: shrink the first class's value so the text gets SHORTER, which is what makes
+    // the second class's spans -- unchanged, still measured against the original text -- land on
+    // the wrong bytes if a caller chains rewriteActorClass instead of using the batch entry point.
+    fmt::ActorClassInfo hero = all[0];
+    hero.capsuleHeight = 9.0f;   // "180f" (4 bytes) -> "9f" (2 bytes): the text shrinks by 2
+
+    std::string out, err;
+    check(fmt::rewriteActorClasses(kTwo, {hero, all[1]}, out, &err),
+          "rewriting both classes together: " + err);
+    check(out.find("Height = 9f;") != std::string::npos, "the shrunk value lands correctly");
+    check(out.find("b.Mesh(\"Meshes/crate.ocmesh\", \"M_Wood\")") != std::string::npos,
+          "and the SECOND class's untouched mesh call is intact -- not spliced by class 0's shift");
+    check(out.find("[AverClass(\"Prop\")]") != std::string::npos, "its attribute still stands");
+
+    // The chained (wrong) way, for contrast: this is what save() used to do, and it must actually
+    // reproduce the corruption or this test would not be exercising the bug it exists for.
+    std::string chained, chainedNext;
+    fmt::rewriteActorClass(kTwo, hero, chained, &err);
+    fmt::rewriteActorClass(chained, all[1], chainedNext, &err);
+    check(chainedNext.find("b.Mesh(\"Meshes/crate.ocmesh\", \"M_Wood\")") == std::string::npos,
+          "confirms the bug: chaining corrupts the second class's mesh call");
+
+    AVER_INFO("=== a path with a backslash or a quote round-trips through the C# literal ===");
+    {
+        fmt::ActorClassInfo prop = all[1];
+        prop.meshPath = "Meshes\\Crate.ocmesh";   // a Windows-style path: one real backslash
+        prop.material = "M_\"Weird\"";            // a quote, to be thorough
+        std::string escaped, escErr;
+        check(fmt::rewriteActorClass(kTwo, prop, escaped, &escErr), "it rewrites: " + escErr);
+        check(escaped.find("b.Mesh(\"Meshes\\\\Crate.ocmesh\", \"M_\\\"Weird\\\"\")") != std::string::npos,
+              "the backslash and the quote are both escaped in the written C#");
+
+        // And it has to round-trip: re-parsing what was written must decode back to the same value,
+        // or the escaping and the parser's decoder disagree about the grammar.
+        const std::vector<fmt::ActorClassInfo> reparsed = fmt::parseActorClasses(escaped);
+        check(reparsed.size() == 2 && reparsed[1].meshPath == "Meshes\\Crate.ocmesh",
+              "re-parsing the escaped output decodes back to the exact original path");
+        check(reparsed.size() == 2 && reparsed[1].material == "M_\"Weird\"",
+              "and the material too");
+    }
+}
+
 
 // Checks that parseActorClasses classifies every shape of actor class a project produces.
 static void testEveryActorShape() {
@@ -312,6 +379,7 @@ int main() {
     testEveryActorShape();
     testClassLevelActor();
     testClassDefaultsRewrite();
+    testMultiClassRewriteAndEscaping();
 
     AVER_INFO("=== reading the generated region ===");
     {

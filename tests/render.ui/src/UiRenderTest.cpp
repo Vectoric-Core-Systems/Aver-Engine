@@ -108,6 +108,7 @@ struct MockContext final : public rhi::IRenderContext {
     void setScissor(u32 x, u32 y, u32 w, u32 h) override { calls.push_back({Call::Kind::Scissor, x, y, w, h}); }
     void setRenderTargets(const rhi::TextureHandle*, u32, rhi::TextureHandle) override {}
     void clearDepth(rhi::TextureHandle, f32) override {}
+    void clearColor(rhi::TextureHandle, const f32[4]) override {}
     void setBindingSet(rhi::BindingSetHandle s, u32 table) override { calls.push_back({Call::Kind::BindingSet, s, table}); }
     void setConstants(u32 slot, const void*, u32 dwords) override { calls.push_back({Call::Kind::Constants, slot, dwords}); }
     void setConstantBuffer(u32, const void*, u32) override {}

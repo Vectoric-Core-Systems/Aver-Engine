@@ -59,8 +59,8 @@ struct MockFactory final : public rhi::IResourceFactory {
 
 // One recorded render-context call: its kind, up to four scalars, and any constant payload.
 struct Call {
-    enum class Kind { Pipeline, Viewport, Scissor, Targets, ClearDepth, Constants, ConstantBuffer,
-                      DrawMesh, Barrier };
+    enum class Kind { Pipeline, Viewport, Scissor, Targets, ClearDepth, ClearColor, Constants,
+                      ConstantBuffer, DrawMesh, Barrier };
     Kind kind;
     u32 a = 0, b = 0, c = 0, d = 0;
     std::vector<f32> payload;   // for Constants / ConstantBuffer
@@ -77,6 +77,7 @@ struct MockContext final : public rhi::IRenderContext {
         calls.push_back({Call::Kind::Targets, n ? c[0] : 0u, n, depth});
     }
     void clearDepth(rhi::TextureHandle t, f32) override { calls.push_back({Call::Kind::ClearDepth, t}); }
+    void clearColor(rhi::TextureHandle t, const f32[4]) override { calls.push_back({Call::Kind::ClearColor, t}); }
     void setBindingSet(rhi::BindingSetHandle, u32) override {}
     void setConstants(u32 slot, const void* data, u32 dwords) override {
         Call c{Call::Kind::Constants, slot, dwords};
@@ -204,6 +205,11 @@ int main() {
         p->prePass(ctx);
         check(ctx.count(Call::Kind::DrawMesh) == 0, "nothing is drawn");
         check(ctx.count(Call::Kind::ClearDepth) == 1, "but the depth target is still cleared");
+        // THE REGRESSION: the colour target used to have no clear at all, so an actor with holes,
+        // or one shrunk by the scale gizmo, kept every earlier frame's pixels wherever nothing drew
+        // over them -- an empty actor is the starkest case, since NOTHING draws and the old target
+        // would have shown whatever was there from the frame before.
+        check(ctx.count(Call::Kind::ClearColor) == 1, "and the colour target is cleared too");
         check(ctx.count(Call::Kind::Targets) == 1, "and the targets are still bound");
     }
 
