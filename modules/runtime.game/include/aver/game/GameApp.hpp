@@ -167,12 +167,8 @@ private:
     bool               pcgAttached_ = false;
     bool               pcgChecked_ = false;
 #endif
-#if AVER_MODULE_PHYSICS
-    int32_t groundBody_ = 0;
-    // The world's floor: a 100 m square, 10 cm thick, centred so its top face sits on z = 0.
-    static constexpr f32 kGroundHalfExtentCm = 5000.0f;
-    static constexpr f32 kGroundHalfThickCm  = 5.0f;
-#endif
+    // No physics members here any more: there is no implicit ground, so nothing for GameApp to
+    // own besides the world itself, which aver_phys_init/aver_phys_shutdown manage globally.
     // Counted so "did physics step at all" is answerable from a log rather than a debugger.
     u64 physSteps_ = 0;
     u64 lastReportedSteps_ = 0;

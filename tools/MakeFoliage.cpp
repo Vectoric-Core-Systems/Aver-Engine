@@ -487,9 +487,9 @@ FOG exp density 0.000012 color 0.66 0.72 0.78
 # a different cloud field.
 PCGVOLUME name Sky seed 7 cell 1600 octaves 4 floor 0.35 bias 1.5 infinite
 
-# The ground. Non-colliding for the arena's reason: the engine already puts a static plane at
-# z = 0, and two coincident floors is a way to get stuck between them.
-PLACEG Meshes/cube.ocmesh 0 0 -10 0 0 0 4200 4200 10 M_Ground nocollide
+# The ground. COLLIDING: the engine has no implicit floor at z=0, so this box is what holds the
+# character up. Step off the clearing's edge and you fall.
+PLACEG Meshes/cube.ocmesh 0 0 -10 0 0 0 4200 4200 10 M_Ground
 
 # --- the forest --------------------------------------------------------------------------------
 # %zu placements, scattered by rejection sampling with a per-species minimum spacing. Each is one

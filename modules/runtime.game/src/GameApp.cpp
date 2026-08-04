@@ -138,12 +138,14 @@ BootConfig GameApp::config() const {
 
 void GameApp::initPhysics() {
 #if AVER_MODULE_PHYSICS
+    // NO IMPLICIT GROUND. This used to create a 100 m box whose top face sat exactly on z = 0, so
+    // EVERY level had an invisible floor there whether it authored one or not -- a level with a
+    // pit, a chasm, or water below its own floor fell through to the same z = 0 plane as a level
+    // with nothing below it at all. A level supplies its own collision now: GameLevel::load already
+    // adds one static body per colliding PLACE. docs/GAME-LIFT.md flagged this as worth dropping
+    // when it was first lifted from the editor; this is that.
     if (aver_phys_init()) {
-        groundBody_ = aver_phys_add_static_box(0.0f, 0.0f, -kGroundHalfThickCm,
-                                               kGroundHalfExtentCm, kGroundHalfExtentCm,
-                                               kGroundHalfThickCm);
-        AVER_INFO("[Game] physics started, ground body={} (fixed step {:.4f}s)",
-                  groundBody_, aver_phys_fixed_step());
+        AVER_INFO("[Game] physics started (fixed step {:.4f}s)", aver_phys_fixed_step());
     } else {
         AVER_WARN("[Game] physics failed to start - gameplay will not collide");
     }
@@ -692,7 +694,6 @@ void GameApp::onShutdown(Engine& e) {
 #endif
 #if AVER_MODULE_PHYSICS
     aver_phys_shutdown();
-    groundBody_ = 0;
 #endif
 
     // Reported unconditionally, including when it is zero. A silent zero is indistinguishable from

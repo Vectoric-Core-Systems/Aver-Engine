@@ -379,9 +379,23 @@ float averFogFactor(float3 wpos) {
     return saturate(1.0 - exp(-tau)) * gFogParams.w;
 }
 
-// The fog's in-scatter target: the sky along the view ray, tinted by the authored fog colour.
+// The fog's in-scatter target: the sky along the view ray.
+//
+// UNDER A PHYSICAL SKY this is averSkyPhysical(dir) -- the SAME atmosphere the dome itself is
+// drawn with -- rather than skyColorFull's authored horizon/zenith gradient tinted by the level's
+// FOG color. Those two used to disagree: the visible sky came from the physical Rayleigh/Mie model,
+// but the ground-level haze and the horizon where distant geometry fades into it came from a
+// separate hand-authored gradient multiplied by an independently-authored fog colour, so the
+// bottom of the world could read a noticeably different blue than the sky directly overhead. This
+// is what UE's "Sky Atmosphere affects fog inscattering colour" does: the height fog inherits the
+// real atmosphere's colour instead of carrying its own, so ground haze and horizon match the dome
+// they sit under exactly, at every sun angle, with nothing to keep in sync by hand.
+//
+// Under an AUTHORED sky there is no physical atmosphere to derive from, so the level's own FOG
+// color still tints the authored dome, unchanged from before.
 float3 averFogInscatter(float3 wpos) {
     float3 dir = normalize(wpos - gCamPos.xyz);
+    if (averAtmoOn()) return averSkyPhysical(dir);
     return skyColorFull(dir) * srgbToLin(gFogColor.rgb);
 }
 

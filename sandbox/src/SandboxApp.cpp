@@ -532,12 +532,14 @@ public:
 
 #if AVER_MODULE_PHYSICS
         // Must start before any level loads: loading builds a static body per colliding placement.
+        //
+        // NO IMPLICIT GROUND. This used to add a 100 m box whose top face sat exactly on z = 0, so
+        // Play-In-Editor had an invisible floor under every level whether it authored one or not --
+        // a pit, a chasm or water below a level's own floor fell through to the same z = 0 plane a
+        // level with nothing below it would. Matches the packaged runtime (GameApp::initPhysics):
+        // a level supplies its own collision now.
         if (aver_phys_init()) {
-            groundBody_ = aver_phys_add_static_box(0.0f, 0.0f, -kGroundHalfThickCm,
-                                                   kGroundHalfExtentCm, kGroundHalfExtentCm,
-                                                   kGroundHalfThickCm);
-            AVER_INFO("[Sandbox] physics started, ground body={} (fixed step {:.4f}s)",
-                      groundBody_, aver_phys_fixed_step());
+            AVER_INFO("[Sandbox] physics started (fixed step {:.4f}s)", aver_phys_fixed_step());
         } else {
             AVER_WARN("[Sandbox] physics failed to start - gameplay will not collide");
         }
@@ -1026,6 +1028,14 @@ public:
             const bool wantCapture = playSessionActive() && !releasedByUser_;
             if (ImGui::IsKeyPressed(ImGuiKey_F1, false) && ImGui::GetIO().KeyShift && playSessionActive())
                 releasedByUser_ = !releasedByUser_;
+            // ESCAPE STOPS PLAY-IN-EDITOR, the same action as clicking Stop. Checked here rather
+            // than in pushInput: this runs once whether or not the mouse is captured, and it must
+            // win over the game seeing the keypress -- a script reading Escape for its own pause
+            // menu should not also race the editor for what the key means.
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && playSessionActive()) {
+                aver_fw_end_play();
+                AVER_INFO("[Sandbox] Escape: play session ended");
+            }
             if (!playSessionActive()) releasedByUser_ = false;
             setMouseCaptured(wantCapture && !ImGui::GetIO().WantTextInput);
         }
@@ -1677,7 +1687,6 @@ public:
         setMouseCaptured(false);
 #if AVER_MODULE_PHYSICS
         aver_phys_shutdown();
-        groundBody_ = 0;
 #endif
 #if AVER_WITH_IMGUI
         if (logoTexture_ || compileIconTexture_ || fileIconsTexture_ || folderIconsTexture_) {
@@ -5762,12 +5771,6 @@ private:
         return false;
 #endif
     }
-#if AVER_MODULE_PHYSICS
-    // The world's floor: a 100m square, 10cm thick, centred so its top face sits on z=0.
-    static constexpr f32 kGroundHalfExtentCm = 5000.0f;
-    static constexpr f32 kGroundHalfThickCm  = 5.0f;
-    int32_t groundBody_ = 0;
-#endif
     // Output Log capture. Written by logSink from any thread under logMutex_, read by the panel.
     static constexpr size_t kMaxLogLines = 4000;
     std::mutex          logMutex_;
