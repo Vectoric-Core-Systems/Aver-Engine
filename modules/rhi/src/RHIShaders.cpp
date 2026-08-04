@@ -337,22 +337,11 @@ float3 skyColor(float3 dir){
     return skyColorFull(dir);
 }
 
-// The sky along one view ray, marched through the physical model.
-float3 averSkyPhysical(float3 dir) {
-    float3 L = normalize(gLightDir.xyz);
-    float cosV = max(dir.z, 0.0);
-    float r0 = averAtmoCamRadius();
-    float b = r0 * cosV;
-    float disc = b * b - (r0 * r0 - gAtmoPlanet.y * gAtmoPlanet.y);
-    if (disc < 0.0) return 0.0;
-
-    float3 T;
-    float3 sky = averAtmoScatter(r0, cosV, L.z, dot(dir, L), -b + sqrt(disc), (int)gAtmoTune.z, T);
-    float g = smoothstep(0.0, 0.35, saturate(-dir.z)) * gGroundColor.a;
-    return lerp(sky, averGroundRadiance(), g);
-}
-
 // ---- fog ---------------------------------------------------------------------------------------
+//
+// averFogFactor sits HERE, above the sky rather than with the rest of the fog below it, because
+// averSkyPhysical needs it: the dome's ground has to be fogged by the distance it actually sits at.
+// HLSL has no forward declarations, so this ordering IS the dependency.
 
 // Exponential height fog opacity at a world point, solved analytically along the view ray.
 float averFogFactor(float3 wpos) {
@@ -379,26 +368,102 @@ float averFogFactor(float3 wpos) {
     return saturate(1.0 - exp(-tau)) * gFogParams.w;
 }
 
+// The reference sky colour that the fog and the dome's ground both converge to: the atmosphere
+// straight up, which is the sky above the clouds. Marched directly here rather than by asking
+// averSkyPhysical for (0,0,1) so that averSkyPhysical can use it without calling a function defined
+// after itself -- the same result either way, since a zenith ray meets no ground.
+float3 averFogInscatterRef() {
+    float3 L  = normalize(gLightDir.xyz);
+    float  r0 = averAtmoCamRadius();
+    float  disc = r0 * r0 - (r0 * r0 - gAtmoPlanet.y * gAtmoPlanet.y);
+    if (disc < 0.0) return 0.0;
+    float3 T;
+    return averAtmoScatter(r0, 1.0, L.z, L.z, -r0 + sqrt(disc), (int)gAtmoTune.z, T);
+}
+
+// The sky along one view ray, marched through the physical model.
+//
+// THE RAY IS NO LONGER CLAMPED TO THE UPPER HEMISPHERE. It used to be -- cosV = max(dir.z, 0) -- so
+// EVERY direction below the horizon was marched as though it pointed exactly AT the horizon, which
+// is the longest and haziest path this model can produce, and the whole lower hemisphere got that
+// one value as a flat slab. On top of that the result was crossfaded to averGroundRadiance() across
+// smoothstep(0, 0.35): a fixed ~20-degree band, painted at that width whatever the camera was doing,
+// and to a ground disc composited as though no air stood in front of it at all. Together those are
+// the bright band across the horizon and the warm brown below it -- two separate wrongs filling half
+// the view.
+//
+// Marched as authored now. A ray that meets the planet STOPS at the planet, so the air in front of
+// the ground is the air actually there: metres of it looking steeply down, tens of kilometres just
+// under the horizon. The ground is then composited the way every other surface in this file is --
+// background * transmittance + inscatter, exactly what averApplyFog does -- instead of replacing the
+// sky outright. Distant ground veils to the horizon's own colour, near ground does not, so the
+// effect follows the view instead of being stamped on at a constant angle. It also means the haze
+// only takes over the horizon once there is real distance to look through, which is the scale
+// argument: at room and arena size there is nothing between you and the ground to scatter, and the
+// band that used to sit there was never earned.
+//
+// ABOVE THE HORIZON THIS IS BIT-IDENTICAL TO WHAT IT REPLACED. For dir.z >= 0 the planet's near root
+// is behind the camera, so tMax is still the far root of the atmosphere shell and cosV still equals
+// dir.z; the old ground crossfade evaluated to zero there too. Only dir.z < 0 changes, which is why
+// the fog's zenith sample and every probe that shades a surface are untouched.
+float3 averSkyPhysical(float3 dir) {
+    float3 L  = normalize(gLightDir.xyz);
+    float  r0 = averAtmoCamRadius();
+    float  b  = r0 * dir.z;
+
+    // Where the ray stops: the planet if it meets it, otherwise the top of the air.
+    float discP   = b * b - (r0 * r0 - gAtmoPlanet.x * gAtmoPlanet.x);
+    float tGround = (dir.z < 0.0 && discP >= 0.0) ? -b - sqrt(discP) : -1.0;
+    bool  hitsGround = tGround > 0.0;
+
+    float tMax = tGround;
+    if (!hitsGround) {
+        float discA = b * b - (r0 * r0 - gAtmoPlanet.y * gAtmoPlanet.y);
+        if (discA < 0.0) return 0.0;
+        tMax = -b + sqrt(discA);
+    }
+
+    float3 T;
+    float3 sky = averAtmoScatter(r0, dir.z, L.z, dot(dir, L), tMax, (int)gAtmoTune.z, T);
+
+    // THE GROUND IS FOGGED BY HOW FAR AWAY IT ACTUALLY IS. The dome is drawn as background, so
+    // averApplyFog -- which fogs every ordinary surface -- never reaches it, and the ground disc was
+    // the one thing in the frame exempt from the level's own air. That is what was left of the brown:
+    // a strip below the horizon holding its raw albedo while the terrain right next to it, at the same
+    // distance, had faded into the haze. tMax is the distance to that ground in kilometres, so the
+    // world-space hit point is known exactly and the same height fog every surface gets can be applied
+    // over the same distance. Far ground -- a horizon tens of kilometres out -- fogs to full opacity
+    // and becomes the fog's own colour, which is the sky above the clouds; ground close enough for the
+    // fog to be thin keeps its albedo, and at that range a level's own floor is drawn over it anyway.
+    if (hitsGround) {
+        float3 hit = gCamPos.xyz + dir * (tGround / max(gAtmoPlanet.z, 1e-12));
+        float3 ground = lerp(averGroundRadiance(), averFogInscatterRef(), averFogFactor(hit));
+        sky += ground * T * gGroundColor.a;
+    }
+    return sky;
+}
+
 // The fog's in-scatter target: the sky above the clouds.
 //
 // UNDER A PHYSICAL SKY this is averSkyPhysical, the SAME atmosphere the dome itself is drawn with,
 // rather than skyColorFull's authored horizon/zenith gradient tinted by the level's FOG color --
 // see the history below. It is sampled straight up (0,0,1), NOT along the view ray toward wpos.
-// averSkyPhysical clamps its view direction to the upper hemisphere (cosV = max(dir.z, 0)), which
-// is correct for painting the actual sky dome -- you are always looking up at it -- but wrong for
-// fog, which sits at or below the horizon: every fogged pixel was pinned to the SAME grazing,
-// edge-on-through-the-whole-atmosphere path, the longest and haziest sample the model has, with a
-// hard seam exactly at the horizon where the clamp engages. That grazing path's own Mie forward-
-// scatter toward the sun read as a flat brown-to-white band, not the ground haze it was meant to
-// be. That glow is a real effect only at kilometre-scale viewing distance -- an actual distant
-// horizon -- not at room or arena scale, where the fog and the ground under it sit metres away, and
-// UE does not let fog inscattering pick it up at this scale either. Sampling zenith instead sidesteps
-// the clamp entirely and gives the flat, stable blue the fog and horizon are supposed to match.
+//
+// WHY ZENITH AND NOT THE RAY. Fog is being asked what colour the AIR is, and the ray toward a fogged
+// point is usually aimed at the ground -- so following it hands back whatever that ray terminates on
+// instead of sky. Just under the horizon that is the long hazy grazing path; steeply down it is the
+// lit ground itself. Fog would end up taking its colour from the dirt beneath it. Zenith asks the one
+// question fog actually has an answer for -- what colour is the sky here -- and yields a single flat,
+// stable blue for the ground haze and the horizon to agree on, which is exactly the intent: the
+// bottom of the world and the sky above the clouds read as the same shade, at every sun angle, with
+// nothing to keep in sync by hand. It is a scale argument too. The sun-relative swing along a grazing
+// ray is a real effect at kilometre distances and not at arena distances, and UE does not let fog
+// inscattering pick it up at this scale either.
 //
 // UNDER AN AUTHORED sky there is no physical atmosphere to derive from, so the level's own FOG
 // color still tints skyColorFull's authored gradient along the true view ray, unchanged from before.
 float3 averFogInscatter(float3 wpos) {
-    if (averAtmoOn()) return averSkyPhysical(float3(0, 0, 1));
+    if (averAtmoOn()) return averFogInscatterRef();
     float3 dir = normalize(wpos - gCamPos.xyz);
     return skyColorFull(dir) * srgbToLin(gFogColor.rgb);
 }

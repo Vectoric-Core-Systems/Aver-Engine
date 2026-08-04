@@ -5381,6 +5381,31 @@ private:
             AVER_INFO("[Level] carrying {} PCGVOLUME record(s) through the editor unchanged",
                       levelPcgVolumes_.size());
 
+        // AND NOW THE SKY FIELD ACTUALLY REACHES THE CLOUD LAYER, as it already did in the packaged
+        // runtime (GameApp::applySky). Carrying the record through a save was all the editor ever did
+        // with it, so a project scaffolded with `PCGVOLUME name Sky` -- which is every new project --
+        // opened onto a bare gradient, and the only ways to see the clouds the level had asked for
+        // were the --clouds switch or ticking the box in the Sky panel by hand. An editor that draws
+        // something other than what the level says is the one thing it must not do.
+        //
+        // BY NAME, not "the first field": a level may also declare a cave mask or a moisture field,
+        // and quietly sampling one of those as the sky would read as a rendering bug rather than the
+        // lookup mistake it would be.
+        //
+        // The floor is INVERTED into coverage. A density floor is the threshold below which the field
+        // is empty, so a HIGH floor leaves LESS material standing -- less cloud, not more. Passing it
+        // through unchanged would clear the sky exactly when the author asked for overcast.
+        for (const fmt::OcPcgVolume& v : levelPcgVolumes_) {
+            if (v.name != "Sky") continue;
+            const f64 floorV = v.coverageFloor < 0.0 ? 0.0 : (v.coverageFloor > 1.0 ? 1.0 : v.coverageFloor);
+            sky_.cloudsEnabled = true;
+            sky_.cloudSeed     = v.seed;
+            sky_.cloudCoverage = static_cast<f32>(1.0 - floorV);
+            AVER_INFO("[Level] sky field '{}' drives the cloud layer: seed {}, coverage {:.2f}",
+                      v.name, sky_.cloudSeed, sky_.cloudCoverage);
+            break;
+        }
+
         scene::World& world = scene::World::instance();
         for (const fmt::OcWorldPlacement& p : w.placements) {
             Transform xf;
