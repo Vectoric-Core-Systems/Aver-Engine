@@ -8,12 +8,21 @@
 
       1. VERSION      read from CMakeLists.txt project(), never passed in
       2. VALIDATE     the payload really is that version, Release, and cut from a clean tree
-      3. PACK         averdist pack -> <edition>-<version>.averpack + manifest-<edition>-<version>.json
-      4. INDEX        averdist index -> index.json, the feed the launcher actually reads
-      5. VERIFY       averdist verify -- reconstructs every pack and hash-checks it, offline
-      6. ZIP          the same payload as an ordinary archive, for installing by hand
-      7. UPLOAD       gh release create (or --clobber onto an existing tag)
-      8. RESOLVE      fetch releases/latest/download/index.json and prove the feed is live
+      3. BUILD TOOLS  dotnet build averdist + averlauncher-cli, fresh, from the launcher checkout
+      4. PACK         averdist pack -> <edition>-<version>.averpack + manifest-<edition>-<version>.json
+      5. INDEX        averdist index -> index.json, the feed the launcher actually reads
+      6. VERIFY       averdist verify -- reconstructs every pack and hash-checks it, offline
+      7. INSTALL      averlauncher-cli installs the feed for real, then boots what it installed
+      8. ZIP          the same payload as an ordinary archive, for installing by hand
+      9. UPLOAD       gh release create (or --clobber onto an existing tag)
+     10. RESOLVE      fetch releases/latest/download/index.json and prove the feed is live
+
+    STEP 7 IS THE ONE averdist ITSELF CANNOT DO. verify reconstructs a pack against its own manifest
+    -- both written by the same tool -- so it only catches averdist disagreeing with itself. It never
+    touches FeedSource, PackInstaller, or any code the shipping launcher actually runs. Step 7 does:
+    a real install into a scratch directory through the launcher's own install path, then starting
+    the binary it installed and confirming it reaches its startup line. A feed that fails here would
+    never have failed averdist verify, and would have shipped.
 
     WHY THIS IS NOT THE LAUNCHER REPO'S publish-release.ps1. That one publishes the launcher AND the
     engine together, and requires a built launcher asset set to do either. Cutting an engine release
@@ -47,8 +56,25 @@
     Markdown file for the release body. Without one, a minimal body is generated; a real release
     should pass one.
 
+.PARAMETER LauncherDir
+    The Aver Launcher checkout that owns the pack format. Defaults to a sibling of this repo,
+    "..\Aver launcher". Rebuilt fresh (Release) every run -- see -AverDist for why.
+
 .PARAMETER AverDist
-    Path to averdist.exe. Defaults to the launcher checkout beside this one.
+    Path to an already-built averdist.exe, skipping the rebuild in -LauncherDir. ONLY for a case
+    where you deliberately want to pin an exact binary (a downloaded launcher release, a checkout at
+    a specific commit). The default path always rebuilds rather than trusting a binary already on
+    disk, because a stale one is a silent format bug: it exits 0, produces a feed that looks right,
+    and only fails on a launcher build new enough to have moved past it. That exact failure was
+    caught by hand once already -- an averdist.exe two days older than the Program.cs that migrated
+    the pack layout from nested manifests\<edition>\<version>.json to flat manifest-<edition>-
+    <version>.json, run without rebuilding first, silently produced the old layout. Nothing about
+    that run looked wrong until the bytes were inspected.
+
+.PARAMETER AverLauncherCli
+    Path to an already-built averlauncher-cli.exe, for use alongside -AverDist. Without it, a pinned
+    -AverDist SKIPS the real launcher-install self-check (step 7) with a loud warning -- averdist
+    verify alone never proves the launcher itself can install what was packed.
 
 .PARAMETER Repo
     The download repository. Defaults to Vectoric-Core-Systems/Aver-Engine-download.
@@ -58,7 +84,9 @@
     can point at a commit is a release nobody can reproduce.
 
 .PARAMETER WhatIf
-    Do everything local -- pack, index, verify, zip -- and print the upload instead of running it.
+    Do everything local -- build the tools, pack, index, verify, install and boot, zip -- and print
+    the upload instead of running it. Nothing through step 8 touches the network either way; -WhatIf
+    only changes whether step 9 runs.
 
 .EXAMPLE
     ./scripts/publish-release.ps1 -WhatIf
@@ -71,7 +99,9 @@ param(
     [string] $Edition = 'standard',
     [string] $Channel = 'beta',
     [string] $NotesFile,
+    [string] $LauncherDir,
     [string] $AverDist,
+    [string] $AverLauncherCli,
     [string] $Repo = 'Vectoric-Core-Systems/Aver-Engine-download',
     [switch] $AllowDirty,
     [switch] $WhatIf
@@ -123,17 +153,44 @@ if ($meta.sourceDirty -and -not $AllowDirty) {
 Say ("payload ok: {0} files, {1:N0} bytes, commit {2}" -f $meta.fileCount, $meta.totalBytes, $meta.sourceCommit.Substring(0, 12))
 
 # ---- 3. averdist ---------------------------------------------------------------------------------
-# The pack format is the launcher's, so its tool owns it. Looked for beside this checkout rather than
-# vendored, because a copy here would be the copy that goes stale.
-if (-not $AverDist) {
-    $guesses = @(
-        (Join-Path (Split-Path -Parent $root) 'Aver launcher\src\Aver.Dist.Cli\bin\Release\net10.0\averdist.exe'),
-        (Join-Path (Split-Path -Parent $root) 'Aver launcher\src\Aver.Dist.Cli\bin\Debug\net10.0\averdist.exe')
-    )
-    $AverDist = $guesses | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-}
-if (-not $AverDist -or -not (Test-Path -LiteralPath $AverDist)) {
-    Fail "averdist.exe not found. Build it:`n          dotnet build `"..\Aver launcher\src\Aver.Dist.Cli`"`n          or pass -AverDist <path>"
+# The pack format is the launcher's, so its tools own it. Looked for beside this checkout rather
+# than vendored, because a copy here would be the copy that goes stale.
+if ($AverDist) {
+    if (-not (Test-Path -LiteralPath $AverDist)) { Fail "-AverDist given but not found: $AverDist" }
+    Say "using pinned averdist: $AverDist"
+    if ($AverLauncherCli -and -not (Test-Path -LiteralPath $AverLauncherCli)) {
+        Fail "-AverLauncherCli given but not found: $AverLauncherCli"
+    }
+    if (-not $AverLauncherCli) {
+        Write-Host '[publish] -AverDist given with no -AverLauncherCli: the real launcher-install self-check is SKIPPED.' -ForegroundColor Yellow
+        Write-Host '          averdist verify only checks the pack against its own manifest, not that the launcher can' -ForegroundColor Yellow
+        Write-Host '          install from it. Pass -AverLauncherCli too to keep that check.' -ForegroundColor Yellow
+    }
+} else {
+    if (-not $LauncherDir) { $LauncherDir = Join-Path (Split-Path -Parent $root) 'Aver launcher' }
+    if (-not (Test-Path -LiteralPath $LauncherDir)) {
+        Fail "no launcher checkout at $LauncherDir`n          pass -LauncherDir <path>, or -AverDist <exe> to skip the rebuild"
+    }
+    $dotnet = (Get-Command dotnet -ErrorAction SilentlyContinue).Source
+    if (-not $dotnet) { Fail 'dotnet SDK not found' }
+
+    # REBUILT, NEVER JUST LOCATED. A found-but-stale averdist.exe is a silent format bug: it exits 0
+    # and produces a feed that looks right, and only fails on a launcher build new enough to have
+    # moved past whatever it predates. See the parameter doc for the exact incident.
+    Say 'building averdist (Release) ...'
+    & $dotnet build (Join-Path $LauncherDir 'src\Aver.Dist.Cli\Aver.Dist.Cli.csproj') -c Release --nologo -v quiet
+    if ($LASTEXITCODE -ne 0) { Fail 'dotnet build averdist failed' }
+    $AverDist = Join-Path $LauncherDir 'src\Aver.Dist.Cli\bin\Release\net10.0\averdist.exe'
+    if (-not (Test-Path -LiteralPath $AverDist)) { Fail "build succeeded but $AverDist is missing - check the csproj's output path" }
+
+    # Same story for the CLI that actually drives an install: this is the code path the launcher's
+    # own UI uses, and it is the one thing that proves the pack does not just look right but installs
+    # and runs. Built alongside averdist so one -LauncherDir / dotnet failure covers both.
+    Say 'building averlauncher-cli (Release) ...'
+    & $dotnet build (Join-Path $LauncherDir 'src\Aver.Launcher.Cli\Aver.Launcher.Cli.csproj') -c Release --nologo -v quiet
+    if ($LASTEXITCODE -ne 0) { Fail 'dotnet build averlauncher-cli failed' }
+    $averLauncherCli = Join-Path $LauncherDir 'src\Aver.Launcher.Cli\bin\Release\net10.0-windows\averlauncher-cli.exe'
+    if (-not (Test-Path -LiteralPath $averLauncherCli)) { Fail "build succeeded but $averLauncherCli is missing - check the csproj's output path" }
 }
 
 # ---- gh, checked before anything is built ---------------------------------------------------------
@@ -153,7 +210,7 @@ if (-not $WhatIf) {
     if (-not $signedIn) { Fail "not signed in to GitHub. Run: gh auth login" }
 }
 
-# ---- 4-5. pack, index, verify ---------------------------------------------------------------------
+# ---- 4-6. pack, index, verify ---------------------------------------------------------------------
 # Rebuilt from scratch every time. An incrementally-updated feed directory is how you publish an
 # index that advertises a pack the release does not carry.
 if (Test-Path -LiteralPath $Out) { Remove-Item -LiteralPath $Out -Recurse -Force }
@@ -181,7 +238,51 @@ if ($index.manifestUrl -notlike "$baseUrl/*") {
     Fail "index.json points at $($index.manifestUrl)`n          expected a URL under $baseUrl"
 }
 
-# ---- 6. the hand-install zip ----------------------------------------------------------------------
+# ---- 7. the actual launcher install, not just averdist checking its own homework -----------------
+# averdist verify reconstructs the pack against its own manifest -- both written by the same tool, so
+# it can only catch averdist disagreeing with itself. It never calls FeedSource, PackInstaller, or
+# any code the shipping launcher runs. This does: the same install path the app's UI drives, for
+# real, into a scratch directory, followed by actually starting the binary it installed.
+#
+# A LOCAL DIRECTORY RESOLVES BY FILE NAME, not by the URLs embedded in the manifest -- see
+# docs/FEED.md in the launcher checkout. So this is a faithful rehearsal of the published install
+# even though $baseUrl points at GitHub and nothing has been uploaded yet: proven empirically, not
+# just cited, by running it against a $baseUrl that does not resolve at all and watching it install
+# anyway.
+if ($AverLauncherCli) {
+    $installRoot = Join-Path $temp "aver-install-check\$tag"
+    if (Test-Path -LiteralPath $installRoot) { Remove-Item -LiteralPath $installRoot -Recurse -Force }
+
+    Say 'installing through the launcher''s own code path (FeedSource + PackInstaller) ...'
+    & $AverLauncherCli install --feed $Out --edition $Edition --root $installRoot --version $version
+    if ($LASTEXITCODE -ne 0) { Fail 'averlauncher-cli install FAILED - this feed would not install through the real launcher. Nothing uploaded.' }
+
+    $installedExe = Join-Path $installRoot "$Edition\$version\$($meta.entryPoint)"
+    if (-not (Test-Path -LiteralPath $installedExe)) { $installedExe = Join-Path $installRoot "$Edition\$version\bin\Sandbox.exe" }
+    if (-not (Test-Path -LiteralPath $installedExe)) { Fail "install reported success but $installedExe does not exist. Nothing uploaded." }
+
+    # NO 2>&1 HERE. PowerShell 5.1 wraps a native command's stderr lines in NativeCommandErrorRecord
+    # and clears $?, and with $ErrorActionPreference = 'Stop' (set at the top of this script) that is
+    # a TERMINATING error -- an ordinary WARN line from the engine (e.g. "createTlas without
+    # ray-tracing support" on a GPU without it) would abort this script and report a false failure on
+    # a perfectly good install. The one line being checked for is INFO-level and lands on stdout
+    # already; nothing here needs stderr merged in.
+    Say 'booting the installed binary headlessly ...'
+    $bootLog = & $installedExe --headless --frames 5
+    $bootExit = $LASTEXITCODE
+    if ($bootExit -ne 0) {
+        Fail "installed Sandbox.exe exited $bootExit - the install is bad. Nothing uploaded. Output:`n$($bootLog -join "`n")"
+    }
+    $bootLine = $bootLog | Select-String 'Engine .* starting' | Select-Object -First 1
+    if (-not $bootLine) {
+        Fail "installed Sandbox.exe exited 0 but never logged its startup line - something is wrong post-install. Nothing uploaded. Output:`n$($bootLog -join "`n")"
+    }
+    Say "installed binary boots clean: $bootLine"
+} else {
+    Write-Host '[publish] SKIPPING the launcher-install self-check (-AverDist given without -AverLauncherCli).' -ForegroundColor Yellow
+}
+
+# ---- 8. the hand-install zip ----------------------------------------------------------------------
 # Same bytes as the pack, ordinary container. Kept because "download a zip and run the exe" should
 # not require installing a launcher first.
 $zipName = "AverEngine-$version-$Channel-win64.zip"
@@ -224,7 +325,7 @@ SHA256  $zipHash
     Say "no -NotesFile given; generated a minimal body at $notesPath"
 }
 
-# ---- 7. upload ------------------------------------------------------------------------------------
+# ---- 9. upload ------------------------------------------------------------------------------------
 if ($WhatIf) {
     Write-Host '[publish] -WhatIf: nothing uploaded. Would run:' -ForegroundColor Yellow
     Write-Host "            gh release create $tag --repo $Repo --title `"$title`" --latest <$($assets.Count) assets>"
@@ -245,7 +346,7 @@ if ($LASTEXITCODE -eq 0) {
     if ($LASTEXITCODE -ne 0) { Fail 'creating the release failed' }
 }
 
-# ---- 8. prove the feed is actually live ------------------------------------------------------------
+# ---- 10. prove the feed is actually live ------------------------------------------------------------
 # The upload succeeding says the assets exist. This says the launcher can find them, which is a
 # different claim and the one that matters.
 Write-Host ''
