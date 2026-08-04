@@ -83,22 +83,44 @@ std::string startLevelText(const std::string& name) {
     s += "# The level a new project opens. Everything here is editable: these are starting values,\n";
     s += "# not engine defaults, and changing them changes only this level.\n";
     s += "NAME " + name + "\n\n";
-    // A LATE-AFTERNOON SUN, about 48 degrees up. Deliberately not noon: an overhead sun flattens
-    // every surface it lights, hides the shadow work entirely, and makes a new level look worse
-    // than the engine actually is. A low sun shows normal maps, shadow softness and the
-    // atmosphere's forward scattering all at once.
-    s += "SUN dir -0.55 0.38 0.74 color 1 0.96 0.9 lux 100000\n";
-    // PHYSICAL sky, which is the engine's real model: Rayleigh, Cornette-Shanks Mie, an ozone tent
-    // and a Chapman-function transmittance. The two overrides are the ones worth authoring per
-    // level: slightly more Mie than clean air, for visible haze and a warmer horizon; and the
-    // multiple-scattering gain, without which the sky goes flat and dark away from the sun.
-    s += "SKY model physical mie 6 multiscatter 1.7\n";
-    // Fog thin enough to read as air rather than as weather. 4e-6 per centimetre is roughly a
-    // 2.5 km visual range, which gives a landscape depth without hiding it.
-    s += "FOG exp density 4e-06 color 0.62 0.7 0.82\n\n";
+    // THE SKY A NEW PROJECT OPENS WITH IS SKYFORGE'S, deliberately and value for value. SkyForge is
+    // the project this engine is actually developed against, so it is the sky that has been looked
+    // at every day and tuned by eye; a template that differed from it meant the first thing anyone
+    // saw was NOT the thing the engine was tuned to produce. Keep these in step with
+    // SkyForge/Content/Maps/Default.ocworld if that one is ever retuned.
+    //
+    // AUTHORED IN DEGREES, which is the whole point of a derived sky: elevation is the only input
+    // that matters and a direction vector invites getting its sign wrong. 59.5 degrees is high
+    // afternoon rather than noon: an overhead sun flattens every surface it lights and hides the
+    // shadow work, while this one still shows normal maps, shadow softness and the atmosphere's
+    // forward scattering at once.
+    s += "SUN elev 59.5 azim 53.2 color 1 0.98 0.92 lux 100000\n";
+    // PHYSICAL sky, the engine's real model: Rayleigh, Cornette-Shanks Mie, an ozone tent and a
+    // Chapman-function transmittance.
+    //
+    // NO OVERRIDES, and removing them is the change. This used to carry `mie 6 multiscatter 1.7`.
+    //
+    // MEASURED, NOT DESCRIBED. Both skies read as near-white under the editor's auto-exposure, so
+    // the difference is not one anybody would call blue-versus-cream; it is a few codes, and it is
+    // consistent. Sampling a 9x9 at three heights against SkyForge as the target:
+    //
+    //                     sky high         sky mid          horizon
+    //   SkyForge      (248,248,244)   (240,240,235)   (209,207,192)
+    //   with mie 6    (232,236,231)   (235,234,226)   (221,219,207)
+    //   no overrides  (246,246,243)   (238,238,232)   (204,201,185)
+    //
+    // The extra Mie darkened the dome and lifted the horizon, and worst per-channel error against
+    // SkyForge falls from 17 to 7 when the overrides go. The defaults ARE the tuned values here;
+    // the overrides were the deviation.
+    s += "SKY model physical\n";
+    // 2e-5 per centimetre, matching SkyForge. Thin enough to read as air rather than as weather,
+    // and the cooler blue-grey tint belongs with an unhazed sky -- the old 0.62 0.7 0.82 was
+    // compensating for the Mie warmth that is now gone.
+    s += "FOG exp density 0.00002 color 0.7 0.78 0.88\n\n";
     // The sky as a PCG field, so a new project has a working example of the record and a seed to
     // change. INFINITE because a sky has no bounds; 1600 cm cells because that is one chunk.
-    s += "PCGVOLUME name Sky seed 1 cell 1600 octaves 4 floor 0.4 bias 1.6 infinite\n\n";
+    // `floor` is a DENSITY floor and so reads inverted as cover: 0.45 is about 55% cloud.
+    s += "PCGVOLUME name Sky seed 3 cell 1600 octaves 4 floor 0.45 bias 1.6 infinite\n\n";
     s += "# A ground plane and two shapes, so the sun, the shadows and the fog have something to\n";
     s += "# fall on. Delete them once your own content is in.\n";
     s += "PLACEG Meshes/cube.ocmesh 0 0 -10 0 0 0 4000 4000 10 M_Floor\n";
@@ -212,26 +234,45 @@ std::string csprojText(const EngineRefs& refs) {
     s += "         NAMED Scripts.FSharp, NOT Scripts.fsproj, and the difference is not cosmetic.\n";
     s += "         Both projects live in this directory and both default AssemblyName to their own\n";
     s += "         filename, so a Scripts.fsproj would emit a second Scripts.dll into the same output\n";
-    s += "         folder and one would overwrite the other. It still COMPILES -- the reference\n";
-    s += "         resolves at build time -- and then fails at load, which is the worst place to find\n";
-    s += "         out. Measured, not guessed. -->\n";
+    // Commas, not dashes. The rule two hundred lines up says no `--` inside an XML comment, and
+    // this sentence broke it: MSBuild rejects the whole file with MSB4025, so EVERY scaffolded
+    // project shipped a Scripts.csproj that would not load. The guard below caught it at run time
+    // and the project was still written, so the failure landed on the user rather than here.
+    s += "         folder and one would overwrite the other. It still COMPILES, because the\n";
+    s += "         reference resolves at build time, and then fails at load, which is the worst\n";
+    s += "         place to find out. Measured, not guessed. -->\n";
     s += "    <ProjectReference Include=\"Scripts.FSharp.fsproj\"\n";
     s += "                      Condition=\"Exists('$(MSBuildThisFileDirectory)Scripts.FSharp.fsproj')\" />\n";
     s += "  </ItemGroup>\n\n";
     s += "</Project>\n";
 
-    // XML forbids `--` inside a comment; a project that contains one cannot load at all.
+    // XML forbids `--` inside a comment; a project that contains one cannot load at all (MSB4025).
+    //
+    // THIS REPAIRS RATHER THAN REPORTS, and that is the fix. It used to log an error and `break`,
+    // and then return the string anyway -- so the broken .csproj was written, every scaffolded
+    // project had a Scripts.csproj MSBuild would not load, and the only sign was one line in a log
+    // the user had no reason to read. A guard that detects a fatal defect and then ships it is
+    // worse than no guard, because it reads like the case is handled.
+    //
+    // Collapsing the pair is safe: this only ever runs inside a comment, where the text is prose,
+    // and a single dash reads the same. The loud log stays, because prose with `--` in it is still
+    // a mistake at the source and should be fixed there rather than relied on being patched here.
     {
         bool inComment = false;
+        u32 repaired = 0;
         for (usize i = 0; i + 1 < s.size(); ++i) {
             if (!inComment && s.compare(i, 4, "<!--") == 0) { inComment = true; i += 3; continue; }
             if (inComment && s.compare(i, 3, "-->") == 0)   { inComment = false; i += 2; continue; }
             if (inComment && s[i] == '-' && s[i + 1] == '-') {
-                AVER_ERROR("[Editor] the generated Scripts.csproj contains '--' inside an XML comment "
-                           "at offset {}; MSBuild will refuse to load it", i);
-                break;
+                s.erase(i, 1);   // "--" becomes "-"; re-test this index in case of "---"
+                ++repaired;
+                --i;
             }
         }
+        if (repaired)
+            AVER_ERROR("[Editor] the generated Scripts.csproj had {} '--' sequence(s) inside an XML "
+                       "comment and they were collapsed to keep the file loadable; fix the prose in "
+                       "ProjectScaffold.cpp rather than leaving it to this repair", repaired);
     }
     return s;
 }
@@ -604,12 +645,33 @@ std::vector<std::string> projectReferences(const std::string& xml) {
     std::vector<std::string> out;
     usize i = 0;
     while ((i = xml.find("<ProjectReference", i)) != std::string::npos) {
+        // The element runs to its own '>'; Include and Condition are both read from inside it.
+        const usize close = xml.find('>', i);
         const usize inc = xml.find("Include=\"", i);
-        if (inc == std::string::npos) break;
+        if (inc == std::string::npos || (close != std::string::npos && inc > close)) break;
         const usize a = inc + 9;
         const usize b = xml.find('"', a);
         if (b == std::string::npos) break;
-        out.push_back(xml.substr(a, b - a));
+        const std::string include = xml.substr(a, b - a);
+
+        // A REFERENCE GUARDED BY Exists() IS NOT MISSING WHEN IT IS ABSENT -- being absent is the
+        // case it was written for. The scaffolder emits exactly one of these:
+        //
+        //     <ProjectReference Include="Scripts.FSharp.fsproj"
+        //                       Condition="Exists('$(MSBuildThisFileDirectory)Scripts.FSharp.fsproj')" />
+        //
+        // so every project that had never added F# reported a dead reference, and the editor met
+        // anyone opening a BRAND NEW project with "this was created by an earlier version and is
+        // missing files a project now needs". Nothing was missing and nothing needed upgrading; the
+        // first thing the engine said to a new user was untrue.
+        const std::string element = xml.substr(i, close == std::string::npos ? 0 : close - i);
+        if (element.find("Condition=") != std::string::npos &&
+            element.find("Exists(") != std::string::npos) {
+            i = b;
+            continue;
+        }
+
+        out.push_back(include);
         i = b;
     }
     return out;
