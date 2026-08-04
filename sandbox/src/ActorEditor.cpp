@@ -1,6 +1,7 @@
 // The actor editor tab: opens a C# actor file, previews it in 3D, and writes placements back.
 
 #include "ActorEditor.hpp"
+#include "EditorEuler.hpp"
 #include "ToolGlyphs.hpp"
 #include "EditorPrefs.hpp"
 
@@ -993,15 +994,40 @@ bool ActorEditor::dragAlong(const fmt::ActorModel& m, int axis, ImVec2 delta,
 }
 
 // Rotates a placement about one axis by a mouse delta.
+//
+// ABOUT THE WORLD AXIS THE HANDLE IS DRAWN ALONG, composed as a quaternion. This used to be
+// `m.rot[2 - axis] += degrees`, adding straight to one Euler component -- and that is only the
+// rotation the user asked for while the other two components are zero.
+//
+// The handles are WORLD-aligned: axisTip probes m.pos[axis] + 1, so the arrow points along world X,
+// Y or Z. But rot is (yaw, pitch, roll) applied Z then Y then X, so roll turns about the object's
+// OWN x axis. Yaw the placement 90 degrees, drag the world-X handle, and the model turns about
+// world Y instead -- the arrow you pulled and the axis it spun about were different lines.
+//
+// Composing `dq * cur` applies the existing rotation first and then the new one about the world
+// axis, which is the same order and the same reasoning as the level viewport's gizmo.
+//
+// The index swap is real and worth stating: ActorModel::rot is (yaw, pitch, roll) while
+// EditorEuler works in Vec3 (roll, pitch, yaw) -- x is roll at one end and yaw at the other. The
+// composition itself is identical to Rot.ToQuat on the C# side, so preview and runtime agree.
 void ActorEditor::dragRotateAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVec2 imageSize) const {
     f32 along = 0.0f;
     if (!dragAlong(m, axis, delta, imageSize, along)) return;
-
-    // rot is (yaw, pitch, roll) about (+Z, +Y, +X), so a gizmo axis maps to rot[2 - axis].
-    const int comp = 2 - axis;
+    if (axis < 0 || axis > 2) return;
 
     // A full handle length is a quarter turn.
-    m.rot[comp] += along * 90.0f;
+    const f32 deg = along * 90.0f;
+    if (std::fabs(deg) < 1e-6f) return;
+
+    Vec3 worldAxis{0.0f, 0.0f, 0.0f};
+    (&worldAxis.x)[axis] = 1.0f;
+
+    const Quat cur = editor::quatFromEulerDeg(Vec3{m.rot[2], m.rot[1], m.rot[0]});
+    const Quat dq  = Quat::fromAxisAngle(worldAxis, radians(deg));
+    const Vec3 e   = editor::eulerDegFromQuat((dq * cur).normalized());
+    m.rot[0] = e.z;   // yaw
+    m.rot[1] = e.y;   // pitch
+    m.rot[2] = e.x;   // roll
 }
 
 // Scales a placement on one axis by a mouse delta.
