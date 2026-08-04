@@ -7,6 +7,7 @@
 #include "aver/platform/FileSystem.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/core/Version.hpp"
 
 namespace aver {
 
@@ -16,7 +17,13 @@ Engine::~Engine() = default;
 // Full lifecycle: init subsystems, run the loop, shut down. Returns the process code.
 int Engine::run(Application* app) {
     BootConfig cfg = app->config();
-    AVER_INFO("Aver Engine 0.1.0 starting (headless={}, maxFrames={})", cfg.headless, cfg.maxFrames);
+    // Name and version come from Version.hpp, which CMake injects from project(). This line used to
+    // spell "Aver Engine 0.1.0" out by hand, so the banner stayed on 0.1.0 through any version bump
+    // -- the one line in the process most likely to be quoted in a bug report, and the one guaranteed
+    // to be wrong. Everything else that states a version (the scaffold's ENGINE line, the About box)
+    // already reads it from there.
+    AVER_INFO("{} Engine {} starting (headless={}, maxFrames={})", kEngineName, kEngineVersion,
+              cfg.headless, cfg.maxFrames);
 
     // maxFrames > 0 is an automated capture run: no splash, and the window opens without focus.
     const bool interactive = cfg.maxFrames == 0;
