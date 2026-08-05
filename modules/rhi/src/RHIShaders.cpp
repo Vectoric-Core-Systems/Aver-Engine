@@ -463,39 +463,56 @@ float averFogFactor(float3 wpos) {
     return saturate(1.0 - exp(-tau)) * gFogParams.w;
 }
 
-// The fog's in-scatter target: the sky above the clouds.
+// The fog's in-scatter target: the sky above the clouds NEARBY, blending toward the sky ALONG THE
+// RAY once there is enough real atmosphere between the camera and wpos for that to be the honest
+// answer.
 //
-// UNDER A PHYSICAL SKY this is averSkyPhysical, the SAME atmosphere the dome itself is drawn with,
-// rather than skyColorFull's authored horizon/zenith gradient tinted by the level's FOG color --
-// see the history below. It is sampled straight up (0,0,1), NOT along the view ray toward wpos.
+// UNDER A PHYSICAL SKY this blends averFogInscatterRef() (zenith -- the same atmosphere the dome is
+// drawn with, sampled straight up) toward averSkyPhysical(dir) (the same atmosphere, marched along
+// the TRUE view ray, ground-hit handling and all) by `t`, the aerial-perspective transmittance
+// averApplyFog already computed getting here. Passed in rather than recomputed: it is the SAME
+// march, so asking for it twice would cost twice for the same answer.
 //
-// WHY ZENITH AND NOT THE RAY. Fog is being asked what colour the AIR is, and the ray toward a fogged
-// point is usually aimed at the ground -- so following it hands back whatever that ray terminates on
-// instead of sky. Just under the horizon that is the long hazy grazing path; steeply down it is the
-// lit ground itself. Fog would end up taking its colour from the dirt beneath it. Zenith asks the one
-// question fog actually has an answer for -- what colour is the sky here -- and yields a single flat,
-// stable blue for the ground haze and the horizon to agree on, which is exactly the intent: the
-// bottom of the world and the sky above the clouds read as the same shade, at every sun angle, with
-// nothing to keep in sync by hand. It is a scale argument too. The sun-relative swing along a grazing
-// ray is a real effect at kilometre distances and not at arena distances, and UE does not let fog
-// inscattering pick it up at this scale either.
+// WHY T IS THE RIGHT BLEND WEIGHT, NOT A DISTANCE OR A THRESHOLD. t is the fraction of light that
+// survives the real Rayleigh/Mie/ozone extinction between camera and wpos -- it is already exactly
+// "how much atmosphere is actually in the way," continuous and smooth by construction (it is
+// exp(-opticalDepth)), so the blend has no seam and no scale to hand-tune: near the camera t is ~1
+// and this returns the flat zenith reference nearly unchanged, the same answer the old
+// always-zenith version gave and for the same reason -- there is no air to speak of between here and
+// there, so there is nothing for the sky to disagree with itself about. Only once a real stretch of
+// atmosphere separates camera and point does t fall and the true ray's own colour -- sun-relative
+// glow, horizon veil, all of it -- fade in. That is "slowly visible at large scale" for free, off a
+// quantity already being computed, not a new one invented to produce it.
+//
+// AND IT IS ALREADY SHAPED BY THE PLANET'S ACTUAL RADIUS, not a separate curvature term bolted on.
+// t comes from averAtmoScatter, whose density profile along the ray is a function of the altitude
+// r = sqrt(r0^2 + 2 r0 cosV t + t^2) -- literally the geometry of a straight ray over a sphere of
+// radius r0 = gAtmoPlanet.x + camera altitude. Shrink the simulated planet and that altitude climbs
+// faster per unit of ground distance, extinction accumulates sooner, t falls off sooner, and the true
+// sky's colour shows up at a shorter range -- a small moon's horizon curves away underfoot and reveals
+// the grazing sky quickly; an Earth-scale planet's is gentle and distant. That correspondence was
+// already sitting in this file; this is the first place fog asked for it.
 //
 // UNDER AN AUTHORED sky there is no physical atmosphere to derive from, so the level's own FOG
 // color still tints skyColorFull's authored gradient along the true view ray, unchanged from before.
-float3 averFogInscatter(float3 wpos) {
-    if (averAtmoOn()) return averFogInscatterRef();
+float3 averFogInscatter(float3 wpos, float3 t) {
+    if (averAtmoOn()) {
+        float3 dir = normalize(wpos - gCamPos.xyz);
+        float  w   = saturate(1.0 - averLuminance(t));
+        return lerp(averFogInscatterRef(), averSkyPhysical(dir), w);
+    }
     float3 dir = normalize(wpos - gCamPos.xyz);
     return skyColorFull(dir) * srgbToLin(gFogColor.rgb);
 }
 
 // Applies the air between the camera and a surface: physical atmosphere, then height fog.
 float3 averApplyFog(float3 color, float3 wpos) {
+    float3 T = 1.0;
     if (averAtmoOn()) {
-        float3 T;
         float3 inscatter = averAtmoAerial(wpos, T);
         color = color * T + inscatter;
     }
-    return lerp(color, averFogInscatter(wpos), averFogFactor(wpos));
+    return lerp(color, averFogInscatter(wpos, T), averFogFactor(wpos));
 }
 
 
