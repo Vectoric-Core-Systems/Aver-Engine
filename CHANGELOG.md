@@ -8,6 +8,37 @@ parentheses are short refs into this repository — `git show <hash>` for the fu
 usually longer and more useful than the line here. `docs/BUGS.md` carries the full defect list with
 triggering inputs for anything summarised below.
 
+## [0.1.2] — 2026-08-05
+
+### Fixed
+
+- **Fog and the sky dome's lower hemisphere now blend toward the true ray's atmospheric colour at
+  large scale, smoothly, instead of a flat zenith reference at every distance.** 0.1.1's fix was
+  correct for the bug it fixed — a bright band and a brown patch at the horizon — but it was a clean
+  break: fog always returned the same flat colour regardless of distance or how much real atmosphere
+  actually lay in the way. Now blends toward the true view ray's colour, weighted by the same
+  aerial-perspective transmittance already computed for ordinary surfaces — continuous, no threshold.
+  (`bac1d87`)
+- **The fog's own colour now responds to the sun at the range fog is actually visible at, not only at
+  kilometres.** The fix above alone wasn't enough: real Rayleigh/Mie extinction only moves visibly
+  over tens of kilometres, while a level's authored fog density is normally tuned to read as fog
+  within a few hundred metres to a couple of kilometres — so at every distance fog actually does
+  anything, the previous fix's blend sat at its unmoved end, and fog never visibly reddened at
+  sunset. Fixed by asking a different question: fog scatters whatever light is actually reaching it,
+  which depends on how far the sun's own light travelled to get here, not on how far the camera is
+  looking. Measured: the same foggy scene reads warm gold with the sun near the horizon and cool
+  neutral grey with it high overhead, at ordinary gameplay range. (`d24c979`)
+
+### Tooling
+
+- `scripts/publish-release.ps1`'s feed-resolve check was misdiagnosing its own bug as a GitHub
+  propagation delay across two commits (`061a9e2` widened a retry window that didn't need widening)
+  before the real cause was found: GitHub serves the feed's `index.json` as
+  `application/octet-stream`, and `Invoke-WebRequest` sometimes hands back the response as a raw
+  byte array instead of decoded text depending on that content type. Piping bytes into
+  `ConvertFrom-Json` doesn't throw — it silently parses nonsense, reading exactly like "the release
+  isn't live yet" when it always was. Fixed by decoding explicitly. (`c712e1f`)
+
 ## [0.1.1] — 2026-08-04
 
 ### Fixed
