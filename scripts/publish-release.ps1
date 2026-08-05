@@ -355,19 +355,23 @@ if ($LASTEXITCODE -eq 0) {
 # The upload succeeding says the assets exist. This says the launcher can find them, which is a
 # different claim and the one that matters.
 #
-# RETRIED, NOT A SINGLE SHOT. releases/latest/download/<asset> is a redirect GitHub resolves against
-# whichever release is currently "latest", and that pointer does not always flip the instant
-# gh release create returns -- the first version of this step fired one request immediately after
-# and got back the PREVIOUS release's index (an empty edition where 0.1.1 was expected), even though
-# the upload itself had fully succeeded and a plain curl moments later resolved correctly. A single
-# failed attempt here used to end the whole script on exit 1 for a release that had, in fact,
-# published fine -- worse than not checking at all, since it reported failure on success. Retried a
-# few times with a short wait between attempts before treating it as a real problem.
+# RETRIED, NOT A SINGLE SHOT, AND FOR LONGER THAN IT FIRST LOOKED LIKE IT NEEDED TO BE.
+# releases/latest/download/<asset> is a redirect GitHub resolves against whichever release is
+# currently "latest", and that pointer does not always flip the instant gh release create returns --
+# the first version of this step fired one request immediately after and got back the PREVIOUS
+# release's index, even though the upload itself had fully succeeded and a plain curl moments later
+# resolved correctly. That got a 5-attempt, ~20s retry window. It was not enough: publishing 0.1.2 hit
+# a propagation delay LONGER than that window, failed all 5 attempts, and a curl run by hand
+# immediately afterward already showed the correct index -- so the wait needed was measured in tens of
+# seconds beyond 20, not absent. Retried for about two and a half minutes now, not twenty seconds,
+# before treating it as a real problem, because the two failure modes still look identical from inside
+# a short window and only patience tells them apart.
 Write-Host ''
 Say 'resolving the published feed ...'
 $feedUrl = "https://github.com/$Repo/releases/latest/download/index.json"
 $resolved = $false
-for ($attempt = 1; $attempt -le 5; $attempt++) {
+$maxAttempts = 12
+for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
     try {
         $r = Invoke-WebRequest -Uri $feedUrl -MaximumRedirection 10 -TimeoutSec 30 -UseBasicParsing
         $live = ($r.Content | ConvertFrom-Json)
@@ -377,14 +381,14 @@ for ($attempt = 1; $attempt -le 5; $attempt++) {
             $resolved = $true
             break
         }
-        Write-Host "            attempt $attempt/5: served index advertises '$latest', expected $version -- GitHub's latest-release pointer may still be propagating" -ForegroundColor Yellow
+        Write-Host "            attempt $attempt/$maxAttempts`: served index advertises '$latest', expected $version -- GitHub's latest-release pointer may still be propagating" -ForegroundColor Yellow
     } catch {
-        Write-Host "            attempt $attempt/5: FAILED to fetch $feedUrl" -ForegroundColor Yellow
+        Write-Host "            attempt $attempt/$maxAttempts`: FAILED to fetch $feedUrl" -ForegroundColor Yellow
     }
-    if ($attempt -lt 5) { Start-Sleep -Seconds 5 }
+    if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds 13 }
 }
 if (-not $resolved) {
-    Write-Host "            the feed did not resolve to $version after 5 attempts over ~20s." -ForegroundColor Red
+    Write-Host "            the feed did not resolve to $version after $maxAttempts attempts over ~2.5 min." -ForegroundColor Red
     Write-Host '            The upload itself succeeded (see the release URL above) -- this is a propagation check failing,' -ForegroundColor Red
     Write-Host '            not evidence the release is broken. Verify by hand: gh release view' "$tag --repo $Repo" -ForegroundColor Red
     Write-Host '            or curl the feed URL directly. If it still will not resolve, the release may be prerelease.' -ForegroundColor Red
