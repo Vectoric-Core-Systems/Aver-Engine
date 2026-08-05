@@ -320,16 +320,49 @@ float3 averSkyAbove(float3 dir) {
                 pow(saturate(dir.z * 0.5 + 0.5), gSkyParams.x));
 }
 
-// The reference sky colour that the fog and the dome's lower half both resolve to: the atmosphere
-// straight up, which is the sky above the clouds. Marched directly rather than by asking
-// averSkyPhysical for (0,0,1) so that both callers can use it without either having to call a
-// function defined after itself -- the same answer either way, since a zenith ray meets no ground.
-// A zenith ray's far root is exactly (atmosphere top - r0), so no intersection is needed.
+// The reference sky colour that the fog and the dome's lower half both resolve to.
+//
+// TWO TERMS, NOT ONE. Straight up (unchanged from before) is the ambient half. Added to it now:
+// straight OUT along the sun's own azimuth, levelled to the true horizon -- the half that actually
+// answers "what colour is the light hitting the fog right now."
+//
+// WHY THE ZENITH TERM ALONE NEVER ANSWERED THAT. bac1d87 blended fog toward the true view ray's
+// colour once real atmosphere lay between the camera and the fogged point, using aerial-perspective
+// transmittance as the gate. It works, but the gate never opens where fog actually is: that
+// transmittance is governed by the REAL Rayleigh/Mie coefficients, which need tens of kilometres to
+// move visibly, while a level's own FOG density is an authored, artistic knob almost always tuned to
+// read as fog within a few hundred metres to a couple of kilometres. At every distance the exponential
+// fog is actually doing anything, the blend sits at its zero end -- this reference, alone -- and this
+// reference was a straight-up march: near-blind to the sun's AZIMUTH (a zenith ray can't tell "sun to
+// my left" from "sun in front of me") and only weakly moved by its elevation. So the fog's colour was
+// never really tracking the sun, at any distance a player would call "foggy."
+//
+// THE FIX ASKS A DIFFERENT QUESTION. Real fog scatters whatever light actually falls on it, and that
+// depends on how far the SUN's own light has travelled to get here -- not on how far the CAMERA is
+// looking. A horizontal ray toward the sun's azimuth is exactly the direction that path is longest:
+// as the sun drops toward the horizon this march's own tMax (the atmosphere-shell exit, taken from
+// the SAME branch averSkyPhysical uses for any non-ground-hit ray, reimplemented here rather than
+// called -- averSkyPhysical calls THIS function for its ground veil, and HLSL has no recursion) grows
+// and the path reddens, at the sun's elevation, independent of the fog's distance from the camera.
+// cosVS falls out of the geometry for free: dot(dirToSun, L) reduces to length(L.xy), the sine of the
+// sun's OWN elevation -- near 0 (phase near its Rayleigh minimum) when the sun is high, near 1 (the
+// Mie forward-scatter peak) as it nears the horizon, with no separate "how low is the sun" gate
+// needed. The blend weight is a tuned constant: how much of that direct, sun-warmed light mixes into
+// the ambient reference, since real multiple scattering (which this single-scatter model does not
+// simulate) is what actually carries a sunset's warmth to fog that isn't looking straight at the sun.
 float3 averFogInscatterRef() {
     float3 L  = normalize(gLightDir.xyz);
     float  r0 = averAtmoCamRadius();
     float3 T;
-    return averAtmoScatter(r0, 1.0, L.z, L.z, gAtmoPlanet.y - r0, (int)gAtmoTune.z, T);
+    float3 zenith = averAtmoScatter(r0, 1.0, L.z, L.z, gAtmoPlanet.y - r0, (int)gAtmoTune.z, T);
+
+    float2 az   = length(L.xy) > 1e-4 ? normalize(L.xy) : float2(1.0, 0.0);
+    float  cA   = (r0 - gAtmoPlanet.y) * (r0 + gAtmoPlanet.y);   // b = r0*cosV = 0 for a level ray
+    float  tMax = sqrt(max(-cA, 0.0));
+    float3 Th;
+    float3 towardSun = averAtmoScatter(r0, 0.0, L.z, length(L.xy), tMax, (int)gAtmoTune.z, Th);
+
+    return lerp(zenith, towardSun, 0.4);
 }
 
 // What the ground below the horizon radiates: albedo times the sun and sky falling on it.
