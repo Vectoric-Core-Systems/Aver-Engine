@@ -355,26 +355,35 @@ if ($LASTEXITCODE -eq 0) {
 # The upload succeeding says the assets exist. This says the launcher can find them, which is a
 # different claim and the one that matters.
 #
-# RETRIED, NOT A SINGLE SHOT, AND FOR LONGER THAN IT FIRST LOOKED LIKE IT NEEDED TO BE.
-# releases/latest/download/<asset> is a redirect GitHub resolves against whichever release is
-# currently "latest", and that pointer does not always flip the instant gh release create returns --
-# the first version of this step fired one request immediately after and got back the PREVIOUS
-# release's index, even though the upload itself had fully succeeded and a plain curl moments later
-# resolved correctly. That got a 5-attempt, ~20s retry window. It was not enough: publishing 0.1.2 hit
-# a propagation delay LONGER than that window, failed all 5 attempts, and a curl run by hand
-# immediately afterward already showed the correct index -- so the wait needed was measured in tens of
-# seconds beyond 20, not absent. Retried for about two and a half minutes now, not twenty seconds,
-# before treating it as a real problem, because the two failure modes still look identical from inside
-# a short window and only patience tells them apart.
+# THE REAL BUG HERE WAS NEVER TIMING. It looked like one -- publishing 0.1.1 saw a single failed
+# attempt resolve on retry, which is exactly what a propagation delay looks like, so a 5-attempt ~20s
+# window went in. Publishing 0.1.2 then failed all 12 attempts of an even WIDER window, twelve times
+# in a row, identically -- and a plain curl run by hand immediately after, and immediately before,
+# both succeeded. Twelve identical failures bracketed by two successful direct fetches is not a slow
+# server; it is a client bug that never depended on elapsed time at all.
+#
+# GITHUB SERVES THIS ASSET AS application/octet-stream, not application/json, and depending on that
+# content type Invoke-WebRequest -UseBasicParsing sometimes hands back $r.Content as a raw byte[]
+# instead of a decoded string -- inconsistently, which is exactly why the very first check (for 0.1.1)
+# happened to see it work on a later attempt: nothing about that success was the extra wait, it was
+# this decoding landing on the string path that time. Piping a byte[] into ConvertFrom-Json does not
+# throw; it silently parses nonsense and every later property access returns empty, which reads
+# exactly like "the feed doesn't have this version yet" while never being that at all. Decoding
+# $r.Content as UTF-8 explicitly whenever it comes back as bytes was the actual, sufficient fix,
+# confirmed against the live 0.1.2 feed before landing this. The retry loop stays, at a smaller
+# window than the 2.5-minute one this replaces -- there is no evidence real propagation delay was ever
+# the problem, but a brand-new release is still a case this has not specifically re-tested, and a
+# short retry costs nothing.
 Write-Host ''
 Say 'resolving the published feed ...'
 $feedUrl = "https://github.com/$Repo/releases/latest/download/index.json"
 $resolved = $false
-$maxAttempts = 12
+$maxAttempts = 5
 for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
     try {
         $r = Invoke-WebRequest -Uri $feedUrl -MaximumRedirection 10 -TimeoutSec 30 -UseBasicParsing
-        $live = ($r.Content | ConvertFrom-Json)
+        $text = if ($r.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($r.Content) } else { $r.Content }
+        $live = $text | ConvertFrom-Json
         $latest = ($live.editions.PSObject.Properties | ForEach-Object { $_.Value.latest } | Sort-Object -Unique | Select-Object -Last 1)
         if ($latest -eq $version) {
             Write-Host "            $($r.StatusCode)  feed advertises $latest" -ForegroundColor Green
@@ -385,10 +394,10 @@ for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
     } catch {
         Write-Host "            attempt $attempt/$maxAttempts`: FAILED to fetch $feedUrl" -ForegroundColor Yellow
     }
-    if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds 13 }
+    if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds 8 }
 }
 if (-not $resolved) {
-    Write-Host "            the feed did not resolve to $version after $maxAttempts attempts over ~2.5 min." -ForegroundColor Red
+    Write-Host "            the feed did not resolve to $version after $maxAttempts attempts over ~40s." -ForegroundColor Red
     Write-Host '            The upload itself succeeded (see the release URL above) -- this is a propagation check failing,' -ForegroundColor Red
     Write-Host '            not evidence the release is broken. Verify by hand: gh release view' "$tag --repo $Repo" -ForegroundColor Red
     Write-Host '            or curl the feed URL directly. If it still will not resolve, the release may be prerelease.' -ForegroundColor Red
