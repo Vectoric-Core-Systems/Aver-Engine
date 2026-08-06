@@ -254,6 +254,127 @@ const char* kShaderHLSL = R"(
 // Shades a scene surface: unshadowed, no bounce, through the prelude's FROZEN plainShadeSurface.
 float4 PSMainPlain(VSOut i) : SV_TARGET { return plainShadeSurface(i, 1.0, float3(0,0,0), 1.0); }
 
+// ================= volumetric clouds =================
+// One raymarched layer, evaluated on sky pixels only, with analytic noise so it needs no SRV.
+//
+// LIVES HERE, NOT IN THE SHARED PRELUDE, ON PURPOSE: PSky below is the only caller anywhere in the
+// engine. Fog and sky-ambient math stay in rhi::sharedShaderPrelude() because ordinary surface
+// shading genuinely needs them (averApplyFog, averSkyIrradiance -- called from Voxi, PBR, every
+// lit pixel shader there is); nothing outside the sky pass itself ever touches a cloud. Putting
+// cloud code in the shared prelude would paste a 24-step raymarch and its noise functions into
+// every module's shader source -- Voxi, PBR, UI, ActorPreview, the path tracer -- none of which
+// call it, for no reason but that the fog/atmosphere code next to it in the file genuinely is
+// shared. gCloudParams/gCloudMotion themselves still live in the shared PerFrame cbuffer (see
+// their own comment there for why splitting the DATA out is separable follow-up work from moving
+// the CODE that reads it).
+
+// Hashes a 3D point to a scalar in [0,1).
+float averHash13(float3 p) {
+    p = frac(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return frac((p.x + p.y) * p.z);
+}
+
+// Value noise with a smoothstep-interpolated lattice. Eight hashes a call.
+float averValueNoise(float3 x) {
+    float3 i = floor(x);
+    float3 f = frac(x);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = averHash13(i + float3(0,0,0)), n100 = averHash13(i + float3(1,0,0));
+    float n010 = averHash13(i + float3(0,1,0)), n110 = averHash13(i + float3(1,1,0));
+    float n001 = averHash13(i + float3(0,0,1)), n101 = averHash13(i + float3(1,0,1));
+    float n011 = averHash13(i + float3(0,1,1)), n111 = averHash13(i + float3(1,1,1));
+    return lerp(lerp(lerp(n000, n100, f.x), lerp(n010, n110, f.x), f.y),
+                lerp(lerp(n001, n101, f.x), lerp(n011, n111, f.x), f.y), f.z);
+}
+
+// Extinction per world unit for a fully dense cloud, derived from the layer's thickness.
+float averCloudSigma() {
+    const float kOpticalDepthAtFull = 9.0;   // a dense cumulus, edge to edge
+    return gCloudParams.y * kOpticalDepthAtFull / max(gCloudParams.w - gCloudParams.z, 1.0);
+}
+
+// Cloud density at a world point. `detail` buys a second noise octave; the light march skips it.
+float averCloudDensity(float3 wpos, bool detail) {
+    float bottom = gCloudParams.z, top = gCloudParams.w;
+    float h = saturate((wpos.z - bottom) / max(top - bottom, 1.0));
+    float shape = saturate(h * 4.0) * saturate((1.0 - h) * 1.6);
+    if (shape <= 0.001) return 0.0;
+
+    float3 p = (wpos + float3(gCloudMotion.xy, 0.0)) * gCloudMotion.z;
+    float n = averValueNoise(p) * 0.6;
+    if (detail) n += averValueNoise(p * 3.17) * 0.3;
+    else        n += 0.15;
+    n += averValueNoise(p * 0.41) * 0.25;
+
+    float cover = 1.0 - gCloudParams.x;
+    float d = saturate((n - cover) / max(1.0 - cover, 1e-3));
+    return d * shape;
+}
+
+// Henyey-Greenstein phase function.
+float averHG(float ct, float g) {
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * ct, 1e-4), 1.5));
+}
+
+// Marches the layer and returns scattered radiance in rgb, TRANSMITTANCE in a.
+float4 averCloudLayer(float3 ro, float3 rd, float3 sunDir, float3 sunColour) {
+    if (gCloudMotion.w < 0.5) return float4(0, 0, 0, 1);
+    float bottom = gCloudParams.z, top = gCloudParams.w;
+
+    float t0, t1;
+    if (rd.z > 1e-4) {
+        if (ro.z > top) return float4(0, 0, 0, 1);
+        t0 = max((bottom - ro.z) / rd.z, 0.0);
+        t1 = (top - ro.z) / rd.z;
+    } else if (rd.z < -1e-4) {
+        if (ro.z < bottom) return float4(0, 0, 0, 1);
+        t0 = max((top - ro.z) / rd.z, 0.0);
+        t1 = (bottom - ro.z) / rd.z;
+    } else {
+        if (ro.z < bottom || ro.z > top) return float4(0, 0, 0, 1);
+        t0 = 0.0; t1 = (top - bottom) * 64.0;
+    }
+    const int kSteps = 24;
+    float featureSize = 1.0 / max(gCloudMotion.z, 1e-9);
+    t1 = min(t1, t0 + kSteps * featureSize * 0.35);
+    if (t1 <= t0) return float4(0, 0, 0, 1);
+
+    float dt = (t1 - t0) / kSteps;
+    float jitter = averHash13(rd * 811.7);
+    float t = t0 + dt * jitter;
+
+    float sigma = averCloudSigma();
+    float3 scattered = 0.0;
+    float transmittance = 1.0;
+    float phase = averHG(dot(rd, sunDir), 0.62);
+
+    [loop] for (int i = 0; i < kSteps; ++i) {
+        if (transmittance < 0.02) break;
+        float3 p = ro + rd * t;
+        float d = averCloudDensity(p, true);
+        if (d > 0.001) {
+            float lt = 0.0;
+            float lstep = (top - bottom) * 0.25;
+            [unroll] for (int j = 0; j < 3; ++j) {
+                float3 lp = p + sunDir * (lstep * (j + 0.5));
+                lt += averCloudDensity(lp, false) * lstep;
+            }
+            float sunT = exp(-lt * sigma);
+            float powder = 1.0 - exp(-d * dt * sigma * 2.0);
+            float3 lit = sunColour * sunT * phase * powder;
+            lit += skyColorFull(float3(0, 0, 1)) * 0.9;
+
+            float stepT = exp(-d * dt * sigma);
+            scattered += transmittance * lit * (1.0 - stepT);
+            transmittance *= stepT;
+        }
+        t += dt;
+    }
+    return float4(scattered, transmittance);
+}
+
 // Procedural sky for a fullscreen triangle. The only place the full scattering integral runs.
 float4 PSky(SkyOut i) : SV_TARGET {
     float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
