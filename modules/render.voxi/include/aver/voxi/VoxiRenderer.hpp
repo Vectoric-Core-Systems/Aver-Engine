@@ -320,22 +320,31 @@ private:
     f32 cascadeCentre_[4][3] = {};
     f32 cascadeRadius_[4] = {};
 
-    // ---- ray-traced sun-shadow temporal history ----
+    // ---- ray-traced temporal history: sun shadow AND reflections ----
     //
-    // rtShadow() traces a handful of occlusion rays per pixel per frame with no reuse across
+    // rtShadow() and rtReflection() each trace fresh rays per pixel per frame with no reuse across
     // frames -- see the module README's "Next" section and STATUS.md 4d item 4, which already flag
-    // temporal accumulation as the missing piece. This blends each frame's fresh (low ray count)
-    // sample with a REPROJECTED sample of the previous frame's result, screen-space, so a static or
-    // slowly-moving shadow converges toward the old brute-force ray count over several frames
-    // instead of paying for it every frame.
+    // temporal accumulation as the missing piece. This blends each frame's fresh sample with a
+    // REPROJECTED sample of the previous frame's result, screen-space, so a static or slowly-moving
+    // result converges toward the old brute-force ray count over several frames instead of paying
+    // for it every frame.
     //
     // PING-PONGED, not one texture: reprojection reads a DIFFERENT texel than the one this frame
     // writes, so reading and writing the same resource in the same frame would race between pixels.
-    // Two full-screen RG32Float textures (x = visibility, y = linear depth) swap roles every frame
-    // -- one is this frame's write target (UAV), the other is last frame's result, read as this
-    // frame's history (SRV). The depth channel is what lets a disocclusion be told apart from a
-    // reprojection that legitimately lands on an already-populated texel.
+    // The two effects have their OWN texture pairs (shape differs -- shadow is a scalar visibility,
+    // reflection is an RGB colour) but share every piece of bookkeeping below: one write index, one
+    // valid flag, one frame index, one tile schedule. They always resize, swap and go valid/invalid
+    // in lockstep, since both are driven by the exact same "is RT active this frame" condition.
+    //
+    // Two full-screen RG32Float textures (x = visibility, y = linear depth) for the shadow, and two
+    // full-screen RGBA16F textures (rgb = reflected colour, a = linear depth, or a NEGATIVE
+    // sentinel meaning "this ray missed -- nothing here to reuse, see rtReflectionTemporal in
+    // VoxiShaders.hpp") for reflections. In each pair, one texture is this frame's write target
+    // (UAV), the other is last frame's result, read as this frame's history (SRV). The depth
+    // channel is what lets a disocclusion be told apart from a reprojection that legitimately lands
+    // on an already-populated texel.
     rhi::TextureHandle rtShadowHist_[2] = {0, 0};
+    rhi::TextureHandle rtReflHist_[2] = {0, 0};
     u32  rtShadowHistW_ = 0, rtShadowHistH_ = 0;
     u32  rtHistWriteIdx_ = 0;
     // False right after creation or a resize: the textures hold no real previous frame yet, and
@@ -350,22 +359,26 @@ private:
     // has nothing to do with the shadow cascades fitCascades computes.
     f32  curSceneViewport_[4] = {};
     f32  prevSceneViewport_[4] = {};
-    // (Re)creates rtShadowHist_ at the given resolution if it does not already match, and resets
-    // rtHistValid_ when it does -- the old contents belong to a resolution that no longer exists.
+    // (Re)creates BOTH rtShadowHist_ and rtReflHist_ at the given resolution if they do not already
+    // match, and resets rtHistValid_ when it does -- the old contents belong to a resolution that
+    // no longer exists.
     bool ensureShadowHistory(u32 width, u32 height);
-    // Whether PSMainVoxi will actually run its ray-traced-shadow-history code path this frame. False
-    // while RT is inactive or the debug view has taken over the scene -- in either case nothing will
-    // write rtShadowHist_, so nothing about it should be touched this frame either.
+    // Whether PSMainVoxi will actually run its ray-traced-history code path this frame, for EITHER
+    // effect. False while RT is inactive or the debug view has taken over the scene -- in either
+    // case nothing will write rtShadowHist_ or rtReflHist_, so nothing about either should be
+    // touched this frame.
     bool shadowHistoryActive() const {
-        return rtActive_ && rtShadowHist_[0] && rtShadowHist_[1] && !suppressesScene();
+        return rtActive_ && rtShadowHist_[0] && rtShadowHist_[1] &&
+               rtReflHist_[0] && rtReflHist_[1] && !suppressesScene();
     }
-    // Swaps the read/write roles, transitions both textures, rebinds them and sets cb_.prevViewProj
-    // / rtParams.w for this frame. Called before shadowPass() so the UAV is writable and the
-    // constants are ready by the time the scene loop runs PSMainVoxi.
+    // Swaps the read/write roles, transitions all four textures, rebinds them and sets
+    // cb_.prevViewProj / rtHistParams for this frame. Called before shadowPass() so the UAVs are
+    // writable and the constants are ready by the time the scene loop runs PSMainVoxi.
     void beginShadowHistory(rhi::IRenderContext& ctx);
     // Advances prevViewProj_ / rtHistWriteIdx_ / rtHistValid_ for NEXT frame, now that fitCascades()
     // (called from shadowPass(), after beginShadowHistory) has filled curViewProj_ with this frame's
-    // camera. Called at the end of prePass.
+    // camera. Called at the end of prePass. Shared by both histories -- see the member comment above
+    // for why one write index serves both.
     void endShadowHistory();
 
     bool giEnabled() const { return settings_.globalIllumination != Quality::Off; }

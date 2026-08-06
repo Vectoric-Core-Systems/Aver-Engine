@@ -73,6 +73,13 @@ StructuredBuffer<RtInstance> gRtInstances : register(t5);
 Texture2D<float2>   gRtShadowHist    : register(t6);
 RWTexture2D<float2> gRtShadowHistOut : register(u2);
 
+// The ray-traced reflection history: LAST frame's resolved (colour, depth) (t7, read this frame)
+// and THIS frame's (u3, written this frame, becomes t7 next frame). Same ping-pong as the shadow
+// history above, its own pair of textures. rgb = the reflection's own shaded colour, a = linear
+// depth of the hit, OR NEGATIVE meaning the ray missed -- see rtReflectionTemporal.
+Texture2D<float4>   gRtReflHist    : register(t7);
+RWTexture2D<float4> gRtReflHistOut : register(u3);
+
 // A hash of the pixel, for rotating each pixel's sample pattern.
 //
 // SPATIAL ONLY, and that is a hard requirement rather than a simplification: the gate oracle
@@ -429,6 +436,99 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, out
     hit = true;
     return inst.albedo * (direct + ambient);
 }
+
+// Reprojects wpos through LAST frame's camera to sample the reflection history there. False when
+// not usable: off-screen, behind last frame's near plane, no hit recorded there (stored.a <= 0 --
+// see gRtReflHist's own comment for the miss sentinel), or a depth mismatch (disocclusion) -- the
+// exact same test rtReprojectHistory uses for the shadow, against the reflection's own depth
+// channel instead.
+//
+// A MISS IS NEVER REPROJECTED, on purpose, and that is the one real difference from the shadow
+// case: sky-by-direction is cheap to recompute (no ray, just an analytic model) and highly VIEW
+// dependent, so reusing a stale miss sample as the camera rotates would show the wrong patch of
+// sky through a still surface. A real hit's shading has no such problem -- it depends on the
+// reflected surface and a mostly-static light, not on the viewing angle -- so only hits are worth
+// the reprojection at all.
+bool rtReprojectReflection(float3 wpos, float2 pixel, out float3 hist, out float2 velocityPx) {
+    hist = 0.0;
+    velocityPx = 0.0;
+    float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
+    if (clip.w <= 1e-4) return false;
+    float3 ndc = clip.xyz / clip.w;
+    if (ndc.z < 0.0 || ndc.z > 1.0) return false;
+    float texW, texH;
+    gRtReflHist.GetDimensions(texW, texH);
+    float2 px = gSceneViewport.xy +
+                float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * gSceneViewport.zw;
+    int2 texel = int2(floor(px));   // see rtReprojectHistory for why floor, not round
+    if (any(texel < 0) || texel.x >= (int)texW || texel.y >= (int)texH) return false;
+
+    const float4 stored = gRtReflHist.Load(int3(texel, 0));
+    if (stored.a <= 0.0) return false;   // a miss was recorded there -- nothing to reuse
+    const float tol = max(clip.w, stored.a) * 0.03 + 1.0;
+    if (abs(clip.w - stored.a) > tol) return false;
+
+    hist = stored.rgb;
+    velocityPx = px - pixel;
+    return true;
+}
+
+// Tiled/temporal wrapper around rtReflection(), mirroring rtShadowTemporal's structure exactly and
+// sharing its tile schedule -- same tileBits, same frameIdx, same per-pixel turn -- so a pixel's
+// shadow ray and reflection ray amortise on the same cadence instead of needing two separate
+// knobs. Called ONLY when the caller has already gated on roughness (s.rough <= 0.5 in
+// PSMainVoxi): a pixel that never qualifies for a reflection ray at all has nothing here to tile
+// or reproject, and this function does not re-check that gate.
+//
+// `hit` means the same thing it does for rtReflection() -- true when there is a real reflection
+// colour to use, false when the caller should fall back to the sky. It is true both for a fresh
+// hit this frame AND for a reused hit from history (haveHist is already conditioned on the stored
+// sample being a real hit, never a miss -- see rtReprojectReflection).
+float3 rtReflectionTemporal(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, out bool hit) {
+    if (gRtHistParams.x < 0.5) return rtReflection(wpos, N, R, L, pixel, hit);
+
+    const float4 curClip = mul(float4(wpos, 1.0), gViewProj);
+    const uint tileBits = (uint)gRtHistParams.w;
+    if (tileBits == 0u) {
+        float3 fresh = rtReflection(wpos, N, R, L, pixel, hit);
+        gRtReflHistOut[uint2(pixel)] = hit ? float4(fresh, curClip.w) : float4(0.0, 0.0, 0.0, -1.0);
+        return fresh;
+    }
+
+    const uint frameIdx = (uint)gRtHistParams.z;
+    const uint tileMask = (1u << tileBits) - 1u;
+    const uint turnMask  = (1u << (2u * tileBits)) - 1u;
+    const uint localIdx  = (((uint)pixel.y & tileMask) << tileBits) | ((uint)pixel.x & tileMask);
+    const bool myTurn    = localIdx == (frameIdx & turnMask);
+
+    float3 hist = 0.0;
+    float2 velocityPx = 0.0;
+    const bool haveHist = gRtHistParams.y > 0.5 && rtReprojectReflection(wpos, pixel, hist, velocityPx);
+
+    float3 col;
+    bool curHit;
+    if (myTurn || !haveHist) {
+        col = rtReflection(wpos, N, R, L, pixel, curHit);
+        // Same adaptive-weight shape as rtShadowTemporal -- see its comment for the reasoning.
+        // Only blends a HIT with history: a fresh miss stays a miss (the caller's own sky fallback
+        // already handles that correctly) rather than being dragged toward a stale hit colour.
+        if (curHit && haveHist) {
+            const float budget = max(6.0 - 1.5 * (float)tileBits, 1.0);
+            const float t = saturate(length(velocityPx) / budget);
+            const float weight = lerp(0.9, 0.1, t);
+            col = lerp(col, hist, weight);
+        }
+    } else {
+        // Not this pixel's turn, and reprojection found a real hit: reuse it outright. No ray at
+        // all this frame -- this is the actual saving tiling exists for.
+        col = hist;
+        curHit = true;
+    }
+
+    hit = curHit;
+    gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, curClip.w) : float4(0.0, 0.0, 0.0, -1.0);
+    return col;
+}
 #endif
 
 // 3x3 PCF inside ONE cascade's quadrant of the atlas. Returns 1 = lit, 0 = shadowed, -1 = outside
@@ -572,7 +672,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     // reflects anyway.
     if (gShadowParams.z > 0.5 && gRtParams.w > 0.5 && s.rough <= 0.5) {
         bool specHit = false;
-        float3 refl = rtReflection(i.wpos, N, R, L, i.pos.xy, specHit);
+        float3 refl = rtReflectionTemporal(i.wpos, N, R, L, i.pos.xy, specHit);
         // Faded out toward the cutoff so a surface does not pop between the two models as its
         // roughness crosses a threshold.
         ind4.specular = lerp(specHit ? refl : skyColor(R), skyColor(R),

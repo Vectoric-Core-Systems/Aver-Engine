@@ -55,11 +55,12 @@ void giSamplers(rhi::PipelineLayout& l) {
 rhi::PipelineLayout giLayout() {
     rhi::PipelineLayout l{};
     // t0 volume, t1 shadow map, t2 acceleration structure, then the flat geometry a reflection
-    // ray reads after a hit: t3 vertices, t4 indices, t5 instances, t6 ray-traced shadow history
-    // (last frame's, reprojected). The material table is BASED on this count rather than at a fixed
-    // register, so widening table 0 rebases it automatically.
-    l.srvCount = 7;
-    l.uavCount = 3;              // u0 volume mip 0, u1 injection accumulator, u2 shadow history (this frame's)
+    // ray reads after a hit: t3 vertices, t4 indices, t5 instances, t6 ray-traced shadow history,
+    // t7 ray-traced reflection history (both last frame's, reprojected). The material table is
+    // BASED on this count rather than at a fixed register, so widening table 0 rebases it
+    // automatically.
+    l.srvCount = 8;
+    l.uavCount = 4;              // u0 volume mip 0, u1 injection accumulator, u2 shadow history, u3 reflection history (this frame's)
     l.srvCount1 = pbr::kMaterialSrvCount;   // table 1: the material's textures, based at t3
     l.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
     giSamplers(l);
@@ -925,14 +926,18 @@ void VoxiRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rh
         AVER_ERROR("[Voxi] ray-traced shadow history could not be (re)created at {}x{}", width, height);
 }
 
-// (Re)creates the ray-traced shadow history at the given resolution. Both textures are destroyed
-// and rebuilt together: one at the wrong size with the other right would corrupt reprojection.
+// (Re)creates the ray-traced shadow AND reflection histories at the given resolution. All four
+// textures are destroyed and rebuilt together: one at the wrong size with another right would
+// corrupt reprojection, and the two pairs share rtHistWriteIdx_/rtHistValid_ so they must always
+// agree on whether a previous frame's contents exist at all.
 bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     if (!res_ || !bindings_ || width == 0 || height == 0) return false;
-    if (rtShadowHist_[0] && rtShadowHist_[1] && rtShadowHistW_ == width && rtShadowHistH_ == height)
+    if (rtShadowHist_[0] && rtShadowHist_[1] && rtReflHist_[0] && rtReflHist_[1] &&
+        rtShadowHistW_ == width && rtShadowHistH_ == height)
         return true;
 
     for (rhi::TextureHandle& t : rtShadowHist_) { if (t) res_->destroyTexture(t); t = 0; }
+    for (rhi::TextureHandle& t : rtReflHist_)   { if (t) res_->destroyTexture(t); t = 0; }
     rtHistValid_ = false;   // the old contents, if any, belonged to a resolution that no longer exists
 
     rhi::TextureDesc d;
@@ -953,6 +958,19 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     rtShadowHist_[1] = res_->createTexture(d);
     if (!rtShadowHist_[0] || !rtShadowHist_[1]) return false;
 
+    // rgb = the reflection's own shaded colour, a = linear depth of the hit, OR a NEGATIVE
+    // sentinel meaning the ray missed and there is nothing here to reuse -- see
+    // rtReflectionTemporal in VoxiShaders.hpp for why a miss is never reprojected (sky-by-direction
+    // is cheap and highly view dependent, so it is recomputed fresh every frame regardless of
+    // turn). RGBA16F rather than RGBA32F: HDR colour does not need full float precision, and this
+    // halves the bandwidth of a buffer already twice the size of the shadow one.
+    d.format = rhi::Format::RGBA16F;
+    d.debugName = "Voxi RT reflection history A";
+    rtReflHist_[0] = res_->createTexture(d);
+    d.debugName = "Voxi RT reflection history B";
+    rtReflHist_[1] = res_->createTexture(d);
+    if (!rtReflHist_[0] || !rtReflHist_[1]) return false;
+
     rtShadowHistW_ = width;
     rtShadowHistH_ = height;
     rtHistWriteIdx_ = 0;
@@ -960,6 +978,8 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     // every frame as the roles swap.
     res_->setUav(bindings_, 2, rtShadowHist_[0], 0);
     res_->setSrv(bindings_, 6, rtShadowHist_[1]);
+    res_->setUav(bindings_, 3, rtReflHist_[0], 0);
+    res_->setSrv(bindings_, 7, rtReflHist_[1]);
     return true;
 }
 
@@ -976,13 +996,19 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
 
     // The write texture rests as ShaderResource between frames; make it writable. The read texture,
     // if it holds a real previous frame, is still sitting in UnorderedAccess from when IT was last
-    // frame's write target -- flip it back to readable.
+    // frame's write target -- flip it back to readable. Both pairs share writeIdx/readIdx: they
+    // always swap together (see the member comment in VoxiRenderer.hpp).
     ctx.textureBarrier(rtShadowHist_[writeIdx], rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
-    if (rtHistValid_)
+    ctx.textureBarrier(rtReflHist_[writeIdx],   rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
+    if (rtHistValid_) {
         ctx.textureBarrier(rtShadowHist_[readIdx], rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
+        ctx.textureBarrier(rtReflHist_[readIdx],   rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
+    }
 
     res_->setUav(bindings_, 2, rtShadowHist_[writeIdx], 0);
     res_->setSrv(bindings_, 6, rtShadowHist_[readIdx]);
+    res_->setUav(bindings_, 3, rtReflHist_[writeIdx], 0);
+    res_->setSrv(bindings_, 7, rtReflHist_[readIdx]);
 
     // Read fresh every frame rather than cached: unlike the texture resolution, the scene viewport
     // can change (an editor panel resize) without a full onRenderTargetsChanged notification. A
@@ -1077,8 +1103,8 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
 
     // Main table. Each slot declares its kind because Tier 1 hardware null-fills by dimension.
     rhi::BindingSetDesc bd;
-    bd.srvCount = 7;
-    bd.uavCount = 3;
+    bd.srvCount = 8;
+    bd.uavCount = 4;
     bd.srvKinds[0] = rhi::SlotKind::Texture3D;              // t0 volume, whole chain
     bd.srvKinds[1] = rhi::SlotKind::Texture2D;              // t1 shadow map
     bd.srvKinds[2] = rhi::SlotKind::AccelerationStructure;  // t2 TLAS, filled once one exists
@@ -1088,18 +1114,20 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     bd.srvKinds[4] = rhi::SlotKind::StructuredBuffer;       // t4 flat indices
     bd.srvKinds[5] = rhi::SlotKind::StructuredBuffer;       // t5 per-instance records
     bd.srvKinds[6] = rhi::SlotKind::Texture2D;              // t6 ray-traced shadow history (read)
+    bd.srvKinds[7] = rhi::SlotKind::Texture2D;              // t7 ray-traced reflection history (read)
     bd.uavKinds[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
     bd.uavKinds[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
     bd.uavKinds[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
+    bd.uavKinds[3] = rhi::SlotKind::Texture2D;              // u3 ray-traced reflection history (write)
     bindings_ = res_->createBindingSet(bd);
     if (!bindings_) { AVER_ERROR("[Voxi] main binding set could not be created"); return false; }
     res_->setSrv(bindings_, 0, voxelTex_, rhi::kAllMips);
     if (shadowTex_) res_->setSrv(bindings_, 1, shadowTex_);
     res_->setUav(bindings_, 0, voxelTex_, 0);
     res_->setUav(bindings_, 1, voxelAccumTex_, 0);
-    // t6/u2 (rtShadowHist_) are populated once onRenderTargetsChanged creates them -- the resolution
-    // is not known this early, and the slots are declared above so Tier 1 null-fills them correctly
-    // until then.
+    // t6/u2 (rtShadowHist_) and t7/u3 (rtReflHist_) are populated once onRenderTargetsChanged
+    // creates them -- the resolution is not known this early, and the slots are declared above so
+    // Tier 1 null-fills them correctly until then.
 
     // The clear and the resolve get UAV-only sets: while they run every mip of the volume is in
     // UnorderedAccess, so no SRV descriptor over it may be live.
