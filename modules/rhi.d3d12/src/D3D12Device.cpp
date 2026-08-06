@@ -840,6 +840,9 @@ private:
     bool drawBindingIgnored_ = false;   // the "backend's own pipeline drops it" warning, said once
 
     bool skyEnabled_ = false;
+    // Set in beginFrame when a feature suppressed the scene (its own scenePass replaced the whole
+    // frame), read in endFrame so the deferred sky draw doesn't run over what that feature drew.
+    bool sceneSuppressed_ = false;
     // The authored atmosphere; the frame block above holds the packed form the shader reads.
     SkyAtmosphere sky_{};
     bool wireframe_ = false;
@@ -1550,7 +1553,21 @@ bool D3D12Device::createPipeline() {
     sp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     sp.RasterizerState.MultisampleEnable = TRUE;
     sp.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    sp.DepthStencilState.DepthEnable = FALSE;
+    // DEPTH-TESTED NOW, NOT DISABLED. The sky draws AFTER opaque geometry (endFrame, not beginFrame
+    // -- see the call site), so by the time this runs the depth buffer already holds every opaque
+    // pixel's real depth and the cleared far value (1.0) everywhere nothing was drawn. VSky emits
+    // o.pos = float4(ndc, 1.0, 1.0), so the sky rasterizes at EXACTLY 1.0.
+    //
+    // EQUAL, NOT GREATER_EQUAL -- caught by a gate run that turned the ENTIRE image one flat colour.
+    // The sky's own depth is a CONSTANT at the maximum of the standard [0,1] range this scene uses
+    // (opaque geometry writes DepthFunc=LESS, so smaller means closer and 1.0 is the far plane). A
+    // constant pinned at the range's own maximum makes GREATER_EQUAL (new >= stored) trivially true
+    // for every stored value there is -- there is nothing a stored depth could be that is NOT <= 1.0
+    // -- so the sky depth-tested as "in front of" geometry that was, by construction, always in front
+    // of it. EQUAL is the actual "still at the clear value" test: true only where nothing closer was
+    // ever written, false everywhere real geometry left a smaller depth behind.
+    sp.DepthStencilState.DepthEnable = TRUE;
+    sp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_EQUAL;
     sp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
     sp.SampleMask = UINT_MAX;
     sp.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -2055,18 +2072,24 @@ void D3D12Device::beginFrame() {
     bindGraphicsRoot(rootSig_.Get());
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
+    sceneSuppressed_ = false;
     for (IRenderFeature* f : features_) {
         if (!f->suppressesScene()) continue;
         if (rhiContext_) f->scenePass(*rhiContext_);
         cmdList_->SetPipelineState(pso_.Get());
+        sceneSuppressed_ = true;
         return;
     }
 
-    if (skyEnabled_) {
-        cmdList_->SetPipelineState(skyPso_.Get());
-        cmdList_->IASetVertexBuffers(0, 0, nullptr);
-        cmdList_->DrawInstanced(3, 1, 0, 0);
-    }
+    // THE SKY NO LONGER DRAWS HERE. It used to run first, depth-disabled, at 100% of the render
+    // target's coverage regardless of how much of the final image opaque geometry would go on to
+    // cover -- the single most expensive shader in this file (the atmosphere march in PSky) paying
+    // full price on every pixel a wall, a tree or a character was about to sit in front of. It now
+    // draws at the START of endFrame, once every opaque drawMesh call this frame has already
+    // happened and the depth buffer holds their real depth -- see that function, and the sky PSO's
+    // now depth-tested creation just above, for why moving it there is correct rather than a
+    // reorder-and-hope: it lands on the SAME still-bound render target and depth buffer, before
+    // endFrame's own first GPU work (the MSAA resolve) ever reads either.
     cmdList_->SetPipelineState(pso_.Get());
 }
 
@@ -2838,6 +2861,34 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
 void D3D12Device::endFrame() {
     if (!hasSwapchain_) return;
     ID3D12Resource* bb = renderTargets_[frameIndex_].Get();
+
+    // THE DEFERRED SKY DRAW. Every opaque drawMesh call the caller was going to make this frame has
+    // already happened by the time endFrame runs -- this is the last point before runPostChain's own
+    // first GPU work (the MSAA resolve, right below) reads the scene render target, so it is also the
+    // last point at which drawing into that target still means anything. Viewport and root signature
+    // are re-set explicitly rather than trusted to still be whatever beginFrame left them as: a
+    // feature's own passes, or setPipeline/setBindingSet from a render feature's own draw calls, can
+    // legitimately change either between beginFrame and here, and both calls are cheap and idempotent
+    // when nothing actually needs to change (bindGraphicsRoot already no-ops on a matching signature).
+    // The render target and depth buffer are NOT re-bound: nothing between beginFrame and here ever
+    // rebinds them away from the scene target, which every opaque drawMesh call this frame already
+    // depended on being true.
+    if (skyEnabled_ && !sceneSuppressed_) {
+        const f32 rx = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
+        const f32 ry = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
+        const f32 rw = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(width_);
+        const f32 rh = vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(height_);
+        D3D12_VIEWPORT vp{rx, ry, rw, rh, 0.0f, 1.0f};
+        D3D12_RECT sc{static_cast<LONG>(rx), static_cast<LONG>(ry), static_cast<LONG>(rx + rw), static_cast<LONG>(ry + rh)};
+        cmdList_->RSSetViewports(1, &vp);
+        cmdList_->RSSetScissorRects(1, &sc);
+        bindGraphicsRoot(rootSig_.Get());
+        cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        cmdList_->SetPipelineState(skyPso_.Get());
+        boundPso_ = skyPso_.Get();
+        cmdList_->IASetVertexBuffers(0, 0, nullptr);
+        cmdList_->DrawInstanced(3, 1, 0, 0);
+    }
 
     runPostChain(bb);
 
