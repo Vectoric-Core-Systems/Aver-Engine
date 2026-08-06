@@ -940,7 +940,11 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     d.width  = width;
     d.height = height;
     d.mips   = 1;
-    d.format = rhi::Format::R32Float;
+    // x = visibility, y = linear depth (view-space, centimetres) -- the depth channel is what lets
+    // rtReprojectHistory tell a reprojection that lands on an already-populated texel apart from
+    // one that has actually disoccluded: a silhouette edge can reproject to the SAME screen texel
+    // while the surface now visible through it sits at a very different depth.
+    d.format = rhi::Format::RG32Float;
     d.bind   = rhi::ResourceBind::ShaderResource | rhi::ResourceBind::UnorderedAccess;
     d.initialState = rhi::ResourceState::ShaderResource;   // where a texture rests between frames
     d.debugName = "Voxi RT shadow history A";

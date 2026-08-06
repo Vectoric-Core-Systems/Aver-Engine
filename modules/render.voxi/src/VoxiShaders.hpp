@@ -65,12 +65,13 @@ StructuredBuffer<RtVertex>   gRtVerts     : register(t3);
 StructuredBuffer<uint>       gRtIndices   : register(t4);
 StructuredBuffer<RtInstance> gRtInstances : register(t5);
 
-// The ray-traced sun-shadow history: LAST frame's resolved visibility (t6, read this frame) and
-// THIS frame's (u2, written this frame, becomes t6 next frame). Ping-ponged on the C++ side --
-// VoxiRenderer.hpp rtShadowHist_ -- never the same texture in the same frame. Single-channel
-// visibility in [0,1], so a plain float is enough.
-Texture2D<float>   gRtShadowHist    : register(t6);
-RWTexture2D<float> gRtShadowHistOut : register(u2);
+// The ray-traced sun-shadow history: LAST frame's resolved (visibility, depth) (t6, read this
+// frame) and THIS frame's (u2, written this frame, becomes t6 next frame). Ping-ponged on the C++
+// side -- VoxiRenderer.hpp rtShadowHist_ -- never the same texture in the same frame. x =
+// visibility in [0,1], y = linear (view-space) depth in centimetres, for rtReprojectHistory's
+// disocclusion test.
+Texture2D<float2>   gRtShadowHist    : register(t6);
+RWTexture2D<float2> gRtShadowHistOut : register(u2);
 
 // A hash of the pixel, for rotating each pixel's sample pattern.
 //
@@ -207,8 +208,17 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3
 }
 
 // Reprojects wpos through LAST frame's camera to sample the ray-traced shadow history there. False
-// when the reprojection is not usable at all (off-screen, behind last frame's near plane) -- in
-// which case `hist` is untouched.
+// when the reprojection is not usable at all: off-screen, behind last frame's near plane, or a
+// DISOCCLUSION -- the stored depth at the reprojected texel does not match what this world point
+// should have looked like last frame (see the depth-comparison block below). In every false case
+// `hist`/`velocityPx` are left untouched.
+//
+// `pixel` is this frame's own screen position; the reprojection's screen-space displacement from
+// it is handed back as `velocityPx` so the caller can discount an otherwise-valid sample that has
+// moved -- camera motion (or the receiver surface itself moving) pushes a static world point
+// across texels between frames, which the depth test alone does not catch: it only tells apart
+// "still the same surface" from "now looking at something else", not "the same surface, but I have
+// slid along it since last frame."
 //
 // NDC -> LAST frame's VIEWPORT rect, not [0,1] of the whole texture: the editor docks the 3D view
 // in a sub-rect of the backbuffer (gSceneViewport), and a plain ndc*0.5+0.5 implicitly assumes the
@@ -227,8 +237,9 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3
 // at 46,46,47 against a real 23,27,32, unmoved between 300 and 1500 frames, so this was not slow
 // convergence). Nearest guarantees this pixel reads its OWN last write, which is what the schedule
 // in rtShadowTemporal actually assumes.
-bool rtReprojectHistory(float3 wpos, out float hist) {
+bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 velocityPx) {
     hist = 0.0;
+    velocityPx = 0.0;
     float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
     if (clip.w <= 1e-4) return false;
     float3 ndc = clip.xyz / clip.w;
@@ -246,10 +257,20 @@ bool rtReprojectHistory(float3 wpos, out float hist) {
     // pixel schedule's "read my own last write" actually needs -- round() was measured to converge
     // to a stable but wrong value (penumbra-rt settled at 78,75,70 against a true ~23,27,32).
     int2 texel = int2(floor(px));
-    // Off-screen: no disocclusion check beyond this one, since this renderer keeps no depth or
-    // normal history to test against (a real rejection needs one).
     if (any(texel < 0) || texel.x >= (int)texW || texel.y >= (int)texH) return false;
-    hist = gRtShadowHist.Load(int3(texel, 0));
+
+    const float2 stored = gRtShadowHist.Load(int3(texel, 0));   // x = visibility, y = linear depth
+    // clip.w IS the expected depth at this reprojected point: the same value VSMain's o.pos.w would
+    // carry for a vertex sitting at wpos (RHIShaders.cpp's VSMain computes o.pos = mul(wp,
+    // gViewProj) the identical way), just through LAST frame's camera instead of this one. Comparing
+    // it to what the history actually stored there catches a disocclusion a screen-position check
+    // alone cannot: a silhouette edge can reproject to an already-populated texel while the surface
+    // now visible through it sits at a completely different depth.
+    const float tol = max(clip.w, stored.y) * 0.03 + 1.0;   // 3% relative, +1cm floor at grazing distances
+    if (abs(clip.w - stored.y) > tol) return false;
+
+    hist = stored.x;
+    velocityPx = px - pixel;
     return true;
 }
 
@@ -259,22 +280,28 @@ bool rtReprojectHistory(float3 wpos, out float hist) {
 // has nothing to do with what a later frame's PRIMARY ray at this same pixel is estimating.
 //
 // gRtHistParams.w is the pixels-per-ray TILE EDGE, as its bit count (0 = off, every pixel traces
-// every frame). At 0 this is BIT-FOR-BIT what rtShadow() alone gives: no jitter, no history read,
+// every frame). At 0 this is BIT-FOR-BIT what rtShadow() alone gives: no jitter, no history blend,
 // only a plain write so the buffer stays live for whenever a caller turns tiling on. Tiling is what
-// actually cuts ray count -- not blending, which by itself only smooths flicker on something that
-// is genuinely moving, at the cost of a small, real change to the converged value at a soft edge
-// (see the two gate comments above). Turning tiling on is what makes that cost worth paying: most
-// pixels do not trace at all most frames.
+// actually cuts ray count -- not blending on its own, which only smooths flicker on something that
+// is genuinely moving. Turning tiling on is what makes the (now adaptive, see below) blend cost
+// worth paying: most pixels do not trace at all most frames.
 float rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays) {
     // gRtHistParams.x is 0 whenever t6/u2 are not bound to real textures this frame (see
     // VoxiRenderer::beginShadowHistory) -- an unbound slot is Tier 1 null-filled, and touching
     // either one here would read or write a null descriptor rather than skip cleanly.
     if (gRtHistParams.x < 0.5) return rtShadow(wpos, N, L, pixel, dpx, dpy, rays, 0.0);
 
+    // THIS frame's own linear depth at wpos, computed the same way VSMain would (mul(wp, gViewProj)
+    // .w) rather than read back from a depth buffer -- the shadow pass has none of its own. Written
+    // into the history alongside visibility every single write below, regardless of which branch is
+    // taken, so next frame's rtReprojectHistory always has a fresh depth to disocclusion-test
+    // against, not one that is itself stale by however many frames since this pixel's last turn.
+    const float curDepth = mul(float4(wpos, 1.0), gViewProj).w;
+
     const uint tileBits = (uint)gRtHistParams.w;
     if (tileBits == 0u) {
         const float fresh = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, 0.0);
-        gRtShadowHistOut[uint2(pixel)] = fresh;
+        gRtShadowHistOut[uint2(pixel)] = float2(fresh, curDepth);
         return fresh;
     }
 
@@ -290,7 +317,8 @@ float rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx
     const bool myTurn    = localIdx == (frameIdx & turnMask);
 
     float hist = 0.0;
-    const bool haveHist = gRtHistParams.y > 0.5 && rtReprojectHistory(wpos, hist);
+    float2 velocityPx = 0.0;
+    const bool haveHist = gRtHistParams.y > 0.5 && rtReprojectHistory(wpos, pixel, hist, velocityPx);
 
     float vis;
     if (myTurn || !haveHist) {
@@ -302,14 +330,28 @@ float rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx
         // path above does not.
         const float frameJitter = (float)frameIdx * 2.39996323;
         vis = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
-        if (haveHist) vis = lerp(vis, hist, 0.85);
+        if (haveHist) {
+            // ADAPTIVE blend weight, not a flat constant: a reprojected sample that has barely
+            // moved on screen is close to a repeated measurement of the same point and earns a high
+            // weight; one that has moved several pixels is increasingly likely to be sampling
+            // slightly the wrong part of the surface even though it passed the depth test above
+            // (depth alone tells "same surface" from "different surface", not "same surface, but
+            // I've slid along it"), so it is trusted less the faster it is moving. The budget the
+            // falloff runs over SHRINKS as the tile grows: a bigger tile's history is on average
+            // staler even before any motion is considered (up to 2^(2*tileBits) frames old), so the
+            // same screen velocity should discount it over a shorter distance.
+            const float budget = max(6.0 - 1.5 * (float)tileBits, 1.0);
+            const float t = saturate(length(velocityPx) / budget);
+            const float weight = lerp(0.9, 0.1, t);
+            vis = lerp(vis, hist, weight);
+        }
     } else {
         // Not this pixel's turn, and reprojection is valid: reuse it outright. No ray at all this
         // frame -- this is the actual saving tiling exists for.
         vis = hist;
     }
 
-    gRtShadowHistOut[uint2(pixel)] = vis;
+    gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
     return vis;
 }
 

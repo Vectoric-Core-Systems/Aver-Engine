@@ -331,8 +331,10 @@ private:
     //
     // PING-PONGED, not one texture: reprojection reads a DIFFERENT texel than the one this frame
     // writes, so reading and writing the same resource in the same frame would race between pixels.
-    // Two full-screen R32Float textures swap roles every frame -- one is this frame's write target
-    // (UAV), the other is last frame's result, read as this frame's history (SRV).
+    // Two full-screen RG32Float textures (x = visibility, y = linear depth) swap roles every frame
+    // -- one is this frame's write target (UAV), the other is last frame's result, read as this
+    // frame's history (SRV). The depth channel is what lets a disocclusion be told apart from a
+    // reprojection that legitimately lands on an already-populated texel.
     rhi::TextureHandle rtShadowHist_[2] = {0, 0};
     u32  rtShadowHistW_ = 0, rtShadowHistH_ = 0;
     u32  rtHistWriteIdx_ = 0;
