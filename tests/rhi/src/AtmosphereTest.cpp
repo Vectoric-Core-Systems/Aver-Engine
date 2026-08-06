@@ -312,6 +312,86 @@ int main() {
         }
     }
 
+    AVER_INFO("fog inscatter reference (mirrors RHIShaders.cpp's averFogInscatterRef)");
+    {
+        // WHY THIS TEST EXISTS: gates.ps1 already proves atmoFogInscatterRef's answer is byte-
+        // identical to what the HLSL used to compute per pixel -- that is the strongest evidence
+        // there is, since it compares actual rendered pixels. What gates cannot do is run headless,
+        // in milliseconds, with no GPU, or catch a future edit that changes the HLSL's blend weight
+        // or step count without updating this CPU mirror -- exactly the drift this file's own header
+        // comment warns every other mirror function about. This checks the properties that edit
+        // would break, not the physics atmoScatterSegment's own tests already cover.
+        f32 sun[3] = {3.0f, 2.88f, 2.70f};
+        f32 dirNoon[3]   = {0.01f, 0.0f, 1.0f};
+        f32 dirSunset[3] = {1.0f, 0.0f, 0.05f};
+
+        f32 noon[3], sunset[3];
+        rhi::atmoFogInscatterRef(air, 0.05f, dirNoon, sun, sunRadius, noon);
+        rhi::atmoFogInscatterRef(air, 0.05f, dirSunset, sun, sunRadius, sunset);
+
+        auto finite = [](const f32 c[3]) {
+            for (int i = 0; i < 3; ++i) if (!(c[i] >= 0.0f) || !std::isfinite(c[i])) return false;
+            return true;
+        };
+        check(finite(noon), "finite and non-negative with the sun near zenith");
+        check(finite(sunset), "finite and non-negative with the sun near the horizon");
+
+        // MEASURED, per this repo's own convention: sun near the horizon warms the reference (higher
+        // red/blue) relative to sun near zenith. Not asserting a specific ratio -- only that the
+        // documented direction of the effect (RHIShaders.cpp: "near 1 ... as it nears the horizon")
+        // actually holds, which is the qualitative behaviour that shipped and was screenshotted.
+        const f32 rbNoon   = noon[0]   / std::fmax(noon[2],   1e-6f);
+        const f32 rbSunset = sunset[0] / std::fmax(sunset[2], 1e-6f);
+        check(rbSunset > rbNoon,
+              "reference warms (red/blue rises) as the sun drops toward the horizon ("
+              + std::to_string(rbNoon) + " -> " + std::to_string(rbSunset) + ")");
+
+        // CONTINUOUS, NOT A THRESHOLD: the same property the dome exponent is checked for above, and
+        // for the same reason -- this function replaced a threshold-shaped bug (c28d125) with a
+        // blend specifically to avoid a seam, and a future edit could reintroduce one silently.
+        //
+        // TRACKS THE RED CHANNEL, NOT A RATIO. An early version of this check used red/blue and
+        // failed on real, expected, physically-smooth behaviour: blue is heavily Rayleigh-extincted
+        // near the horizon, so red/blue grows steeply as blue approaches zero even though red and
+        // blue individually vary smoothly -- a ratio blows up nonlinearly right where a division by a
+        // near-zero denominator would, which is a property of ratios, not evidence of a seam. Red
+        // alone stays well away from zero across this whole sweep and is what "no single step
+        // dominates" can actually mean here: FORTY steps (fine enough that a genuine c28d125-style
+        // jump would stand out as an outlier even against real curvature near the horizon), checked
+        // against the AVERAGE step size rather than the total swing -- the total swing is dominated
+        // by the same near-horizon steepness a smooth function is allowed to have, so bounding a
+        // single step by a fraction of it would fail on smoothness exactly like the ratio version did.
+        const int kSweepSteps = 40;
+        f32 prevRed = noon[0];
+        f32 worstStep = 0.0f, sumStep = 0.0f;
+        for (int i = 1; i <= kSweepSteps; ++i) {
+            const f32 t = static_cast<f32>(i) / static_cast<f32>(kSweepSteps);   // 0 (noon) .. 1 (sunset)
+            f32 dir[3] = {1.0f, 0.0f, 1.0f - t * 0.95f};
+            f32 c[3];
+            rhi::atmoFogInscatterRef(air, 0.05f, dir, sun, sunRadius, c);
+            const f32 step = std::fabs(c[0] - prevRed);
+            worstStep = std::fmax(worstStep, step);
+            sumStep += step;
+            prevRed = c[0];
+        }
+        const f32 avgStep = sumStep / static_cast<f32>(kSweepSteps);
+        check(worstStep < 6.0f * avgStep,
+              "no single step (of " + std::to_string(kSweepSteps) + ") in the red channel is an outlier "
+              "against the average step (worst " + std::to_string(worstStep) + " vs avg "
+              + std::to_string(avgStep) + ")");
+
+        // ALTITUDE READS THE SAME FIELDS averAtmoCamAlt() DOES: a camera at a plausible eye height
+        // (5 m) should differ only slightly from one floored at the 1 mm minimum -- both are
+        // negligible next to the 8 km / 1.2 km Rayleigh/Mie scale heights this model runs on.
+        f32 dirMid[3] = {0.3f, 0.0f, 0.6f};
+        f32 floor_[3], eyeHeight[3];
+        rhi::atmoFogInscatterRef(air, 1e-6f, dirMid, sun, sunRadius, floor_);
+        rhi::atmoFogInscatterRef(air, 0.005f, dirMid, sun, sunRadius, eyeHeight);
+        for (int i = 0; i < 3; ++i)
+            checkNear(eyeHeight[i], floor_[i], 0.05,
+                      "5 m eye height vs the altitude floor, channel " + std::to_string(i));
+    }
+
     AVER_INFO(g_failures ? "AtmosphereTest: {} FAILURES" : "AtmosphereTest: all checks passed ({})",
               g_failures);
     return g_failures ? 1 : 0;

@@ -317,6 +317,7 @@ struct PerFrameCB {
     f32 atmoPlanet[4];   // x planet radius km, y atmosphere top radius km, z world->km, w on/off
     f32 atmoTune[4];     // x ozone centre km, y multi-scatter gain, z view steps, w aerial steps
     f32 atmoSunE0[4];    // rgb sun irradiance above the air, w ground albedo
+    f32 fogInscatterRef[4]; // rgb averFogInscatterRef's answer, baked once per frame on the CPU
     f32 furnace[4];      // x on, y radiance -- the white-furnace energy oracle
 };
 
@@ -914,6 +915,7 @@ private:
     ComPtr<ID3D12PipelineState> msPso_;
     bool msSupported_ = false, msActive_ = false, msRefusalLogged_ = false;
     ID3D12RootSignature* boundRootSig_ = nullptr;   // raw: cache only, ownership stays in the ComPtrs
+    ID3D12PipelineState* boundPso_ = nullptr;       // same cache, for drawMesh's SetPipelineState
 
     bool hasSwapchain_ = false;
     bool vsync_ = true;
@@ -2020,6 +2022,7 @@ void D3D12Device::beginFrame() {
     allocators_[frameIndex_]->Reset();
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
     boundRootSig_ = nullptr;
+    boundPso_ = pso_.Get();   // Reset's second argument IS the command list's initial bound PSO
     postCBUsed_ = 0;
     drawBinding_ = defaultDrawBinding_;
     // Before any feature's prePass and before any draw: a skin target must never be read in the
@@ -2033,7 +2036,7 @@ void D3D12Device::beginFrame() {
 
     if (rhiContext_) {
         for (IRenderFeature* f : features_) f->prePass(*rhiContext_);
-        if (!features_.empty()) boundRootSig_ = nullptr;
+        if (!features_.empty()) { boundRootSig_ = nullptr; boundPso_ = nullptr; }
     }
 
     cmdList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
@@ -2094,6 +2097,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         if (msActive_ && msPso_ && !wireframe_) rhiContext_->dispatchMeshFor(mesh);
         else                                    rhiContext_->drawMesh(mesh);
         boundRootSig_ = nullptr;
+        boundPso_ = nullptr;
         return;
     }
 
@@ -2105,7 +2109,15 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     const GpuMesh& m = meshes_[mesh - 1];
     const bool useMs = msActive_ && msPso_ && !wireframe_;
     bindGraphicsRoot(useMs ? msRootSig_.Get() : rootSig_.Get());
-    cmdList_->SetPipelineState(useMs ? msPso_.Get() : (wireframe_ ? wirePso_.Get() : pso_.Get()));
+    // GUARDED THE SAME WAY bindGraphicsRoot ALREADY GUARDS THE ROOT SIGNATURE, right above. A scene
+    // is typically hundreds to thousands of drawMesh calls sharing one PSO (same shading model, same
+    // wireframe/mesh-shader mode), and this call re-issued SetPipelineState on every single one of
+    // them regardless -- most drivers absorb a redundant identical PSO set cheaply, but it is still a
+    // command-list entry paid for nothing. boundPso_ is invalidated everywhere boundRootSig_ already
+    // is, since anything that can change the root signature (a feature pipeline, PSO recreation on
+    // resize) can just as well change which PSO is actually bound.
+    ID3D12PipelineState* wantPso = useMs ? msPso_.Get() : (wireframe_ ? wirePso_.Get() : pso_.Get());
+    if (wantPso != boundPso_) { cmdList_->SetPipelineState(wantPso); boundPso_ = wantPso; }
     f32 consts[kObjectConstantDwords];
     std::memcpy(consts, world, 16 * sizeof(f32));
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
@@ -2313,6 +2325,18 @@ void D3D12Device::packAtmosphere(const SkyAtmosphere& s) {
                      1.0f / 2.2f);
     }
     frameCB_.skyParams[0] = dome.exponent;
+
+    // averFogInscatterRef's answer, baked here once per frame instead of marched per pixel -- see
+    // that function's own comment in RHIShaders.cpp for why this is exact, not an approximation.
+    // Reads frameCB_.camPos and frameCB_.atmoPlanet, both already written for THIS frame: setCamera
+    // runs before setSkyAtmosphere in every caller (GameApp::pushFrame, SandboxApp's own per-frame
+    // setup), and atmoPlanet[2] (the world-to-km factor) was set a few lines up in this same
+    // function, so neither is a frame stale.
+    const f32 altKm = std::fmax(frameCB_.camPos[2] * frameCB_.atmoPlanet[2], 1e-3f);
+    f32 fogRef[3];
+    atmoFogInscatterRef(fit, altKm, s.sunDirection, e0, sunRadius, fogRef);
+    for (int i = 0; i < 3; ++i) frameCB_.fogInscatterRef[i] = fogRef[i];
+    frameCB_.fogInscatterRef[3] = 0.0f;
 }
 
 // Builds the post chain's root signature, PSOs and constant ring. Size-independent, so built once.
@@ -2650,6 +2674,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     cmdList_->SetDescriptorHeaps(1, heaps);
     cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
     boundRootSig_ = nullptr;
+    boundPso_ = nullptr;
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList_->IASetVertexBuffers(0, 0, nullptr);
 
@@ -4332,6 +4357,7 @@ void D3D12RenderContext::setPipeline(PipelineHandle h) {
         dev_->boundRootSig_ = nullptr;
     }
     dev_->cmdList_->SetPipelineState(p->pso.Get());
+    dev_->boundPso_ = p->pso.Get();   // matches what the line above just bound, not a guess
     pipe_ = p;
 
     bindDeclaredRootCbvs(p);
@@ -4433,6 +4459,7 @@ void D3D12RenderContext::setBindingSet(BindingSetHandle set, u32 table) {
     ID3D12DescriptorHeap* heaps[] = {res_->heap_.Get()};
     dev_->cmdList_->SetDescriptorHeaps(1, heaps);
     dev_->boundRootSig_ = nullptr;
+    dev_->boundPso_ = nullptr;
 
     if (s->srvCount && s->srvBaseRegister != pipe_->srvBaseRegister[table])
         AVER_WARN("[RHI.D3D12] binding set was built for t{} but table {} covers t{}",

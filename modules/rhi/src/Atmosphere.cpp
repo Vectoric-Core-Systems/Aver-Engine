@@ -271,4 +271,31 @@ void atmoFitDome(const AtmosphereProfile& a, f32 altitudeKm, f32 sunCosZenith,
     atmoSunTransmittance(a, altitudeKm, sunCosZenith, sunAngularRadiusRad, out.sunTransmittance);
 }
 
+// Mirrors RHIShaders.cpp's averFogInscatterRef() exactly: a zenith march and a level march toward
+// the sun's own azimuth, blended 0.4 toward the second. Kept in lockstep with that function
+// deliberately -- if its blend weight or step count ever changes, this must change with it, the same
+// discipline every other function in this file already keeps with its own HLSL twin.
+void atmoFogInscatterRef(const AtmosphereProfile& a, f32 altitudeKm, const f32 sunDir[3],
+                         const f32 sunIrradiance[3], f32 sunAngularRadiusRad, f32 outRgb[3]) {
+    const f32 len = std::sqrt(sunDir[0] * sunDir[0] + sunDir[1] * sunDir[1] + sunDir[2] * sunDir[2]);
+    const f32 Lx = len > 1e-6f ? sunDir[0] / len : 0.0f;
+    const f32 Ly = len > 1e-6f ? sunDir[1] / len : 0.0f;
+    const f32 Lz = len > 1e-6f ? sunDir[2] / len : 1.0f;
+
+    const f32 rTop = a.planetRadiusKm + a.atmosphereHeightKm;
+    const f32 r0   = a.planetRadiusKm + (altitudeKm > 0.0f ? altitudeKm : 0.0f);
+
+    f32 zenith[3], zenithT[3];
+    atmoScatterSegment(a, r0, 1.0f, Lz, Lz, rTop - r0, a.viewSteps,
+                       sunIrradiance, sunAngularRadiusRad, zenith, zenithT);
+
+    const f32 lenLxy = std::sqrt(Lx * Lx + Ly * Ly);
+    const f32 tMax    = raySphere(r0, 0.0f, rTop, false);
+    f32 towardSun[3], towardSunT[3];
+    atmoScatterSegment(a, r0, 0.0f, Lz, lenLxy, tMax > 0.0f ? tMax : 0.0f, a.viewSteps,
+                       sunIrradiance, sunAngularRadiusRad, towardSun, towardSunT);
+
+    for (int c = 0; c < 3; ++c) outRgb[c] = zenith[c] + (towardSun[c] - zenith[c]) * 0.4f;
+}
+
 } // namespace aver::rhi

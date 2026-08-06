@@ -119,6 +119,11 @@ cbuffer PerFrame : register(b0) {
     float4   gAtmoPlanet;   // x planet radius km, y atmosphere top radius km, z world->km, w on/off
     float4   gAtmoTune;     // x ozone centre km, y multi-scatter gain, z view steps, w aerial steps
     float4   gAtmoSunE0;    // rgb sun irradiance ABOVE the air, w ground albedo
+    // averFogInscatterRef()'s answer, baked ONCE PER FRAME on the CPU (Atmosphere.cpp's mirror of
+    // this same function) rather than marched per pixel -- see averFogInscatterRef below for why
+    // that is exactly correct and not an approximation: the function has no view-direction or
+    // world-position input, so every pixel that used to compute it was computing the same answer.
+    float4   gFogInscatterRef; // rgb; w unused
     // x > 0.5 puts the shading model in a WHITE FURNACE: every direction carries radiance y and the
     // ground carries it too. z > 0.5 is the SUN-ON variant: the environment drops to zero and the
     // sun stays lit, which is the only configuration in which the direct term is under test at all.
@@ -322,9 +327,11 @@ float3 averSkyAbove(float3 dir) {
 
 // The reference sky colour that the fog and the dome's lower half both resolve to.
 //
-// TWO TERMS, NOT ONE. Straight up (unchanged from before) is the ambient half. Added to it now:
-// straight OUT along the sun's own azimuth, levelled to the true horizon -- the half that actually
-// answers "what colour is the light hitting the fog right now."
+// TWO TERMS, NOT ONE, COMPUTED ONCE PER FRAME ON THE CPU, NOT PER PIXEL. Straight up is the ambient
+// half. Blended with it: straight OUT along the sun's own azimuth, levelled to the true horizon --
+// the half that actually answers "what colour is the light hitting the fog right now." See
+// Atmosphere.cpp's atmoFogInscatterRef -- the ACTUAL implementation now lives there, mirrored from
+// this comment's own reasoning below, and gFogInscatterRef is that function's answer for this frame.
 //
 // WHY THE ZENITH TERM ALONE NEVER ANSWERED THAT. bac1d87 blended fog toward the true view ray's
 // colour once real atmosphere lay between the camera and the fogged point, using aerial-perspective
@@ -340,29 +347,30 @@ float3 averSkyAbove(float3 dir) {
 // THE FIX ASKS A DIFFERENT QUESTION. Real fog scatters whatever light actually falls on it, and that
 // depends on how far the SUN's own light has travelled to get here -- not on how far the CAMERA is
 // looking. A horizontal ray toward the sun's azimuth is exactly the direction that path is longest:
-// as the sun drops toward the horizon this march's own tMax (the atmosphere-shell exit, taken from
-// the SAME branch averSkyPhysical uses for any non-ground-hit ray, reimplemented here rather than
-// called -- averSkyPhysical calls THIS function for its ground veil, and HLSL has no recursion) grows
-// and the path reddens, at the sun's elevation, independent of the fog's distance from the camera.
-// cosVS falls out of the geometry for free: dot(dirToSun, L) reduces to length(L.xy), the sine of the
-// sun's OWN elevation -- near 0 (phase near its Rayleigh minimum) when the sun is high, near 1 (the
-// Mie forward-scatter peak) as it nears the horizon, with no separate "how low is the sun" gate
-// needed. The blend weight is a tuned constant: how much of that direct, sun-warmed light mixes into
-// the ambient reference, since real multiple scattering (which this single-scatter model does not
-// simulate) is what actually carries a sunset's warmth to fog that isn't looking straight at the sun.
+// as the sun drops toward the horizon that march's own far distance (the atmosphere-shell exit)
+// grows and the path reddens, at the sun's elevation, independent of the fog's distance from the
+// camera. cosVS falls out of the geometry for free: dot(dirToSun, L) reduces to length(L.xy), the
+// sine of the sun's OWN elevation -- near 0 (phase near its Rayleigh minimum) when the sun is high,
+// near 1 (the Mie forward-scatter peak) as it nears the horizon, with no separate "how low is the
+// sun" gate needed. The blend weight is a tuned constant: how much of that direct, sun-warmed light
+// mixes into the ambient reference, since real multiple scattering (which this single-scatter model
+// does not simulate) is what actually carries a sunset's warmth to fog that isn't looking straight
+// at the sun.
+//
+// WHY THIS IS SAFE TO HOIST OUT OF THE PIXEL SHADER, NOT AN APPROXIMATION OF IT. Read the two
+// paragraphs above again: nowhere in them does a view direction or a world position appear. This
+// function's ENTIRE input is the sun direction, the atmosphere profile and the camera's altitude --
+// every one of those is already fixed for the whole frame by the time any pixel shades. Every pixel
+// that called this was computing the exact same answer, which used to cost two full 32-step
+// atmosphere marches (each with a Chapman-function transmittance term inside every step) PER CALL,
+// and this function was called up to three times for a single pixel: once from averFogInscatter
+// directly, and up to twice more from inside averSkyPhysical's ground veil (once for the pixel's own
+// sky ray, and averSkyPhysical itself calls this function too). Baking it once on the CPU and
+// reading it back here is not a quality trade-off anywhere in the frame -- it is the exact same
+// 32-step march this file already trusted, run once instead of once-per-pixel-times-up-to-three,
+// matching the pattern gSkyZenith/gSkyHorizon already established for the authored dome.
 float3 averFogInscatterRef() {
-    float3 L  = normalize(gLightDir.xyz);
-    float  r0 = averAtmoCamRadius();
-    float3 T;
-    float3 zenith = averAtmoScatter(r0, 1.0, L.z, L.z, gAtmoPlanet.y - r0, (int)gAtmoTune.z, T);
-
-    float2 az   = length(L.xy) > 1e-4 ? normalize(L.xy) : float2(1.0, 0.0);
-    float  cA   = (r0 - gAtmoPlanet.y) * (r0 + gAtmoPlanet.y);   // b = r0*cosV = 0 for a level ray
-    float  tMax = sqrt(max(-cA, 0.0));
-    float3 Th;
-    float3 towardSun = averAtmoScatter(r0, 0.0, L.z, length(L.xy), tMax, (int)gAtmoTune.z, Th);
-
-    return lerp(zenith, towardSun, 0.4);
+    return gFogInscatterRef.rgb;
 }
 
 // What the ground below the horizon radiates: albedo times the sun and sky falling on it.
@@ -545,7 +553,17 @@ float3 averApplyFog(float3 color, float3 wpos) {
         float3 inscatter = averAtmoAerial(wpos, T);
         color = color * T + inscatter;
     }
-    return lerp(color, averFogInscatter(wpos, T), averFogFactor(wpos));
+
+    // BRANCHED, NOT LERPED UNCONDITIONALLY. HLSL evaluates both sides of a lerp eagerly, so every
+    // pixel nearer than the fog's own start distance -- averFogFactor's early `len <= start` return
+    // at RHIShaders.cpp -- used to pay for averFogInscatter anyway (its dir normalize, and under a
+    // physical sky a full averSkyPhysical march for the large-scale blend) for a contribution
+    // multiplied by exactly zero. averFogFactor is smooth and spatially coherent -- it is a
+    // continuous exponential of distance and height, not a hard cutoff -- so divergence within a
+    // GPU wave should stay confined to the fog's own boundary, not scatter across the image.
+    float fogF = averFogFactor(wpos);
+    if (fogF > 0.001) color = lerp(color, averFogInscatter(wpos, T), fogF);
+    return color;
 }
 
 

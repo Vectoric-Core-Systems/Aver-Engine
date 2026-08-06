@@ -80,4 +80,17 @@ struct AtmosphereDome {
 void atmoFitDome(const AtmosphereProfile& a, f32 altitudeKm, f32 sunCosZenith,
                  const f32 sunIrradiance[3], f32 sunAngularRadiusRad, AtmosphereDome& out);
 
+// The fog/dome-veil reference colour: ambient (straight up) blended with a horizontal march toward
+// the sun's own azimuth. Mirrors RHIShaders.cpp's averFogInscatterRef() function for function -- see
+// its own comment for why two terms and why that blend. `sunDir` need not be normalised.
+//
+// PROVABLY FRAME-CONSTANT: no view direction, no world position enters this calculation anywhere,
+// only the sun direction, the profile and the viewer's altitude -- all already fixed for the whole
+// frame by the time any pixel shades. That is exactly why it is computed HERE, once, instead of in
+// the shader per pixel: the GPU side used to pay for this same answer up to three times per pixel
+// (once for fog directly, up to twice more inside averSkyPhysical's ground veil), a real, measured
+// cost this function exists to remove without changing a single rendered value.
+void atmoFogInscatterRef(const AtmosphereProfile& a, f32 altitudeKm, const f32 sunDir[3],
+                         const f32 sunIrradiance[3], f32 sunAngularRadiusRad, f32 outRgb[3]);
+
 } // namespace aver::rhi
