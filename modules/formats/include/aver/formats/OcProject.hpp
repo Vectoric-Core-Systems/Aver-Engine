@@ -25,11 +25,14 @@ struct ProjectDesc {
     int voxelResolution = -1;   // RENDER.VOXELRES      64 / 128 / 256
     f32 giIntensity     = -1.0f;// RENDER.GIINTENSITY   indirect bounce multiplier
     f32 giMaxDistance   = -1.0f;// RENDER.GIDISTANCE    cone trace range, centimetres
+    int rtShadowRays       = -1; // RENDER.RTSHADOWRAYS     sun occlusion rays/pixel, [1,32]
+    int rtPixelsPerRayTile = -1; // RENDER.RTPIXELSPERRAY   shadow amortisation tile edge, [1,16]
 
     // True when the manifest stated at least one RENDER.* key.
     bool hasRenderSettings() const {
         return giQuality >= 0 || rayTracing >= 0 || pathTracing >= 0 ||
-               voxelResolution > 0 || giIntensity >= 0.0f || giMaxDistance >= 0.0f;
+               voxelResolution > 0 || giIntensity >= 0.0f || giMaxDistance >= 0.0f ||
+               rtShadowRays >= 0 || rtPixelsPerRayTile >= 0;
     }
 
     std::string dir;                    // absolute directory the manifest lives in

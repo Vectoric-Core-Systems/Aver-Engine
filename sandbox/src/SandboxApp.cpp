@@ -1905,6 +1905,8 @@ private:
         if (project_.voxelResolution >  0)    s.voxelResolution    = static_cast<u32>(project_.voxelResolution);
         if (project_.giIntensity     >= 0.0f) s.giIntensity        = project_.giIntensity;
         if (project_.giMaxDistance   >= 0.0f) s.giMaxDistance      = project_.giMaxDistance;
+        if (project_.rtShadowRays       >= 0) s.rtShadowRays       = static_cast<u32>(project_.rtShadowRays);
+        if (project_.rtPixelsPerRayTile >= 0) s.rtPixelsPerRayTile = static_cast<u32>(project_.rtPixelsPerRayTile);
         vx.setSettings(s);   // clamps to this device; the manifest keeps what was asked for
         voxiRenderer_.setSettings(vx.settings());
         AVER_INFO("[Project] applied render settings from {}", project_.manifestPath);
@@ -1918,6 +1920,8 @@ private:
         project_.voxelResolution = static_cast<int>(requested.voxelResolution);
         project_.giIntensity     = requested.giIntensity;
         project_.giMaxDistance   = requested.giMaxDistance;
+        project_.rtShadowRays       = static_cast<int>(requested.rtShadowRays);
+        project_.rtPixelsPerRayTile = static_cast<int>(requested.rtPixelsPerRayTile);
         projectDirty_ = true;
     }
 #else
@@ -1935,6 +1939,8 @@ private:
         if (project_.voxelResolution <= 0)   project_.voxelResolution = static_cast<int>(d.voxelResolution);
         if (project_.giIntensity     < 0.0f) project_.giIntensity     = d.giIntensity;
         if (project_.giMaxDistance   < 0.0f) project_.giMaxDistance   = d.giMaxDistance;
+        if (project_.rtShadowRays       < 0) project_.rtShadowRays       = static_cast<int>(d.rtShadowRays);
+        if (project_.rtPixelsPerRayTile < 0) project_.rtPixelsPerRayTile = static_cast<int>(d.rtPixelsPerRayTile);
 #endif
         std::string why;
         if (saveProjectManifest(&why)) AVER_INFO("[Project] --save-project wrote the manifest");
@@ -4846,6 +4852,8 @@ private:
         ImGui::SetNextWindowPos(ImVec2(mv->GetCenter().x, mv->GetCenter().y), ImGuiCond_FirstUseEver, ImVec2(0.5f,0.5f));
         if (!ImGui::Begin("Project Settings", &showProjectSettings_, ImGuiWindowFlags_NoDocking)) { ImGui::End(); return; }
 
+        // settingsPage_: 0 Description, 1 Rendering>General, 2 >Global Illumination,
+        // 3 >Ray Tracing (denoiser lives here, next to the rays it thins out), 4 >Path Tracing.
         ImGui::BeginChild("##categories", ImVec2(220.0f*dpi_, 0), ImGuiChildFlags_Borders);
         ImGui::TextDisabled("Project");
         ImGui::Indent();
@@ -4853,7 +4861,13 @@ private:
         ImGui::Unindent();
         ImGui::TextDisabled("Engine");
         ImGui::Indent();
-        if (ImGui::Selectable("Rendering", settingsPage_==1)) settingsPage_=1;
+        ImGui::TextDisabled("Rendering");
+        ImGui::Indent();
+        if (ImGui::Selectable("General",               settingsPage_==1)) settingsPage_=1;
+        if (ImGui::Selectable("Global Illumination",    settingsPage_==2)) settingsPage_=2;
+        if (ImGui::Selectable("Ray Tracing",            settingsPage_==3)) settingsPage_=3;
+        if (ImGui::Selectable("Path Tracing",           settingsPage_==4)) settingsPage_=4;
+        ImGui::Unindent();
         ImGui::Unindent();
         ImGui::EndChild();
 
@@ -4902,7 +4916,7 @@ private:
             }
         } else {
 #if AVER_MODULE_VOXI
-            buildRenderingSettings();
+            buildRenderingSettings(settingsPage_);
 #else
             ImGui::TextUnformatted("Rendering");
             ImGui::Separator();
@@ -4914,12 +4928,26 @@ private:
     }
 
 #if AVER_MODULE_VOXI
-    // Draws the Voxi rendering settings page. Each feature reports its real status and is disabled
-    // when the renderer or the GPU cannot do it.
-    void buildRenderingSettings() {
+    // A feature's status badge: green ready, amber not implemented, red unsupported.
+    static void featureStatusBadge(aver::voxi::Renderer& vx, aver::voxi::Feature f) {
+        using namespace aver::voxi;
+        const Status st = vx.status(f);
+        const ImVec4 col = st==Status::Ready ? ImVec4(0.45f,0.85f,0.45f,1)
+                         : st==Status::NotImplemented ? ImVec4(0.95f,0.72f,0.25f,1)
+                                                      : ImVec4(0.75f,0.35f,0.35f,1);
+        ImGui::SameLine(); ImGui::TextColored(col, "[%s]", vx.statusText(f));
+    }
+
+    // Draws one of the Rendering page's sub-pages (General / Global Illumination / Ray Tracing /
+    // Path Tracing) -- see the sidebar in buildProjectSettings for the hierarchy this belongs to.
+    // Each feature reports its real status and is disabled when the renderer or the GPU cannot do
+    // it. Reads and writes the WHOLE Settings struct regardless of which sub-page is showing, so
+    // switching pages never drops a field only some other page's controls touch.
+    void buildRenderingSettings(int page) {
         using namespace aver::voxi;
         Renderer& vx = Renderer::get();
-        ImGui::TextUnformatted("Rendering");
+        static const char* kPageTitle[] = {"", "General", "Global Illumination", "Ray Tracing", "Path Tracing"};
+        ImGui::TextUnformatted(kPageTitle[page]);
         ImGui::SameLine(); ImGui::TextDisabled("(Voxi render module)");
         ImGui::Separator();
 
@@ -4927,63 +4955,105 @@ private:
         bool changed = false;
         ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
 
-        ImGui::TextUnformatted(Renderer::featureName(Feature::Msaa));
-        const u32 mask = vx.deviceInfo().msaaMask;
-        const u32 counts[4] = {1,2,4,8};
-        const char* labels[4] = {"Off","2x","4x","8x"};
-        for (int i=0;i<4;++i) {
-            const bool ok = (mask & counts[i]) != 0;
-            if (i) ImGui::SameLine();
-            ImGui::BeginDisabled(!ok);
-            if (ImGui::RadioButton(labels[i], static_cast<u32>(s.msaa)==counts[i])) { s.msaa=static_cast<Msaa>(counts[i]); changed=true; }
+        if (page == 1) {
+            ImGui::TextUnformatted(Renderer::featureName(Feature::Msaa));
+            const u32 mask = vx.deviceInfo().msaaMask;
+            const u32 counts[4] = {1,2,4,8};
+            const char* labels[4] = {"Off","2x","4x","8x"};
+            for (int i=0;i<4;++i) {
+                const bool ok = (mask & counts[i]) != 0;
+                if (i) ImGui::SameLine();
+                ImGui::BeginDisabled(!ok);
+                if (ImGui::RadioButton(labels[i], static_cast<u32>(s.msaa)==counts[i])) { s.msaa=static_cast<Msaa>(counts[i]); changed=true; }
+                ImGui::EndDisabled();
+            }
+
+            ImGui::Separator();
+            const Status st = vx.status(Feature::MeshShaders);
+            ImGui::TextUnformatted(Renderer::featureName(Feature::MeshShaders));
+            featureStatusBadge(vx, Feature::MeshShaders);
+            ImGui::BeginDisabled(st != Status::Ready);
+            if (ImGui::Checkbox("Use mesh shaders", &s.meshShaders)) changed = true;
             ImGui::EndDisabled();
         }
 
-        auto qualityRow = [&](Feature f, Quality& slot) {
-            ImGui::Separator();
-            const Status st = vx.status(f);
-            ImGui::TextUnformatted(Renderer::featureName(f));
-            const ImVec4 col = st==Status::Ready ? ImVec4(0.45f,0.85f,0.45f,1)
-                             : st==Status::NotImplemented ? ImVec4(0.95f,0.72f,0.25f,1)
-                                                          : ImVec4(0.75f,0.35f,0.35f,1);
-            ImGui::SameLine(); ImGui::TextColored(col, "[%s]", vx.statusText(f));
+        if (page == 2) {
+            const Status st = vx.status(Feature::GlobalIllumination);
+            ImGui::TextUnformatted(Renderer::featureName(Feature::GlobalIllumination));
+            featureStatusBadge(vx, Feature::GlobalIllumination);
             ImGui::BeginDisabled(st != Status::Ready);
-            int q = static_cast<int>(slot);
+            int q = static_cast<int>(s.globalIllumination);
             const char* qs[] = {"Off","Low","Medium","High","Epic"};
-            ImGui::PushID(static_cast<int>(f));
-            if (ImGui::Combo("Quality", &q, qs, 5)) { slot = static_cast<Quality>(q); changed = true; }
-            ImGui::PopID();
+            if (ImGui::Combo("Quality", &q, qs, 5)) { s.globalIllumination = static_cast<Quality>(q); changed = true; }
+
+            int res = static_cast<int>(s.voxelResolution);
+            const char* resLabels[] = {"64", "128", "256"};
+            const int resValues[] = {64, 128, 256};
+            int resIdx = res>=256 ? 2 : (res>=128 ? 1 : 0);
+            if (ImGui::Combo("Voxel grid", &resIdx, resLabels, 3)) { s.voxelResolution = (u32)resValues[resIdx]; changed = true; }
+            if (ImGui::SliderFloat("GI intensity", &s.giIntensity, 0.0f, 4.0f)) changed = true;
+            if (ImGui::SliderFloat("GI distance", &s.giMaxDistance, 10.0f, 20000.0f, "%.0f")) changed = true;
+            ImGui::DragFloat3("Volume centre", &giCenter_.x, 0.5f);
+            ImGui::DragFloat("Volume extent", &giExtent_, 0.5f, 1.0f, 100000.0f);
+            ImGui::Checkbox("Debug: show voxel radiance", &giDebugView_);
             ImGui::EndDisabled();
-        };
-        qualityRow(Feature::GlobalIllumination, s.globalIllumination);
+        }
 
-        ImGui::BeginDisabled(vx.status(Feature::GlobalIllumination) != Status::Ready);
-        int res = static_cast<int>(s.voxelResolution);
-        const char* resLabels[] = {"64", "128", "256"};
-        const int resValues[] = {64, 128, 256};
-        int resIdx = res>=256 ? 2 : (res>=128 ? 1 : 0);
-        if (ImGui::Combo("Voxel grid", &resIdx, resLabels, 3)) { s.voxelResolution = (u32)resValues[resIdx]; changed = true; }
-        if (ImGui::SliderFloat("GI intensity", &s.giIntensity, 0.0f, 4.0f)) changed = true;
-        if (ImGui::SliderFloat("GI distance", &s.giMaxDistance, 10.0f, 20000.0f, "%.0f")) changed = true;
-        ImGui::DragFloat3("Volume centre", &giCenter_.x, 0.5f);
-        ImGui::DragFloat("Volume extent", &giExtent_, 0.5f, 1.0f, 100000.0f);
-        ImGui::Checkbox("Debug: show voxel radiance", &giDebugView_);
-        ImGui::EndDisabled();
-
-        qualityRow(Feature::RayTracing,  s.rayTracing);
-        qualityRow(Feature::PathTracing, s.pathTracing);
-
-        ImGui::Separator();
-        {
-            const Status st = vx.status(Feature::MeshShaders);
-            ImGui::TextUnformatted(Renderer::featureName(Feature::MeshShaders));
-            ImGui::SameLine();
-            const ImVec4 col = st==Status::Ready ? ImVec4(0.45f,0.85f,0.45f,1)
-                             : st==Status::NotImplemented ? ImVec4(0.95f,0.72f,0.25f,1)
-                                                          : ImVec4(0.75f,0.35f,0.35f,1);
-            ImGui::TextColored(col, "[%s]", vx.statusText(Feature::MeshShaders));
+        if (page == 3) {
+            const Status st = vx.status(Feature::RayTracing);
+            ImGui::TextUnformatted(Renderer::featureName(Feature::RayTracing));
+            featureStatusBadge(vx, Feature::RayTracing);
             ImGui::BeginDisabled(st != Status::Ready);
-            if (ImGui::Checkbox("Use mesh shaders", &s.meshShaders)) changed = true;
+            int q = static_cast<int>(s.rayTracing);
+            const char* qs[] = {"Off","Low","Medium","High","Epic"};
+            if (ImGui::Combo("Quality", &q, qs, 5)) { s.rayTracing = static_cast<Quality>(q); changed = true; }
+
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Sun shadow");
+            ImGui::Separator();
+            int rays = static_cast<int>(s.rtShadowRays);
+            if (ImGui::SliderInt("Occlusion rays / pixel", &rays, 1, 32)) {
+                s.rtShadowRays = static_cast<u32>(rays); changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("How many rays a pixel that traces THIS frame casts toward the\n"
+                                   "sun's disc. Linear in cost -- this is the knob to turn down\n"
+                                   "first if ray tracing starts costing frames.");
+
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Denoiser: temporal amortisation");
+            ImGui::Separator();
+            // Tile edge, not raw pixels-per-ray: VoxiRenderer::setPixelsPerRayTile only ever rounds
+            // to a power of two, so offering anything else here would just be relabelled after the
+            // fact. Options themselves are powers of two (1,2,4,8,16) so the SQUARE -- the pixel
+            // count one ray actually covers -- is also always a power of two (1..256): the whole
+            // point of the constraint, stated once here rather than re-derived at every call site.
+            const int tiles[] = {1, 2, 4, 8, 16};
+            const char* tileLabels[] = {"Off (1x1 -- every pixel, every frame)",
+                                        "2x2 (4 pixels/ray)", "4x4 (16 pixels/ray)",
+                                        "8x8 (64 pixels/ray)", "16x16 (256 pixels/ray)"};
+            int tileIdx = 0;
+            for (int i = 0; i < 5; ++i) if (tiles[i] == (int)s.rtPixelsPerRayTile) tileIdx = i;
+            if (ImGui::Combo("Shadow amortisation", &tileIdx, tileLabels, 5)) {
+                s.rtPixelsPerRayTile = static_cast<u32>(tiles[tileIdx]); changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("At N, one pixel in each NxN tile traces a fresh ray each frame;\n"
+                                   "every other pixel reuses a reprojected history sample instead.\n"
+                                   "Every pixel gets its own turn every N*N frames. Off is bit-for-\n"
+                                   "bit identical to having no denoiser; larger tiles trade a real\n"
+                                   "cut in rays traced for more frames of lag on fast-moving shadows.");
+            ImGui::EndDisabled();
+        }
+
+        if (page == 4) {
+            const Status st = vx.status(Feature::PathTracing);
+            ImGui::TextUnformatted(Renderer::featureName(Feature::PathTracing));
+            featureStatusBadge(vx, Feature::PathTracing);
+            ImGui::BeginDisabled(st != Status::Ready);
+            int q = static_cast<int>(s.pathTracing);
+            const char* qs[] = {"Off","Low","Medium","High","Epic"};
+            if (ImGui::Combo("Quality", &q, qs, 5)) { s.pathTracing = static_cast<Quality>(q); changed = true; }
             ImGui::EndDisabled();
         }
 
@@ -5249,7 +5319,7 @@ private:
     bool dockBuilt_=false;   // one-shot DockBuilder layout (nothing is persisted to an ini)
     bool showProjectSettings_=false; // Edit > Project Settings window
     bool showEditorPrefs_=false;     // Edit > Editor Preferences window
-    int  settingsPage_=1;            // 0 = Description, 1 = Rendering
+    int  settingsPage_=1;            // 0 Description, 1 Rendering>General, 2 >GI, 3 >Ray Tracing, 4 >Path Tracing
     int  focusVoxi_=0;               // --project-settings: frames left to force the window open
     int  msaaOverride_=0;            // --msaa N: apply a sample count at startup
     int  giOverride_=0;              // --gi: GI quality to apply at startup
