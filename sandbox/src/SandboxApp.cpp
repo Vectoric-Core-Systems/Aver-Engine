@@ -860,21 +860,28 @@ public:
             else if (giOverride_) s.globalIllumination = static_cast<voxi::Quality>(giOverride_);
             if (rtOverride_) s.rayTracing = static_cast<voxi::Quality>(rtOverride_);
             if (msOverride_) s.meshShaders = true;
+            // Applied to `s` (not voxiRenderer_ directly) and BEFORE it reaches the singleton below:
+            // voxiRenderer_.setSettings() is called again every frame with whatever
+            // voxi::Renderer::get().settings() holds, so an override poked into voxiRenderer_
+            // afterward, once, would be silently overwritten back to the default on the very next
+            // frame. A NEGATIVE COUNT IS REPORTED rather than cast to a huge unsigned one and
+            // clamped: the warning that came out of that read "4294967291 shadow rays clamped to
+            // 32", which describes the cast and not the typo that caused it.
+            if (rtRaysOverride_ > 0) s.rtShadowRays = static_cast<u32>(rtRaysOverride_);
+            else if (rtRaysOverride_ < 0)
+                AVER_WARN("[Sandbox] --rt-rays {} is not a ray count; the default of {} stands",
+                          rtRaysOverride_, s.rtShadowRays);
+            if (rtPixelsPerRayOverride_ > 0) s.rtPixelsPerRayTile = static_cast<u32>(rtPixelsPerRayOverride_);
+            else if (rtPixelsPerRayOverride_ < 0)
+                AVER_WARN("[Sandbox] --rt-pixels-per-ray {} is not a tile edge; the default of {} stands",
+                          rtPixelsPerRayOverride_, s.rtPixelsPerRayTile);
             voxi::Renderer::get().setSettings(s);
             AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
 
             // Registration is non-owning: voxiRenderer_ must outlive the device, torn down in onShutdown.
-            voxiRenderer_.setSettings(s);
-            // Applied here rather than at parse time: the feature has no state to set until it is
-            // about to be initialised, and both of these are read every frame afterwards.
-            //
-            // A NEGATIVE COUNT IS REPORTED rather than cast to a huge unsigned one and clamped: the
-            // warning that came out of that read "4294967291 shadow rays clamped to 32", which
-            // describes the cast and not the typo that caused it.
-            if (rtRaysOverride_ > 0) voxiRenderer_.setShadowRays(static_cast<u32>(rtRaysOverride_));
-            else if (rtRaysOverride_ < 0)
-                AVER_WARN("[Sandbox] --rt-rays {} is not a ray count; the default of {} stands",
-                          rtRaysOverride_, voxiRenderer_.shadowRays());
+            // Read back from the singleton rather than reusing `s` directly, so this sees the same
+            // clamping voxi::Renderer::setSettings just applied.
+            voxiRenderer_.setSettings(voxi::Renderer::get().settings());
             if (frameTimeReport_) voxiRenderer_.setFrameTimeReport(true);
             if (voxiRenderer_.init(*e.device())) {
                 e.device()->addRenderFeature(&voxiRenderer_);
@@ -1815,6 +1822,7 @@ public:
     void setGiForceOff(bool off) { giForceOff_ = off; }                        // --no-gi
     void setRtOverride(int q) { rtOverride_ = q; }                              // --rt
     void setRtRays(int n) { rtRaysOverride_ = n; }                              // --rt-rays N
+    void setRtPixelsPerRay(int n) { rtPixelsPerRayOverride_ = n; }              // --rt-pixels-per-ray N
     void setFrameTimeReport(bool on) { frameTimeReport_ = on; }                 // --frame-time
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
@@ -5248,6 +5256,7 @@ private:
     bool giForceOff_=false;          // --no-gi: force it off, whatever the default is
     int  rtOverride_=0;              // --rt: ray tracing quality at startup
     int  rtRaysOverride_=0;          // --rt-rays N: sun occlusion rays per pixel (0 = flag not given)
+    int  rtPixelsPerRayOverride_=0;  // --rt-pixels-per-ray N: shadow tile edge (0 = flag not given)
     bool frameTimeReport_=false;     // --frame-time: report the frame period, to price the above
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
@@ -5862,7 +5871,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -5936,6 +5945,9 @@ Application* createApplication(int argc, char** argv) {
         // The sun occlusion rays per pixel, so the cost of ray-traced shadows can be MEASURED
         // instead of asserted: the sequence is nested, so 1, 2, 4, 8 is one converging series.
         else if (!std::strcmp(argv[i],"--rt-rays") && i+1<argc) rtRays=std::atoi(argv[++i]);
+        // The ray-traced shadow's temporal amortisation tile edge -- how many pixels share one
+        // traced ray, rounded to the nearest power of two. 1 (unset) traces every pixel every frame.
+        else if (!std::strcmp(argv[i],"--rt-pixels-per-ray") && i+1<argc) rtPixelsPerRay=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--frame-time")) frameTime=true;
         else if (!std::strcmp(argv[i],"--ms")) ms=true;
         else if (!std::strcmp(argv[i],"--probe") && i+2<argc) { probeX=(u32)std::atoi(argv[++i]); probeY=(u32)std::atoi(argv[++i]); }
@@ -6029,6 +6041,7 @@ Application* createApplication(int argc, char** argv) {
     app->setGiOverride(gi, giDbg);
     app->setRtOverride(rt);
     app->setRtRays(rtRays);
+    app->setRtPixelsPerRay(rtPixelsPerRay);
     app->setFrameTimeReport(frameTime);
     app->setMsOverride(ms);
     app->setProbe(probeX, probeY);

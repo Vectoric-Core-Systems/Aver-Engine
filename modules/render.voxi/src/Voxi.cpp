@@ -57,6 +57,12 @@ void Renderer::setSettings(const Settings& s) {
     n.voxelResolution = std::clamp(n.voxelResolution, 32u, 512u);
     n.giIntensity     = std::clamp(n.giIntensity, 0.0f, 8.0f);
     n.giMaxDistance   = std::clamp(n.giMaxDistance, 1.0f, 100000.0f);
+    // Mirrors VoxiRenderer::kMaxShadowRays / kMaxPixelsPerRayTile, restated rather than shared: this
+    // library is core-only and must not depend on the RHI-backed renderer that owns those constants.
+    // The renderer's own setters are the authority on the exact contract (kMaxPixelsPerRayTile also
+    // rounds to a power of two); this is just enough to keep a wild request off the wire to it.
+    n.rtShadowRays       = std::clamp(n.rtShadowRays, 1u, 32u);
+    n.rtPixelsPerRayTile = std::clamp(n.rtPixelsPerRayTile, 1u, 16u);
 
     if (n.msaa != settings_.msaa) msaaDirty_ = true;
     settings_ = n;

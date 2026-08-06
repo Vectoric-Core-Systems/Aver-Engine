@@ -48,12 +48,22 @@ public:
     void setShadowRays(u32 n);
     u32 shadowRays() const { return rtShadowRays_; }
 
+    // Sets the ray-traced shadow's temporal amortisation tile edge, rounded to the nearest power of
+    // two in [1, kMaxPixelsPerRayTile] -- see Settings::rtPixelsPerRayTile for the full contract.
+    // 1 (the default) traces every pixel every frame and is bit-identical to having no denoiser.
+    void setPixelsPerRayTile(u32 n);
+    u32  pixelsPerRayTile() const { return rtPixelsPerRayTile_; }
+
     // Turns on the frame-period report. See rtShadowRays_ for what it is for and what it is not.
     void setFrameTimeReport(bool on) { frameTimeReport_ = on; }
 
     // The largest ray count accepted. Not a hardware limit: there is a recorded TDR history on this
     // machine, and 64 rays per pixel at 8x MSAA is how a knob turns into a device removal.
     static constexpr u32 kMaxShadowRays = 32;
+    // The largest tile edge accepted for ray-traced shadow amortisation: 16x16, one traced pixel
+    // covering 256, which is already an aggressive enough amortisation that a fast-moving shadow
+    // caster or camera visibly lags the tile converging behind it.
+    static constexpr u32 kMaxPixelsPerRayTile = 16;
 
     // Starts a new frame's draw list; the passes replay the previous one.
     void beginScene() override;
@@ -84,8 +94,10 @@ public:
     // Draws the debug raymarch over the already-bound colour target.
     void scenePass(rhi::IRenderContext& ctx) override;
 
-    // Rebuilds the pipelines that bake the sample count and target formats.
-    void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth) override;
+    // Rebuilds the pipelines that bake the sample count and target formats, and resizes the
+    // screen-resolution ray-traced shadow history (see rtShadowHist_).
+    void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
+                                u32 width, u32 height) override;
 
     // The GPU residency of the material library, so the app can ask for a draw's binding set.
     pbr::MaterialSystem& materials() { return materials_; }
@@ -170,6 +182,16 @@ private:
     // tracing ever starts costing frames. There is a recorded TDR history on this machine, so it
     // deliberately does not default high. setShadowRays and --rt-rays move it.
     u32 rtShadowRays_ = 4;
+    // Tile edge for the shadow's temporal amortisation. See setPixelsPerRayTile / Settings for the
+    // contract; 1 traces every pixel every frame.
+    u32 rtPixelsPerRayTile_ = 1;
+    // Advances once per prePass() call, unconditionally -- a pure count of simulated frames, never
+    // wall-clock -- so the ray-traced shadow's per-pixel trace schedule and disc-sample rotation are
+    // a deterministic function of frame NUMBER. A fixed --frames count therefore always reaches the
+    // same value at the same point in a run, which is what keeps that schedule reproducible for
+    // testing even though it is no longer spatial-only the way rtHash alone is (see rtHash's own
+    // comment in VoxiShaders.hpp).
+    u32 rtFrameIndex_ = 0;
 
     // ---- the frame-period sampler ----
     //
@@ -270,8 +292,24 @@ private:
         f32 shadowParams[4] = {};
         // x = the cascade the depth-only shadow pass is currently filling
         f32 shadowDraw[4] = {};
-        // x = tan of the sun's angular radius, y = occlusion rays per pixel, z = base ray bias.
+        // x = tan of the sun's angular radius, y = occlusion rays per pixel, z = base ray bias,
+        // w = 1 once the flat geometry table is ready for a reflection ray's hit lookup.
         f32 rtParams[4] = {};
+        // x = 1 while rtShadowHist_'s slots are actually bound this frame -- the shader must not
+        // touch t6/u2 when this is 0, since an unbound slot is Tier 1 null-filled, not a real
+        // texture. y = 1 once THAT texture also holds a real previous frame (0 right after creation
+        // or a resize, when it is bound but its contents are not a previous frame). z = the current
+        // frame index (rtFrameIndex_), a pure per-frame count, never wall-clock. w = the pixels-
+        // per-ray tile edge AS ITS BIT COUNT (0 = no tiling, every pixel traces every frame).
+        f32 rtHistParams[4] = {};
+        // The CAMERA's view-projection from the frame before this one, for reprojecting a pixel's
+        // world position into last frame's ray-traced shadow history. Only meaningful while
+        // rtHistParams.y is set.
+        f32 prevViewProj[16] = {};
+        // LAST frame's scene viewport rect (x, y, w, h in target pixels) -- see IDevice::sceneViewport.
+        // The reprojected NDC lands in THIS rect, not at [0,1] of the whole history texture: the
+        // editor docks the 3D view in a sub-rect of the backbuffer, same as prevViewProj above.
+        f32 sceneViewport[4] = {};
     } cb_;
 
     // Builds this frame's cascade matrices and splits. Returns the usable cascade count, 0 if none.
@@ -281,6 +319,53 @@ private:
     // kShadowCascades is private to the .cpp, so this repeats its value (4) rather than reach for it.
     f32 cascadeCentre_[4][3] = {};
     f32 cascadeRadius_[4] = {};
+
+    // ---- ray-traced sun-shadow temporal history ----
+    //
+    // rtShadow() traces a handful of occlusion rays per pixel per frame with no reuse across
+    // frames -- see the module README's "Next" section and STATUS.md 4d item 4, which already flag
+    // temporal accumulation as the missing piece. This blends each frame's fresh (low ray count)
+    // sample with a REPROJECTED sample of the previous frame's result, screen-space, so a static or
+    // slowly-moving shadow converges toward the old brute-force ray count over several frames
+    // instead of paying for it every frame.
+    //
+    // PING-PONGED, not one texture: reprojection reads a DIFFERENT texel than the one this frame
+    // writes, so reading and writing the same resource in the same frame would race between pixels.
+    // Two full-screen R32Float textures swap roles every frame -- one is this frame's write target
+    // (UAV), the other is last frame's result, read as this frame's history (SRV).
+    rhi::TextureHandle rtShadowHist_[2] = {0, 0};
+    u32  rtShadowHistW_ = 0, rtShadowHistH_ = 0;
+    u32  rtHistWriteIdx_ = 0;
+    // False right after creation or a resize: the textures hold no real previous frame yet, and
+    // cb_.rtParams.w must say so rather than let the shader blend against garbage.
+    bool rtHistValid_ = false;
+    // This frame's camera view-projection, captured where fitCascades() already reads the camera,
+    // and copied into prevViewProj_ at the end of prePass for NEXT frame's cb_.prevViewProj.
+    f32  curViewProj_[16] = {};
+    f32  prevViewProj_[16] = {};
+    // Same idea, for the scene viewport rect the reprojected NDC needs (IDevice::sceneViewport) --
+    // read fresh each frame in beginShadowHistory rather than piggy-backing on fitCascades, since it
+    // has nothing to do with the shadow cascades fitCascades computes.
+    f32  curSceneViewport_[4] = {};
+    f32  prevSceneViewport_[4] = {};
+    // (Re)creates rtShadowHist_ at the given resolution if it does not already match, and resets
+    // rtHistValid_ when it does -- the old contents belong to a resolution that no longer exists.
+    bool ensureShadowHistory(u32 width, u32 height);
+    // Whether PSMainVoxi will actually run its ray-traced-shadow-history code path this frame. False
+    // while RT is inactive or the debug view has taken over the scene -- in either case nothing will
+    // write rtShadowHist_, so nothing about it should be touched this frame either.
+    bool shadowHistoryActive() const {
+        return rtActive_ && rtShadowHist_[0] && rtShadowHist_[1] && !suppressesScene();
+    }
+    // Swaps the read/write roles, transitions both textures, rebinds them and sets cb_.prevViewProj
+    // / rtParams.w for this frame. Called before shadowPass() so the UAV is writable and the
+    // constants are ready by the time the scene loop runs PSMainVoxi.
+    void beginShadowHistory(rhi::IRenderContext& ctx);
+    // Advances prevViewProj_ / rtHistWriteIdx_ / rtHistValid_ for NEXT frame, now that fitCascades()
+    // (called from shadowPass(), after beginShadowHistory) has filled curViewProj_ with this frame's
+    // camera. Called at the end of prePass.
+    void endShadowHistory();
+
     bool giEnabled() const { return settings_.globalIllumination != Quality::Off; }
     f32 sunDir_[3]   = {rhi::SkyAtmosphere{}.sunDirection[0],
                         rhi::SkyAtmosphere{}.sunDirection[1],

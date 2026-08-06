@@ -19,8 +19,21 @@ cbuffer VoxiFrame : register(b4) {
     float4   gShadowParams; // x = 1/atlasSize, y = enabled, z = accel structure built, w = cascades
     float4   gShadowDraw;   // x = the cascade the depth-only pass is filling right now
     // x = tan of the sun's ANGULAR RADIUS, which is what sets how fast a shadow edge softens;
-    // y = occlusion rays per pixel; z = ray bias in world units at the near plane; w unused.
+    // y = occlusion rays per pixel; z = ray bias in world units at the near plane;
+    // w = 1 once the flat geometry table is ready for a reflection ray's hit lookup.
     float4   gRtParams;
+    // x = 1 while t6/u2 (gRtShadowHist / gRtShadowHistOut) are bound to real textures this frame;
+    // y = 1 once gRtShadowHist ALSO holds a real previous frame (0 right after creation/resize);
+    // z = the current frame index, a pure per-frame count, never wall-clock;
+    // w = the pixels-per-ray tile edge as its BIT COUNT (0 = no tiling, every pixel traces).
+    float4   gRtHistParams;
+    // LAST frame's camera view-projection, for reprojecting a pixel's world position into
+    // gRtShadowHist. Only meaningful while gRtHistParams.y is set.
+    float4x4 gPrevViewProj;
+    // LAST frame's scene viewport rect (x, y, w, h in target pixels): the reprojected NDC lands
+    // here, not at [0,1] of the whole history texture -- the editor docks the 3D view in a sub-rect
+    // of the backbuffer. Same validity as gPrevViewProj.
+    float4   gSceneViewport;
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -52,12 +65,23 @@ StructuredBuffer<RtVertex>   gRtVerts     : register(t3);
 StructuredBuffer<uint>       gRtIndices   : register(t4);
 StructuredBuffer<RtInstance> gRtInstances : register(t5);
 
+// The ray-traced sun-shadow history: LAST frame's resolved visibility (t6, read this frame) and
+// THIS frame's (u2, written this frame, becomes t6 next frame). Ping-ponged on the C++ side --
+// VoxiRenderer.hpp rtShadowHist_ -- never the same texture in the same frame. Single-channel
+// visibility in [0,1], so a plain float is enough.
+Texture2D<float>   gRtShadowHist    : register(t6);
+RWTexture2D<float> gRtShadowHistOut : register(u2);
+
 // A hash of the pixel, for rotating each pixel's sample pattern.
 //
 // SPATIAL ONLY, and that is a hard requirement rather than a simplification: the gate oracle
 // compares 8-bit probe codes BIT-EXACTLY, and two of its gates deliberately sample a penumbra. A
 // seed that varied per frame would make those a coin flip run to run, and the engine's whole
-// verification story rests on flat-neighbourhood probes being reproducible.
+// verification story rests on flat-neighbourhood probes being reproducible. THIS STAYS TRUE of
+// rtHash itself even now that rtShadow accepts a separate, explicit `frameJitter` on top of it --
+// see rtShadow's own comment. Nothing IN rtHash depends on the frame; a caller that wants frame
+// variance adds it outside, deliberately, where it is a choice made once per call site rather than
+// a property of the hash every caller inherits.
 float rtHash(float2 p) {
     float3 q = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
     q += dot(q, q.yzx + 33.33);
@@ -122,7 +146,15 @@ float2 rtDiscSample(uint k, float ang0) {
 // fewer than a primary one. A reflection is already an approximation -- one bounce, no roughness
 // lobe -- and spending a full disc sweep on the shadow of something seen IN a reflection buys
 // detail nobody can resolve. Primary shading still passes the full count.
-float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays) {
+//
+// `frameJitter` is ADDED to the per-pixel rotation, and is NOT part of rtHash: rtHash itself stays
+// exactly what its own comment says it must -- a pure function of the pixel, for the gate oracle's
+// bit-exact single-frame probes. Every existing caller passes 0.0 here and is completely unaffected.
+// rtShadowTemporal is the one caller that passes something else, and only when pixel tiling is
+// actually on -- see its own comment for why a NONZERO, per-frame value is what makes tiling
+// converge at all instead of repeating one sample forever.
+float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
+               float frameJitter) {
     const uint  n    = max(rays, 1u);
     const float tanR = max(gRtParams.x, 0.0);
     const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
@@ -144,7 +176,7 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3
     // Jittering the ray ORIGIN across the footprint turns the per-pixel test into an area estimate,
     // which is antialiasing the shadow rather than blurring it: the result converges to the exact
     // fraction of the pixel that is occluded.
-    const float ang0 = rtHash(pixel) * 6.2831853;
+    const float ang0 = rtHash(pixel) * 6.2831853 + frameJitter;
     float vis = 0.0;
 
     [loop] for (uint k = 0; k < n; ++k) {
@@ -172,6 +204,113 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3
         vis += q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
     }
     return vis / (float)n;
+}
+
+// Reprojects wpos through LAST frame's camera to sample the ray-traced shadow history there. False
+// when the reprojection is not usable at all (off-screen, behind last frame's near plane) -- in
+// which case `hist` is untouched.
+//
+// NDC -> LAST frame's VIEWPORT rect, not [0,1] of the whole texture: the editor docks the 3D view
+// in a sub-rect of the backbuffer (gSceneViewport), and a plain ndc*0.5+0.5 implicitly assumes the
+// viewport covers the entire render target, which lands every reprojection on the wrong texel
+// whenever it does not. Caught by the shadow-rt / penumbra-rt gates -- moved by a full shade, not a
+// rounding difference -- not shipped.
+//
+// NEAREST, not bilinear -- and this is the OPPOSITE of what an earlier version of this function
+// concluded, for a reason specific to who calls it now. That version was read every frame by every
+// pixel, all of them always in sync (freshly traced that same frame), so a bilinear tap blending in
+// a neighbour was blending in something almost identical -- cheap insurance against a reprojected
+// coordinate landing a hair off a texel centre. rtShadowTemporal's tiled path is the opposite
+// situation on purpose: neighbouring pixels are DELIBERATELY out of sync, each mid-way through its
+// own turn cycle, so a bilinear tap mixes in a neighbour that can be many frames stale and on the
+// other side of a penumbra -- measured to converge to a stable but WRONG value (a 4x4 tile settled
+// at 46,46,47 against a real 23,27,32, unmoved between 300 and 1500 frames, so this was not slow
+// convergence). Nearest guarantees this pixel reads its OWN last write, which is what the schedule
+// in rtShadowTemporal actually assumes.
+bool rtReprojectHistory(float3 wpos, out float hist) {
+    hist = 0.0;
+    float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
+    if (clip.w <= 1e-4) return false;
+    float3 ndc = clip.xyz / clip.w;
+    if (ndc.z < 0.0 || ndc.z > 1.0) return false;
+    float texW, texH;
+    gRtShadowHist.GetDimensions(texW, texH);
+    float2 px = gSceneViewport.xy +
+                float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * gSceneViewport.zw;
+    // FLOOR, not round: `px` for a pixel that has not moved lands almost exactly on THAT pixel's own
+    // centre (integer index + 0.5), which is precisely the .5 tie `round()` breaks inconsistently
+    // (round-half-to-even) depending on whether the index is odd or even -- silently sending roughly
+    // half of all pixels to their wrong neighbour instead of themselves. floor() of a centre at
+    // index+0.5 is exactly `index`, matching how the WRITE side already indexes this same texture
+    // (gRtShadowHistOut[uint2(pixel)] truncates SV_Position the same way). This is what a tiled
+    // pixel schedule's "read my own last write" actually needs -- round() was measured to converge
+    // to a stable but wrong value (penumbra-rt settled at 78,75,70 against a true ~23,27,32).
+    int2 texel = int2(floor(px));
+    // Off-screen: no disocclusion check beyond this one, since this renderer keeps no depth or
+    // normal history to test against (a real rejection needs one).
+    if (any(texel < 0) || texel.x >= (int)texW || texel.y >= (int)texH) return false;
+    hist = gRtShadowHist.Load(int3(texel, 0));
+    return true;
+}
+
+// The PRIMARY sun-shadow call only -- rtReflection's own inner rtShadow() call stays exactly as it
+// always has, one ray with no footprint and frameJitter = 0.0, and never touches the history:
+// blending in a reflected surface's shadow would overwrite this pixel's history with a value that
+// has nothing to do with what a later frame's PRIMARY ray at this same pixel is estimating.
+//
+// gRtHistParams.w is the pixels-per-ray TILE EDGE, as its bit count (0 = off, every pixel traces
+// every frame). At 0 this is BIT-FOR-BIT what rtShadow() alone gives: no jitter, no history read,
+// only a plain write so the buffer stays live for whenever a caller turns tiling on. Tiling is what
+// actually cuts ray count -- not blending, which by itself only smooths flicker on something that
+// is genuinely moving, at the cost of a small, real change to the converged value at a soft edge
+// (see the two gate comments above). Turning tiling on is what makes that cost worth paying: most
+// pixels do not trace at all most frames.
+float rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays) {
+    // gRtHistParams.x is 0 whenever t6/u2 are not bound to real textures this frame (see
+    // VoxiRenderer::beginShadowHistory) -- an unbound slot is Tier 1 null-filled, and touching
+    // either one here would read or write a null descriptor rather than skip cleanly.
+    if (gRtHistParams.x < 0.5) return rtShadow(wpos, N, L, pixel, dpx, dpy, rays, 0.0);
+
+    const uint tileBits = (uint)gRtHistParams.w;
+    if (tileBits == 0u) {
+        const float fresh = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, 0.0);
+        gRtShadowHistOut[uint2(pixel)] = fresh;
+        return fresh;
+    }
+
+    // Which pixel in its tileBits x tileBits tile gets to trace THIS frame -- a bitmask against the
+    // pixel coordinate and the frame index, not a modulo, since tileBits is always a power of two
+    // (VoxiRenderer::setPixelsPerRayTile only ever rounds to one). Over 2^(2*tileBits) consecutive
+    // frames every pixel in the tile gets exactly one turn, staggered so a whole tile is never
+    // skipped or traced together -- a block pattern would show as visible tiles rather than noise.
+    const uint frameIdx = (uint)gRtHistParams.z;
+    const uint tileMask = (1u << tileBits) - 1u;
+    const uint turnMask  = (1u << (2u * tileBits)) - 1u;
+    const uint localIdx  = (((uint)pixel.y & tileMask) << tileBits) | ((uint)pixel.x & tileMask);
+    const bool myTurn    = localIdx == (frameIdx & turnMask);
+
+    float hist = 0.0;
+    const bool haveHist = gRtHistParams.y > 0.5 && rtReprojectHistory(wpos, hist);
+
+    float vis;
+    if (myTurn || !haveHist) {
+        // The golden-angle frame offset spends a DIFFERENT sample of the same low-discrepancy
+        // sequence each turn, so 2^(2*tileBits) turns converge toward the same estimate that many
+        // SPATIAL rays would give in one frame -- see rtDiscSample for why that composition works.
+        // frameJitter = 0.0 (rtHash alone) would repeat the identical ray every turn, which never
+        // converges past one sample; that is the whole reason tiling needs this and the tileBits==0
+        // path above does not.
+        const float frameJitter = (float)frameIdx * 2.39996323;
+        vis = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
+        if (haveHist) vis = lerp(vis, hist, 0.85);
+    } else {
+        // Not this pixel's turn, and reprojection is valid: reuse it outright. No ray at all this
+        // frame -- this is the actual saving tiling exists for.
+        vis = hist;
+    }
+
+    gRtShadowHistOut[uint2(pixel)] = vis;
+    return vis;
 }
 
 // Traces one reflection ray and shades what it hits.
@@ -226,7 +365,7 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, out
     // a reflective pixel was firing one reflection ray plus a four-ray disc from its hit, so five
     // rays where two do. The penumbra of a reflected shadow is not resolvable in a one-bounce
     // mirror image.
-    float shadow = rtShadow(hitPos, nWS, L, pixel, float3(0,0,0), float3(0,0,0), 1u);
+    float shadow = rtShadow(hitPos, nWS, L, pixel, float3(0,0,0), float3(0,0,0), 1u, 0.0);
 
     // LAMBERTIAN EXITANT RADIANCE, and the /PI is the whole point. averGroundRadiance is the
     // engine's own reference for this and reads:
@@ -354,8 +493,8 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 #if AVER_RT
     float sunVis;
     if (gShadowParams.z > 0.5)
-        sunVis = rtShadow(i.wpos, N, L, i.pos.xy, ddx(i.wpos), ddy(i.wpos),
-                          (uint)max(gRtParams.y, 1.0));
+        sunVis = rtShadowTemporal(i.wpos, N, L, i.pos.xy, ddx(i.wpos), ddy(i.wpos),
+                                  (uint)max(gRtParams.y, 1.0));
     else                       sunVis = shadowFactor(i.wpos, N, ndl);
 #else
     const float sunVis = shadowFactor(i.wpos, N, ndl);

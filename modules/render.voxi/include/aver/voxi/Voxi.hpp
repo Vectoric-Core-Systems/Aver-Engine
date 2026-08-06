@@ -56,6 +56,19 @@ struct Settings {
     u32 voxelResolution = 128;      // cubic voxel grid edge
     f32 giIntensity     = 1.0f;
     f32 giMaxDistance   = 4000.0f;  // centimetres
+
+    // ---- ray-traced sun shadow: rays per trace, and how many pixels amortise one trace ----
+    u32 rtShadowRays = 4;           // occlusion rays per pixel, when this pixel traces this frame.
+                                     // Clamped to [1, VoxiRenderer::kMaxShadowRays].
+    // Edge length of the square tile a single traced pixel is amortised over via the ray-traced
+    // shadow's temporal history: 1 = every pixel traces every frame (bit-identical to no denoiser
+    // at all); N>1 = one pixel in each NxN tile traces per frame, rotating which one so every pixel
+    // gets its own turn every N*N frames, and every OTHER pixel reuses a reprojected history sample
+    // instead of tracing. MUST be a power of two -- VoxiRenderer::setPixelsPerRayTile rounds to the
+    // nearest one -- so the per-pixel schedule is a bitmask against the pixel coordinate rather than
+    // a modulo, and the pixel COUNT one ray covers (N*N) is a clean power of two throughout: 1, 4,
+    // 16, 64, 256 for tile edges 1, 2, 4, 8, 16. Clamped to [1, VoxiRenderer::kMaxPixelsPerRayTile].
+    u32 rtPixelsPerRayTile = 1;
 };
 
 // Process-wide settings service. Single instance shared by the editor, the runtime and the C ABI.

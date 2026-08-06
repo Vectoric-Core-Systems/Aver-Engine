@@ -653,6 +653,7 @@ public:
     u32    notifiedSamples_ = 0;
     Format notifiedColor_   = Format::Unknown;
     Format notifiedDepth_   = Format::Unknown;
+    u32    notifiedWidth_ = 0, notifiedHeight_ = 0;
     u32 sampleCount() const override { return sampleCount_; }
     bool setSampleCount(u32 samples) override;
 
@@ -686,6 +687,16 @@ public:
         if (viewProj)    std::memcpy(viewProj, frameCB_.viewProj, sizeof(frameCB_.viewProj));
         if (invViewProj) std::memcpy(invViewProj, frameCB_.invViewProj, sizeof(frameCB_.invViewProj));
         if (cameraPos)   std::memcpy(cameraPos, frameCB_.camPos, 3 * sizeof(f32));
+        return true;
+    }
+    // Same rect beginFrame() sets as the scene's actual D3D12 viewport (RSSetViewports below) --
+    // vpW_ == 0 means no sub-rect was set, i.e. the whole backbuffer.
+    bool sceneViewport(f32 rect[4]) const override {
+        if (!rect) return true;
+        rect[0] = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
+        rect[1] = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
+        rect[2] = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(width_);
+        rect[3] = vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(height_);
         return true;
     }
     void setLight(const f32 dir[3], const f32 color[3], f32 ambient) override {
@@ -1375,6 +1386,12 @@ void D3D12Device::addRenderFeature(IRenderFeature* f) {
     for (IRenderFeature* e : features_) if (e == f) return;
     features_.push_back(f);
     AVER_INFO("[RHI.D3D12] render feature registered: {}", f->name());
+    // A feature registering after the device already knows its targets -- the common case, since
+    // the swapchain exists before any feature does -- would otherwise only learn them on the NEXT
+    // change, which may never come in a run that is never resized. width_/height_ are 0 only for a
+    // swapchain-less device, where there is nothing meaningful to tell it yet.
+    if (width_ > 0 && height_ > 0)
+        f->onRenderTargetsChanged(sampleCount_, backbufferFormat(), depthFormat(), width_, height_);
 }
 
 void D3D12Device::removeRenderFeature(IRenderFeature* f) {
@@ -1496,12 +1513,15 @@ u64 D3D12Device::viewportTextureId() {
 // Tells every feature the render targets changed, but only when a pipeline-baked property did.
 void D3D12Device::notifyRenderTargetsChanged() {
     if (sampleCount_ == notifiedSamples_ &&
-        backbufferFormat() == notifiedColor_ && depthFormat() == notifiedDepth_) return;
+        backbufferFormat() == notifiedColor_ && depthFormat() == notifiedDepth_ &&
+        width_ == notifiedWidth_ && height_ == notifiedHeight_) return;
     notifiedSamples_ = sampleCount_;
     notifiedColor_   = backbufferFormat();
     notifiedDepth_   = depthFormat();
+    notifiedWidth_   = width_;
+    notifiedHeight_  = height_;
     for (IRenderFeature* f : features_)
-        f->onRenderTargetsChanged(sampleCount_, backbufferFormat(), depthFormat());
+        f->onRenderTargetsChanged(sampleCount_, backbufferFormat(), depthFormat(), width_, height_);
 }
 
 // Builds the backend's own root signature and its solid, wireframe, sky and line pipelines.

@@ -533,9 +533,10 @@ public:
         (void)ctx; (void)width; (void)height;
     }
 
-    // Rebuilds pipelines that bake sample count or target formats when those change.
-    virtual void onRenderTargetsChanged(u32 sampleCount, Format color, Format depth) {
-        (void)sampleCount; (void)color; (void)depth;
+    // Rebuilds pipelines that bake sample count or target formats, and any screen-resolution-sized
+    // resource of its own, when those change.
+    virtual void onRenderTargetsChanged(u32 sampleCount, Format color, Format depth, u32 width, u32 height) {
+        (void)sampleCount; (void)color; (void)depth; (void)width; (void)height;
     }
 };
 

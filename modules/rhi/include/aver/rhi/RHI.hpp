@@ -345,6 +345,11 @@ public:
     virtual bool camera(f32 viewProj[16], f32 invViewProj[16], f32 cameraPos[3]) const {
         (void)viewProj; (void)invViewProj; (void)cameraPos; return false;
     }
+    // The scene's own viewport rect in target pixels -- {x, y, w, h} -- for a feature reprojecting
+    // a screen-space position between frames. NOT necessarily the whole render target: the editor
+    // docks the 3D view in a sub-rect of the backbuffer, and NDC alone does not say where that
+    // sub-rect sits. False when the backend has no viewport to give.
+    virtual bool sceneViewport(f32 rect[4]) const { (void)rect; return false; }
     // Sets the directional light and the ambient term.
     virtual void setLight(const f32 dirToLight[3], const f32 color[3], f32 ambient) { (void)dirToLight; (void)color; (void)ambient; }
     // Sets the sky, the sun and the air. Supersedes setLight for the sun.
