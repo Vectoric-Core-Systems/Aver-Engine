@@ -246,6 +246,12 @@ private:
         rhi::BindingSetHandle matSet = 0;
         u32 matBytes = 0;
         u8  mat[sizeof(pbr::MaterialConstants)] = {};
+        // World-space bounding sphere, captured once at submit time from IDevice::meshBounds and
+        // this draw's own world matrix. A NEGATIVE radius means the backend had no bounds to give --
+        // the signal for a cull test to treat this draw as unknown and always submit it, rather than
+        // mistake "no answer" for a real, radius-zero point.
+        f32 boundsCentre[3] = {0, 0, 0};
+        f32 boundsRadius = -1.0f;
     };
     std::vector<Draw> draws_, drawsPrev_;
 
@@ -270,6 +276,11 @@ private:
 
     // Builds this frame's cascade matrices and splits. Returns the usable cascade count, 0 if none.
     u32 fitCascades();
+    // Per-cascade world-space bounding sphere, filled in by fitCascades and read by shadowPass to
+    // skip a draw in a cascade its own bounds cannot reach. Sized like cb_.cascadeSplit above --
+    // kShadowCascades is private to the .cpp, so this repeats its value (4) rather than reach for it.
+    f32 cascadeCentre_[4][3] = {};
+    f32 cascadeRadius_[4] = {};
     bool giEnabled() const { return settings_.globalIllumination != Quality::Off; }
     f32 sunDir_[3]   = {rhi::SkyAtmosphere{}.sunDirection[0],
                         rhi::SkyAtmosphere{}.sunDirection[1],

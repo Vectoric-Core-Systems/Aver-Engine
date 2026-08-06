@@ -282,6 +282,35 @@ void VoxiRenderer::reportFrameTime(const char* when) {
               rtShadowRays_, rtActive_ ? "active" : "off");
 }
 
+namespace {
+// Row-vector transform of a point (w = 1), which is this engine's matrix convention throughout.
+Vec3 xformPoint(const Vec3& p, const Mat4& m) {
+    return Vec3{p.x * m.m[0][0] + p.y * m.m[1][0] + p.z * m.m[2][0] + m.m[3][0],
+                p.x * m.m[0][1] + p.y * m.m[1][1] + p.z * m.m[2][1] + m.m[3][1],
+                p.x * m.m[0][2] + p.y * m.m[1][2] + p.z * m.m[2][2] + m.m[3][2]};
+}
+// Same, through a projective matrix, so the perspective divide happens.
+Vec3 xformProjected(const Vec3& p, const Mat4& m) {
+    const f32 x = p.x * m.m[0][0] + p.y * m.m[1][0] + p.z * m.m[2][0] + m.m[3][0];
+    const f32 y = p.x * m.m[0][1] + p.y * m.m[1][1] + p.z * m.m[2][1] + m.m[3][1];
+    const f32 z = p.x * m.m[0][2] + p.y * m.m[1][2] + p.z * m.m[2][2] + m.m[3][2];
+    const f32 w = p.x * m.m[0][3] + p.y * m.m[1][3] + p.z * m.m[2][3] + m.m[3][3];
+    const f32 inv = std::fabs(w) > 1e-9f ? 1.0f / w : 0.0f;
+    return Vec3{x * inv, y * inv, z * inv};
+}
+// The world matrix's largest axis scale, i.e. how much it can stretch a local-space radius. Row-
+// vector convention: rows 0-2 are the images of the local X/Y/Z basis vectors, so each row's length
+// IS that axis's scale factor. Culling needs the max rather than a per-axis figure, because the
+// bounding sphere itself is not axis-aligned -- taking the largest never lets the sphere shrink
+// smaller than the mesh actually reaches along any axis.
+f32 maxAxisScale(const Mat4& m) {
+    const f32 sx = Vec3{m.m[0][0], m.m[0][1], m.m[0][2]}.size();
+    const f32 sy = Vec3{m.m[1][0], m.m[1][1], m.m[1][2]}.size();
+    const f32 sz = Vec3{m.m[2][0], m.m[2][1], m.m[2][2]}.size();
+    return std::max(sx, std::max(sy, sz));
+}
+} // namespace
+
 // ---------------------------------------------------------------- scene submission
 
 // Starts a new draw list. Voxi runs a frame behind: the passes replay the previous one.
@@ -304,6 +333,18 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
     d.matSet = drawBinding;
     d.matBytes = drawConstantBytes < sizeof(d.mat) ? drawConstantBytes : static_cast<u32>(sizeof(d.mat));
     if (drawConstants && d.matBytes) std::memcpy(d.mat, drawConstants, d.matBytes);
+
+    // World-space bounding sphere for shadowPass's per-cascade cull. d.boundsRadius already
+    // defaults to -1 (unknown) for a backend that has no bounds to give; only overwritten below.
+    f32 localCentre[3] = {};
+    f32 localRadius = 0.0f;
+    if (dev_ && dev_->meshBounds(mesh, localCentre, &localRadius)) {
+        Mat4 w;
+        std::memcpy(&w.m[0][0], world, sizeof(w.m));
+        const Vec3 c = xformPoint(Vec3{localCentre[0], localCentre[1], localCentre[2]}, w);
+        d.boundsCentre[0] = c.x; d.boundsCentre[1] = c.y; d.boundsCentre[2] = c.z;
+        d.boundsRadius = localRadius * maxAxisScale(w);
+    }
     draws_.push_back(d);
 }
 
@@ -462,24 +503,6 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     ctx.popMarker();
 }
 
-namespace {
-// Row-vector transform of a point (w = 1), which is this engine's matrix convention throughout.
-Vec3 xformPoint(const Vec3& p, const Mat4& m) {
-    return Vec3{p.x * m.m[0][0] + p.y * m.m[1][0] + p.z * m.m[2][0] + m.m[3][0],
-                p.x * m.m[0][1] + p.y * m.m[1][1] + p.z * m.m[2][1] + m.m[3][1],
-                p.x * m.m[0][2] + p.y * m.m[1][2] + p.z * m.m[2][2] + m.m[3][2]};
-}
-// Same, through a projective matrix, so the perspective divide happens.
-Vec3 xformProjected(const Vec3& p, const Mat4& m) {
-    const f32 x = p.x * m.m[0][0] + p.y * m.m[1][0] + p.z * m.m[2][0] + m.m[3][0];
-    const f32 y = p.x * m.m[0][1] + p.y * m.m[1][1] + p.z * m.m[2][1] + m.m[3][1];
-    const f32 z = p.x * m.m[0][2] + p.y * m.m[1][2] + p.z * m.m[2][2] + m.m[3][2];
-    const f32 w = p.x * m.m[0][3] + p.y * m.m[1][3] + p.z * m.m[2][3] + m.m[3][3];
-    const f32 inv = std::fabs(w) > 1e-9f ? 1.0f / w : 0.0f;
-    return Vec3{x * inv, y * inv, z * inv};
-}
-} // namespace
-
 // Builds one orthographic light frustum per cascade, fitted to a slice of the camera's view, and
 // writes the matrices and splits into cb_. Returns the usable cascade count, 0 if there is no camera.
 u32 VoxiRenderer::fitCascades() {
@@ -564,6 +587,11 @@ u32 VoxiRenderer::fitCascades() {
                 }
             }
         }
+
+        // Persisted for shadowPass's per-draw cull: the same (centre, radius) this cascade's own
+        // frustum and cb_.cascadeSplit are built from, before the sub-texel nudge below.
+        cascadeCentre_[c][0] = centre.x; cascadeCentre_[c][1] = centre.y; cascadeCentre_[c][2] = centre.z;
+        cascadeRadius_[c] = radius;
 
         // Snap the centre to a whole texel of this cascade, in light space.
         const f32 texel = 2.0f * radius / static_cast<f32>(kShadowCascadeSize);
@@ -729,7 +757,18 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
         ctx.setViewport(qx, qy, kShadowCascadeSize, kShadowCascadeSize);
         ctx.setScissor(qx, qy, kShadowCascadeSize, kShadowCascadeSize);
 
+        const Vec3 cascCentre{cascadeCentre_[c][0], cascadeCentre_[c][1], cascadeCentre_[c][2]};
+        const f32 cascRadius = cascadeRadius_[c];
+
         for (const Draw& d : drawsPrev_) {
+            // Sphere-sphere overlap against this cascade's own fitted bounds: a draw whose bounding
+            // sphere cannot reach the cascade's box cannot cast a shadow into it. A negative
+            // boundsRadius means the backend had no bounds for this mesh -- draw it regardless
+            // rather than guess.
+            if (d.boundsRadius >= 0.0f) {
+                const Vec3 dc{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]};
+                if (dist(dc, cascCentre) > cascRadius + d.boundsRadius) continue;
+            }
             f32 consts[rhi::kObjectConstantDwords]{};
             std::memcpy(consts, d.world, 16 * sizeof(f32));   // depth-only: nothing else is read
             ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);

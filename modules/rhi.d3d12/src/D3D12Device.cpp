@@ -377,6 +377,10 @@ struct GpuMesh {
     // every ordinary mesh" -- began answering non-zero for all of them, and the renderer rebuilt
     // every static mesh's acceleration structure every frame. Set only by createSkinTargetMesh.
     bool computeWritten = false;
+    // Local-space bounding sphere -- AABB midpoint and the distance to a corner, computed once in
+    // createMesh. See IDevice::meshBounds for why a corner rather than the farthest actual vertex.
+    f32 boundsCentre[3] = {0.0f, 0.0f, 0.0f};
+    f32 boundsRadius = 0.0f;
 };
 
 // A line list uploaded to the GPU.
@@ -715,6 +719,13 @@ public:
         if (ib) *ib = m.ibBuffer;
         if (vertexCount) *vertexCount = m.vertexCount;
         if (indexCount) *indexCount = m.indexCount;
+        return true;
+    }
+    bool meshBounds(MeshHandle mesh, f32 outCentre[3], f32* outRadius) const override {
+        if (!mesh || mesh > meshes_.size()) return false;
+        const GpuMesh& m = meshes_[mesh - 1];
+        if (outCentre) { outCentre[0] = m.boundsCentre[0]; outCentre[1] = m.boundsCentre[1]; outCentre[2] = m.boundsCentre[2]; }
+        if (outRadius) *outRadius = m.boundsRadius;
         return true;
     }
     void drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) override;
@@ -1901,6 +1912,24 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
     GpuMesh m;
     m.indexCount = icount;
     m.vertexCount = vcount;
+
+    // ONE PASS OVER THE VERTICES, ONCE, AT CREATION -- not per frame, not per caller. An AABB, not a
+    // tight sphere: min/max per axis, then centre = midpoint and radius = distance to a corner. That
+    // radius is measured to the FARTHEST CORNER OF THE BOX, not the farthest actual vertex, so it is
+    // never smaller than a true bounding sphere would be -- conservative in the direction that
+    // matters for a culling test, where returning "might be visible" too often costs GPU cycles and
+    // returning it too rarely costs a wrong picture.
+    {
+        f32 lo[3] = {verts[0].px, verts[0].py, verts[0].pz};
+        f32 hi[3] = {verts[0].px, verts[0].py, verts[0].pz};
+        for (u32 i = 1; i < vcount; ++i) {
+            const f32 p[3] = {verts[i].px, verts[i].py, verts[i].pz};
+            for (int a = 0; a < 3; ++a) { lo[a] = std::fmin(lo[a], p[a]); hi[a] = std::fmax(hi[a], p[a]); }
+        }
+        for (int a = 0; a < 3; ++a) m.boundsCentre[a] = 0.5f * (lo[a] + hi[a]);
+        const f32 dx = hi[0] - m.boundsCentre[0], dy = hi[1] - m.boundsCentre[1], dz = hi[2] - m.boundsCentre[2];
+        m.boundsRadius = std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
     const u64 vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
     const u64 ibytes = static_cast<u64>(icount) * sizeof(u32);
 

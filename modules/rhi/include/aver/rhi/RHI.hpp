@@ -325,6 +325,16 @@ public:
                               u32* vertexCount, u32* indexCount) const {
         (void)mesh; (void)vb; (void)ib; (void)vertexCount; (void)indexCount; return false;
     }
+    // A mesh's LOCAL-SPACE bounding sphere -- centre and radius, in the mesh's own coordinate space
+    // before any world transform. Computed once at createMesh time from the AABB of its vertices
+    // (centre = AABB midpoint, radius = distance to a corner), which is a real, conservative
+    // bounding sphere -- it contains the AABB, which contains every vertex -- not a tight one; a
+    // caller culling with it can produce a false "might be visible", never a false "definitely is
+    // not". False when the backend has no bounds to give, which is the signal to skip culling for
+    // that mesh rather than treat an all-zero sphere as a real, radius-zero point.
+    virtual bool meshBounds(MeshHandle mesh, f32 outCentre[3], f32* outRadius) const {
+        (void)mesh; (void)outCentre; (void)outRadius; return false;
+    }
     // Per-frame camera (row-major, row-vector viewProj = view*proj). invViewProj reconstructs
     // world-space rays for the procedural sky.
     virtual void setCamera(const f32 viewProj[16], const f32 invViewProj[16], const f32 cameraPos[3]) {
