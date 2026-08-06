@@ -302,12 +302,23 @@ float averCloudDensity(float3 wpos, bool detail) {
     if (shape <= 0.001) return 0.0;
 
     float3 p = (wpos + float3(gCloudMotion.xy, 0.0)) * gCloudMotion.z;
-    float n = averValueNoise(p) * 0.6;
+    float cover = 1.0 - gCloudParams.x;
+
+    // The cheapest octave, evaluated FIRST rather than last, as a conservative reject: `n` is at
+    // most nLow + 0.6 (the base octave's full weight) + 0.3-or-0.15 (the detail octave's, if this
+    // call even asked for one) -- every value-noise call returns in [0,1], so that is the best
+    // case no matter what the other two octaves turn out to be. If even that best case cannot
+    // clear `cover`, the remaining one or two noise samples this step would have bought are
+    // guaranteed to leave d at 0 -- skip them. This never skips a point that would have been
+    // nonzero; it only ever skips a point already proven to be empty.
+    float nLow = averValueNoise(p * 0.41) * 0.25;
+    const float bestCase = nLow + (detail ? 0.9 : 0.75);
+    if (bestCase <= cover) return 0.0;
+
+    float n = averValueNoise(p) * 0.6 + nLow;
     if (detail) n += averValueNoise(p * 3.17) * 0.3;
     else        n += 0.15;
-    n += averValueNoise(p * 0.41) * 0.25;
 
-    float cover = 1.0 - gCloudParams.x;
     float d = saturate((n - cover) / max(1.0 - cover, 1e-3));
     return d * shape;
 }
@@ -336,7 +347,10 @@ float4 averCloudLayer(float3 ro, float3 rd, float3 sunDir, float3 sunColour) {
         if (ro.z < bottom || ro.z > top) return float4(0, 0, 0, 1);
         t0 = 0.0; t1 = (top - bottom) * 64.0;
     }
-    const int kSteps = 24;
+    // Was 24: cut a third, relying on the jitter below (already there, already hiding banding as
+    // noise instead of visible steps) to absorb the coarser sampling rather than adding anything
+    // new to hide it.
+    const int kSteps = 16;
     float featureSize = 1.0 / max(gCloudMotion.z, 1e-9);
     t1 = min(t1, t0 + kSteps * featureSize * 0.35);
     if (t1 <= t0) return float4(0, 0, 0, 1);
@@ -356,8 +370,12 @@ float4 averCloudLayer(float3 ro, float3 rd, float3 sunDir, float3 sunColour) {
         float d = averCloudDensity(p, true);
         if (d > 0.001) {
             float lt = 0.0;
-            float lstep = (top - bottom) * 0.25;
-            [unroll] for (int j = 0; j < 3; ++j) {
+            // Was 3 steps at 0.25*(top-bottom): samples at 0.5/1.5/2.5 step-widths ahead reached
+            // (2.5+0.5)*0.25 = 0.75 of the layer's thickness toward the sun. 2 steps at a wider
+            // 0.375*(top-bottom) sample 0.5/1.5 step-widths ahead, reaching (1.5+0.5)*0.375 = 0.75
+            // -- the same total reach, one fewer (and this loop's most expensive) sample.
+            float lstep = (top - bottom) * 0.375;
+            [unroll] for (int j = 0; j < 2; ++j) {
                 float3 lp = p + sunDir * (lstep * (j + 0.5));
                 lt += averCloudDensity(lp, false) * lstep;
             }
