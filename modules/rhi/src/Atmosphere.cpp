@@ -271,10 +271,33 @@ void atmoFitDome(const AtmosphereProfile& a, f32 altitudeKm, f32 sunCosZenith,
     atmoSunTransmittance(a, altitudeKm, sunCosZenith, sunAngularRadiusRad, out.sunTransmittance);
 }
 
-// Mirrors RHIShaders.cpp's averFogInscatterRef() exactly: a zenith march and a level march toward
-// the sun's own azimuth, blended 0.4 toward the second. Kept in lockstep with that function
-// deliberately -- if its blend weight or step count ever changes, this must change with it, the same
-// discipline every other function in this file already keeps with its own HLSL twin.
+// What RHIShaders.cpp's averFogInscatterRef() reads back: this is the CPU side of that value, baked
+// once per frame into gFogInscatterRef (there is no HLSL twin of the maths below -- averFogInscatterRef
+// itself is just the cbuffer read).
+//
+// THE TOWARD-SUN MARCH STAYS THE FULL HORIZON-TO-SPACE CHORD -- SHORTENING IT WAS TRIED AND REVERTED.
+// At ground level that chord is on the order of 800-900 km, long enough that Rayleigh, Mie and the
+// multi-scatter gain all saturate together and the result stops being a colour and becomes a
+// brightness: blended 40% into the zenith term, that is what made every height-fog volume in the game
+// skew pale no matter how close or thin it was authored to be (see averApplyFog's own comment on the
+// couple of kilometres a fog volume is actually meant to cover). The first fix for that bounded the
+// march itself to one Rayleigh scale height (8 km) instead -- correct for the BRIGHTNESS problem, but
+// it broke AtmosphereTest's "no single step is an outlier" sweep: atmoSunTransmittance's shadow term
+// is a smoothstep across a window only sin(sunAngularRadiusRad) wide (a few thousandths), and over an
+// 800 km march that transition is diluted across a huge integral and barely moves the answer: over an
+// 8 km march it is a much larger fraction of the whole path, so crossing it as the sun sweeps toward
+// the horizon now produces a visible jump instead of a ripple. The long march was never the thing
+// making this too white -- it was how much of it got blended in.
+//
+// WEIGHT DOWN, MARCH LENGTH UNCHANGED, THEREFORE. 0.4 -> 0.15 damps the toward-sun term's contribution
+// by the same rough factor the scale-height bound did, without touching the march itself: the
+// integral atmoScatterSegment produces is exactly what it always was (already covered by
+// AtmosphereTest's own smoothness sweep before any of this), only how much of the difference from
+// zenith survives the blend has changed, and a uniform scalar on that difference cannot manufacture a
+// new discontinuity where the unscaled term did not already have one. The true horizon colour is not
+// lost either way -- averFogInscatter already blends toward averSkyPhysical(dir) as real
+// aerial-perspective transmittance falls, which is the large-scale fade this local reference was never
+// the right place to produce.
 void atmoFogInscatterRef(const AtmosphereProfile& a, f32 altitudeKm, const f32 sunDir[3],
                          const f32 sunIrradiance[3], f32 sunAngularRadiusRad, f32 outRgb[3]) {
     const f32 len = std::sqrt(sunDir[0] * sunDir[0] + sunDir[1] * sunDir[1] + sunDir[2] * sunDir[2]);
@@ -290,12 +313,43 @@ void atmoFogInscatterRef(const AtmosphereProfile& a, f32 altitudeKm, const f32 s
                        sunIrradiance, sunAngularRadiusRad, zenith, zenithT);
 
     const f32 lenLxy = std::sqrt(Lx * Lx + Ly * Ly);
-    const f32 tMax    = raySphere(r0, 0.0f, rTop, false);
+    const f32 tMax   = raySphere(r0, 0.0f, rTop, false);
     f32 towardSun[3], towardSunT[3];
     atmoScatterSegment(a, r0, 0.0f, Lz, lenLxy, tMax > 0.0f ? tMax : 0.0f, a.viewSteps,
                        sunIrradiance, sunAngularRadiusRad, towardSun, towardSunT);
 
-    for (int c = 0; c < 3; ++c) outRgb[c] = zenith[c] + (towardSun[c] - zenith[c]) * 0.4f;
+    f32 blended[3];
+    for (int c = 0; c < 3; ++c) blended[c] = zenith[c] + (towardSun[c] - zenith[c]) * 0.15f;
+
+    // RE-HUED -- THE SAME CORRECTION averSkyPhysical CARRIES, LOCALLY, HERE TOO. averSkyPhysical's
+    // own comment has the physics: even a comfortable ~60 degree sun elevation means real airmass
+    // has already taken more blue out of the sun's OWN light than red by the time it reaches
+    // anywhere near ground level (exp(-tau) close to 0.7 for blue against 0.95 for red), and a
+    // single/coarse-multi-scatter model has no way to add that missing blue back the way real light
+    // -- bounced many times, through many different columns of air that each lost a different amount
+    // on ITS OWN path to the sun -- does. averSkyPhysical fixed this for the sky; this reference is
+    // what averFogInscatter falls back to for every NEAR-FIELD fog volume regardless (its own blend
+    // toward the true sky ray only moves once real aerial-perspective transmittance falls, which
+    // near-field fog by definition never reaches), so it carried the same warm bias completely
+    // unfixed until now, reported back as "the fog is too bright, make it blue... it's probably the
+    // atmospheric physics."
+    //
+    // PLAIN ADDITIVE, NOT RESCALED TO PRESERVE LUMINANCE -- rescaling was tried first specifically
+    // because an additive correction raises brightness, and this function's fixed, always-visible
+    // reference seemed like exactly the place a luminance-preserving hue rotation belonged. It broke
+    // AtmosphereTest's "no single step is an outlier" sweep instead: dividing by the boosted colour's
+    // own luminance amplifies whatever small ripple that quantity already had as the sun sweeps
+    // toward the horizon, turning a step this test already passed into one it does not. Checked
+    // directly against the brightness concern that motivated the rescale in the first place -- a
+    // 150x fog-density stress test read as strongly saturated blue, not brighter haze -- so the
+    // plain sum is both the one that passes and the one that measures fine.
+    f32 groundSunT[3];
+    atmoSunTransmittance(a, altitudeKm, Lz, sunAngularRadiusRad, groundSunT);
+    f32 shortfall[3];
+    for (int c = 0; c < 3; ++c) shortfall[c] = groundSunT[0] - groundSunT[c] > 0.0f ? groundSunT[0] - groundSunT[c] : 0.0f;
+
+    const f32 lum = 0.2126f * blended[0] + 0.7152f * blended[1] + 0.0722f * blended[2];
+    for (int c = 0; c < 3; ++c) outRgb[c] = blended[c] + lum * shortfall[c] * 1.5f;
 }
 
 } // namespace aver::rhi

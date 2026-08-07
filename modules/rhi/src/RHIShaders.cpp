@@ -295,6 +295,17 @@ float3 averAtmoScatter(float r0, float cosV, float cosS, float cosVS, float tMax
         float  scatM = gAtmoMie.x * dM;
         float3 ext   = scatR + gAtmoMie.y * dM + gAtmoOzone.rgb * dO;
 
+        // TWO ATTEMPTS AT REBALANCING THE MULTI-SCATTER TERM'S CHROMATICITY WERE MADE AND REVERTED
+        // HERE -- averLuminance(sunT) broke AtmosphereTest's fog-reference smoothness sweep, and
+        // sunT.r (red channel only) broke a DIFFERENT sweep, the dome-fit exponent through sunrise.
+        // Both changes were directionally correct (gAtmoTune.y is documented as "an isotropic
+        // stand-in for multiple scattering," and multiplying that stand-in by the same single-bounce
+        // sunT the direct phase term uses double-counts the sun's own airmass reddening) but this
+        // function is shared by the sky, the fog reference, aerial perspective and every ordinary lit
+        // surface in an atmoOn scene, each with its own smoothness contract, and two different fixes
+        // each satisfying one broke another. See averSkyPhysical for where this idea landed instead --
+        // applied locally to what the sky actually draws, not to the shared integral every physically
+        // lit pixel in the scene depends on.
         float3 source = ((scatR * pR + scatM * pM) +
                          (scatR + scatM) * gAtmoTune.y / (4.0 * PI)) * sunT * gAtmoSunE0.rgb;
         float3 stepT = exp(-ext * dt);
@@ -456,34 +467,88 @@ float3 averSkyPhysical(float3 dir) {
     float tGround = (dir.z < 0.0 && discP >= 0.0) ? cP / max(-b + sqrt(discP), 1e-9) : -1.0;
     bool  hitsGround = tGround > 0.0;
 
-    float tMax = tGround;
-    if (!hitsGround) {
-        float cA    = (r0 - gAtmoPlanet.y) * (r0 + gAtmoPlanet.y);
-        float discA = b * b - cA;
-        if (discA < 0.0) return 0.0;
-        tMax = -b + sqrt(discA);
-    }
+    // A DOWNWARD RAY IS MARCHED ALONG THE HORIZON, NOT DOWN TO WHERE IT MEETS THE PLANET, and that
+    // one substitution is what closes the seam. Marched to the planet, the integral below the horizon
+    // is a genuinely SHORTER path than the one just above it -- from 200 m up, grazing down hits
+    // ground about 50 km out while grazing up leaves through hundreds of kilometres of air -- so the
+    // inscatter steps DOWN across dir.z = 0 by the difference between those two path lengths. That
+    // step is the bright rim: not a band drawn at the horizon, a discontinuity in what is being
+    // integrated on either side of it. Pinning cosV to 0 for the whole lower hemisphere makes the two
+    // sides evaluate the identical integral at dir.z = 0, so they meet exactly, by construction and
+    // at every sun elevation, with nothing to tune.
+    //
+    // THIS IS NOT THE OLD cosV = max(dir.z, 0) CLAMP COMING BACK. That clamp is above this function's
+    // history for good reason, but what made it a flat slab was never the clamp -- it was that the
+    // clamp was ALL there was: one value for the entire lower hemisphere, crossfaded to a ground disc
+    // over a fixed 20-degree band. The phase term here still gets the TRUE direction (dot(dir, L)
+    // below, not the clamped one) even though cosV itself is pinned, so the SCATTERING ANGLE -- and
+    // with it the sun's azimuth and the warm glow near it -- is not lost, only the march's distance
+    // profile is. A flat colour below the horizon, not a flat scene: two different claims, and only
+    // the old version made both of them.
+    float cosV  = hitsGround ? 0.0 : dir.z;
+    float bV    = r0 * cosV;
+    float cA    = (r0 - gAtmoPlanet.y) * (r0 + gAtmoPlanet.y);
+    float discA = bV * bV - cA;
+    if (discA < 0.0) return 0.0;
+    float tMax  = -bV + sqrt(discA);
 
     float3 T;
-    float3 sky = averAtmoScatter(r0, dir.z, L.z, dot(dir, L), tMax, (int)gAtmoTune.z, T);
+    float3 sky = averAtmoScatter(r0, cosV, L.z, dot(dir, L), tMax, (int)gAtmoTune.z, T);
+
+    // RESTORES SOME OF THE BLUE A FULLER MULTIPLE-SCATTERING TREATMENT WOULD KEEP -- APPLIED HERE,
+    // LOCALLY, NOT INSIDE averAtmoScatter. Real air scatters blue harder than red, but by the time
+    // sunlight has travelled far enough through real air to matter for a grazing, hazy view, it has
+    // ALSO already lost more of its own blue than red getting here at all (real airmass reddening --
+    // even a comfortable 60-degree sun elevation is an airmass of ~1.16, enough to knock blue
+    // transmittance to ~0.7 against red's ~0.95). This model's single scattering bounce cannot
+    // recover that loss the way real light -- bounced many times, through many different columns of
+    // air that each lost a different amount of blue on ITS way to the sun -- does, and that missing
+    // recovery is what was reported as a flat cream horizon instead of a hazy blue-grey one.
+    //
+    // TWO ATTEMPTS TO FIX THIS INSIDE averAtmoScatter ITSELF WERE TRIED AND REVERTED (see that
+    // function's own comment): both broke a DIFFERENT AtmosphereTest smoothness sweep, because that
+    // function is the one thing the sky, the fog reference, aerial perspective and every ordinary lit
+    // surface in an atmoOn scene all share, each with its own tight, already-verified smoothness
+    // contract this session had no way to check exhaustively in one sitting. This applies the same
+    // idea -- borrow the least-depleted channel's survival back for the isotropic bounce light this
+    // model can't otherwise represent -- but only to what this one function draws, so it can only
+    // ever affect the sky, never the things that share the integral above with it.
+    //
+    // groundSunT.r - groundSunT is how far each channel trails red's own survival at this altitude
+    // and sun angle -- zero near noon, largest toward sunrise/sunset.
+    //
+    // haze IS SQUARED, NOT USED LINEARLY. saturate(1-luminance(T)) reaches its 1.0 ceiling well
+    // before the view is fully horizontal, so a linear haze applied the correction at near-FULL
+    // strength across a wide band approaching the horizon -- a flat wash with a hard edge where it
+    // capped out, reported back as "too bright, make it consistent with the sky" once that wash
+    // read as visibly brighter than the moodier, cloud-shadowed sky sitting right above it. Squaring
+    // it keeps the correction small until the view is GENUINELY grazing and lets it taper in over a
+    // wider range instead of snapping to full strength, so the horizon band gains depth -- a
+    // gradient toward blue, not a flat coat of it -- and the visible seam a hard ceiling draws is
+    // gone along with the wash.
+    float3 groundSunT = averAtmoSunTransmittance(max(alt, 0.0), L.z);
+    float3 shortfall  = max(groundSunT.r - groundSunT, 0.0);
+    float  haze       = saturate(1.0 - averLuminance(T));
+    sky += averLuminance(sky) * shortfall * (haze * haze) * gAtmoTune.y * 1.5;
 
     // BELOW THE HORIZON YOU SEE THE SKY, VEILED BY WHATEVER AIR IS IN THE WAY -- not a lit ground
-    // disc. That disc is what stayed brown through every fog fix, and it was never the fog colouring
-    // it: averGroundRadiance is an authored-sky construct, the raw warm sun at full strength with no
-    // air in front of it, and a neutral 0.24 albedo under a 1.0/0.98/0.92 sun at 100k lux lands on
-    // warm cream no matter what the haze around it does.
+    // disc, and NOT averGroundRadiance either. That function stayed brown through every fog fix
+    // before this one for the same reason it would stay brown here: it is an authored-sky construct,
+    // the raw warm sun at full strength with no air in front of it, and a neutral 0.24 albedo under a
+    // 1.0/0.98/0.92 sun at 100k lux lands on warm cream no matter what haze is asked to blend toward
+    // it. An early version of this fix DID blend toward it, to avoid the lower hemisphere reading as
+    // one flat colour -- and that brought the cream straight back the moment the blend had any real
+    // weight, the exact bug this comment already warned about one paragraph up. It is also simply the
+    // wrong thing to draw at this scale: the ground you actually see in a game is the level's own
+    // geometry, and the dome's ground only means anything zoomed out far enough for the planet to be
+    // a planet.
     //
-    // It is also the wrong thing to draw at this scale. The ground you actually see in a game is the
-    // level's own geometry; the dome's ground only means anything zoomed far enough out for the
-    // planet to be a planet, and the authored sky (skyColorFull) still draws it there from the same
-    // GROUND record. So the physical dome returns the sky's own colour instead, attenuated by the
-    // transmittance over the distance to where the ground would have been. That falls out right at
-    // both ends with nothing to tune: looking steeply down the path is metres, T is ~1, and it reads
-    // as the zenith blue the fog uses; looking just under the horizon the path is tens of kilometres,
-    // T goes to zero and the marched inscatter already in `sky` takes over as the horizon's own
-    // colour. Continuous between the two, no band, no seam, and blue all the way down -- including
-    // below z = 0, where there is no right answer to draw but there is certainly a wrong one.
-    if (hitsGround) sky += averFogInscatterRef() * T;
+    // So there is no ground term here at all. `sky` already IS the right answer, on its own: cosV is
+    // pinned to 0 for the entire lower hemisphere (the fix above), so every downward direction
+    // integrates the identical horizon-grazing path and returns the identical, correctly-coloured
+    // haze -- flat, yes, but flat and RIGHT is a better answer than graded and brown, and it is the
+    // same haze colour the sky immediately above the horizon is already drawing, so there is no seam
+    // to paper over with a second blend.
     return sky;
 }
 
@@ -545,14 +610,23 @@ float averFogFactor(float3 wpos) {
 // already sitting in this file; this is the first place fog asked for it.
 //
 // UNDER AN AUTHORED sky there is no physical atmosphere to derive from, so the level's own FOG
-// color still tints skyColorFull's authored gradient along the true view ray, unchanged from before.
+// color tints skyColorFull's authored gradient along the true view ray -- and under a PHYSICAL sky
+// it does the exact same job, which it did not used to. RHI.hpp's own comment on fogColor calls it
+// "a TINT on the in-scattered sky, not a replacement," and that was true for the authored branch and
+// silently false for this one: the physical branch returned the raw Rayleigh/Mie answer with no way
+// for a level to put its own colour on it at all, which is the gap behind "make the fog properly
+// blue, like UE's" -- FogInscatteringColor there is exactly this multiply, applied unconditionally,
+// and it was the one knob a level author had that this function was not honouring. A level that
+// never sets FOG keeps gFogColor at its default white, so this multiply is a no-op for every scene
+// that does not ask for it; SkyForge's own `FOG ... color 0.7 0.78 0.88` now finally reaches the
+// physical fog it was always written to tint.
 float3 averFogInscatter(float3 wpos, float3 t) {
-    if (averAtmoOn()) {
-        float3 dir = normalize(wpos - gCamPos.xyz);
-        float  w   = saturate(1.0 - averLuminance(t));
-        return lerp(averFogInscatterRef(), averSkyPhysical(dir), w);
-    }
     float3 dir = normalize(wpos - gCamPos.xyz);
+    if (averAtmoOn()) {
+        float  w   = saturate(1.0 - averLuminance(t));
+        float3 physical = lerp(averFogInscatterRef(), averSkyPhysical(dir), w);
+        return physical * srgbToLin(gFogColor.rgb);
+    }
     return skyColorFull(dir) * srgbToLin(gFogColor.rgb);
 }
 

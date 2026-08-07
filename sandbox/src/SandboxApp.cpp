@@ -941,6 +941,13 @@ public:
             yaw_ = std::atan2(d.y, d.x);
             pitch_ = std::asin(d.z);
         }
+        // Last, so --cam outranks both writers above it: frameCameraOn ran back in loadStartMap,
+        // and the default framing is the branch immediately before this.
+        if (camOverride_) {
+            camPos_ = camPosOverride_;
+            pitch_  = pitchOverride_;
+            yaw_    = yawOverride_;
+        }
     }
 
     // Advances one frame: MCP commands, camera, gameplay tick, physics, and the render state.
@@ -1827,6 +1834,16 @@ public:
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
     void setProbeRel(f32 u, f32 v) { probeU_ = u; probeV_ = v; }                 // --probe-rel U V
+    // --cam X Y Z PITCH YAW: places the viewport camera outright, cm and degrees, pitch 0 level.
+    // A capture tool, not a feature: every other way into this camera either frames the level (always
+    // pitch -31 deg, horizon just off the top edge) or needs a real mouse, so nothing headless could
+    // aim at the sky, and the sky is the one thing no gate covers. Applied last, after level framing.
+    void setCamera(Vec3 pos, f32 pitchDeg, f32 yawDeg) {
+        camOverride_ = true;
+        camPosOverride_ = pos;
+        pitchOverride_ = pitchDeg * 0.01745329252f;
+        yawOverride_   = yawDeg   * 0.01745329252f;
+    }
     void setScriptsDir(std::string d) { scriptsDir_ = std::move(d); }            // --scripts <dir>
     void setSpawnTest(std::string cls) { spawnTestClass_ = std::move(cls); }      // --spawn-test <ClassName>
     void setPlayTest() { playTest_ = true; }                                       // --play-test
@@ -5331,6 +5348,9 @@ private:
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
     f32  probeU_=-1.0f, probeV_=-1.0f;   // --probe-rel U V: a FRACTION of the viewport rect
+    bool camOverride_=false;         // --cam X Y Z PITCH YAW: aim the viewport camera outright
+    Vec3 camPosOverride_{};
+    f32  pitchOverride_=0.0f, yawOverride_=0.0f;   // radians, converted in setCamera
     bool useWarp_=false;             // --warp: run on the D3D12 software rasteriser
     std::string backendName_;   // --backend: which RHI backend to ask for first
     bool debugLayer_=false;          // --debug-layer: validate every graphics call (a real per-call tax)
@@ -5941,7 +5961,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -6060,6 +6080,14 @@ Application* createApplication(int argc, char** argv) {
             probeU=static_cast<f32>(std::atof(argv[++i]));
             probeV=static_cast<f32>(std::atof(argv[++i]));
         }
+        else if (!std::strcmp(argv[i],"--cam") && i+5<argc) {
+            camSet=true;
+            camX    =static_cast<f32>(std::atof(argv[++i]));
+            camY    =static_cast<f32>(std::atof(argv[++i]));
+            camZ    =static_cast<f32>(std::atof(argv[++i]));
+            camPitch=static_cast<f32>(std::atof(argv[++i]));
+            camYaw  =static_cast<f32>(std::atof(argv[++i]));
+        }
         else if (!std::strcmp(argv[i],"--tool") && i+1<argc) {
             const char* t=argv[++i];
             tool = !std::strcmp(t,"move")?Tool::Move : !std::strcmp(t,"rotate")?Tool::Rotate :
@@ -6116,6 +6144,7 @@ Application* createApplication(int argc, char** argv) {
     app->setMsOverride(ms);
     app->setProbe(probeX, probeY);
     if (probeU >= 0.0f) app->setProbeRel(probeU, probeV);
+    if (camSet) app->setCamera(Vec3{camX, camY, camZ}, camPitch, camYaw);
     app->setScriptsDir(scriptsDir);
     app->setSpawnTest(spawnTest);
     if (playTest) app->setPlayTest();

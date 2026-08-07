@@ -98,20 +98,18 @@ std::string startLevelText(const std::string& name) {
     // PHYSICAL sky, the engine's real model: Rayleigh, Cornette-Shanks Mie, an ozone tent and a
     // Chapman-function transmittance.
     //
-    // NO OVERRIDES, and removing them is the change. This used to carry `mie 6 multiscatter 1.7`.
+    // NO OVERRIDES: the same "SkyForge is the tuned target" reasoning as the paragraph above, just
+    // applied to the engine's OWN AtmosphereProfile defaults (Atmosphere.hpp) instead of a per-level
+    // one. SkyForge's own Default.ocworld carries no SKY overrides either, so the two are identical
+    // by construction, not by being kept in step by hand.
     //
-    // MEASURED, NOT DESCRIBED. Both skies read as near-white under the editor's auto-exposure, so
-    // the difference is not one anybody would call blue-versus-cream; it is a few codes, and it is
-    // consistent. Sampling a 9x9 at three heights against SkyForge as the target:
-    //
-    //                     sky high         sky mid          horizon
-    //   SkyForge      (248,248,244)   (240,240,235)   (209,207,192)
-    //   with mie 6    (232,236,231)   (235,234,226)   (221,219,207)
-    //   no overrides  (246,246,243)   (238,238,232)   (204,201,185)
-    //
-    // The extra Mie darkened the dome and lifted the horizon, and worst per-channel error against
-    // SkyForge falls from 17 to 7 when the overrides go. The defaults ARE the tuned values here;
-    // the overrides were the deviation.
+    // MEASURED, NOT DESCRIBED, AGAIN: an earlier version of this comment described the defaults
+    // BEFORE this session's atmosphere pass, and called near-white at the zenith "the tuned value" --
+    // it was, relative to what the old defaults could reach, but it was also a symptom of the same
+    // washed-out sky this session tracked down and fixed (Atmosphere.hpp's mieScatter, mieExtinction
+    // and multiScatterGain retuned against AtmosphereTest's own measured-clear-sky calibration; see
+    // that file). Re-measured after: sky high (74,92,114), horizon (178,200,204) -- genuinely blue at
+    // both, not a few codes apart from white.
     s += "SKY model physical\n";
     // 2e-5 per centimetre, matching SkyForge. Thin enough to read as air rather than as weather,
     // and the cooler blue-grey tint belongs with an unhazed sky -- the old 0.62 0.7 0.82 was

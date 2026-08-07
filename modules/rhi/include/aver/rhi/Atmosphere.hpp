@@ -14,8 +14,15 @@ struct AtmosphereProfile {
     f32 rayleighScatter[3] = {5.802e-3f, 13.558e-3f, 33.100e-3f};
     f32 rayleighScaleKm    = 8.0f;
 
-    f32 mieScatter    = 3.996e-3f;
-    f32 mieExtinction = 4.440e-3f;
+    // WAS 3.996e-3 / 4.440e-3. Mie is nearly grey (unlike Rayleigh, which is what makes the sky blue
+    // in the first place), so every bit of it dilutes that blue toward white -- less of it, at the
+    // same ratio of scatter to extinction the old values held (roughly 0.9), is a purer, more
+    // saturated sky for the same reason a clearer day reads bluer than a hazy one. Bounded by
+    // AtmosphereTest's own "measured clear sky" calibration, not picked freehand: that suite hard-
+    // checks the zenith blue/red ratio (2.5-5) and the diffuse/direct ratio (15-30%) against real-sky
+    // references, and this is as far toward blue as both stay satisfied together.
+    f32 mieScatter    = 2.8e-3f;
+    f32 mieExtinction = 3.1e-3f;
     f32 mieScaleKm    = 1.2f;
     f32 miePhaseG     = 0.80f;
 
@@ -23,7 +30,11 @@ struct AtmosphereProfile {
     f32 ozoneCentreKm  = 25.0f;
     f32 ozoneWidthKm   = 15.0f;
 
-    f32 multiScatterGain = 1.70f;   // isotropic stand-in for multiple scattering and ground bounce
+    // WAS 1.70. Same calibration ceiling as the Mie values above: 2.0 already fails AtmosphereTest's
+    // 30-degree diffuse/direct check (30.1%, over the 30% bound the measured-sky reference sets), so
+    // 1.90 is the richest multi-scatter fill this profile can claim while still matching that
+    // reference, not a number chosen for its own sake.
+    f32 multiScatterGain = 1.90f;   // isotropic stand-in for multiple scattering and ground bounce
 
     f32 groundAlbedo = 0.22f;
 

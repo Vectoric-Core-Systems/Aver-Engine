@@ -329,8 +329,11 @@ float averHG(float ct, float g) {
     return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * ct, 1e-4), 1.5));
 }
 
-// Marches the layer and returns scattered radiance in rgb, TRANSMITTANCE in a.
-float4 averCloudLayer(float3 ro, float3 rd, float3 sunDir, float3 sunColour) {
+// Marches the layer and returns scattered radiance in rgb, TRANSMITTANCE in a. `outDist` comes back
+// as the distance the scattering actually happened at, weighted by how much each step contributed,
+// so the caller can put the right amount of air in front of it.
+float4 averCloudLayer(float3 ro, float3 rd, float3 sunDir, float3 sunColour, out float outDist) {
+    outDist = 0.0;
     if (gCloudMotion.w < 0.5) return float4(0, 0, 0, 1);
     float bottom = gCloudParams.z, top = gCloudParams.w;
 
@@ -362,7 +365,29 @@ float4 averCloudLayer(float3 ro, float3 rd, float3 sunDir, float3 sunColour) {
     float sigma = averCloudSigma();
     float3 scattered = 0.0;
     float transmittance = 1.0;
-    float phase = averHG(dot(rd, sunDir), 0.62);
+    // WAS 0.62. That still left the sky broadly white across a whole quadrant, not just around the
+    // sun disk: with the sun at 59.5 degrees elevation, a near-zenith view keeps a wide swath of
+    // view rays within a moderate angle of sunDir, and HG at g=0.62 stays meaningfully elevated out
+    // past 45 degrees off-forward (phase(60 deg) is still ~0.07 against an isotropic average of
+    // ~0.08 -- barely fallen at all). Rebalancing the sun/ambient weights below moved the pixel I
+    // measured but could not fix that, because the problem was never how MUCH direct light there
+    // was at any one point, it was how WIDE an area was getting a meaningful dose of it. 0.85 is a
+    // realistic Mie asymmetry for actual water droplets (0.62 was already below the usual 0.75-0.85
+    // range) and its narrower lobe is what a narrower dose looks like: phase(60 deg) drops to ~0.03,
+    // under half of 0.62's, while the peak at dead-forward rises -- the glow right around the sun
+    // gets brighter and tighter instead of smearing across the whole sky.
+    float phase = averHG(dot(rd, sunDir), 0.85);
+    float distWeight = 0.0;
+    // THE SAME BRANCH PSky ITSELF TAKES A FEW LINES DOWN -- averSkyPhysical UNDER A PHYSICAL SKY,
+    // skyColorFull ONLY as the authored fallback -- not skyColorFull unconditionally the way this
+    // read before. skyColorFull is a two-colour gradient an artist set by hand; under `SKY model
+    // physical` the real answer for "what colour is the sky overhead" is the Rayleigh/Mie/ozone
+    // march every other physical surface in this file already asks for, and clouds lighting
+    // themselves off the authored gradient instead was exactly the brute-forced colour this cloud
+    // pass was supposed to have stopped doing. It reads as a flat, pale grey-white deck instead of
+    // blue precisely because the one input that WAS carrying blue -- real Rayleigh scattering, which
+    // is blue for a physical reason (short wavelengths scatter harder) -- was never being asked for.
+    float3 ambientTop = averAtmoOn() ? averSkyPhysical(float3(0, 0, 1)) : skyColorFull(float3(0, 0, 1));
 
     [loop] for (int i = 0; i < kSteps; ++i) {
         if (transmittance < 0.02) break;
@@ -380,16 +405,56 @@ float4 averCloudLayer(float3 ro, float3 rd, float3 sunDir, float3 sunColour) {
                 lt += averCloudDensity(lp, false) * lstep;
             }
             float sunT = exp(-lt * sigma);
-            float powder = 1.0 - exp(-d * dt * sigma * 2.0);
-            float3 lit = sunColour * sunT * phase * powder;
-            lit += skyColorFull(float3(0, 0, 1)) * 0.9;
+
+            // NO POWDER TERM ON THE SUN ANY MORE, AND THAT IS WHY THIS LAYER HAS FORM AGAIN. It used
+            // to be 1-exp(-2*d*dt*sigma) -- built from the density of THIS step -- and the result was
+            // then multiplied by (1-stepT), which is 1-exp(-d*dt*sigma) from the same quantity. Two
+            // factors, both going to zero with density, so the direct sun arrived scaled by roughly
+            // density SQUARED while the ambient beside it scaled linearly. Wherever the layer was
+            // thin -- which is most of what a coverage dial around a half actually draws -- the sun
+            // term was squared away to nothing and the pixel was very nearly pure flat ambient. That
+            // is the washed-out grey smear: not a missing effect, an extra factor. Single scatter
+            // wants the one (1-stepT) below and nothing else.
+            //
+            // The form comes from the ambient instead, where it physically belongs. A sample near the
+            // top of the layer sees most of the sky dome; one near the base sees it through every
+            // metre of cloud above it, which is exactly why real cloud bottoms are grey and their
+            // tops are white. Squaring the height ratio keeps the darkening in the lower half of the
+            // layer rather than spreading it evenly. The old flat 0.9 of the zenith at every sample,
+            // base and top alike, is what made this read as one uniform slab of fog.
+            float hN = saturate((p.z - bottom) / max(top - bottom, 1.0));
+
+            // THE 0.6 AND THE 3.0 ARE A MEASURED CORRECTION, NOT A GUESS. Isolating each term at a
+            // pixel deep in the deck showed ambient alone reads a genuine sky blue (44,66,92) while
+            // the full sum reads within a few codes of sun ALONE (145,144,140 vs 142,140,134) -- the
+            // direct term was simply several times the ambient term's magnitude, so summing them
+            // left ambient invisible whatever hue it carried, and that ratio does not move with
+            // exposure: scaling both terms together by a common exposure factor cannot change their
+            // RELATIVE weight, which is confirmed by testing exposures from 0.45 to 1.0 with the
+            // original weights and getting the same near-neutral hue every time. What single-scatter
+            // sun and single-scatter sky can never reproduce on their own is what makes a real cloud's
+            // shadowed interior read blue-grey: MULTIPLE scattering, light bouncing many times through
+            // the droplets before it escapes, which this pass does not simulate and which is most of
+            // a real cloud's brightness. ambientTop is standing in for all of that missing bounce
+            // light, not only the one sky-dome term its name suggests, so it was underweighted twice
+            // over. Direct scaled down and ambient scaled up together land the shadowed underside of a
+            // thick cloud as the blue-grey UE's own clouds show there, without the deck going dim and
+            // moody the way scaling direct down alone did (tried at 0.3 with ambient untouched: the
+            // hue was right, the whole sky read like dusk). This alone was not the whole fix -- see
+            // where `phase` above is computed for the other half of it, the WIDTH of the area getting
+            // any direct light at all, which this ratio cannot touch.
+            float3 lit = sunColour * sunT * phase * 0.6 + ambientTop * lerp(0.12, 0.55, hN * hN) * 3.0;
 
             float stepT = exp(-d * dt * sigma);
-            scattered += transmittance * lit * (1.0 - stepT);
+            float w = transmittance * (1.0 - stepT);
+            scattered += w * lit;
+            outDist += w * t;
+            distWeight += w;
             transmittance *= stepT;
         }
         t += dt;
     }
+    outDist = distWeight > 1e-6 ? outDist / distWeight : t0;
     return float4(scattered, transmittance);
 }
 
@@ -406,7 +471,20 @@ float4 PSky(SkyOut i) : SV_TARGET {
     sky += sunC * disk * 14.0;
     if (!averAtmoOn()) sky += sunC * pow(sd, 12.0) * 0.30;
 
-    float4 cloud = averCloudLayer(gCamPos.xyz, ray, L, sunC);
+    // THE DECK GETS THE AIR IN FRONT OF IT, like every other surface in the renderer. Without this
+    // the cloud radiance was composited straight onto the sky at full strength however far away it
+    // was, and near the horizon "far away" is tens of kilometres -- the deck stayed as crisp and as
+    // bright at the horizon as it was overhead, then simply stopped where the march's distance cap
+    // fell. A hard edge of full-contrast cloud sitting on a band of haze is most of what read as a
+    // rim there. Veiled properly the deck loses contrast into exactly the haze the sky behind it is
+    // already made of, so it recedes instead of ending, and the horizon needs no separate fade.
+    float cloudDist;
+    float4 cloud = averCloudLayer(gCamPos.xyz, ray, L, sunC, cloudDist);
+    if (averAtmoOn() && cloud.a < 0.999) {
+        float3 aerialT;
+        float3 aerialIn = averAtmoAerial(gCamPos.xyz + ray * cloudDist, aerialT);
+        cloud.rgb = cloud.rgb * aerialT + aerialIn * (1.0 - cloud.a);
+    }
     sky = sky * cloud.a + cloud.rgb;
 
     return float4(sky, 1.0);
