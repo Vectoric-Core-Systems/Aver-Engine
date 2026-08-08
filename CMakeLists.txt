@@ -217,6 +217,20 @@ if(AVER_BUILD_GAME)
   add_subdirectory(game)
 endif()
 
+# THE MODULE DAG CHECK, here rather than inside aver_add_module.
+#
+# This is the earliest point at which the question is answerable: CMake permits forward references,
+# and this tree uses them (Aver.Assets.Gpu names Aver.Formats and Aver.RHI, both added later), so a
+# check at the point of declaration cannot tell "declared later" from "optional and absent" and fails
+# the default build. Here, every target exists.
+#
+# It catches exactly one bug class -- an optional module named without an if(TARGET ...) guard -- and
+# that class is worth catching because it does not fail where it is written. It fails as LNK1104 in
+# some unrelated target, which is how AVER_MODULE_PBR=OFF was broken. Everything else about
+# modularity is a C++ preprocessor property of one configuration, and only scripts/module-matrix.ps1,
+# which actually builds them, can decide it.
+aver_check_module_dag()
+
 if(AVER_BUILD_TESTS)
   # Needs Aver.Runtime.Game, so it only exists when the game runtime is built.
   if(AVER_BUILD_GAME AND TARGET Aver.Framework)

@@ -16,6 +16,13 @@ aver_add_module(Aver.Formats
     # nothing beyond Core/Platform/Assets -- it is the AVR1 container and arithmetic, no process, no
     # device, no .NET. That is what lets the landscape tests run on a machine with none of those.
     src/OcLand.cpp
+    # The C# actor-script scanner. MOVED HERE FROM Aver.Formats.Material, where it never belonged:
+    # it parses a generated region out of a C# file and contains not one reference to pbr:: or
+    # MaterialDesc, but sat behind AVER_MODULE_PBR anyway. Four things outside the material system
+    # include its header -- formats.roslyn, render.actorpreview, the editor's ActorEditor and two
+    # tests -- so with PBR off they all lost their implementation and the failure surfaced as
+    # LNK1104 on a library nobody could see a reference to.
+    src/ActorScript.cpp
     src/OcProject.cpp
     src/Texture.cpp
   DEPS
@@ -39,7 +46,6 @@ if(AVER_MODULE_PBR)
     SOURCES
       src/OcMat.cpp
       src/MaterialScript.cpp
-      src/ActorScript.cpp
     DEPS
       Aver.Formats
       Aver.Render.PBR

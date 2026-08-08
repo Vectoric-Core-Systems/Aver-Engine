@@ -162,11 +162,17 @@ private:
     // init succeeds, and a failed init must leave nothing registered rather than an inert member.
     // Null is a LEGAL state: skinned entities then draw at their rest pose rather than not at all.
     std::unique_ptr<render::SkinnedScene> skinnedScene_;
+#endif
+    // OUTSIDE the scene guard, and it was inside it. Aver.Render.Pcg is linked UNCONDITIONALLY
+    // (modules/runtime.game/CMakeLists.txt), there is no AVER_MODULE_PCG switch, and this header
+    // already includes aver/pcg/PcgVolume.hpp outside every guard -- so the members had no business
+    // being scene-conditional. GameApp.cpp agreed with the CMake rather than with the header:
+    // attachPcgTest, checkPcgVolume and the onShutdown cleanup are all correctly unguarded, so with
+    // AVER_MODULE_SCENE=0 the members vanished while their users remained.
     pcg::VolumeBuilder pcgVolume_;
     pcg::VolumeSpec    pcgSpec_{};
     bool               pcgAttached_ = false;
     bool               pcgChecked_ = false;
-#endif
     // No physics members here any more: there is no implicit ground, so nothing for GameApp to
     // own besides the world itself, which aver_phys_init/aver_phys_shutdown manage globally.
     // Counted so "did physics step at all" is answerable from a log rather than a debugger.

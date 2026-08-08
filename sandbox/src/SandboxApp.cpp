@@ -1220,6 +1220,16 @@ public:
         return {};
     }
 
+#endif  // AVER_MODULE_PBR -- the material-specific helpers end here.
+
+    // ---- content and mesh loading: NOT material work, and no longer guarded as if it were --------
+    //
+    // Everything from here to releaseProjectMeshes sat inside the AVER_MODULE_PBR block that opened
+    // above, presumably because the content index was first written for `{guid:...}` TEXTURE
+    // references. But putting a MESH in the world is not a material concern: with PBR off, the
+    // editor lost its asset index, its mesh registry and both resolver callbacks, while every call
+    // site kept calling them.
+
     // Indexes every asset under the project's content root by fnv1a64 of its content-relative path.
     void rebuildContentIndex() {
         contentIndex_.clear();
@@ -1262,6 +1272,10 @@ public:
         return it == self->sceneMeshes_.end() ? 0 : it->second;
     }
 
+// PBR-ONLY, and stranded outside its guard when the content/mesh helpers moved out of the
+// material block: it returns a pbr::MaterialHandle, so the SIGNATURE needs the module, not just
+// the body. Its callers -- the level loader and loadProjectMaterials -- are both already guarded.
+#if AVER_MODULE_PBR
     // Returns the material a surface token names, loading it on first use. 0 when the project has none.
     pbr::MaterialHandle materialForSurface(const std::string& name) {
         if (name.empty()) return 0;
@@ -1292,6 +1306,7 @@ public:
         materialAssets_.emplace(name, h);
         return h;
     }
+#endif  // AVER_MODULE_PBR
 
     // Loads every .ocmesh under the project's Content, keyed by fnv1a64 of its forward-slash relative path.
     void loadProjectMeshes(Engine& e) {
@@ -1349,6 +1364,7 @@ public:
     }
 
     // Loads every .ocmat under Content/Materials and binds each to the surface token its stem interns to.
+#if AVER_MODULE_PBR
     void loadProjectMaterials() {
 #if AVER_MODULE_SCENE
         const std::string dir = project_.contentDir();
@@ -4358,8 +4374,12 @@ private:
 
     // Writes an edited material back to the .cs under Content\Materials that declares it, found by
     // trying each in turn. Returns the file written, or "" with err set.
-    std::string saveMaterialSource(const std::string& name, const pbr::MaterialDesc& d, std::string& err) {
+    //
+    // THE GUARD IS ABOVE THE SIGNATURE, not inside the body, and it was inside. `pbr::MaterialDesc`
+    // is in the parameter list, so with PBR off the function did not compile at all -- the #if was
+    // protecting the body from a type the signature had already required.
 #if AVER_MODULE_PBR
+    std::string saveMaterialSource(const std::string& name, const pbr::MaterialDesc& d, std::string& err) {
         namespace fs = std::filesystem;
         const std::string content = project_.contentDir();
         if (content.empty()) { err = "no project"; return {}; }
@@ -4395,10 +4415,8 @@ private:
         }
         err = firstError.empty() ? ("no .cs under Content\\Materials declares '" + name + "'") : firstError;
         return {};
-#else
-        (void)name; (void)d; err = "built without the material system"; return {};
-#endif
     }
+#endif  // AVER_MODULE_PBR
 
     // Draws the material half of the Details panel, editing the shared MaterialDesc where there is
     // one and the actor's own values otherwise.
@@ -5466,10 +5484,15 @@ private:
     // The built-in look for a named surface with no material asset behind it.
     struct SurfaceLook { f32 col[3]; f32 metallic; f32 roughness; };
     std::unordered_map<i32, SurfaceLook> surfaceLooks_;
+    // fnv1a64(content-relative path) -> absolute path.
+    //
+    // OUTSIDE THE PBR GUARD, and it was inside. Its original purpose was `{guid:...}` texture
+    // references, which is a material concern -- but resolveAnimAsset and resolveSceneMesh read it
+    // too, and both are needed to put a MESH in the world, which has nothing to do with whether the
+    // material system is compiled in.
+    std::unordered_map<u64, std::string> contentIndex_;
 #if AVER_MODULE_PBR
     rhi::IResourceFactory* textureFactory_ = nullptr;   // cached: the resolver is a static callback
-    // fnv1a64(content-relative path) -> absolute path, for `{guid:...}` texture references.
-    std::unordered_map<u64, std::string> contentIndex_;
     // Surface name -> its .ocmat's material. 0 is a cached negative, not a miss to retry.
     std::unordered_map<std::string, pbr::MaterialHandle> materialAssets_;
     // The same answer keyed by the token the scene interns, which is what a CMeshRenderer carries.

@@ -6,6 +6,13 @@
 #include <filesystem>
 #include <system_error>
 
+// UNCONDITIONAL, and it was inside the scene guard below. AssetType/assetTypeFromPath live in
+// modules/assets -- a leaf with no module switch at all, always linked through Aver.Formats -- and
+// they have TWO callers here: loadProjectMeshes(), which is scene-guarded, and
+// loadProjectMaterials(), which is PBR-guarded and has nothing to do with the scene. Scoping the
+// include to one of the two guards left the other branch without the type.
+#include "aver/assets/AssetId.hpp"
+
 #if AVER_MODULE_PBR
 #  include "aver/assets/TextureUpload.hpp"
 #  include "aver/formats/OcMat.hpp"
@@ -13,7 +20,6 @@
 
 #if AVER_MODULE_SCENE
 #  include "aver/anim/AnimSystem.hpp"
-#  include "aver/assets/AssetId.hpp"
 #  include "aver/formats/OcMesh.hpp"
 #  include "aver/scene/scene_abi.h"
 #  include "GameMath.hpp"

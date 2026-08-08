@@ -1,6 +1,20 @@
 // The scene-level skinning check: one rig, one clock, two entities, fifteen pixels.
+//
+// GUARDED ON AVER_MODULE_SCENE, and it was not. This whole translation unit is compiled
+// unconditionally (sandbox/CMakeLists.txt) and used unconditionally from SandboxApp.cpp, yet it
+// included aver/scene/World.hpp and used scene:: throughout with no guard anywhere -- so a build
+// with SCENE off failed with a C1083 on a header, in a file the editor only ever calls behind a
+// runtime check.
+//
+// The header ALREADY DOCUMENTED the right behaviour: SkinSceneTest.hpp says setup() returning false
+// covers "a missing asset, or a build with no scene -- and is reported as unavailable". The class
+// was designed to degrade to a runtime no-op; the implementation just never got the split that makes
+// that true. So the #else branch below is not a new contract, it is the one the header always
+// claimed, finally honoured.
 #include "SkinSceneTest.hpp"
 #include "aver/core/Log.hpp"
+
+#if AVER_MODULE_SCENE
 #include "aver/runtime/Engine.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/scene/World.hpp"
@@ -343,5 +357,19 @@ void SkinSceneTest::report() {
               "held: .ocmesh skin streams, .ocskel, .ocanim, AnimSystem, the per-entity skin target, "
               "and the substituted draw handle.");
 }
+
+#else   // !AVER_MODULE_SCENE
+
+// The documented degraded form: available() stays false, and nothing else does anything.
+bool SkinSceneTest::setup(Engine&, const std::string&, u64*, u64*, u64*, u32*) {
+    AVER_INFO("[Skin] scene test unavailable: this build has no scene module");
+    return false;
+}
+void SkinSceneTest::tick(Engine&, f32, f32, f32, f32, u32) {}
+void SkinSceneTest::report() {
+    AVER_INFO("[Skin] scene test was not run: this build has no scene module");
+}
+
+#endif  // AVER_MODULE_SCENE
 
 } // namespace aver::editor
