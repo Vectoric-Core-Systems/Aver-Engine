@@ -538,10 +538,29 @@ which is the claim that the editor does not depend on the game runtime.
 identical error set in `GameApp.cpp`, `GameContent.cpp`, `SkinSceneTest.cpp` and `SandboxApp.cpp` —
 none of them level-loading code. `Aver.World` itself compiles cleanly in that configuration.
 
-**Slice 1 — the coordinate hierarchy.** `modules/world` becomes real: `RegionCoord`, `ChunkCoord`,
-`floorDiv`, packing, the `chunkSizeCm ≤ 2047` check. Pure, no I/O.
-*Done when:* exhaustive round-trip over a coordinate sweep including negatives and exact boundaries;
-the bit-packing identities in §4.2 hold by test, not by comment; the precision guard fires.
+**Slice 1 — the coordinate hierarchy. DONE 2026-08-08.**
+`modules/world/include/aver/world/ChunkCoord.hpp`: `ChunkCoord`/`RegionCoord`/`ChunkLocal`,
+`floorDiv`/`floorMod`, the ±512 split, 10-bit packing with the 6+4 group/slot cut, `splitCm`,
+`toWorldCm`, `toRegionRelativeCm`, `chunkSizeValid` and `withinSubMillimetre`. Header-only,
+Core-only, no I/O — a value header like `Vec3`, which is why `ChunkCoordTest` links only `Aver.Core`
+and would catch anything leaking into it.
+
+*Evidence:* `ChunkCoordTest` — 45 assertions covering roughly 400 000 individual comparisons
+(`floorDiv` against a floating-point reference over 10 001 × 6 divisors; region round-trip
+exhaustively over four regions; packing over all 1024 values plus all 64 sign corners; `splitCm`
+every 100 cm across four regions). The §4.2 identities are `static_assert`s in the header, so they
+fail the **build**, not a test run. All 33 suites pass. Purely additive — the header is included by
+nothing but its own test, so no shipped binary changed and gates cannot move.
+
+*Two numbers, now measured rather than derived:*
+- A region-relative coordinate holds **0.625 mm** in f32 at worst, sampled every 16 m out to 100 km.
+  That is the property absolute coordinates cannot have at any distance, and the reason the float
+  origin snaps to a region.
+- At 100 km an absolute f32 **loses 5 mm** of a position the split reconstructs exactly.
+
+*Deliberately not here:* a `CHUNKED` record in `.ocworld`. Revision 1 put the level declaration in
+this slice; revision 2 made the hierarchy universal and residency opt-in (§3.1), so there is nothing
+for a level to declare yet. The chunk size becomes authored data with the index, in slice 5.
 
 **Slice 2 — ranged file I/O in `modules/platform`.** Open/seek/read-at/write-at/flush/close, plus
 delete and rename (neither exists today — region compaction and temp-then-swap have no primitive).

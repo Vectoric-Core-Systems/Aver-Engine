@@ -11,8 +11,13 @@ env, spawn, streaming; wires Scene↔Render↔Physics.
 
 | File | What it owns |
 |---|---|
+| `ChunkCoord.hpp` | The region → chunk → local-float coordinate hierarchy. Header-only, **Core-only**. |
 | `LevelTransform.hpp` | The `.ocworld` rotation encoding: Euler degrees ↔ quaternion. Header-only, **Core-only**. |
 | `LevelInstance.hpp/.cpp` | `instantiate()` — parsed placements into live scene entities, plus their static bodies. |
+
+`ChunkCoord.hpp` is a **value header**, like `Vec3`. It is not behind a module switch and must not
+become one: if asking "which chunk is this in" needed an `#if`, every caller would grow one. Its test
+links `Aver.Core` and nothing else, which is what keeps that true.
 
 Both existed **twice** before this module did, once in `modules/runtime.game/src/GameLevel.cpp` and
 once in `sandbox/src/SandboxApp.cpp`. That was deliberate at the time — `modules/runtime.game`'s own
@@ -42,6 +47,8 @@ nothing, the same way `GameLevel.cpp` does.
 
 ## Next
 
-`docs/CHUNKS.md` is the plan. Slice 1 adds the coordinate hierarchy — `RegionCoord`, `ChunkCoord`,
-and the region → chunk → local-float mapping — here, alongside `LevelTransform.hpp` and with the same
-Core-only dependency.
+`docs/CHUNKS.md` is the plan; slices 0 and 1 are done. Next by dependency is **slice 2**, ranged file
+I/O in `modules/platform` — the entire platform surface is whole-file read and truncating whole-file
+write today, so a sector-allocated region file is not expressible yet. **Slice 3**,
+`IDevice::destroyMesh`, is independent of it and worth doing either way: without a mesh release path
+anything streamed in can never be streamed out.
