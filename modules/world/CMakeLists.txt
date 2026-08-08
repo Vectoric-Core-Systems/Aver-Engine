@@ -19,12 +19,16 @@ aver_add_module(Aver.World
     src/RegionIndex.cpp
     src/ChunkSource.cpp
     src/ChunkStreamer.cpp
+    src/ChunkGenerator.cpp
   DEPS
     Aver.Core
     Aver.Formats
     # For aver::File -- ranged, non-truncating, durable. The region format is not expressible on
     # whole-file read/write, which is what docs/CHUNKS.md calls B1.
     Aver.Platform
+    # For pcg::sampleInfinite -- the deterministic CPU noise the chunk generator is the first caller
+    # and the first test of. RHI comes with it, which is why this sits at the end of the list.
+    Aver.Render.Pcg
 )
 
 # The optional half of the link interface, mirroring modules/runtime.game/CMakeLists.txt.

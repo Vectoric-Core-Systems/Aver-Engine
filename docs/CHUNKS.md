@@ -773,8 +773,46 @@ and the guard belongs with that wiring.
 
 **Slice 8 — generation as you go.** Delta-from-baseline; CPU generation path; `sampleInfinite`'s first
 test and first caller.
-*Done when:* the same seed and coord generate identically across processes and platforms; an
-unmodified chunk round-trips to *nothing on disk*; a modified one persists exactly its delta.
+**DONE 2026-08-08.** `GeneratedChunkSource` (deterministic CPU generation), `LayeredChunkSource`
+(overrides on top of generation) and `persistChunk` (the delta rule). **First caller and first test of
+`pcg::sampleInfinite`**, which had neither.
+
+**CPU, and not for performance.** GPU and CPU agree to one ULP, not bit-exactly, because DXC fuses
+multiply-add where MSVC under `/fp:precise` does not. One ULP is invisible in a cloud and fatal here:
+a density landing either side of the threshold places an entity in one process and not the other.
+`coverageBias` is pinned to 1 and `coverageFloor` to 0, which makes `sampleInfinite`'s final
+`std::pow` the identity — that is the only operation in it whose result IEEE 754 does not fix across
+libm implementations, so it is removed rather than hoped about.
+
+*Evidence:* `ChunkGenerateTest` — 32 assertions.
+- **CROSS-PROCESS, which also settles what slice 5 owed.** The test re-executes itself; the child
+  generates the same chunks and cooks a region, and the parent reads that region back. Same digest in
+  both processes, every chunk decodes identically, and the surface comes back as its **name**. The
+  five process-local values all round-trip perfectly *inside* the writing process, so only a second
+  process can prove none crossed.
+- **An unmodified chunk persists to nothing** (`Unchanged`, save file stays empty); a modified one is
+  `Stored`; reverting the edit gives `OverrideRemoved`, so a save does not grow monotonically as a
+  player edits and un-edits.
+- Different seeds give different worlds; positions are chunk-local; off-surface chunks are empty so
+  `has()` is instant for most of a world.
+
+*Two defects the tests caught, both mine:*
+- **The generator produced solid-or-empty chunks.** At `featureSizeCm = 6400` against a 1600 cm
+  chunk, every candidate falls in one noise cell, so all 25 hashed identically: 75 entities in exactly
+  3 of 6 chunks, 25 each. Every other assertion passed anyway. Fixed to 1600, and the test now
+  requires at least one **partially filled** chunk — 4 of 6 non-empty, 3 partial, 89 entities.
+- **The self-spawning test hung**, because `cmd.exe` will not run a `./build/...` forward-slash path
+  and the `--child` argv marker was what distinguished parent from child. A test that launches itself
+  is one quoting mistake from a fork bomb. The marker is an **inherited environment variable** now, so
+  a process that has it can never spawn another, whatever happens to the command line.
+
+All 40 suites pass. Purely additive within `modules/world` and `tests/world`; gates unaffected and
+not run.
+
+*Not done here:* F# rules driving generation. `PcgApply` and every F# rule run only inside
+`Sandbox.exe`; `GameApp` does not reference the script host, and by B5 generation must work with the
+host declining. The native generator above is that default; F# refining it is slice 5 of the control
+layer, not this one.
 
 **Slice 9 — actor-driven residency.** Actors as streaming sources, predictive next-chunk load, the
 boundary hold. **Not** actor despawn (§9.3).

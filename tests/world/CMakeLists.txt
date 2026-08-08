@@ -51,6 +51,17 @@ target_link_libraries(RegionWriteTest PRIVATE Aver.World Aver.Scene Aver.Formats
 set_target_properties(RegionWriteTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ChunkGenerateTest -- generate-as-you-go, and the CROSS-PROCESS round trip slice 5 owed.
+#
+# It re-executes itself. That is not exotic, it is the only way to check the thing that matters: the
+# five process-local values a chunk must never carry all round-trip perfectly INSIDE the process that
+# minted them, so a same-process test passes on a file nothing else can load.
+add_executable(ChunkGenerateTest src/ChunkGenerateTest.cpp)
+target_link_libraries(ChunkGenerateTest PRIVATE
+  Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Render.Pcg Aver.Core)
+set_target_properties(ChunkGenerateTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(ChunkCoordTest src/ChunkCoordTest.cpp)
 target_link_libraries(ChunkCoordTest PRIVATE Aver.World Aver.Core)
 set_target_properties(ChunkCoordTest PROPERTIES
