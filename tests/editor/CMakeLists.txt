@@ -26,3 +26,45 @@ target_include_directories(EditorEulerTest PRIVATE
   ${CMAKE_SOURCE_DIR}/modules/world/include)
 target_link_libraries(EditorEulerTest PRIVATE Aver.Core Aver.Platform)
 set_target_properties(EditorEulerTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# GraphEditorGeometryTest -- the .ocgraph node editor's headless core: the node descriptor table
+# (sandbox/src/GraphNodeDefs.hpp), and layout/hit-testing/link-rules/cycle-detection/canvas-transform
+# (sandbox/src/GraphEditorGeometry.hpp/.cpp). No ImGui, no Engine, no scene:: -- an editor that only
+# edits a text file needs none of those, and keeping it that way is what lets this run headless.
+#
+# COMPILES sandbox/src/GraphEditorGeometry.cpp directly into the test binary rather than linking a
+# library, for EditorPrefsTest's exact reason above: Sandbox is add_executable-only (no library half),
+# and promoting editor geometry into a real module purely to make it testable would put editor UI code
+# into the engine's dependency graph, which is a worse trade than this one unusual line.
+# GraphNodeDefs.hpp is header-only (see its own header comment) and needs no extra source file.
+add_executable(GraphEditorGeometryTest
+  src/GraphEditorGeometryTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorGeometry.cpp)
+target_include_directories(GraphEditorGeometryTest PRIVATE
+  ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(GraphEditorGeometryTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(GraphEditorGeometryTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# GraphEditorLoadSaveTest -- the .ocgraph editor TAB's public surface: construct from a path, save().
+# Same EditorPrefsTest-precedent reasoning as GraphEditorGeometryTest above (Sandbox is
+# add_executable-only), so this compiles sandbox/src/GraphEditor.cpp and GraphEditorGeometry.cpp
+# directly into the test binary rather than linking a library.
+#
+# AVER_WITH_IMGUI is deliberately left UNDEFINED for this target: GraphEditor.cpp's `#include
+# "imgui.h"` and its entire draw() method are behind `#if AVER_WITH_IMGUI` (see that file), so this
+# target never needs ImGui headers or an ImGui context, and genuinely exercises load/save/undo/
+# selection headlessly -- the part of the editor that is NOT gated behind a window.
+#
+# AVER_OCGRAPH_FIXTURE reuses the exact fixture path/definition tests/formats/CMakeLists.txt already
+# established for OcGraphTest's own cross-impl check, so there is one definition of "where that file
+# lives," not two that could drift apart.
+add_executable(GraphEditorLoadSaveTest
+  src/GraphEditorLoadSaveTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditor.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorGeometry.cpp)
+target_include_directories(GraphEditorLoadSaveTest PRIVATE
+  ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_compile_definitions(GraphEditorLoadSaveTest PRIVATE
+  AVER_OCGRAPH_FIXTURE="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/cross_impl_test.ocgraph")
+target_link_libraries(GraphEditorLoadSaveTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(GraphEditorLoadSaveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

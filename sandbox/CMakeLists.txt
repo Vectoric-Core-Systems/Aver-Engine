@@ -13,6 +13,8 @@ add_executable(Sandbox
   src/IdeIntegration.cpp
   src/ShellIntegration.cpp
   src/ToolsMenu.cpp
+  src/GraphEditorGeometry.cpp
+  src/GraphEditor.cpp
   Sandbox.rc)
 target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
 # The level/world runtime. The editor and the game runtime BOTH link this, which is the whole reason
