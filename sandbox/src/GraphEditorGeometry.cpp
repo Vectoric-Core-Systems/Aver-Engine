@@ -1,6 +1,7 @@
 #include "GraphEditorGeometry.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <cmath>
 #include <unordered_set>
 #include <vector>
@@ -356,22 +357,108 @@ std::unordered_map<std::string, Vec2> autoLayoutPositions(const fmt::OcGraphData
 
     const f32 colGapPx = 60.0f * scale;
     const f32 rowGapPx = 24.0f * scale;
-    f32 x = 0.0f;
-    for (const auto& layer : layers) {
-        f32 layerWidth = style.minWidthPx * scale;
-        f32 y = 0.0f;
-        for (const auto& id : layer) {
-            const fmt::OcGraphNode* node = findNode(graph, id);
-            if (!node) continue;
-            const GraphNodeLayout gl = computeNodeLayout(*node, node->type, style, scale);
-            const f32 w = gl.max.x - gl.min.x;
-            const f32 h = gl.max.y - gl.min.y;
-            layerWidth = std::max(layerWidth, w);
-            out[id] = Vec2(x, y);
-            y += h + rowGapPx;
+
+    // Node heights, once. Every pass below needs them and computeNodeLayout is not free.
+    std::unordered_map<std::string, f32> height;
+    for (const auto& layer : layers)
+        for (const auto& id : layer)
+            if (const fmt::OcGraphNode* n = findNode(graph, id))
+                height[id] = computeNodeLayout(*n, n->type, style, scale).max.y -
+                             computeNodeLayout(*n, n->type, style, scale).min.y;
+
+    // Column x, from the widest node in each layer.
+    std::vector<f32> layerX(layers.size(), 0.0f);
+    {
+        f32 x = 0.0f;
+        for (usize li = 0; li < layers.size(); ++li) {
+            layerX[li] = x;
+            f32 w = style.minWidthPx * scale;
+            for (const auto& id : layers[li])
+                if (const fmt::OcGraphNode* n = findNode(graph, id)) {
+                    const GraphNodeLayout gl = computeNodeLayout(*n, n->type, style, scale);
+                    w = std::max(w, gl.max.x - gl.min.x);
+                }
+            x += w + colGapPx;
         }
-        x += layerWidth + colGapPx;
     }
+
+    // Stack each layer top-down as a starting point, then improve the ORDER below.
+    std::unordered_map<std::string, f32> y;
+    for (const auto& layer : layers) {
+        f32 cursor = 0.0f;
+        for (const auto& id : layer) { y[id] = cursor; cursor += height[id] + rowGapPx; }
+    }
+
+    // Adjacency, both directions, for the barycentre passes.
+    std::unordered_map<std::string, std::vector<std::string>> succ, pred;
+    for (const auto& l : graph.links) {
+        if (!height.count(l.sourceNode) || !height.count(l.destNode)) continue;
+        succ[l.sourceNode].push_back(l.destNode);
+        pred[l.destNode].push_back(l.sourceNode);
+    }
+
+    // BARYCENTRE ORDERING, the reason this is not just a stack.
+    //
+    // Layering alone puts every source node in layer 0, so a graph with seven constants feeding
+    // seven different places gets a seven-tall column while its consumers sit near the top -- the
+    // shape Drone.ocgraph opened as, with the tail of the column off the bottom of the view and
+    // wires raking back across the whole canvas.
+    //
+    // Each pass moves a node towards the mean centre of the neighbours it is connected to, re-sorts
+    // its layer by that target, and re-packs the layer without overlap. Backward (towards
+    // successors) then forward (towards predecessors), a few times: one direction alone lets the
+    // other end drift, and this converges quickly enough that a fixed count beats a tolerance test.
+    const auto packLayer = [&](const std::vector<std::string>& layer,
+                               std::unordered_map<std::string, f32>& target) {
+        std::vector<std::string> order = layer;
+        // Stable, and tie-broken by id: two nodes with the same barycentre must not swap depending
+        // on hash order, or the same file lays out differently between runs.
+        std::stable_sort(order.begin(), order.end(), [&](const std::string& a, const std::string& b) {
+            if (target[a] != target[b]) return target[a] < target[b];
+            return a < b;
+        });
+        f32 total = 0.0f;
+        for (const auto& id : order) total += height[id] + rowGapPx;
+        total -= rowGapPx;
+        // Centre the packed run on where the layer wanted to be, so a layer does not creep upward
+        // every pass.
+        f32 wanted = 0.0f;
+        for (const auto& id : order) wanted += target[id] + height[id] * 0.5f;
+        wanted /= static_cast<f32>(order.size());
+        f32 cursor = wanted - total * 0.5f;
+        for (const auto& id : order) { y[id] = cursor; cursor += height[id] + rowGapPx; }
+    };
+
+    const auto barycentre = [&](const std::string& id,
+                                const std::unordered_map<std::string, std::vector<std::string>>& adj) {
+        const auto it = adj.find(id);
+        if (it == adj.end() || it->second.empty()) return y[id];
+        f32 sum = 0.0f;
+        for (const auto& other : it->second) sum += y[other] + height[other] * 0.5f;
+        return sum / static_cast<f32>(it->second.size()) - height[id] * 0.5f;
+    };
+
+    for (int pass = 0; pass < 4; ++pass) {
+        std::unordered_map<std::string, f32> target;
+        for (usize li = layers.size(); li-- > 0;) {          // backward: towards successors
+            for (const auto& id : layers[li]) target[id] = barycentre(id, succ);
+            packLayer(layers[li], target);
+        }
+        for (usize li = 0; li < layers.size(); ++li) {        // forward: towards predecessors
+            for (const auto& id : layers[li]) target[id] = barycentre(id, pred);
+            packLayer(layers[li], target);
+        }
+    }
+
+    // Normalise so the whole graph starts at the origin rather than wherever the passes left it --
+    // the canvas opens at (0,0) and a graph centred on -900 would appear to be missing.
+    f32 minY = std::numeric_limits<f32>::max();
+    for (const auto& kv : y) minY = std::min(minY, kv.second);
+    if (minY == std::numeric_limits<f32>::max()) minY = 0.0f;
+
+    for (usize li = 0; li < layers.size(); ++li)
+        for (const auto& id : layers[li])
+            out[id] = Vec2(layerX[li], y[id] - minY);
     return out;
 }
 
