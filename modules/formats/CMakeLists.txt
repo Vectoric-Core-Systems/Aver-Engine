@@ -5,6 +5,7 @@ aver_add_module(Aver.Formats
     src/Json.cpp
     src/OcAnim.cpp
     src/OcBeam.cpp
+    src/OcGraph.cpp
     src/OcMap.cpp
     src/OcMesh.cpp
     src/OcWorld.cpp

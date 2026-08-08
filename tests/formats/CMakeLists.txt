@@ -3,6 +3,13 @@ target_link_libraries(FormatTest PRIVATE Aver.Formats Aver.Assets Aver.Core Aver
 set_target_properties(FormatTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# OcGraphTest — the .ocgraph visual scripting format. Text parsing, round-tripping, unknown record
+# preservation, and deterministic output. See modules/formats/include/aver/formats/OcGraph.hpp.
+add_executable(OcGraphTest src/OcGraphTest.cpp)
+target_link_libraries(OcGraphTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcGraphTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # MeshTest — the AVR1 container and .ocmesh. A THIRD executable rather than more cases in FormatTest
 # because FormatTest takes file paths on the command line and reports usage with none, so a binary
 # format that must be exercised from memory would never run in a plain `MeshTest.exe` invocation.
