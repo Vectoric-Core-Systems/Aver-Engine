@@ -23,8 +23,9 @@ extern "C" {
 #endif
 
 /* ABI version, as (major << 16) | minor. Major changes break a binding; minor only adds. */
+/* MINOR 1 adds aver_scene_material_name. Additive only -- no existing binding changes. */
 #define AVER_SCENE_ABI_VERSION_MAJOR 1
-#define AVER_SCENE_ABI_VERSION_MINOR 0
+#define AVER_SCENE_ABI_VERSION_MINOR 1
 #define AVER_SCENE_ABI_VERSION \
     ((AVER_SCENE_ABI_VERSION_MAJOR << 16) | AVER_SCENE_ABI_VERSION_MINOR)
 
@@ -139,6 +140,15 @@ AVER_SCENE_ABI int32_t aver_scene_at(int32_t index);
 /* Resolve a material NAME to a stable, positive i32 token within this process; 0 for an empty name.
  * `name0` is the content-pack id (0 == default pack). An opaque token here; the render side maps it. */
 AVER_SCENE_ABI int32_t aver_scene_material(int32_t name0, const char* name);
+/* The NAME a token was interned under, or "" for 0 or an unknown token. Never NULL. The pointer is
+ * owned by the world and must NOT be freed.
+ *
+ * THE INVERSE EXISTS BECAUSE A TOKEN MUST NEVER BE PERSISTED. Its value is `table.size() + 1` at the
+ * moment the name was first seen IN THIS PROCESS, so it depends on startup order and means nothing
+ * in another run -- see docs/CHUNKS.md 5.1. Anything writing a surface out (the editor's level save,
+ * and the region writer after it) has to turn the token back into the name, and until this function
+ * existed it could not: the editor's saveLevel simply dropped every material it had loaded. */
+AVER_SCENE_ABI const char* aver_scene_material_name(int32_t token);
 
 #ifdef __cplusplus
 } /* extern "C" */

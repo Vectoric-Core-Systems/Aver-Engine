@@ -10,6 +10,7 @@
 #if AVER_MODULE_SCENE
 #  include "aver/formats/OcWorld.hpp"
 #  include "aver/scene/scene_abi.h"
+#  include "aver/world/LevelInstance.hpp"
 #endif
 #if AVER_MODULE_PHYSICS
 #  include "aver/physics/physics_abi.h"
@@ -18,21 +19,11 @@
 namespace aver::game {
 
 #if AVER_MODULE_SCENE
-namespace {
 
-// Builds a quaternion from (roll, pitch, yaw) degrees as Rz * Ry * Rx.
-//
-// Copied from SandboxApp.cpp:168 rather than shared, for the reason GameMath.hpp gives. The
-// MULTIPLICATION ORDER IS THE CONTRACT: this is the exact inverse of the editor's euler extraction,
-// and any level authored by the editor is only reproduced by a game that composes the same way
-// round. Getting it backwards yaws things that should roll, which looks like bad authoring rather
-// than like a bug in the loader.
-Quat quatFromEulerDeg(const Vec3& e) {
-    return (Quat::fromAxisAngle({0,0,1}, radians(e.z)) * Quat::fromAxisAngle({0,1,0}, radians(e.y)) *
-            Quat::fromAxisAngle({1,0,0}, radians(e.x))).normalized();
-}
-
-} // namespace
+// quatFromEulerDeg was here, as a file-static copied out of SandboxApp.cpp. It is now
+// aver::world::quatFromEulerDeg in modules/world/include/aver/world/LevelTransform.hpp, reached
+// through LevelInstance.hpp, and the editor re-exports the same definition -- so the rotation
+// contract the comment here used to insist on is now enforced by there being one of it.
 
 void GameLevel::load(const std::string& path, GameContent& content) {
     unload();
@@ -41,48 +32,26 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     std::string why;
     if (!fmt::loadOcworld(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
 
-    scene::World& world = scene::World::instance();
-    for (const fmt::OcWorldPlacement& p : w.placements) {
-        Transform xf;
-        xf.position = Vec3{static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)};
-        xf.rotation = quatFromEulerDeg(Vec3{static_cast<f32>(p.roll), static_cast<f32>(p.pitch),
-                                            static_cast<f32>(p.yaw)});
-        xf.scale = Vec3{static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz)};
-
-        // The entity's CName IS the asset path. That is the editor's convention and the draw walk
-        // does not depend on it, but a level loaded by the game and by the editor must produce the
-        // same names or anything that looks an entity up by name diverges between the two.
-        const scene::Entity e = world.create(p.asset, scene::kInvalidEntity, xf);
-        if (e == scene::kInvalidEntity) continue;
-
-        auto* mr = static_cast<scene::CMeshRenderer*>(world.addComponent(e, scene::kComponentMeshRenderer));
-        if (mr) {
-            mr->mesh = p.objectId;
-            mr->material = p.material.empty() ? 0 : aver_scene_material(0, p.material.c_str());
-            mr->flags |= scene::kMeshRendererVisible;
+    // The placement loop is aver::world::instantiate now, shared with the editor. What is left here
+    // is the part that is genuinely the GAME's: which material cache to bind into, and what to keep.
+    world::InstantiateOptions opt;
 #if AVER_MODULE_PBR
-            // Bind the authored material, if the project has one for this surface token. Done at
-            // load rather than per draw because materialForSurface stats up to three paths on a
-            // miss and caches the negative -- per frame that would be a filesystem hit per entity.
-            if (mr->material) {
-                const pbr::MaterialHandle h = content.materialForSurface(p.material);
-                if (h) content.bindSurfaceMaterial(mr->material, h);
-            }
+    // Bind the authored material, if the project has one for this surface token. Done at load rather
+    // than per draw because materialForSurface stats up to three paths on a miss and caches the
+    // negative -- per frame that would be a filesystem hit per entity.
+    opt.bindMaterial = [&content](i32 token, const std::string& surface) {
+        const pbr::MaterialHandle h = content.materialForSurface(surface);
+        if (h) content.bindSurfaceMaterial(token, h);
+    };
+#else
+    (void)content;
 #endif
-        }
-        levelEntities_.push_back(e);
 
+    const world::LevelInstance inst = world::instantiate(w, opt);
+    levelEntities_ = inst.entities;
 #if AVER_MODULE_PHYSICS
-        // Lifted verbatim, and a no-op until something calls aver_phys_init: the branch already
-        // tests aver_phys_ready(), so it costs nothing to have it here before C9 wires physics up.
-        if (p.collide && aver_phys_ready()) {
-            const int32_t body = aver_phys_add_static_box(
-                static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z),
-                static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz));
-            levelBodies_.push_back(body);
-        }
+    levelBodies_ = inst.bodies;
 #endif
-    }
 
     if (w.hasFog) {
         levelFog_    = static_cast<f32>(w.fogDensity);

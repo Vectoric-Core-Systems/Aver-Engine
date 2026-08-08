@@ -88,6 +88,8 @@
 #include "aver/anim/AnimSystem.hpp"
 #include "aver/scene/World.hpp"
 #include "aver/scene/Components.hpp"
+// The placement -> entity loop, shared with the game runtime. See modules/world/README.md.
+#include "aver/world/LevelInstance.hpp"
 #endif
 
 #if AVER_WITH_IMGUI
@@ -5442,6 +5444,20 @@ private:
     std::string exitPromptError_;         // why a "Save all" attempt failed
     // Every PCGVOLUME the loaded level carried, kept verbatim so a save cannot drop them.
     std::vector<fmt::OcPcgVolume> levelPcgVolumes_;
+    // The loaded level's own header, placements and PCG volumes stripped.
+    //
+    // THE SAME REASONING AS levelPcgVolumes_, GENERALISED. saveLevel used to build a fresh
+    // OcWorldData from the editor's state, so every field the editor does not model was reset to a
+    // default on write: SPAWN was deleted outright, BUILD went back to 0, ID was recomputed from
+    // NAME, and the sun's `lux` reverted to 100000 however the level had authored it. Starting the
+    // save from what the file actually said, and overwriting only what the editor genuinely owns,
+    // fixes all of those at once -- and keeps fixing them for any field added to the format later,
+    // which enumerating them one by one would not.
+    fmt::OcWorldData levelHeader_;
+    // Whether each level entity's placement said `nocollide`. There is NO component for this: it is
+    // a load-time instruction and nothing on the entity records it afterwards, so without this the
+    // save forced `collide = true` on everything and `nocollide` never survived a round trip.
+    std::unordered_map<u32, bool> entityCollide_;
     std::string upgradeStatus_;
     f32         upgradeStatusAge_ = 0.0f;   // seconds since it was set; see setUpgradeStatus
     f32  uiDemoHealth_ = 0.72f, uiDemoStamina_ = 0.44f, uiDemoScroll_ = 0.0f, uiDemoClock_ = 0.0f;
@@ -5476,6 +5492,12 @@ private:
         // The same reasoning as the project manifest keeping unknown keys: a tool that rewrites a
         // file it only partly understands must preserve the rest verbatim.
         levelPcgVolumes_ = w.pcgVolumes;
+        // ...and the rest of the header, for exactly the same reason. Placements and PCG volumes are
+        // stripped because they are already held elsewhere; what is left is identity, BUILD, ALGO,
+        // SPAWN and the environment numbers the editor does not expose.
+        levelHeader_ = w;
+        levelHeader_.placements.clear();
+        levelHeader_.pcgVolumes.clear();
         if (!levelPcgVolumes_.empty())
             AVER_INFO("[Level] carrying {} PCGVOLUME record(s) through the editor unchanged",
                       levelPcgVolumes_.size());
@@ -5505,39 +5527,34 @@ private:
             break;
         }
 
-        scene::World& world = scene::World::instance();
-        for (const fmt::OcWorldPlacement& p : w.placements) {
-            Transform xf;
-            xf.position = Vec3{static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)};
-            xf.rotation = quatFromEulerDeg(Vec3{static_cast<f32>(p.roll), static_cast<f32>(p.pitch),
-                                                static_cast<f32>(p.yaw)});
-            xf.scale = Vec3{static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz)};
-
-            const scene::Entity e = world.create(p.asset, scene::kInvalidEntity, xf);
-            if (e == scene::kInvalidEntity) continue;
-            auto* mr = static_cast<scene::CMeshRenderer*>(world.addComponent(e, scene::kComponentMeshRenderer));
-            if (mr) {
-                mr->mesh = p.objectId;
-                mr->material = p.material.empty() ? 0 : aver_scene_material(0, p.material.c_str());
-                mr->flags |= scene::kMeshRendererVisible;
+        // The placement loop is aver::world::instantiate now, shared with the game runtime. What is
+        // left here is the part that is genuinely the EDITOR's: its label table, its entity->body
+        // map, and the per-entity record saveLevel needs to write the level back out unchanged.
+        world::InstantiateOptions opt;
 #if AVER_MODULE_PBR
-                if (mr->material) {
-                    const pbr::MaterialHandle h = materialForSurface(p.material);
-                    if (h) surfaceMaterials_[mr->material] = h;
-                }
+        opt.bindMaterial = [this](i32 token, const std::string& surface) {
+            const pbr::MaterialHandle h = materialForSurface(surface);
+            if (h) surfaceMaterials_[token] = h;
+        };
 #endif
-            }
-            levelEntities_.push_back(e);
-            entityLabels_[static_cast<u32>(e)] = makeEntityLabel(p.material, p.asset);
-
+        const world::LevelInstance inst = world::instantiate(w, opt);
+        levelEntities_ = inst.entities;
 #if AVER_MODULE_PHYSICS
-            if (p.collide && aver_phys_ready()) {
-                const int32_t body = aver_phys_add_static_box(
-                    static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z),
-                    static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz));
-                levelBodies_.push_back(body);
-                entityBodies_[static_cast<u32>(e)] = body;
-            }
+        levelBodies_ = inst.bodies;
+#endif
+        for (usize k = 0; k < inst.entities.size(); ++k) {
+            const scene::Entity e = inst.entities[k];
+            const fmt::OcWorldPlacement& p = w.placements[inst.placementIndex[k]];
+            entityLabels_[static_cast<u32>(e)] = makeEntityLabel(p.material, p.asset);
+            // WHY `collide` IS REMEMBERED AND THE MATERIAL IS NOT. The surface survives on the
+            // entity -- CMeshRenderer::material -- and saveLevel reads it back through
+            // aver_scene_material_name. `nocollide` has no component at all: it is a load-time
+            // instruction and nothing on the entity records it afterwards. Inferring it from
+            // entityBodies_ would be wrong, because a level opened before aver_phys_init has no
+            // bodies for ANY placement and would save as though every one of them said nocollide.
+            entityCollide_[static_cast<u32>(e)] = p.collide;
+#if AVER_MODULE_PHYSICS
+            if (inst.entityBody[k] >= 0) entityBodies_[static_cast<u32>(e)] = inst.entityBody[k];
 #endif
         }
 
@@ -5646,6 +5663,8 @@ private:
         // Cleared with the rest of the level's state: carrying one level's PCG records into the
         // next would write them into a file that never had them.
         levelPcgVolumes_.clear();
+        levelHeader_ = fmt::OcWorldData{};
+        entityCollide_.clear();
         undoStack_.clear();
         redoStack_.clear();
         editToEntity_.clear();
@@ -5665,7 +5684,10 @@ private:
     // Writes the level's own entities back out to an .ocworld. Spawned actors are not written.
     bool saveLevel(const std::string& path) {
         scene::World& world = scene::World::instance();
-        fmt::OcWorldData w;
+        // STARTS FROM WHAT THE FILE SAID, not from a default-constructed OcWorldData. Everything the
+        // editor does not model -- ID, BUILD, ALGO, SPAWN, the sun's lux -- rides through untouched;
+        // the lines below overwrite only what the editor genuinely owns. See levelHeader_.
+        fmt::OcWorldData w = levelHeader_;
         w.name = levelName_.empty() ? std::string("untitled") : levelName_;
         w.hasFog = hasLevelFog_;
         w.fogDensity = levelFog_;
@@ -5698,8 +5720,17 @@ private:
             const Vec3 euler = eulerDegFromQuat(loc->xf.rotation);
             p.roll = euler.x; p.pitch = euler.y; p.yaw = euler.z;
             p.sx = loc->xf.scale.x; p.sy = loc->xf.scale.y; p.sz = loc->xf.scale.z;
-            p.collide = true;
-            (void)mr;
+            // THE SURFACE, WHICH USED TO BE DROPPED ON EVERY SAVE. `(void)mr;` sat here and the
+            // material line was simply missing, so opening a level and saving it stripped the
+            // surface token off every placement in the file. The token itself must never be written
+            // -- it is a process-local intern id (docs/CHUNKS.md 5.1) -- so it goes back out as the
+            // NAME it was interned under.
+            if (mr && mr->material) p.material = aver_scene_material_name(mr->material);
+            // `nocollide` now round-trips. This was hardcoded true, so a placement authored
+            // nocollide came back colliding and quietly gained a static body on the next load.
+            // Entities created in the editor are absent from the map and keep the true default.
+            const auto collideIt = entityCollide_.find(static_cast<u32>(e));
+            p.collide = collideIt == entityCollide_.end() ? true : collideIt->second;
             w.placements.push_back(std::move(p));
         }
 

@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -64,6 +65,18 @@ void noteWrite(int32_t e, const FieldDesc* d) {
 std::unordered_map<std::string, int32_t>& materialTable() {
     static std::unordered_map<std::string, int32_t> table;
     return table;
+}
+
+// The inverse, indexed by token-1, so aver_scene_material_name is O(1) rather than a scan.
+//
+// A DEQUE AND NOT A VECTOR, on purpose: this hands out `const char*` into its elements, and a vector
+// reallocating would move every short string that lives inside its own object under SSO -- leaving
+// every pointer already returned dangling. A deque never moves an element it has stored.
+//
+// Holds the NAME only, not the "packId/name" key: the pack id is the caller's and it already has it.
+std::deque<std::string>& materialNames() {
+    static std::deque<std::string> names;
+    return names;
 }
 
 // The interned strings a String field's 8 bytes index into. DLL-local.
@@ -386,7 +399,19 @@ int32_t aver_scene_material(int32_t name0, const char* name) {
 
     const int32_t handle = static_cast<int32_t>(table.size()) + 1;   // sequential from 1
     table.emplace(std::move(key), handle);
+    // Kept in lockstep, so materialNames()[handle - 1] is always this name. Appending here and
+    // nowhere else is what keeps the two in step -- there is no other path that mints a token.
+    materialNames().emplace_back(name);
     return handle;
+}
+
+// The name a token was interned under. "" for 0 or anything out of range; never NULL.
+const char* aver_scene_material_name(int32_t token) {
+    if (token <= 0) return "";
+    const std::deque<std::string>& names = materialNames();
+    const std::size_t i = static_cast<std::size_t>(token) - 1;
+    if (i >= names.size()) return "";
+    return names[i].c_str();
 }
 
 }  // extern "C"

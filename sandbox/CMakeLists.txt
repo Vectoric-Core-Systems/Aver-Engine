@@ -15,6 +15,11 @@ add_executable(Sandbox
   src/ToolsMenu.cpp
   Sandbox.rc)
 target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
+# The level/world runtime. The editor and the game runtime BOTH link this, which is the whole reason
+# it is not inside Aver.Runtime.Game: turning a .ocworld placement into an entity used to be written
+# out twice, and every future change to it -- chunk ownership first -- would have had to be made
+# twice and stay agreeing.
+target_link_libraries(Sandbox PRIVATE Aver.World)
 # The Roslyn escalation for an actor script the built-in scanner declines. Linked here rather
 # than pulled in by Aver.Formats, which must stay dependency-free -- see its own CMakeLists.
 if(TARGET Aver.Formats.Roslyn)

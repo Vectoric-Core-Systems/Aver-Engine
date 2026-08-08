@@ -191,6 +191,11 @@ add_subdirectory(modules/audio.abi)
 if(AVER_MODULE_MCP AND WIN32)
   add_subdirectory(modules/mcp)
 endif()
+# The level/world runtime: .ocworld placements into entities, and the region streaming this module
+# has always been scoped to. UNCONDITIONAL and added HERE -- after modules/scene and modules/formats,
+# which it links, and before both hosts, which link it. It is what stops "how a placement becomes an
+# entity" from existing once in the editor and once in the game runtime.
+add_subdirectory(modules/world)
 add_subdirectory(modules/runtime)
 # After modules/runtime: it links Aver.Runtime, and this is a plain subdirectory order dependency.
 if(AVER_BUILD_GAME)
@@ -268,6 +273,9 @@ if(AVER_BUILD_TESTS)
   if(AVER_MODULE_SCENE)
     add_subdirectory(tests/scene)
     add_subdirectory(tests/anim.scene)
+    # The placement -> entity loop the editor and the game runtime now share. Guarded on the scene
+    # for the same reason the module's own source is: without it there is nothing to instantiate into.
+    add_subdirectory(tests/world)
   endif()
   if(AVER_MODULE_FRAMEWORK)
     add_subdirectory(tests/framework)
