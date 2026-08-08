@@ -15,3 +15,13 @@ set_target_properties(WatcherTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BI
 add_executable(InputStateTest src/InputStateTest.cpp)
 target_link_libraries(InputStateTest PRIVATE Aver.Platform Aver.Core)
 set_target_properties(InputStateTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FileRangeTest -- aver::File, the ranged non-truncating handle the region format rests on.
+#
+# Real files, like WatcherTest above and for the same reason: whether a write at 4 GiB lands where it
+# was asked is the operating system's behaviour, and a fake backend would return whatever it was told
+# to and prove nothing. It uses a sparse file for the 64-bit offset case so the check costs no disk,
+# and SKIPS that one case rather than lying if the filesystem declines.
+add_executable(FileRangeTest src/FileRangeTest.cpp)
+target_link_libraries(FileRangeTest PRIVATE Aver.Platform Aver.Core)
+set_target_properties(FileRangeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

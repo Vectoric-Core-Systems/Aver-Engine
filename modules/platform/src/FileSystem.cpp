@@ -10,6 +10,13 @@
 #include <Windows.h>
 #include <ShlObj.h>
 #include <ShObjIdl.h>
+#else
+// The POSIX half of aver::File. pread/pwrite rather than lseek+read, so the handle carries no
+// implicit position and two calls cannot race each other's seek.
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace aver {
@@ -147,6 +154,195 @@ bool writeFileBytes(const std::string& path, const void* data, usize size) {
 // Writes `text` to the file, truncating it. False on failure.
 bool writeFileText(const std::string& path, const std::string& text) {
     return writeFileBytes(path, text.data(), text.size());
+}
+
+// Deletes a file. True if it is gone afterwards, including if it never existed.
+bool deleteFile(const std::string& path) {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    // remove() returns false for "was not there", which is a SUCCESS by this function's contract --
+    // so the answer is the resulting state, not the return value.
+    return !std::filesystem::exists(path, ec);
+}
+
+// Renames `from` to `to`, replacing `to` if present.
+bool renameFile(const std::string& from, const std::string& to) {
+#if defined(_WIN32)
+    // MoveFileExW with REPLACE_EXISTING rather than std::filesystem::rename: the standard one is
+    // specified to fail when the destination exists on some implementations, and replace-in-place is
+    // exactly the operation write-to-temp-then-swap needs. WRITE_THROUGH makes the rename itself
+    // durable before returning, so a crash cannot leave the directory entry unwritten.
+    return MoveFileExW(widen(from).c_str(), widen(to).c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    std::error_code ec;
+    std::filesystem::rename(from, to, ec);
+    return !ec;
+#endif
+}
+
+// ---- File ---------------------------------------------------------------------------------------
+
+File::~File() { close(); }
+
+File::File(File&& other) noexcept {
+#if defined(_WIN32)
+    handle_ = other.handle_; other.handle_ = nullptr;
+#else
+    fd_ = other.fd_; other.fd_ = -1;
+#endif
+    writable_ = other.writable_; other.writable_ = false;
+}
+
+File& File::operator=(File&& other) noexcept {
+    if (this == &other) return *this;
+    close();
+#if defined(_WIN32)
+    handle_ = other.handle_; other.handle_ = nullptr;
+#else
+    fd_ = other.fd_; other.fd_ = -1;
+#endif
+    writable_ = other.writable_; other.writable_ = false;
+    return *this;
+}
+
+bool File::open(const std::string& path, Mode mode) {
+    close();
+    // Traced in EVERY mode, including Create -- see the note on setFileTrace in the header for why
+    // a write-only open is traced too.
+    traceFileOpen(path);
+    writable_ = mode != Mode::Read;
+#if defined(_WIN32)
+    const DWORD access = mode == Mode::Read ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
+    // OPEN_EXISTING / OPEN_ALWAYS, never CREATE_ALWAYS or TRUNCATE_EXISTING: not truncating is the
+    // point of this whole type.
+    const DWORD disp = mode == Mode::Create ? OPEN_ALWAYS : OPEN_EXISTING;
+    // FILE_SHARE_READ so a second reader (a tool, the editor) can look while this handle is open;
+    // deliberately NOT FILE_SHARE_WRITE, so two writers cannot interleave into one region file.
+    const HANDLE h = CreateFileW(widen(path).c_str(), access, FILE_SHARE_READ, nullptr, disp,
+                                 FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) { writable_ = false; return false; }
+    handle_ = h;
+    return true;
+#else
+    int flags = mode == Mode::Read ? O_RDONLY : O_RDWR;
+    if (mode == Mode::Create) flags |= O_CREAT;
+    const int fd = ::open(path.c_str(), flags, 0644);
+    if (fd < 0) { writable_ = false; return false; }
+    fd_ = fd;
+    return true;
+#endif
+}
+
+void File::close() {
+#if defined(_WIN32)
+    if (handle_) { CloseHandle(static_cast<HANDLE>(handle_)); handle_ = nullptr; }
+#else
+    if (fd_ >= 0) { ::close(fd_); fd_ = -1; }
+#endif
+    writable_ = false;
+}
+
+bool File::isOpen() const {
+#if defined(_WIN32)
+    return handle_ != nullptr;
+#else
+    return fd_ >= 0;
+#endif
+}
+
+i64 File::size() const {
+    if (!isOpen()) return -1;
+#if defined(_WIN32)
+    LARGE_INTEGER li{};
+    if (!GetFileSizeEx(static_cast<HANDLE>(handle_), &li)) return -1;
+    return static_cast<i64>(li.QuadPart);
+#else
+    struct stat st{};
+    if (fstat(fd_, &st) != 0) return -1;
+    return static_cast<i64>(st.st_size);
+#endif
+}
+
+bool File::readAt(u64 offset, void* out, usize bytes) const {
+    if (!isOpen()) return false;
+    if (bytes == 0) return true;
+    if (!out) return false;
+    auto* dst = static_cast<u8*>(out);
+    usize done = 0;
+    // LOOPED, because both platforms may legitimately return fewer bytes than asked for on a single
+    // call. A short read is only an ERROR once it stops making progress -- which is the end of the
+    // file, and which this function's contract says must fail rather than half-succeed.
+    while (done < bytes) {
+        const usize want = bytes - done;
+#if defined(_WIN32)
+        OVERLAPPED ov{};
+        const u64 at = offset + done;
+        ov.Offset     = static_cast<DWORD>(at & 0xFFFFFFFFull);
+        ov.OffsetHigh = static_cast<DWORD>(at >> 32);
+        const DWORD chunk = want > 0x7FFFFFFFu ? 0x7FFFFFFFu : static_cast<DWORD>(want);
+        DWORD got = 0;
+        if (!ReadFile(static_cast<HANDLE>(handle_), dst + done, chunk, &got, &ov)) return false;
+        if (got == 0) return false;   // end of file before `bytes` were satisfied
+        done += got;
+#else
+        const ssize_t got = pread(fd_, dst + done, want, static_cast<off_t>(offset + done));
+        if (got < 0) { if (errno == EINTR) continue; return false; }
+        if (got == 0) return false;
+        done += static_cast<usize>(got);
+#endif
+    }
+    return true;
+}
+
+bool File::writeAt(u64 offset, const void* data, usize bytes) {
+    if (!isOpen() || !writable_) return false;
+    if (bytes == 0) return true;
+    if (!data) return false;
+    const auto* src = static_cast<const u8*>(data);
+    usize done = 0;
+    while (done < bytes) {
+        const usize want = bytes - done;
+#if defined(_WIN32)
+        OVERLAPPED ov{};
+        const u64 at = offset + done;
+        ov.Offset     = static_cast<DWORD>(at & 0xFFFFFFFFull);
+        ov.OffsetHigh = static_cast<DWORD>(at >> 32);
+        const DWORD chunk = want > 0x7FFFFFFFu ? 0x7FFFFFFFu : static_cast<DWORD>(want);
+        DWORD put = 0;
+        if (!WriteFile(static_cast<HANDLE>(handle_), src + done, chunk, &put, &ov)) return false;
+        if (put == 0) return false;
+        done += put;
+#else
+        const ssize_t put = pwrite(fd_, src + done, want, static_cast<off_t>(offset + done));
+        if (put < 0) { if (errno == EINTR) continue; return false; }
+        if (put == 0) return false;
+        done += static_cast<usize>(put);
+#endif
+    }
+    return true;
+}
+
+bool File::setSize(u64 bytes) {
+    if (!isOpen() || !writable_) return false;
+#if defined(_WIN32)
+    LARGE_INTEGER li{};
+    li.QuadPart = static_cast<LONGLONG>(bytes);
+    if (!SetFilePointerEx(static_cast<HANDLE>(handle_), li, nullptr, FILE_BEGIN)) return false;
+    return SetEndOfFile(static_cast<HANDLE>(handle_)) != 0;
+#else
+    return ftruncate(fd_, static_cast<off_t>(bytes)) == 0;
+#endif
+}
+
+bool File::sync() {
+    if (!isOpen()) return false;
+    if (!writable_) return true;   // nothing of ours can be in flight
+#if defined(_WIN32)
+    return FlushFileBuffers(static_cast<HANDLE>(handle_)) != 0;
+#else
+    return fsync(fd_) == 0;
+#endif
 }
 
 // Shows the shell's open-file dialog. False if cancelled or unavailable.

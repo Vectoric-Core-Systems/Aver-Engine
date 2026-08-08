@@ -24,7 +24,8 @@
 | "Do not build origin rebasing" | Still true for now — but rebasing now has a **known anchor** (the region) and a **hard constraint** (X/Y only, never Z) | §4. |
 
 Revision 1's blockers B1 (no partial read), B2 (AVR1 exact `FileSize`), B3 (no compression), B4 (no
-job system) and B5 (CLR is Win32-only and declines) all **stand, verified**. B2's specifics are worse
+job system) and B5 (CLR is Win32-only and declines) all **stood, verified**. **B1 is now closed** by
+slice 2's `aver::File`; the other four remain open. B2's specifics are worse
 than stated: `FileSize` sits *inside* the CRC32C range covering bytes `0x00..0x3B`
 (`Avr1.cpp:212-213, :244`), so any growth rewrites the header *and* recomputes its CRC.
 
@@ -562,10 +563,34 @@ nothing but its own test, so no shipped binary changed and gates cannot move.
 this slice; revision 2 made the hierarchy universal and residency opt-in (§3.1), so there is nothing
 for a level to declare yet. The chunk size becomes authored data with the index, in slice 5.
 
-**Slice 2 — ranged file I/O in `modules/platform`.** Open/seek/read-at/write-at/flush/close, plus
-delete and rename (neither exists today — region compaction and temp-then-swap have no primitive).
-*Done when:* a known byte range reads out of a large file; a write-at does not truncate; a
-crash-simulated partial write is detectable.
+**Slice 2 — ranged file I/O in `modules/platform`. DONE 2026-08-08.** `aver::File` — an RAII native
+handle with `readAt`/`writeAt`/`setSize`/`sync`, in three modes none of which truncate — plus
+`deleteFile` and `renameFile`. **This closes B1.**
+
+*Native handles, not `std::fstream`, and the second reason is the load-bearing one:* positional I/O
+needs no seek-between-read-and-write dance, and `std::ostream::flush()` reaches the OS page cache and
+stops there. `sync()` is `FlushFileBuffers`/`fsync`. The region format's crash safety is an *ordering*
+argument — the payload is on disk before the directory entry pointing at it — and without a real
+barrier that ordering is fiction, because the OS may write the two back in either order.
+
+*Evidence:* `FileRangeTest` — 72 assertions against real files, since whether a write at a 4 GiB
+offset lands where it was asked is the OS's behaviour and a fake backend would prove nothing about
+it. Covers: `writeAt` leaves the file length alone; a read running one byte past EOF **fails**
+rather than half-succeeding; a `Read`-mode handle refuses writes; gaps and grown regions read as
+zeros; a file truncated mid-record fails the whole-record read while its surviving prefix still
+reads — the crash-detection property slice 5 layers a CRC on top of. The **>4 GiB path really ran**,
+via a sparse file so it costs no disk: an 8-byte write at 4 GiB + 4 KiB reads back, and offset 4096 —
+where a 32-bit truncation would have landed — is still zero. That check skips loudly rather than
+lying if the filesystem declines sparse files.
+
+All 34 suites pass. The diff has **zero deleted lines**: no existing function changed, so nothing
+shipped moved and gates are unaffected.
+
+*One thing deliberately not suppressed:* `File::open` traces in every mode, including `Create`.
+Tracing only the reading modes was defensible — the trace answers "did the package read outside
+itself" — but it would leave a new open path uncovered and falsify `FileSystem.hpp`'s claim to be the
+whole API. If slice 7's runtime-written regions then trip `verify-game.ps1`, that is a real question
+about where they belong and it should surface there.
 
 **Slice 3 — `IDevice::destroyMesh` (B6).** Independently valuable; also fixes
 `LandscapeRenderer::forgetAll`'s permanent leak and lets `SkinnedScene` stop hoarding.

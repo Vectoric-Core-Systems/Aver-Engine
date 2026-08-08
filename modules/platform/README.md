@@ -12,7 +12,7 @@ under `src/`, not a change to the interface.
 |---|---|---|
 | Window | `Window.hpp` | the OS window, DPI awareness, the message hook, the modal move/size render tick |
 | Splash | `Splash.hpp` | the layered pre-init splash window |
-| FileSystem | `FileSystem.hpp` | paths, known folders, file read/write, `IFileOpenDialog` |
+| FileSystem | `FileSystem.hpp` | paths, known folders, whole-file read/write, `aver::File` ranged access, delete/rename, `IFileOpenDialog` |
 | Image | `Image.hpp` | image decode for the splash (stb, public domain) |
 | **DirectoryWatcher** | `DirectoryWatcher.hpp` | **watches a directory tree and reports what changed** |
 
