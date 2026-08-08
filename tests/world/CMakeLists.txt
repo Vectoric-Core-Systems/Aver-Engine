@@ -12,6 +12,15 @@ set_target_properties(LevelInstanceTest PROPERTIES
 #
 # Core ONLY, and that is worth keeping: ChunkCoord.hpp is a value header like Vec3, so if this test
 # ever needs Scene or Formats to link, something has leaked into it that should not have.
+# ChunkPartitionTest -- scene -> chunks -> payload -> scene, and prove nothing moved.
+#
+# The precursor to docs/CHUNKS.md's "chunked equals flat", which is the strongest test in the whole
+# streaming plan. Needs Aver.Scene because it builds a real world; still no renderer, no GPU, no file.
+add_executable(ChunkPartitionTest src/ChunkPartitionTest.cpp)
+target_link_libraries(ChunkPartitionTest PRIVATE Aver.World Aver.Scene Aver.Formats Aver.Core)
+set_target_properties(ChunkPartitionTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(ChunkCoordTest src/ChunkCoordTest.cpp)
 target_link_libraries(ChunkCoordTest PRIVATE Aver.World Aver.Core)
 set_target_properties(ChunkCoordTest PROPERTIES

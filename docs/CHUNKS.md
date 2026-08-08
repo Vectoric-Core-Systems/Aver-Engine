@@ -630,11 +630,39 @@ stands in the meantime: nothing in the engine calls `destroyMesh` yet, the lands
 engine consumer, `drawMesh`'s new `alive` test is true for every live mesh, and Voxi's new staleness
 test is false for every live BLAS. A confirming sweep is owed whenever it suits the user.
 
-**Slice 4 — the participation protocol.** The seam by which framework, physics and the mesh cache
-contribute to and restore from a chunk. **Includes the entity→body link**, which does not exist (§9.4).
-No files yet.
-*Done when:* an in-memory partition/reassemble reproduces the flat entity set exactly, hierarchies
-intact, oversize list correct, and every body is accounted for on unload.
+**Slice 4 — the participation protocol. DONE 2026-08-08.** In `modules/world`: `ChunkPayload`
+(portable per-entity description + `capture`/`restore`), `ChunkPartition` (`ownerChunkOf`,
+`partitionWorld`, `captureAll`) and `BodyRegistry` (the entity→body link, §9.4). Still no files.
+
+*The three ownership rules are enforced and tested:* by the **root's origin**, never bounds — bounds
+overlap and origins do not; **hierarchies travel whole**, because `CHierarchy` is intrusive and a
+child without its parent is a dangling handle rather than a hole; **oversize is reported, not
+handled**, since a 200 m bridge in a 16 m world must stay resident regardless of distance.
+
+*Where the coordinate hierarchy pays off:* a captured root's position is stored **chunk-local**,
+`[0, chunkSizeCm)`. Measured for an entity 9 km out — absolute f32 grid **0.625 mm**, stored-offset
+grid **0.00061 mm**, ~1000× finer, and a four-digit number is exact through the text writer's `%.6g`
+where an absolute one is not (B8).
+
+*`BodyRegistry` exists because the association did not.* `aver_phys_add_static_box` returns an opaque
+int and takes no entity, so `GameLevel` kept a body vector with no entity link at all, the editor kept
+its own map, and a character's capsule is a private C# field. Its `detachSubtree` takes the whole
+subtree, because `World::destroy` does — `SandboxApp::destroyEntity` walking only the entity it was
+handed is a live child-body leak today.
+
+*Evidence:* `ChunkPartitionTest` — 41 assertions. Round trip over a fixture chosen for the hard
+cases: negative coordinates, exact chunk boundaries (1599/1600/−1600/−1), a hierarchy whose children
+sit several chunks from its root, and an entity 9 km out. **Worst world-position drift: 0.000000 cm**
+— though note the fixture uses whole centimetres, which f32 holds exactly below 2²⁴, so that proves
+the round trip is lossless rather than that the split recovered anything; the magnitude figure above
+is where the split earns its place. All 36 suites pass. Purely additive — zero deleted lines, nothing
+outside `modules/world` and `tests/world` touched, so gates are unaffected and were not run.
+
+*Deliberately not yet done, and named rather than implied:* the hosts still keep their own body
+tables — wiring `GameLevel` and `SandboxApp` onto `BodyRegistry` belongs with the streaming that
+needs it (slice 6). The payload carries transform, name, objectId, tags, mesh renderer and static
+body; a **gameplay class** is not captured, because level placements never become framework actors
+today (`aver_fw_class_of` returns 0 for all of them), so there is nothing yet to capture.
 
 **Slice 5 — `.avrgn` + `.ocindex`, cooked and read-only.** Format, cooker, reader.
 *Done when:* cook determinism; cross-process round trip; chunked-equals-flat; boundary conservation; a

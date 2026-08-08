@@ -12,6 +12,8 @@
 aver_add_module(Aver.World
   SOURCES
     src/LevelInstance.cpp
+    src/ChunkPayload.cpp
+    src/ChunkPartition.cpp
   DEPS
     Aver.Core
     Aver.Formats

@@ -314,3 +314,25 @@ static_assert(regionOfAxis(-512) == 0 && regionOfAxis(-513) == -1, "the region b
 static_assert(localOfAxis(-513) == 511 && localOfAxis(512) == -512, "and wraps to the far end either way");
 
 } // namespace aver::world
+
+// Hashes, so a chunk or a region can key a map. Splitmix-style mixing rather than a shift-xor of the
+// three axes: neighbouring chunks differ by 1 on one axis and are exactly what gets looked up
+// together, so a weak hash puts the entire working set in one bucket.
+namespace std {
+template <> struct hash<aver::world::ChunkCoord> {
+    size_t operator()(const aver::world::ChunkCoord& c) const noexcept {
+        aver::u64 h = static_cast<aver::u64>(static_cast<aver::u32>(c.x));
+        h = h * 0x9E3779B97F4A7C15ull + static_cast<aver::u64>(static_cast<aver::u32>(c.y));
+        h ^= h >> 29; h *= 0xBF58476D1CE4E5B9ull;
+        h += static_cast<aver::u64>(static_cast<aver::u32>(c.z));
+        h ^= h >> 32; h *= 0x94D049BB133111EBull;
+        h ^= h >> 29;
+        return static_cast<size_t>(h);
+    }
+};
+template <> struct hash<aver::world::RegionCoord> {
+    size_t operator()(const aver::world::RegionCoord& r) const noexcept {
+        return hash<aver::world::ChunkCoord>{}(aver::world::ChunkCoord{r.x, r.y, r.z});
+    }
+};
+} // namespace std

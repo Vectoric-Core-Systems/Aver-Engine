@@ -14,6 +14,9 @@ env, spawn, streaming; wires Scene↔Render↔Physics.
 | `ChunkCoord.hpp` | The region → chunk → local-float coordinate hierarchy. Header-only, **Core-only**. |
 | `LevelTransform.hpp` | The `.ocworld` rotation encoding: Euler degrees ↔ quaternion. Header-only, **Core-only**. |
 | `LevelInstance.hpp/.cpp` | `instantiate()` — parsed placements into live scene entities, plus their static bodies. |
+| `ChunkPayload.hpp/.cpp` | A chunk's contents with **no process-local value in it**, and `capture`/`restore`. |
+| `ChunkPartition.hpp/.cpp` | Which chunk owns which entity, and capturing a whole world at once. |
+| `BodyRegistry.hpp` | Entity → physics body. This association exists nowhere else in the engine. |
 
 `ChunkCoord.hpp` is a **value header**, like `Vec3`. It is not behind a module switch and must not
 become one: if asking "which chunk is this in" needed an `#if`, every caller would grow one. Its test
@@ -47,8 +50,7 @@ nothing, the same way `GameLevel.cpp` does.
 
 ## Next
 
-`docs/CHUNKS.md` is the plan; slices 0 and 1 are done. Next by dependency is **slice 2**, ranged file
-I/O in `modules/platform` — the entire platform surface is whole-file read and truncating whole-file
-write today, so a sector-allocated region file is not expressible yet. **Slice 3**,
-`IDevice::destroyMesh`, is independent of it and worth doing either way: without a mesh release path
-anything streamed in can never be streamed out.
+`docs/CHUNKS.md` is the plan; slices 0–4 are done, and blockers B1 and B6 are closed. Next is
+**slice 5**: the `.avrgn` region format and its `.ocindex`, cooked and read-only to begin with. Every
+prerequisite is now in place — the coordinate hierarchy, ranged durable file I/O, a mesh release path,
+and a portable payload to write.
