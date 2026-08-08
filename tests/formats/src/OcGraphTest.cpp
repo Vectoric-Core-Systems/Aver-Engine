@@ -415,6 +415,57 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // --roundtrip <path>: parse a REAL .ocgraph off disk, write it back, and say whether the bytes
+    // survived. Not part of the suite -- a diagnostic, for the question the suite structurally
+    // cannot ask, because every graph it tests is one it built itself.
+    //
+    // That blind spot had already cost something. The C# writer emits `NODE radius ConstFloat` with
+    // no coordinates and `NODE time Param param=time` with an attribute; this parser demanded x/y
+    // and its writer regenerated the NODE line from the fields it modelled. So a real C#-authored
+    // graph would not parse, and one that did would come back out with its attributes stripped --
+    // silently, since a rewrite reports success. Point this at a file the other implementation
+    // wrote and the answer is a byte count, not an opinion.
+    if (argc > 2 && std::string(argv[1]) == "--roundtrip") {
+        std::string text, err;
+        if (!readFileText(argv[2], text)) { AVER_ERROR("could not read {}", argv[2]); return 1; }
+        fmt::OcGraphData g;
+        if (!fmt::parseOcgraph(text, g, &err)) { AVER_ERROR("parse: {}", err); return 1; }
+        const std::string out = fmt::writeOcgraph(g, text);
+        AVER_INFO("parsed {} node(s), {} link(s), {} output(s)", g.nodes.size(), g.links.size(), g.outputs.size());
+        for (const fmt::OcGraphNode& n : g.nodes)
+            if (!n.extraTokens.empty()) {
+                std::string ex;
+                for (const std::string& e : n.extraTokens) ex += (ex.empty() ? "" : " ") + e;
+                AVER_INFO("  node '{}' carries un-modelled tokens: {}", n.id, ex);
+            }
+        // Optional third argument: where to put the rewritten file, so a second --roundtrip over the
+        // output answers the question that matters when the first pass reformats -- whether the
+        // churn settles after one save or keeps moving on every save.
+        if (argc > 3) {
+            std::string werr;
+            if (!fmt::saveOcgraph(argv[3], g, &werr)) { AVER_ERROR("write: {}", werr); return 1; }
+            AVER_INFO("rewrote to {}", argv[3]);
+        }
+        if (out == text) { AVER_INFO("ROUND TRIP EXACT: {} bytes in, {} bytes out", text.size(), out.size()); return 0; }
+        AVER_ERROR("ROUND TRIP CHANGED THE FILE: {} bytes in, {} bytes out", text.size(), out.size());
+        // The first differing line, both sides. A byte offset alone sends the reader counting
+        // characters; the two lines side by side usually name the bug outright.
+        {
+            usize i = 0, line = 1;
+            while (i < text.size() && i < out.size() && text[i] == out[i]) { if (text[i] == '\n') ++line; ++i; }
+            const auto lineAt = [](const std::string& s, usize pos) {
+                const usize b = s.rfind('\n', pos == 0 ? 0 : pos - 1);
+                const usize e = s.find('\n', pos);
+                const usize from = (b == std::string::npos) ? 0 : b + 1;
+                return s.substr(from, (e == std::string::npos ? s.size() : e) - from);
+            };
+            AVER_ERROR("  first difference at line {} (byte {})", line, i);
+            AVER_ERROR("    in : '{}'", lineAt(text, i));
+            AVER_ERROR("    out: '{}'", lineAt(out, i));
+        }
+        return 1;
+    }
+
     testMeta();
     testBasicParse();
     testRoundTrip();

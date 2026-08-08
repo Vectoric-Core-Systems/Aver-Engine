@@ -5,6 +5,9 @@
 # output, so a tree per edition is the supported way to do it.
 /build/
 /build-*/
+# Underscore too. The hyphen glob above misses `build_foo`, and a scratch tree named that way shows
+# up as hundreds of untracked files -- which is exactly the noise that makes `git add -A` dangerous.
+/build_*/
 /out/
 [Bb]in/
 [Oo]bj/

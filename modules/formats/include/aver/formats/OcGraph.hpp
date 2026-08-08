@@ -23,7 +23,30 @@ struct OcGraphNode {
     std::string id;          // Unique node identifier
     std::string type;        // Node type name (e.g., "Add", "Multiply", "Constant")
     f64 x = 0.0, y = 0.0;   // Editor position (centimetres or units, TBD)
+    // Whether x/y should be written. A graph written by hand or emitted by a compiler has no canvas
+    // layout, and re-saving one must not invent `0 0` for it -- that would make a load/save round
+    // trip change the file, which this format's tests forbid.
+    //
+    // DEFAULTS TRUE, and that direction matters. Only the parser sets it false, for a line that
+    // genuinely carried no coordinates. Defaulting it false instead would mean any code building a
+    // node in memory had to remember an extra flag or watch its positions silently vanish on
+    // write -- which is exactly what happened when this was first written the other way round.
+    bool hasPosition = true;
     std::vector<OcGraphPin> pins;
+
+    // Trailing tokens on the NODE line that this implementation does not interpret, kept verbatim
+    // and written back out in order.
+    //
+    // NOT decoration. The C# side (scripting/csharp/Aver.Graph/OcGraphParser.cs) puts key=value
+    // attributes here -- `param=` naming a declared PARAM, `field=` naming a scene field -- and a
+    // Param node without its `param=` does not merely lose a hint, it stops compiling. Without this
+    // vector a C++ rewrite silently drops those attributes, so opening a graph in the node editor
+    // and saving it would break the graph while reporting success.
+    //
+    // The whole-file unknown-RECORD preservation elsewhere in this format does not cover this case:
+    // NODE is a record C++ owns, so its line is regenerated rather than passed through, and
+    // everything on it that C++ did not model was being thrown away.
+    std::vector<std::string> extraTokens;
 };
 
 // One link connecting an output pin to an input pin.
