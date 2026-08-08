@@ -99,6 +99,8 @@
 #include "aver/scene/Components.hpp"
 // The placement -> entity loop, shared with the game runtime. See modules/world/README.md.
 #include "aver/world/LevelInstance.hpp"
+// Opt-in chunk streaming around the editor camera. See SandboxApp::setChunkStreamingEnabled.
+#include "aver/world/ChunkWorld.hpp"
 #endif
 
 #if AVER_WITH_IMGUI
@@ -1037,6 +1039,9 @@ public:
                     const f32 d = std::fmax(50.0f, r / std::tan(radians(30.0f)) * 1.6f);
                     camPos_ = x.pos - fwd * d;
                     flySpeed_ = std::fmax(flySpeed_, r * 0.4f);
+#if AVER_MODULE_SCENE
+                    chunkStreamHaveLastPos_ = false;   // teleport; see frameCameraOn for why
+#endif
                 }
             }
         }
@@ -1111,6 +1116,43 @@ public:
         // the AnimSystem -- whose skinning() is only valid until the next tick.
         if (skinnedScene_)
             skinnedScene_->update(scene::World::instance(), anim::animSystem(), *e.device());
+        // --chunk-stream: switches streaming on N frames in, on its own, so a --frames capture run
+        // can prove it happened without a human clicking Window > Chunk Streaming.
+        if (chunkStreamAutoFrames_ > 0 && --chunkStreamAutoFrames_ == 0) setChunkStreamingEnabled(true);
+        // Chunk streaming, if switched on. Runs here so it sees THIS frame's camPos_ (the WASD/fly
+        // block above has already finalized it) and so its evictions land in the flush() right below
+        // -- not runs unconditionally, i.e. also while just idling in the editor and not in Play
+        // mode, which is deliberate: a designer flying around outside Play is exactly who this
+        // feature is for.
+        if (chunkWorld_) {
+            const f32 invDt = t.dt > 1e-6f ? 1.0f / t.dt : 0.0f;
+            // First frame after enabling (or after any camera teleport -- see frameCameraOn and the
+            // F-key jump above) reports zero velocity: differencing against a stale/teleported-from
+            // position would ask the streamer to prefetch a corridor toward nowhere real.
+            const Vec3 vel = chunkStreamHaveLastPos_ ? (camPos_ - chunkStreamLastCamPos_) * invDt
+                                                      : Vec3{0.0f, 0.0f, 0.0f};
+            chunkStreamLastCamPos_ = camPos_;
+            chunkStreamHaveLastPos_ = true;
+
+            std::vector<i32> freed;
+            chunkStreamStats_ = chunkWorld_->update(scene::World::instance(), camPos_, vel, t.dt, &freed);
+#if AVER_MODULE_PHYSICS
+            for (const i32 b : freed) if (b >= 0) aver_phys_remove_body(b);
+#endif
+            // Greppable proof for a headless run: "[ChunkWorld]" lines for the first few frames that
+            // actually loaded or evicted something, then it quiets down so a long capture is not
+            // flooded once steady state is reached.
+            if (chunkStreamLogsLeft_ > 0 &&
+                (chunkStreamStats_.loadedThisUpdate > 0 || chunkStreamStats_.evictedThisUpdate > 0)) {
+                --chunkStreamLogsLeft_;
+                AVER_INFO("[ChunkWorld] loaded={} evicted={} resident={}chunks/{}entities pending={} "
+                          "failed={} totalLoads={} vel=({:.0f},{:.0f},{:.0f})cm/s",
+                          chunkStreamStats_.loadedThisUpdate, chunkStreamStats_.evictedThisUpdate,
+                          chunkStreamStats_.residentChunks, chunkStreamStats_.residentEntities,
+                          chunkStreamStats_.pendingLoads, chunkStreamStats_.failedLoads,
+                          chunkStreamStats_.totalLoads, vel.x, vel.y, vel.z);
+            }
+        }
         scene::World::instance().flush();
 #endif
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
@@ -1824,6 +1866,10 @@ public:
     void setInputProbe(bool on) { inputProbe_ = on; }
     void setAutoCompile(bool on) { autoCompile_ = on; }   // --auto-compile, and the Tools menu
     void setFocusLevelAt(int frame) { focusLevelAt_ = frame; }   // --focus-level-at <N>
+    // --chunk-stream [N]: frames left before setChunkStreamingEnabled(true) fires on its own. Member
+    // and setter are unguarded (like focusLevelAt_) even though the effect is AVER_MODULE_SCENE-only;
+    // see the countdown in onUpdate.
+    void setChunkStreamAuto(int framesIn) { chunkStreamAutoFrames_ = framesIn; }
     void setShowEditorPrefs(bool on) { if (on) showEditorPrefs_ = true; }   // --editor-prefs
     void setHudTest(int idx) { hudTest_ = idx; }   // --hud-preview <index>
     void setSaveProject(bool on) { saveProject_ = on; }   // --save-project
@@ -2182,6 +2228,7 @@ private:
 
     bool autoCompile_ = false;
     int focusLevelAt_ = 0;
+    int chunkStreamAutoFrames_ = 0;   // --chunk-stream: frames left before auto-enabling, 0 = off
     static constexpr int kAutoCompileQuietMs = 500;
     std::chrono::steady_clock::time_point autoCompileDue_{};
     int autoCompilePending_ = 0;
@@ -3133,6 +3180,11 @@ private:
             for (u32 i = 0; i < n; ++i) {
                 const scene::Entity ent = w.at(i);
                 if (!w.valid(ent) || w.destroyPending(ent)) continue;
+                // Streamed entities are not selectable: selection is the only door into the
+                // gizmo/EditCmd path, and an entity the streamer can evict out from under an
+                // in-flight edit or an undo record must never go through that door. See
+                // setChunkStreamingEnabled and buildPanels (World Outliner) for the same rule.
+                if (chunkWorld_ && chunkWorld_->owns(ent)) continue;
                 const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
                 if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
                 if (sceneMeshes_.find(mr->mesh) == sceneMeshes_.end()) continue;
@@ -3409,6 +3461,22 @@ private:
                 if (ImGui::MenuItem("Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
                 uiReg_.track("window.outputLog");
                 ImGui::Separator();
+#if AVER_MODULE_SCENE
+                {
+                    const bool streamOn = chunkWorld_ != nullptr;
+                    ImGui::BeginDisabled(!project_.valid());
+                    if (ImGui::MenuItem("Chunk Streaming", nullptr, streamOn)) setChunkStreamingEnabled(!streamOn);
+                    ImGui::EndDisabled();
+                    uiReg_.track("window.chunkStreaming");
+                    if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                        ImGui::SetTooltip("Open or create a project first - a streamed world belongs to one.");
+                    else if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(streamOn
+                            ? "Streams chunks generated + saved under <project>\\Chunks around the editor camera.\nTurning this off releases every streamed entity."
+                            : "Opt-in: streams chunks generated + saved under <project>\\Chunks around the editor camera.\nDoes nothing to your level until switched on.");
+                }
+                ImGui::Separator();
+#endif
                 ImGui::BeginDisabled(gameUi_ == nullptr);
                 if (ImGui::MenuItem("Game UI Demo", nullptr, showUiDemo_)) showUiDemo_ = !showUiDemo_;
                 uiReg_.track("window.gameUiDemo");
@@ -3608,6 +3676,9 @@ private:
         drawDrawer(e);
         buildEditorPrefs();
         buildProjectSettings();
+#if AVER_MODULE_SCENE
+        buildChunkStreamingPanel();
+#endif
         if (!openAsset_.empty() && frameNo_ > 5) {
             const std::string want = openAsset_;
             openAsset_.clear();
@@ -4801,6 +4872,10 @@ private:
             for (u32 i = 0; i < n; ++i) {
                 const scene::Entity ent = w.at(i);
                 if (!w.valid(ent) || w.destroyPending(ent)) continue;
+                // Chunk-streamed entities are excluded on purpose: potentially hundreds of them come
+                // and go as the camera moves, and this list is for what a designer placed. Their
+                // live count is in the Chunk Streaming stats window instead (buildChunkStreamingPanel).
+                if (chunkWorld_ && chunkWorld_->owns(ent)) continue;
                 const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
                 const std::string nm = w.name(ent);
                 if (!mr && nm.empty()) continue;
@@ -5805,6 +5880,107 @@ private:
     std::unordered_map<i32, pbr::MaterialHandle> surfaceMaterials_;
 #endif
 #if AVER_MODULE_SCENE
+    // Turns chunk streaming on or off around the editor camera. OPT-IN: nothing in modules/world's
+    // generator or region files is touched until a user flips Window > Chunk Streaming, so an
+    // ordinary project opens exactly as it always did.
+    void setChunkStreamingEnabled(bool on) {
+        if (on == (chunkWorld_ != nullptr)) return;
+
+        if (!on) {
+            std::vector<i32> freed;
+            const world::StreamStats last = chunkWorld_->stats();
+            chunkWorld_->shutdown(scene::World::instance(), freed);
+            scene::World::instance().flush();
+#if AVER_MODULE_PHYSICS
+            for (const i32 b : freed) if (b >= 0) aver_phys_remove_body(b);
+#endif
+            chunkWorld_.reset();
+            chunkStreamHaveLastPos_ = false;
+            chunkStreamStats_ = world::StreamStats{};
+            AVER_INFO("[ChunkWorld] streaming disabled -- {} chunk(s) / {} entities released",
+                      last.residentChunks, last.residentEntities);
+            return;
+        }
+
+        if (!project_.valid()) {
+            AVER_WARN("[ChunkWorld] cannot enable streaming: no project is open");
+            return;
+        }
+
+        auto cw = std::make_unique<world::ChunkWorld>();
+        world::ChunkWorldSettings cwSettings;
+        // Beside Content and Binaries, not inside either: this is generated/streamed state, not
+        // authored content, and must never appear in the Content Browser or get packaged as an asset.
+        cwSettings.worldDir = project_.dir + "\\Chunks";
+        // Generator/stream settings otherwise left at their shipped defaults (ChunkGenerator.hpp /
+        // ChunkStreamer.hpp) so what a designer sees here is the same behaviour the tests exercise.
+
+        world::RestoreOptions& restore = cw->streamer().restoreOptions();
+#if AVER_MODULE_PBR
+        // Same wiring loadLevel uses for placements: bind the token a chunk's entities were restored
+        // with to a real material handle.
+        restore.bindMaterial = [this](i32 token, const std::string& surface) {
+            const pbr::MaterialHandle h = materialForSurface(surface);
+            if (h) surfaceMaterials_[token] = h;
+        };
+#endif
+#if AVER_MODULE_PHYSICS
+        // Static boxes only, same shape loadLevel/recreateFrom create for authored placements. The
+        // returned id flows into ChunkWorld's own BodyRegistry, and back out through freed bodies on
+        // eviction/shutdown below -- this class does not track it a second time.
+        restore.createBody = [](scene::Entity, const Vec3& worldPos, const Vec3& halfExtentCm) -> i32 {
+            if (!aver_phys_ready()) return -1;
+            return aver_phys_add_static_box(worldPos.x, worldPos.y, worldPos.z,
+                                            halfExtentCm.x, halfExtentCm.y, halfExtentCm.z);
+        };
+#endif
+
+        std::string why;
+        if (!cw->open(cwSettings, &why)) {
+            AVER_WARN("[ChunkWorld] failed to enable streaming: {}", why);
+            return;
+        }
+
+        chunkWorld_ = std::move(cw);
+        chunkStreamHaveLastPos_ = false;
+        chunkStreamLogsLeft_ = 8;
+        chunkStreamStats_ = world::StreamStats{};
+        AVER_INFO("[ChunkWorld] streaming enabled -- worldDir='{}' chunkSize={}cm loadRadius={} "
+                  "evictRadius={} verticalRadius={}",
+                  cwSettings.worldDir, chunkWorld_->settings().stream.chunkSizeCm,
+                  chunkWorld_->settings().stream.loadRadius, chunkWorld_->settings().stream.evictRadius,
+                  chunkWorld_->settings().stream.verticalRadius);
+    }
+
+    // A small always-on-while-streaming readout of StreamStats. pendingLoads and failedLoads are
+    // singled out because they are the two numbers that tell "working" (pendingLoads draining, zero
+    // failures) from "not keeping up" (pendingLoads staying high) or "broken" (failedLoads growing).
+    void buildChunkStreamingPanel() {
+        if (!chunkWorld_) return;
+        const world::StreamStats& s = chunkStreamStats_;
+        ImGui::SetNextWindowPos(ImVec2(12.0f * dpi_, 60.0f * dpi_), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowBgAlpha(0.85f);
+        if (!ImGui::Begin("Chunk Streaming", nullptr, ImGuiWindowFlags_NoFocusOnAppearing)) {
+            ImGui::End();
+            return;
+        }
+        ImGui::Text("resident:  %u chunks / %u entities", s.residentChunks, s.residentEntities);
+        ImGui::Text("this frame: +%u loaded, -%u evicted", s.loadedThisUpdate, s.evictedThisUpdate);
+        ImGui::Text("in flight, %u/%u", s.pendingLoads, s.failedLoads);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(pending / failed)");
+        if (s.failedLoads > 0) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.25f, 1.0f), "!");
+        }
+        ImGui::Text("total loads: %u   avg load: %.2f ms", s.totalLoads,
+                    s.totalLoads > 0 ? s.totalLoadMs / static_cast<f64>(s.totalLoads) : 0.0);
+        ImGui::Text("last load: %.2f ms", s.lastLoadMs);
+        ImGui::Separator();
+        ImGui::TextDisabled("%s", chunkWorld_->settings().worldDir.c_str());
+        ImGui::End();
+    }
+
     // Loads an .ocworld into the world as ordinary scene entities: transform, mesh and name.
     void loadLevel(const std::string& path) {
         unloadLevel();
@@ -5960,6 +6136,9 @@ private:
         yaw_   = std::atan2(look.y, look.x);
         pitch_ = std::asin(std::fmax(-1.0f, std::fmin(1.0f, look.z)));
         flySpeed_ = std::fmax(flySpeed_, radius * 0.02f);
+        // This is a teleport, not a move: the next chunk-streaming update must not see this as a
+        // (huge, one-frame) velocity computed against wherever the camera used to be.
+        chunkStreamHaveLastPos_ = false;
 
 #if AVER_MODULE_VOXI
         giCenter_ = centre;
@@ -6075,6 +6254,20 @@ private:
     bool hasLevelSky_ = false;
     bool hasLevelFog_ = false;
     f32  levelFog_ = 0.0002f;
+
+    // ---------------- chunk streaming (opt-in, Window > Chunk Streaming) ----------------
+    // Owned only while streaming is switched on -- created by setChunkStreamingEnabled(true),
+    // destroyed by setChunkStreamingEnabled(false). Deliberately disjoint from levelEntities_: the
+    // World Outliner filters streamed entities out via chunkWorld_->owns(e) (buildPanels), and
+    // saveLevel/undo/redo never see them because they only ever walk levelEntities_/undoStack_,
+    // which streamed entities are never added to.
+    std::unique_ptr<world::ChunkWorld> chunkWorld_;
+    world::StreamStats chunkStreamStats_;
+    Vec3 chunkStreamLastCamPos_{};
+    bool chunkStreamHaveLastPos_ = false;   // false right after enabling or after a camera teleport,
+                                             // so the next frame reports zero velocity instead of a
+                                             // one-frame spike computed against a stale position.
+    u32  chunkStreamLogsLeft_ = 8;          // first few load/evict frames get an explicit log line
 #if AVER_MODULE_PHYSICS
     std::vector<int32_t> levelBodies_;
 #endif
@@ -6321,7 +6514,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -6381,6 +6574,12 @@ Application* createApplication(int argc, char** argv) {
             reloadAt = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 20;
         }
         else if (!std::strcmp(argv[i],"--start-screen")) startScreen=true;
+        // --chunk-stream [N] switches chunk streaming on N frames in (default 5), the same "wait a
+        // few frames for the project/scene to settle" pattern --reload-scripts uses. Exists so a
+        // --frames capture run can prove streaming happened without a human clicking the menu item.
+        else if (!std::strcmp(argv[i],"--chunk-stream")) {
+            chunkStream = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 5;
+        }
         // --drawer log|content[:<sub>] opens a bottom drawer, optionally in a Content subfolder.
         else if (!std::strcmp(argv[i],"--drawer") && i+1<argc) {
             const char* v = argv[++i];
@@ -6487,6 +6686,7 @@ Application* createApplication(int argc, char** argv) {
     app->setFocusScript(focusScript);
     app->setFocusTools(focusTools);
     app->setFocusCompileMenu(focusCompileMenu);
+    if (chunkStream > 0) app->setChunkStreamAuto(chunkStream);
 #if AVER_MODULE_MCP
     app->setMcpPort(mcpPort);
 #else

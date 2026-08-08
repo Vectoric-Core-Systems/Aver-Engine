@@ -72,6 +72,19 @@ target_link_libraries(ChunkActorStreamTest PRIVATE
 set_target_properties(ChunkActorStreamTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ChunkWorldTest -- ChunkWorld, the generator+override+streamer object bound together and driven the
+# way a host actually would: one call a frame with the viewer's position and velocity.
+#
+# Not a re-run of ChunkActorStreamTest -- that test proves the STREAMER's own residency and
+# boundary-hold properties. This one proves ChunkWorld does not lose or misrepresent any of that once
+# it is the thing assembling the pieces, and that its owned-entity view never drifts from the
+# streamer's own resident-entity count across a whole flight.
+add_executable(ChunkWorldTest src/ChunkWorldTest.cpp)
+target_link_libraries(ChunkWorldTest PRIVATE
+  Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Render.Pcg Aver.Core)
+set_target_properties(ChunkWorldTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(ChunkCoordTest src/ChunkCoordTest.cpp)
 target_link_libraries(ChunkCoordTest PRIVATE Aver.World Aver.Core)
 set_target_properties(ChunkCoordTest PROPERTIES

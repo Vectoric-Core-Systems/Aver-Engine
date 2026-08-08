@@ -136,6 +136,17 @@ public:
     usize residentCount() const { return resident_.size(); }
     // Every entity this streamer created for `c`, or an empty span if it is not resident.
     const std::vector<scene::Entity>* entitiesOf(const ChunkCoord& c) const;
+    // Every chunk currently resident, for a host that needs to enumerate rather than query one
+    // coordinate at a time -- e.g. ChunkWorld building the "which entities are mine" answer an
+    // outliner or a save path needs. There was no such enumerator before this; querying one
+    // coordinate at a time is useless to a caller that does not already know which coordinates to
+    // ask about.
+    std::vector<ChunkCoord> residentChunks() const {
+        std::vector<ChunkCoord> out;
+        out.reserve(resident_.size());
+        for (const auto& kv : resident_) out.push_back(kv.first);
+        return out;
+    }
 
     const StreamStats& stats() const { return stats_; }
 
