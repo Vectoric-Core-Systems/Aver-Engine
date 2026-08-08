@@ -23,8 +23,17 @@
 
 #include <cmath>
 #include <vector>
+#endif  // AVER_MODULE_SCENE
 
+// Namespace opened UNCONDITIONALLY: it used to open only inside the #if AVER_MODULE_SCENE branch
+// below, so with the module off the preprocessor dropped "namespace aver::editor {" along with the
+// rest of that branch while the file's one closing brace at the bottom still tried to close it. The
+// #else definitions of setup/tick/report then landed at GLOBAL scope, where neither "SkinSceneTest"
+// nor "Engine" (declared inside namespace aver) resolve unqualified -- hence the "is not a class or
+// namespace name" errors with the module off.
 namespace aver::editor {
+
+#if AVER_MODULE_SCENE
 
 namespace {
 

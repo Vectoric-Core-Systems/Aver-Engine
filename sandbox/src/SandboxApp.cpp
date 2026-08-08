@@ -69,21 +69,30 @@
 #include "aver/scripting/ScriptHost.hpp"
 #endif
 
-#if AVER_MODULE_FRAMEWORK
+// physics_abi.h was nested inside AVER_MODULE_FRAMEWORK, but every use site below (aver_phys_init,
+// aver_phys_step, aver_phys_ready, ...) is guarded on AVER_MODULE_PHYSICS alone. That was invisible
+// as long as physics implied framework in practice, but AVER_MODULE_SCENE=OFF forces FRAMEWORK off
+// (root CMakeLists) while leaving PHYSICS on by default, so this TU stopped seeing the header while
+// its guarded call sites still expected it -- an unrelated-looking wave of "identifier not found".
 #if AVER_MODULE_PHYSICS
 #include "aver/physics/physics_abi.h"
 #endif
+#if AVER_MODULE_FRAMEWORK
 #include "aver/framework/framework_abi.h"
 #include "aver/framework/framework_hooks.h"
 #endif
 
-#if AVER_MODULE_SCENE
+// windows.h was nested inside AVER_MODULE_SCENE, but the Win32 calls that actually need it --
+// setMouseCaptured's ShowCursor/ClipCursor, applyMcpCommand's HWND, warpToAnchor's GetClientRect --
+// are gated on _WIN32 (and, for the MCP one, AVER_MODULE_MCP) with no scene dependency at all. With
+// SCENE off this TU lost the header while those guarded call sites still expected it.
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 #endif
+#if AVER_MODULE_SCENE
 #include "aver/scene/scene_abi.h"
 #include "aver/anim/AnimSystem.hpp"
 #include "aver/scene/World.hpp"
@@ -1249,8 +1258,14 @@ public:
         AVER_INFO("[Content] indexed {} asset(s) under {}", contentIndex_.size(), content);
         // The anim system does its own file discovery through this, and caches by id -- so a
         // re-index has to drop what it cached or a moved asset keeps resolving to the old path.
+        // Aver.Anim.Scene (anim::animSystem) is built only under AVER_MODULE_SCENE (root CMakeLists,
+        // modules/anim.scene sits inside that if()), so these two calls need their own guard even
+        // though the rest of this function is mesh-loading work that has nothing to do with a
+        // material or a scene and must stay unguarded.
+#if AVER_MODULE_SCENE
         anim::animSystem().clear();
         anim::animSystem().setResolver(&SandboxApp::resolveAnimAsset, this);
+#endif
     }
 
     // Maps an asset ObjectId to a path for aver::anim::AnimSystem. A plain function pointer because
@@ -1265,12 +1280,18 @@ public:
     // Maps a mesh ObjectId to the handle the scene pass would draw, for aver::render::SkinnedScene.
     // The SAME table the draw pass uses, deliberately: a skin target built from a different upload
     // than the one on screen would be a rig skinning geometry nobody can see.
+    //
+    // Guarded: its only caller is skinnedScene_->setResolvers(...), itself inside #if AVER_MODULE_SCENE
+    // (skinnedScene_ does not exist otherwise), and the body reads sceneMeshes_, which is a member
+    // declared only under the same guard.
+#if AVER_MODULE_SCENE
     static rhi::MeshHandle resolveSceneMesh(u64 id, void* user) {
         auto* self = static_cast<SandboxApp*>(user);
         if (!self) return 0;
         const auto it = self->sceneMeshes_.find(id);
         return it == self->sceneMeshes_.end() ? 0 : it->second;
     }
+#endif
 
 // PBR-ONLY, and stranded outside its guard when the content/mesh helpers moved out of the
 // material block: it returns a pbr::MaterialHandle, so the SIGNATURE needs the module, not just
@@ -1359,7 +1380,11 @@ public:
 
     // Drops the project's meshes from the id table. The built-in primitives survive.
     void releaseProjectMeshes() {
+        // sceneMeshes_ is scene-only; with the module off loadProjectMeshes() never populated it (see
+        // its own #if AVER_MODULE_SCENE above), so there is nothing here to erase from it either.
+#if AVER_MODULE_SCENE
         for (const u64 id : projectMeshIds_) sceneMeshes_.erase(id);
+#endif
         projectMeshIds_.clear();
     }
 
@@ -1415,7 +1440,13 @@ public:
     void onRender(Engine& e) override {
         handleManip(e);
         e.device()->setWireframe(wireframe_);
+        // levelEntities_ exists only under AVER_MODULE_SCENE; with it off there is no loaded level to
+        // hide the editor placeholders for, so the OR term is simply absent rather than always-false.
+#if AVER_MODULE_SCENE
         hideEditorScene_ = playSessionActive() || !levelEntities_.empty();
+#else
+        hideEditorScene_ = playSessionActive();
+#endif
         const bool hideEditorScene = hideEditorScene_;
         for (int i=0;i<(int)objects_.size();++i) {
             MeshObj& o = objects_[i];
@@ -1600,8 +1631,16 @@ public:
                 objects_[reflBeaconIndex_].visible = refl_->beaconVisible();
             refl_->tick(e, vpX_, vpY_, vpW_, vpH_);
         }
+        // lastSceneCulled_ is declared only under AVER_MODULE_SCENE (it counts what the scene-render
+        // pass above just culled), but skinScene_->tick() is called unguarded -- SkinSceneTest is
+        // designed to degrade to a no-op (setup() already returned false with SCENE off), so with no
+        // scene there is nothing to have culled and 0 is the value lastSceneCulled_ would hold anyway.
         if (skinScene_ && !skinScene_->finished())
+#if AVER_MODULE_SCENE
             skinScene_->tick(e, vpX_, vpY_, vpW_, vpH_, static_cast<u32>(lastSceneCulled_ < 0 ? 0 : lastSceneCulled_));
+#else
+            skinScene_->tick(e, vpX_, vpY_, vpW_, vpH_, 0u);
+#endif
         captureCheck(e);
     }
 
@@ -1756,10 +1795,14 @@ public:
             e.device()->removeRenderFeature(skinDraw_.get());
             skinDraw_.reset();
         }
+        // skinnedScene_ is declared only under AVER_MODULE_SCENE (it is the scene join, meaningless
+        // without a world to join to), but this teardown block was unguarded.
+#if AVER_MODULE_SCENE
         if (skinnedScene_) {
             e.device()->removeRenderFeature(skinnedScene_.get());
             skinnedScene_.reset();
         }
+#endif
 #if AVER_MODULE_VOXI
         if (voxiAttached_) { e.device()->removeRenderFeature(&voxiRenderer_); voxiAttached_ = false; }
         voxiRenderer_.shutdown();
@@ -1907,8 +1950,14 @@ private:
 #endif
     }
 
-#if AVER_MODULE_SCRIPTING
-    // Tells the formats layer where averdesign.exe is installed.
+    // Tells the formats layer where averdesign.exe is installed. Not scripting-specific -- it points
+    // at the Roslyn build tool (gated on AVER_HAVE_ROSLYN just below) and is called unguarded from
+    // onInit(). This, and everything down to reloadScripts(), used to sit inside one
+    // AVER_MODULE_SCRIPTING block, but only resolveScriptsDir() and reloadScripts() actually touch
+    // scripts_/ScriptHost -- the rest (render-settings, project-manifest, HUD-preview and
+    // content-watch code) is called from sites that are themselves unguarded. With SCRIPTING off the
+    // declarations vanished while those callers remained, so the guard is narrowed to just the two
+    // functions that need it rather than widening every call site to match.
     void locateAverDesign() const {
 #if AVER_HAVE_ROSLYN
         fmt::setAverDesignPath(executableDir() + "/Tools/averdesign.exe");
@@ -1917,6 +1966,7 @@ private:
 
     // Returns the directory the CLR host loads user assemblies from: --scripts, else the project's
     // Binaries\Scripts, else <exe>\Scripts.
+#if AVER_MODULE_SCRIPTING
     std::string resolveScriptsDir() const {
         if (scriptsDir_.empty())
             return project_.valid() ? editor::scriptsBinaryDir(project_) : executableDir() + "\\Scripts";
@@ -1924,6 +1974,7 @@ private:
         const bool absolute = sd.size() > 1 && (sd[1] == ':' || sd[0] == '\\' || sd[0] == '/');
         return absolute ? sd : executableDir() + "\\" + sd;
     }
+#endif
 
 #if AVER_MODULE_VOXI
     // Pushes the manifest's render settings into Voxi. Defers until the device info is known.
@@ -2133,6 +2184,7 @@ private:
     std::string autoCompileReason_;
 
     // Unloads the live script assemblies and loads the ones in binDir. Writes a status line.
+#if AVER_MODULE_SCRIPTING
     bool reloadScripts(const std::string& binDir, std::string* status) {
         if (!scripts_.ready()) {
             if (status) *status = "The scripting host is not running: " + scripts_.declineReason();
@@ -2385,7 +2437,13 @@ private:
     };
 
     // Returns the edit id bound to an entity, minting one on first use.
-    EditId editIdFor(scene::Entity e) {
+    //
+    // AvId, NOT scene::Entity: this function (and entityForEdit/rebindEdit below) is called only
+    // from #if AVER_MODULE_SCENE call sites, but the definitions themselves are unguarded, so with
+    // SCENE off the parameter type needs to exist without the scene module. scene::Entity is a bare
+    // type alias for AvId (aver/scene/Entity.hpp), so this is a zero-behaviour-change retype that
+    // drops the dependency instead of widening the guard.
+    EditId editIdFor(AvId e) {
         const u32 key = static_cast<u32>(e);
         if (const auto it = entityToEdit_.find(key); it != entityToEdit_.end()) return it->second;
         const EditId id = nextEditId_++;
@@ -2393,13 +2451,13 @@ private:
         editToEntity_[id]  = e;
         return id;
     }
-    // Returns the entity an edit id names, or kInvalidEntity.
-    scene::Entity entityForEdit(EditId id) const {
+    // Returns the entity an edit id names, or kInvalidId.
+    AvId entityForEdit(EditId id) const {
         const auto it = editToEntity_.find(id);
-        return it == editToEntity_.end() ? scene::kInvalidEntity : it->second;
+        return it == editToEntity_.end() ? kInvalidId : it->second;
     }
     // Points an existing edit id at a newly created entity.
-    void rebindEdit(EditId id, scene::Entity e) {
+    void rebindEdit(EditId id, AvId e) {
         if (const auto old = editToEntity_.find(id); old != editToEntity_.end())
             entityToEdit_.erase(static_cast<u32>(old->second));
         editToEntity_[id] = e;
@@ -2459,7 +2517,8 @@ private:
         if (c.objIndex >= 0 && c.objIndex < (int)objects_.size()) {
             MeshObj& o = objects_[c.objIndex];
             o.pos = x.pos; o.rotDeg = x.rotDeg; o.scale = x.scale;
-            sel_ = c.objIndex; selEntity_ = scene::kInvalidEntity;
+            // Unguarded: this is the non-scene MeshObj fallback, reached with SCENE off too.
+            sel_ = c.objIndex; selEntity_ = kInvalidId;
         }
     }
 
@@ -2645,7 +2704,8 @@ private:
         if (snapMove_) for (int k=0;k<3;++k) (&c.pos.x)[k] = snapf((&c.pos.x)[k], moveSnap_);
         c.color[0]=0.72f; c.color[1]=0.72f; c.color[2]=0.74f; c.metallic=0.0f; c.roughness=0.6f;
         objects_.push_back(c);
-        sel_ = (int)objects_.size() - 1; selEntity_ = scene::kInvalidEntity;
+        // Unguarded: the placeholder-world fallback, reached with SCENE off too.
+        sel_ = (int)objects_.size() - 1; selEntity_ = kInvalidId;
     }
     f32 gizmoLen(const Vec3& origin) const { f32 L = dist(eye_, origin) * 0.17f; return L < 50.0f ? 50.0f : L; }
 
@@ -2921,7 +2981,10 @@ private:
                 f32 t; if (rayAabb(lo,ld,o.aabbMin,o.aabbMax,t) && t<bestT){ bestT=t; best=i; }
             }
 
-        scene::Entity bestEnt = scene::kInvalidEntity;
+        // AvId, not scene::Entity: pick() spans both the placeholder and scene worlds, so bestEnt is
+        // read and compared unguarded below even though only the loop that can set it away from
+        // "nothing" is scene-only.
+        AvId bestEnt = kInvalidId;
 #if AVER_MODULE_SCENE
         {
             scene::World& w = scene::World::instance();
@@ -2941,8 +3004,8 @@ private:
             }
         }
 #endif
-        if (bestEnt != scene::kInvalidEntity) { sel_ = kSelScene; selEntity_ = bestEnt; }
-        else                                  { sel_ = best;     selEntity_ = scene::kInvalidEntity; }
+        if (bestEnt != kInvalidId) { sel_ = kSelScene; selEntity_ = bestEnt; }
+        else                       { sel_ = best;     selEntity_ = kInvalidId; }
     }
 
     // Draws a button with a drop-down triangle. Returns true when clicked.
@@ -3247,12 +3310,22 @@ private:
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
         ImGui::Begin("##maintoolbar", nullptr, kChromeFlags);
         ImGui::SetCursorPosY((toolbarH - ImGui::GetFrameHeight()) * 0.5f);
+        // levelPath_ and saveLevel() are declared only under AVER_MODULE_SCENE (there is no level to
+        // path or save without a world), matching the File-menu Save Level item's own guard above --
+        // this toolbar button was the same feature, unguarded.
+#if AVER_MODULE_SCENE
         ImGui::BeginDisabled(levelPath_.empty());
         if (ImGui::Button("Save")) saveLevel(levelPath_);
         uiReg_.track("toolbar.save");
         ImGui::EndDisabled();
         if (levelPath_.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("No level loaded - File > New Level, then Save Level As");
+#else
+        ImGui::BeginDisabled(true);
+        ImGui::Button("Save");
+        uiReg_.track("toolbar.save");
+        ImGui::EndDisabled();
+#endif
         ImGui::SameLine();
         if (dropButton("Add")) ImGui::OpenPopup("addActor");
         uiReg_.track("toolbar.add");
@@ -4491,7 +4564,7 @@ private:
         ImGui::Begin("World Outliner");
         if (!hideEditorScene_)
             for (int i=0;i<(int)objects_.size();++i)
-                if (ImGui::Selectable((std::string("  ")+objects_[i].name).c_str(), sel_==i)) { sel_=i; selEntity_=scene::kInvalidEntity; }
+                if (ImGui::Selectable((std::string("  ")+objects_[i].name).c_str(), sel_==i)) { sel_=i; selEntity_=kInvalidId; }
 #if AVER_MODULE_SCENE
         {
             scene::World& w = scene::World::instance();
@@ -4515,9 +4588,10 @@ private:
         }
 #endif
         ImGui::Separator();
-        if (ImGui::Selectable("  Directional Light (Sun)", sel_==-2)) { sel_=-2; selEntity_=scene::kInvalidEntity; }
-        if (ImGui::Selectable("  Sky + Atmosphere", sel_==-3))        { sel_=-3; selEntity_=scene::kInvalidEntity; }
-        if (ImGui::Selectable("  Post Process", sel_==-4))            { sel_=-4; selEntity_=scene::kInvalidEntity; }
+        // Unguarded: the sun/sky/post-process pseudo-entries exist whether or not there is a scene.
+        if (ImGui::Selectable("  Directional Light (Sun)", sel_==-2)) { sel_=-2; selEntity_=kInvalidId; }
+        if (ImGui::Selectable("  Sky + Atmosphere", sel_==-3))        { sel_=-3; selEntity_=kInvalidId; }
+        if (ImGui::Selectable("  Post Process", sel_==-4))            { sel_=-4; selEntity_=kInvalidId; }
         ImGui::End();
 
         ImGui::Begin("Details");
@@ -5276,7 +5350,11 @@ private:
     // -2/-3/-4 are the sun/sky/post pseudo-entries, kSelScene means selEntity_ names a scene entity.
     static constexpr int kSelScene = -5;
     int sel_ = 1;
-    scene::Entity selEntity_ = scene::kInvalidEntity;
+    // AvId, not scene::Entity: read and written from unguarded code (pick() across both worlds, the
+    // sun/sky/post-process outliner rows, the applyXformTo MeshObj fallback) as a generic "nothing
+    // selected" sentinel. scene::Entity is a bare alias for AvId, so this drops the dependency with
+    // no behaviour change.
+    AvId selEntity_ = kInvalidId;
     bool hideEditorScene_ = false;
     rhi::IDevice* prefsDevice_ = nullptr;   // borrowed, latched in buildUI
     std::string prefIdeName_;               // stored IDE name, pending the async scan that resolves it
@@ -5292,7 +5370,7 @@ private:
 
     static constexpr std::size_t kUndoDepth = 128;
     std::vector<EditCmd> undoStack_, redoStack_;
-    std::unordered_map<EditId, scene::Entity> editToEntity_;
+    std::unordered_map<EditId, AvId> editToEntity_;
     std::unordered_map<u32, EditId> entityToEdit_;
     EditId nextEditId_ = 1;
     EditXform editBefore_{};
