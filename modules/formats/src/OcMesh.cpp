@@ -18,6 +18,15 @@ constexpr u32 kChunkSTRT = avrFourCC("STRT");
 constexpr u32 kChunkVTXS = avrFourCC("VTXS");
 constexpr u32 kChunkIDXS = avrFourCC("IDXS");
 constexpr u32 kChunkMADR = avrFourCC("MADR");
+constexpr u32 kChunkMLET = avrFourCC("MLET");
+
+// MLET limits (FORMAT_SPECS.md 5.7). Duplicated from Aver.Trifactor's ClusterBuilder.hpp
+// (kMaxClusterVertices/kMaxClusterTriangles) ON PURPOSE, not an oversight: Aver.Formats sits BELOW
+// Aver.Trifactor in the module DAG (cmake/AvModule.cmake) and must load/save .ocmesh with
+// AVER_MODULE_TRIFACTOR=OFF, so this file cannot include Trifactor's header. These two numbers are
+// the on-disk MLET contract's own, not a borrowed constant.
+constexpr u32 kMaxMeshletVertices  = 64;
+constexpr u32 kMaxMeshletTriangles = 124;
 
 // Stream semantics and formats (§5.2, §5.3).
 constexpr u8 kSemPosition = 0, kSemTangentFrame = 1, kSemUV0 = 2, kSemJoints = 5, kSemWeights = 6;
@@ -142,6 +151,28 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     const bool index32 = vcount > 0xFFFF;
     const bool skinned = m.hasSkin();
 
+    // ---- meshlet validation, before any output buffer is built (fail fast, like the checks below) ----
+    for (usize mi = 0; mi < m.meshlets.size(); ++mi) {
+        const OcMeshMeshlet& ml = m.meshlets[mi];
+        if (ml.vertices.size() > kMaxMeshletVertices)
+            return fail(why, ".ocmesh: meshlet " + std::to_string(mi) + " has more than " +
+                                  std::to_string(kMaxMeshletVertices) + " vertices");
+        if (ml.triangles.size() % 3 != 0)
+            return fail(why, ".ocmesh: meshlet " + std::to_string(mi) + "'s triangle list is not a multiple of 3");
+        if (ml.triangleCount() > kMaxMeshletTriangles)
+            return fail(why, ".ocmesh: meshlet " + std::to_string(mi) + " has more than " +
+                                  std::to_string(kMaxMeshletTriangles) + " triangles");
+        for (u32 v : ml.vertices)
+            if (v >= vcount)
+                return fail(why, ".ocmesh: meshlet " + std::to_string(mi) + " references vertex " +
+                                      std::to_string(v) + ", past the mesh's " + std::to_string(vcount) + " vertices");
+        for (u8 t : ml.triangles)
+            if (t >= ml.vertices.size())
+                return fail(why, ".ocmesh: meshlet " + std::to_string(mi) + " has a local triangle index " +
+                                      std::to_string(t) + " past its own " + std::to_string(ml.vertices.size()) +
+                                      " vertices");
+    }
+
     AvrStringTable strt;
     std::vector<u32> nameRefs;
     nameRefs.reserve(m.submeshes.size());
@@ -213,6 +244,56 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         for (const std::string& s : m.materialSlots) w.u32v(strt.add(s));
     }
 
+    // ---- MLET: meshlets (§5.7), four back-to-back sub-arrays, only when meshlets are present ----
+    std::vector<u8> mlet;
+    if (!m.meshlets.empty()) {
+        // VertexIndexOffset (elements, into sub-array 3) and TriangleOffset (bytes, into sub-array 4,
+        // each meshlet's triangle block padded to 4 B) are computed here, in writer order -- nothing
+        // in OcMeshMeshlet stores them, because they are a function of where a meshlet lands among
+        // its siblings, not a property of the meshlet itself.
+        struct Placement { u32 vertexIndexOffset; u32 triangleOffset; };
+        std::vector<Placement> placement(m.meshlets.size());
+        u32 vtxCursor = 0, triCursor = 0;
+        for (usize i = 0; i < m.meshlets.size(); ++i) {
+            const OcMeshMeshlet& ml = m.meshlets[i];
+            placement[i].vertexIndexOffset = vtxCursor;
+            placement[i].triangleOffset    = triCursor;
+            vtxCursor += static_cast<u32>(ml.vertices.size());
+            triCursor += (static_cast<u32>(ml.triangles.size()) + 3u) & ~3u;
+        }
+
+        W w{mlet};
+        // Sub-array 1: MeshletDesc[] (12 B each).
+        for (usize i = 0; i < m.meshlets.size(); ++i) {
+            const OcMeshMeshlet& ml = m.meshlets[i];
+            w.u32v(placement[i].vertexIndexOffset);
+            w.u32v(placement[i].triangleOffset);
+            w.u8v(static_cast<u8>(ml.vertices.size()));
+            w.u8v(static_cast<u8>(ml.triangleCount()));
+            w.u16v(0);   // Pad
+        }
+        // Sub-array 2: MeshletBounds[] (32 B each).
+        for (const OcMeshMeshlet& ml : m.meshlets) {
+            w.f32v(ml.sphereCenter.x); w.f32v(ml.sphereCenter.y); w.f32v(ml.sphereCenter.z);
+            w.f32v(ml.sphereRadius);
+            w.f32v(ml.coneApex.x); w.f32v(ml.coneApex.y); w.f32v(ml.coneApex.z);
+            w.u8v(static_cast<u8>(ml.coneAxis[0])); w.u8v(static_cast<u8>(ml.coneAxis[1]));
+            w.u8v(static_cast<u8>(ml.coneAxis[2])); w.u8v(static_cast<u8>(ml.coneCutoff));
+        }
+        // Sub-array 3: MeshletVertices[] (u32 each), all meshlets' vertex lists back to back.
+        for (const OcMeshMeshlet& ml : m.meshlets)
+            for (u32 v : ml.vertices) w.u32v(v);
+        // Sub-array 4: MeshletTriangles[] (u8, 3 per triangle), each meshlet's block zero-padded to
+        // a 4 B boundary -- must match the `triCursor` padding computed above exactly, or every
+        // TriangleOffset after the first meshlet whose triangle count isn't a multiple of 4 bytes
+        // would point at the wrong meshlet's data.
+        const usize triSectionStart = mlet.size();
+        for (const OcMeshMeshlet& ml : m.meshlets) {
+            for (u8 t : ml.triangles) w.u8v(t);
+            while ((mlet.size() - triSectionStart) % 4 != 0) w.u8v(0);
+        }
+    }
+
     // ---- MHDR ----
     std::vector<u8> mhdr;
     {
@@ -220,6 +301,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         u32 flags = m.flags & ~(kOcMeshIndex32 | kOcMeshMeshlets | kOcMeshHasColor | kOcMeshHasUV1 | kOcMeshHasSkin);
         if (index32) flags |= kOcMeshIndex32;
         if (skinned) flags |= kOcMeshHasSkin;
+        if (!m.meshlets.empty()) flags |= kOcMeshMeshlets;
         w.u32v(flags);
         w.u8v(1);                                             // LODCount
         w.u8v(static_cast<u8>(m.submeshes.size()));            // SubmeshCount
@@ -256,8 +338,11 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         w.u64v(static_cast<u64>(vtxs.size()));       // VtxSize
         w.u64v(0);                                   // IdxOffset
         w.u64v(static_cast<u64>(idxs.size()));       // IdxSize
-        w.u64v(0);                                   // MeshletOffset (none)
-        w.u32v(0);                                   // MeshletCount
+        // MeshletOffset is chunk-relative (into MLET), and this writer only ever emits one LOD's
+        // worth of meshlets starting at the front of the chunk -- so 0 whether or not meshlets are
+        // present, matching the pre-existing "none" value exactly when m.meshlets is empty.
+        w.u64v(0);                                   // MeshletOffset
+        w.u32v(static_cast<u32>(m.meshlets.size())); // MeshletCount
         w.f32v(0.0f);                                // ScreenErrorThreshold (single LOD)
         (void)posPadded;
 
@@ -268,11 +353,19 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
             w.u32v(0);                               // Flags
         }
         // SubmeshRange[LOD*Submesh] (§5.6)
+        //
+        // MeshletStart/MeshletCount stay 0,0 here EVEN WHEN m.meshlets is non-empty. That is a known
+        // gap, not an oversight: buildClusters (Aver.Trifactor) partitions the mesh's WHOLE merged
+        // index buffer into meshlets without regard to submesh/material boundaries, so a meshlet can
+        // straddle two submeshes and there is no per-submesh [start,count) range to report honestly.
+        // Fixing this needs submesh-aware clustering upstream in Trifactor, which is out of this
+        // slice's scope -- see the task's slice boundary. A renderer that wants "meshlets for
+        // submesh N" cannot yet get that from this file; it can only draw the whole meshlet set.
         for (const OcMeshSubmesh& s : m.submeshes) {
             w.u32v(s.indexStart); w.u32v(s.indexCount);
             w.u32v(s.baseVertex); w.u32v(s.vertexCount);
             w.f32v(0); w.f32v(0); w.f32v(0); w.f32v(0);   // per-submesh bounds sphere: not computed
-            w.u32v(0); w.u32v(0);                          // meshlet start/count
+            w.u32v(0); w.u32v(0);                          // meshlet start/count: see comment above
         }
     }
 
@@ -285,6 +378,12 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     f.add(kChunkVTXS, std::move(vtxs), kAvrChunkGpuUploadable);
     f.add(kChunkIDXS, std::move(idxs), kAvrChunkGpuUploadable);
     f.add(kChunkMADR, std::move(madr));
+    // MLET is genuinely OPTIONAL (§5): omitted entirely, not written empty, when there are no
+    // meshlets -- this is what makes an old .ocmesh's bytes for its non-meshlet chunks unaffected by
+    // this feature existing at all, and is the backward-compat contract §3.2's "unknown chunks
+    // skipped" is built to support (never marked kAvrChunkRequired, so an old reader that doesn't
+    // look for MLET is unaffected by its presence in a NEW file either).
+    if (!m.meshlets.empty()) f.add(kChunkMLET, std::move(mlet), kAvrChunkGpuUploadable);
     return writeAvr1(f, out, why);
 }
 
@@ -357,7 +456,10 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
     // LodDesc[0] only; later LODs are read past rather than parsed.
     const u32 vcount = r.u32v();
     const u32 icount = r.u32v();
-    r.u64v(); r.u64v(); r.u64v(); r.u64v(); r.u64v(); r.u32v(); r.f32v();
+    r.u64v(); r.u64v(); r.u64v(); r.u64v();      // VtxOffset, VtxSize, IdxOffset, IdxSize
+    const u64 meshletOffset = r.u64v();
+    const u32 meshletCount  = r.u32v();
+    r.f32v();                                    // ScreenErrorThreshold
     if (!r.ok) return fail(why, ".ocmesh: truncated LOD table");
     if (vcount == 0 || icount == 0) return fail(why, ".ocmesh: LOD 0 is empty");
 
@@ -452,6 +554,114 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
         else         { u16 v; std::memcpy(&v, idxs->data.data() + usize(i) * 2, 2); out.indices[i] = v; }
         if (out.indices[i] >= vcount)
             return fail(why, ".ocmesh: index " + std::to_string(out.indices[i]) + " is past the vertex count");
+    }
+
+    // ---- meshlets, when the file carries them (§5.7) ----
+    //
+    // Gated on kOcMeshMeshlets AND MeshletCount > 0, not on the chunk's mere presence: a file with
+    // the flag clear but a stray MLET chunk (hand-edited, or written by a future tool this reader
+    // does not know about) should NOT populate out.meshlets, exactly as an old file with no MLET
+    // chunk at all does not. This is also what keeps a plain flags-only round trip byte-identical --
+    // see writeOcMesh, which never emits MLET unless m.meshlets is non-empty.
+    out.meshlets.clear();
+    if ((out.flags & kOcMeshMeshlets) != 0 && meshletCount > 0) {
+        const AvrChunk* mlet = f.find(kChunkMLET);
+        if (!mlet) return fail(why, ".ocmesh: MeshletCount is nonzero but there is no MLET chunk");
+        const u8* base = mlet->data.data();
+        const u64 chunkSize = mlet->data.size();
+        if (meshletOffset > chunkSize) return fail(why, ".ocmesh: MeshletOffset is past the end of MLET");
+
+        const u64 descBytes = u64(meshletCount) * 12;
+        const u64 boundsBytes = u64(meshletCount) * 32;
+        if (descBytes > chunkSize - meshletOffset || boundsBytes > chunkSize - meshletOffset - descBytes)
+            return fail(why, ".ocmesh: MLET is smaller than MeshletDesc[]/MeshletBounds[] require");
+
+        // ---- sub-array 1: MeshletDesc[] ----
+        struct DescIn { u32 vtxOff = 0, triOff = 0; u8 vtxCount = 0, triCount = 0; };
+        std::vector<DescIn> descs(meshletCount);
+        {
+            R dr{base + meshletOffset, base + meshletOffset + descBytes};
+            for (u32 i = 0; i < meshletCount; ++i) {
+                descs[i].vtxOff   = dr.u32v();
+                descs[i].triOff   = dr.u32v();
+                descs[i].vtxCount = dr.u8v();
+                descs[i].triCount = dr.u8v();
+                dr.u16v();   // Pad
+            }
+            if (!dr.ok) return fail(why, ".ocmesh: truncated MeshletDesc[]");
+        }
+        for (u32 i = 0; i < meshletCount; ++i) {
+            if (descs[i].vtxCount > kMaxMeshletVertices)
+                return fail(why, ".ocmesh: meshlet " + std::to_string(i) + " declares more than " +
+                                      std::to_string(kMaxMeshletVertices) + " vertices");
+            if (descs[i].triCount > kMaxMeshletTriangles)
+                return fail(why, ".ocmesh: meshlet " + std::to_string(i) + " declares more than " +
+                                      std::to_string(kMaxMeshletTriangles) + " triangles");
+        }
+
+        // ---- sub-array 2: MeshletBounds[] ----
+        const u64 boundsStart = meshletOffset + descBytes;
+        out.meshlets.resize(meshletCount);
+        {
+            R br{base + boundsStart, base + boundsStart + boundsBytes};
+            for (u32 i = 0; i < meshletCount; ++i) {
+                OcMeshMeshlet& ml = out.meshlets[i];
+                ml.sphereCenter = Vec3{br.f32v(), br.f32v(), br.f32v()};
+                ml.sphereRadius = br.f32v();
+                ml.coneApex     = Vec3{br.f32v(), br.f32v(), br.f32v()};
+                ml.coneAxis[0]  = static_cast<i8>(br.u8v());
+                ml.coneAxis[1]  = static_cast<i8>(br.u8v());
+                ml.coneAxis[2]  = static_cast<i8>(br.u8v());
+                ml.coneCutoff   = static_cast<i8>(br.u8v());
+            }
+            if (!br.ok) return fail(why, ".ocmesh: truncated MeshletBounds[]");
+        }
+
+        // ---- sub-arrays 3/4 start where 1/2 end. Nothing in the header names these two offsets
+        // directly (see FORMAT_SPECS.md 5.7: "four back-to-back sub-arrays"), so sub-array 3's start
+        // is computed here, and sub-array 4's start is computed from the TOTAL vertex count just
+        // read out of every MeshletDesc -- both are then re-validated against each meshlet's own
+        // VertexIndexOffset/TriangleOffset below, so a corrupt Desc cannot walk this reader off the
+        // end of the chunk. ----
+        u64 totalVerts = 0;
+        for (const DescIn& d : descs) totalVerts += d.vtxCount;
+        const u64 vertsStart = boundsStart + boundsBytes;
+        const u64 vertsBytes = totalVerts * 4;
+        if (vertsBytes > chunkSize - vertsStart)
+            return fail(why, ".ocmesh: MLET is smaller than MeshletVertices[] requires");
+        const u64 trisStart = vertsStart + vertsBytes;
+        const u64 trisBytesAvailable = chunkSize - trisStart;
+
+        for (u32 i = 0; i < meshletCount; ++i) {
+            OcMeshMeshlet& ml = out.meshlets[i];
+            const DescIn& d = descs[i];
+
+            const u64 vOff = u64(d.vtxOff) * 4;
+            if (vOff + u64(d.vtxCount) * 4 > vertsBytes)
+                return fail(why, ".ocmesh: meshlet " + std::to_string(i) + "'s VertexIndexOffset is out of range");
+            ml.vertices.resize(d.vtxCount);
+            for (u32 k = 0; k < d.vtxCount; ++k) {
+                u32 v; std::memcpy(&v, base + vertsStart + vOff + u64(k) * 4, 4);
+                if (v >= vcount)
+                    return fail(why, ".ocmesh: meshlet " + std::to_string(i) + " references vertex " +
+                                          std::to_string(v) + ", past the mesh's " + std::to_string(vcount) +
+                                          " vertices");
+                ml.vertices[k] = v;
+            }
+
+            const u64 triByteCount = u64(d.triCount) * 3;
+            const u64 tOff = u64(d.triOff);
+            if (tOff + triByteCount > trisBytesAvailable)
+                return fail(why, ".ocmesh: meshlet " + std::to_string(i) + "'s TriangleOffset is out of range");
+            ml.triangles.resize(triByteCount);
+            for (u64 k = 0; k < triByteCount; ++k) {
+                const u8 local = base[trisStart + tOff + k];
+                if (local >= d.vtxCount)
+                    return fail(why, ".ocmesh: meshlet " + std::to_string(i) +
+                                          " has a local triangle index past its own vertex list");
+                ml.triangles[k] = local;
+            }
+        }
     }
 
     // ---- material slots ----

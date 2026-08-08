@@ -49,6 +49,13 @@ option(AVER_MODULE_PHYSICS "Physics module: rigid bodies, characters and raycast
 # culling and chunk geometry -- so it depends on nothing optional and costs nothing to leave on.
 option(AVER_MODULE_LANDSCAPE "Landscape module: chunked heightfield terrain, LOD and chunk geometry" ON)
 option(AVER_MODULE_DEFORM "Sub-bone vertex deformation: a cage finer than the skeleton" ON)
+# Trifactor: the virtualized-geometry cluster builder + LOD DAG (docs/VIRTUALIZED_GEOMETRY.md).
+# ON, like its siblings above. It was briefly OFF because meshoptimizer was not vendored and every
+# default build would have failed at configure; third_party/meshoptimizer (v1.2, MIT) is now here,
+# so that reason is gone. Left ON deliberately rather than merely permitted: it is CPU-only, so it
+# costs nothing at runtime for a game that never cooks, and being in the default build is what makes
+# TrifactorTest part of the default suite instead of something that silently rots.
+option(AVER_MODULE_TRIFACTOR "Virtualized-geometry cluster builder and LOD DAG (meshlets, LOD DAG)" ON)
 # The editor control channel, so a tool can press the editor's own buttons and then look at the result.
 # OFF BY DEFAULT: it is a debugging aid, the editor must work without it, and nobody should ship an
 # editor that can be driven over a socket unless they asked for it. Even built, it listens only when the
@@ -69,6 +76,12 @@ message(STATUS "Aver Engine ${PROJECT_VERSION} | D3D12=${AVER_RHI_D3D12} D3D11=$
 # ---- Third-party (permissively-licensed) ----
 if(AVER_ENABLE_UI)
   add_subdirectory(third_party/imgui)
+endif()
+# meshoptimizer (MIT), the meshlet/simplify backbone RENDERING.md:42 and FORMAT_SPECS.md:242 already
+# named. Added only when something wants it -- it is a static library nobody else links, and a build
+# with Trifactor off should not pay to compile twenty translation units it will never call.
+if(AVER_MODULE_TRIFACTOR)
+  add_subdirectory(third_party/meshoptimizer)
 endif()
 
 # ---- Tier 0-6 implemented modules ----
@@ -96,6 +109,10 @@ add_subdirectory(modules/anim)
 # pose. Optional: a game that only needs bone skinning does not link it.
 if(AVER_MODULE_DEFORM)
   add_subdirectory(modules/deform)
+endif()
+# Trifactor, beside Deform for the same reason: it needs only Core + Formats and is optional.
+if(AVER_MODULE_TRIFACTOR)
+  add_subdirectory(modules/trifactor)
 endif()
 # Landscape, above formats because it reads .ocland through it and below anything that draws. The
 # renderer half is a separate target and is not built yet, which is why this needs no RHI.

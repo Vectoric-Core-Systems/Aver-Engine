@@ -31,6 +31,30 @@ struct OcMeshSubmesh {
 // Bone influences per vertex. Four is the spec's JOINTS/WEIGHTS width (5.3) and the GPU stride.
 inline constexpr u32 kOcMeshInfluences = 4;
 
+// One meshlet, matching the on-disk MLET shape byte for byte (FORMAT_SPECS.md 5.7): MeshletDesc's
+// VertexIndexOffset/TriangleOffset/Pad are a WRITE-TIME detail (computed from where this meshlet
+// lands among its siblings), not carried here -- this struct is the DECODED, offset-free form both
+// the writer starts from and the reader hands back.
+//
+// This type deliberately does NOT come from Aver.Trifactor's Cluster (modules/trifactor/include/
+// aver/trifactor/ClusterBuilder.hpp), even though the two are near-identical in shape. Aver.Formats
+// sits BELOW Aver.Trifactor in the module DAG (cmake/AvModule.cmake, aver_check_module_dag) and a
+// format reader/writer must load with AVER_MODULE_TRIFACTOR=OFF, so it cannot name a Trifactor type.
+// The conversion from Cluster to OcMeshMeshlet lives at the one call site that is allowed to see
+// both: tests/formats/src/ConvertTool.cpp, behind `#if AVER_MODULE_TRIFACTOR`.
+struct OcMeshMeshlet {
+    std::vector<u32> vertices;    // GLOBAL indices into this LOD's vertex buffer, <= 64 entries
+    std::vector<u8>  triangles;   // LOCAL indices (0..vertices.size()-1), 3 per triangle, <= 124 tris
+
+    Vec3 sphereCenter{0, 0, 0};
+    f32  sphereRadius = 0.0f;
+    Vec3 coneApex{0, 0, 0};
+    i8   coneAxis[3] = {0, 0, 0};   // snorm8: value/127.0 -> [-1,1]
+    i8   coneCutoff  = -127;        // snorm8; -127 (not -128) is the conservative "never cull" value
+
+    u32 triangleCount() const { return static_cast<u32>(triangles.size() / 3); }
+};
+
 struct OcMeshData {
     std::vector<f32> positions;      // 3 per vertex
     std::vector<f32> normals;        // 3 per vertex
@@ -47,6 +71,11 @@ struct OcMeshData {
     std::vector<u16> joints;         // bone index into the .ocskel this mesh is bound to
     std::vector<f32> weights;        // normalised; the writer renormalises if they are not
 
+    // Meshlets for LOD 0, present only when kOcMeshMeshlets is set. Optional: this slice writes and
+    // reads only a single LOD (LodDesc[1], as the writer always has), so a Trifactor LOD DAG's
+    // coarser levels are not yet persisted here -- only buildClusters' LOD-0 output is.
+    std::vector<OcMeshMeshlet> meshlets;
+
     Vec3 boundsMin{0, 0, 0}, boundsMax{0, 0, 0};
     u32  flags = 0;
 
@@ -56,6 +85,10 @@ struct OcMeshData {
         const usize v = positions.size() / 3;
         return v > 0 && joints.size() == v * kOcMeshInfluences && weights.size() == v * kOcMeshInfluences;
     }
+    // True when at least one meshlet is present. Byte-level validity (limits, index ranges) is
+    // checked by writeOcMesh/parseOcMesh, not here -- this mirrors hasSkin()'s split of "is the
+    // feature present" from "is the file well-formed".
+    bool hasMeshlets() const { return !meshlets.empty(); }
     // True when the streams are non-empty and the same length.
     bool valid() const {
         const usize v = positions.size() / 3;

@@ -58,6 +58,18 @@ target_link_libraries(LandscapeTest PRIVATE Aver.Formats Aver.Core Aver.Platform
 set_target_properties(LandscapeTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# TrifactorTest -- the cluster builder, the LOD DAG, and MLET persistence (see the file's own header
+# comment for why it is a separate executable from MeshTest). `if(TARGET Aver.Trifactor)`, not
+# `if(AVER_MODULE_TRIFACTOR)`, for MaterialTest's exact reason above: an unconditional Aver.Trifactor
+# is a hard configure error in the AVER_MODULE_TRIFACTOR=OFF tree this repo defaults to, and that
+# default has to keep configuring even though this test cannot exist in it.
+if(TARGET Aver.Trifactor)
+  add_executable(TrifactorTest src/TrifactorTest.cpp)
+  target_link_libraries(TrifactorTest PRIVATE Aver.Trifactor Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(TrifactorTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # MaterialTest — the .ocmat reader/writer and the mip filter. A SECOND executable rather than more
 # cases in FormatTest, because it is the only one that needs the material DLL: a machine where
 # Aver.Render.PBR.dll fails to load would otherwise report the .ocbeam parser as broken.
@@ -77,6 +89,13 @@ endif()
 add_executable(ConvertTool src/ConvertTool.cpp)
 target_link_libraries(ConvertTool PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(ConvertTool PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# Clustering the imported mesh before saving is OPTIONAL, exactly like MaterialTest/ActorScriptTest
+# above needing Aver.Formats.Material: `if(TARGET ...)`, not `if(AVER_MODULE_...)`, because an
+# unconditional Aver.Trifactor is a hard configure error in the AVER_MODULE_TRIFACTOR=OFF tree this
+# repo defaults to (modules/trifactor/CMakeLists.txt), and ConvertTool has to work in that tree.
+if(TARGET Aver.Trifactor)
+  target_link_libraries(ConvertTool PRIVATE Aver.Trifactor)
+endif()
 
 # MakeRig -- writes content/dev/Rig.gltf, the tree's ONLY skinned asset source. Registered here for
 # ConvertTool's reason rather than because it is a test: this is where Aver.Formats is already linked.

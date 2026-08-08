@@ -9,9 +9,49 @@
 #include "aver/formats/OcAnim.hpp"
 #include "aver/core/Log.hpp"
 
+// Clustering is entirely OPTIONAL: ConvertTool must still import and write the .oc* triple with
+// AVER_MODULE_TRIFACTOR=OFF (the tree's default -- see modules/trifactor/CMakeLists.txt on why it
+// is off by default). AVER_MODULE_TRIFACTOR reaches this translation unit only through the link
+// interface (tests/formats/CMakeLists.txt's `if(TARGET Aver.Trifactor)` block), the same mechanism
+// modules/runtime.game/src/GameContent.cpp uses for AVER_MODULE_PBR/AVER_MODULE_SCENE.
+#if AVER_MODULE_TRIFACTOR
+#include "aver/trifactor/ClusterBuilder.hpp"
+#endif
+
 #include <string>
 
 using namespace aver;
+
+#if AVER_MODULE_TRIFACTOR
+namespace {
+// Converts buildClusters' LOD-0 output into the on-disk OcMeshMeshlet shape and appends it to `m`.
+// Returns false (mesh saved without meshlets, exactly as if Trifactor were absent) rather than
+// aborting the whole conversion -- a clustering failure on some pathological input is not a reason
+// to fail an otherwise-good import, and ConvertTool's job is "wire it", not "referee it".
+bool addMeshlets(fmt::OcMeshData& m, std::string* why) {
+    aver::trifactor::LodDag dag;
+    if (!aver::trifactor::buildClusters(m, dag, why)) return false;
+
+    m.meshlets.clear();
+    m.meshlets.reserve(dag.levels.empty() ? 0 : dag.levels[0].size());
+    for (const u32 cid : (dag.levels.empty() ? std::vector<u32>{} : dag.levels[0])) {
+        const aver::trifactor::Cluster& c = dag.clusters[cid];
+        fmt::OcMeshMeshlet ml;
+        ml.vertices  = c.vertices;
+        ml.triangles = c.triangles;
+        ml.sphereCenter = c.bounds.sphereCenter;
+        ml.sphereRadius = c.bounds.sphereRadius;
+        ml.coneApex     = c.bounds.coneApex;
+        ml.coneAxis[0]  = c.bounds.coneAxis[0];
+        ml.coneAxis[1]  = c.bounds.coneAxis[1];
+        ml.coneAxis[2]  = c.bounds.coneAxis[2];
+        ml.coneCutoff   = c.bounds.coneCutoff;
+        m.meshlets.push_back(std::move(ml));
+    }
+    return true;
+}
+} // namespace
+#endif
 
 namespace {
 
@@ -52,10 +92,24 @@ int main(int argc, char** argv) {
     const std::string base = argc > 3 ? std::string(argv[3]) : stemOf(argv[1]);
 
     // ---- the mesh ----
-    const fmt::OcMeshData& m = res.meshes[0];
+    // A copy, not a const ref to res.meshes[0]: clustering (when built) mutates the meshlets field
+    // in place, and the alternative -- a second OcMeshData just for the clustered case -- would make
+    // the AVER_MODULE_TRIFACTOR=OFF and =ON code paths save two DIFFERENT objects, which is exactly
+    // the kind of divergence that only shows up once someone diffs the two builds' output.
+    fmt::OcMeshData m = res.meshes[0];
     AVER_INFO("imported '{}': {} verts, {} tris, skin {}, bounds ({:.1f},{:.1f},{:.1f})..({:.1f},{:.1f},{:.1f})",
               res.meshNames[0], m.vertexCount(), m.indices.size() / 3, m.hasSkin() ? "yes" : "no",
               m.boundsMin.x, m.boundsMin.y, m.boundsMin.z, m.boundsMax.x, m.boundsMax.y, m.boundsMax.z);
+
+#if AVER_MODULE_TRIFACTOR
+    // Best-effort: a mesh too small/degenerate to cluster (see TrifactorTest's degenerate cases)
+    // still gets saved, just without an MLET chunk -- the mesh is not lost over an optional feature.
+    if (!addMeshlets(m, &why)) {
+        AVER_WARN("clustering '{}': {} (saving without meshlets)", res.meshNames[0], why);
+    } else {
+        AVER_INFO("clustered '{}': {} meshlets", res.meshNames[0], m.meshlets.size());
+    }
+#endif
 
     const std::string meshPath = dir + "/" + base + ".ocmesh";
     if (!fmt::saveOcMesh(meshPath, m, &why)) { AVER_ERROR("save mesh: {}", why); return 1; }
