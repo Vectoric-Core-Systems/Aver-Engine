@@ -16,6 +16,7 @@
 // modules/runtime.game/src/GameContent.cpp uses for AVER_MODULE_PBR/AVER_MODULE_SCENE.
 #if AVER_MODULE_TRIFACTOR
 #include "aver/trifactor/ClusterBuilder.hpp"
+#include <algorithm>
 #endif
 
 #include <string>
@@ -24,21 +25,16 @@ using namespace aver;
 
 #if AVER_MODULE_TRIFACTOR
 namespace {
-// Converts buildClusters' LOD-0 output into the on-disk OcMeshMeshlet shape and appends it to `m`.
-// Returns false (mesh saved without meshlets, exactly as if Trifactor were absent) rather than
-// aborting the whole conversion -- a clustering failure on some pathological input is not a reason
-// to fail an otherwise-good import, and ConvertTool's job is "wire it", not "referee it".
-bool addMeshlets(fmt::OcMeshData& m, std::string* why) {
-    aver::trifactor::LodDag dag;
-    if (!aver::trifactor::buildClusters(m, dag, why)) return false;
-
-    m.meshlets.clear();
-    m.meshlets.reserve(dag.levels.empty() ? 0 : dag.levels[0].size());
-    for (const u32 cid : (dag.levels.empty() ? std::vector<u32>{} : dag.levels[0])) {
+// Converts one LOD level of a DAG into the on-disk OcMeshMeshlet shape.
+std::vector<fmt::OcMeshMeshlet> toMeshlets(const aver::trifactor::LodDag& dag, u32 level) {
+    std::vector<fmt::OcMeshMeshlet> out;
+    if (level >= dag.levels.size()) return out;
+    out.reserve(dag.levels[level].size());
+    for (const u32 cid : dag.levels[level]) {
         const aver::trifactor::Cluster& c = dag.clusters[cid];
         fmt::OcMeshMeshlet ml;
-        ml.vertices  = c.vertices;
-        ml.triangles = c.triangles;
+        ml.vertices     = c.vertices;
+        ml.triangles    = c.triangles;
         ml.sphereCenter = c.bounds.sphereCenter;
         ml.sphereRadius = c.bounds.sphereRadius;
         ml.coneApex     = c.bounds.coneApex;
@@ -46,7 +42,70 @@ bool addMeshlets(fmt::OcMeshData& m, std::string* why) {
         ml.coneAxis[1]  = c.bounds.coneAxis[1];
         ml.coneAxis[2]  = c.bounds.coneAxis[2];
         ml.coneCutoff   = c.bounds.coneCutoff;
-        m.meshlets.push_back(std::move(ml));
+        out.push_back(std::move(ml));
+    }
+    return out;
+}
+
+// Converts one LOD level's clusters back into a plain GLOBAL-index triangle list -- the level's own
+// index buffer, for the raster fallback and for OcMeshLod::indices. A cluster's `triangles` are
+// LOCAL indices into its own `vertices` (the on-disk MLET shape); this undoes that, mirroring
+// Aver.Trifactor's own appendGlobalTriangles (ClusterBuilder.cpp, private to that TU).
+std::vector<u32> toIndices(const aver::trifactor::LodDag& dag, u32 level) {
+    std::vector<u32> out;
+    if (level >= dag.levels.size()) return out;
+    for (const u32 cid : dag.levels[level]) {
+        const aver::trifactor::Cluster& c = dag.clusters[cid];
+        for (usize t = 0; t + 2 < c.triangles.size(); t += 3) {
+            out.push_back(c.vertices[c.triangles[t + 0]]);
+            out.push_back(c.vertices[c.triangles[t + 1]]);
+            out.push_back(c.vertices[c.triangles[t + 2]]);
+        }
+    }
+    return out;
+}
+
+// Builds the FULL LOD hierarchy (buildClusters for LOD 0, buildLodHierarchy for every coarser level)
+// and persists all of it into `m`: LOD 0 into meshlets (as before), LOD 1+ into coarserLods, each
+// with its own index buffer and its ScreenErrorThreshold converted from the DAG's geometric error
+// (aver::trifactor::toScreenErrorThreshold). Returns false (mesh saved without meshlets, exactly as
+// if Trifactor were absent) only when buildClusters itself fails or the converted screen error is
+// not monotonic -- a clustering failure on some pathological input is not a reason to fail an
+// otherwise-good import, and ConvertTool's job is "wire it", not "referee it". buildLodHierarchy
+// failing (it does not, on any input buildClusters accepted -- see its own doc comment) is
+// deliberately non-fatal: the mesh still saves with LOD 0 only, same as before this function existed.
+bool addMeshlets(fmt::OcMeshData& m, std::string* why) {
+    aver::trifactor::LodDag dag;
+    if (!aver::trifactor::buildClusters(m, dag, why)) return false;
+
+    std::string hierWhy;
+    if (!aver::trifactor::buildLodHierarchy(m, dag, &hierWhy))
+        AVER_WARN("buildLodHierarchy: {} (saving LOD 0 only)", hierWhy);
+
+    // Cluster::error is raw/relative (meshopt units, see ClusterBuilder.hpp); worldExtentScale is the
+    // ONE constant that turns every cluster's error in this mesh's DAG into an absolute (cm) error --
+    // see Aver.Trifactor's own comment on why that is safe to compute once per mesh.
+    const f32 scale = aver::trifactor::worldExtentScale(m);
+    std::string monoWhy;
+    if (!aver::trifactor::validateScreenErrorMonotonic(dag, scale, &monoWhy)) {
+        if (why) *why = "screen-error monotonicity broke after conversion: " + monoWhy;
+        return false;
+    }
+
+    m.meshlets = toMeshlets(dag, 0);
+    m.coarserLods.clear();
+    for (u32 level = 1; level < dag.levelCount(); ++level) {
+        fmt::OcMeshLod lod;
+        lod.indices  = toIndices(dag, level);
+        lod.meshlets = toMeshlets(dag, level);
+        // Every cluster newly created at this level shares the SAME propagatedError (buildLodHierarchy
+        // assigns it once per group, to every cluster the group's re-split produced), so max() over
+        // the level is defensive rather than strictly necessary -- it stays correct even if a future
+        // change to buildLodHierarchy ever let that stop being true.
+        f32 rawError = 0.0f;
+        for (u32 cid : dag.levels[level]) rawError = std::max(rawError, dag.clusters[cid].error);
+        lod.screenErrorThreshold = aver::trifactor::toScreenErrorThreshold(rawError, scale);
+        m.coarserLods.push_back(std::move(lod));
     }
     return true;
 }
@@ -132,7 +191,11 @@ int main(int argc, char** argv) {
     if (!addMeshlets(m, &why)) {
         AVER_WARN("clustering '{}': {} (saving without meshlets)", res.meshNames[0], why);
     } else {
-        AVER_INFO("clustered '{}': {} meshlets", res.meshNames[0], m.meshlets.size());
+        AVER_INFO("clustered '{}': {} LOD(s), {} meshlets at LOD 0", res.meshNames[0], m.lodCount(), m.meshlets.size());
+        for (usize i = 0; i < m.coarserLods.size(); ++i)
+            AVER_INFO("  LOD {}: {} tris, {} meshlets, screenError {:.4f}", i + 1,
+                      m.coarserLods[i].indices.size() / 3, m.coarserLods[i].meshlets.size(),
+                      m.coarserLods[i].screenErrorThreshold);
     }
 #endif
 

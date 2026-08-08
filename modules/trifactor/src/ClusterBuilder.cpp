@@ -342,8 +342,15 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             for (u32 cid : group) appendGlobalTriangles(dag.clusters[cid], mergedIndices);
 
             // Target: halve the group's triangle count, floored to a whole number of triangles, with
-            // a floor of 2 triangles (6 indices) so a target of zero is never asked for.
-            const usize targetIndexCount = std::max<usize>(6, (mergedIndices.size() / 2 / 3) * 3);
+            // a floor of 2 triangles (6 indices) so a target of zero is never asked for -- UNLESS the
+            // merged group itself has fewer than 6 indices (a single locked-border triangle, which
+            // happens on real assets: coastal_cliff_04's LOD hierarchy hits this), in which case that
+            // floor would ask meshopt_simplify for MORE indices than the group has, tripping its
+            // `target_index_count <= index_count` precondition (asserts/aborts in debug). Clamp to
+            // the group's own size: such a group cannot be reduced further, so the honest target is
+            // "leave it alone", not a floor that overshoots what exists.
+            const usize targetIndexCount =
+                std::min(mergedIndices.size(), std::max<usize>(6, (mergedIndices.size() / 2 / 3) * 3));
 
             std::vector<u32> simplified(mergedIndices.size());
             f32 resultError = 0.0f;
@@ -485,6 +492,34 @@ ValidationReport validateLodDag(const fmt::OcMeshData& mesh, const LodDag& dag) 
     }
 
     return report;
+}
+
+f32 worldExtentScale(const fmt::OcMeshData& mesh) {
+    const usize vertexCount = mesh.positions.size() / 3;
+    if (vertexCount == 0) return 0.0f;
+    return meshopt_simplifyScale(mesh.positions.data(), vertexCount, sizeof(f32) * 3);
+}
+
+f32 toScreenErrorThreshold(f32 clusterError, f32 scale) {
+    const f32 absoluteErrorCm = clusterError * scale;
+    return absoluteErrorCm * kReferenceProjScale;
+}
+
+bool validateScreenErrorMonotonic(const LodDag& dag, f32 scale, std::string* why) {
+    for (const Cluster& c : dag.clusters) {
+        const f32 cScreen = toScreenErrorThreshold(c.error, scale);
+        for (u32 parentId : c.parents) {
+            const Cluster& p = dag.clusters[parentId];
+            const f32 pScreen = toScreenErrorThreshold(p.error, scale);
+            if (pScreen + 1e-6f < cScreen) {
+                if (why) *why = "cluster " + std::to_string(c.id) + " (screen error " +
+                                 std::to_string(cScreen) + ") has parent " + std::to_string(parentId) +
+                                 " with smaller screen error " + std::to_string(pScreen);
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {

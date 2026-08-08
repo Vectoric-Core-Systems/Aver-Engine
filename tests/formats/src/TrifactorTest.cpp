@@ -27,6 +27,7 @@
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -124,6 +125,25 @@ static std::vector<fmt::OcMeshMeshlet> toMeshlets(const trifactor::LodDag& dag, 
     return out;
 }
 
+// Converts one LOD level's clusters into a plain GLOBAL-index triangle list -- the level's own index
+// buffer, for OcMeshLod::indices. A cluster's `triangles` are LOCAL indices into its own `vertices`
+// (the on-disk MLET shape); this undoes that. Duplicated from tests/formats/src/ConvertTool.cpp's
+// own toIndices for the same reason toMeshlets above is duplicated: this file has no header of its
+// own to share one from.
+static std::vector<u32> toIndices(const trifactor::LodDag& dag, u32 level) {
+    std::vector<u32> out;
+    if (level >= dag.levels.size()) return out;
+    for (u32 cid : dag.levels[level]) {
+        const trifactor::Cluster& c = dag.clusters[cid];
+        for (usize t = 0; t + 2 < c.triangles.size(); t += 3) {
+            out.push_back(c.vertices[c.triangles[t + 0]]);
+            out.push_back(c.vertices[c.triangles[t + 1]]);
+            out.push_back(c.vertices[c.triangles[t + 2]]);
+        }
+    }
+    return out;
+}
+
 int main() {
     AVER_INFO("=== buildClusters: LOD-0 coverage and per-cluster limits ===");
     {
@@ -214,6 +234,95 @@ int main() {
         std::vector<u8> bytes2;
         check(fmt::writeOcMesh(back, bytes2, &why), "re-writes the reloaded mesh: " + why);
         check(bytes == bytes2, "save -> load -> save produces byte-identical output (" +
+                                    std::to_string(bytes.size()) + " vs " + std::to_string(bytes2.size()) + " bytes)");
+    }
+
+    AVER_INFO("=== persisting the FULL LOD hierarchy through .ocmesh (multi-level MLET) ===");
+    {
+        const fmt::OcMeshData grid = makeGridMesh(24);
+        trifactor::LodDag dag;
+        std::string why;
+        check(trifactor::buildClusters(grid, dag, &why), "buildClusters: " + why);
+        check(trifactor::buildLodHierarchy(grid, dag, &why), "buildLodHierarchy: " + why);
+        check(dag.levelCount() >= 2,
+              "the fixture actually produces more than one LOD level (got " + std::to_string(dag.levelCount()) + ")");
+
+        // ---- geometric error -> ScreenErrorThreshold, and monotonicity re-checked AFTER conversion,
+        // not inferred from the raw error's own (already-checked) invariant ----
+        const f32 scale = trifactor::worldExtentScale(grid);
+        check(scale > 0.0f, "worldExtentScale is positive for a non-degenerate mesh (" + std::to_string(scale) + ")");
+
+        std::string monoWhy;
+        check(trifactor::validateScreenErrorMonotonic(dag, scale, &monoWhy),
+              "ScreenErrorThreshold stays monotonic (non-decreasing child -> parent) after conversion: " + monoWhy);
+
+        // ---- build the on-disk shape: LOD 0 into meshlets (as ever), every coarser level into
+        // coarserLods with its own index buffer and its converted screen error ----
+        fmt::OcMeshData src = grid;
+        src.meshlets = toMeshlets(dag, 0);
+        src.coarserLods.clear();
+        for (u32 level = 1; level < dag.levelCount(); ++level) {
+            fmt::OcMeshLod lod;
+            lod.indices  = toIndices(dag, level);
+            lod.meshlets = toMeshlets(dag, level);
+            f32 rawError = 0.0f;
+            for (u32 cid : dag.levels[level]) rawError = std::max(rawError, dag.clusters[cid].error);
+            lod.screenErrorThreshold = trifactor::toScreenErrorThreshold(rawError, scale);
+            src.coarserLods.push_back(std::move(lod));
+        }
+        check(!src.coarserLods.empty(), "the fixture actually has coarser LODs to persist");
+
+        std::vector<u8> bytes;
+        check(fmt::writeOcMesh(src, bytes, &why), "writes the full hierarchy: " + why);
+
+        fmt::OcMeshData back;
+        check(fmt::parseOcMesh(bytes.data(), bytes.size(), back, &why), "reads it back: " + why);
+        check(back.lodCount() == src.lodCount(),
+              "LOD count survives (" + std::to_string(back.lodCount()) + " vs " + std::to_string(src.lodCount()) + ")");
+        check(back.coarserLods.size() == src.coarserLods.size(), "coarser LOD count survives");
+
+        bool everyLevelExact = back.coarserLods.size() == src.coarserLods.size();
+        bool everyLevelSelfConsistent = true;   // meshlets reconstruct that level's OWN index buffer
+        bool screenErrorNonDecreasing = true;
+        f32 prevError = 0.0f;   // LOD 0's error is 0 by definition
+        for (usize i = 0; i < src.coarserLods.size() && everyLevelExact; ++i) {
+            const fmt::OcMeshLod& a = src.coarserLods[i];
+            const fmt::OcMeshLod& b = back.coarserLods[i];
+            everyLevelExact = everyLevelExact && a.indices == b.indices && a.meshlets.size() == b.meshlets.size();
+            for (usize mi = 0; mi < a.meshlets.size() && everyLevelExact; ++mi)
+                everyLevelExact = everyLevelExact && a.meshlets[mi].vertices == b.meshlets[mi].vertices &&
+                                   a.meshlets[mi].triangles == b.meshlets[mi].triangles;
+
+            // "per-level meshlet ranges are correct and non-overlapping": reconstructing every
+            // meshlet's global triangles at this level must reproduce that level's OWN index buffer
+            // exactly, as a SET (no gaps, no duplicates) -- the same coverage check
+            // validateLodDag uses for LOD 0, applied here to a coarser level's meshlets after a
+            // round trip through the file.
+            std::vector<std::array<u32, 3>> fromMeshlets, fromIndices;
+            for (const fmt::OcMeshMeshlet& ml : b.meshlets)
+                for (usize t = 0; t + 2 < ml.triangles.size(); t += 3)
+                    fromMeshlets.push_back({ml.vertices[ml.triangles[t]], ml.vertices[ml.triangles[t + 1]],
+                                             ml.vertices[ml.triangles[t + 2]]});
+            for (usize t = 0; t + 2 < b.indices.size(); t += 3)
+                fromIndices.push_back({b.indices[t], b.indices[t + 1], b.indices[t + 2]});
+            std::sort(fromMeshlets.begin(), fromMeshlets.end());
+            std::sort(fromIndices.begin(), fromIndices.end());
+            if (fromMeshlets != fromIndices) everyLevelSelfConsistent = false;
+
+            if (b.screenErrorThreshold + 1e-3f < prevError) screenErrorNonDecreasing = false;
+            prevError = std::max(prevError, b.screenErrorThreshold);
+        }
+        check(everyLevelExact, "every coarser level's indices/meshlets survive the round trip exactly");
+        check(everyLevelSelfConsistent,
+              "every coarser level's meshlets reconstruct that level's own triangle list exactly "
+              "(no gaps, no duplicates -- i.e. per-level meshlet ranges are correct and non-overlapping)");
+        check(screenErrorNonDecreasing,
+              "ScreenErrorThreshold is non-decreasing from LOD 0 up through every coarser level, on disk");
+
+        // ---- determinism: save -> load -> save is byte-identical, now for a multi-LOD mesh ----
+        std::vector<u8> bytes2;
+        check(fmt::writeOcMesh(back, bytes2, &why), "re-writes the reloaded multi-LOD mesh: " + why);
+        check(bytes == bytes2, "save -> load -> save produces byte-identical output for a multi-LOD mesh (" +
                                     std::to_string(bytes.size()) + " vs " + std::to_string(bytes2.size()) + " bytes)");
     }
 

@@ -55,6 +55,20 @@ struct OcMeshMeshlet {
     u32 triangleCount() const { return static_cast<u32>(triangles.size() / 3); }
 };
 
+// One coarser LOD level (level >= 1) of a Trifactor DAG, beyond the base LOD 0 that
+// OcMeshData::indices/meshlets always carries. See OcMeshData::coarserLods for the full reasoning on
+// why a coarser level owns its own index buffer but not its own vertex buffer.
+struct OcMeshLod {
+    std::vector<u32> indices;             // this level's own triangle list, global indices into `positions`
+    std::vector<OcMeshMeshlet> meshlets;  // this level's meshlet partition of `indices`
+
+    // FORMAT_SPECS.md 5.5 ScreenErrorThreshold: worldErrorCm * kReferenceProjScale, i.e. the
+    // distance-independent half of screenErrorPx = worldErrorCm * projScale / distanceCm. See
+    // aver::trifactor::toScreenErrorThreshold (modules/trifactor/include/aver/trifactor/
+    // ClusterBuilder.hpp) for the exact formula and the reference viewport/FOV it assumes.
+    f32 screenErrorThreshold = 0.0f;
+};
+
 struct OcMeshData {
     std::vector<f32> positions;      // 3 per vertex
     std::vector<f32> normals;        // 3 per vertex
@@ -71,13 +85,35 @@ struct OcMeshData {
     std::vector<u16> joints;         // bone index into the .ocskel this mesh is bound to
     std::vector<f32> weights;        // normalised; the writer renormalises if they are not
 
-    // Meshlets for LOD 0, present only when kOcMeshMeshlets is set. Optional: this slice writes and
-    // reads only a single LOD (LodDesc[1], as the writer always has), so a Trifactor LOD DAG's
-    // coarser levels are not yet persisted here -- only buildClusters' LOD-0 output is.
+    // Meshlets for LOD 0, present only when kOcMeshMeshlets is set. LOD 0 is always `indices` (above)
+    // + `meshlets` (here); this is unchanged from before coarser levels existed, which is exactly
+    // what keeps a single-LOD mesh's shape -- and its on-disk bytes -- identical to before this
+    // feature existed. Coarser levels, when a Trifactor LOD DAG produced more than one, live in
+    // `coarserLods` below.
     std::vector<OcMeshMeshlet> meshlets;
+
+    // Coarser LOD levels, in ascending coarseness: coarserLods[0] is LOD 1 (one level up from
+    // indices/meshlets above), coarserLods.back() is the coarsest / DAG root level. Empty for a
+    // single-LOD mesh -- every mesh before this feature, and every mesh Trifactor's
+    // buildLodHierarchy could not reduce any further (e.g. a mesh smaller than one cluster) -- and
+    // that emptiness is what keeps such a mesh's LODCount at 1 and its on-disk bytes unaffected by
+    // this feature existing (see writeOcMesh).
+    //
+    // A coarser level is a DIFFERENT triangle list, not a subset of LOD 0's (buildLodHierarchy
+    // simplifies a GROUP of clusters as a unit and re-splits the result), so it carries its own
+    // index buffer here. It does NOT carry its own vertex buffer: every level of a Trifactor DAG is
+    // simplified and re-split against the SAME mesh.positions array (see
+    // modules/trifactor/src/ClusterBuilder.cpp's file-level comment on why that is what keeps a
+    // boundary vertex bit-identical at every LOD), so a coarser level's `indices` and its meshlets'
+    // `vertices` reference the exact same global vertex ids LOD 0 does, and share LOD 0's on-disk
+    // vertex streams (writeOcMesh writes one VTXS block; every LodDesc points at it).
+    std::vector<OcMeshLod> coarserLods;
 
     Vec3 boundsMin{0, 0, 0}, boundsMax{0, 0, 0};
     u32  flags = 0;
+
+    // 1 (just LOD 0) + however many coarser levels are present.
+    u32 lodCount() const { return 1u + static_cast<u32>(coarserLods.size()); }
 
     u32  vertexCount() const { return static_cast<u32>(positions.size() / 3); }
     // True when the skin streams are present and correctly sized for the vertex count.

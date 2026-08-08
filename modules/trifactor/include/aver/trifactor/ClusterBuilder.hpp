@@ -119,6 +119,65 @@ struct ValidationReport {
 //    least one parent
 ValidationReport validateLodDag(const fmt::OcMeshData& mesh, const LodDag& dag);
 
+// ---- geometric error -> FORMAT_SPECS' ScreenErrorThreshold ------------------------------------
+//
+// Cluster::error (above) is deliberately left in meshopt's own relative units. This is the
+// conversion that field's own comment said was deferred: the projection into FORMAT_SPECS.md 5.5's
+// ScreenErrorThreshold (a distance-independent, screen-space-px quantity a runtime LOD selector can
+// compare a threshold against).
+//
+// The runtime formula this assumes -- already shipping for landscape chunks, see
+// modules/landscape/src/LandscapeTree.cpp's `descend()` -- is
+//     screenErrorPx = worldErrorCm * projScale / distanceCm
+//     projScale     = viewportHeightPx / (2 * tan(fovY / 2))
+// i.e. a perspective-projection falloff: a fixed-size defect subtends fewer pixels the farther away
+// it is. `distanceCm` is per-frame, per-camera and NOT known at cook time, so what gets stored on
+// disk is the distance-independent half of that product: `worldErrorCm * projScale`. A runtime under
+// the SAME reference projScale this was computed with can then recover the actual screen error with
+// a single divide (`screenErrorPx = ScreenErrorThreshold / distanceCm`); one under a different
+// viewport/FOV rescales first by `(actualProjScale / kReferenceProjScale)`.
+//
+// REFERENCE CONDITIONS, pinned here because (per the task that added this) "a threshold means
+// nothing without them": 1080 px reference viewport height, 90-degree reference vertical FOV, which
+// gives
+//     kReferenceProjScale = 1080 / (2 * tan(45 deg)) = 1080 / 2 = 540.0f
+// chosen to EQUAL modules/landscape/include/aver/landscape/LandscapeTree.hpp's own
+// `SelectParams::projScale` default (540.0f) on purpose -- this is the one metric already shipping
+// in this engine for the same problem shape (bounding sphere + precomputed error, projected via
+// distance-to-near-surface and projScale), and inventing a second reference here would be exactly
+// the "two LOD metrics in one engine" trap a mesh-cluster LOD selector must not fall into.
+inline constexpr f32 kReferenceViewportHeightPx = 1080.0f;
+inline constexpr f32 kReferenceFovYRadians       = kPi / 2.0f;   // 90 degrees
+inline constexpr f32 kReferenceProjScale         = 540.0f;       // see the derivation above
+
+// meshopt_simplify's `result_error` (what Cluster::error holds) is RELATIVE to the mesh's own
+// bounding-box max-axis extent, not an absolute distance -- see meshoptimizer.h's
+// meshopt_simplifyScale doc and ClusterBuilder.cpp's buildLodHierarchy, which never sets
+// meshopt_SimplifyErrorAbsolute. Every meshopt_simplify call in buildLodHierarchy is against the
+// SAME `mesh.positions`/vertexCount (the whole mesh, never a per-group subset -- see the comment on
+// Cluster::error), so this scaling factor is ONE constant for a whole mesh's DAG, safe to compute
+// once and reuse for every cluster's error.
+f32 worldExtentScale(const fmt::OcMeshData& mesh);
+
+// Converts one Cluster::error value into FORMAT_SPECS' ScreenErrorThreshold units, given `scale`
+// from worldExtentScale(mesh) (the SAME mesh the error was computed against). This is
+//     absoluteErrorCm      = clusterError * scale
+//     screenErrorThreshold = absoluteErrorCm * kReferenceProjScale
+// A single multiply by two positive constants, so it is strictly monotonic in `clusterError`: the
+// DAG's `parent.error >= child.error` invariant (buildLodHierarchy, validateLodDag) therefore
+// survives the conversion automatically. validateScreenErrorMonotonic below re-checks this on the
+// CONVERTED values regardless, per the rule that this must be asserted AFTER conversion, not
+// inferred from the raw values' own invariant.
+f32 toScreenErrorThreshold(f32 clusterError, f32 scale);
+
+// Re-checks error-monotonicity (parent's converted screen error >= every child's, across every DAG
+// edge) AFTER projecting every cluster's Cluster::error through toScreenErrorThreshold. Mirrors
+// validateLodDag's "error-monotonicity" check exactly, but on the value a runtime will actually
+// compare against a pixel budget, not on the raw geometric error -- the two are computed by
+// different code and a future change to the conversion (a non-linear projection, a per-cluster
+// scale, etc.) should not be trusted to preserve monotonicity just because the raw error does.
+bool validateScreenErrorMonotonic(const LodDag& dag, f32 scale, std::string* why = nullptr);
+
 // Reduces `mesh` in place to roughly `ratio` of its triangles (0 < ratio < 1), rewriting positions,
 // normals, UVs and indices. Returns false and leaves the mesh UNTOUCHED if the input is unusable or
 // the simplifier could not reach anywhere near the target.

@@ -143,6 +143,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     if (!in.valid()) return fail(why, ".ocmesh: mesh has no vertices, no indices, or mismatched attribute counts");
     if (in.submeshes.empty()) return fail(why, ".ocmesh: at least one submesh is required");
     if (in.submeshes.size() > 255) return fail(why, ".ocmesh: more than 255 submeshes");
+    if (in.lodCount() > 255) return fail(why, ".ocmesh: more than 255 LODs");
 
     OcMeshData m = in;
     m.computeBounds();
@@ -151,26 +152,58 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     const bool index32 = vcount > 0xFFFF;
     const bool skinned = m.hasSkin();
 
-    // ---- meshlet validation, before any output buffer is built (fail fast, like the checks below) ----
-    for (usize mi = 0; mi < m.meshlets.size(); ++mi) {
-        const OcMeshMeshlet& ml = m.meshlets[mi];
-        if (ml.vertices.size() > kMaxMeshletVertices)
-            return fail(why, ".ocmesh: meshlet " + std::to_string(mi) + " has more than " +
-                                  std::to_string(kMaxMeshletVertices) + " vertices");
-        if (ml.triangles.size() % 3 != 0)
-            return fail(why, ".ocmesh: meshlet " + std::to_string(mi) + "'s triangle list is not a multiple of 3");
-        if (ml.triangleCount() > kMaxMeshletTriangles)
-            return fail(why, ".ocmesh: meshlet " + std::to_string(mi) + " has more than " +
-                                  std::to_string(kMaxMeshletTriangles) + " triangles");
-        for (u32 v : ml.vertices)
-            if (v >= vcount)
-                return fail(why, ".ocmesh: meshlet " + std::to_string(mi) + " references vertex " +
-                                      std::to_string(v) + ", past the mesh's " + std::to_string(vcount) + " vertices");
-        for (u8 t : ml.triangles)
-            if (t >= ml.vertices.size())
-                return fail(why, ".ocmesh: meshlet " + std::to_string(mi) + " has a local triangle index " +
-                                      std::to_string(t) + " past its own " + std::to_string(ml.vertices.size()) +
-                                      " vertices");
+    // ---- per-LOD views: LOD 0 is `indices`/`meshlets` (unchanged from before coarser levels
+    // existed), LOD 1+ are `coarserLods`. Every level shares the SAME vertex buffer (see
+    // OcMeshData::coarserLods), so only indices/meshlets/screenError vary per level below. ----
+    struct LodView {
+        const std::vector<u32>* indices;
+        const std::vector<OcMeshMeshlet>* meshlets;
+        f32 screenError;
+    };
+    std::vector<LodView> lods;
+    lods.reserve(m.lodCount());
+    lods.push_back({&m.indices, &m.meshlets, 0.0f});   // LOD 0 has no measured error by definition
+    for (const OcMeshLod& cl : m.coarserLods) lods.push_back({&cl.indices, &cl.meshlets, cl.screenErrorThreshold});
+
+    // ---- per-level validation, before any output buffer is built (fail fast, like the checks
+    // below): meshlet limits/ranges over every level's meshlets, and index range/multiple-of-3 over
+    // every level's OWN triangle list (LOD 0's is covered by in.valid() already, but a coarser
+    // level's is not, and a bad one here would walk the MLET/IDXS writers off the end of `positions`
+    // just as surely as a bad LOD-0 index would). ----
+    for (usize L = 0; L < lods.size(); ++L) {
+        const std::vector<u32>& idx = *lods[L].indices;
+        if (L > 0) {
+            if (idx.empty()) return fail(why, ".ocmesh: LOD " + std::to_string(L) + " has no indices");
+            if (idx.size() % 3 != 0)
+                return fail(why, ".ocmesh: LOD " + std::to_string(L) + "'s index count is not a multiple of 3");
+            for (u32 v : idx)
+                if (v >= vcount)
+                    return fail(why, ".ocmesh: LOD " + std::to_string(L) + " references vertex " +
+                                          std::to_string(v) + ", past the mesh's " + std::to_string(vcount) + " vertices");
+        }
+        const std::vector<OcMeshMeshlet>& mls = *lods[L].meshlets;
+        for (usize mi = 0; mi < mls.size(); ++mi) {
+            const OcMeshMeshlet& ml = mls[mi];
+            if (ml.vertices.size() > kMaxMeshletVertices)
+                return fail(why, ".ocmesh: LOD " + std::to_string(L) + " meshlet " + std::to_string(mi) +
+                                      " has more than " + std::to_string(kMaxMeshletVertices) + " vertices");
+            if (ml.triangles.size() % 3 != 0)
+                return fail(why, ".ocmesh: LOD " + std::to_string(L) + " meshlet " + std::to_string(mi) +
+                                      "'s triangle list is not a multiple of 3");
+            if (ml.triangleCount() > kMaxMeshletTriangles)
+                return fail(why, ".ocmesh: LOD " + std::to_string(L) + " meshlet " + std::to_string(mi) +
+                                      " has more than " + std::to_string(kMaxMeshletTriangles) + " triangles");
+            for (u32 v : ml.vertices)
+                if (v >= vcount)
+                    return fail(why, ".ocmesh: LOD " + std::to_string(L) + " meshlet " + std::to_string(mi) +
+                                          " references vertex " + std::to_string(v) + ", past the mesh's " +
+                                          std::to_string(vcount) + " vertices");
+            for (u8 t : ml.triangles)
+                if (t >= ml.vertices.size())
+                    return fail(why, ".ocmesh: LOD " + std::to_string(L) + " meshlet " + std::to_string(mi) +
+                                          " has a local triangle index " + std::to_string(t) + " past its own " +
+                                          std::to_string(ml.vertices.size()) + " vertices");
+        }
     }
 
     AvrStringTable strt;
@@ -228,12 +261,23 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         }
     }
 
-    // ---- IDXS ----
+    // ---- IDXS: one block per LOD, back to back. A coarser LOD is a DIFFERENT triangle list (not a
+    // subset of LOD 0's -- buildLodHierarchy re-splits a simplified GROUP into new clusters), so it
+    // needs its own slice of IDXS; LodDesc[L].IdxOffset/IdxSize below records where each one landed.
+    // For a single-LOD mesh (lods.size() == 1, every mesh before this feature) this reduces to
+    // exactly the single write + one pad16() the format always had -- IdxOffset 0, IdxSize
+    // idxs.size() -- so a meshlet-free or LOD-0-only mesh's bytes here are unchanged. ----
     std::vector<u8> idxs;
+    struct IdxPlacement { u64 offset = 0, size = 0; };
+    std::vector<IdxPlacement> idxPlacement(lods.size());
     {
         W w{idxs};
-        for (const u32 idx : m.indices) { if (index32) w.u32v(idx); else w.u16v(static_cast<u16>(idx)); }
-        w.pad16();
+        for (usize L = 0; L < lods.size(); ++L) {
+            const u64 start = idxs.size();
+            for (const u32 idx : *lods[L].indices) { if (index32) w.u32v(idx); else w.u16v(static_cast<u16>(idx)); }
+            w.pad16();
+            idxPlacement[L] = {start, static_cast<u64>(idxs.size()) - start};
+        }
     }
 
     // ---- MADR: slot index -> surface name ----
@@ -244,53 +288,71 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         for (const std::string& s : m.materialSlots) w.u32v(strt.add(s));
     }
 
-    // ---- MLET: meshlets (§5.7), four back-to-back sub-arrays, only when meshlets are present ----
+    // ---- MLET: meshlets (§5.7), four back-to-back sub-arrays PER LOD, only when at least one level
+    // has meshlets. Each level's four sub-arrays are self-contained -- MeshletDesc's
+    // VertexIndexOffset/TriangleOffset are relative to THAT LEVEL's own sub-array 3/4, restarting at
+    // 0 for every level -- matching §5.7's "offsets from the LOD's MeshletOffset". For a single-LOD
+    // mesh this is exactly the one block the format always wrote. ----
+    const bool anyMeshlets = [&] {
+        for (const LodView& l : lods) if (!l.meshlets->empty()) return true;
+        return false;
+    }();
     std::vector<u8> mlet;
-    if (!m.meshlets.empty()) {
-        // VertexIndexOffset (elements, into sub-array 3) and TriangleOffset (bytes, into sub-array 4,
-        // each meshlet's triangle block padded to 4 B) are computed here, in writer order -- nothing
-        // in OcMeshMeshlet stores them, because they are a function of where a meshlet lands among
-        // its siblings, not a property of the meshlet itself.
-        struct Placement { u32 vertexIndexOffset; u32 triangleOffset; };
-        std::vector<Placement> placement(m.meshlets.size());
-        u32 vtxCursor = 0, triCursor = 0;
-        for (usize i = 0; i < m.meshlets.size(); ++i) {
-            const OcMeshMeshlet& ml = m.meshlets[i];
-            placement[i].vertexIndexOffset = vtxCursor;
-            placement[i].triangleOffset    = triCursor;
-            vtxCursor += static_cast<u32>(ml.vertices.size());
-            triCursor += (static_cast<u32>(ml.triangles.size()) + 3u) & ~3u;
-        }
+    std::vector<u64> meshletOffsetPerLod(lods.size(), 0);
+    std::vector<u32> meshletCountPerLod(lods.size(), 0);
+    if (anyMeshlets) {
+        for (usize L = 0; L < lods.size(); ++L) {
+            const std::vector<OcMeshMeshlet>& mls = *lods[L].meshlets;
+            meshletOffsetPerLod[L] = mlet.size();
+            meshletCountPerLod[L]  = static_cast<u32>(mls.size());
+            if (mls.empty()) continue;   // offset recorded, but nothing to write for this level
 
-        W w{mlet};
-        // Sub-array 1: MeshletDesc[] (12 B each).
-        for (usize i = 0; i < m.meshlets.size(); ++i) {
-            const OcMeshMeshlet& ml = m.meshlets[i];
-            w.u32v(placement[i].vertexIndexOffset);
-            w.u32v(placement[i].triangleOffset);
-            w.u8v(static_cast<u8>(ml.vertices.size()));
-            w.u8v(static_cast<u8>(ml.triangleCount()));
-            w.u16v(0);   // Pad
-        }
-        // Sub-array 2: MeshletBounds[] (32 B each).
-        for (const OcMeshMeshlet& ml : m.meshlets) {
-            w.f32v(ml.sphereCenter.x); w.f32v(ml.sphereCenter.y); w.f32v(ml.sphereCenter.z);
-            w.f32v(ml.sphereRadius);
-            w.f32v(ml.coneApex.x); w.f32v(ml.coneApex.y); w.f32v(ml.coneApex.z);
-            w.u8v(static_cast<u8>(ml.coneAxis[0])); w.u8v(static_cast<u8>(ml.coneAxis[1]));
-            w.u8v(static_cast<u8>(ml.coneAxis[2])); w.u8v(static_cast<u8>(ml.coneCutoff));
-        }
-        // Sub-array 3: MeshletVertices[] (u32 each), all meshlets' vertex lists back to back.
-        for (const OcMeshMeshlet& ml : m.meshlets)
-            for (u32 v : ml.vertices) w.u32v(v);
-        // Sub-array 4: MeshletTriangles[] (u8, 3 per triangle), each meshlet's block zero-padded to
-        // a 4 B boundary -- must match the `triCursor` padding computed above exactly, or every
-        // TriangleOffset after the first meshlet whose triangle count isn't a multiple of 4 bytes
-        // would point at the wrong meshlet's data.
-        const usize triSectionStart = mlet.size();
-        for (const OcMeshMeshlet& ml : m.meshlets) {
-            for (u8 t : ml.triangles) w.u8v(t);
-            while ((mlet.size() - triSectionStart) % 4 != 0) w.u8v(0);
+            // VertexIndexOffset (elements, into sub-array 3) and TriangleOffset (bytes, into
+            // sub-array 4, each meshlet's triangle block padded to 4 B) are computed here, in writer
+            // order -- nothing in OcMeshMeshlet stores them, because they are a function of where a
+            // meshlet lands among its siblings, not a property of the meshlet itself.
+            struct Placement { u32 vertexIndexOffset; u32 triangleOffset; };
+            std::vector<Placement> placement(mls.size());
+            u32 vtxCursor = 0, triCursor = 0;
+            for (usize i = 0; i < mls.size(); ++i) {
+                const OcMeshMeshlet& ml = mls[i];
+                placement[i].vertexIndexOffset = vtxCursor;
+                placement[i].triangleOffset    = triCursor;
+                vtxCursor += static_cast<u32>(ml.vertices.size());
+                triCursor += (static_cast<u32>(ml.triangles.size()) + 3u) & ~3u;
+            }
+
+            W w{mlet};
+            // Sub-array 1: MeshletDesc[] (12 B each).
+            for (usize i = 0; i < mls.size(); ++i) {
+                const OcMeshMeshlet& ml = mls[i];
+                w.u32v(placement[i].vertexIndexOffset);
+                w.u32v(placement[i].triangleOffset);
+                w.u8v(static_cast<u8>(ml.vertices.size()));
+                w.u8v(static_cast<u8>(ml.triangleCount()));
+                w.u16v(0);   // Pad
+            }
+            // Sub-array 2: MeshletBounds[] (32 B each).
+            for (const OcMeshMeshlet& ml : mls) {
+                w.f32v(ml.sphereCenter.x); w.f32v(ml.sphereCenter.y); w.f32v(ml.sphereCenter.z);
+                w.f32v(ml.sphereRadius);
+                w.f32v(ml.coneApex.x); w.f32v(ml.coneApex.y); w.f32v(ml.coneApex.z);
+                w.u8v(static_cast<u8>(ml.coneAxis[0])); w.u8v(static_cast<u8>(ml.coneAxis[1]));
+                w.u8v(static_cast<u8>(ml.coneAxis[2])); w.u8v(static_cast<u8>(ml.coneCutoff));
+            }
+            // Sub-array 3: MeshletVertices[] (u32 each), all this level's meshlets' vertex lists back
+            // to back.
+            for (const OcMeshMeshlet& ml : mls)
+                for (u32 v : ml.vertices) w.u32v(v);
+            // Sub-array 4: MeshletTriangles[] (u8, 3 per triangle), each meshlet's block zero-padded
+            // to a 4 B boundary -- must match the `triCursor` padding computed above exactly, or
+            // every TriangleOffset after the first meshlet whose triangle count isn't a multiple of
+            // 4 bytes would point at the wrong meshlet's data.
+            const usize triSectionStart = mlet.size();
+            for (const OcMeshMeshlet& ml : mls) {
+                for (u8 t : ml.triangles) w.u8v(t);
+                while ((mlet.size() - triSectionStart) % 4 != 0) w.u8v(0);
+            }
         }
     }
 
@@ -301,9 +363,9 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         u32 flags = m.flags & ~(kOcMeshIndex32 | kOcMeshMeshlets | kOcMeshHasColor | kOcMeshHasUV1 | kOcMeshHasSkin);
         if (index32) flags |= kOcMeshIndex32;
         if (skinned) flags |= kOcMeshHasSkin;
-        if (!m.meshlets.empty()) flags |= kOcMeshMeshlets;
+        if (anyMeshlets) flags |= kOcMeshMeshlets;
         w.u32v(flags);
-        w.u8v(1);                                             // LODCount
+        w.u8v(static_cast<u8>(lods.size()));                  // LODCount
         w.u8v(static_cast<u8>(m.submeshes.size()));            // SubmeshCount
         w.u8v(skinned ? 4 : 2);                               // StreamCount: +JOINTS +WEIGHTS
         w.u8v(1);                                             // UVChannelCount
@@ -329,22 +391,25 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
             w.u16v(kSkinStride); w.u16v(kSkinWeightOffset);
         }
 
-        // LodDesc[1] (§5.5)
+        // LodDesc[LODCount] (§5.5). VertexCount/VtxOffset/VtxSize are the SAME for every level --
+        // every level of a Trifactor DAG shares LOD 0's vertex buffer (see OcMeshData::coarserLods)
+        // -- so only IdxOffset/IdxSize/MeshletOffset/MeshletCount/ScreenErrorThreshold vary per LOD.
+        // For a single-LOD mesh (lods.size() == 1) this writes exactly the bytes the format always
+        // wrote: IdxOffset 0, MeshletOffset 0 when empty, ScreenErrorThreshold 0.0f.
         const u64 posBytes  = u64(vcount) * 12;
         const u64 posPadded = (posBytes + 15) & ~u64(15);
-        w.u32v(vcount);
-        w.u32v(static_cast<u32>(m.indices.size()));
-        w.u64v(0);                                   // VtxOffset
-        w.u64v(static_cast<u64>(vtxs.size()));       // VtxSize
-        w.u64v(0);                                   // IdxOffset
-        w.u64v(static_cast<u64>(idxs.size()));       // IdxSize
-        // MeshletOffset is chunk-relative (into MLET), and this writer only ever emits one LOD's
-        // worth of meshlets starting at the front of the chunk -- so 0 whether or not meshlets are
-        // present, matching the pre-existing "none" value exactly when m.meshlets is empty.
-        w.u64v(0);                                   // MeshletOffset
-        w.u32v(static_cast<u32>(m.meshlets.size())); // MeshletCount
-        w.f32v(0.0f);                                // ScreenErrorThreshold (single LOD)
         (void)posPadded;
+        for (usize L = 0; L < lods.size(); ++L) {
+            w.u32v(vcount);
+            w.u32v(static_cast<u32>(lods[L].indices->size()));
+            w.u64v(0);                              // VtxOffset -- shared vertex block, every LOD
+            w.u64v(static_cast<u64>(vtxs.size()));  // VtxSize
+            w.u64v(idxPlacement[L].offset);          // IdxOffset (chunk-relative, into IDXS)
+            w.u64v(idxPlacement[L].size);            // IdxSize
+            w.u64v(meshletOffsetPerLod[L]);          // MeshletOffset (chunk-relative, into MLET)
+            w.u32v(meshletCountPerLod[L]);           // MeshletCount
+            w.f32v(lods[L].screenError);             // ScreenErrorThreshold
+        }
 
         // SubmeshDesc[] (§5.6)
         for (usize i = 0; i < m.submeshes.size(); ++i) {
@@ -352,15 +417,22 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
             w.u32v(nameRefs[i]);
             w.u32v(0);                               // Flags
         }
-        // SubmeshRange[LOD*Submesh] (§5.6)
+        // SubmeshRange (§5.6). Spec-literal layout is [LODCount*SubmeshCount], one 40 B block per
+        // (LOD, submesh) pair -- but this writer emits exactly SubmeshCount blocks, describing LOD
+        // 0's partition ONLY, regardless of LODCount. Deliberate, for the same reason
+        // MeshletStart/MeshletCount stay 0,0 below: buildLodHierarchy (Aver.Trifactor) simplifies the
+        // mesh's WHOLE merged index buffer as one unit per group, with no regard to submesh/material
+        // boundaries, so there is no honest per-submesh [start,count) range to report for LOD >= 1 --
+        // fabricating one (e.g. by copying LOD 0's ranges, or scaling them) would be worse than
+        // omitting it. Fixing this needs submesh-aware clustering upstream in Trifactor, out of this
+        // slice's scope. The reader below reads exactly SubmeshCount entries to match, so this is
+        // self-consistent rather than a spec violation waiting to desync a reader -- see parseOcMesh.
         //
-        // MeshletStart/MeshletCount stay 0,0 here EVEN WHEN m.meshlets is non-empty. That is a known
-        // gap, not an oversight: buildClusters (Aver.Trifactor) partitions the mesh's WHOLE merged
-        // index buffer into meshlets without regard to submesh/material boundaries, so a meshlet can
-        // straddle two submeshes and there is no per-submesh [start,count) range to report honestly.
-        // Fixing this needs submesh-aware clustering upstream in Trifactor, which is out of this
-        // slice's scope -- see the task's slice boundary. A renderer that wants "meshlets for
-        // submesh N" cannot yet get that from this file; it can only draw the whole meshlet set.
+        // MeshletStart/MeshletCount stay 0,0 here EVEN WHEN m.meshlets is non-empty, for the same
+        // "no honest per-submesh range" reason: buildClusters (Aver.Trifactor) partitions the mesh's
+        // WHOLE merged index buffer into meshlets without regard to submesh/material boundaries, so a
+        // meshlet can straddle two submeshes. A renderer that wants "meshlets for submesh N" cannot
+        // yet get that from this file; it can only draw a whole LOD's meshlet set.
         for (const OcMeshSubmesh& s : m.submeshes) {
             w.u32v(s.indexStart); w.u32v(s.indexCount);
             w.u32v(s.baseVertex); w.u32v(s.vertexCount);
@@ -383,7 +455,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     // this feature existing at all, and is the backward-compat contract §3.2's "unknown chunks
     // skipped" is built to support (never marked kAvrChunkRequired, so an old reader that doesn't
     // look for MLET is unaffected by its presence in a NEW file either).
-    if (!m.meshlets.empty()) f.add(kChunkMLET, std::move(mlet), kAvrChunkGpuUploadable);
+    if (anyMeshlets) f.add(kChunkMLET, std::move(mlet), kAvrChunkGpuUploadable);
     return writeAvr1(f, out, why);
 }
 
@@ -453,18 +525,35 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
     if (!r.ok) return fail(why, ".ocmesh: truncated stream table");
     if (!sawPosition || !sawAttrs) return fail(why, ".ocmesh: missing the position or tangent-frame stream");
 
-    // LodDesc[0] only; later LODs are read past rather than parsed.
-    const u32 vcount = r.u32v();
-    const u32 icount = r.u32v();
-    r.u64v(); r.u64v(); r.u64v(); r.u64v();      // VtxOffset, VtxSize, IdxOffset, IdxSize
-    const u64 meshletOffset = r.u64v();
-    const u32 meshletCount  = r.u32v();
-    r.f32v();                                    // ScreenErrorThreshold
+    // LodDesc[LODCount] (§5.5). Every level is parsed now, not skipped past: LOD 0 populates
+    // out.indices/out.meshlets exactly as it always has, LOD 1+ populate out.coarserLods (below,
+    // after the vertex/skin streams that only need LOD 0's VertexCount). VtxOffset/VtxSize are read
+    // but not kept per level -- every LOD shares LOD 0's vertex buffer (see
+    // OcMeshData::coarserLods), so `vcount` from LOD 0 alone sizes the position/attribute/skin
+    // decode below, exactly as before this feature existed.
+    struct LodDescIn {
+        u32 vcount = 0, icount = 0;
+        u64 idxOffset = 0, idxSize = 0;
+        u64 meshletOffset = 0;
+        u32 meshletCount = 0;
+        f32 screenError = 0.0f;
+    };
+    std::vector<LodDescIn> lodDescs(lodCount);
+    for (u8 i = 0; i < lodCount; ++i) {
+        LodDescIn& d = lodDescs[i];
+        d.vcount = r.u32v();
+        d.icount = r.u32v();
+        r.u64v(); r.u64v();          // VtxOffset, VtxSize (shared across every LOD; not kept)
+        d.idxOffset = r.u64v();
+        d.idxSize   = r.u64v();
+        d.meshletOffset = r.u64v();
+        d.meshletCount  = r.u32v();
+        d.screenError   = r.f32v();
+    }
     if (!r.ok) return fail(why, ".ocmesh: truncated LOD table");
+    const u32 vcount = lodDescs[0].vcount;
+    const u32 icount = lodDescs[0].icount;
     if (vcount == 0 || icount == 0) return fail(why, ".ocmesh: LOD 0 is empty");
-
-    // Skip any further LodDescs so the submesh tables land at the right place.
-    for (u8 i = 1; i < lodCount; ++i) { for (int k = 0; k < 14; ++k) r.u32v(); }
 
     out.submeshes.clear();
     out.submeshes.resize(submeshCount);
@@ -543,38 +632,53 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
         }
     }
 
-    // ---- indices ----
+    // ---- indices, per LOD. `decodeIndices` is shared by LOD 0 (into out.indices, exactly as
+    // before) and every coarser level (into coarserLods[i-1].indices, below) ----
     const bool index32 = (out.flags & kOcMeshIndex32) != 0;
     const usize istride = index32 ? 4u : 2u;
-    if (u64(icount) * istride > idxs->data.size())
-        return fail(why, ".ocmesh: IDXS is smaller than the LOD's index count requires");
-    out.indices.resize(icount);
-    for (u32 i = 0; i < icount; ++i) {
-        if (index32) { u32 v; std::memcpy(&v, idxs->data.data() + usize(i) * 4, 4); out.indices[i] = v; }
-        else         { u16 v; std::memcpy(&v, idxs->data.data() + usize(i) * 2, 2); out.indices[i] = v; }
-        if (out.indices[i] >= vcount)
-            return fail(why, ".ocmesh: index " + std::to_string(out.indices[i]) + " is past the vertex count");
-    }
+    auto decodeIndices = [&](const LodDescIn& d, std::vector<u32>& dst, u32 level) -> bool {
+        if (d.idxOffset > idxs->data.size() || u64(d.icount) * istride > idxs->data.size() - d.idxOffset)
+            return fail(why, ".ocmesh: IDXS is smaller than LOD " + std::to_string(level) + "'s index count requires");
+        dst.resize(d.icount);
+        const u8* base = idxs->data.data() + d.idxOffset;
+        for (u32 i = 0; i < d.icount; ++i) {
+            if (index32) { u32 v; std::memcpy(&v, base + usize(i) * 4, 4); dst[i] = v; }
+            else         { u16 v; std::memcpy(&v, base + usize(i) * 2, 2); dst[i] = v; }
+            if (dst[i] >= vcount)
+                return fail(why, ".ocmesh: LOD " + std::to_string(level) + " index " + std::to_string(dst[i]) +
+                                      " is past the vertex count");
+        }
+        return true;
+    };
+    if (!decodeIndices(lodDescs[0], out.indices, 0)) return false;
 
-    // ---- meshlets, when the file carries them (§5.7) ----
+    // ---- meshlets, per LOD, when the file carries them (§5.7). `decodeMeshlets` is shared by LOD 0
+    // (into out.meshlets, exactly as before) and every coarser level (below).
     //
     // Gated on kOcMeshMeshlets AND MeshletCount > 0, not on the chunk's mere presence: a file with
     // the flag clear but a stray MLET chunk (hand-edited, or written by a future tool this reader
-    // does not know about) should NOT populate out.meshlets, exactly as an old file with no MLET
-    // chunk at all does not. This is also what keeps a plain flags-only round trip byte-identical --
-    // see writeOcMesh, which never emits MLET unless m.meshlets is non-empty.
-    out.meshlets.clear();
-    if ((out.flags & kOcMeshMeshlets) != 0 && meshletCount > 0) {
+    // does not know about) should NOT populate any level's meshlets, exactly as an old file with no
+    // MLET chunk at all does not. This is also what keeps a plain flags-only round trip
+    // byte-identical -- see writeOcMesh, which never emits MLET unless some level's meshlets are
+    // non-empty. ----
+    auto decodeMeshlets = [&](const LodDescIn& d, std::vector<OcMeshMeshlet>& dst, u32 level) -> bool {
+        dst.clear();
+        if ((out.flags & kOcMeshMeshlets) == 0 || d.meshletCount == 0) return true;
+
         const AvrChunk* mlet = f.find(kChunkMLET);
         if (!mlet) return fail(why, ".ocmesh: MeshletCount is nonzero but there is no MLET chunk");
         const u8* base = mlet->data.data();
         const u64 chunkSize = mlet->data.size();
-        if (meshletOffset > chunkSize) return fail(why, ".ocmesh: MeshletOffset is past the end of MLET");
+        const u64 meshletOffset = d.meshletOffset;
+        const u32 meshletCount = d.meshletCount;
+        if (meshletOffset > chunkSize)
+            return fail(why, ".ocmesh: LOD " + std::to_string(level) + "'s MeshletOffset is past the end of MLET");
 
         const u64 descBytes = u64(meshletCount) * 12;
         const u64 boundsBytes = u64(meshletCount) * 32;
         if (descBytes > chunkSize - meshletOffset || boundsBytes > chunkSize - meshletOffset - descBytes)
-            return fail(why, ".ocmesh: MLET is smaller than MeshletDesc[]/MeshletBounds[] require");
+            return fail(why, ".ocmesh: MLET is smaller than LOD " + std::to_string(level) +
+                                  "'s MeshletDesc[]/MeshletBounds[] require");
 
         // ---- sub-array 1: MeshletDesc[] ----
         struct DescIn { u32 vtxOff = 0, triOff = 0; u8 vtxCount = 0, triCount = 0; };
@@ -588,24 +692,24 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
                 descs[i].triCount = dr.u8v();
                 dr.u16v();   // Pad
             }
-            if (!dr.ok) return fail(why, ".ocmesh: truncated MeshletDesc[]");
+            if (!dr.ok) return fail(why, ".ocmesh: truncated MeshletDesc[] for LOD " + std::to_string(level));
         }
         for (u32 i = 0; i < meshletCount; ++i) {
             if (descs[i].vtxCount > kMaxMeshletVertices)
-                return fail(why, ".ocmesh: meshlet " + std::to_string(i) + " declares more than " +
-                                      std::to_string(kMaxMeshletVertices) + " vertices");
+                return fail(why, ".ocmesh: LOD " + std::to_string(level) + " meshlet " + std::to_string(i) +
+                                      " declares more than " + std::to_string(kMaxMeshletVertices) + " vertices");
             if (descs[i].triCount > kMaxMeshletTriangles)
-                return fail(why, ".ocmesh: meshlet " + std::to_string(i) + " declares more than " +
-                                      std::to_string(kMaxMeshletTriangles) + " triangles");
+                return fail(why, ".ocmesh: LOD " + std::to_string(level) + " meshlet " + std::to_string(i) +
+                                      " declares more than " + std::to_string(kMaxMeshletTriangles) + " triangles");
         }
 
         // ---- sub-array 2: MeshletBounds[] ----
         const u64 boundsStart = meshletOffset + descBytes;
-        out.meshlets.resize(meshletCount);
+        dst.resize(meshletCount);
         {
             R br{base + boundsStart, base + boundsStart + boundsBytes};
             for (u32 i = 0; i < meshletCount; ++i) {
-                OcMeshMeshlet& ml = out.meshlets[i];
+                OcMeshMeshlet& ml = dst[i];
                 ml.sphereCenter = Vec3{br.f32v(), br.f32v(), br.f32v()};
                 ml.sphereRadius = br.f32v();
                 ml.coneApex     = Vec3{br.f32v(), br.f32v(), br.f32v()};
@@ -614,54 +718,80 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
                 ml.coneAxis[2]  = static_cast<i8>(br.u8v());
                 ml.coneCutoff   = static_cast<i8>(br.u8v());
             }
-            if (!br.ok) return fail(why, ".ocmesh: truncated MeshletBounds[]");
+            if (!br.ok) return fail(why, ".ocmesh: truncated MeshletBounds[] for LOD " + std::to_string(level));
         }
 
-        // ---- sub-arrays 3/4 start where 1/2 end. Nothing in the header names these two offsets
-        // directly (see FORMAT_SPECS.md 5.7: "four back-to-back sub-arrays"), so sub-array 3's start
-        // is computed here, and sub-array 4's start is computed from the TOTAL vertex count just
-        // read out of every MeshletDesc -- both are then re-validated against each meshlet's own
-        // VertexIndexOffset/TriangleOffset below, so a corrupt Desc cannot walk this reader off the
-        // end of the chunk. ----
+        // ---- sub-arrays 3/4 start where 1/2 end, WITHIN THIS LEVEL'S OWN BLOCK. Nothing in the
+        // header names these two offsets directly (see FORMAT_SPECS.md 5.7: "four back-to-back
+        // sub-arrays"), so sub-array 3's start is computed here, and sub-array 4's start/size from
+        // the TOTAL vertex/triangle bytes just read out of every MeshletDesc -- both are then
+        // re-validated against each meshlet's own VertexIndexOffset/TriangleOffset below, so a
+        // corrupt Desc cannot walk this reader off the end of the chunk. Bounding TriangleOffset to
+        // THIS LEVEL's own byte count (not whatever remains in the whole MLET chunk) matters once
+        // more than one LOD's block shares one chunk: without it, a corrupt offset could silently
+        // read a NEIGHBOURING level's bytes instead of failing. ----
         u64 totalVerts = 0;
-        for (const DescIn& d : descs) totalVerts += d.vtxCount;
+        for (const DescIn& d2 : descs) totalVerts += d2.vtxCount;
         const u64 vertsStart = boundsStart + boundsBytes;
         const u64 vertsBytes = totalVerts * 4;
         if (vertsBytes > chunkSize - vertsStart)
-            return fail(why, ".ocmesh: MLET is smaller than MeshletVertices[] requires");
+            return fail(why, ".ocmesh: MLET is smaller than LOD " + std::to_string(level) + "'s MeshletVertices[] requires");
         const u64 trisStart = vertsStart + vertsBytes;
-        const u64 trisBytesAvailable = chunkSize - trisStart;
+
+        u64 trisBytesForLevel = 0;
+        for (const DescIn& d2 : descs) trisBytesForLevel += (u64(d2.triCount) * 3 + 3) & ~u64(3);
+        if (trisBytesForLevel > chunkSize - trisStart)
+            return fail(why, ".ocmesh: MLET is smaller than LOD " + std::to_string(level) + "'s MeshletTriangles[] requires");
 
         for (u32 i = 0; i < meshletCount; ++i) {
-            OcMeshMeshlet& ml = out.meshlets[i];
-            const DescIn& d = descs[i];
+            OcMeshMeshlet& ml = dst[i];
+            const DescIn& d2 = descs[i];
 
-            const u64 vOff = u64(d.vtxOff) * 4;
-            if (vOff + u64(d.vtxCount) * 4 > vertsBytes)
-                return fail(why, ".ocmesh: meshlet " + std::to_string(i) + "'s VertexIndexOffset is out of range");
-            ml.vertices.resize(d.vtxCount);
-            for (u32 k = 0; k < d.vtxCount; ++k) {
+            const u64 vOff = u64(d2.vtxOff) * 4;
+            if (vOff + u64(d2.vtxCount) * 4 > vertsBytes)
+                return fail(why, ".ocmesh: LOD " + std::to_string(level) + " meshlet " + std::to_string(i) +
+                                      "'s VertexIndexOffset is out of range");
+            ml.vertices.resize(d2.vtxCount);
+            for (u32 k = 0; k < d2.vtxCount; ++k) {
                 u32 v; std::memcpy(&v, base + vertsStart + vOff + u64(k) * 4, 4);
                 if (v >= vcount)
-                    return fail(why, ".ocmesh: meshlet " + std::to_string(i) + " references vertex " +
-                                          std::to_string(v) + ", past the mesh's " + std::to_string(vcount) +
-                                          " vertices");
+                    return fail(why, ".ocmesh: LOD " + std::to_string(level) + " meshlet " + std::to_string(i) +
+                                          " references vertex " + std::to_string(v) + ", past the mesh's " +
+                                          std::to_string(vcount) + " vertices");
                 ml.vertices[k] = v;
             }
 
-            const u64 triByteCount = u64(d.triCount) * 3;
-            const u64 tOff = u64(d.triOff);
-            if (tOff + triByteCount > trisBytesAvailable)
-                return fail(why, ".ocmesh: meshlet " + std::to_string(i) + "'s TriangleOffset is out of range");
+            const u64 triByteCount = u64(d2.triCount) * 3;
+            const u64 tOff = u64(d2.triOff);
+            if (tOff + triByteCount > trisBytesForLevel)
+                return fail(why, ".ocmesh: LOD " + std::to_string(level) + " meshlet " + std::to_string(i) +
+                                      "'s TriangleOffset is out of range");
             ml.triangles.resize(triByteCount);
             for (u64 k = 0; k < triByteCount; ++k) {
                 const u8 local = base[trisStart + tOff + k];
-                if (local >= d.vtxCount)
-                    return fail(why, ".ocmesh: meshlet " + std::to_string(i) +
+                if (local >= d2.vtxCount)
+                    return fail(why, ".ocmesh: LOD " + std::to_string(level) + " meshlet " + std::to_string(i) +
                                           " has a local triangle index past its own vertex list");
                 ml.triangles[k] = local;
             }
         }
+        return true;
+    };
+    if (!decodeMeshlets(lodDescs[0], out.meshlets, 0)) return false;
+
+    // ---- coarser LODs (level >= 1): each gets its own index buffer (decodeIndices) and its own
+    // meshlet partition of it (decodeMeshlets), sharing LOD 0's vertex buffer throughout. Empty for
+    // a single-LOD file (lodCount == 1) -- the loop below then does not run at all, which combined
+    // with everything above is what makes an old .ocmesh load completely unchanged. ----
+    out.coarserLods.clear();
+    out.coarserLods.resize(lodCount > 0 ? usize(lodCount) - 1 : 0);
+    for (u8 i = 1; i < lodCount; ++i) {
+        OcMeshLod& cl = out.coarserLods[usize(i) - 1];
+        cl.screenErrorThreshold = lodDescs[i].screenError;
+        if (lodDescs[i].icount == 0)
+            return fail(why, ".ocmesh: LOD " + std::to_string(i) + " has no indices");
+        if (!decodeIndices(lodDescs[i], cl.indices, i)) return false;
+        if (!decodeMeshlets(lodDescs[i], cl.meshlets, i)) return false;
     }
 
     // ---- material slots ----
