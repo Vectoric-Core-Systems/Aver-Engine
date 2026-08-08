@@ -48,8 +48,13 @@ void ChunkWorld::rebuildOwned() {
 
 StreamStats ChunkWorld::update(scene::World& w, const Vec3& viewerPosCm, const Vec3& viewerVelCmPerSec,
                                f32 dt, std::vector<i32>* freedBodies) {
+    return update(w, std::vector<StreamSource>{StreamSource{viewerPosCm, viewerVelCmPerSec}}, dt, freedBodies);
+}
+
+StreamStats ChunkWorld::update(scene::World& w, const std::vector<StreamSource>& sources,
+                               f32 dt, std::vector<i32>* freedBodies) {
     (void)dt;   // see the header comment: the streamer's own prediction runs on leadSeconds, not dt.
-    streamer_.setSources({StreamSource{viewerPosCm, viewerVelCmPerSec}});
+    streamer_.setSources(sources);
     const StreamStats stats = streamer_.update(w, bodies_, freedBodies);
     // ChunkStreamer::update only QUEUES destroys (scene::World::destroy defers to the next flush --
     // World.hpp:27-28); every test and caller of the streamer itself flushes immediately after update

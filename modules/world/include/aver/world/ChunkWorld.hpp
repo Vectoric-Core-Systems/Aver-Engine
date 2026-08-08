@@ -85,6 +85,14 @@ public:
     StreamStats update(scene::World& w, const Vec3& viewerPosCm, const Vec3& viewerVelCmPerSec,
                        f32 dt, std::vector<i32>* freedBodies = nullptr);
 
+    // Same step, for more than one thing the world stays loaded around at once -- e.g. the editor
+    // camera AND a graph-driven actor flying independently of it. `sources` replaces whatever was
+    // passed last call entirely (this is not additive across calls); a caller that wants the camera
+    // to keep counting must include it in `sources` itself. See StreamSource (ChunkStreamer.hpp) for
+    // why this is a list rather than a single position in the first place.
+    StreamStats update(scene::World& w, const std::vector<StreamSource>& sources,
+                       f32 dt, std::vector<i32>* freedBodies = nullptr);
+
     // Every entity this world currently owns, chunk by chunk flattened into one list. This is the
     // answer an outliner or a save path needs to tell a streamed entity from an authored one --
     // without it, a streamed world gets written into a level file or clutters a panel meant for what

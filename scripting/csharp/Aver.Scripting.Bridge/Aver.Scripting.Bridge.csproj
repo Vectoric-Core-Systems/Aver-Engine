@@ -41,6 +41,10 @@
          nothing at all. Discovery matches the attribute by NAME for the same reason; see
          DiscoverHuds, but the draw calls still have to reach one shared native seam. -->
     <ProjectReference Include="..\Aver.UI\Aver.UI.csproj" />
+    <!-- Aver.Graph: hosts one compiled .ocgraph per driven entity (GraphLoad/GraphTick/GraphUnload
+         below). References Aver.Scene itself, which is already transitive through Aver.Framework
+         above, so this adds no new native surface, just the managed graph runtime. -->
+    <ProjectReference Include="..\Aver.Graph\Aver.Graph.csproj" />
   </ItemGroup>
 
 </Project>

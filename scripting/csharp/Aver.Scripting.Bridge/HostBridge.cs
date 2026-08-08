@@ -7,6 +7,7 @@ using System.Runtime.Loader;
 using System.Text;
 
 using Aver.Framework;
+using Aver.Graph;
 
 namespace Aver.Scripting.Bridge;
 
@@ -302,12 +303,80 @@ public static class HostBridge
         {
             ManagedDispatch.Clear();
 
+            s_graphs.Clear();
             DrainAndUnload();
             Log.SetSink(null);
         }
         catch
         {
         }
+    }
+
+    // ------------------------------------------------------------------ graph hosting
+
+    // One GraphHost per driven entity. GraphHost.Load compiles the .ocgraph EXACTLY ONCE (see its
+    // own doc comment) and its default PositionSink already P/Invokes straight into
+    // aver_scene_set_vec against CLocal.position, so a loaded graph drives a real native entity the
+    // moment GraphTick is called -- nothing else in this file needs to know where the numbers go.
+    private static readonly Dictionary<int, GraphHost> s_graphs = new();
+
+    /// <summary>Loads and compiles the .ocgraph at <paramref name="utf8Path"/>, binding it to
+    /// <paramref name="entity"/>. Returns 1 on success, 0 on any failure -- bad path, parse error,
+    /// compile error, or a PARAM shape GraphHost cannot supply (see GraphHost.Load). A graph already
+    /// bound to this entity is replaced.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int GraphLoad(int entity, IntPtr utf8Path)
+    {
+        try
+        {
+            string? path = Marshal.PtrToStringUTF8(utf8Path);
+            if (string.IsNullOrEmpty(path))
+                return 0;
+
+            var host = new GraphHost();
+            if (!host.Load(path, out string? err))
+            {
+                Emit((int)Log.Level.Error, $"[Graph] entity {entity}: {err}");
+                return 0;
+            }
+            s_graphs[entity] = host;
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error, $"[Graph] entity {entity}: load threw: {Describe(ex)}");
+            return 0;
+        }
+    }
+
+    /// <summary>Ticks the graph bound to <paramref name="entity"/>, if any -- a silent no-op
+    /// otherwise, so the native caller does not have to track which entities are graph-driven
+    /// separately from the ones that are not. A tick that throws unloads the graph rather than
+    /// retrying it every frame; RUNTIME ERRORS are not swallowed at the GraphHost.Tick level (see
+    /// its own doc comment) but a per-entity bridge cannot let one bad graph take the whole
+    /// Update() loop down, so it stops here instead.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void GraphTick(int entity, float timeSeconds)
+    {
+        if (!s_graphs.TryGetValue(entity, out GraphHost? host))
+            return;
+        try
+        {
+            host.Tick(entity, timeSeconds);
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error,
+                 $"[Graph] entity {entity}: tick threw: {Describe(ex)} - the graph has been unloaded");
+            s_graphs.Remove(entity);
+        }
+    }
+
+    /// <summary>Drops the graph bound to <paramref name="entity"/>, if any.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void GraphUnload(int entity)
+    {
+        try { s_graphs.Remove(entity); } catch { }
     }
 
     // ------------------------------------------------------------------ loading

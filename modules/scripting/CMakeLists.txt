@@ -63,14 +63,19 @@ file(GLOB AVER_BRIDGE_SOURCES CONFIGURE_DEPENDS
   ${AVER_CSHARP_DIR}/Aver.Framework/*.cs
   ${AVER_CSHARP_DIR}/Aver.Framework/*.csproj
   ${AVER_CSHARP_DIR}/Aver.Scene/*.cs
-  ${AVER_CSHARP_DIR}/Aver.Scene/*.csproj)
+  ${AVER_CSHARP_DIR}/Aver.Scene/*.csproj
+  # Aver.Graph (GraphHost, the graph compiler, the .ocgraph parser): referenced by the bridge so
+  # HostBridge's GraphLoad/GraphTick/GraphUnload can host a compiled graph per entity.
+  ${AVER_CSHARP_DIR}/Aver.Graph/*.cs
+  ${AVER_CSHARP_DIR}/Aver.Graph/*.csproj)
 
 set(AVER_BRIDGE_OUTPUTS
   ${AVER_BRIDGE_DIR}/Aver.Scripting.Bridge.dll
   ${AVER_BRIDGE_DIR}/Aver.Scripting.Bridge.runtimeconfig.json
   ${AVER_BRIDGE_DIR}/Aver.Scripting.dll
   ${AVER_BRIDGE_DIR}/Aver.Framework.dll
-  ${AVER_BRIDGE_DIR}/Aver.Scene.dll)
+  ${AVER_BRIDGE_DIR}/Aver.Scene.dll
+  ${AVER_BRIDGE_DIR}/Aver.Graph.dll)
 
 add_custom_command(
   OUTPUT ${AVER_BRIDGE_OUTPUTS}

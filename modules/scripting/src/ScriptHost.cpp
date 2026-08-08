@@ -54,6 +54,9 @@ using shutdown_fn      = void(__cdecl*)(void);
 using hud_count_fn     = int32_t(__cdecl*)(void);
 using hud_name_fn      = int32_t(__cdecl*)(int32_t, char*, int32_t);
 using hud_draw_fn      = int32_t(__cdecl*)(int32_t, float);
+using graph_load_fn    = int32_t(__cdecl*)(int32_t entity, const char* utf8Path);
+using graph_tick_fn    = void(__cdecl*)(int32_t entity, float timeSeconds);
+using graph_unload_fn  = void(__cdecl*)(int32_t entity);
 
 // Converts UTF-8 to UTF-16.
 std::wstring widen(const std::string& s) {
@@ -96,6 +99,9 @@ struct ScriptHost::Impl {
     hud_count_fn hudCount = nullptr;
     hud_name_fn  hudName  = nullptr;
     hud_draw_fn  hudDraw  = nullptr;
+    graph_load_fn   graphLoad   = nullptr;
+    graph_tick_fn   graphTick   = nullptr;
+    graph_unload_fn graphUnload = nullptr;
 };
 
 ScriptHost::ScriptHost() = default;
@@ -198,6 +204,17 @@ bool ScriptHost::init(const HostDesc& desc) {
         AVER_WARN("[Scripting] the bridge exports no HUD entry points; HUD preview is unavailable");
     }
 
+    // Graph hosting is optional too, same reasoning as the HUD three: a bridge built before
+    // GraphLoad/GraphTick/GraphUnload existed still boots, and graphAvailable() just reports false.
+    if (!bind(L"GraphLoad", reinterpret_cast<void**>(&impl_->graphLoad)) ||
+        !bind(L"GraphTick", reinterpret_cast<void**>(&impl_->graphTick)) ||
+        !bind(L"GraphUnload", reinterpret_cast<void**>(&impl_->graphUnload))) {
+        impl_->graphLoad = nullptr;
+        impl_->graphTick = nullptr;
+        impl_->graphUnload = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no Graph entry points; graph hosting is unavailable");
+    }
+
     AverScriptHostApi api{};
     api.structBytes = static_cast<int32_t>(sizeof(AverScriptHostApi));
     api.contractVersion = AVER_SCRIPTING_CONTRACT_VERSION;
@@ -266,6 +283,30 @@ void ScriptHost::update(f32 dt) {
     impl_->update(dt);
 }
 
+// Whether the staged bridge exports GraphLoad/GraphTick -- see the optional-bind block in init().
+bool ScriptHost::graphAvailable() const {
+    return ready_ && impl_ && impl_->graphLoad && impl_->graphTick;
+}
+
+// Loads and compiles an .ocgraph, binding it to `entity`. False when unavailable or on any failure
+// GraphHost.Load reports (bad path, parse error, compile error, unsupported PARAM shape).
+bool ScriptHost::graphLoad(i32 entity, const std::string& path) {
+    if (!graphAvailable()) return false;
+    return impl_->graphLoad(entity, path.c_str()) != 0;
+}
+
+// Ticks the graph bound to `entity`. A no-op for an entity with none, or when unavailable.
+void ScriptHost::graphTick(i32 entity, f32 timeSeconds) {
+    if (!graphAvailable()) return;
+    impl_->graphTick(entity, timeSeconds);
+}
+
+// Drops the graph bound to `entity`, if any.
+void ScriptHost::graphUnload(i32 entity) {
+    if (!ready_ || !impl_ || !impl_->graphUnload) return;
+    impl_->graphUnload(entity);
+}
+
 // Drains the behaviours, unloads the context and closes the host context. Safe twice.
 void ScriptHost::shutdown() {
     if (!impl_) return;
@@ -300,6 +341,10 @@ i32 ScriptHost::loadScripts(const std::string&) { return -1; }
 bool ScriptHost::unloadScripts() { return false; }
 void ScriptHost::update(f32) {}
 void ScriptHost::shutdown() {}
+bool ScriptHost::graphAvailable() const { return false; }
+bool ScriptHost::graphLoad(i32, const std::string&) { return false; }
+void ScriptHost::graphTick(i32, f32) {}
+void ScriptHost::graphUnload(i32) {}
 
 #endif
 

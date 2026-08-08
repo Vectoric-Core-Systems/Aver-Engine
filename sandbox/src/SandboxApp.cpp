@@ -42,6 +42,7 @@
 #include "AssetEditor.hpp"
 #include "ActorEditor.hpp"
 #include "AnimEditor.hpp"
+#include "GraphEditor.hpp"
 #include "EditorEuler.hpp"
 #include "EditorPrefs.hpp"
 #include "aver/platform/DirectoryWatcher.hpp"
@@ -383,6 +384,10 @@ public:
     // Rebuilds the ImGui style and font atlas for the given DPI scale.
     void applyDpi(f32 dpi) {
         dpi_ = dpi;
+        // Pushed rather than pulled: AssetEditor::draw() carries no dpi argument, and widening that
+        // interface for one subclass is the wrong trade. ActorEditor's content-root setter set this
+        // precedent; GraphEditor follows it.
+        editor::setGraphEditorDpi(dpi_);
         applyUnrealStyle();
         if (dpi_ > 1.01f) ImGui::GetStyle().ScaleAllSizes(dpi_);
 
@@ -514,6 +519,9 @@ public:
         assetEditors_.registerFactory(&editor::makeMeshEditor);
         assetEditors_.registerFactory(&editor::makeActorEditor);
         assetEditors_.registerFactory(&editor::makeAnimEditor);
+        // APPENDED, not inserted: AssetEditorHost::open() tries factories in registration order, so
+        // moving this ahead of the others would change which editor claims a file they both accept.
+        assetEditors_.registerFactory(&editor::makeGraphEditor);
         // Must run before any actor factory: the "is Roslyn available" answer is cached on first ask.
         locateAverDesign();
         {
@@ -1066,10 +1074,10 @@ public:
             // than in pushInput: this runs once whether or not the mouse is captured, and it must
             // win over the game seeing the keypress -- a script reading Escape for its own pause
             // menu should not also race the editor for what the key means.
-            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && playSessionActive()) {
-                aver_fw_end_play();
-                AVER_INFO("[Sandbox] Escape: play session ended");
-            }
+            // Escape ends a drone stand-in too. Play started it, so Play's exit has to end it, or
+            // the only way out is a menu item the user has no reason to think is involved.
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && (playSessionActive() || dronePlayActive()))
+                stopPlay();
             if (!playSessionActive()) releasedByUser_ = false;
             setMouseCaptured(wantCapture && !ImGui::GetIO().WantTextInput);
         }
@@ -1116,6 +1124,36 @@ public:
         // the AnimSystem -- whose skinning() is only valid until the next tick.
         if (skinnedScene_)
             skinnedScene_->update(scene::World::instance(), anim::animSystem(), *e.device());
+        // --drone: switches the graph-driven drone on N frames in, on its own, mirroring
+        // --chunk-stream immediately below so a --frames capture run can prove it without a human
+        // clicking Window > Drone.
+        if (droneAutoFrames_ > 0 && --droneAutoFrames_ == 0) setDroneEnabled(true);
+#if AVER_MODULE_SCRIPTING
+        // Ticks the graph-driven drone, if one is live. Runs BEFORE chunk streaming below so this
+        // frame's drone position/velocity are what chunk streaming's extra StreamSource (and the log
+        // line right under it) see -- not last frame's.
+        if (droneEntity_ != scene::kInvalidEntity && droneGraphLoaded_) {
+            droneTimeSeconds_ += t.dt;
+            scripts_.graphTick(static_cast<i32>(droneEntity_), droneTimeSeconds_);
+            scene::World& dw = scene::World::instance();
+            if (dw.valid(droneEntity_)) {
+                dronePos_ = dw.localTransform(droneEntity_).position;
+                const f32 droneInvDt = t.dt > 1e-6f ? 1.0f / t.dt : 0.0f;
+                droneVel_ = droneHaveLastPos_ ? (dronePos_ - droneLastPos_) * droneInvDt
+                                              : Vec3{0.0f, 0.0f, 0.0f};
+                droneLastPos_ = dronePos_;
+                droneHaveLastPos_ = true;
+                // Greppable proof the drone actually MOVED, across several frames -- not just that it
+                // spawned. 30 lines, not chunk streaming's 8: the ask here is a trajectory.
+                if (droneLogsLeft_ > 0) {
+                    --droneLogsLeft_;
+                    AVER_INFO("[Drone] t={:.3f}s pos=({:.1f},{:.1f},{:.1f}) vel=({:.1f},{:.1f},{:.1f})cm/s",
+                              droneTimeSeconds_, dronePos_.x, dronePos_.y, dronePos_.z,
+                              droneVel_.x, droneVel_.y, droneVel_.z);
+                }
+            }
+        }
+#endif
         // --chunk-stream: switches streaming on N frames in, on its own, so a --frames capture run
         // can prove it happened without a human clicking Window > Chunk Streaming.
         if (chunkStreamAutoFrames_ > 0 && --chunkStreamAutoFrames_ == 0) setChunkStreamingEnabled(true);
@@ -1135,7 +1173,21 @@ public:
             chunkStreamHaveLastPos_ = true;
 
             std::vector<i32> freed;
-            chunkStreamStats_ = chunkWorld_->update(scene::World::instance(), camPos_, vel, t.dt, &freed);
+#if AVER_MODULE_SCRIPTING
+            if (droneEntity_ != scene::kInvalidEntity && droneGraphLoaded_) {
+                // Optional part 4: the drone flying is what pulls chunks in too, not just the camera
+                // -- both are StreamSource entries, so either one moving keeps its own corridor
+                // resident. See ChunkWorld::update's std::vector<StreamSource> overload.
+                const std::vector<world::StreamSource> sources = {
+                    world::StreamSource{camPos_, vel},
+                    world::StreamSource{dronePos_, droneVel_},
+                };
+                chunkStreamStats_ = chunkWorld_->update(scene::World::instance(), sources, t.dt, &freed);
+            } else
+#endif
+            {
+                chunkStreamStats_ = chunkWorld_->update(scene::World::instance(), camPos_, vel, t.dt, &freed);
+            }
 #if AVER_MODULE_PHYSICS
             for (const i32 b : freed) if (b >= 0) aver_phys_remove_body(b);
 #endif
@@ -1870,6 +1922,10 @@ public:
     // and setter are unguarded (like focusLevelAt_) even though the effect is AVER_MODULE_SCENE-only;
     // see the countdown in onUpdate.
     void setChunkStreamAuto(int framesIn) { chunkStreamAutoFrames_ = framesIn; }
+    // --drone [N]: frames left before setDroneEnabled(true) fires on its own, same shape as
+    // --chunk-stream. Member and setter are unguarded for the same reason chunkStreamAutoFrames_ is
+    // (the countdown in onUpdate is what's actually AVER_MODULE_SCENE-gated).
+    void setDroneAuto(int framesIn) { droneAutoFrames_ = framesIn; }
     void setShowEditorPrefs(bool on) { if (on) showEditorPrefs_ = true; }   // --editor-prefs
     void setHudTest(int idx) { hudTest_ = idx; }   // --hud-preview <index>
     void setSaveProject(bool on) { saveProject_ = on; }   // --save-project
@@ -2229,6 +2285,7 @@ private:
     bool autoCompile_ = false;
     int focusLevelAt_ = 0;
     int chunkStreamAutoFrames_ = 0;   // --chunk-stream: frames left before auto-enabling, 0 = off
+    int droneAutoFrames_ = 0;        // --drone: frames left before auto-enabling, 0 = off
     static constexpr int kAutoCompileQuietMs = 500;
     std::chrono::steady_clock::time_point autoCompileDue_{};
     int autoCompilePending_ = 0;
@@ -2286,10 +2343,34 @@ private:
     }
 
     // Starts a play session: finds the user GameMode and optional GameInstance and begins play.
+    //
+    // WITH NO GAMEMODE, falls back to the drone rather than doing nothing. Pressing Play used to
+    // log a warning and return, which is a poor answer in a project that has content but no scripts
+    // yet -- the button appears to be broken. A level with nothing attached now gets the
+    // graph-driven drone as its default configuration: something moves, the camera has something to
+    // follow, and chunk streaming has a viewer that is actually inside the generated band.
+    //
+    // A REAL GameMode always wins. This is only ever reached when the project declares none, so a
+    // game that defines its own play behaviour never sees the drone.
     void startPlay() {
         const int32_t gm = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE);
         if (gm == 0) {
-            AVER_WARN("[Sandbox] Play: no GameMode class is loaded - open a project with scripts (--scripts <dir>)");
+            // scene:: is safe to reach here without a further guard: the root CMakeLists forces
+            // AVER_MODULE_FRAMEWORK off when AVER_MODULE_SCENE is off (CMakeLists.txt:169-171), and
+            // this whole function is inside #if AVER_MODULE_FRAMEWORK.
+            if (droneEntity_ == scene::kInvalidEntity) {
+                setDroneEnabled(true);
+                // setDroneEnabled refuses for its own reasons -- no project, no scripting host, a
+                // bridge with no Graph exports -- and says which in the log. Only claim the fallback
+                // if an entity actually exists now.
+                droneStartedByPlay_ = (droneEntity_ != scene::kInvalidEntity);
+            }
+            if (droneStartedByPlay_)
+                AVER_INFO("[Sandbox] Play: no GameMode declared -- flying the default drone instead. "
+                          "Declare an [AverGameMode] class to take over.");
+            else
+                AVER_WARN("[Sandbox] Play: no GameMode class is loaded, and the drone fallback could "
+                          "not start either (see the reason logged above)");
             return;
         }
         const int32_t gi = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_INSTANCE);  // 0 == none, allowed
@@ -2298,6 +2379,26 @@ private:
                       gi ? std::string(" GameInstance='") + aver_fw_class_name(gi) + "'" : std::string());
         else
             AVER_WARN("[Sandbox] Play: begin_play was rejected (already playing?)");
+    }
+
+    // True when Play is standing in a drone because the project declares no GameMode. Not a real
+    // play session -- aver_fw_begin_play never ran -- so aver_fw_play_state() knows nothing about it
+    // and every place that gates on "are we playing" has to ask this too.
+    bool dronePlayActive() const { return droneStartedByPlay_; }
+
+    // Ends whichever kind of play is running. Both kinds, deliberately: a drone the USER switched on
+    // from Window > Drone is left alone, because stopping play should not take down something the
+    // user started for their own reasons and never asked play to own.
+    void stopPlay() {
+        if (droneStartedByPlay_) {
+            setDroneEnabled(false);
+            droneStartedByPlay_ = false;
+            AVER_INFO("[Sandbox] Stop: default drone stopped");
+        }
+        if (aver_fw_play_state() != AVER_FW_PLAY_EDITOR) {
+            aver_fw_end_play();
+            AVER_INFO("[Sandbox] Stop: play session ended");
+        }
     }
 
     // Runs the --play-test session: begins play, drives synthetic input for 150 frames, then stops.
@@ -3475,6 +3576,19 @@ private:
                             ? "Streams chunks generated + saved under <project>\\Chunks around the editor camera.\nTurning this off releases every streamed entity."
                             : "Opt-in: streams chunks generated + saved under <project>\\Chunks around the editor camera.\nDoes nothing to your level until switched on.");
                 }
+                {
+                    const bool droneOn = droneEntity_ != scene::kInvalidEntity;
+                    ImGui::BeginDisabled(!project_.valid());
+                    if (ImGui::MenuItem("Drone", nullptr, droneOn)) setDroneEnabled(!droneOn);
+                    ImGui::EndDisabled();
+                    uiReg_.track("window.drone");
+                    if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                        ImGui::SetTooltip("Open or create a project first - the drone reads its graph from Content\\Scripts.");
+                    else if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(droneOn
+                            ? "A cube driven by Content\\Scripts\\Drone.ocgraph through GraphHost.\nTurning this off releases it."
+                            : "Opt-in: spawns a cube and drives it from Content\\Scripts\\Drone.ocgraph through GraphHost.");
+                }
                 ImGui::Separator();
 #endif
                 ImGui::BeginDisabled(gameUi_ == nullptr);
@@ -3557,16 +3671,24 @@ private:
 #if AVER_MODULE_FRAMEWORK
             const int32_t ps = aver_fw_play_state();
             const bool playing = ps != AVER_FW_PLAY_EDITOR;
-            ImGui::BeginDisabled(playing);
+            // A drone stand-in is not a play session -- begin_play never ran -- so aver_fw_play_state
+            // reports EDITOR throughout. Without folding it in here, Play would stay lit while the
+            // drone flew and Stop would sit greyed out, leaving no way to stop it from the toolbar.
+            const bool anyPlay = playing || dronePlayActive();
+            ImGui::BeginDisabled(anyPlay);
             if (ImGui::Button("Play")) startPlay();
             uiReg_.track("toolbar.play");
             ImGui::EndDisabled();
             ImGui::SameLine();
+            // Pause stays tied to a REAL session: there is no framework state to pause for a drone,
+            // and a Pause button that visibly does nothing is worse than one that is clearly off.
             ImGui::BeginDisabled(!playing);
             if (ImGui::Button(ps == AVER_FW_PLAY_PAUSED ? "Resume" : "Pause"))
                 aver_fw_set_paused(ps != AVER_FW_PLAY_PAUSED ? 1 : 0);
+            ImGui::EndDisabled();
             ImGui::SameLine();
-            if (ImGui::Button("Stop")) { aver_fw_end_play(); AVER_INFO("[Sandbox] Stop: play session ended"); }
+            ImGui::BeginDisabled(!anyPlay);
+            if (ImGui::Button("Stop")) stopPlay();
             uiReg_.track("toolbar.stop");
             ImGui::EndDisabled();
 #else
@@ -4297,6 +4419,7 @@ private:
         if (ext == ".ocanim") return 0;
         if (ext == ".ocskel") return 1;
         if (ext == ".ocmesh") return 2;
+        if (ext == ".ocgraph") return 3;
         return -1;
     }
 
@@ -4876,6 +4999,10 @@ private:
                 // and go as the camera moves, and this list is for what a designer placed. Their
                 // live count is in the Chunk Streaming stats window instead (buildChunkStreamingPanel).
                 if (chunkWorld_ && chunkWorld_->owns(ent)) continue;
+                // The graph-driven drone is excluded for the identical reason: transient, not
+                // authored, tracked separately (see the [Drone] AVER_INFO lines / the Details panel
+                // if selected directly some other way -- there isn't one; it just isn't listed here).
+                if (ent == droneEntity_) continue;
                 const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
                 const std::string nm = w.name(ent);
                 if (!mr && nm.empty()) continue;
@@ -5783,7 +5910,7 @@ private:
     // every icon silently shifted.
     static constexpr int kFileIconTiles   = 4;
     static constexpr int kFolderIconTiles = 2;
-    static constexpr int kAssetIconTiles  = 3;
+    static constexpr int kAssetIconTiles  = 4;   // anim, skeleton, mesh, graph
     // Tiles are packed into one int so a cached DirListing entry stays one field: below the base is
     // the file sheet, at or above it the asset sheet.
     static constexpr int kAssetTileBase   = 100;
@@ -5986,6 +6113,86 @@ private:
                   "band {}..{}cm (layers {}..{}). Nothing will load until it is inside that band -- "
                   "press F to focus something near ground level, or fly down.",
                   camPos_.z, camChunkZ, lo, hi, surfaceZ - st.verticalRadius, surfaceZ + st.verticalRadius);
+    }
+
+    // Spawns (or despawns) the graph-driven drone. OPT-IN, same shape as setChunkStreamingEnabled:
+    // Window > Drone or --drone, nothing touched until asked for.
+    //
+    // TRANSIENT, LIKE A CHUNK-STREAMED ENTITY, ON PURPOSE. droneEntity_ is never pushed to
+    // levelEntities_, so saveLevel/undo/redo never see it (they only ever walk
+    // levelEntities_/undoStack_ -- see the ChunkWorld comment above this block for the identical
+    // argument), and buildPanels' World Outliner filters it out explicitly by entity id, the same way
+    // it filters chunkWorld_->owns(e).
+    void setDroneEnabled(bool on) {
+        if (on == (droneEntity_ != scene::kInvalidEntity)) return;
+
+        if (!on) {
+            scene::World& world = scene::World::instance();
+            if (world.valid(droneEntity_)) { world.destroy(droneEntity_); world.flush(); }
+#if AVER_MODULE_SCRIPTING
+            if (scripts_.ready()) scripts_.graphUnload(static_cast<i32>(droneEntity_));
+#endif
+            AVER_INFO("[Drone] disabled -- entity #{} released", (u32)droneEntity_);
+            droneEntity_ = scene::kInvalidEntity;
+            droneGraphLoaded_ = false;
+            droneHaveLastPos_ = false;
+            return;
+        }
+
+        if (!project_.valid()) {
+            AVER_WARN("[Drone] cannot enable: no project is open");
+            return;
+        }
+#if AVER_MODULE_SCRIPTING
+        if (!scripts_.ready()) {
+            AVER_WARN("[Drone] cannot enable: the scripting host is not running ({})",
+                      scripts_.declineReason());
+            return;
+        }
+        if (!scripts_.graphAvailable()) {
+            AVER_WARN("[Drone] cannot enable: this build's staged bridge exports no Graph entry "
+                      "points -- rebuild with the .NET SDK present so Aver.Scripting.Bridge picks up "
+                      "GraphLoad/GraphTick/GraphUnload");
+            return;
+        }
+#else
+        AVER_WARN("[Drone] cannot enable: this build has no scripting module (AVER_MODULE_SCRIPTING=OFF)");
+        return;
+#endif
+        scene::World& world = scene::World::instance();
+        Transform xf;
+        xf.position = camPos_ + camForward() * kAddDistance;
+        xf.rotation = Quat{0, 0, 0, 1};
+        xf.scale = Vec3{kEditorCubeHalf, kEditorCubeHalf, kEditorCubeHalf};
+
+        // FROZEN, same as spawnCube: the entity name is the asset path the mesh resolver hashes.
+        static const std::string kDroneAsset = "Meshes/cube.ocmesh";
+        const scene::Entity e = world.create(kDroneAsset, scene::kInvalidEntity, xf);
+        if (e == scene::kInvalidEntity) { AVER_WARN("[Drone] the world refused a new entity"); return; }
+        if (auto* mr = static_cast<scene::CMeshRenderer*>(
+                world.addComponent(e, scene::kComponentMeshRenderer))) {
+            mr->mesh = fnv1a64(std::string_view(kDroneAsset));
+            mr->flags |= scene::kMeshRendererVisible;
+            mr->aabbMin[0] = mr->aabbMin[1] = mr->aabbMin[2] = -1.0f;
+            mr->aabbMax[0] = mr->aabbMax[1] = mr->aabbMax[2] =  1.0f;
+        }
+        // Deliberately NOT levelEntities_.push_back(e) and NOT pushEdit(...): see the comment above
+        // this function for why.
+
+#if AVER_MODULE_SCRIPTING
+        const std::string graphPath = project_.contentDir() + "\\Scripts\\Drone.ocgraph";
+        droneGraphLoaded_ = scripts_.graphLoad(static_cast<i32>(e), graphPath);
+        if (!droneGraphLoaded_)
+            AVER_WARN("[Drone] entity #{} spawned but its graph would not load from '{}' -- see the "
+                      "[Graph] error line just above for why", (u32)e, graphPath);
+#endif
+        droneEntity_ = e;
+        droneTimeSeconds_ = 0.0f;
+        droneHaveLastPos_ = false;
+        droneLogsLeft_ = 30;
+        AVER_INFO("[Drone] enabled -- entity #{} spawned at ({:.0f},{:.0f},{:.0f}), graph {}",
+                  (u32)e, xf.position.x, xf.position.y, xf.position.z,
+                  droneGraphLoaded_ ? "loaded" : "NOT loaded");
     }
 
     // A small always-on-while-streaming readout of StreamStats. pendingLoads and failedLoads are
@@ -6307,6 +6514,27 @@ private:
 #if AVER_MODULE_PHYSICS
     std::vector<int32_t> levelBodies_;
 #endif
+
+    // ---------------- graph-driven drone (opt-in, Window > Drone or --drone) ----------------
+    // Proves a native scene can be driven by an .ocgraph end to end: spawned by setDroneEnabled(true),
+    // ticked from onUpdate via scripts_.graphTick(), released by setDroneEnabled(false). Deliberately
+    // disjoint from levelEntities_ for the exact reason chunkWorld_'s entities are (see the comment
+    // above): transient, never saved, never undo-tracked. The World Outliner filters it out the same
+    // way it filters chunkWorld_->owns(e) -- see buildPanels.
+    scene::Entity droneEntity_ = scene::kInvalidEntity;
+    // Whether PLAY started this drone, as opposed to the user switching it on from Window > Drone.
+    // Stop takes down only the former: ending play should not remove something the user started for
+    // their own reasons, and without this flag there is no way to tell the two apart.
+    bool droneStartedByPlay_ = false;
+    bool droneGraphLoaded_ = false;
+    f32  droneTimeSeconds_ = 0.0f;
+    Vec3 dronePos_{};
+    Vec3 droneVel_{};
+    Vec3 droneLastPos_{};
+    bool droneHaveLastPos_ = false;         // false right after enabling, so the first velocity
+                                             // sample is zero rather than a spike from (0,0,0).
+    u32  droneLogsLeft_ = 30;               // more than chunk streaming's 8: the ask is proving
+                                             // MOVEMENT across several frames, not just one event.
 #endif // AVER_MODULE_SCENE
 
     // Mouse capture, for a playing game: the cursor is hidden, confined and re-centred every frame.
@@ -6321,6 +6549,15 @@ private:
 #if AVER_MODULE_MCP
     mcp::McpBridge mcp_;         // inert until --mcp asks for it
     u16  mcpPort_ = 0;           // 0 = never asked for
+#if AVER_MODULE_SCENE && AVER_MODULE_SCRIPTING
+    // State for the "graph" ABI's load/attach/tick trio (see registerMcpAbis): load stages a path,
+    // attach binds+compiles it onto a caller-chosen entity via scripts_.graphLoad, tick re-drives
+    // that one entity's graph with a caller-supplied absolute time. One graph at a time, deliberately
+    // -- this is a debugging/proving seam for an agent, not a general multi-entity graph manager.
+    std::string  mcpGraphPath_;
+    scene::Entity mcpGraphEntity_ = scene::kInvalidEntity;
+    f32          mcpGraphTimeSeconds_ = 0.0f;
+#endif
 
     // Applies one MCP command: an ABI call, or synthetic input posted to the window as Win32 messages.
     void applyMcpCommand(const mcp::Command& c) {
@@ -6420,6 +6657,150 @@ private:
             return false;
         });
 #endif
+
+        // ALWAYS REGISTERED, even when this build has no scene module: a client asking `modules`
+        // sees "world" either way, and a call into it gets a clear "this build has no scene module"
+        // refusal rather than the generic "no ABI registered" one -- see the house rule this task
+        // came with: degrade the entry points, do not compile them out inconsistently.
+        mcp_.registerAbi("world", [this](const mcp::AbiCall& a, std::string& r, std::string& w) {
+#if AVER_MODULE_SCENE
+            if (a.fn == "stream_on") {
+                setChunkStreamingEnabled(true);
+                if (!chunkWorld_) {
+                    w = "streaming did not turn on -- see the editor log (no project open, or "
+                        "ChunkWorld::open failed)";
+                    return false;
+                }
+                r = "on";
+                return true;
+            }
+            if (a.fn == "stream_off") {
+                setChunkStreamingEnabled(false);
+                r = "off";
+                return true;
+            }
+            if (a.fn == "stream_stats") {
+                const world::StreamStats& s = chunkStreamStats_;
+                char buf[320];
+                std::snprintf(buf, sizeof buf,
+                    "streaming=%s residentChunks=%u residentEntities=%u loadedThisUpdate=%u "
+                    "evictedThisUpdate=%u pendingLoads=%u failedLoads=%u totalLoads=%u "
+                    "lastLoadMs=%.3f totalLoadMs=%.3f",
+                    chunkWorld_ ? "on" : "off", s.residentChunks, s.residentEntities,
+                    s.loadedThisUpdate, s.evictedThisUpdate, s.pendingLoads, s.failedLoads,
+                    s.totalLoads, s.lastLoadMs, s.totalLoadMs);
+                r = buf;
+                return true;
+            }
+            if (a.fn == "warp") {
+                if (a.args.size() < 3) { w = "warp needs 3 args: x y z (world centimetres)"; return false; }
+                camPos_ = Vec3{static_cast<f32>(a.args[0]), static_cast<f32>(a.args[1]),
+                               static_cast<f32>(a.args[2])};
+                // A teleport, not a move: the next chunk-streaming update must not see this as a
+                // huge one-frame velocity computed against wherever the camera used to be -- the
+                // same rule frameCameraOn's own comment states for the same reason.
+                chunkStreamHaveLastPos_ = false;
+                char buf[96];
+                std::snprintf(buf, sizeof buf, "camPos=(%.1f,%.1f,%.1f)", camPos_.x, camPos_.y, camPos_.z);
+                r = buf;
+                return true;
+            }
+            w = "world has no entry point '" + a.fn + "'";
+            return false;
+#else
+            (void)a;
+            w = "this build has no scene module (AVER_MODULE_SCENE=OFF) -- chunk streaming and the "
+                "world ABI are unavailable";
+            return false;
+#endif
+        });
+
+        // ALWAYS REGISTERED too, for the same reason as "world" above.
+        mcp_.registerAbi("graph", [this](const mcp::AbiCall& a, std::string& r, std::string& w) {
+#if AVER_MODULE_SCENE
+            if (a.fn == "entity_pos") {
+                if (a.args.empty()) { w = "entity_pos needs an entity id"; return false; }
+                const scene::Entity ent =
+                    static_cast<scene::Entity>(static_cast<u32>(static_cast<i32>(a.args[0])));
+                if (!scene::World::instance().valid(ent)) { w = "no live entity with that id"; return false; }
+                const Vec3 p = scene::World::instance().localTransform(ent).position;
+                char buf[96];
+                std::snprintf(buf, sizeof buf, "(%.3f,%.3f,%.3f)", p.x, p.y, p.z);
+                r = buf;
+                return true;
+            }
+#if AVER_MODULE_SCRIPTING
+            // load/attach/tick: GraphHost is now hosted from native code via ScriptHost::graphLoad/
+            // graphTick (scripts_ member, same seam the drone entity uses in onUpdate -- see
+            // setDroneEnabled and the AVER_MODULE_SCRIPTING block right after it). ScriptHost::graphLoad
+            // binds a path AND an entity in one call, so "load" just stages the path and "attach" is
+            // what actually calls scripts_.graphLoad and reports success/failure honestly.
+            if (a.fn == "load") {
+                if (a.text.empty()) { w = "load needs a path in \"text\""; return false; }
+                if (!scripts_.ready()) {
+                    w = "the scripting host is not running: " + scripts_.declineReason();
+                    return false;
+                }
+                if (!scripts_.graphAvailable()) {
+                    w = "this build's staged bridge exports no Graph entry points -- rebuild with the "
+                        ".NET SDK present so Aver.Scripting.Bridge picks up GraphLoad/GraphTick/GraphUnload";
+                    return false;
+                }
+                mcpGraphPath_ = a.text;
+                r = "path staged: " + mcpGraphPath_ + " -- call graph::attach <entityId> to load, "
+                    "compile and bind it";
+                return true;
+            }
+            if (a.fn == "attach") {
+                if (a.args.empty()) { w = "attach needs an entity id"; return false; }
+                if (mcpGraphPath_.empty()) { w = "call graph::load <path> first"; return false; }
+                const scene::Entity ent =
+                    static_cast<scene::Entity>(static_cast<u32>(static_cast<i32>(a.args[0])));
+                if (!scene::World::instance().valid(ent)) { w = "no live entity with that id"; return false; }
+                if (!scripts_.graphLoad(static_cast<i32>(ent), mcpGraphPath_)) {
+                    w = "graph failed to load/compile from '" + mcpGraphPath_ + "' -- see the [Graph] "
+                        "error line just above in the editor log for why";
+                    return false;
+                }
+                mcpGraphEntity_ = ent;
+                mcpGraphTimeSeconds_ = 0.0f;
+                r = "attached entity #" + std::to_string(static_cast<u32>(ent)) + " to " + mcpGraphPath_;
+                return true;
+            }
+            if (a.fn == "tick") {
+                if (a.args.empty()) { w = "tick needs a seconds value (absolute time, not a delta)"; return false; }
+                if (mcpGraphEntity_ == scene::kInvalidEntity) {
+                    w = "no entity attached -- call graph::attach <entityId> first";
+                    return false;
+                }
+                if (!scene::World::instance().valid(mcpGraphEntity_)) {
+                    w = "the attached entity no longer exists";
+                    return false;
+                }
+                mcpGraphTimeSeconds_ = static_cast<f32>(a.args[0]);
+                scripts_.graphTick(static_cast<i32>(mcpGraphEntity_), mcpGraphTimeSeconds_);
+                const Vec3 p = scene::World::instance().localTransform(mcpGraphEntity_).position;
+                char buf[128];
+                std::snprintf(buf, sizeof buf, "t=%.3f pos=(%.3f,%.3f,%.3f)",
+                              mcpGraphTimeSeconds_, p.x, p.y, p.z);
+                r = buf;
+                return true;
+            }
+#else
+            if (a.fn == "load" || a.fn == "attach" || a.fn == "tick") {
+                w = "this build has no scripting module (AVER_MODULE_SCRIPTING=OFF) -- graph hosting is "
+                    "unavailable; entity_pos still works because it reads scene::World directly";
+                return false;
+            }
+#endif
+            w = "graph has no entry point '" + a.fn + "'";
+            return false;
+#else
+            (void)a;
+            w = "this build has no scene module (AVER_MODULE_SCENE=OFF) -- the graph ABI is unavailable";
+            return false;
+#endif
+        });
     }
 #endif // AVER_MODULE_MCP
     bool releasedByUser_ = false;   // Shift+F1 during a session; cleared when the session ends
@@ -6550,7 +6931,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -6615,6 +6996,11 @@ Application* createApplication(int argc, char** argv) {
         // --frames capture run can prove streaming happened without a human clicking the menu item.
         else if (!std::strcmp(argv[i],"--chunk-stream")) {
             chunkStream = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 5;
+        }
+        // --drone [N] switches the graph-driven drone on N frames in (default 5), same shape and
+        // reason as --chunk-stream just above: proves it headlessly without a human clicking the menu.
+        else if (!std::strcmp(argv[i],"--drone")) {
+            droneAuto = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 5;
         }
         // --drawer log|content[:<sub>] opens a bottom drawer, optionally in a Content subfolder.
         else if (!std::strcmp(argv[i],"--drawer") && i+1<argc) {
@@ -6723,6 +7109,7 @@ Application* createApplication(int argc, char** argv) {
     app->setFocusTools(focusTools);
     app->setFocusCompileMenu(focusCompileMenu);
     if (chunkStream > 0) app->setChunkStreamAuto(chunkStream);
+    if (droneAuto > 0) app->setDroneAuto(droneAuto);
 #if AVER_MODULE_MCP
     app->setMcpPort(mcpPort);
 #else

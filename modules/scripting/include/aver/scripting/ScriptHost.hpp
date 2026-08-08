@@ -47,6 +47,19 @@ public:
     // Drives OnShutdown, unloads the context and closes the host context. Safe called twice.
     void shutdown();
 
+    // Graph hosting: GraphLoad/GraphTick/GraphUnload, bound OPTIONALLY at init time exactly like the
+    // HUD three -- a bridge built before these existed still boots; graphAvailable() is false and
+    // every call below is a documented no-op/false rather than a crash.
+    bool graphAvailable() const;
+    // Loads and compiles the .ocgraph at `path`, binding it to `entity`. False on any failure
+    // (missing bridge support, bad path, parse/compile error) -- see Aver.Graph.GraphHost.Load.
+    bool graphLoad(i32 entity, const std::string& path);
+    // Ticks the graph bound to `entity`, if any. A no-op for an entity with none, or when
+    // graphAvailable() is false.
+    void graphTick(i32 entity, f32 timeSeconds);
+    // Drops the graph bound to `entity`, if any.
+    void graphUnload(i32 entity);
+
     bool ready() const { return ready_; }
     // Behaviours that were discovered, constructed and survived OnStart. Zero is normal.
     i32 behaviourCount() const { return behaviours_; }
