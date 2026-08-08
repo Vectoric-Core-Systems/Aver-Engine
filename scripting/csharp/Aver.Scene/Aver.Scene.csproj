@@ -23,4 +23,12 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Aver.Graph's GraphCompiler emits IL that calls straight through to Native's P/Invoke
+         externs (aver_scene_get_f32/set_f32) for getfield/setfield, rather than duplicating a
+         second, differently-configured DllImport+resolver pair of its own. That needs compile-time
+         access to an internal type from a different assembly. -->
+    <InternalsVisibleTo Include="Aver.Graph" />
+  </ItemGroup>
+
 </Project>

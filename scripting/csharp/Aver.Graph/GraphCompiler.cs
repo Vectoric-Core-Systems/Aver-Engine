@@ -13,21 +13,50 @@ using Aver.Scene;
 
 namespace Aver.Graph;
 
+/// <summary>Resolves a scene field's dense id and kind by qualified name, so getfield/setfield
+/// nodes can be checked at COMPILE time rather than silently doing nothing at runtime. fieldId
+/// is 0 (and the return is false) when the name is unknown; kind mirrors aver::scene::FieldKind
+/// (Fields.hpp) when it is.
+///
+/// GraphCompiler's default implementation calls straight through to the live scene via
+/// Native.aver_scene_field/aver_scene_field_kind -- correct for a graph compiled inside a running
+/// engine, where the scene's field table is exactly the authority a graph should be checked
+/// against. That default requires the native Aver.Scene library to be loadable; a process with no
+/// scene running (a bare unit test, notably) cannot exercise it and should supply its own resolver
+/// instead of standing up a native scene just to compile a graph.</summary>
+public delegate bool FieldResolver(string qualifiedName, out int fieldId, out int kind);
+
 /// Compiles a graph to a DynamicMethod and invokes it.
 public class GraphCompiler
 {
+    // aver::scene::FieldKind::F32 (Fields.hpp) -- getfield/setfield only support this kind today.
+    // Reading/writing Vec3/Quat/Mat4 fields (e.g. CLocal.position) needs aver_scene_get_vec/set_vec
+    // and a vector-typed pin the graph format doesn't have yet; out of scope for this slice.
+    private const int FieldKindF32 = 0;
+
     private Graph _graph;
+    private readonly FieldResolver _fieldResolver;
     private Dictionary<string, LocalBuilder> _nodeLocals = new();
     private Dictionary<(string, string), LocalBuilder> _pinLocals = new();
     private ILGenerator? _il;
 
-    public GraphCompiler(Graph graph)
+    public GraphCompiler(Graph graph, FieldResolver? fieldResolver = null)
     {
         _graph = graph;
+        _fieldResolver = fieldResolver ?? DefaultFieldResolver;
     }
 
-    /// Compiles the graph to a DynamicMethod. The method has no parameters and returns
-    /// the single output pin's value, or void if multiple outputs.
+    private static bool DefaultFieldResolver(string qualifiedName, out int fieldId, out int kind)
+    {
+        fieldId = Native.aver_scene_field(qualifiedName);
+        kind = fieldId != 0 ? Native.aver_scene_field_kind(fieldId) : 0;
+        return fieldId != 0;
+    }
+
+    /// Compiles the graph to a DynamicMethod. The method takes one argument per PARAM the graph
+    /// declares, in declaration order (no PARAM records -- the common case today -- means zero
+    /// arguments, exactly as before PARAM existed), and returns the single output pin's value, or
+    /// void if multiple outputs.
     /// Returns null if compilation fails; check log for errors.
     public Delegate? Compile(out string? err)
     {
@@ -42,8 +71,11 @@ public class GraphCompiler
 
         try
         {
-            // Determine the return type. If there's one output, return its type.
-            // If there are zero or multiple, return void.
+            // Determine the return type. Zero outputs -> void (unchanged). One output -> that
+            // pin's own CLR type, exactly as before (every existing single-output graph and test
+            // keeps the same Func<T> shape). Two or more outputs -> object[], one boxed entry per
+            // Outputs record IN FILE ORDER -- see the OUTPUTS ARRAY comment below Compile() for why
+            // this is object[] and not a second delegate convention.
             Type returnType = typeof(void);
             string singleOutputNodeId = "";
             string singleOutputPinName = "";
@@ -62,11 +94,17 @@ public class GraphCompiler
                     }
                 }
             }
+            else if (_graph.Outputs.Count >= 2)
+            {
+                returnType = typeof(object[]);
+            }
+
+            Type[] paramTypes = _graph.Parameters.Select(p => PinTypeToCLRType(p.Type)).ToArray();
 
             var method = new DynamicMethod(
                 "CompiledGraph",
                 returnType,
-                Type.EmptyTypes,
+                paramTypes,
                 restrictedSkipVisibility: true
             );
 
@@ -101,10 +139,43 @@ public class GraphCompiler
                     return null;
                 }
             }
+            else if (_graph.Outputs.Count >= 2)
+            {
+                // OUTPUTS ARRAY: multiple OUT records used to compile to a void-returning method
+                // whose computed values were locals inside the DynamicMethod and thus unrecoverable
+                // by the caller -- the graph "ran" but nothing it produced could ever be read back.
+                // A drone's flight path needs x, y, and z out of ONE compile (three separate
+                // single-output graphs would triple-compute the shared angle/time math and, worse,
+                // could drift out of sync if edited independently), so this builds a boxed
+                // object[_graph.Outputs.Count] instead, one entry per OUT record IN FILE ORDER. A
+                // typed tuple would be nicer to consume but MakeGenericType over ValueTuple's arity
+                // needs the same "which arity" dispatch GetDelegateType already does for Func/Action
+                // by NAME -- object[] avoids inventing that a second time for a return type instead
+                // of a delegate type. The caller (GraphHost) unboxes by the LOCAL'S declared CLR
+                // type, which is exactly the pin's own type -- see LocalBuilder.LocalType below.
+                _il.Emit(OpCodes.Ldc_I4, _graph.Outputs.Count);
+                _il.Emit(OpCodes.Newarr, typeof(object));
+
+                for (int i = 0; i < _graph.Outputs.Count; i++)
+                {
+                    var (nodeId, pinName) = _graph.Outputs[i];
+                    if (!_pinLocals.TryGetValue((nodeId, pinName), out var outLocal))
+                    {
+                        err = $"Output pin {nodeId}.{pinName} was not computed";
+                        return null;
+                    }
+
+                    _il.Emit(OpCodes.Dup);
+                    _il.Emit(OpCodes.Ldc_I4, i);
+                    _il.Emit(OpCodes.Ldloc, outLocal);
+                    _il.Emit(OpCodes.Box, outLocal.LocalType);
+                    _il.Emit(OpCodes.Stelem_Ref);
+                }
+            }
 
             _il.Emit(OpCodes.Ret);
 
-            return method.CreateDelegate(GetDelegateType(returnType));
+            return method.CreateDelegate(GetDelegateType(paramTypes, returnType));
         }
         catch (Exception ex)
         {
@@ -202,6 +273,29 @@ public class GraphCompiler
 
             case "setfield":
                 EmitSetField(node);
+                break;
+
+            case "sin":
+                EmitSin(node);
+                break;
+
+            case "cos":
+                EmitCos(node);
+                break;
+
+            case "subtract":
+            case "sub":
+                EmitSubtract(node);
+                break;
+
+            case "divide":
+            case "div":
+                EmitDivide(node);
+                break;
+
+            case "param":
+            case "getparam":
+                EmitParam(node);
                 break;
 
             default:
@@ -303,13 +397,26 @@ public class GraphCompiler
     {
         if (_il == null) return;
 
-        // This is a placeholder. A real implementation would:
-        // 1. Load the entity ID from the input pin.
-        // 2. Call aver_scene_get_f32 through P/Invoke.
-        // 3. Store the result to the output pin.
-        //
-        // For this minimal slice, we just return 0.0 to prove the structure.
-        _il.Emit(OpCodes.Ldc_R4, 0f);
+        if (string.IsNullOrEmpty(node.FieldName))
+            throw new InvalidOperationException($"GetField node '{node.Id}' has no field= attribute naming which scene field to read");
+
+        if (!_fieldResolver(node.FieldName, out int fieldId, out int kind))
+            throw new InvalidOperationException($"GetField node '{node.Id}' references unknown scene field '{node.FieldName}'");
+
+        if (kind != FieldKindF32)
+            throw new InvalidOperationException(
+                $"GetField node '{node.Id}' field '{node.FieldName}' is not an F32 field (kind={kind}); " +
+                "getfield only supports F32 fields today, not Vec3/Quat/Bool/I32/etc");
+
+        // Load the entity id (input pin), then the resolved field id, then call straight through to
+        // the same P/Invoke extern Aver.Scene's own C# consumers use (Native.cs) -- not a second,
+        // differently-configured DllImport surface. GraphCompiler needs InternalsVisibleTo("Aver.Graph")
+        // from Aver.Scene.csproj to name the internal Native type at compile time; DynamicMethod's
+        // restrictedSkipVisibility:true (set in Compile()) is what lets the EMITTED IL actually call it.
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Ldc_I4, fieldId);
+        _il.Emit(OpCodes.Call, GetFieldMethod);
+
         if (_pinLocals.TryGetValue((node.Id, "value"), out var local))
             _il.Emit(OpCodes.Stloc, local);
     }
@@ -318,14 +425,129 @@ public class GraphCompiler
     {
         if (_il == null) return;
 
-        // This is a placeholder. A real implementation would:
-        // 1. Load the entity ID and value from input pins.
-        // 2. Call aver_scene_set_f32 through P/Invoke.
-        // 3. Store success (0 or 1) to the output pin.
-        //
-        // For this minimal slice, we just return success=true.
-        _il.Emit(OpCodes.Ldc_I4, 1);
+        if (string.IsNullOrEmpty(node.FieldName))
+            throw new InvalidOperationException($"SetField node '{node.Id}' has no field= attribute naming which scene field to write");
+
+        if (!_fieldResolver(node.FieldName, out int fieldId, out int kind))
+            throw new InvalidOperationException($"SetField node '{node.Id}' references unknown scene field '{node.FieldName}'");
+
+        if (kind != FieldKindF32)
+            throw new InvalidOperationException(
+                $"SetField node '{node.Id}' field '{node.FieldName}' is not an F32 field (kind={kind}); " +
+                "setfield only supports F32 fields today, not Vec3/Quat/Bool/I32/etc");
+
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Ldc_I4, fieldId);
+        LoadPin(node.Id, "value");
+        _il.Emit(OpCodes.Call, SetFieldMethod);
+        // aver_scene_set_f32 returns 1 on success, 0 on any rejection (unknown entity, read-only
+        // field -- e.g. CWorld.matrix -- or missing component). That real return code is now what
+        // reaches the "success" pin; the old stub hardcoded 1 regardless of whether anything happened.
+
         if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+    }
+
+    private void EmitSin(Node node)
+    {
+        if (_il == null) return;
+
+        // System.Math.Sin takes and returns double; the graph is float end to end, so the value
+        // needs an explicit widen going in and an explicit narrow coming out. Skipping either
+        // conversion still compiles (the IL verifier accepts a bare double left where a float local
+        // was declared in some cases) but silently reinterprets bits rather than converting the
+        // value -- wrong numbers with no error, exactly what this comment exists to not repeat.
+        LoadPin(node.Id, "a");
+        _il.Emit(OpCodes.Conv_R8);
+        _il.Emit(OpCodes.Call, MathSinMethod);
+        _il.Emit(OpCodes.Conv_R4);
+
+        if (_pinLocals.TryGetValue((node.Id, "result"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+    }
+
+    private void EmitCos(Node node)
+    {
+        if (_il == null) return;
+
+        LoadPin(node.Id, "a");
+        _il.Emit(OpCodes.Conv_R8);
+        _il.Emit(OpCodes.Call, MathCosMethod);
+        _il.Emit(OpCodes.Conv_R4);
+
+        if (_pinLocals.TryGetValue((node.Id, "result"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+    }
+
+    private void EmitSubtract(Node node)
+    {
+        if (_il == null) return;
+
+        LoadPin(node.Id, "a");
+        LoadPin(node.Id, "b");
+        _il.Emit(OpCodes.Sub);
+
+        if (_pinLocals.TryGetValue((node.Id, "result"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+    }
+
+    private void EmitDivide(Node node)
+    {
+        if (_il == null) return;
+
+        // DIVIDE-BY-ZERO CONVENTION: b == 0.0 exactly yields 0.0, not IEEE754's NaN/Infinity.
+        //
+        // A bare `div` on floats never throws -- 5/0 is +Infinity, -5/0 is -Infinity, 0/0 is NaN --
+        // and any of those reaching a transform (position, rotation, scale) is very hard to trace
+        // back to the divide node that produced it: it propagates silently through every downstream
+        // add/multiply and shows up frames later as an object that vanished or exploded, nowhere near
+        // this node. 0.0 is a defined, inert value a drone flight path can just continue through;
+        // NaN is not. This is a deliberate choice, not the IEEE default left alone -- flag if a
+        // consumer ever needs the propagating-NaN behavior instead (e.g. to detect the condition
+        // downstream via a compare-vs-self NaN check).
+        var aLocal = _il.DeclareLocal(typeof(float));
+        var bLocal = _il.DeclareLocal(typeof(float));
+        LoadPin(node.Id, "a");
+        _il.Emit(OpCodes.Stloc, aLocal);
+        LoadPin(node.Id, "b");
+        _il.Emit(OpCodes.Stloc, bLocal);
+
+        var zeroLabel = _il.DefineLabel();
+        var endLabel = _il.DefineLabel();
+
+        _il.Emit(OpCodes.Ldloc, bLocal);
+        _il.Emit(OpCodes.Ldc_R4, 0f);
+        _il.Emit(OpCodes.Ceq);
+        _il.Emit(OpCodes.Brtrue, zeroLabel);
+
+        _il.Emit(OpCodes.Ldloc, aLocal);
+        _il.Emit(OpCodes.Ldloc, bLocal);
+        _il.Emit(OpCodes.Div);
+        _il.Emit(OpCodes.Br, endLabel);
+
+        _il.MarkLabel(zeroLabel);
+        _il.Emit(OpCodes.Ldc_R4, 0f);
+
+        _il.MarkLabel(endLabel);
+        if (_pinLocals.TryGetValue((node.Id, "result"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+    }
+
+    private void EmitParam(Node node)
+    {
+        if (_il == null) return;
+
+        // Graph.Validate() (run at the top of Compile(), and again by the parser) already checked
+        // param= is present and names a declared PARAM with a matching pin type; this repeats the
+        // lookup defensively rather than trusting a check made in a different method, the same
+        // pattern LoadPin already follows for its own node/pin lookups below.
+        int index = _graph.Parameters.FindIndex(p => p.Name == node.ParamName);
+        if (index < 0)
+            throw new InvalidOperationException($"Param node '{node.Id}' references undeclared parameter '{node.ParamName}'");
+
+        _il.Emit(OpCodes.Ldarg, (short)index);
+
+        if (_pinLocals.TryGetValue((node.Id, "value"), out var local))
             _il.Emit(OpCodes.Stloc, local);
     }
 
@@ -389,16 +611,45 @@ public class GraphCompiler
         _ => typeof(void)
     };
 
-    private static Type GetDelegateType(Type returnType)
+    // Resolved once, by reflection: Native is internal to Aver.Scene, so these are looked up with
+    // BindingFlags.NonPublic rather than a plain method-group reference. (This is independent of the
+    // InternalsVisibleTo grant on Aver.Scene.csproj, which is what lets GraphCompiler.cs name the
+    // `Native` TYPE at compile time in the first place; GetMethod itself would find an internal
+    // method either way.)
+    private static readonly MethodInfo GetFieldMethod =
+        typeof(Native).GetMethod("aver_scene_get_f32", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Scene.Native.aver_scene_get_f32 was not found by reflection");
+    private static readonly MethodInfo SetFieldMethod =
+        typeof(Native).GetMethod("aver_scene_set_f32", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Scene.Native.aver_scene_set_f32 was not found by reflection");
+    private static readonly MethodInfo MathSinMethod =
+        typeof(Math).GetMethod(nameof(Math.Sin), new[] { typeof(double) })
+        ?? throw new InvalidOperationException("System.Math.Sin(double) was not found by reflection");
+    private static readonly MethodInfo MathCosMethod =
+        typeof(Math).GetMethod(nameof(Math.Cos), new[] { typeof(double) })
+        ?? throw new InvalidOperationException("System.Math.Cos(double) was not found by reflection");
+
+    /// Builds the Action/Action&lt;...&gt; or Func&lt;...,TResult&gt; matching paramTypes and
+    /// returnType. Generalized over BCL Action`N/Func`N by name (both go up to 16 type parameters)
+    /// rather than hand-listing every arity GraphCompiler happens to need today -- a graph declaring
+    /// a 5th PARAM should not require a matching hardcoded case here.
+    private static Type GetDelegateType(Type[] paramTypes, Type returnType)
     {
+        int n = paramTypes.Length;
+
         if (returnType == typeof(void))
-            return typeof(Action);
-        if (returnType == typeof(float))
-            return typeof(Func<float>);
-        if (returnType == typeof(int))
-            return typeof(Func<int>);
-        if (returnType == typeof(bool))
-            return typeof(Func<bool>);
-        throw new NotSupportedException($"Delegate type for {returnType.Name} is not supported");
+        {
+            if (n == 0) return typeof(Action);
+            var openAction = Type.GetType($"System.Action`{n}")
+                ?? throw new NotSupportedException($"Action with {n} parameters is not supported");
+            return openAction.MakeGenericType(paramTypes);
+        }
+
+        var openFunc = Type.GetType($"System.Func`{n + 1}")
+            ?? throw new NotSupportedException($"Func with {n} parameters is not supported");
+        var typeArgs = new Type[n + 1];
+        Array.Copy(paramTypes, typeArgs, n);
+        typeArgs[n] = returnType;
+        return openFunc.MakeGenericType(typeArgs);
     }
 }

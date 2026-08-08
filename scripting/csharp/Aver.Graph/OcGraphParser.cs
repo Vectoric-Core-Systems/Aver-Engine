@@ -86,6 +86,41 @@ public class OcGraphParser
                     }
                 }
             }
+            else if (key.Equals("PARAM", StringComparison.OrdinalIgnoreCase))
+            {
+                // PARAM <name> <type>
+                //
+                // Declares one argument the compiled method accepts, in declaration order. Existing
+                // .ocgraph files have no PARAM records at all, so graph.Parameters stays empty and
+                // GraphCompiler.Compile() produces a zero-argument method exactly as it always has --
+                // this is purely additive. A brand-new record rather than reusing NODE/PIN because a
+                // parameter is not a node: it has no pins of its own to link into, and needs to be known
+                // by name before any node can be validated against it (see AddDefaultPins below, and
+                // Graph.Validate's Param-node checks).
+                //
+                // A NEW record, not an unknown one: the C++ side does not parse PARAM at all today, so
+                // it round-trips PARAM lines as opaque unrecognised records (writeOcgraph preserves them
+                // verbatim, per OcGraph.hpp's documented "unknown records are ignored during parse but
+                // preserved during rewrite" contract) rather than failing on them. That keeps the two
+                // implementations in agreement about every graph that predates this change -- including
+                // the checked-in cross-implementation fixture, which has no PARAM records and is
+                // therefore untouched byte-for-byte by this addition.
+                if (tokens.Count < 3)
+                {
+                    err = "PARAM requires a name and a type";
+                    return false;
+                }
+
+                string paramName = tokens[1];
+                string paramTypeName = tokens[2];
+                if (!Enum.TryParse<PinType>(paramTypeName, true, out var paramType))
+                {
+                    err = $"Unknown parameter type '{paramTypeName}'";
+                    return false;
+                }
+
+                graph.Parameters.Add(new GraphParameter { Name = paramName, Type = paramType });
+            }
             else if (key.Equals("NODE", StringComparison.OrdinalIgnoreCase))
             {
                 // NODE <id> <type> [key=value ...]
@@ -127,6 +162,17 @@ public class OcGraphParser
                         {
                             graph.ConstantOutputs.Add(new ConstantOutput { NodeId = nodeId, Value = constVal });
                         }
+                    }
+                    // param= names which declared PARAM a "param" node reads (see Node.ParamName).
+                    else if (k == "param")
+                    {
+                        node.ParamName = v;
+                    }
+                    // field= names the qualified scene field a "getfield"/"setfield" node addresses
+                    // (see Node.FieldName). Resolved to a dense id at compile time, not here.
+                    else if (k == "field")
+                    {
+                        node.FieldName = v;
                     }
                 }
 
@@ -339,7 +385,7 @@ public class OcGraphParser
         // Default pins for built-in node types if not explicitly declared.
         foreach (var node in graph.Nodes.Values)
         {
-            AddDefaultPins(node);
+            AddDefaultPins(node, graph);
         }
 
         // Validate the graph.
@@ -354,7 +400,7 @@ public class OcGraphParser
 
     /// Adds default pins for built-in node types if they weren't explicitly declared.
     /// This allows a compact text format where most pins are implicit.
-    private static void AddDefaultPins(Node node)
+    private static void AddDefaultPins(Node node, Graph graph)
     {
         // Only add defaults if no pins are explicitly declared.
         if (node.Pins.Count > 0) return;
@@ -405,6 +451,41 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "value", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
+
+            case "sin":
+            case "cos":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "subtract":
+            case "sub":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "divide":
+            case "div":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "param":
+            case "getparam":
+            {
+                // The output pin's type comes from the referenced PARAM's declared type, not a fixed
+                // type the way every other default-pin case has one. If param= is missing or names a
+                // parameter that was never declared, add no pin at all: Graph.Validate() (run right
+                // after this loop, and again at the start of every Compile()) reports the specific
+                // reason, which is more useful than a generic "no output pin 'value'" from whatever
+                // LINK or OUT record tries to use this node next.
+                var declaredParam = graph.Parameters.FirstOrDefault(p => p.Name == node.ParamName);
+                if (declaredParam != null)
+                    node.Pins.Add(new Pin { Name = "value", Type = declaredParam.Type, IsOutput = true, NodeId = node.Id });
+                break;
+            }
         }
     }
 

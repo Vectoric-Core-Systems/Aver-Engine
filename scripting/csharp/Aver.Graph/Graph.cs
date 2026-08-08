@@ -55,6 +55,27 @@ public class Node
     public required string Id { get; init; }  // String to support both int and string IDs from different formats.
     public required string Type { get; init; }  // "Const", "Add", "Multiply", etc.
     public List<Pin> Pins { get; init; } = new();
+
+    // Which graph PARAMETER a "param" node reads, e.g. "entity" or "time". Set from the NODE
+    // line's "param=<name>" attribute. Null for every other node type.
+    public string? ParamName { get; set; }
+
+    // Which scene field a "getfield"/"setfield" node addresses, e.g. "CLocal.position". Set from
+    // the NODE line's "field=<qualifiedName>" attribute. Null for every other node type. The name
+    // is resolved to a dense field id at COMPILE time (GraphCompiler), not here -- resolution needs
+    // the live scene's field table, which the format layer has no access to.
+    public string? FieldName { get; set; }
+}
+
+/// One parameter the compiled method accepts -- e.g. the entity a graph drives, or the current
+/// time. Declared with a top-level `PARAM <name> <type>` record; order is declaration order and
+/// becomes the compiled method's argument order. A node reads one by naming it in a "param" node's
+/// `param=<name>` attribute (see Node.ParamName) rather than the format inventing a second way to
+/// wire data into a node beyond LINK/PINVAL that every other node type already uses.
+public class GraphParameter
+{
+    public required string Name { get; init; }
+    public required PinType Type { get; init; }
 }
 
 /// A complete graph: nodes, links, pinned values, and output pins to evaluate.
@@ -67,6 +88,7 @@ public class Graph
     public List<ConstantOutput> ConstantOutputs { get; set; } = new();
     public List<PinnedValue> PinnedValues { get; set; } = new();
     public List<(string NodeId, string PinName)> Outputs { get; set; } = new();
+    public List<GraphParameter> Parameters { get; set; } = new();  // Declared via top-level PARAM records; empty means the compiled method takes no arguments, exactly as before this existed.
 
     /// Validates the graph for consistency. Returns false if invalid; sets err to a message.
     /// Note: Comparison is case-sensitive for node IDs. If nodes are added as "1" and referenced as "1",
@@ -125,6 +147,56 @@ public class Graph
             if (pin == null)
             {
                 err = $"Node {pv.NodeId} has no input pin '{pv.PinName}'";
+                return false;
+            }
+        }
+
+        // Check PARAM declarations are unique -- two parameters with the same name would make
+        // "which argument does this node read" ambiguous.
+        var paramNames = new HashSet<string>();
+        foreach (var p in Parameters)
+        {
+            if (!paramNames.Add(p.Name))
+            {
+                err = $"Duplicate PARAM declaration '{p.Name}'";
+                return false;
+            }
+        }
+
+        // Check every Param node names a parameter that was actually declared, and that if it
+        // already has an explicit output pin (hand-written PIN line, rather than the parser's
+        // default-pins path) that pin's type agrees with the PARAM's declared type. Checked here
+        // rather than only in GraphCompiler because Validate() runs both at parse time and again
+        // at the start of Compile() -- a graph built programmatically (not through the text parser)
+        // gets the same check.
+        //
+        // Deliberately BEFORE the Outputs check below: a Param node with a bad param= attribute has
+        // no default output pin (see AddDefaultPins), so any LINK or OUT record touching it would
+        // otherwise fail first with a generic "no output pin 'value'" that names the symptom, not the
+        // param= problem that caused it.
+        foreach (var node in Nodes.Values)
+        {
+            bool isParamNode = node.Type.Equals("param", System.StringComparison.OrdinalIgnoreCase) ||
+                                node.Type.Equals("getparam", System.StringComparison.OrdinalIgnoreCase);
+            if (!isParamNode) continue;
+
+            if (string.IsNullOrEmpty(node.ParamName))
+            {
+                err = $"Node '{node.Id}' is a Param node but has no param= attribute naming which parameter it reads";
+                return false;
+            }
+
+            var declared = Parameters.FirstOrDefault(p => p.Name == node.ParamName);
+            if (declared == null)
+            {
+                err = $"Node '{node.Id}' references undeclared parameter '{node.ParamName}' -- add 'PARAM {node.ParamName} <type>'";
+                return false;
+            }
+
+            var valuePin = node.Pins.FirstOrDefault(p => p.Name == "value" && p.IsOutput);
+            if (valuePin != null && valuePin.Type != declared.Type)
+            {
+                err = $"Node '{node.Id}' declares output pin 'value' as {valuePin.Type} but parameter '{node.ParamName}' is {declared.Type}";
                 return false;
             }
         }
