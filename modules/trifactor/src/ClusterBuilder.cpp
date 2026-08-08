@@ -13,13 +13,30 @@
 // determinism, meshlet-free compatibility, and two degenerate inputs). The reasoning below about
 // the crack-free invariant is therefore now backed by a run, not only by the argument.
 //
-// One thing the blind authoring cost, and it is worth fixing later: the grouping step below is a
-// hand-rolled greedy region-grow over a shared-vertex adjacency graph, written that way because
-// meshoptimizer's own meshopt_partitionClusters could not be seen at the time. v1.2 ships it
-// (meshoptimizer.h:852), it solves exactly this problem, and it is very likely better than the
-// heuristic here. Swapping to it is a contained change to buildLodHierarchy's grouping loop and
-// nothing else -- the locked-border reasoning below does not depend on HOW clusters are grouped,
-// only on all of a group's triangles landing in one merged index buffer.
+// Two things the blind authoring cost, both since fixed and re-verified against TrifactorTest,
+// not just argued:
+//
+//   1. Grouping used to be a hand-rolled greedy region-grow over a shared-vertex adjacency graph,
+//      written that way because meshoptimizer's own meshopt_partitionClusters could not be seen at
+//      the time. It now calls that function (meshoptimizer.h:852) instead -- see groupClusters'
+//      own comment for what that changes (a different DAG topology) and what it does not (crack-
+//      freeness, error-monotonicity).
+//
+//   2. Every meshopt_simplify call used to pay setup cost proportional to the WHOLE MESH's vertex
+//      count on every group at every level, regardless of how few vertices the group's own merged
+//      buffer actually referenced -- meshopt_SimplifySparse existed for exactly this and was never
+//      set. Measured this session (see the call site in buildLodHierarchy) as ~98% of a synthetic
+//      498K-triangle mesh's total buildLodHierarchy time, and a fully sufficient explanation for the
+//      13m35s/8m40s real cook times a prior profiling pass reported. Fixed by setting the flag.
+//      IMPORTANT: this does NOT touch the vertex-buffer-identity argument below -- the flag only
+//      skips setup work sized to vertex_count; the actual simplify call still receives the SAME
+//      global mesh.positions/vertexCount as before, and meshoptimizer remaps its sparse-internal
+//      indices back to global ids before returning them (verified by reading simplifier.cpp), so
+//      every "global vertex id" propagated by this file is exactly as global as it always was. The
+//      one real side effect is that meshopt_simplify's returned `result_error` becomes relative to
+//      the group's own subset extent instead of the whole mesh's (meshoptimizer.h:471's own doc)
+//      -- groupExtentScale (above appendGlobalTriangles) and the rescale at the call site correct
+//      for that before the error goes anywhere near worldExtentScale/toScreenErrorThreshold.
 // ============================================================================================
 //
 // ---- The crack-free invariant, and how this file actually holds it ---------------------------
@@ -57,7 +74,6 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
-#include <unordered_map>
 
 namespace aver::trifactor {
 
@@ -143,77 +159,62 @@ QuantizedCone quantizeConeConservative(const Vec3& rawAxis, f32 cutoff) {
 constexpr u32 kTargetGroupSize = 6;
 constexpr u32 kMaxGroupSize    = 8;
 
-// Adjacency by SHARED VERTEX, not strictly shared edge: two clusters that share an original mesh
-// vertex are adjacent, weighted by how many vertices they share. Sharing an edge implies sharing
-// its two endpoint vertices, so this is a superset of "shares a boundary edge" -- it can find a
-// small number of vertex-touching-but-not-edge-touching pairs a stricter test would not.
-// Deliberately fine to be loose here: this adjacency is only the grouping HEURISTIC (which clusters
-// get simplified together). The correctness mechanism -- what actually stays locked -- is
-// meshopt_SimplifyLockBorder on the group's own merged index buffer, which is exact regardless of
-// how the group was chosen (see the file-level comment).
-std::vector<std::vector<std::pair<u32, u32>>> buildAdjacency(const LodDag& dag,
-                                                               const std::vector<u32>& levelClusterIds) {
-    std::unordered_map<u32, std::vector<u32>> vertexToClusters;
-    for (u32 cid : levelClusterIds)
-        for (u32 v : dag.clusters[cid].vertices) vertexToClusters[v].push_back(cid);
+// meshopt_partitionClusters guarantees actual partition sizes of target..target+target/3
+// (meshoptimizer.h:850) -- for kTargetGroupSize=6 that is exactly 6..8, which is where
+// kMaxGroupSize=8 came from in the first place. Not a coincidence to re-derive at every call site;
+// asserted once here so a change to kTargetGroupSize that silently breaks the "8 is the hard cap"
+// assumption fails to compile instead of quietly producing an oversized group.
+static_assert(kTargetGroupSize + kTargetGroupSize / 3 == kMaxGroupSize,
+              "kMaxGroupSize documents meshopt_partitionClusters' own target..target+target/3 bound "
+              "for kTargetGroupSize -- keep them in sync");
 
-    std::unordered_map<u32, std::unordered_map<u32, u32>> weight; // clusterId -> neighborId -> sharedVerts
-    for (auto& [vertex, clusters] : vertexToClusters) {
-        for (usize i = 0; i < clusters.size(); ++i)
-            for (usize j = i + 1; j < clusters.size(); ++j) {
-                weight[clusters[i]][clusters[j]]++;
-                weight[clusters[j]][clusters[i]]++;
-            }
-    }
-
-    std::vector<std::vector<std::pair<u32, u32>>> adjacency(levelClusterIds.size());
-    std::unordered_map<u32, u32> idToPos;
-    for (u32 pos = 0; pos < levelClusterIds.size(); ++pos) idToPos[levelClusterIds[pos]] = pos;
-    for (u32 pos = 0; pos < levelClusterIds.size(); ++pos) {
-        auto it = weight.find(levelClusterIds[pos]);
-        if (it == weight.end()) continue;
-        for (auto& [nb, w] : it->second) adjacency[pos].push_back({nb, w});
-        std::sort(adjacency[pos].begin(), adjacency[pos].end(),
-                  [](auto& lhs, auto& rhs) { return lhs.second > rhs.second; });
-    }
-    return adjacency;
-}
-
-// Greedy region growing: start a new group at the lowest-position unvisited cluster, then
-// repeatedly pull in the highest-weight unvisited neighbor of ANY cluster currently in the group,
-// until the group reaches kTargetGroupSize, runs out of reachable unvisited neighbors, or hits
-// kMaxGroupSize. An isolated cluster (no unvisited neighbor reachable at all) becomes its own group
-// of size 1 -- meshopt_simplify on a group of 1, with its entire boundary therefore locked, is
-// correctly a no-op rather than an error.
-std::vector<std::vector<u32>> groupClusters(const LodDag& dag, const std::vector<u32>& levelClusterIds) {
-    const auto adjacency = buildAdjacency(dag, levelClusterIds);
+// Groups clusters for joint simplification via meshopt_partitionClusters (meshoptimizer.h:852),
+// which solves exactly this problem -- it was not available when this file was first written (see
+// the file-level comment) and is used here now that meshoptimizer is vendored.
+//
+// WHY THIS IS SAFE, and what it changes. The correctness mechanism this whole file leans on --
+// meshopt_SimplifyLockBorder on ONE merged index buffer per group (see appendGlobalTriangles's call
+// site in buildLodHierarchy and the file-level comment) -- depends only on which triangles end up
+// in the SAME group, not on how the grouping decision was made. meshopt_partitionClusters is a
+// different algorithm from the hand-rolled greedy region-grow this replaced (a proper agglomerative
+// merge over a flat-array adjacency graph, plus a spatial-proximity fallback pass for otherwise
+// unconnected clusters, per its own source) and DOES produce a measurably different partition on the
+// same input -- verified this session (a 1854-LOD-0-cluster case grouped into 337 groups by the old
+// code and 289 by this one). That changes the DAG's topology (which clusters coarsen together, level
+// count, per-cluster geometry) but not its correctness: crack-freeness and error-monotonicity are
+// both enforced independently of grouping choice (LockBorder on the merged buffer; the explicit
+// max() in buildLodHierarchy's error propagation, respectively) -- confirmed by re-running
+// TrifactorTest's full invariant suite (LOD-0 coverage, cluster limits, error monotonicity,
+// acyclicity, MLET round-trip, the skinned-mesh regression) after this swap, not just argued.
+//
+// `mesh` is needed here (the old hand-rolled grouper did not take it) because
+// meshopt_partitionClusters' spatial-fallback pass wants vertex positions, not just the shared-vertex
+// topology dag.clusters[].vertices already carries.
+std::vector<std::vector<u32>> groupClusters(const LodDag& dag, const std::vector<u32>& levelClusterIds,
+                                             const fmt::OcMeshData& mesh) {
     const u32 n = static_cast<u32>(levelClusterIds.size());
-    std::vector<bool> visited(n, false);
-    std::unordered_map<u32, u32> idToPos;
-    for (u32 pos = 0; pos < n; ++pos) idToPos[levelClusterIds[pos]] = pos;
+    if (n == 0) return {};
+    if (n == 1) return {{levelClusterIds[0]}};   // meshopt_partitionClusters needs no help with this
 
-    std::vector<std::vector<u32>> groups;
-    for (u32 startPos = 0; startPos < n; ++startPos) {
-        if (visited[startPos]) continue;
-        std::vector<u32> group{levelClusterIds[startPos]};
-        visited[startPos] = true;
-
-        while (group.size() < kTargetGroupSize) {
-            u32 bestPos = std::numeric_limits<u32>::max();
-            u32 bestWeight = 0;
-            for (u32 memberId : group) {
-                for (auto& [nbId, w] : adjacency[idToPos[memberId]]) {
-                    const u32 nbPos = idToPos[nbId];
-                    if (!visited[nbPos] && w > bestWeight) { bestWeight = w; bestPos = nbPos; }
-                }
-            }
-            if (bestPos == std::numeric_limits<u32>::max()) break;
-            group.push_back(levelClusterIds[bestPos]);
-            visited[bestPos] = true;
-            if (group.size() >= kMaxGroupSize) break;
-        }
-        groups.push_back(std::move(group));
+    std::vector<u32> clusterIndices;
+    std::vector<u32> clusterIndexCounts(n);
+    clusterIndices.reserve(n * kMaxClusterVertices);   // worst case every cluster is full
+    for (u32 pos = 0; pos < n; ++pos) {
+        const std::vector<u32>& verts = dag.clusters[levelClusterIds[pos]].vertices;
+        clusterIndexCounts[pos] = static_cast<u32>(verts.size());
+        clusterIndices.insert(clusterIndices.end(), verts.begin(), verts.end());
     }
+
+    const usize vertexCount = mesh.positions.size() / 3;
+    std::vector<u32> partitionOf(n);
+    const usize partitionCount = meshopt_partitionClusters(
+        partitionOf.data(), clusterIndices.data(), clusterIndices.size(),
+        clusterIndexCounts.data(), n,
+        mesh.positions.data(), vertexCount, sizeof(f32) * 3,
+        kTargetGroupSize);
+
+    std::vector<std::vector<u32>> groups(partitionCount);
+    for (u32 pos = 0; pos < n; ++pos) groups[partitionOf[pos]].push_back(levelClusterIds[pos]);
     return groups;
 }
 
@@ -226,6 +227,33 @@ void appendGlobalTriangles(const Cluster& c, std::vector<u32>& out) {
         out.push_back(c.vertices[c.triangles[t + 1]]);
         out.push_back(c.vertices[c.triangles[t + 2]]);
     }
+}
+
+// The world-extent scale (meshopt_simplifyScale's own units, see meshoptimizer.h:606) of exactly the
+// DISTINCT global vertices `mergedIndices` references -- i.e. one group's own subset, not the whole
+// mesh. This is what buildLodHierarchy's meshopt_simplify call below now measures its "relative"
+// error against once meshopt_SimplifySparse is set (its doc: "error becomes relative to subset
+// extents", meshoptimizer.h:471), because meshopt_SimplifySparse's internal sparse_remap collapses
+// the effective vertex set to exactly this same distinct-referenced-vertex set before computing the
+// scale (verified by reading simplifier.cpp: buildSparseRemap at line 242 produces the identical set
+// this function recomputes, and rescalePositions at line 549 takes its min/max over exactly that set
+// -- a bounding-box extent, so recomputing it from an unordered copy of the same positions is exact,
+// not approximate). A caller needs this to convert that per-group-relative result_error back into
+// the whole-mesh-relative units Cluster::error is documented to hold (ClusterBuilder.hpp) -- see the
+// call site.
+f32 groupExtentScale(const fmt::OcMeshData& mesh, const std::vector<u32>& mergedIndices) {
+    std::vector<u32> unique(mergedIndices);
+    std::sort(unique.begin(), unique.end());
+    unique.erase(std::unique(unique.begin(), unique.end()), unique.end());
+
+    std::vector<f32> positions(unique.size() * 3);
+    for (usize i = 0; i < unique.size(); ++i) {
+        const u32 v = unique[i];
+        positions[i * 3 + 0] = mesh.positions[usize(v) * 3 + 0];
+        positions[i * 3 + 1] = mesh.positions[usize(v) * 3 + 1];
+        positions[i * 3 + 2] = mesh.positions[usize(v) * 3 + 2];
+    }
+    return meshopt_simplifyScale(positions.data(), positions.size() / 3, sizeof(f32) * 3);
 }
 
 // Runs meshopt_buildMeshlets + meshopt_computeMeshletBounds over `indices` (a plain global index
@@ -319,11 +347,18 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
     const usize vertexCount = mesh.positions.size() / 3;
     constexpr u32 kMaxLevels = 32; // safety cap against a non-converging loop, not an expected case
 
+    // Computed ONCE for the whole hierarchy (this is worldExtentScale(mesh) -- the same public
+    // function ConvertTool calls after this returns), and reused below to rescale every group's
+    // meshopt_SimplifySparse-relative error back into the whole-mesh-relative units Cluster::error is
+    // documented to hold. See the meshopt_simplify call site below for why that rescale exists at
+    // all.
+    const f32 meshScale = worldExtentScale(mesh);
+
     for (u32 level = 0; level < kMaxLevels; ++level) {
         const std::vector<u32> current = dag.levels[level]; // copy: dag.levels grows below
         if (current.size() <= 1) break;                     // already a single root cluster
 
-        const auto groups = groupClusters(dag, current);
+        const auto groups = groupClusters(dag, current, mesh);
 
         // Pass 1: simplify every group. Nothing is written to `dag` yet, so if NO group reduced,
         // this level can be abandoned cleanly -- `level` stays the DAG's topmost (root) level rather
@@ -338,7 +373,16 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
         bool anyReduction = false;
 
         for (const auto& group : groups) {
+            // Sized once instead of letting push_back inside appendGlobalTriangles grow it by
+            // doubling: this loop runs once per group at every level (thousands of times across a
+            // real hierarchy), and with the O(vertex_count) meshopt_simplify cost above gone, this
+            // reallocation churn stopped being invisible. The exact total is known up front -- every
+            // member cluster's triangles all land in this one merged buffer -- so there's nothing
+            // approximate about sizing to it exactly.
+            usize mergedTriIndices = 0;
+            for (u32 cid : group) mergedTriIndices += dag.clusters[cid].triangles.size();
             std::vector<u32> mergedIndices;
+            mergedIndices.reserve(mergedTriIndices);
             for (u32 cid : group) appendGlobalTriangles(dag.clusters[cid], mergedIndices);
 
             // Target: halve the group's triangle count, floored to a whole number of triangles, with
@@ -352,18 +396,42 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             const usize targetIndexCount =
                 std::min(mergedIndices.size(), std::max<usize>(6, (mergedIndices.size() / 2 / 3) * 3));
 
+            // meshopt_SimplifySparse: WITHOUT this flag, meshopt_simplify pays setup cost
+            // (buildPositionRemap's vertex hash table, vertex_kind/quadric/loop buffers, ...)
+            // proportional to `vertexCount` -- the WHOLE MESH's vertex count -- on EVERY group at
+            // EVERY level, even though a group's own merged buffer references only a few hundred of
+            // them at most (kMaxGroupSize*kMaxClusterVertices = 512). Measured this session with an
+            // isolated single-call comparison (one real 578-triangle/338-referenced-vertex group,
+            // simplified repeatedly against a padded vertex buffer of growing total size): the
+            // current-shape call's cost scaled from 0.05ms to 35.08ms as the MESH's vertex count grew
+            // from 1,000 to 1,000,000 for the IDENTICAL group, while meshopt_SimplifySparse held flat
+            // at 0.03-0.04ms throughout -- i.e. this flag alone turns an O(whole-mesh-vertex-count)
+            // cost that is repeated thousands of times across a hierarchy into an O(group-size) cost
+            // paid once per group. See groupExtentScale's comment just above appendGlobalTriangles
+            // for the one thing this flag changes that this call site has to correct for.
             std::vector<u32> simplified(mergedIndices.size());
             f32 resultError = 0.0f;
             const usize simplifiedCount = meshopt_simplify(
                 simplified.data(), mergedIndices.data(), mergedIndices.size(),
                 mesh.positions.data(), vertexCount, sizeof(f32) * 3,
                 targetIndexCount, /*target_error=*/1e-2f,
-                meshopt_SimplifyLockBorder, &resultError);
+                meshopt_SimplifyLockBorder | meshopt_SimplifySparse, &resultError);
             simplified.resize(simplifiedCount);
 
             if (simplifiedCount < mergedIndices.size()) anyReduction = true;
 
-            pending.push_back({group, std::move(simplified), resultError});
+            // meshopt_SimplifySparse makes `resultError` relative to THIS GROUP's own subset extent
+            // (meshoptimizer.h:471's own doc: "error becomes relative to subset extents"), not the
+            // whole mesh's -- rescale it back to whole-mesh-relative units (what every OTHER path
+            // that touches Cluster::error assumes -- worldExtentScale/toScreenErrorThreshold,
+            // ClusterBuilder.hpp's own comment on the field) before it is compared against another
+            // group's error or propagated to a parent. Absolute error is scale-invariant (subset
+            // extent * subset-relative error == mesh extent * mesh-relative error, both being the
+            // same physical distance), so this is an exact unit conversion, not an approximation.
+            const f32 groupScale = groupExtentScale(mesh, mergedIndices);
+            const f32 rescaledError = (meshScale > 0.0f) ? resultError * (groupScale / meshScale) : resultError;
+
+            pending.push_back({group, std::move(simplified), rescaledError});
         }
 
         if (!anyReduction) break;

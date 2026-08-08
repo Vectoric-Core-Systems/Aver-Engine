@@ -36,14 +36,21 @@ $configs = [ordered]@{
     "landscape-off" = @("-DAVER_MODULE_LANDSCAPE=OFF", "-DAVER_MODULE_DEFORM=OFF")
     "scripting-off" = @("-DAVER_MODULE_SCRIPTING=OFF")
     "scene-off"     = @("-DAVER_MODULE_SCENE=OFF", "-DAVER_MODULE_FRAMEWORK=OFF")
+    "trifactor-off" = @("-DAVER_MODULE_TRIFACTOR=OFF")
     "no-ui"         = @("-DAVER_ENABLE_UI=OFF")
     "no-game"       = @("-DAVER_BUILD_GAME=OFF")
     "no-sandbox"    = @("-DAVER_BUILD_SANDBOX=OFF")
     "all-off"       = @("-DAVER_MODULE_SCENE=OFF", "-DAVER_MODULE_FRAMEWORK=OFF",
                         "-DAVER_MODULE_PHYSICS=OFF", "-DAVER_MODULE_PBR=OFF",
                         "-DAVER_MODULE_VOXI=OFF", "-DAVER_MODULE_SCRIPTING=OFF",
-                        "-DAVER_MODULE_LANDSCAPE=OFF", "-DAVER_MODULE_DEFORM=OFF")
+                        "-DAVER_MODULE_LANDSCAPE=OFF", "-DAVER_MODULE_DEFORM=OFF",
+                        "-DAVER_MODULE_TRIFACTOR=OFF")
 }
+
+# A module absent from this list is a module nobody checks. TRIFACTOR was, for its whole life --
+# added as an option, defaulted ON, and never given a row here, so "the matrix passes" said nothing
+# about the one module the virtualized-geometry work lives in. If you add an option() to the root
+# CMakeLists, add it here in the same commit.
 
 # The toolchain the normal build already found, rather than whatever is on PATH -- this script is
 # routinely run from a plain shell with no MSVC environment.
@@ -52,7 +59,13 @@ if (-not (Test-Path $cache)) {
     Write-Error "No build/CMakeCache.txt. Configure the normal build once first, so this script can reuse its toolchain."
 }
 function Get-Cached([string] $key) {
-    $line = Select-String -Path $cache -Pattern "^$key:" | Select-Object -First 1
+    # "^${key}:" and NOT "^$key:". PowerShell parses `$key:` as a DRIVE-QUALIFIED variable -- the
+    # same syntax as $env:PATH -- so it reads "key" as a drive name and throws
+    # InvalidVariableReferenceWithDrive at PARSE time. Parse time is the important part: the script
+    # died before building a single configuration, which is why the one tool meant to catch
+    # modularity breaks had never actually run on this machine, and two broken configurations
+    # (voxi-off, no-ui) sat at head unnoticed.
+    $line = Select-String -Path $cache -Pattern "^${key}:" | Select-Object -First 1
     if (-not $line) { return "" }
     return ($line.Line -split "=", 2)[1]
 }

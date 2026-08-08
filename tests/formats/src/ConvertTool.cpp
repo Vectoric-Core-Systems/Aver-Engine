@@ -16,9 +16,13 @@
 // modules/runtime.game/src/GameContent.cpp uses for AVER_MODULE_PBR/AVER_MODULE_SCENE.
 #if AVER_MODULE_TRIFACTOR
 #include "aver/trifactor/ClusterBuilder.hpp"
-#include <algorithm>
 #endif
 
+// UNGUARDED, and it was not. <algorithm> sat inside the block above while the multi-mesh merge
+// below -- which has nothing to do with Trifactor -- uses std::min/std::max, so a build with the
+// module off failed on a header the merge never asked for. The same guard-scoping shape that has
+// been fixed seventeen times in this tree.
+#include <algorithm>
 #include <string>
 
 using namespace aver;
@@ -164,13 +168,75 @@ int main(int argc, char** argv) {
     const std::string base = argc > 3 ? std::string(argv[3]) : stemOf(argv[1]);
 
     // ---- the mesh ----
-    // A copy, not a const ref to res.meshes[0]: clustering (when built) mutates the meshlets field
-    // in place, and the alternative -- a second OcMeshData just for the clustered case -- would make
-    // the AVER_MODULE_TRIFACTOR=OFF and =ON code paths save two DIFFERENT objects, which is exactly
-    // the kind of divergence that only shows up once someone diffs the two builds' output.
+    // EVERY mesh in the file, merged into one, not just res.meshes[0].
+    //
+    // Taking the first one silently discarded most of most real assets, and did it without a word:
+    // a glTF from any scanning or scattering library is routinely a SCENE of several meshes, and
+    // this tool imported one of them and reported success. Measured against the source polycounts,
+    // 11 of 15 Poly Haven assets came in short -- moss_01 arrived as 24 triangles out of 246,170,
+    // and rock_moss_set_01 as 11,000 out of 63,127. Nothing failed; the .ocmesh was simply a
+    // fragment, and the only way to notice was to already know what the number should have been.
+    //
+    // MERGED rather than one file per mesh, because these are single objects to whoever authored
+    // them -- a "rock moss set" is one prop with several parts, and a scatter palette wants to place
+    // it as one thing. Each source mesh becomes its own submesh, so the parts stay addressable and
+    // keep their own material slots.
+    //
+    // A copy, not a const ref: clustering (when built) mutates the meshlets field in place, and the
+    // alternative -- a second OcMeshData just for the clustered case -- would make the
+    // AVER_MODULE_TRIFACTOR=OFF and =ON code paths save two DIFFERENT objects, which is exactly the
+    // kind of divergence that only shows up once someone diffs the two builds' output.
     fmt::OcMeshData m = res.meshes[0];
-    AVER_INFO("imported '{}': {} verts, {} tris, skin {}, bounds ({:.1f},{:.1f},{:.1f})..({:.1f},{:.1f},{:.1f})",
-              res.meshNames[0], m.vertexCount(), m.indices.size() / 3, m.hasSkin() ? "yes" : "no",
+    for (usize mi = 1; mi < res.meshes.size(); ++mi) {
+        const fmt::OcMeshData& src = res.meshes[mi];
+        if (src.positions.empty() || src.indices.empty()) continue;
+
+        // SKIN IS THE ONE THING THAT CANNOT BE MERGED BLIND. Two meshes' JOINTS_0 indices address
+        // their own skin's joint order, so concatenating them would silently bind vertices to the
+        // wrong bones -- a rig that looks intact and animates wrongly. A rigged file keeps the
+        // old first-mesh-only behaviour, and says so.
+        if (src.hasSkin() || m.hasSkin()) {
+            AVER_WARN("'{}' is skinned; merging additional meshes would remap its joints wrongly, so "
+                      "only the first mesh was imported ({} of {} meshes)",
+                      res.meshNames[mi], 1, res.meshes.size());
+            break;
+        }
+
+        const u32 base = m.vertexCount();
+        const u32 firstIndex = static_cast<u32>(m.indices.size());
+        m.positions.insert(m.positions.end(), src.positions.begin(), src.positions.end());
+        m.normals.insert(m.normals.end(), src.normals.begin(), src.normals.end());
+        m.uvs.insert(m.uvs.end(), src.uvs.begin(), src.uvs.end());
+        for (const u32 idx : src.indices) m.indices.push_back(idx + base);
+
+        // The source's material slots move across with it, and its submeshes are re-pointed at the
+        // merged buffers. A submesh keeping its old slot index would silently repaint the part with
+        // whatever material happened to sit at that index in the first mesh.
+        const u32 slotBase = static_cast<u32>(m.materialSlots.size());
+        m.materialSlots.insert(m.materialSlots.end(), src.materialSlots.begin(), src.materialSlots.end());
+        if (src.submeshes.empty()) {
+            m.submeshes.push_back(fmt::OcMeshSubmesh{res.meshNames[mi], slotBase, firstIndex,
+                                                     static_cast<u32>(src.indices.size()),
+                                                     base, src.vertexCount()});
+        } else {
+            for (fmt::OcMeshSubmesh sm : src.submeshes) {
+                sm.materialSlot += slotBase;
+                sm.indexStart   += firstIndex;
+                sm.baseVertex   += base;
+                m.submeshes.push_back(std::move(sm));
+            }
+        }
+
+        m.boundsMin = Vec3{std::min(m.boundsMin.x, src.boundsMin.x), std::min(m.boundsMin.y, src.boundsMin.y),
+                           std::min(m.boundsMin.z, src.boundsMin.z)};
+        m.boundsMax = Vec3{std::max(m.boundsMax.x, src.boundsMax.x), std::max(m.boundsMax.y, src.boundsMax.y),
+                           std::max(m.boundsMax.z, src.boundsMax.z)};
+    }
+
+    AVER_INFO("imported '{}'{}: {} verts, {} tris, skin {}, bounds ({:.1f},{:.1f},{:.1f})..({:.1f},{:.1f},{:.1f})",
+              res.meshNames[0],
+              res.meshes.size() > 1 ? " (+" + std::to_string(res.meshes.size() - 1) + " more merged)" : "",
+              m.vertexCount(), m.indices.size() / 3, m.hasSkin() ? "yes" : "no",
               m.boundsMin.x, m.boundsMin.y, m.boundsMin.z, m.boundsMax.x, m.boundsMax.y, m.boundsMax.z);
 
 #if AVER_MODULE_TRIFACTOR
