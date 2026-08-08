@@ -15,6 +15,9 @@
 #include "aver/formats/OcWorld.hpp"
 #include "aver/formats/OcMesh.hpp"
 #include "aver/formats/GltfImport.hpp"
+#if AVER_MODULE_TRIFACTOR
+#include "aver/trifactor/ClusterAdapt.hpp"
+#endif
 #if AVER_HAVE_AUDIO_IMPORT
 #  include "aver/formats/OcAudio.hpp"
 #endif
@@ -1488,7 +1491,52 @@ public:
             meshTris_[id] = static_cast<u32>(md.indices.size() / 3);
             projectMeshIds_.push_back(id);
             ++loaded;
-            AVER_INFO("[Mesh] '{}' -> {} verts, {} indices", rel, verts.size(), md.indices.size());
+            AVER_INFO("[Mesh] '{}' -> {} verts, {} indices, lodCount={}, coarserLods={}, meshlets={}",
+                      rel, verts.size(), md.indices.size(), md.lodCount(), md.coarserLods.size(),
+                      md.meshlets.size());
+
+#if AVER_MODULE_TRIFACTOR
+            // The Cook wrote coarser LOD levels for this mesh: build one whole-level MeshHandle per
+            // level, ONCE, here at load time -- never per frame. Every level shares `verts` (the SAME
+            // vertex buffer, per OcMeshData::coarserLods' own contract), so this only duplicates INDEX
+            // data on the GPU, never vertices, and it sidesteps entirely the per-frame-index-upload
+            // failure mode the task brief warns about: nothing about the selection pass below writes
+            // to a buffer while a frame might still be reading it, because nothing is written per
+            // frame at all -- selection only ever CHOOSES among these already-resident handles.
+            if (md.lodCount() > 1) {
+                MeshLodLadder ladder;
+                const u32 levels = md.lodCount();
+                ladder.handles.reserve(levels);
+                ladder.triCounts.reserve(levels);
+                ladder.errorCm.reserve(levels);
+                ladder.clusters.resize(levels);
+
+                ladder.handles.push_back(h);
+                ladder.triCounts.push_back(meshTris_[id]);
+                ladder.errorCm.push_back(0.0f);
+                trifactor::buildLevelClusterViews(md, 0, ladder.clusters[0]);
+
+                bool ok = true;
+                for (u32 lvl = 1; lvl < levels && ok; ++lvl) {
+                    const fmt::OcMeshLod& lod = md.coarserLods[lvl - 1];
+                    const rhi::MeshHandle lh = e.device()->createMesh(
+                        verts.data(), (u32)verts.size(), lod.indices.data(), (u32)lod.indices.size());
+                    if (!lh) {
+                        AVER_WARN("[Mesh] '{}' LOD {} refused by the device; ladder truncated at {} level(s)",
+                                  rel, lvl, ladder.handles.size());
+                        ok = false;
+                        break;
+                    }
+                    ladder.handles.push_back(lh);
+                    ladder.triCounts.push_back(trifactor::levelTriangleCount(md, lvl));
+                    ladder.errorCm.push_back(trifactor::levelWorldErrorCm(md, lvl));
+                    trifactor::buildLevelClusterViews(md, lvl, ladder.clusters[lvl]);
+                }
+                AVER_INFO("[Mesh] '{}' LOD ladder: {} level(s), {} tris at LOD0 -> {} tris at the coarsest",
+                          rel, ladder.handles.size(), ladder.triCounts.front(), ladder.triCounts.back());
+                meshLods_[id] = std::move(ladder);
+            }
+#endif
         }
         if (loaded || failed)
             AVER_INFO("[Mesh] {} project mesh(es) loaded from {}{}", loaded, dir,
@@ -1503,7 +1551,12 @@ public:
         // sceneMeshes_ is scene-only; with the module off loadProjectMeshes() never populated it (see
         // its own #if AVER_MODULE_SCENE above), so there is nothing here to erase from it either.
 #if AVER_MODULE_SCENE
-        for (const u64 id : projectMeshIds_) { sceneMeshes_.erase(id); meshTris_.erase(id); }
+        for (const u64 id : projectMeshIds_) {
+            sceneMeshes_.erase(id); meshTris_.erase(id);
+#if AVER_MODULE_TRIFACTOR
+            meshLods_.erase(id);
+#endif
+        }
 #endif
         projectMeshIds_.clear();
     }
@@ -1589,6 +1642,9 @@ public:
         {
             scene::World& w = scene::World::instance();
             int drawn = 0, culled = 0;
+#if AVER_MODULE_TRIFACTOR
+            lodStats_ = LodSelectStats{};   // this frame's counters, from zero -- see the struct comment
+#endif
 
             // The six frustum planes, from the camera's viewProj. ENGINE convention: row-vector, so
             // a clip coordinate is a dot with a COLUMN, and each plane is a sum or difference of two
@@ -1634,11 +1690,12 @@ public:
                 // is drawn rather than culled: an entity whose bounds were never filled in must not
                 // vanish, and being conservative costs a draw call where being wrong costs a
                 // character.
+                bool haveWorldBox = false;
+                Vec3 wlo{1e30f, 1e30f, 1e30f}, whi{-1e30f, -1e30f, -1e30f};
                 {
                     const Vec3 lo{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
                     const Vec3 hi{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
                     if (hi.x > lo.x && hi.y > lo.y && hi.z > lo.z) {
-                        Vec3 wlo{1e30f, 1e30f, 1e30f}, whi{-1e30f, -1e30f, -1e30f};
                         for (u32 c = 0; c < 8; ++c) {
                             const Vec3 p{(c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y, (c & 4) ? hi.z : lo.z};
                             const Vec3 t = xformPoint(wm, p);
@@ -1646,6 +1703,7 @@ public:
                             wlo.y = std::fmin(wlo.y, t.y); whi.y = std::fmax(whi.y, t.y);
                             wlo.z = std::fmin(wlo.z, t.z); whi.z = std::fmax(whi.z, t.z);
                         }
+                        haveWorldBox = true;
                         bool outside = false;
                         for (u32 pi = 0; pi < 6 && !outside; ++pi) {
                             // The corner FURTHEST along the plane normal. If even that one is behind,
@@ -1694,6 +1752,72 @@ public:
                 // substituting the handle reaches every pass at once. Zero means "not skinned",
                 // never "not drawn" -- a character that fails to skin must still appear.
                 rhi::MeshHandle mesh = it->second;
+#if AVER_MODULE_TRIFACTOR
+                // Virtualized-geometry LOD selection (aver::trifactor::ClusterAdapt/ClusterSelect).
+                // Per-LEVEL, not per-cluster -- see ClusterAdapt.hpp's file header for why. Skipped
+                // for a skinned entity (its posed handle below always wins anyway, per THE SEAM
+                // comment) and for a mesh with no LOD ladder (single-LOD meshes are unaffected, same
+                // as before this feature existed). NO CACHE: chooseLevelCached is a handful of float
+                // ops per instance and touches no GPU resource, so it is cheap enough to run fresh
+                // EVERY frame -- see the task report for why that trivially satisfies "a moving
+                // camera must still update the choice" without needing an invalidation rule at all.
+                if (lodSelectEnabled_ && !skinned && haveWorldBox) {
+                    if (const auto lit = meshLods_.find(mr->mesh); lit != meshLods_.end()) {
+                        const MeshLodLadder& ladder = lit->second;
+                        const Vec3 sphereCenter = (wlo + whi) * 0.5f;
+                        const f32 sphereRadius = dist(wlo, whi) * 0.5f;   // half the box diagonal:
+                                                                          // encloses the box exactly,
+                                                                          // same conservative shape
+                                                                          // ClusterSelect's own sphere
+                                                                          // tests assume.
+                        trifactor::View view;
+                        view.eye = eye_;
+                        view.viewProj = viewProj_;
+                        view.viewportHeightPx = vpH_;
+                        view.verticalFovRadians = radians(60.0f);   // matches the literal at this
+                                                                     // frame's own proj build, above
+                        const u32 level = trifactor::chooseLevelCached(
+                            ladder.errorCm, sphereCenter, sphereRadius, lodErrorThresholdPx_, view);
+                        mesh = ladder.handles[level];
+
+                        ++lodStats_.instancesTested;
+                        if (level > 0) ++lodStats_.levelCollapsed;
+                        lodStats_.trianglesBeforeLod0 += ladder.triCounts.front();
+                        lodStats_.trianglesAfterLevel += ladder.triCounts[level];
+
+                        // Informational cluster-cull telemetry for the CHOSEN level only -- real,
+                        // tested selectVisibleClustersWithStats, but its result is not subtracted
+                        // from trianglesAfterLevel above: this slice draws the whole chosen level.
+                        // See ClusterAdapt.hpp's file header and MeshLodLadder's own comment.
+                        //
+                        // ladder.clusters[level] holds bounds in MESH-LOCAL space (as authored in the
+                        // .ocmesh); view.viewProj/frustum are WORLD space, so a working copy must be
+                        // transformed by this instance's world matrix first, or the frustum/cone test
+                        // would compare world-space planes against local-space spheres and mean
+                        // nothing. Radius/axis use a UNIFORM-scale approximation (length of one
+                        // transformed basis vector) -- exact for a uniformly-scaled instance,
+                        // conservative-ish otherwise; acceptable for an INFORMATIONAL counter that
+                        // never reaches the draw call.
+                        if (lodClusterStatsEnabled_ &&
+                            level < ladder.clusters.size() && !ladder.clusters[level].empty()) {
+                            const f32 worldScale = xformVec(wm, Vec3{1, 0, 0}).size();
+                            std::vector<trifactor::ClusterView> worldClusters = ladder.clusters[level];
+                            for (trifactor::ClusterView& cv : worldClusters) {
+                                cv.sphereCenter = xformPoint(wm, cv.sphereCenter);
+                                cv.sphereRadius *= worldScale;
+                                cv.coneApex = xformPoint(wm, cv.coneApex);
+                                cv.coneAxis = xformVec(wm, cv.coneAxis).getSafeNormal();
+                            }
+                            const trifactor::SelectionResult sr = trifactor::selectVisibleClustersWithStats(
+                                worldClusters, 1e30f /* no LOD collapse: already chosen */, view,
+                                true /* useFrustum */);
+                            lodStats_.clustersTested += sr.stats.tested;
+                            lodStats_.frustumCulled += sr.stats.frustumCulled;
+                            lodStats_.coneCulled += sr.stats.coneCulled;
+                        }
+                    }
+                }
+#endif
                 if (skinnedScene_)
                     if (const rhi::MeshHandle sk = skinnedScene_->drawHandle(ent)) mesh = sk;
                 e.device()->drawMesh(mesh, &wm.m[0][0], col, metallic, roughness);
@@ -1707,6 +1831,28 @@ public:
                 lastSceneDrawn_ = drawn;
                 lastSceneCulled_ = culled;
             }
+#if AVER_MODULE_TRIFACTOR
+            // Greppable per the brief's "report the counters" requirement: `[LOD-SELECT]`, only when
+            // something in the tuple changed (same log-on-change discipline as scene-render above).
+            // trianglesBeforeLod0 vs trianglesAfterLevel is the number that actually predicts frame
+            // time -- every triangle in "after" reaches a real drawMesh call this frame. clustersTested/
+            // frustumCulled/coneCulled are real telemetry from ClusterSelect's own tested functions,
+            // run against the CHOSEN level's meshlets, but are informational only in this slice: see
+            // ClusterAdapt.hpp's file header for why they are not (yet) subtracted from trianglesAfterLevel.
+            if (lodSelectEnabled_ &&
+                (lodStats_.instancesTested != lastLoggedLodStats_.instancesTested ||
+                 lodStats_.levelCollapsed != lastLoggedLodStats_.levelCollapsed ||
+                 lodStats_.trianglesAfterLevel != lastLoggedLodStats_.trianglesAfterLevel ||
+                 lodStats_.frustumCulled != lastLoggedLodStats_.frustumCulled ||
+                 lodStats_.coneCulled != lastLoggedLodStats_.coneCulled)) {
+                AVER_INFO("[LOD-SELECT] instances={} levelCollapsed={} clustersTested={} "
+                          "frustumCulled(info)={} coneCulled(info)={} trisBefore={} trisAfter={}",
+                          lodStats_.instancesTested, lodStats_.levelCollapsed, lodStats_.clustersTested,
+                          lodStats_.frustumCulled, lodStats_.coneCulled,
+                          lodStats_.trianglesBeforeLod0, lodStats_.trianglesAfterLevel);
+                lastLoggedLodStats_ = lodStats_;
+            }
+#endif
         }
 #endif
         // Selection outline: an enlarged wireframe shell over both passes, interactive runs only.
@@ -1935,6 +2081,28 @@ public:
         AVER_INFO("[Sandbox] shutdown");
     }
     void setVSyncOff(bool off) { vsyncOffRequested_ = off; }               // --no-vsync
+    // --lod-select [px]: turns on virtualized-geometry LOD selection (aver::trifactor::ClusterAdapt)
+    // for meshes the Cook wrote coarser LOD levels for. OFF (the default) reproduces pre-existing
+    // behaviour EXACTLY -- every instance keeps drawing sceneMeshes_[id] (LOD 0), same handle, same
+    // code path, as if this feature did not exist. `thresholdPx` is the pixel budget passed straight
+    // through to chooseLevelCached/screenSpaceErrorPx.
+    void setLodSelect(bool on, f32 thresholdPx) {
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+        lodSelectEnabled_ = on;
+        lodErrorThresholdPx_ = thresholdPx;
+#else
+        (void)on; (void)thresholdPx;
+#endif
+    }
+    // --lod-cluster-stats: see lodClusterStatsEnabled_'s own comment for why this is a second,
+    // separately-gated flag rather than folded into setLodSelect.
+    void setLodClusterStats(bool on) {
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+        lodClusterStatsEnabled_ = on;
+#else
+        (void)on;
+#endif
+    }
     void setUiDemo(bool on) { showUiDemo_ = on; }                          // --ui-demo
     void setOpenAsset(std::string p) { openAsset_ = std::move(p); }        // --open-asset
     void setInputProbe(bool on) { inputProbe_ = on; }
@@ -1947,10 +2115,20 @@ public:
 
     // --fog-match. A negative opacity means "leave the target where it is" and just switch matching
     // on, so `--fog-match` alone uses the panel's own default rather than silently redefining it.
+    // PRE-EXISTING SCOPING BUG, fixed in passing while verifying THIS task's own -DAVER_MODULE_SCENE=OFF
+    // build (house rule 6): unlike setChunkStreamAuto/setDroneAuto right above (deliberately unguarded,
+    // per their own comments, because the FIELDS they touch are unguarded too), this setter referenced
+    // matchFogToStreamRadius_/fogMatchTargetOpacity_, which ARE guarded `#if AVER_MODULE_SCENE` at
+    // their declaration -- so the unguarded setter simply failed to compile with the module off. Not
+    // part of the LOD-select feature; flagged separately in this task's report.
+#if AVER_MODULE_SCENE
     void setFogMatchToStreamRadius(bool on, f32 targetOpacity) {
         matchFogToStreamRadius_ = on;
         if (targetOpacity > 0.0f) fogMatchTargetOpacity_ = std::clamp(targetOpacity, 0.05f, 0.99f);
     }
+#else
+    void setFogMatchToStreamRadius(bool, f32) {}
+#endif
     // --drone [N]: frames left before setDroneEnabled(true) fires on its own, same shape as
     // --chunk-stream. Member and setter are unguarded for the same reason chunkStreamAutoFrames_ is
     // (the countdown in onUpdate is what's actually AVER_MODULE_SCENE-gated).
@@ -2227,7 +2405,12 @@ private:
         if (contentWatch_.poll(watchEvents_)) {
             AVER_WARN("[Editor] the watcher lost records; every open editor is being told to re-read");
             assetEditors_.notifyWatchLost();
-#if AVER_MODULE_PBR
+// BOTH modules, not just PBR. materials() is the PBR system, but it is reached THROUGH
+// voxiRenderer_, which is declared under AVER_MODULE_VOXI. Guarding on PBR alone compiles the call
+// in a VOXI=OFF + PBR=ON build where the member does not exist -- which is exactly the
+// configuration that has been failing to build at head, unnoticed, because the module matrix
+// script that would have caught it could not run (see scripts/module-matrix.ps1's Get-Cached).
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
             // Records were lost, so a texture may have arrived unseen. Forgetting the failed
             // resolves is cheap and the alternative is a material stuck on its fallback forever.
             voxiRenderer_.materials().forgetFailedResolves();
@@ -2244,7 +2427,7 @@ private:
             if (autoCompile_ && isScriptSource(ev.path)) scheduleAutoCompile(ev.path);
             if (isTextureSource(ev.path)) sawImage = true;
         }
-#if AVER_MODULE_PBR
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
         // AN IMAGE APPEARED OR CHANGED UNDER THE CONTENT ROOT, which is the one moment a texture
         // that failed to resolve might now succeed. The material system remembers failures so a
         // material naming a missing file does not re-hit the filesystem every drain; without this
@@ -7115,6 +7298,60 @@ private:
     int lastSceneDrawn_=-1;           // last scene-entity draw count, so the log line fires only on change
     int lastSceneCulled_=-1;          // and the cull count, so a frustum bug shows as a number rather than a gap
 #endif
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+    // Per-mesh LOD ladder for virtualized-geometry selection (aver::trifactor::ClusterAdapt/
+    // ClusterSelect). Populated in loadProjectMeshes ONLY for a mesh the Cook wrote coarserLods for
+    // (lodCount() > 1); a mesh with no entry here has no coarser LOD and always draws its LOD-0
+    // handle (already in sceneMeshes_[id]), identically to before this feature existed. Every vector
+    // is indexed by LEVEL: [0] mirrors sceneMeshes_[id]/meshTris_[id] exactly (same handle, same
+    // count), [i>0] is the Cook's mesh.coarserLods[i-1] -- ITS OWN index buffer, drawn against the
+    // SAME vertex buffer level 0 uses (OcMeshData::coarserLods' own comment: every LOD level of a
+    // Trifactor DAG shares one vertex stream), so this only ever duplicates INDEX data, never
+    // vertices, across the ladder.
+    struct MeshLodLadder {
+        std::vector<rhi::MeshHandle> handles;   // [level] -> whole-level MeshHandle
+        std::vector<u32> triCounts;              // [level] -> that level's own triangle count
+        std::vector<f32> errorCm;                // [level] -> aver::trifactor::levelWorldErrorCm(mesh, level)
+        // [level] -> that level's meshlets, decoded to ClusterView (bounds + cone only, no vertex
+        // data) -- kept resident so the per-frame pass can run the REAL, tested
+        // selectVisibleClustersWithStats for informational frustum/cone-cull telemetry on the level
+        // actually chosen, without re-parsing the .ocmesh every frame. See onRender's scene-entity
+        // pass and ClusterAdapt.hpp's file header for why this culling is counted but NOT (yet)
+        // subtracted from what gets drawn in this slice.
+        std::vector<std::vector<trifactor::ClusterView>> clusters;
+    };
+    std::unordered_map<u64, MeshLodLadder> meshLods_;
+    bool lodSelectEnabled_ = false;     // --lod-select / editor toggle. OFF reproduces pre-existing
+                                        // behaviour EXACTLY: every instance draws sceneMeshes_[id]
+                                        // (LOD 0), the same handle and code path as before this file.
+    f32  lodErrorThresholdPx_ = 1.0f;   // --lod-error-px <n>; pixels of projected screen error
+                                        // tolerated before a coarser level is preferred. Same unit
+                                        // ClusterSelect.hpp's inCut/screenSpaceErrorPx compare against.
+    // --lod-cluster-stats: OFF by default, on purpose. It gates ONLY the informational per-meshlet
+    // frustum/cone-cull telemetry below (a real, extra per-instance CPU cost: transforming a working
+    // copy of that level's ClusterViews to world space every frame -- see the comment at its call
+    // site). Keeping it separate from lodSelectEnabled_ means the primary --lod-select on/off frame-
+    // time comparison measures ONLY the level-selection draw-call change, not this telemetry's own
+    // CPU cost on top of it -- the two must not be conflated when reporting numbers.
+    bool lodClusterStatsEnabled_ = false;
+    // This frame's selection counters, logged under the "[LOD-SELECT]" tag (greppable) whenever any
+    // of them changes -- see the brief's "report the counters" requirement. trianglesBeforeLod0 vs
+    // trianglesAfterLevel is the number that actually predicts frame time (every triangle counted in
+    // "after" really reaches a drawMesh call this frame); the cluster-cull counters are real,
+    // measured telemetry from ClusterSelect's own tested functions but are NOT yet subtracted from
+    // "after" -- see the file header on why (per-level, not per-cluster, selection this slice).
+    struct LodSelectStats {
+        u32 instancesTested = 0;
+        u32 levelCollapsed = 0;        // instances that drew level > 0 this frame
+        u32 clustersTested = 0;        // sum of chosen-level meshlet counts, over drawn instances
+        u32 frustumCulled = 0;         // informational -- see struct comment
+        u32 coneCulled = 0;            // informational -- see struct comment
+        u64 trianglesBeforeLod0 = 0;   // sum of LOD-0 triangle counts, as if every instance drew level 0
+        u64 trianglesAfterLevel = 0;   // sum of the CHOSEN level's triangle counts -- what actually draws
+    };
+    LodSelectStats lodStats_{};
+    LodSelectStats lastLoggedLodStats_{};
+#endif
     Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };
 
@@ -7135,7 +7372,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; bool fogMatch=false; f32 fogMatchOpacity=-1.0f;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=false; f32 lodErrorPx=1.0f; bool lodClusterStats=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -7256,6 +7493,16 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--exposure") && i+1<argc) exposure=static_cast<f32>(std::atof(argv[++i]));
         else if (!std::strcmp(argv[i],"--auto-exposure")) autoExposure=true;
         else if (!std::strcmp(argv[i],"--no-vsync")) vsyncOff=true;
+        // --lod-select [px]: virtualized-geometry per-instance LOD level selection
+        // (aver::trifactor::ClusterAdapt). Optional pixel error budget, default 1.0px.
+        else if (!std::strcmp(argv[i],"--lod-select")) {
+            lodSelect=true;
+            if (i+1 < argc && (argv[i+1][0] != '-' || (argv[i+1][1] >= '0' && argv[i+1][1] <= '9')))
+                lodErrorPx=static_cast<f32>(std::atof(argv[++i]));
+        }
+        // --lod-cluster-stats: turns on the informational per-meshlet frustum/cone-cull counters on
+        // top of --lod-select. Separate flag on purpose -- see lodClusterStatsEnabled_'s own comment.
+        else if (!std::strcmp(argv[i],"--lod-cluster-stats")) lodClusterStats=true;
         else if (!std::strcmp(argv[i],"--ui-demo")) uiDemo=true;
         // Coverage is optional: `--clouds` alone takes the authored default.
         else if (!std::strcmp(argv[i],"--clouds")) {
@@ -7300,6 +7547,8 @@ Application* createApplication(int argc, char** argv) {
     if (skyPhysical) app->setSkyPhysical(skyElevation);
     if (skyAuthored) app->setSkyAuthored();
     app->setVSyncOff(vsyncOff);
+    app->setLodSelect(lodSelect, lodErrorPx);
+    app->setLodClusterStats(lodClusterStats);
     app->setUiDemo(uiDemo);
     app->setOpenAsset(openAsset);
     app->setInputProbe(inputProbe);

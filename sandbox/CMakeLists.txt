@@ -213,3 +213,13 @@ set_property(SOURCE Sandbox.rc APPEND PROPERTY
 if(TARGET Aver.Mcp)
   target_link_libraries(Sandbox PRIVATE Aver.Mcp)
 endif()
+
+# Virtualized-geometry cluster selection (ClusterAdapt/ClusterSelect): the per-frame LOD-level chooser
+# that turns a .ocmesh's coarserLods into an actual draw-time decision. Optional and named explicitly
+# for the same reason Scene/PBR/Physics are above: it brings its own AVER_MODULE_TRIFACTOR=1 define
+# through its link interface (modules/trifactor/CMakeLists.txt PUBLIC_DEFS), which is what lets
+# SandboxApp.cpp guard the feature with `#if AVER_MODULE_TRIFACTOR` and have it read as a real zero,
+# not an accidental always-off, in a build with the module disabled.
+if(TARGET Aver.Trifactor)
+  target_link_libraries(Sandbox PRIVATE Aver.Trifactor)
+endif()
