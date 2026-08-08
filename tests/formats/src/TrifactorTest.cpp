@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -72,6 +73,23 @@ static fmt::OcMeshData makeGridMesh(u32 n, f32 spacing = 100.0f) {
     }
     m.submeshes.push_back(fmt::OcMeshSubmesh{"grid", 0, 0, static_cast<u32>(m.indices.size()), 0, m.vertexCount()});
     m.materialSlots = {"M_Grid"};
+    return m;
+}
+
+// The same grid, plus skin streams: four influences per vertex, bound to two bones by which half of
+// the grid a vertex sits in. Deliberately NOT uniform -- if every vertex had identical influences,
+// a remap that dropped or reordered them would still produce a plausible-looking result, and the
+// test would pass while the rig was destroyed.
+static fmt::OcMeshData makeSkinnedGridMesh(u32 n, f32 spacing = 100.0f) {
+    fmt::OcMeshData m = makeGridMesh(n, spacing);
+    const u32 v = m.vertexCount();
+    m.joints.resize(usize(v) * fmt::kOcMeshInfluences, 0);
+    m.weights.resize(usize(v) * fmt::kOcMeshInfluences, 0.0f);
+    for (u32 i = 0; i < v; ++i) {
+        const u16 bone = static_cast<u16>((i % 2 == 0) ? 0 : 1);
+        m.joints [usize(i) * fmt::kOcMeshInfluences + 0] = bone;
+        m.weights[usize(i) * fmt::kOcMeshInfluences + 0] = 1.0f;   // rest stay 0, as a rig may
+    }
     return m;
 }
 
@@ -159,6 +177,59 @@ int main() {
         const trifactor::ValidationReport report0 = trifactor::validateLodDag(grid, dag);
         for (const auto& issue : report0.issues) AVER_ERROR("  validateLodDag: {} -- {}", issue.where, issue.detail);
         check(report0.ok, "validateLodDag passes on LOD-0-only output (coverage + limits + bounds)");
+    }
+
+    AVER_INFO("=== simplifyMesh keeps a skinned mesh saveable ===");
+    {
+        // THE REGRESSION. simplifyMesh remapped positions/normals/uvs down to the new vertex count
+        // and left joints/weights sized for the old one, so hasSkin() -- which wants both at exactly
+        // v*4 for the NEW v -- went false and writeOcMesh refused the mesh entirely. It made
+        // `ConvertTool ... --lod <ratio>` unusable on every rigged asset, and reported it as
+        // "mesh has no vertices, no indices, or mismatched attribute counts", which names everything
+        // except the cause.
+        fmt::OcMeshData skinned = makeSkinnedGridMesh(16);
+        const u32 beforeVerts = skinned.vertexCount();
+        check(skinned.hasSkin(), "the fixture starts out skinned");
+        check(skinned.valid(), "...and valid before simplifying");
+
+        std::string why;
+        check(trifactor::simplifyMesh(skinned, 0.5f, &why), "simplifyMesh on a skinned mesh: " + why);
+
+        const u32 afterVerts = skinned.vertexCount();
+        check(afterVerts < beforeVerts, "the vertex count actually fell (" +
+              std::to_string(beforeVerts) + " -> " + std::to_string(afterVerts) + ")");
+        check(skinned.joints.size() == usize(afterVerts) * fmt::kOcMeshInfluences,
+              "joints were resized with the vertex buffer, not left at the old count");
+        check(skinned.weights.size() == usize(afterVerts) * fmt::kOcMeshInfluences,
+              "weights were resized with the vertex buffer");
+        check(skinned.hasSkin(), "the mesh is STILL skinned after simplifying");
+        check(skinned.valid(), "...and still valid, which is what writeOcMesh refuses without");
+
+        // Influences must survive as data, not merely as a correctly-sized buffer. Every surviving
+        // vertex came from exactly one source vertex, so every weight should still be one of the
+        // values the fixture assigned -- never a blend, and never zeroed.
+        bool sawBone0 = false, sawBone1 = false, weightsIntact = true;
+        for (u32 i = 0; i < afterVerts; ++i) {
+            const u16 b = skinned.joints[usize(i) * fmt::kOcMeshInfluences + 0];
+            const f32 w = skinned.weights[usize(i) * fmt::kOcMeshInfluences + 0];
+            if (b == 0) sawBone0 = true;
+            if (b == 1) sawBone1 = true;
+            if (w != 1.0f) weightsIntact = false;
+        }
+        check(weightsIntact, "every surviving vertex kept its full weight (no blending, no zeroing)");
+        check(sawBone0 && sawBone1, "both bones still have vertices bound to them");
+
+        // The end of the road that actually failed: the writer.
+        const std::string out = (std::filesystem::temp_directory_path() / "trifactor_skin.ocmesh").string();
+        std::string saveWhy;
+        check(fmt::saveOcMesh(out, skinned, &saveWhy), "writeOcMesh accepts the simplified skinned mesh: " + saveWhy);
+        fmt::OcMeshData back;
+        check(fmt::loadOcMesh(out, back, &saveWhy), "it reloads: " + saveWhy);
+        check(back.hasSkin(), "the reloaded mesh still carries its skin");
+        check(back.joints == skinned.joints && back.weights == skinned.weights,
+              "joints and weights survive the round trip byte for byte");
+        std::error_code rmec;
+        std::filesystem::remove(out, rmec);
     }
 
     AVER_INFO("=== buildLodHierarchy: multiple levels, monotonic error, acyclic ===");

@@ -566,6 +566,30 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
         uv.resize(newVerts * 2);
         meshopt_remapVertexBuffer(uv.data(), mesh.uvs.data(), vcount, sizeof(f32) * 2, remap.data());
     }
+
+    // THE SKIN STREAMS, and forgetting them made this function unusable on any rigged asset.
+    // positions/normals/uvs were remapped and resized to newVerts while joints/weights kept the OLD
+    // vertex count, so OcMeshData::hasSkin() -- which requires both to be exactly v*4 for the NEW v --
+    // went false, valid() failed, and writeOcMesh refused to save the mesh at all. The visible
+    // symptom was a successful "simplified to 50%" line followed by "mesh has no vertices, no
+    // indices, or mismatched attribute counts", which points at everything except the real cause.
+    //
+    // No blending is needed and none would be correct. meshopt_optimizeVertexFetchRemap does not
+    // merge vertices -- meshopt_simplify already did that, by rewriting the INDEX buffer -- it only
+    // compacts away the vertices no surviving triangle references. Every destination vertex
+    // therefore comes from exactly one source vertex, so its influences carry across unchanged.
+    // Averaging weights here would corrupt a rig that the remap reproduces exactly.
+    std::vector<u16> jnt;
+    std::vector<f32> wgt;
+    if (mesh.hasSkin()) {
+        jnt.resize(newVerts * fmt::kOcMeshInfluences);
+        wgt.resize(newVerts * fmt::kOcMeshInfluences);
+        meshopt_remapVertexBuffer(jnt.data(), mesh.joints.data(), vcount,
+                                  sizeof(u16) * fmt::kOcMeshInfluences, remap.data());
+        meshopt_remapVertexBuffer(wgt.data(), mesh.weights.data(), vcount,
+                                  sizeof(f32) * fmt::kOcMeshInfluences, remap.data());
+    }
+
     meshopt_remapIndexBuffer(out.data(), out.data(), got, remap.data());
 
     // Committed only now: every step above could fail, and a half-rewritten mesh is worse than an
@@ -573,6 +597,10 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
     mesh.positions = std::move(pos);
     mesh.normals   = std::move(nrm);
     mesh.uvs       = std::move(uv);
+    // Both, together, or neither: hasSkin() is an all-or-nothing predicate, and a mesh carrying
+    // joints without matching weights is exactly the invalid state this bug produced.
+    mesh.joints    = std::move(jnt);
+    mesh.weights   = std::move(wgt);
     mesh.indices   = std::move(out);
     mesh.meshlets.clear();   // stale the moment the triangles change; rebuild after simplifying
 
