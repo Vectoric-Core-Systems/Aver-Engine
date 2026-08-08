@@ -291,6 +291,10 @@ inline constexpr f32 kEditorGridHalf  = 1000.0f;   // cm
 // How far in front of the camera Add places a new object.
 inline constexpr f32 kAddDistance     = 400.0f;    // cm
 
+// Drag-drop payload carrying a content-browser item's full path as bytes (content browser ->
+// viewport asset placement). Under ImGui's 32-char payload-type limit; not prefixed with '_'.
+static constexpr const char* kAssetDragDropType = "AVER_ASSET_PATH";
+
 // One placed object in the editor scene: mesh, transform, and surface parameters.
 struct MeshObj {
     std::string name;
@@ -2707,6 +2711,136 @@ private:
         // Unguarded: the placeholder-world fallback, reached with SCENE off too.
         sel_ = (int)objects_.size() - 1; selEntity_ = kInvalidId;
     }
+
+#if AVER_MODULE_SCENE
+    // Finds a finite world point to drop an asset at, from a screen-space mouse position. Order:
+    // nearest scene-entity hit, else the ground plane, else a fixed distance along the ray from the
+    // camera. Z is up in this engine (see averAtmoCamAlt()), so the ground plane is Z = 0, not Y = 0.
+    Vec3 dropWorldPoint(f32 screenX, f32 screenY) const {
+        Vec3 ro, rd;
+        viewportRay(screenX, screenY, ro, rd);
+
+        f32 bestT = 1e30f; bool hit = false;
+        if (!hideEditorScene_) {
+            scene::World& w = scene::World::instance();
+            const u32 n = w.count();
+            for (u32 i = 0; i < n; ++i) {
+                const scene::Entity ent = w.at(i);
+                if (!w.valid(ent) || w.destroyPending(ent)) continue;
+                const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
+                if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
+                if (sceneMeshes_.find(mr->mesh) == sceneMeshes_.end()) continue;
+                Vec3 lmin{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
+                Vec3 lmax{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
+                if (!(lmax.x > lmin.x && lmax.y > lmin.y && lmax.z > lmin.z)) { lmin = Vec3{-1,-1,-1}; lmax = Vec3{1,1,1}; }
+                const Mat4 iw = w.worldMatrix(ent).inverse();
+                const Vec3 lo = xformPoint(iw, ro), ld = xformVec(iw, rd);
+                f32 t; if (rayAabb(lo, ld, lmin, lmax, t) && t > 0.0f && t < bestT) { bestT = t; hit = true; }
+            }
+        }
+        if (hit) {
+            const Vec3 p = ro + rd * bestT;
+            if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)) return p;
+        }
+
+        // Ground plane: Z = 0.
+        if (std::fabs(rd.z) > 1e-6f) {
+            const f32 t = -ro.z / rd.z;
+            if (t > 0.0f) {
+                const Vec3 p = ro + rd * t;
+                if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)) return p;
+            }
+        }
+
+        // The ray is parallel to (or points away from) the ground: fall back to a fixed distance
+        // in front of the camera, matching spawnCube()'s placement.
+        return camPos_ + camForward() * kAddDistance;
+    }
+
+    // Places a content-browser asset dropped on the viewport at a screen-space position, following
+    // spawnCube()'s create -> CMeshRenderer -> levelEntities_ -> undo recipe exactly. Only .ocmesh
+    // assets are placeable in this slice; anything else is reported, not silently ignored.
+    void spawnFromAssetDrop(Engine& e, const std::string& full, f32 screenX, f32 screenY) {
+        const std::string ext = lowerExt(std::filesystem::path(full));
+        const std::string fileName = std::filesystem::path(full).filename().string();
+        if (ext != ".ocmesh") {
+            cbStatus_ = "'" + fileName + "' can't be placed in the level (only .ocmesh assets can)";
+            AVER_WARN("[Editor] drop: '{}' is not a placeable asset (need .ocmesh)", full);
+            return;
+        }
+        if (!(hideEditorScene_ || !levelPath_.empty())) {
+            cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
+            AVER_WARN("[Editor] drop: no scene world is active to place '{}' into", full);
+            return;
+        }
+
+        const std::string content = project_.contentDir();
+        std::error_code ec;
+        std::string rel = content.empty() ? std::string()
+                                          : std::filesystem::relative(full, content, ec).string();
+        if (content.empty() || ec || rel.empty()) {
+            cbStatus_ = "Could not resolve '" + fileName + "' to a project-relative path";
+            AVER_WARN("[Editor] drop: relative() failed for '{}' against content root '{}'", full, content);
+            return;
+        }
+        for (char& c : rel) if (c == '\\') c = '/';
+
+        const u64 meshId = fnv1a64(std::string_view(rel));
+        if (sceneMeshes_.find(meshId) == sceneMeshes_.end()) {
+            // Not loaded yet -- most likely imported moments ago. Reload synchronously (the same
+            // release+load pair buildUI() runs for wantMeshReload_) rather than waiting a frame, so
+            // the drop the user just made actually lands.
+            releaseProjectMeshes();
+            loadProjectMeshes(e);
+        }
+        const auto meshIt = sceneMeshes_.find(meshId);
+        if (meshIt == sceneMeshes_.end()) {
+            cbStatus_ = "Could not resolve '" + rel + "' to a loaded mesh";
+            AVER_WARN("[Editor] drop: '{}' (id {}) is not a loaded scene mesh", rel, meshId);
+            return;
+        }
+
+        const Vec3 at = dropWorldPoint(screenX, screenY);
+        if (!(std::isfinite(at.x) && std::isfinite(at.y) && std::isfinite(at.z))) {
+            cbStatus_ = "Could not find a valid drop position";
+            AVER_WARN("[Editor] drop: computed a non-finite world position for '{}'", rel);
+            return;
+        }
+
+        scene::World& world = scene::World::instance();
+        Transform xf;
+        xf.position = at;
+        if (snapMove_) for (int k=0;k<3;++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], moveSnap_);
+        xf.rotation = Quat{0,0,0,1};
+        xf.scale = Vec3{1,1,1};
+
+        const scene::Entity ent = world.create(rel, scene::kInvalidEntity, xf);
+        if (ent == scene::kInvalidEntity) {
+            cbStatus_ = "The world refused to place '" + rel + "'";
+            AVER_WARN("[Editor] drop: the world refused a new entity for '{}'", rel);
+            return;
+        }
+        if (auto* mr = static_cast<scene::CMeshRenderer*>(
+                world.addComponent(ent, scene::kComponentMeshRenderer))) {
+            mr->mesh = meshId;
+            mr->flags |= scene::kMeshRendererVisible;
+            mr->aabbMin[0] = mr->aabbMin[1] = mr->aabbMin[2] = -1.0f;
+            mr->aabbMax[0] = mr->aabbMax[1] = mr->aabbMax[2] =  1.0f;
+        }
+        levelEntities_.push_back(ent);
+        entityLabels_[static_cast<u32>(ent)] = makeEntityLabel(std::string(), rel);
+        sel_ = kSelScene; selEntity_ = ent;
+        {
+            EditCmd c = describeEntity(ent);
+            c.kind = EditCmd::Kind::Create;
+            pushEdit(std::move(c));
+        }
+        cbStatus_ = "Placed " + fileName;
+        AVER_INFO("[Editor] placed entity #{} from '{}' at ({:.0f}, {:.0f}, {:.0f})",
+                  (u32)ent, rel, xf.position.x, xf.position.y, xf.position.z);
+    }
+#endif  // AVER_MODULE_SCENE
+
     f32 gizmoLen(const Vec3& origin) const { f32 L = dist(eye_, origin) * 0.17f; return L < 50.0f ? 50.0f : L; }
 
     // Projects a world point to viewport pixels (row-vector clip = p * viewProj). False when behind.
@@ -2959,18 +3093,25 @@ private:
         }
     }
 
-    // Selects whatever the cursor's ray hits first, across both the placeholder and scene worlds.
-    void pick(Engine& e, const ImGuiIO& io) {
-        (void)e;
-        const f32 nx = (io.MousePos.x - vpX_) / vpW_ * 2.f - 1.f;   // NDC within the viewport rect
-        const f32 ny = 1.f - (io.MousePos.y - vpY_) / vpH_ * 2.f;
+    // Unprojects a screen-space point within the viewport rect into a world-space ray. Shared by
+    // pick() and the asset drag-drop drop point so there is exactly one screen->ray conversion.
+    void viewportRay(f32 screenX, f32 screenY, Vec3& ro, Vec3& rd) const {
+        const f32 nx = (screenX - vpX_) / vpW_ * 2.f - 1.f;   // NDC within the viewport rect
+        const f32 ny = 1.f - (screenY - vpY_) / vpH_ * 2.f;
         const Mat4& iv = invVP_;
         const f32 rx = nx*iv.m[0][0]+ny*iv.m[1][0]+iv.m[2][0]+iv.m[3][0];
         const f32 ry = nx*iv.m[0][1]+ny*iv.m[1][1]+iv.m[2][1]+iv.m[3][1];
         const f32 rz = nx*iv.m[0][2]+ny*iv.m[1][2]+iv.m[2][2]+iv.m[3][2];
         const f32 rw = nx*iv.m[0][3]+ny*iv.m[1][3]+iv.m[2][3]+iv.m[3][3];
         const Vec3 farW{rx/rw, ry/rw, rz/rw};
-        const Vec3 ro = eye_, rd = farW - eye_;
+        ro = eye_; rd = farW - eye_;
+    }
+
+    // Selects whatever the cursor's ray hits first, across both the placeholder and scene worlds.
+    void pick(Engine& e, const ImGuiIO& io) {
+        (void)e;
+        Vec3 ro, rd;
+        viewportRay(io.MousePos.x, io.MousePos.y, ro, rd);
         int best=-1; f32 bestT=1e30f;
         if (!hideEditorScene_)
             for (int i=0;i<(int)objects_.size();++i){
@@ -3437,6 +3578,24 @@ private:
                         const ImVec2 uv0(at.x / bw, at.y / bh);
                         const ImVec2 uv1((at.x + w) / bw, (at.y + h) / bh);
                         ImGui::Image(static_cast<ImTextureID>(tex), ImVec2(w, h), uv0, uv1);
+                        // Drop target for content-browser assets (see kAssetDragDropType). The scene
+                        // symbols the actual placement needs live in spawnFromAssetDrop, guarded on
+                        // their own -- this call site stays compilable with the module off either way.
+                        if (ImGui::BeginDragDropTarget()) {
+                            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kAssetDragDropType)) {
+                                const std::string droppedPath(
+                                    static_cast<const char*>(payload->Data),
+                                    payload->DataSize > 0 ? static_cast<usize>(payload->DataSize - 1) : usize(0));
+                                const ImVec2 mp = ImGui::GetMousePos();
+#if AVER_MODULE_SCENE
+                                spawnFromAssetDrop(e, droppedPath, mp.x, mp.y);
+#else
+                                cbStatus_ = "Placing objects needs the scene module";
+                                AVER_WARN("[Editor] drop: scene module not compiled in, ignoring '{}'", droppedPath);
+#endif
+                            }
+                            ImGui::EndDragDropTarget();
+                        }
                     }
                 }
             }
@@ -3625,6 +3784,13 @@ private:
     // False for engine content, which the browser mounts read-only.
     bool cbIsEditable(const std::string& path) const { return !isEnginePath(path); }
 
+    // Explains why `dir` cannot be imported/created into, or empty if it can.
+    std::string cbImportBlockedReason(const std::string& dir) const {
+        if (cbIsEditable(dir)) return {};
+        const std::string name = std::filesystem::path(dir).filename().string();
+        return "'" + (name.empty() ? dir : name) + "' is engine content and is read-only.";
+    }
+
     // Renames a file or folder and follows the rename in the selection and the history.
     void cbRenameEntry(const std::string& from, const std::string& newName) {
         if (newName.empty()) return;
@@ -3799,9 +3965,14 @@ private:
             ImGui::EndPopup();
         }
         ImGui::SameLine();
-        ImGui::BeginDisabled(!cbIsEditable(cbSelectedDir_));
-        if (ImGui::Button("Import...")) cbWantImport_ = true;
-        ImGui::EndDisabled();
+        {
+            const std::string reason = cbImportBlockedReason(cbSelectedDir_);
+            ImGui::BeginDisabled(!reason.empty());
+            if (ImGui::Button("Import...")) cbWantImport_ = true;
+            ImGui::EndDisabled();
+            if (!reason.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", reason.c_str());
+        }
         drawImportModal();
 
         // View controls, right-aligned: Tiles/List, and the tile zoom when tiles are showing.
@@ -3852,11 +4023,13 @@ private:
         drawFolderFiles(cbSelectedDir_);
         if (ImGui::BeginPopupContextWindow("##cbbgctx",
                 ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
-            const bool editable = cbIsEditable(cbSelectedDir_);
-            ImGui::BeginDisabled(!editable);
+            const std::string reason = cbImportBlockedReason(cbSelectedDir_);
+            ImGui::BeginDisabled(!reason.empty());
             if (ImGui::MenuItem("New Folder")) { cbWantNewFolder_ = true; cbNewFolderBuf_[0] = '\0'; }
             if (ImGui::MenuItem("Import...")) cbWantImport_ = true;
             ImGui::EndDisabled();
+            if (!reason.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", reason.c_str());
             ImGui::Separator();
             if (ImGui::MenuItem("Show in Explorer")) editor::revealInFileManager(cbSelectedDir_);
             if (ImGui::MenuItem("Copy Path")) { ImGui::SetClipboardText(cbSelectedDir_.c_str()); cbStatus_ = "Path copied"; }
@@ -3916,7 +4089,7 @@ private:
         if (cbWantRename_)    { ImGui::OpenPopup("cbRename");    cbWantRename_ = false; }
         if (cbWantDelete_)    { ImGui::OpenPopup("cbDelete");    cbWantDelete_ = false; }
         if (cbWantNewFolder_) { ImGui::OpenPopup("cbNewFolder"); cbWantNewFolder_ = false; }
-        if (cbWantImport_)    { ImGui::OpenPopup("cbImport");    cbWantImport_ = false; }
+        if (cbWantImport_)    { ImGui::OpenPopup("Import Asset"); cbWantImport_ = false; }
 
         if (ImGui::BeginPopupModal("cbRename", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::TextDisabled("Rename %s", cbContextIsDir_ ? "folder" : "file");
@@ -4200,6 +4373,13 @@ private:
                         if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !cbDoubleClickEnter_))
                             cbOpenEntry(e.full, e.isDir);
                     }
+                    // Only .ocmesh assets are placeable (see spawnFromAssetDrop) -- only they start a
+                    // drag, so the viewport drop target never has to reject a payload it received.
+                    if (!e.isDir && lowerExt(e.path) == ".ocmesh" && ImGui::BeginDragDropSource()) {
+                        ImGui::SetDragDropPayload(kAssetDragDropType, e.full.c_str(), e.full.size() + 1);
+                        ImGui::TextUnformatted(e.name.c_str());
+                        ImGui::EndDragDropSource();
+                    }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.name.c_str());
                     cbItemContextMenu(e.full, e.name, e.isDir);
                     drawEntryIcon(dl, ImVec2(o.x + cellW*0.5f, o.y + tile*0.5f), tile*0.52f, e.isDir, e.tile, e.module);
@@ -4253,6 +4433,13 @@ private:
                     if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !cbDoubleClickEnter_))
                         cbOpenEntry(e.full, e.isDir);
                 }
+                // Only .ocmesh assets are placeable (see spawnFromAssetDrop) -- only they start a
+                // drag, so the viewport drop target never has to reject a payload it received.
+                if (!e.isDir && lowerExt(e.path) == ".ocmesh" && ImGui::BeginDragDropSource()) {
+                    ImGui::SetDragDropPayload(kAssetDragDropType, e.full.c_str(), e.full.size() + 1);
+                    ImGui::TextUnformatted(e.name.c_str());
+                    ImGui::EndDragDropSource();
+                }
                 cbItemContextMenu(e.full, e.name, e.isDir);
                 ImGui::PopID();
             }
@@ -4261,16 +4448,57 @@ private:
     }
 
     // Draws the Import modal: a source path and the destination folder.
+    //
+    // A MODAL, and it has to be one. "Browse..." below calls openFileDialog, which opens a native
+    // Win32 dialog and blocks this thread until the user dismisses it -- the app stops pumping
+    // ImGui entirely, and the OS focus moves to another window. A plain BeginPopup does not survive
+    // that reliably: imgui.h:850 says popups "may be closed as any time", and a click over void is
+    // expected to close one (imgui.h:2725). BeginPopupModal is the one that "cannot be closed by
+    // user" (imgui.h:855), so the popup is still there when the dialog returns and the path it
+    // picked has somewhere to land.
+    //
+    // ProjectBrowser.cpp calls openFileDialog from inside a popup too and is fine -- but that one is
+    // BeginPopupModal (ProjectBrowser.cpp:244), so it is not precedent for doing it from a plain
+    // popup. The name doubles as the modal's title bar text, hence "Import Asset" rather than the
+    // old "cbImport" id; OpenPopup's string was changed to match.
     void drawImportModal() {
-        if (!ImGui::BeginPopup("cbImport")) return;
+        if (!ImGui::BeginPopupModal("Import Asset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
         ImGui::TextUnformatted("Import an asset into the selected folder.");
         ImGui::TextDisabled(".gltf/.glb become .ocmesh; .wav/.mp3/.m4a/.flac become .ocaudio.");
         ImGui::TextDisabled("Anything else is copied as-is.");
         ImGui::SetNextItemWidth(420.0f * dpi_);
         ImGui::InputText("Source file", importPath_, sizeof(importPath_));
+        ImGui::SameLine();
+        if (ImGui::Button("Browse...")) {
+            const std::string start = importPath_[0] != '\0'
+                ? std::filesystem::path(importPath_).parent_path().string() : std::string();
+#if AVER_HAVE_AUDIO_IMPORT
+            const char* kFilterLabel = "Importable assets (*.gltf, *.glb, *.wav, *.mp3, *.m4a, *.flac)";
+            const char* kFilterSpec  = "*.gltf;*.glb;*.wav;*.mp3;*.m4a;*.flac";
+#else
+            const char* kFilterLabel = "Importable assets (*.gltf, *.glb)";
+            const char* kFilterSpec  = "*.gltf;*.glb";
+#endif
+            std::string picked;
+            if (openFileDialog("Import asset", kFilterLabel, kFilterSpec,
+                               directoryExists(start) ? start : std::string(), picked)) {
+                if (picked.size() < sizeof(importPath_)) {
+                    std::snprintf(importPath_, sizeof(importPath_), "%s", picked.c_str());
+                } else {
+                    AVER_WARN("[Import] picked path is {} chars, longer than the {}-char field - not applied",
+                              picked.size(), sizeof(importPath_) - 1);
+                    cbStatus_ = "Picked path is too long - not applied";
+                }
+            }
+        }
         const std::string dest = cbSelectedDir_.empty() ? project_.contentDir() : cbSelectedDir_;
-        ImGui::TextDisabled("Into: %s", dest.c_str());
-        ImGui::BeginDisabled(importPath_[0] == '\0');
+        const std::string blocked = cbImportBlockedReason(dest);
+        if (blocked.empty()) {
+            ImGui::Text("Into: %s", dest.c_str());
+        } else {
+            ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "Into: %s - %s", dest.c_str(), blocked.c_str());
+        }
+        ImGui::BeginDisabled(importPath_[0] == '\0' || !blocked.empty());
         if (ImGui::Button("Import")) {
             importAsset(importPath_, dest);
             importPath_[0] = '\0';
