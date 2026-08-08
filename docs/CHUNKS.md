@@ -664,9 +664,31 @@ needs it (slice 6). The payload carries transform, name, objectId, tags, mesh re
 body; a **gameplay class** is not captured, because level placements never become framework actors
 today (`aver_fw_class_of` returns 0 for all of them), so there is nothing yet to capture.
 
-**Slice 5 — `.avrgn` + `.ocindex`, cooked and read-only.** Format, cooker, reader.
-*Done when:* cook determinism; cross-process round trip; chunked-equals-flat; boundary conservation; a
-corrupt CRC is refused naming the chunk rather than crashing.
+**Slice 5 — `.avrgn` + `.ocindex`, cooked and read-only. DONE 2026-08-08.** `ChunkCodec` (payload ↔
+bytes), `RegionFile` (`writeRegion` + a seeking reader), `RegionIndex`.
+
+*Evidence:* `RegionFileTest` — 66 assertions against real files. **Two cooks of the same content,
+fed in opposite orders, are byte-identical**; a damaged payload is refused **naming the chunk** and
+saying it failed its checksum, while every undamaged chunk in the same region still reads; header
+copy A destroyed and the region still opens on copy B, reporting that it fell back; both headers
+destroyed and it is refused rather than guessed at; a corrupt index is rejected by checksum *before
+any field is trusted*. All 37 suites pass.
+
+*Two deviations from §5/§6, both deliberate:*
+- The group directory entry is **12 bytes**, not 8 — `{firstSector, byteLength, crc32c}`. 4096 × 12
+  = 48 KiB = 12 sectors exactly. The per-chunk CRC is what makes "refused, naming the chunk"
+  possible at all, and a region is up to 16 km across, so "this file is corrupt" is not something
+  anyone can act on.
+- The index is sorted **lexicographically by (x, y, z)**, not by Morton code. Morton buys locality
+  in the *file*, which matters when entries are paged; this index is fully resident, so it buys
+  nothing — and a Morton key over three signed 32-bit axes is 96 bits, real complexity for no gain.
+  Lexicographic is equally binary-searchable and equally deterministic.
+
+*Not yet done:* the **cross-process** round trip. Everything here runs in one process, and §10 is
+emphatic that this is the single easiest test to get wrong — the five process-local values all
+round-trip perfectly inside the process that minted them. The codec refuses to carry any of them by
+construction, but that is an argument, not a measurement, until a test forks. **Chunked-equals-flat**
+also waits on slice 6, since nothing streams yet.
 
 **Slice 6 — native streaming residency, camera only.** Residency set, radius policy, hysteresis, load
 budget. No generation, no writes, no F#.

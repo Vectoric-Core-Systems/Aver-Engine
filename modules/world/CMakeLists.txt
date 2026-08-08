@@ -14,9 +14,15 @@ aver_add_module(Aver.World
     src/LevelInstance.cpp
     src/ChunkPayload.cpp
     src/ChunkPartition.cpp
+    src/ChunkCodec.cpp
+    src/RegionFile.cpp
+    src/RegionIndex.cpp
   DEPS
     Aver.Core
     Aver.Formats
+    # For aver::File -- ranged, non-truncating, durable. The region format is not expressible on
+    # whole-file read/write, which is what docs/CHUNKS.md calls B1.
+    Aver.Platform
 )
 
 # The optional half of the link interface, mirroring modules/runtime.game/CMakeLists.txt.
