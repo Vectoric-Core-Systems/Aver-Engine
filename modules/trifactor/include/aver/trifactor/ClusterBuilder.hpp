@@ -119,4 +119,26 @@ struct ValidationReport {
 //    least one parent
 ValidationReport validateLodDag(const fmt::OcMeshData& mesh, const LodDag& dag);
 
+// Reduces `mesh` in place to roughly `ratio` of its triangles (0 < ratio < 1), rewriting positions,
+// normals, UVs and indices. Returns false and leaves the mesh UNTOUCHED if the input is unusable or
+// the simplifier could not reach anywhere near the target.
+//
+// WHY THIS EXISTS, and what it is not. It is not virtualized geometry -- it is the blunt instrument
+// that makes photogrammetry usable before virtualized geometry lands. Measured on this tree: frame
+// time is linear in drawn triangles at roughly 2.1 ms per million, so a 6.95-million-triangle scan
+// placed fourteen times costs about 200 ms a frame on its own, and no amount of frustum culling
+// helps because the triangles are genuinely on screen. They are just far smaller than a pixel,
+// which is precisely the case docs/VIRTUALIZED_GEOMETRY.md §3.5 is about: the hardware rasterizer
+// shades in 2x2 quads, so a sub-pixel triangle wastes three quarters of the work it triggers.
+//
+// The real fix is picking a LOD per cluster on the GPU (that plan's slices 1-5), for which
+// buildLodHierarchy above already computes the hierarchy and the error metric. This function is the
+// stopgap that does not need any of it: ONE decimation, at cook time, for the whole mesh.
+//
+// SEAMS ARE NOT PROTECTED HERE, deliberately. buildLodHierarchy locks group borders because
+// neighbouring clusters must still meet; a whole-mesh decimation has no neighbour to meet, so
+// locking its outer border would only prevent the silhouette from ever simplifying. If this is ever
+// used on something that tiles against another mesh, that assumption stops holding.
+bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why = nullptr);
+
 } // namespace aver::trifactor

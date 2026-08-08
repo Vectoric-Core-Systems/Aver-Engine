@@ -55,6 +55,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <unordered_map>
 
@@ -484,6 +485,69 @@ ValidationReport validateLodDag(const fmt::OcMeshData& mesh, const LodDag& dag) 
     }
 
     return report;
+}
+
+bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
+    const auto fail = [&](const char* m) { if (why) *why = m; return false; };
+
+    if (!(ratio > 0.0f) || !(ratio < 1.0f)) return fail("ratio must be strictly between 0 and 1");
+    const u32 vcount = mesh.vertexCount();
+    if (vcount == 0 || mesh.indices.empty() || mesh.indices.size() % 3 != 0)
+        return fail("mesh has no triangles to simplify");
+
+    const usize targetIndices = usize(f64(mesh.indices.size()) * f64(ratio)) / 3 * 3;
+    if (targetIndices < 3) return fail("ratio leaves fewer than one triangle");
+
+    // FLT_MAX rather than a small bound, deliberately: the caller asked for a triangle COUNT, and a
+    // tight error bound would silently return far more triangles than requested while reporting
+    // success. Letting error float and reporting what it cost is the honest shape.
+    f32 resultError = 0.0f;
+    std::vector<u32> out(mesh.indices.size());
+    const usize got = meshopt_simplify(
+        out.data(), mesh.indices.data(), mesh.indices.size(),
+        mesh.positions.data(), vcount, sizeof(f32) * 3,
+        targetIndices, std::numeric_limits<f32>::max(), 0, &resultError);
+    out.resize(got);
+
+    if (got < 3) return fail("the simplifier returned no triangles");
+    // A simplifier that barely moved has usually hit a mesh it cannot collapse (every edge on a
+    // border, or degenerate topology). Saying so beats writing a "simplified" mesh that is not.
+    if (got > mesh.indices.size() * 9 / 10 && got > targetIndices * 2)
+        return fail("the simplifier could not get near the requested ratio");
+
+    // The reduced index buffer still addresses the ORIGINAL vertex array, so most of those vertices
+    // are now unreferenced. Compact, or the file keeps every vertex of the source mesh and the whole
+    // point -- less data -- is lost while the triangle count alone goes down.
+    std::vector<u32> remap(vcount);
+    const usize newVerts = meshopt_optimizeVertexFetchRemap(remap.data(), out.data(), got, vcount);
+
+    std::vector<f32> pos(newVerts * 3), nrm, uv;
+    meshopt_remapVertexBuffer(pos.data(), mesh.positions.data(), vcount, sizeof(f32) * 3, remap.data());
+    if (mesh.normals.size() == usize(vcount) * 3) {
+        nrm.resize(newVerts * 3);
+        meshopt_remapVertexBuffer(nrm.data(), mesh.normals.data(), vcount, sizeof(f32) * 3, remap.data());
+    }
+    if (mesh.uvs.size() == usize(vcount) * 2) {
+        uv.resize(newVerts * 2);
+        meshopt_remapVertexBuffer(uv.data(), mesh.uvs.data(), vcount, sizeof(f32) * 2, remap.data());
+    }
+    meshopt_remapIndexBuffer(out.data(), out.data(), got, remap.data());
+
+    // Committed only now: every step above could fail, and a half-rewritten mesh is worse than an
+    // untouched one. The header promises the mesh is untouched on failure; this is where that holds.
+    mesh.positions = std::move(pos);
+    mesh.normals   = std::move(nrm);
+    mesh.uvs       = std::move(uv);
+    mesh.indices   = std::move(out);
+    mesh.meshlets.clear();   // stale the moment the triangles change; rebuild after simplifying
+
+    if (why) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "%zu tris, %zu verts, error %.4f",
+                      mesh.indices.size() / 3, usize(newVerts), double(resultError));
+        *why = buf;
+    }
+    return true;
 }
 
 } // namespace aver::trifactor

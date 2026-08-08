@@ -78,9 +78,22 @@ std::string safe(const std::string& in, const std::string& fallback) {
 // Returns 0 on success, 1 on a conversion error, 2 on bad usage.
 int main(int argc, char** argv) {
     if (argc < 3) {
-        AVER_ERROR("usage: ConvertTool <in.gltf|in.glb> <out-directory> [base-name]");
+        AVER_ERROR("usage: ConvertTool <in.gltf|in.glb> <out-directory> [base-name] [--lod <ratio>]");
         return 2;
     }
+    // --lod <ratio> decimates to roughly that fraction of the triangles at cook time. Parsed out of
+    // argv before the positional arguments are read, so it can be written anywhere on the line and
+    // [base-name] does not accidentally swallow it.
+    f32 lodRatio = 0.0f;
+    int positional = argc;
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (std::string(argv[i]) == "--lod") {
+            lodRatio = static_cast<f32>(std::atof(argv[i + 1]));
+            positional = (positional == argc) ? i : positional;
+        }
+    }
+    argc = positional;   // hide the flag from the positional reads below
+
     fmt::GltfImportResult res;
     std::string why;
     if (!fmt::importGltf(argv[1], res, {}, &why)) { AVER_ERROR("import: {}", why); return 1; }
@@ -102,6 +115,18 @@ int main(int argc, char** argv) {
               m.boundsMin.x, m.boundsMin.y, m.boundsMin.z, m.boundsMax.x, m.boundsMax.y, m.boundsMax.z);
 
 #if AVER_MODULE_TRIFACTOR
+    // Decimation BEFORE clustering, necessarily: simplifyMesh rewrites the index buffer and clears
+    // any meshlets, so clustering first would only throw that work away.
+    if (lodRatio > 0.0f) {
+        const usize before = m.indices.size() / 3;
+        if (!aver::trifactor::simplifyMesh(m, lodRatio, &why)) {
+            AVER_WARN("--lod {}: {} (saving at full density)", lodRatio, why);
+        } else {
+            AVER_INFO("simplified to {:.1f}%: {} -> {} tris ({})", double(lodRatio) * 100.0,
+                      before, m.indices.size() / 3, why);
+        }
+    }
+
     // Best-effort: a mesh too small/degenerate to cluster (see TrifactorTest's degenerate cases)
     // still gets saved, just without an MLET chunk -- the mesh is not lost over an optional feature.
     if (!addMeshlets(m, &why)) {
