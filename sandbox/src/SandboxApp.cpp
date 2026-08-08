@@ -5950,6 +5950,42 @@ private:
                   cwSettings.worldDir, chunkWorld_->settings().stream.chunkSizeCm,
                   chunkWorld_->settings().stream.loadRadius, chunkWorld_->settings().stream.evictRadius,
                   chunkWorld_->settings().stream.verticalRadius);
+        warnIfCameraOutsideGeneratedBand();
+    }
+
+    // Says so when streaming is switched on somewhere nothing will ever load.
+    //
+    // The generator fills a SINGLE BAND of chunk layers -- surfaceChunkZ plus or minus
+    // verticalRadius -- and the streamer never asks outside it. A camera above or below that band
+    // gets a wanted-set that is empty by construction: no error, no warning, no chunks, and a panel
+    // reading zero that looks identical to "still starting up".
+    //
+    // This is not hypothetical. Enabling streaming on the ElectricDreams sample does exactly that:
+    // its 30000x30000 ground plane dominates frameCameraOn's bounding box, so the level-load camera
+    // parks near Z=37000 while the default band reaches about -1600..+3200. Nothing loads and
+    // nothing says why. The interaction predates streaming having a consumer at all; the silence is
+    // the part that is fixable here, so fix the silence.
+    //
+    // A WARNING, NOT A CORRECTION. Moving the camera would be worse: a designer who switched this on
+    // to look at their own authored level would be yanked somewhere else, and "the tool teleported
+    // me" is a harder bug to understand than "the tool told me I was out of range".
+    void warnIfCameraOutsideGeneratedBand() const {
+        if (!chunkWorld_) return;
+        const world::StreamSettings& st = chunkWorld_->settings().stream;
+        if (st.chunkSizeCm <= 0) return;
+
+        const i32 camChunkZ = world::floorDiv(static_cast<i32>(camPos_.z), st.chunkSizeCm);
+        const i32 surfaceZ  = chunkWorld_->settings().generator.surfaceChunkZ;
+        if (std::abs(camChunkZ - surfaceZ) <= st.verticalRadius) return;
+
+        // Inclusive of the top layer's full height, so the number quoted is the last Z that can
+        // actually contain something rather than the coordinate its floor sits at.
+        const i64 lo = i64(surfaceZ - st.verticalRadius) * st.chunkSizeCm;
+        const i64 hi = i64(surfaceZ + st.verticalRadius + 1) * st.chunkSizeCm;
+        AVER_WARN("[ChunkWorld] the camera is at Z={:.0f}cm (chunk layer {}), outside the generated "
+                  "band {}..{}cm (layers {}..{}). Nothing will load until it is inside that band -- "
+                  "press F to focus something near ground level, or fly down.",
+                  camPos_.z, camChunkZ, lo, hi, surfaceZ - st.verticalRadius, surfaceZ + st.verticalRadius);
     }
 
     // A small always-on-while-streaming readout of StreamStats. pendingLoads and failedLoads are
