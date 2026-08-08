@@ -592,10 +592,43 @@ itself" — but it would leave a new open path uncovered and falsify `FileSystem
 whole API. If slice 7's runtime-written regions then trip `verify-game.ps1`, that is a real question
 about where they belong and it should surface there.
 
-**Slice 3 — `IDevice::destroyMesh` (B6).** Independently valuable; also fixes
-`LandscapeRenderer::forgetAll`'s permanent leak and lets `SkinnedScene` stop hoarding.
-*Done when:* create/destroy in a loop holds steady GPU memory; the landscape cache evicts instead of
-capping; gates unmoved.
+**Slice 3 — `IDevice::destroyMesh`. DONE 2026-08-08. This closes B6.** Plus
+`IResourceFactory::destroyBlas`/`blasMesh` (non-pure — `tests/render.ui` and
+`tests/render.actorpreview` each implement that interface with a mock, and a new `= 0` would break
+both). `LandscapeRenderer` now evicts least-recently-used instead of capping, and `forgetAll` frees.
+
+*Three hazards, all real, all handled:*
+- **A BLAS holds the mesh's GPU addresses.** `destroyMesh` destroys any structure built from that
+  mesh first; unlike a raster draw, traversing freed memory faults the device rather than drawing a
+  hole. `createBlas` also now refuses a destroyed mesh — the handle is in range and the slot exists,
+  so the old bounds test passed and the build would have proceeded over a cleared vertex view.
+- **`createSkinTargetMesh` shares its source's index buffer.** `GpuMesh` records `ibOwned`/`ibShares`/
+  `ibSource`, so a skin target never frees borrowed indices and a source with live sharers refuses to
+  be destroyed, loudly, rather than pulling triangles out from under them.
+- **Voxi builds its TLAS from `drawsPrev_`** — *last* frame's draws — so a mesh freed between frames
+  is still named there. Its cache now asks the factory what a cached BLAS is actually for and drops
+  the entry itself, rather than needing every `destroyMesh` caller to remember to tell it.
+
+**The handle is never recycled.** The slot is cleared and kept, so a stale handle addresses a dead
+mesh and draws nothing. Recycling would make it address a *different live* mesh and silently draw the
+wrong geometry — much harder to notice than a hole. The cost is a few dozen bytes per destroyed mesh
+against the megabytes actually reclaimed; if churn ever makes that matter the fix is a generation in
+the handle, not bare reuse.
+
+*Evidence:* `LandscapeEvictTest` — 35 assertions, headless, using a counting `IDevice`. It turns "the
+cache leaks GPU memory" into the arithmetic property `created − destroyed == live`. Measured over a
+24-frame camera sweep with a 32-node cache: **118 created, 86 destroyed, 32 resident**, conservation
+exact, root never evicted, `forgetAll` ending at `created == destroyed`. All 35 suites pass.
+
+*Gate status — stated honestly.* A sweep was started and then abandoned at the user's request; it must
+not be re-run without asking, because it fronts an editor window. What it did return before being
+stopped: **16 of 18 probes byte-identical** to the recorded before-picture, `sunlit` flagged
+`[BAD-PROBE tiny-rect 96x24]` and `penumbra-rt`'s confirm read degenerate at `45x24` — both the
+collapsed-probe-rectangle artefact of a disturbed window, not a rendering change. So the sweep is
+**inconclusive for those two probes** and no claim is made about them. The static argument is what
+stands in the meantime: nothing in the engine calls `destroyMesh` yet, the landscape module has no
+engine consumer, `drawMesh`'s new `alive` test is true for every live mesh, and Voxi's new staleness
+test is false for every live BLAS. A confirming sweep is owed whenever it suits the user.
 
 **Slice 4 — the participation protocol.** The seam by which framework, physics and the mesh cache
 contribute to and restore from a chunk. **Includes the entity→body link**, which does not exist (§9.4).

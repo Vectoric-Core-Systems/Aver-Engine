@@ -30,12 +30,28 @@ u32 LandscapeRenderer::residentAncestor(const LandscapeTree& tree, u32 node) con
     return kInvalidNode;
 }
 
+// Frees the least-recently-used resident. See the declaration for what it will not touch.
+bool LandscapeRenderer::evictOne(rhi::IDevice& device, u32 rootIndex) {
+    auto victim = meshes_.end();
+    for (auto it = meshes_.begin(); it != meshes_.end(); ++it) {
+        if (it->first == rootIndex) continue;          // the universal fallback ancestor
+        if (it->second.lastUsed == frame_) continue;   // wanted on THIS frame; freeing it undoes the work
+        if (victim == meshes_.end() || it->second.lastUsed < victim->second.lastUsed) victim = it;
+    }
+    if (victim == meshes_.end()) return false;         // everything resident is in use right now
+    device.destroyMesh(victim->second.handle);
+    meshes_.erase(victim);
+    ++stats_.evicted;
+    return true;
+}
+
 // Draws one section's selected nodes, creating meshes lazily and substituting resident ancestors.
 void LandscapeRenderer::draw(rhi::IDevice& device, const fmt::OcLandData& data,
                              const LandscapeTree& tree, const SelectResult& selection,
                              const f32 world[16], f32 uvTilingCm) {
     stats_ = LandscapeRenderStats{};
     drawnThisFrame_.clear();
+    ++frame_;
 
     // The root is claimed first so there is always one ancestor every other node can fall back to.
     const u32 rootIndex = tree.root();
@@ -46,7 +62,7 @@ void LandscapeRenderer::draw(rhi::IDevice& device, const fmt::OcLandData& data,
                 reinterpret_cast<const rhi::MeshVertex*>(rootMesh.vertices.data()),
                 static_cast<u32>(rootMesh.vertices.size()),
                 rootMesh.indices.data(), static_cast<u32>(rootMesh.indices.size()));
-            if (h) { meshes_.emplace(rootIndex, h); ++stats_.created; }
+            if (h) { meshes_.emplace(rootIndex, Resident{h, frame_}); ++stats_.created; }
         }
     }
 
@@ -55,6 +71,13 @@ void LandscapeRenderer::draw(rhi::IDevice& device, const fmt::OcLandData& data,
 
         auto it = meshes_.find(nodeIndex);
         if (it == meshes_.end()) {
+            // FULL NOW MEANS "MAKE ROOM", NOT "GIVE UP". This used to be a bare
+            // `meshes_.size() < maxResident_` and nothing else: once the cache filled, every further
+            // node drew a coarser ancestor forever, because there was no IDevice::destroyMesh and
+            // residency could not be reclaimed. evictOne declines when everything resident is wanted
+            // this frame, and the ancestor substitution below is still the answer then -- it is the
+            // fallback now rather than the steady state.
+            if (meshes_.size() >= maxResident_) evictOne(device, rootIndex);
             if (meshes_.size() < maxResident_) {
                 ChunkMesh mesh;
                 if (buildChunkMesh(data, tree, nodeIndex, mesh, uvTilingCm)) {
@@ -65,7 +88,7 @@ void LandscapeRenderer::draw(rhi::IDevice& device, const fmt::OcLandData& data,
                         mesh.indices.data(),
                         static_cast<u32>(mesh.indices.size()));
                     if (h) {
-                        meshes_.emplace(nodeIndex, h);
+                        meshes_.emplace(nodeIndex, Resident{h, frame_});
                         ++stats_.created;
                         it = meshes_.find(nodeIndex);
                     }
@@ -86,19 +109,27 @@ void LandscapeRenderer::draw(rhi::IDevice& device, const fmt::OcLandData& data,
         const auto mesh = meshes_.find(toDraw);
         if (mesh == meshes_.end()) { ++stats_.skipped; continue; }
 
-        device.drawMesh(mesh->second, world, baseColor_, metallic_, roughness_);
+        // Touched on USE, including when it was reached as somebody else's ancestor -- an ancestor
+        // standing in for four children is the most wanted node in the cache, and evicting it
+        // because it is not itself selected is exactly backwards.
+        mesh->second.lastUsed = frame_;
+        device.drawMesh(mesh->second.handle, world, baseColor_, metallic_, roughness_);
         ++stats_.submitted;
     }
 
     stats_.residentNodes = static_cast<u32>(meshes_.size());
 
     // Said once per session, not once per frame.
+    //
+    // REWORDED because the cause changed. Substitution used to mean "the cache is full and can
+    // never be reclaimed"; it now means the working set genuinely does not fit, because everything
+    // resident was wanted on the same frame and there was nothing eviction could safely take.
     if (stats_.substituted > 0 && !warnedFull_) {
         warnedFull_ = true;
-        AVER_WARN("[Landscape] the mesh cache is full at {} nodes; {} node(s) fell back to a coarser "
-                  "resident ancestor. There is no destroyMesh, so residency cannot be reclaimed -- "
-                  "raise maxResidentNodes or use smaller sections.",
-                  maxResident_, stats_.substituted);
+        AVER_WARN("[Landscape] {} node(s) fell back to a coarser resident ancestor: the {}-node mesh "
+                  "cache is full of nodes all wanted on the same frame, so eviction had nothing to "
+                  "take. Raise maxResidentNodes or use smaller sections.",
+                  stats_.substituted, maxResident_);
     }
 }
 

@@ -431,7 +431,18 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     u32 firstBuilds = 0;
     for (const Draw& d : drawsPrev_) {
         auto it = blas_.find(d.mesh);
+        // A CACHED STRUCTURE WHOSE MESH HAS BEEN DESTROYED UNDERNEATH US. This is reachable, not
+        // theoretical: the instance list is built from drawsPrev_ -- LAST frame's draws -- so a mesh
+        // freed between frames is still named here, and handing its structure to the TLAS would have
+        // the GPU traverse memory that has gone back to the heap. Asking the factory what the BLAS
+        // is actually for catches it without every caller of destroyMesh having to remember to tell
+        // this cache, which is the "one missed site" shape this renderer has been bitten by before.
+        if (it != blas_.end() && it->second && res_->blasMesh(it->second) != d.mesh) {
+            blas_.erase(it);
+            it = blas_.end();
+        }
         if (it == blas_.end()) {
+            // Returns 0 for a destroyed mesh, which is then recorded and not retried.
             const rhi::BlasHandle nb = res_->createBlas(d.mesh);
             if (nb) { ctx.buildBlas(nb); ++firstBuilds; }
             // A zero is recorded too, so a mesh that cannot produce a BLAS is not retried each frame.

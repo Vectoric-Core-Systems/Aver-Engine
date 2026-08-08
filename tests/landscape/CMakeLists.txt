@@ -23,4 +23,16 @@ endif()
 if(TARGET Aver.Landscape.Renderer)
   target_link_libraries(LandscapeTreeTest PRIVATE Aver.Landscape.Renderer)
   target_compile_definitions(LandscapeTreeTest PRIVATE AVER_LANDSCAPE_TEST_RENDERER=1)
+
+  # LandscapeEvictTest -- whether the mesh cache RECLAIMS residency or only refuses to grow.
+  #
+  # A separate executable rather than another section of the one above, because it asks a different
+  # kind of question: not "is the geometry right" but "is the bookkeeping conserved". Its counting
+  # device turns a GPU memory leak -- previously visible only in a profiler -- into the arithmetic
+  # property `destroyed + live == created`, which needs no GPU at all.
+  add_executable(LandscapeEvictTest src/LandscapeEvictTest.cpp)
+  target_link_libraries(LandscapeEvictTest PRIVATE
+    Aver.Landscape.Renderer Aver.Landscape Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(LandscapeEvictTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()

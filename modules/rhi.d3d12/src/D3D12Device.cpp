@@ -598,6 +598,25 @@ struct GpuMesh {
     // createMesh. See IDevice::meshBounds for why a corner rather than the farthest actual vertex.
     f32 boundsCentre[3] = {0.0f, 0.0f, 0.0f};
     f32 boundsRadius = 0.0f;
+
+    // ---- index-buffer sharing, which exists ONLY because of createSkinTargetMesh ----
+    //
+    // A skin target owns its vertices and SHARES its source's indices (`m.ib = src.ib` there --
+    // skinning moves vertices and never renumbers triangles). Freeing an index buffer twice, or
+    // freeing one out from under a mesh still drawing with it, is silent corruption: the resource
+    // goes back to the heap and the next allocation writes over the triangles.
+    //
+    // So ownership is recorded rather than inferred. `ibOwned` is false on a skin target, which
+    // therefore never frees the buffer; `ibShares` counts live sharers on the SOURCE, which
+    // therefore refuses to be destroyed while any remain; `ibSource` is how a skin target finds
+    // the source to decrement on its way out.
+    bool ibOwned = true;
+    u32  ibShares = 0;
+    MeshHandle ibSource = 0;
+
+    // False once destroyMesh has released this slot. The slot itself is KEPT -- see
+    // IDevice::destroyMesh for why a stale handle must address a dead mesh rather than a live one.
+    bool alive = true;
 };
 
 // A line list uploaded to the GPU.
@@ -930,6 +949,7 @@ public:
 
     MeshHandle createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override;
     MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) override;
+    bool destroyMesh(MeshHandle mesh) override;
     BufferHandle meshVertexBuffer(MeshHandle mesh) const override {
         if (!mesh || mesh > meshes_.size()) return 0;
         const GpuMesh& m = meshes_[mesh - 1];
@@ -1330,6 +1350,12 @@ public:
 
     void destroyTexture(TextureHandle h) override;
     void destroyBuffer(BufferHandle h) override;
+    void destroyBlas(BlasHandle h) override;
+    MeshHandle blasMesh(BlasHandle h) const override;
+    // Destroys every acceleration structure built from `mesh`. Concrete rather than part of
+    // IResourceFactory: it is an implementation detail of D3D12Device::destroyMesh, and no caller
+    // outside this file has any business asking for it.
+    void destroyBlasForMesh(MeshHandle mesh);
     void destroyShader(ShaderHandle h) override;
     void destroyPipeline(PipelineHandle h) override;
     void destroyBindingSet(BindingSetHandle h) override;
@@ -2248,6 +2274,11 @@ MeshHandle D3D12Device::createSkinTargetMesh(MeshHandle source, BufferHandle* ou
     // perfectly readable. The visible consequence was that one skinned entity switched ray-traced
     // reflections off for the whole scene, because the BLAS build could not see its geometry.
     m.ibBuffer = src.ibBuffer;
+    // ...and with it, the record that these indices are BORROWED. Without this the skin target
+    // would free the source's index buffer on destruction and every mesh still drawing with it
+    // would render from reclaimed memory.
+    m.ibOwned = false;
+    m.ibSource = source;
     // Likewise vertexCount, which stayed 0 and is what a geometry consumer sizes its read by.
     m.vertexCount = src.vertexCount;
     m.computeWritten = true;   // the whole point of this entry point
@@ -2259,6 +2290,9 @@ MeshHandle D3D12Device::createSkinTargetMesh(MeshHandle source, BufferHandle* ou
 
     meshes_.push_back(std::move(m));
     const MeshHandle h = static_cast<MeshHandle>(meshes_.size());
+    // Counted on the SOURCE, after the push_back -- `src` is a reference into meshes_ and the
+    // push_back above may have reallocated it.
+    meshes_[source - 1].ibShares += 1;
 
     // Seed it with the rest pose. Queued rather than done here because a copy needs an open command
     // list and this may well be called outside a frame -- and the point of seeding at all is that a
@@ -2360,8 +2394,63 @@ void D3D12Device::beginFrame() {
 }
 
 // Draws one mesh into the scene, through whichever pipeline owns the lit pass.
+// Releases a mesh's GPU memory. See IDevice::destroyMesh for the handle-recycling argument.
+bool D3D12Device::destroyMesh(MeshHandle mesh) {
+    if (mesh == 0 || mesh > meshes_.size()) return false;
+    GpuMesh& m = meshes_[mesh - 1];
+    if (!m.alive) return false;   // already destroyed; saying so beats double-freeing
+
+    // A source mesh whose indices someone else is still drawing with cannot go. Refusing loudly is
+    // the whole point: freeing the buffer anyway would leave the skin target rendering from memory
+    // the heap has handed to something else, which shows up as scrambled triangles somewhere
+    // unrelated rather than as an error here.
+    if (m.ibShares > 0) {
+        AVER_WARN("[RHI.D3D12] destroyMesh({}) refused: {} skin target(s) still share its indices",
+                  mesh, m.ibShares);
+        return false;
+    }
+
+    // The acceleration structures FIRST. A BLAS holds this mesh's vertex and index GPU addresses,
+    // so releasing the buffers while one is live would leave ray tracing traversing freed memory --
+    // and unlike a raster draw, that faults the device rather than drawing a hole.
+    if (rhiFactory_) rhiFactory_->destroyBlasForMesh(mesh);
+
+    // Then the buffers, through the factory, so they retire behind the fence rather than being
+    // released while a command list still in flight references them.
+    if (rhiFactory_) {
+        if (m.vbBuffer) rhiFactory_->destroyBuffer(m.vbBuffer);
+        // ONLY IF OWNED. A skin target's indices belong to its source.
+        if (m.ibOwned && m.ibBuffer) rhiFactory_->destroyBuffer(m.ibBuffer);
+    }
+    // Give the source its share back, so a source held open only by this target can now go too.
+    if (!m.ibOwned && m.ibSource != 0 && m.ibSource <= meshes_.size()) {
+        GpuMesh& src = meshes_[m.ibSource - 1];
+        if (src.ibShares > 0) src.ibShares -= 1;
+    }
+
+    // The slot is CLEARED AND KEPT, never recycled. A handle held past its mesh then names
+    // something dead and draws nothing, instead of naming whatever was created next.
+    m.vb.Reset();
+    m.ib.Reset();
+    m.vbv = D3D12_VERTEX_BUFFER_VIEW{};
+    m.ibv = D3D12_INDEX_BUFFER_VIEW{};
+    m.indexCount = 0;
+    m.vertexCount = 0;
+    m.vbBuffer = 0;
+    m.ibBuffer = 0;
+    m.computeWritten = false;
+    m.ibSource = 0;
+    m.boundsRadius = 0.0f;
+    m.alive = false;
+    return true;
+}
+
 void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) {
     if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
+    // A destroyed mesh draws NOTHING rather than drawing from a cleared vertex view. This is the
+    // other half of not recycling handles: a caller that kept a handle too long gets a visible hole
+    // it can trace, not a device removal.
+    if (!meshes_[mesh - 1].alive) return;
     for (IRenderFeature* f : features_)
         f->submitDraw(mesh, world, color, metallic, roughness,
                       drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
@@ -4266,6 +4355,10 @@ BlasHandle D3D12ResourceFactory::createBlas(MeshHandle mesh) {
     collect();
     if (!dev_->device5_) { AVER_WARN("[RHI.D3D12] createBlas without ray-tracing support"); return 0; }
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.D3D12] createBlas with an invalid mesh handle"); return 0; }
+    // A DESTROYED mesh is invalid too, and separately worth naming: the handle is in range and the
+    // slot exists, so the bounds test above passes and the build would proceed over a cleared vertex
+    // view. Returning 0 lets the caller record "no structure for this mesh" and stop asking.
+    if (!dev_->meshes_[mesh - 1].alive) { AVER_WARN("[RHI.D3D12] createBlas for destroyed mesh {}", mesh); return 0; }
     const GpuMesh& m = dev_->meshes_[mesh - 1];
     if (m.indexCount == 0) { AVER_ERROR("[RHI.D3D12] createBlas for a mesh with no indices"); return 0; }
 
@@ -4343,6 +4436,38 @@ void D3D12ResourceFactory::destroyBuffer(BufferHandle h) {
     b->res.Reset();
     b->mapped = nullptr;
     collect();
+}
+
+// Releases an acceleration structure, its scratch with it.
+//
+// The slot is cleared and kept, exactly as a mesh slot is, so a stale BlasHandle names something
+// dead rather than something else's structure. `mesh` going to 0 is what blasMesh() reports and
+// what lets VoxiRenderer's cache notice on its own that its entry has expired.
+void D3D12ResourceFactory::destroyBlas(BlasHandle h) {
+    if (h == 0 || h > blases_.size()) return;
+    RhiBlas& b = blases_[h - 1];
+    if (!b.as && !b.scratch) return;
+    retire(b.as);
+    retire(b.scratch);
+    b.as.Reset();
+    b.scratch.Reset();
+    b.mesh = 0;
+    b.built = false;
+    collect();
+}
+
+MeshHandle D3D12ResourceFactory::blasMesh(BlasHandle h) const {
+    if (h == 0 || h > blases_.size()) return 0;
+    return blases_[h - 1].mesh;
+}
+
+// Destroys every structure built from `mesh`. A linear scan, and that is proportionate: blases_ has
+// one entry per distinct mesh ever ray-traced, which is the same order as the mesh table itself and
+// is walked once per destroy rather than once per frame.
+void D3D12ResourceFactory::destroyBlasForMesh(MeshHandle mesh) {
+    if (mesh == 0) return;
+    for (usize i = 0; i < blases_.size(); ++i)
+        if (blases_[i].mesh == mesh) destroyBlas(static_cast<BlasHandle>(i + 1));
 }
 
 // Frees a shader's bytecode.

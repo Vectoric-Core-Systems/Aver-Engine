@@ -25,6 +25,7 @@ struct LandscapeRenderStats {
     u32 substituted = 0;    // nodes that fell back to a resident ancestor
     u32 residentNodes = 0;
     u32 skipped = 0;        // selected, not resident, and no resident ancestor either
+    u32 evicted = 0;        // least-recently-used residents freed to make room this frame
 };
 
 // Caches node meshes and submits the selected nodes each frame.
@@ -42,15 +43,38 @@ public:
 
     const LandscapeRenderStats& stats() const { return stats_; }
 
-    // Forgets the resident meshes. Call when the device goes; it cannot free them.
-    void forgetAll() { meshes_.clear(); }
+    // Releases every resident mesh.
+    //
+    // IT USED TO LEAK, and said so: "Forgets the resident meshes. Call when the device goes; it
+    // cannot free them." That was true -- there was no IDevice::destroyMesh -- and it meant one
+    // vertex buffer and one index buffer per cached node stranded on the GPU for the life of the
+    // process, every time a section was closed. The device is a parameter now because freeing is
+    // the whole point; a caller that genuinely only wants the handles dropped is a caller whose
+    // device has already gone, and there is no such caller in the tree.
+    void forgetAll(rhi::IDevice& device) {
+        for (const auto& kv : meshes_) device.destroyMesh(kv.second.handle);
+        meshes_.clear();
+        warnedFull_ = false;
+    }
 
 private:
     // The nearest ancestor of `node` that already has a mesh, or kInvalidNode.
     u32 residentAncestor(const LandscapeTree& tree, u32 node) const;
 
-    std::unordered_map<u32, rhi::MeshHandle> meshes_;
+    // One cached node mesh and the frame it was last wanted on, which is what makes eviction
+    // possible: without it the cache can only refuse to grow, never choose what to give up.
+    struct Resident {
+        rhi::MeshHandle handle = 0;
+        u64 lastUsed = 0;
+    };
+    // Evicts the least-recently-used resident to make room, and returns true if it managed to.
+    // Refuses to evict anything wanted THIS frame, and refuses to evict the root -- which is the
+    // ancestor every other node falls back to, so freeing it turns a substitution into a hole.
+    bool evictOne(rhi::IDevice& device, u32 rootIndex);
+
+    std::unordered_map<u32, Resident> meshes_;
     std::unordered_set<u32> drawnThisFrame_;
+    u64 frame_ = 0;
     f32 baseColor_[4] = {0.42f, 0.45f, 0.36f, 1.0f};
     f32 metallic_ = 0.0f;
     f32 roughness_ = 0.85f;

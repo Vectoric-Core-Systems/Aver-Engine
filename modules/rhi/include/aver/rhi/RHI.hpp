@@ -283,6 +283,27 @@ public:
         (void)verts; (void)vertexCount; (void)indices; (void)indexCount; return 0;
     }
 
+    // Releases a mesh's GPU memory. False if the handle is invalid, already dead, or still shared.
+    //
+    // WHY THIS DID NOT EXIST, AND WHY IT HAD TO. Until this, every mesh ever created lived until the
+    // device did. Two subsystems hit that and worked around it rather than fixing it:
+    // LandscapeRenderer capped its cache and drew a coarser ancestor once full (its own warning said
+    // "there is no destroyMesh, so residency cannot be reclaimed"), and SkinnedScene recycles dead
+    // entries because it cannot free them. A streaming world makes it fatal rather than untidy:
+    // loading chunks in without ever letting them out is a leak with a camera attached.
+    //
+    // THE HANDLE IS NOT RECYCLED. The slot is cleared and kept, so a stale handle addresses a DEAD
+    // mesh and draws nothing. Reusing slots would make it address a DIFFERENT live mesh and silently
+    // draw the wrong geometry, which is far harder to notice than a hole. The cost is a few dozen
+    // bytes of dead slot per destroyed mesh -- against the megabytes of vertex and index data this
+    // actually reclaims. If churn ever makes that matter, the fix is a generation in the handle, not
+    // bare reuse.
+    //
+    // ACCELERATION STRUCTURES GO WITH IT. A BLAS holds the mesh's GPU addresses, so leaving one
+    // behind would point ray tracing at freed memory. The backend destroys any it built from this
+    // mesh as part of this call.
+    virtual bool destroyMesh(MeshHandle mesh) { (void)mesh; return false; }
+
     // Creates a mesh whose VERTEX BUFFER IS A COMPUTE TARGET, sharing `source`'s index buffer.
     //
     // This is how skinning reaches the rasteriser, and it is deliberately a creation entry point

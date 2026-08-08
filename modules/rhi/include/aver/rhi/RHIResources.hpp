@@ -385,6 +385,25 @@ public:
     virtual void destroyPipeline(PipelineHandle h) = 0;
     virtual void destroyBindingSet(BindingSetHandle h) = 0;
 
+    // Releases an acceleration structure. Normally reached through IDevice::destroyMesh, which
+    // destroys whatever it built from the mesh it is freeing -- a BLAS left behind would keep
+    // pointing ray tracing at that mesh's freed vertex and index memory.
+    //
+    // NOT PURE, unlike its siblings above, and deliberately: tests/render.ui and
+    // tests/render.actorpreview each implement this interface with a MockFactory, and a new `= 0`
+    // would break both for a method neither has any use for. A backend that grew acceleration
+    // structures without growing a way to release them is a bug in that backend, not here.
+    virtual void destroyBlas(BlasHandle h) { (void)h; }
+
+    // The mesh a BLAS was built from, or 0 if it is dead or was never built.
+    //
+    // EXISTS SO A CACHE CAN SELF-HEAL. VoxiRenderer memoises MeshHandle -> BlasHandle, and after a
+    // mesh is destroyed that entry names a structure over freed memory. Asking the factory what a
+    // BLAS is actually for lets the cache notice on its own, rather than needing every caller of
+    // destroyMesh to remember to tell it -- which is the "one missed site" shape this codebase has
+    // been bitten by before.
+    virtual MeshHandle blasMesh(BlasHandle h) const { (void)h; return 0; }
+
     // Populates a binding set. Slots left unset are null-filled.
     virtual void setSrv(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip = kAllMips) = 0;
     virtual void setUav(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip) = 0;
