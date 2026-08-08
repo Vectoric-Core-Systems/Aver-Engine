@@ -1,0 +1,183 @@
+#include "aver/world/ChunkStreamer.hpp"
+
+#if AVER_MODULE_SCENE
+
+#  include "aver/core/Log.hpp"
+#  include "aver/core/Time.hpp"
+
+#  include <algorithm>
+
+namespace aver::world {
+namespace {
+
+i32 chebyshev(const ChunkCoord& a, const ChunkCoord& b) {
+    const i32 dx = a.x > b.x ? a.x - b.x : b.x - a.x;
+    const i32 dy = a.y > b.y ? a.y - b.y : b.y - a.y;
+    const i32 dz = a.z > b.z ? a.z - b.z : b.z - a.z;
+    return dx > dy ? (dx > dz ? dx : dz) : (dy > dz ? dy : dz);
+}
+
+} // namespace
+
+void ChunkStreamer::setSettings(const StreamSettings& s) {
+    settings_ = s;
+    if (settings_.loadRadius < 0) settings_.loadRadius = 0;
+    if (settings_.verticalRadius < 0) settings_.verticalRadius = 0;
+    if (!chunkSizeValid(settings_.chunkSizeCm)) settings_.chunkSizeCm = kDefaultChunkSizeCm;
+    // ENFORCED, not documented and hoped for. evictRadius == loadRadius is the thrash case: a source
+    // on the boundary loads and evicts the same chunk on alternate frames, forever.
+    if (settings_.evictRadius <= settings_.loadRadius) {
+        settings_.evictRadius = settings_.loadRadius + 1;
+        AVER_WARN("[Stream] evictRadius must exceed loadRadius or the boundary thrashes; raised to {}",
+                  settings_.evictRadius);
+    }
+}
+
+i32 ChunkStreamer::distanceToNearestSource(const ChunkCoord& c) const {
+    i32 best = 1 << 24;
+    for (const Vec3& p : sources_) {
+        const ChunkCoord sc = splitCm(p, settings_.chunkSizeCm).chunk;
+        // Vertical measured separately: a surface world wants a slab, not a cube, and folding z into
+        // one Chebyshev distance would make the load radius control the height too.
+        const i32 dz = sc.z > c.z ? sc.z - c.z : c.z - sc.z;
+        if (dz > settings_.verticalRadius) continue;
+        const i32 d = chebyshev(ChunkCoord{sc.x, sc.y, c.z}, ChunkCoord{c.x, c.y, c.z});
+        if (d < best) best = d;
+    }
+    return best;
+}
+
+const std::vector<scene::Entity>* ChunkStreamer::entitiesOf(const ChunkCoord& c) const {
+    const auto it = resident_.find(c);
+    return it == resident_.end() ? nullptr : &it->second.entities;
+}
+
+StreamStats ChunkStreamer::update(scene::World& w, BodyRegistry& bodies,
+                                  std::vector<i32>* freedBodies) {
+    stats_.loadedThisUpdate = 0;
+    stats_.evictedThisUpdate = 0;
+    stats_.entitiesIn = 0;
+    stats_.entitiesOut = 0;
+    stats_.pendingLoads = 0;
+    stats_.failedLoads = 0;
+    if (!source_) return stats_;
+
+    // ---- what should be resident ----
+    // Gathered per source and deduplicated, sorted NEAREST FIRST so a budget spends itself on what
+    // the camera is about to see rather than on whatever the iteration order happened to reach.
+    std::vector<std::pair<i32, ChunkCoord>> wanted;
+    for (const Vec3& p : sources_) {
+        const ChunkCoord sc = splitCm(p, settings_.chunkSizeCm).chunk;
+        for (i32 dz = -settings_.verticalRadius; dz <= settings_.verticalRadius; ++dz)
+            for (i32 dy = -settings_.loadRadius; dy <= settings_.loadRadius; ++dy)
+                for (i32 dx = -settings_.loadRadius; dx <= settings_.loadRadius; ++dx) {
+                    const ChunkCoord c{sc.x + dx, sc.y + dy, sc.z + dz};
+                    if (resident_.find(c) != resident_.end()) continue;
+                    wanted.emplace_back(distanceToNearestSource(c), c);
+                }
+    }
+    std::sort(wanted.begin(), wanted.end(), [](const auto& a, const auto& b) {
+        if (a.first != b.first) return a.first < b.first;
+        // A total order, so two sources at equal distance do not make the load order depend on which
+        // was listed first -- which would make a replay of the same flight load a different sequence.
+        if (a.second.x != b.second.x) return a.second.x < b.second.x;
+        if (a.second.y != b.second.y) return a.second.y < b.second.y;
+        return a.second.z < b.second.z;
+    });
+    wanted.erase(std::unique(wanted.begin(), wanted.end(),
+                             [](const auto& a, const auto& b) { return a.second == b.second; }),
+                 wanted.end());
+
+    // ---- evict, before loading ----
+    // BEFORE, deliberately: eviction frees entity slots and memory that the loads below may want,
+    // and doing it after would peak at resident + loaded rather than at resident.
+    {
+        std::vector<ChunkCoord> gone;
+        for (const auto& kv : resident_)
+            if (distanceToNearestSource(kv.first) > settings_.evictRadius) gone.push_back(kv.first);
+        // Furthest first: if the budget cannot take them all, the ones least likely to be wanted
+        // again go first.
+        std::sort(gone.begin(), gone.end(), [this](const ChunkCoord& a, const ChunkCoord& b) {
+            return distanceToNearestSource(a) > distanceToNearestSource(b);
+        });
+        for (const ChunkCoord& c : gone) {
+            if (settings_.evictBudget && stats_.evictedThisUpdate >= settings_.evictBudget) break;
+            const auto it = resident_.find(c);
+            if (it == resident_.end()) continue;
+            for (const scene::Entity e : it->second.entities) {
+                if (!w.valid(e)) continue;
+                // The bodies FIRST, while the entity is still alive to be walked. detachSubtree
+                // takes the whole subtree because World::destroy does -- taking only the root would
+                // leak every child's collision, which is the bug SandboxApp::destroyEntity has today.
+                //
+                // They go OUT to the caller rather than being removed here: this module links
+                // Aver.Scene and not Aver.Physics, on purpose, so a build without physics still has
+                // a streamer that compiles.
+                if (freedBodies) bodies.detachSubtree(w, e, *freedBodies);
+                else { std::vector<i32> sink; bodies.detachSubtree(w, e, sink); }
+                w.destroy(e);
+                ++stats_.entitiesOut;
+            }
+            resident_.erase(it);
+            ++stats_.evictedThisUpdate;
+        }
+    }
+
+    // ---- load, within budget ----
+    for (const auto& item : wanted) {
+        if (item.first > settings_.loadRadius) continue;
+        if (settings_.loadBudget && stats_.loadedThisUpdate >= settings_.loadBudget) {
+            ++stats_.pendingLoads;
+            continue;
+        }
+        if (!source_->has(item.second)) continue;   // empty space is the common case, and not a miss
+
+        Clock clock;
+        ChunkPayload payload;
+        std::string why;
+        if (!source_->load(item.second, payload, &why)) {
+            ++stats_.failedLoads;
+            // Named and said once per chunk, not once per frame: a chunk that fails is not retried,
+            // because it is recorded as resident-with-nothing below.
+            AVER_WARN("[Stream] chunk ({},{},{}) could not be loaded: {}",
+                      item.second.x, item.second.y, item.second.z, why);
+            resident_.emplace(item.second, Resident{});
+            ++stats_.loadedThisUpdate;
+            continue;
+        }
+
+        Resident r;
+        r.entities = restore(payload, w, restore_);
+        // A restore that produced nothing still counts as resident: retrying it every frame would
+        // turn one bad chunk into a permanent stall.
+        stats_.entitiesIn += static_cast<u32>(r.entities.size());
+        resident_.emplace(item.second, std::move(r));
+        ++stats_.loadedThisUpdate;
+
+        const f64 ms = clock.restart() * 1000.0;
+        stats_.lastLoadMs = ms;
+        stats_.totalLoadMs += ms;
+        ++stats_.totalLoads;
+    }
+
+    stats_.residentChunks = static_cast<u32>(resident_.size());
+    stats_.residentEntities = 0;
+    for (const auto& kv : resident_) stats_.residentEntities += static_cast<u32>(kv.second.entities.size());
+    return stats_;
+}
+
+void ChunkStreamer::unloadAll(scene::World& w, BodyRegistry& bodies, std::vector<i32>& freedBodies) {
+    for (auto& kv : resident_)
+        for (const scene::Entity e : kv.second.entities) {
+            if (!w.valid(e)) continue;
+            bodies.detachSubtree(w, e, freedBodies);
+            w.destroy(e);
+        }
+    resident_.clear();
+    stats_.residentChunks = 0;
+    stats_.residentEntities = 0;
+}
+
+} // namespace aver::world
+
+#endif // AVER_MODULE_SCENE

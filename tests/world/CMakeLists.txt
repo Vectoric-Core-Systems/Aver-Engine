@@ -31,6 +31,16 @@ target_link_libraries(RegionFileTest PRIVATE Aver.World Aver.Scene Aver.Formats 
 set_target_properties(RegionFileTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ChunkStreamTest -- residency, a camera flight, and CHUNKED EQUALS FLAT.
+#
+# The last of those is what docs/CHUNKS.md section 10 calls the strongest single test in the plan,
+# and the reason section 3.1 keeps flat loading permanently: delete the flat path and streaming can
+# only be compared against itself.
+add_executable(ChunkStreamTest src/ChunkStreamTest.cpp)
+target_link_libraries(ChunkStreamTest PRIVATE Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Core)
+set_target_properties(ChunkStreamTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(ChunkCoordTest src/ChunkCoordTest.cpp)
 target_link_libraries(ChunkCoordTest PRIVATE Aver.World Aver.Core)
 set_target_properties(ChunkCoordTest PROPERTIES

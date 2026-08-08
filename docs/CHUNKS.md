@@ -692,8 +692,43 @@ also waits on slice 6, since nothing streams yet.
 
 **Slice 6 — native streaming residency, camera only.** Residency set, radius policy, hysteresis, load
 budget. No generation, no writes, no F#.
-*Done when:* a camera flight across ≥9 regions holds a bounded resident set, never drops an entity,
-and the per-region load cost is measured and written down.
+**DONE 2026-08-08.** `IChunkSource` / `RegionChunkSource` (index + region files, LRU over open
+handles) and `ChunkStreamer`.
+
+**Synchronous, on the frame thread, and measured** — B4's answer, not a first draft. `scene::World`
+is a process-global singleton whose header says "not thread-safe", every framework side table is a
+process-global mutable static, and Jolt's pool is linked PRIVATE by design. A background thread may
+not create an entity, so the honest slice 6 is a budgeted synchronous loader plus the numbers to
+decide whether a worker is worth building.
+
+**Hysteresis is enforced, not documented.** `setSettings` raises `evictRadius` when it does not
+exceed `loadRadius`, and says so. Equal radii is the thrash case: a source on the boundary loads a
+chunk, moves a centimetre, evicts it, moves back, forever.
+
+*Evidence:* `ChunkStreamTest` — 40 assertions, headless, over a fixture spanning **9 region files**.
+- **CHUNKED EQUALS FLAT.** Build flat, snapshot, partition, cook, destroy the world, stream it back:
+  177 entities, none missing, none invented, **every world position bit-identical**, every surface
+  name preserved. §10 calls this the strongest single test in the plan, and it is why §3.1 keeps
+  flat loading permanently.
+- **A flight across all nine regions** delivers each one's content, over nine *distinct* regions,
+  with the open-file cache staying within its cap of 8 — so it really did retire handles.
+- **A bounded resident set** across an 80-step there-and-back sweep: 225 loads, 207 evictions, peak
+  27 chunks against a wanted set of 147.
+- **Jitter across a chunk boundary causes zero churn** once settled.
+- **A stale index is refused, not served** — a region whose header hash disagrees with the index is
+  rejected naming staleness.
+
+*The measurement this slice asks to be written down:* **chunk materialisation averaged 0.0066 ms**
+over 225 loads, 0.0078 ms worst. That is a small fixture — payloads of 3–24 entities — and it scales
+with entity count, not chunk count, so it is a floor rather than a budget. On this evidence a worker
+thread is **not** yet justified; revisit when a chunk carries real content.
+
+*Slot churn, B7's threat, measured rather than assumed:* after 225 loads and 207 evictions,
+**0 entity slots retired**. The 7-bit generation is nowhere near exhaustion at this scale — but the
+flight lasts seconds and B7 is about sessions, so this bounds nothing about a long one.
+
+All 38 suites pass. Purely additive within `modules/world` and `tests/world`; gates unaffected and
+not run.
 
 **Slice 7 — runtime writes.** Sector allocator, free list, double-header crash safety, compaction.
 *Done when:* the crash-safety test passes at every sector boundary; compaction equals a fresh cook;

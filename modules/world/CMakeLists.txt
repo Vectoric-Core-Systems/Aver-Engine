@@ -17,6 +17,8 @@ aver_add_module(Aver.World
     src/ChunkCodec.cpp
     src/RegionFile.cpp
     src/RegionIndex.cpp
+    src/ChunkSource.cpp
+    src/ChunkStreamer.cpp
   DEPS
     Aver.Core
     Aver.Formats
