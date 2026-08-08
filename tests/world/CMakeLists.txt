@@ -41,6 +41,16 @@ target_link_libraries(ChunkStreamTest PRIVATE Aver.World Aver.Scene Aver.Formats
 set_target_properties(ChunkStreamTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# RegionWriteTest -- runtime mutation: the sector allocator, the free list, crash safety, compaction.
+#
+# The crash case is checked at EVERY sector boundary rather than a sampled few, because a crash does
+# not sample. The property is not "a truncated region opens" but "a truncated region never serves
+# something plausible and wrong".
+add_executable(RegionWriteTest src/RegionWriteTest.cpp)
+target_link_libraries(RegionWriteTest PRIVATE Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Core)
+set_target_properties(RegionWriteTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(ChunkCoordTest src/ChunkCoordTest.cpp)
 target_link_libraries(ChunkCoordTest PRIVATE Aver.World Aver.Core)
 set_target_properties(ChunkCoordTest PROPERTIES

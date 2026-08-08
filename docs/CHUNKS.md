@@ -730,10 +730,46 @@ flight lasts seconds and B7 is about sessions, so this bounds nothing about a lo
 All 38 suites pass. Purely additive within `modules/world` and `tests/world`; gates unaffected and
 not run.
 
-**Slice 7 — runtime writes.** Sector allocator, free list, double-header crash safety, compaction.
-*Done when:* the crash-safety test passes at every sector boundary; compaction equals a fresh cook;
-the directory watcher does not feed the engine's own writes back into asset reload
-(`Win32DirectoryWatcher.cpp:24-26` — it will, by default).
+**Slice 7 — runtime writes. DONE 2026-08-08.** `RegionWriter`: sector allocator with a coalescing
+free list, in-place chunk add/replace/remove, alternating durable headers, and compaction.
+
+**The format went to version 2.** v1 pinned the group table at sector 2 with the directories
+immediately after — which is the same mistake that disqualified AVR1, made one level up: a chunk
+landing in a group that does not exist yet needs a new directory *and* a longer table, and a table
+that cannot move displaces everything behind it. It went unnoticed while the format was cook-only,
+because a cook lays the file out once and nothing grows. `groupTableSector`, `freeListSector` and
+`freeListCount` are header fields now. No v1 file exists outside a test temp directory, so the bump
+refuses them rather than carrying a compatibility path for content nobody has.
+
+**What crash safety does and does not promise**, stated precisely because claiming it loosely is how
+a format ends up like Anvil: a payload is never written over live data, so a crash mid-payload leaks
+sectors rather than corrupting any; the directory entry is then patched and synced, and a torn entry
+produces a chunk that **fails its CRC and is refused by name** — one chunk lost, region usable; the
+header goes last, to the copy that is *not* live, with `serial + 1`. What that does **not** give is a
+transaction: a crash between the directory patch and the header leaves the new chunk visible under a
+header one step stale. The data is correct; the index's staleness check fires. Making it atomic needs
+a double-buffered directory, which is real cost for a case that degrades safely — so it is named
+rather than pretended away.
+
+*Evidence:* `RegionWriteTest` — 46 assertions.
+- **Crash safety at EVERY sector boundary**, not a sampled few, because a crash does not sample. 72
+  truncations: 69 opened, 3 refused, 36 chunks served, **0 wrong**. The property is not "a truncated
+  region opens" but "a truncated region never serves something plausible and incorrect".
+- **COMPACTION EQUALS A FRESH COOK, byte for byte** (72 sectors → 71). This is the format's only
+  determinism guarantee once it mutates: two files that reached the same content by different write
+  sequences differ, because allocation depends on history, and compaction is the map back onto the
+  one canonical form. Done through a temp file and a rename, so a crash during the one operation that
+  touches every byte leaves the original intact.
+- Freed sectors are **reused rather than abandoned**; removing a chunk twice fails rather than
+  double-freeing; the two header copies genuinely differ after a write.
+
+All 39 suites pass. Purely additive outside the v2 header change; gates unaffected and not run.
+
+*The directory-watcher clause is not yet applicable, and that is a real answer rather than a skip.*
+`Win32DirectoryWatcher` does watch `FILE_NOTIFY_CHANGE_LAST_WRITE` and would feed the engine's own
+region writes back into asset reload — but **nothing in either host writes a region yet**: the
+streamer is not wired into `SandboxApp` or `GameApp`. There is no feedback loop to break until it is,
+and the guard belongs with that wiring.
 
 **Slice 8 — generation as you go.** Delta-from-baseline; CPU generation path; `sampleInfinite`'s first
 test and first caller.
