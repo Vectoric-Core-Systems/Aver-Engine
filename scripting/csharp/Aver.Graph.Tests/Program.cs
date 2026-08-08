@@ -1,6 +1,8 @@
 // Test suite for Aver.Graph: parsing and compilation.
 // Comment explains WHY: this slice proves the property that a graph loaded from text,
 // compiled to IL, and invoked returns the same value as hand-written C#.
+// Tests verify that both C# format (integer node IDs as strings) and C++ format
+// (string node IDs, dot notation links) are supported.
 
 using System;
 using System.Collections.Generic;
@@ -19,6 +21,9 @@ class Program
         failures += TestMultiply();
         failures += TestCompare();
         failures += TestAddThenMultiply();
+        failures += TestCppFormat();
+        failures += TestNameAndDescription();
+        failures += TestCrossImplementationFixture();
 
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
@@ -325,6 +330,194 @@ OUT 5 result
                 return 1;
             }
 
+            float result = fn();
+            float expected = 36.0f;
+            if (Math.Abs(result - expected) > 1e-6)
+            {
+                Console.WriteLine($"  FAIL: Expected {expected}, got {result}");
+                return 1;
+            }
+
+            Console.WriteLine($"  PASS: {result}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {ex.Message}");
+            return 1;
+        }
+    }
+
+    // Test parsing graphs in C++ format (string node IDs, dot notation for links)
+    static int TestCppFormat()
+    {
+        Console.WriteLine("Test: CppFormat (dot notation links)");
+        try
+        {
+            var graphText = @"
+OCGRAPH 1
+NODE const1 ConstFloat value=5.5
+NODE const2 ConstFloat value=4.5
+NODE adder Add
+PIN const1 value out float
+PIN const2 value out float
+PIN adder a in float
+PIN adder b in float
+PIN adder result out float
+LINK const1.value adder.a
+LINK const2.value adder.b
+OUT adder result
+";
+
+            if (!OcGraphParser.Parse(graphText, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+
+            var compiler = new GraphCompiler(graph);
+            if (compiler.Compile(out var compileErr) is not Func<float> fn)
+            {
+                Console.WriteLine($"  FAIL: Compile error: {compileErr}");
+                return 1;
+            }
+
+            float result = fn();
+            float expected = 10.0f;  // 5.5 + 4.5
+            if (Math.Abs(result - expected) > 1e-6)
+            {
+                Console.WriteLine($"  FAIL: Expected {expected}, got {result}");
+                return 1;
+            }
+
+            Console.WriteLine($"  PASS: {result}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {ex.Message}");
+            return 1;
+        }
+    }
+
+    // Test that NAME and DESCRIPTION records are parsed and preserved
+    static int TestNameAndDescription()
+    {
+        Console.WriteLine("Test: NameAndDescription");
+        try
+        {
+            var graphText = @"
+OCGRAPH 1
+NAME TestGraph
+DESCRIPTION This is a test graph for the cross-implementation test
+NODE n1 ConstFloat value=15.0
+OUT n1 value
+";
+
+            if (!OcGraphParser.Parse(graphText, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+
+            // Verify NAME was stored
+            if (graph.Name != "TestGraph")
+            {
+                Console.WriteLine($"  FAIL: Expected name 'TestGraph', got '{graph.Name}'");
+                return 1;
+            }
+
+            // Verify DESCRIPTION was stored
+            if (graph.Description != "This is a test graph for the cross-implementation test")
+            {
+                Console.WriteLine($"  FAIL: Expected description, got '{graph.Description}'");
+                return 1;
+            }
+
+            var compiler = new GraphCompiler(graph);
+            if (compiler.Compile(out var compileErr) is not Func<float> fn)
+            {
+                Console.WriteLine($"  FAIL: Compile error: {compileErr}");
+                return 1;
+            }
+
+            float result = fn();
+            float expected = 15.0f;
+            if (Math.Abs(result - expected) > 1e-6)
+            {
+                Console.WriteLine($"  FAIL: Expected {expected}, got {result}");
+                return 1;
+            }
+
+            Console.WriteLine($"  PASS: Name={graph.Name}, Description preserved");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {ex.Message}");
+            return 1;
+        }
+    }
+
+    // Cross-implementation test: load a graph written by the C++ OcGraph writer,
+    // parse it with the C# parser, compile it to IL, and verify the result.
+    // This fixture (cross_impl_test.ocgraph) is in the exact format produced by OcGraph.cpp.
+    static int TestCrossImplementationFixture()
+    {
+        Console.WriteLine("Test: CrossImplementationFixture");
+        try
+        {
+            // Read the fixture file that was written by the C++ OcGraph writer.
+            string filePath = "cross_impl_test.ocgraph";
+            if (!File.Exists(filePath))
+            {
+                Console.WriteLine($"  FAIL: Fixture file not found: {filePath}");
+                return 1;
+            }
+
+            string graphText = File.ReadAllText(filePath);
+
+            if (!OcGraphParser.Parse(graphText, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+
+            // Verify metadata was preserved from the C++ format.
+            if (graph.Name != "CrossImplementationTest")
+            {
+                Console.WriteLine($"  FAIL: Expected name 'CrossImplementationTest', got '{graph.Name}'");
+                return 1;
+            }
+
+            // Checked for the "C#" specifically, because that is what caught the bug this fixture
+            // exists to prevent: the parser used to strip from the first '#' ANYWHERE in a line, so
+            // this description arrived as "...executed by the C". A format about C# scripting meets
+            // '#' inside values constantly.
+            if (!graph.Description.Contains("C# runtime"))
+            {
+                Console.WriteLine($"  FAIL: description lost its '#' - got '{graph.Description}'");
+                return 1;
+            }
+
+            // Compile the graph.
+            var compiler = new GraphCompiler(graph);
+            var compiled = compiler.Compile(out var compileErr);
+            if (compiled is not Func<float> fn)
+            {
+                Console.WriteLine($"  FAIL: Compile error: {compileErr ?? "(no error message)"}");
+                Console.WriteLine($"  Nodes: {graph.Nodes.Count}, Links: {graph.Links.Count}, Outputs: {graph.Outputs.Count}");
+                if (graph.Outputs.Count > 0)
+                {
+                    Console.WriteLine($"  Output: {graph.Outputs[0].NodeId}.{graph.Outputs[0].PinName}");
+                }
+                return 1;
+            }
+
+            // Execute the compiled graph and verify the result.
+            // The fixture computes (5 + 7) * 3 = 36. CHAINED on purpose: a single constant would
+            // pass on a runtime that ignored links entirely, which is the failure mode a
+            // cross-implementation test most needs to exclude.
             float result = fn();
             float expected = 36.0f;
             if (Math.Abs(result - expected) > 1e-6)

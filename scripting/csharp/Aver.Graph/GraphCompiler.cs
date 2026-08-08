@@ -17,8 +17,8 @@ namespace Aver.Graph;
 public class GraphCompiler
 {
     private Graph _graph;
-    private Dictionary<int, LocalBuilder> _nodeLocals = new();
-    private Dictionary<(int, string), LocalBuilder> _pinLocals = new();
+    private Dictionary<string, LocalBuilder> _nodeLocals = new();
+    private Dictionary<(string, string), LocalBuilder> _pinLocals = new();
     private ILGenerator? _il;
 
     public GraphCompiler(Graph graph)
@@ -45,7 +45,7 @@ public class GraphCompiler
             // Determine the return type. If there's one output, return its type.
             // If there are zero or multiple, return void.
             Type returnType = typeof(void);
-            int singleOutputNodeId = -1;
+            string singleOutputNodeId = "";
             string singleOutputPinName = "";
 
             if (_graph.Outputs.Count == 1)
@@ -89,7 +89,7 @@ public class GraphCompiler
             }
 
             // If there's a single output, load it and return.
-            if (_graph.Outputs.Count == 1 && singleOutputNodeId >= 0)
+            if (_graph.Outputs.Count == 1 && !string.IsNullOrEmpty(singleOutputNodeId))
             {
                 if (_pinLocals.TryGetValue((singleOutputNodeId, singleOutputPinName), out var outLocal))
                 {
@@ -117,8 +117,8 @@ public class GraphCompiler
     /// Returns null if there is a cycle.
     private List<Node>? TopologicalSort()
     {
-        var visited = new HashSet<int>();
-        var visiting = new HashSet<int>();
+        var visited = new HashSet<string>();
+        var visiting = new HashSet<string>();
         var result = new List<Node>();
 
         foreach (var nodeId in _graph.Nodes.Keys)
@@ -130,7 +130,7 @@ public class GraphCompiler
         return result;
     }
 
-    private bool TopologicalSortDFS(int nodeId, HashSet<int> visited, HashSet<int> visiting, List<Node> result)
+    private bool TopologicalSortDFS(string nodeId, HashSet<string> visited, HashSet<string> visiting, List<Node> result)
     {
         if (visited.Contains(nodeId)) return true;
         if (visiting.Contains(nodeId)) return false;  // Cycle detected.
@@ -331,7 +331,8 @@ public class GraphCompiler
 
     /// Loads a pin value onto the stack. If the pin is an output of another node, load it
     /// from that node's local. If it's a constant, load the constant. Otherwise, load a default.
-    private void LoadPin(int nodeId, string pinName)
+    /// nodeId is a string to support both integer and arbitrary string node IDs.
+    private void LoadPin(string nodeId, string pinName)
     {
         if (_il == null) return;
 

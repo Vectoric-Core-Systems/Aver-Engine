@@ -22,20 +22,20 @@ public class Pin
     public required string Name { get; init; }
     public required PinType Type { get; init; }
     public required bool IsOutput { get; init; }
-    public required int NodeId { get; init; }
+    public required string NodeId { get; init; }  // String to support both int and string IDs from different formats.
 }
 
 /// A constant output value for a Const node (provided during node creation).
 public class ConstantOutput
 {
-    public required int NodeId { get; init; }
+    public required string NodeId { get; init; }  // String to support both int and string IDs from different formats.
     public required object Value { get; init; }  // float, int, or bool
 }
 
 /// A pinned value (constant) clamped to an input pin.
 public class PinnedValue
 {
-    public required int NodeId { get; init; }
+    public required string NodeId { get; init; }  // String to support both int and string IDs from different formats.
     public required string PinName { get; init; }
     public required object Value { get; init; }  // float, int, or bool
 }
@@ -43,16 +43,16 @@ public class PinnedValue
 /// A link connecting an output pin to an input pin.
 public class Link
 {
-    public required int SourceNodeId { get; init; }
+    public required string SourceNodeId { get; init; }  // String to support both int and string IDs from different formats.
     public required string SourcePinName { get; init; }
-    public required int TargetNodeId { get; init; }
+    public required string TargetNodeId { get; init; }  // String to support both int and string IDs from different formats.
     public required string TargetPinName { get; init; }
 }
 
 /// A computation node in the graph.
 public class Node
 {
-    public required int Id { get; init; }
+    public required string Id { get; init; }  // String to support both int and string IDs from different formats.
     public required string Type { get; init; }  // "Const", "Add", "Multiply", etc.
     public List<Pin> Pins { get; init; } = new();
 }
@@ -60,13 +60,18 @@ public class Node
 /// A complete graph: nodes, links, pinned values, and output pins to evaluate.
 public class Graph
 {
-    public Dictionary<int, Node> Nodes { get; set; } = new();
+    public string Name { get; set; } = "untitled";
+    public string Description { get; set; } = "";
+    public Dictionary<string, Node> Nodes { get; set; } = new();  // String keys to support both int and string IDs from different formats.
     public List<Link> Links { get; set; } = new();
     public List<ConstantOutput> ConstantOutputs { get; set; } = new();
     public List<PinnedValue> PinnedValues { get; set; } = new();
-    public List<(int NodeId, string PinName)> Outputs { get; set; } = new();
+    public List<(string NodeId, string PinName)> Outputs { get; set; } = new();
 
     /// Validates the graph for consistency. Returns false if invalid; sets err to a message.
+    /// Note: Comparison is case-sensitive for node IDs. If nodes are added as "1" and referenced as "1",
+    /// they must match exactly. The C# parser uses string representations of integer IDs, and the C++ writer
+    /// uses string node IDs; both must be normalized consistently.
     public bool Validate(out string? err)
     {
         err = null;

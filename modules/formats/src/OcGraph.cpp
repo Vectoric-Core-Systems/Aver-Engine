@@ -26,7 +26,7 @@ bool isOwnedKey(std::string_view line) {
     const std::string_view l = trim(line);
     if (l.empty() || l[0] == '#') return false;
     static const char* kOwned[] = {
-        "OCGRAPH", "NAME", "DESCRIPTION", "NODE", "PIN", "LINK",
+        "OCGRAPH", "NAME", "DESCRIPTION", "NODE", "PIN", "LINK", "OUT",
     };
     const std::vector<std::string_view> t = splitWhitespace(l);
     if (t.empty()) return false;
@@ -188,6 +188,23 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
             link.destPin = destPin;
 
             out.links.push_back(link);
+        } else if (equalsCI(key, "OUT")) {
+            // OUT <nodeId> <pinName> -- which pin the graph hands back. See OcGraphData::outputs.
+            if (t.size() < 3) {
+                if (err) *err = "OUT requires 2 tokens: OUT nodeid pinname";
+                return false;
+            }
+            const std::string nodeId(t[1]);
+            const std::string pinName(t[2]);
+            // Validated against the nodes seen so far, like LINK is, so a typo is refused here
+            // rather than surfacing as a null result when something tries to run the graph.
+            bool outNodeExists = false;
+            for (const auto& n : out.nodes) if (n.id == nodeId) outNodeExists = true;
+            if (!outNodeExists) {
+                if (err) *err = "OUT references non-existent node: " + nodeId;
+                return false;
+            }
+            out.outputs.emplace_back(nodeId, pinName);
         }
     }
 
@@ -245,6 +262,12 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
                  " " + link.destNode + "." + link.destPin + "\n";
     }
 
+    // Outputs LAST, because they read as the conclusion of the graph -- a human scanning the file
+    // looks for them where a return statement would be.
+    for (const auto& o : g.outputs) {
+        owned += "OUT " + o.first + " " + o.second + "\n";
+    }
+
     // If no existing content, build from scratch with header, comment, and formatting.
     if (trim(existing).empty()) {
         std::string out = "OCGRAPH " + std::to_string(g.version > 0 ? g.version : 1) + "\n";
@@ -300,6 +323,12 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
             for (const OcGraphLink& link : g.links) {
                 out += "LINK " + link.sourceNode + "." + link.sourcePin +
                        " " + link.destNode + "." + link.destPin + "\n";
+            }
+        }
+        if (!g.outputs.empty()) {
+            out += "\n";
+            for (const auto& o : g.outputs) {
+                out += "OUT " + o.first + " " + o.second + "\n";
             }
         }
         return out;

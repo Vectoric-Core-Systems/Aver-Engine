@@ -7,6 +7,11 @@ set_target_properties(FormatTest PROPERTIES
 # preservation, and deterministic output. See modules/formats/include/aver/formats/OcGraph.hpp.
 add_executable(OcGraphTest src/OcGraphTest.cpp)
 target_link_libraries(OcGraphTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+# The cross-implementation fixture the C# runtime is tested against. Passed in rather than guessed,
+# so the test does not have to reason about where it is being run from -- and so the ONE definition
+# of that path lives here, next to the target, rather than in two languages.
+target_compile_definitions(OcGraphTest PRIVATE
+  AVER_OCGRAPH_FIXTURE="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/cross_impl_test.ocgraph")
 set_target_properties(OcGraphTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 

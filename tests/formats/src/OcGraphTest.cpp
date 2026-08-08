@@ -2,6 +2,7 @@
 // Also tests malformed input rejection.
 #include "aver/formats/OcGraph.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/platform/FileSystem.hpp"
 
 #include <cmath>
 #include <string>
@@ -331,13 +332,97 @@ static void testMeta() {
 }
 
 // Runs all tests. Returns the failure count.
-int main() {
+// The graph the CROSS-IMPLEMENTATION fixture holds: (5 + 7) * 3 == 36.
+//
+// Chained on purpose, so the C# side has to walk more than one node to get the answer -- a single
+// constant would pass on a runtime that ignored links entirely.
+static fmt::OcGraphData crossFixtureGraph() {
+    using namespace fmt;
+    OcGraphData g;
+    g.name = "CrossImplementationTest";
+    g.description = "Written by the C++ writer, parsed and executed by the C# runtime";
+
+    const auto node = [&](const char* id, const char* type, f64 x, f64 y) {
+        OcGraphNode n; n.id = id; n.type = type; n.x = x; n.y = y; g.nodes.push_back(n);
+    };
+    const auto pin = [&](const char* nodeId, const char* name, bool isOut, const char* def) {
+        for (OcGraphNode& n : g.nodes) if (n.id == nodeId) {
+            OcGraphPin p; p.name = name; p.isOutput = isOut; p.type = "float";
+            if (def) p.defaultValue = def;
+            n.pins.push_back(p);
+        }
+    };
+    const auto link = [&](const char* sn, const char* sp, const char* dn, const char* dp) {
+        OcGraphLink l; l.sourceNode = sn; l.sourcePin = sp; l.destNode = dn; l.destPin = dp;
+        g.links.push_back(l);
+    };
+
+    node("c1", "ConstFloat", 0, 0);
+    node("c2", "ConstFloat", 0, 100);
+    node("c3", "ConstFloat", 0, 200);
+    node("sum", "Add", 200, 50);
+    node("prod", "Multiply", 400, 100);
+    pin("c1", "value", true, "5");
+    pin("c2", "value", true, "7");
+    pin("c3", "value", true, "3");
+    pin("sum", "a", false, nullptr);
+    pin("sum", "b", false, nullptr);
+    pin("sum", "result", true, nullptr);
+    pin("prod", "a", false, nullptr);
+    pin("prod", "b", false, nullptr);
+    pin("prod", "result", true, nullptr);
+    link("c1", "value", "sum", "a");
+    link("c2", "value", "sum", "b");
+    link("sum", "result", "prod", "a");
+    link("c3", "value", "prod", "b");
+    g.outputs.emplace_back("prod", "result");
+    return g;
+}
+
+// Asserts the checked-in cross-implementation fixture is still exactly what the writer produces.
+//
+// WHY THIS TEST EXISTS. The C# runtime is tested against a fixture file, and a fixture hand-written
+// to satisfy the C# PARSER proves nothing about whether C# can read what C++ WRITES -- which is the
+// only property that makes this one format rather than two with the same name. The first attempt at
+// that fixture was hand-written and diverged in two ways at once: it had none of the blank lines the
+// writer emits between sections, and it ended with a record the writer did not then produce at all.
+//
+// So the fixture is GENERATED (`OcGraphTest --write-fixture <path>`) and this test keeps it honest:
+// change the writer without regenerating, and this fails naming the file, rather than the C# suite
+// quietly continuing to pass against a stale approximation.
+static void testCrossFixtureCurrent(const std::string& fixturePath) {
+    AVER_INFO("=== .ocgraph cross-implementation fixture ===");
+    std::string onDisk;
+    if (!readFileText(fixturePath, onDisk)) {
+        check(false, "the cross-implementation fixture is readable at " + fixturePath);
+        return;
+    }
+    const std::string fresh = fmt::writeOcgraph(crossFixtureGraph());
+    check(fresh == onDisk,
+          "the checked-in fixture is byte-identical to what writeOcgraph produces today "
+          "(regenerate with --write-fixture if the writer changed on purpose)");
+}
+
+int main(int argc, char** argv) {
+    // Regeneration mode, used by a human after a deliberate format change -- never by the suite.
+    if (argc > 2 && std::string(argv[1]) == "--write-fixture") {
+        std::string err;
+        if (!fmt::saveOcgraph(argv[2], crossFixtureGraph(), &err)) {
+            AVER_ERROR("could not write the fixture: {}", err);
+            return 1;
+        }
+        AVER_INFO("fixture written to {}", argv[2]);
+        return 0;
+    }
+
     testMeta();
     testBasicParse();
     testRoundTrip();
     testUnknownRecords();
     testDeterministic();
     testMalformedInput();
+    // The path is passed in by CMake, so the test does not have to guess the repo layout.
+    testCrossFixtureCurrent(AVER_OCGRAPH_FIXTURE);
 
     AVER_INFO("==================================================");
     AVER_INFO("OcGraph tests done: {} failure(s)", g_failures);

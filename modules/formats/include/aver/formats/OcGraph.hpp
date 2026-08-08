@@ -42,6 +42,18 @@ struct OcGraphData {
 
     std::vector<OcGraphNode> nodes;
     std::vector<OcGraphLink> links;
+
+    // Which pins the graph HANDS BACK when it runs: `OUT <nodeId> <pinName>`, in order.
+    //
+    // THE FORMAT HAD NO WAY TO SAY THIS, and the gap only showed when a second implementation tried
+    // to execute a graph rather than draw one. Nodes and links describe the dataflow; nothing said
+    // which value the caller actually wanted, and "the node with no outgoing link" is not the same
+    // question -- a graph can end in several such nodes, or in one whose result is a side effect.
+    //
+    // The C# runtime invented an OUT record for its own reader before this existed, so the two sides
+    // agreed on nodes and links and silently disagreed about what a graph RETURNS. Writing it down
+    // here is what makes them one format instead of two with the same name.
+    std::vector<std::pair<std::string, std::string>> outputs;   // {nodeId, pinName}
 };
 
 // Parses a graph from memory. Unknown records are ignored during parse but preserved during rewrite.
