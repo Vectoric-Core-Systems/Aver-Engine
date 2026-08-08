@@ -276,6 +276,13 @@ if(AVER_BUILD_TESTS)
   if(AVER_MODULE_DEFORM)
     add_subdirectory(tests/deform)
   endif()
+  # Trifactor's runtime selection maths -- screen-space error, frustum and cone culling. A separate
+  # directory from tests/formats (which holds TrifactorTest, the COOK side) because the two halves
+  # fail for unrelated reasons: one is a file format, the other is arithmetic against a camera, and a
+  # failure should name which. Without this line tests/trifactor/CMakeLists.txt exists and is inert.
+  if(AVER_MODULE_TRIFACTOR)
+    add_subdirectory(tests/trifactor)
+  endif()
   # The directory watcher. Unconditional because Aver.Platform always exists, and needed because the
   # editor's live sync now rests on it -- it shipped with no consumer and no test, and the first
   # thing that depended on it should not also be the first thing that exercised it.

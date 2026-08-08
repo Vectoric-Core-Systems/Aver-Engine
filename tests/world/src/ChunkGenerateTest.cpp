@@ -17,9 +17,12 @@
 #include "aver/world/ChunkGenerator.hpp"
 #include "aver/world/RegionFile.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace aver;
@@ -312,6 +315,161 @@ int main(int argc, char** argv) {
         gen.load(ChunkCoord{-3, -4, 0}, fresh, nullptr);
         check(encodeChunk(untouched) == encodeChunk(fresh),
               "...straight from the generator, with nothing on disk behind it");
+    }
+
+    // ---- scatter palette --------------------------------------------------------------------------
+    {
+        // A three-species palette spanning the whole eligible density range between them, so every
+        // candidate that clears `threshold` places SOMETHING -- lets the weight-distribution check
+        // below reason about "which species" without also reasoning about "did anything place".
+        //   rock:  weak end of the field, no clearance check (collisionRadiusCm = 0)
+        //   tree:  strong end of the field, LARGE clearance -- this is the interpenetration case
+        //   grass: the whole range, tiny weight, so it only wins where rock/tree did not
+        GeneratorSettings ps = fixture();
+        ps.samplesPerAxis = 6;   // more candidates per chunk than the 5x5 fixture, for better weight stats
+        ScatterSpecies rock;
+        rock.meshPath = "Meshes/rock.ocmesh";
+        rock.material = "M_Rock";
+        rock.weight = 3.0f;
+        rock.scaleMin = 0.6f;
+        rock.scaleMax = 0.9f;
+        rock.densityMin = ps.threshold;
+        rock.densityMax = 0.75f;
+        ScatterSpecies tree;
+        tree.meshPath = "Meshes/pine_tree_01.ocmesh";
+        tree.material = "M_Bark";
+        tree.weight = 2.0f;
+        tree.scaleMin = 1.0f;
+        tree.scaleMax = 2.0f;
+        tree.densityMin = 0.75f;
+        tree.densityMax = 1.0f;
+        tree.collisionRadiusCm = 300.0f;   // a real footprint -- the interpenetration case
+        ScatterSpecies grass;
+        grass.meshPath = "Meshes/grass_medium_01.ocmesh";
+        grass.material = "M_Foliage";
+        grass.weight = 1.0f;
+        grass.scaleMin = 0.8f;
+        grass.scaleMax = 1.3f;
+        grass.densityMin = ps.threshold;
+        grass.densityMax = 1.0f;
+        ps.palette = {rock, tree, grass};
+
+        // A wide spread of chunks -- many more than the 6-chunk fixture -- so weight ratios and scale
+        // ranges have enough samples to be meaningful rather than noise from a handful of entities.
+        std::vector<ChunkCoord> many;
+        for (i32 x = -12; x <= 12; ++x)
+            for (i32 y = -12; y <= 12; ++y) many.push_back(ChunkCoord{x, y, 0});
+
+        GeneratedChunkSource pg(ps);
+
+        u32 rockCount = 0, treeCount = 0, grassCount = 0, otherCount = 0;
+        bool scalesInRange = true;
+        bool anyTreeOverlap = false;
+        u64 totalEntities2 = 0;
+        for (const ChunkCoord& c : many) {
+            const ChunkPayload p = pg.generate(c);
+            totalEntities2 += p.entities.size();
+            std::vector<std::pair<f32, f32>> treePositions;   // local x,y of trees in this chunk
+            for (const PayloadEntity& e : p.entities) {
+                const f32 s = e.local.scale.x;
+                if (e.material == "M_Rock") {
+                    ++rockCount;
+                    if (s < rock.scaleMin - 1e-4f || s > rock.scaleMax + 1e-4f) scalesInRange = false;
+                } else if (e.material == "M_Bark") {
+                    ++treeCount;
+                    if (s < tree.scaleMin - 1e-4f || s > tree.scaleMax + 1e-4f) scalesInRange = false;
+                    treePositions.emplace_back(e.local.position.x, e.local.position.y);
+                } else if (e.material == "M_Foliage") {
+                    ++grassCount;
+                    if (s < grass.scaleMin - 1e-4f || s > grass.scaleMax + 1e-4f) scalesInRange = false;
+                } else {
+                    ++otherCount;
+                }
+            }
+            // Within THIS chunk, no two trees may be closer than the sum of their (scaled) radii --
+            // the in-chunk half of requirement 4. Cross-chunk seams are the documented exception.
+            for (usize a = 0; a < treePositions.size(); ++a) {
+                for (usize b = a + 1; b < treePositions.size(); ++b) {
+                    const f32 dx = treePositions[a].first - treePositions[b].first;
+                    const f32 dy = treePositions[a].second - treePositions[b].second;
+                    // Radii vary with scale (0.6x-1.8x of 300cm); 2*minScale*collisionRadius is a
+                    // sound lower bound the true rejection distance can only exceed, so this is a
+                    // conservative (never-false-positive) proximity check.
+                    const f32 minPossible = 2.0f * tree.collisionRadiusCm * tree.scaleMin;
+                    if (std::sqrt(dx * dx + dy * dy) < minPossible - 1.0f) anyTreeOverlap = true;
+                }
+            }
+        }
+        check(otherCount == 0, "every placed entity's material matches a palette species");
+        check(rockCount > 0 && treeCount > 0 && grassCount > 0, "all three species were placed somewhere");
+        check(scalesInRange, "every entity's scale stayed inside its own species' [scaleMin, scaleMax]");
+        check(!anyTreeOverlap, "no two trees in the same chunk overlap their (scaled) collision radii");
+        // Weight ratio: rock:tree = 3:2 over their SHARED band [threshold, 0.75] is not directly
+        // comparable (tree cannot appear there), so compare rock:grass instead -- both are eligible
+        // across their bands with grass's weight (1) much lower than rock's (3), so rock should
+        // outnumber grass by roughly 3x wherever both could have appeared. This is a loose bound
+        // (grass's band is wider than rock's, so grass gets some candidates rock cannot compete for
+        // at all), so the check only asks for the right DIRECTION with real margin, not an exact ratio.
+        check(rockCount > grassCount,
+              "the heavier-weighted species (rock, weight 3) was placed more often than the lighter one "
+              "(grass, weight 1) despite grass's band being at least as wide");
+        AVER_INFO("   note  palette: {} rock, {} tree, {} grass, {} total entities over {} chunks",
+                  rockCount, treeCount, grassCount, totalEntities2, many.size());
+
+        // A palette entry with weight <= 0 must never be chosen.
+        {
+            GeneratorSettings zw = ps;
+            zw.palette[2].weight = 0.0f;   // grass disabled
+            GeneratedChunkSource zg(zw);
+            bool anyGrass = false;
+            for (const ChunkCoord& c : many) {
+                for (const PayloadEntity& e : zg.generate(c).entities)
+                    if (e.material == "M_Foliage") anyGrass = true;
+                if (anyGrass) break;
+            }
+            check(!anyGrass, "a species with weight <= 0 is never selected");
+        }
+
+        // An empty density band (a candidate whose d falls between rock's and tree's bands, in this
+        // palette there is none -- rock ends at 0.75, tree starts at 0.75) is covered implicitly by
+        // otherCount == 0 above: nothing placed a material outside {M_Rock, M_Bark, M_Foliage}.
+
+        // ---- determinism under a DIFFERENT visitation order ---------------------------------------
+        //
+        // Requirement 3, proven directly rather than argued: generate the SAME set of chunks twice,
+        // once in ascending coordinate order and once reversed, and require every chunk's ENCODED
+        // BYTES to match regardless of which order the calls happened in. generate() takes no state
+        // from GeneratedChunkSource across calls (resolvedPalette_/spec_ are fixed at setSettings()),
+        // so this also stands in for "chunk A generated before or after chunk B" -- the property the
+        // scouts flagged as the trap a running counter would fall into.
+        {
+            std::vector<ChunkCoord> order1 = many;
+            std::vector<ChunkCoord> order2 = many;
+            std::reverse(order2.begin(), order2.end());
+
+            std::vector<std::vector<u8>> encoded1(order1.size());
+            for (usize idx = 0; idx < order1.size(); ++idx)
+                encoded1[idx] = encodeChunk(pg.generate(order1[idx]));
+
+            // Reversed pass through a SEPARATE source instance built from the same settings, so any
+            // hidden cross-call state in GeneratedChunkSource itself (not just chunk-generation order)
+            // would also be caught -- a fresh source generating in reverse order must still agree with
+            // the first source's forward-order results, chunk for chunk.
+            GeneratedChunkSource pg2(ps);
+            std::vector<std::vector<u8>> encoded2(order2.size());
+            for (usize idx = 0; idx < order2.size(); ++idx)
+                encoded2[idx] = encodeChunk(pg2.generate(order2[idx]));
+
+            bool allMatch = true;
+            for (usize idx = 0; idx < order1.size(); ++idx) {
+                // order2 is order1 reversed, so order1[idx] == order2[order2.size()-1-idx].
+                const usize mirror = order2.size() - 1 - idx;
+                if (encoded1[idx] != encoded2[mirror]) { allMatch = false; break; }
+            }
+            check(allMatch,
+                  "every chunk's encoded bytes are identical whether the whole set was generated "
+                  "forward or reversed -- species/scale/rejection depend on (seed, coord, salt) only");
+        }
     }
 
     std::filesystem::remove_all(dir, ec);

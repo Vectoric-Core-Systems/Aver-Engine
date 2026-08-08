@@ -36,6 +36,7 @@ endif()
 aver_add_module(Aver.Trifactor
   SOURCES
     src/ClusterBuilder.cpp
+    src/ClusterSelect.cpp
   DEPS
     Aver.Core
     Aver.Formats

@@ -33,9 +33,44 @@
 #include "aver/world/ChunkSource.hpp"
 
 #if AVER_MODULE_SCENE
+#  include <limits>
 #  include <string>
+#  include <vector>
 
 namespace aver::world {
+
+// One weighted entry in a scatter palette: what to place, how big, how it randomises, and which
+// band of the density field it prefers.
+//
+// THE DENSITY BAND IS WHAT MAKES THIS AN ECOLOGY RATHER THAN CONFETTI. A candidate already passed
+// GeneratorSettings::threshold (it exists at all); the band then decides WHICH species is even
+// eligible there -- rock species low in the field, tree species high in it -- before the weighted
+// draw picks among whatever is left. A species whose band spans the whole range (the default) is
+// eligible everywhere, which is what reproduces today's one-species behaviour exactly.
+struct ScatterSpecies {
+    std::string meshPath = "Meshes/cube.ocmesh";
+    std::string material = "M_Foliage";
+
+    // Relative selection weight among the species eligible for a given candidate. <= 0 means this
+    // species can never be picked (a way to disable an entry without removing it).
+    f32 weight = 1.0f;
+
+    f32 scaleMin = 0.75f;
+    f32 scaleMax = 1.25f;
+    bool randomizeYaw = true;
+
+    // Candidates are eligible for this species only when the sampled density d satisfies
+    // densityMin <= d <= densityMax. Defaults span every value sampleInfinite can return, so a
+    // single default species never excludes a candidate the threshold already accepted.
+    f32 densityMin = -std::numeric_limits<f32>::max();
+    f32 densityMax = std::numeric_limits<f32>::max();
+
+    // Half-extent in world centimetres used for the in-chunk interpenetration check, BEFORE the
+    // per-candidate scale is applied (the check scales it up alongside the candidate). 0 disables
+    // the check for this species -- grass and other small/overlap-tolerant fill has no business
+    // paying for it or blocking anything else.
+    f32 collisionRadiusCm = 0.0f;
+};
 
 struct GeneratorSettings {
     u64 worldSeed = 0;
@@ -65,8 +100,15 @@ struct GeneratorSettings {
     // by default and `has()` can answer instantly for the overwhelming majority of coordinates.
     i32 surfaceChunkZ = 0;
 
+    // Back-compat single-species convenience, used ONLY when `palette` below is empty -- see
+    // GeneratedChunkSource::setSettings. A caller (and every existing test) that never touches the
+    // palette gets exactly one species built from these two fields, with the palette's own default
+    // scale range and yaw, which reproduces the generator's original behaviour bit-for-bit.
     std::string meshPath = "Meshes/cube.ocmesh";
     std::string material = "M_Foliage";
+
+    // The weighted scatter palette. Empty means "one species from meshPath/material above".
+    std::vector<ScatterSpecies> palette;
 };
 
 // A source that invents its chunks. Never fails and never touches a file.
@@ -84,6 +126,10 @@ public:
 
 private:
     GeneratorSettings settings_;
+    // Resolved once in setSettings(), never touched inside generate(): either settings_.palette
+    // verbatim, or the single meshPath/material species when the palette was left empty. Fixed for
+    // the lifetime of a settings assignment, so generate() stays a pure function of (coord, salt).
+    std::vector<ScatterSpecies> resolvedPalette_;
     pcg::InfiniteSpec spec_{};
     // has() is almost always followed by load() for the same chunk, and generating twice would
     // double the cost of every streamed chunk for nothing.

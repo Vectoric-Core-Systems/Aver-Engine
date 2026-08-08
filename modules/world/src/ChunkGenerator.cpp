@@ -32,6 +32,47 @@ u32 mixChunk(u64 seed, const ChunkCoord& c, u32 salt) {
     return mix32(h ^ salt);
 }
 
+// A SECOND, INDEPENDENT DRAW off the same per-candidate hash, rather than stealing more bits out
+// of it. `h` already commits bits [0,9] to yaw and [10,17] to scale (below); reusing any of those
+// for species choice would correlate species with rotation/size in a way nothing asked for, and
+// running out of bits as the palette grows is a real risk with only 14 left. mix32 is a full
+// avalanche, so XOR-ing in a fixed salt and mixing again is a cheap, still-pure second value that
+// depends on nothing but `h` -- and therefore, transitively, on nothing but (worldSeed, coord, salt).
+constexpr u32 kPaletteSpeciesSalt = 0xA5A5C3C3u;
+u32 mixSpecies(u32 h) { return mix32(h ^ kPaletteSpeciesSalt); }
+
+// Picks a species index for a candidate whose density `d` already passed the existence threshold.
+// Returns -1 when no species in `pal` is eligible (empty palette, every weight <= 0, or `d` falls
+// outside every band) -- the candidate then places nothing at all, despite having passed threshold.
+//
+// PURE IN hSpecies AND d ONLY. No other state, so calling this twice with the same inputs -- from
+// the same chunk, from a different chunk, in any order -- always agrees.
+i32 pickSpecies(const std::vector<ScatterSpecies>& pal, f32 d, u32 hSpecies) {
+    f64 total = 0.0;
+    for (const ScatterSpecies& s : pal) {
+        if (s.weight <= 0.0f) continue;
+        if (d < s.densityMin || d > s.densityMax) continue;
+        total += static_cast<f64>(s.weight);
+    }
+    if (total <= 0.0) return -1;
+
+    // hSpecies is uniform over [0, 2^32); scale it into [0, total) and walk the cumulative weight.
+    const f64 target = (static_cast<f64>(hSpecies) / 4294967296.0) * total;
+    f64 cum = 0.0;
+    i32 lastEligible = -1;
+    for (usize idx = 0; idx < pal.size(); ++idx) {
+        const ScatterSpecies& s = pal[idx];
+        if (s.weight <= 0.0f) continue;
+        if (d < s.densityMin || d > s.densityMax) continue;
+        lastEligible = static_cast<i32>(idx);
+        cum += static_cast<f64>(s.weight);
+        if (target < cum) return static_cast<i32>(idx);
+    }
+    // Only reachable through float rounding at the very top of the range -- fall back to the last
+    // eligible entry rather than dropping a candidate that should have placed something.
+    return lastEligible;
+}
+
 } // namespace
 
 void GeneratedChunkSource::setSettings(const GeneratorSettings& s) {
@@ -40,6 +81,19 @@ void GeneratedChunkSource::setSettings(const GeneratorSettings& s) {
     if (settings_.samplesPerAxis == 0) settings_.samplesPerAxis = 1;
     if (settings_.octaves == 0) settings_.octaves = 1;
     memoValid_ = false;
+
+    // RESOLVED ONCE, HERE -- never inside generate(). An empty palette becomes exactly the one
+    // species the old single-mesh generator placed, built from meshPath/material with the palette
+    // struct's own default scale range (0.75..1.25, matching the old hardcoded range) and an
+    // unbounded density band, so a caller that never touches the palette sees byte-identical output.
+    if (settings_.palette.empty()) {
+        ScatterSpecies def;
+        def.meshPath = settings_.meshPath;
+        def.material = settings_.material;
+        resolvedPalette_ = {def};
+    } else {
+        resolvedPalette_ = settings_.palette;
+    }
 
     spec_ = pcg::InfiniteSpec{};
     spec_.seed = static_cast<i32>(settings_.worldSeed ^ (settings_.worldSeed >> 32));
@@ -72,6 +126,30 @@ ChunkPayload GeneratedChunkSource::generate(const ChunkCoord& c) const {
     const u32 n = settings_.samplesPerAxis;
     const f32 step = static_cast<f32>(settings_.chunkSizeCm) / static_cast<f32>(n);
 
+    // IN-CHUNK-ONLY interpenetration rejection. Big species register themselves here as they are
+    // accepted and reject a later candidate whose circle would overlap one already placed.
+    //
+    // WHY THIS STAYS DETERMINISTIC: candidates are walked in a FIXED raster order -- salt = j*n+i,
+    // ascending, always -- which depends only on n. That order is the same every time generate(c)
+    // is called for this c, so "did an earlier candidate in THIS chunk claim this spot" is itself a
+    // pure function of (worldSeed, coord, salt), never of which OTHER chunks were generated first or
+    // in what order streaming asked for them. `placedSolid` is a local, lives only for this call, and
+    // is never touched outside it -- there is no member or static counter here for a different chunk
+    // order to disagree about.
+    //
+    // THE CHUNK BOUNDARY CASE IS NOT SOLVED. A big species candidate near an edge only ever sees
+    // OTHER candidates inside the SAME chunk; a neighbour chunk's candidates are invisible here,
+    // whether or not that neighbour has been generated yet (chunks are generated independently, and
+    // streaming does not generate them in any particular order relative to each other -- see
+    // ChunkStreamer.cpp). Two big species can therefore still interpenetrate across a chunk seam.
+    // Solving it properly needs either sampling a margin into each neighbour (which multiplies
+    // generation cost per chunk and makes a chunk's result depend on reading outside its own bounds)
+    // or a placement grid that is not chunk-scoped at all -- both bigger changes than this task's
+    // scope. Keeping species that need real clearance away from typical chunk edges, or accepting
+    // the occasional seam overlap, are the only mitigations today.
+    struct PlacedSolid { f32 x, y, r; };
+    std::vector<PlacedSolid> placedSolid;
+
     for (u32 j = 0; j < n; ++j) {
         for (u32 i = 0; i < n; ++i) {
             // Candidate at the centre of its cell, so no sample ever lands exactly on a chunk face --
@@ -91,6 +169,32 @@ ChunkPayload GeneratedChunkSource::generate(const ChunkCoord& c) const {
             const u32 salt = j * n + i;
             const u32 h = mixChunk(settings_.worldSeed, c, salt);
 
+            // WHICH SPECIES, from a SECOND hash draw off `h` -- never from a counter, never from how
+            // many candidates in this chunk (or any other) were accepted before this one. See
+            // mixSpecies()/pickSpecies() above.
+            const i32 speciesIdx = pickSpecies(resolvedPalette_, d, mixSpecies(h));
+            if (speciesIdx < 0) continue;   // no species wanted this candidate's density band
+            const ScatterSpecies& sp = resolvedPalette_[static_cast<usize>(speciesIdx)];
+
+            // Same bit range the original generator used for scale (bits [10,17] of h), just
+            // remapped into the species' own range instead of a hardcoded 0.75..1.25. For the
+            // default species (scaleMin/Max unchanged at 0.75/1.25) this is the SAME expression the
+            // generator always used, so default output is bit-for-bit unchanged.
+            const f32 raw01 = static_cast<f32>((h >> 10) & 255u);
+            const f32 scale = sp.scaleMin + raw01 * ((sp.scaleMax - sp.scaleMin) / 255.0f);
+
+            if (sp.collisionRadiusCm > 0.0f) {
+                const f32 r = sp.collisionRadiusCm * scale;
+                bool rejected = false;
+                for (const PlacedSolid& ps : placedSolid) {
+                    const f32 dx = ps.x - lx, dy = ps.y - ly;
+                    const f32 minDist = ps.r + r;
+                    if (dx * dx + dy * dy < minDist * minDist) { rejected = true; break; }
+                }
+                if (rejected) continue;   // a bigger neighbour already claimed this spot
+                placedSolid.push_back({lx, ly, r});
+            }
+
             PayloadEntity e;
             // NAMED FROM THE SEED AND THE COORD, never from a counter: a counter would renumber every
             // entity in a chunk the moment one candidate above it stopped qualifying, and the names
@@ -101,12 +205,13 @@ ChunkPayload GeneratedChunkSource::generate(const ChunkCoord& c) const {
             // Chunk-local, which is what a payload stores: in [0, chunkSizeCm) by construction.
             e.local.position = Vec3{lx, ly, 0.0f};
             // A deterministic yaw from the same hash, so the field does not look stamped.
-            e.local.rotation = Quat::fromAxisAngle({0, 0, 1}, static_cast<f32>(h & 1023u) * 0.006135923f);
-            const f32 scale = 0.75f + static_cast<f32>((h >> 10) & 255u) * (0.5f / 255.0f);
+            e.local.rotation = sp.randomizeYaw
+                ? Quat::fromAxisAngle({0, 0, 1}, static_cast<f32>(h & 1023u) * 0.006135923f)
+                : Quat::identity();
             e.local.scale = Vec3{scale, scale, scale};
             e.hasMesh = true;
-            e.mesh = fnv1a64(settings_.meshPath.c_str());
-            e.material = settings_.material;
+            e.mesh = fnv1a64(sp.meshPath.c_str());
+            e.material = sp.material;
             e.meshFlags = 1;   // kMeshRendererVisible, without dragging the scene header in here
             p.entities.push_back(std::move(e));
         }

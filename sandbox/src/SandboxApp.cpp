@@ -624,6 +624,8 @@ public:
             sceneMeshes_[cubeId]   = unitCube;
             meshBounds_[sphereId]  = unitBounds;
             meshBounds_[cubeId]    = unitBounds;
+            meshTris_[sphereId]    = static_cast<u32>(si.size() / 3);
+            meshTris_[cubeId]      = static_cast<u32>(ci.size() / 3);
             // Kept so a dev check can build geometry of its own without re-uploading a cube.
             unitCubeMesh_ = unitCube;
             // Reported so the bounds above are OBSERVABLE rather than merely written. The editor
@@ -645,6 +647,14 @@ public:
             look("M_Target", 0.86f, 0.20f, 0.16f, 0.05f, 0.40f);
             look("M_Metal",  0.55f, 0.57f, 0.60f, 0.85f, 0.28f);
             look("M_Accent", 0.95f, 0.66f, 0.15f, 0.30f, 0.35f);
+            // Added for the chunk generator's scatter palette (GeneratorSettings::material default
+            // is "M_Foliage", and the demo palette below adds "M_Bark"/"M_Rock"): without a look or
+            // an .ocmat asset a surface just renders the flat 0.80/0.80/0.85 fallback (SandboxApp's
+            // scene draw loop), which is not wrong but reads as unfinished next to the level's own
+            // authored M_Floor surfaces.
+            look("M_Foliage", 0.16f, 0.42f, 0.14f, 0.0f, 0.85f);
+            look("M_Bark",    0.35f, 0.24f, 0.15f, 0.0f, 0.85f);
+            look("M_Rock",    0.42f, 0.40f, 0.37f, 0.05f, 0.80f);
         }
 #endif
 
@@ -1197,10 +1207,11 @@ public:
             if (chunkStreamLogsLeft_ > 0 &&
                 (chunkStreamStats_.loadedThisUpdate > 0 || chunkStreamStats_.evictedThisUpdate > 0)) {
                 --chunkStreamLogsLeft_;
-                AVER_INFO("[ChunkWorld] loaded={} evicted={} resident={}chunks/{}entities pending={} "
-                          "failed={} totalLoads={} vel=({:.0f},{:.0f},{:.0f})cm/s",
+                AVER_INFO("[ChunkWorld] loaded={} evicted={} resident={}chunks/{}entities/{}tris "
+                          "pending={} failed={} totalLoads={} vel=({:.0f},{:.0f},{:.0f})cm/s",
                           chunkStreamStats_.loadedThisUpdate, chunkStreamStats_.evictedThisUpdate,
                           chunkStreamStats_.residentChunks, chunkStreamStats_.residentEntities,
+                          residentTriangleCount(),
                           chunkStreamStats_.pendingLoads, chunkStreamStats_.failedLoads,
                           chunkStreamStats_.totalLoads, vel.x, vel.y, vel.z);
             }
@@ -1252,6 +1263,16 @@ public:
         f32 fog = fogDensity_;
 #if AVER_MODULE_SCENE
         if (hasLevelFog_) fog = levelFog_;
+        // OPT-IN, and overrides whatever the level/slider said while it is on: match fog density to
+        // the streaming load boundary instead. See fogDensityForOpacityAt and the member comment on
+        // matchFogToStreamRadius_ for the derivation and the honesty caveat -- this makes the world
+        // visibly foggier, on purpose, and only when asked for.
+        if (matchFogToStreamRadius_ && chunkWorld_) {
+            const world::StreamSettings& st = chunkWorld_->settings().stream;
+            const f32 boundaryCm = static_cast<f32>(st.loadRadius) * static_cast<f32>(st.chunkSizeCm);
+            const f32 matched = fogDensityForOpacityAt(boundaryCm, fogMatchTargetOpacity_);
+            if (matched > 0.0f) fog = matched;
+        }
 #endif
         // FROZEN: sunDirection stays unnormalised here -- the shaders normalise it.
         sky_.enabled = true;
@@ -1464,6 +1485,7 @@ public:
             const u64 id = fnv1a64(std::string_view(rel));
             sceneMeshes_[id] = h;
             meshBounds_[id] = {md.boundsMin, md.boundsMax};
+            meshTris_[id] = static_cast<u32>(md.indices.size() / 3);
             projectMeshIds_.push_back(id);
             ++loaded;
             AVER_INFO("[Mesh] '{}' -> {} verts, {} indices", rel, verts.size(), md.indices.size());
@@ -1481,7 +1503,7 @@ public:
         // sceneMeshes_ is scene-only; with the module off loadProjectMeshes() never populated it (see
         // its own #if AVER_MODULE_SCENE above), so there is nothing here to erase from it either.
 #if AVER_MODULE_SCENE
-        for (const u64 id : projectMeshIds_) sceneMeshes_.erase(id);
+        for (const u64 id : projectMeshIds_) { sceneMeshes_.erase(id); meshTris_.erase(id); }
 #endif
         projectMeshIds_.clear();
     }
@@ -1922,6 +1944,13 @@ public:
     // and setter are unguarded (like focusLevelAt_) even though the effect is AVER_MODULE_SCENE-only;
     // see the countdown in onUpdate.
     void setChunkStreamAuto(int framesIn) { chunkStreamAutoFrames_ = framesIn; }
+
+    // --fog-match. A negative opacity means "leave the target where it is" and just switch matching
+    // on, so `--fog-match` alone uses the panel's own default rather than silently redefining it.
+    void setFogMatchToStreamRadius(bool on, f32 targetOpacity) {
+        matchFogToStreamRadius_ = on;
+        if (targetOpacity > 0.0f) fogMatchTargetOpacity_ = std::clamp(targetOpacity, 0.05f, 0.99f);
+    }
     // --drone [N]: frames left before setDroneEnabled(true) fires on its own, same shape as
     // --chunk-stream. Member and setter are unguarded for the same reason chunkStreamAutoFrames_ is
     // (the countdown in onUpdate is what's actually AVER_MODULE_SCENE-gated).
@@ -5163,6 +5192,24 @@ private:
             ImGui::DragFloat("Fog Height", &sky_.fogHeight, 1.0f);
             ImGui::DragFloat("Fog Start", &sky_.fogStart, 1.0f, 0.0f, 1e6f);
             ImGui::SliderFloat("Max Opacity", &sky_.fogMaxOpacity, 0.0f, 1.0f, "%.2f");
+#if AVER_MODULE_SCENE
+            if (chunkWorld_) {
+                const world::StreamSettings& mst = chunkWorld_->settings().stream;
+                const f32 boundaryCm = static_cast<f32>(mst.loadRadius) * static_cast<f32>(mst.chunkSizeCm);
+                ImGui::Checkbox("Match Fog To Streaming Radius", &matchFogToStreamRadius_);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Recomputes Fog Density every frame -- overriding the slider\n"
+                                      "above -- so opacity AT the load boundary (%.0fcm here) equals\n"
+                                      "the target below. NOT a free win: hiding a boundary this close\n"
+                                      "typically needs an order of magnitude more density than a\n"
+                                      "level's authored default, i.e. a visibly foggier world.", boundaryCm);
+                if (matchFogToStreamRadius_) {
+                    ImGui::SliderFloat("Target Opacity At Boundary", &fogMatchTargetOpacity_, 0.5f, 0.99f, "%.2f");
+                    const f32 matched = fogDensityForOpacityAt(boundaryCm, fogMatchTargetOpacity_);
+                    ImGui::TextDisabled("boundary %.0fcm -> density %.2e", boundaryCm, matched);
+                }
+            }
+#endif
 
             ImGui::Separator();
             ImGui::TextUnformatted("Volumetric Clouds");
@@ -5831,6 +5878,16 @@ private:
     f32 skyZenith_[3]={0.19f,0.42f,0.78f}, skyHorizon_[3]={0.72f,0.80f,0.90f};
     // A tint on the in-scattered sky (white = clear air), and an extinction per cm.
     f32 fogColor_[3]={1.0f,1.0f,1.0f}, fogDensity_=4e-6f;
+#if AVER_MODULE_SCENE
+    // OPT-IN (Height Fog panel, only shown while chunk streaming is on): recomputes fogDensity every
+    // frame from the streaming load boundary instead of a density chosen once and left to drift out
+    // of sync with a radius the user later changes. See the per-frame fog push (near setCamera) for
+    // the derivation -- it solves averFogFactor's own k<=1e-8 branch (RHIShaders.cpp) for density,
+    // it does not approximate it. Default OFF: this is a visibly foggier world, not a free win, and
+    // must never become the silent default -- see the task this shipped with.
+    bool matchFogToStreamRadius_ = false;
+    f32  fogMatchTargetOpacity_ = 0.9f;   // opacity WANTED at the load boundary itself
+#endif
     rhi::PostSettings post_{};
     // The authored sky, sun and air. Sole owner of the sun's direction.
     rhi::SkyAtmosphere sky_{};
@@ -6010,6 +6067,88 @@ private:
     // Turns chunk streaming on or off around the editor camera. OPT-IN: nothing in modules/world's
     // generator or region files is touched until a user flips Window > Chunk Streaming, so an
     // ordinary project opens exactly as it always did.
+    // Builds a weighted scatter palette from whichever of the demo's CC0 assets are actually present
+    // under the project's Content/Meshes -- empty when none are, which leaves GeneratedChunkSource
+    // to fall back to its single-species (cube) behaviour exactly as before this existed. NOT
+    // project-specific by construction: this checks the DISK, not the project's name, so any project
+    // that happens to import these five filenames gets the same palette, and one that does not sees
+    // no change at all.
+    //
+    // BANDS SIT ABOVE GeneratorSettings::threshold ON PURPOSE. A candidate only ever reaches
+    // pickSpecies() after the existence threshold (0.62 by default, or a level's PCGVOLUME coverage
+    // floor -- see setChunkStreamingEnabled below) already passed, so a band's lower edge below the
+    // threshold is dead weight: it can never be reached from below. Pines and island trees sit in
+    // the UPPER part of the surviving range (denser, spatially-coherent patches, since d itself is
+    // coherent noise) and cliffs/rocks sit in the narrow band just above threshold (the sparser
+    // edge) -- which is what turns "pines in dense bands, rocks in sparse ones" from a description
+    // into an actual banding rule rather than a hope.
+    //
+    // WEIGHTS TUNED AGAINST THE TRIANGLE BUDGET, not just the look: pine_tree_01 is the heaviest
+    // asset here by a wide margin, so it gets the lowest weight AND the narrowest band of the two
+    // tree species -- deliberately the rarest thing in the palette. See the task report for the
+    // measured resident-triangle count and frame time this produced.
+    std::vector<world::ScatterSpecies> buildDemoScatterPalette() const {
+        std::vector<world::ScatterSpecies> pal;
+        const std::string content = project_.contentDir();
+        if (content.empty()) return pal;
+        auto present = [&](const char* rel) {
+            std::error_code ec;
+            return std::filesystem::exists(content + "\\Meshes\\" + rel, ec);
+        };
+
+        if (present("pine_tree_01.ocmesh")) {
+            world::ScatterSpecies s;
+            s.meshPath = "Meshes/pine_tree_01.ocmesh"; s.material = "M_Bark";
+            s.weight = 0.35f; s.densityMin = 0.88f; s.densityMax = 1.0f;
+            s.scaleMin = 0.75f; s.scaleMax = 1.05f; s.collisionRadiusCm = 260.0f;
+            pal.push_back(s);
+        }
+        if (present("island_tree_03.ocmesh")) {
+            world::ScatterSpecies s;
+            s.meshPath = "Meshes/island_tree_03.ocmesh"; s.material = "M_Bark";
+            s.weight = 0.6f; s.densityMin = 0.80f; s.densityMax = 1.0f;
+            s.scaleMin = 0.9f; s.scaleMax = 1.6f; s.collisionRadiusCm = 170.0f;
+            pal.push_back(s);
+        }
+        if (present("coastal_cliff_04.ocmesh")) {
+            world::ScatterSpecies s;
+            s.meshPath = "Meshes/coastal_cliff_04.ocmesh"; s.material = "M_Rock";
+            // Scale capped well below the level's own hand-placed cliffs (which run up to 3.3x) --
+            // at chunk-generator density a full-size cliff lands often enough to dominate every shot
+            // taken anywhere near it, which reads as "one huge rock", not "sparse outcrops".
+            s.weight = 0.05f; s.densityMin = 0.62f; s.densityMax = 0.65f;
+            s.scaleMin = 1.0f; s.scaleMax = 1.5f; s.collisionRadiusCm = 500.0f;
+            pal.push_back(s);
+        }
+        if (present("coast_rocks_02.ocmesh")) {
+            world::ScatterSpecies s;
+            s.meshPath = "Meshes/coast_rocks_02.ocmesh"; s.material = "M_Rock";
+            s.weight = 0.25f; s.densityMin = 0.62f; s.densityMax = 0.68f;
+            s.scaleMin = 0.6f; s.scaleMax = 1.1f; s.collisionRadiusCm = 220.0f;
+            pal.push_back(s);
+        }
+        if (present("grass_medium_01.ocmesh")) {
+            world::ScatterSpecies s;
+            s.meshPath = "Meshes/grass_medium_01.ocmesh"; s.material = "M_Foliage";
+            s.weight = 6.0f; s.densityMin = 0.62f; s.densityMax = 1.0f;
+            s.scaleMin = 0.8f; s.scaleMax = 1.4f; s.collisionRadiusCm = 0.0f;
+            pal.push_back(s);
+        }
+        return pal;
+    }
+
+    // The exact inverse of averFogFactor's k<=1e-8 branch (RHIShaders.cpp:558-566): that function
+    // computes opacity(d) = 1 - exp(-density*d), so this solves the SAME expression backwards for
+    // density given a target opacity at a known distance. Not an approximation of the shader --
+    // level-authored fog always takes that branch, because OcWorld.hpp/.cpp has no fields for
+    // fogFalloff or fogStart at all (only density and color parse from a FOG record), so k and start
+    // are always 0 for anything a level can author.
+    static f32 fogDensityForOpacityAt(f32 distanceCm, f32 targetOpacity) {
+        if (distanceCm <= 1.0f) return 0.0f;
+        const f32 t = targetOpacity < 0.01f ? 0.01f : (targetOpacity > 0.999f ? 0.999f : targetOpacity);
+        return -std::log(1.0f - t) / distanceCm;
+    }
+
     void setChunkStreamingEnabled(bool on) {
         if (on == (chunkWorld_ != nullptr)) return;
 
@@ -6039,8 +6178,48 @@ private:
         // Beside Content and Binaries, not inside either: this is generated/streamed state, not
         // authored content, and must never appear in the Content Browser or get packaged as an asset.
         cwSettings.worldDir = project_.dir + "\\Chunks";
-        // Generator/stream settings otherwise left at their shipped defaults (ChunkGenerator.hpp /
-        // ChunkStreamer.hpp) so what a designer sees here is the same behaviour the tests exercise.
+        // Stream settings (chunkSize/loadRadius/evictRadius/verticalRadius/budgets) are left at
+        // their shipped defaults (ChunkStreamer.hpp) -- nothing here describes those, so there is
+        // nothing to wire through.
+
+        // The scatter palette: present only when the demo's own assets are actually on disk (see
+        // buildDemoScatterPalette's own comment). Empty elsewhere, which reproduces the single-cube
+        // generator exactly as it always behaved.
+        cwSettings.generator.palette = buildDemoScatterPalette();
+
+        // Take the generator's seed/cell-size/octaves/coverage from the level's own declared density
+        // field when it has one, instead of leaving GeneratorSettings at its shipped defaults no
+        // matter what a level's PCGVOLUME said. A level describing a density field nothing samples
+        // was a lie in the file -- see the task this shipped with.
+        //
+        // "Sky" IS SKIPPED: that name is already spoken for (loadLevel above drives the cloud layer
+        // from it), so a level with only a Sky volume behaves exactly as it did before this existed
+        // -- the generator keeps GeneratorSettings' shipped defaults. The first NON-Sky PCGVOLUME
+        // wins; a level with more than one is not disambiguated further than that.
+        //
+        // COVERAGE MAPS TO threshold, NOT TO THE GENERATOR'S OWN pcg::InfiniteSpec::coverageFloor/
+        // coverageBias. Those two are pinned to 0/1 inside GeneratedChunkSource::setSettings
+        // (ChunkGenerator.cpp) ON PURPOSE: sampleInfinite's final pow(remapped, bias) is the one
+        // operation in it that IEEE 754 does not pin across libm implementations, and this
+        // generator's whole reproducibility guarantee depends on never calling it with bias != 1.
+        // coverageFloor and threshold mean the same thing in different words -- "the density below
+        // which nothing is here" -- so it maps directly onto the one density knob the generator
+        // exposes; coverageBias has no equivalent here and is deliberately left unmapped.
+        for (const fmt::OcPcgVolume& v : levelPcgVolumes_) {
+            if (v.name == "Sky") continue;
+            cwSettings.generator.worldSeed = static_cast<u64>(static_cast<u32>(v.seed));
+            if (v.cellSizeCm > 0.0) cwSettings.generator.featureSizeCm = static_cast<f32>(v.cellSizeCm);
+            if (v.octaves > 0) cwSettings.generator.octaves = static_cast<u32>(v.octaves);
+            {
+                const f64 t = v.coverageFloor < 0.0 ? 0.0 : (v.coverageFloor > 1.0 ? 1.0 : v.coverageFloor);
+                cwSettings.generator.threshold = static_cast<f32>(t);
+            }
+            AVER_INFO("[ChunkWorld] generator settings taken from PCGVOLUME '{}': seed={} "
+                      "featureSize={:.0f}cm octaves={} threshold={:.2f}",
+                      v.name, cwSettings.generator.worldSeed, cwSettings.generator.featureSizeCm,
+                      cwSettings.generator.octaves, cwSettings.generator.threshold);
+            break;
+        }
 
         world::RestoreOptions& restore = cw->streamer().restoreOptions();
 #if AVER_MODULE_PBR
@@ -6073,10 +6252,12 @@ private:
         chunkStreamLogsLeft_ = 8;
         chunkStreamStats_ = world::StreamStats{};
         AVER_INFO("[ChunkWorld] streaming enabled -- worldDir='{}' chunkSize={}cm loadRadius={} "
-                  "evictRadius={} verticalRadius={}",
+                  "evictRadius={} verticalRadius={} palette={} species threshold={:.2f}",
                   cwSettings.worldDir, chunkWorld_->settings().stream.chunkSizeCm,
                   chunkWorld_->settings().stream.loadRadius, chunkWorld_->settings().stream.evictRadius,
-                  chunkWorld_->settings().stream.verticalRadius);
+                  chunkWorld_->settings().stream.verticalRadius,
+                  chunkWorld_->settings().generator.palette.size(),
+                  chunkWorld_->settings().generator.threshold);
         warnIfCameraOutsideGeneratedBand();
     }
 
@@ -6195,6 +6376,23 @@ private:
                   droneGraphLoaded_ ? "loaded" : "NOT loaded");
     }
 
+    // Sum of triangle counts over every entity chunkWorld_ currently owns. O(residentEntities),
+    // walked fresh each call rather than kept running -- residentEntities is a few hundred at most
+    // and this only runs while the streaming panel is open or a log line needs it, not every frame
+    // unconditionally.
+    u64 residentTriangleCount() const {
+        u64 total = 0;
+        if (!chunkWorld_) return total;
+        const scene::World& world = scene::World::instance();
+        for (const scene::Entity e : chunkWorld_->streamedEntities()) {
+            const auto* mr = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+            if (!mr) continue;
+            const auto it = meshTris_.find(mr->mesh);
+            if (it != meshTris_.end()) total += it->second;
+        }
+        return total;
+    }
+
     // A small always-on-while-streaming readout of StreamStats. pendingLoads and failedLoads are
     // singled out because they are the two numbers that tell "working" (pendingLoads draining, zero
     // failures) from "not keeping up" (pendingLoads staying high) or "broken" (failedLoads growing).
@@ -6219,6 +6417,7 @@ private:
         ImGui::Text("total loads: %u   avg load: %.2f ms", s.totalLoads,
                     s.totalLoads > 0 ? s.totalLoadMs / static_cast<f64>(s.totalLoads) : 0.0);
         ImGui::Text("last load: %.2f ms", s.lastLoadMs);
+        ImGui::Text("resident triangles: %llu", static_cast<unsigned long long>(residentTriangleCount()));
         ImGui::Separator();
         ImGui::TextDisabled("%s", chunkWorld_->settings().worldDir.c_str());
         ImGui::End();
@@ -6908,6 +7107,11 @@ private:
     // picking a 100 cm character meant hitting a 2 cm box at its origin, and culling could not have
     // worked at all. Skinned entities have theirs overwritten per frame by SkinnedScene.
     std::unordered_map<u64, std::pair<Vec3, Vec3>> meshBounds_;
+    // Triangle count per mesh id, same key as sceneMeshes_/meshBounds_. Exists so a resident
+    // triangle BUDGET can be reported (chunk streaming panel / log) instead of guessed -- a
+    // scattered pine forest's cost is invisible without this, and the whole reason a scatter
+    // palette needs tuning "by looking" is that triangle count is not visible any other way.
+    std::unordered_map<u64, u32> meshTris_;
     int lastSceneDrawn_=-1;           // last scene-entity draw count, so the log line fires only on change
     int lastSceneCulled_=-1;          // and the cull count, so a frustum bug shows as a number rather than a gap
 #endif
@@ -6931,7 +7135,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; bool fogMatch=false; f32 fogMatchOpacity=-1.0f;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -6996,6 +7200,14 @@ Application* createApplication(int argc, char** argv) {
         // --frames capture run can prove streaming happened without a human clicking the menu item.
         else if (!std::strcmp(argv[i],"--chunk-stream")) {
             chunkStream = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 5;
+        }
+        // --fog-match [opacity] ties fog density to the streaming radius, the same thing the Height
+        // Fog panel's checkbox does. A flag as well as a checkbox because the feature is invisible
+        // without one: it is opt-in by design (it makes the world markedly foggier), so a headless
+        // run could never exercise it, and a verifier reasonably reported it as inert.
+        else if (!std::strcmp(argv[i],"--fog-match")) {
+            fogMatch = true;
+            if (i+1 < argc && argv[i+1][0] != '-') fogMatchOpacity = static_cast<f32>(std::atof(argv[++i]));
         }
         // --drone [N] switches the graph-driven drone on N frames in (default 5), same shape and
         // reason as --chunk-stream just above: proves it headlessly without a human clicking the menu.
@@ -7109,6 +7321,7 @@ Application* createApplication(int argc, char** argv) {
     app->setFocusTools(focusTools);
     app->setFocusCompileMenu(focusCompileMenu);
     if (chunkStream > 0) app->setChunkStreamAuto(chunkStream);
+    if (fogMatch) app->setFogMatchToStreamRadius(true, fogMatchOpacity);
     if (droneAuto > 0) app->setDroneAuto(droneAuto);
 #if AVER_MODULE_MCP
     app->setMcpPort(mcpPort);
