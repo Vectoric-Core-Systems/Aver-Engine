@@ -816,8 +816,46 @@ layer, not this one.
 
 **Slice 9 — actor-driven residency.** Actors as streaming sources, predictive next-chunk load, the
 boundary hold. **Not** actor despawn (§9.3).
-*Done when:* an actor driving at maximum speed never reaches a non-resident chunk; when starved, it
-holds at the boundary rather than falling.
+**DONE 2026-08-08.** `StreamSource` (position + velocity), a predictive lead along that velocity, and
+`clampToResident` — the boundary hold. The camera is just one source; an actor is the same shape,
+which is why this was a list from slice 6 rather than a single position.
+
+**A corridor, not two islands** — and the first implementation got this wrong in a way only speed
+exposed. Anchoring on the position and the lead *point* looks right and breaks the moment the lead
+exceeds twice the load radius: the two cubes stop overlapping and the mover flies through unloaded
+space *between* them, which is worse than not leading at all. Anchors now step along the segment at
+one radius each, so consecutive cubes overlap by half however fast the source is going, bounded at 64
+steps so an absurd velocity degrades the lead rather than stalling the frame it was protecting.
+
+**The hold, and why it is the only acceptable answer.** When the loader has not kept up the three
+options are not equal: a synchronous load is a frame hitch of unbounded size; letting the mover
+through puts a character on a chunk that does not exist, which is a fall through the world. Holding
+at the last loaded chunk is the only outcome that is both recoverable and visible in a test. It backs
+off by a margin so the mover does not rest exactly on the face and re-trigger every frame — the same
+reasoning as eviction hysteresis — and a mover already outside is left where it is rather than
+teleported.
+
+*Evidence:* `ChunkActorStreamTest` — 17 assertions, with a **control**.
+- At **600 m/s over 600 frames: 0 arrivals in unloaded space.**
+- The same flight with the lead and the budget removed: **375 arrivals**. Without that control,
+  "never arrives unloaded" could just mean the radius was generous and the prediction untested — at
+  the 120 m/s the test first used, a budget of 1 kept up unaided and the lead was doing nothing.
+- The hold is stable (clamping again does not creep), a move inside loaded space is returned
+  unchanged, and a stranded mover is left alone.
+- Three actors in separate neighbourhoods each get the ground under them *and* the space ahead.
+
+*One number worth keeping:* **warm-up took 54 updates** before the wanted set was satisfied. Nothing
+is resident on frame zero, so a budget of 8 cannot fill a neighbourhood before a 600 m/s mover has
+left it — the first run measured exactly 2 arrivals in unloaded space, both in the opening frames.
+Spawning a player and moving at full speed in the same frame is not a case the streamer can serve, so
+the test warms up as a game does at level load rather than loosening the steady-state assertion to
+hide a transient.
+
+All 41 suites pass. Purely additive within `modules/world` and `tests/world`; gates unaffected and
+not run.
+
+*Still deliberately excluded (§9.3):* actor **despawn** on leaving all loaded range. B7's 127-lives
+slot budget makes destroy/respawn churn a session-length leak, and nothing here destroys an actor.
 
 **Slice 10 — floating origin, X/Y only.** Region-anchored, with `prevViewProj_` compensation and the
 `PerFrameCB` layout change.

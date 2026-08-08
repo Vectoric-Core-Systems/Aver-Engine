@@ -6,6 +6,7 @@
 #  include "aver/core/Time.hpp"
 
 #  include <algorithm>
+#  include <cmath>
 
 namespace aver::world {
 namespace {
@@ -33,9 +34,49 @@ void ChunkStreamer::setSettings(const StreamSettings& s) {
     }
 }
 
+// Each source's residency centre: where it is, plus where its own velocity takes it over
+// `leadSeconds`. A stationary source anchors on itself, so this costs nothing when nothing moves.
+void ChunkStreamer::rebuildAnchors() {
+    anchors_.clear();
+    anchors_.reserve(sources_.size());
+    for (const StreamSource& s : sources_) {
+        anchors_.push_back(s.positionCm);   // always where it IS
+        const f32 t = settings_.leadSeconds > 0.0f ? settings_.leadSeconds : 0.0f;
+        if (t <= 0.0f) continue;
+
+        const f32 dx = s.velocityCmPerSec.x * t;
+        const f32 dy = s.velocityCmPerSec.y * t;
+        const f32 dz = s.velocityCmPerSec.z * t;
+        const f32 lead = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (lead <= 0.0f) continue;
+
+        // A CORRIDOR, NOT TWO ISLANDS. Anchoring only on the position and the lead POINT looks
+        // right and is wrong the moment the lead exceeds twice the load radius: the two cubes stop
+        // overlapping and the mover flies through unloaded space between them, which is worse than
+        // not leading at all. The first version of this did exactly that, and only showed up once the
+        // test speed was raised far enough for the gap to open.
+        //
+        // Stepping at one radius keeps consecutive cubes overlapping by half, so the corridor is
+        // continuous however fast the source is going.
+        const f32 stepCm = static_cast<f32>(settings_.loadRadius > 0 ? settings_.loadRadius : 1) *
+                           static_cast<f32>(settings_.chunkSizeCm);
+        // Bounded, so an absurd velocity cannot ask for thousands of anchors and stall the frame it
+        // was trying to protect. Past this the lead is simply shorter than asked for -- degrading is
+        // the right failure, and the boundary hold is what catches what it cannot cover.
+        constexpr i32 kMaxSteps = 64;
+        const i32 steps = static_cast<i32>(lead / stepCm);
+        const i32 n = steps < kMaxSteps ? steps : kMaxSteps;
+        for (i32 i = 1; i <= n; ++i) {
+            const f32 f = static_cast<f32>(i) * stepCm / lead;
+            anchors_.push_back(Vec3{s.positionCm.x + dx * f, s.positionCm.y + dy * f,
+                                    s.positionCm.z + dz * f});
+        }
+    }
+}
+
 i32 ChunkStreamer::distanceToNearestSource(const ChunkCoord& c) const {
     i32 best = 1 << 24;
-    for (const Vec3& p : sources_) {
+    for (const Vec3& p : anchors_) {
         const ChunkCoord sc = splitCm(p, settings_.chunkSizeCm).chunk;
         // Vertical measured separately: a surface world wants a slab, not a cube, and folding z into
         // one Chebyshev distance would make the load radius control the height too.
@@ -60,13 +101,16 @@ StreamStats ChunkStreamer::update(scene::World& w, BodyRegistry& bodies,
     stats_.entitiesOut = 0;
     stats_.pendingLoads = 0;
     stats_.failedLoads = 0;
+    // Rebuilt every step, so a velocity the caller stopped updating cannot keep dragging the
+    // residency somewhere the source is not going.
+    rebuildAnchors();
     if (!source_) return stats_;
 
     // ---- what should be resident ----
     // Gathered per source and deduplicated, sorted NEAREST FIRST so a budget spends itself on what
     // the camera is about to see rather than on whatever the iteration order happened to reach.
     std::vector<std::pair<i32, ChunkCoord>> wanted;
-    for (const Vec3& p : sources_) {
+    for (const Vec3& p : anchors_) {
         const ChunkCoord sc = splitCm(p, settings_.chunkSizeCm).chunk;
         for (i32 dz = -settings_.verticalRadius; dz <= settings_.verticalRadius; ++dz)
             for (i32 dy = -settings_.loadRadius; dy <= settings_.loadRadius; ++dy)
@@ -164,6 +208,33 @@ StreamStats ChunkStreamer::update(scene::World& w, BodyRegistry& bodies,
     stats_.residentEntities = 0;
     for (const auto& kv : resident_) stats_.residentEntities += static_cast<u32>(kv.second.entities.size());
     return stats_;
+}
+
+Vec3 ChunkStreamer::clampToResident(const Vec3& from, const Vec3& to, f32 marginCm) const {
+    if (isResidentAt(to)) return to;
+
+    // Binary search along the segment for the last resident point. Sixteen steps resolves a 16 m
+    // chunk to a quarter of a millimetre, which is far finer than anything downstream cares about,
+    // and it beats stepping the segment because the cost does not grow with how far the mover tried
+    // to travel.
+    Vec3 good = from;
+    if (!isResidentAt(good)) return from;   // already outside; moving further cannot help
+
+    Vec3 bad = to;
+    for (int i = 0; i < 16; ++i) {
+        const Vec3 mid{0.5f * (good.x + bad.x), 0.5f * (good.y + bad.y), 0.5f * (good.z + bad.z)};
+        if (isResidentAt(mid)) good = mid;
+        else bad = mid;
+    }
+
+    // Backed off along the direction of travel, so the mover does not come to rest exactly on the
+    // face and re-enter this every frame -- the same reason eviction has hysteresis.
+    const f32 dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
+    const f32 len = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (len <= 0.0f || marginCm <= 0.0f) return good;
+    const f32 k = marginCm / len;
+    const Vec3 backed{good.x - dx * k, good.y - dy * k, good.z - dz * k};
+    return isResidentAt(backed) ? backed : good;
 }
 
 void ChunkStreamer::unloadAll(scene::World& w, BodyRegistry& bodies, std::vector<i32>& freedBodies) {

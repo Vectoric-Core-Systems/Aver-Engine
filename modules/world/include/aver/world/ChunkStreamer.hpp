@@ -46,6 +46,24 @@ struct StreamSettings {
     // Vertical range, in chunks, around each source. A surface world wants far less height than
     // width, and loading a 7x7x7 cube where a 7x7x3 slab would do is 3x the work for nothing.
     i32 verticalRadius = 1;
+
+    // How far AHEAD of a moving source to keep resident, in seconds of its own velocity.
+    //
+    // THE RADIUS ALONE IS NOT ENOUGH FOR A MOVING SOURCE, and the arithmetic says why: a source at
+    // v cm/s with a radius of R chunks has R*chunkSizeCm/v seconds of loaded space in front of it,
+    // and the loader needs that long to fill the next ring at `loadBudget` chunks per frame. Past
+    // some speed it does not, and the source arrives somewhere that has not loaded. Leading the
+    // residency along the velocity buys back exactly the time the budget needs.
+    f32 leadSeconds = 1.5f;
+};
+
+// One thing the world stays loaded around. The camera is just the first of them -- an actor is the
+// same shape, which is the whole reason this is a struct rather than a Vec3.
+struct StreamSource {
+    Vec3 positionCm;
+    // Centimetres per second. Zero for anything stationary, and for the camera unless a host
+    // bothers to differentiate it.
+    Vec3 velocityCmPerSec{0, 0, 0};
 };
 
 struct StreamStats {
@@ -76,8 +94,14 @@ public:
     // owns both, this owns only the timing.
     RestoreOptions& restoreOptions() { return restore_; }
 
-    // World-space positions to stay resident around.
-    void setSources(const std::vector<Vec3>& positions) { sources_ = positions; }
+    // What to stay resident around.
+    void setSources(const std::vector<StreamSource>& sources) { sources_ = sources; }
+    // Stationary convenience, for a caller that has only positions.
+    void setSources(const std::vector<Vec3>& positions) {
+        sources_.clear();
+        sources_.reserve(positions.size());
+        for (const Vec3& p : positions) sources_.push_back(StreamSource{p});
+    }
 
     // One step. Loads up to `loadBudget` and evicts up to `evictBudget`, nearest first.
     //
@@ -91,6 +115,24 @@ public:
     void unloadAll(scene::World& w, BodyRegistry& bodies, std::vector<i32>& freedBodies);
 
     bool isResident(const ChunkCoord& c) const { return resident_.find(c) != resident_.end(); }
+    // Whether the chunk containing a world position is loaded.
+    bool isResidentAt(const Vec3& worldCm) const {
+        return isResident(splitCm(worldCm, settings_.chunkSizeCm).chunk);
+    }
+
+    // Where a mover is ALLOWED to end up this step, given what is loaded.
+    //
+    // THE BOUNDARY HOLD. When the loader has not kept up, something has to give, and the three
+    // options are not equal: a synchronous load means a frame hitch of unbounded size; letting the
+    // mover through means it stands on a chunk that does not exist, which for a character is a fall
+    // through the world. Holding it at the last loaded chunk is the only one that is recoverable and
+    // the only one that is visible in a test.
+    //
+    // Returns `to` when the destination is resident. Otherwise returns the furthest point along
+    // from->to that still is, backed off by `marginCm` so the caller does not sit exactly on the
+    // face and re-trigger this every frame. Returns `from` when even that is not resident -- which
+    // means the mover is already somewhere unloaded and moving it further cannot help.
+    Vec3 clampToResident(const Vec3& from, const Vec3& to, f32 marginCm = 1.0f) const;
     usize residentCount() const { return resident_.size(); }
     // Every entity this streamer created for `c`, or an empty span if it is not resident.
     const std::vector<scene::Entity>* entitiesOf(const ChunkCoord& c) const;
@@ -103,11 +145,15 @@ private:
     };
     // Chebyshev distance in chunks from the nearest source, or a large number when there are none.
     i32 distanceToNearestSource(const ChunkCoord& c) const;
+    // Where a source's residency is centred: its position, plus its velocity over `leadSeconds`.
+    // One entry per source, rebuilt each update so a stale velocity never lingers.
+    std::vector<Vec3> anchors_;
+    void rebuildAnchors();
 
     StreamSettings settings_;
     IChunkSource* source_ = nullptr;
     RestoreOptions restore_;
-    std::vector<Vec3> sources_;
+    std::vector<StreamSource> sources_;
     std::unordered_map<ChunkCoord, Resident> resident_;
     StreamStats stats_;
 };

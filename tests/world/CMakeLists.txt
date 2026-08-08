@@ -62,6 +62,16 @@ target_link_libraries(ChunkGenerateTest PRIVATE
 set_target_properties(ChunkGenerateTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ChunkActorStreamTest -- actors as streaming sources: predictive load and the boundary hold.
+#
+# It has a CONTROL: the same flight with the lead and the budget removed must FAIL to keep up. Without
+# that, "never arrives unloaded" could just mean the radius was generous and the prediction untested.
+add_executable(ChunkActorStreamTest src/ChunkActorStreamTest.cpp)
+target_link_libraries(ChunkActorStreamTest PRIVATE
+  Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Render.Pcg Aver.Core)
+set_target_properties(ChunkActorStreamTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(ChunkCoordTest src/ChunkCoordTest.cpp)
 target_link_libraries(ChunkCoordTest PRIVATE Aver.World Aver.Core)
 set_target_properties(ChunkCoordTest PROPERTIES
