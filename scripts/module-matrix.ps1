@@ -37,9 +37,13 @@ $configs = [ordered]@{
     "scripting-off" = @("-DAVER_MODULE_SCRIPTING=OFF")
     "scene-off"     = @("-DAVER_MODULE_SCENE=OFF", "-DAVER_MODULE_FRAMEWORK=OFF")
     "trifactor-off" = @("-DAVER_MODULE_TRIFACTOR=OFF")
-    # AverSR (docs/AVERSR.md). The IUpscaler seam lives in Aver.RHI itself, not this module, so
-    # nothing should reference Aver.Render.Sr outside modules/render.sr -- this row is what turns
-    # that claim from a comment into something a build can contradict.
+    # AverSR (docs/AVERSR.md). The IUpscaler seam lives in Aver.RHI itself, not this module, so no
+    # RENDERER may reference Aver.Render.Sr -- only sandbox, as the composition root that constructs
+    # the concrete SpatialUpscaler and hands the seam an IUpscaler* it can hold as null, links it
+    # (sandbox/CMakeLists.txt's `if(TARGET Aver.Render.Sr)` block). This row is what turns "sandbox
+    # tolerates the module's absence" from a comment into something a build can contradict: with the
+    # module off, `#if AVER_MODULE_SR` compiles it all out and Sandbox must still build, link and
+    # render at native resolution.
     "sr-off"        = @("-DAVER_MODULE_SR=OFF")
     "no-ui"         = @("-DAVER_ENABLE_UI=OFF")
     "no-game"       = @("-DAVER_BUILD_GAME=OFF")

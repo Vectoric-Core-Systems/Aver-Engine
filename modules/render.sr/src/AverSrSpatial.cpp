@@ -36,8 +36,8 @@ bool SpatialUpscaler::ensurePipeline(rhi::TextureHandle outTarget) {
     if (pipeline_) { res_.destroyPipeline(pipeline_); pipeline_ = 0; }
 
     const char* src = spatialUpscaleShaderSource();
-    rhi::ShaderDesc vsd; vsd.source = src; vsd.entry = "VSUpscale";        vsd.stage = rhi::ShaderStage::Vertex; vsd.minShaderModel = 51;
-    rhi::ShaderDesc psd; psd.source = src; psd.entry = "PSSpatialUpscale"; psd.stage = rhi::ShaderStage::Pixel;  psd.minShaderModel = 51;
+    rhi::ShaderDesc vsd; vsd.source = src; vsd.entry = "AverSrSpatialVS";   vsd.stage = rhi::ShaderStage::Vertex; vsd.minShaderModel = 51;
+    rhi::ShaderDesc psd; psd.source = src; psd.entry = "AverSrSpatialMain"; psd.stage = rhi::ShaderStage::Pixel;  psd.minShaderModel = 51;
     const rhi::ShaderHandle vs = res_.createShader(vsd);
     const rhi::ShaderHandle ps = res_.createShader(psd);
 
@@ -130,7 +130,7 @@ SamplerState       gUpscaleSamp    : register(s0);
 struct AverSrVSOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 
 // Emits one vertex of the fullscreen upscale triangle from SV_VertexID -- no vertex buffer bound.
-AverSrVSOut VSUpscale(uint id : SV_VertexID) {
+AverSrVSOut AverSrSpatialVS(uint id : SV_VertexID) {
     AverSrVSOut o;
     float2 uv = float2((id << 1) & 2, id & 2);
     o.uv = uv;
@@ -151,7 +151,7 @@ float4 averSrCatmullRomWeights(float t) {
          0.5 * t3 - 0.5 * t2);
 }
 
-float4 PSSpatialUpscale(AverSrVSOut i) : SV_TARGET {
+float4 AverSrSpatialMain(AverSrVSOut i) : SV_TARGET {
     float2 srcTexel = i.uv * gUpscaleSrc.xy - 0.5;
     float2 f    = frac(srcTexel);
     float2 base = floor(srcTexel);

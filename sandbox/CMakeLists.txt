@@ -233,3 +233,15 @@ endif()
 if(TARGET Aver.Landscape.Renderer)
   target_link_libraries(Sandbox PRIVATE Aver.Landscape.Renderer)
 endif()
+
+# AverSR (docs/AVERSR.md): the built-in upscaler implementations. Optional and named explicitly for
+# the same reason every module above is: it brings AVER_MODULE_SR=1 through its link interface
+# (modules/render.sr/CMakeLists.txt PUBLIC_DEFS), which is what lets SandboxApp.cpp guard the
+# --aversr flag and the render-settings quality combo with `#if AVER_MODULE_SR` and have it read as
+# a real zero, not an accidental always-off, in a build with the module disabled. Sandbox is the
+# COMPOSITION ROOT here, not the renderer -- it is the concrete `aver::sr::SpatialUpscaler` type
+# that only this link line can see, exactly as docs/AVERSR.md says a "host holds an IUpscaler* that
+# may be null"; Aver.RHI itself still never links this module and never will.
+if(TARGET Aver.Render.Sr)
+  target_link_libraries(Sandbox PRIVATE Aver.Render.Sr)
+endif()

@@ -93,6 +93,15 @@
 #include "aver/scripting/ScriptHost.hpp"
 #endif
 
+// AverSR (docs/AVERSR.md). Sandbox is the composition root that links Aver.Render.Sr -- see
+// sandbox/CMakeLists.txt's own comment on the `if(TARGET Aver.Render.Sr)` block -- and constructs
+// the concrete aver::sr::SpatialUpscaler; the generic RHI (aver/rhi/RHI.hpp, included above) never
+// does and never will.
+#if AVER_MODULE_SR
+#include "aver/sr/AverSrQuality.hpp"
+#include "aver/sr/AverSrSpatial.hpp"
+#endif
+
 // physics_abi.h was nested inside AVER_MODULE_FRAMEWORK, but every use site below (aver_phys_init,
 // aver_phys_step, aver_phys_ready, ...) is guarded on AVER_MODULE_PHYSICS alone. That was invisible
 // as long as physics implied framework in practice, but AVER_MODULE_SCENE=OFF forces FRAMEWORK off
@@ -149,6 +158,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -564,6 +574,16 @@ public:
     // Builds the editor: asset editors, MCP, physics, the placeholder scene, gizmos, and the render features.
     void onInit(Engine& e) override {
         AVER_INFO("[Sandbox] backend={} adapter='{}'", rhi::backendName(e.device()->backend()), e.device()->adapterName());
+#if AVER_MODULE_SR
+        // AverSR quality (docs/AVERSR.md "Quality levels"): sets the SAME renderScaleOverride_ knob
+        // --render-scale drives, so an explicit --render-scale still wins over it -- same "still at
+        // its 1.0 sentinel" precedent loadEditorPreferences() below already uses for --render-scale
+        // vs. the saved pref. At Off (the default whether or not --aversr was even given) this line
+        // does nothing, and neither does anything else guarded on averSrQuality_ below: Off stays
+        // bit-identical to a tree with no AverSR in it, exactly as docs/AVERSR.md requires.
+        if (averSrQuality_ != aver::sr::Quality::Off && renderScaleOverride_ == 1.0f)
+            renderScaleOverride_ = aver::sr::renderScaleFor(averSrQuality_);
+#endif
         // --render-scale F: applied once, here, before anything sizes itself off the device. 1.0 (no
         // flag) is a no-op -- setRenderScale clamps into [0.25,1] but a backend without a swapchain
         // yet just stores it for createSwapchainResources to pick up.
@@ -571,6 +591,16 @@ public:
             e.device()->setRenderScale(renderScaleOverride_);
             AVER_INFO("[Sandbox] render scale {:.2f} (--render-scale)", e.device()->renderScale());
         }
+#if AVER_MODULE_SR
+        // Constructs SpatialUpscaler (a real GPU-resource-owning object, not the CLI-only
+        // renderScaleOverride_ float above) so the editor genuinely holds a live aver::sr::IUpscaler
+        // implementation whenever a non-Off level was requested on the command line. See
+        // logAverSrActive()'s own comment for the honest limit of what that buys today.
+        if (averSrQuality_ != aver::sr::Quality::Off) {
+            ensureAverSrUpscaler(e.device());
+            logAverSrActive(e.device());
+        }
+#endif
 
         // Registration order is precedence: the first factory that accepts a path wins.
         assetEditors_.registerFactory(&editor::makeMeshEditor);
@@ -2592,6 +2622,12 @@ public:
         releaseProjectMaterials();
         textureFactory_ = nullptr;
 #endif
+#if AVER_MODULE_SR
+        // Explicit, while e.device() (and so the rhi::IResourceFactory averSrUpscaler_ was built
+        // against) is still known good -- the same reason the texture teardown above runs here
+        // rather than leaving it to averSrUpscaler_'s own destructor after onShutdown returns.
+        averSrUpscaler_.reset();
+#endif
         if (gameUi_) {
             e.device()->removeRenderFeature(gameUi_);
             delete gameUi_;
@@ -2805,6 +2841,57 @@ public:
     void setRtPixelsPerRay(int n) { rtPixelsPerRayOverride_ = n; }              // --rt-pixels-per-ray N
     void setGiUpdateInterval(int n) { giUpdateIntervalOverride_ = n; }          // --gi-update-interval N
     void setRenderScale(f32 s) { renderScaleOverride_ = s; }                    // --render-scale F
+#if AVER_MODULE_SR
+    void setAverSrQuality(aver::sr::Quality q) { averSrQuality_ = q; }          // --aversr LEVEL
+
+    // Constructs SpatialUpscaler against `dev`'s resource factory if it is not already built.
+    // Idempotent -- cheap to call every time the quality combo changes, not just once. See
+    // logAverSrActive()'s comment for what constructing it does and does not buy today.
+    void ensureAverSrUpscaler(rhi::IDevice* dev) {
+        if (!dev || averSrUpscaler_) return;
+        if (rhi::IResourceFactory* res = dev->resources())
+            averSrUpscaler_ = std::make_unique<aver::sr::SpatialUpscaler>(*res);
+    }
+
+    // Logs the [AverSR] brand-tag line docs/AVERSR.md's naming table specifies, plus the one honest
+    // caveat this stage leaves open: rhi::IDevice has no setUpscaler()/upscaler() hook yet (see
+    // modules/render.sr/README.md "Backend wiring"), so nothing on the present path ever calls
+    // SpatialUpscaler::execute(). The render-scale change is real and already measurable through
+    // --render-scale; SpatialUpscaler is constructed, correct against the rhi::IUpscaler seam, and
+    // reachable from the editor for the first time, but its resample pass is not yet what produces
+    // the pixels on screen -- what is on screen is still the backend's own bilinear render-scale
+    // resize. Closing that gap needs a backend to read device->upscaler() from its own
+    // composite/present step instead of that resize; modules/rhi.d3d12/src/D3D12Device.cpp is where,
+    // and it is out of this change's file ownership.
+    void logAverSrActive(rhi::IDevice* dev) {
+        if (!dev) return;
+        AVER_INFO("[AverSR] {}: render scale {:.2f}{}", aver::sr::qualityName(averSrQuality_),
+                  dev->renderScale(),
+                  averSrUpscaler_ ? "" : " (SpatialUpscaler not constructed -- no resource factory)");
+        if (averSrUpscaler_)
+            AVER_WARN("[AverSR] SpatialUpscaler ('{}') is constructed but not yet reachable from the "
+                      "present path -- rhi::IDevice has no upscaler hook to call it from. The resized "
+                      "image on screen is the backend's own render-scale resize, not AverSR's resample.",
+                      averSrUpscaler_->name());
+    }
+
+    // Applies one AverSR quality level from the render-settings combo: the docs/AVERSR.md
+    // render-scale table through the SAME rhi::IDevice::setRenderScale the slider next to the combo
+    // already edits. Off resets the scale to native and drops any constructed upscaler, so switching
+    // back to Off is bit-identical to never having touched the combo at all.
+    void applyAverSrQuality(rhi::IDevice* dev, aver::sr::Quality q) {
+        averSrQuality_ = q;
+        if (!dev) return;
+        if (q == aver::sr::Quality::Off) {
+            averSrUpscaler_.reset();
+            dev->setRenderScale(1.0f);
+            return;
+        }
+        dev->setRenderScale(aver::sr::renderScaleFor(q));
+        ensureAverSrUpscaler(dev);
+        logAverSrActive(dev);
+    }
+#endif
     void setFrameTimeReport(bool on) { frameTimeReport_ = on; }                 // --frame-time
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
@@ -6683,6 +6770,24 @@ private:
             ImGui::SameLine();
             ImGui::TextDisabled(vs ? "(capped to the refresh rate)" : "(uncapped, may tear)");
 
+#if AVER_MODULE_SR
+            // AverSR quality (docs/AVERSR.md "Quality levels"): a named shortcut into the SAME
+            // render-scale knob the slider just below edits directly, nothing more -- selecting a
+            // level here is exactly equivalent to dragging the slider to its table value by hand.
+            // Because of that, this combo shows the last level CHOSEN through it or --aversr, not a
+            // live read of whether the current scale still matches one: dragging the slider
+            // afterwards moves the scale without moving this combo back to "Custom". Cheap and
+            // honest about what it is, not a full two-way-bound settings pair.
+            static const char* kAverSrNames[] = {"Off", "Quality", "Balanced", "Performance"};
+            int aversrIdx = static_cast<int>(averSrQuality_);
+            if (ImGui::Combo("AverSR", &aversrIdx, kAverSrNames, 4) && prefsDevice_)
+                applyAverSrQuality(prefsDevice_, static_cast<aver::sr::Quality>(aversrIdx));
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Aver Super Resolution: renders the scene smaller and resamples it\n"
+                                  "back up. Off is bit-identical to no AverSR at all. See docs/AVERSR.md\n"
+                                  "-- on this build, this sets render scale for real; the resample pass\n"
+                                  "itself is not yet wired into what actually reaches the screen.");
+#endif
             // Render scale: the 3D scene's own resolution as a fraction of the window's. 1.0 (the
             // right edge) is the pre-existing behaviour -- the scene renders 1:1 with the window --
             // and everything below it trades scene sharpness for every pixel-bound pass' cost. The
@@ -7329,6 +7434,19 @@ private:
     int  rtPixelsPerRayOverride_=0;  // --rt-pixels-per-ray N: shadow tile edge (0 = flag not given)
     int  giUpdateIntervalOverride_=0; // --gi-update-interval N: GI revoxelise interval (0 = flag not given)
     f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
+#if AVER_MODULE_SR
+    // --aversr LEVEL / the render-settings quality combo. Off (the default) is what a build with no
+    // AverSR in it looks like: no render-scale change beyond whatever --render-scale itself asked
+    // for, no SpatialUpscaler construction, nothing under the [AverSR] tag. See docs/AVERSR.md
+    // "Quality levels" and this file's onInit()/applyAverSrQuality() for where it is actually read.
+    aver::sr::Quality averSrQuality_ = aver::sr::Quality::Off;
+    // Constructed lazily the first time a non-Off quality is applied (onInit() or the combo); never
+    // rebuilt after that, only dropped back to null when quality returns to Off. `factory` (passed
+    // to its constructor) must outlive every execute() call per AverSrSpatial.hpp's own contract --
+    // satisfied here because it is the SAME rhi::IDevice::resources() the rest of the editor uses
+    // for as long as the device exists.
+    std::unique_ptr<aver::sr::SpatialUpscaler> averSrUpscaler_;
+#endif
     bool frameTimeReport_=false;     // --frame-time: report the frame period, to price the above
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
@@ -8853,7 +8971,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=false; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=false; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -9080,6 +9198,12 @@ Application* createApplication(int argc, char** argv) {
         // (unset) reproduces the pre-existing 1:1 behaviour exactly. Clamped to [0.25,1] by the
         // device; measures the render-scale/GI-cost tradeoff independently of everything else.
         else if (!std::strcmp(argv[i],"--render-scale") && i+1<argc) renderScale=static_cast<f32>(std::atof(argv[++i]));
+        // --aversr LEVEL: off|quality|balanced|performance (case-insensitive), the docs/AVERSR.md
+        // "Quality levels" table. Stored as a string here and parsed/applied below (after the loop,
+        // alongside every other app->setXxx call) rather than inline, so a build with the module
+        // compiled out can still recognise the flag and explain why it did nothing rather than
+        // erroring as unknown -- see the AVER_MODULE_SR branch after the parse loop.
+        else if (!std::strcmp(argv[i],"--aversr") && i+1<argc) aversrArg=argv[++i];
         else if (!std::strcmp(argv[i],"--frame-time")) frameTime=true;
         else if (!std::strcmp(argv[i],"--ms")) ms=true;
         else if (!std::strcmp(argv[i],"--probe") && i+2<argc) { probeX=(u32)std::atoi(argv[++i]); probeY=(u32)std::atoi(argv[++i]); }
@@ -9228,6 +9352,17 @@ Application* createApplication(int argc, char** argv) {
     app->setRtPixelsPerRay(rtPixelsPerRay);
     app->setGiUpdateInterval(giUpdateInterval);
     app->setRenderScale(renderScale);
+    if (!aversrArg.empty()) {
+#if AVER_MODULE_SR
+        aver::sr::Quality aversrQuality;
+        if (aver::sr::parseQuality(aversrArg.c_str(), aversrQuality)) app->setAverSrQuality(aversrQuality);
+        else AVER_ERROR("[AverSR] --aversr '{}' not recognised (off|quality|balanced|performance)", aversrArg);
+#else
+        AVER_WARN("[AverSR] --aversr '{}' was given but this build has no AverSR module "
+                  "(-DAVER_MODULE_SR=ON to include it); the editor renders at native resolution "
+                  "regardless", aversrArg);
+#endif
+    }
     app->setFrameTimeReport(frameTime);
     app->setMsOverride(ms);
     app->setProbe(probeX, probeY);

@@ -19,6 +19,25 @@ renderer, no other module, links `Aver.Render.Sr` to know it exists. A renderer 
   backend-specific code of its own. It reads only the scene colour target (`needs()` answers
   `UpscalerNeeds::None`); depth, motion vectors, jitter and history are accepted by the seam but
   ignored here.
+- `include/aver/sr/AverSrQuality.hpp` — `sr::Quality` (`Off`/`Quality`/`Balanced`/`Performance`),
+  `renderScaleFor()` and `qualityName()` for the render-scale table in docs/AVERSR.md "Quality
+  levels", plus a case-insensitive `parseQuality()` for a CLI flag or a UI combo. Header-only,
+  RHI-free — a caller-facing convenience, not part of the `IUpscaler` seam itself.
+
+## Who links this module
+
+`sandbox` (the editor) does, as of this phase — see `sandbox/CMakeLists.txt`'s `if(TARGET
+Aver.Render.Sr)` block. It is the **composition root**: the only place concrete enough to
+`new aver::sr::SpatialUpscaler(...)` and hold the result behind an `IUpscaler*`, exactly as
+docs/AVERSR.md's "nothing may depend on AverSR" section describes a host doing. `Aver.RHI` itself
+still never links this module and never will; the seam stays the only thing a renderer sees.
+
+Sandbox exposes an `--aversr <level>` flag and an "AverSR" combo in Editor Preferences → Display,
+both driving `sr::renderScaleFor()` into the same `IDevice::setRenderScale()` `--render-scale`
+already used, and constructing a live `SpatialUpscaler` once a non-`Off` level is selected. `Off`
+(the default, whether or not `--aversr` was ever passed) runs none of that: no render-scale change
+beyond whatever `--render-scale` itself asked for, no `SpatialUpscaler` construction, nothing under
+the `[AverSR]` log tag — the same code path as a tree with no AverSR in it.
 
 ## What's NOT here yet
 
@@ -29,15 +48,26 @@ renderer, no other module, links `Aver.Render.Sr` to know it exists. A renderer 
   screen-space motion vectors, depth, exposure and a camera-cut reset signal as whole-frame data —
   none of which exists yet outside Voxi's ray-traced-shadow-only reprojection. See
   `docs/AVERSR.md` "Prerequisites".
-- **Backend wiring.** No renderer currently calls `IDevice::setUpscaler`/`upscaler()` or
-  `IUpscaler::execute()` — those hooks exist on `IDevice` (default no-op) so a future phase can
-  register `SpatialUpscaler` (or FSR) in place of a backend's own inline resize, without this
-  module or the seam changing again. Until that lands, every backend's existing behaviour is
-  unchanged, by construction: nothing here is on any include or link path a backend already walks.
+- **Backend wiring — still the real gap.** `IDevice` does **not** yet have a
+  `setUpscaler`/`upscaler()` hook — checked again this phase against
+  `modules/rhi/include/aver/rhi/RHI.hpp`, unchanged. Sandbox now constructs a real
+  `SpatialUpscaler` and holds it (see "Who links this module" above) and its own
+  `--render-scale`-driven resize is real and measured, but nothing calls
+  `SpatialUpscaler::execute()`: no backend's composite/present step reads an upscaler off the
+  device and calls it instead of its own bilinear resize. The pixels a non-`Off` AverSR level
+  produces today are that backend resize, not AverSR's resample. Closing this needs a
+  `setUpscaler`/`upscaler()` pair on `IDevice` (default no-op, so every existing backend is
+  unchanged by construction) AND a backend's composite step reading it — concretely
+  `modules/rhi.d3d12/src/D3D12Device.cpp`'s composite pass (see its own comment starting "dst is
+  present-space... THIS IS the actual render-scale upscale"), which is the one place that owns the
+  scene-resolution colour target as an addressable resource today. Neither file was touched this
+  phase: both were out of this change's file ownership, not skipped by oversight.
 
 ## Verified this phase
 
-Built as its own module (`AVER_MODULE_SR=ON`, the default) alongside the rest of the engine; the
-headless suites this phase's build produced are listed in the change's own report. **Not** verified
-by a GPU capture: `SpatialUpscaler::execute()` has never been run against a live swapchain, because
-nothing yet calls it — see "Backend wiring" above.
+Built as its own module (`AVER_MODULE_SR=ON`, the default) alongside the rest of the engine, now
+with `sandbox` linking it (`sandbox/CMakeLists.txt`) and constructing `SpatialUpscaler` for real
+when a non-`Off` `--aversr` level or Editor Preferences combo selection is applied. **Not** verified
+by a GPU capture: `SpatialUpscaler::execute()` has still never been run against a live swapchain
+(or against anything), because nothing yet calls it — see "Backend wiring" above, which is the
+same gap the previous phase found, not yet closed.

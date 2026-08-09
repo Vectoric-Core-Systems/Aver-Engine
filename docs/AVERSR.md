@@ -102,12 +102,22 @@ An upscaler takes a colour target, a depth target, motion vectors and a jitter o
 a bigger colour target. It has no legitimate reason to know what a material, an entity, a chunk or
 a heightfield is, and the day it links one of them the seam has stopped being a seam.
 
-### And nothing may depend on AverSR
+### And no ENGINE MODULE may depend on AverSR
 
-This is the half that is easier to get wrong. The `IUpscaler` **interface** lives in `Aver.RHI`
-beside `IRenderFeature`, not in this module; `Aver.Render.Sr` provides implementations of it. So a
-renderer holds an `IUpscaler*` that may be null and calls it if it is not, exactly as it holds
-registered render features today -- without linking, including, or knowing that AverSR exists.
+This is the half that is easier to get wrong, and the wording matters. Something has to construct
+a concrete `SpatialUpscaler`, so "nothing links it" is impossible as stated. The precise rule is
+the one Voxi already follows: **the HOST links it, the ENGINE does not**.
+
+The `IUpscaler` **interface** lives in `Aver.RHI` beside `IRenderFeature`, not in this module.
+`Aver.Render.Sr` provides implementations. A renderer holds an `IUpscaler*` that may be null and
+calls it if it is not -- without linking, including, or knowing that AverSR exists. Only the
+composition root (`sandbox`, and one day the game runtime) names the concrete type, behind
+`if(TARGET Aver.Render.Sr)`, exactly as it already does for `Aver.Render.Voxi.Renderer` and
+`Aver.Landscape.Renderer`.
+
+So the test is not "does anything link it" but **"does any module under `modules/` link it"**.
+Today the answer is no: `grep -rn 'Aver.Render.Sr' --include=CMakeLists.txt` returns the module's
+own file and `sandbox/CMakeLists.txt`, nothing else.
 
 The consequence, and the test: **`-DAVER_MODULE_SR=OFF` must build, link and render**, at native
 resolution with no upscaler, and the pixels must be identical to a tree where the module was never
