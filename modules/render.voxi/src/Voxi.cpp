@@ -63,6 +63,8 @@ void Renderer::setSettings(const Settings& s) {
     // rounds to a power of two); this is just enough to keep a wild request off the wire to it.
     n.rtShadowRays       = std::clamp(n.rtShadowRays, 1u, 32u);
     n.rtPixelsPerRayTile = std::clamp(n.rtPixelsPerRayTile, 1u, 16u);
+    // Mirrors VoxiRenderer::kMaxGiUpdateInterval for the same reason as rtPixelsPerRayTile above.
+    n.giUpdateInterval   = std::clamp(n.giUpdateInterval, 1u, 8u);
 
     if (n.msaa != settings_.msaa) msaaDirty_ = true;
     settings_ = n;
@@ -233,6 +235,15 @@ float   aver_voxi_get_gi_max_distance(void) { return Renderer::get().settings().
 // Sets the cone trace range, in centimetres.
 int32_t aver_voxi_set_gi_max_distance(float cm) {
     Settings s = Renderer::get().settings(); s.giMaxDistance = cm; Renderer::get().setSettings(s); return 1;
+}
+
+// Returns how many frames apart the GI volume is re-voxelised (1 = every frame).
+int32_t aver_voxi_get_gi_update_interval(void) { return static_cast<int32_t>(Renderer::get().settings().giUpdateInterval); }
+// Sets the GI revoxelise interval, in frames. Returns 0 if out of range.
+int32_t aver_voxi_set_gi_update_interval(int32_t frames) {
+    if (frames < 1 || frames > 8) return 0;
+    Settings s = Renderer::get().settings(); s.giUpdateInterval = static_cast<aver::u32>(frames);
+    Renderer::get().setSettings(s); return 1;
 }
 
 // Returns the device's ray tracing tier.

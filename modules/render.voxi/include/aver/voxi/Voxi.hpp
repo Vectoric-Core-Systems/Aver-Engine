@@ -68,7 +68,18 @@ struct Settings {
     // nearest one -- so the per-pixel schedule is a bitmask against the pixel coordinate rather than
     // a modulo, and the pixel COUNT one ray covers (N*N) is a clean power of two throughout: 1, 4,
     // 16, 64, 256 for tile edges 1, 2, 4, 8, 16. Clamped to [1, VoxiRenderer::kMaxPixelsPerRayTile].
+    // NOTE: this governs the RT (DXR RayQuery) sun-shadow/reflection history and only has any effect
+    // while rayTracing != Quality::Off; it does nothing to the voxel cone-trace GI cost below, which
+    // is governed instead by giUpdateInterval.
     u32 rtPixelsPerRayTile = 1;
+
+    // How many frames apart the GI volume is re-voxelised: 1 (the default) revoxelises and re-filters
+    // every frame, identical to the original always-fresh behaviour. N>1 reuses the previous frame's
+    // voxelised+filtered volume for the N-1 frames in between, amortising the voxelise-rasterise pass
+    // and the mip filter chain (VoxiRenderer::voxelizePass / filterMips) at the cost of the indirect
+    // lighting lagging scene changes by up to N-1 frames -- a visible latency trade, not a resolution
+    // one, and the reason the default keeps it off. Clamped to [1, VoxiRenderer::kMaxGiUpdateInterval].
+    u32 giUpdateInterval = 1;
 };
 
 // Process-wide settings service. Single instance shared by the editor, the runtime and the C ABI.

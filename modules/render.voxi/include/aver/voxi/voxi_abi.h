@@ -74,6 +74,10 @@ AVER_VOXI_ABI int32_t aver_voxi_set_gi_intensity(float v);
 AVER_VOXI_ABI float   aver_voxi_get_gi_max_distance(void);
 /* Sets the cone trace range, in centimetres. */
 AVER_VOXI_ABI int32_t aver_voxi_set_gi_max_distance(float cm);
+/* Returns how many frames apart the GI volume is re-voxelised (1 = every frame). */
+AVER_VOXI_ABI int32_t aver_voxi_get_gi_update_interval(void);
+/* Sets the GI revoxelise interval, in frames; clamped [1, 8]. */
+AVER_VOXI_ABI int32_t aver_voxi_set_gi_update_interval(int32_t frames);
 
 /* Returns the device's ray tracing tier: 0 none, 10 DXR 1.0, 11 DXR 1.1. */
 AVER_VOXI_ABI int32_t aver_voxi_ray_tracing_tier(void);

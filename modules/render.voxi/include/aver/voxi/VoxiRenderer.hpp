@@ -54,6 +54,15 @@ public:
     void setPixelsPerRayTile(u32 n);
     u32  pixelsPerRayTile() const { return rtPixelsPerRayTile_; }
 
+    // Sets how many frames apart the GI volume (voxelizePass + filterMips) is rebuilt, clamped to
+    // [1, kMaxGiUpdateInterval]. 1 (the default) rebuilds every frame -- bit-identical to the original
+    // always-fresh behaviour. N>1 reuses the previous frame's voxelised+filtered volume for the N-1
+    // frames in between: the cone trace still runs every frame (it is a per-pixel forward-shader
+    // lookup, unaffected by this), it just samples a volume that is up to N-1 frames stale. See
+    // Settings::giUpdateInterval for the full contract.
+    void setGiUpdateInterval(u32 n);
+    u32  giUpdateInterval() const { return giUpdateInterval_; }
+
     // Turns on the frame-period report. See rtShadowRays_ for what it is for and what it is not.
     void setFrameTimeReport(bool on) { frameTimeReport_ = on; }
 
@@ -64,6 +73,9 @@ public:
     // covering 256, which is already an aggressive enough amortisation that a fast-moving shadow
     // caster or camera visibly lags the tile converging behind it.
     static constexpr u32 kMaxPixelsPerRayTile = 16;
+    // The largest GI revoxelise interval accepted: 8 frames of staleness is already a visible lag for
+    // anything moving through the volume at a normal pace.
+    static constexpr u32 kMaxGiUpdateInterval = 8;
 
     // Starts a new frame's draw list; the passes replay the previous one.
     void beginScene() override;
@@ -185,6 +197,9 @@ private:
     // Tile edge for the shadow's temporal amortisation. See setPixelsPerRayTile / Settings for the
     // contract; 1 traces every pixel every frame.
     u32 rtPixelsPerRayTile_ = 1;
+    // Frames apart the GI volume is rebuilt. See setGiUpdateInterval / Settings for the contract; 1
+    // rebuilds every frame. Read against rtFrameIndex_ in prePass() -- see that call site.
+    u32 giUpdateInterval_ = 1;
     // Advances once per prePass() call, unconditionally -- a pure count of simulated frames, never
     // wall-clock -- so the ray-traced shadow's per-pixel trace schedule and disc-sample rotation are
     // a deterministic function of frame NUMBER. A fixed --frames count therefore always reaches the

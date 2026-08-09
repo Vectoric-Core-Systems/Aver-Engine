@@ -241,6 +241,7 @@ void VoxiRenderer::setSettings(const Settings& s) {
     // setters (setShadowRays, setPixelsPerRayTile) still own the actual clamping.
     setShadowRays(s.rtShadowRays);
     setPixelsPerRayTile(s.rtPixelsPerRayTile);
+    setGiUpdateInterval(s.giUpdateInterval);
 }
 
 // Places the GI volume: centre in world units, half-edge extent.
@@ -284,6 +285,17 @@ void VoxiRenderer::setPixelsPerRayTile(u32 n) {
     rtPixelsPerRayTile_ = rounded;
     AVER_INFO("[Voxi] ray-traced shadow tile: {}x{} ({} pixels per trace)",
               rounded, rounded, rounded * rounded);
+}
+
+// Clamped to [1, kMaxGiUpdateInterval]; no rounding needed, unlike the tile-edge setters above -- this
+// is a plain frame count, not a bitmask operand.
+void VoxiRenderer::setGiUpdateInterval(u32 n) {
+    const u32 clamped = n < 1 ? 1 : (n > kMaxGiUpdateInterval ? kMaxGiUpdateInterval : n);
+    if (clamped != n)
+        AVER_WARN("[Voxi] GI update interval {} clamped to {}", n, clamped);
+    if (clamped == giUpdateInterval_) return;
+    giUpdateInterval_ = clamped;
+    AVER_INFO("[Voxi] GI volume rebuilds every {} frame(s)", giUpdateInterval_);
 }
 
 // Prints what the run's frames cost. The MEDIAN leads because a frame period is a heavy-tailed
@@ -409,8 +421,18 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     beginShadowHistory(ctx);
     shadowPass(ctx);                    // fitCascades(), called from here, fills curViewProj_
     if (giEnabled()) {
-        voxelizePass(ctx);
-        filterMips(ctx);
+        // Amortised revoxelisation: rtFrameIndex_ was already incremented above, so it reads 1 on
+        // this feature's very first prePass -- (rtFrameIndex_-1) % N therefore always lands on 0 for
+        // frame 1, guaranteeing the volume is built at least once before anything ever samples it,
+        // however large giUpdateInterval_ is. Every Nth frame after that rebuilds again; the frames in
+        // between skip straight past voxelizePass/filterMips and the cone trace (gated by
+        // voxelParams[3] above, unaffected by this) samples whatever the volume held last time it was
+        // rebuilt. giUpdateInterval_ == 1 (the default) takes the fast path every frame, identical to
+        // the code before this knob existed.
+        if (giUpdateInterval_ <= 1 || ((rtFrameIndex_ - 1) % giUpdateInterval_) == 0) {
+            voxelizePass(ctx);
+            filterMips(ctx);
+        }
     }
     endShadowHistory();
 }
