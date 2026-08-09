@@ -717,6 +717,19 @@ float plainGeomSchlick(float nd, float k){ return nd/(nd*(1.0-k)+k); }
 float4 plainShadeSurface(VSOut i, float sunVis, float3 indirectRadiance, float ao) {
     float3 N = normalize(i.nrmWS);
     float3 V = normalize(gCamPos.xyz - i.wpos);
+    // TWO-SIDED SHADING. A leaf, a frond or a grass blade is one sheet of triangles drawn with
+    // culling off, so half of what you see is the BACK of a surface whose normal points away from
+    // you. Shading that with the unflipped normal puts N.L below zero, the saturate clamps it to
+    // black, and every plant in the world renders as a dark silhouette against lit ground -- which
+    // is exactly what this engine did until now. Nothing anywhere handled it: SV_IsFrontFace does
+    // not appear in a single shader in this tree.
+    //
+    // dot(N, V) RATHER THAN SV_IsFrontFace, deliberately. The face flag is the textbook answer but
+    // needs a new PS input threaded through every entry point in this file and the mesh-shader
+    // variants beside it; flipping on the view vector needs one line and answers the same question
+    // for the case that matters -- "am I looking at the back of this sheet". On a correctly wound
+    // closed mesh the back faces are culled before they reach here, so this cannot fire there.
+    if (dot(N, V) < 0.0) N = -N;
     float3 L = normalize(gLightDir.xyz);
     float3 H = normalize(V + L);
     float metallic = saturate(gMaterial.x);

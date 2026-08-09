@@ -99,6 +99,12 @@ AverVertex averVertexOf(VSOut i) {
     v.wpos = i.wpos;
     v.N    = normalize(i.nrmWS);
     v.V    = normalize(gCamPos.xyz - i.wpos);
+    // Two-sided shading, matching plainShadeSurface in rhi::sharedShaderPrelude -- see its comment
+    // for why this is dot(N, V) and not SV_IsFrontFace. It belongs in BOTH preludes because a
+    // material-shaded draw never goes through the plain path, and foliage is exactly what the
+    // material path is for: a one-sheet leaf drawn with culling off shades its back side black
+    // without this.
+    if (dot(v.N, v.V) < 0.0) v.N = -v.N;
     v.uv   = i.uv;
     return v;
 }
