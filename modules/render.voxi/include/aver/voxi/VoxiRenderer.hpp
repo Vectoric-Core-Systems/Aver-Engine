@@ -167,15 +167,13 @@ private:
     // mesh whose vertices are written by compute -- IDevice::meshVertexBuffer is what says which --
     // where the cache expires every frame and the structure is rebuilt.
     //
-    // THAT PREDICATE IS CURRENTLY TRUE OF EVERY MESH, which is measured and not suspected: the
-    // editor's placeholder scene has no skinned geometry at all and still logs
-    // `mesh 1 has compute-written vertices`, then two rebuilds a frame forever. meshVertexBuffer is
-    // contracted to be "non-zero when a mesh's vertices are WRITTEN BY COMPUTE ... zero for every
-    // ordinary mesh", and the D3D12 backend returns GpuMesh::vbBuffer, which createMesh has filled
-    // in for every mesh since a3022e0 gave a shader the ability to read a mesh's geometry. The
-    // backend needs a flag set only by createSkinTargetMesh; this side cannot tell the difference
-    // and must not guess. Priced at 0.071 ms/frame for this scene's two 14-vertex meshes -- almost
-    // all of it fixed per-build overhead, so it grows with mesh COUNT before it grows with triangles.
+    // FIXED: this used to say the predicate above was true of every mesh, forcing a two-rebuild-a-
+    // frame cost onto ordinary static geometry that was never compute-written at all. That was
+    // meshVertexBuffer returning GpuMesh::vbBuffer, which createMesh fills in for every mesh --
+    // compute-written or not -- since a3022e0 gave a shader the ability to read a mesh's geometry.
+    // D3D12Device.cpp now gates it on GpuMesh::computeWritten, set only by createSkinTargetMesh and
+    // cleared by destroyMesh, so an ordinary static mesh's BLAS is cached across frames as this
+    // comment always intended, and only a genuine skin target pays the per-frame rebuild.
     //
     // Either way the rebuild is a full PREFER_FAST_TRACE build rather than a refit, because the RHI
     // has no update verb. See the module README for the two verbs it would take; do not reach for

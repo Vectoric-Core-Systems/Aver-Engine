@@ -1244,6 +1244,15 @@ private:
     bool msSupported_ = false, msActive_ = false, msRefusalLogged_ = false;
     ID3D12RootSignature* boundRootSig_ = nullptr;   // raw: cache only, ownership stays in the ComPtrs
     ID3D12PipelineState* boundPso_ = nullptr;       // same cache, for drawMesh's SetPipelineState
+    // Same idea, for the LAST descriptor heap array actually pushed onto cmdList_ via
+    // SetDescriptorHeaps -- see D3D12RenderContext::setBindingSet for why this is worth caching at
+    // all: this backend only ever has ONE generic heap (res_->heap_), so a scene of thousands of
+    // draws through a render feature calls SetDescriptorHeaps with the identical single-entry array
+    // every single draw. Every direct SetDescriptorHeaps call that bypasses setBindingSet (the post
+    // chain's postSrvHeap_, ImGui's uiSrvHeap_) must update this immediately after, the same
+    // discipline boundRootSig_/boundPso_ already follow, or a later setBindingSet call would wrongly
+    // believe res_->heap_ was still the one visible to the command list.
+    ID3D12DescriptorHeap* boundHeap_ = nullptr;
 
     bool hasSwapchain_ = false;
     bool vsync_ = true;
@@ -2436,6 +2445,9 @@ void D3D12Device::beginFrame() {
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
     boundRootSig_ = nullptr;
     boundPso_ = pso_.Get();   // Reset's second argument IS the command list's initial bound PSO
+    // Reset() does not carry descriptor heaps forward either -- a freshly reset command list has
+    // none bound until the first SetDescriptorHeaps of the new recording, same as the root signature.
+    boundHeap_ = nullptr;
     postCBUsed_ = 0;
     drawBinding_ = defaultDrawBinding_;
     // Before any feature's prePass and before any draw: a skin target must never be read in the
@@ -3151,6 +3163,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
 
     ID3D12DescriptorHeap* heaps[] = {postSrvHeap_.Get()};
     cmdList_->SetDescriptorHeaps(1, heaps);
+    boundHeap_ = postSrvHeap_.Get();
     cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
     boundRootSig_ = nullptr;
     boundPso_ = nullptr;
@@ -3395,6 +3408,7 @@ void D3D12Device::endFrame() {
         cmdList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         ID3D12DescriptorHeap* heaps[] = {uiSrvHeap_.Get()};
         cmdList_->SetDescriptorHeaps(1, heaps);
+        boundHeap_ = uiSrvHeap_.Get();
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmdList_.Get());
     }
 #endif
@@ -5030,8 +5044,17 @@ void D3D12RenderContext::setBindingSet(BindingSetHandle set, u32 table) {
     RhiBindingSet* s = res_->bindingSet(set);
     if (!s || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] setBindingSet with an invalid handle"); return; }
 
-    ID3D12DescriptorHeap* heaps[] = {res_->heap_.Get()};
-    dev_->cmdList_->SetDescriptorHeaps(1, heaps);
+    // This backend has exactly one generic heap, so a scene of thousands of feature-overridden draws
+    // (D3D12Device::drawMesh's per-entity branch) called this with the SAME single-entry array every
+    // single draw. Elided the same way boundRootSig_/boundPso_ already elide their own redundant
+    // sets below -- see boundHeap_'s member comment for the invalidation this depends on staying
+    // correct at every OTHER site that calls SetDescriptorHeaps directly.
+    ID3D12DescriptorHeap* const heap = res_->heap_.Get();
+    if (dev_->boundHeap_ != heap) {
+        ID3D12DescriptorHeap* heaps[] = {heap};
+        dev_->cmdList_->SetDescriptorHeaps(1, heaps);
+        dev_->boundHeap_ = heap;
+    }
     dev_->boundRootSig_ = nullptr;
     dev_->boundPso_ = nullptr;
 

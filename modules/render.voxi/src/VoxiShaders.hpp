@@ -743,6 +743,16 @@ void GSVoxel(triangle VoxOut inp[3], inout TriangleStream<VoxOut> os) {
 
 #if AVER_MS
 // Voxelisation without a geometry shader: the same dominant-axis projection, per primitive.
+//
+// nr[k] went through averTransformNormal(v.nrm, gWorld) rather than a plain mul(float4(nrm,0),
+// gWorld) so that this path actually matches VSVoxel below (and VSMain, ActorPreview's vertex
+// shader and MSClusterMain) -- see 1856da1 "Render: a normal transform, two GPU races, and a seam
+// along every terrain section", which fixed all four OTHER call sites of this exact bug and missed
+// this fifth one because MSVoxel is compiled only behind AVER_MS, which nothing had turned on yet.
+// A plain mul is correct only under rotation and uniform scale; every normal with components on
+// more than one axis reads wrong the moment an entity's scale goes non-uniform, and this pass
+// backs indirect lighting -- a mis-shaded normal here does not flicker on one triangle, it tints an
+// entire surface's bounce light for as long as the volume holds it.
 [numthreads(AVER_MS_TRIS, 1, 1)]
 [outputtopology("triangle")]
 void MSVoxel(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
@@ -758,7 +768,7 @@ void MSVoxel(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
     [unroll] for (uint k = 0; k < 3; ++k) {
         MeshVtx v = gVerts[idx[k]];
         wp[k] = mul(float4(v.pos, 1.0), gWorld).xyz;
-        nr[k] = mul(float4(v.nrm, 0.0), gWorld).xyz;
+        nr[k] = averTransformNormal(v.nrm, gWorld);
         uv[k] = v.uv;
     }
     float3 n = abs(cross(wp[1] - wp[0], wp[2] - wp[0]));

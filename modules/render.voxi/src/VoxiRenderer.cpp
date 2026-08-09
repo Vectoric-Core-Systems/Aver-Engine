@@ -865,7 +865,19 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     ctx.dispatch(cg, cg, cg);
     ctx.uavBarrierTexture(voxelAccumTex_);   // injection must see the cleared accumulator
 
-    const bool useMs = settings_.meshShaders && voxelMsPso_;
+    // Prefers the mesh-shader voxelise pipeline WHENEVER the device built one, independent of
+    // settings_.meshShaders. That flag is a wider, device-level switch -- it also moves the MAIN
+    // scene's lit draws onto their own mesh-shader pipeline (see scenePipeline / IDevice::setMeshShaders
+    // in SandboxApp.cpp) and stays off by default because turning the whole scene over to a rarely-
+    // exercised path is a real behaviour change to opt into. Voxelisation has no such wrinkle: PSVoxel
+    // is the SAME pixel shader either way, the pipeline state (cull none, no depth clip, conservative
+    // raster, no render target) is copied from the same `vox` desc, and MSVoxel now runs the identical
+    // dominant-axis projection VSVoxel+GSVoxel do -- see MSVoxel's own comment for the normal-transform
+    // bug this depended on fixing first. createPipelines() already builds and validates voxelMsPso_
+    // for any device that reports mesh-shader support, REGARDLESS of this setting, so `voxelMsPso_ != 0`
+    // is exactly "the device already proved it can do this" and nothing more needs asking. This is the
+    // path GSVoxel exists to be a fallback for, on a device with no mesh-shader tier.
+    const bool useMs = voxelMsPso_ != 0;
     ctx.setPipeline(useMs ? voxelMsPso_ : voxelPso_);
     ctx.setBindingSet(bindings_);
     ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
