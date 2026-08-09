@@ -120,6 +120,18 @@ struct OcScatterSpecies {
 struct OcLandscapePlacement {
     std::string name;      // level-local identifier; "unnamed" when empty, mirroring OcPcgVolume
     std::string section;   // asset reference to the .ocland file; required in practice
+    // Material name, resolved by the host exactly as PLACE's and SCATTER's are -- empty means the
+    // renderer's own flat default colour.
+    //
+    // THE LEVEL IS THE ONLY PLACE THAT CAN SAY THIS. An .ocland file carries heights and nothing
+    // else (OcLand.hpp: two chunk ids, LHDR and HGHT), so the same heightfield is a forest floor in
+    // one level and a sand dune in another; putting the surface in the asset would make that
+    // impossible, and putting it in the engine would make it the same in every project.
+    //
+    // Its absence is why terrain rendered as one flat olive: LandscapeRenderer::setSurface had a
+    // hardcoded {0.42, 0.45, 0.36} and no call site anywhere in the tree, and a level had no token
+    // with which to override it.
+    std::string material;
     f64 x = 0, y = 0, z = 0;   // world placement (cm) of the section's own origin sample, overriding
                                 // whatever the .ocland file's own originCm says
 

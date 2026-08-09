@@ -374,6 +374,49 @@ static void checkOcworldLandscape() {
         check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
     }
     {
+        // `material` on a LANDSCAPE line: the token that decides what terrain is SHADED with, and
+        // the reason it exists is that there was no way to say it. LandscapeRenderer::setSurface
+        // held a hardcoded olive and had no call site in the tree, so every level's terrain rendered
+        // the same flat colour whatever it contained.
+        //
+        // Checked BOTH WAYS on purpose. Stating it must survive a round trip, and NOT stating it
+        // must not invent one -- an empty material means "the renderer keeps its own default", so a
+        // level that never mentioned terrain shading must not come back from a save claiming a
+        // material it does not have. That is the same unset-is-not-a-value rule `extent` follows
+        // just above, and the writer omits both for the same reason.
+        OcWorldData w;
+        check(parseOcworld(
+            "OCWORLD 1\nNAME T\n"
+            "LANDSCAPE name Floor section Terrain/floor.ocland material M_forest_leaves_02 at 0 0 0\n"
+            "LANDSCAPE name Bare section Terrain/bare.ocland at 100 0 0\n", w, &err),
+            "a LANDSCAPE record with a `material` clause parses");
+        check(w.landscapes.size() == 2, "and both sections survive");
+        check(w.landscapes[0].material == "M_forest_leaves_02", "the material name is kept verbatim");
+        check(w.landscapes[1].material.empty(),
+              "a section with no `material` clause leaves it empty, not defaulted to a name");
+        // Placement still parses correctly with `material` sitting between `section` and `at` --
+        // the token order is free, and a new key must not shift the ones after it.
+        check(std::fabs(w.landscapes[1].x - 100.0) < 1e-9,
+              "a later key still parses with `material` present on the sibling record");
+
+        const std::string text = writeOcworld(w);
+        check(text.find("material M_forest_leaves_02") != std::string::npos,
+              "the written text carries the material");
+        const usize barePos = text.find("Terrain/bare.ocland");
+        const usize bareEnd = text.find('\n', barePos);
+        check(barePos != std::string::npos &&
+              text.substr(barePos, bareEnd - barePos).find("material") == std::string::npos,
+              "a section with no material has no `material` token at all");
+
+        OcWorldData back;
+        check(parseOcworld(text, back, &err), "the written text parses again");
+        check(back.landscapes.size() == 2 &&
+              back.landscapes[0].material == "M_forest_leaves_02" &&
+              back.landscapes[1].material.empty(),
+              "and material round-trips, present and absent alike");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
         // Unknown-record tolerance, both directions: a line no branch understands must not disturb a
         // LANDSCAPE record next to it, whichever side it sits on.
         OcWorldData w;

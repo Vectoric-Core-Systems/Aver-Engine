@@ -1929,6 +1929,14 @@ public:
         if (landscapeLoaded_) updateLandscapeRingTiles(e.device(), eye_.x, eye_.y);
 
         if (landscapeLoaded_ && landscapeRenderer_) {
+            // Bind the level's terrain material the first frame the material system is ready.
+            // LEVEL LOAD CANNOT BE TRUSTED TO BE LATE ENOUGH: loadProjectMaterials() runs before
+            // the landscape loads, but MaterialSystem::ready() also needs its GPU side up, and the
+            // two do not have a guaranteed order. A bool test per frame is cheaper than reasoning
+            // about that ordering, and it self-heals if the system comes up later.
+            if (!landscapeMaterial_.empty() && !landscapeRenderer_->hasSurfaceBinding())
+                applyLandscapeSurfaceToAll();
+
             landscape::SelectParams lp;
             lp.cameraCm[0] = eye_.x; lp.cameraCm[1] = eye_.y; lp.cameraCm[2] = eye_.z;
             // Same fovY (radians(60.0f)) and the same projScale formula trifactor::projScale uses,
@@ -3129,6 +3137,34 @@ private:
     // with an identity world matrix, the sculpt raycast walks the same grid, the height source
     // samples it, and the physics bridge converts it; all four read originCm, so moving the section
     // is one assignment rather than four transforms that could disagree.
+    // Pushes the level's LANDSCAPE material into one landscape renderer, as an opaque binding.
+    //
+    // THE HOST DOES THE RESOLVING, which is the whole reason LandscapeRenderer::setSurfaceBinding
+    // takes bytes and a handle instead of a pbr:: type. Aver.Landscape.Renderer links Core, RHI and
+    // Aver.Landscape only; the material system lives here, in the composition root, exactly as the
+    // concrete Voxi and AverSR types do.
+    void applyLandscapeSurface(landscape::LandscapeRenderer& r) {
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+        if (landscapeMaterial_.empty()) return;
+        pbr::MaterialSystem& ms = voxiRenderer_.materials();
+        if (!ms.ready()) return;
+        const pbr::MaterialHandle h = materialForSurface(landscapeMaterial_);
+        if (!h) return;
+        r.setSurfaceBinding(ms.bindingSet(h), &ms.constants(h), sizeof(pbr::MaterialConstants));
+#else
+        (void)r;
+#endif
+    }
+
+    // Re-applies it to the authored section and every resident ring tile at once. Called after a
+    // level load, and after the material system becomes ready -- whichever happens second is the one
+    // that actually binds anything, and neither is reliably first.
+    void applyLandscapeSurfaceToAll() {
+        if (landscapeRenderer_) applyLandscapeSurface(*landscapeRenderer_);
+        for (auto& kv : landscapeRingTiles_)
+            if (kv.second.renderer) applyLandscapeSurface(*kv.second.renderer);
+    }
+
     void loadLandscapeForLevel(rhi::IDevice* device, const std::string& levelPath,
                                const fmt::OcWorldData& w) {
         std::string path = landscapeCliOverride_;
@@ -3141,6 +3177,10 @@ private:
                 AVER_WARN("[Landscape] level declares {} LANDSCAPE sections; the editor holds one and "
                           "is using '{}'. Tiling several sections is not implemented.",
                           w.landscapes.size(), lp.name.empty() ? lp.section : lp.name);
+            // Taken even when the section path below fails: the material is a property of the
+            // level's terrain, not of which file the heights came from, and the .ocland fallback
+            // convention still wants it.
+            landscapeMaterial_ = lp.material;
             if (!lp.section.empty()) {
                 const std::string content = project_.contentDir();
                 path = content.empty() ? lp.section : content + "\\" + lp.section;
@@ -3194,6 +3234,7 @@ private:
         }
         rebuildLandscapeCollision();
         applyLandscapeToStreaming();
+        applyLandscapeSurfaceToAll();
     }
 
     // Keeps a small window of PROCEDURAL tiles resident around (cameraXCm, cameraYCm), so the terrain
@@ -3263,6 +3304,9 @@ private:
             tile.tree.resetHysteresis();
             tile.renderer =
                 std::make_unique<landscape::LandscapeRenderer>(kLandscapeMaxResidentNodesPerTile);
+            // A tile born mid-session has to be told the surface too, or the ring renders untextured
+            // around a textured home section -- a seam that moves with the camera.
+            applyLandscapeSurface(*tile.renderer);
             landscapeRingTiles_.emplace(t, std::move(tile));
         }
 
@@ -7608,6 +7652,11 @@ private:
     // Heap-owned so unloadLandscape() can destroy and recreate it independently of the section data,
     // mirroring LandscapeRenderer's own forget-then-discard lifecycle (LandscapeRenderer.hpp:46-58).
     std::unique_ptr<landscape::LandscapeRenderer> landscapeRenderer_;
+    // The material name the level's LANDSCAPE record named, held as TEXT rather than a resolved
+    // handle: the material system is not necessarily ready when the level parses, and re-resolving
+    // from the name is what lets applyLandscapeSurfaceToAll() be called again later without caring
+    // which of the two finished first.
+    std::string landscapeMaterial_;
     bool landscapeLoaded_ = false;
     std::string landscapePath_;   // the section actually resident; empty when none is
     bool landscapeDirty_ = false; // true once a sculpt has touched landscapeData_ since the last save
@@ -8168,6 +8217,18 @@ private:
                 sky_.sunDirection[i] = static_cast<f32>(w.sunDir[i]);
                 sunColor_[i] = static_cast<f32>(w.sunColor[i]);
             }
+            // `lux` WAS STILL BEING DROPPED after the comment above said sunDir/sunColor no longer
+            // were. Two of the three got wired; the brightness did not, so a level could state any
+            // sun intensity it liked and every scene rendered at the editor's default 3.0. It is
+            // silent, and it is invisible in a diff -- the value parses, round-trips through a save,
+            // and never reaches a pixel. Caught by changing lux 112000 -> 34000 and getting a
+            // BIT-IDENTICAL frame back.
+            //
+            // The divisor makes the two defaults agree rather than inventing a constant: OcWorldData
+            // defaults sunLux to 100000, rhi::SkyAtmosphere defaults sunIntensity to 3.0, so a level
+            // that states neither, and a level that states exactly the format default, both land on
+            // the value the engine already used. Nothing that omits SUN changes brightness.
+            sky_.sunIntensity = static_cast<f32>(w.sunLux / (100000.0 / 3.0));
             // A sun below the horizon is legal -- the physical model renders night -- but under the
             // authored dome it silently lit everything from underneath, so no level was ever told.
             // Say it out loud rather than clamping: only the author knows if they meant it.

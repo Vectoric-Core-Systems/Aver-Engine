@@ -8,6 +8,7 @@
 
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace aver::landscape {
 
@@ -36,6 +37,24 @@ public:
 
     // Sets the one material the whole landscape is shaded with.
     void setSurface(const f32 baseColor[4], f32 metallic, f32 roughness);
+
+    // Sets the TEXTURE binding every landscape draw is submitted with -- the terrain's albedo,
+    // normal, roughness and AO maps, rather than the single flat colour setSurface takes.
+    //
+    // OPAQUE ON PURPOSE. `set` and `constants` are whatever the host's material system produced;
+    // this module does not know, and must not know, that pbr::MaterialSystem or pbr::
+    // MaterialConstants exist. Aver.Landscape.Renderer links Aver.Core, Aver.RHI and Aver.Landscape
+    // and that is the whole list -- taking a pbr::MaterialHandle here would put the PBR module in
+    // the link line of anything that draws terrain, which is exactly the coupling the two-target
+    // split at the top of this module's CMakeLists exists to prevent.
+    //
+    // `constants` is COPIED, so the caller may reuse or destroy its buffer immediately; a null
+    // `set` (the default) restores the flat-colour behaviour with no binding of its own.
+    void setSurfaceBinding(rhi::BindingSetHandle set, const void* constants, u32 bytes);
+
+    // Whether a texture binding has been supplied. Callers use this to decide whether the flat
+    // baseColor_ is still doing the shading.
+    bool hasSurfaceBinding() const { return surfaceSet_ != 0; }
 
     // Draws one section's selected nodes, creating their meshes lazily. `world` is applied to every node.
     void draw(rhi::IDevice& device, const fmt::OcLandData& data, const LandscapeTree& tree,
@@ -112,6 +131,9 @@ private:
     f32 baseColor_[4] = {0.42f, 0.45f, 0.36f, 1.0f};
     f32 metallic_ = 0.0f;
     f32 roughness_ = 0.85f;
+    // The host's material binding, held as bytes rather than a type. Empty until setSurfaceBinding.
+    rhi::BindingSetHandle surfaceSet_ = 0;
+    std::vector<u8> surfaceConstants_;
     u32 maxResident_ = 512;
     bool warnedFull_ = false;
     LandscapeRenderStats stats_;

@@ -116,8 +116,9 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
         } else if (equalsCI(key, "LANDSCAPE")) {
             OcLandscapePlacement lp;
             for (usize i = 1; i < t.size(); ++i) {
-                if      (equalsCI(t[i], "name")    && i + 1 < t.size()) lp.name    = std::string(t[++i]);
-                else if (equalsCI(t[i], "section") && i + 1 < t.size()) lp.section = std::string(t[++i]);
+                if      (equalsCI(t[i], "name")     && i + 1 < t.size()) lp.name     = std::string(t[++i]);
+                else if (equalsCI(t[i], "section")  && i + 1 < t.size()) lp.section  = std::string(t[++i]);
+                else if (equalsCI(t[i], "material") && i + 1 < t.size()) lp.material = std::string(t[++i]);
                 else if (equalsCI(t[i], "at")      && i + 3 < t.size()) {
                     lp.x = parseF64(t[i+1]); lp.y = parseF64(t[i+2]); lp.z = parseF64(t[i+3]);
                     i += 3;
@@ -269,8 +270,11 @@ std::string writeOcworld(const OcWorldData& w) {
         s += "\n";
         for (const OcLandscapePlacement& lp : w.landscapes) {
             s += "LANDSCAPE name " + (lp.name.empty() ? std::string("unnamed") : lp.name) +
-                 " section " + lp.section +
-                 " at " + num(lp.x) + " " + num(lp.y) + " " + num(lp.z);
+                 " section " + lp.section;
+            // Omitted when unset, for the same reason `extent` is below: empty means "the renderer
+            // keeps its own default", and writing a blank token back would not round-trip.
+            if (!lp.material.empty()) s += " material " + lp.material;
+            s += " at " + num(lp.x) + " " + num(lp.y) + " " + num(lp.z);
             // OMITTED WHEN UNSET, same reasoning as PCGVOLUME's `samples` just below: 0 is this
             // field's "nothing declared, ask the section file" sentinel, and a level that never
             // stated an extent should not come back from a save claiming zero.

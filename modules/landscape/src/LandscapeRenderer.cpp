@@ -12,6 +12,17 @@ void LandscapeRenderer::setSurface(const f32 baseColor[4], f32 metallic, f32 rou
     roughness_ = roughness;
 }
 
+// Sets the texture binding every landscape draw is submitted with. See the header for why this
+// takes bytes and an opaque handle rather than a material type.
+void LandscapeRenderer::setSurfaceBinding(rhi::BindingSetHandle set, const void* constants, u32 bytes) {
+    surfaceSet_ = set;
+    surfaceConstants_.clear();
+    if (constants && bytes) {
+        const u8* p = static_cast<const u8*>(constants);
+        surfaceConstants_.assign(p, p + bytes);
+    }
+}
+
 // The nearest ancestor of `node` that already has a mesh, or kInvalidNode.
 u32 LandscapeRenderer::residentAncestor(const LandscapeTree& tree, u32 node) const {
     u32 current = node;
@@ -52,6 +63,18 @@ void LandscapeRenderer::draw(rhi::IDevice& device, const fmt::OcLandData& data,
     stats_ = LandscapeRenderStats{};
     drawnThisFrame_.clear();
     ++frame_;
+
+    // SET ONCE, HERE, AND NOT PER DRAW -- setDrawBinding is sticky (rhi/RHI.hpp: "sticky until
+    // changed and consumed by every subsequent drawMesh"), so one call covers every node below.
+    //
+    // IT HAS TO BE INSIDE draw(), THOUGH. Stickiness is exactly why: whatever loop ran before this
+    // one left ITS material bound, and the terrain would be shaded with it. That was the state
+    // before this existed -- the landscape never bound anything, so it inherited whichever mesh
+    // happened to be submitted last and fell back to the flat baseColor_ below, which is why
+    // terrain has always rendered as one untextured colour no matter what the level said.
+    if (surfaceSet_ && !surfaceConstants_.empty())
+        device.setDrawBinding(surfaceSet_, surfaceConstants_.data(),
+                              static_cast<u32>(surfaceConstants_.size()));
 
     // The root is claimed first so there is always one ancestor every other node can fall back to.
     const u32 rootIndex = tree.root();
