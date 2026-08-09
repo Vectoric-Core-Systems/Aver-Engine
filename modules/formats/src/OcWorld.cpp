@@ -137,6 +137,29 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             if (v.cellSizeCm <= 0.0) v.cellSizeCm = 1600.0;
             if (v.octaves < 1) v.octaves = 1;
             out.pcgVolumes.push_back(std::move(v));
+        } else if (equalsCI(key, "SCATTER")) {
+            OcScatterSpecies sp;
+            // density is read into locals first: two tokens have to arrive together or not at all, and
+            // the struct's own unbounded default must survive untouched when the line has no `density`
+            // clause -- exactly PCGVOLUME's `bounds` shape, one line up.
+            bool sawDensity = false;
+            f64 dMin = 0.0, dMax = 0.0;
+            for (usize i = 1; i < t.size(); ++i) {
+                if      (equalsCI(t[i], "mesh")     && i + 1 < t.size()) sp.meshPath = std::string(t[++i]);
+                else if (equalsCI(t[i], "material") && i + 1 < t.size()) sp.material = std::string(t[++i]);
+                else if (equalsCI(t[i], "weight")   && i + 1 < t.size()) sp.weight = parseF64(t[++i]);
+                else if (equalsCI(t[i], "scale")    && i + 2 < t.size()) {
+                    sp.scaleMin = parseF64(t[i+1]); sp.scaleMax = parseF64(t[i+2]); i += 2;
+                } else if (equalsCI(t[i], "density") && i + 2 < t.size()) {
+                    dMin = parseF64(t[i+1]); dMax = parseF64(t[i+2]); sawDensity = true; i += 2;
+                } else if (equalsCI(t[i], "collide") && i + 1 < t.size()) {
+                    sp.collisionRadiusCm = parseF64(t[++i]);
+                } else if (equalsCI(t[i], "noyaw")) {
+                    sp.randomizeYaw = false;
+                }
+            }
+            if (sawDensity) { sp.densityMin = dMin; sp.densityMax = dMax; }
+            out.scatterSpecies.push_back(std::move(sp));
         } else if (equalsCI(key, "PLACE") || equalsCI(key, "PLACEG")) {
             const bool g = equalsCI(key, "PLACEG");
             OcWorldPlacement p;
@@ -242,6 +265,29 @@ std::string writeOcworld(const OcWorldData& w) {
                 s += " bounds " + num(v.boundsMin[0]) + " " + num(v.boundsMin[1]) + " " + num(v.boundsMin[2]) +
                      " " + num(v.boundsMax[0]) + " " + num(v.boundsMax[1]) + " " + num(v.boundsMax[2]);
             }
+            s += "\n";
+        }
+    }
+
+    if (!w.scatterSpecies.empty()) {
+        s += "\n";
+        for (const OcScatterSpecies& sp : w.scatterSpecies) {
+            s += "SCATTER mesh " + sp.meshPath +
+                 " material " + sp.material +
+                 " weight " + num(sp.weight) +
+                 " scale " + num(sp.scaleMin) + " " + num(sp.scaleMax);
+            // OMITTED, DELIBERATELY, rather than printed as ~1.79769e+308: an unbounded band is the
+            // default every species starts from, and a level a person can still read should never
+            // have to spell out float's own sentinel. The threshold is half of max rather than max
+            // itself so a value merely CLOSE to the sentinel (never produced by this writer, but not
+            // impossible from a hand edit) still round-trips as an explicit, printed band.
+            const bool unbounded = sp.densityMin <= -std::numeric_limits<f64>::max() / 2.0 &&
+                                    sp.densityMax >=  std::numeric_limits<f64>::max() / 2.0;
+            if (!unbounded) s += " density " + num(sp.densityMin) + " " + num(sp.densityMax);
+            s += " collide " + num(sp.collisionRadiusCm);
+            // A BARE TOKEN, matching PLACE's `nocollide` and PCGVOLUME's `infinite`: a statement about
+            // what the species IS, not a value it carries.
+            if (!sp.randomizeYaw) s += " noyaw";
             s += "\n";
         }
     }

@@ -20,6 +20,7 @@ aver_add_module(Aver.World
     src/ChunkSource.cpp
     src/ChunkStreamer.cpp
     src/ChunkGenerator.cpp
+    src/ScatterPalette.cpp
     src/ChunkWorld.cpp
   DEPS
     Aver.Core

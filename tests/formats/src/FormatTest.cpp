@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <string>
 
 using namespace aver;
@@ -216,11 +217,102 @@ static void checkOcworld() {
     }
 }
 
+// Checks the SCATTER record: every field, round-trip byte-identity, an unbounded density band's
+// deliberate omission from the written text, and that a line this parser does not understand (a
+// stand-in for a future record) does not disturb SCATTER or anything else already parsed.
+static void checkOcworldScatter() {
+    AVER_INFO("=== .ocworld SCATTER record ===");
+    using namespace fmt;
+    std::string err;
+
+    {
+        // Two species, every field given explicitly, so nothing here is a struct default in disguise.
+        OcWorldData w;
+        check(parseOcworld(
+            "OCWORLD 1\nNAME T\n"
+            "SCATTER mesh Meshes/island_tree_03.ocmesh material M_Bark weight 0.6 scale 0.9 1.6 "
+            "density 0.8 1.0 collide 170\n"
+            "SCATTER mesh Meshes/grass_medium_01.ocmesh material M_Foliage weight 6 scale 0.8 1.4 "
+            "collide 0 noyaw\n", w, &err),
+            "a world with two SCATTER records parses");
+        check(w.scatterSpecies.size() == 2, "and keeps both");
+
+        const OcScatterSpecies& a = w.scatterSpecies[0];
+        check(a.meshPath == "Meshes/island_tree_03.ocmesh", "species 0: mesh path");
+        check(a.material == "M_Bark", "species 0: material");
+        check(std::fabs(a.weight - 0.6) < 1e-12, "species 0: weight");
+        check(std::fabs(a.scaleMin - 0.9) < 1e-12 && std::fabs(a.scaleMax - 1.6) < 1e-12,
+              "species 0: scale range");
+        check(std::fabs(a.densityMin - 0.8) < 1e-12 && std::fabs(a.densityMax - 1.0) < 1e-12,
+              "species 0: density band");
+        check(std::fabs(a.collisionRadiusCm - 170.0) < 1e-9, "species 0: collision radius");
+        check(a.randomizeYaw, "species 0: yaw randomises by default (no `noyaw` token)");
+
+        const OcScatterSpecies& b = w.scatterSpecies[1];
+        check(b.meshPath == "Meshes/grass_medium_01.ocmesh", "species 1: mesh path");
+        check(std::fabs(b.weight - 6.0) < 1e-12, "species 1: weight");
+        check(b.densityMin <= -std::numeric_limits<f64>::max() / 2.0 &&
+              b.densityMax >=  std::numeric_limits<f64>::max() / 2.0,
+              "species 1: no `density` clause leaves the unbounded default");
+        check(!b.randomizeYaw, "species 1: `noyaw` turns off yaw randomisation");
+
+        // ---- round trip --------------------------------------------------------------------------
+        const std::string text = writeOcworld(w);
+        check(text.find("SCATTER mesh Meshes/island_tree_03.ocmesh") != std::string::npos,
+              "the written text carries the first species");
+        check(text.find("density 0.8 1") != std::string::npos,
+              "...with its explicit density band");
+        check(text.find("noyaw") != std::string::npos, "and the second species' `noyaw`");
+        // The UNBOUNDED case is deliberately not printed as ~1.79769e+308 -- see writeOcworld's own
+        // comment. Checked by absence: nothing in the grass line's output should carry a density
+        // clause the input never gave it.
+        const usize grassPos = text.find("Meshes/grass_medium_01.ocmesh");
+        const usize grassLineEnd = text.find('\n', grassPos);
+        check(grassPos != std::string::npos &&
+              text.substr(grassPos, grassLineEnd - grassPos).find("density") == std::string::npos,
+              "an unbounded species' line has no `density` token at all");
+
+        OcWorldData back;
+        check(parseOcworld(text, back, &err), "what the writer produced parses again");
+        check(back.scatterSpecies.size() == 2, "with both species still present");
+        check(back.scatterSpecies[0].meshPath == a.meshPath &&
+              std::fabs(back.scatterSpecies[0].weight - a.weight) < 1e-9 &&
+              std::fabs(back.scatterSpecies[0].collisionRadiusCm - a.collisionRadiusCm) < 1e-6,
+              "and the first species' fields round-trip");
+        check(!back.scatterSpecies[1].randomizeYaw, "...including the second species' `noyaw`");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
+        // A line no branch of the parser understands must not disturb a SCATTER record next to it --
+        // the reader's own contract ("unknown records are skipped, not failed") exercised with SCATTER
+        // specifically, since it is the newest record in the chain of if/else-if branches.
+        OcWorldData w;
+        check(parseOcworld(
+            "OCWORLD 1\nNAME T\n"
+            "FUTURERECORD something nobody has written yet\n"
+            "SCATTER mesh Meshes/rock.ocmesh weight 1\n", w, &err),
+            "a world with an unknown record before SCATTER still parses");
+        check(w.scatterSpecies.size() == 1 && w.scatterSpecies[0].meshPath == "Meshes/rock.ocmesh",
+              "and SCATTER is unaffected by the record it did not understand");
+    }
+    {
+        // A malformed SCATTER line (missing the value a keyword expects) is simply the token that
+        // never matches any branch -- the same tolerance PCGVOLUME already has for a short `bounds`.
+        // What must NOT happen is the whole record disappearing or the parse failing outright.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\nSCATTER mesh Meshes/x.ocmesh weight\n", w, &err),
+              "a SCATTER line with a dangling keyword still parses the file");
+        check(w.scatterSpecies.size() == 1 && std::fabs(w.scatterSpecies[0].weight - 1.0) < 1e-12,
+              "and the species keeps weight's own default rather than reading garbage");
+    }
+}
+
 // Runs the self-checks, then every file named on the command line. Returns the failure count.
 int main(int argc, char** argv) {
     checkFnv();
     checkOcproject();
     checkOcworld();
+    checkOcworldScatter();
     if (argc < 2) {
         AVER_INFO("usage: FormatTest <file.ocbeam|file.ocmap> [more...]");
         return g_failures;

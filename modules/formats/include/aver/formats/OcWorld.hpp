@@ -1,10 +1,12 @@
 #pragma once
 // .ocworld — the native world format, and a strict superset of .ocmap (FORMAT_SPECS.md §11).
-// Identity, SUN/FOG environment, and PLACE/PLACEG placements. Unknown records parse and are skipped.
+// Identity, SUN/FOG environment, PLACE/PLACEG placements, and the SCATTER palette a PCGVOLUME's
+// density field is populated with. Unknown records parse and are skipped.
 // Engine space: centimetres, +X forward, +Y right, +Z up, left-handed. Positions are f64.
 #include "aver/core/Types.hpp"
 #include "aver/assets/AssetId.hpp"
 
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -50,6 +52,29 @@ struct OcPcgVolume {
     f64 boundsMax[3] = {0, 0, 0};
 };
 
+// One species in a level's scatter palette: what a PCGVOLUME's density field places, and how.
+//
+// THE PALETTE IS LEVEL DATA, sitting beside the PCGVOLUME it scatters onto, for the reason
+// OcWorld.hpp already states for that record: the engine must not know what is in a project. Every
+// field here mirrors aver::world::ScatterSpecies (modules/world/include/aver/world/
+// ChunkGenerator.hpp) one for one, but keeps its own f64 fields rather than that struct's f32 ones --
+// every other numeric field in this file is f64, and the narrowing to f32 happens exactly once, at
+// the format -> runtime conversion in Aver.World (aver::world::buildScatterPalette), not here.
+struct OcScatterSpecies {
+    std::string meshPath;                  // required in practice; empty fails validation, same as a
+                                            // mesh path that does not resolve to a real asset
+    std::string material = "M_Foliage";
+    f64 weight = 1.0;
+    f64 scaleMin = 0.75, scaleMax = 1.25;
+    bool randomizeYaw = true;
+    // Unbounded by default -- eligible at every density sampleInfinite can return, matching
+    // ScatterSpecies's own default so a level that names one species with no `density` clause scatters
+    // it everywhere the field accepts a candidate at all.
+    f64 densityMin = -std::numeric_limits<f64>::max();
+    f64 densityMax =  std::numeric_limits<f64>::max();
+    f64 collisionRadiusCm = 0.0;
+};
+
 struct OcWorldData {
     int version = 1;
     u64 contentId = 0;                     // ID = FNV-1a-64(NAME)
@@ -83,6 +108,10 @@ struct OcWorldData {
     // Declared density fields. Order is the file's order, so a level that declares two with the
     // same name keeps both rather than silently losing one -- the reader reports it instead.
     std::vector<OcPcgVolume> pcgVolumes;
+
+    // The level's scatter palette -- what the density field above places, species by species. Order
+    // is the file's order, same reasoning as pcgVolumes above.
+    std::vector<OcScatterSpecies> scatterSpecies;
 
     std::vector<OcWorldPlacement> placements;
 };

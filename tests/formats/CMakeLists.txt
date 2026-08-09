@@ -3,6 +3,17 @@ target_link_libraries(FormatTest PRIVATE Aver.Formats Aver.Assets Aver.Core Aver
 set_target_properties(FormatTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# LevelInspect -- not a test. A small CLI that loads a .ocworld/.ocmap through the LIVE parser
+# (parseOcworld, not FormatTest's testMap which goes through the separate legacy OcMap.cpp) and
+# reports its PCGVOLUME and SCATTER records, for the same reason ActorSweep exists: a fixture is
+# written by whoever wrote the parser and agrees with it by construction, but a hand-authored level
+# gets no editor and no compiler, so this is how a typo in a SCATTER line gets caught before it
+# silently scatters nothing.
+add_executable(LevelInspect src/LevelInspect.cpp)
+target_link_libraries(LevelInspect PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(LevelInspect PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # OcGraphTest — the .ocgraph visual scripting format. Text parsing, round-tripping, unknown record
 # preservation, and deterministic output. See modules/formats/include/aver/formats/OcGraph.hpp.
 add_executable(OcGraphTest src/OcGraphTest.cpp)

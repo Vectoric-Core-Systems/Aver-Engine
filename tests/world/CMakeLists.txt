@@ -89,3 +89,25 @@ add_executable(ChunkCoordTest src/ChunkCoordTest.cpp)
 target_link_libraries(ChunkCoordTest PRIVATE Aver.World Aver.Core)
 set_target_properties(ChunkCoordTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ScatterPaletteTest -- OcScatterSpecies -> ScatterSpecies, the conversion both the editor and the
+# game runtime call (see modules/world/include/aver/world/ScatterPalette.hpp), and the validation
+# that names a bad species rather than letting a level silently scatter nothing.
+add_executable(ScatterPaletteTest src/ScatterPaletteTest.cpp)
+target_link_libraries(ScatterPaletteTest PRIVATE
+  Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Core)
+set_target_properties(ScatterPaletteTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ScatterBudgetTool -- not a test. Runs the real generator against a level's real SCATTER records and
+# real cooked meshes and reports a measured resident-triangle count for a streaming radius, for the
+# same reason LevelInspect (tests/formats) and ActorSweep exist: a fixture agrees with its own parser
+# by construction, and this answers a question about a REAL level that a synthetic test cannot -- see
+# the file's own header comment for why this exists alongside (not instead of) an editor screenshot.
+#
+#     ScatterBudgetTool.exe "<project>\Content\Maps\Default.ocmap" "<project>\Content" [radius]
+add_executable(ScatterBudgetTool src/ScatterBudgetTool.cpp)
+target_link_libraries(ScatterBudgetTool PRIVATE
+  Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Core)
+set_target_properties(ScatterBudgetTool PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
