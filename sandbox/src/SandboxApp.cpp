@@ -105,6 +105,9 @@
 #include "aver/world/LevelInstance.hpp"
 // Opt-in chunk streaming around the editor camera. See SandboxApp::setChunkStreamingEnabled.
 #include "aver/world/ChunkWorld.hpp"
+// A level's SCATTER records -> the generator's palette. The editor does not do this conversion
+// itself: the game runtime needs the identical one, and one of the two would drift.
+#include "aver/world/ScatterPalette.hpp"
 #endif
 
 #if AVER_WITH_IMGUI
@@ -6713,75 +6716,6 @@ private:
     // Turns chunk streaming on or off around the editor camera. OPT-IN: nothing in modules/world's
     // generator or region files is touched until a user flips Window > Chunk Streaming, so an
     // ordinary project opens exactly as it always did.
-    // Builds a weighted scatter palette from whichever of the demo's CC0 assets are actually present
-    // under the project's Content/Meshes -- empty when none are, which leaves GeneratedChunkSource
-    // to fall back to its single-species (cube) behaviour exactly as before this existed. NOT
-    // project-specific by construction: this checks the DISK, not the project's name, so any project
-    // that happens to import these five filenames gets the same palette, and one that does not sees
-    // no change at all.
-    //
-    // BANDS SIT ABOVE GeneratorSettings::threshold ON PURPOSE. A candidate only ever reaches
-    // pickSpecies() after the existence threshold (0.62 by default, or a level's PCGVOLUME coverage
-    // floor -- see setChunkStreamingEnabled below) already passed, so a band's lower edge below the
-    // threshold is dead weight: it can never be reached from below. Pines and island trees sit in
-    // the UPPER part of the surviving range (denser, spatially-coherent patches, since d itself is
-    // coherent noise) and cliffs/rocks sit in the narrow band just above threshold (the sparser
-    // edge) -- which is what turns "pines in dense bands, rocks in sparse ones" from a description
-    // into an actual banding rule rather than a hope.
-    //
-    // WEIGHTS TUNED AGAINST THE TRIANGLE BUDGET, not just the look: pine_tree_01 is the heaviest
-    // asset here by a wide margin, so it gets the lowest weight AND the narrowest band of the two
-    // tree species -- deliberately the rarest thing in the palette. See the task report for the
-    // measured resident-triangle count and frame time this produced.
-    std::vector<world::ScatterSpecies> buildDemoScatterPalette() const {
-        std::vector<world::ScatterSpecies> pal;
-        const std::string content = project_.contentDir();
-        if (content.empty()) return pal;
-        auto present = [&](const char* rel) {
-            std::error_code ec;
-            return std::filesystem::exists(content + "\\Meshes\\" + rel, ec);
-        };
-
-        if (present("pine_tree_01.ocmesh")) {
-            world::ScatterSpecies s;
-            s.meshPath = "Meshes/pine_tree_01.ocmesh"; s.material = "M_Bark";
-            s.weight = 0.35f; s.densityMin = 0.88f; s.densityMax = 1.0f;
-            s.scaleMin = 0.75f; s.scaleMax = 1.05f; s.collisionRadiusCm = 260.0f;
-            pal.push_back(s);
-        }
-        if (present("island_tree_03.ocmesh")) {
-            world::ScatterSpecies s;
-            s.meshPath = "Meshes/island_tree_03.ocmesh"; s.material = "M_Bark";
-            s.weight = 0.6f; s.densityMin = 0.80f; s.densityMax = 1.0f;
-            s.scaleMin = 0.9f; s.scaleMax = 1.6f; s.collisionRadiusCm = 170.0f;
-            pal.push_back(s);
-        }
-        if (present("coastal_cliff_04.ocmesh")) {
-            world::ScatterSpecies s;
-            s.meshPath = "Meshes/coastal_cliff_04.ocmesh"; s.material = "M_Rock";
-            // Scale capped well below the level's own hand-placed cliffs (which run up to 3.3x) --
-            // at chunk-generator density a full-size cliff lands often enough to dominate every shot
-            // taken anywhere near it, which reads as "one huge rock", not "sparse outcrops".
-            s.weight = 0.05f; s.densityMin = 0.62f; s.densityMax = 0.65f;
-            s.scaleMin = 1.0f; s.scaleMax = 1.5f; s.collisionRadiusCm = 500.0f;
-            pal.push_back(s);
-        }
-        if (present("coast_rocks_02.ocmesh")) {
-            world::ScatterSpecies s;
-            s.meshPath = "Meshes/coast_rocks_02.ocmesh"; s.material = "M_Rock";
-            s.weight = 0.25f; s.densityMin = 0.62f; s.densityMax = 0.68f;
-            s.scaleMin = 0.6f; s.scaleMax = 1.1f; s.collisionRadiusCm = 220.0f;
-            pal.push_back(s);
-        }
-        if (present("grass_medium_01.ocmesh")) {
-            world::ScatterSpecies s;
-            s.meshPath = "Meshes/grass_medium_01.ocmesh"; s.material = "M_Foliage";
-            s.weight = 6.0f; s.densityMin = 0.62f; s.densityMax = 1.0f;
-            s.scaleMin = 0.8f; s.scaleMax = 1.4f; s.collisionRadiusCm = 0.0f;
-            pal.push_back(s);
-        }
-        return pal;
-    }
 
     // The exact inverse of averFogFactor's k<=1e-8 branch (RHIShaders.cpp:558-566): that function
     // computes opacity(d) = 1 - exp(-density*d), so this solves the SAME expression backwards for
@@ -6828,10 +6762,29 @@ private:
         // their shipped defaults (ChunkStreamer.hpp) -- nothing here describes those, so there is
         // nothing to wire through.
 
-        // The scatter palette: present only when the demo's own assets are actually on disk (see
-        // buildDemoScatterPalette's own comment). Empty elsewhere, which reproduces the single-cube
-        // generator exactly as it always behaved.
-        cwSettings.generator.palette = buildDemoScatterPalette();
+        // The scatter palette comes from the LEVEL's own SCATTER records, and the editor has no
+        // opinion about what a world scatters.
+        //
+        // It used to be a hardcoded five-species palette built in this file: five asset filenames,
+        // with weights, density bands, scales and collision radii tuned against one sample project's
+        // triangle budget. It probed the disk rather than the project name, which made it look
+        // general, but a palette that only ever fires for projects importing those five filenames is
+        // that project's content living in the engine. WHICH meshes a world scatters is authored
+        // data, exactly like which meshes it places.
+        //
+        // A level with no SCATTER records leaves the palette empty, and GeneratedChunkSource falls
+        // back to its single-species cube -- the same behaviour as before any of this existed.
+        {
+            std::vector<std::string> scatterErrors;
+            if (!world::buildScatterPalette(levelHeader_.scatterSpecies, project_.contentDir(),
+                                            cwSettings.generator.palette, scatterErrors)) {
+                // Reported per species, and streaming still starts on whatever validated: a level
+                // that scatters nothing because one mesh path was wrong, silently, is the failure
+                // mode this whole path was built to avoid.
+                for (const std::string& e : scatterErrors)
+                    AVER_WARN("[ChunkWorld] {}", e);
+            }
+        }
 
         // Take the generator's seed/cell-size/octaves/coverage from the level's own declared density
         // field when it has one, instead of leaving GeneratorSettings at its shipped defaults no
