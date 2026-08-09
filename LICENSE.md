@@ -1,9 +1,12 @@
 AVER ENGINE — SOURCE CODE EVALUATION LICENSE AGREEMENT
 
 Copyright (c) 2026 Hydrogen-Isotope. All Rights Reserved.
+Developed by Vectoric-Core-Systems.
+Source: https://github.com/Vectoric-Core-Systems/Aver-Source
 
 This Evaluation License Agreement ("Agreement") is a legal agreement between you 
-("Licensee" or "Tester") and Hydrogen-Isotope ("Licensor") for access to the 
+("Licensee" or "Tester") and Hydrogen-Isotope, developing as Vectoric-Core-Systems
+("Licensor"), for access to the 
 private source code, binaries, and related documentation for the Aver Engine ("Software").
 
 BY CLONING, DOWNLOADING, COMPILING, OR USING THIS SOFTWARE, YOU AGREE TO BE BOUND BY 
@@ -48,3 +51,19 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND 
 NONINFRINGEMENT. IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER 
 LIABILITY ARISING FROM THE USE OF THE SOFTWARE.
+
+THIRD-PARTY COMPONENTS
+
+This Software incorporates third-party components that remain under their own licences and
+are NOT covered by the grant above. Each carries its own licence text in its directory:
+
+  third_party/imgui             Dear ImGui                 MIT
+  third_party/stb               stb single-file libraries  Public domain / MIT
+  third_party/meshoptimizer     meshoptimizer              MIT
+  third_party/fonts             Roboto                     Apache-2.0
+  third_party/vulkan-headers    Vulkan-Headers (Khronos)   Apache-2.0
+  third_party/fidelityfx-fsr    AMD FidelityFX FSR 1       MIT
+  modules/physics.jolt/Jolt     Jolt Physics               MIT
+
+Nothing in this Agreement restricts rights granted to you by those licences, and no per-file
+copyright notice in this repository is applied to them.

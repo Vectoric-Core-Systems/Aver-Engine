@@ -70,6 +70,62 @@ renamed by whoever takes them. What it does is make provenance obvious — lifte
 `AverSrTemporalResolveMain` and `aver_sr_set_quality` into someone else's binary, where it is
 trivially identifiable. That is worth having, and it is the honest reason to do it.
 
+## Module boundaries
+
+AverSR is **its own module** and is coupled to nothing, held to the standard
+`modules/render.voxi` already meets. Voxi is the reference because it is the module in this engine
+that most obviously could have been coupled and is not: it renders PBR materials, it drives the
+sun, it owns GI -- and its CMakeLists still links only `Aver.Core`, `Aver.RHI` and
+`Aver.Render.PBR.Materials`, with a comment spelling out that the dependency runs one way and
+never the other.
+
+### Targets
+
+| Target | Kind | Links | Why |
+|---|---|---|---|
+| `Aver.Render.Sr` | STATIC | `Aver.Core`, `Aver.RHI` | the upscaler implementations |
+
+`Aver.RHI` is the **generic** interface. Never `Aver.RHI.D3D12`, never `Aver.RHI.Vulkan` -- no
+backend type may cross this boundary, and a link line is the only place that rule can actually be
+enforced rather than merely intended.
+
+Unlike Voxi there is no second SHARED target, because nothing P/Invokes the upscaler from C#. If
+that ever changes, split it the way Voxi is split -- settings in a DLL depending on `Aver.Core`
+alone, GPU work in a static library -- rather than putting `rhi::` types on a P/Invoke boundary.
+
+### What AverSR must NEVER depend on
+
+`Aver.Render.Voxi` · `Aver.Render.PBR` · `Aver.Scene` · `Aver.World` · `Aver.Landscape` ·
+`Aver.Physics` · `Aver.Trifactor` · any RHI backend.
+
+An upscaler takes a colour target, a depth target, motion vectors and a jitter offset, and produces
+a bigger colour target. It has no legitimate reason to know what a material, an entity, a chunk or
+a heightfield is, and the day it links one of them the seam has stopped being a seam.
+
+### And nothing may depend on AverSR
+
+This is the half that is easier to get wrong. The `IUpscaler` **interface** lives in `Aver.RHI`
+beside `IRenderFeature`, not in this module; `Aver.Render.Sr` provides implementations of it. So a
+renderer holds an `IUpscaler*` that may be null and calls it if it is not, exactly as it holds
+registered render features today -- without linking, including, or knowing that AverSR exists.
+
+The consequence, and the test: **`-DAVER_MODULE_SR=OFF` must build, link and render**, at native
+resolution with no upscaler, and the pixels must be identical to a tree where the module was never
+written. `AVER_MODULE_SR=1` is a PUBLIC compile definition on the target so consumers can `#if`
+the whole feature out, and it reaches a translation unit ONLY through the link interface -- the
+same mechanism, and the same failure mode, documented in `modules/world/CMakeLists.txt`.
+
+### Enforcement, not intention
+
+1. `option(AVER_MODULE_SR "..." ON)` in the root `CMakeLists.txt`.
+2. An `sr-off` row in `scripts/module-matrix.ps1`, **in the same commit as the option**. That file
+   says it plainly: *a module absent from this list is a module nobody checks*, and TRIFACTOR spent
+   its whole life in exactly that gap.
+3. `aver_check_module_dag()` catches an optional module named without an `if(TARGET ...)` guard.
+4. A grep that no `sr::` type appears in a public header of any module that does not link it.
+
+Modularity claimed in a comment is worth nothing; the matrix row is what makes it a fact.
+
 ## Quality levels
 
 `Off` renders at native resolution and runs no upscaler at all — the pre-existing behaviour, and it
