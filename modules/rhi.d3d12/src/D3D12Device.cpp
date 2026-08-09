@@ -1417,7 +1417,18 @@ constexpr u32 kRhiHeapSize = 65536;
 // Transient constant bytes per frame in flight.
 // The upload ring's STARTING size per frame in flight. It grows from here on demand (ringAlloc), so
 // this is the floor for a quiet scene rather than a budget anything has to fit inside.
-constexpr u64 kRhiRingBytes = 1u << 20;
+//
+// 2 MB, RAISED FROM 1 MB, because overflow is not free the way "it just grows" suggests: ringAlloc
+// returns 0 on the frame it runs out, and every draw that asked for constants after that point loses
+// them for that frame. Growth only takes effect at the NEXT epoch, so the overflowing frame renders
+// wrong and the log says so -- every session on any real scene opened with
+// "upload ring (1024 KB) exhausted this frame; growing to 2048 KB", which is one visibly wrong frame
+// at startup that nobody was reading as a defect.
+//
+// 2 MB is where this scene actually settled, measured, not guessed. It does not remove the failure
+// mode for a heavier scene -- that wants ringAlloc to fall back to a one-off allocation instead of
+// returning 0 -- it removes the case that was hitting every single run.
+constexpr u64 kRhiRingBytes = 2u << 20;
 // The ceiling that growth stops at. 64 MB is about 260,000 per-draw constant slices in one frame --
 // far past any draw count this renderer can submit at an interactive rate, so hitting it means
 // something is wrong upstream, not that the ring is too small. A ceiling exists at all because the
