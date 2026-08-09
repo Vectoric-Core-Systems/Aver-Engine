@@ -243,6 +243,30 @@ ChunkPayload GeneratedChunkSource::generate(const ChunkCoord& c) const {
     return p;
 }
 
+std::function<bool(f32, f32, f32&)> makeInfiniteHeightSource(const InfiniteHeightFieldSettings& hf) {
+    // Built ONCE here, then captured by value below -- every call the returned lambda makes reads
+    // this same, now-immutable spec, so two calls (in any order, from any number of candidates) are
+    // guaranteed to agree exactly, the same property setSettings() gives spec_ for the density field.
+    pcg::InfiniteSpec spec{};
+    spec.seed = hf.seed;
+    spec.layerCount = 1;
+    spec.layers[0].frequency = 1.0f;
+    spec.layers[0].amplitude = 1.0f;
+    spec.layers[0].octaves = hf.octaves > 0 ? static_cast<i32>(hf.octaves) : 1;
+    spec.layers[0].lacunarity = 2.0f;
+    spec.layers[0].gain = 0.5f;
+    spec.layers[0].seedOffset = 0;
+    spec.cellSizeCm = hf.featureSizeCm > 0.0f ? hf.featureSizeCm : 1600.0f;
+    // coverageFloor/coverageBias are left at InfiniteSpec's own defaults: sampleInfiniteHeight never
+    // reads either, so their value here has no effect on anything -- see PcgVolume.hpp.
+    const f32 amplitude = hf.amplitudeCm;
+    const f32 baseZ = hf.baseZCm;
+    return [spec, amplitude, baseZ](f32 wx, f32 wy, f32& outZ) -> bool {
+        outZ = pcg::sampleInfiniteHeightCm(spec, amplitude, baseZ, wx, wy);
+        return true;   // a total field: every world position has an answer
+    };
+}
+
 bool GeneratedChunkSource::has(const ChunkCoord& c) {
     if (c.z != settings_.surfaceChunkZ) return false;   // the cheap answer, for most of the world
     if (!memoValid_ || !(memoCoord_ == c)) {

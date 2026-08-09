@@ -16,7 +16,12 @@ add_library(Aver.Landscape STATIC
   # Editor-facing but still RHI-free: a cursor ray against the surface, and the brush edits
   # (raise/lower/smooth/flatten) that mutate an OcLandData's heights in place.
   src/HeightfieldRay.cpp
-  src/Sculpt.cpp)
+  src/Sculpt.cpp
+  # The infinite fill past an authored section's own rim: a linkable copy of TerrainGenTool's noise
+  # (TerrainNoise.cpp), and the tile coordinate + procedural-section synthesis built on top of it
+  # (TerrainTile.cpp). See TerrainNoise.hpp for why this is not pcg::sampleInfinite.
+  src/TerrainNoise.cpp
+  src/TerrainTile.cpp)
 
 target_include_directories(Aver.Landscape PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Landscape PUBLIC cxx_std_20)

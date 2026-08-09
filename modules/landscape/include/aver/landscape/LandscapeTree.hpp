@@ -86,6 +86,20 @@ public:
     // Forgets which nodes are refined, so the next select is unbiased.
     void resetHysteresis() const;
 
+    // Widens the skirt of every node touching the section's OUTER rim to at least `minSkirtCm`.
+    //
+    // build()'s own skirt formula (skirtCm = max(coarser-level error * 1.5, spacing * 0.25)) assumes a
+    // node's only neighbours are within THIS tree, at most one level coarser -- true by construction
+    // for an inner LOD boundary, because selection is 2:1-balanced. At the section's outer edge that
+    // assumption does not hold the moment something else is drawn just past it: a NEIGHBOUR TILE,
+    // built as its own independent LandscapeTree, selecting levels from its own camera distance with
+    // no knowledge of this tree's choices, and possibly still mid-stream-in with only a coarse
+    // ancestor mesh resident. This tree cannot compute the right skirt for that -- it does not know
+    // what is over there -- so call this instead with a flat, generous floor after build(), on any
+    // section that borders another rather than open air. It masks whatever level a neighbour actually
+    // picked, rather than trying to predict it.
+    void widenRimSkirts(f32 minSkirtCm);
+
     // The largest error of any node at `level`, or 0 past the top.
     f32 levelErrorCm(u32 level) const {
         return level < levelError_.size() ? levelError_[level] : 0.0f;

@@ -51,6 +51,14 @@ if(TARGET Aver.Landscape.Renderer)
   target_compile_definitions(SculptTest PRIVATE AVER_LANDSCAPE_TEST_RENDERER=1)
 endif()
 
+# TerrainTileTest -- the infinite-fill half: terrainHeightAt's determinism, tile coordinates, that
+# adjacent synthesized tiles share an EXACT edge (the property that removes the rim with no seam), and
+# widenRimSkirts' selectivity. Aver.Landscape only -- no renderer, no device.
+add_executable(TerrainTileTest src/TerrainTileTest.cpp)
+target_link_libraries(TerrainTileTest PRIVATE Aver.Landscape Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(TerrainTileTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # TerrainGenTool -- not a test. Writes an .ocland from fBm noise, for the same reason LevelInspect
 # and ScatterBudgetTool exist: it answers a real need that a fixture cannot. Aver.Landscape shipped a
 # complete heightfield runtime and this repository contained no .ocland file at all, so there was

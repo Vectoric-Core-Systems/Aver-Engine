@@ -176,6 +176,19 @@ void LandscapeTree::resetHysteresis() const {
     std::fill(refined_.begin(), refined_.end(), static_cast<u8>(0));
 }
 
+// Widens the outer-rim skirt; see the header for why an inner-boundary formula cannot cover this case.
+void LandscapeTree::widenRimSkirts(f32 minSkirtCm) {
+    if (nodes_.empty() || rootIndex_ == kInvalidNode) return;
+    // The root always covers the whole section, so its own span is the section's total quad count --
+    // the same number every node's sampleX/sampleY/spanQuads are expressed against.
+    const u32 total = nodes_[rootIndex_].spanQuads;
+    for (LandscapeNode& n : nodes_) {
+        const bool onRim = n.sampleX == 0 || n.sampleY == 0 ||
+                            n.sampleX + n.spanQuads >= total || n.sampleY + n.spanQuads >= total;
+        if (onRim) n.skirtCm = std::fmax(n.skirtCm, minSkirtCm);
+    }
+}
+
 // Walks one node: emits it, or recurses into its children when its projected error is too large.
 void LandscapeTree::descend(u32 index, const SelectParams& p, SelectResult& out,
                             std::vector<f32>& errors) const {

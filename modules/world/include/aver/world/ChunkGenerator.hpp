@@ -172,6 +172,39 @@ private:
     mutable ChunkPayload memo_;
 };
 
+// Parameters for the pcg-based INFINITE height field a caller can install as
+// GeneratorSettings::heightSource via makeInfiniteHeightSource() below -- the four/five knobs a level
+// actually wants to tune, rather than the lower-level NoiseLayer/InfiniteSpec fields a scatter density
+// volume exposes (layerCount, coverageFloor/Bias, ...), most of which mean nothing for elevation.
+struct InfiniteHeightFieldSettings {
+    i32 seed = 0;
+    // World centimetres spanned by one lattice cell of the first octave -- pcg::InfiniteSpec's own
+    // cellSizeCm, named the way a level author thinks about it.
+    f32 featureSizeCm = 6400.0f;
+    // Roughly half the peak-to-trough excursion: the field spans [baseZCm - amplitudeCm,
+    // baseZCm + amplitudeCm]. See pcg::sampleInfiniteHeightCm for the exact remap.
+    f32 amplitudeCm = 1000.0f;
+    u32 octaves = 4;
+    f32 baseZCm = 0.0f;
+};
+
+// Builds a GeneratorSettings::heightSource backed by pcg::sampleInfiniteHeightCm.
+//
+// NEVER FALSE. Unlike landscape::surfaceHeightAt's finite section, this field has no footprint to
+// fall outside of -- every (worldX, worldY) has an answer, which is the whole point relative to a
+// FINITE .ocland section: past a section's rim, THIS is what a scatter candidate (or, later, terrain
+// geometry) finds instead of nothing.
+//
+// THE SAME pcg::sampleInfiniteHeightCm terrain geometry will (later) call directly for the mesh
+// itself, given the same InfiniteHeightFieldSettings -- see PcgVolume.hpp for that function and why
+// it lives in Aver.Render.Pcg rather than here. Nothing about the noise is reimplemented in this
+// module; this is a thin, pure translation from a level-facing settings struct to the spec that
+// function already takes, closed over by value in the returned lambda so the lambda itself carries no
+// state a second call could see change out from under it -- the same PURE FUNCTION OF (worldXCm,
+// worldYCm) contract GeneratorSettings::heightSource already documents.
+std::function<bool(f32 worldXCm, f32 worldYCm, f32& outWorldZCm)>
+makeInfiniteHeightSource(const InfiniteHeightFieldSettings& hf);
+
 // Generated content underneath, persisted overrides on top.
 //
 // A chunk the player has changed is stored and wins; everything else is invented on demand. That is

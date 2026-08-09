@@ -92,6 +92,56 @@ f32 sampleInfinite(const InfiniteSpec& spec, f32 wx, f32 wy, f32 wz) {
     return std::pow(remapped, spec.coverageBias);
 }
 
+f32 sampleInfiniteHeight(const InfiniteSpec& spec, f32 wx, f32 wy) {
+    const f32 cell = spec.cellSizeCm > 0.0f ? spec.cellSizeCm : 1.0f;
+    f32 total = 0.0f, norm = 0.0f;
+    const u32 layers = spec.layerCount < kMaxLayers ? spec.layerCount : kMaxLayers;
+    for (u32 l = 0; l < layers; ++l) {
+        const NoiseLayer& ly = spec.layers[l];
+        f32 amp = ly.amplitude;
+        f32 freq = ly.frequency;
+        const i32 octaves = ly.octaves > 1 ? ly.octaves : 1;
+        const i32 seed = spec.seed + ly.seedOffset;
+        for (i32 o = 0; o < octaves; ++o) {
+            const f32 s = freq / cell;
+            const f32 px = wx * s, py = wy * s;
+            // FLOOR, not truncation -- the same reason sampleInfinite floors rather than casts: a
+            // cast toward zero would double the cell straddling the origin on both axes.
+            const f32 fx = std::floor(px), fy = std::floor(py);
+            const i32 cx = static_cast<i32>(fx), cy = static_cast<i32>(fy);
+            // Smoothstep fade on the fractional part, exactly TerrainGenTool.cpp's valueNoise(): C1
+            // continuity, no crease along a lattice line once lit.
+            f32 tx = px - fx, ty = py - fy;
+            tx = tx * tx * (3.0f - 2.0f * tx);
+            ty = ty * ty * (3.0f - 2.0f * ty);
+            // The four corners surrounding (px, py), z fixed at 0 -- this is a 2D field, and hash3's
+            // third argument exists only so this reuses the SAME mixer sampleInfinite/sampleDensity
+            // already use rather than a bespoke 2-argument copy of it.
+            const f32 h00 = float01(hash3(seed, cx,     cy,     0));
+            const f32 h10 = float01(hash3(seed, cx + 1, cy,     0));
+            const f32 h01 = float01(hash3(seed, cx,     cy + 1, 0));
+            const f32 h11 = float01(hash3(seed, cx + 1, cy + 1, 0));
+            const f32 top = h00 + (h10 - h00) * tx;
+            const f32 bot = h01 + (h11 - h01) * tx;
+            const f32 v = top + (bot - top) * ty;
+            total += v * amp;
+            norm  += amp;
+            amp  *= ly.gain;
+            freq *= ly.lacunarity;
+        }
+    }
+    // 0.5, not 0.0 -- unlike sampleInfinite/sampleDensity, whose norm<=0 fallback feeds a floor/pow
+    // remap where 0 is a meaningful "below everything". Here 0.5 is the neutral midpoint
+    // sampleInfiniteHeightCm remaps to exactly baseZCm, so a caller that ends up with no configured
+    // layers gets a flat field at its base height rather than one pinned to its lowest excursion.
+    if (norm <= 0.0f) return 0.5f;
+    return total / norm;
+}
+
+f32 sampleInfiniteHeightCm(const InfiniteSpec& spec, f32 amplitudeCm, f32 baseZCm, f32 wx, f32 wy) {
+    return baseZCm + (sampleInfiniteHeight(spec, wx, wy) * 2.0f - 1.0f) * amplitudeCm;
+}
+
 bool VolumeBuilder::init(rhi::IDevice& dev) {
     res_ = dev.resources();
     if (!res_) return false;   // a GPU-less backend declines here, as designed

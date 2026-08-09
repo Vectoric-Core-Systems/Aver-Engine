@@ -55,6 +55,44 @@ struct InfiniteSpec {
 // The F# mirror does the same, for the same reason.
 f32 sampleInfinite(const InfiniteSpec& spec, f32 wx, f32 wy, f32 wz);
 
+// Samples an INFINITE, C1-CONTINUOUS scalar field at a WORLD (x, y), in [0, 1]. Same InfiniteSpec as
+// sampleInfinite -- same seed, layers, cellSizeCm -- but NOT the same result: sampleInfinite hashes
+// only the lattice CELL a position falls in, a per-cell constant with a visible step at every cell
+// boundary of every octave. This instead hashes the four lattice CORNERS surrounding the position
+// and blends them with a smoothstep fade, the technique tests/landscape/src/TerrainGenTool.cpp's own
+// valueNoise() already uses for the .ocland heightfield it writes. That is what makes this usable AS
+// a height: sampleInfinite would render as a field of vertical cliffs, one at every noise-cell edge.
+//
+// coverageFloor/coverageBias ARE NOT READ HERE. That remap is a density-sculpting concept -- push
+// more of the field toward 0 or toward 1 -- and means nothing for an elevation signal. Dropping it
+// also drops the one operation sampleInfinite has that IEEE 754 does not pin exactly across libm
+// implementations (std::pow, PcgShaders.hpp:8-12), so this function is MORE strictly, not less,
+// reproducible bit-for-bit cross-platform: nothing here is anything but integer hashing, multiplies
+// and adds.
+//
+// wz IS NOT A PARAMETER, deliberately: an elevation function of (x, y) cannot sensibly also depend on
+// the z it is being asked to define. A single fixed z (0) feeds the shared hash3 mixer instead, so
+// this reuses that mixer exactly rather than a 2D-only copy of it.
+//
+// THE FUNCTION TERRAIN GEOMETRY WILL LATER CALL, alongside a chunk generator's heightSource (see
+// aver::world::makeInfiniteHeightSource, modules/world/include/aver/world/ChunkGenerator.hpp) --
+// living here, in Aver.Render.Pcg, is what lets both reach it with zero new module dependencies:
+// Aver.World already depends on this module, and Aver.Landscape must never depend on Aver.World.
+f32 sampleInfiniteHeight(const InfiniteSpec& spec, f32 wx, f32 wy);
+
+// Convenience: sampleInfiniteHeight's [0, 1] remapped into a world Z in centimetres, centred on
+// `baseZCm` and spanning roughly [baseZCm - amplitudeCm, baseZCm + amplitudeCm] -- the same
+// half-amplitude convention TerrainGenTool.cpp's own ridged fBm uses (there, the noise is remapped to
+// [-1, 1] before the caller's own `* amplitude`; here the remap and the scale are folded into one
+// call because sampleInfiniteHeight's raw [0, 1] has no reason to be exposed to two separate
+// multiplications at every call site).
+//
+// CALL THIS, NOT sampleInfiniteHeight DIRECTLY, wherever a caller wants a WORLD Z rather than a raw
+// [0, 1] sample -- it is the one place the remap is written, so two callers configured with the same
+// spec/amplitudeCm/baseZCm can never compute two different Z values for the same (wx, wy) through a
+// transcription slip in the remap arithmetic.
+f32 sampleInfiniteHeightCm(const InfiniteSpec& spec, f32 amplitudeCm, f32 baseZCm, f32 wx, f32 wy);
+
 // THE CPU REFERENCE, and the reason this header exists at all.
 //
 // Mirrors the HLSL in PcgShaders.hpp function for function, exactly as the atmosphere model is

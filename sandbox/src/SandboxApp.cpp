@@ -33,6 +33,10 @@
 // halves already existed and tests/landscape proves the pair with a real Jolt raycast -- nothing
 // called it.
 #include "aver/landscape/PhysicsBridge.hpp"
+// The infinite fill past an authored section's own rim: terrainHeightAt (TerrainNoise.hpp) and the
+// tile coordinate + procedural-section synthesis (TerrainTile.hpp) that lets SandboxApp keep a small
+// ring of streamed sections resident around the camera. See updateLandscapeRingTiles() below.
+#include "aver/landscape/TerrainTile.hpp"
 #endif
 #if AVER_HAVE_AUDIO_IMPORT
 #  include "aver/formats/OcAudio.hpp"
@@ -1845,6 +1849,8 @@ public:
         // objects_ loop just above -- not an IRenderFeature (LandscapeRenderer implements none of its
         // virtuals) and not gated on hideEditorScene (terrain is real environment geometry, not an
         // editor placeholder, so it stays visible through Play just like the sky and fog do).
+        if (landscapeLoaded_) updateLandscapeRingTiles(e.device(), eye_.x, eye_.y);
+
         if (landscapeLoaded_ && landscapeRenderer_) {
             landscape::SelectParams lp;
             lp.cameraCm[0] = eye_.x; lp.cameraCm[1] = eye_.y; lp.cameraCm[2] = eye_.z;
@@ -1858,6 +1864,9 @@ public:
             for (int r = 0; r < 4; ++r)
                 for (int c = 0; c < 4; ++c) vpm[r * 4 + c] = viewProj_.m[r][c];
             lp.frustum = landscape::Frustum::fromViewProj(vpm);
+            // A SHARE of the renderer's one shared draw budget, not the whole thing -- see the member
+            // block's own comment on kLandscapeMaxDrawsPerTile (docs/LANDSCAPE_EDITOR.md blocker 9).
+            lp.maxDraws = kLandscapeMaxDrawsPerTile;
 
             landscape::SelectResult lsel;
             landscapeTree_.select(lp, lsel);
@@ -1867,6 +1876,18 @@ public:
             // applies on top is identity, not a placement matrix.
             static const f32 kIdentity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
             landscapeRenderer_->draw(*e.device(), landscapeData_, landscapeTree_, lsel, kIdentity);
+
+            // The ring: every procedural tile currently resident around the camera, each its own
+            // section drawn through the SAME select()+draw() pair, sharing the SAME per-tile budget --
+            // that sharing is what keeps the total draws submitted across every resident section this
+            // frame within the renderer's one real ceiling, no matter how many tiles are resident.
+            for (auto& kv : landscapeRingTiles_) {
+                LandscapeRingTile& tile = kv.second;
+                if (!tile.renderer) continue;
+                landscape::SelectResult rsel;
+                tile.tree.select(lp, rsel);
+                tile.renderer->draw(*e.device(), tile.data, tile.tree, rsel, kIdentity);
+            }
         }
 #endif
 
@@ -2832,8 +2853,15 @@ private:
         }
         landscapeData_ = std::move(data);
         landscapeTree_ = std::move(tree);
+        // The section is tile (0,0) of the ring now (see the member block's own comment) -- its outer
+        // rim borders a procedural neighbour just like any ring tile's does, so it needs the same
+        // generous, cross-tree-mismatch-proof floor. 2x the noise amplitude is the mathematical bound
+        // on how much a ridged-fBm field can vary at all (see TerrainNoise.hpp), so this covers any
+        // level a neighbour could have picked regardless of which it actually did.
+        landscapeTree_.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
         landscapeTree_.resetHysteresis();
-        landscapeRenderer_ = std::make_unique<landscape::LandscapeRenderer>();
+        landscapeRenderer_ =
+            std::make_unique<landscape::LandscapeRenderer>(kLandscapeMaxResidentNodesPerTile);
         landscapeLoaded_ = true;
         landscapePath_ = path;
         landscapeDirty_ = false;
@@ -2903,7 +2931,9 @@ private:
 #endif
     }
 
-    // Frees the resident section's meshes (when a device exists to free them through) and drops it.
+    // Frees the resident section's meshes (when a device exists to free them through) and drops it,
+    // AND every ring tile around it -- they are tile (0,0)'s neighbours and outlive their reason to
+    // exist the moment (0,0) does.
     void unloadLandscape(rhi::IDevice* device) {
         if (landscapeRenderer_ && device) landscapeRenderer_->forgetAll(*device);
         landscapeRenderer_.reset();
@@ -2916,6 +2946,10 @@ private:
         landscapeDirty_ = false;
         sculpting_ = false;
         sculptCursorValid_ = false;
+        for (auto& kv : landscapeRingTiles_)
+            if (kv.second.renderer && device) kv.second.renderer->forgetAll(*device);
+        landscapeRingTiles_.clear();
+        landscapeLastCameraTileValid_ = false;
     }
 
     // Writes the in-memory section back to the path it was loaded from -- the --landscape override
@@ -3003,8 +3037,17 @@ private:
             // where the section used to be.
             std::string why;
             if (landscapeTree_.build(landscapeData_, landscapeTree_.nodeQuads(), &why)) {
+                landscapeTree_.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
                 landscapeTree_.resetHysteresis();
                 if (landscapeRenderer_ && device) landscapeRenderer_->forgetAll(*device);
+                // The section moved, so its ring-tile grid (centred on ITS centre) moved too --
+                // whatever was resident was built against the old placement and no longer borders it
+                // correctly. Simplest correct fix: drop the ring and let updateLandscapeRingTiles()
+                // resynthesize around wherever the camera is next frame.
+                for (auto& kv : landscapeRingTiles_)
+                    if (kv.second.renderer && device) kv.second.renderer->forgetAll(*device);
+                landscapeRingTiles_.clear();
+                landscapeLastCameraTileValid_ = false;
                 AVER_INFO("[Landscape] placed at ({:.0f}, {:.0f}, {:.0f}) by the level's LANDSCAPE record",
                           at[0], at[1], at[2]);
             } else {
@@ -3013,6 +3056,81 @@ private:
         }
         rebuildLandscapeCollision();
         applyLandscapeToStreaming();
+    }
+
+    // Keeps a small window of PROCEDURAL tiles resident around (cameraXCm, cameraYCm), so the terrain
+    // drawn extends past the authored section's own rim instead of stopping dead at it. Cheap to call
+    // every frame -- it does real work only the frame the camera's OWN tile coordinate changes, which
+    // for a 30000cm-ish tile is far less often than once a frame.
+    //
+    // Tile (0, 0) -- the authored section -- is never touched here; it is loaded, sculpted and saved
+    // exactly as it always was. This only manages the RING around it.
+    void updateLandscapeRingTiles(rhi::IDevice* device, f32 cameraXCm, f32 cameraYCm) {
+        if (!landscapeLoaded_) return;
+        const f32 tileSizeCm = landscapeData_.extentCm();
+        if (!(tileSizeCm > 0.0f)) return;
+        const f32 centreX = landscapeData_.originCm[0] + tileSizeCm * 0.5f;
+        const f32 centreY = landscapeData_.originCm[1] + tileSizeCm * 0.5f;
+
+        const landscape::TileCoord camTile =
+            landscape::tileAt(cameraXCm, cameraYCm, centreX, centreY, tileSizeCm);
+        if (landscapeLastCameraTileValid_ && camTile == landscapeLastCameraTile_) return;
+        landscapeLastCameraTile_ = camTile;
+        landscapeLastCameraTileValid_ = true;
+
+        // Which coordinates should be resident now -- a (2R+1)x(2R+1) window around the camera's own
+        // tile, minus (0,0) itself (that is the home tile above, not a ring tile).
+        std::vector<landscape::TileCoord> want;
+        want.reserve(kLandscapeMaxSectionsResident);
+        for (i32 dy = -kLandscapeRingRadius; dy <= kLandscapeRingRadius; ++dy)
+            for (i32 dx = -kLandscapeRingRadius; dx <= kLandscapeRingRadius; ++dx) {
+                const landscape::TileCoord t{camTile.tx + dx, camTile.ty + dy};
+                if (t.tx == 0 && t.ty == 0) continue;
+                want.push_back(t);
+            }
+
+        // Evict whatever is resident but no longer wanted.
+        for (auto it = landscapeRingTiles_.begin(); it != landscapeRingTiles_.end(); ) {
+            const bool stillWanted = std::find(want.begin(), want.end(), it->first) != want.end();
+            if (!stillWanted) {
+                if (it->second.renderer && device) it->second.renderer->forgetAll(*device);
+                it = landscapeRingTiles_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        // Synthesize and build whatever is wanted but not yet resident. Same sample count as the
+        // authored section -- it already validated against LandscapeTree::build's tiling rule, so a
+        // ring tile built the same way is guaranteed to validate too.
+        for (const landscape::TileCoord& t : want) {
+            if (landscapeRingTiles_.find(t) != landscapeRingTiles_.end()) continue;
+            LandscapeRingTile tile;
+            if (!landscape::synthesizeTerrainTile(t, centreX, centreY, tileSizeCm,
+                                                  landscapeData_.sampleCount, landscapeNoiseParams_,
+                                                  tile.data)) {
+                AVER_WARN("[Landscape] could not synthesize ring tile ({}, {})", t.tx, t.ty);
+                continue;
+            }
+            std::string why;
+            if (!tile.tree.build(tile.data, landscapeTree_.nodeQuads(), &why)) {
+                AVER_WARN("[Landscape] ring tile ({}, {}) quadtree would not build: {}", t.tx, t.ty, why);
+                continue;
+            }
+            // Every rim of a ring tile borders SOMETHING -- the home tile, or another ring tile --
+            // never open air, so all four get the same generous floor the home tile's outer rim got in
+            // loadLandscape(). See LandscapeTree::widenRimSkirts's own comment for why an inner-LOD
+            // skirt formula cannot cover a cross-tree neighbour.
+            tile.tree.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
+            tile.tree.resetHysteresis();
+            tile.renderer =
+                std::make_unique<landscape::LandscapeRenderer>(kLandscapeMaxResidentNodesPerTile);
+            landscapeRingTiles_.emplace(t, std::move(tile));
+        }
+
+        AVER_INFO("[Landscape] ring around tile ({}, {}): {} tile(s) resident, {} draws/tile, "
+                  "{} resident-node cap/tile", camTile.tx, camTile.ty, landscapeRingTiles_.size(),
+                  kLandscapeMaxDrawsPerTile, kLandscapeMaxResidentNodesPerTile);
     }
 #endif
 
@@ -4240,6 +4358,7 @@ private:
                 // invalidation below is footprint-local.
                 std::string why;
                 if (landscapeTree_.build(landscapeData_, landscapeTree_.nodeQuads(), &why)) {
+                    landscapeTree_.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
                     landscapeTree_.resetHysteresis();
                     if (landscapeRenderer_)
                         landscapeRenderer_->forgetOverlapping(*e.device(), landscapeTree_,
@@ -7212,6 +7331,38 @@ private:
     bool sculptCursorValid_ = false;      // true when this frame's cursor ray actually hit the section
     Vec3 sculptCursor_{0, 0, 0};          // world hit point, for the brush-radius ring and the next tick
     rhi::LineHandle brushRing_ = 0;       // a unit ring in the XY plane -- landscape heights run +Z
+
+    // ---------------- the ring: procedural tiles past the authored section's own rim ----------------
+    // The authored section (landscapeData_/landscapeTree_/landscapeRenderer_ above) is ALWAYS tile
+    // (0, 0) of a grid the size of its own extentCm(), centred on wherever the level placed it -- see
+    // TerrainTile.hpp. It keeps its own storage and every sculpt/raycast/collision/save code path
+    // above untouched; this is purely the ADDITIONAL tiles that make the world not stop dead at its
+    // edge. A tile here is never authored and never sculpted: it is regenerated from terrainHeightAt
+    // whenever it re-enters residency, which is why there is nothing to save for it.
+    struct LandscapeRingTile {
+        fmt::OcLandData data;
+        landscape::LandscapeTree tree;
+        std::unique_ptr<landscape::LandscapeRenderer> renderer;
+    };
+    std::unordered_map<landscape::TileCoord, LandscapeRingTile> landscapeRingTiles_;
+    landscape::TerrainNoiseParams landscapeNoiseParams_;   // shared by every ring tile AND heightSource
+    static constexpr i32 kLandscapeRingRadius = 1;         // tiles each side of the camera's tile: 3x3
+    static constexpr u32 kLandscapeMaxSectionsResident = (2 * kLandscapeRingRadius + 1) *
+                                                          (2 * kLandscapeRingRadius + 1);   // 9
+    // docs/LANDSCAPE_EDITOR.md's blocker 9: the renderer's transient constant ring is a SHARED,
+    // fixed 1 MiB no matter how many sections are resident, so the single section's own long-safe
+    // defaults (192 draws, 512 cached meshes) are a TOTAL from here on -- split evenly across the
+    // largest window this ring can ever hold, never handed to each resident tile whole. Computed once,
+    // statically, rather than redivided every time the resident count changes: reconstructing the home
+    // tile's LandscapeRenderer (its cap is fixed at construction) to match a moving divisor would throw
+    // away its whole mesh cache on every tile crossing, which is a worse cost than the modest
+    // under-use of an empty ring slot's unspent share.
+    static constexpr u32 kLandscapeMaxDrawsPerTile =
+        192u / kLandscapeMaxSectionsResident;
+    static constexpr u32 kLandscapeMaxResidentNodesPerTile =
+        512u / kLandscapeMaxSectionsResident;
+    landscape::TileCoord landscapeLastCameraTile_{};
+    bool landscapeLastCameraTileValid_ = false;
 #endif
 
 #if AVER_MODULE_SCENE
@@ -7340,17 +7491,23 @@ private:
         // not depend on Aver.Landscape (see modules/world/CMakeLists.txt), so the editor, which
         // depends on both, is the right place to close this lambda.
         //
-        // FALSE OUTSIDE THE SECTION, on purpose: surfaceHeightAt refuses rather than clamping, and
-        // the generator then falls back to its flat behaviour. A world larger than its terrain gets
-        // flat ground beyond the rim instead of the rim's height smeared to the horizon.
+        // THE AUTHORED SECTION WINS WHERE IT EXISTS, exactly as before: surfaceHeightAt refuses rather
+        // than clamping there. Past its rim this now falls through to terrainHeightAt -- the SAME
+        // continuous noise the ring tiles' GEOMETRY is built from (see updateLandscapeRingTiles), so a
+        // scattered entity's height agrees with the ground it is standing on whether that ground is
+        // the authored section or a synthesized ring tile. terrainHeightAt is TOTAL (always true), so
+        // the lambda itself always returns true once a section is loaded at all -- there is no rim left
+        // for the generator's own flat fallback to catch.
 #if AVER_MODULE_LANDSCAPE
         if (landscapeLoaded_) {
             cwSettings.generator.heightSource = [this](f32 x, f32 y, f32& outZ) {
-                return landscape::surfaceHeightAt(landscapeData_, x, y, outZ);
+                if (landscape::surfaceHeightAt(landscapeData_, x, y, outZ)) return true;
+                outZ = landscape::terrainHeightAt(x, y, landscapeNoiseParams_);
+                return true;
             };
             AVER_INFO("[ChunkWorld] scatter will follow the landscape section ({}x{} samples, "
-                      "{:.0f}cm spacing)", landscapeData_.sampleCount, landscapeData_.sampleCount,
-                      landscapeData_.spacingCm);
+                      "{:.0f}cm spacing) and the infinite noise field past its rim",
+                      landscapeData_.sampleCount, landscapeData_.sampleCount, landscapeData_.spacingCm);
         }
 #endif
 

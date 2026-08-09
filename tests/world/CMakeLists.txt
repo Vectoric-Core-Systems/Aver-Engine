@@ -99,6 +99,16 @@ target_link_libraries(ScatterPaletteTest PRIVATE
 set_target_properties(ScatterPaletteTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# InfiniteHeightFieldTest -- pcg::sampleInfiniteHeight/sampleInfiniteHeightCm (modules/render.pcg) and
+# their wiring into GeneratorSettings::heightSource via makeInfiniteHeightSource: determinism across
+# call order, continuity across a chunk boundary (with sampleInfinite itself as the jump-having
+# control), and that leaving heightSource unset stays byte-identical to today's flat generator.
+add_executable(InfiniteHeightFieldTest src/InfiniteHeightFieldTest.cpp)
+target_link_libraries(InfiniteHeightFieldTest PRIVATE
+  Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Render.Pcg Aver.Core)
+set_target_properties(InfiniteHeightFieldTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ScatterBudgetTool -- not a test. Runs the real generator against a level's real SCATTER records and
 # real cooked meshes and reports a measured resident-triangle count for a streaming radius, for the
 # same reason LevelInspect (tests/formats) and ActorSweep exist: a fixture agrees with its own parser
