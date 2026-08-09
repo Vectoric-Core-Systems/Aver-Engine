@@ -926,6 +926,29 @@ public:
             // `caps`, not `c`: a MeshObj named `c` is still in scope from the editor-cube setup
             // two hundred lines up, and shadowing it warned (C4456).
             const rhi::DeviceCaps caps = e.device()->caps();
+
+            // VIRTUALIZED GEOMETRY IS ON BY DEFAULT WHERE THE HARDWARE ALLOWS IT, and it used to be
+            // opt-in behind --lod-mesh-shader. That default was indefensible: this project's
+            // pine_tree_01 is 17.18 MILLION triangles, fifteen of them are hand-placed, and with the
+            // flag off the editor drew every one at LOD0 -- around 258 million triangles for a scene
+            // whose status bar reads "2 actors", at 13 FPS. The feature built precisely to make that
+            // tractable sat behind a switch nobody opening the editor would know to throw.
+            //
+            // AUTO, NOT FORCED: -1 means "decide from caps", and --lod-mesh-shader / --no-lod-mesh-
+            // shader pin it either way. The gate is the same one createShader enforces, so a device
+            // that would refuse the pipeline never gets asked for it and silently keeps the CPU path.
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+            if (lodMeshShaderRequest_ < 0) {
+                const bool ok = caps.meshShaderTier > 0 && caps.shaderModel >= 65 && caps.dxcAvailable;
+                lodMeshShaderEnabled_ = ok;
+                if (ok) AVER_INFO("[LOD] per-cluster mesh-shader path ON by default (mesh tier {}, SM {})",
+                                  caps.meshShaderTier, caps.shaderModel);
+                else    AVER_INFO("[LOD] per-cluster mesh-shader path unavailable (mesh tier {}, SM {}, "
+                                  "DXC {}); drawing without it", caps.meshShaderTier, caps.shaderModel,
+                                  caps.dxcAvailable);
+            }
+#endif
+
             voxi::DeviceInfo di;
             di.msaaMask = caps.msaaMask; di.maxMsaaSamples = caps.maxMsaaSamples;
             di.rayTracingTier = caps.rayTracingTier; di.computeShaders = caps.computeShaders;
@@ -2630,8 +2653,11 @@ public:
     // branch order. Falls back to whichever of the other two flags is also set, per-instance, if
     // either the mesh has no GPU cluster buffers yet or the pipeline never came up: house rule 6's
     // "degrade, not crash" at the feature level, not just the shader-compile level.
+    // --lod-mesh-shader / --no-lod-mesh-shader. Records an EXPLICIT choice, which suppresses the
+    // caps-driven default in onInit -- see the comment there for why the default is on.
     void setLodMeshShader(bool on, f32 thresholdPx) {
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+        lodMeshShaderRequest_ = on ? 1 : 0;
         lodMeshShaderEnabled_ = on;
         if (on) lodErrorThresholdPx_ = thresholdPx;   // shares the one pixel-budget knob with the others
 #else
@@ -7795,7 +7821,27 @@ private:
         // The placement loop is aver::world::instantiate now, shared with the game runtime. What is
         // left here is the part that is genuinely the EDITOR's: its label table, its entity->body
         // map, and the per-entity record saveLevel needs to write the level back out unchanged.
+        // TERRAIN FIRST, THEN THE THINGS THAT STAND ON IT. This used to run at the very end of
+        // loadLevel, after every placement had already been instantiated, which was harmless only
+        // while the ground was a flat plane at z=0. A `snap` placement asks the ground how high it
+        // is, so the ground has to exist by then.
+#if AVER_MODULE_LANDSCAPE
+        loadLandscapeForLevel(eng.device(), path, w);
+#endif
+
         world::InstantiateOptions opt;
+#if AVER_MODULE_LANDSCAPE
+        // The same surface the scatter follows, so a hand-placed tree and a scattered fern sitting
+        // a metre apart agree about where the ground is.
+        opt.groundHeightAt = [this](f64 x, f64 y, f64& outZ) {
+            if (!landscapeLoaded_) return false;
+            f32 z = 0.0f;
+            if (!landscape::surfaceHeightAt(landscapeData_, static_cast<f32>(x),
+                                            static_cast<f32>(y), z)) return false;
+            outZ = static_cast<f64>(z);
+            return true;
+        };
+#endif
 #if AVER_MODULE_PBR
         opt.bindMaterial = [this](i32 token, const std::string& surface) {
             const pbr::MaterialHandle h = materialForSurface(surface);
@@ -7841,9 +7887,6 @@ private:
 
         AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
 
-#if AVER_MODULE_LANDSCAPE
-        loadLandscapeForLevel(eng.device(), path, w);
-#endif
     }
 
     // Applies a level's SUN and SKY records to the live atmosphere.
@@ -8593,7 +8636,11 @@ private:
         u32 clusterCount = 0;
     };
     std::unordered_map<u64, MeshClusterGpu> meshClusterGpu_;
-    bool lodMeshShaderEnabled_ = false;   // --lod-mesh-shader
+    bool lodMeshShaderEnabled_ = false;   // resolved in onInit; see lodMeshShaderRequest_
+    // -1 = decide from DeviceCaps (the default), 0 = --no-lod-mesh-shader, 1 = --lod-mesh-shader.
+    // Unguarded like chunkStreamAutoFrames_: the setter is called from unguarded flag parsing, so the
+    // member must exist in every configuration even where nothing reads it.
+    int lodMeshShaderRequest_ = -1;
 
     // Pipeline creation is lazy (first frame the flag is on and a device exists) and tried EXACTLY
     // ONCE per run: a failed compile or a tier-0 device means "use the CPU path instead", logged once,
@@ -8661,7 +8708,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=false; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; bool lodMeshShader=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=false; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -8936,6 +8983,10 @@ Application* createApplication(int argc, char** argv) {
             if (i+1 < argc && (argv[i+1][0] != '-' || (argv[i+1][1] >= '0' && argv[i+1][1] <= '9')))
                 lodErrorPx=static_cast<f32>(std::atof(argv[++i]));
         }
+        // --no-lod-mesh-shader forces the GPU per-cluster path OFF. It exists because the path is
+        // now ON by default wherever the device supports it (see onInit), so "compare against not
+        // having it" needs a way to say so -- which is exactly how its 2.8x speedup was measured.
+        else if (!std::strcmp(argv[i],"--no-lod-mesh-shader")) lodMeshShader=0;
         else if (!std::strcmp(argv[i],"--ui-demo")) uiDemo=true;
         // Coverage is optional: `--clouds` alone takes the authored default.
         else if (!std::strcmp(argv[i],"--clouds")) {
@@ -8988,7 +9039,7 @@ Application* createApplication(int argc, char** argv) {
     app->setLodSelect(lodSelect, lodErrorPx);
     app->setLodClusterStats(lodClusterStats);
     app->setLodPerCluster(lodPerCluster, lodErrorPx);
-    app->setLodMeshShader(lodMeshShader, lodErrorPx);
+    if (lodMeshShader >= 0) app->setLodMeshShader(lodMeshShader != 0, lodErrorPx);
     app->setUiDemo(uiDemo);
     app->setOpenAsset(openAsset);
     app->setInputProbe(inputProbe);

@@ -191,6 +191,10 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             }
             for (usize i = next; i < t.size(); ++i) {
                 if (equalsCI(t[i], "nocollide")) p.collide = false;
+                // Bare token, beside `nocollide`. BEFORE the material fallback below, or the
+                // word would be swallowed as a surface name -- which is how a trailing bare
+                // token silently becomes a material called "snap".
+                else if (equalsCI(t[i], "snap")) p.snapToGround = true;
                 else if (p.material.empty()) p.material = std::string(t[i]);
             }
             p.objectId = fnv1a64(std::string_view(p.asset));
@@ -338,6 +342,7 @@ std::string writeOcworld(const OcWorldData& w) {
         }
         if (!p.material.empty()) { s += " "; s += p.material; }
         if (!p.collide) s += " nocollide";
+        if (p.snapToGround) s += " snap";
         s += "\n";
     }
     return s;

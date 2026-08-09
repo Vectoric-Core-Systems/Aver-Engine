@@ -24,6 +24,15 @@ struct OcWorldPlacement {
     f64 sx = 1, sy = 1, sz = 1;            // non-uniform scale (a PLACE sets all three equal)
     bool collide = true;                   // whether the world builds a static body for it
 
+    // `snap`: sit on the ground, with `z` read as an offset ABOVE it rather than an absolute
+    // height. A bare token, matching PLACE's own `nocollide` and PCGVOLUME's `infinite` -- it is a
+    // statement about what the placement IS, not a value it carries.
+    //
+    // WHO ANSWERS IT is the host, through InstantiateOptions::groundHeightAt. This module has no
+    // idea whether a level has terrain under it, and adding one would drag the landscape into the
+    // dependency graph of a text parser.
+    bool snapToGround = false;
+
     bool uniform() const { return sx == sy && sy == sz; }
 };
 

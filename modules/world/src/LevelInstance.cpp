@@ -27,8 +27,18 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
         // observable and the two copies were free to drift apart. See docs/CHUNKS.md B8 for why the
         // f64 does not help anyway: the TEXT writer formats with %.6g, so a coordinate past ~10 km
         // loses centimetres on every save regardless of the type it is held in.
+        // A placement that asked to sit on the ground gets its authored Z treated as an OFFSET
+        // from the surface, not as an absolute height -- so `z 0 snap` means "on the ground" and
+        // `z 50 snap` means "half a metre above it", and both survive the terrain being resculpted.
+        // No callback, or no ground under this point, and the authored Z stands unchanged.
+        f64 pz = p.z;
+        if (p.snapToGround && opt.groundHeightAt) {
+            f64 ground = 0.0;
+            if (opt.groundHeightAt(p.x, p.y, ground)) pz = ground + p.z;
+        }
+
         Transform xf;
-        xf.position = Vec3{static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)};
+        xf.position = Vec3{static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(pz)};
         xf.rotation = quatFromEulerDeg(Vec3{static_cast<f32>(p.roll), static_cast<f32>(p.pitch),
                                             static_cast<f32>(p.yaw)});
         xf.scale = Vec3{static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz)};
@@ -59,7 +69,7 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
         // initPhysics-after-openProject ordering mistake visible instead of silent.
         if (opt.createBodies && p.collide && aver_phys_ready()) {
             body = aver_phys_add_static_box(
-                static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z),
+                static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(pz),
                 static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz));
             out.bodies.push_back(body);
         }

@@ -47,6 +47,20 @@ struct InstantiateOptions {
     // without physics, or when aver_phys_ready() is false -- which is not an error: it is the state
     // a host is in before it has called aver_phys_init.
     bool createBodies = true;
+
+    // Answers "what is the ground height at (x, y)" for placements that asked to be snapped to it.
+    // False from the callback means there is no ground there and the placement keeps its authored Z.
+    //
+    // A HOST CALLBACK, for the reason every other seam in this struct is one: the ground might be a
+    // heightfield section, a procedural field, or nothing at all, and Aver.World must not learn to
+    // tell those apart -- it does not depend on Aver.Landscape and is not going to start.
+    //
+    // WHY THIS EXISTS AT ALL: adding terrain under a level whose placements were authored against a
+    // flat plane at z=0 buries every one of them. The demo project's hand-placed pines sat at z=0
+    // against terrain running -343..+843cm and sank up to eight metres. Re-authoring the Z of every
+    // placement would fix that level and no other, and would break again the moment the terrain is
+    // resculpted; asking for the ground at load does not.
+    std::function<bool(f64 worldXCm, f64 worldYCm, f64& outGroundZCm)> groundHeightAt;
 };
 
 // The result, in placement order. `entities` holds only the placements that produced an entity, so
