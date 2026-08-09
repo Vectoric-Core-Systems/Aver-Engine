@@ -734,11 +734,16 @@ public:
             look("M_Target", 0.86f, 0.20f, 0.16f, 0.05f, 0.40f);
             look("M_Metal",  0.55f, 0.57f, 0.60f, 0.85f, 0.28f);
             look("M_Accent", 0.95f, 0.66f, 0.15f, 0.30f, 0.35f);
-            // Added for the chunk generator's scatter palette (GeneratorSettings::material default
-            // is "M_Foliage", and the demo palette below adds "M_Bark"/"M_Rock"): without a look or
-            // an .ocmat asset a surface just renders the flat 0.80/0.80/0.85 fallback (SandboxApp's
-            // scene draw loop), which is not wrong but reads as unfinished next to the level's own
-            // authored M_Floor surfaces.
+            // Three more generic surface names, kept for the same reason as the seven above: a
+            // surface with neither a look nor an .ocmat renders the flat 0.80/0.80/0.85 fallback,
+            // which is not wrong but reads as unfinished.
+            //
+            // THE COMMENT HERE USED TO CITE "the demo palette below" AND A "M_Foliage" DEFAULT.
+            // Both are gone: buildDemoScatterPalette was deleted when levels learned to declare
+            // their own SCATTER records, and OcScatterSpecies::material now defaults to empty
+            // rather than naming a material one project happened to use. These three stay because
+            // they are ordinary vocabulary any outdoor project might use -- not because a demo
+            // needs them.
             look("M_Foliage", 0.16f, 0.42f, 0.14f, 0.0f, 0.85f);
             look("M_Bark",    0.35f, 0.24f, 0.15f, 0.0f, 0.85f);
             look("M_Rock",    0.42f, 0.40f, 0.37f, 0.05f, 0.80f);

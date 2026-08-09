@@ -50,7 +50,7 @@ namespace aver::world {
 // eligible everywhere, which is what reproduces today's one-species behaviour exactly.
 struct ScatterSpecies {
     std::string meshPath = "Meshes/cube.ocmesh";
-    std::string material = "M_Foliage";
+    std::string material;   // empty = the mesh's own cooked material; see OcWorld.hpp
 
     // Relative selection weight among the species eligible for a given candidate. <= 0 means this
     // species can never be picked (a way to disable an entry without removing it).
@@ -106,7 +106,7 @@ struct GeneratorSettings {
     // palette gets exactly one species built from these two fields, with the palette's own default
     // scale range and yaw, which reproduces the generator's original behaviour bit-for-bit.
     std::string meshPath = "Meshes/cube.ocmesh";
-    std::string material = "M_Foliage";
+    std::string material;   // empty = the mesh's own cooked material; see OcWorld.hpp
 
     // The weighted scatter palette. Empty means "one species from meshPath/material above".
     std::vector<ScatterSpecies> palette;

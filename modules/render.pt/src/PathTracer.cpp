@@ -21,8 +21,8 @@ constexpr u32 kGroup = 8;
 constexpr u32 kShaderModel = 65;
 constexpr u32 kRayTracingTier = 11;
 
-// MIRRORS cbuffer PtFrame in kPathTracerHLSL, field for field. Nothing checks this across the
-// C++/HLSL boundary, and a shifted field here reads a camera basis as a sample count.
+// MIRRORS cbuffer PtFrame in kPathTracerHLSL, field for field. A shifted field here reads a camera
+// basis as a sample count -- silently, and only in the rendered image.
 struct FrameCB {
     f32 origin[4];
     f32 forward[4];
@@ -32,6 +32,14 @@ struct FrameCB {
     u32 sample[4];
     f32 trace[4];
 };
+
+// Seven float4/uint4 rows, matching PtShaders.hpp's cbuffer exactly. This assert used to say
+// "nothing checks this across the C++/HLSL boundary" -- which was true, and was the whole problem.
+// It cannot catch a field REORDERED within the same size, but it does catch the common case: a row
+// added on one side and not the other. pbr::MaterialConstants (MaterialGpu.hpp:38) has guarded
+// itself this way all along; this struct and pcg::VolumeCB were simply the two that never did.
+static_assert(sizeof(FrameCB) == 112, "cbuffer PtFrame in PtShaders.hpp mirrors this byte for byte");
+static_assert(sizeof(FrameCB) % 16 == 0, "must be a legal constant-buffer size");
 
 } // namespace
 

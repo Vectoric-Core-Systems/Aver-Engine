@@ -35,6 +35,19 @@ struct alignas(16) VolumeCB {
     i32 layerB[kMaxLayers][4];
 };
 
+// THE ARRAY LENGTH IS THE COUPLING, not just the total size. PcgShaders.hpp writes the layer arrays
+// as `float4 gLayerA[4]` and `int4 gLayerB[4]` -- a LITERAL 4, because HLSL has no access to
+// kMaxLayers. Raising kMaxLayers here would silently grow this block past what the shader declares
+// and every layer after the fourth would be read as garbage, or not at all. So both facts are
+// asserted: the constant the shader assumes, and the total the two sides must agree on.
+//
+// This module's whole premise is that three implementations -- HLSL, C++ and F# -- agree to one ULP
+// (see PcgShaders.hpp's header), which makes an unchecked struct boundary a strange gap to have
+// left. pbr::MaterialConstants (MaterialGpu.hpp:38) has always guarded itself this way.
+static_assert(kMaxLayers == 4, "PcgShaders.hpp hardcodes gLayerA[4]/gLayerB[4]; raise both together");
+static_assert(sizeof(VolumeCB) == 176, "cbuffer PcgVolumeCB mirrors this byte for byte");
+static_assert(sizeof(VolumeCB) % 16 == 0, "must be a legal constant-buffer size");
+
 } // namespace
 
 f32 sampleDensity(const VolumeSpec& spec, u32 x, u32 y, u32 z) {

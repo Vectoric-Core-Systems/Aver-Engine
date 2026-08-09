@@ -87,7 +87,11 @@ struct OcPcgVolume {
 struct OcScatterSpecies {
     std::string meshPath;                  // required in practice; empty fails validation, same as a
                                             // mesh path that does not resolve to a real asset
-    std::string material = "M_Foliage";
+    // EMPTY, not "M_Foliage". A text format has no business naming a material that only one
+    // project ever had: empty means "use the mesh's own cooked material", which is what a
+    // SCATTER record that states no opinion actually wants. Every record in the demo level
+    // names its material explicitly, so nothing depended on the old default.
+    std::string material;
     f64 weight = 1.0;
     f64 scaleMin = 0.75, scaleMax = 1.25;
     bool randomizeYaw = true;
