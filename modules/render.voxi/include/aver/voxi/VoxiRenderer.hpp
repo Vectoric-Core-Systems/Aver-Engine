@@ -144,6 +144,11 @@ private:
 
     rhi::TextureHandle shadowTex_ = 0;
     rhi::PipelineHandle shadowPso_ = 0;
+    // Same depth-only pass, drawn with IRenderContext::drawMeshInstanced instead of one drawMesh()
+    // per surviving draw -- see shadowPass()'s per-cascade mesh grouping and VSShadowInstanced in
+    // VoxiShaders.hpp. 0 on a device/shader-compile combination that couldn't build it; shadowPass()
+    // then falls back to shadowPso_'s one-draw-per-instance path automatically.
+    rhi::PipelineHandle shadowInstancedPso_ = 0;
 
     // Radiance volume: RGBA16F Tex3D, full mip chain. Mip N is the cone footprint at distance N.
     rhi::TextureHandle  voxelTex_ = 0;
@@ -292,6 +297,14 @@ private:
         f32 boundsRadius = -1.0f;
     };
     std::vector<Draw> draws_, drawsPrev_;
+
+    // shadowPass() scratch: this cascade's culled draws, grouped by mesh, so every instance of one
+    // mesh reaches the GPU in a single drawMeshInstanced() call rather than one drawMesh() each.
+    // A member (not a cascade-local) so its buffers' capacity survives from cascade to cascade and
+    // frame to frame instead of reallocating four times a frame -- see shadowPass()'s own comment
+    // at the reset for why clearing `worlds` (not erasing the group) is what makes that stick.
+    struct ShadowInstanceGroup { rhi::MeshHandle mesh = 0; std::vector<f32> worlds; };
+    std::vector<ShadowInstanceGroup> shadowInstanceGroups_;
 
     f32 center_[3] = {0, 0, 0};
     f32 extent_ = 2000.0f;

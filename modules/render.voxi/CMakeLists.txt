@@ -38,3 +38,18 @@ target_link_libraries(Aver.Render.Voxi.Renderer PUBLIC Aver.Core Aver.RHI Aver.R
                                                        Aver.Render.PBR.Materials)
 
 set_target_properties(Aver.Render.Voxi.Renderer PROPERTIES FOLDER "modules")
+
+# ---- TEMPORARY: isolating shadowPass's cost ------------------------------------------------------
+# No CLI flag reaches VoxiRenderer::shadowPass today, and the flag-parsing loop that could add one
+# lives in sandbox/src/SandboxApp.cpp -- out of scope for this change. This cache variable is the
+# build-time substitute: it caps the cascade count the pass actually loops over (0 disables the
+# pass outright), so its cost can be isolated by rebuilding rather than by a run-time switch.
+# 4 -- kShadowCascades, the existing cascade count -- is the default and reproduces the unmodified
+# renderer exactly: leave this untouched and the #ifdef in VoxiRenderer.cpp never has anything to
+# clamp, so nobody who doesn't pass -DAVER_VOXI_SHADOW_CASCADE_LIMIT sees any difference at all.
+set(AVER_VOXI_SHADOW_CASCADE_LIMIT 4 CACHE STRING
+    "Temporary instrumentation: caps shadowPass's cascade loop to at most this many cascades (0 \
+disables the pass entirely, 4 is the unmodified default). For isolating shadowPass's cost; not a \
+real quality setting -- do not wire this to the editor or a project manifest.")
+target_compile_definitions(Aver.Render.Voxi.Renderer PRIVATE
+    AVER_VOXI_SHADOW_CASCADE_LIMIT=${AVER_VOXI_SHADOW_CASCADE_LIMIT})

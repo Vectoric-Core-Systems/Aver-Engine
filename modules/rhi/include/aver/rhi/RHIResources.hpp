@@ -4,6 +4,7 @@
 #pragma once
 #include "aver/core/Types.hpp"
 
+#include <cstring>
 #include <string>
 namespace aver::rhi {
 
@@ -272,6 +273,14 @@ struct GraphicsPipelineDesc {
     u32    sampleCount       = 1;
 
     BlendMode blend = BlendMode::Opaque;
+
+    // Reserves ONE EXTRA root SRV, past every t-register `layout` itself declares (and past the
+    // mesh-shader geometry SRVs too, when `ms` is also set): a per-instance StructuredBuffer that
+    // IRenderContext::drawMeshInstanced binds and the shader indexes with SV_InstanceID. See that
+    // method and kInstanceWorldRegister's comment below for the whole mechanism. Defaulted false so
+    // every EXISTING pipeline gets the exact root signature it already had -- this is additive, not
+    // a reinterpretation of anything `layout` already means.
+    bool instanced = false;
 };
 
 // How to create a compute pipeline.
@@ -343,6 +352,17 @@ static_assert(kFeatureFrameConstantRegister < kMaxConstantSlots,
               "a feature must be able to DECLARE the register it is told to put frame constants at");
 static_assert(kMeshGeometryConstantRegister >= kMaxConstantSlots,
               "the backend's mesh geometry constants must sit above every declarable slot");
+
+// Reserved for GraphicsPipelineDesc::instanced == true, and declared in the CALLER's own shader (not
+// the shared prelude -- unlike PerObject, not every consumer wants this, so it is opt-in per pipeline
+// rather than universal): a StructuredBuffer<float4x4> of per-instance world matrices, one draw's
+// worth of transforms, indexed with SV_InstanceID. Its t-register is t(declaredSrvCount(layout)),
+// or t(declaredSrvCount(layout) + 2) when the SAME pipeline is also a mesh-shader one (`ms` set),
+// since dispatchMeshFor's own vertex/index SRVs already claim declaredSrvCount and +1 in that case.
+// A caller compiling its instanced shader must pass the SAME NUMBER as a #define -- see
+// VoxiShaders.hpp's VSShadowInstanced and VoxiRenderer.cpp's AVER_INSTANCE_SRV for the pattern; the
+// backend has no way to push a register number INTO already-compiled HLSL text, so this is computed
+// identically on both sides from the same layout rather than shared any other way.
 
 // ---------------------------------------------------------------- acceleration structures
 
@@ -477,6 +497,36 @@ public:
     virtual void drawMesh(MeshHandle mesh) = 0;
     // Draws one backend-owned mesh through the mesh-shader path.
     virtual void dispatchMeshFor(MeshHandle mesh) = 0;
+
+    // Draws `instanceCount` copies of one backend-owned mesh in a SINGLE call, with per-instance
+    // world transforms read from a StructuredBuffer the shader indexes with SV_InstanceID -- see
+    // kInstanceWorldRegister's comment above GraphicsPipelineDesc::instanced for the whole mechanism.
+    // `worlds` is `instanceCount` row-major 4x4 matrices back to back (ENGINE convention: cm, +Z up,
+    // do not pre-transpose -- the same layout drawMesh's caller already writes into PerObject via
+    // setConstants(kObjectConstantRegister, ...)); COPIED, so the caller may reuse its buffer
+    // immediately. The bound pipeline must have been built with GraphicsPipelineDesc::instanced =
+    // true, exactly as dispatchMeshFor requires a mesh-shader pipeline.
+    //
+    // This is deliberately narrower than a full per-instance PerObject block (world plus base
+    // colour, material, shading model, emissive): the depth-only shadow pass is this mechanism's
+    // first caller and reads nothing else per instance -- see VoxiRenderer::shadowPass. The
+    // SRV-indexed-by-SV_InstanceID SHAPE generalises to any other per-instance payload a future
+    // caller wants; widen the element type and the shader that reads it then, not this entry point.
+    //
+    // NOT PURE, same reasoning as dispatchMeshClusters below: adding a new virtual here must not
+    // break an existing IRenderContext that never asked for instancing. The default below is a
+    // correct, unaccelerated fallback -- one setConstants + drawMesh per instance, exactly what a
+    // caller would otherwise write by hand -- so MockContext and any other override keep compiling
+    // and behaving correctly, unmodified, the moment this method exists; only D3D12RenderContext
+    // turns it into an actual DrawIndexedInstanced with an instance count above 1.
+    virtual void drawMeshInstanced(MeshHandle mesh, const f32* worlds, u32 instanceCount) {
+        f32 consts[kObjectConstantDwords] = {};
+        for (u32 i = 0; i < instanceCount; ++i) {
+            std::memcpy(consts, worlds + static_cast<size_t>(i) * 16, 16 * sizeof(f32));
+            setConstants(kObjectConstantRegister, consts, kObjectConstantDwords);
+            drawMesh(mesh);
+        }
+    }
     // Dispatches a compute pipeline.
     virtual void dispatch(u32 gx, u32 gy, u32 gz) = 0;
 

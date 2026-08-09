@@ -699,6 +699,26 @@ float4 VSShadow(VSIn i) : SV_POSITION {
     return mul(mul(float4(i.pos, 1.0), gWorld), gCascadeViewProj[(uint)gShadowDraw.x]);
 }
 
+#ifdef AVER_INSTANCE_SRV
+// AVER_INSTANCE_SRV is the t-register VoxiRenderer.cpp computed for THIS pipeline's layout when it
+// compiled this entry point -- see GraphicsPipelineDesc::instanced in RHIResources.hpp. Two macro
+// layers so the register NUMBER (not the literal text "AVER_INSTANCE_SRV") gets pasted after "t".
+#define AVER_INST_JOIN2(a, b) a##b
+#define AVER_INST_JOIN(a, b) AVER_INST_JOIN2(a, b)
+StructuredBuffer<float4x4> gInstanceWorlds : register(AVER_INST_JOIN(t, AVER_INSTANCE_SRV));
+
+// VSShadow's instanced twin: one DrawIndexedInstanced call submits every surviving instance of one
+// mesh in one cascade, instead of shadowPass calling drawMesh() once per instance. The world
+// transform comes from gInstanceWorlds[instanceID] -- written by VoxiRenderer::shadowPass via
+// IRenderContext::drawMeshInstanced -- rather than from PerObject's gWorld, which this entry point
+// never reads. Everything else (the cascade's view-projection, the depth-only output) is identical
+// to VSShadow.
+float4 VSShadowInstanced(VSIn i, uint instanceID : SV_InstanceID) : SV_POSITION {
+    float4x4 world = gInstanceWorlds[instanceID];
+    return mul(mul(float4(i.pos, 1.0), world), gCascadeViewProj[(uint)gShadowDraw.x]);
+}
+#endif
+
 // ================= Voxi: voxelisation =================
 // The scene is rasterised once per frame with no render target; the pixel shader writes lit
 // radiance straight into the volume.

@@ -1338,6 +1338,9 @@ struct RhiPipeline {
     i32  slotParam[kMaxConstantSlots] = {-1, -1, -1, -1, -1};
     u32  slotDwords[kMaxConstantSlots] = {};  // 0 = the slot is a root CBV rather than root constants
     i32  msVertexParam = -1, msIndexParam = -1, msCountParam = -1;
+    // -1 unless GraphicsPipelineDesc::instanced was set; see RHIResources.hpp's comment above
+    // GraphicsPipelineDesc::instanced for what this root SRV carries.
+    i32  instanceWorldParam = -1;
 };
 
 // One suballocated descriptor range plus the kind declared for each of its slots. Slots past the
@@ -1379,10 +1382,15 @@ struct RhiTlas {
 struct RootSigEntry {
     PipelineLayout layout{};
     bool mesh = false;
+    // Part of the cache key alongside layout/mesh: two identical layouts, one instanced and one not,
+    // need DIFFERENT root signatures (the instanced one has an extra root SRV param), so they must
+    // not collide on the same cache entry.
+    bool instanced = false;
     ComPtr<ID3D12RootSignature> sig;
     i32 srvParam[kBindingTableCount] = {-1, -1}, uavParam[kBindingTableCount] = {-1, -1};
     i32 slotParam[kMaxConstantSlots] = {-1, -1, -1, -1, -1};
     i32 msVertexParam = -1, msIndexParam = -1, msCountParam = -1;
+    i32 instanceWorldParam = -1;
 };
 
 // A destroyed object the GPU may still be reading. Released once the fence passes, never sooner.
@@ -1484,7 +1492,7 @@ private:
     RhiBlas*       blas(BlasHandle h);
     RhiTlas*       tlas(TlasHandle h);
 
-    const RootSigEntry* rootSignature(const PipelineLayout& layout, bool mesh);
+    const RootSigEntry* rootSignature(const PipelineLayout& layout, bool mesh, bool instanced = false);
     // Descriptor slot `heapBase + index`, CPU side (for writing) and GPU side (for binding).
     D3D12_CPU_DESCRIPTOR_HANDLE cpuSlot(u32 index) const;
     D3D12_GPU_DESCRIPTOR_HANDLE gpuSlot(u32 index) const;
@@ -1534,6 +1542,7 @@ public:
     void setConstantBuffer(u32 slot, const void* data, u32 bytes) override;
     void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override;
     void drawMesh(MeshHandle mesh) override;
+    void drawMeshInstanced(MeshHandle mesh, const f32* worlds, u32 instanceCount) override;
     void dispatchMeshFor(MeshHandle mesh) override;
     void dispatchMeshClusters(MeshHandle mesh, u32 clusterCount) override;
     void dispatch(u32 gx, u32 gy, u32 gz) override;
@@ -3885,16 +3894,18 @@ void D3D12ResourceFactory::collect() {
 
 // ---- root-signature cache
 // Returns the cached root signature for `layout`, building it on first use.
-const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& layout, bool mesh) {
+const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& layout, bool mesh, bool instanced) {
     for (const RootSigEntry& e : rootSigs_)
-        if (e.mesh == mesh && sameLayout(e.layout, layout)) return &e;
+        if (e.mesh == mesh && e.instanced == instanced && sameLayout(e.layout, layout)) return &e;
 
     RootSigEntry e;
     e.layout = layout;
     e.mesh = mesh;
+    e.instanced = instanced;
 
     D3D12_DESCRIPTOR_RANGE ranges[2 * kBindingTableCount] = {};
-    D3D12_ROOT_PARAMETER params[2 * kBindingTableCount + kMaxConstantSlots + 3] = {};
+    // +3 for the mesh geometry SRVs/count, +1 more for the instanced-draw world-matrix SRV.
+    D3D12_ROOT_PARAMETER params[2 * kBindingTableCount + kMaxConstantSlots + 4] = {};
     u32 n = 0;
     const u32 srvCounts[kBindingTableCount] = {layout.srvCount, layout.srvCount1};
     const u32 uavCounts[kBindingTableCount] = {layout.uavCount, layout.uavCount1};
@@ -3948,6 +3959,16 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
         params[n].Constants.ShaderRegister = kMeshGeometryConstantRegister;
         params[n].Constants.Num32BitValues = 4;
         e.msCountParam = static_cast<i32>(n++);
+    }
+    if (instanced) {
+        // One more root SRV, past declaredSrvCount(layout) AND past the two mesh geometry SRVs
+        // above when this is also a mesh pipeline (msVertexParam/msIndexParam already claimed
+        // declaredSrvCount and +1 in that case) -- see RHIResources.hpp's comment above
+        // GraphicsPipelineDesc::instanced for the register arithmetic a shader compiling against
+        // this same layout must reproduce.
+        params[n].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        params[n].Descriptor.ShaderRegister = declaredSrvCount(layout) + (mesh ? 2 : 0);
+        e.instanceWorldParam = static_cast<i32>(n++);
     }
     for (u32 i = 0; i < n; ++i) params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
@@ -4305,7 +4326,7 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
         return 0;
     }
 
-    const RootSigEntry* rs = rootSignature(d.layout, d.ms != 0);
+    const RootSigEntry* rs = rootSignature(d.layout, d.ms != 0, d.instanced);
     if (!rs) return 0;
 
     RhiPipeline p;
@@ -4317,6 +4338,7 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
     p.msVertexParam = rs->msVertexParam;
     p.msIndexParam = rs->msIndexParam;
     p.msCountParam = rs->msCountParam;
+    p.instanceWorldParam = rs->instanceWorldParam;
     for (u32 i = 0; i < kMaxConstantSlots; ++i) { p.slotParam[i] = rs->slotParam[i]; p.slotDwords[i] = d.layout.constantDwords[i]; }
 
     D3D12_RASTERIZER_DESC raster{};
@@ -5208,6 +5230,33 @@ void D3D12RenderContext::drawMesh(MeshHandle mesh) {
     dev_->cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
     dev_->cmdList_->IASetIndexBuffer(&m.ibv);
     dev_->cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+}
+
+// Draws `instanceCount` copies of a device mesh in one DrawIndexedInstanced, with per-instance world
+// transforms read from a root-SRV-bound StructuredBuffer -- see IRenderContext::drawMeshInstanced and
+// RHIResources.hpp's comment above GraphicsPipelineDesc::instanced for the whole mechanism.
+void D3D12RenderContext::drawMeshInstanced(MeshHandle mesh, const f32* worlds, u32 instanceCount) {
+    if (!dev_->cmdList_) return;
+    if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.D3D12] drawMeshInstanced with an invalid mesh handle"); return; }
+    if (instanceCount == 0) return;
+    if (!pipe_ || pipe_->instanceWorldParam < 0) {
+        // The bound pipeline wasn't built with GraphicsPipelineDesc::instanced -- fall back to the
+        // base class's one-draw-per-instance behaviour rather than binding an undeclared root param
+        // (which would be an uninitialised root argument on whatever slot happened to sit there).
+        AVER_ERROR("[RHI.D3D12] drawMeshInstanced against a pipeline built without "
+                   "GraphicsPipelineDesc::instanced; falling back to {} individual draws", instanceCount);
+        IRenderContext::drawMeshInstanced(mesh, worlds, instanceCount);
+        return;
+    }
+    const D3D12_GPU_VIRTUAL_ADDRESS va = ringAlloc(worlds, instanceCount * 16 * static_cast<u32>(sizeof(f32)));
+    if (!va) return;   // ring exhausted this frame; ringAlloc already logged it
+    const GpuMesh& m = dev_->meshes_[mesh - 1];
+    applyDrawBinding();
+    dev_->cmdList_->SetGraphicsRootShaderResourceView(static_cast<UINT>(pipe_->instanceWorldParam), va);
+    dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    dev_->cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
+    dev_->cmdList_->IASetIndexBuffer(&m.ibv);
+    dev_->cmdList_->DrawIndexedInstanced(m.indexCount, instanceCount, 0, 0, 0);
 }
 
 // Draws a device mesh through the mesh-shader path.

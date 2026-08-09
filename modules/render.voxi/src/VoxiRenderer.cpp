@@ -157,10 +157,13 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
         if (!mipBindings_[m]) missing = "mip binding set";
 
     AVER_INFO("[Voxi] init: shadow tex={} volume={} accum={} ({}^3, {} mips) bindings={}/{}/{}/+{} "
-              "pipelines shadow={} voxel={} voxelMs={} clear={} resolve={} mip={} debug={} scene={}/{}/{}/{}",
+              "pipelines shadow={}/{} voxel={} voxelMs={} clear={} resolve={} mip={} debug={} scene={}/{}/{}/{}",
               shadowTex_, voxelTex_, voxelAccumTex_, voxelResBuilt_, voxelMips_,
               bindings_, clearBindings_, resolveBindings_, static_cast<u32>(mipBindings_.size()),
-              shadowPso_, voxelPso_, voxelMsPso_, clearPso_, resolvePso_, mipPso_, debugPso_,
+              // shadow is per-draw/instanced -- a zero in the second slot is shadowPass silently
+              // falling back to one draw per instance, which is a 3% frame-time difference and
+              // otherwise invisible. It cost an hour of misattributed measurement to learn that.
+              shadowPso_, shadowInstancedPso_, voxelPso_, voxelMsPso_, clearPso_, resolvePso_, mipPso_, debugPso_,
               scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_);
 
     if (missing) {
@@ -800,9 +803,30 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
 }
 
 // Renders the replayed draw list into each cascade's quadrant of the shadow atlas, depth only.
+//
+// INSTANCED BY DEFAULT when shadowInstancedPso_ built (see createPipelines): every surviving draw in
+// a cascade is grouped by mesh into shadowInstanceGroups_, and each group reaches the GPU as ONE
+// IRenderContext::drawMeshInstanced call instead of one drawMesh() per draw. Depth-only rendering
+// with a strict Less test is order-independent except for two triangles landing on EXACTLY the same
+// depth at the same pixel -- regrouping by mesh cannot change a single output depth value in any
+// other case, so the shadow map this produces is the same map the old per-draw loop produced. What
+// it gives up: nothing quality-wise; what changes is WORK -- up to ~2,114 drawMesh calls per cascade
+// collapse to at most ~30 (this scene's distinct mesh count) drawMeshInstanced calls. Falls back to
+// the untouched one-draw-per-instance path (shadowPso_) if the instanced pipeline failed to build.
 void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
-    if (!shadowPso_ || drawsPrev_.empty()) { cb_.shadowParams[1] = 0.0f; return; }
-    const u32 cascades = fitCascades();
+    const bool useInstancing = shadowInstancedPso_ != 0;
+    if ((!shadowPso_ && !shadowInstancedPso_) || drawsPrev_.empty()) { cb_.shadowParams[1] = 0.0f; return; }
+    u32 cascades = fitCascades();
+#ifdef AVER_VOXI_SHADOW_CASCADE_LIMIT
+    // TEMPORARY, for isolating this pass's own cost -- see the cache variable of the same name in
+    // this module's CMakeLists.txt. The default build sets it to kShadowCascades (4), so `cascades`
+    // (already <= 4, fitCascades' own ceiling) is never actually reduced and this is a no-op unless
+    // someone deliberately reconfigures with -DAVER_VOXI_SHADOW_CASCADE_LIMIT. fitCascades() still
+    // runs UNCLAMPED above: it is cheap CPU work, and it is also where curViewProj_ gets captured,
+    // which endShadowHistory needs every frame regardless of how many cascades get drawn.
+    if (cascades > static_cast<u32>(AVER_VOXI_SHADOW_CASCADE_LIMIT))
+        cascades = static_cast<u32>(AVER_VOXI_SHADOW_CASCADE_LIMIT);
+#endif
     if (cascades == 0) { cb_.shadowParams[1] = 0.0f; return; }
 
     cb_.shadowParams[0] = 1.0f / static_cast<f32>(kShadowSize);
@@ -811,10 +835,21 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
 
     ctx.pushMarker("Voxi shadow");
     ctx.textureBarrier(shadowTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::DepthWrite);
-    ctx.setPipeline(shadowPso_);
+    ctx.setPipeline(useInstancing ? shadowInstancedPso_ : shadowPso_);
     ctx.setBindingSet(bindings_);       // Tier 1: bind every declared table, read or not
     ctx.setRenderTargets(nullptr, 0, shadowTex_);
     ctx.clearDepth(shadowTex_, 1.0f);   // the whole atlas, once, before any quadrant is drawn
+
+    // Depth-only, no pixel shader bound in either pipeline: material CONTENT is never read, so one
+    // binding for the whole pass satisfies Tier 1's "table 1 must hold something" requirement for
+    // every draw regardless of which draw's own material it actually names.
+    ctx.setDrawBinding(materials_.fallbackBindingSet(), &materials_.fallbackConstants(), sizeof(pbr::MaterialConstants));
+
+    // TEMPORARY measurement instrumentation: a one-time census of what this pass actually submits,
+    // per cascade. Logged ONCE, not every frame -- this asks "what does a typical frame cost", not
+    // "watch it every frame". Adds one INFO line to the log and nothing to the rendered image.
+    static bool sShadowCensusLogged = false;
+    u32 censusPerCascade[kShadowCascades] = {};
 
     for (u32 c = 0; c < cascades; ++c) {
         cb_.shadowDraw[0] = static_cast<f32>(c);
@@ -829,24 +864,60 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
         const Vec3 cascCentre{cascadeCentre_[c][0], cascadeCentre_[c][1], cascadeCentre_[c][2]};
         const f32 cascRadius = cascadeRadius_[c];
 
-        for (const Draw& d : drawsPrev_) {
-            // Sphere-sphere overlap against this cascade's own fitted bounds: a draw whose bounding
-            // sphere cannot reach the cascade's box cannot cast a shadow into it. A negative
-            // boundsRadius means the backend had no bounds for this mesh -- draw it regardless
-            // rather than guess.
-            if (d.boundsRadius >= 0.0f) {
-                const Vec3 dc{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]};
-                if (dist(dc, cascCentre) > cascRadius + d.boundsRadius) continue;
+        u32 submitted = 0;
+        if (useInstancing) {
+            // Reset capacity, not the group list itself: the mesh set repeats cascade to cascade and
+            // frame to frame, so keeping each group's (now empty) vector alive means only the FIRST
+            // frame's cascades pay for growth -- see shadowInstanceGroups_'s own comment.
+            for (ShadowInstanceGroup& g : shadowInstanceGroups_) g.worlds.clear();
+
+            for (const Draw& d : drawsPrev_) {
+                // Sphere-sphere overlap against this cascade's own fitted bounds: a draw whose
+                // bounding sphere cannot reach the cascade's box cannot cast a shadow into it. A
+                // negative boundsRadius means the backend had no bounds for this mesh -- draw it
+                // regardless rather than guess.
+                if (d.boundsRadius >= 0.0f) {
+                    const Vec3 dc{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]};
+                    if (dist(dc, cascCentre) > cascRadius + d.boundsRadius) continue;
+                }
+                ShadowInstanceGroup* group = nullptr;
+                for (ShadowInstanceGroup& g : shadowInstanceGroups_)
+                    if (g.mesh == d.mesh) { group = &g; break; }
+                if (!group) { shadowInstanceGroups_.push_back({d.mesh, {}}); group = &shadowInstanceGroups_.back(); }
+                const usize base = group->worlds.size();
+                group->worlds.resize(base + 16);
+                std::memcpy(group->worlds.data() + base, d.world, 16 * sizeof(f32));
+                ++submitted;
             }
-            f32 consts[rhi::kObjectConstantDwords]{};
-            std::memcpy(consts, d.world, 16 * sizeof(f32));   // depth-only: nothing else is read
-            ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
-            // Bound even though this pass is depth-only: Tier 1 requires table 1 populated.
-            if (d.matSet) ctx.setDrawBinding(d.matSet, d.mat, d.matBytes);
-            else          ctx.setDrawBinding(materials_.fallbackBindingSet(),
-                                             &materials_.fallbackConstants(), sizeof(pbr::MaterialConstants));
-            ctx.drawMesh(d.mesh);
+            for (const ShadowInstanceGroup& g : shadowInstanceGroups_) {
+                if (g.worlds.empty()) continue;
+                ctx.drawMeshInstanced(g.mesh, g.worlds.data(), static_cast<u32>(g.worlds.size() / 16));
+            }
+        } else {
+            for (const Draw& d : drawsPrev_) {
+                if (d.boundsRadius >= 0.0f) {
+                    const Vec3 dc{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]};
+                    if (dist(dc, cascCentre) > cascRadius + d.boundsRadius) continue;
+                }
+                f32 consts[rhi::kObjectConstantDwords]{};
+                std::memcpy(consts, d.world, 16 * sizeof(f32));   // depth-only: nothing else is read
+                ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
+                ctx.drawMesh(d.mesh);
+                ++submitted;
+            }
         }
+        censusPerCascade[c] = submitted;
+    }
+
+    if (!sShadowCensusLogged) {
+        u32 total = 0;
+        for (u32 c = 0; c < kShadowCascades; ++c) total += censusPerCascade[c];
+        AVER_INFO("[Voxi] shadowPass census (once): {} draws available this frame, {} cascade(s) run, "
+                  "per-cascade draws submitted = [{}, {}, {}, {}], total submitted = {}",
+                  static_cast<u32>(drawsPrev_.size()), cascades,
+                  censusPerCascade[0], censusPerCascade[1], censusPerCascade[2], censusPerCascade[3],
+                  total);
+        sShadowCensusLogged = true;
     }
 
     ctx.textureBarrier(shadowTex_, rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderResource);
@@ -1239,6 +1310,31 @@ bool VoxiRenderer::createPipelines() {
         shadowPso_ = res_->createGraphicsPipeline(p);
     }
     if (!shadowPso_) AVER_ERROR("[Voxi] shadow pipeline unavailable");
+
+    // --- 1b. the same depth-only pass, but instanced: one DrawIndexedInstanced per mesh per cascade
+    // instead of one drawMesh() per surviving draw per cascade. See VSShadowInstanced in
+    // VoxiShaders.hpp and IRenderContext::drawMeshInstanced (RHIResources.hpp) for the mechanism.
+    // AVER_INSTANCE_SRV must be the SAME number GraphicsPipelineDesc::instanced makes the backend
+    // reserve for this exact layout -- declaredSrvCount(gi), the register right past every t-register
+    // `gi` itself declares across both binding tables (see the comment above `instanced` in
+    // RHIResources.hpp for why this can't be shared any other way). Optional: shadowPass() falls
+    // back to shadowPso_'s one-draw-per-instance path if this failed to build.
+    const std::string instDefs = rasterDefs(("AVER_INSTANCE_SRV=" + std::to_string(rhi::declaredSrvCount(gi))).c_str());
+    if (const rhi::ShaderHandle vsInst = compile("VSShadowInstanced", rhi::ShaderStage::Vertex, kBaseSm, instDefs.c_str())) {
+        rhi::GraphicsPipelineDesc p;
+        p.vs = vsInst;
+        p.layout = gi;
+        p.instanced = true;
+        p.cull = rhi::CullMode::None;
+        p.depth = {true, true, rhi::CompareOp::Less};
+        p.renderTargetCount = 0;
+        p.depthFormat = rhi::Format::D32Float;
+        p.sampleCount = 1;
+        p.slopeScaledDepthBias = 1.5f;
+        shadowInstancedPso_ = res_->createGraphicsPipeline(p);
+    }
+    if (!shadowInstancedPso_)
+        AVER_WARN("[Voxi] instanced shadow pipeline unavailable; shadowPass falls back to one draw per instance");
 
     // --- 2/3. voxelisation + light injection: rasterise with NO render target ---
     const rhi::ShaderHandle psVoxel = compile("PSVoxel", rhi::ShaderStage::Pixel, kBaseSm, rasterDefs(nullptr).c_str());
