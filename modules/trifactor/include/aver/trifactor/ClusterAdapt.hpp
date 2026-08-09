@@ -173,6 +173,44 @@ struct MeshClusterView {
 void buildMeshClusterViews(const fmt::OcMeshData& mesh, std::vector<MeshClusterView>& outViews,
                             std::vector<std::vector<u32>>& outIndices);
 
+// ================================================================================================
+// GPU-FACING cluster data, for an amplification+mesh-shader pair that culls and expands a cluster
+// PER THREAD/GROUP instead of the CPU assembling one concatenated index buffer (buildMeshClusterViews'
+// outIndices, above) every time the selected cut changes. Where buildMeshClusterViews EXPANDS every
+// meshlet's triangles into global vertex indices up front (the CPU-assembly cost this whole design is
+// trying to get off the critical path), this function keeps each meshlet's OWN local vertex/triangle
+// block intact, only concatenating the blocks across levels and rebasing their offsets -- the flat,
+// all-levels MeshletDesc/MeshletVertices/MeshletTriangles shape FORMAT_SPECS 5.7 already describes per
+// LOD level, just spliced across every level of one mesh the same way buildMeshClusterViews splices
+// MeshClusterView. `outBounds[i]`/`outDesc[i]` describe the SAME cluster i as buildMeshClusterViews'
+// `outViews[i]` would for the same mesh -- same per-level order (LOD 0 first, then coarserLods
+// ascending) -- so a cluster id means the same cluster whichever of the two functions produced it.
+// ================================================================================================
+
+// Where one cluster's geometry lives in the flat outVertices/outTriangles arrays below, rebased from
+// the on-disk per-LOD-level MeshletDesc offsets (FORMAT_SPECS 5.7) to this mesh's whole, all-levels-
+// concatenated buffers.
+struct GpuMeshletDesc {
+    u32 vertexOffset = 0;     // index into outVertices (element index, not bytes)
+    u32 triangleOffset = 0;   // index into outTriangles (one element per TRIANGLE, not bytes)
+    u32 vertexCount = 0;      // <= kMaxClusterVertices (64, ClusterBuilder.hpp)
+    u32 triangleCount = 0;    // <= kMaxClusterTriangles (124, ClusterBuilder.hpp)
+};
+
+// outVertices: GLOBAL indices into the mesh's own (LOD-0-shared) vertex buffer, copied verbatim from
+// OcMeshMeshlet::vertices -- already global, per OcMesh.hpp's own contract, so no decode happens here.
+//
+// outTriangles: one u32 per triangle, its three LOCAL indices (0..vertexCount-1, i.e. positions in
+// THIS cluster's own outVertices slice, exactly what OcMeshMeshlet::triangles already stores) packed
+// as `a | (b << 8) | (c << 16)`. A cluster's vertex count is capped at 64 (kMaxClusterVertices), so an
+// 8-bit field never truncates a valid local index. A malformed on-disk triangle (a local index past
+// this meshlet's own vertex count) fails safe to local index 0, the same discipline
+// buildMeshClusterViews already uses for its own out-of-range guard -- it is not this function's job
+// to validate the Cook's output, only to not read out of bounds because of it.
+void buildMeshClusterGpuData(const fmt::OcMeshData& mesh, std::vector<MeshClusterView>& outBounds,
+                              std::vector<GpuMeshletDesc>& outDesc, std::vector<u32>& outVertices,
+                              std::vector<u32>& outTriangles);
+
 // THE local cut test, exactly as the task brief states it, and PURELY LOCAL: reads only `c`'s own
 // two stored scalars and its own bounding sphere -- no `clusters` array, no parent lookup, unlike
 // ClusterSelect.hpp's inCut (which has to walk `c.parents` because its ClusterView was never given
@@ -184,6 +222,20 @@ void buildMeshClusterViews(const fmt::OcMeshData& mesh, std::vector<MeshClusterV
 // (world space for a real draw) -- this function does no transform of its own, same convention
 // ClusterSelect.hpp's own selection functions use.
 bool inLocalCut(const MeshClusterView& c, f32 thresholdPx, const View& view);
+
+
+// THE BUDGET CLAMP BUG, fixed here and nowhere else -- inLocalCut is the only place that reads a
+// caller-supplied threshold, so clamping here fixes every caller (selectClusterLocal,
+// selectClusterCut, and the GPU amplification shader's own copy of this same constant, which the
+// caller-side code that packs its per-instance budget must apply too -- see SandboxApp.cpp).
+//
+// AT thresholdPx == 0.0f, `ownPx >= thresholdPx` is true for EVERY cluster at EVERY level: ownPx is
+// never negative (screenSpaceErrorPx floors distance at 0 and errorCm is never negative), so ownPx>=0
+// always holds and inLocalCut rejects the entire DAG -- the whole mesh instance draws nothing. This
+// is not a hypothetical: LOD 0's ownError is exactly 0.0f BY CONVENTION (OcMesh.hpp), so this is the
+// FIRST budget a naive caller would try. kMinClusterBudgetPx is small enough to be visually
+// indistinguishable from "no error tolerated" (a tenth of a pixel) while staying strictly positive.
+inline constexpr f32 kMinClusterBudgetPx = 0.05f;
 
 // inLocalCut, ANDed with frustum visibility and backface (cone) culling -- the full per-cluster
 // draw/no-draw decision, mirroring ClusterSelect.hpp's selectCluster exactly in shape (three

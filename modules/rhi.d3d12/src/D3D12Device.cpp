@@ -876,6 +876,14 @@ public:
     Format backbufferFormat() const override { return fromDxgiFormat(kSceneColorFormat); }
     Format depthFormat() const override { return fromDxgiFormat(kDepthFormat); }
     IResourceFactory* resources() override;
+    // See IDevice::renderContext()'s own comment: the SAME context object the overridesScenePipeline
+    // branch of drawMesh() below uses internally, exposed so a caller can interleave its own
+    // setPipeline/dispatchMeshClusters-shaped calls for a SUBSET of instances in the same frame.
+    // OUT-OF-LINE (not defined here): D3D12RenderContext is only forward-declared this early (line
+    // 843), so returning `rhiContext_` as an IRenderContext* needs its complete type, which is not
+    // visible again until its own definition below -- the same reason resources() just above is
+    // declared here and defined out-of-line rather than inline.
+    IRenderContext* renderContext() override;
     // NON-owning. Registering the same feature twice would double every hook, so it is ignored.
     void addRenderFeature(IRenderFeature* f) override;
     void removeRenderFeature(IRenderFeature* f) override;
@@ -1252,6 +1260,10 @@ struct RhiPipeline {
     ID3D12RootSignature* rootSig = nullptr;   // owned by the root-signature cache, not by this
     bool compute = false;
     bool mesh = false;
+    // True when this mesh pipeline also has an amplification shader (GraphicsPipelineDesc::as != 0),
+    // i.e. it is a dispatchMeshClusters() pipeline, not a dispatchMeshFor() one. Always false when
+    // `mesh` is false.
+    bool amplification = false;
     // One entry per declarable table; -1 where the layout declared nothing for it.
     i32  srvParam[kBindingTableCount] = {-1, -1}, uavParam[kBindingTableCount] = {-1, -1};
     // The first shader register each table covers.
@@ -1448,6 +1460,7 @@ public:
     void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override;
     void drawMesh(MeshHandle mesh) override;
     void dispatchMeshFor(MeshHandle mesh) override;
+    void dispatchMeshClusters(MeshHandle mesh, u32 clusterCount) override;
     void dispatch(u32 gx, u32 gy, u32 gz) override;
     void copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes,
                     u64 dstOffset, u64 srcOffset) override;
@@ -1623,6 +1636,7 @@ D3D12Device::~D3D12Device() {
 }
 
 IResourceFactory* D3D12Device::resources() { return rhiFactory_; }
+IRenderContext* D3D12Device::renderContext() { return rhiContext_; }
 
 void D3D12Device::addRenderFeature(IRenderFeature* f) {
     if (!f) return;
@@ -1935,9 +1949,13 @@ struct alignas(void*) Subobject {
     Subobject& operator=(const T& v) { value = v; return *this; }
 };
 
-// The subobject stream a mesh-shader PSO is created from.
+// The subobject stream a mesh-shader PSO is created from. `as` is OPTIONAL: a default-constructed
+// Subobject holds a zero-length D3D12_SHADER_BYTECODE, which the runtime treats exactly as if the AS
+// subobject were omitted -- so D3D12Device::initMeshShaders' fixed voxelisation PSO, which never
+// touches `s.as`, is unaffected by this member existing on the shared struct.
 struct MeshPsoStream {
     Subobject<ID3D12RootSignature*,     D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE>    rootSig;
+    Subobject<D3D12_SHADER_BYTECODE,    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS>                as;
     Subobject<D3D12_SHADER_BYTECODE,    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS>                ms;
     Subobject<D3D12_SHADER_BYTECODE,    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS>                ps;
     Subobject<D3D12_RASTERIZER_DESC,    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER>        raster;
@@ -4088,6 +4106,7 @@ const char* fxcTargetFor(ShaderStage s) {
         case ShaderStage::Geometry: return "gs_5_1";
         case ShaderStage::Compute:  return "cs_5_1";
         case ShaderStage::Mesh:
+        case ShaderStage::Amplification:
         case ShaderStage::Vertex:   break;
     }
     return "vs_5_1";
@@ -4095,11 +4114,12 @@ const char* fxcTargetFor(ShaderStage s) {
 // Shader-target prefix for a stage.
 const char* stagePrefixFor(ShaderStage s) {
     switch (s) {
-        case ShaderStage::Pixel:    return "ps";
-        case ShaderStage::Geometry: return "gs";
-        case ShaderStage::Compute:  return "cs";
-        case ShaderStage::Mesh:     return "ms";
-        case ShaderStage::Vertex:   break;
+        case ShaderStage::Pixel:         return "ps";
+        case ShaderStage::Geometry:      return "gs";
+        case ShaderStage::Compute:       return "cs";
+        case ShaderStage::Mesh:          return "ms";
+        case ShaderStage::Amplification: return "as";
+        case ShaderStage::Vertex:        break;
     }
     return "vs";
 }
@@ -4110,13 +4130,25 @@ ShaderHandle D3D12ResourceFactory::createShader(const ShaderDesc& d) {
     collect();
     if (!d.source || !d.entry) { AVER_ERROR("[RHI.D3D12] createShader without source or entry point"); return 0; }
 
+    // Mesh and Amplification share one floor: both are D3D12 Ultimate stages, unavailable below
+    // Tier 1 mesh-shader hardware regardless of what shader model the device otherwise reports. This
+    // is the explicit half of the degrade -- house rule 6 -- the other half being that a PSO built
+    // from a shader this rejects simply never gets created, so the caller's existing draw path is
+    // untouched. See D3D12Device::initMeshShaders for the same gate applied to the backend's own
+    // fixed voxelisation mesh-shader pipeline.
+    const bool isMeshFamily = d.stage == ShaderStage::Mesh || d.stage == ShaderStage::Amplification;
+    if (isMeshFamily && dev_->caps_.meshShaderTier == 0) {
+        AVER_WARN("[RHI.D3D12] createShader '{}' needs mesh-shader hardware, which this device reports as tier 0", d.entry);
+        return 0;
+    }
+
     u32 model = d.minShaderModel;
-    if (d.stage == ShaderStage::Mesh && model < 65) model = 65;
+    if (isMeshFamily && model < 65) model = 65;
     if (model > dev_->caps_.shaderModel) {
         AVER_WARN("[RHI.D3D12] createShader '{}' wants SM {} but the device reports {}", d.entry, model, dev_->caps_.shaderModel);
         return 0;
     }
-    const bool needsDxc = model > 60 || d.stage == ShaderStage::Mesh;
+    const bool needsDxc = model > 60 || isMeshFamily;
     if (needsDxc && !dev_->caps_.dxcAvailable) {
         AVER_WARN("[RHI.D3D12] createShader '{}' needs DXC, which is unavailable", d.entry);
         return 0;
@@ -4128,7 +4160,7 @@ ShaderHandle D3D12ResourceFactory::createShader(const ShaderDesc& d) {
 
     char sm6[16] = {};
     const char* sm6Target = nullptr;
-    if (model > 60 || d.stage == ShaderStage::Mesh) {
+    if (model > 60 || isMeshFamily) {
         std::snprintf(sm6, sizeof(sm6), "%s_%u_%u", stagePrefixFor(d.stage), model / 10, model % 10);
         sm6Target = sm6;
     }
@@ -4152,11 +4184,16 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
         AVER_ERROR("[RHI.D3D12] createGraphicsPipeline needs exactly one of vs / ms");
         return 0;
     }
+    if (d.as != 0 && d.ms == 0) {
+        AVER_ERROR("[RHI.D3D12] createGraphicsPipeline: an amplification shader (as) needs a mesh shader (ms) alongside it");
+        return 0;
+    }
     RhiShader* vs = shader(d.vs);
     RhiShader* gs = shader(d.gs);
     RhiShader* ms = shader(d.ms);
     RhiShader* ps = shader(d.ps);
-    if ((d.vs && !vs) || (d.gs && !gs) || (d.ms && !ms) || (d.ps && !ps)) {
+    RhiShader* as = shader(d.as);
+    if ((d.vs && !vs) || (d.gs && !gs) || (d.ms && !ms) || (d.ps && !ps) || (d.as && !as)) {
         AVER_ERROR("[RHI.D3D12] createGraphicsPipeline given an invalid shader handle");
         return 0;
     }
@@ -4167,6 +4204,7 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
     RhiPipeline p;
     p.rootSig = rs->sig.Get();
     p.mesh = d.ms != 0;
+    p.amplification = d.as != 0;
     for (u32 t = 0; t < kBindingTableCount; ++t) { p.srvParam[t] = rs->srvParam[t]; p.uavParam[t] = rs->uavParam[t]; }
     p.srvBaseRegister[1] = d.layout.srvCount;
     p.msVertexParam = rs->msVertexParam;
@@ -4239,6 +4277,7 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
         MeshPsoStream s{};
         s.rootSig = rs->sig.Get();
         s.ms = D3D12_SHADER_BYTECODE{ms->blob->GetBufferPointer(), ms->blob->GetBufferSize()};
+        if (as) s.as = D3D12_SHADER_BYTECODE{as->blob->GetBufferPointer(), as->blob->GetBufferSize()};
         if (ps) s.ps = D3D12_SHADER_BYTECODE{ps->blob->GetBufferPointer(), ps->blob->GetBufferSize()};
         s.raster = raster;
         s.depth = depth;
@@ -5023,6 +5062,46 @@ void D3D12RenderContext::dispatchMeshFor(MeshHandle mesh) {
     const u32 tc[4] = {tris, 0, 0, 0};
     dev_->cmdList_->SetGraphicsRoot32BitConstants(static_cast<UINT>(pipe_->msCountParam), 4, tc, 0);
     dev_->cmdList6_->DispatchMesh((tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
+}
+
+// Dispatches an amplification+mesh-shader pipeline over one cluster cut. See the declaration in
+// RHIResources.hpp for why this is a separate entry point from dispatchMeshFor rather than a second
+// meaning bolted onto it. The cluster arrays (MeshletDesc/Bounds/Vertices/Triangles) are whatever
+// the caller already bound via setBindingSet/setSrvBuffer before this call -- this function only
+// supplies the group count and, when `mesh` names a live mesh, that mesh's plain vertex buffer,
+// the same way dispatchMeshFor supplies it, since every cluster's MeshletVertices are global indices
+// into that same buffer (FORMAT_SPECS 5.7).
+void D3D12RenderContext::dispatchMeshClusters(MeshHandle mesh, u32 clusterCount) {
+    if (!pipe_ || !pipe_->mesh || !pipe_->amplification) {
+        AVER_ERROR("[RHI.D3D12] dispatchMeshClusters without an amplification-shader pipeline");
+        return;
+    }
+    if (!dev_->cmdList6_) { AVER_ERROR("[RHI.D3D12] DispatchMesh is unavailable on this command list"); return; }
+    if (clusterCount == 0) return;
+    applyDrawBinding();
+    // FIX: the root signature this pipeline was built with (rootSignature(layout, /*mesh=*/true))
+    // ALWAYS reserves msVertexParam/msIndexParam/msCountParam as three extra root parameters -- see
+    // D3D12ResourceFactory::rootSignature's own "FROZEN: geometry SRVs sit past both declared tables"
+    // comment -- regardless of whether a cluster-culling pipeline's own shaders read all three.
+    // Leaving any of them unset is an UNINITIALIZED ROOT ARGUMENT: undefined per the D3D12 spec, and
+    // exactly the kind of thing this house's own TDR history says to take seriously. The cluster mesh
+    // shader never reads the flat index buffer (msIndexParam) or a triangle count (msCountParam,
+    // which the geometry convention reserves for exactly that), but this call still binds real,
+    // valid addresses to both -- this mesh's own index buffer, and clusterCount itself -- so nothing
+    // is ever an unset root argument even though nothing here reads them.
+    if (mesh != 0 && mesh <= dev_->meshes_.size() && dev_->meshes_[mesh - 1].alive) {
+        const GpuMesh& m = dev_->meshes_[mesh - 1];
+        if (pipe_->msVertexParam >= 0)
+            dev_->cmdList_->SetGraphicsRootShaderResourceView(static_cast<UINT>(pipe_->msVertexParam), m.vb->GetGPUVirtualAddress());
+        if (pipe_->msIndexParam >= 0)
+            dev_->cmdList_->SetGraphicsRootShaderResourceView(static_cast<UINT>(pipe_->msIndexParam), m.ib->GetGPUVirtualAddress());
+    }
+    if (pipe_->msCountParam >= 0) {
+        const UINT block[4] = {clusterCount, 0, 0, 0};
+        dev_->cmdList_->SetGraphicsRoot32BitConstants(static_cast<UINT>(pipe_->msCountParam), 4, block, 0);
+    }
+    const u32 groups = (clusterCount + kClusterAmplificationGroupSize - 1) / kClusterAmplificationGroupSize;
+    dev_->cmdList6_->DispatchMesh(groups, 1, 1);
 }
 
 // Dispatches the bound compute pipeline.

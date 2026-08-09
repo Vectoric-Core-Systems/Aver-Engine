@@ -913,6 +913,10 @@ public:
             else if (rtPixelsPerRayOverride_ < 0)
                 AVER_WARN("[Sandbox] --rt-pixels-per-ray {} is not a tile edge; the default of {} stands",
                           rtPixelsPerRayOverride_, s.rtPixelsPerRayTile);
+            if (giUpdateIntervalOverride_ > 0) s.giUpdateInterval = static_cast<u32>(giUpdateIntervalOverride_);
+            else if (giUpdateIntervalOverride_ < 0)
+                AVER_WARN("[Sandbox] --gi-update-interval {} is not a frame count; the default of {} stands",
+                          giUpdateIntervalOverride_, s.giUpdateInterval);
             voxi::Renderer::get().setSettings(s);
             AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
 
@@ -1545,6 +1549,55 @@ public:
                 trifactor::buildMeshClusterViews(md, cd.clusters, cd.clusterIndices);
                 if (!cd.clusters.empty())
                     meshClusterData_[id] = std::move(cd);
+
+                // GPU cluster buffers for --lod-mesh-shader, built ONLY when the flag is on, so a run
+                // that never asks for this feature never pays for the extra upload. Uses
+                // buildMeshClusterGpuData (NOT buildMeshClusterViews' outIndices above): that one
+                // keeps each meshlet's own local vertex/triangle block intact -- the shape the
+                // amplification+mesh shader pair reads -- instead of pre-expanding every cluster's
+                // triangles into global indices, which is the CPU-assembly cost this GPU path exists
+                // to avoid paying at all, let alone per cut change.
+                if (lodMeshShaderEnabled_) {
+                    std::vector<trifactor::MeshClusterView> gpuBounds;
+                    std::vector<trifactor::GpuMeshletDesc> gpuDesc;
+                    std::vector<u32> gpuVerts, gpuTris;
+                    trifactor::buildMeshClusterGpuData(md, gpuBounds, gpuDesc, gpuVerts, gpuTris);
+                    if (!gpuBounds.empty()) {
+                        if (rhi::IResourceFactory* res = e.device()->resources()) {
+                            MeshClusterGpu gpu;
+                            gpu.clusterCount = static_cast<u32>(gpuBounds.size());
+                            auto upload = [&](const void* data, u64 bytes, const char* name) -> rhi::BufferHandle {
+                                rhi::BufferDesc bd; bd.bytes = bytes; bd.kind = rhi::BufferKind::Upload;
+                                bd.debugName = name;
+                                const rhi::BufferHandle h = res->createBuffer(bd);
+                                if (h) res->writeBuffer(h, data, bytes, 0);
+                                return h;
+                            };
+                            gpu.bounds = upload(gpuBounds.data(), gpuBounds.size() * sizeof(trifactor::MeshClusterView), "lod-mesh-shader bounds");
+                            gpu.desc   = upload(gpuDesc.data(),   gpuDesc.size()   * sizeof(trifactor::GpuMeshletDesc),  "lod-mesh-shader desc");
+                            gpu.verts  = upload(gpuVerts.data(),  gpuVerts.size()  * sizeof(u32),                        "lod-mesh-shader verts");
+                            gpu.tris   = upload(gpuTris.data(),   gpuTris.size()   * sizeof(u32),                        "lod-mesh-shader tris");
+                            if (gpu.bounds && gpu.desc && gpu.verts && gpu.tris) {
+                                rhi::BindingSetDesc bsd;
+                                bsd.srvCount = 4;
+                                bsd.srvKinds[0] = bsd.srvKinds[1] = bsd.srvKinds[2] = bsd.srvKinds[3] =
+                                    rhi::SlotKind::StructuredBuffer;
+                                gpu.bindingSet = res->createBindingSet(bsd);
+                                if (gpu.bindingSet) {
+                                    res->setSrvBuffer(gpu.bindingSet, 0, gpu.bounds, sizeof(trifactor::MeshClusterView), (u32)gpuBounds.size());
+                                    res->setSrvBuffer(gpu.bindingSet, 1, gpu.desc,   sizeof(trifactor::GpuMeshletDesc),  (u32)gpuDesc.size());
+                                    res->setSrvBuffer(gpu.bindingSet, 2, gpu.verts,  sizeof(u32), (u32)gpuVerts.size());
+                                    res->setSrvBuffer(gpu.bindingSet, 3, gpu.tris,   sizeof(u32), (u32)gpuTris.size());
+                                    meshClusterGpu_[id] = gpu;
+                                } else {
+                                    AVER_WARN("[LOD-MESH-SHADER] '{}' binding set failed; this mesh falls back to the CPU per-cluster path", rel);
+                                }
+                            } else {
+                                AVER_WARN("[LOD-MESH-SHADER] '{}' GPU cluster buffer upload failed; this mesh falls back to the CPU per-cluster path", rel);
+                            }
+                        }
+                    }
+                }
             }
 #endif
         }
@@ -1555,6 +1608,98 @@ public:
         (void)e;
 #endif
     }
+
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+    // Creates the AS+MS+PS pipeline --lod-mesh-shader draws through. Tried EXACTLY ONCE per run
+    // (lodMeshPipelineTried_ latches immediately, success or not) -- a failed compile or a tier-0
+    // device means "the CPU per-cluster path runs instead", logged once, never retried every frame.
+    // Safe to call every frame; only the first call (with the flag on) does real work.
+    void ensureLodMeshPipeline(Engine& e) {
+        if (lodMeshPipelineTried_) return;
+        lodMeshPipelineTried_ = true;
+        if (!lodMeshShaderEnabled_) return;
+
+        const rhi::DeviceCaps caps = e.device()->caps();
+        if (caps.meshShaderTier == 0 || caps.shaderModel < 65 || !caps.dxcAvailable) {
+            AVER_WARN("[LOD-MESH-SHADER] this device (meshShaderTier={}, shaderModel={}, dxc={}) "
+                      "cannot run the GPU per-cluster path -- house rule 6's degrade: falling back to "
+                      "--lod-per-cluster/--lod-select, whichever else is on",
+                      caps.meshShaderTier, caps.shaderModel, caps.dxcAvailable);
+            return;
+        }
+        rhi::IResourceFactory* res = e.device()->resources();
+        rhi::IRenderContext* ctx = e.device()->renderContext();
+        if (!res || !ctx) {
+            AVER_WARN("[LOD-MESH-SHADER] no resource factory / render context on this backend; falling back");
+            return;
+        }
+
+        lodMeshLayout_ = rhi::PipelineLayout{};
+        lodMeshLayout_.srvCount = 4;   // t0..t3: ClusterBounds, ClusterMeshletDesc, verts, tris
+        // b1 (PerObject): the SAME 32-dword root-constants shape drawMesh() itself uses, so
+        // MSClusterMain's shared PSClusterMain (plainShadeSurface, via the prelude) reads real
+        // gWorld/gBaseColor/gMaterial. b4 (kFeatureFrameConstantRegister): a root CBV, exactly the
+        // register the shared convention reserves for "a feature's own per-frame/per-draw data" --
+        // see RHIResources.hpp's own comment on kFeatureFrameConstantRegister.
+        lodMeshLayout_.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
+        lodMeshLayout_.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;
+
+        // Everything AVER_MS_CLUSTER=1 needs -- ASMain, MSClusterMain, PSClusterMain, and the shared
+        // VSOut/PerFrame/PerObject/plainShadeSurface they all read -- lives inside
+        // sharedShaderPrelude() itself; there is no separate feature-owned HLSL source to append.
+        const std::string defs = std::string("AVER_MS_CLUSTER=1;") + rhi::meshGeometryDefines(lodMeshLayout_);
+        static const std::string kEmptySource;
+
+        rhi::ShaderDesc asd;
+        asd.prelude = rhi::sharedShaderPrelude();
+        asd.source = kEmptySource.c_str();
+        asd.entry = "ASMain";
+        asd.stage = rhi::ShaderStage::Amplification;
+        asd.minShaderModel = 65;
+        asd.defines = defs.c_str();
+        lodMeshAsShader_ = res->createShader(asd);
+
+        rhi::ShaderDesc msd = asd;
+        msd.entry = "MSClusterMain";
+        msd.stage = rhi::ShaderStage::Mesh;
+        lodMeshMsShader_ = res->createShader(msd);
+
+        rhi::ShaderDesc psd = asd;
+        psd.entry = "PSClusterMain";
+        psd.stage = rhi::ShaderStage::Pixel;
+        // NOT 60: the shared source string handed to createShader is the WHOLE prelude with
+        // AVER_MS_CLUSTER=1 -- ASMain/MSClusterMain's payload/DispatchMesh/[outputtopology] syntax is
+        // SM6-only and FXC (the SM5.1 compiler createShader would otherwise pick for a plain Pixel
+        // stage) cannot parse it even for an entry point that never calls it. Forcing DXC/SM 6.5 here
+        // too, exactly like the AS/MS compiles, is what keeps FXC from ever seeing that text at all.
+        psd.minShaderModel = 65;
+        lodMeshPsShader_ = res->createShader(psd);
+
+        if (!lodMeshAsShader_ || !lodMeshMsShader_ || !lodMeshPsShader_) {
+            AVER_WARN("[LOD-MESH-SHADER] AS/MS/PS compile failed; falling back to --lod-per-cluster/--lod-select");
+            return;
+        }
+
+        rhi::GraphicsPipelineDesc pd;
+        pd.as = lodMeshAsShader_;
+        pd.ms = lodMeshMsShader_;
+        pd.ps = lodMeshPsShader_;
+        pd.layout = lodMeshLayout_;
+        pd.cull = rhi::CullMode::None;
+        pd.depth = {true, true, rhi::CompareOp::Less};
+        pd.renderTargetCount = 1;
+        pd.renderTargets[0] = e.device()->backbufferFormat();
+        pd.depthFormat = e.device()->depthFormat();
+        pd.sampleCount = e.device()->sampleCount();
+        lodMeshPipeline_ = res->createGraphicsPipeline(pd);
+        if (!lodMeshPipeline_) {
+            AVER_WARN("[LOD-MESH-SHADER] pipeline creation failed; falling back to --lod-per-cluster/--lod-select");
+            return;
+        }
+        lodMeshPipelineReady_ = true;
+        AVER_INFO("[LOD-MESH-SHADER] GPU per-cluster pipeline ready (meshShaderTier={})", caps.meshShaderTier);
+    }
+#endif
 
     // Drops the project's meshes from the id table. The built-in primitives survive.
     void releaseProjectMeshes(Engine& e) {
@@ -1664,6 +1809,7 @@ public:
 #if AVER_MODULE_TRIFACTOR
             lodStats_ = LodSelectStats{};   // this frame's counters, from zero -- see the struct comment
             lodClusterStats_ = LodClusterStats{};
+            lodMeshShaderStats_ = LodMeshShaderStats{};
             ++lodClusterFrame_;
             // Sweep the per-instance cut cache: an entry an instance did not touch for a while (its
             // entity was destroyed, its CMeshRenderer removed, or lodPerClusterEnabled_ just got
@@ -1790,6 +1936,11 @@ public:
                 // substituting the handle reaches every pass at once. Zero means "not skinned",
                 // never "not drawn" -- a character that fails to skin must still appear.
                 rhi::MeshHandle mesh = it->second;
+                // Set true only by the GPU per-cluster path below (AVER_MODULE_TRIFACTOR only) when it
+                // actually dispatches this instance's geometry itself -- declared unconditionally,
+                // like `mesh` just above, so the plain drawMesh() call at the end of this block can
+                // check it regardless of whether that module is compiled in.
+                bool clusterDispatched = false;
 #if AVER_MODULE_TRIFACTOR
                 // Virtualized-geometry LOD selection (aver::trifactor::ClusterAdapt/ClusterSelect).
                 // Per-LEVEL, not per-cluster -- see ClusterAdapt.hpp's file header for why. Skipped
@@ -1799,11 +1950,91 @@ public:
                 // ops per instance and touches no GPU resource, so it is cheap enough to run fresh
                 // EVERY frame -- see the task report for why that trivially satisfies "a moving
                 // camera must still update the choice" without needing an invalidation rule at all.
+                // GPU per-cluster path (--lod-mesh-shader) wins over EVERYTHING below when the mesh
+                // has GPU cluster buffers AND the pipeline came up on this device -- it dispatches the
+                // geometry itself (DispatchMesh, inside dispatchMeshClusters), so `mesh` is never
+                // substituted and the ordinary drawMesh() call at the end of this block is skipped
+                // entirely for this instance. Falls through to the CPU per-cluster / per-level paths
+                // unchanged whenever it does not apply (skinned, no world box, no GPU cluster data for
+                // this mesh, or the pipeline never came up on this device/run) -- see
+                // ensureLodMeshPipeline's own comment for the degrade.
+                if (lodMeshShaderEnabled_ && lodMeshPipelineReady_ && !skinned && haveWorldBox) {
+                    if (const auto git = meshClusterGpu_.find(mr->mesh); git != meshClusterGpu_.end()) {
+                        const MeshClusterGpu& gpu = git->second;
+                        if (rhi::IRenderContext* ctx = e.device()->renderContext(); ctx && gpu.clusterCount) {
+                            trifactor::View view;
+                            view.eye = eye_;
+                            view.viewProj = viewProj_;
+                            view.viewportHeightPx = vpH_;
+                            view.verticalFovRadians = radians(60.0f);
+                            const f32 worldScale = xformVec(wm, Vec3{1, 0, 0}).size();
+
+                            // ClusterFrameCB (b4): budget CLAMPED above zero here, on the CPU, before
+                            // upload -- ASMain does not re-clamp (see its own comment) -- and the six
+                            // frustum planes copied verbatim from the SAME Frustum::fromViewProj the
+                            // CPU reference itself calls, so the GPU test runs against the identical
+                            // numbers, not a second derivation of them.
+                            ClusterFrameCB frameCb;
+                            frameCb.budgetPx = std::max(lodErrorThresholdPx_, trifactor::kMinClusterBudgetPx);
+                            frameCb.projScale = trifactor::projScale(view);
+                            frameCb.worldScale = worldScale;
+                            const trifactor::Frustum frustum = trifactor::Frustum::fromViewProj(view.viewProj);
+                            static_assert(sizeof(frameCb.planes) == sizeof(frustum.plane),
+                                          "ClusterFrameCB::planes must match trifactor::Frustum::plane byte for byte");
+                            std::memcpy(frameCb.planes, frustum.plane, sizeof(frameCb.planes));
+
+                            // PerObject (b1): the SAME 32-dword layout drawMesh() itself packs
+                            // (world, base colour, metallic/roughness, then the frozen shading-model
+                            // tail), so PSClusterMain's plainShadeSurface reads real, live values.
+                            f32 consts[rhi::kObjectConstantDwords];
+                            std::memcpy(consts, &wm.m[0][0], 16 * sizeof(f32));
+                            std::memcpy(consts + 16, col, 4 * sizeof(f32));
+                            consts[20] = metallic; consts[21] = roughness; consts[22] = 0.0f; consts[23] = 0.0f;
+                            const u32 shadingModel = 0;   // AVER_MODEL_STANDARD
+                            std::memcpy(consts + 24, &shadingModel, sizeof(shadingModel));
+                            consts[25] = 0.04f; consts[26] = 1.0f; consts[27] = 0.0f;
+                            consts[28] = consts[29] = consts[30] = consts[31] = 0.0f;
+
+                            ctx->setPipeline(lodMeshPipeline_);
+                            ctx->setBindingSet(gpu.bindingSet, 0);
+                            ctx->setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
+                            ctx->setConstantBuffer(rhi::kFeatureFrameConstantRegister, &frameCb, sizeof(frameCb));
+                            ctx->dispatchMeshClusters(mesh, gpu.clusterCount);
+                            clusterDispatched = true;
+
+                            ++lodMeshShaderStats_.instancesTested;
+                            lodMeshShaderStats_.clustersDispatched += gpu.clusterCount;
+
+                            // Informational counters -- see LodMeshShaderStats' own comment: the SAME
+                            // CPU reference (trifactor::selectClusterCut), over the SAME world-space
+                            // clusters and budget the GPU dispatch just used, sampled every 64 frames
+                            // rather than every frame, per the task's own "sample it" allowance.
+                            if (lodClusterFrame_ % 64 == 0) {
+                                if (const auto cit2 = meshClusterData_.find(mr->mesh); cit2 != meshClusterData_.end()) {
+                                    std::vector<trifactor::MeshClusterView> worldClusters = cit2->second.clusters;
+                                    for (trifactor::MeshClusterView& cv : worldClusters) {
+                                        cv.sphereCenter = xformPoint(wm, cv.sphereCenter);
+                                        cv.sphereRadius *= worldScale;
+                                        cv.coneApex = xformPoint(wm, cv.coneApex);
+                                        cv.coneAxis = xformVec(wm, cv.coneAxis).getSafeNormal();
+                                    }
+                                    const trifactor::ClusterCutResult cr = trifactor::selectClusterCut(
+                                        worldClusters, lodErrorThresholdPx_, view, true);
+                                    lodMeshShaderStats_.survivors += cr.stats.drawn;
+                                    lodMeshShaderStats_.trianglesDrawn += cr.stats.trianglesAfter;
+                                    if (cr.stats.distinctLevels > 1) ++lodMeshShaderStats_.instancesMixedLevels;
+                                    lodMeshShaderStats_.maxDistinctLevelsSeen =
+                                        std::max(lodMeshShaderStats_.maxDistinctLevelsSeen, cr.stats.distinctLevels);
+                                }
+                            }
+                        }
+                    }
+                }
                 // PER-CLUSTER path wins over per-LEVEL when both are enabled -- see setLodPerCluster's
                 // own comment. This is what actually mixes LOD levels within one instance's draw; the
                 // per-level `else if` below it is entirely unchanged, still reachable when
                 // --lod-per-cluster is off, still reproducing pre-existing behaviour exactly then.
-                if (lodPerClusterEnabled_ && !skinned && haveWorldBox) {
+                if (!clusterDispatched && lodPerClusterEnabled_ && !skinned && haveWorldBox) {
                     if (const auto cit = meshClusterData_.find(mr->mesh); cit != meshClusterData_.end()) {
                         const MeshClusterData& cd = cit->second;
                         trifactor::View view;
@@ -1895,7 +2126,7 @@ public:
                         }
                         if (cache.handle) mesh = cache.handle;
                     }
-                } else if (lodSelectEnabled_ && !skinned && haveWorldBox) {
+                } else if (!clusterDispatched && lodSelectEnabled_ && !skinned && haveWorldBox) {
                     if (const auto lit = meshLods_.find(mr->mesh); lit != meshLods_.end()) {
                         const MeshLodLadder& ladder = lit->second;
                         const Vec3 sphereCenter = (wlo + whi) * 0.5f;
@@ -1954,7 +2185,11 @@ public:
 #endif
                 if (skinnedScene_)
                     if (const rhi::MeshHandle sk = skinnedScene_->drawHandle(ent)) mesh = sk;
-                e.device()->drawMesh(mesh, &wm.m[0][0], col, metallic, roughness);
+                // The GPU per-cluster path already dispatched this instance's geometry itself
+                // (DispatchMesh, inside dispatchMeshClusters) -- drawing it again here would be a
+                // double draw, not a fallback.
+                if (!clusterDispatched)
+                    e.device()->drawMesh(mesh, &wm.m[0][0], col, metallic, roughness);
                 if (sel_ == kSelScene && ent == selEntity_)
                     selectionOutline_ = wm, selectionMesh_ = mesh, hasSelection_ = true;
                 ++drawn;
@@ -2010,6 +2245,25 @@ public:
                           lodClusterStats_.rebuilds, lodClusterStats_.cacheHits,
                           lodClusterStats_.rebuildIndices, lodClusterStats_.rebuildMs);
                 lastLoggedLodClusterStats_ = lodClusterStats_;
+            }
+            // `[LOD-MESH-SHADER]`, greppable, same log-on-change discipline. `clustersDispatched` is
+            // real: the exact clusterCount every dispatchMeshClusters call this frame used, the same
+            // number the amplification shader's own gClusterCount reads. `survivors`/`trianglesDrawn`/
+            // `distinctLevelsMax` are the CPU-mirrored telemetry LodMeshShaderStats' own comment
+            // describes -- sampled every 64 frames, not read back from the GPU this slice.
+            if (lodMeshShaderEnabled_ &&
+                (lodMeshShaderStats_.instancesTested != lastLoggedLodMeshShaderStats_.instancesTested ||
+                 lodMeshShaderStats_.clustersDispatched != lastLoggedLodMeshShaderStats_.clustersDispatched ||
+                 lodMeshShaderStats_.survivors != lastLoggedLodMeshShaderStats_.survivors ||
+                 lodMeshShaderStats_.instancesMixedLevels != lastLoggedLodMeshShaderStats_.instancesMixedLevels)) {
+                AVER_INFO("[LOD-MESH-SHADER] pipelineReady={} instances={} clustersDispatched={} "
+                          "survivors(sampled)={} trisDrawn(sampled)={} instancesMixedLevels(sampled)={} "
+                          "distinctLevelsMax(sampled)={}",
+                          lodMeshPipelineReady_, lodMeshShaderStats_.instancesTested,
+                          lodMeshShaderStats_.clustersDispatched, lodMeshShaderStats_.survivors,
+                          lodMeshShaderStats_.trianglesDrawn, lodMeshShaderStats_.instancesMixedLevels,
+                          lodMeshShaderStats_.maxDistinctLevelsSeen);
+                lastLoggedLodMeshShaderStats_ = lodMeshShaderStats_;
             }
 #endif
         }
@@ -2275,6 +2529,22 @@ public:
         (void)on; (void)thresholdPx;
 #endif
     }
+    // --lod-mesh-shader [px]: the GPU per-cluster path -- an amplification shader runs the SAME local
+    // cut test as --lod-per-cluster's CPU reference, one thread per cluster, and DispatchMesh's the
+    // survivors instead of the CPU assembling one index buffer per cut change. Wins over
+    // --lod-per-cluster and --lod-select for an instance whose mesh has GPU cluster data uploaded AND
+    // this run's device actually built the pipeline (mesh-shader tier > 0) -- see the draw loop's
+    // branch order. Falls back to whichever of the other two flags is also set, per-instance, if
+    // either the mesh has no GPU cluster buffers yet or the pipeline never came up: house rule 6's
+    // "degrade, not crash" at the feature level, not just the shader-compile level.
+    void setLodMeshShader(bool on, f32 thresholdPx) {
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+        lodMeshShaderEnabled_ = on;
+        if (on) lodErrorThresholdPx_ = thresholdPx;   // shares the one pixel-budget knob with the others
+#else
+        (void)on; (void)thresholdPx;
+#endif
+    }
     void setUiDemo(bool on) { showUiDemo_ = on; }                          // --ui-demo
     void setOpenAsset(std::string p) { openAsset_ = std::move(p); }        // --open-asset
     void setInputProbe(bool on) { inputProbe_ = on; }
@@ -2284,6 +2554,17 @@ public:
     // and setter are unguarded (like focusLevelAt_) even though the effect is AVER_MODULE_SCENE-only;
     // see the countdown in onUpdate.
     void setChunkStreamAuto(int framesIn) { chunkStreamAutoFrames_ = framesIn; }
+    // --drone-graph <relPath>. Unlike setChunkStreamAuto/setDroneAuto above, `droneGraphRel_` itself
+    // is guarded `#if AVER_MODULE_SCENE` at its declaration (it names a .ocgraph the SCENE module
+    // spawns), so this setter must be guarded too -- SAME PRE-EXISTING SCOPING BUG as
+    // setFogMatchToStreamRadius below, fixed the same way while verifying this task's own
+    // -DAVER_MODULE_SCENE=OFF build (house rule 6). Not part of the LOD-select/mesh-cluster work;
+    // flagged separately in this task's report.
+#if AVER_MODULE_SCENE
+    void setDroneGraph(std::string relPath) { droneGraphRel_ = std::move(relPath); }
+#else
+    void setDroneGraph(std::string) {}
+#endif
 
     // --fog-match. A negative opacity means "leave the target where it is" and just switch matching
     // on, so `--fog-match` alone uses the panel's own default rather than silently redefining it.
@@ -2376,6 +2657,7 @@ public:
     void setRtOverride(int q) { rtOverride_ = q; }                              // --rt
     void setRtRays(int n) { rtRaysOverride_ = n; }                              // --rt-rays N
     void setRtPixelsPerRay(int n) { rtPixelsPerRayOverride_ = n; }              // --rt-pixels-per-ray N
+    void setGiUpdateInterval(int n) { giUpdateIntervalOverride_ = n; }          // --gi-update-interval N
     void setFrameTimeReport(bool on) { frameTimeReport_ = on; }                 // --frame-time
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
@@ -2421,6 +2703,14 @@ private:
 #if AVER_MODULE_SCENE
         releaseProjectMeshes(e);
         loadProjectMeshes(e);
+#endif
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+        // Moved here from onRender's per-frame call: pipeline/shader creation belongs at a project-
+        // load/setup point, not mid-frame between beginFrame/endFrame, where the resource factory's
+        // reentrancy with an in-flight command list was unverified. This runs exactly once regardless
+        // (lodMeshPipelineTried_ latches), so calling it here instead of every onRender changes only
+        // WHEN the one real attempt happens, not whether it does.
+        ensureLodMeshPipeline(e);
 #endif
 #if AVER_MODULE_SCENE
         loadStartMap();
@@ -6284,6 +6574,7 @@ private:
     int  rtOverride_=0;              // --rt: ray tracing quality at startup
     int  rtRaysOverride_=0;          // --rt-rays N: sun occlusion rays per pixel (0 = flag not given)
     int  rtPixelsPerRayOverride_=0;  // --rt-pixels-per-ray N: shadow tile edge (0 = flag not given)
+    int  giUpdateIntervalOverride_=0; // --gi-update-interval N: GI revoxelise interval (0 = flag not given)
     bool frameTimeReport_=false;     // --frame-time: report the frame period, to price the above
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
@@ -6716,11 +7007,27 @@ private:
         // this function for why.
 
 #if AVER_MODULE_SCRIPTING
-        const std::string graphPath = project_.contentDir() + "\\Scripts\\Drone.ocgraph";
-        droneGraphLoaded_ = scripts_.graphLoad(static_cast<i32>(e), graphPath);
-        if (!droneGraphLoaded_)
-            AVER_WARN("[Drone] entity #{} spawned but its graph would not load from '{}' -- see the "
-                      "[Graph] error line just above for why", (u32)e, graphPath);
+        // The graph comes from the PROJECT, named by --drone-graph, and the engine has no opinion
+        // about what it is called.
+        //
+        // It used to be hardcoded as Content\Scripts\Drone.ocgraph, which made Sandbox.exe assume
+        // every project contains a file of that name -- one sample project's content compiled into
+        // the editor. A graph-driven actor is an engine feature; WHICH graph drives it is content,
+        // the same way the editor does not know what any project's meshes are called.
+        const std::string graphPath =
+            droneGraphRel_.empty() ? std::string()
+                                   : project_.contentDir() + "\\" + droneGraphRel_;
+        if (graphPath.empty()) {
+            AVER_WARN("[Drone] entity #{} spawned with NO graph: pass --drone-graph <path relative "
+                      "to Content>, e.g. --drone-graph Scripts\\MyActor.ocgraph. It will sit still.",
+                      (u32)e);
+            droneGraphLoaded_ = false;
+        } else {
+            droneGraphLoaded_ = scripts_.graphLoad(static_cast<i32>(e), graphPath);
+            if (!droneGraphLoaded_)
+                AVER_WARN("[Drone] entity #{} spawned but its graph would not load from '{}' -- see "
+                          "the [Graph] error line just above for why", (u32)e, graphPath);
+        }
 #endif
         droneEntity_ = e;
         droneTimeSeconds_ = 0.0f;
@@ -7080,6 +7387,10 @@ private:
     // Stop takes down only the former: ending play should not remove something the user started for
     // their own reasons, and without this flag there is no way to tell the two apart.
     bool droneStartedByPlay_ = false;
+    // Which .ocgraph drives the drone, relative to the project's Content directory. EMPTY by
+    // default and set only by --drone-graph: the engine must not assume a project contains a file
+    // with any particular name.
+    std::string droneGraphRel_;
     bool droneGraphLoaded_ = false;
     f32  droneTimeSeconds_ = 0.0f;
     Vec3 dronePos_{};
@@ -7585,6 +7896,79 @@ private:
     };
     LodClusterStats lodClusterStats_{};
     LodClusterStats lastLoggedLodClusterStats_{};
+
+    // ============================================================================================
+    // GPU per-cluster LOD -- --lod-mesh-shader. An amplification shader (ASMain) runs the SAME local
+    // cut test as selectClusterLocal/inLocalCut above, one thread per cluster, and DispatchMesh's the
+    // survivors; a mesh shader (MSClusterMain) expands each surviving cluster's own vertex/triangle
+    // block. See modules/rhi/src/RHIShaders.cpp's AVER_MS_CLUSTER block for the shaders themselves and
+    // modules/trifactor/include/aver/trifactor/ClusterAdapt.hpp's buildMeshClusterGpuData for the
+    // upload shape. Exists ALONGSIDE the CPU per-cluster path above (never replaces it): the CPU path
+    // stays the correctness reference the two are checked to agree with, per the task's own
+    // instruction, and is what a mesh-shader-tier-0 device still runs when this flag is on.
+    // ============================================================================================
+
+    // Per-mesh GPU cluster buffers, built once at load time (loadProjectMeshes) alongside
+    // MeshClusterData -- ONLY when --lod-mesh-shader is on, so a run that never asks for this feature
+    // never pays for the extra upload. `clusterCount` is outBounds.size() from
+    // buildMeshClusterGpuData -- every level's clusters, concatenated, exactly like the CPU
+    // MeshClusterData's own `clusters` array covers.
+    struct MeshClusterGpu {
+        rhi::BufferHandle bounds = 0;   // ClusterBounds[] -- t0
+        rhi::BufferHandle desc   = 0;   // ClusterMeshletDesc[] -- t1
+        rhi::BufferHandle verts  = 0;   // flat global vertex indices -- t2
+        rhi::BufferHandle tris   = 0;   // flat packed local triangles -- t3
+        rhi::BindingSetHandle bindingSet = 0;
+        u32 clusterCount = 0;
+    };
+    std::unordered_map<u64, MeshClusterGpu> meshClusterGpu_;
+    bool lodMeshShaderEnabled_ = false;   // --lod-mesh-shader
+
+    // Pipeline creation is lazy (first frame the flag is on and a device exists) and tried EXACTLY
+    // ONCE per run: a failed compile or a tier-0 device means "use the CPU path instead", logged once,
+    // not retried every frame -- the degrade house rule 6 asks for, at the feature level.
+    bool lodMeshPipelineTried_ = false;
+    bool lodMeshPipelineReady_ = false;
+    rhi::ShaderHandle lodMeshAsShader_ = 0, lodMeshMsShader_ = 0, lodMeshPsShader_ = 0;
+    rhi::PipelineHandle lodMeshPipeline_ = 0;
+    rhi::PipelineLayout lodMeshLayout_{};   // srvCount=4 (the four cluster buffers); kept so
+                                             // meshGeometryDefines(layout) at draw time (were it ever
+                                             // needed again) agrees with what compiled the shaders.
+
+    // Per-instance constant block for ASMain/MSClusterMain beyond gWorld/gViewProj/gCamPos --
+    // byte-for-byte the HLSL ClusterFrameCB (RHIShaders.cpp), bound as a root CBV at b4
+    // (kFeatureFrameConstantRegister). `planes` is aver::trifactor::Frustum::fromViewProj's own
+    // output, copied verbatim -- see that struct's `plane[6][4]` -- so the GPU test runs against the
+    // IDENTICAL six numbers the CPU reference tests against, not a second derivation of them.
+    struct ClusterFrameCB {
+        f32 budgetPx = 0.0f;
+        f32 projScale = 0.0f;
+        f32 worldScale = 1.0f;
+        u32 _pad = 0;
+        f32 planes[6][4] = {};
+    };
+
+    // Informational counters for --lod-mesh-shader, logged under "[LOD-MESH-SHADER]" (greppable, same
+    // log-on-change discipline as the other two paths). NOT a GPU readback this slice: computed by
+    // running the SAME, already-tested CPU reference (trifactor::selectClusterCut) over the SAME
+    // world-space clusters and the SAME budget the GPU dispatch just used, purely for telemetry --
+    // never reaching drawMesh, exactly the "informational, real, tested" discipline the per-level
+    // path's own cluster telemetry above already uses. Because ASMain/MSClusterMain are byte-for-byte
+    // ports of inLocalCut/coneCull/Frustum::intersectsSphere (RHIShaders.cpp's AVER_MS_CLUSTER block
+    // comments say so at each function), what this counts is what the GPU dispatch actually drew, NOT
+    // a separate estimate that merely correlates with it -- but it is still the CPU arithmetic that
+    // produced the number, not bytes read back from the GPU that ran it. Said plainly in the report,
+    // not just here.
+    struct LodMeshShaderStats {
+        u32 instancesTested = 0;
+        u32 clustersDispatched = 0;      // sum of MeshClusterGpu::clusterCount over drawn instances
+        u32 survivors = 0;               // sum of survivor counts (CPU-mirrored, see struct comment)
+        u64 trianglesDrawn = 0;
+        u32 instancesMixedLevels = 0;
+        u32 maxDistinctLevelsSeen = 0;
+    };
+    LodMeshShaderStats lodMeshShaderStats_{};
+    LodMeshShaderStats lastLoggedLodMeshShaderStats_{};
 #endif
     Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };
@@ -7606,7 +7990,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=false; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=false; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; bool lodMeshShader=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -7669,6 +8053,10 @@ Application* createApplication(int argc, char** argv) {
         // --chunk-stream [N] switches chunk streaming on N frames in (default 5), the same "wait a
         // few frames for the project/scene to settle" pattern --reload-scripts uses. Exists so a
         // --frames capture run can prove streaming happened without a human clicking the menu item.
+        // --drone-graph <path> names the .ocgraph the drone runs, relative to Content. Without it
+        // the drone spawns and sits still, which is the honest behaviour for an engine that does
+        // not know what any project's scripts are called.
+        else if (!std::strcmp(argv[i],"--drone-graph") && i+1<argc) droneGraph = argv[++i];
         else if (!std::strcmp(argv[i],"--chunk-stream")) {
             chunkStream = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 5;
         }
@@ -7702,6 +8090,10 @@ Application* createApplication(int argc, char** argv) {
         // The ray-traced shadow's temporal amortisation tile edge -- how many pixels share one
         // traced ray, rounded to the nearest power of two. 1 (unset) traces every pixel every frame.
         else if (!std::strcmp(argv[i],"--rt-pixels-per-ray") && i+1<argc) rtPixelsPerRay=std::atoi(argv[++i]);
+        // How many frames apart the GI volume is revoxelised -- 1 (unset) rebuilds every frame, the
+        // original always-fresh behaviour. Measures the voxelise+filter amortisation independently of
+        // everything else, per the "measure each change, do not stack guesses" rule.
+        else if (!std::strcmp(argv[i],"--gi-update-interval") && i+1<argc) giUpdateInterval=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--frame-time")) frameTime=true;
         else if (!std::strcmp(argv[i],"--ms")) ms=true;
         else if (!std::strcmp(argv[i],"--probe") && i+2<argc) { probeX=(u32)std::atoi(argv[++i]); probeY=(u32)std::atoi(argv[++i]); }
@@ -7742,6 +8134,15 @@ Application* createApplication(int argc, char** argv) {
         // 1.0px, same knob --lod-select uses.
         else if (!std::strcmp(argv[i],"--lod-per-cluster")) {
             lodPerCluster=true;
+            if (i+1 < argc && (argv[i+1][0] != '-' || (argv[i+1][1] >= '0' && argv[i+1][1] <= '9')))
+                lodErrorPx=static_cast<f32>(std::atof(argv[++i]));
+        }
+        // --lod-mesh-shader [px]: the GPU per-cluster path (amplification+mesh shader). Wins over
+        // --lod-per-cluster and --lod-select for an instance whose mesh has GPU cluster data AND this
+        // device's pipeline came up; falls back per-instance otherwise. Optional pixel error budget,
+        // default 1.0px, same knob the other two share.
+        else if (!std::strcmp(argv[i],"--lod-mesh-shader")) {
+            lodMeshShader=true;
             if (i+1 < argc && (argv[i+1][0] != '-' || (argv[i+1][1] >= '0' && argv[i+1][1] <= '9')))
                 lodErrorPx=static_cast<f32>(std::atof(argv[++i]));
         }
@@ -7792,6 +8193,7 @@ Application* createApplication(int argc, char** argv) {
     app->setLodSelect(lodSelect, lodErrorPx);
     app->setLodClusterStats(lodClusterStats);
     app->setLodPerCluster(lodPerCluster, lodErrorPx);
+    app->setLodMeshShader(lodMeshShader, lodErrorPx);
     app->setUiDemo(uiDemo);
     app->setOpenAsset(openAsset);
     app->setInputProbe(inputProbe);
@@ -7812,6 +8214,7 @@ Application* createApplication(int argc, char** argv) {
     app->setFocusScript(focusScript);
     app->setFocusTools(focusTools);
     app->setFocusCompileMenu(focusCompileMenu);
+    if (!droneGraph.empty()) app->setDroneGraph(droneGraph);
     if (chunkStream > 0) app->setChunkStreamAuto(chunkStream);
     if (fogMatch) app->setFogMatchToStreamRadius(true, fogMatchOpacity);
     if (droneAuto > 0) app->setDroneAuto(droneAuto);
@@ -7828,6 +8231,7 @@ Application* createApplication(int argc, char** argv) {
     app->setRtOverride(rt);
     app->setRtRays(rtRays);
     app->setRtPixelsPerRay(rtPixelsPerRay);
+    app->setGiUpdateInterval(giUpdateInterval);
     app->setFrameTimeReport(frameTime);
     app->setMsOverride(ms);
     app->setProbe(probeX, probeY);

@@ -125,7 +125,69 @@ void buildMeshClusterViews(const fmt::OcMeshData& mesh, std::vector<MeshClusterV
     }
 }
 
+void buildMeshClusterGpuData(const fmt::OcMeshData& mesh, std::vector<MeshClusterView>& outBounds,
+                              std::vector<GpuMeshletDesc>& outDesc, std::vector<u32>& outVertices,
+                              std::vector<u32>& outTriangles) {
+    const u32 levels = mesh.lodCount();
+    for (u32 lvl = 0; lvl < levels; ++lvl) {
+        const std::vector<fmt::OcMeshMeshlet>* meshlets = nullptr;
+        if (lvl == 0) {
+            meshlets = &mesh.meshlets;
+        } else {
+            const u32 idx = lvl - 1;
+            if (idx >= mesh.coarserLods.size()) continue;
+            meshlets = &mesh.coarserLods[idx].meshlets;
+        }
+        outBounds.reserve(outBounds.size() + meshlets->size());
+        outDesc.reserve(outDesc.size() + meshlets->size());
+        for (const fmt::OcMeshMeshlet& m : *meshlets) {
+            // Bounds/error: byte-for-byte the same decode buildMeshClusterViews uses (same function,
+            // duplicated rather than shared, because that one also builds the CPU-path's expanded
+            // global index list this function deliberately does NOT build -- see the file header).
+            MeshClusterView cv;
+            cv.sphereCenter = m.sphereCenter;
+            cv.sphereRadius = m.sphereRadius;
+            cv.coneApex = m.coneApex;
+            cv.coneAxis = Vec3{m.coneAxis[0] / 127.0f, m.coneAxis[1] / 127.0f, m.coneAxis[2] / 127.0f};
+            cv.coneCutoff = static_cast<f32>(m.coneCutoff) / 127.0f;
+            cv.triangleCount = m.triangleCount();
+            cv.level = lvl;
+            cv.ownErrorCm = m.ownError / kReferenceProjScale;
+            cv.parentErrorCm = m.parentError / kReferenceProjScale;
+            outBounds.push_back(cv);
+
+            GpuMeshletDesc d;
+            d.vertexOffset = static_cast<u32>(outVertices.size());
+            d.triangleOffset = static_cast<u32>(outTriangles.size());
+            d.vertexCount = static_cast<u32>(m.vertices.size());
+            d.triangleCount = cv.triangleCount;
+            outDesc.push_back(d);
+
+            outVertices.insert(outVertices.end(), m.vertices.begin(), m.vertices.end());
+
+            for (u32 t = 0; t < d.triangleCount; ++t) {
+                const usize base = usize(t) * 3;
+                u8 a = base + 0 < m.triangles.size() ? m.triangles[base + 0] : 0;
+                u8 b = base + 1 < m.triangles.size() ? m.triangles[base + 1] : 0;
+                u8 c = base + 2 < m.triangles.size() ? m.triangles[base + 2] : 0;
+                // Fail safe, not out-of-bounds -- same discipline buildMeshClusterViews uses.
+                if (a >= d.vertexCount) a = 0;
+                if (b >= d.vertexCount) b = 0;
+                if (c >= d.vertexCount) c = 0;
+                outTriangles.push_back(static_cast<u32>(a) | (static_cast<u32>(b) << 8) |
+                                        (static_cast<u32>(c) << 16));
+            }
+        }
+    }
+}
+
 bool inLocalCut(const MeshClusterView& c, f32 thresholdPx, const View& view) {
+    // THE BUDGET CLAMP BUG: at thresholdPx <= 0, `ownPx >= thresholdPx` is true for every cluster at
+    // every level (ownPx is never negative), so the unclamped test rejects the entire DAG and the
+    // whole mesh instance draws nothing -- see kMinClusterBudgetPx's own comment in ClusterAdapt.hpp.
+    // Clamped HERE, the single place every caller (selectClusterLocal, selectClusterCut, and any
+    // future one) funnels through, rather than at each call site.
+    thresholdPx = thresholdPx > kMinClusterBudgetPx ? thresholdPx : kMinClusterBudgetPx;
     const f32 ownPx = screenSpaceErrorPx(c.sphereCenter, c.sphereRadius, c.ownErrorCm, view);
     if (ownPx >= thresholdPx) return false;   // too coarse on its own: something finer must stand in
     const f32 parentPx = screenSpaceErrorPx(c.sphereCenter, c.sphereRadius, c.parentErrorCm, view);

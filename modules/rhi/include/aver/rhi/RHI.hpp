@@ -234,6 +234,19 @@ public:
     // support, which is how a feature declines to initialise.
     virtual IResourceFactory* resources() { return nullptr; }
 
+    // The SAME command-recording context the backend's own drawMesh() uses internally to let a
+    // registered IRenderFeature override individual scene draws (see D3D12Device::drawMesh's
+    // overridesScenePipeline branch). Exposed here too so a CALLER -- not just a registered feature
+    // -- can interleave its own setPipeline/dispatchMeshClusters-shaped calls with ordinary
+    // e.device()->drawMesh() calls in the same frame, for the SUBSET of instances that want a
+    // different draw path (per-cluster GPU LOD is the first consumer: most instances still go
+    // through drawMesh(), only the ones with cluster data take this). setPipeline() already
+    // invalidates the backend's own cached root-signature/PSO state as a side effect (see its own
+    // comment), which is what makes drawMesh() calls safe again immediately afterwards -- the same
+    // contract IRenderFeature's override path already relies on every frame. nullptr on a backend
+    // with no GPU support, exactly like resources().
+    virtual IRenderContext* renderContext() { return nullptr; }
+
     // Render-feature registration. NON-owning: the caller keeps the feature alive.
     virtual void addRenderFeature(IRenderFeature* f) { (void)f; }
     virtual void removeRenderFeature(IRenderFeature* f) { (void)f; }

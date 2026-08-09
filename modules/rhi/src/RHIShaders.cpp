@@ -91,6 +91,8 @@ static_assert(kMeshGeometryConstantRegister == 5, "MeshCB in the prelude is writ
 static_assert(kObjectConstantRegister == 1, "PerObject in the prelude is written out as b1");
 static_assert(kObjectConstantDwords == 32,
               "PerObject below is 32 dwords: world 16, base colour 4, material 4, model 4, emissive 4");
+static_assert(kClusterAmplificationGroupSize == 32, "AVER_MSC_GROUP in the cluster shader is written out as 32");
+static_assert(kFeatureFrameConstantRegister == 4, "ClusterFrameCB in the cluster shader is written out as b4");
 
 // The shared HLSL prelude. Composed once and cached for the life of the process.
 const char* sharedShaderPrelude() {
@@ -812,6 +814,197 @@ void MSMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
     tris[gtid] = uint3(o, o + 1, o + 2);
 }
 #endif // AVER_MS
+
+#if AVER_MS_CLUSTER
+// ================= Per-cluster GPU LOD: amplification + mesh shader =================
+// One amplification-shader thread per cluster (kClusterAmplificationGroupSize per group), running
+// EXACTLY the CPU reference's local cut test unchanged -- aver::trifactor::inLocalCut/coneCull/
+// Frustum::intersectsSphere (modules/trifactor/src/ClusterAdapt.cpp, ClusterSelect.cpp): same
+// comparison directions, same distance/near-sentinel handling, same cone sign convention -- then
+// DispatchMesh's the survivors, one mesh-shader group per surviving cluster. Reuses AVER_MS_VTX_REG/
+// AVER_MS_IDX_REG from rhi::meshGeometryDefines (same macro names AVER_MS's own block uses; the two
+// paths are never compiled into the same shader, so there is no collision) rather than inventing a
+// second -D convention for the same "vertices/indices sit past this layout's own SRV table" idea.
+#if !defined(AVER_MS_VTX_REG) || !defined(AVER_MS_IDX_REG)
+#error "AVER_MS_CLUSTER needs AVER_MS_VTX_REG / AVER_MS_IDX_REG from rhi::meshGeometryDefines"
+#endif
+#define AVER_MSC_JOIN2(a, b) a##b
+#define AVER_MSC_JOIN(a, b) AVER_MSC_JOIN2(a, b)
+
+// Byte-for-byte aver::trifactor::MeshClusterView (ClusterAdapt.hpp) -- built and uploaded by
+// aver::trifactor::buildMeshClusterGpuData, MESH-LOCAL, never repacked on the way to the GPU. Field
+// order and types must not move without moving both sides together.
+struct ClusterBounds {
+    float3 sphereCenter; float sphereRadius;
+    float3 coneApex; float3 coneAxis; float coneCutoff;
+    float ownErrorCm; float parentErrorCm;
+    uint triangleCount; uint level;
+};
+// aver::trifactor::GpuMeshletDesc (ClusterAdapt.hpp): where one cluster's geometry lives in
+// gClusterVerts/gClusterTris below.
+struct ClusterMeshletDesc { uint vertexOffset; uint triangleOffset; uint vertexCount; uint triangleCount; };
+
+StructuredBuffer<ClusterBounds>      gClusterBounds : register(t0);
+StructuredBuffer<ClusterMeshletDesc> gClusterDesc   : register(t1);
+StructuredBuffer<uint>               gClusterVerts  : register(t2);   // global vertex index per slot
+StructuredBuffer<uint>               gClusterTris   : register(t3);   // packed local tri: a|(b<<8)|(c<<16)
+
+// Vertex stride on this path: must match rhi::MeshVertex byte for byte, same contract AVER_MS's own
+// MeshVtx has, for the same reason -- this is a SEPARATE declaration (not a shared one) because the
+// two mesh-shader paths are never compiled together and each keeps its own name.
+struct MeshVtxC { float3 pos; float3 nrm; float2 uv; };
+StructuredBuffer<MeshVtxC> gVertsC : register(AVER_MSC_JOIN(t, AVER_MS_VTX_REG));
+// AVER_MS_IDX_REG is reserved by the backend's mesh-geometry convention (declaredSrvCount + 1) and
+// dispatchMeshClusters binds a real address there (this mesh's own index buffer) so the root
+// signature's SRV root parameter is never left unset -- but nothing in THIS shader ever declares a
+// resource at that register: the cluster path has no use for a whole-mesh flat index buffer, only
+// gClusterVerts/gClusterTris above. A root signature may over-provision what a shader actually reads;
+// it may not under-provide what a shader reads, and this shader reads nothing there at all.
+
+// How many clusters this dispatch covers -- dispatchMeshClusters' clusterCount argument.
+cbuffer ClusterCountCB : register(b5) { uint gClusterCount; uint3 _mscPad; };
+
+// Per-instance data the amplification shader needs beyond gWorld/gViewProj/gCamPos (already reachable
+// from PerObject/PerFrame, b1/b0, since every declared root parameter is ALL-stage visible): the
+// pixel budget (already clamped above zero by the CPU caller, kMinClusterBudgetPx), the projection
+// scale (aver::trifactor::projScale), a uniform-scale factor for the cluster bounds (the same
+// approximation SandboxApp's CPU path already uses transforming a cluster sphere by an instance's
+// world matrix), and the 6 world-space frustum planes -- PRECOMPUTED ON THE CPU by the exact same
+// aver::trifactor::Frustum::fromViewProj this design is told to reuse unchanged. Uploading the planes
+// rather than re-deriving them per GPU thread means the GPU test runs against the identical six
+// numbers the CPU reference tested against, not a second formula that merely agrees with it.
+cbuffer ClusterFrameCB : register(b4) {
+    float  gBudgetPx;
+    float  gProjScale;
+    float  gWorldScale;
+    uint   _cfcPad;
+    float4 gFrustumPlane[6];
+};
+
+#define AVER_MSC_GROUP 32
+#define AVER_MSC_MAX_VERTS 64
+#define AVER_MSC_MAX_TRIS 124
+
+// One AS group's survivors, handed to the mesh-shader groups it spawns.
+struct ClusterPayload { uint clusterId[AVER_MSC_GROUP]; };
+groupshared ClusterPayload gsPayload;
+groupshared uint gsSurvivorCount;
+
+// THE LOD cut, PORTED UNCHANGED from aver::trifactor::inLocalCut (ClusterAdapt.cpp): same nearest-
+// point-of-sphere distance (floored at 0), same 1e-3 near-camera sentinel (1e30, finite, matching the
+// CPU's own comment on why not IEEE inf), same STRICT-LESS on own error, GREATER-OR-EQUAL on parent
+// error. `budgetPx` arrives already clamped above zero by the CPU caller -- this does not re-clamp,
+// staying a literal mirror of inLocalCut's own body, which also trusts its caller's clamp.
+bool clusterInCut(ClusterBounds c, float3 centerWS, float radiusWS, float3 eye, float budgetPx, float projScale) {
+    float d = max(length(centerWS - eye) - radiusWS, 0.0);
+    float ownPx = (d <= 1e-3) ? 1e30 : c.ownErrorCm * projScale / d;
+    if (ownPx >= budgetPx) return false;
+    float parentPx = (d <= 1e-3) ? 1e30 : c.parentErrorCm * projScale / d;
+    return parentPx >= budgetPx;
+}
+
+// Cone backface test, PORTED UNCHANGED from aver::trifactor::coneCull (ClusterSelect.cpp): cull iff
+// dot(normalize(apex - eye), axis) >= cutoff -- the ">= cull" direction, not "<=", per that file's own
+// measured-not-assumed sign convention. `axisWS` here already folds in the CPU path's own
+// getSafeNormal() (zero-length axis -> never cull), matching the transform this shader itself does
+// just before calling this, one line below.
+bool clusterConeCull(float3 axisWS, float3 apexWS, float3 eye, float cutoff) {
+    if (dot(axisWS, axisWS) < 0.25) return false;   // degenerate axis: never cull
+    float3 toApex = apexWS - eye;
+    float lenSq = dot(toApex, toApex);
+    if (lenSq < 1e-8) return false;                  // eye at/near apex: never cull
+    float3 dir = toApex * rsqrt(lenSq);
+    return dot(dir, axisWS) >= cutoff;
+}
+
+[numthreads(AVER_MSC_GROUP, 1, 1)]
+void ASMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID) {
+    if (gtid == 0) gsSurvivorCount = 0;
+    GroupMemoryBarrierWithGroupSync();
+
+    bool survive = false;
+    if (dtid < gClusterCount) {
+        ClusterBounds c = gClusterBounds[dtid];
+        float3 centerWS = mul(float4(c.sphereCenter, 1.0), gWorld).xyz;
+        float radiusWS = c.sphereRadius * gWorldScale;
+
+        // Frustum: conservative -- a sphere straddling a plane counts as inside, matching
+        // aver::trifactor::Frustum::intersectsSphere exactly (same planes, same "false only if
+        // definitely outside" logic).
+        bool inFrustum = true;
+        [unroll] for (uint p = 0; p < 6; ++p) {
+            if (dot(gFrustumPlane[p].xyz, centerWS) + gFrustumPlane[p].w < -radiusWS) { inFrustum = false; break; }
+        }
+
+        if (inFrustum) {
+            float3 apexWS = mul(float4(c.coneApex, 1.0), gWorld).xyz;
+            // Plain direction transform (not the cofactor normal transform averTransformNormal does):
+            // coneAxis is a direction along the surface, not a surface normal, matching how the CPU
+            // path's xformVec transforms it.
+            float3 axisRaw = mul(c.coneAxis, (float3x3)gWorld);
+            float axisLenSq = dot(axisRaw, axisRaw);
+            float3 axisWS = axisLenSq > 1e-8 ? axisRaw * rsqrt(axisLenSq) : float3(0, 0, 0);
+            if (!clusterConeCull(axisWS, apexWS, gCamPos.xyz, c.coneCutoff))
+                survive = clusterInCut(c, centerWS, radiusWS, gCamPos.xyz, gBudgetPx, gProjScale);
+        }
+    }
+
+    uint slot = 0;
+    if (survive) {
+        InterlockedAdd(gsSurvivorCount, 1, slot);
+        if (slot < AVER_MSC_GROUP) gsPayload.clusterId[slot] = dtid;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // Every thread calls DispatchMesh once, uniformly, with the same arguments -- required by the
+    // mesh-shader pipeline, same discipline SetMeshOutputCounts already uses in AVER_MS's MSMain.
+    uint count = min(gsSurvivorCount, (uint)AVER_MSC_GROUP);
+    DispatchMesh(count, 1, 1, gsPayload);
+}
+
+// One mesh-shader group per surviving cluster: expands that cluster's own local vertex/triangle
+// block, unindexed, respecting the 64-vertex/124-triangle caps the format guarantees
+// (ClusterBuilder.hpp's kMaxClusterVertices/kMaxClusterTriangles) -- getting SetMeshOutputCounts
+// wrong here drops triangles silently rather than erroring, so it is called with the desc's own
+// counts, verbatim, before any vertex/index write.
+[numthreads(AVER_MSC_MAX_VERTS, 1, 1)]
+[outputtopology("triangle")]
+void MSClusterMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
+                    in payload ClusterPayload pld,
+                    out vertices VSOut verts[AVER_MSC_MAX_VERTS],
+                    out indices uint3 tris[AVER_MSC_MAX_TRIS]) {
+    uint clusterIdx = pld.clusterId[gid];
+    ClusterMeshletDesc d = gClusterDesc[clusterIdx];
+    SetMeshOutputCounts(d.vertexCount, d.triangleCount);
+
+    if (gtid < d.vertexCount) {
+        uint globalVtx = gClusterVerts[d.vertexOffset + gtid];
+        MeshVtxC v = gVertsC[globalVtx];
+        float4 wp = mul(float4(v.pos, 1.0), gWorld);
+        VSOut ov;
+        ov.wpos  = wp.xyz;
+        ov.pos   = mul(wp, gViewProj);
+        ov.nrmWS = averTransformNormal(v.nrm, gWorld);
+        ov.uv    = v.uv;
+        verts[gtid] = ov;
+    }
+    // Up to 124 triangles, 64 threads: a thread may emit a second triangle 64 slots ahead of its
+    // first, exactly the loop AVER_MSC_MAX_VERTS's own value sizes the stride for.
+    for (uint t = gtid; t < d.triangleCount; t += AVER_MSC_MAX_VERTS) {
+        uint packed = gClusterTris[d.triangleOffset + t];
+        tris[t] = uint3(packed & 0xFF, (packed >> 8) & 0xFF, (packed >> 16) & 0xFF);
+    }
+}
+
+// Shades a cluster the SAME way the IA/whole-mesh scene path does (D3D12Device.cpp's own
+// PSMainPlain calls the identical plainShadeSurface(i, 1.0, float3(0,0,0), 1.0)) -- so a cluster
+// drawn via this path is not visually distinguishable from one drawn via drawMesh() by its
+// shading, only by which triangles exist. PSMainPlain itself lives in D3D12Device.cpp's
+// backend-internal kShaderHLSL and is not reachable from a feature module's own shader source
+// (sceneShaderSource() is never exposed outside that file), so this is a separate definition
+// calling the SAME shared prelude function, not a rename of the same symbol.
+float4 PSClusterMain(VSOut i) : SV_TARGET { return plainShadeSurface(i, 1.0, float3(0, 0, 0), 1.0); }
+#endif // AVER_MS_CLUSTER
 )";
     return s.c_str();
 }

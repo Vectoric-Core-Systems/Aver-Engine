@@ -156,8 +156,10 @@ struct SamplerDesc {
 
 // ---------------------------------------------------------------- shaders & pipelines
 
-// Which programmable stage a shader is compiled for.
-enum class ShaderStage : u8 { Vertex, Pixel, Geometry, Compute, Mesh };
+// Which programmable stage a shader is compiled for. Amplification runs BEFORE Mesh and decides,
+// per group, whether and how many mesh-shader groups DispatchMesh spawns -- the stage a per-cluster
+// LOD cut runs on, since it is one thread's local test with no dependency on any other cluster.
+enum class ShaderStage : u8 { Vertex, Pixel, Geometry, Compute, Mesh, Amplification };
 
 // One HLSL shader to compile.
 struct ShaderDesc {
@@ -244,8 +246,9 @@ struct VertexLayout {
 
 // How to create a graphics pipeline.
 struct GraphicsPipelineDesc {
-    // Either (vs[,gs]) or ms must be set.
-    ShaderHandle vs = 0, gs = 0, ms = 0, ps = 0;
+    // Either (vs[,gs]) or ms must be set. `as` is optional and valid ONLY alongside `ms`: it runs
+    // ahead of the mesh shader and decides, per group, how many mesh-shader groups get dispatched.
+    ShaderHandle vs = 0, gs = 0, ms = 0, ps = 0, as = 0;
 
     // The vertex format the input assembler reads; left empty, the engine's own MeshVertex.
     VertexLayout vertexLayout{};
@@ -313,6 +316,14 @@ constexpr u32 kAllSubresources = 0xFFFFFFFFu;
 
 // Triangles per mesh-shader thread group. The shader's own [numthreads] must agree.
 constexpr u32 kMeshShaderTrisPerGroup = 64;
+
+// Clusters per amplification-shader thread group, for a cluster-culling mesh-shader pipeline
+// dispatched with dispatchMeshClusters(). The shader's own [numthreads] must agree. Kept separate
+// from kMeshShaderTrisPerGroup: that one sizes a group of TRIANGLES inside a mesh shader that reads
+// one flat index buffer; this one sizes a group of CLUSTERS inside the amplification shader ahead
+// of it, where each thread does one cluster's local LOD-cut test (ownError/parentError vs budget,
+// frustum, cone) and DispatchMesh()'s the survivors -- unrelated units, unrelated shaders.
+constexpr u32 kClusterAmplificationGroupSize = 32;
 
 // ---------------------------------------------------------------- reserved registers
 // Reserved by the backend for dispatchMeshFor(), and declared in sharedShaderPrelude(): vertices
@@ -468,6 +479,30 @@ public:
     virtual void dispatchMeshFor(MeshHandle mesh) = 0;
     // Dispatches a compute pipeline.
     virtual void dispatch(u32 gx, u32 gy, u32 gz) = 0;
+
+    // Dispatches an amplification+mesh-shader pipeline over `clusterCount` clusters -- one
+    // amplification-shader thread per cluster, in groups of kClusterAmplificationGroupSize -- for a
+    // per-cluster LOD cut. `mesh`, if non-zero and alive, has its plain vertex buffer bound the same
+    // way dispatchMeshFor binds one: every cluster's MeshletVertices are GLOBAL indices into that
+    // SAME buffer (FORMAT_SPECS 5.7 -- every LOD level shares LOD 0's vertex array), so the mesh
+    // shader still needs it to resolve a cluster's vertices to positions. The cluster arrays
+    // themselves (MeshletDesc/Bounds/Vertices/Triangles) are NOT resolved here: unlike a MeshHandle's
+    // vertex/index pair, a cluster CUT has no single backend-owned source, so the caller binds them
+    // explicitly first (setBindingSet/setSrvBuffer), exactly as any other feature binds its own data
+    // ahead of a draw or dispatch call.
+    //
+    // Deliberately a SEPARATE entry point from dispatchMeshFor(MeshHandle), not an overload of it:
+    // dispatchMeshFor dispatches by TRIANGLE COUNT over one flat, immutable index buffer and knows
+    // nothing about clusters. Giving it a second, cluster-shaped meaning would make one function
+    // answer two different questions depending on which pipeline happened to be bound -- exactly the
+    // kind of silent double-duty this codebase has been bitten by before.
+    //
+    // NOT PURE: adding it here must not break every existing IRenderContext (MockContext in
+    // tests/render.ui and tests/render.actorpreview implement this interface and have no use for a
+    // cluster-culling path). A backend that grows cluster support without growing this override is a
+    // bug in that backend, not here -- see IResourceFactory::destroyBlas for the identical reasoning.
+    virtual void dispatchMeshClusters(MeshHandle mesh, u32 clusterCount) { (void)mesh; (void)clusterCount; }
+
     // Copies whole bytes between buffers. Both must already be in CopySource / CopyDest.
     // Copies a range between buffers. The offsets are what let several sources be CONCATENATED
     // into one destination -- which is how a set of separate meshes becomes the single flat table
