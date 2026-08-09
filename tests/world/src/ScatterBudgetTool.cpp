@@ -66,8 +66,18 @@ int main(int argc, char** argv) {
         if (v.octaves > 0) gen.octaves = static_cast<u32>(v.octaves);
         const f64 t = v.coverageFloor < 0.0 ? 0.0 : (v.coverageFloor > 1.0 ? 1.0 : v.coverageFloor);
         gen.threshold = static_cast<f32>(t);
-        AVER_INFO("   PCGVOLUME '{}': seed={} featureSize={:.0f}cm octaves={} threshold={:.2f}",
-                  v.name, gen.worldSeed, gen.featureSizeCm, gen.octaves, gen.threshold);
+        // samples: the same clamp SandboxApp::setChunkStreamingEnabled applies. THIS TOOL IS ONLY
+        // WORTH ANYTHING IF IT MIRRORS THAT MAPPING EXACTLY -- it was written before `samples`
+        // existed, and reported a level asking for 16 as though it had asked for the default 4,
+        // i.e. one sixteenth of the real instance count. A budget tool that under-reports is worse
+        // than no budget tool.
+        if (v.samplesPerAxis > 0) {
+            constexpr i32 kMaxSamplesPerAxis = 64;
+            const i32 n = v.samplesPerAxis > kMaxSamplesPerAxis ? kMaxSamplesPerAxis : v.samplesPerAxis;
+            gen.samplesPerAxis = static_cast<u32>(n);
+        }
+        AVER_INFO("   PCGVOLUME '{}': seed={} featureSize={:.0f}cm octaves={} threshold={:.2f} samples={}/axis",
+                  v.name, gen.worldSeed, gen.featureSizeCm, gen.octaves, gen.threshold, gen.samplesPerAxis);
         foundVolume = true;
         break;
     }

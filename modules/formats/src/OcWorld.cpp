@@ -122,6 +122,7 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "octaves") && i + 1 < t.size()) v.octaves       = static_cast<i32>(parseF64(t[++i]));
                 else if (equalsCI(t[i], "floor")   && i + 1 < t.size()) v.coverageFloor = parseF64(t[++i]);
                 else if (equalsCI(t[i], "bias")    && i + 1 < t.size()) v.coverageBias  = parseF64(t[++i]);
+                else if (equalsCI(t[i], "samples") && i + 1 < t.size()) v.samplesPerAxis = static_cast<i32>(parseF64(t[++i]));
                 // A BARE TOKEN, not `infinite 1`. It is a statement about what the field IS rather
                 // than a value it carries, and it reads that way in the file.
                 else if (equalsCI(t[i], "infinite")) v.infinite = true;
@@ -256,6 +257,10 @@ std::string writeOcworld(const OcWorldData& w) {
                  " octaves " + std::to_string(v.octaves) +
                  " floor " + num(v.coverageFloor) +
                  " bias " + num(v.coverageBias);
+            // Omitted when unset, rather than written as `samples 0`: zero is this field's "the
+            // runtime keeps its own default" sentinel, and a level that never mentioned sampling
+            // should not come back from a save claiming to have asked for none.
+            if (v.samplesPerAxis > 0) s += " samples " + std::to_string(v.samplesPerAxis);
             // The bounds token LAST, because parsing `bounds` consumes the six numbers after it and
             // anything following them would have to be re-found. Writing it last means the reader
             // never has to.

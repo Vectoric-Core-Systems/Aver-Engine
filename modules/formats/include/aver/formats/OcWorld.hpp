@@ -46,6 +46,20 @@ struct OcPcgVolume {
     i32 octaves = 4;
     f64 coverageFloor = 0.0;
     f64 coverageBias  = 1.0;
+    // Candidate placement positions per horizontal chunk axis: the field is sampled on an n x n grid
+    // and each sample that clears the coverage floor may become one scattered entity. ZERO MEANS
+    // UNSET -- the runtime keeps aver::world::GeneratorSettings' own default rather than being told
+    // 0 samples and generating an empty world.
+    //
+    // THIS IS THE KNOB THAT DECIDES HOW DENSE A WORLD LOOKS, and it had no way into a level at all:
+    // the generator's default of 4 puts one candidate every 400 cm on a 1600 cm chunk, so even a
+    // palette of twenty species rendered as a handful of objects scattered metres apart. Nothing was
+    // wrong with the palette; a forest floor simply needs to be sampled far more finely than a
+    // scattering of boulders, and only the level knows which it is.
+    //
+    // COST IS QUADRATIC. n=16 is 16x the candidates of n=4, and every accepted one is an entity with
+    // its own draw. Raise it with the palette's triangle budget in view, not on its own.
+    i32 samplesPerAxis = 0;
     // False means boundsMin/Max are meaningful. True means the field is everywhere.
     bool infinite = true;
     f64 boundsMin[3] = {0, 0, 0};

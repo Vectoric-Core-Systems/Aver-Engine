@@ -1340,7 +1340,15 @@ bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
 // Descriptors every binding set suballocates from: one shader-visible heap for the whole device.
 constexpr u32 kRhiHeapSize = 65536;
 // Transient constant bytes per frame in flight.
+// The upload ring's STARTING size per frame in flight. It grows from here on demand (ringAlloc), so
+// this is the floor for a quiet scene rather than a budget anything has to fit inside.
 constexpr u64 kRhiRingBytes = 1u << 20;
+// The ceiling that growth stops at. 64 MB is about 260,000 per-draw constant slices in one frame --
+// far past any draw count this renderer can submit at an interactive rate, so hitting it means
+// something is wrong upstream, not that the ring is too small. A ceiling exists at all because the
+// buffer is CPU-visible upload memory, one per frame in flight, and unbounded growth driven by a
+// runaway draw loop would exhaust address space instead of reporting a problem.
+constexpr u64 kRhiRingMaxBytes = 64ull << 20;
 
 // The generic RHI factory: handle tables, the shared descriptor heap, and deferred destruction.
 class D3D12ResourceFactory final : public IResourceFactory {
@@ -1494,6 +1502,15 @@ private:
     ComPtr<ID3D12Resource> ring_[kFrameCount];
     u8* ringPtr_[kFrameCount] = {};
     u64 ringUsed_[kFrameCount] = {};
+    // How big each frame's ring actually IS, which stopped being kRhiRingBytes when the ring learned
+    // to grow -- see ringAlloc. Zero means "not created yet".
+    u64 ringBytes_[kFrameCount] = {};
+    // The size the busiest frame so far asked for. Monotonic: a ring never shrinks back, because the
+    // scene that needed it once will almost certainly need it again a frame later.
+    u64 ringWanted_ = kRhiRingBytes;
+    // The epoch an overflow was last reported in, so the message is once per frame rather than once
+    // per failed allocation.
+    u64 ringOverflowEpoch_ = ~0ull;
     // The ring resets itself when the device's monotonic fence counter moves on.
     u64 ringEpoch_ = ~0ull;
 
@@ -5012,23 +5029,69 @@ void D3D12RenderContext::applyDrawBinding() {
 }
 
 // Copies `bytes` into this frame's upload ring and returns their GPU address.
+//
+// THE RING GROWS, and it did not used to. It was a fixed 1 MB per frame, and every per-draw constant
+// costs a 256-byte-aligned slice, so a scene crossed the cliff at roughly four thousand draws: past
+// that, ringAlloc returned 0 and the draw silently lost its constants. Worse than the dropped draws
+// was the diagnosis -- one AVER_ERROR per failed call, which on a 5,760-instance forest produced
+// over four million log lines in a 600-frame run and cost far more time than the rendering did. A
+// content change (denser scatter) is not supposed to be able to do that to a backend.
+//
+// Growth happens at the FRAME BOUNDARY, never mid-frame: addresses already handed out this frame
+// point into the live buffer, and reallocating under them would hand the GPU freed memory. So an
+// exhausted frame still loses its remaining constants -- there is no way to rescue it -- but it
+// records the size it actually wanted, and the next frame through this buffer is big enough. In
+// practice that means one bad frame on the way up, not a permanently broken scene.
 D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderContext::ringAlloc(const void* data, u32 bytes) {
     if (!data || bytes == 0) return 0;
     const u32 f = dev_->frameIndex_ < kFrameCount ? dev_->frameIndex_ : 0;
+
+    // New epoch: reset the cursor, and take the growth the previous frames asked for.
+    if (ringEpoch_ != dev_->nextFence_) {
+        ringEpoch_ = dev_->nextFence_;
+        ringUsed_[f] = 0;
+        if (ringWanted_ > ringBytes_[f]) {
+            // This buffer is only safe to drop now because kFrameCount frames have retired since it
+            // was last recorded into -- the same invariant that makes the cursor reset safe.
+            ring_[f].Reset();
+            ringPtr_[f] = nullptr;
+            ringBytes_[f] = 0;
+        }
+    }
+
     if (!ring_[f]) {
+        u64 want = ringWanted_ > kRhiRingBytes ? ringWanted_ : kRhiRingBytes;
+        if (want > kRhiRingMaxBytes) want = kRhiRingMaxBytes;
         auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
-        auto rd = bufferDesc(kRhiRingBytes);
+        auto rd = bufferDesc(want);
         if (!hrOk(dev_->device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &rd,
                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ring_[f])), "rhi upload ring")) return 0;
         D3D12_RANGE none{0, 0};
         ring_[f]->Map(0, &none, reinterpret_cast<void**>(&ringPtr_[f]));
+        ringBytes_[f] = want;
+        if (want > kRhiRingBytes)
+            AVER_INFO("[RHI.D3D12] upload ring grown to {} KB for frame {}", want / 1024, f);
     }
-    if (ringEpoch_ != dev_->nextFence_) { ringEpoch_ = dev_->nextFence_; ringUsed_[f] = 0; }
 
     const u64 offset = (ringUsed_[f] + 255ull) & ~255ull;
     const u64 size = (static_cast<u64>(bytes) + 255ull) & ~255ull;
-    if (offset + size > kRhiRingBytes) {
-        AVER_ERROR("[RHI.D3D12] upload ring exhausted ({} bytes per frame)", kRhiRingBytes);
+    if (offset + size > ringBytes_[f]) {
+        // Ask for headroom rather than exactly what this call needed: the frame is still running and
+        // more allocations are almost certainly coming behind this one.
+        const u64 want = (offset + size) * 2ull;
+        if (want > ringWanted_) ringWanted_ = want > kRhiRingMaxBytes ? kRhiRingMaxBytes : want;
+        // ONCE PER FRAME, not once per call. See this function's header comment: the per-call form
+        // of this message was itself the dominant cost of the frame it was reporting on.
+        if (ringOverflowEpoch_ != ringEpoch_) {
+            ringOverflowEpoch_ = ringEpoch_;
+            if (ringBytes_[f] >= kRhiRingMaxBytes)
+                AVER_ERROR("[RHI.D3D12] upload ring exhausted at its {} KB ceiling -- draws in this "
+                           "frame are losing their constants. Reduce draw count or raise "
+                           "kRhiRingMaxBytes.", kRhiRingMaxBytes / 1024);
+            else
+                AVER_WARN("[RHI.D3D12] upload ring ({} KB) exhausted this frame; growing to {} KB",
+                          ringBytes_[f] / 1024, ringWanted_ / 1024);
+        }
         return 0;
     }
     std::memcpy(ringPtr_[f] + offset, data, bytes);

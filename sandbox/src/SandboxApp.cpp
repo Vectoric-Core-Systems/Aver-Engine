@@ -6813,6 +6813,19 @@ private:
                 const f64 t = v.coverageFloor < 0.0 ? 0.0 : (v.coverageFloor > 1.0 ? 1.0 : v.coverageFloor);
                 cwSettings.generator.threshold = static_cast<f32>(t);
             }
+            // How finely the field is sampled for placement, which is what decides whether a world
+            // reads as a forest floor or as objects strewn metres apart. Clamped rather than
+            // trusted: the cost is quadratic in this number and the file is authored by hand, so a
+            // stray extra digit would generate millions of entities per chunk. Zero means the level
+            // said nothing, and GeneratorSettings' own default stands.
+            if (v.samplesPerAxis > 0) {
+                constexpr i32 kMaxSamplesPerAxis = 64;   // 4096 candidates in one chunk
+                const i32 n = v.samplesPerAxis > kMaxSamplesPerAxis ? kMaxSamplesPerAxis : v.samplesPerAxis;
+                if (n != v.samplesPerAxis)
+                    AVER_WARN("[ChunkWorld] PCGVOLUME '{}' asks for {} samples per axis; clamped to {}",
+                              v.name, v.samplesPerAxis, n);
+                cwSettings.generator.samplesPerAxis = static_cast<u32>(n);
+            }
             AVER_INFO("[ChunkWorld] generator settings taken from PCGVOLUME '{}': seed={} "
                       "featureSize={:.0f}cm octaves={} threshold={:.2f}",
                       v.name, cwSettings.generator.worldSeed, cwSettings.generator.featureSizeCm,
@@ -6851,12 +6864,18 @@ private:
         chunkStreamLogsLeft_ = 8;
         chunkStreamStats_ = world::StreamStats{};
         AVER_INFO("[ChunkWorld] streaming enabled -- worldDir='{}' chunkSize={}cm loadRadius={} "
-                  "evictRadius={} verticalRadius={} palette={} species threshold={:.2f}",
+                  "evictRadius={} verticalRadius={} palette={} species threshold={:.2f} "
+                  "samples={}/axis ({} candidates/chunk, one per {:.0f}cm)",
                   cwSettings.worldDir, chunkWorld_->settings().stream.chunkSizeCm,
                   chunkWorld_->settings().stream.loadRadius, chunkWorld_->settings().stream.evictRadius,
                   chunkWorld_->settings().stream.verticalRadius,
                   chunkWorld_->settings().generator.palette.size(),
-                  chunkWorld_->settings().generator.threshold);
+                  chunkWorld_->settings().generator.threshold,
+                  chunkWorld_->settings().generator.samplesPerAxis,
+                  chunkWorld_->settings().generator.samplesPerAxis *
+                      chunkWorld_->settings().generator.samplesPerAxis,
+                  static_cast<f32>(chunkWorld_->settings().stream.chunkSizeCm) /
+                      static_cast<f32>(chunkWorld_->settings().generator.samplesPerAxis));
         warnIfCameraOutsideGeneratedBand();
     }
 
