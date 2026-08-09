@@ -28,6 +28,22 @@ constexpr u32 kChunkMLET = avrFourCC("MLET");
 constexpr u32 kMaxMeshletVertices  = 64;
 constexpr u32 kMaxMeshletTriangles = 124;
 
+// MLET chunk versions (FORMAT_SPECS.md 5.7). Version is a property of the whole MLET chunk (every
+// LOD's sub-arrays inside it share one AvrChunk::version), not per meshlet -- there is exactly one
+// MLET chunk per file. v1 is every MLET chunk written before per-cluster LOD existed: MeshletBounds
+// is 32 B (Sphere + ConeApex + ConeAxis/Cutoff), no error fields. v2 appends OwnError/ParentError
+// (2x f32, 8 B) to MeshletBounds, making it 40 B -- additive growth per the container's own
+// versioning rule (docs/formats/FORMAT_SPECS.md §3.2: "additive fields grow the struct; readers ...
+// read min(known_size, on_disk_size) and zero-fill the rest"), applied here as a version-gated
+// stride rather than a tail append because MeshletBounds is a repeated array, not a single struct --
+// the effect is the same: an old (v1) file's bytes are read with the old 32 B stride exactly as
+// before, unaffected by this feature existing, and OwnError/ParentError simply default (see
+// OcMeshMeshlet's own defaults) rather than appearing from nowhere.
+constexpr u16 kMlChunkVersionLegacy = 1;   // MeshletBounds 32 B, no OwnError/ParentError
+constexpr u16 kMlChunkVersionErrors = 2;   // MeshletBounds 40 B, + OwnError, ParentError
+constexpr u32 kMeshletBoundsBytesV1 = 32;
+constexpr u32 kMeshletBoundsBytesV2 = 40;
+
 // Stream semantics and formats (§5.2, §5.3).
 constexpr u8 kSemPosition = 0, kSemTangentFrame = 1, kSemUV0 = 2, kSemJoints = 5, kSemWeights = 6;
 constexpr u8 kFmtR32G32B32F = 0, kFmtR16G16B16A16S = 1, kFmtR16G16F = 2;
@@ -332,13 +348,17 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
                 w.u8v(static_cast<u8>(ml.triangleCount()));
                 w.u16v(0);   // Pad
             }
-            // Sub-array 2: MeshletBounds[] (32 B each).
+            // Sub-array 2: MeshletBounds[] (40 B each, chunk version 2: the original 32 B Sphere +
+            // ConeApex + ConeAxis/Cutoff, then OwnError, ParentError appended -- see
+            // kMlChunkVersionErrors above).
             for (const OcMeshMeshlet& ml : mls) {
                 w.f32v(ml.sphereCenter.x); w.f32v(ml.sphereCenter.y); w.f32v(ml.sphereCenter.z);
                 w.f32v(ml.sphereRadius);
                 w.f32v(ml.coneApex.x); w.f32v(ml.coneApex.y); w.f32v(ml.coneApex.z);
                 w.u8v(static_cast<u8>(ml.coneAxis[0])); w.u8v(static_cast<u8>(ml.coneAxis[1]));
                 w.u8v(static_cast<u8>(ml.coneAxis[2])); w.u8v(static_cast<u8>(ml.coneCutoff));
+                w.f32v(ml.ownError);
+                w.f32v(ml.parentError);
             }
             // Sub-array 3: MeshletVertices[] (u32 each), all this level's meshlets' vertex lists back
             // to back.
@@ -455,7 +475,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     // this feature existing at all, and is the backward-compat contract §3.2's "unknown chunks
     // skipped" is built to support (never marked kAvrChunkRequired, so an old reader that doesn't
     // look for MLET is unaffected by its presence in a NEW file either).
-    if (anyMeshlets) f.add(kChunkMLET, std::move(mlet), kAvrChunkGpuUploadable);
+    if (anyMeshlets) f.add(kChunkMLET, std::move(mlet), kAvrChunkGpuUploadable, kMlChunkVersionErrors);
     return writeAvr1(f, out, why);
 }
 
@@ -674,8 +694,15 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
         if (meshletOffset > chunkSize)
             return fail(why, ".ocmesh: LOD " + std::to_string(level) + "'s MeshletOffset is past the end of MLET");
 
+        // The MeshletBounds stride depends on the CHUNK's version, not this LOD's: v1 files (every
+        // MLET written before per-cluster LOD existed) are 32 B/meshlet with no OwnError/ParentError,
+        // v2 files are 40 B/meshlet (see kMlChunkVersionErrors above). Gating on the version rather
+        // than assuming the newer stride is what lets an old .ocmesh keep loading unchanged.
+        const bool hasErrorFields = mlet->version >= kMlChunkVersionErrors;
+        const u32 boundsStride = hasErrorFields ? kMeshletBoundsBytesV2 : kMeshletBoundsBytesV1;
+
         const u64 descBytes = u64(meshletCount) * 12;
-        const u64 boundsBytes = u64(meshletCount) * 32;
+        const u64 boundsBytes = u64(meshletCount) * boundsStride;
         if (descBytes > chunkSize - meshletOffset || boundsBytes > chunkSize - meshletOffset - descBytes)
             return fail(why, ".ocmesh: MLET is smaller than LOD " + std::to_string(level) +
                                   "'s MeshletDesc[]/MeshletBounds[] require");
@@ -717,6 +744,14 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
                 ml.coneAxis[1]  = static_cast<i8>(br.u8v());
                 ml.coneAxis[2]  = static_cast<i8>(br.u8v());
                 ml.coneCutoff   = static_cast<i8>(br.u8v());
+                // v1 chunks stop here (32 B/meshlet): ml.ownError/parentError keep the defaults
+                // OcMeshMeshlet's default constructor already gave them (0.0f, +FLT_MAX) -- the same
+                // "always drawable, and nothing finer needs to exist" pair a root cluster gets, which
+                // is the harmless choice for data written before this field existed.
+                if (hasErrorFields) {
+                    ml.ownError    = br.f32v();
+                    ml.parentError = br.f32v();
+                }
             }
             if (!br.ok) return fail(why, ".ocmesh: truncated MeshletBounds[] for LOD " + std::to_string(level));
         }

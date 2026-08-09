@@ -590,6 +590,81 @@ bool validateScreenErrorMonotonic(const LodDag& dag, f32 scale, std::string* why
     return true;
 }
 
+std::vector<ClusterErrorBounds> computeClusterErrorBounds(const LodDag& dag, f32 scale) {
+    std::vector<ClusterErrorBounds> out(dag.clusters.size());
+    if (dag.clusters.empty()) return out;
+
+    // Same "root" definition validateLodDag and LodDag's own doc comment use -- NOT
+    // c.parents.empty(), so a dag-connectivity bug (a non-root cluster wrongly missing a parent)
+    // surfaces as an ownError > parentError violation below instead of silently matching the root
+    // sentinel. See this function's header comment.
+    const u32 topLevel = dag.levelCount() > 0 ? dag.levelCount() - 1 : 0;
+
+    for (const Cluster& c : dag.clusters) {
+        ClusterErrorBounds& b = out[c.id];
+        b.ownError = toScreenErrorThreshold(c.error, scale);
+
+        if (c.level == topLevel) {
+            b.parentError = std::numeric_limits<f32>::max();
+            continue;
+        }
+
+        // MAX over every parent, not parents[0] -- see this function's header comment for why that
+        // matters even though, today, every parent from the same simplified group carries the exact
+        // same propagatedError.
+        f32 maxParentError = 0.0f;
+        for (u32 parentId : c.parents)
+            maxParentError = std::max(maxParentError, toScreenErrorThreshold(dag.clusters[parentId].error, scale));
+        b.parentError = maxParentError;
+    }
+    return out;
+}
+
+bool validateClusterErrorBounds(const LodDag& dag, const std::vector<ClusterErrorBounds>& bounds, std::string* why) {
+    if (bounds.size() != dag.clusters.size()) {
+        if (why) *why = "validateClusterErrorBounds: bounds.size() (" + std::to_string(bounds.size()) +
+                         ") does not match dag.clusters.size() (" + std::to_string(dag.clusters.size()) +
+                         ") -- bounds must come from computeClusterErrorBounds(dag, ...) for this same dag";
+        return false;
+    }
+
+    const u32 topLevel = dag.levelCount() > 0 ? dag.levelCount() - 1 : 0;
+    constexpr f32 kFltMax = std::numeric_limits<f32>::max();
+
+    for (const Cluster& c : dag.clusters) {
+        const ClusterErrorBounds& b = bounds[c.id];
+
+        // The local test's whole soundness argument: a cluster the test would ever draw is fine
+        // enough on its own (ownError < budget) and its parent is NOT (parentError < budget is what
+        // the test rejects), so ownError <= parentError is what keeps every budget's cut a genuine
+        // partition of the surface rather than one with holes.
+        if (b.ownError > b.parentError + 1e-6f) {
+            if (why) *why = "cluster " + std::to_string(c.id) + " (level " + std::to_string(c.level) +
+                             ") has ownError " + std::to_string(b.ownError) + " greater than parentError " +
+                             std::to_string(b.parentError) +
+                             " -- the local cut test's coverage guarantee requires ownError <= parentError "
+                             "for every cluster";
+            return false;
+        }
+
+        const bool isRoot = (c.level == topLevel);
+        if (isRoot && b.parentError != kFltMax) {
+            if (why) *why = "root cluster " + std::to_string(c.id) + " has a FINITE parentError " +
+                             std::to_string(b.parentError) +
+                             " -- a root must have parentError == FLT_MAX or it silently stops drawing "
+                             "at distance once no finer cluster qualifies";
+            return false;
+        }
+        if (!isRoot && b.parentError == kFltMax) {
+            if (why) *why = "non-root cluster " + std::to_string(c.id) + " (level " + std::to_string(c.level) +
+                             ") has an INFINITE parentError -- only the root level may, or this cluster and "
+                             "its ancestor can both be drawn at the same budget";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
     const auto fail = [&](const char* m) { if (why) *why = m; return false; };
 

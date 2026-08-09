@@ -1090,6 +1090,7 @@ void ToolsMenu::reapPackage() {
     }
 }
 
+#if AVER_WITH_IMGUI
 void ToolsMenu::drawPackageModal(const fmt::ProjectDesc& project, f32 dpi) {
     ImGui::SetNextWindowSize(ImVec2(760.0f * dpi, 460.0f * dpi), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal("Package Project", nullptr, ImGuiWindowFlags_NoSavedSettings)) return;
@@ -1148,5 +1149,6 @@ void ToolsMenu::drawPackageModal(const fmt::ProjectDesc& project, f32 dpi) {
     ImGui::EndChild();
     ImGui::EndPopup();
 }
+#endif // AVER_WITH_IMGUI
 
 } // namespace aver::editor

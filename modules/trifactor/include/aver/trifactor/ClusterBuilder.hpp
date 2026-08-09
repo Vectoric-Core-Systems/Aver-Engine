@@ -14,6 +14,7 @@
 #include "aver/core/Math.hpp"
 #include "aver/formats/OcMesh.hpp"
 
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -177,6 +178,59 @@ f32 toScreenErrorThreshold(f32 clusterError, f32 scale);
 // different code and a future change to the conversion (a non-linear projection, a per-cluster
 // scale, etc.) should not be trusted to preserve monotonicity just because the raw error does.
 bool validateScreenErrorMonotonic(const LodDag& dag, f32 scale, std::string* why = nullptr);
+
+// ---- per-cluster error, the pair OcMeshMeshlet::ownError/parentError (OcMesh.hpp) persists --------
+//
+// One cluster's packed screen-space error pair, indexed exactly like dag.clusters (bounds[c.id]
+// belongs to dag.clusters[c.id]). This is what turns per-LEVEL selection (LodDesc.ScreenErrorThreshold,
+// one value for a whole LOD) into a per-CLUSTER local cut test:
+//     draw this cluster  iff  ownError < pixelBudget  AND  parentError >= pixelBudget
+struct ClusterErrorBounds {
+    f32 ownError    = 0.0f;
+    f32 parentError = std::numeric_limits<f32>::max();
+};
+
+// Computes ownError/parentError for every cluster in `dag`, converting Cluster::error through
+// toScreenErrorThreshold(_, scale) -- the SAME conversion validateScreenErrorMonotonic re-checks, so
+// this inherits its monotonicity guarantee rather than asserting a new one.
+//
+// A cluster's ROOT-ness is `c.level == dag.levelCount() - 1` -- the same definition validateLodDag
+// and LodDag's own doc comment use for "coarsest level" -- not "c.parents.empty()": that keeps this
+// function's root/non-root split from silently agreeing with a dag-connectivity bug (a non-root
+// cluster that wrongly has no parents) instead of exposing it. A root gets
+// parentError = +FLT_MAX (a finite sentinel, not IEEE +inf -- see OcMeshMeshlet's own comment on
+// why): the local cut test must always accept a root once nothing finer already qualified, and a
+// finite value here would make a distant root silently stop drawing.
+//
+// For a non-root cluster with MORE THAN ONE parent (splitIntoClusters, called from
+// buildLodHierarchy, can produce more than one new cluster per simplified group when
+// meshopt_buildMeshlets' 64-vertex/124-triangle limits force a re-split), parentError is the MAX
+// over every parent's converted error, not parents[0]. Today every parent from the same group
+// carries the exact SAME propagatedError -- buildLodHierarchy assigns one shared local variable to
+// every one of a group's newIds (see its own comment) -- so max() and parents[0] agree numerically.
+// max() is used anyway because it stays correct even if that equality ever stops holding (a future
+// per-newId error computation): picking parents[0] blindly could then under-report parentError by
+// grabbing a smaller sibling's error, which is exactly the "holes in the mesh" failure mode the
+// local cut test has no way to detect on its own -- see validateClusterErrorBounds, which is the
+// backstop that catches ownError > parentError before it reaches a file.
+//
+// If `dag` is empty this returns an empty vector.
+std::vector<ClusterErrorBounds> computeClusterErrorBounds(const LodDag& dag, f32 scale);
+
+// Validates the local cut test's entire correctness argument, over EVERY cluster in `dag`:
+//   - ownError <= parentError (the property the local test's "covers every surface exactly once"
+//     claim rests on -- see computeClusterErrorBounds's doc comment)
+//   - a cluster is a root (c.level == dag.levelCount() - 1) IFF its parentError is exactly +FLT_MAX
+//     (checks the SENTINEL actually made it through, not merely that some large value did, and
+//     equally flags a non-root that was wrongly given the "always draw" root sentinel)
+// `bounds` must come from computeClusterErrorBounds(dag, scale) for this same `dag` (indexed the
+// same way). Returns false and sets `why` to the first violation found, loudly, rather than letting
+// a violation reach a file: per the local test's own definition, a cluster with ownError >
+// parentError could be skipped alongside its ancestor at some pixel budget (a hole), or a wrongly
+// non-infinite root could vanish at distance, or a wrongly infinite non-root could double-draw
+// alongside its ancestor.
+bool validateClusterErrorBounds(const LodDag& dag, const std::vector<ClusterErrorBounds>& bounds,
+                                 std::string* why = nullptr);
 
 // Reduces `mesh` in place to roughly `ratio` of its triangles (0 < ratio < 1), rewriting positions,
 // normals, UVs and indices. Returns false and leaves the mesh UNTOUCHED if the input is unusable or

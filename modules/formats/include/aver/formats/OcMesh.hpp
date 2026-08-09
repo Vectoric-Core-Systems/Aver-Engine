@@ -4,6 +4,7 @@
 #include "aver/core/Types.hpp"
 #include "aver/core/Math.hpp"
 
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,28 @@ struct OcMeshMeshlet {
     Vec3 coneApex{0, 0, 0};
     i8   coneAxis[3] = {0, 0, 0};   // snorm8: value/127.0 -> [-1,1]
     i8   coneCutoff  = -127;        // snorm8; -127 (not -128) is the conservative "never cull" value
+
+    // Per-cluster screen-space error, the two floats that turn whole-LOD selection into per-cluster
+    // selection (FORMAT_SPECS.md 5.7, MeshletBounds chunk-version 2). `ownError` is this cluster's
+    // own converted ScreenErrorThreshold; `parentError` is the error of the coarser cluster/group
+    // this one feeds into. The runtime's local cut test is then purely per-cluster:
+    //     draw this cluster  iff  ownError < pixelBudget  AND  parentError >= pixelBudget
+    // which covers a mesh's surface exactly once, with no gaps and no overlap, PROVIDED
+    // ownError <= parentError holds for every cluster (see aver::trifactor::
+    // validateClusterErrorBounds, which is what actually enforces that at cook time).
+    //
+    // ROOT clusters (no coarser cluster to feed into) get parentError = +FLT_MAX, not IEEE +inf: a
+    // finite comparison keeps `parentError >= pixelBudget` well-defined for any budget without
+    // risking NaN/inf propagating into a shader that later does arithmetic on it, and it is exactly
+    // the "always draw when nothing finer already qualified" behaviour a root needs.
+    //
+    // Defaults (ownError=0, parentError=FLT_MAX) are deliberately the "always drawable, and nothing
+    // finer needs to exist" pair -- the same shape a root cluster gets -- so an OcMeshMeshlet built
+    // by code that does not know about per-cluster LOD (a hand-built fixture, an old on-disk MLET
+    // chunk version 1 read back with these fields never written) is harmless if it ever reaches the
+    // local cut test, rather than defaulting to "never draw" (0, 0) or "undefined" (uninitialized).
+    f32 ownError    = 0.0f;
+    f32 parentError = std::numeric_limits<f32>::max();
 
     u32 triangleCount() const { return static_cast<u32>(triangles.size() / 3); }
 };

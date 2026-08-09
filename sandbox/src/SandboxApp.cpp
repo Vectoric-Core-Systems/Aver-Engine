@@ -1535,6 +1535,16 @@ public:
                 AVER_INFO("[Mesh] '{}' LOD ladder: {} level(s), {} tris at LOD0 -> {} tris at the coarsest",
                           rel, ladder.handles.size(), ladder.triCounts.front(), ladder.triCounts.back());
                 meshLods_[id] = std::move(ladder);
+
+                // Flat, all-levels-at-once cluster data for the per-cluster path (--lod-per-cluster).
+                // `verts` is copied here (not moved) because the LOD-0 MeshHandle `h` above was
+                // already created from it -- this copy is what a cache rebuild re-uploads later, the
+                // exact upload the task brief says to measure.
+                MeshClusterData cd;
+                cd.verts = verts;
+                trifactor::buildMeshClusterViews(md, cd.clusters, cd.clusterIndices);
+                if (!cd.clusters.empty())
+                    meshClusterData_[id] = std::move(cd);
             }
 #endif
         }
@@ -1547,7 +1557,8 @@ public:
     }
 
     // Drops the project's meshes from the id table. The built-in primitives survive.
-    void releaseProjectMeshes() {
+    void releaseProjectMeshes(Engine& e) {
+        (void)e;   // only read under AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR, below
         // sceneMeshes_ is scene-only; with the module off loadProjectMeshes() never populated it (see
         // its own #if AVER_MODULE_SCENE above), so there is nothing here to erase from it either.
 #if AVER_MODULE_SCENE
@@ -1555,8 +1566,16 @@ public:
             sceneMeshes_.erase(id); meshTris_.erase(id);
 #if AVER_MODULE_TRIFACTOR
             meshLods_.erase(id);
+            meshClusterData_.erase(id);
 #endif
         }
+#if AVER_MODULE_TRIFACTOR
+        // Every per-instance CPU-assembled cut handle is about to be invalid (its source mesh data
+        // is gone) -- destroy each one explicitly rather than leaking GPU index/vertex buffers.
+        for (auto& [ent, cache] : clusterCutCache_)
+            if (cache.handle) e.device()->destroyMesh(cache.handle);
+        clusterCutCache_.clear();
+#endif
 #endif
         projectMeshIds_.clear();
     }
@@ -1644,6 +1663,25 @@ public:
             int drawn = 0, culled = 0;
 #if AVER_MODULE_TRIFACTOR
             lodStats_ = LodSelectStats{};   // this frame's counters, from zero -- see the struct comment
+            lodClusterStats_ = LodClusterStats{};
+            ++lodClusterFrame_;
+            // Sweep the per-instance cut cache: an entry an instance did not touch for a while (its
+            // entity was destroyed, its CMeshRenderer removed, or lodPerClusterEnabled_ just got
+            // turned off) leaks its GPU handle forever otherwise -- there is no destruction hook to
+            // catch that here. 256 frames of grace before reclaiming, so a briefly-off-screen instance
+            // (still ticking, still touching its cache entry every frame it's visible) is never
+            // mistaken for a gone one; only checked every 64 frames, so the sweep itself is not a
+            // per-frame cost.
+            if (lodPerClusterEnabled_ && (lodClusterFrame_ % 64 == 0)) {
+                for (auto it2 = clusterCutCache_.begin(); it2 != clusterCutCache_.end();) {
+                    if (lodClusterFrame_ - it2->second.lastUsedFrame > 256) {
+                        if (it2->second.handle) e.device()->destroyMesh(it2->second.handle);
+                        it2 = clusterCutCache_.erase(it2);
+                    } else {
+                        ++it2;
+                    }
+                }
+            }
 #endif
 
             // The six frustum planes, from the camera's viewProj. ENGINE convention: row-vector, so
@@ -1761,7 +1799,103 @@ public:
                 // ops per instance and touches no GPU resource, so it is cheap enough to run fresh
                 // EVERY frame -- see the task report for why that trivially satisfies "a moving
                 // camera must still update the choice" without needing an invalidation rule at all.
-                if (lodSelectEnabled_ && !skinned && haveWorldBox) {
+                // PER-CLUSTER path wins over per-LEVEL when both are enabled -- see setLodPerCluster's
+                // own comment. This is what actually mixes LOD levels within one instance's draw; the
+                // per-level `else if` below it is entirely unchanged, still reachable when
+                // --lod-per-cluster is off, still reproducing pre-existing behaviour exactly then.
+                if (lodPerClusterEnabled_ && !skinned && haveWorldBox) {
+                    if (const auto cit = meshClusterData_.find(mr->mesh); cit != meshClusterData_.end()) {
+                        const MeshClusterData& cd = cit->second;
+                        trifactor::View view;
+                        view.eye = eye_;
+                        view.viewProj = viewProj_;
+                        view.viewportHeightPx = vpH_;
+                        view.verticalFovRadians = radians(60.0f);
+
+                        // Mesh-local -> world, once per instance per frame, for EVERY cluster of the
+                        // mesh's whole DAG at once (all levels) -- the local cut test needs every
+                        // cluster's world-space sphere to compare against this frame's camera. Same
+                        // uniform-scale approximation the per-level path's informational telemetry
+                        // above already uses for radius/axis.
+                        const f32 worldScale = xformVec(wm, Vec3{1, 0, 0}).size();
+                        std::vector<trifactor::MeshClusterView> worldClusters = cd.clusters;
+                        for (trifactor::MeshClusterView& cv : worldClusters) {
+                            cv.sphereCenter = xformPoint(wm, cv.sphereCenter);
+                            cv.sphereRadius *= worldScale;
+                            cv.coneApex = xformPoint(wm, cv.coneApex);
+                            cv.coneAxis = xformVec(wm, cv.coneAxis).getSafeNormal();
+                        }
+
+                        const trifactor::ClusterCutResult cr = trifactor::selectClusterCut(
+                            worldClusters, lodErrorThresholdPx_, view, true /* useFrustum */);
+
+                        ++lodClusterStats_.instancesTested;
+                        lodClusterStats_.clustersTested += cr.stats.tested;
+                        lodClusterStats_.frustumCulled += cr.stats.frustumCulled;
+                        lodClusterStats_.coneCulled += cr.stats.coneCulled;
+                        lodClusterStats_.lodRejected += cr.stats.lodRejected;
+                        lodClusterStats_.clustersDrawn += cr.stats.drawn;
+                        lodClusterStats_.trianglesDrawn += cr.stats.trianglesAfter;
+                        if (const auto tIt = meshTris_.find(mr->mesh); tIt != meshTris_.end())
+                            lodClusterStats_.trianglesBeforeLod0 += tIt->second;
+                        if (cr.stats.distinctLevels > 1) ++lodClusterStats_.instancesMixedLevels;
+                        lodClusterStats_.maxDistinctLevelsSeen =
+                            std::max(lodClusterStats_.maxDistinctLevelsSeen, cr.stats.distinctLevels);
+
+                        // Sort for a cheap, order-independent "did the cut change since last frame"
+                        // comparison -- see ClusterCutCache's own comment. The cut is expected to be
+                        // STABLE frame to frame (the camera moves continuously, not by a full LOD
+                        // jump every frame), so this is a cache hit most frames once settled.
+                        std::vector<u32> selectedIds = cr.drawnIds;
+                        std::sort(selectedIds.begin(), selectedIds.end());
+
+                        ClusterCutCache& cache = clusterCutCache_[ent];
+                        cache.lastUsedFrame = lodClusterFrame_;
+                        if (selectedIds != cache.selectedIds || cache.handle == 0) {
+                            // REBUILD: concatenate every selected cluster's precomputed expanded
+                            // GLOBAL index list into ONE fresh index buffer, against the SAME shared
+                            // vertex array every level of this mesh already uses (cd.verts) -- one
+                            // draw call for the whole mixed-LOD cut, never one call per cluster (see
+                            // the task report on why that shape avoids needing ExecuteIndirect at
+                            // all). Measured, not guessed: real wall time around the real createMesh
+                            // call, and the real index/vertex byte counts that upload costs.
+                            std::vector<u32> assembled;
+                            u64 idxCount = 0;
+                            for (u32 cidx : selectedIds)
+                                if (cidx < cd.clusterIndices.size()) idxCount += cd.clusterIndices[cidx].size();
+                            assembled.reserve(idxCount);
+                            for (u32 cidx : selectedIds)
+                                if (cidx < cd.clusterIndices.size())
+                                    assembled.insert(assembled.end(), cd.clusterIndices[cidx].begin(),
+                                                      cd.clusterIndices[cidx].end());
+
+                            const auto t0 = std::chrono::steady_clock::now();
+                            const rhi::MeshHandle newHandle = assembled.empty() ? 0 :
+                                e.device()->createMesh(cd.verts.data(), (u32)cd.verts.size(),
+                                                        assembled.data(), (u32)assembled.size());
+                            const auto t1 = std::chrono::steady_clock::now();
+                            lodClusterStats_.rebuildMs +=
+                                std::chrono::duration<f64, std::milli>(t1 - t0).count();
+                            lodClusterStats_.rebuildIndices += assembled.size();
+                            ++lodClusterStats_.rebuilds;
+
+                            if (newHandle) {
+                                if (cache.handle) e.device()->destroyMesh(cache.handle);
+                                cache.handle = newHandle;
+                                cache.selectedIds = std::move(selectedIds);
+                                ++cache.rebuildCount;
+                            }
+                            // newHandle == 0 (empty cut this frame, or the device refused): keep
+                            // whatever handle the cache already had (fail-safe -- an instance never
+                            // draws visibly-wrong geometry because ONE frame's cut came up empty), or
+                            // fall through to the LOD-0 whole-mesh handle `mesh` already holds, for
+                            // the very first frame where there is no old handle yet either.
+                        } else {
+                            ++lodClusterStats_.cacheHits;
+                        }
+                        if (cache.handle) mesh = cache.handle;
+                    }
+                } else if (lodSelectEnabled_ && !skinned && haveWorldBox) {
                     if (const auto lit = meshLods_.find(mr->mesh); lit != meshLods_.end()) {
                         const MeshLodLadder& ladder = lit->second;
                         const Vec3 sphereCenter = (wlo + whi) * 0.5f;
@@ -1851,6 +1985,31 @@ public:
                           lodStats_.frustumCulled, lodStats_.coneCulled,
                           lodStats_.trianglesBeforeLod0, lodStats_.trianglesAfterLevel);
                 lastLoggedLodStats_ = lodStats_;
+            }
+            // `[LOD-CLUSTER]`, greppable, same log-on-change discipline. `distinctLevelsMax` is the
+            // number the task brief calls the proof of the feature: if it never exceeds 1 across a
+            // whole run, every instance's cut still collapsed to one level and this is discrete LOD
+            // with extra steps, not virtualized geometry, whatever else changed. `rebuilds`/`hits`
+            // and `rebuildMs`/`rebuildIdx` are the CPU-assembly cost this design was told to measure,
+            // not guess -- real counts and real wall time from the real createMesh calls above.
+            if (lodPerClusterEnabled_ &&
+                (lodClusterStats_.instancesTested != lastLoggedLodClusterStats_.instancesTested ||
+                 lodClusterStats_.clustersDrawn != lastLoggedLodClusterStats_.clustersDrawn ||
+                 lodClusterStats_.trianglesDrawn != lastLoggedLodClusterStats_.trianglesDrawn ||
+                 lodClusterStats_.instancesMixedLevels != lastLoggedLodClusterStats_.instancesMixedLevels ||
+                 lodClusterStats_.rebuilds != lastLoggedLodClusterStats_.rebuilds)) {
+                AVER_INFO("[LOD-CLUSTER] instances={} clustersTested={} frustumCulled={} coneCulled={} "
+                          "lodRejected={} clustersDrawn={} trisBefore={} trisDrawn={} "
+                          "instancesMixedLevels={} distinctLevelsMax={} rebuilds={} hits={} "
+                          "rebuildIdx={} rebuildMs={:.3f}",
+                          lodClusterStats_.instancesTested, lodClusterStats_.clustersTested,
+                          lodClusterStats_.frustumCulled, lodClusterStats_.coneCulled,
+                          lodClusterStats_.lodRejected, lodClusterStats_.clustersDrawn,
+                          lodClusterStats_.trianglesBeforeLod0, lodClusterStats_.trianglesDrawn,
+                          lodClusterStats_.instancesMixedLevels, lodClusterStats_.maxDistinctLevelsSeen,
+                          lodClusterStats_.rebuilds, lodClusterStats_.cacheHits,
+                          lodClusterStats_.rebuildIndices, lodClusterStats_.rebuildMs);
+                lastLoggedLodClusterStats_ = lodClusterStats_;
             }
 #endif
         }
@@ -2103,6 +2262,19 @@ public:
         (void)on;
 #endif
     }
+    // --lod-per-cluster [px]: turns on PER-CLUSTER virtualized-geometry selection
+    // (aver::trifactor::ClusterAdapt's selectClusterCut), replacing --lod-select's per-LEVEL choice
+    // for an instance entirely when both are given (this one wins -- see the draw loop's branch).
+    // OFF (the default) leaves --lod-select's per-level path, or no LOD selection at all, completely
+    // unaffected -- same "before/after is one flag on the same build" contract as --lod-select.
+    void setLodPerCluster(bool on, f32 thresholdPx) {
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+        lodPerClusterEnabled_ = on;
+        if (on) lodErrorThresholdPx_ = thresholdPx;   // shares the one pixel-budget knob with --lod-select
+#else
+        (void)on; (void)thresholdPx;
+#endif
+    }
     void setUiDemo(bool on) { showUiDemo_ = on; }                          // --ui-demo
     void setOpenAsset(std::string p) { openAsset_ = std::move(p); }        // --open-asset
     void setInputProbe(bool on) { inputProbe_ = on; }
@@ -2247,7 +2419,7 @@ private:
         loadProjectMaterials();
 #endif
 #if AVER_MODULE_SCENE
-        releaseProjectMeshes();
+        releaseProjectMeshes(e);
         loadProjectMeshes(e);
 #endif
 #if AVER_MODULE_SCENE
@@ -3150,7 +3322,7 @@ private:
             // Not loaded yet -- most likely imported moments ago. Reload synchronously (the same
             // release+load pair buildUI() runs for wantMeshReload_) rather than waiting a frame, so
             // the drop the user just made actually lands.
-            releaseProjectMeshes();
+            releaseProjectMeshes(e);
             loadProjectMeshes(e);
         }
         const auto meshIt = sceneMeshes_.find(meshId);
@@ -3674,7 +3846,7 @@ private:
 #if AVER_MODULE_SCENE
         if (wantMeshReload_) {
             wantMeshReload_ = false;
-            releaseProjectMeshes();
+            releaseProjectMeshes(e);
             loadProjectMeshes(e);
         }
 #endif
@@ -7351,6 +7523,68 @@ private:
     };
     LodSelectStats lodStats_{};
     LodSelectStats lastLoggedLodStats_{};
+
+    // ============================================================================================
+    // PER-CLUSTER selection -- what actually makes this virtualized geometry instead of discrete LOD
+    // with generated levels. See aver::trifactor::ClusterAdapt.hpp's "PER-CLUSTER, at last" section.
+    // Switchable against the per-level path above (--lod-per-cluster) so before/after is one flag on
+    // top of the SAME build/binary, not a separate compile -- both paths ship in every binary and the
+    // flag decides which one an instance uses at draw time.
+    // ============================================================================================
+
+    // Every meshlet of a mesh, across EVERY LOD level at once, mesh-local space, plus its expanded
+    // GLOBAL triangle-index list -- built once at load time (loadProjectMeshes, same gate as
+    // MeshLodLadder: only for a mesh the Cook wrote coarserLods for). `verts` is a COPY of the same
+    // vertex array createMesh was first called with; every cluster from every level indexes it
+    // (OcMeshData::coarserLods' shared-vertex-buffer contract), so ONE copy serves the whole DAG and
+    // every cut this mesh's instances can ever select.
+    struct MeshClusterData {
+        std::vector<trifactor::MeshClusterView> clusters;   // mesh-local; all levels
+        std::vector<std::vector<u32>> clusterIndices;        // [clusterId] -> expanded global indices
+        std::vector<rhi::MeshVertex> verts;
+    };
+    std::unordered_map<u64, MeshClusterData> meshClusterData_;
+
+    // ONE cut-assembled MeshHandle PER INSTANCE (not per mesh -- two instances of the same mesh at
+    // different distances select different clusters), rebuilt only when the selected cluster-id set
+    // actually changes -- "cache the cut and rebuild only when it changes" per the task brief. Keyed
+    // by scene::Entity because that is what is stable across frames for a CMeshRenderer instance;
+    // `lastUsedFrame` is how staleEntityCacheSweep below reclaims a handle whose entity stopped
+    // appearing (destroyed, or its component removed) without needing every entity's destruction
+    // hooked explicitly.
+    struct ClusterCutCache {
+        std::vector<u32> selectedIds;   // sorted; last frame's cut, for the cheap same-cut check
+        rhi::MeshHandle handle = 0;     // 0 = none yet, or the selection was empty
+        u64 lastUsedFrame = 0;
+        u64 rebuildCount = 0;           // how many times THIS instance's handle was actually rebuilt
+    };
+    std::unordered_map<scene::Entity, ClusterCutCache> clusterCutCache_;
+    u64 lodClusterFrame_ = 0;           // incremented once per onRender call; drives the sweep below
+    bool lodPerClusterEnabled_ = false; // --lod-per-cluster. OFF: the per-LEVEL path above runs
+                                        // unchanged, exactly as if this whole section did not exist.
+
+    // Measured cost of the CPU-assembly upload this design's report flags as the failure mode to
+    // watch -- see modules/trifactor/include/aver/trifactor/ClusterAdapt.hpp and the task's own
+    // "MEASURE the upload" instruction. Real std::chrono timing around every createMesh call this
+    // path makes, not a guess.
+    struct LodClusterStats {
+        u32 instancesTested = 0;
+        u32 clustersTested = 0;
+        u32 frustumCulled = 0;
+        u32 coneCulled = 0;
+        u32 lodRejected = 0;
+        u32 clustersDrawn = 0;
+        u64 trianglesBeforeLod0 = 0;
+        u64 trianglesDrawn = 0;
+        u32 instancesMixedLevels = 0;   // instances whose OWN cut spans > 1 distinct level this frame
+        u32 maxDistinctLevelsSeen = 0;  // the single highest distinct-level count seen on any instance
+        u32 rebuilds = 0;               // cache misses (cut changed) this frame, across all instances
+        u32 cacheHits = 0;              // cache hits (cut unchanged) this frame
+        u64 rebuildIndices = 0;         // sum of assembled index counts on rebuilds this frame
+        f64 rebuildMs = 0.0;            // wall time spent inside createMesh on rebuilds this frame
+    };
+    LodClusterStats lodClusterStats_{};
+    LodClusterStats lastLoggedLodClusterStats_{};
 #endif
     Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };
@@ -7372,7 +7606,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=false; f32 lodErrorPx=1.0f; bool lodClusterStats=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=false; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -7503,6 +7737,14 @@ Application* createApplication(int argc, char** argv) {
         // --lod-cluster-stats: turns on the informational per-meshlet frustum/cone-cull counters on
         // top of --lod-select. Separate flag on purpose -- see lodClusterStatsEnabled_'s own comment.
         else if (!std::strcmp(argv[i],"--lod-cluster-stats")) lodClusterStats=true;
+        // --lod-per-cluster [px]: PER-CLUSTER virtualized-geometry selection (replaces --lod-select's
+        // per-level choice for an instance when both are given). Optional pixel error budget, default
+        // 1.0px, same knob --lod-select uses.
+        else if (!std::strcmp(argv[i],"--lod-per-cluster")) {
+            lodPerCluster=true;
+            if (i+1 < argc && (argv[i+1][0] != '-' || (argv[i+1][1] >= '0' && argv[i+1][1] <= '9')))
+                lodErrorPx=static_cast<f32>(std::atof(argv[++i]));
+        }
         else if (!std::strcmp(argv[i],"--ui-demo")) uiDemo=true;
         // Coverage is optional: `--clouds` alone takes the authored default.
         else if (!std::strcmp(argv[i],"--clouds")) {
@@ -7549,6 +7791,7 @@ Application* createApplication(int argc, char** argv) {
     app->setVSyncOff(vsyncOff);
     app->setLodSelect(lodSelect, lodErrorPx);
     app->setLodClusterStats(lodClusterStats);
+    app->setLodPerCluster(lodPerCluster, lodErrorPx);
     app->setUiDemo(uiDemo);
     app->setOpenAsset(openAsset);
     app->setInputProbe(inputProbe);

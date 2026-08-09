@@ -29,8 +29,12 @@ using namespace aver;
 
 #if AVER_MODULE_TRIFACTOR
 namespace {
-// Converts one LOD level of a DAG into the on-disk OcMeshMeshlet shape.
-std::vector<fmt::OcMeshMeshlet> toMeshlets(const aver::trifactor::LodDag& dag, u32 level) {
+// Converts one LOD level of a DAG into the on-disk OcMeshMeshlet shape. `errorBounds` is
+// aver::trifactor::computeClusterErrorBounds(dag, scale)'s output, indexed by Cluster::id exactly
+// like dag.clusters -- this is where ownError/parentError cross from Trifactor's Cluster into
+// Formats' OcMeshMeshlet, the one call site allowed to see both (OcMesh.hpp:39-44).
+std::vector<fmt::OcMeshMeshlet> toMeshlets(const aver::trifactor::LodDag& dag, u32 level,
+                                            const std::vector<aver::trifactor::ClusterErrorBounds>& errorBounds) {
     std::vector<fmt::OcMeshMeshlet> out;
     if (level >= dag.levels.size()) return out;
     out.reserve(dag.levels[level].size());
@@ -46,6 +50,8 @@ std::vector<fmt::OcMeshMeshlet> toMeshlets(const aver::trifactor::LodDag& dag, u
         ml.coneAxis[1]  = c.bounds.coneAxis[1];
         ml.coneAxis[2]  = c.bounds.coneAxis[2];
         ml.coneCutoff   = c.bounds.coneCutoff;
+        ml.ownError     = errorBounds[cid].ownError;
+        ml.parentError  = errorBounds[cid].parentError;
         out.push_back(std::move(ml));
     }
     return out;
@@ -96,12 +102,24 @@ bool addMeshlets(fmt::OcMeshData& m, std::string* why) {
         return false;
     }
 
-    m.meshlets = toMeshlets(dag, 0);
+    // ownError/parentError, the per-cluster values OcMeshMeshlet packs (OcMesh.hpp) -- computed
+    // once for the whole DAG, then validated BEFORE anything is packed: a violation here is exactly
+    // the "holes in the mesh" failure mode the local cut test cannot detect on its own, so it must
+    // fail the cook loudly rather than reach a file.
+    const std::vector<aver::trifactor::ClusterErrorBounds> errorBounds =
+        aver::trifactor::computeClusterErrorBounds(dag, scale);
+    std::string boundsWhy;
+    if (!aver::trifactor::validateClusterErrorBounds(dag, errorBounds, &boundsWhy)) {
+        if (why) *why = "per-cluster error bounds invalid: " + boundsWhy;
+        return false;
+    }
+
+    m.meshlets = toMeshlets(dag, 0, errorBounds);
     m.coarserLods.clear();
     for (u32 level = 1; level < dag.levelCount(); ++level) {
         fmt::OcMeshLod lod;
         lod.indices  = toIndices(dag, level);
-        lod.meshlets = toMeshlets(dag, level);
+        lod.meshlets = toMeshlets(dag, level, errorBounds);
         // Every cluster newly created at this level shares the SAME propagatedError (buildLodHierarchy
         // assigns it once per group, to every cluster the group's re-split produced), so max() over
         // the level is defensive rather than strictly necessary -- it stays correct even if a future

@@ -278,8 +278,11 @@ private:
     // Rebuilds the preview's draw list from the live snapshot or the parsed source.
     void buildDrawList(Engine& e);
 
-    // Asks the shared preview to match the panel, debounced until the size settles.
+    // Asks the shared preview to match the panel, debounced until the size settles. Only draw() ever
+    // calls this, and draw() is itself a no-op with UI off, so an empty body with UI off is never
+    // actually reached -- it exists only so the class stays a complete type either way.
     void requestPreviewSize(f32 w, f32 h) {
+#if AVER_WITH_IMGUI
         if (!g_preview) return;
         const u32 want [2] = {static_cast<u32>(w), static_cast<u32>(h)};
         const u32 have [2] = {g_preview->width(), g_preview->height()};
@@ -296,6 +299,9 @@ private:
         if (now < previewResizeAt_) return;
         previewResizeAt_ = -1.0;
         g_preview->resize(pendingPreviewW_, pendingPreviewH_);
+#else
+        (void)w; (void)h;
+#endif
     }
     double previewResizeAt_ = -1.0;
     u32 pendingPreviewW_ = 0, pendingPreviewH_ = 0;
@@ -335,7 +341,15 @@ private:
     }
 
     // ---- the gizmo ----
-
+    //
+    // Every member below this line is ImVec2-typed in its own signature (ImVec2 is imgui's, not
+    // ours) or, for tool_, defaulted from ToolGlyphs.hpp's ToolKind -- a whole header that is itself
+    // entirely behind AVER_WITH_IMGUI. Neither can be declared as a plain, UI-off-safe stand-in
+    // without duplicating imgui's own vector type, and neither needs to be: every call site is
+    // inside draw()'s own AVER_WITH_IMGUI body (see draw(), below), so with UI off nothing ever
+    // reaches them. Guarding the declarations themselves -- not just the bodies -- is what keeps the
+    // class a complete type in both builds; see the task note on ImGui types in members.
+#if AVER_WITH_IMGUI
     // Projects a world point to image pixels. Returns false when it is behind the eye.
     bool projectToScreen(const f32 world[3], ImVec2 imageSize, ImVec2& out) const;
     // Returns the gizmo axis under an image-local point, or -1.
@@ -357,6 +371,7 @@ private:
     int tool_ = ToolMove;
     // Screen position of an axis handle's tip. Returns false when the axis points at the eye.
     bool axisTip(const fmt::ActorModel& m, int axis, ImVec2 imageSize, ImVec2& out) const;
+#endif // AVER_WITH_IMGUI
 
     int draggingAxis_ = -1;   // -1 when not dragging
 
@@ -568,7 +583,11 @@ void ActorEditor::buildTree() {
 // ---------------------------------------------------------------- the Components panel
 
 namespace {
-// Returns the tint a component kind is drawn in.
+// Returns the tint a component kind is drawn in. ImVec4-typed, so it exists only with UI on -- its
+// three callers (drawTreeNode, drawComponentTree, drawComponentWireframes) are themselves reachable
+// only from draw()'s own AVER_WITH_IMGUI body. Same precedent as GraphEditor.cpp's toIm/fromIm: an
+// ImGui-typed free helper guarded inside an anonymous namespace that itself stays unconditional.
+#if AVER_WITH_IMGUI
 ImVec4 kindColour(ComponentKind k) {
     switch (k) {
         case ComponentKind::Root:       return ImVec4(0.95f, 0.80f, 0.45f, 1.0f);
@@ -579,6 +598,7 @@ ImVec4 kindColour(ComponentKind k) {
     }
     return ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
 }
+#endif // AVER_WITH_IMGUI
 // Returns the one ASCII character standing in for a component kind's icon.
 const char* kindGlyph(ComponentKind k) {
     switch (k) {
@@ -593,7 +613,10 @@ const char* kindGlyph(ComponentKind k) {
 } // namespace
 
 namespace {
-// A draggable divider between two columns. Reads and writes *width, clamped against avail.
+// A draggable divider between two columns. Reads and writes *width, clamped against avail. Its own
+// signature carries no ImGui type, but its only caller is draw()'s own AVER_WITH_IMGUI body, and its
+// body is pure ImGui drawing, so the whole definition is gated rather than left to dangle unused.
+#if AVER_WITH_IMGUI
 bool columnSplitter(const char* id, f32 thickness, f32* width, f32 avail, f32 minSelf, f32 minOther,
                     bool* released = nullptr) {
     ImGui::SameLine(0.0f, 0.0f);
@@ -623,10 +646,15 @@ bool columnSplitter(const char* id, f32 thickness, f32* width, f32 avail, f32 mi
     ImGui::SameLine(0.0f, 0.0f);
     return moved;
 }
+#endif // AVER_WITH_IMGUI
 } // namespace
 
-// Draws one tree row and its children.
+// Draws one tree row and its children. Declared with an ImGui-free signature (ActorEditor.hpp/class
+// body: `void drawTreeNode(int idx);`), so it must still exist with UI off -- its body is pure
+// drawing, and its only caller (drawComponentTree) is itself only reached from draw()'s own
+// AVER_WITH_IMGUI body, so the #else branch below is dead code kept for linkage, not behaviour.
 void ActorEditor::drawTreeNode(int idx) {
+#if AVER_WITH_IMGUI
     if (idx < 0 || idx >= static_cast<int>(tree_.size())) return;
     const ComponentNode& n = tree_[static_cast<usize>(idx)];
 
@@ -654,10 +682,16 @@ void ActorEditor::drawTreeNode(int idx) {
         for (const int c : kids) drawTreeNode(c);
         ImGui::TreePop();
     }
+#else
+    (void)idx;   // draws nothing -- there is no ImGui to draw it with
+#endif // AVER_WITH_IMGUI
 }
 
-// Draws the COMPONENTS panel and the summary of the selected row.
+// Draws the COMPONENTS panel and the summary of the selected row. Declared with an ImGui-free
+// signature (ActorEditor.hpp/class body: `void drawComponentTree(bool ownColumn);`); reached only
+// from draw()'s own AVER_WITH_IMGUI body, so the #else branch is dead code kept for linkage only.
 void ActorEditor::drawComponentTree(bool ownColumn) {
+#if AVER_WITH_IMGUI
     const f32 dpi = ImGui::GetFontSize() / 16.0f;
     ImGui::TextDisabled("COMPONENTS");
     const f32 h = ownColumn ? -(76.0f * dpi) : 190.0f * dpi;
@@ -674,6 +708,9 @@ void ActorEditor::drawComponentTree(bool ownColumn) {
         if (!n.drawsGeometry && n.kind != ComponentKind::Root)
             ImGui::TextDisabled("(no geometry -- shown in the viewport as a wireframe)");
     }
+#else
+    (void)ownColumn;   // draws nothing -- there is no ImGui to draw it with
+#endif // AVER_WITH_IMGUI
 }
 
 // ---------------------------------------------------------------- the live view
@@ -832,6 +869,11 @@ constexpr f32 kGizmoPixels = 64.0f;
 // How near the cursor must be to grab a handle, in pixels.
 constexpr f32 kGrabPixels = 10.0f;
 } // namespace
+
+// Every definition from here through dragScaleAxis matches a declaration that only exists inside
+// the class body's own AVER_WITH_IMGUI guard (see ActorEditor's private section, above) -- ImVec2 is
+// imgui's type, so none of these can be declared, let alone defined, without it.
+#if AVER_WITH_IMGUI
 
 // Projects a world point to image pixels. Returns false when it is behind the eye.
 bool ActorEditor::projectToScreen(const f32 world[3], ImVec2 imageSize, ImVec2& out) const {
@@ -1075,6 +1117,8 @@ void ActorEditor::dragScaleAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVe
     m.scale[axis] *= factor;
     if (m.scale[axis] < 1e-4f) m.scale[axis] = 1e-4f;
 }
+
+#endif // AVER_WITH_IMGUI
 
 // Draws the whole tab.
 void ActorEditor::draw(Engine& e) {

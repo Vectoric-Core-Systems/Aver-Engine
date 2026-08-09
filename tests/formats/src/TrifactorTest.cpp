@@ -24,12 +24,14 @@
 // against instead.
 #include "aver/trifactor/ClusterBuilder.hpp"
 #include "aver/formats/OcMesh.hpp"
+#include "aver/formats/Avr1.hpp"
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -121,8 +123,10 @@ static fmt::OcMeshData makeSingleQuad() {
 
 // Converts one LOD level of a DAG into the on-disk OcMeshMeshlet shape -- the same conversion
 // tests/formats/src/ConvertTool.cpp does, duplicated rather than shared because this file has no
-// header of its own to put a shared helper in, and the conversion is eight lines.
-static std::vector<fmt::OcMeshMeshlet> toMeshlets(const trifactor::LodDag& dag, u32 level) {
+// header of its own to put a shared helper in. `errorBounds` is
+// trifactor::computeClusterErrorBounds(dag, scale)'s output, indexed by Cluster::id.
+static std::vector<fmt::OcMeshMeshlet> toMeshlets(const trifactor::LodDag& dag, u32 level,
+                                                    const std::vector<trifactor::ClusterErrorBounds>& errorBounds) {
     std::vector<fmt::OcMeshMeshlet> out;
     if (level >= dag.levels.size()) return out;
     out.reserve(dag.levels[level].size());
@@ -138,6 +142,8 @@ static std::vector<fmt::OcMeshMeshlet> toMeshlets(const trifactor::LodDag& dag, 
         ml.coneAxis[1]  = c.bounds.coneAxis[1];
         ml.coneAxis[2]  = c.bounds.coneAxis[2];
         ml.coneCutoff   = c.bounds.coneCutoff;
+        ml.ownError     = errorBounds[cid].ownError;
+        ml.parentError  = errorBounds[cid].parentError;
         out.push_back(std::move(ml));
     }
     return out;
@@ -271,8 +277,16 @@ int main() {
         std::string why;
         check(trifactor::buildClusters(grid, dag, &why), "buildClusters: " + why);
 
+        // LOD-0-only: every cluster is level 0 == topLevel, so every one is a root by
+        // computeClusterErrorBounds' definition, and every one should get parentError == FLT_MAX.
+        const f32 scale = trifactor::worldExtentScale(grid);
+        const std::vector<trifactor::ClusterErrorBounds> errorBounds = trifactor::computeClusterErrorBounds(dag, scale);
+        std::string boundsWhy;
+        check(trifactor::validateClusterErrorBounds(dag, errorBounds, &boundsWhy),
+              "validateClusterErrorBounds passes on a single-level (all-root) DAG: " + boundsWhy);
+
         fmt::OcMeshData src = grid;
-        src.meshlets = toMeshlets(dag, 0);
+        src.meshlets = toMeshlets(dag, 0, errorBounds);
         check(!src.meshlets.empty(), "the fixture actually has meshlets to persist");
 
         std::vector<u8> bytes;
@@ -292,6 +306,20 @@ int main() {
             everyMeshletExact = everyMeshletExact && a.vertices == b.vertices && a.triangles == b.triangles;
         }
         check(everyMeshletExact, "every meshlet's vertex/triangle lists survive exactly (u32/u8, no quantization)");
+
+        // ownError/parentError: raw f32 in, raw f32 out (no quantization anywhere in the MLET path),
+        // so this is a bit-exact check, not a tolerance one -- exactly like vertices/triangles above.
+        bool everyErrorExact = true;
+        for (usize i = 0; i < src.meshlets.size() && everyErrorExact; ++i)
+            everyErrorExact = everyErrorExact && src.meshlets[i].ownError == back.meshlets[i].ownError &&
+                               src.meshlets[i].parentError == back.meshlets[i].parentError;
+        check(everyErrorExact, "every meshlet's ownError/parentError survive the round trip bit-exact");
+
+        bool everyRootParentInfinite = true;
+        for (const fmt::OcMeshMeshlet& ml : back.meshlets)
+            if (ml.parentError != std::numeric_limits<f32>::max()) everyRootParentInfinite = false;
+        check(everyRootParentInfinite,
+              "every LOD-0-only meshlet (all root, single level) has parentError == FLT_MAX on disk");
 
         f32 worstBoundsErr = 0.0f;
         for (usize i = 0; i < src.meshlets.size(); ++i) {
@@ -327,15 +355,23 @@ int main() {
         check(trifactor::validateScreenErrorMonotonic(dag, scale, &monoWhy),
               "ScreenErrorThreshold stays monotonic (non-decreasing child -> parent) after conversion: " + monoWhy);
 
+        // ---- ownError/parentError for every cluster, and the invariant the local cut test's whole
+        // correctness argument rests on, validated BEFORE anything is packed (item 3 of the task) ----
+        const std::vector<trifactor::ClusterErrorBounds> errorBounds = trifactor::computeClusterErrorBounds(dag, scale);
+        check(errorBounds.size() == dag.clusters.size(), "computeClusterErrorBounds returns one entry per cluster");
+        std::string boundsWhy;
+        check(trifactor::validateClusterErrorBounds(dag, errorBounds, &boundsWhy),
+              "validateClusterErrorBounds passes on the full multi-level hierarchy: " + boundsWhy);
+
         // ---- build the on-disk shape: LOD 0 into meshlets (as ever), every coarser level into
         // coarserLods with its own index buffer and its converted screen error ----
         fmt::OcMeshData src = grid;
-        src.meshlets = toMeshlets(dag, 0);
+        src.meshlets = toMeshlets(dag, 0, errorBounds);
         src.coarserLods.clear();
         for (u32 level = 1; level < dag.levelCount(); ++level) {
             fmt::OcMeshLod lod;
             lod.indices  = toIndices(dag, level);
-            lod.meshlets = toMeshlets(dag, level);
+            lod.meshlets = toMeshlets(dag, level, errorBounds);
             f32 rawError = 0.0f;
             for (u32 cid : dag.levels[level]) rawError = std::max(rawError, dag.clusters[cid].error);
             lod.screenErrorThreshold = trifactor::toScreenErrorThreshold(rawError, scale);
@@ -355,6 +391,7 @@ int main() {
         bool everyLevelExact = back.coarserLods.size() == src.coarserLods.size();
         bool everyLevelSelfConsistent = true;   // meshlets reconstruct that level's OWN index buffer
         bool screenErrorNonDecreasing = true;
+        bool everyLevelErrorExact = true;        // ownError/parentError survive bit-exact, every level
         f32 prevError = 0.0f;   // LOD 0's error is 0 by definition
         for (usize i = 0; i < src.coarserLods.size() && everyLevelExact; ++i) {
             const fmt::OcMeshLod& a = src.coarserLods[i];
@@ -363,6 +400,10 @@ int main() {
             for (usize mi = 0; mi < a.meshlets.size() && everyLevelExact; ++mi)
                 everyLevelExact = everyLevelExact && a.meshlets[mi].vertices == b.meshlets[mi].vertices &&
                                    a.meshlets[mi].triangles == b.meshlets[mi].triangles;
+            for (usize mi = 0; mi < a.meshlets.size() && mi < b.meshlets.size(); ++mi)
+                everyLevelErrorExact = everyLevelErrorExact &&
+                                        a.meshlets[mi].ownError == b.meshlets[mi].ownError &&
+                                        a.meshlets[mi].parentError == b.meshlets[mi].parentError;
 
             // "per-level meshlet ranges are correct and non-overlapping": reconstructing every
             // meshlet's global triangles at this level must reproduce that level's OWN index buffer
@@ -389,12 +430,182 @@ int main() {
               "(no gaps, no duplicates -- i.e. per-level meshlet ranges are correct and non-overlapping)");
         check(screenErrorNonDecreasing,
               "ScreenErrorThreshold is non-decreasing from LOD 0 up through every coarser level, on disk");
+        check(everyLevelErrorExact,
+              "every coarser level's meshlets' ownError/parentError survive the round trip bit-exact");
+
+        // ---- ownError <= parentError, and only the root level is infinite, RE-CHECKED on the
+        // round-tripped bytes (not just on the in-memory values before writing) ----
+        bool decodedOwnLeParent = true, decodedRootInfinite = true, decodedNonRootFinite = true;
+        for (const fmt::OcMeshMeshlet& ml : back.meshlets) {   // LOD 0: never the root, dag.levelCount() >= 2 here
+            if (ml.ownError > ml.parentError + 1e-3f) decodedOwnLeParent = false;
+            if (ml.parentError == std::numeric_limits<f32>::max()) decodedNonRootFinite = false;
+        }
+        for (usize i = 0; i < back.coarserLods.size(); ++i) {
+            const bool isRootLevel = (i + 1 == back.coarserLods.size());   // coarserLods.back() is the DAG root
+            for (const fmt::OcMeshMeshlet& ml : back.coarserLods[i].meshlets) {
+                if (ml.ownError > ml.parentError + 1e-3f) decodedOwnLeParent = false;
+                const bool isInf = ml.parentError == std::numeric_limits<f32>::max();
+                if (isRootLevel && !isInf) decodedRootInfinite = false;
+                if (!isRootLevel && isInf) decodedNonRootFinite = false;
+            }
+        }
+        check(decodedOwnLeParent, "on the round-tripped bytes, ownError <= parentError for every meshlet at every level");
+        check(decodedRootInfinite, "on the round-tripped bytes, every meshlet at the coarsest (root) level has parentError == FLT_MAX");
+        check(decodedNonRootFinite, "on the round-tripped bytes, every meshlet below the root level has a finite parentError");
 
         // ---- determinism: save -> load -> save is byte-identical, now for a multi-LOD mesh ----
         std::vector<u8> bytes2;
         check(fmt::writeOcMesh(back, bytes2, &why), "re-writes the reloaded multi-LOD mesh: " + why);
         check(bytes == bytes2, "save -> load -> save produces byte-identical output for a multi-LOD mesh (" +
                                     std::to_string(bytes.size()) + " vs " + std::to_string(bytes2.size()) + " bytes)");
+    }
+
+    AVER_INFO("=== backward compatibility: an old (MLET chunk version 1, no error fields) file still loads ===");
+    {
+        // Every .ocmesh with meshlets ever written before this feature has a MLET chunk at version 1
+        // (32 B MeshletBounds, no OwnError/ParentError -- see kMlChunkVersionLegacy, OcMesh.cpp).
+        // The CURRENT writer always emits version 2 now, so to prove an old file still loads, one is
+        // reconstructed here: write a real mesh with today's writer (version 2), then splice the
+        // MLET chunk back down to what version 1 actually looked like and re-serialize with the
+        // container's own writeAvr1 -- this exercises the real AVR1 header/CRC/offset machinery
+        // rather than hand-rolling it, and only touches bytes this test computed itself.
+        const fmt::OcMeshData tri = makeSingleTriangle();
+        trifactor::LodDag dag;
+        std::string why;
+        check(trifactor::buildClusters(tri, dag, &why), "buildClusters on one triangle: " + why);
+        check(dag.levels[0].size() == 1, "exactly one LOD-0 cluster -- keeps the byte surgery below simple "
+                                          "(one MeshletDesc, one MeshletBounds entry)");
+
+        const f32 scale = trifactor::worldExtentScale(tri);
+        const std::vector<trifactor::ClusterErrorBounds> errorBounds = trifactor::computeClusterErrorBounds(dag, scale);
+
+        fmt::OcMeshData src = tri;
+        src.meshlets = toMeshlets(dag, 0, errorBounds);
+        check(src.meshlets.size() == 1, "exactly one meshlet in the MLET chunk");
+
+        std::vector<u8> bytesV2;
+        check(fmt::writeOcMesh(src, bytesV2, &why), "writes with today's writer (chunk version 2): " + why);
+
+        fmt::Avr1File container;
+        check(fmt::parseAvr1(bytesV2.data(), bytesV2.size(), container, &why), "parses the v2 container: " + why);
+
+        fmt::AvrChunk* mlet = nullptr;
+        for (fmt::AvrChunk& c : container.chunks) if (c.id == fmt::avrFourCC("MLET")) mlet = &c;
+        check(mlet != nullptr, "the v2 file has an MLET chunk");
+        check(mlet && mlet->version == 2, "the writer stamped MLET chunk version 2");
+        // Layout for one meshlet, one LOD: MeshletDesc[0..12), MeshletBounds[12..52) (40 B v2:
+        // 32 B bounds/cone + 8 B OwnError/ParentError), MeshletVertices/Triangles after that. The two
+        // error floats are MeshletBounds' trailing 8 B, at [44, 52).
+        check(mlet && mlet->data.size() >= 52, "MLET holds at least one MeshletDesc + one v2 MeshletBounds");
+        if (mlet && mlet->data.size() >= 52) {
+            mlet->data.erase(mlet->data.begin() + 44, mlet->data.begin() + 52);
+            mlet->version = 1;
+        }
+
+        std::vector<u8> bytesV1;
+        check(fmt::writeAvr1(container, bytesV1, &why), "re-serializes as a version-1-style MLET container: " + why);
+
+        fmt::OcMeshData backV1;
+        check(fmt::parseOcMesh(bytesV1.data(), bytesV1.size(), backV1, &why),
+              "the reconstructed old (chunk version 1) file still loads: " + why);
+        check(backV1.meshlets.size() == 1, "the meshlet survives on the old file");
+        if (backV1.meshlets.size() == 1) {
+            check(backV1.meshlets[0].vertices == src.meshlets[0].vertices &&
+                  backV1.meshlets[0].triangles == src.meshlets[0].triangles,
+                  "geometry (vertices/triangles) survives on the old file, unaffected by the newer fields' absence");
+            check(backV1.meshlets[0].ownError == 0.0f,
+                  "a version-1 file's meshlet defaults ownError to 0.0f (the field was never written)");
+            check(backV1.meshlets[0].parentError == std::numeric_limits<f32>::max(),
+                  "...and parentError to FLT_MAX -- the same safe 'always drawable, nothing finer needed' "
+                  "default a root cluster gets, not whatever this test's v2 cook actually computed");
+        }
+    }
+
+    AVER_INFO("=== the local cut test: for several pixel budgets, selected clusters cover the DAG exactly once ===");
+    {
+        // THE PROPERTY THAT PROVES per-cluster LOD is right, not merely plumbed: for ANY pixel
+        // budget, { c : ownError(c) < budget <= parentError(c) } must select exactly one cluster
+        // along every leaf's ancestry -- no gap (some region left undrawn) and no overlap (a cluster
+        // AND its own ancestor both drawn, double-shading the same area).
+        const fmt::OcMeshData grid = makeGridMesh(24);
+        trifactor::LodDag dag;
+        std::string why;
+        check(trifactor::buildClusters(grid, dag, &why), "buildClusters: " + why);
+        check(trifactor::buildLodHierarchy(grid, dag, &why), "buildLodHierarchy: " + why);
+        check(dag.levelCount() >= 3, "the fixture needs several levels for this test to be meaningful "
+                                      "(got " + std::to_string(dag.levelCount()) + ")");
+
+        const f32 scale = trifactor::worldExtentScale(grid);
+        const std::vector<trifactor::ClusterErrorBounds> bounds = trifactor::computeClusterErrorBounds(dag, scale);
+        check(bounds.size() == dag.clusters.size(), "computeClusterErrorBounds returns one entry per cluster");
+
+        std::string boundsWhy;
+        check(trifactor::validateClusterErrorBounds(dag, bounds, &boundsWhy),
+              "validateClusterErrorBounds passes on the real hierarchy: " + boundsWhy);
+
+        // Restated directly here too (not only folded into validateClusterErrorBounds above), because
+        // the task calls both properties out by name.
+        const u32 topLevel = dag.levelCount() - 1;
+        bool rootsInfinite = true, nonRootsFinite = true, ownLeParent = true;
+        for (const trifactor::Cluster& c : dag.clusters) {
+            const bool isRoot = (c.level == topLevel);
+            const bool isInf = bounds[c.id].parentError == std::numeric_limits<f32>::max();
+            if (isRoot && !isInf) rootsInfinite = false;
+            if (!isRoot && isInf) nonRootsFinite = false;
+            if (bounds[c.id].ownError > bounds[c.id].parentError + 1e-6f) ownLeParent = false;
+        }
+        check(rootsInfinite, "every root cluster's parentError is +FLT_MAX");
+        check(nonRootsFinite, "every non-root cluster's parentError is finite");
+        check(ownLeParent, "ownError <= parentError for every cluster");
+
+        // Budgets: just above zero (should resolve to the finest available detail), every distinct
+        // ownError value actually produced (the exact thresholds where the cut moves from one level
+        // to the next -- the values most likely to expose a < vs <= off-by-one), and well past the
+        // coarsest cluster's own error (should resolve to the root).
+        std::vector<f32> budgets = {1e-6f};
+        f32 maxOwn = 0.0f;
+        for (const auto& b : bounds) {
+            if (b.ownError > 0.0f) budgets.push_back(b.ownError);
+            maxOwn = std::max(maxOwn, b.ownError);
+        }
+        budgets.push_back(maxOwn * 2.0f + 1.0f);
+
+        const auto selected = [&](u32 cid, f32 budget) {
+            return bounds[cid].ownError < budget && bounds[cid].parentError >= budget;
+        };
+
+        bool everyEdgeExclusive = true;
+        bool everyLeafCoveredOnce = true;
+        for (f32 budget : budgets) {
+            // No overlap: no DAG edge (child, parent) has both endpoints selected. Sufficient to
+            // rule out overlap between ANY ancestor pair, not just adjacent ones: parentError(child)
+            // == ownError(parent) by construction, so if child and parent were both selected,
+            // budget <= parentError(child) == ownError(parent) < budget from the parent's own
+            // selection -- a direct contradiction. Checking every edge therefore checks every chain.
+            for (const trifactor::Cluster& c : dag.clusters)
+                for (u32 parentId : c.parents)
+                    if (selected(c.id, budget) && selected(parentId, budget)) everyEdgeExclusive = false;
+
+            // No gap: every LOD-0 cluster's ancestor chain (following parents[0] -- every parent from
+            // the same group shares the identical propagatedError, so any one is a valid
+            // representative, see computeClusterErrorBounds's doc comment) contains EXACTLY one
+            // selected cluster, for this budget.
+            for (u32 leafId : dag.levels[0]) {
+                u32 cur = leafId;
+                u32 hits = 0;
+                for (u32 guard = 0; guard <= dag.levelCount(); ++guard) {
+                    if (selected(cur, budget)) ++hits;
+                    if (dag.clusters[cur].parents.empty()) break;
+                    cur = dag.clusters[cur].parents[0];
+                }
+                if (hits != 1) everyLeafCoveredOnce = false;
+            }
+        }
+        check(everyEdgeExclusive, "no DAG edge is ever selected at both ends, across " +
+                                       std::to_string(budgets.size()) + " tested pixel budgets");
+        check(everyLeafCoveredOnce, "every LOD-0 cluster's ancestor chain has EXACTLY ONE selected cluster "
+                                     "for every tested budget -- the surface is covered exactly once, no "
+                                     "gaps and no overlap");
     }
 
     AVER_INFO("=== compatibility: a mesh without meshlets round-trips exactly as before ===");
