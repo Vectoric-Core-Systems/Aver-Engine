@@ -48,3 +48,6 @@ scripting/**/obj/
 
 # Agent worktrees (transient, created by tooling)
 .claude/worktrees/
+
+# Python bytecode, from importing tools/mcp/aver_mcp.py to test it
+__pycache__/

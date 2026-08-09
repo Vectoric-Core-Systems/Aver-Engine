@@ -96,6 +96,32 @@ def tool_build(args):
     }
 
 
+# Which build tree aver_run / aver_tests reach into.
+#
+# WHY THIS EXISTS AT ALL. aver_build has always taken build_dir; aver_run and aver_tests hardcoded
+# "build"/"build-release". That asymmetry is worse than it sounds, because agents in this repo are
+# told to build into their OWN tree and never touch `build` -- so they could compile a change and
+# then had no way to run it. aver_run silently launched `build/bin/Sandbox.exe` instead: a DIFFERENT,
+# older binary that does not have their change and does not know their new flag, which an unknown
+# flag being ignored rather than rejected makes completely silent. A whole perf investigation
+# reported four frame-time numbers for a flag the binary it measured had never heard of, and only
+# caught it by noticing the timestamps. Numbers like that are worse than no numbers.
+#
+# release + build_dir together: build_dir wins, because it is the more specific statement of intent.
+# `release` only ever selected a tree NAME, and naming the tree outright says the same thing better.
+def resolve_tree(args):
+    """Returns (tree_name, error_or_None). Same charset check tool_package uses."""
+    build_dir = args.get("build_dir")
+    if build_dir:
+        # Rejects path separators and .., so this can only ever name a sibling of the repo root --
+        # the argument is interpolated into a filesystem path below.
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", build_dir):
+            return None, ("suspicious build_dir %r: letters, digits, dot, dash and underscore only, "
+                          "and it must be a directory directly under the repo root" % build_dir)
+        return build_dir, None
+    return ("build-release" if bool(args.get("release")) else "build"), None
+
+
 # The flags this refuses to pass through, and why. A denylist rather than an allowlist because the CLI
 # grows and an allowlist would silently block new flags; these two are the only ones that can outlive
 # the call.
@@ -114,8 +140,9 @@ def tool_run(args):
         if f in _REFUSED_FLAGS:
             return {"ok": False, "error": "%s refused: %s" % (f, _REFUSED_FLAGS[f])}
 
-    release = bool(args.get("release"))
-    tree = "build-release" if release else "build"
+    tree, err = resolve_tree(args)
+    if err:
+        return {"ok": False, "error": err}
     exe = os.path.join(ROOT, tree, "bin", "Sandbox.exe")
     if not os.path.exists(exe):
         return {"ok": False, "error": "%s does not exist -- build first" % exe}
@@ -169,7 +196,52 @@ def tool_run(args):
         "warnings": warns[:30],
         "matched": matched[:60],
         "log_lines": len(lines),
+        # WHICH BINARY THIS ACTUALLY MEASURED, always reported, never on request. A result that does
+        # not say what it ran is indistinguishable from a result that ran the wrong thing, and the
+        # engine ignores unrecognized flags rather than rejecting them, so "my new flag did nothing"
+        # and "my new flag was never in this binary" produce identical output. See resolve_tree.
+        "binary": binary_provenance(exe),
     }
+
+
+# Describes the binary a run actually used, and says so out loud when source is newer than it.
+#
+# The staleness test is deliberately a HEURISTIC, and reported as one: a source file newer than the
+# executable means the executable cannot contain that edit, which is sound, but the converse proves
+# nothing (an unrelated edit also trips it). A false "stale" costs a rebuild; a false "fresh" costs a
+# published number that was never real, which is the failure this is here to prevent.
+def binary_provenance(exe):
+    built = os.path.getmtime(exe)
+    newest, newest_path = 0.0, None
+    for sub in ("modules", "sandbox", "game"):
+        base = os.path.join(ROOT, sub)
+        if not os.path.isdir(base):
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            # Vendored third-party trees are huge and are not what a caller just edited.
+            dirnames[:] = [d for d in dirnames if d not in ("Jolt", "third_party", ".git")]
+            for fn in filenames:
+                if fn.endswith((".cpp", ".hpp", ".h", ".hlsl", ".cs")):
+                    p = os.path.join(dirpath, fn)
+                    try:
+                        m = os.path.getmtime(p)
+                    except OSError:
+                        continue
+                    if m > newest:
+                        newest, newest_path = m, os.path.relpath(p, ROOT)
+    info = {
+        "path": os.path.relpath(exe, ROOT),
+        "built": time.strftime("%H:%M:%S", time.localtime(built)),
+    }
+    if newest_path and newest > built:
+        info["stale"] = True
+        info["newer_source"] = newest_path
+        info["newer_source_at"] = time.strftime("%H:%M:%S", time.localtime(newest))
+        info["warning"] = ("this binary predates %s -- it cannot contain that edit, and any flag added "
+                           "with it will be silently ignored rather than rejected. Rebuild into this "
+                           "tree, or pass build_dir to name the tree you actually built."
+                           % newest_path)
+    return info
 
 
 def tool_inspect_image(args):
@@ -211,8 +283,9 @@ def tool_inspect_image(args):
 
 
 def tool_tests(args):
-    release = bool(args.get("release"))
-    tree = "build-release" if release else "build"
+    tree, err = resolve_tree(args)
+    if err:
+        return {"ok": False, "error": err}
     binf = os.path.join(ROOT, tree, "bin")
     if not os.path.isdir(binf):
         return {"ok": False, "error": "%s does not exist -- build first" % binf}
@@ -353,6 +426,10 @@ TOOLS = [
             "screenshot": {"type": "string", "description": "path for a PNG of the whole backbuffer"},
             "grep": {"type": "string", "description": "regex; matching log lines are returned"},
             "release": {"type": "boolean"},
+            "build_dir": {"type": "string", "description": "build tree to run from (default 'build'). "
+                                                           "MUST match the build_dir you passed to "
+                                                           "aver_build, or you measure a stale binary "
+                                                           "that silently ignores your new flags."},
             "timeout": {"type": "integer"},
         }},
         "fn": tool_run,
@@ -377,6 +454,9 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {
             "only": {"type": "string"},
             "release": {"type": "boolean"},
+            "build_dir": {"type": "string", "description": "build tree to run from (default 'build'). "
+                                                           "MUST match the build_dir you passed to "
+                                                           "aver_build, or you run stale executables."},
         }},
         "fn": tool_tests,
     },

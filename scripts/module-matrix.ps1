@@ -40,6 +40,32 @@ $configs = [ordered]@{
     "no-ui"         = @("-DAVER_ENABLE_UI=OFF")
     "no-game"       = @("-DAVER_BUILD_GAME=OFF")
     "no-sandbox"    = @("-DAVER_BUILD_SANDBOX=OFF")
+    "no-tests"      = @("-DAVER_BUILD_TESTS=OFF")
+    # MCP defaults OFF, so every other row here already builds it off and none of them says anything
+    # about it. The UNCHECKED configuration of an off-by-default option is the ON one -- the mirror
+    # image of the rest of this table, and the same gap TRIFACTOR had.
+    "mcp-on"        = @("-DAVER_MODULE_MCP=ON")
+
+    # ---- the RHI is a module too, and swapping its implementation is the whole point of it ----
+    #
+    # These three rows are the reason `d3d12.h` must not appear outside modules/rhi.d3d12: everything
+    # above the RHI talks to IDevice/IRenderContext and to DeviceCaps, never to a backend type. That
+    # is a claim about the DEFAULT tree's include graph, and grep can support it but only a build can
+    # decide it -- an `#include <d3d12.h>` reached transitively through some other module's public
+    # header is invisible to grep of the file that suffers from it.
+    #
+    # d3d12-off is the sharp one. AVER_HAS_D3D12 goes undefined, tryBackend() returns nullptr for
+    # Backend::D3D12, and the engine falls back to the null device -- so this configuration BUILDS
+    # AND LINKS but renders nothing, which is correct and is exactly what is being asserted. It fails
+    # only if something outside the backend needs a D3D12 symbol to link, which is the coupling worth
+    # catching. Do not "fix" a failure here by linking Aver.RHI.D3D12 back in.
+    #
+    # vulkan-on costs nothing today: modules/rhi.vulkan is a 13-line stub with no SDK dependency (its
+    # CMakeLists defers find_package(Vulkan) to Phase 3). The row exists so that the day the real
+    # backend lands, the configuration is already being built rather than discovered broken.
+    "d3d12-off"     = @("-DAVER_RHI_D3D12=OFF")
+    "d3d11-off"     = @("-DAVER_RHI_D3D11=OFF")
+    "vulkan-on"     = @("-DAVER_RHI_VULKAN=ON")
     "all-off"       = @("-DAVER_MODULE_SCENE=OFF", "-DAVER_MODULE_FRAMEWORK=OFF",
                         "-DAVER_MODULE_PHYSICS=OFF", "-DAVER_MODULE_PBR=OFF",
                         "-DAVER_MODULE_VOXI=OFF", "-DAVER_MODULE_SCRIPTING=OFF",
