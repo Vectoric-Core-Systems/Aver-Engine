@@ -113,6 +113,19 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                     out.fogColor[0] = parseF64(t[i+1]); out.fogColor[1] = parseF64(t[i+2]); out.fogColor[2] = parseF64(t[i+3]);
                 }
             }
+        } else if (equalsCI(key, "LANDSCAPE")) {
+            OcLandscapePlacement lp;
+            for (usize i = 1; i < t.size(); ++i) {
+                if      (equalsCI(t[i], "name")    && i + 1 < t.size()) lp.name    = std::string(t[++i]);
+                else if (equalsCI(t[i], "section") && i + 1 < t.size()) lp.section = std::string(t[++i]);
+                else if (equalsCI(t[i], "at")      && i + 3 < t.size()) {
+                    lp.x = parseF64(t[i+1]); lp.y = parseF64(t[i+2]); lp.z = parseF64(t[i+3]);
+                    i += 3;
+                } else if (equalsCI(t[i], "extent") && i + 1 < t.size()) {
+                    lp.extentCm = parseF64(t[++i]);
+                }
+            }
+            out.landscapes.push_back(std::move(lp));
         } else if (equalsCI(key, "PCGVOLUME")) {
             OcPcgVolume v;
             for (usize i = 1; i < t.size(); ++i) {
@@ -246,6 +259,20 @@ std::string writeOcworld(const OcWorldData& w) {
     if (w.hasFog) {
         s += "FOG exp density " + num(w.fogDensity) +
              " color " + num(w.fogColor[0]) + " " + num(w.fogColor[1]) + " " + num(w.fogColor[2]) + "\n";
+    }
+
+    if (!w.landscapes.empty()) {
+        s += "\n";
+        for (const OcLandscapePlacement& lp : w.landscapes) {
+            s += "LANDSCAPE name " + (lp.name.empty() ? std::string("unnamed") : lp.name) +
+                 " section " + lp.section +
+                 " at " + num(lp.x) + " " + num(lp.y) + " " + num(lp.z);
+            // OMITTED WHEN UNSET, same reasoning as PCGVOLUME's `samples` just below: 0 is this
+            // field's "nothing declared, ask the section file" sentinel, and a level that never
+            // stated an extent should not come back from a save claiming zero.
+            if (lp.extentCm > 0.0) s += " extent " + num(lp.extentCm);
+            s += "\n";
+        }
     }
 
     if (!w.pcgVolumes.empty()) {

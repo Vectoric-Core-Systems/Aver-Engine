@@ -18,6 +18,18 @@
 #if AVER_MODULE_TRIFACTOR
 #include "aver/trifactor/ClusterAdapt.hpp"
 #endif
+// The landscape runtime: a complete quadtree-LOD heightfield renderer that, before this change,
+// nothing outside tests/landscape linked. See the member block near landscapeData_ below for how it
+// is hosted -- independent of AVER_MODULE_SCENE, since a section is not an ECS entity.
+#if AVER_MODULE_LANDSCAPE
+#include "aver/formats/OcLand.hpp"
+#include "aver/landscape/LandscapeTree.hpp"
+#include "aver/landscape/LandscapeRenderer.hpp"
+// The sculpt editor: a cursor ray against the section's surface, and the brush edits themselves.
+// Both are RHI-free, same as the rest of Aver.Landscape -- see their own headers.
+#include "aver/landscape/HeightfieldRay.hpp"
+#include "aver/landscape/Sculpt.hpp"
+#endif
 #if AVER_HAVE_AUDIO_IMPORT
 #  include "aver/formats/OcAudio.hpp"
 #endif
@@ -271,9 +283,21 @@ static std::vector<rhi::LineVertex> buildScaleAxis(int a, const Vec3& c) {
     return v;
 }
 
-// The viewport manipulation mode.
-enum class Tool { Select, Move, Rotate, Scale };
+// The viewport manipulation mode. The four sculpt tools exist only where AVER_MODULE_LANDSCAPE does
+// -- they are the same "which mouse-drag behaviour is active" idea Move/Rotate/Scale are, just aimed
+// at a heightfield's samples instead of an object's transform, and they follow the same enum/toolbar
+// shape rather than inventing a parallel one. See handleSculpt() and the ##vpbar_right toolbar block.
+enum class Tool { Select, Move, Rotate, Scale
+#if AVER_MODULE_LANDSCAPE
+    , SculptRaise, SculptLower, SculptSmooth, SculptFlatten
+#endif
+};
+#if AVER_MODULE_LANDSCAPE
+static const char* kToolNames[8] = {"Select", "Move", "Rotate", "Scale",
+                                     "Sculpt: Raise", "Sculpt: Lower", "Sculpt: Smooth", "Sculpt: Flatten"};
+#else
 static const char* kToolNames[4] = {"Select", "Move", "Rotate", "Scale"};
+#endif
 
 // Which bottom drawer is up. Only one at a time.
 enum class Drawer { None, Content, Log };
@@ -705,6 +729,14 @@ public:
             auto sc=buildScaleAxis(a,kAxisCol[a]);  gzScale_[a] =e.device()->createLineMesh(sc.data(),(u32)sc.size());
             auto sh=buildScaleAxis(a,kAxisHi);      gzScaleHi_[a]=e.device()->createLineMesh(sh.data(),(u32)sh.size());
         }
+
+#if AVER_MODULE_LANDSCAPE
+        // The sculpt brush's footprint ring: buildRotRing(2, ...) is the ring PERPENDICULAR TO Z --
+        // i.e. already flat IN the XY plane, which is the ground plane landscape heights are measured
+        // from (see OcLand.hpp: "heights along +Z"). Reused rather than duplicated; only its radius
+        // and world position (both per-frame, via the draw matrix) ever change.
+        { auto bring = buildRotRing(2, kAxisHi); brushRing_ = e.device()->createLineMesh(bring.data(), (u32)bring.size()); }
+#endif
 
 #if AVER_MODULE_SCENE
         // The scene join. Registered HERE, before the Voxi renderer, for the reason spelled out
@@ -1804,6 +1836,36 @@ public:
             if (i == sel_) selectionOutline_ = w, selectionMesh_ = o.mesh, hasSelection_ = true;
         }
 
+#if AVER_MODULE_LANDSCAPE
+        // The landscape pass: one direct select()+draw() call, the same hand-rolled shape as the
+        // objects_ loop just above -- not an IRenderFeature (LandscapeRenderer implements none of its
+        // virtuals) and not gated on hideEditorScene (terrain is real environment geometry, not an
+        // editor placeholder, so it stays visible through Play just like the sky and fog do).
+        if (landscapeLoaded_ && landscapeRenderer_) {
+            landscape::SelectParams lp;
+            lp.cameraCm[0] = eye_.x; lp.cameraCm[1] = eye_.y; lp.cameraCm[2] = eye_.z;
+            // Same fovY (radians(60.0f)) and the same projScale formula trifactor::projScale uses,
+            // over THIS frame's actual viewport height rather than SelectParams's own 540.0f default
+            // -- a mismatched scale reads as terrain refining at the wrong distance, not as a crash,
+            // which is exactly the kind of bug that would go unnoticed.
+            lp.projScale = vpH_ / (2.0f * std::tan(radians(60.0f) * 0.5f));
+            lp.useFrustum = true;
+            f32 vpm[16];
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c) vpm[r * 4 + c] = viewProj_.m[r][c];
+            lp.frustum = landscape::Frustum::fromViewProj(vpm);
+
+            landscape::SelectResult lsel;
+            landscapeTree_.select(lp, lsel);
+
+            // Sections carry their own world position in every sample (OcLandData::worldAt already
+            // folds originCm in -- see ChunkMesh.cpp), so the transform LandscapeRenderer::draw()
+            // applies on top is identity, not a placement matrix.
+            static const f32 kIdentity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+            landscapeRenderer_->draw(*e.device(), landscapeData_, landscapeTree_, lsel, kIdentity);
+        }
+#endif
+
 #if AVER_MODULE_SCENE
         // Scene-entity pass: draws every live entity carrying a CMeshRenderer.
         {
@@ -2291,6 +2353,9 @@ public:
             e.device()->drawLines(gridMesh_, &g.m[0][0]);
         }
         drawGizmo(e);
+#if AVER_MODULE_LANDSCAPE
+        drawSculptCursor(e);
+#endif
         buildUI(e);
         uiReg_.endFrame();
         submitGameUi(e);
@@ -2569,6 +2634,14 @@ public:
     void setDroneGraph(std::string) {}
 #endif
 
+    // --landscape <path>: an explicit .ocland override. Wins over the convention loadLandscapeForLevel
+    // uses (the loaded level's own path with its extension swapped to .ocland) the next time a level
+    // loads. Exists so a --frames capture run can prove the render and per-frame LOD-selection path
+    // draws real terrain without a level file that names one and without a human clicking anything.
+    // Unguarded like setChunkStreamAuto/setDroneAuto above: with the module off, loadLandscapeForLevel
+    // itself does not exist, and nothing else reads this field.
+    void setLandscapePath(std::string path) { landscapeCliOverride_ = std::move(path); }
+
     // --fog-match. A negative opacity means "leave the target where it is" and just switch matching
     // on, so `--fog-match` alone uses the panel's own default rather than silently redefining it.
     // PRE-EXISTING SCOPING BUG, fixed in passing while verifying THIS task's own -DAVER_MODULE_SCENE=OFF
@@ -2716,7 +2789,7 @@ private:
         ensureLodMeshPipeline(e);
 #endif
 #if AVER_MODULE_SCENE
-        loadStartMap();
+        loadStartMap(e);
 #endif
 #if AVER_MODULE_SCRIPTING
         if (scripts_.ready() && scriptsDir_.empty() && project_.valid()) {
@@ -2727,6 +2800,84 @@ private:
         }
 #endif
     }
+
+#if AVER_MODULE_LANDSCAPE
+    // Loads one .ocland section and builds its quadtree. Pure CPU -- LandscapeRenderer's mesh cache
+    // is created lazily by draw() the first time onRender() calls it, so this needs no device and may
+    // run before one exists.
+    //
+    // `device` frees the section CURRENTLY resident (if any) through forgetAll before replacing it;
+    // pass nullptr only when no device has been created yet, in which case there is nothing resident
+    // to free either.
+    void loadLandscape(rhi::IDevice* device, const std::string& path) {
+        unloadLandscape(device);
+        fmt::OcLandData data;
+        std::string why;
+        if (!fmt::loadOcLand(path, data, &why)) {
+            AVER_WARN("[Landscape] could not load '{}': {}", path, why);
+            return;
+        }
+        landscape::LandscapeTree tree;
+        if (!tree.build(data, landscape::kDefaultNodeQuads, &why)) {
+            AVER_WARN("[Landscape] '{}' loaded but its quadtree would not build: {}", path, why);
+            return;
+        }
+        landscapeData_ = std::move(data);
+        landscapeTree_ = std::move(tree);
+        landscapeTree_.resetHysteresis();
+        landscapeRenderer_ = std::make_unique<landscape::LandscapeRenderer>();
+        landscapeLoaded_ = true;
+        landscapePath_ = path;
+        landscapeDirty_ = false;
+        AVER_INFO("[Landscape] '{}' loaded: {} node(s) across {} level(s), {}x{} samples",
+                  path, landscapeTree_.nodes().size(), landscapeTree_.levelCount(),
+                  landscapeData_.sampleCount, landscapeData_.sampleCount);
+    }
+
+    // Frees the resident section's meshes (when a device exists to free them through) and drops it.
+    void unloadLandscape(rhi::IDevice* device) {
+        if (landscapeRenderer_ && device) landscapeRenderer_->forgetAll(*device);
+        landscapeRenderer_.reset();
+        landscapeLoaded_ = false;
+        landscapePath_.clear();
+        landscapeData_ = fmt::OcLandData{};
+        landscapeDirty_ = false;
+        sculpting_ = false;
+        sculptCursorValid_ = false;
+    }
+
+    // Writes the in-memory section back to the path it was loaded from -- the --landscape override
+    // or the levelname.ocland convention loadLandscapeForLevel resolved (see landscapePath_'s own
+    // comment). A sculpt is fully functional in memory without this; it is the one place edits
+    // actually reach disk. Silent no-op if there is nothing loaded or nowhere to write it, matching
+    // the Save Landscape menu item's own BeginDisabled guard.
+    void saveLandscape() {
+        if (!landscapeLoaded_ || landscapePath_.empty()) return;
+        std::string why;
+        if (fmt::saveOcLand(landscapePath_, landscapeData_, &why)) {
+            landscapeDirty_ = false;
+            AVER_INFO("[Landscape] saved '{}'", landscapePath_);
+        } else {
+            AVER_ERROR("[Landscape] could not save '{}': {}", landscapePath_, why);
+        }
+    }
+
+    // Resolves which .ocland a just-loaded level should draw: the --landscape override if one was
+    // given, else <levelPath with its extension swapped to .ocland> -- "named by the level". Silent
+    // when neither exists: most levels have no terrain yet, and that must not warn on every load.
+    void loadLandscapeForLevel(rhi::IDevice* device, const std::string& levelPath) {
+        std::string path = landscapeCliOverride_;
+        const bool explicitPath = !path.empty();
+        if (!explicitPath) {
+            std::filesystem::path p(levelPath);
+            p.replace_extension(".ocland");
+            path = p.string();
+        }
+        std::error_code ec;
+        if (explicitPath || std::filesystem::exists(path, ec))
+            loadLandscape(device, path);
+    }
+#endif
 
     // Tells the formats layer where averdesign.exe is installed. Not scripting-specific -- it points
     // at the Roslyn build tool (gated on AVER_HAVE_ROSLYN just below) and is called unguarded from
@@ -3818,32 +3969,60 @@ private:
             if (ImGui::IsKeyPressed(ImGuiKey_2)) tool_=Tool::Move;
             if (ImGui::IsKeyPressed(ImGuiKey_3)) tool_=Tool::Rotate;
             if (ImGui::IsKeyPressed(ImGuiKey_4)) tool_=Tool::Scale;
+#if AVER_MODULE_LANDSCAPE
+            if (landscapeLoaded_) {
+                if (ImGui::IsKeyPressed(ImGuiKey_5)) tool_=Tool::SculptRaise;
+                if (ImGui::IsKeyPressed(ImGuiKey_6)) tool_=Tool::SculptLower;
+                if (ImGui::IsKeyPressed(ImGuiKey_7)) tool_=Tool::SculptSmooth;
+                if (ImGui::IsKeyPressed(ImGuiKey_8)) tool_=Tool::SculptFlatten;
+            }
+#endif
         }
         const f32 mx=io.MousePos.x, my=io.MousePos.y;
         const bool overScene = levelHovered_ && inViewport(mx, my);
 
+#if AVER_MODULE_LANDSCAPE
+        const bool isSculptTool = tool_==Tool::SculptRaise || tool_==Tool::SculptLower ||
+                                   tool_==Tool::SculptSmooth || tool_==Tool::SculptFlatten;
+#else
+        // Unused with the module off -- the isSculptTool branch below compiles out along with it --
+        // but declared anyway so isXformTool's "everything that is not a sculpt tool" phrasing does
+        // not need its own second definition per configuration.
+        [[maybe_unused]] const bool isSculptTool = false;
+#endif
+        // Only Move/Rotate/Scale ever show or drive the transform gizmo -- a sculpt tool has its own
+        // brush-ring cursor (drawSculptCursor()) and its own click/drag handling below, not this one.
+        const bool isXformTool = tool_==Tool::Move || tool_==Tool::Rotate || tool_==Tool::Scale;
+
         hoverAxis_ = -1;
         EditXform gx;
-        const bool haveGizmo = tool_!=Tool::Select && anySelected() && selectedXform(gx);
+        const bool haveGizmo = isXformTool && anySelected() && selectedXform(gx);
         Vec3 gaxis[3];
         if (haveGizmo) gizmoBasis(gx, gaxis);
         if (haveGizmo && !dragging_ && overScene)
             hoverAxis_ = pickAxis(gx.pos, gaxis, gizmoLen(gx.pos), mx, my);
 
-        if (ImGui::IsMouseClicked(0) && overScene) {
-            int ax = -1;
-            if (haveGizmo)
-                ax = pickAxis(gx.pos, gaxis, gizmoLen(gx.pos), mx, my);
-            if (ax >= 0) {
-                dragging_=true; activeAxis_=ax; prevMouseX_=mx; prevMouseY_=my;
-                rotDragDeg_=0.0f; rotAppliedDeg_=0.0f;   // see applyRotate
-                beginTransformEdit();
+#if AVER_MODULE_LANDSCAPE
+        if (isSculptTool) {
+            handleSculpt(e, io, overScene, mx, my);
+        } else
+#endif
+        {
+            if (ImGui::IsMouseClicked(0) && overScene) {
+                int ax = -1;
+                if (haveGizmo)
+                    ax = pickAxis(gx.pos, gaxis, gizmoLen(gx.pos), mx, my);
+                if (ax >= 0) {
+                    dragging_=true; activeAxis_=ax; prevMouseX_=mx; prevMouseY_=my;
+                    rotDragDeg_=0.0f; rotAppliedDeg_=0.0f;   // see applyRotate
+                    beginTransformEdit();
+                }
+                else pick(e, io);
             }
-            else pick(e, io);
-        }
-        if (!io.MouseDown[0]) {
-            if (dragging_) endTransformEdit();
-            dragging_=false; activeAxis_=-1;
+            if (!io.MouseDown[0]) {
+                if (dragging_) endTransformEdit();
+                dragging_=false; activeAxis_=-1;
+            }
         }
 
         if (levelFocused_ && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
@@ -3870,9 +4049,82 @@ private:
 #endif
     }
 
+#if AVER_MODULE_LANDSCAPE && AVER_WITH_IMGUI
+    // Applies the active sculpt brush continuously while LMB is held over the terrain. Reuses
+    // viewportRay() -- the SAME screen->ray conversion pick() and the asset drag-drop's drop point
+    // use, per the task's own instruction not to reinvent it -- and landscape::raycastHeightfield()
+    // for where that ray actually meets the section's surface.
+    void handleSculpt(Engine& e, const ImGuiIO& io, bool overScene, f32 mx, f32 my) {
+        sculptCursorValid_ = false;
+        if (!landscapeLoaded_) { sculpting_ = false; return; }
+
+        Vec3 ro, rd;
+        viewportRay(mx, my, ro, rd);
+        const f32 roA[3] = {ro.x, ro.y, ro.z}, rdA[3] = {rd.x, rd.y, rd.z};
+        landscape::HeightfieldHit hit;
+        const bool haveHit = overScene && landscape::raycastHeightfield(landscapeData_, roA, rdA, hit);
+        if (haveHit) {
+            sculptCursorValid_ = true;
+            sculptCursor_ = Vec3{hit.posCm[0], hit.posCm[1], hit.posCm[2]};
+        }
+
+        if (ImGui::IsMouseClicked(0) && overScene && haveHit) {
+            sculpting_ = true;
+            sculptFlattenTargetCm_ = hit.posCm[2];   // captured once per stroke -- see BrushParams
+        }
+        if (!io.MouseDown[0]) sculpting_ = false;
+
+        if (sculpting_ && haveHit) {
+            landscape::BrushParams p;
+            p.centerCm[0] = hit.posCm[0];
+            p.centerCm[1] = hit.posCm[1];
+            p.radiusCm = sculptRadiusCm_;
+            p.strength = sculptStrengthCm_;
+            p.flattenTargetCm = sculptFlattenTargetCm_;
+            p.mode = tool_==Tool::SculptRaise  ? landscape::BrushMode::Raise
+                   : tool_==Tool::SculptLower  ? landscape::BrushMode::Lower
+                   : tool_==Tool::SculptSmooth ? landscape::BrushMode::Smooth
+                                                : landscape::BrushMode::Flatten;
+
+            // dt-scaled so holding the button paints at a constant rate regardless of frame rate,
+            // clamped the same way the other per-frame dt reads in this file are (see e.g. the fly
+            // camera's own dt clamp) so a stall does not apply one giant, frame-skipping stroke.
+            const f32 dt = std::fmin(e.time().dt, 0.05f);
+            const f32 amount = std::fmin(1.0f, dt * 6.0f);
+
+            const landscape::BrushRect touched = landscape::applyBrush(landscapeData_, p, amount);
+            if (!touched.empty) {
+                // REBUILDS THE WHOLE TREE, not just the touched nodes: LandscapeTree::build() has no
+                // incremental form (a coarser node's errorCm/skirtCm/radius all depend on a per-level
+                // MAXIMUM taken over every node at that level, so a local change can, in principle,
+                // change any of them). It is proportional to the section's total sample count, not to
+                // the brush footprint -- cheap at the sizes this editor has been run against, but a
+                // real cost on a large section held under continuous painting. Only the GPU mesh cache
+                // invalidation below is footprint-local.
+                std::string why;
+                if (landscapeTree_.build(landscapeData_, landscapeTree_.nodeQuads(), &why)) {
+                    landscapeTree_.resetHysteresis();
+                    if (landscapeRenderer_)
+                        landscapeRenderer_->forgetOverlapping(*e.device(), landscapeTree_,
+                                                               touched.x0, touched.y0, touched.x1, touched.y1);
+                } else {
+                    AVER_ERROR("[Landscape] sculpt left the section unbuildable: {}", why);
+                }
+                landscapeDirty_ = true;
+            }
+        }
+    }
+#endif
+
     // Draws the current tool's gizmo over the selection, on top of geometry.
     void drawGizmo(Engine& e) {
-        if (tool_==Tool::Select) return;
+        // Anything but Move/Rotate/Scale has no gizmo -- Select has none, and (see handleManip's
+        // isXformTool) neither do the sculpt tools, which draw their OWN cursor via
+        // drawSculptCursor() instead. Spelled as the allow-list the three real gizmo tools are,
+        // rather than Select's own denylist of one, so a tool added later defaults to "no gizmo"
+        // instead of silently inheriting the Scale gizmo the old `: gzScale_` fallback below would
+        // have given it.
+        if (tool_!=Tool::Move && tool_!=Tool::Rotate && tool_!=Tool::Scale) return;
         EditXform x;
         if (!selectedXform(x)) return;
         const Vec3 O = x.pos;
@@ -3893,6 +4145,22 @@ private:
         }
         e.device()->setLineDepth(true);
     }
+
+#if AVER_MODULE_LANDSCAPE
+    // The sculpt brush's footprint, drawn over the terrain the same undepth-tested way drawGizmo()
+    // draws over a selection -- it needs to read through the ground plane it is standing on.
+    void drawSculptCursor(Engine& e) {
+        if (!brushRing_ || !sculptCursorValid_) return;
+        const bool sculptTool = tool_==Tool::SculptRaise || tool_==Tool::SculptLower ||
+                                 tool_==Tool::SculptSmooth || tool_==Tool::SculptFlatten;
+        if (!sculptTool) return;
+        const Mat4 w = Mat4::scale(Vec3{sculptRadiusCm_, sculptRadiusCm_, sculptRadiusCm_}) *
+                       Mat4::translation(sculptCursor_);
+        e.device()->setLineDepth(false);
+        e.device()->drawLines(brushRing_, &w.m[0][0]);
+        e.device()->setLineDepth(true);
+    }
+#endif
 
 #if AVER_WITH_IMGUI
     // Removes the selected entity or placeholder object from the world. Pseudo-entries are ignored.
@@ -4183,9 +4451,9 @@ private:
 #if AVER_MODULE_SCENE
                 const bool haveProject = project_.valid();
                 ImGui::BeginDisabled(!haveProject);
-                if (ImGui::MenuItem("New Level")) { unloadLevel(); levelName_ = "untitled"; }
+                if (ImGui::MenuItem("New Level")) { unloadLevel(e); levelName_ = "untitled"; }
                 uiReg_.track("file.newLevel");
-                if (ImGui::MenuItem("Open Level")) loadStartMap();
+                if (ImGui::MenuItem("Open Level")) loadStartMap(e);
                 uiReg_.track("file.openLevel");
                 if (ImGui::MenuItem("Save Level", "Ctrl+S") && !levelPath_.empty()) saveLevel(levelPath_);
                 uiReg_.track("file.saveLevel");
@@ -4194,6 +4462,23 @@ private:
                     ImGui::SetTooltip("Open or create a project first - a level belongs to one.");
 #else
                 ImGui::MenuItem("New Level"); ImGui::MenuItem("Open Level..."); ImGui::MenuItem("Save Level");
+#endif
+#if AVER_MODULE_LANDSCAPE
+                // Independent of the Save Level item above: a sculpt changes landscapeData_ in
+                // memory only (see handleSculpt) -- the SAME split saveLevel/Save Level already has
+                // between "the editor's state" and "what is actually on disk". Disabled with the
+                // same specific-reason convention Package Project uses just below.
+                {
+                    const bool canSave = landscapeLoaded_ && !landscapePath_.empty();
+                    ImGui::BeginDisabled(!canSave);
+                    if (ImGui::MenuItem(landscapeDirty_ ? "Save Landscape *" : "Save Landscape")) saveLandscape();
+                    ImGui::EndDisabled();
+                    uiReg_.track("file.saveLandscape");
+                    if (!canSave && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                        ImGui::SetTooltip(!landscapeLoaded_
+                            ? "No landscape section loaded (--landscape, or <levelname>.ocland beside the level)."
+                            : "This section has no file path to save back to.");
+                }
 #endif
                 ImGui::Separator();
                 // Packaging. Disabled with a SPECIFIC reason rather than a generic one: "greyed
@@ -6417,11 +6702,50 @@ private:
             for (f32 v : opts){ char b[24]; std::snprintf(b,sizeof b,"%g", v); if (ImGui::Selectable(b, scaleSnap_==v)){ scaleSnap_=v; snapScale_=true; } }
             ImGui::EndPopup();
         }
+
+#if AVER_MODULE_LANDSCAPE
+        // Sculpt tools: only shown once a section is actually loaded -- a toolbar full of brushes
+        // with nothing to paint on would just error out the first time one was clicked.
+        if (landscapeLoaded_) {
+            ImGui::SameLine(0, gap*2);
+            if (toolBtn("##tSRaise", 4, tool_==Tool::SculptRaise)) tool_=Tool::SculptRaise;
+            uiReg_.track("tool.sculptRaise");
+            ImGui::SameLine(0, gap);
+            if (toolBtn("##tSLower", 5, tool_==Tool::SculptLower)) tool_=Tool::SculptLower;
+            uiReg_.track("tool.sculptLower");
+            ImGui::SameLine(0, gap);
+            if (toolBtn("##tSSmooth", 6, tool_==Tool::SculptSmooth)) tool_=Tool::SculptSmooth;
+            uiReg_.track("tool.sculptSmooth");
+            ImGui::SameLine(0, gap);
+            if (toolBtn("##tSFlatten", 7, tool_==Tool::SculptFlatten)) tool_=Tool::SculptFlatten;
+            uiReg_.track("tool.sculptFlatten");
+
+            const bool sculptActive = tool_==Tool::SculptRaise || tool_==Tool::SculptLower ||
+                                       tool_==Tool::SculptSmooth || tool_==Tool::SculptFlatten;
+            if (sculptActive) {
+                ImGui::SameLine(0, gap);
+                char brushLbl[32]; std::snprintf(brushLbl, sizeof brushLbl, "Brush %.0f", sculptRadiusCm_);
+                if (dropButton(brushLbl)) ImGui::OpenPopup("brushParams");
+            }
+            if (ImGui::BeginPopup("brushParams")) {
+                ImGui::SliderFloat("Radius (cm)", &sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+                ImGui::SliderFloat("Strength (cm)", &sculptStrengthCm_, 5.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+                ImGui::EndPopup();
+            }
+        }
+#endif
         ImGui::End();
 
         ImGui::SetNextWindowPos(ImVec2(vpX_+pad, vpY_+vpH_-pad), ImGuiCond_Always, ImVec2(0,1));
         ImGui::SetNextWindowBgAlpha(0.35f);
         ImGui::Begin("##vphint", nullptr, f | ImGuiWindowFlags_NoInputs);
+#if AVER_MODULE_LANDSCAPE
+        if (tool_==Tool::SculptRaise || tool_==Tool::SculptLower ||
+            tool_==Tool::SculptSmooth || tool_==Tool::SculptFlatten)
+            ImGui::Text("%s  |  LMB paint  |  radius %.0f cm, strength %.0f cm (Brush dropdown)  |  5-8 sculpt tools",
+                        kToolNames[(int)tool_], sculptRadiusCm_, sculptStrengthCm_);
+        else
+#endif
         ImGui::Text("%s  |  RMB fly (WASD/QE)  wheel speed  MMB pan  F focus  |  1-4 tools", kToolNames[(int)tool_]);
         ImGui::End();
     }
@@ -6712,6 +7036,43 @@ private:
     // The same answer keyed by the token the scene interns, which is what a CMeshRenderer carries.
     std::unordered_map<i32, pbr::MaterialHandle> surfaceMaterials_;
 #endif
+
+    // ---------------- landscape (opt-in; --landscape <path>, or <levelname>.ocland beside the level) ----------------
+    // Hosts ONE open .ocland section: render, level-reference, AND sculpt (raise/lower/smooth/
+    // flatten via the sculpt tools below -- see docs/LANDSCAPE_EDITOR.md's slice 0 for what is still
+    // NOT here: no .ocworld-level reference record, no collision, no asset-editor tab). Independent
+    // of AVER_MODULE_SCENE -- a section is not an ECS entity, and LandscapeRenderer::draw() calls
+    // IDevice::drawMesh directly, the same hand-rolled pattern the objects_ loop above uses, not an
+    // IRenderFeature (LandscapeRenderer implements none of its virtuals) and not
+    // GameRender::drawWorld/CMeshRenderer (a section has no CMeshRenderer to route through). See that
+    // doc's section 3 and section 6 item 6.
+    //
+    // UNGUARDED, matching chunkStreamAutoFrames_'s own reasoning right below: setLandscapePath() must
+    // compile with the module off (command-line parsing is unconditional), so the field it writes
+    // must exist unconditionally too. Everything that actually READS it is inside
+    // `#if AVER_MODULE_LANDSCAPE`.
+    std::string landscapeCliOverride_;
+#if AVER_MODULE_LANDSCAPE
+    fmt::OcLandData landscapeData_;
+    landscape::LandscapeTree landscapeTree_;
+    // Heap-owned so unloadLandscape() can destroy and recreate it independently of the section data,
+    // mirroring LandscapeRenderer's own forget-then-discard lifecycle (LandscapeRenderer.hpp:46-58).
+    std::unique_ptr<landscape::LandscapeRenderer> landscapeRenderer_;
+    bool landscapeLoaded_ = false;
+    std::string landscapePath_;   // the section actually resident; empty when none is
+    bool landscapeDirty_ = false; // true once a sculpt has touched landscapeData_ since the last save
+
+    // Sculpt tool state. Radius/strength are shared across all four brush modes -- the same "one
+    // knob set, the mode picks what it means" shape the transform tools' snap popups already use.
+    f32 sculptRadiusCm_ = 500.0f;
+    f32 sculptStrengthCm_ = 150.0f;
+    bool sculpting_ = false;              // LMB down, over the terrain, with a sculpt tool active
+    f32 sculptFlattenTargetCm_ = 0.0f;    // captured once per stroke -- see BrushParams::flattenTargetCm
+    bool sculptCursorValid_ = false;      // true when this frame's cursor ray actually hit the section
+    Vec3 sculptCursor_{0, 0, 0};          // world hit point, for the brush-radius ring and the next tick
+    rhi::LineHandle brushRing_ = 0;       // a unit ring in the XY plane -- landscape heights run +Z
+#endif
+
 #if AVER_MODULE_SCENE
     // Turns chunk streaming on or off around the editor camera. OPT-IN: nothing in modules/world's
     // generator or region files is touched until a user flips Window > Chunk Streaming, so an
@@ -7058,8 +7419,14 @@ private:
     }
 
     // Loads an .ocworld into the world as ordinary scene entities: transform, mesh and name.
-    void loadLevel(const std::string& path) {
-        unloadLevel();
+    //
+    // TAKES Engine& (it did not before) so it can hand a real device down to loadLandscapeForLevel --
+    // the landscape's GPU mesh cache is created lazily by onRender()'s own draw() call regardless, but
+    // unloadLevel/unloadLandscape need a device to free what the PREVIOUS level left resident, and the
+    // only device this function ever has is the one its own two callers already hold (applyProject and
+    // buildUI's "Open Level"/"New Level" menu items).
+    void loadLevel(Engine& eng, const std::string& path) {
+        unloadLevel(eng);
         fmt::OcWorldData w;
         std::string why;
         if (!fmt::loadOcworld(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
@@ -7156,6 +7523,10 @@ private:
         if (!w.placements.empty()) frameCameraOn(w);
 
         AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
+
+#if AVER_MODULE_LANDSCAPE
+        loadLandscapeForLevel(eng.device(), path);
+#endif
     }
 
     // Applies a level's SUN and SKY records to the live atmosphere.
@@ -7223,7 +7594,7 @@ private:
     }
 
     // Loads the project's start map, resolved against its content directory. Missing is not an error.
-    void loadStartMap() {
+    void loadStartMap(Engine& eng) {
         if (!project_.valid() || project_.startMap.empty()) return;
         const std::string path = project_.contentDir() + "\\" + project_.startMap;
         std::error_code ec;
@@ -7233,11 +7604,12 @@ private:
             levelPath_ = path;
             return;
         }
-        loadLevel(path);
+        loadLevel(eng, path);
     }
 
     // Destroys the loaded level's entities and everything keyed to them: labels, bodies, undo.
-    void unloadLevel() {
+    void unloadLevel(Engine& eng) {
+        (void)eng;   // only read under AVER_MODULE_LANDSCAPE, at the end of this function
         scene::World& world = scene::World::instance();
         for (const scene::Entity e : levelEntities_) if (world.valid(e)) world.destroy(e);
         levelEntities_.clear();
@@ -7263,6 +7635,9 @@ private:
         hasLevelSun_ = false;
         hasLevelSky_ = false;
         levelPath_.clear();
+#if AVER_MODULE_LANDSCAPE
+        unloadLandscape(eng.device());
+#endif
     }
 
     // Writes the level's own entities back out to an .ocworld. Spawned actors are not written.
@@ -7450,9 +7825,16 @@ private:
     void registerMcpAbis() {
         mcp_.registerAbi("editor", [this](const mcp::AbiCall& a, std::string& r, std::string& w) {
             if (a.fn == "tool") {
-                if (a.args.empty()) { w = "tool needs a tool index 0-3"; return false; }
+                // kToolNames[4..7] are the sculpt tools, present only where AVER_MODULE_LANDSCAPE is
+                // -- the bound below must track its size or an in-range request would read past it.
+#if AVER_MODULE_LANDSCAPE
+                constexpr int kMaxTool = 7;
+#else
+                constexpr int kMaxTool = 3;
+#endif
+                if (a.args.empty()) { w = "tool needs a tool index 0-" + std::to_string(kMaxTool); return false; }
                 const int t = static_cast<int>(a.args[0]);
-                if (t < 0 || t > 3) { w = "tool index out of range 0-3"; return false; }
+                if (t < 0 || t > kMaxTool) { w = "tool index out of range 0-" + std::to_string(kMaxTool); return false; }
                 tool_ = static_cast<Tool>(t);
                 r = kToolNames[t];
                 return true;
@@ -7962,7 +8344,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=false; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; bool lodMeshShader=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=false; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; bool lodMeshShader=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -7994,6 +8376,120 @@ Application* createApplication(int argc, char** argv) {
                 std::exit(1);
             }
             std::exit(0);
+        }
+        // --landscape-gen <path> [sampleCount] [spacingCm] writes a synthetic rolling-hill .ocland
+        // through the real writeOcLand/loadOcLand round trip and exits, touching no device. Exists
+        // because no .ocland fixture exists anywhere -- the format's own reader/writer is the only
+        // thing this repo has ever produced one with (tests/landscape builds one in memory and never
+        // saves it) -- and a hand-rolled binary fixture would prove nothing about the real format.
+        // sampleCount must be (k * 64) + 1 (LandscapeTree::build's own acceptance rule); the default,
+        // 257, is 4*64+1 -- three LOD levels, small enough to build and upload in a --frames run.
+        else if (!std::strcmp(argv[i],"--landscape-gen") && i+1<argc) {
+            const std::string outPath = argv[++i];
+            u32 samples = 257; f32 spacingCm = 400.0f;
+            if (i+1 < argc && argv[i+1][0] != '-') samples = static_cast<u32>(std::atoi(argv[++i]));
+            if (i+1 < argc && argv[i+1][0] != '-') spacingCm = static_cast<f32>(std::atof(argv[++i]));
+#if AVER_MODULE_LANDSCAPE
+            fmt::OcLandData d;
+            d.sampleCount = samples;
+            d.spacingCm = spacingCm;
+            const f32 extentCm = static_cast<f32>(samples - 1) * spacingCm;
+            // CENTRED ON THE ORIGIN, so the section sits under wherever a level's own placements
+            // already are rather than requiring the level to be authored around the terrain instead.
+            d.originCm[0] = -extentCm * 0.5f; d.originCm[1] = -extentCm * 0.5f; d.originCm[2] = 0.0f;
+            d.heights.resize(static_cast<usize>(samples) * samples);
+            for (u32 iy = 0; iy < samples; ++iy) {
+                for (u32 ix = 0; ix < samples; ++ix) {
+                    const f32 fx = static_cast<f32>(ix), fy = static_cast<f32>(iy);
+                    // Two overlapping sine fields, index-frequency (not world-frequency): rolling
+                    // hills with real relief at any spacing, so --frames LOD selection has something
+                    // to refine and coarsen against, not a plane a first-time reader could mistake for
+                    // a bug.
+                    const f32 h = 1400.0f * std::sin(fx * 0.045f) * std::cos(fy * 0.037f)
+                                + 700.0f  * std::sin((fx + fy) * 0.021f);
+                    d.heights[static_cast<usize>(iy) * samples + ix] = h;
+                }
+            }
+            std::string why;
+            if (fmt::saveOcLand(outPath, d, &why)) {
+                AVER_INFO("[Sandbox] wrote {} ({}x{} samples, {:.0f} m across)",
+                          outPath, samples, samples, extentCm / 100.0f);
+                std::exit(0);
+            }
+            AVER_ERROR("[Sandbox] could not write '{}': {}", outPath, why);
+            std::exit(1);
+#else
+            (void)samples; (void)spacingCm;
+            AVER_ERROR("[Sandbox] --landscape-gen needs AVER_MODULE_LANDSCAPE (this build has it OFF): '{}' not written", outPath);
+            std::exit(1);
+#endif
+        }
+        // --sculpt-test <in.ocland> <out.ocland> [mode] [radiusCm] [strengthCm] applies one brush
+        // stroke (several ticks, the same shape a held mouse button produces -- see handleSculpt's
+        // own amount-per-tick, here fixed rather than dt-derived so the result is reproducible)
+        // through the EXACT functions the editor's own sculpt tools call -- landscape::applyBrush
+        // and fmt::saveOcLand -- centred on the section's own middle, then exits touching no device.
+        // Exists for the same reason --landscape-gen does: "a sculpt changes the stored heights"
+        // needs a real .ocland round trip, not a claim about code nobody ran.
+        else if (!std::strcmp(argv[i],"--sculpt-test") && i+2<argc) {
+            const std::string sculptIn = argv[++i], sculptOut = argv[++i];
+            std::string sculptMode = "raise"; f32 sculptRadiusArg = 0.0f, sculptStrengthArg = 0.0f;
+            if (i+1 < argc && argv[i+1][0] != '-') sculptMode = argv[++i];
+            if (i+1 < argc && argv[i+1][0] != '-') sculptRadiusArg = static_cast<f32>(std::atof(argv[++i]));
+            if (i+1 < argc && argv[i+1][0] != '-') sculptStrengthArg = static_cast<f32>(std::atof(argv[++i]));
+#if AVER_MODULE_LANDSCAPE
+            fmt::OcLandData sd;
+            std::string sculptWhy;
+            if (!fmt::loadOcLand(sculptIn, sd, &sculptWhy)) {
+                AVER_ERROR("[Sandbox] --sculpt-test could not load '{}': {}", sculptIn, sculptWhy);
+                std::exit(1);
+            }
+            const landscape::BrushMode sculptModeVal =
+                sculptMode == "lower"   ? landscape::BrushMode::Lower
+              : sculptMode == "smooth"  ? landscape::BrushMode::Smooth
+              : sculptMode == "flatten" ? landscape::BrushMode::Flatten
+                                        : landscape::BrushMode::Raise;
+            landscape::BrushParams sp;
+            sp.centerCm[0] = sd.originCm[0] + sd.extentCm() * 0.5f;
+            sp.centerCm[1] = sd.originCm[1] + sd.extentCm() * 0.5f;
+            sp.radiusCm = sculptRadiusArg > 0.0f ? sculptRadiusArg : sd.extentCm() * 0.2f;
+            sp.strength = sculptStrengthArg > 0.0f ? sculptStrengthArg : 300.0f;
+            sp.mode = sculptModeVal;
+            const u32 cix = (sd.sampleCount - 1) / 2, ciy = cix;
+            sp.flattenTargetCm = sd.heightAt(cix, ciy) + 500.0f;   // only read by Flatten
+            const f32 sculptBefore = sd.heightAt(cix, ciy);
+            // Eight ticks at amount 0.25, like ~130ms of a held mouse button at the dt*6 rate
+            // handleSculpt uses -- not one amount=1 jump, so the result actually depends on
+            // strength/radius rather than degenerating to "did anything change at all".
+            landscape::BrushRect sculptRect{};
+            for (int tick = 0; tick < 8; ++tick) sculptRect = landscape::applyBrush(sd, sp, 0.25f);
+            if (sculptRect.empty) {
+                AVER_ERROR("[Sandbox] --sculpt-test: the brush touched no sample -- radius/centre "
+                           "landed entirely off the section");
+                std::exit(1);
+            }
+            const f32 sculptAfter = sd.heightAt(cix, ciy);
+            if (!fmt::saveOcLand(sculptOut, sd, &sculptWhy)) {
+                AVER_ERROR("[Sandbox] --sculpt-test could not write '{}': {}", sculptOut, sculptWhy);
+                std::exit(1);
+            }
+            fmt::OcLandData sculptBack;
+            if (!fmt::loadOcLand(sculptOut, sculptBack, &sculptWhy)) {
+                AVER_ERROR("[Sandbox] --sculpt-test could not read back '{}': {}", sculptOut, sculptWhy);
+                std::exit(1);
+            }
+            const f32 sculptSaved = sculptBack.heightAt(cix, ciy);
+            AVER_INFO("[Sandbox] --sculpt-test {} on '{}': centre sample {:.2f} -> {:.2f} cm in "
+                      "memory, {:.2f} cm after save+reload, touched rect [{},{}]-[{},{}]",
+                      sculptMode, sculptIn, sculptBefore, sculptAfter, sculptSaved,
+                      sculptRect.x0, sculptRect.y0, sculptRect.x1, sculptRect.y1);
+            std::exit(0);
+#else
+            (void)sculptIn; (void)sculptMode; (void)sculptRadiusArg; (void)sculptStrengthArg;
+            AVER_ERROR("[Sandbox] --sculpt-test needs AVER_MODULE_LANDSCAPE (this build has it OFF): "
+                       "'{}' not written", sculptOut);
+            std::exit(1);
+#endif
         }
         // --open-asset <path> opens a file through the same host a double-click goes through.
         else if (!std::strcmp(argv[i],"--open-asset") && i+1<argc) openAsset=argv[++i];
@@ -8029,6 +8525,11 @@ Application* createApplication(int argc, char** argv) {
         // the drone spawns and sits still, which is the honest behaviour for an engine that does
         // not know what any project's scripts are called.
         else if (!std::strcmp(argv[i],"--drone-graph") && i+1<argc) droneGraph = argv[++i];
+        // --landscape <path.ocland> overrides the levelname.ocland convention loadLandscapeForLevel
+        // otherwise derives from whatever level loads next. Exists so a --frames capture run can
+        // prove the render and per-frame LOD-selection path draws real terrain without a level file
+        // that names one and without a human clicking anything -- see loadLandscapeForLevel.
+        else if (!std::strcmp(argv[i],"--landscape") && i+1<argc) landscapePath = argv[++i];
         else if (!std::strcmp(argv[i],"--chunk-stream")) {
             chunkStream = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 5;
         }
@@ -8146,7 +8647,12 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--tool") && i+1<argc) {
             const char* t=argv[++i];
             tool = !std::strcmp(t,"move")?Tool::Move : !std::strcmp(t,"rotate")?Tool::Rotate :
-                   !std::strcmp(t,"scale")?Tool::Scale : Tool::Select;
+                   !std::strcmp(t,"scale")?Tool::Scale :
+#if AVER_MODULE_LANDSCAPE
+                   !std::strcmp(t,"sculpt-raise")?Tool::SculptRaise : !std::strcmp(t,"sculpt-lower")?Tool::SculptLower :
+                   !std::strcmp(t,"sculpt-smooth")?Tool::SculptSmooth : !std::strcmp(t,"sculpt-flatten")?Tool::SculptFlatten :
+#endif
+                   Tool::Select;
         }
         else if (argv[i][0]!='-') { if (isOcproject(argv[i])) project=argv[i]; else beam=argv[i]; }
     }
@@ -8187,6 +8693,7 @@ Application* createApplication(int argc, char** argv) {
     app->setFocusTools(focusTools);
     app->setFocusCompileMenu(focusCompileMenu);
     if (!droneGraph.empty()) app->setDroneGraph(droneGraph);
+    if (!landscapePath.empty()) app->setLandscapePath(landscapePath);
     if (chunkStream > 0) app->setChunkStreamAuto(chunkStream);
     if (fogMatch) app->setFogMatchToStreamRadius(true, fogMatchOpacity);
     if (droneAuto > 0) app->setDroneAuto(droneAuto);

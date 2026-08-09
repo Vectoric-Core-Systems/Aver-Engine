@@ -12,7 +12,11 @@ add_library(Aver.Landscape STATIC
   src/LandscapeTree.cpp
   src/ChunkMesh.cpp
   # The physics sample adapter. Emits a plain array, so this stays free of Aver.Physics.
-  src/PhysicsBridge.cpp)
+  src/PhysicsBridge.cpp
+  # Editor-facing but still RHI-free: a cursor ray against the surface, and the brush edits
+  # (raise/lower/smooth/flatten) that mutate an OcLandData's heights in place.
+  src/HeightfieldRay.cpp
+  src/Sculpt.cpp)
 
 target_include_directories(Aver.Landscape PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Landscape PUBLIC cxx_std_20)

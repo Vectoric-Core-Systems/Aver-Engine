@@ -152,6 +152,119 @@ int main(int argc, char** argv) {
                   nonEmpty, fixtureChunks().size(), partial, totalEntities, perChunk);
     }
 
+    // ---- the height seam: unset means untouched -----------------------------------------------------
+    {
+        // No heightSource installed -- must reproduce today's output bit for bit. GeneratorSettings's
+        // own default (an empty std::function) is what decides this, not a separate flag anywhere.
+        GeneratorSettings flat = gs;
+        check(!flat.heightSource, "the fixture settings carry no height source by default");
+        GeneratedChunkSource genFlat(flat);
+
+        bool everyZZero = true;
+        for (const ChunkCoord& c : fixtureChunks())
+            for (const PayloadEntity& e : genFlat.generate(c).entities)
+                if (e.local.position.z != 0.0f) everyZZero = false;
+        check(everyZZero, "with no height source every entity still sits at local Z == 0, exactly as before");
+
+        // Byte-identical to `gen` (declared above, used throughout this file, and never touching
+        // heightSource either) -- not just "Z is zero" but the WHOLE payload, unaffected by this
+        // field merely existing on the struct.
+        bool identicalToBaseline = true;
+        for (const ChunkCoord& c : fixtureChunks())
+            if (encodeChunk(gen.generate(c)) != encodeChunk(genFlat.generate(c))) identicalToBaseline = false;
+        check(identicalToBaseline,
+              "a GeneratorSettings that never mentions heightSource generates byte-identical payloads "
+              "to one built moments after it -- adding the field changed nothing by default");
+    }
+
+    // ---- the height seam: installed, it moves placement only, and stays deterministic ---------------
+    {
+        // A pure function of world (x, y) only -- no captured state -- so two independently written
+        // lambdas computing the SAME formula stand in for "the same height source", the way two
+        // GeneratedChunkSource instances already stand in for "the same generator" elsewhere here.
+        auto surface = [](f32 wx, f32 wy, f32& outZ) -> bool {
+            outZ = 500.0f + 0.02f * wx - 0.015f * wy;   // a tilted plane; deterministic, no lookups
+            return true;
+        };
+        GeneratorSettings hs = gs;
+        hs.heightSource = surface;
+        GeneratedChunkSource genH(hs);
+
+        bool anyNonZero = false, allFinite = true;
+        for (const ChunkCoord& c : fixtureChunks())
+            for (const PayloadEntity& e : genH.generate(c).entities) {
+                if (e.local.position.z != 0.0f) anyNonZero = true;
+                if (!std::isfinite(e.local.position.z)) allFinite = false;
+            }
+        check(anyNonZero, "installing a height source moves scatter off local Z == 0");
+        check(allFinite, "...to a finite height");
+
+        // PLACEMENT ONLY: existence, naming, and X/Y must be exactly what the flat baseline already
+        // produced -- a height source cannot change WHICH candidates exist, only where they sit.
+        bool sameShape = true;
+        for (const ChunkCoord& c : fixtureChunks()) {
+            const ChunkPayload flatP = gen.generate(c);
+            const ChunkPayload heighted = genH.generate(c);
+            if (flatP.entities.size() != heighted.entities.size()) { sameShape = false; continue; }
+            for (usize i = 0; i < flatP.entities.size(); ++i) {
+                if (flatP.entities[i].name != heighted.entities[i].name) sameShape = false;
+                if (flatP.entities[i].local.position.x != heighted.entities[i].local.position.x) sameShape = false;
+                if (flatP.entities[i].local.position.y != heighted.entities[i].local.position.y) sameShape = false;
+            }
+        }
+        check(sameShape,
+              "a height source changes Z only -- existence, naming and X/Y match the flat baseline "
+              "entity for entity");
+
+        // Determinism, generate()'s own documented contract: same (settings, coord) -> same payload,
+        // always. Checked within one instance, and again across a SECOND instance built from an
+        // INDEPENDENT lambda computing the identical formula, so no state captured anywhere is doing
+        // the work invisibly.
+        bool stableWithinInstance = true;
+        for (const ChunkCoord& c : fixtureChunks())
+            if (encodeChunk(genH.generate(c)) != encodeChunk(genH.generate(c))) stableWithinInstance = false;
+        check(stableWithinInstance, "generating the same chunk twice with a height source installed still agrees");
+
+        auto surface2 = [](f32 wx, f32 wy, f32& outZ) -> bool {
+            outZ = 500.0f + 0.02f * wx - 0.015f * wy;
+            return true;
+        };
+        GeneratorSettings hs2 = gs;
+        hs2.heightSource = surface2;
+        GeneratedChunkSource genH2(hs2);
+        bool stableAcrossInstances = true;
+        for (const ChunkCoord& c : fixtureChunks())
+            if (encodeChunk(genH.generate(c)) != encodeChunk(genH2.generate(c))) stableAcrossInstances = false;
+        check(stableAcrossInstances,
+              "a SECOND source built from an independently-written but formula-identical height "
+              "source agrees byte for byte with the first -- the property is in the FUNCTION, not the "
+              "object holding it");
+
+        // A height source answering false for some candidates leaves exactly THOSE at the flat
+        // default -- "no surface known here" is not "generation fails". A wider spread of chunks than
+        // the 6-chunk fixture, so both halves of the split are almost certain to have content.
+        std::vector<ChunkCoord> spread;
+        for (i32 x = -6; x <= 6; ++x)
+            for (i32 y = -2; y <= 2; ++y) spread.push_back(ChunkCoord{x, y, 0});
+        auto partial = [](f32 wx, f32 wy, f32& outZ) -> bool {
+            (void)wy;
+            if (wx < 0.0f) return false;   // half the world has no known surface
+            outZ = 300.0f;
+            return true;
+        };
+        GeneratorSettings hp = gs;
+        hp.heightSource = partial;
+        GeneratedChunkSource genP(hp);
+        bool sawFlat = false, sawSurfaced = false;
+        for (const ChunkCoord& c : spread)
+            for (const PayloadEntity& e : genP.generate(c).entities) {
+                if (e.local.position.z == 0.0f) sawFlat = true; else sawSurfaced = true;
+            }
+        check(sawFlat && sawSurfaced,
+              "a height source that answers false for some candidates leaves exactly those at the "
+              "flat default, while the rest follow the surface -- per candidate, not all-or-nothing");
+    }
+
     // A different seed must give a different world, or the seed is decorative.
     {
         GeneratorSettings other = gs;
@@ -315,6 +428,130 @@ int main(int argc, char** argv) {
         gen.load(ChunkCoord{-3, -4, 0}, fresh, nullptr);
         check(encodeChunk(untouched) == encodeChunk(fresh),
               "...straight from the generator, with nothing on disk behind it");
+    }
+
+    // ---- chunk-cache invalidation when a height source changes ---------------------------------------
+    //
+    // THIS SECTION DOCUMENTS A REAL GAP RATHER THAN CLOSING ONE. persistChunk compares ENCODED BYTES
+    // (ChunkGenerator.hpp's own contract on PersistOutcome) with no notion of WHY two payloads differ.
+    // A chunk that was resident under a flat baseline, and saved as "unchanged" because it matched
+    // generation exactly, is not regenerated the instant a height source goes live -- so the NEXT
+    // persistChunk call for that same chunk compares its STILL-FLAT entities against a NEW,
+    // terrain-following baseline, finds them different, and stores the stale flat payload as a
+    // permanent override. LayeredChunkSource::isOverridden always prefers an override over the
+    // baseline afterwards, so that chunk stays flat forever, even with the height source live from
+    // then on.
+    //
+    // generatorVersion is the field RegionIndex.hpp documents as existing for exactly this case
+    // ("GENERATOR SKEW... makes 'these regions were made by an older one' detectable"), and it
+    // round-trips faithfully through RegionFile and RegionIndex (RegionFileTest, this same suite).
+    // What this block proves is that round-tripping it is ALL that happens today: nothing at
+    // RegionChunkSource::open()/regionFor() reads a live GeneratorSettings::generatorVersion back and
+    // compares it against a loaded index's own. Bumping the version when a height source is installed
+    // is correct bookkeeping; it enforces nothing by itself.
+    {
+        const std::filesystem::path hdir = dir / "heightseam";
+        std::filesystem::create_directories(hdir, ec);
+
+        // A flat baseline, generatorVersion 1.
+        GeneratorSettings flatSettings = gs;
+        flatSettings.generatorVersion = 1;
+        GeneratedChunkSource flatGen(flatSettings);
+
+        // A chunk with content, found the same way the "delta from baseline" block above does.
+        ChunkCoord hc{0, 0, 0};
+        ChunkPayload flatPayload;
+        for (const ChunkCoord& c : fixtureChunks()) {
+            ChunkPayload p;
+            flatGen.load(c, p, nullptr);
+            if (!p.entities.empty()) { hc = c; flatPayload = p; break; }
+        }
+        check(!flatPayload.entities.empty(),
+              "a flat-baseline chunk with content was found for the invalidation case");
+
+        const std::string savePath = (hdir / "resident.avrgn").string();
+        RegionWriteDesc desc;
+        desc.coord = regionOf(hc);
+        desc.chunkSizeCm = flatSettings.chunkSizeCm;
+        desc.worldSeed = flatSettings.worldSeed;
+        desc.generatorVersion = flatSettings.generatorVersion;
+        RegionWriter wr;
+        checkWhy(wr.open(savePath, desc, &why), "an invalidation-case save region is created");
+
+        const PersistOutcome before = persistChunk(wr, flatGen, hc, flatPayload, &why);
+        check(before == PersistOutcome::Unchanged,
+              "under the flat baseline the resident chunk still persists to nothing, before any "
+              "height source exists");
+        check(wr.header().chunkCount == 0, "...so the save is still empty at this point");
+
+        // A height source goes live -- a real terrain-following surface, not the flat plane -- and
+        // the level bumps generatorVersion, as documented practice.
+        auto terrain = [](f32 wx, f32 wy, f32& outZ) -> bool {
+            outZ = 200.0f + 0.05f * wx + 0.03f * wy;
+            return true;
+        };
+        GeneratorSettings terrainSettings = flatSettings;
+        terrainSettings.heightSource = terrain;
+        terrainSettings.generatorVersion = 2;
+        GeneratedChunkSource terrainGen(terrainSettings);
+
+        ChunkPayload terrainPayload;
+        terrainGen.load(hc, terrainPayload, nullptr);
+        check(terrainPayload.entities.size() == flatPayload.entities.size(),
+              "the height source changed WHERE this chunk's entities sit, not how many exist");
+        bool anyHeightChanged = false;
+        for (usize i = 0; i < terrainPayload.entities.size() && i < flatPayload.entities.size(); ++i)
+            if (terrainPayload.entities[i].local.position.z != flatPayload.entities[i].local.position.z)
+                anyHeightChanged = true;
+        check(anyHeightChanged, "...and the new baseline really does place this chunk's entities differently");
+
+        // THE HAZARD: the chunk is still RESIDENT with its OLD flat positions -- nothing regenerated
+        // it -- and the next persistChunk call compares that stale payload against the NEW baseline.
+        const PersistOutcome after = persistChunk(wr, terrainGen, hc, flatPayload, &why);
+        check(after == PersistOutcome::Stored,
+              "once a height source changes the baseline, a chunk that is STILL RESIDENT with its "
+              "old flat positions gets FROZEN as a permanent override -- persistChunk cannot tell "
+              "'the player edited this' from 'the world changed underneath it'");
+        check(wr.header().chunkCount == 1, "...and the save is no longer empty, though nobody edited anything");
+        wr.close();
+
+        // Cook the index the way a level's save directory would carry it, generatorVersion included.
+        RegionIndex ix;
+        ix.levelId = 1;
+        ix.chunkSizeCm = terrainSettings.chunkSizeCm;
+        ix.worldSeed = terrainSettings.worldSeed;
+        ix.generatorVersion = flatSettings.generatorVersion;   // the version the SAVED region was cooked under
+        {
+            RegionFile rf;
+            rf.open(savePath, &why);
+            RegionEntry e;
+            e.coord = desc.coord;
+            e.contentHash = rf.header().contentHash;
+            e.chunkCount = rf.header().chunkCount;
+            e.relativePath = "resident.avrgn";
+            ix.add(e);
+        }
+        writeIndex((hdir / "resident.ocindex").string(), ix, &why);
+
+        // THE SECOND HALF OF THE GAP: opening that index against a LIVE generator whose version has
+        // since moved on raises no error and refuses nothing.
+        RegionChunkSource overrides;
+        checkWhy(overrides.open((hdir / "resident.ocindex").string(), hdir.string(), &why),
+                 "the index opens even though it was cooked under an older generatorVersion");
+        check(overrides.index().generatorVersion != terrainSettings.generatorVersion,
+              "the live generator has since moved to a new generatorVersion...");
+        check(overrides.has(hc),
+              "...and the mismatched region is served anyway -- open()/has() never compare "
+              "generatorVersion against anything, so nothing here refuses or purges a stale override "
+              "on a version bump. Wiring that check is a separate task; this proves it does not exist "
+              "today rather than assuming it does.");
+
+        ChunkPayload servedStale;
+        checkWhy(overrides.load(hc, servedStale, &why), "the stale override still loads");
+        check(encodeChunk(servedStale) == encodeChunk(flatPayload),
+              "...and what it serves is still the FROZEN FLAT payload, not the terrain-following one "
+              "-- a LayeredChunkSource in front of {terrainGen, overrides} would show flat scatter "
+              "here forever, even with the height source live");
     }
 
     // ---- scatter palette --------------------------------------------------------------------------

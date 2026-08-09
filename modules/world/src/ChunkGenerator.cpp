@@ -202,8 +202,32 @@ ChunkPayload GeneratedChunkSource::generate(const ChunkCoord& c) const {
             e.name = "gen_" + std::to_string(c.x) + "_" + std::to_string(c.y) + "_" + std::to_string(salt);
             e.objectId = (static_cast<u64>(h) << 32) | salt;
             e.parent = -1;
-            // Chunk-local, which is what a payload stores: in [0, chunkSizeCm) by construction.
-            e.local.position = Vec3{lx, ly, 0.0f};
+
+            // THE HEIGHT SEAM. Unset (the default): localZ stays 0.0f, the exact literal this line
+            // always wrote -- byte-identical to a generator that has never heard of heightSource.
+            // Installed: asked once for THIS candidate's own (wx, wy) -- the same world position
+            // already computed above for the density sample -- and only for a candidate that has
+            // already passed threshold and gotten a species, so a height source can never change
+            // WHICH candidates exist, only where an accepted one sits.
+            f32 localZ = 0.0f;
+            if (settings_.heightSource) {
+                f32 surfaceZ = 0.0f;
+                if (settings_.heightSource(wx, wy, surfaceZ)) {
+                    // f64 subtract, narrowed once -- the same trick wx/wy themselves use just above
+                    // (oz is exact as an i64; mixing it with an f32 surfaceZ before subtracting would
+                    // round the CHUNK ORIGIN itself before the usually-much-smaller difference is
+                    // even taken).
+                    localZ = static_cast<f32>(static_cast<f64>(surfaceZ) - static_cast<f64>(oz));
+                }
+                // false means "no surface known here" for THIS candidate only -- it falls back to the
+                // flat default, exactly as if no height source were installed at all. Every other
+                // candidate in this chunk still asks independently.
+            }
+
+            // Chunk-local, which is what a payload stores: in [0, chunkSizeCm) by construction. Z is
+            // NOT range-constrained the way X/Y are -- see GeneratorSettings::heightSource's own
+            // comment -- so a height source is free to place an entity above or below its chunk.
+            e.local.position = Vec3{lx, ly, localZ};
             // A deterministic yaw from the same hash, so the field does not look stamped.
             e.local.rotation = sp.randomizeYaw
                 ? Quat::fromAxisAngle({0, 0, 1}, static_cast<f32>(h & 1023u) * 0.006135923f)

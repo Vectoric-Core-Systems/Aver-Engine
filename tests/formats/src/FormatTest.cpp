@@ -307,12 +307,110 @@ static void checkOcworldScatter() {
     }
 }
 
+// Checks the LANDSCAPE record: every field, round-trip byte-identity, the unset-extent field's
+// deliberate omission from the written text, and that a line this parser does not understand does not
+// disturb LANDSCAPE or anything else already parsed -- the same three properties checkOcworldScatter
+// already proves for SCATTER, exercised against the newest record in the chain of if/else-if branches.
+static void checkOcworldLandscape() {
+    AVER_INFO("=== .ocworld LANDSCAPE record ===");
+    using namespace fmt;
+    std::string err;
+
+    {
+        // Two sections, every field given explicitly on the first, so nothing here is a struct
+        // default in disguise. The second omits `extent` and `name`, which is the common case: a
+        // level with one terrain section rarely bothers naming it or restating its own footprint.
+        OcWorldData w;
+        check(parseOcworld(
+            "OCWORLD 1\nNAME T\n"
+            "LANDSCAPE name Valley section Terrain/valley_00.ocland at 1000 -500 120 extent 25600\n"
+            "LANDSCAPE section Terrain/valley_01.ocland at 26600 -500 80\n", w, &err),
+            "a world with two LANDSCAPE records parses");
+        check(w.landscapes.size() == 2, "and keeps both");
+
+        const OcLandscapePlacement& a = w.landscapes[0];
+        check(a.name == "Valley", "section 0: name");
+        check(a.section == "Terrain/valley_00.ocland", "section 0: asset reference");
+        check(std::fabs(a.x - 1000.0) < 1e-9 && std::fabs(a.y + 500.0) < 1e-9 && std::fabs(a.z - 120.0) < 1e-9,
+              "section 0: world placement");
+        check(std::fabs(a.extentCm - 25600.0) < 1e-6, "section 0: declared extent");
+
+        const OcLandscapePlacement& b = w.landscapes[1];
+        check(b.name.empty(), "section 1: no `name` clause leaves the name empty");
+        check(b.section == "Terrain/valley_01.ocland", "section 1: asset reference");
+        check(std::fabs(b.x - 26600.0) < 1e-9, "section 1: world placement, x");
+        check(b.extentCm == 0.0, "section 1: no `extent` clause leaves the unset-zero default");
+
+        // ---- round trip --------------------------------------------------------------------------
+        const std::string text = writeOcworld(w);
+        check(text.find("LANDSCAPE name Valley section Terrain/valley_00.ocland") != std::string::npos,
+              "the written text carries the first section");
+        check(text.find("extent 25600") != std::string::npos, "...with its explicit extent");
+        // UNSET extent is deliberately not printed as `extent 0` -- see writeOcworld's own comment.
+        // Checked by absence: the second section's line must carry no `extent` token at all, and its
+        // name must come back as the writer's own "unnamed" placeholder rather than an empty token a
+        // reader could not parse a second time.
+        check(text.find("LANDSCAPE name unnamed section Terrain/valley_01.ocland") != std::string::npos,
+              "an unnamed section is written with the same 'unnamed' placeholder PCGVOLUME uses");
+        const usize sec1Pos = text.find("Terrain/valley_01.ocland");
+        const usize sec1LineEnd = text.find('\n', sec1Pos);
+        check(sec1Pos != std::string::npos &&
+              text.substr(sec1Pos, sec1LineEnd - sec1Pos).find("extent") == std::string::npos,
+              "a section with no declared extent has no `extent` token at all");
+
+        OcWorldData back;
+        check(parseOcworld(text, back, &err), "what the writer produced parses again");
+        check(back.landscapes.size() == 2, "with both sections still present");
+        check(back.landscapes[0].name == a.name && back.landscapes[0].section == a.section &&
+              std::fabs(back.landscapes[0].extentCm - a.extentCm) < 1e-6,
+              "and the first section's fields round-trip");
+        // NOT empty here -- "unnamed" is a WRITTEN placeholder, same as PCGVOLUME's own, and the
+        // parser has no way to tell "the file says unnamed" from "the file says the word unnamed" on
+        // a second read. That collision is already accepted for PCGVOLUME; b.name.empty() above is
+        // the check that actually matters (an un-round-tripped level reads back empty, not "unnamed").
+        check(back.landscapes[1].name == "unnamed",
+              "...with the second section now carrying the literal placeholder the first write chose "
+              "-- idempotent from here on, which the byte-for-byte check just below confirms");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
+        // Unknown-record tolerance, both directions: a line no branch understands must not disturb a
+        // LANDSCAPE record next to it, whichever side it sits on.
+        OcWorldData w;
+        check(parseOcworld(
+            "OCWORLD 1\nNAME T\n"
+            "FUTURERECORD something nobody has written yet\n"
+            "LANDSCAPE section Terrain/mesa.ocland at 0 0 0\n"
+            "ANOTHERUNKNOWNRECORD 1 2 3\n", w, &err),
+            "a world with unknown records around LANDSCAPE still parses");
+        check(w.landscapes.size() == 1 && w.landscapes[0].section == "Terrain/mesa.ocland",
+              "and LANDSCAPE is unaffected by records it did not understand, before or after it");
+    }
+    {
+        // A malformed LANDSCAPE line (a dangling keyword with no value) is simply the token that never
+        // matches any branch -- the same tolerance SCATTER and PCGVOLUME already have.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\nLANDSCAPE section Terrain/x.ocland extent\n", w, &err),
+              "a LANDSCAPE line with a dangling keyword still parses the file");
+        check(w.landscapes.size() == 1 && w.landscapes[0].extentCm == 0.0,
+              "and the section keeps extent's own unset default rather than reading garbage");
+    }
+    {
+        // The record is optional and must stay so: every level written before it existed has none.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\nPLACE m.ocmesh 0 0 0 0 0 0 1\n", w, &err),
+              "a world with no LANDSCAPE still parses");
+        check(w.landscapes.empty(), "and reports none, rather than inventing a section from nothing");
+    }
+}
+
 // Runs the self-checks, then every file named on the command line. Returns the failure count.
 int main(int argc, char** argv) {
     checkFnv();
     checkOcproject();
     checkOcworld();
     checkOcworldScatter();
+    checkOcworldLandscape();
     if (argc < 2) {
         AVER_INFO("usage: FormatTest <file.ocbeam|file.ocmap> [more...]");
         return g_failures;

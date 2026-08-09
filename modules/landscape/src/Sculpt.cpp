@@ -1,0 +1,114 @@
+// Brush edits to a landscape section's heights: see Sculpt.hpp.
+#include "aver/landscape/Sculpt.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
+namespace aver::landscape {
+
+// The inclusive sample-space rectangle a brush can reach, clamped to the section's grid.
+BrushRect brushRect(const fmt::OcLandData& d, const BrushParams& p) {
+    BrushRect r;
+    if (!d.valid() || d.spacingCm <= 0.0f || p.radiusCm <= 0.0f) return r;
+
+    const f32 minX = p.centerCm[0] - p.radiusCm, maxX = p.centerCm[0] + p.radiusCm;
+    const f32 minY = p.centerCm[1] - p.radiusCm, maxY = p.centerCm[1] + p.radiusCm;
+    const f32 gridMaxX = d.originCm[0] + d.extentCm(), gridMaxY = d.originCm[1] + d.extentCm();
+    if (maxX < d.originCm[0] || minX > gridMaxX || maxY < d.originCm[1] || minY > gridMaxY)
+        return r;   // the brush's box never touches the grid's box at all
+
+    const i32 maxIdx = static_cast<i32>(d.sampleCount) - 1;
+    auto toIndex = [&](f32 worldCoord, f32 originCoord, bool roundUp) -> i32 {
+        const f32 f = (worldCoord - originCoord) / d.spacingCm;
+        const f32 rounded = roundUp ? std::ceil(f) : std::floor(f);
+        return std::clamp(static_cast<i32>(rounded), 0, maxIdx);
+    };
+    const i32 x0 = toIndex(minX, d.originCm[0], false);
+    const i32 x1 = toIndex(maxX, d.originCm[0], true);
+    const i32 y0 = toIndex(minY, d.originCm[1], false);
+    const i32 y1 = toIndex(maxY, d.originCm[1], true);
+    if (x1 < x0 || y1 < y0) return r;
+
+    r.x0 = static_cast<u32>(x0); r.x1 = static_cast<u32>(x1);
+    r.y0 = static_cast<u32>(y0); r.y1 = static_cast<u32>(y1);
+    r.empty = false;
+    return r;
+}
+
+// Applies one stroke tick in place. See Sculpt.hpp.
+BrushRect applyBrush(fmt::OcLandData& d, const BrushParams& p, f32 amount) {
+    const BrushRect r = brushRect(d, p);
+    if (r.empty || amount <= 0.0f) return r;
+
+    // Smooth reads its neighbours, so it needs a stable PRE-EDIT snapshot of the touched region,
+    // padded by one sample so an edge cell's neighbours are pre-edit too -- otherwise a raster-order
+    // sweep would blend some cells against values this very call already changed.
+    std::vector<f32> snapshot;
+    u32 sx0 = 0, sy0 = 0, sw = 0;
+    if (p.mode == BrushMode::Smooth) {
+        sx0 = r.x0 > 0 ? r.x0 - 1 : 0;
+        sy0 = r.y0 > 0 ? r.y0 - 1 : 0;
+        const u32 sx1 = std::min(r.x1 + 1, d.sampleCount - 1);
+        const u32 sy1 = std::min(r.y1 + 1, d.sampleCount - 1);
+        sw = sx1 - sx0 + 1;
+        const u32 sh = sy1 - sy0 + 1;
+        snapshot.resize(static_cast<usize>(sw) * sh);
+        for (u32 y = sy0; y <= sy1; ++y)
+            for (u32 x = sx0; x <= sx1; ++x)
+                snapshot[static_cast<usize>(y - sy0) * sw + (x - sx0)] = d.heightAt(x, y);
+    }
+    auto snap = [&](u32 x, u32 y) { return snapshot[static_cast<usize>(y - sy0) * sw + (x - sx0)]; };
+
+    bool changed = false;
+    for (u32 y = r.y0; y <= r.y1; ++y) {
+        for (u32 x = r.x0; x <= r.x1; ++x) {
+            const f32 wx = d.originCm[0] + static_cast<f32>(x) * d.spacingCm;
+            const f32 wy = d.originCm[1] + static_cast<f32>(y) * d.spacingCm;
+            const f32 dx = wx - p.centerCm[0], dy = wy - p.centerCm[1];
+            const f32 dist = std::sqrt(dx*dx + dy*dy);
+            if (dist > p.radiusCm) continue;
+
+            // Smoothstep falloff: 1 at the centre, 0 at the rim, and flat-topped near the centre --
+            // unlike a linear falloff this does not leave a visible cone tip under the cursor.
+            const f32 t = dist / p.radiusCm;
+            const f32 falloff = 1.0f - t*t*(3.0f - 2.0f*t);
+            const f32 w = falloff * amount;
+            if (w <= 0.0f) continue;
+
+            f32& h = d.heights[static_cast<usize>(y) * d.sampleCount + x];
+            switch (p.mode) {
+                case BrushMode::Raise: h += p.strength * w; break;
+                case BrushMode::Lower: h -= p.strength * w; break;
+                case BrushMode::Flatten: {
+                    const f32 rate = std::min(1.0f, w * 4.0f);   // converges over a few ticks, not one
+                    h += (p.flattenTargetCm - h) * rate;
+                    break;
+                }
+                case BrushMode::Smooth: {
+                    const u32 xm = x > 0 ? x - 1 : x, xp = x + 1 < d.sampleCount ? x + 1 : x;
+                    const u32 ym = y > 0 ? y - 1 : y, yp = y + 1 < d.sampleCount ? y + 1 : y;
+                    const f32 avg = (snap(xm, y) + snap(xp, y) + snap(x, ym) + snap(x, yp) + snap(x, y)) / 5.0f;
+                    const f32 rate = std::min(1.0f, w * 4.0f);
+                    h = snap(x, y) + (avg - snap(x, y)) * rate;
+                    break;
+                }
+            }
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        f32 lo = d.heights[0], hi = d.heights[0];
+        for (f32 v : d.heights) { lo = std::fmin(lo, v); hi = std::fmax(hi, v); }
+        d.boundsMin[0] = d.originCm[0];
+        d.boundsMin[1] = d.originCm[1];
+        d.boundsMin[2] = lo;
+        d.boundsMax[0] = d.originCm[0] + d.extentCm();
+        d.boundsMax[1] = d.originCm[1] + d.extentCm();
+        d.boundsMax[2] = hi;
+    }
+    return r;
+}
+
+} // namespace aver::landscape

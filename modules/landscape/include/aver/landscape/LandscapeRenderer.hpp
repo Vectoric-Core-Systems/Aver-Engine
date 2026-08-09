@@ -57,6 +57,40 @@ public:
         warnedFull_ = false;
     }
 
+    // Forgets every RESIDENT mesh whose node could show stale geometry after a heights edit spanning
+    // source samples [x0,x1]x[y0,y1] (inclusive, in the section's own sample index space -- the same
+    // rect landscape::brushRect()/applyBrush() return). Nothing is rebuilt eagerly here: draw() does
+    // that lazily, the next time an evicted node is selected. Non-resident nodes cost nothing to
+    // "forget" and are not visited. Returns how many were forgotten.
+    //
+    // THE ONE PLACE OUTSIDE draw()/forgetAll() THAT TOUCHES meshes_. It exists because there is no
+    // updateMesh (see the module README's "no updateMesh" limit) -- a sculpted node's cached mesh is
+    // permanently wrong until it is destroyed and rebuilt, and forgetAll() would throw away every
+    // OTHER resident node in the section too, most of which the edit never touched.
+    u32 forgetOverlapping(rhi::IDevice& device, const LandscapeTree& tree, u32 x0, u32 y0, u32 x1, u32 y1) {
+        u32 forgotten = 0;
+        for (auto it = meshes_.begin(); it != meshes_.end(); ) {
+            const u32 nodeIndex = it->first;
+            // An index the tree no longer has (a topology change, not a heights-only edit) cannot be
+            // checked for overlap -- the safe answer is to drop it rather than risk keeping something
+            // stale.
+            bool overlaps = true;
+            if (nodeIndex < tree.nodes().size()) {
+                const LandscapeNode& n = tree.nodes()[nodeIndex];
+                const u32 nx1 = n.sampleX + n.spanQuads, ny1 = n.sampleY + n.spanQuads;
+                overlaps = !(nx1 < x0 || n.sampleX > x1 || ny1 < y0 || n.sampleY > y1);
+            }
+            if (overlaps) {
+                device.destroyMesh(it->second.handle);
+                it = meshes_.erase(it);
+                ++forgotten;
+            } else {
+                ++it;
+            }
+        }
+        return forgotten;
+    }
+
 private:
     // The nearest ancestor of `node` that already has a mesh, or kInvalidNode.
     u32 residentAncestor(const LandscapeTree& tree, u32 node) const;

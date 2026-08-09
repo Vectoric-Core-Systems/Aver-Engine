@@ -1,7 +1,8 @@
 #pragma once
 // .ocworld — the native world format, and a strict superset of .ocmap (FORMAT_SPECS.md §11).
-// Identity, SUN/FOG environment, PLACE/PLACEG placements, and the SCATTER palette a PCGVOLUME's
-// density field is populated with. Unknown records parse and are skipped.
+// Identity, SUN/FOG environment, PLACE/PLACEG placements, the LANDSCAPE sections a level's terrain is
+// built from, and the SCATTER palette a PCGVOLUME's density field is populated with. Unknown records
+// parse and are skipped.
 // Engine space: centimetres, +X forward, +Y right, +Z up, left-handed. Positions are f64.
 #include "aver/core/Types.hpp"
 #include "aver/assets/AssetId.hpp"
@@ -89,6 +90,33 @@ struct OcScatterSpecies {
     f64 collisionRadiusCm = 0.0;
 };
 
+// One landscape SECTION a level places in world space: heightfield terrain from an .ocland asset
+// (modules/formats/include/aver/formats/OcLand.hpp -- "one landscape SECTION: a square heightfield
+// grid, in the AVR1 container"). The level carries no heights itself, only where a section sits and,
+// optionally, how large the level declares it to be.
+//
+// NAMED, for the same reason OcPcgVolume is: a level tiling several sections into one landscape names
+// each one, so a script or a scout asking for "the landscape" when there are several knows which it
+// means.
+//
+// PLACEMENT IS SEPARATE FROM THE ASSET, exactly as OcWorldPlacement's x/y/z sit apart from the mesh it
+// names: an .ocland file already carries its own originCm, but a level author positioning (or
+// re-using) the same section at a different spot in the world should not have to re-author the asset
+// to do it -- `at` OVERRIDES the section's own origin, the same way PLACE overrides wherever a mesh's
+// pivot happens to be.
+struct OcLandscapePlacement {
+    std::string name;      // level-local identifier; "unnamed" when empty, mirroring OcPcgVolume
+    std::string section;   // asset reference to the .ocland file; required in practice
+    f64 x = 0, y = 0, z = 0;   // world placement (cm) of the section's own origin sample, overriding
+                                // whatever the .ocland file's own originCm says
+
+    // Declared footprint in cm. ZERO MEANS UNSET -- the section file's own sampleCount/spacingCm
+    // remain the authority; this is a level-authored HINT for a reader that would rather not open the
+    // asset just to learn how much space it occupies (an editor bounds preview, a streaming budget),
+    // never a second source of truth the runtime has to reconcile against the file.
+    f64 extentCm = 0.0;
+};
+
 struct OcWorldData {
     int version = 1;
     u64 contentId = 0;                     // ID = FNV-1a-64(NAME)
@@ -118,6 +146,10 @@ struct OcWorldData {
 
     bool hasSpawn = false;
     f64 spawnX = 0, spawnY = 0, spawnZ = 0, spawnYaw = 0;
+
+    // The level's landscape sections. Order is the file's order, same reasoning as pcgVolumes below --
+    // a level naming two the same keeps both rather than silently losing one.
+    std::vector<OcLandscapePlacement> landscapes;
 
     // Declared density fields. Order is the file's order, so a level that declares two with the
     // same name keeps both rather than silently losing one -- the reader reports it instead.

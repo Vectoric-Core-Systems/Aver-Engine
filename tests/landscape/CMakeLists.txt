@@ -36,3 +36,17 @@ if(TARGET Aver.Landscape.Renderer)
   set_target_properties(LandscapeEvictTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# SculptTest -- the sculpt editor's CPU model: brush edits (raise/lower/smooth/flatten), the
+# ray-vs-heightfield pick a cursor needs, and that editing a section invalidates exactly the resident
+# meshes the edit could have touched, not the whole cache. Aver.Landscape only; the renderer-cache
+# section is guarded the same way LandscapeTreeTest's own renderer section is, for the same reason.
+add_executable(SculptTest src/SculptTest.cpp)
+target_link_libraries(SculptTest PRIVATE Aver.Landscape Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(SculptTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+if(TARGET Aver.Landscape.Renderer)
+  target_link_libraries(SculptTest PRIVATE Aver.Landscape.Renderer)
+  target_compile_definitions(SculptTest PRIVATE AVER_LANDSCAPE_TEST_RENDERER=1)
+endif()

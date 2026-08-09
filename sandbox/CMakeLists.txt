@@ -223,3 +223,13 @@ endif()
 if(TARGET Aver.Trifactor)
   target_link_libraries(Sandbox PRIVATE Aver.Trifactor)
 endif()
+
+# The landscape runtime: quadtree LOD selection, chunk mesh generation and the GPU draw loop
+# (modules/landscape). Before this, nothing outside tests/landscape linked either target -- the
+# renderer was a complete, tested subsystem the editor could not host. Linking only the .Renderer
+# target is sufficient: it PUBLIC-links Aver.Landscape (modules/landscape/CMakeLists.txt), which is
+# what brings AVER_MODULE_LANDSCAPE=1 through the link interface and lets SandboxApp.cpp guard the
+# feature with `#if AVER_MODULE_LANDSCAPE`, same shape as Aver.Render.Voxi.Renderer above.
+if(TARGET Aver.Landscape.Renderer)
+  target_link_libraries(Sandbox PRIVATE Aver.Landscape.Renderer)
+endif()

@@ -33,6 +33,7 @@
 #include "aver/world/ChunkSource.hpp"
 
 #if AVER_MODULE_SCENE
+#  include <functional>
 #  include <limits>
 #  include <string>
 #  include <vector>
@@ -109,6 +110,39 @@ struct GeneratorSettings {
 
     // The weighted scatter palette. Empty means "one species from meshPath/material above".
     std::vector<ScatterSpecies> palette;
+
+    // OPTIONAL: where a candidate that already exists actually sits vertically. Called at most once
+    // per ACCEPTED candidate (one that already cleared `threshold` and got a species from the
+    // palette), with that candidate's world (x, y) in centimetres; on true, `outWorldZCm` is the
+    // world Z the entity is placed at. False (or this left unset, its default) means "no surface
+    // known here", and the candidate falls back to today's flat behaviour for ITSELF ALONE -- every
+    // other candidate in the same chunk still asks independently.
+    //
+    // THE SEAM IS PLACEMENT ONLY. It cannot change which candidates exist, which species one gets, its
+    // scale, its yaw, or the interpenetration bookkeeping (ChunkGenerator.cpp's `placedSolid`) -- none
+    // of those read Z. Installing or changing a height source only moves accepted entities up or down.
+    //
+    // UNSET IS THE DEFAULT, AND MUST STAY BYTE-IDENTICAL TO TODAY. An empty std::function is falsy, so
+    // every candidate's local Z stays exactly 0.0f, the same literal ChunkGenerator.cpp always wrote --
+    // this field costs a caller that never touches it nothing, not even a different code path.
+    //
+    // MUST BE A PURE FUNCTION OF (worldXCm, worldYCm) for as long as it is installed -- the same
+    // contract every other field here already carries (worldSeed, threshold, octaves, ...): generate()
+    // is documented as a pure function of (settings, coord), and a height source that reads live,
+    // still-changing terrain breaks that guarantee the moment two calls disagree. A loaded, immutable
+    // `.ocland` section qualifies; a terrain edit mid-stroke does not, and must be finalised first.
+    //
+    // SET BEFORE ChunkWorld::open(), NOT AFTER. Unlike RestoreOptions::bindMaterial/::createBody --
+    // which the streamer owns and a caller assigns once open() has returned -- GeneratorSettings is
+    // value-copied into GeneratedChunkSource by setSettings(), which ChunkWorld::open() calls once, at
+    // open time. Assigning this field on a ChunkWorldSettings already passed to open() has no effect:
+    // it never reaches the copy generate() reads.
+    //
+    // NEVER LINKS Aver.Landscape. This module takes no dependency on it and never will -- a host that
+    // wants terrain-backed placement links Aver.Landscape itself and closes a lambda over it, exactly
+    // as RestoreOptions::bindMaterial closes over a host's own material system rather than this module
+    // depending on Aver.Render.PBR.
+    std::function<bool(f32 worldXCm, f32 worldYCm, f32& outWorldZCm)> heightSource;
 };
 
 // A source that invents its chunks. Never fails and never touches a file.
