@@ -295,16 +295,28 @@ static std::vector<rhi::LineVertex> buildScaleAxis(int a, const Vec3& c) {
 // -- they are the same "which mouse-drag behaviour is active" idea Move/Rotate/Scale are, just aimed
 // at a heightfield's samples instead of an object's transform, and they follow the same enum/toolbar
 // shape rather than inventing a parallel one. See handleSculpt() and the ##vpbar_right toolbar block.
-enum class Tool { Select, Move, Rotate, Scale
-#if AVER_MODULE_LANDSCAPE
-    , SculptRaise, SculptLower, SculptSmooth, SculptFlatten
-#endif
-};
-#if AVER_MODULE_LANDSCAPE
-static const char* kToolNames[8] = {"Select", "Move", "Rotate", "Scale",
-                                     "Sculpt: Raise", "Sculpt: Lower", "Sculpt: Smooth", "Sculpt: Flatten"};
-#else
+// WHICH MODE THE EDITOR IS IN: what the viewport is FOR right now.
+//
+// Select edits OBJECTS -- click to pick, gizmo to transform. Landscape edits TERRAIN -- click to
+// sculpt, no picking, no gizmo. They are different activities with different meanings for the same
+// mouse button, and that is the whole reason a mode exists rather than another tool.
+//
+// THIS USED TO BE ONE ENUM. Sculpt: Raise/Lower/Smooth/Flatten sat in `Tool` beside Move and Rotate,
+// on keys 5-8, so terrain editing was a peer of "move an object": the gizmo still drew, picking
+// still ran, the brush had nowhere of its own to put a radius or a strength, and nothing told you
+// which of the two things a click was about to do. Splitting the mode out is what lets each side
+// own its own toolbar, its own hotkeys 1..N, and its own answer to what clicking means.
+enum class EditorMode { Select, Landscape };
+static const char* kEditorModeNames[2] = {"Select", "Landscape"};
+
+// Object tools. Only meaningful in EditorMode::Select.
+enum class Tool { Select, Move, Rotate, Scale };
 static const char* kToolNames[4] = {"Select", "Move", "Rotate", "Scale"};
+
+#if AVER_MODULE_LANDSCAPE
+// Terrain brushes. Only meaningful in EditorMode::Landscape.
+enum class SculptTool { Raise, Lower, Smooth, Flatten };
+static const char* kSculptToolNames[4] = {"Raise", "Lower", "Smooth", "Flatten"};
 #endif
 
 // Which bottom drawer is up. Only one at a time.
@@ -4246,16 +4258,26 @@ private:
         const ImGuiIO& io = ImGui::GetIO();
 
         if (levelFocused_ && !io.WantCaptureKeyboard) {
-            if (ImGui::IsKeyPressed(ImGuiKey_1)) tool_=Tool::Select;
-            if (ImGui::IsKeyPressed(ImGuiKey_2)) tool_=Tool::Move;
-            if (ImGui::IsKeyPressed(ImGuiKey_3)) tool_=Tool::Rotate;
-            if (ImGui::IsKeyPressed(ImGuiKey_4)) tool_=Tool::Scale;
+            // 1..4 select a tool WITHIN the active mode, so the same keys mean "the four things this
+            // mode does" rather than being a single flat list that grows every time a mode is added.
+            // Tab switches mode, which is the one binding that has to mean the same thing in both.
+            if (ImGui::IsKeyPressed(ImGuiKey_Tab)) toggleEditorMode();
+#if AVER_MODULE_LANDSCAPE
+            if (mode_ == EditorMode::Landscape) {
+                if (ImGui::IsKeyPressed(ImGuiKey_1)) sculptTool_=SculptTool::Raise;
+                if (ImGui::IsKeyPressed(ImGuiKey_2)) sculptTool_=SculptTool::Lower;
+                if (ImGui::IsKeyPressed(ImGuiKey_3)) sculptTool_=SculptTool::Smooth;
+                if (ImGui::IsKeyPressed(ImGuiKey_4)) sculptTool_=SculptTool::Flatten;
+            } else
+#endif
+            {
+                if (ImGui::IsKeyPressed(ImGuiKey_1)) tool_=Tool::Select;
+                if (ImGui::IsKeyPressed(ImGuiKey_2)) tool_=Tool::Move;
+                if (ImGui::IsKeyPressed(ImGuiKey_3)) tool_=Tool::Rotate;
+                if (ImGui::IsKeyPressed(ImGuiKey_4)) tool_=Tool::Scale;
+            }
 #if AVER_MODULE_LANDSCAPE
             if (landscapeLoaded_) {
-                if (ImGui::IsKeyPressed(ImGuiKey_5)) tool_=Tool::SculptRaise;
-                if (ImGui::IsKeyPressed(ImGuiKey_6)) tool_=Tool::SculptLower;
-                if (ImGui::IsKeyPressed(ImGuiKey_7)) tool_=Tool::SculptSmooth;
-                if (ImGui::IsKeyPressed(ImGuiKey_8)) tool_=Tool::SculptFlatten;
             }
 #endif
         }
@@ -4263,8 +4285,7 @@ private:
         const bool overScene = levelHovered_ && inViewport(mx, my);
 
 #if AVER_MODULE_LANDSCAPE
-        const bool isSculptTool = tool_==Tool::SculptRaise || tool_==Tool::SculptLower ||
-                                   tool_==Tool::SculptSmooth || tool_==Tool::SculptFlatten;
+        const bool isSculptTool = editorModeIsLandscape();
 #else
         // Unused with the module off -- the isSculptTool branch below compiles out along with it --
         // but declared anyway so isXformTool's "everything that is not a sculpt tool" phrasing does
@@ -4273,7 +4294,10 @@ private:
 #endif
         // Only Move/Rotate/Scale ever show or drive the transform gizmo -- a sculpt tool has its own
         // brush-ring cursor (drawSculptCursor()) and its own click/drag handling below, not this one.
-        const bool isXformTool = tool_==Tool::Move || tool_==Tool::Rotate || tool_==Tool::Scale;
+        // Object transforms are a Select-mode action, for the same reason. In Landscape mode a
+        // drag is a brush stroke and must not also nudge whatever happens to be selected.
+        const bool isXformTool = !editorModeIsLandscape() &&
+                                 (tool_==Tool::Move || tool_==Tool::Rotate || tool_==Tool::Scale);
 
         hoverAxis_ = -1;
         EditXform gx;
@@ -4362,9 +4386,9 @@ private:
             p.radiusCm = sculptRadiusCm_;
             p.strength = sculptStrengthCm_;
             p.flattenTargetCm = sculptFlattenTargetCm_;
-            p.mode = tool_==Tool::SculptRaise  ? landscape::BrushMode::Raise
-                   : tool_==Tool::SculptLower  ? landscape::BrushMode::Lower
-                   : tool_==Tool::SculptSmooth ? landscape::BrushMode::Smooth
+            p.mode = sculptTool_==SculptTool::Raise  ? landscape::BrushMode::Raise
+                   : sculptTool_==SculptTool::Lower  ? landscape::BrushMode::Lower
+                   : sculptTool_==SculptTool::Smooth ? landscape::BrushMode::Smooth
                                                 : landscape::BrushMode::Flatten;
 
             // dt-scaled so holding the button paints at a constant rate regardless of frame rate,
@@ -4406,6 +4430,10 @@ private:
         // rather than Select's own denylist of one, so a tool added later defaults to "no gizmo"
         // instead of silently inheriting the Scale gizmo the old `: gzScale_` fallback below would
         // have given it.
+        // The gizmo belongs to Select mode. Without this it would keep drawing over the terrain
+        // while a brush was active, because tool_ still holds whatever object tool was last used --
+        // the mode changes what the viewport is for, it does not clear the other mode's state.
+        if (editorModeIsLandscape()) return;
         if (tool_!=Tool::Move && tool_!=Tool::Rotate && tool_!=Tool::Scale) return;
         EditXform x;
         if (!selectedXform(x)) return;
@@ -4433,8 +4461,7 @@ private:
     // draws over a selection -- it needs to read through the ground plane it is standing on.
     void drawSculptCursor(Engine& e) {
         if (!brushRing_ || !sculptCursorValid_) return;
-        const bool sculptTool = tool_==Tool::SculptRaise || tool_==Tool::SculptLower ||
-                                 tool_==Tool::SculptSmooth || tool_==Tool::SculptFlatten;
+        const bool sculptTool = editorModeIsLandscape();
         if (!sculptTool) return;
         const Mat4 w = Mat4::scale(Vec3{sculptRadiusCm_, sculptRadiusCm_, sculptRadiusCm_}) *
                        Mat4::translation(sculptCursor_);
@@ -6942,6 +6969,64 @@ private:
             return clk;
         };
 
+        // MODE FIRST, then that mode's tools. The switcher is always the leftmost thing in the
+        // toolbar so "what am I editing" is answered before "with which tool" -- the two questions
+        // were previously the same flat row, which is how a brush ended up sitting next to Rotate.
+        {
+            auto modeBtn = [&](const char* label, EditorMode m, bool enabled) {
+                const bool on = mode_ == m;
+                if (!enabled) ImGui::BeginDisabled();
+                if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.79f, 0.47f, 0.16f, 1.0f));
+                if (ImGui::Button(label)) setEditorMode(m);
+                if (on) ImGui::PopStyleColor();
+                if (!enabled) {
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                        ImGui::SetTooltip("This level has no landscape section. Add a LANDSCAPE "
+                                          "record, or pass --landscape <file.ocland>.");
+                }
+            };
+            modeBtn("Select", EditorMode::Select, true);
+            uiReg_.track("mode.select");
+#if AVER_MODULE_LANDSCAPE
+            ImGui::SameLine(0, gap);
+            // Offered even with nothing loaded, but disabled and explaining why: a mode that simply
+            // vanishes reads as a missing feature rather than an unmet precondition.
+            modeBtn("Landscape", EditorMode::Landscape, landscapeLoaded_);
+            uiReg_.track("mode.landscape");
+#endif
+            ImGui::SameLine(0, gap*2);
+        }
+
+#if AVER_MODULE_LANDSCAPE
+        if (mode_ == EditorMode::Landscape) {
+            if (toolBtn("##tSRaise", 4, sculptTool_==SculptTool::Raise)) sculptTool_=SculptTool::Raise;
+            uiReg_.track("tool.sculptRaise");
+            ImGui::SameLine(0, gap);
+            if (toolBtn("##tSLower", 5, sculptTool_==SculptTool::Lower)) sculptTool_=SculptTool::Lower;
+            uiReg_.track("tool.sculptLower");
+            ImGui::SameLine(0, gap);
+            if (toolBtn("##tSSmooth", 6, sculptTool_==SculptTool::Smooth)) sculptTool_=SculptTool::Smooth;
+            uiReg_.track("tool.sculptSmooth");
+            ImGui::SameLine(0, gap);
+            if (toolBtn("##tSFlatten", 7, sculptTool_==SculptTool::Flatten)) sculptTool_=SculptTool::Flatten;
+            uiReg_.track("tool.sculptFlatten");
+            ImGui::SameLine(0, gap*2);
+            // The brush settings live HERE, in the mode that owns them, rather than appearing and
+            // disappearing from a shared row depending on which tool happened to be selected.
+            char brushLbl[32]; std::snprintf(brushLbl, sizeof brushLbl, "Brush %.0f", sculptRadiusCm_);
+            if (dropButton(brushLbl)) ImGui::OpenPopup("brushParams");
+            ImGui::SameLine(0, gap);
+            if (ImGui::Button(landscapeDirty_ ? "Save Terrain *" : "Save Terrain")) saveLandscape();
+            uiReg_.track("landscape.save");
+            if (ImGui::BeginPopup("brushParams")) {
+                ImGui::SliderFloat("Radius (cm)", &sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+                ImGui::SliderFloat("Strength (cm)", &sculptStrengthCm_, 5.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+                ImGui::EndPopup();
+            }
+        } else
+#endif
+        {
         if (toolBtn("##tSel", 0, tool_==Tool::Select)) tool_=Tool::Select;
         uiReg_.track("tool.select");
         ImGui::SameLine(0, gap);
@@ -6958,6 +7043,8 @@ private:
         ImGui::SameLine(0, tiny); if (caretBtn("##cScl", snapScale_)) ImGui::OpenPopup("snapScale");
         ImGui::SameLine(0, gap*2);
         if (ImGui::Button(worldSpace_ ? "World" : "Local")) worldSpace_ = !worldSpace_;
+        }
+
         ImGui::SameLine(0, gap);
         char camLbl[32]; std::snprintf(camLbl, sizeof camLbl, "Cam %.0f", flySpeed_);
         if (dropButton(camLbl)) ImGui::OpenPopup("camSpeed");
@@ -6975,7 +7062,7 @@ private:
         if (ImGui::BeginPopup("snapRot")) {
             ImGui::Checkbox("Angle snap (rotation)", &snapRot_); ImGui::Separator();
             const f32 opts[] = {1,5,10,15,30,45,90};
-            for (f32 v : opts){ char b[24]; std::snprintf(b,sizeof b,"%g\xC2\xB0", v); if (ImGui::Selectable(b, rotSnap_==v)){ rotSnap_=v; snapRot_=true; } }
+            for (f32 v : opts){ char b[24]; std::snprintf(b,sizeof b,"%gÂ°", v); if (ImGui::Selectable(b, rotSnap_==v)){ rotSnap_=v; snapRot_=true; } }
             ImGui::EndPopup();
         }
         if (ImGui::BeginPopup("snapScale")) {
@@ -6984,51 +7071,18 @@ private:
             for (f32 v : opts){ char b[24]; std::snprintf(b,sizeof b,"%g", v); if (ImGui::Selectable(b, scaleSnap_==v)){ scaleSnap_=v; snapScale_=true; } }
             ImGui::EndPopup();
         }
-
-#if AVER_MODULE_LANDSCAPE
-        // Sculpt tools: only shown once a section is actually loaded -- a toolbar full of brushes
-        // with nothing to paint on would just error out the first time one was clicked.
-        if (landscapeLoaded_) {
-            ImGui::SameLine(0, gap*2);
-            if (toolBtn("##tSRaise", 4, tool_==Tool::SculptRaise)) tool_=Tool::SculptRaise;
-            uiReg_.track("tool.sculptRaise");
-            ImGui::SameLine(0, gap);
-            if (toolBtn("##tSLower", 5, tool_==Tool::SculptLower)) tool_=Tool::SculptLower;
-            uiReg_.track("tool.sculptLower");
-            ImGui::SameLine(0, gap);
-            if (toolBtn("##tSSmooth", 6, tool_==Tool::SculptSmooth)) tool_=Tool::SculptSmooth;
-            uiReg_.track("tool.sculptSmooth");
-            ImGui::SameLine(0, gap);
-            if (toolBtn("##tSFlatten", 7, tool_==Tool::SculptFlatten)) tool_=Tool::SculptFlatten;
-            uiReg_.track("tool.sculptFlatten");
-
-            const bool sculptActive = tool_==Tool::SculptRaise || tool_==Tool::SculptLower ||
-                                       tool_==Tool::SculptSmooth || tool_==Tool::SculptFlatten;
-            if (sculptActive) {
-                ImGui::SameLine(0, gap);
-                char brushLbl[32]; std::snprintf(brushLbl, sizeof brushLbl, "Brush %.0f", sculptRadiusCm_);
-                if (dropButton(brushLbl)) ImGui::OpenPopup("brushParams");
-            }
-            if (ImGui::BeginPopup("brushParams")) {
-                ImGui::SliderFloat("Radius (cm)", &sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-                ImGui::SliderFloat("Strength (cm)", &sculptStrengthCm_, 5.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-                ImGui::EndPopup();
-            }
-        }
-#endif
         ImGui::End();
 
         ImGui::SetNextWindowPos(ImVec2(vpX_+pad, vpY_+vpH_-pad), ImGuiCond_Always, ImVec2(0,1));
         ImGui::SetNextWindowBgAlpha(0.35f);
         ImGui::Begin("##vphint", nullptr, f | ImGuiWindowFlags_NoInputs);
 #if AVER_MODULE_LANDSCAPE
-        if (tool_==Tool::SculptRaise || tool_==Tool::SculptLower ||
-            tool_==Tool::SculptSmooth || tool_==Tool::SculptFlatten)
-            ImGui::Text("%s  |  LMB paint  |  radius %.0f cm, strength %.0f cm (Brush dropdown)  |  5-8 sculpt tools",
-                        kToolNames[(int)tool_], sculptRadiusCm_, sculptStrengthCm_);
+        if (mode_ == EditorMode::Landscape)
+            ImGui::Text("Landscape: %s  |  LMB paint  |  radius %.0f cm, strength %.0f cm  |  1-4 brushes, Tab to Select",
+                        kSculptToolNames[(int)sculptTool_], sculptRadiusCm_, sculptStrengthCm_);
         else
 #endif
-        ImGui::Text("%s  |  RMB fly (WASD/QE)  wheel speed  MMB pan  F focus  |  1-4 tools", kToolNames[(int)tool_]);
+        ImGui::Text("Select: %s  |  RMB fly (WASD/QE)  wheel speed  MMB pan  F focus  |  1-4 tools, Tab to Landscape", kToolNames[(int)tool_]);
         ImGui::End();
     }
 #endif
@@ -7122,6 +7176,52 @@ private:
         return base + " " + std::to_string(++labelCounts_[base]);
     }
     Tool tool_ = Tool::Select;
+
+    // Which mode the viewport is in, and the brush the Landscape mode is holding. Both members are
+    // UNGUARDED even though sculpting is AVER_MODULE_LANDSCAPE-only: the mode switch, the viewport
+    // hint and the input dispatch all read them from unguarded code, and a member that disappears
+    // under one configuration while its readers remain is the split-guard defect this file has been
+    // bitten by repeatedly. With the module off, Landscape simply never becomes reachable.
+    EditorMode mode_ = EditorMode::Select;
+#if AVER_MODULE_LANDSCAPE
+    SculptTool sculptTool_ = SculptTool::Raise;
+#endif
+
+    // True only when terrain editing is actually possible right now: the mode is Landscape AND a
+    // section is loaded. Every "should this click sculpt" test goes through here rather than
+    // checking the mode alone, so a mode left selected when a level without terrain loads cannot
+    // paint into a section that is not there.
+    bool editorModeIsLandscape() const {
+#if AVER_MODULE_LANDSCAPE
+        return mode_ == EditorMode::Landscape && landscapeLoaded_;
+#else
+        return false;
+#endif
+    }
+
+    // Switching mode ends whatever the previous one was mid-way through. A drag that began as a
+    // gizmo move and finishes as a brush stroke would apply one to the other's target.
+    void setEditorMode(EditorMode m) {
+        if (mode_ == m) return;
+#if AVER_MODULE_LANDSCAPE
+        if (m == EditorMode::Landscape && !landscapeLoaded_) {
+            AVER_WARN("[Editor] Landscape mode needs a terrain section; this level has none");
+            return;
+        }
+        sculpting_ = false;
+        sculptCursorValid_ = false;
+#endif
+        dragging_ = false;
+        mode_ = m;
+        // Leaving Select with something selected is fine and even useful -- the selection is still
+        // there when you come back -- but the gizmo must stop drawing, which it does because its
+        // draw path tests the mode.
+        AVER_INFO("[Editor] mode: {}", kEditorModeNames[static_cast<int>(m)]);
+    }
+
+    void toggleEditorMode() {
+        setEditorMode(mode_ == EditorMode::Select ? EditorMode::Landscape : EditorMode::Select);
+    }
     // Free-fly editor camera: position plus yaw/pitch.
     Vec3 camPos_{7.0f, 7.0f, 4.5f};
     f32 yaw_ = 0.0f, pitch_ = 0.0f, flySpeed_ = 800.0f, lookSpeed_ = 0.005f;   // cm/s
@@ -9017,8 +9117,7 @@ Application* createApplication(int argc, char** argv) {
             tool = !std::strcmp(t,"move")?Tool::Move : !std::strcmp(t,"rotate")?Tool::Rotate :
                    !std::strcmp(t,"scale")?Tool::Scale :
 #if AVER_MODULE_LANDSCAPE
-                   !std::strcmp(t,"sculpt-raise")?Tool::SculptRaise : !std::strcmp(t,"sculpt-lower")?Tool::SculptLower :
-                   !std::strcmp(t,"sculpt-smooth")?Tool::SculptSmooth : !std::strcmp(t,"sculpt-flatten")?Tool::SculptFlatten :
+
 #endif
                    Tool::Select;
         }
