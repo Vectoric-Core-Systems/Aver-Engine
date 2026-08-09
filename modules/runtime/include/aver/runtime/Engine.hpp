@@ -3,6 +3,8 @@
 #include "aver/core/Types.hpp"
 #include "aver/core/Time.hpp"
 
+#include <string>
+
 namespace aver {
 
 class Window;
@@ -26,6 +28,15 @@ public:
     rhi::IDevice* device() const { return device_; }
     const Timestep& time() const { return time_; }
 
+    // Names the startup stage currently underway, on the splash screen's status line.
+    //
+    // FOR onInit's USE. Everything slow about starting this editor happens inside
+    // Application::onInit -- shader preludes, a project's meshes and materials, the scripting host --
+    // and the engine cannot name those stages because it does not know what the application is
+    // doing. A no-op once the splash has closed, and in headless or capture runs where there never
+    // was one, so a caller never has to ask whether it is safe to call.
+    void setLoadingStatus(const std::string& stage);
+
 private:
     // One frame: sync swapchain to the window size, update, render, present.
     void frameStep();
@@ -36,6 +47,10 @@ private:
     rhi::IDevice* device_ = nullptr;
     rhi::ISwapchain* swapchain_ = nullptr;
     Application* app_ = nullptr;
+    // Borrowed, non-owning, and only non-null for the duration of onInit -- the Splash itself is a
+    // local in run() and is destroyed when startup ends. Typed as void* so this header does not have
+    // to include a platform one for a pointer it never dereferences.
+    void* splashForApp_ = nullptr;
     Clock frameClock_;
     Timestep time_;
     bool exit_ = false;

@@ -31,6 +31,10 @@ int Engine::run(Application* app) {
     // --- Splash (shown during startup) ---
     Splash splash;
     if (!cfg.headless && interactive) splash.show(executableDir() + "\\splash.png");
+    // The stages below are named as they START, not as they finish, because the point of the line is
+    // to say what the process is busy with while it is unresponsive. Each call repaints
+    // synchronously; a message that appears only after the work completes says nothing useful.
+    splash.setStatus("Opening window");
 
     // --- Window (optional; fall back to headless on failure) ---
     if (!cfg.headless) {
@@ -68,9 +72,11 @@ int Engine::run(Application* app) {
                        "default order", cfg.backend);
         }
     }
+    splash.setStatus("Creating graphics device");
     device_ = rhi::createDevice(dd);
 
     if (window_) {
+        splash.setStatus("Creating swapchain");
         rhi::SwapchainDesc sd;
         sd.windowHandle = window_->nativeHandle();
         sd.width = window_->width();
@@ -78,13 +84,20 @@ int Engine::run(Application* app) {
         swapchain_ = device_->createSwapchain(sd);
 
         // In-window editor UI (Dear ImGui). Route raw window messages to it.
+        splash.setStatus("Initialising editor UI");
         if (device_->uiInit(window_->nativeHandle())) {
             window_->setMessageHook(&rhi::uiWndProc);
         }
     }
 
     app_ = app;
+    // onInit is where the long tail lives -- shader preludes are compiled, the project's meshes,
+    // materials and textures are loaded, scripts are hosted. The application reports its own stages
+    // through this, which is why the splash is handed to it rather than kept private here.
+    splash.setStatus("Compiling shaders");
+    splashForApp_ = &splash;
     app->onInit(*this);
+    splashForApp_ = nullptr;
     // Render one frame per modal-loop timer tick.
     if (window_) window_->setRenderTick(&Engine::renderTickThunk, this);
     if (!cfg.headless) splash.close(1100);
@@ -124,6 +137,12 @@ int Engine::run(Application* app) {
     else
         AVER_INFO("Aver Engine stopped after {} frame(s)", time_.frame);
     return code;
+}
+
+// Names the startup stage on the splash's status line. See the header for why this exists.
+void Engine::setLoadingStatus(const std::string& stage) {
+    if (!splashForApp_) return;
+    static_cast<Splash*>(splashForApp_)->setStatus(stage);
 }
 
 // One frame: sync swapchain to the window size, update, render, present.
