@@ -29,6 +29,10 @@
 // Both are RHI-free, same as the rest of Aver.Landscape -- see their own headers.
 #include "aver/landscape/HeightfieldRay.hpp"
 #include "aver/landscape/Sculpt.hpp"
+// Terrain collision. Aver.Landscape does the conversion; the physics ABI takes the result. Both
+// halves already existed and tests/landscape proves the pair with a real Jolt raycast -- nothing
+// called it.
+#include "aver/landscape/PhysicsBridge.hpp"
 #endif
 #if AVER_HAVE_AUDIO_IMPORT
 #  include "aver/formats/OcAudio.hpp"
@@ -2809,18 +2813,22 @@ private:
     // `device` frees the section CURRENTLY resident (if any) through forgetAll before replacing it;
     // pass nullptr only when no device has been created yet, in which case there is nothing resident
     // to free either.
-    void loadLandscape(rhi::IDevice* device, const std::string& path) {
+    // Returns whether a section is now resident, so a caller that has more to do to it (place it,
+    // hand it to the chunk generator) can tell the difference between "loaded" and "there is no
+    // terrain here", rather than reading landscapeLoaded_ back out and hoping it was this call that
+    // set it.
+    bool loadLandscape(rhi::IDevice* device, const std::string& path) {
         unloadLandscape(device);
         fmt::OcLandData data;
         std::string why;
         if (!fmt::loadOcLand(path, data, &why)) {
             AVER_WARN("[Landscape] could not load '{}': {}", path, why);
-            return;
+            return false;
         }
         landscape::LandscapeTree tree;
         if (!tree.build(data, landscape::kDefaultNodeQuads, &why)) {
             AVER_WARN("[Landscape] '{}' loaded but its quadtree would not build: {}", path, why);
-            return;
+            return false;
         }
         landscapeData_ = std::move(data);
         landscapeTree_ = std::move(tree);
@@ -2832,12 +2840,76 @@ private:
         AVER_INFO("[Landscape] '{}' loaded: {} node(s) across {} level(s), {}x{} samples",
                   path, landscapeTree_.nodes().size(), landscapeTree_.levelCount(),
                   landscapeData_.sampleCount, landscapeData_.sampleCount);
+        return true;
+    }
+
+    // Points a live chunk generator at the resident section, so scattered entities sit ON the
+    // terrain instead of on the flat plane at the chunk's origin Z.
+    //
+    // CALLED FROM BOTH DIRECTIONS, because either can happen first: a level load can bring terrain in
+    // while streaming is already running, and switching streaming on can find terrain already
+    // resident. setChunkStreamingEnabled does the same wiring for the second case.
+    //
+    // THE LAMBDA CAPTURES `this`, NOT THE DATA. Sculpting mutates landscapeData_ in place, so a copy
+    // would silently keep scattering onto the heights the terrain had when streaming started. It is
+    // safe because the generator lives in chunkWorld_, which this object owns and destroys.
+    void applyLandscapeToStreaming() {
+#if AVER_MODULE_SCENE
+        // Nothing streaming yet: setChunkStreamingEnabled wires the source itself when it opens, so
+        // the common order (level loads terrain, streaming switched on afterwards) needs nothing here.
+        if (!chunkWorld_) return;
+        // ChunkWorld exposes settings() as CONST ONLY -- there is no supported way to swap a live
+        // generator's height source, and adding one to reach in from here would widen that module's
+        // API for the editor's convenience. Restarting streaming re-opens through the same path that
+        // already knows how to wire it, and re-generates only the chunks around the camera. Doing it
+        // this way also drops every chunk generated against the OLD surface, which matters because
+        // the region index's generatorVersion is carried but not yet compared -- a known gap, and
+        // one this would otherwise fall straight into.
+        AVER_INFO("[ChunkWorld] terrain changed under a live stream -- restarting it so scatter "
+                  "re-generates against the new surface");
+        setChunkStreamingEnabled(false);
+        setChunkStreamingEnabled(true);
+#endif
+    }
+
+    // Gives the resident section a static collision body, so things can stand on the terrain rather
+    // than only look at it.
+    //
+    // REBUILT WHOLE, not patched. Jolt's heightfield shape is immutable once created, and
+    // PhysicsBridge converts the entire section (transposing into its row order) in one pass; there
+    // is no partial update to reach for. That is why this is called at LOAD and at SAVE rather than
+    // per brush stroke -- a stroke would pay for the whole conversion, several times a second.
+    //
+    // THE CONSEQUENCE, stated rather than hidden: between sculpting and saving, what you see and
+    // what you collide with disagree. The visual mesh and the scatter's height source both read
+    // landscapeData_ live; the body is a snapshot.
+    void rebuildLandscapeCollision() {
+#if AVER_MODULE_PHYSICS
+        if (landscapeBody_ >= 0) { aver_phys_remove_body(landscapeBody_); landscapeBody_ = -1; }
+        if (!landscapeLoaded_ || !aver_phys_ready()) return;
+        landscape::PhysicsHeightfield hf;
+        if (!landscape::toPhysicsHeightfield(landscapeData_, hf)) {
+            AVER_WARN("[Landscape] section is not internally consistent; no collision built");
+            return;
+        }
+        landscapeBody_ = aver_phys_add_heightfield(hf.samples.data(), static_cast<i32>(hf.sampleCount),
+                                                   hf.spacingCm, hf.cornerCm[0], hf.cornerCm[1],
+                                                   hf.cornerCm[2]);
+        if (landscapeBody_ >= 0)
+            AVER_INFO("[Landscape] collision body #{} built ({}x{} samples)", landscapeBody_,
+                      hf.sampleCount, hf.sampleCount);
+        else
+            AVER_WARN("[Landscape] physics refused the heightfield; terrain has no collision");
+#endif
     }
 
     // Frees the resident section's meshes (when a device exists to free them through) and drops it.
     void unloadLandscape(rhi::IDevice* device) {
         if (landscapeRenderer_ && device) landscapeRenderer_->forgetAll(*device);
         landscapeRenderer_.reset();
+#if AVER_MODULE_PHYSICS
+        if (landscapeBody_ >= 0) { aver_phys_remove_body(landscapeBody_); landscapeBody_ = -1; }
+#endif
         landscapeLoaded_ = false;
         landscapePath_.clear();
         landscapeData_ = fmt::OcLandData{};
@@ -2857,6 +2929,10 @@ private:
         if (fmt::saveOcLand(landscapePath_, landscapeData_, &why)) {
             landscapeDirty_ = false;
             AVER_INFO("[Landscape] saved '{}'", landscapePath_);
+            // Saving is the natural commit point for a sculpt, so it is where the collision snapshot
+            // catches up with the heights -- see rebuildLandscapeCollision on why this is not done
+            // per stroke.
+            rebuildLandscapeCollision();
         } else {
             AVER_ERROR("[Landscape] could not save '{}': {}", landscapePath_, why);
         }
@@ -2865,8 +2941,49 @@ private:
     // Resolves which .ocland a just-loaded level should draw: the --landscape override if one was
     // given, else <levelPath with its extension swapped to .ocland> -- "named by the level". Silent
     // when neither exists: most levels have no terrain yet, and that must not warn on every load.
-    void loadLandscapeForLevel(rhi::IDevice* device, const std::string& levelPath) {
+    // Resolves which .ocland a level is standing on, in this order:
+    //   1. --landscape <path>, an explicit override that always wins
+    //   2. the level's own LANDSCAPE record, resolved against the project's Content
+    //   3. the levelname.ocland convention
+    //
+    // (2) IS WHY THE FORMAT RECORD EXISTS. The format learned to carry a LANDSCAPE record and the
+    // editor learned to draw an .ocland in the same change, and the two halves were never joined --
+    // so a level could declare its terrain and the editor would ignore the declaration and go
+    // looking for a filename. The convention stays as the last resort because it costs nothing and
+    // levels authored before the record exists still open.
+    //
+    // `at` OVERRIDES THE SECTION'S OWN originCm, and doing it here -- in the data, once -- is what
+    // makes every consumer agree without being told about placement separately. The renderer draws
+    // with an identity world matrix, the sculpt raycast walks the same grid, the height source
+    // samples it, and the physics bridge converts it; all four read originCm, so moving the section
+    // is one assignment rather than four transforms that could disagree.
+    void loadLandscapeForLevel(rhi::IDevice* device, const std::string& levelPath,
+                               const fmt::OcWorldData& w) {
         std::string path = landscapeCliOverride_;
+        bool haveAt = false;
+        f64 at[3] = {0, 0, 0};
+
+        if (path.empty() && !w.landscapes.empty()) {
+            const fmt::OcLandscapePlacement& lp = w.landscapes.front();
+            if (w.landscapes.size() > 1)
+                AVER_WARN("[Landscape] level declares {} LANDSCAPE sections; the editor holds one and "
+                          "is using '{}'. Tiling several sections is not implemented.",
+                          w.landscapes.size(), lp.name.empty() ? lp.section : lp.name);
+            if (!lp.section.empty()) {
+                const std::string content = project_.contentDir();
+                path = content.empty() ? lp.section : content + "\\" + lp.section;
+                std::error_code ec;
+                if (!std::filesystem::exists(path, ec)) {
+                    AVER_WARN("[Landscape] level's LANDSCAPE section '{}' does not exist at '{}' -- "
+                              "falling back to the levelname.ocland convention", lp.section, path);
+                    path.clear();
+                } else {
+                    at[0] = lp.x; at[1] = lp.y; at[2] = lp.z;
+                    haveAt = true;
+                }
+            }
+        }
+
         const bool explicitPath = !path.empty();
         if (!explicitPath) {
             std::filesystem::path p(levelPath);
@@ -2874,8 +2991,28 @@ private:
             path = p.string();
         }
         std::error_code ec;
-        if (explicitPath || std::filesystem::exists(path, ec))
-            loadLandscape(device, path);
+        if (!explicitPath && !std::filesystem::exists(path, ec)) return;
+        if (!loadLandscape(device, path)) return;
+
+        if (haveAt) {
+            landscapeData_.originCm[0] = static_cast<f32>(at[0]);
+            landscapeData_.originCm[1] = static_cast<f32>(at[1]);
+            landscapeData_.originCm[2] = static_cast<f32>(at[2]);
+            // The tree caches node centres and bounds derived from originCm, so it has to be rebuilt
+            // rather than nudged -- otherwise LOD selection and frustum culling would run against
+            // where the section used to be.
+            std::string why;
+            if (landscapeTree_.build(landscapeData_, landscapeTree_.nodeQuads(), &why)) {
+                landscapeTree_.resetHysteresis();
+                if (landscapeRenderer_ && device) landscapeRenderer_->forgetAll(*device);
+                AVER_INFO("[Landscape] placed at ({:.0f}, {:.0f}, {:.0f}) by the level's LANDSCAPE record",
+                          at[0], at[1], at[2]);
+            } else {
+                AVER_ERROR("[Landscape] could not rebuild after placement: {}", why);
+            }
+        }
+        rebuildLandscapeCollision();
+        applyLandscapeToStreaming();
     }
 #endif
 
@@ -7061,6 +7198,10 @@ private:
     bool landscapeLoaded_ = false;
     std::string landscapePath_;   // the section actually resident; empty when none is
     bool landscapeDirty_ = false; // true once a sculpt has touched landscapeData_ since the last save
+    // The static body the terrain collides through, or -1. Guarded at every USE rather than here:
+    // the member is unconditional so the declaration cannot go out of scope from under a call site
+    // guarded differently -- the split-guard defect this file has been bitten by repeatedly.
+    i32 landscapeBody_ = -1;
 
     // Sculpt tool state. Radius/strength are shared across all four brush modes -- the same "one
     // knob set, the mode picks what it means" shape the transform tools' snap popups already use.
@@ -7193,6 +7334,25 @@ private:
                       cwSettings.generator.octaves, cwSettings.generator.threshold);
             break;
         }
+
+        // Scatter follows the terrain when a section is resident. The generator asks only "what is
+        // the surface Z at (x, y)" and knows nothing about landscapes -- Aver.World deliberately does
+        // not depend on Aver.Landscape (see modules/world/CMakeLists.txt), so the editor, which
+        // depends on both, is the right place to close this lambda.
+        //
+        // FALSE OUTSIDE THE SECTION, on purpose: surfaceHeightAt refuses rather than clamping, and
+        // the generator then falls back to its flat behaviour. A world larger than its terrain gets
+        // flat ground beyond the rim instead of the rim's height smeared to the horizon.
+#if AVER_MODULE_LANDSCAPE
+        if (landscapeLoaded_) {
+            cwSettings.generator.heightSource = [this](f32 x, f32 y, f32& outZ) {
+                return landscape::surfaceHeightAt(landscapeData_, x, y, outZ);
+            };
+            AVER_INFO("[ChunkWorld] scatter will follow the landscape section ({}x{} samples, "
+                      "{:.0f}cm spacing)", landscapeData_.sampleCount, landscapeData_.sampleCount,
+                      landscapeData_.spacingCm);
+        }
+#endif
 
         world::RestoreOptions& restore = cw->streamer().restoreOptions();
 #if AVER_MODULE_PBR
@@ -7525,7 +7685,7 @@ private:
         AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
 
 #if AVER_MODULE_LANDSCAPE
-        loadLandscapeForLevel(eng.device(), path);
+        loadLandscapeForLevel(eng.device(), path, w);
 #endif
     }
 

@@ -50,3 +50,18 @@ if(TARGET Aver.Landscape.Renderer)
   target_link_libraries(SculptTest PRIVATE Aver.Landscape.Renderer)
   target_compile_definitions(SculptTest PRIVATE AVER_LANDSCAPE_TEST_RENDERER=1)
 endif()
+
+# TerrainGenTool -- not a test. Writes an .ocland from fBm noise, for the same reason LevelInspect
+# and ScatterBudgetTool exist: it answers a real need that a fixture cannot. Aver.Landscape shipped a
+# complete heightfield runtime and this repository contained no .ocland file at all, so there was
+# nothing to render, sculpt, collide with, or scatter onto -- the sculpt tools can reshape a section
+# but cannot conjure the first one.
+#
+#     TerrainGenTool.exe <out.ocland> [samples] [spacingCm] [amplitudeCm] [seed] [featureCm]
+#
+# Formats only: the noise is self-contained (see the file's header for why it does not borrow
+# render.pcg's), so this needs neither Aver.Landscape nor a device.
+add_executable(TerrainGenTool src/TerrainGenTool.cpp)
+target_link_libraries(TerrainGenTool PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(TerrainGenTool PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -34,6 +34,18 @@ f32 sampleHeight(const fmt::OcLandData& d, f32 wx, f32 wy) {
 
 } // namespace
 
+bool surfaceHeightAt(const fmt::OcLandData& d, f32 wx, f32 wy, f32& outZ) {
+    if (!d.valid() || d.sampleCount < 2) return false;
+    // The footprint test uses the LAST SAMPLE, not sampleCount * spacing: a grid of n samples spans
+    // n-1 cells, and using n would claim one cell of terrain past the final row that has no fourth
+    // corner to interpolate against.
+    const f32 span = static_cast<f32>(d.sampleCount - 1) * d.spacingCm;
+    const f32 x0 = d.originCm[0], y0 = d.originCm[1];
+    if (wx < x0 || wy < y0 || wx > x0 + span || wy > y0 + span) return false;
+    outZ = sampleHeight(d, wx, wy);
+    return true;
+}
+
 bool raycastHeightfield(const fmt::OcLandData& d, const f32 ro[3], const f32 rd[3],
                          HeightfieldHit& out, f32 maxDistCm) {
     if (!d.valid() || d.sampleCount < 2 || maxDistCm <= 0.0f) return false;

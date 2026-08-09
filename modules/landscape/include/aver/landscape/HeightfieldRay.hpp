@@ -26,4 +26,20 @@ struct HeightfieldHit {
 bool raycastHeightfield(const fmt::OcLandData& data, const f32 ro[3], const f32 rd[3],
                          HeightfieldHit& out, f32 maxDistCm = 200000.0f);
 
+// The surface height directly above/below a world (x, y): a straight bilinear lookup, no marching.
+//
+// SEPARATE FROM raycastHeightfield ON PURPOSE. A vertical query is the common case -- "put this
+// plant on the ground" -- and answering it by casting a downward ray would march the grid to
+// rediscover a cell that one division already names. This is the call a chunk generator's
+// heightSource makes once per candidate, thousands of times per chunk, so the difference is the
+// whole cost.
+//
+// RETURNS FALSE OUTSIDE THE FOOTPRINT, and that distinction is the point. sampleHeight clamps to the
+// edge samples internally, which is right for a ray clipping a corner and WRONG for a scatter
+// candidate: clamping would smear the section's rim height across the entire rest of the world, so
+// every plant beyond the terrain would sit at whatever the nearest edge happened to be. A caller
+// that gets false should fall back to its own flat behaviour, which is what leaving
+// GeneratorSettings::heightSource unset already does.
+bool surfaceHeightAt(const fmt::OcLandData& data, f32 worldXCm, f32 worldYCm, f32& outWorldZCm);
+
 } // namespace aver::landscape
