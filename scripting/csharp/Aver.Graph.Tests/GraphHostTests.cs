@@ -18,14 +18,25 @@ using Aver.Graph;
 
 static class GraphHostTests
 {
-    // The exact path this phase wrote Drone.ocgraph to (see the task). Hardcoded rather than
-    // computed from this test project's own location because the two live in entirely separate
-    // trees -- Drone.ocgraph belongs to a game project (AverProjects/ElectricDreams), not to the
-    // Aver Engine repo this test project is part of. If this path doesn't exist, the load test below
-    // fails loudly rather than silently skipping, which is the honest behavior when a specific file
-    // was asked for by name.
-    private const string DroneGraphPath =
-        @"C:\Users\User\Documents\AverProjects\ElectricDreams\Content\Scripts\Drone.ocgraph";
+    // THIS TEST PROJECT'S OWN FIXTURE, beside cross_impl_test.ocgraph, resolved relative to the test
+    // rather than by absolute path.
+    //
+    // It used to point at C:\Users\User\Documents\AverProjects\ElectricDreams\Content\Scripts\
+    // Drone.ocgraph -- a game project, on one machine, outside this repository. The engine's own test
+    // suite cannot depend on a project: it fails on every other computer, it fails in CI, and it
+    // fails the moment someone edits their level's drone, which is a thing they are entitled to do
+    // without breaking the engine.
+    //
+    // The original comment argued the absolute path was the honest choice because a missing file
+    // would "fail loudly rather than silently skip". That reasoning was right about skipping and
+    // wrong about the fix: a test that fails loudly for a reason unrelated to the code under test is
+    // not signal. Owning a copy of the fixture gets both -- it always exists, and it only changes
+    // when someone deliberately changes it here.
+    //
+    // A COPY, not a reference, on purpose. This asserts what GraphHost does with a known graph; the
+    // sample project's Drone.ocgraph asserts what that project wants its drone to do. They started
+    // identical and are allowed to diverge.
+    private const string DroneGraphPath = "drone_test.ocgraph";
 
     // Mirrors the constants baked into Drone.ocgraph's PIN lines. Kept here, by hand, so this test
     // proves the compiled graph matches the INTENDED formula, not just "whatever GraphCompiler
