@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // The smallest sample behaviour: it logs from managed code through the host's log callback.
 using Aver.Scripting;
 

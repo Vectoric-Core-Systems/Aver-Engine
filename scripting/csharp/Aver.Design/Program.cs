@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // averdesign — reads an actor script with Roslyn and prints what it declares as JSON.
 // Output mirrors, field for field, the built-in scanner in modules/formats; that scanner is the
 // specification. `averdesign <file.cs>` prints JSON; `averdesign --probe` prints its version.

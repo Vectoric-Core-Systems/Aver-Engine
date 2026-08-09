@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // AverActor: the root gameplay type — one entity handle, the lifecycle hooks, and spawn helpers.
 
 using Aver.Scene;

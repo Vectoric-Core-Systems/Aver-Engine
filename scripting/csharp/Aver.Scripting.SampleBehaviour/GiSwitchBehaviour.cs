@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // A sample behaviour that turns global illumination on from managed code.
 using Aver.Scripting;
 

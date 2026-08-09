@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // Parser for .ocgraph text format.
 // Comment explains WHY: the format is line-based UTF-8 text matching the OC family pattern.
 // Lines are stripped of trailing semicolons and comments (after '#'). This parser supports

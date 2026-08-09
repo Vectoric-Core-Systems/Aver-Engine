@@ -1,3 +1,6 @@
+﻿// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 #include "aver/voxi/VoxiRenderer.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"   // light-frustum fit: Vec3 / Mat4::lookAtLH

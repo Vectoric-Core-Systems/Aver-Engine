@@ -1,4 +1,7 @@
-// Aver RHI — the single render-hardware abstraction every GPU consumer targets. Backends
+﻿// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
+// Aver RHI â€” the single render-hardware abstraction every GPU consumer targets. Backends
 // (D3D12/D3D11/Vulkan) implement these interfaces; a Null backend is always available as a fallback.
 #pragma once
 #include "aver/core/Types.hpp"
@@ -278,6 +281,16 @@ public:
     // Confines scene rendering to a sub-rectangle of the backbuffer, in physical pixels with a
     // top-left origin. (0,0,0,0) = full backbuffer.
     virtual void setViewportRect(u32 x, u32 y, u32 w, u32 h) { (void)x; (void)y; (void)w; (void)h; }
+
+    // Decouples the 3D scene's own render targets from the swapchain's: the scene renders at
+    // round(present * scale) and the post chain's composite upscales it back to the present size,
+    // which the editor UI and the backbuffer/viewport texture stay pinned to (they never see this
+    // value). Clamped to [0.25, 1.0]. 1.0 (the default) reproduces the pre-existing behaviour of
+    // sizing the scene 1:1 with the swapchain, byte-for-byte -- a backend that never implements this
+    // is exactly that default, permanently. Rebuilds the scene-sized targets immediately if a
+    // swapchain already exists.
+    virtual void setRenderScale(f32 scale) { (void)scale; }
+    virtual f32  renderScale() const { return 1.0f; }
 
     // Sends the post chain's output to an offscreen texture instead of the backbuffer, so the UI
     // can draw the scene as an ordinary image. The texture is the FULL backbuffer size.

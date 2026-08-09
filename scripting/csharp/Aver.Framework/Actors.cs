@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // Entity-to-instance lookup, backed by a resolver the scripting host installs at bootstrap,
 // plus the public spawn entry point for callers that are not themselves actors.
 

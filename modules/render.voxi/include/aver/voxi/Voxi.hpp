@@ -1,3 +1,6 @@
+﻿// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 #pragma once
 #include "aver/core/Types.hpp"
 
@@ -53,7 +56,12 @@ struct Settings {
     Quality pathTracing        = Quality::Off;
     bool    meshShaders        = false;
 
-    u32 voxelResolution = 128;      // cubic voxel grid edge
+    // Cubic voxel grid edge; the volume's memory and per-voxel GPU cost are both O(this^3). Defaults
+    // to Medium's rung (128) below. Renderer::setSettings derives this from globalIllumination
+    // whenever the tier changes and this field arrives unchanged -- see voxelResolutionForQuality
+    // and setSettings. Set it explicitly (a different value than what's currently active, in the
+    // same call that changes the tier) to override the tier's rung.
+    u32 voxelResolution = 128;
     f32 giIntensity     = 1.0f;
     f32 giMaxDistance   = 4000.0f;  // centimetres
 
@@ -109,6 +117,10 @@ public:
     static const char* featureName(Feature f);
     // Returns a quality level's display name.
     static const char* qualityName(Quality q);
+    // Returns the voxel grid edge a GI quality tier resolves to when setSettings derives
+    // voxelResolution from a tier change -- see setSettings and Voxi.cpp for the ladder and why it
+    // only ever applies when the caller left voxelResolution untouched.
+    static u32 voxelResolutionForQuality(Quality q);
 
 private:
     Renderer() = default;

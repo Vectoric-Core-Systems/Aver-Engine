@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // Redirects this assembly's P/Invokes to the native DLLs staged beside the executable.
 
 using System.Diagnostics;

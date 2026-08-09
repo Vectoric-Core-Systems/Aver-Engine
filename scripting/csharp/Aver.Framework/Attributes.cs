@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // The gameplay attributes: class registration, GameMode wiring, editable fields and model slots.
 
 namespace Aver.Framework;

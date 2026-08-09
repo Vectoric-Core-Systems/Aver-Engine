@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // IL compiler for graphs.
 // Comment explains WHY: System.Reflection.Emit lets us turn a graph into native .NET IL at runtime
 // without needing a compiler (Roslyn). This removes the constraint that games must ship a compiler.

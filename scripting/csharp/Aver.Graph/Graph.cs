@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // Minimal in-memory graph model: nodes, pins, links, and pinned values.
 // Comment explains WHY: a graph is a DAG of computation nodes. Each node has inputs and outputs.
 // Links connect pins. Pinned values are constants clamped to a node's input pin. The model carries

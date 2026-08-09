@@ -56,6 +56,12 @@ option(AVER_MODULE_DEFORM "Sub-bone vertex deformation: a cage finer than the sk
 # costs nothing at runtime for a game that never cooks, and being in the default build is what makes
 # TrifactorTest part of the default suite instead of something that silently rots.
 option(AVER_MODULE_TRIFACTOR "Virtualized-geometry cluster builder and LOD DAG (meshlets, LOD DAG)" ON)
+# AverSR: the upscaler seam's implementations (docs/AVERSR.md). ON like its render-module siblings
+# above -- it links only Aver.Core and Aver.RHI, so it costs nothing to leave in a build that never
+# registers an IUpscaler, and -DAVER_MODULE_SR=OFF must still build, link and render at native
+# resolution, pixel-identical to a tree where this module was never written (see the doc for why
+# that is the actual test, not the option existing).
+option(AVER_MODULE_SR "AverSR upscaler implementations: the built-in spatial resample, and the seam FSR vendors into" ON)
 # The editor control channel, so a tool can press the editor's own buttons and then look at the result.
 # OFF BY DEFAULT: it is a debugging aid, the editor must work without it, and nobody should ship an
 # editor that can be driven over a socket unless they asked for it. Even built, it listens only when the
@@ -154,6 +160,13 @@ if(AVER_MODULE_VOXI AND NOT AVER_MODULE_PBR)
 endif()
 if(AVER_MODULE_VOXI)
   add_subdirectory(modules/render.voxi)   # optional: render feature settings + C ABI for C#
+endif()
+# AverSR, beside Voxi for the same reason Deform sits beside Trifactor: it is optional and needs
+# only Aver.Core and Aver.RHI, so where it is added relative to Voxi/PBR does not matter -- unlike
+# Voxi it takes no dependency on PBR (see docs/AVERSR.md: an upscaler resamples a colour target and
+# has no legitimate reason to know what a material is).
+if(AVER_MODULE_SR)
+  add_subdirectory(modules/render.sr)     # optional: AverSR upscaler implementations
 endif()
 # PCG's GPU half. Needs only the RHI, so it is unconditional like the UI: there is no combination of
 # switches in which the RHI exists and a compute shader that writes a 3D texture does not.

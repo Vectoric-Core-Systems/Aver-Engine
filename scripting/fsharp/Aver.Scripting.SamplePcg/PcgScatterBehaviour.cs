@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // The C# end of the PCG split: run the F# rules, apply the result, and report what happened.
 //
 // This is the whole architecture in one file. F# decided what goes where; nothing below decides

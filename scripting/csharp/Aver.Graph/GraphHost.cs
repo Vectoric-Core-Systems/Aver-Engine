@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // Hosts one compiled graph against one entity, ticked once per frame.
 // Comment explains WHY: GraphCompiler proves a graph CAN become IL; nothing before this file
 // loaded a graph from disk, kept the compiled delegate around, and fed it a live time value every

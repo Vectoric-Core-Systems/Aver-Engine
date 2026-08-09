@@ -564,6 +564,13 @@ public:
     // Builds the editor: asset editors, MCP, physics, the placeholder scene, gizmos, and the render features.
     void onInit(Engine& e) override {
         AVER_INFO("[Sandbox] backend={} adapter='{}'", rhi::backendName(e.device()->backend()), e.device()->adapterName());
+        // --render-scale F: applied once, here, before anything sizes itself off the device. 1.0 (no
+        // flag) is a no-op -- setRenderScale clamps into [0.25,1] but a backend without a swapchain
+        // yet just stores it for createSwapchainResources to pick up.
+        if (renderScaleOverride_ != 1.0f) {
+            e.device()->setRenderScale(renderScaleOverride_);
+            AVER_INFO("[Sandbox] render scale {:.2f} (--render-scale)", e.device()->renderScale());
+        }
 
         // Registration order is precedence: the first factory that accepts a path wins.
         assetEditors_.registerFactory(&editor::makeMeshEditor);
@@ -2797,6 +2804,7 @@ public:
     void setRtRays(int n) { rtRaysOverride_ = n; }                              // --rt-rays N
     void setRtPixelsPerRay(int n) { rtPixelsPerRayOverride_ = n; }              // --rt-pixels-per-ray N
     void setGiUpdateInterval(int n) { giUpdateIntervalOverride_ = n; }          // --gi-update-interval N
+    void setRenderScale(f32 s) { renderScaleOverride_ = s; }                    // --render-scale F
     void setFrameTimeReport(bool on) { frameTimeReport_ = on; }                 // --frame-time
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
@@ -3225,7 +3233,16 @@ private:
         project_.giQuality       = static_cast<int>(requested.globalIllumination);
         project_.rayTracing      = static_cast<int>(requested.rayTracing);
         project_.pathTracing     = static_cast<int>(requested.pathTracing);
-        project_.voxelResolution = static_cast<int>(requested.voxelResolution);
+        // If the GI tier just changed here and voxelResolution was NOT independently touched in
+        // this same edit, leave the manifest's voxelResolution unset (-1) instead of baking in the
+        // number it held under the OLD tier: vx.setSettings (called right after this) is about to
+        // derive the new tier's rung from the identical signal (see Renderer::setSettings), and
+        // pinning the stale pre-derivation value here would silently stop this project from ever
+        // letting its GI quality drive the grid again on a later load.
+        const voxi::Settings& live = voxi::Renderer::get().settings();
+        const bool tierOnlyChange = requested.globalIllumination != live.globalIllumination
+                                  && requested.voxelResolution == live.voxelResolution;
+        project_.voxelResolution = tierOnlyChange ? -1 : static_cast<int>(requested.voxelResolution);
         project_.giIntensity     = requested.giIntensity;
         project_.giMaxDistance   = requested.giMaxDistance;
         project_.rtShadowRays       = static_cast<int>(requested.rtShadowRays);
@@ -3244,7 +3261,12 @@ private:
         if (project_.giQuality       < 0)    project_.giQuality       = static_cast<int>(d.globalIllumination);
         if (project_.rayTracing      < 0)    project_.rayTracing      = static_cast<int>(d.rayTracing);
         if (project_.pathTracing     < 0)    project_.pathTracing     = static_cast<int>(d.pathTracing);
-        if (project_.voxelResolution <= 0)   project_.voxelResolution = static_cast<int>(d.voxelResolution);
+        // Derived from the (now-seeded) GI tier, not from d.voxelResolution's raw struct default --
+        // otherwise a manifest that only states giQuality would bake in Medium's 128 regardless of
+        // the tier, and never let that tier drive the grid on a later load (see Renderer::setSettings).
+        if (project_.voxelResolution <= 0)
+            project_.voxelResolution = static_cast<int>(
+                voxi::Renderer::voxelResolutionForQuality(static_cast<voxi::Quality>(project_.giQuality)));
         if (project_.giIntensity     < 0.0f) project_.giIntensity     = d.giIntensity;
         if (project_.giMaxDistance   < 0.0f) project_.giMaxDistance   = d.giMaxDistance;
         if (project_.rtShadowRays       < 0) project_.rtShadowRays       = static_cast<int>(d.rtShadowRays);
@@ -6568,6 +6590,8 @@ private:
 
         if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
             prefsDevice_->setVSync(prefBool("display.vsync", prefsDevice_->vsync()));
+        if (prefsDevice_ && renderScaleOverride_ == 1.0f)   // --render-scale on the command line wins
+            prefsDevice_->setRenderScale(prefFloat("display.renderScale", prefsDevice_->renderScale()));
     }
 
     // Resolves the stored IDE name to an index, once the async scan has produced the list.
@@ -6602,6 +6626,8 @@ private:
 
         if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
             setPrefBool("display.vsync", prefsDevice_->vsync());
+        if (prefsDevice_)
+            setPrefFloat("display.renderScale", prefsDevice_->renderScale());
 
         flushEditorPrefs();
     }
@@ -6656,6 +6682,17 @@ private:
                                   "Needs DXGI tearing support (DXGI 1.5+).");
             ImGui::SameLine();
             ImGui::TextDisabled(vs ? "(capped to the refresh rate)" : "(uncapped, may tear)");
+
+            // Render scale: the 3D scene's own resolution as a fraction of the window's. 1.0 (the
+            // right edge) is the pre-existing behaviour -- the scene renders 1:1 with the window --
+            // and everything below it trades scene sharpness for every pixel-bound pass' cost. The
+            // editor UI itself never moves: it stays native regardless of this slider.
+            float rs = prefsDevice_ ? prefsDevice_->renderScale() : 1.0f;
+            if (ImGui::SliderFloat("Render Scale", &rs, 0.25f, 1.0f, "%.2f") && prefsDevice_)
+                prefsDevice_->setRenderScale(rs);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Renders the 3D scene at a fraction of the window's resolution, then\n"
+                                  "upscales it back for display. The editor UI stays crisp either way.");
         }
         if (ImGui::CollapsingHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Show grid", &showGrid_);
@@ -6817,10 +6854,17 @@ private:
             if (ImGui::Combo("Quality", &q, qs, 5)) { s.globalIllumination = static_cast<Quality>(q); changed = true; }
 
             int res = static_cast<int>(s.voxelResolution);
-            const char* resLabels[] = {"64", "128", "256"};
-            const int resValues[] = {64, 128, 256};
-            int resIdx = res>=256 ? 2 : (res>=128 ? 1 : 0);
-            if (ImGui::Combo("Voxel grid", &resIdx, resLabels, 3)) { s.voxelResolution = (u32)resValues[resIdx]; changed = true; }
+            const char* resLabels[] = {"64", "128", "256", "512"};
+            const int resValues[] = {64, 128, 256, 512};
+            int resIdx = res>=512 ? 3 : (res>=256 ? 2 : (res>=128 ? 1 : 0));
+            if (ImGui::Combo("Voxel grid", &resIdx, resLabels, 4)) { s.voxelResolution = (u32)resValues[resIdx]; changed = true; }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Cubic edge of the GI volume -- memory and per-voxel GPU cost are\n"
+                                   "both this NUMBER CUBED, so each step up is an 8x jump:\n"
+                                   "  64  ~6 MB    128  ~50 MB    256  ~400 MB    512  ~3.2 GB\n"
+                                   "Changing Quality above moves this to match its rung (Off/Low=64,\n"
+                                   "Medium=128, High=256, Epic=512) unless you pick a value here\n"
+                                   "yourself, which then overrides the tier's default.");
             if (ImGui::SliderFloat("GI intensity", &s.giIntensity, 0.0f, 4.0f)) changed = true;
             if (ImGui::SliderFloat("GI distance", &s.giMaxDistance, 10.0f, 20000.0f, "%.0f")) changed = true;
             ImGui::DragFloat3("Volume centre", &giCenter_.x, 0.5f);
@@ -7284,6 +7328,7 @@ private:
     int  rtRaysOverride_=0;          // --rt-rays N: sun occlusion rays per pixel (0 = flag not given)
     int  rtPixelsPerRayOverride_=0;  // --rt-pixels-per-ray N: shadow tile edge (0 = flag not given)
     int  giUpdateIntervalOverride_=0; // --gi-update-interval N: GI revoxelise interval (0 = flag not given)
+    f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
     bool frameTimeReport_=false;     // --frame-time: report the frame period, to price the above
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
@@ -8808,7 +8853,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=false; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=false; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -9031,6 +9076,10 @@ Application* createApplication(int argc, char** argv) {
         // original always-fresh behaviour. Measures the voxelise+filter amortisation independently of
         // everything else, per the "measure each change, do not stack guesses" rule.
         else if (!std::strcmp(argv[i],"--gi-update-interval") && i+1<argc) giUpdateInterval=std::atoi(argv[++i]);
+        // The scene's own render resolution as a fraction of the present/swapchain size -- 1.0
+        // (unset) reproduces the pre-existing 1:1 behaviour exactly. Clamped to [0.25,1] by the
+        // device; measures the render-scale/GI-cost tradeoff independently of everything else.
+        else if (!std::strcmp(argv[i],"--render-scale") && i+1<argc) renderScale=static_cast<f32>(std::atof(argv[++i]));
         else if (!std::strcmp(argv[i],"--frame-time")) frameTime=true;
         else if (!std::strcmp(argv[i],"--ms")) ms=true;
         else if (!std::strcmp(argv[i],"--probe") && i+2<argc) { probeX=(u32)std::atoi(argv[++i]); probeY=(u32)std::atoi(argv[++i]); }
@@ -9178,6 +9227,7 @@ Application* createApplication(int argc, char** argv) {
     app->setRtRays(rtRays);
     app->setRtPixelsPerRay(rtPixelsPerRay);
     app->setGiUpdateInterval(giUpdateInterval);
+    app->setRenderScale(renderScale);
     app->setFrameTimeReport(frameTime);
     app->setMsOverride(ms);
     app->setProbe(probeX, probeY);

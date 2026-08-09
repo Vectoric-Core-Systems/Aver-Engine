@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // The F# half of the smallest real round trip: a function C# calls and gets a value back from.
 
 namespace Aver.FSharp.Sample

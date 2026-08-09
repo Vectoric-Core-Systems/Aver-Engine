@@ -1,3 +1,6 @@
+﻿// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 #include "aver/voxi/Voxi.hpp"
 #include "aver/voxi/voxi_abi.h"
 #include "aver/core/Log.hpp"
@@ -53,6 +56,17 @@ void Renderer::setSettings(const Settings& s) {
         if (n.meshShaders) refuse(Feature::MeshShaders);
         n.meshShaders = false;
     }
+
+    // Quality tiers used to leave voxelResolution completely alone -- selecting Epic cost nothing
+    // extra because nothing read the tier to size the grid. When the caller changes the GI tier and
+    // leaves voxelResolution exactly as it already was -- the common case: the editor's Quality
+    // combo touched alone, or a project manifest that states giQuality but not voxelResolution (see
+    // applyProjectRenderSettings in SandboxApp.cpp) -- derive the grid edge from the new tier. An
+    // explicit voxelResolution request arriving in the SAME call (the incoming value differs from
+    // what is currently active) always wins over the derived one, so the editor's "Voxel grid"
+    // combo and a manifest's explicit voxelResolution keep overriding it exactly as before.
+    if (n.globalIllumination != settings_.globalIllumination && n.voxelResolution == settings_.voxelResolution)
+        n.voxelResolution = voxelResolutionForQuality(n.globalIllumination);
 
     n.voxelResolution = std::clamp(n.voxelResolution, 32u, 512u);
     n.giIntensity     = std::clamp(n.giIntensity, 0.0f, 8.0f);
@@ -118,6 +132,29 @@ const char* Renderer::featureName(Feature f) {
         case Feature::PathTracing:        return "Path Tracing";
         case Feature::MeshShaders:        return "Mesh Shaders";
         default: return "?";
+    }
+}
+
+// The voxel grid edge each GI quality tier resolves to (see setSettings for when this actually
+// applies). Doubling the edge is an 8x jump in both memory and per-voxel GPU cost -- the volume is
+// resolution CUBED -- so this ladder is deliberately conservative: Medium keeps the long-standing
+// fixed default (128) so any project already tuned around Medium sees no change; Off and Low share
+// the cheapest grid, since Off's volume is otherwise idle VRAM (voxelizePass/filterMips are skipped
+// whenever GI is disabled -- see VoxiRenderer::prePass -- so a smaller grid there costs nothing in
+// frame time, only in bytes reserved). Approximate VRAM for the radiance volume (RGBA16F, full mip
+// chain) plus the R32_UINT injection accumulator that sits beside it, at each rung:
+//   Off / Low (64):   ~6 MB
+//   Medium    (128):  ~50 MB   (today's fixed default, unchanged)
+//   High      (256):  ~400 MB
+//   Epic      (512):  ~3.2 GB  -- by far the steepest rung; only for a GPU with gigabytes to spare
+u32 Renderer::voxelResolutionForQuality(Quality q) {
+    switch (q) {
+        case Quality::Off:
+        case Quality::Low:    return 64;
+        case Quality::Medium: return 128;
+        case Quality::High:   return 256;
+        case Quality::Epic:   return 512;
+        default:              return 128;
     }
 }
 

@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // Entity handle: a 32-bit key into the native scene, with transform, naming and identity accessors.
 
 using Aver.Scene;

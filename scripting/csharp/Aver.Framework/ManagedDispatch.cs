@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // The native managed-dispatch table and its install/clear ABI, as the scripting bridge fills it.
 
 using System.Runtime.InteropServices;

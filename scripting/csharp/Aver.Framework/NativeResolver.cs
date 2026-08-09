@@ -1,3 +1,6 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // DllImport resolver that loads the native Aver.Framework / Aver.Scene DLLs from the executable directory.
 
 using System.Diagnostics;

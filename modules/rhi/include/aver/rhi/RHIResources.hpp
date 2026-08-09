@@ -594,6 +594,87 @@ public:
     }
 };
 
+// ---------------------------------------------------------------- upscaling
+// Scene-resolution colour in, present-resolution colour out. See docs/AVERSR.md for the full design
+// (naming, module boundaries, quality tiers) -- this is the seam that design names AverSR: the
+// INTERFACE lives here, beside IRenderFeature, in the generic RHI; every actual implementation
+// (Aver's own spatial resample, a vendored FSR, a DLSS slot that stays empty on this hardware)
+// lives in a module that links Aver.RHI and is never linked BY it, so a renderer holds an
+// IUpscaler* that may be null and calls it if it is not, exactly as it holds registered render
+// features today -- without this module ever knowing any of them exist.
+
+// What an upscaler reads besides the scene colour target. A caller (the post chain) queries this
+// ONCE, ahead of the scene pass, so it knows whether to pay for a motion-vector target or a
+// jittered projection matrix at all -- work only a temporal upscaler will ever read. Same idiom as
+// ResourceBind above: an implementation ORs together whatever it actually consumes.
+enum class UpscalerNeeds : u32 {
+    None          = 0,
+    // Scene-resolution depth, same frame, same format as the scene's own depth buffer.
+    Depth         = 1u << 0,
+    // Scene-resolution, screen-space motion in texels/frame (RG; destination texel minus source
+    // texel). Nothing in this engine produces this today -- FSR2/3 and DLSS both need it; the
+    // built-in upscaler does not ask for it.
+    MotionVectors = 1u << 1,
+    // The sub-pixel offset THIS frame's scene was rendered with, so a temporal accumulator can
+    // un-jitter a sample before blending it into history. Nothing jitters the camera today either.
+    Jitter        = 1u << 2,
+    // Last frame's OWN present-resolution output, for temporal accumulation across frames.
+    History       = 1u << 3,
+};
+inline UpscalerNeeds operator|(UpscalerNeeds a, UpscalerNeeds b) {
+    return static_cast<UpscalerNeeds>(static_cast<u32>(a) | static_cast<u32>(b));
+}
+inline bool any(UpscalerNeeds v, UpscalerNeeds bit) {
+    return (static_cast<u32>(v) & static_cast<u32>(bit)) != 0;
+}
+
+// One frame's upscaler input. `color` is always valid; every other field is populated ONLY when
+// needs() asked for the matching flag -- a caller that skips producing what nothing reads leaves
+// the rest at their zero defaults, and an implementation must not read a field it did not ask for.
+struct UpscalerInput {
+    TextureHandle color = 0;             // scene-resolution colour, scene-resolution sized
+    u32 srcWidth = 0, srcHeight = 0;     // the scene's own size, whatever produced it
+    u32 dstWidth = 0, dstHeight = 0;     // the present size to produce
+
+    TextureHandle depth         = 0;     // valid only if needs() has UpscalerNeeds::Depth
+    TextureHandle motionVectors = 0;     // valid only if needs() has UpscalerNeeds::MotionVectors
+    f32 jitterX = 0.0f, jitterY = 0.0f;  // valid only if needs() has UpscalerNeeds::Jitter (texels)
+    TextureHandle history       = 0;     // valid only if needs() has UpscalerNeeds::History
+};
+
+// The seam itself, declared the way IRenderFeature just above is: a couple of pure virtuals for
+// identity and the one thing every implementation must do, defaulted hooks for everything a simple
+// implementation can ignore. That split is what lets a plain spatial resample, a future vendored
+// FSR2/3, and a DLSS slot that stays empty on this hardware all compile against the SAME interface,
+// with nothing here changing when any of them arrives -- see docs/AVERSR.md for why the empty slot
+// is deliberate (no source to integrate, and hardware/licence this repo cannot use regardless).
+class IUpscaler {
+public:
+    virtual ~IUpscaler() = default;
+    virtual const char* name() const = 0;
+
+    // Declared ONCE, not re-queried per frame: an implementation's input needs are a property of
+    // what algorithm it is, not of any particular frame, so the renderer can decide before the
+    // scene pass even runs whether to produce motion vectors or a jitter offset at all. A plain
+    // spatial resample returns None -- it reads nothing but the scene colour.
+    virtual UpscalerNeeds needs() const { return UpscalerNeeds::None; }
+
+    // True for an upscaler that accumulates state across frames -- reprojected history, an
+    // exponential moving average -- and so needs it thrown away on a cut: a camera teleport, a
+    // level load, a change of render scale. False (the default) means reset() is never called,
+    // because there is nothing to throw away.
+    virtual bool isTemporal() const { return false; }
+    virtual void reset() {}
+
+    // Scene-resolution colour in `in.color`, present-resolution colour out at `outTarget`. `ctx` is
+    // the SAME command-recording context the rest of the frame draws with. The CALLER has already
+    // bound `outTarget` as the sole render target and already set the viewport and scissor to
+    // (0, 0, in.dstWidth, in.dstHeight) -- the identical contract IRenderFeature::overlayPass above
+    // already uses for the backbuffer it is handed. An implementation only records its own pipeline
+    // bind and draw; it does not transition `outTarget` before or after.
+    virtual void execute(IRenderContext& ctx, const UpscalerInput& in, TextureHandle outTarget) = 0;
+};
+
 // The shared HLSL prelude: cbuffer layouts, vertex structures and helpers.
 const char* sharedShaderPrelude();
 

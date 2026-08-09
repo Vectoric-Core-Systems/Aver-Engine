@@ -37,6 +37,10 @@ $configs = [ordered]@{
     "scripting-off" = @("-DAVER_MODULE_SCRIPTING=OFF")
     "scene-off"     = @("-DAVER_MODULE_SCENE=OFF", "-DAVER_MODULE_FRAMEWORK=OFF")
     "trifactor-off" = @("-DAVER_MODULE_TRIFACTOR=OFF")
+    # AverSR (docs/AVERSR.md). The IUpscaler seam lives in Aver.RHI itself, not this module, so
+    # nothing should reference Aver.Render.Sr outside modules/render.sr -- this row is what turns
+    # that claim from a comment into something a build can contradict.
+    "sr-off"        = @("-DAVER_MODULE_SR=OFF")
     "no-ui"         = @("-DAVER_ENABLE_UI=OFF")
     "no-game"       = @("-DAVER_BUILD_GAME=OFF")
     "no-sandbox"    = @("-DAVER_BUILD_SANDBOX=OFF")
@@ -70,7 +74,7 @@ $configs = [ordered]@{
                         "-DAVER_MODULE_PHYSICS=OFF", "-DAVER_MODULE_PBR=OFF",
                         "-DAVER_MODULE_VOXI=OFF", "-DAVER_MODULE_SCRIPTING=OFF",
                         "-DAVER_MODULE_LANDSCAPE=OFF", "-DAVER_MODULE_DEFORM=OFF",
-                        "-DAVER_MODULE_TRIFACTOR=OFF")
+                        "-DAVER_MODULE_TRIFACTOR=OFF", "-DAVER_MODULE_SR=OFF")
 }
 
 # A module absent from this list is a module nobody checks. TRIFACTOR was, for its whole life --

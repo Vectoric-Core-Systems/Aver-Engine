@@ -1,3 +1,6 @@
+﻿// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
 // DirectX 12 backend for Aver.RHI: device, swapchain, scene pipelines, the camera post chain,
 // and the generic resource factory and render context. Hand-rolled D3D12 structs (no d3dx12.h).
 #include "aver/rhi/RHI.hpp"
@@ -754,7 +757,7 @@ u32 blockBytes(Format f) {
     return 0;
 }
 
-// Tightly packed bytes in one source row of a surface this wide — one row of BLOCKS for a block
+// Tightly packed bytes in one source row of a surface this wide â€” one row of BLOCKS for a block
 // format, which is the unit the upload loop counts rows in.
 u64 packedRowPitch(Format f, u32 widthTexels) {
     if (const u32 bb = blockBytes(f)) return u64((widthTexels + 3) / 4) * bb;
@@ -917,9 +920,17 @@ public:
 
     void setViewportRect(u32 x, u32 y, u32 w, u32 h) override {
         if (w == 0 || h == 0 || x >= width_ || y >= height_) { vpX_ = vpY_ = vpW_ = vpH_ = 0; return; }
-        vpX_ = x; vpY_ = y;
-        vpW_ = (x + w > width_) ? width_ - x : w;
-        vpH_ = (y + h > height_) ? height_ - y : h;
+        const u32 cw = (x + w > width_) ? width_ - x : w;
+        const u32 ch = (y + h > height_) ? height_ - y : h;
+        // The caller thinks in present-space pixels (the editor confines the scene to a dockspace
+        // sub-rect of the actual window), but the render target these coordinates end up addressing
+        // is the SCENE one, which is smaller than the backbuffer whenever renderScale_ < 1 -- so the
+        // rect is scaled into scene-space here, once, rather than at every one of its several
+        // readers. Identity at renderScale_ == 1.0 (scaleToSceneW/H(v) == v exactly).
+        vpX_ = scaleToSceneW(x);  vpY_ = scaleToSceneH(y);
+        vpW_ = scaleToSceneW(cw); vpH_ = scaleToSceneH(ch);
+        if (vpW_ == 0) vpW_ = 1;
+        if (vpH_ == 0) vpH_ = 1;
     }
 
     void setCamera(const f32 viewProj[16], const f32 invViewProj[16], const f32 camPos[3]) override {
@@ -934,13 +945,15 @@ public:
         return true;
     }
     // Same rect beginFrame() sets as the scene's actual D3D12 viewport (RSSetViewports below) --
-    // vpW_ == 0 means no sub-rect was set, i.e. the whole backbuffer.
+    // vpW_ == 0 means no sub-rect was set, i.e. the whole scene target. SCENE-space (see
+    // setViewportRect): what a reprojecting feature needs, since its own history textures are sized
+    // off sceneWidth_/sceneHeight_ via onRenderTargetsChanged, not width_/height_.
     bool sceneViewport(f32 rect[4]) const override {
         if (!rect) return true;
         rect[0] = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
         rect[1] = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
-        rect[2] = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(width_);
-        rect[3] = vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(height_);
+        rect[2] = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(sceneWidth_);
+        rect[3] = vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(sceneHeight_);
         return true;
     }
     void setLight(const f32 dir[3], const f32 color[3], f32 ambient) override {
@@ -1163,6 +1176,51 @@ private:
     void seedSkinTargets();
     PerFrameCB frameCB_{};
     u32 width_ = 0, height_ = 0;
+    // The scene's OWN render-target size: width_/height_ scaled by renderScale_, rounded, floored at
+    // 1. Equal to width_/height_ whenever renderScale_ == 1.0 (the default) -- computeSceneSize()
+    // guarantees that exactly, integer division cancelling the multiply, so every byte on that path
+    // stays identical to before renderScale_ existed. Everything present-resolution (the backbuffer,
+    // the editor's composited viewport texture, ImGui, capture) is keyed off width_/height_ still;
+    // only the scene's depth/MSAA-colour targets, the post chain's resolve+bloom pyramid, and what
+    // render features are told via onRenderTargetsChanged key off this pair instead.
+    u32 sceneWidth_ = 0, sceneHeight_ = 0;
+    f32 renderScale_ = 1.0f;   // [0.25, 1.0]; see IDevice::setRenderScale
+    void computeSceneSize() {
+        sceneWidth_  = width_  ? static_cast<u32>(std::lround(static_cast<f32>(width_)  * renderScale_)) : 0;
+        sceneHeight_ = height_ ? static_cast<u32>(std::lround(static_cast<f32>(height_) * renderScale_)) : 0;
+        if (width_  && sceneWidth_  < 1) sceneWidth_  = 1;
+        if (height_ && sceneHeight_ < 1) sceneHeight_ = 1;
+    }
+    // Present-space -> scene-space scaling for the editor's viewport sub-rect (setViewportRect takes
+    // physical backbuffer pixels; the render target those pixels address is the scene one, which is
+    // smaller than the backbuffer whenever renderScale_ < 1). Exact identity at renderScale_ == 1.0
+    // (sceneWidth_ == width_, so v * sceneWidth_ / width_ == v).
+    u32 scaleToSceneW(u32 v) const { return width_  ? static_cast<u32>((static_cast<u64>(v) * sceneWidth_)  / width_)  : v; }
+    u32 scaleToSceneH(u32 v) const { return height_ ? static_cast<u32>((static_cast<u64>(v) * sceneHeight_) / height_) : v; }
+    void setRenderScale(f32 scale) override {
+        scale = std::fmax(0.25f, std::fmin(1.0f, scale));
+        if (scale == renderScale_) return;
+        renderScale_ = scale;
+        if (!hasSwapchain_) return;   // applied next createSwapchainResources
+        rebuildSceneTargets();
+    }
+    f32 renderScale() const override { return renderScale_; }
+    // Tears down and rebuilds every target sized off sceneWidth_/sceneHeight_ after renderScale_
+    // changes with a swapchain already live -- the same set resize() rebuilds, minus the swapchain
+    // itself and the present-space viewport texture, neither of which renderScale_ touches.
+    void rebuildSceneTargets() {
+        waitForGpu();
+        depthBuffer_.Reset();
+        msaaColor_.Reset();
+        computeSceneSize();
+        vpX_ = vpY_ = vpW_ = vpH_ = 0;   // stored in scene-space; stale until the next setViewportRect
+        createDepthBuffer();
+        createMsaaColor();
+        releasePostTargets();
+        notifyRenderTargetsChanged();
+        AVER_TRACE("[RHI.D3D12] render scale {:.2f} -> scene {}x{} (present {}x{})",
+                   renderScale_, sceneWidth_, sceneHeight_, width_, height_);
+    }
     u32 vpX_ = 0, vpY_ = 0, vpW_ = 0, vpH_ = 0; // scene sub-rect; w/h == 0 means full backbuffer
     u32 sampleCount_ = kDefaultSampleCount;     // live MSAA sample count (1 = off)
     DeviceCaps caps_{};
@@ -1662,10 +1720,10 @@ void D3D12Device::addRenderFeature(IRenderFeature* f) {
     AVER_INFO("[RHI.D3D12] render feature registered: {}", f->name());
     // A feature registering after the device already knows its targets -- the common case, since
     // the swapchain exists before any feature does -- would otherwise only learn them on the NEXT
-    // change, which may never come in a run that is never resized. width_/height_ are 0 only for a
-    // swapchain-less device, where there is nothing meaningful to tell it yet.
-    if (width_ > 0 && height_ > 0)
-        f->onRenderTargetsChanged(sampleCount_, backbufferFormat(), depthFormat(), width_, height_);
+    // change, which may never come in a run that is never resized. sceneWidth_/sceneHeight_ are 0
+    // only for a swapchain-less device, where there is nothing meaningful to tell it yet.
+    if (sceneWidth_ > 0 && sceneHeight_ > 0)
+        f->onRenderTargetsChanged(sampleCount_, backbufferFormat(), depthFormat(), sceneWidth_, sceneHeight_);
 }
 
 void D3D12Device::removeRenderFeature(IRenderFeature* f) {
@@ -1785,17 +1843,19 @@ u64 D3D12Device::viewportTextureId() {
 }
 
 // Tells every feature the render targets changed, but only when a pipeline-baked property did.
+// SCENE size (sceneWidth_/sceneHeight_), not present size: a render feature's targets (Voxi's
+// ray-traced shadow/reflection history, notably) need to match what they actually render into.
 void D3D12Device::notifyRenderTargetsChanged() {
     if (sampleCount_ == notifiedSamples_ &&
         backbufferFormat() == notifiedColor_ && depthFormat() == notifiedDepth_ &&
-        width_ == notifiedWidth_ && height_ == notifiedHeight_) return;
+        sceneWidth_ == notifiedWidth_ && sceneHeight_ == notifiedHeight_) return;
     notifiedSamples_ = sampleCount_;
     notifiedColor_   = backbufferFormat();
     notifiedDepth_   = depthFormat();
-    notifiedWidth_   = width_;
-    notifiedHeight_  = height_;
+    notifiedWidth_   = sceneWidth_;
+    notifiedHeight_  = sceneHeight_;
     for (IRenderFeature* f : features_)
-        f->onRenderTargetsChanged(sampleCount_, backbufferFormat(), depthFormat(), width_, height_);
+        f->onRenderTargetsChanged(sampleCount_, backbufferFormat(), depthFormat(), sceneWidth_, sceneHeight_);
 }
 
 // Builds the backend's own root signature and its solid, wireframe, sky and line pipelines.
@@ -2066,6 +2126,7 @@ void D3D12Device::bindGraphicsRoot(ID3D12RootSignature* rs) {
 bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
     if (!d.windowHandle) { AVER_WARN("[RHI.D3D12] createSwapchain without a window (headless)"); return false; }
     width_ = d.width; height_ = d.height;
+    computeSceneSize();
 
     {
         ComPtr<IDXGIFactory5> f5;
@@ -2146,11 +2207,11 @@ void D3D12Device::createRenderTargetViews() {
     }
 }
 
-// Creates the depth target at the current size and sample count.
+// Creates the depth target at the current scene size and sample count.
 bool D3D12Device::createDepthBuffer() {
     D3D12_RESOURCE_DESC td{};
     td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    td.Width = width_; td.Height = height_;
+    td.Width = sceneWidth_; td.Height = sceneHeight_;
     td.DepthOrArraySize = 1; td.MipLevels = 1;
     td.Format = kDepthFormat; td.SampleDesc.Count = sampleCount_;
     td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
@@ -2162,11 +2223,11 @@ bool D3D12Device::createDepthBuffer() {
     return true;
 }
 
-// Creates the scene colour target at the current size and sample count.
+// Creates the scene colour target at the current scene size and sample count.
 bool D3D12Device::createMsaaColor() {
     D3D12_RESOURCE_DESC td{};
     td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    td.Width = width_; td.Height = height_;
+    td.Width = sceneWidth_; td.Height = sceneHeight_;
     td.DepthOrArraySize = 1; td.MipLevels = 1;
     td.Format = kSceneColorFormat; td.SampleDesc.Count = sampleCount_;
     td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
@@ -2395,10 +2456,13 @@ void D3D12Device::beginFrame() {
     cmdList_->ClearRenderTargetView(rtv, sceneClear_, 0, nullptr);
     cmdList_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
+    // vpX_/vpY_/vpW_/vpH_ are already scene-space (setViewportRect scales them); the fallback when
+    // no sub-rect is set is the whole SCENE target, which this viewport draws into -- not width_/
+    // height_, the present size.
     const f32 rx = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
     const f32 ry = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
-    const f32 rw = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(width_);
-    const f32 rh = vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(height_);
+    const f32 rw = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(sceneWidth_);
+    const f32 rh = vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(sceneHeight_);
     D3D12_VIEWPORT vp{rx, ry, rw, rh, 0.0f, 1.0f};
     D3D12_RECT sc{static_cast<LONG>(rx), static_cast<LONG>(ry), static_cast<LONG>(rx + rw), static_cast<LONG>(ry + rh)};
     cmdList_->RSSetViewports(1, &vp);
@@ -2907,12 +2971,12 @@ void D3D12Device::releasePostTargets() {
 // points at either. Rebuilt on resize and on a sample-count change; the pipelines above survive both.
 bool D3D12Device::createPostTargets() {
     releasePostTargets();
-    if (!postRootSig_ || width_ == 0 || height_ == 0) return false;
+    if (!postRootSig_ || sceneWidth_ == 0 || sceneHeight_ == 0) return false;
 
     if (sampleCount_ > 1) {
         D3D12_RESOURCE_DESC td{};
         td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        td.Width = width_; td.Height = height_;
+        td.Width = sceneWidth_; td.Height = sceneHeight_;
         td.DepthOrArraySize = 1; td.MipLevels = 1;
         td.Format = kSceneColorFormat; td.SampleDesc.Count = 1;
         auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
@@ -2921,8 +2985,10 @@ bool D3D12Device::createPostTargets() {
             return false;
     }
 
-    bloomW_ = width_ / 2 > 1 ? width_ / 2 : 1;
-    bloomH_ = height_ / 2 > 1 ? height_ / 2 : 1;
+    // Bloom tracks the SCENE's own resolution, not the present one -- it samples straight off the
+    // (possibly downscaled) scene target, same as the resolve destination above.
+    bloomW_ = sceneWidth_ / 2 > 1 ? sceneWidth_ / 2 : 1;
+    bloomH_ = sceneHeight_ / 2 > 1 ? sceneHeight_ / 2 : 1;
     bloomMips_ = 1;
     while (bloomMips_ < kMaxBloomMips &&
            (bloomW_ >> bloomMips_) >= 8 && (bloomH_ >> bloomMips_) >= 8) ++bloomMips_;
@@ -3144,10 +3210,12 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     auto mipH = [&](u32 m) { return bloomH_ >> m ? bloomH_ >> m : 1u; };
 
     // ---- eye adaptation ----
+    // hw/hh (the downscaled dispatch grid) and the src dims below both derive from the SCENE target
+    // this samples -- sceneWidth_/sceneHeight_, not the present width_/height_.
     if (autoExp) {
-        const u32 hw = width_ / kHistogramDownscale > 1 ? width_ / kHistogramDownscale : 1;
-        const u32 hh = height_ / kHistogramDownscale > 1 ? height_ / kHistogramDownscale : 1;
-        fillCommon(hw, hh, width_, height_);
+        const u32 hw = sceneWidth_ / kHistogramDownscale > 1 ? sceneWidth_ / kHistogramDownscale : 1;
+        const u32 hh = sceneHeight_ / kHistogramDownscale > 1 ? sceneHeight_ / kHistogramDownscale : 1;
+        fillCommon(hw, hh, sceneWidth_, sceneHeight_);
 
         cmdList_->SetComputeRootSignature(postRootSig_.Get());
         cmdList_->SetPipelineState(histogramPso_.Get());
@@ -3179,7 +3247,8 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     // ---- bloom ----
     if (bloom) {
         bloomTo(0, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        fillCommon(mipW(0), mipH(0), width_, height_);
+        // Prefilter's source is the scene target, not the present size.
+        fillCommon(mipW(0), mipH(0), sceneWidth_, sceneHeight_);
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = bloomRtv(0);
         fullscreen(bloomPrefilterPso_.Get(), kPostTriplePrefilter, mipW(0), mipH(0), &rtv);
 
@@ -3201,7 +3270,12 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     }
 
     // ---- composite ----
-    fillCommon(width_, height_, width_, height_);
+    // dst is present-space (the backbuffer or the viewport texture, both width_/height_); src is the
+    // scene target this upscales (or 1:1 samples, at the default renderScale_ == 1.0) from --
+    // sceneWidth_/sceneHeight_. This IS the actual render-scale upscale: the composite pixel shader
+    // already samples by normalized UV through a bilinear sampler (gPostSamp), so the only change
+    // needed here is telling it the source is a different size than the destination.
+    fillCommon(width_, height_, sceneWidth_, sceneHeight_);
     {
         auto toRt = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
         cmdList_->ResourceBarrier(1, &toRt);
@@ -3264,10 +3338,11 @@ void D3D12Device::endFrame() {
     // rebinds them away from the scene target, which every opaque drawMesh call this frame already
     // depended on being true.
     if (skyEnabled_ && !sceneSuppressed_) {
+        // Same scene-space rect (and fallback to the scene target, not the present one) as beginFrame.
         const f32 rx = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
         const f32 ry = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
-        const f32 rw = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(width_);
-        const f32 rh = vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(height_);
+        const f32 rw = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(sceneWidth_);
+        const f32 rh = vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(sceneHeight_);
         D3D12_VIEWPORT vp{rx, ry, rw, rh, 0.0f, 1.0f};
         D3D12_RECT sc{static_cast<LONG>(rx), static_cast<LONG>(ry), static_cast<LONG>(rx + rw), static_cast<LONG>(ry + rh)};
         cmdList_->RSSetViewports(1, &vp);
@@ -3395,6 +3470,7 @@ void D3D12Device::resize(u32 w, u32 h) {
         return;
     }
     width_ = w; height_ = h;
+    computeSceneSize();
     vpX_ = vpY_ = vpW_ = vpH_ = 0;
     for (u32 n = 0; n < kFrameCount; ++n) fenceValues_[n] = 0;
     createRenderTargetViews();
@@ -4981,7 +5057,7 @@ void D3D12RenderContext::setConstants(u32 slot, const void* data, u32 dwords) {
     const i32 param = pipe_->slotParam[slot];
     const u32 declared = pipe_->slotDwords[slot];
     if (param < 0 || declared == 0) {
-        AVER_ERROR("[RHI.D3D12] setConstants: slot {} declares constantDwords 0, so it is a root CBV — use setConstantBuffer", slot);
+        AVER_ERROR("[RHI.D3D12] setConstants: slot {} declares constantDwords 0, so it is a root CBV â€” use setConstantBuffer", slot);
         return;
     }
 
@@ -4998,7 +5074,7 @@ void D3D12RenderContext::setConstantBuffer(u32 slot, const void* data, u32 bytes
     if (!pipe_ || slot >= kMaxConstantSlots || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] setConstantBuffer without a pipeline"); return; }
     const i32 param = pipe_->slotParam[slot];
     if (param < 0 || pipe_->slotDwords[slot] != 0) {
-        AVER_ERROR("[RHI.D3D12] setConstantBuffer: slot {} declares {} root constants, not a CBV — use setConstants",
+        AVER_ERROR("[RHI.D3D12] setConstantBuffer: slot {} declares {} root constants, not a CBV â€” use setConstants",
                    slot, pipe_->slotDwords[slot]);
         return;
     }
