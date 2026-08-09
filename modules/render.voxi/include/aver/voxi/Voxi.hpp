@@ -86,8 +86,19 @@ struct Settings {
     // voxelised+filtered volume for the N-1 frames in between, amortising the voxelise-rasterise pass
     // and the mip filter chain (VoxiRenderer::voxelizePass / filterMips) at the cost of the indirect
     // lighting lagging scene changes by up to N-1 frames -- a visible latency trade, not a resolution
-    // one, and the reason the default keeps it off. Clamped to [1, VoxiRenderer::kMaxGiUpdateInterval].
-    u32 giUpdateInterval = 1;
+    // one. Clamped to [1, VoxiRenderer::kMaxGiUpdateInterval].
+    //
+    // DERIVED FROM globalIllumination on a tier change, exactly as voxelResolution above is: Low 8,
+    // Medium 4, High 2, Epic 1. Set it explicitly in the same call that changes the tier to override
+    // the derived value.
+    //
+    // THE DEFAULT IS 4 BECAUSE THE DEFAULT TIER IS Medium, and the two have to agree by construction
+    // -- the derivation only fires when the tier CHANGES, so a struct whose defaults contradict each
+    // other never reaches the rung it claims. voxelResolution's 128 is Medium's rung for exactly this
+    // reason; 1 here was Epic's, and the result was that the default configuration silently ran the
+    // most expensive revoxelisation rate in the ladder. Measured: it left 187.9 ms on the table
+    // against the 104.5 ms the same scene reaches at interval 4.
+    u32 giUpdateInterval = 4;
 };
 
 // Process-wide settings service. Single instance shared by the editor, the runtime and the C ABI.
@@ -121,6 +132,10 @@ public:
     // voxelResolution from a tier change -- see setSettings and Voxi.cpp for the ladder and why it
     // only ever applies when the caller left voxelResolution untouched.
     static u32 voxelResolutionForQuality(Quality q);
+    // Returns the revoxelisation interval a GI quality tier resolves to, derived by setSettings on a
+    // tier change under exactly the same "only if the caller left it untouched" rule as the grid edge
+    // above. Epic is 1 -- always fresh -- so the top tier's indirect light is unchanged by this.
+    static u32 giUpdateIntervalForQuality(Quality q);
 
 private:
     Renderer() = default;
