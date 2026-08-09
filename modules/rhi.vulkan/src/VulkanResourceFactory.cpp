@@ -1,0 +1,2111 @@
+// VulkanResourceFactory — the Vulkan analog of D3D12ResourceFactory (modules/rhi.d3d12/src/
+// D3D12Device.cpp, ~3607-4844). Owns every generic GPU object a render-feature module creates
+// through IResourceFactory: textures, buffers, samplers (via the pipeline-layout cache), shaders,
+// pipelines, binding sets, and acceleration structures — plus the deferred-destruction queue every
+// one of those destroy calls defers into.
+//
+// FILE MAP: see VulkanCommon.hpp's own banner. This file owns VulkanResourceFactory in full, the
+// pipeline-layout / table-shape / sampler caches, nullFill/uploadInitialData, retireFence/retire/
+// collect, and the four createXCommitted/destroyXCommitted free functions.
+//
+// THE ONE STRUCTURAL PROBLEM THIS FILE HAD TO SOLVE THAT D3D12 NEVER FACES: a D3D12 root descriptor
+// TABLE range is type-erased — "N SRV descriptors starting at t0" says nothing about whether each
+// one is a Texture2D, a StructuredBuffer or an acceleration structure; the HLSL alone decides that,
+// and CreateShaderResourceView can point ANY of those kinds at ANY slot. PipelineLayout
+// (RHIResources.hpp) mirrors that: it declares SRV/UAV COUNTS per table, never per-slot KINDS.
+// Vulkan's VkDescriptorSetLayoutBinding is not type-erased — a binding commits to exactly one
+// VkDescriptorType, and building a pipeline against the wrong one is invalid. Since
+// GraphicsPipelineDesc/ComputePipelineDesc/PipelineLayout are off-limits to edit (modules/rhi/ is
+// owned by other work) and carry no per-slot kind, the only remaining source of truth for "is t3 a
+// texture or a buffer" is the shader ITSELF — which is exactly why RhiShader keeps its compiled
+// `spirv` words around after building the VkShaderModule (VulkanCommon.hpp never says why; this is
+// why). See reflectTableSlotKinds() below for the mechanism, and its own comment for the smuggling
+// trick descriptorLayout()'s FIXED, cross-file signature forced.
+#include "VulkanCommon.hpp"
+
+#include <algorithm>
+#include <cstring>
+
+namespace aver::rhi::vkb {
+
+// ================================================================================================
+// 0. Small local helpers — Vulkan descriptor-type mapping, SPIR-V reflection, one-shot command
+//    submission, and the lazily-built "null" resources nullFill() writes into unset slots.
+//    Everything in this anonymous namespace is private to this translation unit; nothing here is
+//    declared in VulkanCommon.hpp because nothing else needs it.
+// ================================================================================================
+namespace {
+
+// ---- SlotKind <-> VkDescriptorType -------------------------------------------------------------
+// `rtSupported` substitutes a sampled-image descriptor for an SRV AccelerationStructure slot when
+// VK_KHR_acceleration_structure is unavailable — the direct Vulkan-side twin of D3D12ResourceFactory
+// ::nullFill's own substitution (D3D12Device.cpp ~3686-3699: "no ray tracing on this device:
+// acceleration-structure slots are filled with a null 2D view"). D3D12 can make that substitution
+// PURELY AT WRITE TIME, because a root descriptor table slot has no fixed type. Vulkan cannot: the
+// VkDescriptorSetLayoutBinding itself must already say SAMPLED_IMAGE, or vkCreateDescriptorSetLayout
+// for VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR is invalid without the extension enabled — so
+// this same substitution has to happen here too, at LAYOUT-BUILD time, not just at nullFill time.
+VkDescriptorType toVkSrvDescriptorType(SlotKind kind, bool rtSupported) {
+    switch (kind) {
+        case SlotKind::StructuredBuffer: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case SlotKind::AccelerationStructure:
+            return rtSupported ? VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        case SlotKind::Texture2D:
+        case SlotKind::Texture3D:
+        default: return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    }
+}
+VkDescriptorType toVkUavDescriptorType(SlotKind kind) {
+    switch (kind) {
+        case SlotKind::StructuredBuffer: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case SlotKind::AccelerationStructure:
+            AVER_ERROR("[RHI.Vulkan] binding set UAV slot declares AccelerationStructure, which is SRV-only");
+            return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        case SlotKind::Texture2D:
+        case SlotKind::Texture3D:
+        default: return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    }
+}
+VkImageViewType viewTypeFor(TextureDim dim) { return dim == TextureDim::Tex3D ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D; }
+
+// ---- minimal SPIR-V reflection ------------------------------------------------------------------
+// UNVERIFIED against a real compile (no build was permitted this pass — see the caller's own
+// honestState). Opcode/decoration/storage-class numbers below are the public, stable SPIR-V values;
+// re-check with `spirv-dis` the day a build is possible, per this module's own house rule.
+enum SpvOp : u32 {
+    kSpvOpEntryPoint = 15,
+    kSpvOpTypeImage = 25,
+    kSpvOpTypeSampler = 26,
+    kSpvOpTypeStruct = 30,
+    kSpvOpTypePointer = 32,
+    kSpvOpTypeAccelerationStructureKHR = 5341,
+    kSpvOpVariable = 59,
+    kSpvOpDecorate = 71,
+};
+enum SpvDecoration : u32 { kSpvDecBlock = 2, kSpvDecBufferBlock = 3, kSpvDecBinding = 33, kSpvDecDescriptorSet = 34 };
+enum SpvStorageClass : u32 { kSpvSCUniformConstant = 0, kSpvSCUniform = 2, kSpvSCStorageBuffer = 12 };
+
+struct SpvBinding { u32 set = ~0u, binding = ~0u; VkDescriptorType type = VK_DESCRIPTOR_TYPE_MAX_ENUM; };
+
+// Walks one compiled module's word stream and appends every resource-variable (set, binding,
+// VkDescriptorType) it finds. A push-constant, stage-IO, or otherwise undecorated variable has no
+// DescriptorSet/Binding pair and is silently skipped, not guessed. Bounds-checked throughout: a
+// malformed or truncated module stops the scan rather than reading out of range.
+void reflectSpirvBindings(const std::vector<u32>& code, std::vector<SpvBinding>& out) {
+    if (code.size() < 5 || code[0] != 0x07230203u) return;
+    const u32 bound = code[3];
+    if (bound == 0 || bound > (1u << 22)) return;   // sanity ceiling; a real module's bound is small
+
+    struct TypeInfo { u32 opcode = 0; u32 storageClass = ~0u; u32 pointeeType = ~0u; u32 imageSampled = ~0u; bool isBufferBlock = false; };
+    std::vector<TypeInfo> types(bound);
+    std::vector<u32> varStorageClass(bound, ~0u);
+    std::vector<u32> varPointerType(bound, ~0u);
+    std::vector<std::pair<u32, u32>> setOf, bindingOf;
+
+    usize i = 5;
+    while (i < code.size()) {
+        const u32 word0 = code[i];
+        const u32 wordCount = word0 >> 16;
+        const u32 opcode = word0 & 0xFFFFu;
+        if (wordCount == 0 || i + wordCount > code.size()) break;
+        switch (opcode) {
+            case kSpvOpTypeImage:
+                if (wordCount > 1 && code[i + 1] < bound) {
+                    types[code[i + 1]].opcode = opcode;
+                    types[code[i + 1]].imageSampled = wordCount > 7 ? code[i + 7] : 0;
+                }
+                break;
+            case kSpvOpTypeSampler:
+            case kSpvOpTypeAccelerationStructureKHR:
+            case kSpvOpTypeStruct:
+                if (wordCount > 1 && code[i + 1] < bound) types[code[i + 1]].opcode = opcode;
+                break;
+            case kSpvOpTypePointer:
+                if (wordCount >= 4 && code[i + 1] < bound) {
+                    types[code[i + 1]].opcode = opcode;
+                    types[code[i + 1]].storageClass = code[i + 2];
+                    types[code[i + 1]].pointeeType = code[i + 3];
+                }
+                break;
+            case kSpvOpVariable:
+                if (wordCount >= 4 && code[i + 2] < bound) {
+                    varPointerType[code[i + 2]] = code[i + 1];
+                    varStorageClass[code[i + 2]] = code[i + 3];
+                }
+                break;
+            case kSpvOpDecorate:
+                if (wordCount >= 3) {
+                    const u32 target = code[i + 1], decoration = code[i + 2];
+                    if (decoration == kSpvDecDescriptorSet && wordCount >= 4) setOf.push_back({target, code[i + 3]});
+                    else if (decoration == kSpvDecBinding && wordCount >= 4) bindingOf.push_back({target, code[i + 3]});
+                    else if (decoration == kSpvDecBufferBlock && target < bound) types[target].isBufferBlock = true;
+                }
+                break;
+            default: break;
+        }
+        i += wordCount;
+    }
+
+    auto findU32 = [](const std::vector<std::pair<u32, u32>>& v, u32 id) -> u32 {
+        for (auto& p : v) if (p.first == id) return p.second;
+        return ~0u;
+    };
+
+    for (u32 id = 0; id < bound; ++id) {
+        const u32 sc = varStorageClass[id];
+        if (sc == ~0u) continue;
+        const u32 set = findU32(setOf, id);
+        const u32 binding = findU32(bindingOf, id);
+        if (set == ~0u || binding == ~0u) continue;
+
+        const u32 ptrType = varPointerType[id];
+        if (ptrType >= bound || types[ptrType].opcode != kSpvOpTypePointer) continue;
+        const u32 pointee = types[ptrType].pointeeType;
+        if (pointee >= bound) continue;
+
+        VkDescriptorType dt = VK_DESCRIPTOR_TYPE_MAX_ENUM;
+        if (sc == kSpvSCStorageBuffer) {
+            dt = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        } else if (sc == kSpvSCUniform) {
+            dt = types[pointee].isBufferBlock ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        } else if (sc == kSpvSCUniformConstant) {
+            const u32 op = types[pointee].opcode;
+            if (op == kSpvOpTypeImage)
+                dt = (types[pointee].imageSampled == 2) ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            else if (op == kSpvOpTypeSampler) dt = VK_DESCRIPTOR_TYPE_SAMPLER;
+            else if (op == kSpvOpTypeAccelerationStructureKHR) dt = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        }
+        if (dt == VK_DESCRIPTOR_TYPE_MAX_ENUM) continue;
+        out.push_back({set, binding, dt});
+    }
+}
+
+// OpEntryPoint's literal name, read back from the module itself. RhiShader keeps no entry-point
+// string of its own (spirv/stage/module only — see VulkanCommon.hpp section 7), and
+// VkPipelineShaderStageCreateInfo::pName needs a live C-string naming the SPIR-V entry function;
+// the module's own OpEntryPoint instruction is the one place that name is guaranteed to survive,
+// so this decodes it rather than threading ShaderDesc::entry through an extra field the header
+// does not declare.
+std::string spirvEntryPointName(const std::vector<u32>& code) {
+    if (code.size() < 5 || code[0] != 0x07230203u) return {};
+    usize i = 5;
+    while (i < code.size()) {
+        const u32 word0 = code[i];
+        const u32 wordCount = word0 >> 16;
+        const u32 opcode = word0 & 0xFFFFu;
+        if (wordCount == 0 || i + wordCount > code.size()) break;
+        if (opcode == kSpvOpEntryPoint && wordCount >= 4) {
+            const char* bytes = reinterpret_cast<const char*>(&code[i + 3]);
+            const usize maxBytes = static_cast<usize>(wordCount - 3) * 4;
+            usize len = 0;
+            while (len < maxBytes && bytes[len] != '\0') ++len;
+            return std::string(bytes, len);
+        }
+        i += wordCount;
+    }
+    return {};
+}
+
+SlotKind fromVkDescriptorTypeSrv(VkDescriptorType t) {
+    if (t == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) return SlotKind::StructuredBuffer;
+    if (t == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR) return SlotKind::AccelerationStructure;
+    return SlotKind::Texture2D;   // SAMPLED_IMAGE, or anything unrecognised -- see the caller's own note
+}
+SlotKind fromVkDescriptorTypeUav(VkDescriptorType t) {
+    return (t == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) ? SlotKind::StructuredBuffer : SlotKind::Texture2D;
+}
+
+// The per-call reflected table shape, SMUGGLED from createGraphicsPipeline/createComputePipeline
+// into descriptorLayout() around each call. Necessary because descriptorLayout()'s signature is
+// FIXED by VulkanCommon.hpp — `(const PipelineLayout&, bool)`, shared across four translation
+// units, not something this file may redesign — and carries no shader information, yet building a
+// correct VkDescriptorSetLayout for table 0/1 needs exactly that (see this file's banner). Set
+// immediately before each descriptorLayout() call this file makes and cleared immediately after;
+// safe as a plain (non-thread_local) static because this factory, like D3D12ResourceFactory, takes
+// no lock and is never called concurrently with itself.
+struct PendingTableKinds {
+    bool active = false;
+    SlotKind srv0[kMaxBindingSlots], uav0[kMaxBindingSlots], srv1[kMaxBindingSlots], uav1[kMaxBindingSlots];
+};
+PendingTableKinds gPendingKinds;
+
+// Reflects every given (already-resolved) shader stage and fills `out` with the REAL kind each
+// declared PipelineLayout slot needs, defaulting an UNMENTIONED slot to Texture2D (logged) rather
+// than guessing further — an unread register is a real, legal case (RHIResources.hpp's own note on
+// dispatchMeshClusters "always reserving regardless of whether a shader reads all three").
+void reflectTableSlotKinds(const RhiShader* const* stages, u32 stageCount, const PipelineLayout& layout,
+                           PendingTableKinds& out) {
+    out.active = true;
+    for (u32 i = 0; i < kMaxBindingSlots; ++i)
+        out.srv0[i] = out.uav0[i] = out.srv1[i] = out.uav1[i] = SlotKind::Texture2D;
+
+    std::vector<SpvBinding> bindings;
+    for (u32 s = 0; s < stageCount; ++s)
+        if (stages[s]) reflectSpirvBindings(stages[s]->spirv, bindings);
+
+    bool anyFound = false;
+    for (const SpvBinding& b : bindings) {
+        if (b.set == kVkSetTable0) {
+            if (b.binding < layout.srvCount) { out.srv0[b.binding] = fromVkDescriptorTypeSrv(b.type); anyFound = true; }
+            else if (b.binding >= kVkUavBindingBase && b.binding - kVkUavBindingBase < layout.uavCount) {
+                out.uav0[b.binding - kVkUavBindingBase] = fromVkDescriptorTypeUav(b.type); anyFound = true;
+            }
+        } else if (b.set == kVkSetTable1) {
+            if (b.binding < layout.srvCount1) { out.srv1[b.binding] = fromVkDescriptorTypeSrv(b.type); anyFound = true; }
+            else if (b.binding >= kVkUavBindingBase && b.binding - kVkUavBindingBase < layout.uavCount1) {
+                out.uav1[b.binding - kVkUavBindingBase] = fromVkDescriptorTypeUav(b.type); anyFound = true;
+            }
+        }
+    }
+    if (!anyFound && (layout.srvCount || layout.uavCount || layout.srvCount1 || layout.uavCount1))
+        AVER_WARN("[RHI.Vulkan] reflectTableSlotKinds found no descriptor-bound variables at all for a "
+                  "pipeline declaring table slots; every slot defaults to Texture2D, which is wrong for "
+                  "any StructuredBuffer/AccelerationStructure register");
+}
+
+// ---- one-shot command submission ----------------------------------------------------------------
+// Records `fn`, submits it on the graphics queue, and blocks until it retires. D3D12's
+// CreateCommittedResource can put a resource directly into any starting D3D12_RESOURCE_STATES with
+// no extra command; a Vulkan image is ALWAYS born VK_IMAGE_LAYOUT_UNDEFINED, so "create a texture
+// already in RenderTarget state" needs a real barrier submitted and waited on before createTexture
+// can return — this generalises the one-shot pattern uploadInitialData needs anyway, since a fresh
+// texture with an initial layout (seeded or not) needs it too.
+bool runOneShotCommands(VulkanDevice& dev, const std::function<void(VkCommandBuffer)>& fn, const char* what) {
+    const VulkanApi& api = dev.api();
+    VkDevice device = dev.vkDevice();
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo pi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    pi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pi.queueFamilyIndex = dev.graphicsQueueFamily();
+    if (!vkOk(api.CreateCommandPool(device, &pi, nullptr, &pool), what)) return false;
+
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ai.commandPool = pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    bool ok = vkOk(api.AllocateCommandBuffers(device, &ai, &cmd), what);
+
+    if (ok) {
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        ok = vkOk(api.BeginCommandBuffer(cmd, &bi), what);
+    }
+    if (ok) {
+        fn(cmd);
+        ok = vkOk(api.EndCommandBuffer(cmd), what);
+    }
+    if (ok) {
+        VkFence fence = VK_NULL_HANDLE;
+        VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        ok = vkOk(api.CreateFence(device, &fi, nullptr, &fence), what);
+        if (ok) {
+            VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &cmd;
+            ok = vkOk(api.QueueSubmit(dev.graphicsQueue(), 1, &si, fence), what);
+            if (ok) ok = vkOk(api.WaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), what);
+            api.DestroyFence(device, fence, nullptr);
+        }
+    }
+    api.DestroyCommandPool(device, pool, nullptr);   // frees the one command buffer too
+    return ok;
+}
+
+// One-shot image layout transition, UNDEFINED -> `to`, every mip and the whole aspect. Used for a
+// freshly created, unseeded texture whose TextureDesc::initialState is not Common -- see this
+// namespace's runOneShotCommands comment for why Vulkan needs this where D3D12 needs nothing.
+void transitionFreshImage(VulkanDevice& dev, VkImage image, VkImageAspectFlags aspect, u32 mips, ResourceState to) {
+    const VkImageBarrierInfo info = toVkImageBarrierInfo(to);
+    runOneShotCommands(dev, [&](VkCommandBuffer cmd) {
+        VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        b.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        b.srcAccessMask = VK_ACCESS_2_NONE;
+        b.dstStageMask = info.stage;
+        b.dstAccessMask = info.access;
+        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b.newLayout = info.layout;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = image;
+        b.subresourceRange = {aspect, 0, mips, 0, 1};
+        VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &b;
+        dev.api().CmdPipelineBarrier2(cmd, &dep);
+    }, "rhi createTexture initial-layout transition");
+}
+
+// ---- lazily-built dummy resources nullFill() writes into every unset declared slot --------------
+// Tier 1 requires a valid, dimension-matched descriptor in every declared slot even when unused
+// (RHIResources.hpp's own comment; D3D12ResourceFactory::nullFill, D3D12Device.cpp ~3678-3739, does
+// the identical thing with a null SRV/UAV view). Core Vulkan has no equivalent of
+// `CreateShaderResourceView(nullptr, &desc, handle)` -- without VK_EXT_robustness2's nullDescriptor
+// feature (not in this backend's extension list), every descriptor write needs a REAL, valid
+// resource behind it. These are that resource: a 1x1 image (used for both Texture2D and Texture3D
+// null-fills; Vulkan's descriptor TYPE, not the view's declared dimensionality, is what has to
+// match the layout) and a 16-byte buffer, built once and reused for the life of the process. Kept
+// as file-local statics rather than factory members because VulkanResourceFactory's class body is
+// fixed by VulkanCommon.hpp and cannot grow a new field here; this assumes at most one live
+// VulkanResourceFactory per process, true of this engine's actual usage throughout.
+struct NullResources {
+    bool ready = false;
+    VkImage image2D = VK_NULL_HANDLE, image3D = VK_NULL_HANDLE;
+    VkDeviceMemory image2DMemory = VK_NULL_HANDLE, image3DMemory = VK_NULL_HANDLE;
+    VkImageView view2D = VK_NULL_HANDLE, view3D = VK_NULL_HANDLE;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory bufferMemory = VK_NULL_HANDLE;
+    // A degenerate, 0-instance TLAS, built only if the device actually has ray tracing -- the one
+    // case a dummy IMAGE cannot stand in for, since the descriptor set layout for an
+    // AccelerationStructure slot, when RT IS supported, is really VK_DESCRIPTOR_TYPE_
+    // ACCELERATION_STRUCTURE_KHR (see toVkSrvDescriptorType) and nothing else is a legal write there.
+    VkAccelerationStructureKHR dummyTlas = VK_NULL_HANDLE;
+    VkBuffer dummyTlasBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory dummyTlasMemory = VK_NULL_HANDLE;
+    VkBuffer dummyTlasScratch = VK_NULL_HANDLE;
+    VkDeviceMemory dummyTlasScratchMemory = VK_NULL_HANDLE;
+};
+NullResources gNull;
+
+bool ensureNullResources(VulkanDevice& dev) {
+    if (gNull.ready) return true;
+    const VulkanApi& api = dev.api();
+    VkDevice device = dev.vkDevice();
+
+    VkImageCreateInfo ci2{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ci2.imageType = VK_IMAGE_TYPE_2D;
+    ci2.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ci2.extent = {1, 1, 1};
+    ci2.mipLevels = 1;
+    ci2.arrayLayers = 1;
+    ci2.samples = VK_SAMPLE_COUNT_1_BIT;
+    ci2.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ci2.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+    ci2.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (!createImageCommitted(dev, ci2, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, gNull.image2D, gNull.image2DMemory, "AverRhiNullTexture2D"))
+        return false;
+
+    VkImageCreateInfo ci3 = ci2;
+    ci3.imageType = VK_IMAGE_TYPE_3D;
+    if (!createImageCommitted(dev, ci3, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, gNull.image3D, gNull.image3DMemory, "AverRhiNullTexture3D"))
+        return false;
+
+    // VK_IMAGE_LAYOUT_GENERAL: this one image backs BOTH a null SRV and a null UAV write below, so
+    // it must be valid for both simultaneously -- GENERAL is the one layout that always is.
+    transitionFreshImage(dev, gNull.image2D, VK_IMAGE_ASPECT_COLOR_BIT, 1, ResourceState::UnorderedAccess);
+    transitionFreshImage(dev, gNull.image3D, VK_IMAGE_ASPECT_COLOR_BIT, 1, ResourceState::UnorderedAccess);
+
+    VkImageViewCreateInfo vi2{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi2.image = gNull.image2D;
+    vi2.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi2.format = ci2.format;
+    vi2.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (!vkOk(api.CreateImageView(device, &vi2, nullptr, &gNull.view2D), "rhi null texture2D view")) return false;
+    VkImageViewCreateInfo vi3 = vi2;
+    vi3.image = gNull.image3D;
+    vi3.viewType = VK_IMAGE_VIEW_TYPE_3D;
+    if (!vkOk(api.CreateImageView(device, &vi3, nullptr, &gNull.view3D), "rhi null texture3D view")) return false;
+
+    if (!createBufferCommitted(dev, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, gNull.buffer, gNull.bufferMemory, nullptr, "AverRhiNullBuffer"))
+        return false;
+
+    if (dev.cachedCaps().rayTracingTier != 0 && api.CreateAccelerationStructureKHR && api.GetAccelerationStructureBuildSizesKHR) {
+        VkAccelerationStructureGeometryKHR geom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+        geom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+        geom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+        VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+        bi.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+        bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+        bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        bi.geometryCount = 1;
+        bi.pGeometries = &geom;
+        const u32 zeroInstances = 0;
+        VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+        api.GetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bi, &zeroInstances, &sizes);
+        // A degenerate build can legally report a zero-ish size on some drivers; floor it so the
+        // buffer creation below is never asked for zero bytes.
+        const VkDeviceSize asBytes = sizes.accelerationStructureSize ? sizes.accelerationStructureSize : 256;
+        const VkDeviceSize scratchBytes = sizes.buildScratchSize ? sizes.buildScratchSize : 256;
+        if (createBufferCommitted(dev, asBytes, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, gNull.dummyTlasBuffer, gNull.dummyTlasMemory, nullptr, "AverRhiNullTlasBuffer") &&
+            createBufferCommitted(dev, scratchBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, gNull.dummyTlasScratch, gNull.dummyTlasScratchMemory, nullptr, "AverRhiNullTlasScratch")) {
+            VkAccelerationStructureCreateInfoKHR aci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+            aci.buffer = gNull.dummyTlasBuffer;
+            aci.size = asBytes;
+            aci.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+            if (vkOk(api.CreateAccelerationStructureKHR(device, &aci, nullptr, &gNull.dummyTlas), "rhi null TLAS")) {
+                VkDeviceAddress scratchAddr = 0;
+                VkBufferDeviceAddressInfo dai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+                dai.buffer = gNull.dummyTlasScratch;
+                scratchAddr = api.GetBufferDeviceAddress(device, &dai);
+                bi.dstAccelerationStructure = gNull.dummyTlas;
+                bi.scratchData.deviceAddress = scratchAddr;
+                VkAccelerationStructureBuildRangeInfoKHR range{0, 0, 0, 0};
+                const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
+                runOneShotCommands(dev, [&](VkCommandBuffer cmd) {
+                    api.CmdBuildAccelerationStructuresKHR(cmd, 1, &bi, &pRange);
+                }, "rhi null TLAS build");
+            }
+        }
+    } else if (dev.cachedCaps().rayTracingTier != 0) {
+        AVER_WARN("[RHI.Vulkan] ray tracing reported available but the acceleration-structure entry "
+                  "points did not load; SRV AccelerationStructure slots will be left unwritten when unset");
+    }
+
+    gNull.ready = true;
+    return true;
+}
+
+void destroyNullResources(VulkanDevice& dev) {
+    if (!gNull.ready && !gNull.image2D && !gNull.image3D && !gNull.buffer) return;
+    const VulkanApi& api = dev.api();
+    VkDevice device = dev.vkDevice();
+    if (gNull.dummyTlas) api.DestroyAccelerationStructureKHR(device, gNull.dummyTlas, nullptr);
+    destroyBufferCommitted(dev, gNull.dummyTlasScratch, gNull.dummyTlasScratchMemory);
+    destroyBufferCommitted(dev, gNull.dummyTlasBuffer, gNull.dummyTlasMemory);
+    if (gNull.view2D) api.DestroyImageView(device, gNull.view2D, nullptr);
+    if (gNull.view3D) api.DestroyImageView(device, gNull.view3D, nullptr);
+    destroyImageCommitted(dev, gNull.image2D, gNull.image2DMemory);
+    destroyImageCommitted(dev, gNull.image3D, gNull.image3DMemory);
+    destroyBufferCommitted(dev, gNull.buffer, gNull.bufferMemory);
+    gNull = NullResources{};
+}
+
+// ---- pipeline fixed-function state conversions ---------------------------------------------------
+VkPipelineColorBlendAttachmentState toVkBlendAttachment(BlendMode m) {
+    VkPipelineColorBlendAttachmentState a{};
+    a.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    switch (m) {
+        case BlendMode::Opaque: break;
+        case BlendMode::AlphaBlend:
+            a.blendEnable = VK_TRUE;
+            a.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            a.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            a.colorBlendOp = VK_BLEND_OP_ADD;
+            a.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            a.alphaBlendOp = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::PremultipliedAlpha:
+            a.blendEnable = VK_TRUE;
+            a.srcColorBlendFactor = a.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            a.dstColorBlendFactor = a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            a.colorBlendOp = a.alphaBlendOp = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::Additive:
+            a.blendEnable = VK_TRUE;
+            a.srcColorBlendFactor = a.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            a.dstColorBlendFactor = a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            a.colorBlendOp = a.alphaBlendOp = VK_BLEND_OP_ADD;
+            break;
+    }
+    return a;
+}
+
+} // namespace
+
+// ================================================================================================
+// 1. pushConstantLayout() — free function, declared in VulkanCommon.hpp section 4.
+// ================================================================================================
+PushConstantLayout pushConstantLayout(const PipelineLayout& layout, bool mesh) {
+    PushConstantLayout pc;
+    // b1 (the object block) is always present and always first -- every feature module that builds
+    // a PipelineLayout sets constantDwords[kObjectConstantRegister] = kObjectConstantDwords itself
+    // (see e.g. VoxiRenderer.cpp's giLayout()), so this is reproduced here, not re-derived from
+    // whatever the caller happened to write.
+    pc.slotOffset[kObjectConstantRegister] = PushConstantLayout::kObjectOffset;
+    pc.slotBytes[kObjectConstantRegister] = PushConstantLayout::kObjectBytes;
+    u32 offset = PushConstantLayout::kObjectOffset + PushConstantLayout::kObjectBytes;
+    for (u32 k = 0; k < kMaxConstantSlots; ++k) {
+        if (k == kObjectConstantRegister) continue;      // placed first, above
+        if (layout.constantDwords[k] == 0) continue;     // a root CBV (dynamic UBO), not a push constant
+        pc.slotOffset[k] = offset;
+        pc.slotBytes[k] = layout.constantDwords[k] * 4;
+        offset += pc.slotBytes[k];
+    }
+    if (mesh) {
+        offset = (offset + 7u) & ~7u;   // 8-byte align the two VkDeviceAddress fields
+        pc.meshVertexAddrOffset = offset; offset += static_cast<u32>(sizeof(VkDeviceAddress));
+        pc.meshIndexAddrOffset = offset; offset += static_cast<u32>(sizeof(VkDeviceAddress));
+        pc.meshCountOffset = offset; offset += 16;   // 4 dwords, mirrors D3D12's kMeshGeometryConstantRegister block
+    }
+    pc.totalBytes = offset;
+    return pc;
+}
+
+// ================================================================================================
+// 2. createBufferCommitted / createImageCommitted / destroyBufferCommitted / destroyImageCommitted
+//    — declared in VulkanCommon.hpp section 9.
+// ================================================================================================
+bool createBufferCommitted(VulkanDevice& dev, VkDeviceSize bytes, VkBufferUsageFlags usage,
+                           VkMemoryPropertyFlags required, VkBuffer& outBuffer, VkDeviceMemory& outMemory,
+                           VkDeviceAddress* outAddress, const char* debugName) {
+    outBuffer = VK_NULL_HANDLE;
+    outMemory = VK_NULL_HANDLE;
+    const VulkanApi& api = dev.api();
+    VkDevice device = dev.vkDevice();
+
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.size = bytes;
+    bi.usage = usage;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (!vkOk(api.CreateBuffer(device, &bi, nullptr, &outBuffer), debugName ? debugName : "rhi buffer")) return false;
+
+    VkMemoryRequirements req{};
+    api.GetBufferMemoryRequirements(device, outBuffer, &req);
+
+    u32 typeIndex = findMemoryType(dev.memoryProperties(), req.memoryTypeBits, required);
+    if (typeIndex == ~0u && (required & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+        typeIndex = findMemoryType(dev.memoryProperties(), req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    if (typeIndex == ~0u) {
+        AVER_ERROR("[RHI.Vulkan] {}: no memory type matches required flags 0x{:x} (type bits 0x{:x})",
+                   debugName ? debugName : "createBufferCommitted", static_cast<u32>(required), req.memoryTypeBits);
+        api.DestroyBuffer(device, outBuffer, nullptr);
+        outBuffer = VK_NULL_HANDLE;
+        return false;
+    }
+
+    // Every buffer this factory creates carries VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+    // (toVkBufferUsage's "everything is everything" policy, or the caller's own explicit AS-buffer
+    // usage above), so its backing memory must always be allocated with the matching allocate flag
+    // -- there is no per-resource opt-out the way D3D12 simply never needs one (a GPU virtual
+    // address is always available there with no allocation-time flag at all).
+    VkMemoryAllocateFlagsInfo flagsInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+    flagsInfo.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.pNext = &flagsInfo;
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = typeIndex;
+    if (!vkOk(api.AllocateMemory(device, &ai, nullptr, &outMemory), debugName ? debugName : "rhi buffer memory")) {
+        api.DestroyBuffer(device, outBuffer, nullptr);
+        outBuffer = VK_NULL_HANDLE;
+        return false;
+    }
+    if (!vkOk(api.BindBufferMemory(device, outBuffer, outMemory, 0), debugName ? debugName : "rhi buffer bind")) {
+        api.FreeMemory(device, outMemory, nullptr);
+        api.DestroyBuffer(device, outBuffer, nullptr);
+        outBuffer = VK_NULL_HANDLE;
+        outMemory = VK_NULL_HANDLE;
+        return false;
+    }
+    if (outAddress) {
+        VkBufferDeviceAddressInfo dai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+        dai.buffer = outBuffer;
+        *outAddress = api.GetBufferDeviceAddress(device, &dai);
+    }
+    setVkObjectName(api, device, VK_OBJECT_TYPE_BUFFER, reinterpret_cast<u64>(outBuffer), debugName);
+    return true;
+}
+
+bool createImageCommitted(VulkanDevice& dev, const VkImageCreateInfo& imageInfo,
+                          VkMemoryPropertyFlags required, VkImage& outImage, VkDeviceMemory& outMemory,
+                          const char* debugName) {
+    outImage = VK_NULL_HANDLE;
+    outMemory = VK_NULL_HANDLE;
+    const VulkanApi& api = dev.api();
+    VkDevice device = dev.vkDevice();
+    if (!vkOk(api.CreateImage(device, &imageInfo, nullptr, &outImage), debugName ? debugName : "rhi image")) return false;
+
+    VkMemoryRequirements req{};
+    api.GetImageMemoryRequirements(device, outImage, &req);
+    const u32 typeIndex = findMemoryType(dev.memoryProperties(), req.memoryTypeBits, required);
+    if (typeIndex == ~0u) {
+        AVER_ERROR("[RHI.Vulkan] {}: no memory type matches required flags 0x{:x} (type bits 0x{:x})",
+                   debugName ? debugName : "createImageCommitted", static_cast<u32>(required), req.memoryTypeBits);
+        api.DestroyImage(device, outImage, nullptr);
+        outImage = VK_NULL_HANDLE;
+        return false;
+    }
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = typeIndex;
+    if (!vkOk(api.AllocateMemory(device, &ai, nullptr, &outMemory), debugName ? debugName : "rhi image memory")) {
+        api.DestroyImage(device, outImage, nullptr);
+        outImage = VK_NULL_HANDLE;
+        return false;
+    }
+    if (!vkOk(api.BindImageMemory(device, outImage, outMemory, 0), debugName ? debugName : "rhi image bind")) {
+        api.FreeMemory(device, outMemory, nullptr);
+        api.DestroyImage(device, outImage, nullptr);
+        outImage = VK_NULL_HANDLE;
+        outMemory = VK_NULL_HANDLE;
+        return false;
+    }
+    setVkObjectName(api, device, VK_OBJECT_TYPE_IMAGE, reinterpret_cast<u64>(outImage), debugName);
+    return true;
+}
+
+void destroyBufferCommitted(VulkanDevice& dev, VkBuffer buffer, VkDeviceMemory memory) {
+    if (buffer) dev.api().DestroyBuffer(dev.vkDevice(), buffer, nullptr);
+    if (memory) dev.api().FreeMemory(dev.vkDevice(), memory, nullptr);
+}
+void destroyImageCommitted(VulkanDevice& dev, VkImage image, VkDeviceMemory memory) {
+    if (image) dev.api().DestroyImage(dev.vkDevice(), image, nullptr);
+    if (memory) dev.api().FreeMemory(dev.vkDevice(), memory, nullptr);
+}
+
+// ================================================================================================
+// 3. Construction / destruction / init / selfTest
+// ================================================================================================
+
+VulkanResourceFactory::~VulkanResourceFactory() {
+    // D3D12ResourceFactory's destructor is `dev_->waitForGpu(); retired_.clear();` -- ComPtr RAII,
+    // baked into every RhiTexture/RhiBuffer/... member, releases everything the handle tables still
+    // hold the moment THEIR OWN destructors run right after. A VkImage/VkBuffer/... is a plain u64,
+    // not a smart pointer, so the same "just clear the vectors" line here would leak every live GPU
+    // allocation until the whole VkDevice tears down. Wait for the GPU first (nothing below may run
+    // concurrently with a submit that still references any of this), run every already-retired
+    // destroy callback (its fence has necessarily passed once the wait returns), then walk every
+    // handle table and free whatever is still alive.
+    const VulkanApi& api = dev_->api();
+    VkDevice device = dev_->vkDevice();
+    dev_->waitForGpu();
+
+    for (auto& r : retired_) if (r.destroy) r.destroy();
+    retired_.clear();
+
+    for (auto& t : textures_) {
+        if (t.srvView) api.DestroyImageView(device, t.srvView, nullptr);
+        if (t.rtvView) api.DestroyImageView(device, t.rtvView, nullptr);
+        if (t.dsvView) api.DestroyImageView(device, t.dsvView, nullptr);
+        for (VkImageView v : t.uavViews) if (v) api.DestroyImageView(device, v, nullptr);
+        destroyImageCommitted(*dev_, t.image, t.memory);
+    }
+    textures_.clear();
+
+    for (auto& b : buffers_) destroyBufferCommitted(*dev_, b.buffer, b.memory);
+    buffers_.clear();
+
+    for (auto& s : shaders_) if (s.module) api.DestroyShaderModule(device, s.module, nullptr);
+    shaders_.clear();
+
+    for (auto& p : pipelines_) if (p.pipeline) api.DestroyPipeline(device, p.pipeline, nullptr);
+    pipelines_.clear();
+
+    // bindingSets_ hold no Vk-owned resource beyond the VkDescriptorSet itself, and every one of
+    // those goes away in one shot with the pool destroy below.
+    bindingSets_.clear();
+
+    for (auto& b : blases_) {
+        if (b.as) api.DestroyAccelerationStructureKHR(device, b.as, nullptr);
+        destroyBufferCommitted(*dev_, b.asBuffer, b.asMemory);
+        destroyBufferCommitted(*dev_, b.scratchBuffer, b.scratchMemory);
+    }
+    blases_.clear();
+
+    for (auto& t : tlases_) {
+        if (t.as) api.DestroyAccelerationStructureKHR(device, t.as, nullptr);
+        destroyBufferCommitted(*dev_, t.asBuffer, t.asMemory);
+        destroyBufferCommitted(*dev_, t.scratchBuffer, t.scratchMemory);
+        for (u32 i = 0; i < kFrameCount; ++i) destroyBufferCommitted(*dev_, t.instanceBuffers[i], t.instanceMemory[i]);
+    }
+    tlases_.clear();
+
+    for (auto& e : descriptorLayouts_) {
+        if (e.constantsSetLayout) api.DestroyDescriptorSetLayout(device, e.constantsSetLayout, nullptr);
+        if (e.samplersSetLayout) api.DestroyDescriptorSetLayout(device, e.samplersSetLayout, nullptr);
+        if (e.pipelineLayout) api.DestroyPipelineLayout(device, e.pipelineLayout, nullptr);
+        // tableSetLayouts[] are owned by tableShapes_ below, not here -- see TableShapeEntry's own
+        // comment on why the two caches are separate.
+    }
+    descriptorLayouts_.clear();
+
+    for (auto& e : tableShapes_) if (e.layout) api.DestroyDescriptorSetLayout(device, e.layout, nullptr);
+    tableShapes_.clear();
+
+    for (auto& e : samplers_) if (e.sampler) api.DestroySampler(device, e.sampler, nullptr);
+    samplers_.clear();
+
+    destroyNullResources(*dev_);
+
+    // Every VkDescriptorSet allocated from this pool (every binding set, every samplers set) dies
+    // in one shot here, which is why nothing above calls vkFreeDescriptorSets individually.
+    if (descriptorPool_) api.DestroyDescriptorPool(device, descriptorPool_, nullptr);
+    descriptorPool_ = VK_NULL_HANDLE;
+}
+
+bool VulkanResourceFactory::init() {
+    const VulkanApi& api = dev_->api();
+    VkDevice device = dev_->vkDevice();
+
+    // Sizing is a policy call with no D3D12 number to derive it from: D3D12's kRhiHeapSize (65536)
+    // counts individual CBV_SRV_UAV descriptor SLOTS in one heap; Vulkan counts descriptor SETS and,
+    // separately, a per-TYPE budget across the whole pool. Sized generously rather than measured,
+    // since nothing in this engine's actual usage has been profiled yet -- revisit if
+    // vkAllocateDescriptorSets/vkCreateDescriptorPool ever reports VK_ERROR_OUT_OF_POOL_MEMORY.
+    constexpr u32 kMaxSets = 4096;
+    VkDescriptorPoolSize sizes[] = {
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 16384},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8192},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16384},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 512},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 256},
+        {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 256},
+    };
+    VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    // FREE_DESCRIPTOR_SET_BIT: destroyBindingSet must be able to return its one set individually --
+    // the Vulkan analog of D3D12's reusable descriptor RANGE (allocRange/freeRanges_) -- which a
+    // Vulkan pool cannot do unless created with this flag (otherwise it can only be reset as a whole).
+    pi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    pi.maxSets = kMaxSets;
+    pi.poolSizeCount = static_cast<u32>(sizeof(sizes) / sizeof(sizes[0]));
+    pi.pPoolSizes = sizes;
+    if (!vkOk(api.CreateDescriptorPool(device, &pi, nullptr, &descriptorPool_), "rhi descriptor pool")) return false;
+
+    // RhiPipeline::layoutEntry is a RAW POINTER into descriptorLayouts_ (VulkanCommon.hpp section
+    // 12's own comment: "owned by VulkanResourceFactory's cache, not by this"). A std::vector that
+    // reallocates on growth would dangle every already-built pipeline's pointer the moment a LATER,
+    // differently-shaped pipeline layout pushes past this capacity. D3D12's RootSigEntry cache has
+    // no equivalent hazard: D3D12Device.cpp's RhiPipeline stores the raw ID3D12RootSignature*
+    // straight out of the cache entry, not a pointer to the entry itself. Reserving up front is the
+    // whole mitigation; if this engine ever legitimately builds more than 256 distinct
+    // (PipelineLayout, mesh) combinations, this needs revisiting, not just a bigger number.
+    descriptorLayouts_.reserve(256);
+
+    return true;
+}
+
+namespace {
+const char* kSelfTestCS = R"(
+cbuffer SelfTestCB : register(b0) { uint4 gValue; };
+RWTexture3D<float4> gOut : register(u0);
+[numthreads(4,4,4)]
+void CSSelfTest(uint3 id : SV_DispatchThreadID) { gOut[id] = float4(gValue); }
+)";
+} // namespace
+
+void VulkanResourceFactory::selfTest() {
+    TextureDesc td{};
+    td.dim = TextureDim::Tex3D;
+    td.width = td.height = td.depth = 32;
+    td.mips = 0;
+    td.format = Format::RGBA16F;
+    td.bind = ResourceBind::ShaderResource | ResourceBind::UnorderedAccess;
+    td.initialState = ResourceState::UnorderedAccess;
+    td.debugName = "AverRhiSelfTestVolume";
+    const TextureHandle tex = createTexture(td);
+    TextureDesc got{};
+    const bool info = tex != 0 && textureInfo(tex, got);
+    AVER_INFO("[RHI.Vulkan] factory self-test: texture {} (32^3 RGBA16F, {} mips resolved)",
+              tex ? "ok" : "FAILED", info ? got.mips : 0u);
+
+    BufferDesc bd{};
+    bd.bytes = 4096;
+    bd.kind = BufferKind::Upload;
+    bd.debugName = "AverRhiSelfTestBuffer";
+    const BufferHandle buf = createBuffer(bd);
+    AVER_INFO("[RHI.Vulkan] factory self-test: buffer {}", buf ? "ok" : "FAILED");
+
+    ShaderDesc sd{};
+    sd.source = kSelfTestCS;
+    sd.entry = "CSSelfTest";
+    sd.stage = ShaderStage::Compute;
+    sd.minShaderModel = 60;   // this backend's compiler is DXC-only; SM 5.1 (FXC-only) is not reachable
+    const ShaderHandle cs = createShader(sd);
+    ComputePipelineDesc cd{};
+    cd.cs = cs;
+    cd.layout.uavCount = 1;
+    cd.layout.constantDwords[0] = 4;
+    const PipelineHandle pipe = cs ? createComputePipeline(cd) : 0;
+    AVER_INFO("[RHI.Vulkan] factory self-test: compute pipeline {}", pipe ? "ok" : "FAILED");
+
+    BindingSetDesc bsd{};
+    bsd.srvCount = 1;
+    bsd.uavCount = 1;
+    bsd.srvKinds[0] = SlotKind::Texture3D;
+    bsd.uavKinds[0] = SlotKind::Texture3D;
+    const BindingSetHandle set = createBindingSet(bsd);
+    if (set && tex) setUav(set, 0, tex, 0);
+    AVER_INFO("[RHI.Vulkan] factory self-test: binding set {}", set ? "ok" : "FAILED");
+    destroyBindingSet(set);
+
+    BufferDesc sd2{};
+    sd2.bytes = 4096;
+    sd2.kind = BufferKind::Default;
+    sd2.allowUnorderedAccess = true;
+    sd2.debugName = "AverRhiSelfTestStructured";
+    const BufferHandle sbuf = createBuffer(sd2);
+
+    BufferDesc rb{};
+    rb.bytes = 4096;
+    rb.kind = BufferKind::Readback;
+    rb.debugName = "AverRhiSelfTestReadback";
+    const BufferHandle rbuf = createBuffer(rb);
+
+    BindingSetDesc bufSet{};
+    bufSet.srvCount = 1;
+    bufSet.uavCount = 1;
+    bufSet.srvKinds[0] = SlotKind::StructuredBuffer;
+    bufSet.uavKinds[0] = SlotKind::StructuredBuffer;
+    const BindingSetHandle bset = createBindingSet(bufSet);
+    if (bset && sbuf) {
+        setSrvBuffer(bset, 0, sbuf, 16, 256, 0);
+        setUavBuffer(bset, 0, sbuf, 16, 256, 0);
+    }
+    u8 probe[16] = {};
+    const bool readOk = rbuf && readBuffer(rbuf, probe, sizeof probe, 0);
+    AVER_INFO("[RHI.Vulkan] factory self-test: buffer views {} (structured SRV+UAV, readback {})",
+              (sbuf && rbuf && bset) ? "ok" : "FAILED", readOk ? "ok" : "FAILED");
+
+    destroyBindingSet(bset);
+    destroyBuffer(rbuf);
+    destroyBuffer(sbuf);
+    destroyPipeline(pipe);
+    destroyShader(cs);
+    destroyBuffer(buf);
+    destroyTexture(tex);
+    collect();
+}
+
+// ================================================================================================
+// 4. Table lookups
+// ================================================================================================
+RhiTexture* VulkanResourceFactory::texture(TextureHandle h) {
+    if (h == 0 || h > textures_.size()) return nullptr;
+    RhiTexture& t = textures_[h - 1];
+    return t.image ? &t : nullptr;
+}
+const RhiTexture* VulkanResourceFactory::texture(TextureHandle h) const {
+    if (h == 0 || h > textures_.size()) return nullptr;
+    const RhiTexture& t = textures_[h - 1];
+    return t.image ? &t : nullptr;
+}
+RhiBuffer* VulkanResourceFactory::buffer(BufferHandle h) {
+    if (h == 0 || h > buffers_.size()) return nullptr;
+    RhiBuffer& b = buffers_[h - 1];
+    return b.buffer ? &b : nullptr;
+}
+const RhiBuffer* VulkanResourceFactory::buffer(BufferHandle h) const {
+    if (h == 0 || h > buffers_.size()) return nullptr;
+    const RhiBuffer& b = buffers_[h - 1];
+    return b.buffer ? &b : nullptr;
+}
+RhiShader* VulkanResourceFactory::shader(ShaderHandle h) {
+    if (h == 0 || h > shaders_.size()) return nullptr;
+    RhiShader& s = shaders_[h - 1];
+    return s.module ? &s : nullptr;
+}
+RhiPipeline* VulkanResourceFactory::pipeline(PipelineHandle h) {
+    if (h == 0 || h > pipelines_.size()) return nullptr;
+    RhiPipeline& p = pipelines_[h - 1];
+    return p.pipeline ? &p : nullptr;
+}
+RhiBindingSet* VulkanResourceFactory::bindingSet(BindingSetHandle h) {
+    if (h == 0 || h > bindingSets_.size()) return nullptr;
+    RhiBindingSet& s = bindingSets_[h - 1];
+    return s.alive ? &s : nullptr;
+}
+RhiBlas* VulkanResourceFactory::blas(BlasHandle h) {
+    if (h == 0 || h > blases_.size()) return nullptr;
+    RhiBlas& b = blases_[h - 1];
+    return b.as ? &b : nullptr;
+}
+RhiTlas* VulkanResourceFactory::tlas(TlasHandle h) {
+    if (h == 0 || h > tlases_.size()) return nullptr;
+    RhiTlas& t = tlases_[h - 1];
+    return t.as ? &t : nullptr;
+}
+VkBuffer VulkanResourceFactory::bufferResource(BufferHandle h) const {
+    return (h == 0 || h > buffers_.size()) ? VK_NULL_HANDLE : buffers_[h - 1].buffer;
+}
+u64 VulkanResourceFactory::uiDescriptor(TextureHandle h) {
+    // Unused while VulkanDevice does not override IDevice's ui* methods (see its own note in
+    // VulkanCommon.hpp) -- a harmless always-0 stub so the surface exists the day imgui_impl_vulkan
+    // is wired up, mirroring D3D12ResourceFactory::uiDescriptor's own #else branch.
+    (void)h;
+    return 0;
+}
+
+// ================================================================================================
+// 5. Descriptor-set-layout / pipeline-layout cache, sampler cache
+// ================================================================================================
+VkDescriptorSetLayout VulkanResourceFactory::tableSetLayout(u32 srvCount, u32 uavCount,
+                                                             const SlotKind* srvKinds, const SlotKind* uavKinds) {
+    for (auto& e : tableShapes_) {
+        if (sameTableShape(e.srvCount, e.uavCount, e.srvKinds, e.uavKinds, srvCount, uavCount, srvKinds, uavKinds))
+            return e.layout;
+    }
+
+    const bool rtSupported = dev_->cachedCaps().rayTracingTier != 0;
+    std::vector<VkDescriptorSetLayoutBinding> bindings;
+    bindings.reserve(static_cast<usize>(srvCount) + uavCount);
+    for (u32 i = 0; i < srvCount; ++i) {
+        VkDescriptorSetLayoutBinding b{};
+        b.binding = i;
+        b.descriptorType = toVkSrvDescriptorType(srvKinds[i], rtSupported);
+        b.descriptorCount = 1;
+        b.stageFlags = VK_SHADER_STAGE_ALL;
+        bindings.push_back(b);
+    }
+    for (u32 i = 0; i < uavCount; ++i) {
+        VkDescriptorSetLayoutBinding b{};
+        b.binding = kVkUavBindingBase + i;
+        b.descriptorType = toVkUavDescriptorType(uavKinds[i]);
+        b.descriptorCount = 1;
+        b.stageFlags = VK_SHADER_STAGE_ALL;
+        bindings.push_back(b);
+    }
+    VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    ci.bindingCount = static_cast<u32>(bindings.size());
+    ci.pBindings = bindings.empty() ? nullptr : bindings.data();
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    if (!vkOk(dev_->api().CreateDescriptorSetLayout(dev_->vkDevice(), &ci, nullptr, &layout), "rhi table descriptor set layout"))
+        return VK_NULL_HANDLE;
+
+    TableShapeEntry e;
+    e.srvCount = srvCount;
+    e.uavCount = uavCount;
+    for (u32 i = 0; i < srvCount && i < kMaxBindingSlots; ++i) e.srvKinds[i] = srvKinds[i];
+    for (u32 i = 0; i < uavCount && i < kMaxBindingSlots; ++i) e.uavKinds[i] = uavKinds[i];
+    e.layout = layout;
+    tableShapes_.push_back(e);
+    return layout;
+}
+
+VkSampler VulkanResourceFactory::getOrCreateSampler(const SamplerDesc& d) {
+    for (auto& e : samplers_) if (sameSampler(e.desc, d)) return e.sampler;
+
+    VkSamplerCreateInfo ci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    ci.magFilter = toVkFilter(d.filter);
+    ci.minFilter = toVkFilter(d.filter);
+    ci.mipmapMode = toVkMipmapMode(d.filter);
+    ci.addressModeU = ci.addressModeV = ci.addressModeW = toVkAddressMode(d.address);
+    ci.minLod = 0.0f;
+    ci.maxLod = d.maxLod;
+    // compareEnable/compareOp are meaningful exactly when the caller asked for ComparisonLinear --
+    // SamplerDesc's own comment marks `compare` as "ComparisonLinear only", so the caller is trusted
+    // to have set a real op alongside that filter, matching D3D12's D3D12_FILTER_COMPARISON_* path.
+    ci.compareEnable = (d.filter == Filter::ComparisonLinear) ? VK_TRUE : VK_FALSE;
+    ci.compareOp = toVkCompareOp(d.compare);
+    ci.anisotropyEnable = (d.filter == Filter::Anisotropic) ? VK_TRUE : VK_FALSE;
+    ci.maxAnisotropy = d.maxAnisotropy ? static_cast<f32>(d.maxAnisotropy) : 1.0f;
+    ci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+    VkSampler s = VK_NULL_HANDLE;
+    if (!vkOk(dev_->api().CreateSampler(dev_->vkDevice(), &ci, nullptr, &s), "rhi sampler")) return VK_NULL_HANDLE;
+    samplers_.push_back({d, s});
+    return s;
+}
+
+const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const PipelineLayout& layout, bool mesh) {
+    SlotKind srv0[kMaxBindingSlots], uav0[kMaxBindingSlots], srv1[kMaxBindingSlots], uav1[kMaxBindingSlots];
+    for (u32 i = 0; i < kMaxBindingSlots; ++i) srv0[i] = uav0[i] = srv1[i] = uav1[i] = SlotKind::Texture2D;
+    if (gPendingKinds.active) {
+        std::memcpy(srv0, gPendingKinds.srv0, sizeof(srv0));
+        std::memcpy(uav0, gPendingKinds.uav0, sizeof(uav0));
+        std::memcpy(srv1, gPendingKinds.srv1, sizeof(srv1));
+        std::memcpy(uav1, gPendingKinds.uav1, sizeof(uav1));
+    } else if (layout.srvCount || layout.uavCount || layout.srvCount1 || layout.uavCount1) {
+        AVER_WARN("[RHI.Vulkan] descriptorLayout building table shapes with no reflected kinds "
+                  "(called outside createGraphicsPipeline/createComputePipeline?); every slot "
+                  "defaults to Texture2D");
+    }
+
+    const VkDescriptorSetLayout wantTable0 = tableSetLayout(layout.srvCount, layout.uavCount, srv0, uav0);
+    const VkDescriptorSetLayout wantTable1 = tableSetLayout(layout.srvCount1, layout.uavCount1, srv1, uav1);
+    if (wantTable0 == VK_NULL_HANDLE || wantTable1 == VK_NULL_HANDLE) return nullptr;
+
+    // Cache lookup is deliberately MORE restrictive than sameLayout() alone (which VulkanCommon.hpp
+    // pins verbatim and compares only counts/constants/samplers, never SlotKind): two PipelineLayouts
+    // with identical counts but different underlying resource kinds (e.g. one compute pipeline's u0
+    // is a StructuredBuffer, another's is a Texture3D, yet both declare layout.uavCount==1) MUST NOT
+    // share a cache entry, or the second pipeline silently gets the first one's table layout. Since
+    // tableSetLayout() above already deduplicates by REAL shape, comparing its OUTPUT handles is a
+    // free, exact way to add that precision without touching DescriptorLayoutEntry's own fields.
+    for (auto& e : descriptorLayouts_) {
+        if (e.mesh == mesh && sameLayout(e.layout, layout) &&
+            e.tableSetLayouts[kVkSetTable0] == wantTable0 && e.tableSetLayouts[kVkSetTable1] == wantTable1)
+            return &e;
+    }
+
+    const VulkanApi& api = dev_->api();
+    VkDevice device = dev_->vkDevice();
+
+    DescriptorLayoutEntry e;
+    e.layout = layout;
+    e.mesh = mesh;
+    e.tableSetLayouts[kVkSetTable0] = wantTable0;
+    e.tableSetLayouts[kVkSetTable1] = wantTable1;
+    e.pushConstants = pushConstantLayout(layout, mesh);
+    if (e.pushConstants.totalBytes > dev_->maxPushConstantsSize()) {
+        AVER_ERROR("[RHI.Vulkan] pipeline layout needs {} bytes of push constants, over this device's "
+                   "{}-byte limit", e.pushConstants.totalBytes, dev_->maxPushConstantsSize());
+        return nullptr;
+    }
+
+    // ---- constants set: one dynamic-UBO binding per declared zero-dword slot, always including b0
+    {
+        VkDescriptorSetLayoutBinding bindings[kMaxConstantSlots];
+        u32 n = 0;
+        for (u32 k = 0; k < kMaxConstantSlots; ++k) {
+            if (k != kEngineFrameConstantRegister && layout.constantDwords[k] != 0) continue;
+            bindings[n] = VkDescriptorSetLayoutBinding{};
+            bindings[n].binding = k;
+            bindings[n].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+            bindings[n].descriptorCount = 1;
+            bindings[n].stageFlags = VK_SHADER_STAGE_ALL;
+            ++n;
+        }
+        VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        ci.bindingCount = n;
+        ci.pBindings = bindings;
+        if (!vkOk(api.CreateDescriptorSetLayout(device, &ci, nullptr, &e.constantsSetLayout), "rhi constants descriptor set layout"))
+            return nullptr;
+    }
+
+    // ---- samplers set: immutable only, VK_NULL_HANDLE (per DescriptorLayoutEntry's own comment)
+    // when this layout declares none, so the pipeline layout below can OMIT set index 3 entirely
+    // rather than bind a pointless empty set.
+    if (layout.samplerCount > 0) {
+        const u32 n = layout.samplerCount < 4 ? layout.samplerCount : 4;
+        VkDescriptorSetLayoutBinding bindings[4];
+        VkSampler immutable[4];
+        for (u32 i = 0; i < n; ++i) {
+            immutable[i] = getOrCreateSampler(layout.samplers[i]);
+            bindings[i] = VkDescriptorSetLayoutBinding{};
+            bindings[i].binding = i;
+            bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+            bindings[i].descriptorCount = 1;
+            bindings[i].stageFlags = VK_SHADER_STAGE_ALL;
+            bindings[i].pImmutableSamplers = &immutable[i];
+        }
+        VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        ci.bindingCount = n;
+        ci.pBindings = bindings;
+        if (!vkOk(api.CreateDescriptorSetLayout(device, &ci, nullptr, &e.samplersSetLayout), "rhi samplers descriptor set layout")) {
+            api.DestroyDescriptorSetLayout(device, e.constantsSetLayout, nullptr);
+            return nullptr;
+        }
+        // Allocated and populated ONCE, here -- nothing is ever WRITTEN to it at draw time
+        // (pImmutableSamplers bakes every VkSampler into the layout itself), so this is the one and
+        // only time this set needs to exist.
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = descriptorPool_;
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &e.samplersSetLayout;
+        if (!vkOk(api.AllocateDescriptorSets(device, &ai, &e.samplersSet), "rhi samplers descriptor set")) {
+            api.DestroyDescriptorSetLayout(device, e.samplersSetLayout, nullptr);
+            api.DestroyDescriptorSetLayout(device, e.constantsSetLayout, nullptr);
+            return nullptr;
+        }
+    }
+
+    VkDescriptorSetLayout setLayouts[kVkDescriptorSetCount] = {
+        e.tableSetLayouts[kVkSetTable0], e.tableSetLayouts[kVkSetTable1], e.constantsSetLayout, e.samplersSetLayout,
+    };
+    const u32 setLayoutCount = (layout.samplerCount > 0) ? kVkDescriptorSetCount : (kVkDescriptorSetCount - 1);
+
+    VkPushConstantRange pcRange{};
+    VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli.setLayoutCount = setLayoutCount;
+    pli.pSetLayouts = setLayouts;
+    if (e.pushConstants.totalBytes > 0) {
+        pcRange.stageFlags = VK_SHADER_STAGE_ALL;
+        pcRange.size = e.pushConstants.totalBytes;
+        pli.pushConstantRangeCount = 1;
+        pli.pPushConstantRanges = &pcRange;
+    }
+    if (!vkOk(api.CreatePipelineLayout(device, &pli, nullptr, &e.pipelineLayout), "rhi pipeline layout")) {
+        if (e.samplersSet) api.FreeDescriptorSets(device, descriptorPool_, 1, &e.samplersSet);
+        if (e.samplersSetLayout) api.DestroyDescriptorSetLayout(device, e.samplersSetLayout, nullptr);
+        api.DestroyDescriptorSetLayout(device, e.constantsSetLayout, nullptr);
+        return nullptr;
+    }
+
+    descriptorLayouts_.push_back(e);
+    return &descriptorLayouts_.back();
+}
+
+// ================================================================================================
+// 6. Deferred destruction
+// ================================================================================================
+u64 VulkanResourceFactory::retireFence() const { return dev_->retireFenceValue(); }
+
+void VulkanResourceFactory::retire(std::function<void()> destroyFn) {
+    if (!destroyFn) return;
+    retired_.push_back({retireFence(), std::move(destroyFn)});
+}
+
+void VulkanResourceFactory::collect() {
+    if (retired_.empty()) return;
+    u64 done = 0;
+    dev_->api().GetSemaphoreCounterValue(dev_->vkDevice(), dev_->timelineSemaphore(), &done);
+    for (usize i = 0; i < retired_.size();) {
+        if (retired_[i].fence <= done) {
+            if (retired_[i].destroy) retired_[i].destroy();
+            retired_[i] = std::move(retired_.back());
+            retired_.pop_back();
+        } else {
+            ++i;
+        }
+    }
+}
+
+// ================================================================================================
+// 7. Textures / buffers
+// ================================================================================================
+bool VulkanResourceFactory::uploadInitialData(VkImage image, const VkImageCreateInfo& ci, const TextureDesc& d, u32 mips) {
+    if (packedRowPitchVk(d.format, 1) == 0) {
+        AVER_ERROR("[RHI.Vulkan] createTexture: initial data for a format with no CPU footprint");
+        return false;
+    }
+    const u32 count = d.initialDataCount < mips ? d.initialDataCount : mips;
+    const VkImageAspectFlags aspect = toVkAspect(d.format);
+
+    struct Footprint { u64 offset; u32 width, height, depth, rowPitch; };
+    std::vector<Footprint> fp(count);
+    u64 total = 0;
+    for (u32 s = 0; s < count; ++s) {
+        const u32 w = std::max(1u, ci.extent.width >> s);
+        const u32 h = std::max(1u, ci.extent.height >> s);
+        const u32 dep = std::max(1u, ci.extent.depth >> s);
+        const u64 rowPitch = packedRowPitchVk(d.format, w);
+        fp[s] = {total, w, h, dep, static_cast<u32>(rowPitch)};
+        total += rowPitch * (isBlockFormat(d.format) ? (h + 3) / 4 : h) * dep;
+    }
+
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    if (!createBufferCommitted(*dev_, total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               staging, stagingMemory, nullptr, "rhi texture staging"))
+        return false;
+
+    u8* mapped = nullptr;
+    if (!vkOk(dev_->api().MapMemory(dev_->vkDevice(), stagingMemory, 0, total, 0, reinterpret_cast<void**>(&mapped)), "rhi staging map")) {
+        destroyBufferCommitted(*dev_, staging, stagingMemory);
+        return false;
+    }
+    for (u32 s = 0; s < count; ++s) {
+        const auto* src = static_cast<const u8*>(d.initialData[s]);
+        if (!src) continue;
+        const u64 srcPitch = (s == 0 && d.initialRowPitch) ? d.initialRowPitch : fp[s].rowPitch;
+        const u32 rows = isBlockFormat(d.format) ? (fp[s].height + 3) / 4 : fp[s].height;
+        u8* dst = mapped + fp[s].offset;
+        for (u32 z = 0; z < fp[s].depth; ++z) {
+            for (u32 y = 0; y < rows; ++y) {
+                const u64 row = static_cast<u64>(z) * rows + y;
+                std::memcpy(dst + row * fp[s].rowPitch, src + row * srcPitch, static_cast<usize>(fp[s].rowPitch));
+            }
+        }
+    }
+    dev_->api().UnmapMemory(dev_->vkDevice(), stagingMemory);
+
+    const VkImageBarrierInfo finalInfo = toVkImageBarrierInfo(d.initialState);
+    const bool ok = runOneShotCommands(*dev_, [&](VkCommandBuffer cmd) {
+        VkImageMemoryBarrier2 toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        toDst.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        toDst.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        toDst.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toDst.srcQueueFamilyIndex = toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDst.image = image;
+        toDst.subresourceRange = {aspect, 0, mips, 0, 1};
+        VkDependencyInfo dep0{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep0.imageMemoryBarrierCount = 1;
+        dep0.pImageMemoryBarriers = &toDst;
+        dev_->api().CmdPipelineBarrier2(cmd, &dep0);
+
+        for (u32 s = 0; s < count; ++s) {
+            if (!d.initialData[s]) continue;
+            VkBufferImageCopy region{};
+            region.bufferOffset = fp[s].offset;
+            region.imageSubresource = {aspect, s, 0, 1};
+            region.imageExtent = {fp[s].width, fp[s].height, fp[s].depth};
+            dev_->api().CmdCopyBufferToImage(cmd, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        }
+
+        VkImageMemoryBarrier2 toFinal{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        toFinal.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        toFinal.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        toFinal.dstStageMask = finalInfo.stage;
+        toFinal.dstAccessMask = finalInfo.access;
+        toFinal.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toFinal.newLayout = (finalInfo.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_IMAGE_LAYOUT_GENERAL : finalInfo.layout;
+        toFinal.srcQueueFamilyIndex = toFinal.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toFinal.image = image;
+        toFinal.subresourceRange = {aspect, 0, mips, 0, 1};
+        VkDependencyInfo dep1{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep1.imageMemoryBarrierCount = 1;
+        dep1.pImageMemoryBarriers = &toFinal;
+        dev_->api().CmdPipelineBarrier2(cmd, &dep1);
+    }, "rhi texture upload");
+
+    destroyBufferCommitted(*dev_, staging, stagingMemory);
+    return ok;
+}
+
+TextureHandle VulkanResourceFactory::createTexture(const TextureDesc& d) {
+    collect();
+    if (d.width == 0 || d.height == 0) { AVER_ERROR("[RHI.Vulkan] createTexture with a zero extent"); return 0; }
+    const VkFormat fmt = toVkFormat(d.format);
+    if (fmt == VK_FORMAT_UNDEFINED) { AVER_ERROR("[RHI.Vulkan] createTexture with an unknown format"); return 0; }
+
+    if (isBlockFormat(d.format)) {
+        if (any(d.bind, ResourceBind::UnorderedAccess) || any(d.bind, ResourceBind::RenderTarget) || any(d.bind, ResourceBind::DepthStencil)) {
+            AVER_ERROR("[RHI.Vulkan] createTexture: a block-compressed format is sample-only");
+            return 0;
+        }
+        if ((d.width & 3u) || (d.height & 3u)) {
+            AVER_ERROR("[RHI.Vulkan] createTexture: block-compressed extents must be multiples of 4 ({}x{})", d.width, d.height);
+            return 0;
+        }
+        if (d.dim == TextureDim::Tex3D) { AVER_ERROR("[RHI.Vulkan] createTexture: block-compressed volumes are not supported"); return 0; }
+    }
+
+    const u32 depth = (d.dim == TextureDim::Tex3D && d.depth) ? d.depth : 1;
+    u32 mips = d.mips;
+    if (mips == 0) {
+        u32 largest = d.width > d.height ? d.width : d.height;
+        if (d.dim == TextureDim::Tex3D && depth > largest) largest = depth;
+        mips = 1;
+        for (u32 e = largest; e > 1; e >>= 1) ++mips;
+    }
+
+    const bool isDepth = isDepthFormatVk(d.format);
+    VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ci.imageType = (d.dim == TextureDim::Tex3D) ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+    ci.format = fmt;
+    ci.extent = {d.width, d.height, depth};
+    ci.mipLevels = mips;
+    ci.arrayLayers = 1;
+    ci.samples = VK_SAMPLE_COUNT_1_BIT;
+    ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ci.usage = toVkImageUsage(d.bind, isDepth);
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    const bool seeded = d.initialData && d.initialDataCount > 0;
+    RhiTexture t{};
+    if (!createImageCommitted(*dev_, ci, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, t.image, t.memory, d.debugName)) return 0;
+
+    if (seeded) {
+        if (!uploadInitialData(t.image, ci, d, mips)) { destroyImageCommitted(*dev_, t.image, t.memory); return 0; }
+    } else if (d.initialState != ResourceState::Common) {
+        transitionFreshImage(*dev_, t.image, toVkAspect(d.format), mips, d.initialState);
+    }
+
+    const VkImageAspectFlags aspect = toVkAspect(d.format);
+    if (any(d.bind, ResourceBind::ShaderResource)) {
+        VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vi.image = t.image;
+        vi.viewType = viewTypeFor(d.dim);
+        vi.format = fmt;
+        vi.subresourceRange = {aspect, 0, mips, 0, 1};
+        if (!vkOk(dev_->api().CreateImageView(dev_->vkDevice(), &vi, nullptr, &t.srvView), "rhi texture SRV view")) {
+            destroyImageCommitted(*dev_, t.image, t.memory);
+            return 0;
+        }
+    }
+    if (any(d.bind, ResourceBind::RenderTarget)) {
+        VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vi.image = t.image;
+        vi.viewType = viewTypeFor(d.dim);
+        vi.format = fmt;
+        vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkOk(dev_->api().CreateImageView(dev_->vkDevice(), &vi, nullptr, &t.rtvView), "rhi texture RTV view");
+    }
+    if (any(d.bind, ResourceBind::DepthStencil) || isDepth) {
+        VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vi.image = t.image;
+        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vi.format = fmt;
+        vi.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+        vkOk(dev_->api().CreateImageView(dev_->vkDevice(), &vi, nullptr, &t.dsvView), "rhi texture DSV view");
+    }
+    t.uavViews.assign(any(d.bind, ResourceBind::UnorderedAccess) ? mips : 0, VK_NULL_HANDLE);
+
+    t.desc = d;
+    t.desc.mips = mips;
+    t.desc.depth = depth;
+    t.desc.debugName = nullptr;
+#if AVER_RHI_TRACK_STATE
+    if (d.debugName) t.debugName = d.debugName;
+    t.states.assign(mips, d.initialState);
+#endif
+    textures_.push_back(std::move(t));
+    return static_cast<TextureHandle>(textures_.size());
+}
+
+BufferHandle VulkanResourceFactory::createBuffer(const BufferDesc& d) {
+    collect();
+    if (d.bytes == 0) { AVER_ERROR("[RHI.Vulkan] createBuffer of zero bytes"); return 0; }
+
+    const bool upload = d.kind == BufferKind::Upload;
+    const bool readback = d.kind == BufferKind::Readback;
+    const bool hostVisible = upload || readback;
+
+    RhiBuffer b{};
+    b.desc = d;
+    const VkMemoryPropertyFlags required = hostVisible
+        ? (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+        : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    if (!createBufferCommitted(*dev_, d.bytes, toVkBufferUsage(d), required, b.buffer, b.memory, &b.address, d.debugName))
+        return 0;
+
+    if (hostVisible) {
+        if (!vkOk(dev_->api().MapMemory(dev_->vkDevice(), b.memory, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&b.mapped)), "rhi buffer map")) {
+            destroyBufferCommitted(*dev_, b.buffer, b.memory);
+            return 0;
+        }
+        b.coherent = true;   // required flags above always ask for HOST_COHERENT; findMemoryType's
+                              // own HOST_VISIBLE-only fallback (see createBufferCommitted) is the
+                              // only path that could make this untrue, and this engine's actual
+                              // hardware is not expected to need it -- flagged, not silently assumed.
+    }
+    b.desc.debugName = nullptr;
+#if AVER_RHI_TRACK_STATE
+    if (d.debugName) b.debugName = d.debugName;
+    b.state = (d.kind == BufferKind::AccelStructure) ? ResourceState::AccelerationStructure : ResourceState::Common;
+    b.stateFixed = upload || d.kind == BufferKind::AccelStructure;
+#endif
+    buffers_.push_back(std::move(b));
+    return static_cast<BufferHandle>(buffers_.size());
+}
+
+// ================================================================================================
+// 8. Shaders
+// ================================================================================================
+ShaderHandle VulkanResourceFactory::createShader(const ShaderDesc& d) {
+    collect();
+    if (!d.source || !d.entry) { AVER_ERROR("[RHI.Vulkan] createShader without source or entry point"); return 0; }
+
+    const bool isMeshFamily = d.stage == ShaderStage::Mesh || d.stage == ShaderStage::Amplification;
+    if (isMeshFamily && dev_->cachedCaps().meshShaderTier == 0) {
+        AVER_WARN("[RHI.Vulkan] createShader '{}' needs mesh-shader hardware, which this device reports as tier 0", d.entry);
+        return 0;
+    }
+    u32 model = d.minShaderModel;
+    if (isMeshFamily && model < 65) model = 65;
+    if (model > dev_->cachedCaps().shaderModel) {
+        AVER_WARN("[RHI.Vulkan] createShader '{}' wants SM {} but the device reports {}", d.entry, model, dev_->cachedCaps().shaderModel);
+        return 0;
+    }
+    if (!dev_->cachedCaps().dxcAvailable) {
+        AVER_WARN("[RHI.Vulkan] createShader '{}' needs DXC, which is unavailable -- this backend has "
+                  "no FXC-equivalent fallback (SPIR-V comes only from DXC's -spirv path)", d.entry);
+        return 0;
+    }
+
+    std::string src;
+    if (d.prelude) src = d.prelude;
+    src += d.source;
+
+    RhiShader s;
+    s.stage = d.stage;
+    if (!vulkanShaderCompiler().compile(src.c_str(), d.entry, d.stage, model, d.defines, s.spirv) || s.spirv.empty()) {
+        AVER_ERROR("[RHI.Vulkan] createShader '{}' failed to compile", d.entry);
+        return 0;
+    }
+
+    VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    mi.codeSize = s.spirv.size() * sizeof(u32);
+    mi.pCode = s.spirv.data();
+    if (!vkOk(dev_->api().CreateShaderModule(dev_->vkDevice(), &mi, nullptr, &s.module), "rhi shader module")) return 0;
+
+    shaders_.push_back(std::move(s));
+    return static_cast<ShaderHandle>(shaders_.size());
+}
+
+void VulkanResourceFactory::destroyShader(ShaderHandle h) {
+    RhiShader* s = shader(h);
+    if (!s) return;
+    // Immediate, not deferred: like a D3D12 PSO, a VkPipeline does not keep referencing the
+    // VkShaderModule it was built from after vkCreateGraphicsPipelines/vkCreateComputePipelines
+    // returns (D3D12ResourceFactory::destroyShader resets its blob immediately for the same reason).
+    if (s->module) dev_->api().DestroyShaderModule(dev_->vkDevice(), s->module, nullptr);
+    s->module = VK_NULL_HANDLE;
+    s->spirv.clear();
+}
+
+// ================================================================================================
+// 9. Pipelines
+// ================================================================================================
+PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipelineDesc& d) {
+    collect();
+    if ((d.vs == 0) == (d.ms == 0)) { AVER_ERROR("[RHI.Vulkan] createGraphicsPipeline needs exactly one of vs / ms"); return 0; }
+    if (d.as != 0 && d.ms == 0) { AVER_ERROR("[RHI.Vulkan] createGraphicsPipeline: an amplification shader (as) needs a mesh shader (ms) alongside it"); return 0; }
+
+    RhiShader* vs = shader(d.vs);
+    RhiShader* gs = shader(d.gs);
+    RhiShader* ms = shader(d.ms);
+    RhiShader* ps = shader(d.ps);
+    RhiShader* as = shader(d.as);
+    if ((d.vs && !vs) || (d.gs && !gs) || (d.ms && !ms) || (d.ps && !ps) || (d.as && !as)) {
+        AVER_ERROR("[RHI.Vulkan] createGraphicsPipeline given an invalid shader handle");
+        return 0;
+    }
+
+    const bool mesh = d.ms != 0;
+    const RhiShader* stages[5] = {vs, gs, ms, ps, as};
+    PendingTableKinds saved = gPendingKinds;
+    reflectTableSlotKinds(stages, 5, d.layout, gPendingKinds);
+    const DescriptorLayoutEntry* entry = descriptorLayout(d.layout, mesh);
+    gPendingKinds = saved;
+    if (!entry) return 0;
+
+    VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = (d.fill == FillMode::Wireframe) ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+    raster.cullMode = (d.cull == CullMode::Back) ? VK_CULL_MODE_BACK_BIT : (d.cull == CullMode::Front) ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_NONE;
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    // D3D12's DepthClipEnable=TRUE means "clip normally"; Vulkan's depthClampEnable=TRUE means the
+    // OPPOSITE ("clamp instead of clip") -- the two booleans are inverted twins, not synonyms.
+    raster.depthClampEnable = d.depthClip ? VK_FALSE : VK_TRUE;
+    raster.depthBiasEnable = (d.depthBias != 0.0f || d.slopeScaledDepthBias != 0.0f) ? VK_TRUE : VK_FALSE;
+    raster.depthBiasConstantFactor = d.depthBias;
+    raster.depthBiasSlopeFactor = d.slopeScaledDepthBias;
+    raster.lineWidth = 1.0f;
+
+    VkPipelineRasterizationConservativeStateCreateInfoEXT consState{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_CONSERVATIVE_STATE_CREATE_INFO_EXT};
+    if (d.conservativeRaster && dev_->cachedCaps().conservativeRaster) {
+        consState.conservativeRasterizationMode = VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT;
+        raster.pNext = &consState;
+    }
+
+    VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    depth.depthTestEnable = d.depth.test ? VK_TRUE : VK_FALSE;
+    depth.depthWriteEnable = d.depth.write ? VK_TRUE : VK_FALSE;
+    depth.depthCompareOp = toVkCompareOp(d.depth.op);
+
+    const VkPipelineColorBlendAttachmentState blendAttachment = toVkBlendAttachment(d.blend);
+    const u32 rtCount = d.renderTargetCount < 4 ? d.renderTargetCount : 4;
+    VkPipelineColorBlendAttachmentState blendAttachments[4];
+    for (u32 i = 0; i < rtCount; ++i) blendAttachments[i] = blendAttachment;
+    VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    blend.attachmentCount = rtCount;
+    blend.pAttachments = blendAttachments;
+
+    const u32 samples = d.sampleCount ? d.sampleCount : 1;
+    VkPipelineMultisampleStateCreateInfo ms_{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms_.rasterizationSamples = toVkSampleCount(samples);
+
+    VkDynamicState dynStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dyn{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dyn.dynamicStateCount = 2;
+    dyn.pDynamicStates = dynStates;
+
+    VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vp.viewportCount = 1;
+    vp.scissorCount = 1;
+
+    VkFormat colorFormats[4];
+    for (u32 i = 0; i < rtCount; ++i) colorFormats[i] = toVkFormat(d.renderTargets[i]);
+    VkPipelineRenderingCreateInfo rc{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    rc.colorAttachmentCount = rtCount;
+    rc.pColorAttachmentFormats = colorFormats;
+    rc.depthAttachmentFormat = toVkFormat(d.depthFormat);
+
+    // Entry-point names must stay alive through vkCreateGraphicsPipelines; kept in this function's
+    // own scope, not RhiShader's (which retains none -- see this file's banner).
+    std::string names[5];
+    VkPipelineShaderStageCreateInfo stageInfos[5];
+    u32 stageCount = 0;
+    auto addStage = [&](RhiShader* sh, VkShaderStageFlagBits flag) {
+        if (!sh) return;
+        names[stageCount] = spirvEntryPointName(sh->spirv);
+        VkPipelineShaderStageCreateInfo si{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        si.stage = flag;
+        si.module = sh->module;
+        si.pName = names[stageCount].c_str();
+        stageInfos[stageCount++] = si;
+    };
+
+    RhiPipeline p{};
+    p.mesh = mesh;
+    p.amplification = d.as != 0;
+    p.layoutEntry = entry;
+
+    VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    pi.pNext = &rc;
+    pi.pRasterizationState = &raster;
+    pi.pDepthStencilState = &depth;
+    pi.pColorBlendState = &blend;
+    pi.pMultisampleState = &ms_;
+    pi.pDynamicState = &dyn;
+    pi.pViewportState = &vp;
+    pi.layout = entry->pipelineLayout;
+    pi.renderPass = VK_NULL_HANDLE;   // dynamic rendering (core at 1.3): no VkRenderPass object anywhere in this backend
+
+    VkPipelineVertexInputStateCreateInfo vin{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkVertexInputBindingDescription binding{};
+    VkVertexInputAttributeDescription meshAttribs[3];
+    VkVertexInputAttributeDescription layoutAttribs[kMaxVertexAttribs];
+
+    if (mesh) {
+        addStage(as, VK_SHADER_STAGE_TASK_BIT_EXT);
+        addStage(ms, VK_SHADER_STAGE_MESH_BIT_EXT);
+        addStage(ps, VK_SHADER_STAGE_FRAGMENT_BIT);
+        // Mesh pipelines carry no fixed-function vertex-input stage at all -- these members are
+        // ignored (and legally null) whenever a mesh shader stage is present, per VK_EXT_mesh_shader.
+        pi.pVertexInputState = nullptr;
+        pi.pInputAssemblyState = nullptr;
+    } else {
+        addStage(vs, VK_SHADER_STAGE_VERTEX_BIT);
+        addStage(gs, VK_SHADER_STAGE_GEOMETRY_BIT);
+        addStage(ps, VK_SHADER_STAGE_FRAGMENT_BIT);
+        if (d.vertexLayout.attribCount > 0) {
+            binding = {0, d.vertexLayout.stride, VK_VERTEX_INPUT_RATE_VERTEX};
+            const u32 n = buildVertexInputAttributes(d.vertexLayout, layoutAttribs);
+            vin.vertexBindingDescriptionCount = 1;
+            vin.pVertexBindingDescriptions = &binding;
+            vin.vertexAttributeDescriptionCount = n;
+            vin.pVertexAttributeDescriptions = layoutAttribs;
+        } else {
+            meshVertexInputState(binding, meshAttribs);
+            vin.vertexBindingDescriptionCount = 1;
+            vin.pVertexBindingDescriptions = &binding;
+            vin.vertexAttributeDescriptionCount = 3;
+            vin.pVertexAttributeDescriptions = meshAttribs;
+        }
+        pi.pVertexInputState = &vin;
+        pi.pInputAssemblyState = &ia;
+    }
+    pi.stageCount = stageCount;
+    pi.pStages = stageInfos;
+
+    if (!vkOk(dev_->api().CreateGraphicsPipelines(dev_->vkDevice(), VK_NULL_HANDLE, 1, &pi, nullptr, &p.pipeline), "rhi graphics pipeline"))
+        return 0;
+    pipelines_.push_back(p);
+    return static_cast<PipelineHandle>(pipelines_.size());
+}
+
+PipelineHandle VulkanResourceFactory::createComputePipeline(const ComputePipelineDesc& d) {
+    collect();
+    RhiShader* cs = shader(d.cs);
+    if (!cs || cs->stage != ShaderStage::Compute) {
+        AVER_ERROR("[RHI.Vulkan] createComputePipeline given a handle that is not a compute shader");
+        return 0;
+    }
+
+    const RhiShader* stages[1] = {cs};
+    PendingTableKinds saved = gPendingKinds;
+    reflectTableSlotKinds(stages, 1, d.layout, gPendingKinds);
+    const DescriptorLayoutEntry* entry = descriptorLayout(d.layout, false);
+    gPendingKinds = saved;
+    if (!entry) return 0;
+
+    const std::string entryName = spirvEntryPointName(cs->spirv);
+    VkPipelineShaderStageCreateInfo si{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    si.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    si.module = cs->module;
+    si.pName = entryName.c_str();
+
+    RhiPipeline p{};
+    p.compute = true;
+    p.layoutEntry = entry;
+
+    VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ci.stage = si;
+    ci.layout = entry->pipelineLayout;
+    if (!vkOk(dev_->api().CreateComputePipelines(dev_->vkDevice(), VK_NULL_HANDLE, 1, &ci, nullptr, &p.pipeline), "rhi compute pipeline"))
+        return 0;
+    pipelines_.push_back(p);
+    return static_cast<PipelineHandle>(pipelines_.size());
+}
+
+void VulkanResourceFactory::destroyPipeline(PipelineHandle h) {
+    RhiPipeline* p = pipeline(h);
+    if (!p) return;
+    VkPipeline pipe = p->pipeline;
+    retire([this, pipe]() { dev_->api().DestroyPipeline(dev_->vkDevice(), pipe, nullptr); });
+    p->pipeline = VK_NULL_HANDLE;
+    p->layoutEntry = nullptr;
+    collect();
+}
+
+// ================================================================================================
+// 10. Binding sets
+// ================================================================================================
+BindingSetHandle VulkanResourceFactory::createBindingSet(const BindingSetDesc& d) {
+    collect();
+    const u32 count = d.srvCount + d.uavCount;
+    if (count == 0) { AVER_ERROR("[RHI.Vulkan] createBindingSet declaring no slots"); return 0; }
+    if (d.srvCount > kMaxBindingSlots || d.uavCount > kMaxBindingSlots) {
+        AVER_ERROR("[RHI.Vulkan] createBindingSet declares {} SRV / {} UAV slots, over the {} limit", d.srvCount, d.uavCount, kMaxBindingSlots);
+        return 0;
+    }
+
+    const VkDescriptorSetLayout layout = tableSetLayout(d.srvCount, d.uavCount, d.srvKinds, d.uavKinds);
+    if (layout == VK_NULL_HANDLE) return 0;
+
+    RhiBindingSet s{};
+    s.layout = layout;
+    s.srvCount = d.srvCount;
+    s.uavCount = d.uavCount;
+    s.srvBaseRegister = d.srvBaseRegister;
+    s.uavBaseRegister = d.uavBaseRegister;
+    for (u32 i = 0; i < kMaxBindingSlots; ++i) { s.srvKinds[i] = d.srvKinds[i]; s.uavKinds[i] = d.uavKinds[i]; }
+
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = descriptorPool_;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &layout;
+    if (!vkOk(dev_->api().AllocateDescriptorSets(dev_->vkDevice(), &ai, &s.set), "rhi binding set")) return 0;
+
+    s.alive = true;
+    nullFill(s);
+    bindingSets_.push_back(s);
+    return static_cast<BindingSetHandle>(bindingSets_.size());
+}
+
+void VulkanResourceFactory::destroyBindingSet(BindingSetHandle h) {
+    RhiBindingSet* s = bindingSet(h);
+    if (!s) return;
+    VkDescriptorSet set = s->set;
+    retire([this, set]() {
+        VkDescriptorSet local = set;
+        dev_->api().FreeDescriptorSets(dev_->vkDevice(), descriptorPool_, 1, &local);
+    });
+    s->alive = false;
+    s->set = VK_NULL_HANDLE;
+    collect();
+}
+
+void VulkanResourceFactory::nullFill(const RhiBindingSet& s) {
+    if (!ensureNullResources(*dev_)) {
+        AVER_ERROR("[RHI.Vulkan] nullFill: dummy null resources could not be built; every declared "
+                  "slot in this binding set is left UNWRITTEN, which is undefined to read");
+        return;
+    }
+    const bool rtSupported = dev_->cachedCaps().rayTracingTier != 0;
+    std::vector<VkWriteDescriptorSet> writes;
+    std::vector<VkDescriptorImageInfo> imageInfos;
+    std::vector<VkDescriptorBufferInfo> bufferInfos;
+    std::vector<VkWriteDescriptorSetAccelerationStructureKHR> asInfos;
+    imageInfos.reserve(s.srvCount + s.uavCount);
+    bufferInfos.reserve(s.srvCount + s.uavCount);
+    asInfos.reserve(s.srvCount);
+    writes.reserve(s.srvCount + s.uavCount);
+
+    for (u32 i = 0; i < s.srvCount; ++i) {
+        const SlotKind kind = s.srvKinds[i];
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = s.set;
+        w.dstBinding = i;
+        w.descriptorCount = 1;
+        w.descriptorType = toVkSrvDescriptorType(kind, rtSupported);
+        if (kind == SlotKind::StructuredBuffer) {
+            bufferInfos.push_back({gNull.buffer, 0, VK_WHOLE_SIZE});
+            w.pBufferInfo = &bufferInfos.back();
+            writes.push_back(w);
+        } else if (kind == SlotKind::AccelerationStructure && rtSupported) {
+            if (!gNull.dummyTlas) continue;   // ensureNullResources logged why, if it failed
+            asInfos.push_back(VkWriteDescriptorSetAccelerationStructureKHR{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR});
+            asInfos.back().accelerationStructureCount = 1;
+            asInfos.back().pAccelerationStructures = &gNull.dummyTlas;
+            w.pNext = &asInfos.back();
+            writes.push_back(w);
+        } else {
+            const bool tex3D = (kind == SlotKind::Texture3D);
+            imageInfos.push_back({VK_NULL_HANDLE, tex3D ? gNull.view3D : gNull.view2D, VK_IMAGE_LAYOUT_GENERAL});
+            w.pImageInfo = &imageInfos.back();
+            writes.push_back(w);
+        }
+    }
+    for (u32 i = 0; i < s.uavCount; ++i) {
+        SlotKind kind = s.uavKinds[i];
+        if (kind == SlotKind::AccelerationStructure) kind = SlotKind::Texture2D;   // logged already, in toVkUavDescriptorType
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = s.set;
+        w.dstBinding = kVkUavBindingBase + i;
+        w.descriptorCount = 1;
+        w.descriptorType = toVkUavDescriptorType(kind);
+        if (kind == SlotKind::StructuredBuffer) {
+            bufferInfos.push_back({gNull.buffer, 0, VK_WHOLE_SIZE});
+            w.pBufferInfo = &bufferInfos.back();
+        } else {
+            const bool tex3D = (kind == SlotKind::Texture3D);
+            imageInfos.push_back({VK_NULL_HANDLE, tex3D ? gNull.view3D : gNull.view2D, VK_IMAGE_LAYOUT_GENERAL});
+            w.pImageInfo = &imageInfos.back();
+        }
+        writes.push_back(w);
+    }
+
+    // NOTE: every VkDescriptorImageInfo/BufferInfo/AS-write pushed into a std::vector above via
+    // push_back can reallocate that vector and invalidate EARLIER entries' addresses that `writes[]`
+    // already captured -- reserve() at the top sizes every vector to its worst case up front
+    // specifically to rule that out; do not remove the reserve() calls without re-deriving this.
+    if (!writes.empty()) dev_->api().UpdateDescriptorSets(dev_->vkDevice(), static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+}
+
+// ================================================================================================
+// 11. Acceleration structures
+// ================================================================================================
+namespace {
+bool accelStructureSupported(VulkanDevice& dev) {
+    return dev.cachedCaps().rayTracingTier != 0 && dev.api().CreateAccelerationStructureKHR &&
+           dev.api().GetAccelerationStructureBuildSizesKHR && dev.api().GetAccelerationStructureDeviceAddressKHR;
+}
+} // namespace
+
+BlasHandle VulkanResourceFactory::createBlas(MeshHandle mesh) {
+    collect();
+    if (!accelStructureSupported(*dev_)) { AVER_WARN("[RHI.Vulkan] createBlas without ray-tracing support"); return 0; }
+    if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.Vulkan] createBlas with an invalid mesh handle"); return 0; }
+    if (!dev_->meshes_[mesh - 1].alive) { AVER_WARN("[RHI.Vulkan] createBlas for destroyed mesh {}", mesh); return 0; }
+    const GpuMesh& m = dev_->meshes_[mesh - 1];
+    if (m.indexCount == 0) { AVER_ERROR("[RHI.Vulkan] createBlas for a mesh with no indices"); return 0; }
+
+    const VulkanApi& api = dev_->api();
+    VkDevice device = dev_->vkDevice();
+
+    VkAccelerationStructureGeometryTrianglesDataKHR tri{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};
+    tri.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    tri.vertexData.deviceAddress = m.vbAddress;
+    tri.vertexStride = sizeof(MeshVertex);
+    tri.maxVertex = m.vertexCount > 0 ? m.vertexCount - 1 : 0;
+    tri.indexType = VK_INDEX_TYPE_UINT32;
+    tri.indexData.deviceAddress = m.ibAddress;
+
+    VkAccelerationStructureGeometryKHR geom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    geom.geometry.triangles = tri;
+    geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+
+    VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    bi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    bi.geometryCount = 1;
+    bi.pGeometries = &geom;
+
+    const u32 primCount = m.indexCount / 3;
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    api.GetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bi, &primCount, &sizeInfo);
+
+    RhiBlas b{};
+    b.mesh = mesh;
+    if (!createBufferCommitted(*dev_, sizeInfo.accelerationStructureSize,
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, b.asBuffer, b.asMemory, nullptr, "rhi BLAS buffer") ||
+        !createBufferCommitted(*dev_, sizeInfo.buildScratchSize,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, b.scratchBuffer, b.scratchMemory, nullptr, "rhi BLAS scratch")) {
+        AVER_ERROR("[RHI.Vulkan] createBlas allocation failed");
+        destroyBufferCommitted(*dev_, b.asBuffer, b.asMemory);
+        destroyBufferCommitted(*dev_, b.scratchBuffer, b.scratchMemory);
+        return 0;
+    }
+
+    VkAccelerationStructureCreateInfoKHR aci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+    aci.buffer = b.asBuffer;
+    aci.size = sizeInfo.accelerationStructureSize;
+    aci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    if (!vkOk(api.CreateAccelerationStructureKHR(device, &aci, nullptr, &b.as), "rhi BLAS create")) {
+        destroyBufferCommitted(*dev_, b.asBuffer, b.asMemory);
+        destroyBufferCommitted(*dev_, b.scratchBuffer, b.scratchMemory);
+        return 0;
+    }
+    VkAccelerationStructureDeviceAddressInfoKHR dai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
+    dai.accelerationStructure = b.as;
+    b.asAddress = api.GetAccelerationStructureDeviceAddressKHR(device, &dai);
+
+    // NOT built here -- buildBlas() (VulkanRenderContext.cpp) records the actual
+    // vkCmdBuildAccelerationStructuresKHR, matching D3D12's own split between allocation
+    // (D3D12ResourceFactory::createBlas) and the build command (D3D12RenderContext::buildBlas).
+    b.built = false;
+    blases_.push_back(b);
+    return static_cast<BlasHandle>(blases_.size());
+}
+
+TlasHandle VulkanResourceFactory::createTlas(u32 maxInstances) {
+    collect();
+    if (!accelStructureSupported(*dev_)) { AVER_WARN("[RHI.Vulkan] createTlas without ray-tracing support"); return 0; }
+    if (maxInstances == 0) { AVER_ERROR("[RHI.Vulkan] createTlas for zero instances"); return 0; }
+
+    const VulkanApi& api = dev_->api();
+    VkDevice device = dev_->vkDevice();
+
+    VkAccelerationStructureGeometryKHR geom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    geom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+
+    VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    bi.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    bi.geometryCount = 1;
+    bi.pGeometries = &geom;
+
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    api.GetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bi, &maxInstances, &sizeInfo);
+
+    RhiTlas t{};
+    t.maxInstances = maxInstances;
+    if (!createBufferCommitted(*dev_, sizeInfo.accelerationStructureSize,
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, t.asBuffer, t.asMemory, nullptr, "rhi TLAS buffer") ||
+        !createBufferCommitted(*dev_, sizeInfo.buildScratchSize,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, t.scratchBuffer, t.scratchMemory, nullptr, "rhi TLAS scratch")) {
+        AVER_ERROR("[RHI.Vulkan] createTlas allocation failed");
+        destroyBufferCommitted(*dev_, t.asBuffer, t.asMemory);
+        destroyBufferCommitted(*dev_, t.scratchBuffer, t.scratchMemory);
+        return 0;
+    }
+
+    VkAccelerationStructureCreateInfoKHR aci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+    aci.buffer = t.asBuffer;
+    aci.size = sizeInfo.accelerationStructureSize;
+    aci.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    if (!vkOk(api.CreateAccelerationStructureKHR(device, &aci, nullptr, &t.as), "rhi TLAS create")) {
+        destroyBufferCommitted(*dev_, t.asBuffer, t.asMemory);
+        destroyBufferCommitted(*dev_, t.scratchBuffer, t.scratchMemory);
+        return 0;
+    }
+    VkAccelerationStructureDeviceAddressInfoKHR dai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
+    dai.accelerationStructure = t.as;
+    t.asAddress = api.GetAccelerationStructureDeviceAddressKHR(device, &dai);
+
+    const u64 bytes = static_cast<u64>(maxInstances) * sizeof(VkAccelerationStructureInstanceKHR);
+    for (u32 i = 0; i < kFrameCount; ++i) {
+        if (!createBufferCommitted(*dev_, bytes, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                   t.instanceBuffers[i], t.instanceMemory[i], nullptr, "rhi TLAS instances")) {
+            AVER_ERROR("[RHI.Vulkan] createTlas instance buffer {} failed", i);
+            return 0;
+        }
+        vkOk(api.MapMemory(device, t.instanceMemory[i], 0, bytes, 0, reinterpret_cast<void**>(&t.instancePtr[i])), "rhi TLAS instance map");
+    }
+
+    tlases_.push_back(t);
+    return static_cast<TlasHandle>(tlases_.size());
+}
+
+void VulkanResourceFactory::destroyTexture(TextureHandle h) {
+    RhiTexture* t = texture(h);
+    if (!t) return;
+    VkImage image = t->image;
+    VkDeviceMemory memory = t->memory;
+    VkImageView srv = t->srvView, rtv = t->rtvView, dsv = t->dsvView;
+    std::vector<VkImageView> uavs = std::move(t->uavViews);
+    retire([this, image, memory, srv, rtv, dsv, uavs]() {
+        if (srv) dev_->api().DestroyImageView(dev_->vkDevice(), srv, nullptr);
+        if (rtv) dev_->api().DestroyImageView(dev_->vkDevice(), rtv, nullptr);
+        if (dsv) dev_->api().DestroyImageView(dev_->vkDevice(), dsv, nullptr);
+        for (VkImageView v : uavs) if (v) dev_->api().DestroyImageView(dev_->vkDevice(), v, nullptr);
+        destroyImageCommitted(*dev_, image, memory);
+    });
+    t->image = VK_NULL_HANDLE;
+    t->memory = VK_NULL_HANDLE;
+    t->srvView = t->rtvView = t->dsvView = VK_NULL_HANDLE;
+    t->uavViews.clear();
+    collect();
+}
+
+void VulkanResourceFactory::destroyBuffer(BufferHandle h) {
+    RhiBuffer* b = buffer(h);
+    if (!b) return;
+    VkBuffer buf = b->buffer;
+    VkDeviceMemory mem = b->memory;
+    retire([this, buf, mem]() { destroyBufferCommitted(*dev_, buf, mem); });
+    b->buffer = VK_NULL_HANDLE;
+    b->memory = VK_NULL_HANDLE;
+    b->mapped = nullptr;
+    collect();
+}
+
+void VulkanResourceFactory::destroyBlas(BlasHandle h) {
+    if (h == 0 || h > blases_.size()) return;
+    RhiBlas& b = blases_[h - 1];
+    if (!b.as && !b.asBuffer) return;
+    VkAccelerationStructureKHR as = b.as;
+    VkBuffer asBuf = b.asBuffer, scratchBuf = b.scratchBuffer;
+    VkDeviceMemory asMem = b.asMemory, scratchMem = b.scratchMemory;
+    retire([this, as, asBuf, scratchBuf, asMem, scratchMem]() {
+        if (as) dev_->api().DestroyAccelerationStructureKHR(dev_->vkDevice(), as, nullptr);
+        destroyBufferCommitted(*dev_, asBuf, asMem);
+        destroyBufferCommitted(*dev_, scratchBuf, scratchMem);
+    });
+    b.as = VK_NULL_HANDLE;
+    b.asBuffer = VK_NULL_HANDLE;
+    b.scratchBuffer = VK_NULL_HANDLE;
+    b.mesh = 0;
+    b.built = false;
+    collect();
+}
+
+MeshHandle VulkanResourceFactory::blasMesh(BlasHandle h) const {
+    if (h == 0 || h > blases_.size()) return 0;
+    return blases_[h - 1].mesh;
+}
+
+void VulkanResourceFactory::destroyBlasForMesh(MeshHandle mesh) {
+    if (mesh == 0) return;
+    for (usize i = 0; i < blases_.size(); ++i)
+        if (blases_[i].mesh == mesh) destroyBlas(static_cast<BlasHandle>(i + 1));
+}
+
+// ================================================================================================
+// 12. Descriptor population
+// ================================================================================================
+void VulkanResourceFactory::setSrv(BindingSetHandle set, u32 slot, TextureHandle h, u32 mip) {
+    RhiBindingSet* s = bindingSet(set);
+    RhiTexture* t = texture(h);
+    if (!s || !t) { AVER_ERROR("[RHI.Vulkan] setSrv with an invalid handle"); return; }
+    if (slot >= s->srvCount) { AVER_ERROR("[RHI.Vulkan] setSrv slot {} past the {} declared", slot, s->srvCount); return; }
+
+    VkImageView view = t->srvView;
+    VkImageView builtView = VK_NULL_HANDLE;
+    if (mip != kAllMips) {
+        if (mip >= t->desc.mips) { AVER_ERROR("[RHI.Vulkan] setSrv mip {} is past the {} this texture has", mip, t->desc.mips); return; }
+        VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vi.image = t->image;
+        vi.viewType = viewTypeFor(t->desc.dim);
+        vi.format = toVkFormat(t->desc.format);
+        vi.subresourceRange = {toVkAspect(t->desc.format), mip, 1, 0, 1};
+        if (!vkOk(dev_->api().CreateImageView(dev_->vkDevice(), &vi, nullptr, &builtView), "rhi setSrv mip view")) return;
+        view = builtView;
+    }
+    VkDescriptorImageInfo ii{VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = s->set;
+    w.dstBinding = slot;
+    w.descriptorCount = 1;
+    w.descriptorType = toVkSrvDescriptorType(s->srvKinds[slot], dev_->cachedCaps().rayTracingTier != 0);
+    w.pImageInfo = &ii;
+    dev_->api().UpdateDescriptorSets(dev_->vkDevice(), 1, &w, 0, nullptr);
+
+    if (builtView) {
+        // A one-off view built for THIS call, not kept anywhere -- retire it behind the fence this
+        // write's draw could still be reading through, rather than leaking it or freeing it early.
+        retire([this, builtView]() { dev_->api().DestroyImageView(dev_->vkDevice(), builtView, nullptr); });
+    }
+}
+
+void VulkanResourceFactory::setUav(BindingSetHandle set, u32 slot, TextureHandle h, u32 mip) {
+    RhiBindingSet* s = bindingSet(set);
+    RhiTexture* t = texture(h);
+    if (!s || !t) { AVER_ERROR("[RHI.Vulkan] setUav with an invalid handle"); return; }
+    if (slot >= s->uavCount) { AVER_ERROR("[RHI.Vulkan] setUav slot {} past the {} declared", slot, s->uavCount); return; }
+    if (mip == kAllMips || mip >= t->desc.mips) { AVER_ERROR("[RHI.Vulkan] setUav needs a single valid mip"); return; }
+
+    if (mip >= t->uavViews.size()) t->uavViews.resize(t->desc.mips, VK_NULL_HANDLE);
+    if (t->uavViews[mip] == VK_NULL_HANDLE) {
+        VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vi.image = t->image;
+        vi.viewType = viewTypeFor(t->desc.dim);
+        vi.format = toVkFormat(t->desc.format);
+        vi.subresourceRange = {toVkAspect(t->desc.format), mip, 1, 0, 1};
+        if (!vkOk(dev_->api().CreateImageView(dev_->vkDevice(), &vi, nullptr, &t->uavViews[mip]), "rhi setUav mip view")) return;
+    }
+    VkDescriptorImageInfo ii{VK_NULL_HANDLE, t->uavViews[mip], VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = s->set;
+    w.dstBinding = kVkUavBindingBase + slot;
+    w.descriptorCount = 1;
+    w.descriptorType = toVkUavDescriptorType(s->uavKinds[slot]);
+    w.pImageInfo = &ii;
+    dev_->api().UpdateDescriptorSets(dev_->vkDevice(), 1, &w, 0, nullptr);
+}
+
+void VulkanResourceFactory::setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle h) {
+    RhiBindingSet* s = bindingSet(set);
+    RhiTlas* t = tlas(h);
+    if (!s || !t) { AVER_ERROR("[RHI.Vulkan] setSrvTlas with an invalid handle"); return; }
+    if (slot >= s->srvCount) { AVER_ERROR("[RHI.Vulkan] setSrvTlas slot {} past the {} declared", slot, s->srvCount); return; }
+
+    VkWriteDescriptorSetAccelerationStructureKHR asInfo{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+    asInfo.accelerationStructureCount = 1;
+    asInfo.pAccelerationStructures = &t->as;
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.pNext = &asInfo;
+    w.dstSet = s->set;
+    w.dstBinding = slot;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    dev_->api().UpdateDescriptorSets(dev_->vkDevice(), 1, &w, 0, nullptr);
+}
+
+void VulkanResourceFactory::setSrvBuffer(BindingSetHandle set, u32 slot, BufferHandle bh, u32 stride, u32 count, u32 firstElement) {
+    RhiBindingSet* s = bindingSet(set);
+    RhiBuffer* b = buffer(bh);
+    if (!s || !b) { AVER_ERROR("[RHI.Vulkan] setSrvBuffer with an invalid handle"); return; }
+    if (slot >= s->srvCount) { AVER_ERROR("[RHI.Vulkan] setSrvBuffer slot {} past the {} declared", slot, s->srvCount); return; }
+    if (s->srvKinds[slot] != SlotKind::StructuredBuffer) { AVER_ERROR("[RHI.Vulkan] setSrvBuffer on slot {}, which was declared as a texture", slot); return; }
+    if (stride == 0) { AVER_ERROR("[RHI.Vulkan] setSrvBuffer with a zero stride"); return; }
+
+    VkDescriptorBufferInfo bi{b->buffer, static_cast<VkDeviceSize>(firstElement) * stride, static_cast<VkDeviceSize>(count) * stride};
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = s->set;
+    w.dstBinding = slot;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w.pBufferInfo = &bi;
+    dev_->api().UpdateDescriptorSets(dev_->vkDevice(), 1, &w, 0, nullptr);
+}
+
+void VulkanResourceFactory::setUavBuffer(BindingSetHandle set, u32 slot, BufferHandle bh, u32 stride, u32 count, u32 firstElement) {
+    RhiBindingSet* s = bindingSet(set);
+    RhiBuffer* b = buffer(bh);
+    if (!s || !b) { AVER_ERROR("[RHI.Vulkan] setUavBuffer with an invalid handle"); return; }
+    if (slot >= s->uavCount) { AVER_ERROR("[RHI.Vulkan] setUavBuffer slot {} past the {} declared", slot, s->uavCount); return; }
+    if (s->uavKinds[slot] != SlotKind::StructuredBuffer) { AVER_ERROR("[RHI.Vulkan] setUavBuffer on slot {}, which was declared as a texture", slot); return; }
+    if (stride == 0) { AVER_ERROR("[RHI.Vulkan] setUavBuffer with a zero stride"); return; }
+
+    VkDescriptorBufferInfo bi{b->buffer, static_cast<VkDeviceSize>(firstElement) * stride, static_cast<VkDeviceSize>(count) * stride};
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = s->set;
+    w.dstBinding = kVkUavBindingBase + slot;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w.pBufferInfo = &bi;
+    dev_->api().UpdateDescriptorSets(dev_->vkDevice(), 1, &w, 0, nullptr);
+}
+
+// ================================================================================================
+// 13. Reads, writes, misc
+// ================================================================================================
+bool VulkanResourceFactory::writeBuffer(BufferHandle h, const void* src, u64 bytes, u64 offset) {
+    RhiBuffer* b = buffer(h);
+    if (!b) { AVER_ERROR("[RHI.Vulkan] writeBuffer with an invalid handle"); return false; }
+    if (!b->mapped) { AVER_ERROR("[RHI.Vulkan] writeBuffer on a buffer that is not BufferKind::Upload"); return false; }
+    if (!src || bytes == 0) return true;
+    if (offset + bytes > b->desc.bytes) {
+        AVER_ERROR("[RHI.Vulkan] writeBuffer of {} bytes at {} overruns a {}-byte buffer", bytes, offset, b->desc.bytes);
+        return false;
+    }
+    std::memcpy(b->mapped + offset, src, static_cast<usize>(bytes));
+    if (!b->coherent) {
+        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory = b->memory;
+        range.offset = 0;
+        range.size = VK_WHOLE_SIZE;
+        dev_->api().FlushMappedMemoryRanges(dev_->vkDevice(), 1, &range);
+    }
+    return true;
+}
+
+bool VulkanResourceFactory::readBuffer(BufferHandle h, void* dst, u64 bytes, u64 offset) {
+    RhiBuffer* b = buffer(h);
+    if (!b) { AVER_ERROR("[RHI.Vulkan] readBuffer with an invalid handle"); return false; }
+    if (b->desc.kind != BufferKind::Readback || !b->mapped) {
+        AVER_ERROR("[RHI.Vulkan] readBuffer on a buffer that is not BufferKind::Readback");
+        return false;
+    }
+    if (!dst || bytes == 0) return true;
+    if (offset + bytes > b->desc.bytes) {
+        AVER_ERROR("[RHI.Vulkan] readBuffer of {} bytes at {} overruns a {}-byte buffer", bytes, offset, b->desc.bytes);
+        return false;
+    }
+    std::memcpy(dst, b->mapped + offset, static_cast<usize>(bytes));
+    return true;
+}
+
+bool VulkanResourceFactory::textureInfo(TextureHandle h, TextureDesc& out) const {
+    const RhiTexture* t = texture(h);
+    if (!t) return false;
+    out = t->desc;
+    return true;
+}
+
+void VulkanResourceFactory::waitIdle() {
+    dev_->waitForGpu();
+    collect();
+}
+
+} // namespace aver::rhi::vkb
