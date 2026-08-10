@@ -479,12 +479,28 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
             // difference between this gate paying for itself and it being a hash walk that never
             // hits. A run that reports 100% rebuilt is a run where the saving is zero, and that is
             // worth seeing rather than assuming.
-            if (!giGateLogged_ && (giSkipped_ + giRebuilt_) >= 64) {
-                giGateLogged_ = true;
-                AVER_INFO("[Voxi] GI rebuild gate (once): {} rebuilt, {} skipped of {} update tick(s) "
-                          "-- {}% of revoxelisations avoided",
-                          giRebuilt_, giSkipped_, giSkipped_ + giRebuilt_,
-                          (giSkipped_ * 100) / (giSkipped_ + giRebuilt_));
+            // REPORTED SEVERAL TIMES, NOT ONCE, and that is a correction rather than a preference.
+            // The first version logged once at 64 ticks and stopped. At the default interval of 4
+            // that is frame ~256 -- which on any streamed level is still mid-fill, when the draw list
+            // changes every tick and the gate CANNOT match by construction. So it could only ever
+            // print 0%, whatever the gate actually did later, and it did: "0 skipped of 64" on every
+            // run. A measurement whose window excludes the case it is measuring is worse than none,
+            // because it reads as a result.
+            //
+            // Now it reports at widening intervals and prints the SINCE-LAST-REPORT ratio alongside
+            // the lifetime one, so the steady state is visible instead of being averaged away by the
+            // loading phase it can never help with.
+            const u64 ticks = giSkipped_ + giRebuilt_;
+            if (ticks >= giGateNextReport_) {
+                const u64 winTicks = ticks - giGateLastTicks_;
+                const u64 winSkipped = giSkipped_ - giGateLastSkipped_;
+                AVER_INFO("[Voxi] GI rebuild gate: {} rebuilt / {} skipped of {} tick(s) "
+                          "-- {}% avoided overall, {}% since the last report",
+                          giRebuilt_, giSkipped_, ticks, (giSkipped_ * 100) / ticks,
+                          winTicks ? (winSkipped * 100) / winTicks : 0);
+                giGateLastTicks_ = ticks;
+                giGateLastSkipped_ = giSkipped_;
+                giGateNextReport_ = ticks * 2;   // 64, 128, 256, ... -- a handful of lines, not a flood
             }
         }
     }
@@ -660,24 +676,49 @@ u64 VoxiRenderer::giDrawsKey() const {
 
 // True when every input to voxelizePass is identical to the last rebuild's.
 bool VoxiRenderer::giSnapshotUnchanged() const {
-    if (!giSnapValid_) return false;
-    if (giSnapExtent_ != extent_) return false;
-    for (u32 i = 0; i < 3; ++i) if (giSnapCenter_[i] != center_[i]) return false;
+    // WHICH CHECK REJECTED, said once. Two plausible causes for "never fires" were fixed on
+    // reasoning alone and neither was it, which is the point at which guessing stops being
+    // cheaper than measuring: the gate compares four independent things and the log said only
+    // that the answer was no, never which of them said it.
+    // ONE LINE PER DISTINCT REASON, not one line total. The first version latched on the first
+    // rejection of any kind, which is trivially the "no snapshot yet" that fires on frame one -- so
+    // it reported the one uninteresting cause and hid every real one behind it.
+    const auto reject = [this](u32 bit, const char* which) {
+        if (!(giGateWhyMask_ & (1u << bit))) {
+            giGateWhyMask_ |= (1u << bit);
+            AVER_INFO("[Voxi] GI rebuild gate rejected on: {}", which);
+        }
+        return false;
+    };
+    if (!giSnapValid_) return reject(0, "no snapshot yet (expected once)");
+    if (giSnapExtent_ != extent_) return reject(1, "volume extent changed");
+    for (u32 i = 0; i < 3; ++i) if (giSnapCenter_[i] != center_[i]) return reject(2, "volume centre changed");
     // The whole sky struct, byte for byte. It is where sunDirection, sunColor, sunIntensity, the
     // ground albedo and the sky-light intensity all live, and PSVoxel reads every one of them
     // (directly, or through averSunRadiance/averSkyIrradiance). Comparing the bytes rather than a
     // chosen subset of fields is what keeps this correct when a field is ADDED to SkyAtmosphere --
     // a hand-picked field list would silently stop covering the new one.
     if (!dev_) return false;
-    const rhi::SkyAtmosphere now = dev_->skyAtmosphere();
-    if (std::memcmp(&now, &giSky_, sizeof(now)) != 0) return false;
-    return giDrawsKey() == giDrawsKey_;
+    // ZERO-INITIALISED, THEN ASSIGNED -- and that two-step is the whole reason this works.
+    // skyAtmosphere() returns BY VALUE, and SkyAtmosphere opens with a bool followed by padding.
+    // memcmp on a raw returned copy compares that padding, which is unspecified, so the comparison
+    // failed every single time and this gate never once fired: 0 skipped of 512 ticks, on a scene
+    // that had been standing still for two thousand frames. Copy-assigning into a value-initialised
+    // object leaves the padding at the zero both sides started from, so only the MEMBERS are
+    // compared -- while keeping the property the byte comparison was chosen for, that a field added
+    // to SkyAtmosphere later cannot silently fall outside the check.
+    rhi::SkyAtmosphere now{};
+    now = dev_->skyAtmosphere();
+    if (std::memcmp(&now, &giSky_, sizeof(now)) != 0) return reject(3, "sky/sun changed");
+    if (giDrawsKey() != giDrawsKey_) return reject(4, "draw list changed");
+    return true;
 }
 
 // Records what the rebuild about to run was computed from.
 void VoxiRenderer::takeGiSnapshot() {
     giDrawsKey_ = giDrawsKey();
-    if (dev_) giSky_ = dev_->skyAtmosphere();
+    // Same two-step on the stored side, so both sides of the memcmp have zero padding.
+    if (dev_) { giSky_ = rhi::SkyAtmosphere{}; giSky_ = dev_->skyAtmosphere(); }
     for (u32 i = 0; i < 3; ++i) giSnapCenter_[i] = center_[i];
     giSnapExtent_ = extent_;
     giSnapValid_ = true;

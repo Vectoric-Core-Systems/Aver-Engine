@@ -405,7 +405,9 @@ private:
     f32 giSnapExtent_ = -1.0f;   // negative = no snapshot yet, so the first tick always rebuilds
     bool giSnapValid_ = false;
     u64 giSkipped_ = 0, giRebuilt_ = 0;   // for the one-time report; counts, not impressions
-    bool giGateLogged_ = false;
+    mutable u32  giGateWhyMask_ = 0;   // one bit per rejection reason already reported
+    u64  giGateNextReport_ = 64;   // doubles each time, so the steady state gets reported too
+    u64  giGateLastTicks_ = 0, giGateLastSkipped_ = 0;
 
     // Builds this frame's cascade matrices and splits. Returns the usable cascade count, 0 if none.
     u32 fitCascades();

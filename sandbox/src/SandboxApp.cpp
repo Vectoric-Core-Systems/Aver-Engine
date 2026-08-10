@@ -3119,30 +3119,6 @@ private:
     // resident. setChunkStreamingEnabled does the same wiring for the second case.
     //
     // THE LAMBDA CAPTURES `this`, NOT THE DATA. Sculpting mutates landscapeData_ in place, so a copy
-    // would silently keep scattering onto the heights the terrain had when streaming started. It is
-    // Folds one additional field's stream stats into the running total. Counters add; `totalLoads`
-    // adds too because it is a lifetime counter per world.
-    static void accumulateStreamStats(world::StreamStats& into, const world::StreamStats& add) {
-        into.residentChunks   += add.residentChunks;
-        into.residentEntities += add.residentEntities;
-        into.loadedThisUpdate += add.loadedThisUpdate;
-        into.evictedThisUpdate += add.evictedThisUpdate;
-        into.entitiesIn       += add.entitiesIn;
-        into.entitiesOut      += add.entitiesOut;
-        into.pendingLoads     += add.pendingLoads;
-        into.failedLoads      += add.failedLoads;
-        into.totalLoads       += add.totalLoads;
-    }
-
-    // True when any resident density field owns `e`. The World Outliner and the save path both use
-    // this to tell streamed entities from authored ones, so it MUST see every world -- a streamed
-    // entity that no world claims would be offered for editing and written into the level file.
-    bool anyChunkWorldOwns(scene::Entity e) const {
-        if (chunkWorld_ && chunkWorld_->owns(e)) return true;
-        for (const auto& extra : chunkWorldsExtra_)
-            if (extra && extra->owns(e)) return true;
-        return false;
-    }
 
     // safe because the generator lives in chunkWorld_, which this object owns and destroys.
     void applyLandscapeToStreaming() {
@@ -4260,7 +4236,9 @@ private:
     // A TRANSIENT ENTITY, never pushed to levelEntities_, for the same reason the drone is not: it
     // must not also be saved as a PLACE record, which would make the marker a mesh placement AND a
     // spawn record at once -- two sources of truth again, one of them invisible.
+#if AVER_MODULE_SCENE
     scene::Entity playerStart_ = scene::kInvalidEntity;
+#endif
     f32 playerStartYaw_ = 0.0f;
 
     // The spawn transform a level should use: the marker if one is live, else the loaded SPAWN
@@ -7135,6 +7113,16 @@ private:
     // the two-sources-of-truth trap the Player Start marker was built to avoid.
     void buildWorldSettings() {
         if (!showWorldSettings_) return;
+#if !AVER_MODULE_SCENE
+        // WITHOUT THE SCENE MODULE THERE IS NO LEVEL to have settings for -- levelPath_/levelName_
+        // are themselves scene-guarded. Saying so beats hiding the menu entry: the window exists in
+        // every build, and a person who opens it deserves the reason it is empty rather than a menu
+        // item that silently does nothing.
+        if (ImGui::Begin("World Settings", &showWorldSettings_, ImGuiWindowFlags_NoDocking))
+            ImGui::TextDisabled("This build has no scene module, so there is no level to configure.");
+        ImGui::End();
+        return;
+#else
 
         const ImGuiViewport* mv = ImGui::GetMainViewport();
         ImGui::SetNextWindowSize(ImVec2(560.0f * dpi_, 480.0f * dpi_), ImGuiCond_FirstUseEver);
@@ -7258,6 +7246,7 @@ private:
         }
 
         ImGui::End();
+#endif
     }
 
     void buildProjectSettings() {
@@ -8121,6 +8110,38 @@ private:
         const f32 t = targetOpacity < 0.01f ? 0.01f : (targetOpacity > 0.999f ? 0.999f : targetOpacity);
         return -std::log(1.0f - t) / distanceCm;
     }
+
+    // would silently keep scattering onto the heights the terrain had when streaming started. It is
+    // Folds one additional field's stream stats into the running total. Counters add; `totalLoads`
+    // adds too because it is a lifetime counter per world.
+    //
+    // GUARDED: world::StreamStats and scene::Entity do not exist with AVER_MODULE_SCENE=OFF, and
+    // every caller of these two is inside a SCENE guard already. Missing it here is what broke the
+    // scene-off row of scripts/module-matrix.ps1 -- which is the only thing that checks this, and
+    // is exactly why it exists.
+#if AVER_MODULE_SCENE
+    static void accumulateStreamStats(world::StreamStats& into, const world::StreamStats& add) {
+        into.residentChunks   += add.residentChunks;
+        into.residentEntities += add.residentEntities;
+        into.loadedThisUpdate += add.loadedThisUpdate;
+        into.evictedThisUpdate += add.evictedThisUpdate;
+        into.entitiesIn       += add.entitiesIn;
+        into.entitiesOut      += add.entitiesOut;
+        into.pendingLoads     += add.pendingLoads;
+        into.failedLoads      += add.failedLoads;
+        into.totalLoads       += add.totalLoads;
+    }
+
+    // True when any resident density field owns `e`. The World Outliner and the save path both use
+    // this to tell streamed entities from authored ones, so it MUST see every world -- a streamed
+    // entity that no world claims would be offered for editing and written into the level file.
+    bool anyChunkWorldOwns(scene::Entity e) const {
+        if (chunkWorld_ && chunkWorld_->owns(e)) return true;
+        for (const auto& extra : chunkWorldsExtra_)
+            if (extra && extra->owns(e)) return true;
+        return false;
+    }
+#endif
 
     void setChunkStreamingEnabled(bool on) {
         if (on == (chunkWorld_ != nullptr)) return;
