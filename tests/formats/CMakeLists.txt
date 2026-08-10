@@ -172,6 +172,17 @@ target_link_libraries(MakeFoliage PRIVATE Aver.Formats Aver.Core Aver.Platform)
 target_include_directories(MakeFoliage PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
 set_target_properties(MakeFoliage PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# RelodTool -- reports the LOD ladder Trifactor would build today for an already-cooked .ocmesh,
+# against the one the file carries. Sits here with the other generators for the same reason they do:
+# it is a tool, not a test, and it links the same formats+trifactor pair the cook does.
+#
+#     RelodTool.exe "<project>\Content\Meshes"
+if (AVER_MODULE_TRIFACTOR)
+    add_executable(RelodTool ${CMAKE_SOURCE_DIR}/tools/RelodTool.cpp)
+    target_link_libraries(RelodTool PRIVATE Aver.Formats Aver.Trifactor Aver.Core)
+    set_target_properties(RelodTool PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 add_executable(MakeSamples ${CMAKE_SOURCE_DIR}/tools/MakeSamples.cpp)
 target_link_libraries(MakeSamples PRIVATE Aver.Core)
 set_target_properties(MakeSamples PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -438,6 +438,22 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             // cost that is repeated thousands of times across a hierarchy into an O(group-size) cost
             // paid once per group. See groupExtentScale's comment just above appendGlobalTriangles
             // for the one thing this flag changes that this call site has to correct for.
+            // TWO THINGS TRIED HERE AND MEASURED AND REVERTED, so nobody spends the day again.
+            // The problem being attacked: this ladder barely reduces foliage. fir_sapling goes
+            // 433,021 triangles at LOD 0 to 393,157 at its COARSEST of 13 levels -- 9% across the
+            // whole hierarchy -- because LockBorder locks any edge used by exactly one triangle, and
+            // a fir sapling is thousands of separate needle cards whose every edge is a border edge.
+            //
+            // meshopt_SimplifyPrune (meshoptimizer.h:474), which removes whole disconnected
+            // components "regardless of the topological restrictions inside components" and is
+            // documented for exactly this shape of mesh: measured with tools/RelodTool over all 33
+            // demo meshes, fir_sapling's coarsest level went 393,157 -> 391,012. Half a percent.
+            // 5.6% summed across every mesh. Not worth changing cook output for.
+            //
+            // target_error = FLT_MAX, which the OTHER meshopt_simplify call in this file uses with
+            // the comment that a tight bound "would silently return far more triangles than
+            // requested": it does not terminate. TrifactorTest hangs inside buildLodHierarchy with
+            // no error bound to stop the descent, so 1e-2 is load-bearing, not incidental.
             std::vector<u32> simplified(mergedIndices.size());
             f32 resultError = 0.0f;
             const auto tSimplify = tick();
