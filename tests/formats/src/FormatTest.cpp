@@ -305,6 +305,58 @@ static void checkOcworldScatter() {
         check(w.scatterSpecies.size() == 1 && std::fabs(w.scatterSpecies[0].weight - 1.0) < 1e-12,
               "and the species keeps weight's own default rather than reading garbage");
     }
+    {
+        // SEVERAL DENSITY FIELDS, and species bound to them by name. The tokens that make a level
+        // able to have a foreground and a background: PCGVOLUME `radius` (how far this field
+        // streams, in chunks) and SCATTER `volume` (which field places this species).
+        //
+        // One field forces one streaming radius for everything, and one radius cannot be right for
+        // two things at once -- ground cover wants to be dense and near, a canopy wants to be sparse
+        // and far. Both defaults are the unset sentinel, so a level naming neither behaves exactly
+        // as every level did before these existed, which is the property checked last here.
+        OcWorldData w;
+        check(parseOcworld(
+            "OCWORLD 1\nNAME T\n"
+            "PCGVOLUME name Canopy seed 7 cell 3200 octaves 2 floor 0.7 bias 1 samples 3 radius 10 infinite\n"
+            "PCGVOLUME name Floor seed 8 cell 1600 octaves 3 floor 0.3 bias 1 samples 12 infinite\n"
+            "SCATTER mesh Meshes/pine.ocmesh material M_pine volume Canopy weight 2.5 scale 0.9 1.4 collide 120\n"
+            "SCATTER mesh Meshes/fern.ocmesh material M_fern weight 16 scale 0.8 1.6 collide 0\n", w, &err),
+            "a world with two PCGVOLUMEs and a volume-bound species parses");
+        check(w.pcgVolumes.size() == 2 && w.scatterSpecies.size() == 2, "both volumes and both species survive");
+        check(w.pcgVolumes[0].radiusChunks == 10, "the canopy volume keeps its streaming radius");
+        check(w.pcgVolumes[1].radiusChunks == 0,
+              "a volume with no `radius` clause keeps the unset-zero sentinel, not a defaulted number");
+        check(w.scatterSpecies[0].volume == "Canopy", "the species names its volume verbatim");
+        check(w.scatterSpecies[1].volume.empty(),
+              "a species with no `volume` clause stays empty -- the first-non-Sky behaviour it always had");
+        // `radius` must not disturb the six numbers `bounds` consumes, nor the tokens after `samples`.
+        check(w.pcgVolumes[0].infinite && std::fabs(w.pcgVolumes[0].cellSizeCm - 3200.0) < 1e-9 &&
+              w.pcgVolumes[0].samplesPerAxis == 3,
+              "`radius` does not shift the tokens around it");
+
+        const std::string text = writeOcworld(w);
+        check(text.find("radius 10") != std::string::npos, "the written text carries the radius");
+        check(text.find("volume Canopy") != std::string::npos, "...and the species' volume binding");
+        // Both unset forms must be ABSENT, not written as `radius 0` / `volume `.
+        const usize floorPos = text.find("name Floor");
+        const usize floorEnd = text.find('\n', floorPos);
+        check(floorPos != std::string::npos &&
+              text.substr(floorPos, floorEnd - floorPos).find("radius") == std::string::npos,
+              "a volume with no declared radius has no `radius` token at all");
+        const usize fernPos = text.find("Meshes/fern.ocmesh");
+        const usize fernEnd = text.find('\n', fernPos);
+        check(fernPos != std::string::npos &&
+              text.substr(fernPos, fernEnd - fernPos).find("volume") == std::string::npos,
+              "a species with no declared volume has no `volume` token at all");
+
+        OcWorldData back;
+        check(parseOcworld(text, back, &err), "the written text parses again");
+        check(back.pcgVolumes.size() == 2 && back.pcgVolumes[0].radiusChunks == 10 &&
+              back.pcgVolumes[1].radiusChunks == 0 &&
+              back.scatterSpecies[0].volume == "Canopy" && back.scatterSpecies[1].volume.empty(),
+              "radius and volume round-trip, present and absent alike");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
 }
 
 // Checks the LANDSCAPE record: every field, round-trip byte-identity, the unset-extent field's

@@ -1320,10 +1320,24 @@ public:
                     world::StreamSource{dronePos_, droneVel_},
                 };
                 chunkStreamStats_ = chunkWorld_->update(scene::World::instance(), sources, t.dt, &freed);
+                // Every additional density field streams on the SAME sources and the same dt, each
+                // against its own radius. Stats are summed rather than replaced: "resident chunks"
+                // means the whole world, and reporting only the primary's would under-report by
+                // exactly the strata this feature exists to add.
+                for (auto& extra : chunkWorldsExtra_) {
+                    if (!extra) continue;
+                    accumulateStreamStats(chunkStreamStats_,
+                                          extra->update(scene::World::instance(), sources, t.dt, &freed));
+                }
             } else
 #endif
             {
                 chunkStreamStats_ = chunkWorld_->update(scene::World::instance(), camPos_, vel, t.dt, &freed);
+                for (auto& extra : chunkWorldsExtra_) {
+                    if (!extra) continue;
+                    accumulateStreamStats(chunkStreamStats_,
+                                          extra->update(scene::World::instance(), camPos_, vel, t.dt, &freed));
+                }
             }
 #if AVER_MODULE_PHYSICS
             for (const i32 b : freed) if (b >= 0) aver_phys_remove_body(b);
@@ -3026,6 +3040,30 @@ private:
     //
     // THE LAMBDA CAPTURES `this`, NOT THE DATA. Sculpting mutates landscapeData_ in place, so a copy
     // would silently keep scattering onto the heights the terrain had when streaming started. It is
+    // Folds one additional field's stream stats into the running total. Counters add; `totalLoads`
+    // adds too because it is a lifetime counter per world.
+    static void accumulateStreamStats(world::StreamStats& into, const world::StreamStats& add) {
+        into.residentChunks   += add.residentChunks;
+        into.residentEntities += add.residentEntities;
+        into.loadedThisUpdate += add.loadedThisUpdate;
+        into.evictedThisUpdate += add.evictedThisUpdate;
+        into.entitiesIn       += add.entitiesIn;
+        into.entitiesOut      += add.entitiesOut;
+        into.pendingLoads     += add.pendingLoads;
+        into.failedLoads      += add.failedLoads;
+        into.totalLoads       += add.totalLoads;
+    }
+
+    // True when any resident density field owns `e`. The World Outliner and the save path both use
+    // this to tell streamed entities from authored ones, so it MUST see every world -- a streamed
+    // entity that no world claims would be offered for editing and written into the level file.
+    bool anyChunkWorldOwns(scene::Entity e) const {
+        if (chunkWorld_ && chunkWorld_->owns(e)) return true;
+        for (const auto& extra : chunkWorldsExtra_)
+            if (extra && extra->owns(e)) return true;
+        return false;
+    }
+
     // safe because the generator lives in chunkWorld_, which this object owns and destroys.
     void applyLandscapeToStreaming() {
 #if AVER_MODULE_SCENE
@@ -4709,7 +4747,7 @@ private:
                 // gizmo/EditCmd path, and an entity the streamer can evict out from under an
                 // in-flight edit or an undo record must never go through that door. See
                 // setChunkStreamingEnabled and buildPanels (World Outliner) for the same rule.
-                if (chunkWorld_ && chunkWorld_->owns(ent)) continue;
+                if (anyChunkWorldOwns(ent)) continue;
                 const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
                 if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
                 if (sceneMeshes_.find(mr->mesh) == sceneMeshes_.end()) continue;
@@ -6439,7 +6477,7 @@ private:
                 // Chunk-streamed entities are excluded on purpose: potentially hundreds of them come
                 // and go as the camera moves, and this list is for what a designer placed. Their
                 // live count is in the Chunk Streaming stats window instead (buildChunkStreamingPanel).
-                if (chunkWorld_ && chunkWorld_->owns(ent)) continue;
+                if (anyChunkWorldOwns(ent)) continue;
                 // The graph-driven drone is excluded for the identical reason: transient, not
                 // authored, tracked separately (see the [Drone] AVER_INFO lines / the Details panel
                 // if selected directly some other way -- there isn't one; it just isn't listed here).
@@ -7742,8 +7780,17 @@ private:
 
         if (!on) {
             std::vector<i32> freed;
-            const world::StreamStats last = chunkWorld_->stats();
+            world::StreamStats last = chunkWorld_->stats();
             chunkWorld_->shutdown(scene::World::instance(), freed);
+            // Every additional field is torn down in the same pass and into the SAME `freed` list --
+            // those bodies are as real as the primary's, and leaving them would leak a physics body
+            // per streamed collider each time streaming is toggled.
+            for (auto& extra : chunkWorldsExtra_) {
+                if (!extra) continue;
+                accumulateStreamStats(last, extra->stats());
+                extra->shutdown(scene::World::instance(), freed);
+            }
+            chunkWorldsExtra_.clear();
             scene::World::instance().flush();
 #if AVER_MODULE_PHYSICS
             for (const i32 b : freed) if (b >= 0) aver_phys_remove_body(b);
@@ -7761,154 +7808,200 @@ private:
             return;
         }
 
-        auto cw = std::make_unique<world::ChunkWorld>();
-        world::ChunkWorldSettings cwSettings;
-        // Beside Content and Binaries, not inside either: this is generated/streamed state, not
-        // authored content, and must never appear in the Content Browser or get packaged as an asset.
-        cwSettings.worldDir = project_.dir + "\\Chunks";
-        // Stream settings (chunkSize/loadRadius/evictRadius/verticalRadius/budgets) are left at
-        // their shipped defaults (ChunkStreamer.hpp) -- nothing here describes those, so there is
-        // nothing to wire through.
+        // ---- ONE ChunkWorld PER DECLARED DENSITY FIELD ----
+        //
+        // A ChunkWorld carries its own StreamSettings, and loadRadius is what decides how far the
+        // world is actually populated. One field means one radius for everything, and one radius
+        // cannot serve a dense floor and a sparse canopy at once: at the shipped 3 the scatter ends
+        // 48 m out while the camera sees to the horizon, so the world stops at a visible ring with
+        // bare terrain beyond it. Raising that single radius is not the fix -- the palette is
+        // dominated by ground cover, and radius 6 quadruples the chunk count for triangles that are
+        // invisible at that distance.
+        //
+        // Several fields, each with its own radius, seed, feature size and species, is the fix:
+        // canopy at radius 10 with 3 samples/axis, floor at 3 with 12. Cost then scales with what is
+        // visible at each distance instead of with the largest radius any one species needs.
+        //
+        // ONE WORLD PER FIELD rather than one generator holding several specs, because that is the
+        // SMALLER change -- ChunkGenerator's sampling core is reproducibility-pinned and its header
+        // is explicit about protecting it.
+        std::vector<const fmt::OcPcgVolume*> fields;
+        for (const fmt::OcPcgVolume& pv : levelPcgVolumes_)
+            if (pv.name != "Sky") fields.push_back(&pv);
 
-        // The scatter palette comes from the LEVEL's own SCATTER records, and the editor has no
-        // opinion about what a world scatters.
-        //
-        // It used to be a hardcoded five-species palette built in this file: five asset filenames,
-        // with weights, density bands, scales and collision radii tuned against one sample project's
-        // triangle budget. It probed the disk rather than the project name, which made it look
-        // general, but a palette that only ever fires for projects importing those five filenames is
-        // that project's content living in the engine. WHICH meshes a world scatters is authored
-        // data, exactly like which meshes it places.
-        //
-        // A level with no SCATTER records leaves the palette empty, and GeneratedChunkSource falls
-        // back to its single-species cube -- the same behaviour as before any of this existed.
-        {
-            std::vector<std::string> scatterErrors;
-            if (!world::buildScatterPalette(levelHeader_.scatterSpecies, project_.contentDir(),
-                                            cwSettings.generator.palette, scatterErrors)) {
-                // Reported per species, and streaming still starts on whatever validated: a level
-                // that scatters nothing because one mesh path was wrong, silently, is the failure
-                // mode this whole path was built to avoid.
-                for (const std::string& e : scatterErrors)
-                    AVER_WARN("[ChunkWorld] {}", e);
-            }
+        // No non-Sky volume still builds exactly ONE world on GeneratorSettings' shipped defaults --
+        // the behaviour before any of this, and what the single-species cube fallback relies on.
+        const usize fieldCount = fields.empty() ? usize{1} : fields.size();
+        const bool multi = fieldCount > 1;
+
+        // A species naming a volume the level does not declare would otherwise scatter nowhere, in
+        // silence. Reported once per bad name and folded into the primary rather than dropped: a
+        // typo in one SCATTER line must not delete that species from the world.
+        for (const fmt::OcScatterSpecies& sp : levelHeader_.scatterSpecies) {
+            if (sp.volume.empty()) continue;
+            bool found = false;
+            for (const fmt::OcPcgVolume* pv : fields) if (pv->name == sp.volume) { found = true; break; }
+            if (!found)
+                AVER_WARN("[ChunkWorld] SCATTER '{}' names volume '{}', which this level does not "
+                          "declare; it will scatter in the first field instead",
+                          sp.meshPath, sp.volume);
         }
 
-        // Take the generator's seed/cell-size/octaves/coverage from the level's own declared density
-        // field when it has one, instead of leaving GeneratorSettings at its shipped defaults no
-        // matter what a level's PCGVOLUME said. A level describing a density field nothing samples
-        // was a lie in the file -- see the task this shipped with.
-        //
-        // "Sky" IS SKIPPED: that name is already spoken for (loadLevel above drives the cloud layer
-        // from it), so a level with only a Sky volume behaves exactly as it did before this existed
-        // -- the generator keeps GeneratorSettings' shipped defaults. The first NON-Sky PCGVOLUME
-        // wins; a level with more than one is not disambiguated further than that.
-        //
-        // COVERAGE MAPS TO threshold, NOT TO THE GENERATOR'S OWN pcg::InfiniteSpec::coverageFloor/
-        // coverageBias. Those two are pinned to 0/1 inside GeneratedChunkSource::setSettings
-        // (ChunkGenerator.cpp) ON PURPOSE: sampleInfinite's final pow(remapped, bias) is the one
-        // operation in it that IEEE 754 does not pin across libm implementations, and this
-        // generator's whole reproducibility guarantee depends on never calling it with bias != 1.
-        // coverageFloor and threshold mean the same thing in different words -- "the density below
-        // which nothing is here" -- so it maps directly onto the one density knob the generator
-        // exposes; coverageBias has no equivalent here and is deliberately left unmapped.
-        for (const fmt::OcPcgVolume& v : levelPcgVolumes_) {
-            if (v.name == "Sky") continue;
-            cwSettings.generator.worldSeed = static_cast<u64>(static_cast<u32>(v.seed));
-            if (v.cellSizeCm > 0.0) cwSettings.generator.featureSizeCm = static_cast<f32>(v.cellSizeCm);
-            if (v.octaves > 0) cwSettings.generator.octaves = static_cast<u32>(v.octaves);
+        std::vector<std::unique_ptr<world::ChunkWorld>> built;
+        for (usize fi = 0; fi < fieldCount; ++fi) {
+            const fmt::OcPcgVolume* v = fields.empty() ? nullptr : fields[fi];
+
+            // Which species this field places. An UNNAMED species goes to the first field, which is
+            // exactly where every species went before the `volume` token existed -- so a level that
+            // never mentions volumes produces one world with the whole palette, as before. A species
+            // naming a volume that does not exist lands here too (warned above).
+            std::vector<fmt::OcScatterSpecies> mine;
+            for (const fmt::OcScatterSpecies& sp : levelHeader_.scatterSpecies) {
+                bool named = false;
+                if (!sp.volume.empty())
+                    for (const fmt::OcPcgVolume* pv : fields) if (pv->name == sp.volume) { named = true; break; }
+                if (named) { if (v && sp.volume == v->name) mine.push_back(sp); }
+                else if (fi == 0)                            mine.push_back(sp);
+            }
+            // A field with no species would generate the fallback cube everywhere. Skip it: a level
+            // may declare a field for something other than scatter (a cave mask, a moisture map).
+            if (mine.empty()) {
+                AVER_INFO("[ChunkWorld] field '{}' has no SCATTER species; not streamed",
+                          v ? v->name : std::string("<none>"));
+                continue;
+            }
+
+            auto cw = std::make_unique<world::ChunkWorld>();
+            world::ChunkWorldSettings cwSettings;
+
+            // Beside Content and Binaries, not inside either: generated/streamed state, not authored
+            // content, so it must never appear in the Content Browser or be packaged as an asset.
+            //
+            // PER FIELD ONLY WHEN THERE IS MORE THAN ONE. Region files are keyed by chunk coordinate,
+            // so two worlds sharing a directory would write each other's chunks -- they must not.
+            // A single-field level keeps the plain "Chunks" path it has always used, so no existing
+            // project's streamed state is orphaned by this change.
+            cwSettings.worldDir = project_.dir + "\\Chunks";
+            if (multi) cwSettings.worldDir += "\\" + (v && !v->name.empty() ? v->name
+                                                                            : std::to_string(fi));
+
+            // The scatter palette comes from the LEVEL's own SCATTER records; the editor has no
+            // opinion about what a world scatters. A field whose species all fail validation streams
+            // nothing rather than falling back to the cube.
             {
-                const f64 t = v.coverageFloor < 0.0 ? 0.0 : (v.coverageFloor > 1.0 ? 1.0 : v.coverageFloor);
-                cwSettings.generator.threshold = static_cast<f32>(t);
+                std::vector<std::string> scatterErrors;
+                if (!world::buildScatterPalette(mine, project_.contentDir(),
+                                                cwSettings.generator.palette, scatterErrors)) {
+                    for (const std::string& e : scatterErrors)
+                        AVER_WARN("[ChunkWorld] {}", e);
+                }
             }
-            // How finely the field is sampled for placement, which is what decides whether a world
-            // reads as a forest floor or as objects strewn metres apart. Clamped rather than
-            // trusted: the cost is quadratic in this number and the file is authored by hand, so a
-            // stray extra digit would generate millions of entities per chunk. Zero means the level
-            // said nothing, and GeneratorSettings' own default stands.
-            if (v.samplesPerAxis > 0) {
-                constexpr i32 kMaxSamplesPerAxis = 64;   // 4096 candidates in one chunk
-                const i32 n = v.samplesPerAxis > kMaxSamplesPerAxis ? kMaxSamplesPerAxis : v.samplesPerAxis;
-                if (n != v.samplesPerAxis)
-                    AVER_WARN("[ChunkWorld] PCGVOLUME '{}' asks for {} samples per axis; clamped to {}",
-                              v.name, v.samplesPerAxis, n);
-                cwSettings.generator.samplesPerAxis = static_cast<u32>(n);
-            }
-            AVER_INFO("[ChunkWorld] generator settings taken from PCGVOLUME '{}': seed={} "
-                      "featureSize={:.0f}cm octaves={} threshold={:.2f}",
-                      v.name, cwSettings.generator.worldSeed, cwSettings.generator.featureSizeCm,
-                      cwSettings.generator.octaves, cwSettings.generator.threshold);
-            break;
-        }
 
-        // Scatter follows the terrain when a section is resident. The generator asks only "what is
-        // the surface Z at (x, y)" and knows nothing about landscapes -- Aver.World deliberately does
-        // not depend on Aver.Landscape (see modules/world/CMakeLists.txt), so the editor, which
-        // depends on both, is the right place to close this lambda.
-        //
-        // THE AUTHORED SECTION WINS WHERE IT EXISTS, exactly as before: surfaceHeightAt refuses rather
-        // than clamping there. Past its rim this now falls through to terrainHeightAt -- the SAME
-        // continuous noise the ring tiles' GEOMETRY is built from (see updateLandscapeRingTiles), so a
-        // scattered entity's height agrees with the ground it is standing on whether that ground is
-        // the authored section or a synthesized ring tile. terrainHeightAt is TOTAL (always true), so
-        // the lambda itself always returns true once a section is loaded at all -- there is no rim left
-        // for the generator's own flat fallback to catch.
+            // The field's own noise parameters. COVERAGE MAPS TO threshold, NOT to the generator's
+            // pcg::InfiniteSpec::coverageFloor/coverageBias -- those are pinned to 0/1 inside
+            // GeneratedChunkSource::setSettings on purpose, because sampleInfinite's final
+            // pow(remapped, bias) is the one operation in it IEEE 754 does not pin across libm
+            // implementations, and this generator's reproducibility depends on never calling it with
+            // bias != 1. coverageFloor and threshold mean the same thing in different words.
+            if (v) {
+                cwSettings.generator.worldSeed = static_cast<u64>(static_cast<u32>(v->seed));
+                if (v->cellSizeCm > 0.0) cwSettings.generator.featureSizeCm = static_cast<f32>(v->cellSizeCm);
+                if (v->octaves > 0) cwSettings.generator.octaves = static_cast<u32>(v->octaves);
+                {
+                    const f64 t = v->coverageFloor < 0.0 ? 0.0
+                                                          : (v->coverageFloor > 1.0 ? 1.0 : v->coverageFloor);
+                    cwSettings.generator.threshold = static_cast<f32>(t);
+                }
+                // Clamped rather than trusted: cost is quadratic in this and the file is authored by
+                // hand, so a stray digit would generate millions of entities per chunk.
+                if (v->samplesPerAxis > 0) {
+                    constexpr i32 kMaxSamplesPerAxis = 64;   // 4096 candidates in one chunk
+                    const i32 n = v->samplesPerAxis > kMaxSamplesPerAxis ? kMaxSamplesPerAxis
+                                                                          : v->samplesPerAxis;
+                    if (n != v->samplesPerAxis)
+                        AVER_WARN("[ChunkWorld] PCGVOLUME '{}' asks for {} samples per axis; clamped to {}",
+                                  v->name, v->samplesPerAxis, n);
+                    cwSettings.generator.samplesPerAxis = static_cast<u32>(n);
+                }
+                // How far this field streams. Clamped for the same reason, and evictRadius is raised
+                // with it: ChunkStreamer.hpp requires evictRadius > loadRadius or the boundary
+                // thrashes, and it enforces that rather than trusting the caller.
+                if (v->radiusChunks > 0) {
+                    constexpr i32 kMaxRadiusChunks = 24;
+                    const i32 r = v->radiusChunks > kMaxRadiusChunks ? kMaxRadiusChunks : v->radiusChunks;
+                    if (r != v->radiusChunks)
+                        AVER_WARN("[ChunkWorld] PCGVOLUME '{}' asks for radius {}; clamped to {}",
+                                  v->name, v->radiusChunks, r);
+                    cwSettings.stream.loadRadius  = r;
+                    cwSettings.stream.evictRadius = r + 2;
+                }
+            }
+
+            // Scatter follows the terrain when a section is resident. The generator asks only "what
+            // is the surface Z at (x, y)" and knows nothing about landscapes -- Aver.World does not
+            // depend on Aver.Landscape, so the editor, which depends on both, closes this lambda.
+            // The authored section wins where it exists; past its rim this falls through to the same
+            // continuous noise the ring tiles' geometry is built from.
 #if AVER_MODULE_LANDSCAPE
-        if (landscapeLoaded_) {
-            cwSettings.generator.heightSource = [this](f32 x, f32 y, f32& outZ) {
-                if (landscape::surfaceHeightAt(landscapeData_, x, y, outZ)) return true;
-                outZ = landscape::terrainHeightAt(x, y, landscapeNoiseParams_);
-                return true;
-            };
-            AVER_INFO("[ChunkWorld] scatter will follow the landscape section ({}x{} samples, "
-                      "{:.0f}cm spacing) and the infinite noise field past its rim",
-                      landscapeData_.sampleCount, landscapeData_.sampleCount, landscapeData_.spacingCm);
-        }
+            if (landscapeLoaded_) {
+                cwSettings.generator.heightSource = [this](f32 x, f32 y, f32& outZ) {
+                    if (landscape::surfaceHeightAt(landscapeData_, x, y, outZ)) return true;
+                    outZ = landscape::terrainHeightAt(x, y, landscapeNoiseParams_);
+                    return true;
+                };
+            }
 #endif
 
-        world::RestoreOptions& restore = cw->streamer().restoreOptions();
+            world::RestoreOptions& restore = cw->streamer().restoreOptions();
 #if AVER_MODULE_PBR
-        // Same wiring loadLevel uses for placements: bind the token a chunk's entities were restored
-        // with to a real material handle.
-        restore.bindMaterial = [this](i32 token, const std::string& surface) {
-            const pbr::MaterialHandle h = materialForSurface(surface);
-            if (h) surfaceMaterials_[token] = h;
-        };
+            restore.bindMaterial = [this](i32 token, const std::string& surface) {
+                const pbr::MaterialHandle h = materialForSurface(surface);
+                if (h) surfaceMaterials_[token] = h;
+            };
 #endif
 #if AVER_MODULE_PHYSICS
-        // Static boxes only, same shape loadLevel/recreateFrom create for authored placements. The
-        // returned id flows into ChunkWorld's own BodyRegistry, and back out through freed bodies on
-        // eviction/shutdown below -- this class does not track it a second time.
-        restore.createBody = [](scene::Entity, const Vec3& worldPos, const Vec3& halfExtentCm) -> i32 {
-            if (!aver_phys_ready()) return -1;
-            return aver_phys_add_static_box(worldPos.x, worldPos.y, worldPos.z,
-                                            halfExtentCm.x, halfExtentCm.y, halfExtentCm.z);
-        };
+            restore.createBody = [](scene::Entity, const Vec3& worldPos, const Vec3& halfExtentCm) -> i32 {
+                if (!aver_phys_ready()) return -1;
+                return aver_phys_add_static_box(worldPos.x, worldPos.y, worldPos.z,
+                                                halfExtentCm.x, halfExtentCm.y, halfExtentCm.z);
+            };
 #endif
 
-        std::string why;
-        if (!cw->open(cwSettings, &why)) {
-            AVER_WARN("[ChunkWorld] failed to enable streaming: {}", why);
+            std::string why;
+            if (!cw->open(cwSettings, &why)) {
+                // One field failing must not take the others down with it -- a level with a good
+                // floor and a broken canopy should still show its floor.
+                AVER_WARN("[ChunkWorld] field '{}' failed to open: {}",
+                          v ? v->name : std::string("<none>"), why);
+                continue;
+            }
+
+            AVER_INFO("[ChunkWorld] field '{}' -- worldDir='{}' loadRadius={} evictRadius={} "
+                      "palette={} species threshold={:.2f} samples={}/axis (populated to {:.0f}m)",
+                      v ? v->name : std::string("<none>"), cwSettings.worldDir,
+                      cwSettings.stream.loadRadius, cwSettings.stream.evictRadius,
+                      cwSettings.generator.palette.size(), cwSettings.generator.threshold,
+                      cwSettings.generator.samplesPerAxis,
+                      static_cast<f32>(cwSettings.stream.loadRadius * cwSettings.stream.chunkSizeCm) / 100.0f);
+            built.push_back(std::move(cw));
+        }
+
+        if (built.empty()) {
+            AVER_WARN("[ChunkWorld] cannot enable streaming: no density field produced a world");
             return;
         }
 
-        chunkWorld_ = std::move(cw);
+        chunkWorld_ = std::move(built[0]);
+        chunkWorldsExtra_.clear();
+        for (usize k = 1; k < built.size(); ++k) chunkWorldsExtra_.push_back(std::move(built[k]));
+
         chunkStreamHaveLastPos_ = false;
         chunkStreamLogsLeft_ = 8;
         chunkStreamStats_ = world::StreamStats{};
-        AVER_INFO("[ChunkWorld] streaming enabled -- worldDir='{}' chunkSize={}cm loadRadius={} "
-                  "evictRadius={} verticalRadius={} palette={} species threshold={:.2f} "
-                  "samples={}/axis ({} candidates/chunk, one per {:.0f}cm)",
-                  cwSettings.worldDir, chunkWorld_->settings().stream.chunkSizeCm,
-                  chunkWorld_->settings().stream.loadRadius, chunkWorld_->settings().stream.evictRadius,
-                  chunkWorld_->settings().stream.verticalRadius,
-                  chunkWorld_->settings().generator.palette.size(),
-                  chunkWorld_->settings().generator.threshold,
-                  chunkWorld_->settings().generator.samplesPerAxis,
-                  chunkWorld_->settings().generator.samplesPerAxis *
-                      chunkWorld_->settings().generator.samplesPerAxis,
-                  static_cast<f32>(chunkWorld_->settings().stream.chunkSizeCm) /
-                      static_cast<f32>(chunkWorld_->settings().generator.samplesPerAxis));
+        AVER_INFO("[ChunkWorld] streaming enabled -- {} density field(s), chunkSize={}cm "
+                  "verticalRadius={}",
+                  built.size(), chunkWorld_->settings().stream.chunkSizeCm,
+                  chunkWorld_->settings().stream.verticalRadius);
         warnIfCameraOutsideGeneratedBand();
     }
 
@@ -8051,12 +8144,18 @@ private:
         u64 total = 0;
         if (!chunkWorld_) return total;
         const scene::World& world = scene::World::instance();
-        for (const scene::Entity e : chunkWorld_->streamedEntities()) {
-            const auto* mr = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
-            if (!mr) continue;
-            const auto it = meshTris_.find(mr->mesh);
-            if (it != meshTris_.end()) total += it->second;
-        }
+        // Every field, not just the primary: a canopy streaming at radius 10 is exactly the triangles
+        // someone reading this number is trying to account for.
+        const auto add = [&](const world::ChunkWorld& cw) {
+            for (const scene::Entity e : cw.streamedEntities()) {
+                const auto* mr = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+                if (!mr) continue;
+                const auto it = meshTris_.find(mr->mesh);
+                if (it != meshTris_.end()) total += it->second;
+            }
+        };
+        add(*chunkWorld_);
+        for (const auto& extra : chunkWorldsExtra_) if (extra) add(*extra);
         return total;
     }
 
@@ -8414,6 +8513,26 @@ private:
     // saveLevel/undo/redo never see them because they only ever walk levelEntities_/undoStack_,
     // which streamed entities are never added to.
     std::unique_ptr<world::ChunkWorld> chunkWorld_;
+
+    // The level's SECOND and further density fields, one ChunkWorld each. Empty for every level that
+    // declares one PCGVOLUME, which is the shape every level had before this existed.
+    //
+    // ONE WORLD PER FIELD, rather than one generator holding several specs. A ChunkWorld carries its
+    // own StreamSettings, and the streaming RADIUS is the whole point: one field forces one radius
+    // for everything, and one radius cannot serve both a dense floor and a sparse canopy. At the
+    // shipped radius of 3 the world is populated for 48 m while the camera sees to the horizon, so
+    // the scatter ends at a visible ring -- raising that one radius multiplies the ground cover too,
+    // which is invisible at that distance and is most of the triangles. Separate worlds let a canopy
+    // stream at radius 10 with 3 samples/axis while the floor stays at 3 with 12.
+    //
+    // It is also the SMALLER change: extending ChunkGenerator to hold several specs would touch the
+    // reproducibility-pinned sampling core its header is explicit about protecting.
+    //
+    // chunkWorld_ above stays the PRIMARY -- the first non-Sky volume -- so the thirty-odd sites that
+    // only read settings for a panel or a log keep working unchanged. Only the five that must see
+    // every world (update, owns, shutdown, streamedEntities, and the builder) walk both.
+    std::vector<std::unique_ptr<world::ChunkWorld>> chunkWorldsExtra_;
+
     world::StreamStats chunkStreamStats_;
     Vec3 chunkStreamLastCamPos_{};
     bool chunkStreamHaveLastPos_ = false;   // false right after enabling or after a camera teleport,

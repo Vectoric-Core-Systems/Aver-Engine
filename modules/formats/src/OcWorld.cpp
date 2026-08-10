@@ -137,6 +137,7 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "floor")   && i + 1 < t.size()) v.coverageFloor = parseF64(t[++i]);
                 else if (equalsCI(t[i], "bias")    && i + 1 < t.size()) v.coverageBias  = parseF64(t[++i]);
                 else if (equalsCI(t[i], "samples") && i + 1 < t.size()) v.samplesPerAxis = static_cast<i32>(parseF64(t[++i]));
+                else if (equalsCI(t[i], "radius")  && i + 1 < t.size()) v.radiusChunks   = static_cast<i32>(parseF64(t[++i]));
                 // A BARE TOKEN, not `infinite 1`. It is a statement about what the field IS rather
                 // than a value it carries, and it reads that way in the file.
                 else if (equalsCI(t[i], "infinite")) v.infinite = true;
@@ -162,6 +163,7 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             for (usize i = 1; i < t.size(); ++i) {
                 if      (equalsCI(t[i], "mesh")     && i + 1 < t.size()) sp.meshPath = std::string(t[++i]);
                 else if (equalsCI(t[i], "material") && i + 1 < t.size()) sp.material = std::string(t[++i]);
+                else if (equalsCI(t[i], "volume")   && i + 1 < t.size()) sp.volume = std::string(t[++i]);
                 else if (equalsCI(t[i], "weight")   && i + 1 < t.size()) sp.weight = parseF64(t[++i]);
                 else if (equalsCI(t[i], "scale")    && i + 2 < t.size()) {
                     sp.scaleMin = parseF64(t[i+1]); sp.scaleMax = parseF64(t[i+2]); i += 2;
@@ -296,6 +298,8 @@ std::string writeOcworld(const OcWorldData& w) {
             // runtime keeps its own default" sentinel, and a level that never mentioned sampling
             // should not come back from a save claiming to have asked for none.
             if (v.samplesPerAxis > 0) s += " samples " + std::to_string(v.samplesPerAxis);
+            // Same unset-is-not-a-value rule as `samples` directly above.
+            if (v.radiusChunks > 0) s += " radius " + std::to_string(v.radiusChunks);
             // The bounds token LAST, because parsing `bounds` consumes the six numbers after it and
             // anything following them would have to be re-found. Writing it last means the reader
             // never has to.
@@ -313,8 +317,12 @@ std::string writeOcworld(const OcWorldData& w) {
         s += "\n";
         for (const OcScatterSpecies& sp : w.scatterSpecies) {
             s += "SCATTER mesh " + sp.meshPath +
-                 " material " + sp.material +
-                 " weight " + num(sp.weight) +
+                 " material " + sp.material;
+            // Omitted when empty, same unset-is-not-a-value rule the density band below follows:
+            // empty means "the first non-Sky volume", which is what every species meant before this
+            // token existed, so a level that never named a volume must not come back naming one.
+            if (!sp.volume.empty()) s += " volume " + sp.volume;
+            s += " weight " + num(sp.weight) +
                  " scale " + num(sp.scaleMin) + " " + num(sp.scaleMax);
             // OMITTED, DELIBERATELY, rather than printed as ~1.79769e+308: an unbounded band is the
             // default every species starts from, and a level a person can still read should never

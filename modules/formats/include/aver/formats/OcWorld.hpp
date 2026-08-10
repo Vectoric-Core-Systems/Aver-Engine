@@ -70,6 +70,26 @@ struct OcPcgVolume {
     // COST IS QUADRATIC. n=16 is 16x the candidates of n=4, and every accepted one is an entity with
     // its own draw. Raise it with the palette's triangle budget in view, not on its own.
     i32 samplesPerAxis = 0;
+
+    // How far this field streams, as a Chebyshev radius in CHUNKS. ZERO MEANS UNSET -- the runtime
+    // keeps world::StreamSettings' own default (3).
+    //
+    // THIS IS WHAT LETS A LEVEL HAVE A FOREGROUND AND A BACKGROUND. One field for the whole world
+    // forces one radius for everything, and one radius cannot be right for two things at once: at
+    // 3 chunks the world is populated for 48 m while the camera sees kilometres, so the scatter
+    // stops at a visible ring and bare terrain runs to the horizon. Raising the single radius is not
+    // the answer either -- the palette is dominated by ground cover, and radius 5 multiplies ALL of
+    // it, triangles that are invisible at that distance included.
+    //
+    // Several volumes, each with its own radius and its own species, is the answer: a canopy field
+    // at radius 10 sampled coarsely, ground cover at radius 3 sampled finely. Cost scales with what
+    // is actually visible at each distance rather than with the largest radius any species needs.
+    //
+    // COST IS QUADRATIC IN THIS, same as samplesPerAxis: radius 6 is four times the chunks of
+    // radius 3. Pair a large radius with a small samplesPerAxis and a short palette, never with the
+    // ground-cover tier.
+    i32 radiusChunks = 0;
+
     // False means boundsMin/Max are meaningful. True means the field is everywhere.
     bool infinite = true;
     f64 boundsMin[3] = {0, 0, 0};
@@ -92,6 +112,17 @@ struct OcScatterSpecies {
     // SCATTER record that states no opinion actually wants. Every record in the demo level
     // names its material explicitly, so nothing depended on the old default.
     std::string material;
+
+    // Which PCGVOLUME's density field places this species, by name. EMPTY MEANS THE FIRST NON-"Sky"
+    // VOLUME, which is exactly what the runtime did for every species before this field existed, so
+    // a level that never mentions it behaves identically.
+    //
+    // BY NAME, not by index, for the reason OcPcgVolume itself is named: a level may declare several
+    // and "the first one" is how the wrong field gets sampled with nothing saying so. The same
+    // argument the sky path already settled -- aver::game::GameLevel::pcgField(name) has stored
+    // every declared volume by name from the start; only the scatter side was stuck on first-match.
+    std::string volume;
+
     f64 weight = 1.0;
     f64 scaleMin = 0.75, scaleMax = 1.25;
     bool randomizeYaw = true;
