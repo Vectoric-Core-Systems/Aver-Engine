@@ -58,6 +58,11 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             out.build = static_cast<u32>(t.size() > 1 ? parseU64(t[1]) : 0);
         } else if (equalsCI(key, "ALGO")) {
             out.algo = static_cast<u32>(t.size() > 1 ? parseU64(t[1]) : 3);
+        } else if (equalsCI(key, "GAMEMODE") && t.size() >= 2) {
+            // The rest of the line, so a class name containing spaces survives. Names are authored
+            // by whoever wrote the C# class, and nothing forbids one.
+            out.gameMode = std::string(t[1]);
+            for (usize i = 2; i < t.size(); ++i) { out.gameMode += ' '; out.gameMode += std::string(t[i]); }
         } else if (equalsCI(key, "SPAWN")) {
             out.hasSpawn = true;
             out.spawnX = tokF(t, 1); out.spawnY = tokF(t, 2);
@@ -238,6 +243,9 @@ std::string writeOcworld(const OcWorldData& w) {
     s += "BUILD "; s += std::to_string(w.build); s += "\n";
     s += "ALGO "; s += std::to_string(w.algo); s += "\n";
 
+    // Omitted when empty: no override is the default, and a blank GAMEMODE line would read back as
+    // a class named "" rather than as an absence.
+    if (!w.gameMode.empty()) s += "GAMEMODE " + w.gameMode + "\n";
     if (w.hasSpawn) {
         s += "SPAWN " + num(w.spawnX) + " " + num(w.spawnY) + " " + num(w.spawnZ) + " " + num(w.spawnYaw) + "\n";
     }

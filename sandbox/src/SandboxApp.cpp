@@ -5222,6 +5222,10 @@ private:
                 if (ImGui::MenuItem("Content Browser", "Ctrl+Space", drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
                 uiReg_.track("window.contentBrowser");
                 if (ImGui::MenuItem("Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
+                uiReg_.track("window.outputLogDup");
+                if (ImGui::MenuItem("World Settings", nullptr, showWorldSettings_))
+                    showWorldSettings_ = !showWorldSettings_;
+                uiReg_.track("window.worldSettings");
                 uiReg_.track("window.outputLog");
                 ImGui::Separator();
 #if AVER_MODULE_SCENE
@@ -5462,6 +5466,7 @@ private:
         drawDrawer(e);
         buildEditorPrefs();
         buildProjectSettings();
+        buildWorldSettings();
 #if AVER_MODULE_SCENE
         buildChunkStreamingPanel();
 #endif
@@ -7099,6 +7104,143 @@ private:
     }
 
     // Draws the Project Settings window: a category sidebar beside the selected settings page.
+    // Window > World Settings: the per-LEVEL settings, as opposed to Project Settings' per-project
+    // ones. The split is the same one UE draws, and it is not cosmetic -- one project routinely holds
+    // a menu level, a gameplay level and a test level that need different rules, and anything put in
+    // the project forces all three to share.
+    //
+    // EVERY VALUE HERE EDITS SOMETHING THE LEVEL FILE ALREADY CARRIES. Nothing in this window is a
+    // new parallel setting: the GameMode override writes OcWorldData::gameMode, the Player Start row
+    // reports the SPAWN record's live marker, and the streaming rows edit each PCGVOLUME's own
+    // `radius` and `samples` tokens. Adding a second, window-only copy of any of these is exactly
+    // the two-sources-of-truth trap the Player Start marker was built to avoid.
+    void buildWorldSettings() {
+        if (!showWorldSettings_) return;
+
+        const ImGuiViewport* mv = ImGui::GetMainViewport();
+        ImGui::SetNextWindowSize(ImVec2(560.0f * dpi_, 480.0f * dpi_), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(mv->GetCenter().x, mv->GetCenter().y), ImGuiCond_FirstUseEver,
+                                ImVec2(0.5f, 0.5f));
+        if (!ImGui::Begin("World Settings", &showWorldSettings_, ImGuiWindowFlags_NoDocking)) {
+            ImGui::End();
+            return;
+        }
+
+        if (levelPath_.empty()) {
+            ImGui::TextDisabled("No level is open.");
+            ImGui::TextWrapped("World Settings edit the level file. Open or create a level first.");
+            ImGui::End();
+            return;
+        }
+
+        ImGui::TextDisabled("Level");
+        ImGui::Separator();
+        ImGui::Text("%s", levelName_.empty() ? "(untitled)" : levelName_.c_str());
+        ImGui::TextDisabled("%s", levelPath_.c_str());
+        ImGui::Dummy(ImVec2(0, 6.0f * dpi_));
+
+        // ---- GameMode override ----
+        ImGui::TextDisabled("Game Mode");
+        ImGui::Separator();
+        {
+            // BY NAME, because that is what the file stores and what survives a restart: framework
+            // class handles come from aver_fw_class_declare at runtime and are process-local, so a
+            // number written into a level would mean something else next launch.
+            char buf[128];
+            const std::string& gm = levelHeader_.gameMode;
+            std::snprintf(buf, sizeof buf, "%s", gm.c_str());
+            ImGui::SetNextItemWidth(320.0f * dpi_);
+            if (ImGui::InputText("GameMode Override", buf, sizeof buf)) {
+                levelHeader_.gameMode = buf;
+            }
+            uiReg_.track("worldSettings.gameMode");
+
+            // Says whether the name resolves, rather than leaving a typo to be discovered on Play.
+            // A blank field is not an error -- it means "use the project default".
+#if AVER_MODULE_FRAMEWORK
+            if (levelHeader_.gameMode.empty()) {
+                ImGui::TextDisabled("Empty -- the project's default GameMode applies.");
+            } else {
+                const int32_t c = aver_fw_class_find(levelHeader_.gameMode.c_str());
+                if (c == 0) {
+                    ImGui::TextColored(ImVec4(0.95f, 0.6f, 0.2f, 1.0f),
+                                       "No class named '%s' is declared.", levelHeader_.gameMode.c_str());
+                    ImGui::TextDisabled("Compile .NET first, or check the spelling.");
+                } else if ((aver_fw_class_get_flags(c) & AVER_FW_CLASS_GAME_MODE) == 0) {
+                    ImGui::TextColored(ImVec4(0.95f, 0.6f, 0.2f, 1.0f),
+                                       "'%s' exists but is not a GameMode.", levelHeader_.gameMode.c_str());
+                } else {
+                    ImGui::TextDisabled("Resolved.");
+                }
+            }
+#else
+            ImGui::TextDisabled("This build has no framework module, so the name cannot be checked.");
+#endif
+        }
+        ImGui::Dummy(ImVec2(0, 6.0f * dpi_));
+
+        // ---- Player Start ----
+        ImGui::TextDisabled("Player Start");
+        ImGui::Separator();
+        {
+            Vec3 sp{}; f32 sy = 0.0f;
+            if (playerStartTransform(sp, sy)) {
+                ImGui::Text("(%.0f, %.0f, %.0f)  yaw %.0f", sp.x, sp.y, sp.z, sy);
+#if AVER_MODULE_SCENE
+                if (playerStart_ != scene::kInvalidEntity) {
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Select")) { sel_ = kSelScene; selEntity_ = playerStart_; }
+                    uiReg_.track("worldSettings.selectPlayerStart");
+                }
+#endif
+                ImGui::TextDisabled("Where the player spawns in. Move the marker to change it.");
+            } else {
+                ImGui::TextDisabled("None. Add one with Add > Player Start.");
+            }
+        }
+        ImGui::Dummy(ImVec2(0, 6.0f * dpi_));
+
+        // ---- Streaming, per density field ----
+        ImGui::TextDisabled("World Streaming");
+        ImGui::Separator();
+        if (levelPcgVolumes_.empty()) {
+            ImGui::TextDisabled("This level declares no PCGVOLUME, so nothing streams.");
+        } else {
+            // ONE ROW PER FIELD, because the radius is per field. A single level-wide "streaming
+            // radius" would be exactly the setting this engine deliberately does not have: one
+            // radius cannot serve a dense ground cover and a sparse canopy at once, which is why
+            // PCGVOLUME carries its own.
+            ImGui::TextDisabled("Radius is per density field, in 16m chunks. Cost is quadratic in it.");
+            for (usize i = 0; i < levelPcgVolumes_.size(); ++i) {
+                fmt::OcPcgVolume& v = levelPcgVolumes_[i];
+                if (v.name == "Sky") continue;   // the cloud field; it streams nothing
+                ImGui::PushID(static_cast<int>(i));
+                ImGui::Text("%s", v.name.empty() ? "(unnamed)" : v.name.c_str());
+
+                int radius = v.radiusChunks > 0 ? v.radiusChunks : 3;   // 0 = "runtime default (3)"
+                ImGui::SetNextItemWidth(160.0f * dpi_);
+                if (ImGui::SliderInt("Radius (chunks)", &radius, 1, 24)) {
+                    v.radiusChunks = radius;
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("%.0fm", static_cast<f64>(radius) * 16.0);
+
+                int samples = v.samplesPerAxis > 0 ? v.samplesPerAxis : 4;
+                ImGui::SetNextItemWidth(160.0f * dpi_);
+                if (ImGui::SliderInt("Samples / axis", &samples, 1, 32)) {
+                    v.samplesPerAxis = samples;
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("%d candidates/chunk", samples * samples);
+                ImGui::PopID();
+                ImGui::Dummy(ImVec2(0, 4.0f * dpi_));
+            }
+            ImGui::TextDisabled("Takes effect when streaming is next enabled (Window > Chunk Streaming).");
+        }
+
+        ImGui::End();
+    }
+
     void buildProjectSettings() {
         if (focusVoxi_ > 0) { showProjectSettings_ = true; --focusVoxi_; } // --project-settings
         if (!showProjectSettings_) return;
@@ -7707,6 +7849,7 @@ private:
     f32 vpX_=0, vpY_=0, vpW_=1600, vpH_=900;
     bool dockBuilt_=false;   // one-shot DockBuilder layout (nothing is persisted to an ini)
     bool showProjectSettings_=false; // Edit > Project Settings window
+    bool showWorldSettings_=false;   // Window > World Settings (per-LEVEL settings)
     bool showEditorPrefs_=false;     // Edit > Editor Preferences window
     int  settingsPage_=1;            // 0 Description, 1 Rendering>General, 2 >GI, 3 >Ray Tracing, 4 >Path Tracing
     int  focusVoxi_=0;               // --project-settings: frames left to force the window open

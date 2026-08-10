@@ -177,6 +177,20 @@ struct OcWorldData {
     int version = 1;
     u64 contentId = 0;                     // ID = FNV-1a-64(NAME)
     std::string name;
+
+    // The GAMEMODE this level overrides the project's default with, by CLASS NAME. Empty means "no
+    // override" -- the project's own default applies, which is what every level did before this
+    // existed.
+    //
+    // BY NAME, not by a handle or an index: framework classes are declared at runtime by the managed
+    // side (aver_fw_class_declare) and their handles are process-local, so a number written into a
+    // level file would mean something different in the next process. The name is the only stable
+    // identity a file can carry, and aver_fw_class_find turns it back into a handle on load.
+    //
+    // A LEVEL-SCOPED OVERRIDE, deliberately, matching what a World Settings window is for: one
+    // project can hold a menu level, a gameplay level and a test level that need different rules,
+    // and putting the choice in the project would force them to share one.
+    std::string gameMode;
     u32 build = 0;
     u32 algo = 3;
 

@@ -306,6 +306,35 @@ static void checkOcworldScatter() {
               "and the species keeps weight's own default rather than reading garbage");
     }
     {
+        // GAMEMODE: the level's own override of the project's default, by CLASS NAME -- what a World
+        // Settings window edits. By name and not by handle because framework class handles come from
+        // aver_fw_class_declare at runtime and are process-local; a number in a file would mean
+        // something different next launch.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\nGAMEMODE ForestGameMode\n", w, &err),
+              "a GAMEMODE record parses");
+        check(w.gameMode == "ForestGameMode", "and keeps the class name verbatim");
+
+        // The REST OF THE LINE, so a class name with spaces survives -- nothing forbids one, and
+        // silently truncating at the first space would bind the wrong class or none.
+        OcWorldData sp;
+        check(parseOcworld("OCWORLD 1\nGAMEMODE My Game Mode\n", sp, nullptr), "a spaced name parses");
+        check(sp.gameMode == "My Game Mode", "...and is not truncated at the first space");
+
+        OcWorldData none;
+        check(parseOcworld("OCWORLD 1\nNAME T\n", none, nullptr), "a level with no GAMEMODE parses");
+        check(none.gameMode.empty(), "...and states no override, rather than a class named nothing");
+
+        const std::string text = writeOcworld(w);
+        check(text.find("GAMEMODE ForestGameMode") != std::string::npos, "the writer emits it");
+        check(writeOcworld(none).find("GAMEMODE") == std::string::npos,
+              "a level with no override writes no GAMEMODE line at all");
+
+        OcWorldData back;
+        check(parseOcworld(text, back, &err) && back.gameMode == w.gameMode, "and it round-trips");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
         // SEVERAL DENSITY FIELDS, and species bound to them by name. The tokens that make a level
         // able to have a foreground and a background: PCGVOLUME `radius` (how far this field
         // streams, in chunks) and SCATTER `volume` (which field places this species).
