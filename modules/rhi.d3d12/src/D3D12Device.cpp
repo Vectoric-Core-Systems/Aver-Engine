@@ -44,13 +44,20 @@ constexpr DXGI_FORMAT kSceneColorFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr u32 kMaxBloomMips = 6;
 // Descriptor triples the post heap holds: prefilter, histogram, composite, then one per
 // downsample and one per upsample. Each triple is contiguous, as a root table must be.
-constexpr u32 kPostTripleCount = 3 + (kMaxBloomMips - 1) * 2;
+// +1 for kPostTripleCompositeUpscaled: the composite needs a SECOND triple because its scene SRV
+// points at a different texture on the AverSR path (presentHdrTex_) than on the default one
+// (`scene`), and a triple is contiguous by definition -- it cannot be rewritten per frame without
+// racing the frames still in flight that were recorded against the old contents.
+constexpr u32 kPostTripleCount = 4 + (kMaxBloomMips - 1) * 2;
 constexpr u32 kPostDescriptorCount = kPostTripleCount * 3 + 2;   // + the histogram/exposure UAVs
 // Which triple is which. The bloom ones are ranges based at these.
 constexpr u32 kPostTriplePrefilter = 0;
 constexpr u32 kPostTripleHistogram = 1;
 constexpr u32 kPostTripleComposite = 2;
-constexpr u32 kPostTripleDownBase  = 3;
+// The composite's AverSR twin: identical bindings except the scene SRV, which points at the
+// already-upscaled present-resolution HDR image instead of the scene-resolution one.
+constexpr u32 kPostTripleCompositeUpscaled = 3;
+constexpr u32 kPostTripleDownBase  = 4;
 constexpr u32 kPostTripleUpBase    = kPostTripleDownBase + (kMaxBloomMips - 1);
 // The luminance window the histogram bins over, in log2. Anything outside lands in the end bins.
 constexpr f32 kHistogramMinLogLum = -10.0f;
@@ -890,6 +897,11 @@ public:
     // NON-owning. Registering the same feature twice would double every hook, so it is ignored.
     void addRenderFeature(IRenderFeature* f) override;
     void removeRenderFeature(IRenderFeature* f) override;
+    // NON-owning, same contract as the features above. Null (the default) keeps the untouched
+    // single-pass composite path, which is what makes AverSR Off bit-identical to a build without
+    // the module -- docs/AVERSR.md's own invariant.
+    void setUpscaler(IUpscaler* u) override { upscaler_ = u; }
+    IUpscaler* upscaler() const override { return upscaler_; }
     void notifyRenderTargetsChanged();
     // Creates or resizes the factory texture the scene renders into for the viewport.
     bool ensureViewportTexture();
@@ -1273,6 +1285,23 @@ private:
     D3D12ResourceFactory* rhiFactory_ = nullptr;
     D3D12RenderContext* rhiContext_ = nullptr;
     std::vector<IRenderFeature*> features_;   // non-owning
+
+    // ---- AverSR ----
+    // Null unless a host set one. EVERY branch below tests this handle, not a quality enum or a
+    // build flag, so "no upscaler" and "no AverSR module in the build" are the same code path.
+    IUpscaler* upscaler_ = nullptr;
+    // A factory-created ALIAS of the scene colour, and the reason it has to exist: `scene`
+    // (sceneResolved_/msaaColor_) is a raw ComPtr made by CreateCommittedResource directly, never
+    // through the resource factory, so it has no TextureHandle -- and IUpscaler::execute needs one
+    // for in.color. A per-frame CopyResource fills this. Scene resolution, RGBA16F, SRV only.
+    TextureHandle sceneColorTex_ = 0;
+    u32           sceneColorTexW_ = 0, sceneColorTexH_ = 0;
+    // AverSR's output: HDR (pre-tonemap) at PRESENT resolution. The upscale runs on radiance and
+    // PSComposite then tonemaps an image that is already the right size, so its own resample
+    // becomes 1:1 and neither the shader nor its pipeline changes.
+    TextureHandle presentHdrTex_ = 0;
+    u32           presentHdrTexW_ = 0, presentHdrTexH_ = 0;
+    bool          srLogged_ = false;   // the once-only "it really ran" line
 
     friend class D3D12ResourceFactory;
     friend class D3D12RenderContext;
@@ -2995,6 +3024,15 @@ D3D12_CPU_DESCRIPTOR_HANDLE D3D12Device::postTripleCpu(u32 triple) const {
 void D3D12Device::releasePostTargets() {
     sceneResolved_.Reset();
     bloomTex_.Reset();
+    // FACTORY HANDLES, SO destroyTexture -- NOT .Reset(). These two are the only targets in this
+    // function created through the resource factory; the ComPtrs above own their resources directly
+    // and a Reset is the whole of their teardown. Treating a handle the same way would leak the
+    // factory's row and its descriptors every resize, which is exactly often enough to matter.
+    if (D3D12ResourceFactory* f = rhiFactory_) {
+        if (sceneColorTex_) { f->destroyTexture(sceneColorTex_); sceneColorTex_ = 0; }
+        if (presentHdrTex_) { f->destroyTexture(presentHdrTex_); presentHdrTex_ = 0; }
+    }
+    sceneColorTexW_ = sceneColorTexH_ = presentHdrTexW_ = presentHdrTexH_ = 0;
     bloomMips_ = bloomW_ = bloomH_ = 0;
     postReady_ = false;
 }
@@ -3072,6 +3110,51 @@ bool D3D12Device::createPostTargets() {
     writeTriple(kPostTriplePrefilter, scene, 0, scene, 0, true);
     writeTriple(kPostTripleHistogram, scene, 0, scene, 0, false);
     writeTriple(kPostTripleComposite, scene, 0, bloomTex_.Get(), 0, true);
+
+    // ---- AverSR's two intermediates, and the composite triple that reads the upscaled one ----
+    //
+    // GUARDED ON upscaler_, ALL OF IT. Creating these unconditionally would cost every Off build two
+    // HDR textures it never samples; writing the triple unconditionally would be worse -- it would
+    // hand rhiFactory_->texture(0) to a writeTriple that dereferences it, and crash createPostTargets
+    // on the DEFAULT path. (That exact null-deref was in the design this follows; an adversarial
+    // review caught it before it was written.)
+    if (upscaler_) {
+        if (D3D12ResourceFactory* f = rhiFactory_) {
+            // #1: a factory-created ALIAS of the scene colour. `scene` above is a raw ComPtr from
+            // CreateCommittedResource, so it has no TextureHandle, and IUpscaler::execute needs one.
+            // SRV only -- nothing draws into it, a CopyResource fills it each frame.
+            TextureDesc sc;
+            sc.width = sceneWidth_; sc.height = sceneHeight_;
+            sc.format = fromDxgiFormat(kSceneColorFormat);
+            sc.bind = ResourceBind::ShaderResource;
+            sc.initialState = ResourceState::ShaderResource;
+            sc.debugName = "AverSR.SceneColor";
+            sceneColorTex_ = f->createTexture(sc);
+            sceneColorTexW_ = sceneWidth_; sceneColorTexH_ = sceneHeight_;
+
+            // #2: AverSR's output. HDR and PRESENT-sized -- the upscale runs on radiance, before the
+            // tonemap, so PSComposite afterwards sees an image already at the right size and its own
+            // resample degenerates to 1:1. That is what lets the composite shader stay untouched.
+            TextureDesc ph;
+            ph.width = width_; ph.height = height_;
+            ph.format = fromDxgiFormat(kSceneColorFormat);
+            ph.bind = ResourceBind::RenderTarget | ResourceBind::ShaderResource;
+            ph.initialState = ResourceState::ShaderResource;
+            ph.hasClearValue = true;
+            ph.debugName = "AverSR.PresentHdr";
+            presentHdrTex_ = f->createTexture(ph);
+            presentHdrTexW_ = width_; presentHdrTexH_ = height_;
+
+            RhiTexture* phr = presentHdrTex_ ? f->texture(presentHdrTex_) : nullptr;
+            if (!sceneColorTex_ || !phr || !phr->res) {
+                AVER_WARN("[RHI.D3D12] AverSR targets could not be created; upscaling stays off this resize");
+                if (sceneColorTex_) { f->destroyTexture(sceneColorTex_); sceneColorTex_ = 0; }
+                if (presentHdrTex_) { f->destroyTexture(presentHdrTex_); presentHdrTex_ = 0; }
+            } else {
+                writeTriple(kPostTripleCompositeUpscaled, phr->res.Get(), 0, bloomTex_.Get(), 0, true);
+            }
+        }
+    }
     for (u32 m = 1; m < bloomMips_; ++m) {
         writeTriple(kPostTripleDownBase + (m - 1), bloomTex_.Get(), m - 1, bloomTex_.Get(), m - 1, false);
         writeTriple(kPostTripleUpBase   + (m - 1), bloomTex_.Get(), m,     bloomTex_.Get(), m,     false);
@@ -3302,13 +3385,91 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         bloomTo(0, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
 
+    // ---- AverSR: Pass A, the upscale (HDR, before the tonemap) ----
+    //
+    // ONLY WHEN AN UPSCALER IS SET. With none -- the default, and quality Off -- not a line of this
+    // runs and the composite below takes exactly the path it always did. That is the whole of
+    // docs/AVERSR.md's "Off must be bit-identical" invariant: one branch, on one pointer.
+    //
+    // BEFORE THE TONEMAP, deliberately. The composite fuses resize + exposure + bloom + ACES + gamma
+    // into one pass, so an upscaler cannot simply replace it. Running the resample on scene RADIANCE
+    // and handing the composite an image that is ALREADY present-sized leaves that shader and its
+    // pipeline completely untouched -- its own resample just degenerates to 1:1.
+    bool srUpscaled = false;
+    if (upscaler_ && sceneColorTex_ && presentHdrTex_ && rhiFactory_ && rhiContext_) {
+        RhiTexture* srcT = rhiFactory_->texture(sceneColorTex_);
+        RhiTexture* dstT = rhiFactory_->texture(presentHdrTex_);
+        if (srcT && srcT->res && dstT && dstT->res && dstT->rtvHeap) {
+            // The copy that exists only because `scene` has no TextureHandle. `scene` is the COPY
+            // SOURCE, so it transitions to COPY_SOURCE -- not CopyDest, which is the destination's
+            // state and would be a validation error and a wrong barrier.
+            D3D12_RESOURCE_BARRIER pre[2] = {
+                transition(scene, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                transition(srcT->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST),
+            };
+            cmdList_->ResourceBarrier(2, pre);
+            cmdList_->CopyResource(srcT->res.Get(), scene);
+            D3D12_RESOURCE_BARRIER post[2] = {
+                transition(scene, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+                transition(srcT->res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+            };
+            cmdList_->ResourceBarrier(2, post);
+
+            auto toRt = transition(dstT->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cmdList_->ResourceBarrier(1, &toRt);
+            D3D12_CPU_DESCRIPTOR_HANDLE srRtv = dstT->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+            cmdList_->OMSetRenderTargets(1, &srRtv, FALSE, nullptr);
+            // execute()'s documented contract: the CALLER binds the target and sets viewport and
+            // scissor to the destination size; the implementation records only its own pipeline and
+            // draw, and transitions nothing.
+            D3D12_VIEWPORT srVp{0.0f, 0.0f, static_cast<f32>(width_), static_cast<f32>(height_), 0.0f, 1.0f};
+            D3D12_RECT srSc{0, 0, static_cast<LONG>(width_), static_cast<LONG>(height_)};
+            cmdList_->RSSetViewports(1, &srVp);
+            cmdList_->RSSetScissorRects(1, &srSc);
+
+            UpscalerInput in{};
+            in.color = sceneColorTex_;
+            in.srcWidth = sceneWidth_;   in.srcHeight = sceneHeight_;
+            in.dstWidth = width_;        in.dstHeight = height_;
+            upscaler_->execute(*rhiContext_, in, presentHdrTex_);
+
+            auto backToSrv = transition(dstT->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cmdList_->ResourceBarrier(1, &backToSrv);
+
+            // execute() bound its own descriptor heap and root signature. The composite below is
+            // recorded straight after and assumes the post chain's -- restore both, or it draws with
+            // whatever the upscaler happened to leave bound.
+            ID3D12DescriptorHeap* heaps[] = {postSrvHeap_.Get()};
+            cmdList_->SetDescriptorHeaps(1, heaps);
+            cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
+            srUpscaled = true;
+
+            // ONCE, and it reports what actually happened rather than what was configured. The
+            // difference matters: this feature spent its whole life "constructed and correct and
+            // never called", and a log that fires on the SETTING would have said it was working
+            // the entire time.
+            if (!srLogged_) {
+                srLogged_ = true;
+                AVER_INFO("[AverSR] '{}' upscaling {}x{} -> {}x{} in HDR, before the tonemap",
+                          upscaler_->name(), sceneWidth_, sceneHeight_, width_, height_);
+            }
+        }
+    }
+
     // ---- composite ----
     // dst is present-space (the backbuffer or the viewport texture, both width_/height_); src is the
     // scene target this upscales (or 1:1 samples, at the default renderScale_ == 1.0) from --
     // sceneWidth_/sceneHeight_. This IS the actual render-scale upscale: the composite pixel shader
     // already samples by normalized UV through a bilinear sampler (gPostSamp), so the only change
     // needed here is telling it the source is a different size than the destination.
-    fillCommon(width_, height_, sceneWidth_, sceneHeight_);
+    //
+    // ON THE AverSR PATH the source is already present-sized, so src == dst and the shader's own
+    // bilinear stretch does nothing -- AverSR's filter produced those pixels, not gPostSamp's.
+    if (srUpscaled) fillCommon(width_, height_, width_, height_);
+    else            fillCommon(width_, height_, sceneWidth_, sceneHeight_);
+    const u32 compositeTriple = srUpscaled ? kPostTripleCompositeUpscaled : kPostTripleComposite;
     {
         auto toRt = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
         cmdList_->ResourceBarrier(1, &toRt);
@@ -3325,14 +3486,14 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
                                       D3D12_RESOURCE_STATE_RENDER_TARGET);
             cmdList_->ResourceBarrier(1, &toRtTex);
             D3D12_CPU_DESCRIPTOR_HANDLE trtv = vt->rtvHeap->GetCPUDescriptorHandleForHeapStart();
-            fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0].Get(), kPostTripleComposite,
+            fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0].Get(), compositeTriple,
                        width_, height_, &trtv);
             auto backToSrv = transition(vt->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             cmdList_->ResourceBarrier(1, &backToSrv);
             cmdList_->OMSetRenderTargets(1, &bbRtv, FALSE, nullptr);
         } else {
-            fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0].Get(), kPostTripleComposite,
+            fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0].Get(), compositeTriple,
                        width_, height_, &bbRtv);
         }
     }

@@ -2914,10 +2914,11 @@ public:
         AVER_INFO("[AverSR] {}: render scale {:.2f}{}", aver::sr::qualityName(averSrQuality_),
                   dev->renderScale(),
                   averSrUpscaler_ ? "" : " (SpatialUpscaler not constructed -- no resource factory)");
-        if (averSrUpscaler_)
-            AVER_WARN("[AverSR] SpatialUpscaler ('{}') is constructed but not yet reachable from the "
-                      "present path -- rhi::IDevice has no upscaler hook to call it from. The resized "
-                      "image on screen is the backend's own render-scale resize, not AverSR's resample.",
+        // The old warning here said SpatialUpscaler was "constructed but not yet reachable from
+        // the present path -- rhi::IDevice has no upscaler hook". That hook exists now and the
+        // backend logs when it actually runs, so this would have been a lie the moment it fired.
+        if (averSrUpscaler_ && averSrQuality_ != aver::sr::Quality::Off)
+            AVER_INFO("[AverSR] {} handed to the device; the backend reports when it upscales",
                       averSrUpscaler_->name());
     }
 
