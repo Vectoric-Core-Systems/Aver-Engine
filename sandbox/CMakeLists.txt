@@ -220,6 +220,9 @@ endif()
 # through its link interface (modules/trifactor/CMakeLists.txt PUBLIC_DEFS), which is what lets
 # SandboxApp.cpp guard the feature with `#if AVER_MODULE_TRIFACTOR` and have it read as a real zero,
 # not an accidental always-off, in a build with the module disabled.
+if(TARGET Aver.Upgrade)
+  target_link_libraries(Sandbox PRIVATE Aver.Upgrade)
+endif()
 if(TARGET Aver.Trifactor)
   target_link_libraries(Sandbox PRIVATE Aver.Trifactor)
 endif()

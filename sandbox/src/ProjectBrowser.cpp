@@ -6,6 +6,9 @@
 
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Version.hpp"
+#if AVER_MODULE_UPGRADE
+#include "aver/upgrade/Upgrade.hpp"
+#endif
 #include "aver/core/Log.hpp"
 
 #include <cstdio>
@@ -58,6 +61,22 @@ void adoptVersionStamp(fmt::ProjectDesc& p) {
     AVER_INFO("[Editor] '{}' recorded no engine version; adopted as {}", p.name, kEngineVersion);
 }
 
+// ONE PLACE THE UPGRADE MODULE IS ASKED ANYTHING, so a build without it degrades in one spot
+// rather than through an #if at every call site.
+//
+// WITHOUT Aver.Upgrade THERE IS NO OLDER PROJECT. That is not a stub: the browser must never offer
+// a migration this build could not carry out, so with no chain compiled in, every project opens as
+// it always did. The version tag still draws -- it is just a string from the manifest -- and only
+// the prompt disappears.
+#if AVER_MODULE_UPGRADE
+bool madeByOlderSeries(const std::string& stamp) {
+    upgrade::Version v{};
+    return upgrade::parseVersion(stamp, v) && upgrade::olderSeries(v, upgrade::engineVersion());
+}
+#else
+bool madeByOlderSeries(const std::string&) { return false; }
+#endif
+
 // The name to show for a manifest path: the file stem.
 std::string displayName(const std::string& manifestPath) {
     return std::filesystem::path(manifestPath).stem().string();
@@ -107,6 +126,91 @@ void ProjectBrowser::forget(const std::string& manifestPath) {
     for (usize i = 0; i < recents_.size(); ++i) {
         if (recents_[i] == manifestPath) { recents_.erase(recents_.begin() + static_cast<isize>(i)); return; }
     }
+}
+
+// Rebuilds the card list: the recent projects first, in their order, then every other .ocproject
+// found one level under the projects folder.
+//
+// THE FOLDER IS SCANNED, not just the recent list, because "recent" is per-machine state in
+// AppData and the projects are not. Copy a project onto another machine, or reinstall, and the
+// recent list is empty while the work is right there in Documents\Aver Projects.
+void ProjectBrowser::rescan() {
+    cards_.clear();
+    cardsDirty_ = false;
+
+    const auto push = [this](const std::string& path, bool recent) {
+        for (const Card& c : cards_) if (c.path == path) return;   // recents win; no duplicates
+        Card c;
+        c.path = path;
+        c.name = displayName(path);
+        c.recent = recent;
+        // The version only: a full load would validate the ENGINE line and reject the very
+        // projects this screen exists to show, which is the opposite of useful in a browser.
+        fmt::ProjectDesc d;
+        if (fmt::loadOcproject(path, d, nullptr)) c.version = d.createdWith;
+        cards_.push_back(std::move(c));
+    };
+
+    for (const std::string& r : recents_) push(r, true);
+
+    std::error_code ec;
+    const std::filesystem::path root = std::filesystem::path(std::string(locBuf_));
+    if (std::filesystem::is_directory(root, ec)) {
+        for (const auto& sub : std::filesystem::directory_iterator(root, ec)) {
+            if (!sub.is_directory(ec)) continue;
+            for (const auto& f : std::filesystem::directory_iterator(sub.path(), ec)) {
+                if (f.is_regular_file(ec) && f.path().extension() == ".ocproject")
+                    push(f.path().string(), false);
+            }
+        }
+    }
+}
+
+// Copies a whole project tree to a sibling folder named for this engine version.
+std::string ProjectBrowser::copyProjectTree(const std::string& manifestPath, std::string* err) const {
+    std::error_code ec;
+    const std::filesystem::path src = std::filesystem::path(manifestPath).parent_path();
+    const std::string stem = displayName(manifestPath);
+
+    // A NEW NAME RATHER THAN AN OVERWRITE, and a numbered one if that is taken too: the entire
+    // promise of "work on a copy" is that nothing existing is touched, and silently reusing a
+    // directory that already holds somebody's project would break exactly that promise.
+    std::filesystem::path dst = src.parent_path() / (stem + " (" + std::string(kEngineVersion) + ")");
+    for (int n = 2; std::filesystem::exists(dst, ec) && n < 100; ++n)
+        dst = src.parent_path() / (stem + " (" + std::string(kEngineVersion) + ") " + std::to_string(n));
+    if (std::filesystem::exists(dst, ec)) { if (err) *err = "could not find a free folder name"; return {}; }
+
+    std::filesystem::copy(src, dst, std::filesystem::copy_options::recursive, ec);
+    if (ec) { if (err) *err = "copy failed: " + ec.message(); return {}; }
+
+    // The manifest keeps its own file name inside the new folder, so the copy opens like any project.
+    const std::filesystem::path out = dst / std::filesystem::path(manifestPath).filename();
+    if (!std::filesystem::exists(out, ec)) { if (err) *err = "the copy has no manifest"; return {}; }
+    return out.string();
+}
+
+// Opens a project unless it predates this engine's series, in which case the author is asked first.
+bool ProjectBrowser::openOrOfferUpgrade(const std::string& path, std::string* errOut) {
+    fmt::ProjectDesc peek;
+    // A manifest that will not load at all is not an upgrade question -- let open() report why.
+    if (fmt::loadOcproject(path, peek, nullptr) && madeByOlderSeries(peek.createdWith)) {
+        upgradeModal_ = true;
+        upgradePath_  = path;
+        upgradeName_  = displayName(path);
+        upgradeFrom_  = peek.createdWith;
+        upgradeError_.clear();
+        upgradeConfirmBuf_[0] = '\0';
+        return false;
+    }
+    std::string err;
+    if (open(path, &err)) return true;
+    error_ = err;
+    if (errOut) *errOut = err;
+    forget(path);
+    saveRecents();
+    cardsDirty_ = true;
+    recentSel_ = -1;
+    return false;
 }
 
 // Loads an .ocproject and moves it to the top of the recent list. False on failure.
@@ -189,28 +293,41 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
     if (medium) ImGui::PopFont();
     ImGui::Spacing();
     ImGui::BeginChild("##recentlist", ImVec2(0, 0), ImGuiChildFlags_Borders);
-    if (recents_.empty()) {
+    if (cardsDirty_) rescan();
+    if (cards_.empty()) {
         ImGui::Dummy(ImVec2(0, 6.0f * dpi));
-        ImGui::TextDisabled("  No projects opened yet.");
+        ImGui::TextDisabled("  No projects yet.");
         ImGui::TextDisabled("  Use New Project to scaffold one, or Open Project to");
         ImGui::TextDisabled("  point the editor at an existing .ocproject.");
     }
-    for (int i = 0; i < (int)recents_.size(); ++i) {
+    for (int i = 0; i < (int)cards_.size(); ++i) {
+        const Card& card = cards_[i];
         ImGui::PushID(i);
-        const std::string label = "  " + displayName(recents_[i]);
+        const std::string label = "  " + card.name;
         if (ImGui::Selectable(label.c_str(), recentSel_ == i,
                               ImGuiSelectableFlags_AllowDoubleClick, ImVec2(0, 40.0f * dpi))) {
             recentSel_ = i;
-            if (ImGui::IsMouseDoubleClicked(0)) {
-                std::string err;
-                if (open(recents_[i], &err)) action = BrowserAction::Open;
-                else { error_ = err; forget(recents_[i]); saveRecents(); recentSel_ = -1; }
-            }
+            if (ImGui::IsMouseDoubleClicked(0) && openOrOfferUpgrade(card.path))
+                action = BrowserAction::Open;
         }
         const ImVec2 rmin = ImGui::GetItemRectMin();
-        ImGui::GetWindowDrawList()->AddText(
-            ImVec2(rmin.x + 12.0f * dpi, rmin.y + 20.0f * dpi),
-            ImGui::GetColorU32(ImGuiCol_TextDisabled), recents_[i].c_str());
+        const ImVec2 rmax = ImGui::GetItemRectMax();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddText(ImVec2(rmin.x + 12.0f * dpi, rmin.y + 20.0f * dpi),
+                    ImGui::GetColorU32(ImGuiCol_TextDisabled), card.path.c_str());
+
+        // THE VERSION TAG, top right. A project with no stamp shows nothing rather than "unknown":
+        // an empty stamp means "adopted as current on first open", so saying anything would be
+        // reporting a state the author is never asked to act on. A project from an OLDER series is
+        // tinted, because that one WILL ask a question when it is opened and the card is the only
+        // warning before the click.
+        if (!card.version.empty()) {
+            const bool old = madeByOlderSeries(card.version);
+            const ImVec2 ts = ImGui::CalcTextSize(card.version.c_str());
+            const ImVec2 at(rmax.x - ts.x - 12.0f * dpi, rmin.y + 6.0f * dpi);
+            dl->AddText(at, old ? ImGui::GetColorU32(accent) : ImGui::GetColorU32(ImGuiCol_TextDisabled),
+                        card.version.c_str());
+        }
         ImGui::PopID();
     }
     ImGui::EndChild();
@@ -331,6 +448,76 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(110.0f * dpi, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    // ---- Upgrade modal ----
+    // Raised instead of opening a project made by an older SERIES. Three ways out and no fourth:
+    // work on a copy, convert this one, or go back. Nothing is touched until one is chosen.
+    if (upgradeModal_) { ImGui::OpenPopup("Upgrade Project"); upgradeModal_ = false; }
+    ImGui::SetNextWindowSize(ImVec2(620.0f * dpi, 0), ImGuiCond_Always);
+    if (ImGui::BeginPopupModal("Upgrade Project", nullptr, ImGuiWindowFlags_NoResize)) {
+        ImGui::TextWrapped("'%s' was made with Aver Engine %s. This is %.*s.",
+                           upgradeName_.c_str(), upgradeFrom_.c_str(),
+                           (int)kEngineVersion.size(), kEngineVersion.data());
+        ImGui::Spacing();
+        ImGui::TextDisabled("Upgrading rewrites files the engine owns. It cannot be undone.");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // COPY FIRST AND COPY DEFAULT, because it is the only choice that cannot lose work. The
+        // migration chain has no rollback: a step that fails leaves the project as it found it.
+        if (ImGui::Button("Upgrade a Copy", ImVec2(190.0f * dpi, 32.0f * dpi))) {
+            std::string err;
+            const std::string copied = copyProjectTree(upgradePath_, &err);
+            if (copied.empty()) {
+                upgradeError_ = err;
+            } else if (!open(copied, &err)) {
+                upgradeError_ = err;
+            } else {
+                cardsDirty_ = true;
+                upgradePath_.clear();
+                action = BrowserAction::Open;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("copies the folder, then opens the copy");
+
+        ImGui::Dummy(ImVec2(0, 8.0f * dpi));
+        ImGui::TextDisabled("Or convert this project in place. Type its name to confirm:");
+        ImGui::PushItemWidth(260.0f * dpi);
+        ImGui::InputTextWithHint("##confirm", upgradeName_.c_str(), upgradeConfirmBuf_,
+                                 sizeof upgradeConfirmBuf_);
+        ImGui::PopItemWidth();
+        const bool typed = upgradeName_ == upgradeConfirmBuf_;
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!typed);
+        if (ImGui::Button("Convert in Place", ImVec2(170.0f * dpi, 0))) {
+            std::string err;
+            if (!open(upgradePath_, &err)) {
+                upgradeError_ = err;
+            } else {
+                cardsDirty_ = true;
+                upgradePath_.clear();
+                action = BrowserAction::Open;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::EndDisabled();
+
+        if (!upgradeError_.empty()) {
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.30f, 1.0f), "%s", upgradeError_.c_str());
+        }
+
+        ImGui::Dummy(ImVec2(0, 6.0f * dpi));
+        ImGui::Separator();
+        if (ImGui::Button("Cancel", ImVec2(110.0f * dpi, 0))) {
+            upgradeError_.clear();
+            upgradePath_.clear();         // the question is answered: nothing pending
+            ImGui::CloseCurrentPopup();   // back to the browser, project untouched
+        }
         ImGui::EndPopup();
     }
 

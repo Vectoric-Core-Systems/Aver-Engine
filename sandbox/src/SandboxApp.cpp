@@ -700,9 +700,23 @@ public:
 #endif
 
         if (!projectPath_.empty()) {
+            // THROUGH THE SAME GATE AS A CLICK. A project named on the command line used to reach
+            // browser_.open() directly, so a project from an older series opened with no prompt --
+            // the upgrade question fired only for someone who double-clicked a card. Whether a
+            // project is chosen by mouse or by argv is not a reason to migrate it silently.
+            //
+            // When the gate declines it has raised the modal, so the start screen is shown instead
+            // of the editor and the author answers it there. That is why this arms the browser
+            // rather than reporting a failure: nothing failed, a question is waiting.
             std::string err;
-            if (browser_.open(projectPath_, &err)) applyProject(e);
-            else AVER_WARN("[Sandbox] '{}' not loaded: {}", projectPath_, err);
+            if (browser_.openOrOfferUpgrade(projectPath_, &err)) applyProject(e);
+            else if (browser_.upgradePending()) {
+                armBrowser(true);
+                AVER_INFO("[Sandbox] '{}' was made by an older series; asking before opening it",
+                          projectPath_);
+            } else {
+                AVER_WARN("[Sandbox] '{}' not loaded: {}", projectPath_, err);
+            }
         }
 #if AVER_WITH_IMGUI
         if (e.device()->uiActive()) {
