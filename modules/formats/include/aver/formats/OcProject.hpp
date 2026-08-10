@@ -14,6 +14,17 @@ struct ProjectDesc {
     std::string name;                   // NAME
     std::string engineName;             // ENGINE <name> ...
     std::string engineMinVersion;       // ENGINE ... <minVersion>
+
+    // CREATEDWITH: the engine version this project was last opened and stamped by. NOT the same
+    // thing as engineMinVersion, which is a FLOOR the manifest may state ("needs at least 0.2");
+    // this records what actually touched it, so the editor can tell an 0.1-era project from a
+    // current one and run the migration chain between.
+    //
+    // EMPTY MEANS CURRENT, DELIBERATELY. Every project that existed before this field did has no
+    // value here, and treating empty as "very old" would prompt every author on earth to migrate
+    // something that is probably fine. Empty is adopted: stamped with today's version on open, no
+    // prompt. Only a project stamped with an OLDER SERIES is ever asked to upgrade.
+    std::string createdWith;            // CREATEDWITH <version>
     std::string contentRoot = "Content"; // CONTENT, relative to the manifest
     std::string startMap;               // STARTMAP, relative to the content root
     std::string author;                 // AUTHOR (free text, rest of line)

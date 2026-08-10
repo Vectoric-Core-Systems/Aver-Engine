@@ -56,6 +56,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
         } else if (equalsCI(key, "ENGINE")) {
             if (t.size() > 1) out.engineName = std::string(t[1]);
             if (t.size() > 2) out.engineMinVersion = std::string(t[2]);
+        } else if (equalsCI(key, "CREATEDWITH")) {
+            if (t.size() > 1) out.createdWith = std::string(t[1]);
         } else if (equalsCI(key, "CONTENT")) {
             if (t.size() > 1) out.contentRoot = std::string(t[1]);
         } else if (equalsCI(key, "STARTMAP")) {
@@ -142,7 +144,7 @@ bool isOwnedKey(std::string_view line) {
     const std::string_view l = trim(line);
     if (l.empty() || l[0] == '#') return false;
     static const char* kOwned[] = {
-        "NAME", "ENGINE", "CONTENT", "STARTMAP", "AUTHOR",
+        "NAME", "ENGINE", "CREATEDWITH", "CONTENT", "STARTMAP", "AUTHOR",
         "RENDER.GI", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY",
@@ -164,6 +166,9 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
         if (!d.engineMinVersion.empty()) { owned += ' '; owned += d.engineMinVersion; }
         owned += '\n';
     }
+    // What last opened it, as against ENGINE's "what it needs at least". Written whenever it is
+    // known, so a project stamped once carries its provenance forward through every later save.
+    if (!d.createdWith.empty())      { owned += "CREATEDWITH "; owned += d.createdWith; owned += '\n'; }
     if (!d.contentRoot.empty())      { owned += "CONTENT ";  owned += d.contentRoot; owned += '\n'; }
     if (!d.startMap.empty())         { owned += "STARTMAP "; owned += d.startMap;    owned += '\n'; }
     if (!d.author.empty())           { owned += "AUTHOR ";   owned += d.author;      owned += '\n'; }

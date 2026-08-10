@@ -62,6 +62,10 @@ std::string manifestText(const std::string& name) {
     s += "# references it; see the engine's docs/PROJECTS.md.\n";
     s += "NAME " + name + "\n";
     s += "ENGINE " + std::string(kEngineName) + " " + std::string(kEngineVersion) + "\n";
+    // What made it, as opposed to ENGINE's "what it needs at least". This is the value the upgrade
+    // chain reads to decide whether a later engine has to migrate the project, so a project stamped
+    // here today is one a 0.4 editor can carry forward without guessing at its age.
+    s += "CREATEDWITH " + std::string(kEngineVersion) + "\n";
     s += "CONTENT Content\n";
     s += "STARTMAP Maps/Default.ocmap\n";
     s += "# AUTHOR <your name>\n";

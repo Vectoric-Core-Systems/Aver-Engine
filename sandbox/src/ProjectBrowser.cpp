@@ -23,6 +23,41 @@ constexpr usize kMaxRecents = 10;
 
 std::string recentsPath() { return userDataDir() + "\\recent.txt"; }
 
+// ADOPTS a project that records no CREATEDWITH: stamps it with this engine and writes the manifest
+// back. Never prompts, never migrates.
+//
+// EMPTY MEANS CURRENT, and that is a policy choice rather than a reading of the file. Every project
+// that existed before the field did has no value here, and treating "no stamp" as "very old" would
+// make every author on earth answer an upgrade prompt for a project that is very likely fine. So
+// the first open under 0.2 records 0.2 and says nothing, and only a project stamped with an OLDER
+// SERIES is ever asked to migrate.
+//
+// The cost of that choice, stated plainly because it is real: a project genuinely made by an 0.1
+// install is adopted as 0.2 without running the 0.1 -> 0.2 step, so an author who hit the F# starter
+// bug still has to fix it by hand or with --upgrade-project. The alternative was prompting everyone,
+// which is worse for far more people.
+//
+// A FAILED WRITE IS NOT A FAILED OPEN. A read-only project, a file open elsewhere, a network share
+// that blinked -- none of those are reasons to refuse to open somebody's work. The stamp is missing
+// again next time, which costs one line in the log and nothing else.
+void adoptVersionStamp(fmt::ProjectDesc& p) {
+    if (!p.createdWith.empty() || p.manifestPath.empty()) return;
+
+    std::string existing;
+    if (!readFileText(p.manifestPath, existing)) {
+        AVER_WARN("[Editor] '{}' records no engine version and could not be re-read to stamp one", p.name);
+        return;
+    }
+    p.createdWith = std::string(kEngineVersion);
+    const std::string text = fmt::writeOcproject(p, existing);
+    if (!writeFileText(p.manifestPath, text)) {
+        AVER_WARN("[Editor] '{}': could not write the {} version stamp; it will be stamped next open",
+                  p.name, kEngineVersion);
+        return;
+    }
+    AVER_INFO("[Editor] '{}' recorded no engine version; adopted as {}", p.name, kEngineVersion);
+}
+
 // The name to show for a manifest path: the file stem.
 std::string displayName(const std::string& manifestPath) {
     return std::filesystem::path(manifestPath).stem().string();
@@ -79,6 +114,7 @@ bool ProjectBrowser::open(const std::string& manifestPath, std::string* err) {
     fmt::ProjectDesc desc;
     if (!fmt::loadOcproject(manifestPath, desc, err)) return false;
     project_ = desc;
+    adoptVersionStamp(project_);
 
     forget(project_.manifestPath);
     recents_.insert(recents_.begin(), project_.manifestPath);
