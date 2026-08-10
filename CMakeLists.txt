@@ -33,40 +33,105 @@ option(AVER_BUILD_GAME "Build the standalone game runtime (AverGame.exe)" ON)
 option(AVER_BUILD_TESTS "Build test executables" ON)
 option(AVER_ENABLE_UI "In-window editor UI (Dear ImGui)" ON)
 
+# --- Editions: a named module set the launcher can offer and install ---
+#
+# WHAT THIS IS FOR. The launcher already installs per-EDITION -- scripts/publish-release.ps1 takes
+# -Edition (default 'standard'), AverDist packs it, AverLauncherCli installs to
+# <root>\<edition>\<version>\bin -- and that path is exactly where a shipped engine reports itself
+# from. The plumbing has existed and has only ever cut one edition. This is the missing half: a
+# name on THIS side that says which modules an edition contains.
+#
+# WHY NOT RUNTIME MODULE SWAPPING. AVER_MODULE_* is compile-time. Five modules are already SHARED
+# (Voxi, PBR, Scene, Framework, Physics), but a Sandbox.exe built with one calls into it through
+# an import table, so deleting the DLL does not disable a feature -- it stops the process starting.
+# Toggling modules inside ONE install needs runtime dispatch through every cross-module call, which
+# is a different engine from the one the 18-row matrix in scripts/module-matrix.ps1 verifies. An
+# edition is a build, and every edition is just another row that matrix can check.
+#
+# STANDARD IS TODAY'S DEFAULTS, EXACTLY. Not approximately: the value beside every module below is
+# the value that was already there, so a tree that never names an edition configures identically to
+# one from before this block existed. That is what makes this safe to land ahead of anyone using it.
+set(AVER_EDITION "standard" CACHE STRING "Module preset an edition ships: standard | slim | full")
+set_property(CACHE AVER_EDITION PROPERTY STRINGS standard slim full)
+
+# ON for every module the edition includes; the option() calls below take these as their DEFAULT,
+# so an explicit -DAVER_MODULE_X=OFF on the command line still wins over the edition.
+# One command per line: CMake has no statement separator, so two set()s on one line is a parse
+# error, not a style question.
+macro(_aver_edition_defaults voxi pbr scripting scene framework physics landscape deform trifactor sr mcp)
+  set(_ed_VOXI      ${voxi})
+  set(_ed_PBR       ${pbr})
+  set(_ed_SCRIPTING ${scripting})
+  set(_ed_SCENE     ${scene})
+  set(_ed_FRAMEWORK ${framework})
+  set(_ed_PHYSICS   ${physics})
+  set(_ed_LANDSCAPE ${landscape})
+  set(_ed_DEFORM    ${deform})
+  set(_ed_TRIFACTOR ${trifactor})
+  set(_ed_SR        ${sr})
+  set(_ed_MCP       ${mcp})
+endmacro()
+
+if(AVER_EDITION STREQUAL "slim")
+  # The smallest thing that still runs a game: scene, gameplay, materials, physics, terrain.
+  # No voxel GI, no geometry cooking, no sub-bone deformation, no upscaler.
+  _aver_edition_defaults(OFF ON ON ON ON ON ON OFF OFF OFF OFF)
+elseif(AVER_EDITION STREQUAL "full")
+  # Everything, including the editor control channel that standard deliberately leaves out.
+  _aver_edition_defaults(ON ON ON ON ON ON ON ON ON ON ON)
+elseif(AVER_EDITION STREQUAL "standard")
+  _aver_edition_defaults(ON ON ON ON ON ON ON ON ON ON OFF)
+else()
+  message(FATAL_ERROR "AVER_EDITION '${AVER_EDITION}' is not a known edition (standard, slim, full)")
+endif()
+
+# AN EDITION CHANGE HAS TO RE-DERIVE, and this is the trap that makes it worth the code. option()
+# never overwrites a cache entry that already exists, so reconfiguring an existing tree with a
+# different -DAVER_EDITION would leave every module exactly as the previous edition set it and the
+# build would silently be the old edition under the new name. Only a CHANGE forces the update, so a
+# deliberate -DAVER_MODULE_X=OFF on a later configure of the SAME edition is still respected.
+if(DEFINED AVER_EDITION_APPLIED AND NOT AVER_EDITION_APPLIED STREQUAL AVER_EDITION)
+  message(STATUS "Aver: edition ${AVER_EDITION_APPLIED} -> ${AVER_EDITION}, re-deriving module set")
+  foreach(m VOXI PBR SCRIPTING SCENE FRAMEWORK PHYSICS LANDSCAPE DEFORM TRIFACTOR SR MCP)
+    set(AVER_MODULE_${m} ${_ed_${m}} CACHE BOOL "" FORCE)
+  endforeach()
+endif()
+set(AVER_EDITION_APPLIED "${AVER_EDITION}" CACHE INTERNAL "the edition the cached module set came from")
+
 # --- Optional feature modules (the engine builds and runs with these OFF) ---
-option(AVER_MODULE_VOXI "Voxi render module: AA / GI / ray tracing / path tracing settings" ON)
-option(AVER_MODULE_PBR  "PBR material system: material library, C ABI and the surface BRDF" ON)
-option(AVER_MODULE_SCRIPTING "In-process .NET scripting host (hostfxr/CoreCLR)" ON)
-option(AVER_MODULE_SCENE "Entity/component world: entities, transforms, hierarchy and the C ABI" ON)
-option(AVER_MODULE_FRAMEWORK "Gameplay framework: game instance, game mode, actors, pawns" ON)
+option(AVER_MODULE_VOXI "Voxi render module: AA / GI / ray tracing / path tracing settings" ${_ed_VOXI})
+option(AVER_MODULE_PBR  "PBR material system: material library, C ABI and the surface BRDF" ${_ed_PBR})
+option(AVER_MODULE_SCRIPTING "In-process .NET scripting host (hostfxr/CoreCLR)" ${_ed_SCRIPTING})
+option(AVER_MODULE_SCENE "Entity/component world: entities, transforms, hierarchy and the C ABI" ${_ed_SCENE})
+option(AVER_MODULE_FRAMEWORK "Gameplay framework: game instance, game mode, actors, pawns" ${_ed_FRAMEWORK})
 # Physics is declared HERE, beside its peers, rather than down in the third-party section where it
 # used to sit. Jolt is the engine's rigid-body backend, not a dependency the build happens to pull
 # in, and the switch that turns physics off is the same kind of switch as the five above it. Still
 # optional for the same two reasons as before: the engine configures and runs without it, and 153
 # translation units are worth being able to opt out of.
-option(AVER_MODULE_PHYSICS "Physics module: rigid bodies, characters and raycasts (Jolt backend)" ON)
+option(AVER_MODULE_PHYSICS "Physics module: rigid bodies, characters and raycasts (Jolt backend)" ${_ed_PHYSICS})
 # Landscape: the chunked heightfield terrain. CPU-only at this stage -- the quadtree, the LOD metric,
 # culling and chunk geometry -- so it depends on nothing optional and costs nothing to leave on.
-option(AVER_MODULE_LANDSCAPE "Landscape module: chunked heightfield terrain, LOD and chunk geometry" ON)
-option(AVER_MODULE_DEFORM "Sub-bone vertex deformation: a cage finer than the skeleton" ON)
+option(AVER_MODULE_LANDSCAPE "Landscape module: chunked heightfield terrain, LOD and chunk geometry" ${_ed_LANDSCAPE})
+option(AVER_MODULE_DEFORM "Sub-bone vertex deformation: a cage finer than the skeleton" ${_ed_DEFORM})
 # Trifactor: the virtualized-geometry cluster builder + LOD DAG (docs/VIRTUALIZED_GEOMETRY.md).
 # ON, like its siblings above. It was briefly OFF because meshoptimizer was not vendored and every
 # default build would have failed at configure; third_party/meshoptimizer (v1.2, MIT) is now here,
 # so that reason is gone. Left ON deliberately rather than merely permitted: it is CPU-only, so it
 # costs nothing at runtime for a game that never cooks, and being in the default build is what makes
 # TrifactorTest part of the default suite instead of something that silently rots.
-option(AVER_MODULE_TRIFACTOR "Virtualized-geometry cluster builder and LOD DAG (meshlets, LOD DAG)" ON)
+option(AVER_MODULE_TRIFACTOR "Virtualized-geometry cluster builder and LOD DAG (meshlets, LOD DAG)" ${_ed_TRIFACTOR})
 # AverSR: the upscaler seam's implementations (docs/AVERSR.md). ON like its render-module siblings
 # above -- it links only Aver.Core and Aver.RHI, so it costs nothing to leave in a build that never
 # registers an IUpscaler, and -DAVER_MODULE_SR=OFF must still build, link and render at native
 # resolution, pixel-identical to a tree where this module was never written (see the doc for why
 # that is the actual test, not the option existing).
-option(AVER_MODULE_SR "AverSR upscaler implementations: the built-in spatial resample, and the seam FSR vendors into" ON)
+option(AVER_MODULE_SR "AverSR upscaler implementations: the built-in spatial resample, and the seam FSR vendors into" ${_ed_SR})
 # The editor control channel, so a tool can press the editor's own buttons and then look at the result.
 # OFF BY DEFAULT: it is a debugging aid, the editor must work without it, and nobody should ship an
 # editor that can be driven over a socket unless they asked for it. Even built, it listens only when the
 # app is told to with --mcp.
-option(AVER_MODULE_MCP "Editor control channel over loopback (debugging aid, not needed to run)" OFF)
+option(AVER_MODULE_MCP "Editor control channel over loopback (debugging aid, not needed to run)" ${_ed_MCP})
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
