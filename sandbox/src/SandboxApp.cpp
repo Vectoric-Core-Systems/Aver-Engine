@@ -1059,6 +1059,9 @@ public:
                 textureFactory_ = e.device()->resources();
                 voxiRenderer_.materials().setTextureResolver(&SandboxApp::resolveMaterialTexture, this);
 #endif
+                // Installed unconditionally, even in a build with no Trifactor: depthProxy_ is then
+                // simply empty, every lookup answers 0, and every pass draws what it drew before.
+                voxiRenderer_.setDepthProxy(&SandboxApp::depthProxyLookup, this);
             }
         }
 #endif
@@ -1673,6 +1676,42 @@ public:
                 }
                 AVER_INFO("[Mesh] '{}' LOD ladder: {} level(s), {} tris at LOD0 -> {} tris at the coarsest",
                           rel, ladder.handles.size(), ladder.triCounts.front(), ladder.triCounts.back());
+
+                // THE HANDLE THE SHADOW AND VOXEL PASSES WILL DRAW INSTEAD. Those passes are
+                // depth-only: they resolve an occluder's silhouette, never its surface, so the
+                // detail a coarser level drops is detail they were not going to show. The lit pass
+                // is unaffected -- it keeps choosing per instance as it always has.
+                //
+                // CHOSEN ON WORLD ERROR, NOT ON A TRIANGLE RATIO. A ratio was the first thing tried
+                // here and it picks badly at both ends: it left fir_sapling at 393k triangles (1.1x
+                // off LOD 0, so nearly no saving on one of the heaviest meshes in the scene) while
+                // being willing to reduce a 116-triangle moss. How coarse a level is says nothing
+                // about how wrong it looks; Trifactor already measures that per level, in centimetres.
+                //
+                // The threshold is a shadow-map texel, near enough. A cascade covers its slice with
+                // 2048 texels, so silhouette error below roughly that lands inside one texel and
+                // cannot change the shadow -- geometry accurate to less than the thing sampling it is
+                // detail nobody can see.
+                {
+                    constexpr f32 kShadowErrorCm = 20.0f;
+                    u32 pick = 0;
+                    for (u32 lvl = 1; lvl < ladder.handles.size(); ++lvl)
+                        if (ladder.errorCm[lvl] <= kShadowErrorCm) pick = lvl;
+                    if (pick > 0) {
+                        // Keyed on every level's handle, not just LOD 0's: when --lod-select is on the
+                        // lit pass submits whichever level it chose, and that handle must resolve too
+                        // or the proxy silently stops applying to exactly the instances furthest away.
+                        for (u32 lvl = 0; lvl < ladder.handles.size(); ++lvl)
+                            if (ladder.triCounts[lvl] > ladder.triCounts[pick])
+                                depthProxy_[ladder.handles[lvl]] = ladder.handles[pick];
+                        AVER_INFO("[Mesh] '{}' depth proxy: LOD {} ({} tris, {:.1f}x less than LOD 0, "
+                                  "{:.1f}cm error)",
+                                  rel, pick, ladder.triCounts[pick],
+                                  static_cast<f64>(ladder.triCounts.front()) /
+                                      static_cast<f64>(ladder.triCounts[pick] ? ladder.triCounts[pick] : 1),
+                                  ladder.errorCm[pick]);
+                    }
+                }
                 meshLods_[id] = std::move(ladder);
 
                 // Flat, all-levels-at-once cluster data for the per-cluster path (--lod-per-cluster).
@@ -2693,11 +2732,15 @@ public:
         AVER_INFO("[Sandbox] shutdown");
     }
     void setVSyncOff(bool off) { vsyncOffRequested_ = off; }               // --no-vsync
-    // --lod-select [px]: turns on virtualized-geometry LOD selection (aver::trifactor::ClusterAdapt)
-    // for meshes the Cook wrote coarser LOD levels for. OFF (the default) reproduces pre-existing
-    // behaviour EXACTLY -- every instance keeps drawing sceneMeshes_[id] (LOD 0), same handle, same
-    // code path, as if this feature did not exist. `thresholdPx` is the pixel budget passed straight
-    // through to chooseLevelCached/screenSpaceErrorPx.
+    // --lod-select [px] / --no-lod-select: virtualized-geometry LOD selection
+    // (aver::trifactor::ClusterAdapt) for meshes the Cook wrote coarser LOD levels for. `thresholdPx`
+    // is the pixel budget passed straight through to chooseLevelCached/screenSpaceErrorPx.
+    //
+    // NOW ON BY DEFAULT. It was off, on the reasoning that off "reproduces pre-existing behaviour
+    // EXACTLY" -- true, and the pre-existing behaviour was drawing every instance at LOD 0 at every
+    // distance. Measured on the Electric Dreams camera at --no-vsync: 102.7ms median / 153.0ms p90
+    // with selection off, 76.7ms / 127.3ms with it on. A 1px error budget is not a quality decision
+    // anyone would make deliberately in the other direction.
     void setLodSelect(bool on, f32 thresholdPx) {
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
         lodSelectEnabled_ = on;
@@ -9384,7 +9427,22 @@ private:
         std::vector<std::vector<trifactor::ClusterView>> clusters;
     };
     std::unordered_map<u64, MeshLodLadder> meshLods_;
-    bool lodSelectEnabled_ = false;     // --lod-select / editor toggle. OFF reproduces pre-existing
+
+    // Full-detail MeshHandle -> the coarser handle the depth-only passes should draw for it. Built
+    // at load time beside the ladder, never per frame; a handle with no entry has nothing cheaper
+    // and is drawn as-is. Handed to Voxi as a plain function pointer so the renderer stays ignorant
+    // of both Trifactor and this editor.
+    std::unordered_map<rhi::MeshHandle, rhi::MeshHandle> depthProxy_;
+
+    static rhi::MeshHandle depthProxyLookup(rhi::MeshHandle mesh, void* user) {
+        const auto& m = static_cast<const SandboxApp*>(user)->depthProxy_;
+        const auto it = m.find(mesh);
+        return it == m.end() ? 0 : it->second;
+    }
+    // ON by default since the cost of leaving it off was measured: every instance was drawing LOD 0
+    // no matter how far away it was, which is the entire thing the Cook builds a ladder to avoid.
+    // --no-lod-select restores the old behaviour. See setLodSelect for the numbers.
+    bool lodSelectEnabled_ = true;      // --lod-select / editor toggle. OFF reproduces pre-existing
                                         // behaviour EXACTLY: every instance draws sceneMeshes_[id]
                                         // (LOD 0), the same handle and code path as before this file.
     f32  lodErrorThresholdPx_ = 1.0f;   // --lod-error-px <n>; pixels of projected screen error
@@ -9574,7 +9632,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=false; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -9845,6 +9903,11 @@ Application* createApplication(int argc, char** argv) {
             if (i+1 < argc && (argv[i+1][0] != '-' || (argv[i+1][1] >= '0' && argv[i+1][1] <= '9')))
                 lodErrorPx=static_cast<f32>(std::atof(argv[++i]));
         }
+        // --no-lod-select: draw every instance at LOD 0, whatever the Cook wrote. This is what the
+        // editor did by default until the cost of it was measured -- 102.7ms median against 76.7ms
+        // with selection on, on the same Electric Dreams camera -- and it is kept only as the escape
+        // hatch for telling a selection artefact apart from a real one.
+        else if (!std::strcmp(argv[i],"--no-lod-select")) lodSelect=false;
         // --lod-cluster-stats: turns on the informational per-meshlet frustum/cone-cull counters on
         // top of --lod-select. Separate flag on purpose -- see lodClusterStatsEnabled_'s own comment.
         else if (!std::strcmp(argv[i],"--lod-cluster-stats")) lodClusterStats=true;

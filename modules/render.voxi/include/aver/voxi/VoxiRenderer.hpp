@@ -295,6 +295,10 @@ private:
     // One replayed draw: its transform, its legacy colour parameters and its captured material.
     struct Draw {
         rhi::MeshHandle mesh;
+        // What the DEPTH-ONLY passes draw instead: the four cascades, the GI shadow map and
+        // voxelisation. Always valid -- it falls back to `mesh` -- so a pass can use it
+        // unconditionally without asking whether a proxy existed.
+        rhi::MeshHandle depthMesh = 0;
         f32 world[16];
         f32 color[4];
         f32 metallic, roughness;
@@ -309,6 +313,24 @@ private:
         f32 boundsRadius = -1.0f;
     };
     std::vector<Draw> draws_, drawsPrev_;
+
+public:
+    // A CHEAPER STAND-IN FOR THE DEPTH-ONLY PASSES. Every mesh this renderer received was drawn at
+    // full resolution into all four cascades, the GI shadow map and the voxel grid -- six times a
+    // frame -- while the lit pass beside them was already picking an LOD per instance. On a streamed
+    // scene that is the largest single item in the frame and none of it is visible: a shadow does not
+    // resolve the silhouette detail a coarser level drops.
+    //
+    // A FUNCTION POINTER RATHER THAN A DEPENDENCY, because the LOD ladder belongs to whoever loaded
+    // the mesh, not here. This renderer must not learn what Trifactor is: it asks "have you got
+    // anything cheaper for this handle?" and accepts 0 for no. Nobody installing a resolver is the
+    // default, and it renders exactly as it did before.
+    using DepthProxyFn = rhi::MeshHandle (*)(rhi::MeshHandle mesh, void* user);
+    void setDepthProxy(DepthProxyFn fn, void* user) { depthProxyFn_ = fn; depthProxyUser_ = user; }
+
+private:
+    DepthProxyFn depthProxyFn_ = nullptr;
+    void*        depthProxyUser_ = nullptr;
 
     // shadowPass() scratch: this cascade's culled draws, grouped by mesh, so every instance of one
     // mesh reaches the GPU in a single drawMeshInstanced() call rather than one drawMesh() each.
@@ -406,6 +428,8 @@ private:
     bool giSnapValid_ = false;
     u64 giSkipped_ = 0, giRebuilt_ = 0;   // for the one-time report; counts, not impressions
     mutable u32  giGateWhyMask_ = 0;   // one bit per rejection reason already reported
+    u32          voxelCullLogs_ = 0;   // voxelize passes so far; the cull ratio reports at 2^n of them
+    bool         drawCapReported_ = false;   // the draw-list-full warning is worth saying once, not every frame
     u64  giGateNextReport_ = 64;   // doubles each time, so the steady state gets reported too
     u64  giGateLastTicks_ = 0, giGateLastSkipped_ = 0;
 

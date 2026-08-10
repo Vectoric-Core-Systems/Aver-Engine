@@ -49,7 +49,15 @@ constexpr f32 kCascadeSplitLambda = 0.85f;
 constexpr f32 kShadowRangeFromNear = 4000.0f;
 
 // The draw-list cap, and therefore the instance count the TLAS is sized for.
-constexpr u32 kMaxDraws = 4096;
+//
+// 4096 until now, which the Electric Dreams demo passes before it has finished streaming: at ~6,370
+// resident entities every draw past the 4096th was dropped by submit() and returned silently, so
+// those entities cast no cascade shadow, no GI shadow, and wrote nothing into the voxel grid. The
+// symptom is not a missing object -- they still render, because the lit pass does not go through
+// here -- but objects that light as though they were not there, which reads as a shading bug rather
+// than a cap. 16384 covers the demo with room to stream; the cost is the TLAS instance array
+// (64 bytes each, so 1 MB) and it is only paid when ray tracing is on.
+constexpr u32 kMaxDraws = 16384;
 
 // The material system's sampler register. materialShaderDefines() is told the same number.
 constexpr u32 kMaterialSamplerSlot = 2;
@@ -390,9 +398,23 @@ void VoxiRenderer::beginScene() {
 void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                           f32 metallic, f32 roughness, rhi::BindingSetHandle drawBinding,
                           const void* drawConstants, u32 drawConstantBytes) {
-    if (mesh == 0 || draws_.size() >= kMaxDraws) return;
+    if (mesh == 0) return;
+    if (draws_.size() >= kMaxDraws) {
+        // Says so exactly once. The old silent return is what let a 4096 cap survive a scene with
+        // 6,370 entities in it without anyone noticing the shadows were incomplete.
+        if (!drawCapReported_) {
+            drawCapReported_ = true;
+            AVER_WARN("[Voxi] draw list is full at {} -- further entities cast no shadow and do not "
+                      "voxelise this frame; raise kMaxDraws", kMaxDraws);
+        }
+        return;
+    }
     Draw d;
     d.mesh = mesh;
+    // Resolved ONCE here, not per pass: six depth passes asking the same question about the same
+    // handle would be six map lookups for one answer that cannot change within a frame.
+    d.depthMesh = depthProxyFn_ ? depthProxyFn_(mesh, depthProxyUser_) : 0;
+    if (!d.depthMesh) d.depthMesh = mesh;
     std::memcpy(d.world, world, 16 * sizeof(f32));
     std::memcpy(d.color, baseColor, 4 * sizeof(f32));
     d.metallic = metallic;
@@ -1069,8 +1091,8 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
                 }
                 ShadowInstanceGroup* group = nullptr;
                 for (ShadowInstanceGroup& g : shadowInstanceGroups_)
-                    if (g.mesh == d.mesh) { group = &g; break; }
-                if (!group) { shadowInstanceGroups_.push_back({d.mesh, {}}); group = &shadowInstanceGroups_.back(); }
+                    if (g.mesh == d.depthMesh) { group = &g; break; }
+                if (!group) { shadowInstanceGroups_.push_back({d.depthMesh, {}}); group = &shadowInstanceGroups_.back(); }
                 const usize base = group->worlds.size();
                 group->worlds.resize(base + 16);
                 std::memcpy(group->worlds.data() + base, d.world, 16 * sizeof(f32));
@@ -1089,7 +1111,7 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
                 f32 consts[rhi::kObjectConstantDwords]{};
                 std::memcpy(consts, d.world, 16 * sizeof(f32));   // depth-only: nothing else is read
                 ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
-                ctx.drawMesh(d.mesh);
+                ctx.drawMesh(d.depthMesh);
                 ++submitted;
             }
         }
@@ -1151,8 +1173,8 @@ void VoxiRenderer::giShadowPass(rhi::IRenderContext& ctx) {
                                                 giCentre) > giShadowRadius_ + d.boundsRadius) continue;
             ShadowInstanceGroup* group = nullptr;
             for (ShadowInstanceGroup& g : giShadowInstanceGroups_)
-                if (g.mesh == d.mesh) { group = &g; break; }
-            if (!group) { giShadowInstanceGroups_.push_back({d.mesh, {}}); group = &giShadowInstanceGroups_.back(); }
+                if (g.mesh == d.depthMesh) { group = &g; break; }
+            if (!group) { giShadowInstanceGroups_.push_back({d.depthMesh, {}}); group = &giShadowInstanceGroups_.back(); }
             const usize base = group->worlds.size();
             group->worlds.resize(base + 16);
             std::memcpy(group->worlds.data() + base, d.world, 16 * sizeof(f32));
@@ -1169,7 +1191,7 @@ void VoxiRenderer::giShadowPass(rhi::IRenderContext& ctx) {
             f32 consts[rhi::kObjectConstantDwords]{};
             std::memcpy(consts, d.world, 16 * sizeof(f32));
             ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
-            ctx.drawMesh(d.mesh);
+            ctx.drawMesh(d.depthMesh);
             ++submitted;
         }
     }
@@ -1218,7 +1240,27 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     ctx.setRenderTargets(nullptr, 0, 0);   // no targets at all: the pixel shader writes only the UAV
     ctx.setViewport(0, 0, res, res);
     ctx.setScissor(0, 0, res, res);
+
+    // CULLED AGAINST THE VOLUME, which this pass did not do at all until now: it rasterised every
+    // draw in drawsPrev_, including the ones streaming had brought in kilometres away. Those draws
+    // were never going to survive -- the pixel shader's UAV write lands outside the 128^3 grid and
+    // is dropped -- but the vertex and raster cost was paid in full before that could be discovered.
+    // On a streamed scene the volume covers a small fraction of what is resident, so this is most
+    // of the pass.
+    //
+    // The sphere is derived HERE from center_/extent_ rather than read from the giShadowCentre_/
+    // giShadowRadius_ that giShadowPass culls against, even though fitGiShadow() computes the same
+    // expression immediately before. Reading those would silently couple voxelisation to whether
+    // the GI shadow PSO built: when it fails, fitGiShadow() never runs, the fields keep whatever
+    // they last held, and the grid would under-voxelise on that device only.
+    const Vec3 volCentre{center_[0], center_[1], center_[2]};
+    const f32 volRadius = (extent_ > 1.0f ? extent_ : 1.0f) * 1.7320508f;
+    u32 voxelSubmitted = 0, voxelCulled = 0;
+
     for (const Draw& d : drawsPrev_) {
+        if (d.boundsRadius >= 0.0f && dist(Vec3{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]},
+                                            volCentre) > volRadius + d.boundsRadius) { ++voxelCulled; continue; }
+        ++voxelSubmitted;
         f32 consts[rhi::kObjectConstantDwords];
         std::memcpy(consts, d.world, 16 * sizeof(f32));
         std::memcpy(consts + 16, d.color, 4 * sizeof(f32));
@@ -1230,9 +1272,20 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
         if (d.matSet) ctx.setDrawBinding(d.matSet, d.mat, d.matBytes);
         else          ctx.setDrawBinding(materials_.fallbackBindingSet(),
                                          &materials_.fallbackConstants(), sizeof(pbr::MaterialConstants));
-        if (useMs) ctx.dispatchMeshFor(d.mesh);
-        else       ctx.drawMesh(d.mesh);
+        if (useMs) ctx.dispatchMeshFor(d.depthMesh);
+        else       ctx.drawMesh(d.depthMesh);
     }
+
+    // Reported on a widening interval, because the ratio is the whole point of the cull and a
+    // silent one would be indistinguishable from a cull that never fires. If this ever reads
+    // "culled 0", the draws are arriving with boundsRadius < 0 and the cull is a no-op.
+    if ((voxelCullLogs_ & (voxelCullLogs_ + 1)) == 0) {
+        const u32 considered = voxelSubmitted + voxelCulled;
+        AVER_INFO("[Voxi] voxelize {} draw(s), culled {} outside the volume ({:.0f}%)",
+                  voxelSubmitted, voxelCulled,
+                  considered ? 100.0 * static_cast<f64>(voxelCulled) / static_cast<f64>(considered) : 0.0);
+    }
+    ++voxelCullLogs_;
 
     // Reduce the atomic sums into the filterable RGBA16F volume.
     ctx.uavBarrierTexture(voxelAccumTex_);
