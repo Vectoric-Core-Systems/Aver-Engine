@@ -8,6 +8,84 @@ parentheses are short refs into this repository — `git show <hash>` for the fu
 usually longer and more useful than the line here. `docs/BUGS.md` carries the full defect list with
 triggering inputs for anything summarised below.
 
+## [0.2.0] — 2026-08-11
+
+### Performance
+
+- **The editor is roughly 30% faster on a streamed scene, and the stutter is gone.** Measured on the
+  Electric Dreams demo, same camera, 870 frames, vsync off: `109.6 ms median / 215.9 ms p90` became
+  `76.5 ms / 77.4 ms`. p90 now equals the median, which is the real change — frames are even instead
+  of hitching every fourth one. Three causes, each of which turned out to be a feature that had never
+  actually run:
+  - **LOD selection was off by default.** Every instance drew LOD 0 at every distance — the exact
+    thing the Cook builds a ladder to avoid. Now on; `--no-lod-select` restores the old behaviour.
+    This alone is 26 ms of the 33. (`d5f2829`)
+  - **The GI rebuild gate had never once passed.** `rhi::SkyAtmosphere::cloudTime` is an accumulating
+    clock and sits inside the struct the gate compares byte-for-byte, so it reported "the sky changed"
+    on every tick and rebuilt the whole 128³ volume forever. 77% of rebuilds are now skipped, which is
+    the entire p90 fix. Found by making the rejection say WHICH BYTE differed rather than that
+    something did. (`3b42099`)
+  - **The depth-only passes had no LOD at all.** Four shadow cascades, the GI shadow map and
+    voxelisation each drew full-detail meshes — six times a frame. They now draw a coarser proxy,
+    resolved through a function pointer so the renderer still does not know Trifactor exists.
+    (`d5f2829`)
+
+### Fixed
+
+- **Every project a shipped engine created was born unable to build.** On a Launcher install a
+  brand-new project failed its first compile with `FS0039: The namespace 'Pcg' is not defined`, in a
+  file the author had never opened. `payload.allowlist` shipped `scripting/csharp/**` — with a long
+  comment explaining why that is load-bearing — and never `scripting/fsharp/**`, while
+  `ProjectScaffold` writes an F# starter that references `Aver.Pcg`. Every guard did its local job:
+  the reference walk correctly returned empty, the `<ProjectReference>` was correctly omitted, and
+  `Sky.fs` was written anyway still saying `open Aver.Pcg`. Fixed at both ends — the F# tree ships,
+  and the scaffold no longer writes F# it cannot reference. (`0a9c959`)
+- **The GPU per-cluster mesh-shader path had never executed.** `onInit` resolved the enabling flag
+  *after* `applyProject`, which is what builds the GPU cluster buffers and creates the pipeline, and
+  `ensureLodMeshPipeline` latched "already tried" before testing the flag — so one early call burned
+  the only attempt the process would ever make. Per-cluster frustum and cone culling have therefore
+  never run in this editor. Fixed, but left **off by default**: with the path genuinely live it is 22%
+  faster and renders every plant as a black silhouette, because `PSClusterMain` never receives the
+  per-draw material binding. The feature is unfinished rather than merely unreachable, and the log
+  line now says so. (`4434ef6`)
+
+### Added
+
+- **Project upgrades.** Projects record the engine version that made them (`CREATEDWITH`), which is
+  distinct from `ENGINE`'s minimum-version floor. Opening a project made by an older *series* raises a
+  prompt: **Upgrade a Copy** (the default — copies to a numbered sibling folder and never touches the
+  original), **Convert in Place** (type the project's name to confirm), or **Cancel**. Only
+  major.minor gate: `0.1.0 → 0.1.7` opens with no prompt, `0.1.x → 0.2.x` migrates. A project that
+  records no version is adopted as current and stamped silently. (`7ccf87f`, `4fd31c3`, `e60926c`)
+- **`Aver.Upgrade`**, a migration *chain* rather than a one-shot fix. Each step declares the series it
+  moves from and to, and a path is planned through them, so a project from any past version reaches
+  the current one and each step only ever knows its own boundary. Refusing is a feature: a project
+  from a newer series fails with a reason rather than inventing a downgrade, and a gap in the step
+  table is reported rather than skipped. (`7ccf87f`)
+- **The start screen scans the projects folder**, not only the recent list — "recent" is per-machine
+  state in AppData and projects are not, so a project copied from another machine or surviving a
+  reinstall now appears. Each card carries its engine version in the corner; older ones are
+  highlighted. (`e60926c`)
+- **Editions.** `AVER_EDITION` selects a module preset the Launcher can install — `standard`, `slim`
+  (no voxel GI, geometry cooking, deformation or upscaler) or `full`. The distribution side has been
+  edition-aware since it was written and had only ever cut one; this is the missing half that says
+  what an edition contains. `standard` reproduces the previous defaults value for value.
+  (`0edb5ec`)
+- **Per-pass GPU timestamps** in the D3D12 backend, riding the markers that already bracket every
+  pass and read two frames late so the measurement never creates the stall it reports. The frame now
+  attributes to 0.2 ms unmarked. This is what finally ended five rounds of guessing at where the
+  frame went. (`1fa6cd1`)
+
+### Tooling
+
+- `tools/RelodTool` reports the LOD ladder Trifactor would build today for an already-cooked
+  `.ocmesh`. The demo ships 69 cooked meshes and no source assets, so a simplifier change could not
+  previously be evaluated at all. It reports only — rebuilding a ladder in place is a lossy rewrite of
+  somebody's art. It immediately killed two cook changes that looked right: `meshopt_SimplifyPrune`
+  (0.5% on the worst mesh) and lifting `target_error` to `FLT_MAX` (does not terminate). (`57dab61`)
+- Both gate baselines re-recorded: 153 values moved in each config, none added or dropped, verified
+  green against the binaries they were recorded from over 328 checks. (`839c24b`)
+
 ## [0.1.2] — 2026-08-05
 
 ### Fixed
