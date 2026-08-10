@@ -706,6 +706,22 @@ PushConstantLayout pushConstantLayout(const PipelineLayout& layout, bool mesh);
 //    "no fresh descriptor write per draw". OWNED BY VulkanRenderContext.cpp (the scene/post-chain
 //    ring) — see ConstantRing's own note on the one exception.
 // ================================================================================================
+// Transient constant bytes per frame in flight: starting size and the ceiling growth stops at.
+//
+// DECLARED HERE, ABOVE ConstantRing, BECAUSE ConstantRing USES IT. These two lines used to sit
+// about thirty lines BELOW that struct, so every translation unit in this module failed on
+// `kRhiRingBytes: identifier not found`. Nothing noticed, because the module could not be
+// CONFIGURED either -- its CMakeLists named a source file that did not exist, so CMake failed
+// before a compiler ever ran. Two breakages stacked, and fixing the outer one is what finally
+// surfaced this one.
+//
+// The D3D12 backend has its own constant of the same name in its own .cpp, deliberately not
+// shared: its ring is an UPLOAD-heap buffer that is always mappable, while this one may not be
+// HOST_COHERENT (see ConstantRing::coherent below). Same idea, different object, measured
+// separately.
+constexpr u64 kRhiRingBytes = 1u << 20;
+constexpr u64 kRhiRingMaxBytes = 64ull << 20;
+
 struct ConstantRing {
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -715,9 +731,9 @@ struct ConstantRing {
                               // -- Vulkan memory coherency varies by vendor/type, unlike D3D12's
                               // UPLOAD heap which is always simply mappable. MUST be checked, not
                               // assumed; see the architecture scout's own flag on this.
-    VkDeviceSize bytes = 0;    // current allocation size; grows geometrically, mirrors kRhiRingBytes/ringBytes_
+    VkDeviceSize bytes = 0;    // current allocation size; grows geometrically, mirrors D3D12's ringBytes_
     VkDeviceSize used = 0;     // this frame's bump cursor, reset every beginFrame
-    VkDeviceSize wanted = kRhiRingBytes;   // sticky high-water mark across frames, mirrors ringWanted_
+    VkDeviceSize wanted = kRhiRingBytes;   // sticky high-water mark across frames
 };
 // One suballocation's address, ready to feed straight into vkCmdBindDescriptorSets'
 // pDynamicOffsets (via `offset`) or a direct memcpy (via `cpu`).
@@ -728,9 +744,6 @@ struct ConstantAllocation {
                           // D3D12 ringAlloc: log once per frame (ringOverflowEpoch_-shaped), then
                           // skip the draw/pass rather than write past the buffer.
 };
-// Transient constant bytes per frame in flight, starting size. Mirrors kRhiRingBytes/kRhiRingMaxBytes.
-constexpr u64 kRhiRingBytes = 1u << 20;
-constexpr u64 kRhiRingMaxBytes = 64ull << 20;
 
 // ================================================================================================
 // 6. Per-frame / per-draw CPU-side structs. PerFrameCB is a BYTE-FOR-BYTE copy of

@@ -1,7 +1,14 @@
+# src/VulkanPipeline.cpp WAS MISSING FROM THIS LIST while src/VulkanShaderCompiler.cpp was named
+# and did not exist, so this module could not CONFIGURE at all -- CMake fails on a source file that
+# is not there, before any compiler runs. Nothing caught it because scripts/module-matrix.ps1's
+# vulkan-on row was the only configuration that would have, and it had not been run since the file
+# split landed. Both halves fixed together: the compiler TU is written now (see its own banner for
+# what it does and the descriptor-set gap it cannot close), and the pipeline TU is listed.
 aver_add_module(Aver.RHI.Vulkan
   SOURCES
     src/VulkanDevice.cpp
     src/VulkanShaderCompiler.cpp
+    src/VulkanPipeline.cpp
     src/VulkanResourceFactory.cpp
     src/VulkanRenderContext.cpp
   DEPS
@@ -46,7 +53,36 @@ target_compile_definitions(Aver.RHI.Vulkan PRIVATE
 # modules/rhi.d3d12/CMakeLists.txt whenever that module is part of the build. VulkanShaderCompiler
 # (src/VulkanShaderCompiler.cpp) loads that SAME dxcompiler.dll by name at runtime and asks it for
 # SPIR-V instead of DXIL via the `-spirv` argument, so this module adds no new copy step of its
-# own. Every configuration this engine currently builds keeps AVER_RHI_D3D12 ON alongside
+# own.
+#
+# ############################################################################################
+# THAT LAST SENTENCE IS WRONG, AND IT IS THE CURRENT BLOCKER. Measured, not reasoned: running
+# `Sandbox.exe --backend vulkan` gets all the way to a live VkDevice with caps queried (MSAA 8x,
+# RT tier 11, SM 65, mesh-shader tier 1) and then dies on the first shader with
+#
+#     [RHI.Vulkan] VSMain (vs_6_0): SPIR-V CodeGen not available.
+#                                    Please recompile with -DENABLE_SPIRV_CODEGEN=ON.
+#
+# The dxcompiler.dll being loaded comes from the WINDOWS SDK -- see modules/rhi.d3d12/
+# CMakeLists.txt's `find_file(AVER_DXCOMPILER dxcompiler.dll HINTS "${_wsdk_bin}" ...)` -- and
+# Microsoft builds their redistributable WITHOUT the SPIR-V backend compiled in. `-spirv` is
+# accepted as an argument and then refused at codegen. Only the Khronos DirectXShaderCompiler
+# GitHub releases and the LunarG Vulkan SDK ship a dxcompiler.dll built with
+# ENABLE_SPIRV_CODEGEN=ON.
+#
+# So the premise this whole backend was designed on -- "the engine already has DXC, which emits
+# SPIR-V with -spirv, so no glslang/shaderc either" -- does not hold for the DLL the engine
+# actually has. Closing it needs ONE of:
+#   (a) vendor a SPIR-V-capable dxcompiler.dll (Khronos DXC release; check its licence against
+#       docs/ASSET_IMPORT.md's accepted list) and load THAT by an explicit path here rather than
+#       whichever one the SDK put beside the exe;
+#   (b) vendor glslang/shaderc after all, which this module's README deliberately ruled out for
+#       being a second source of truth for the same HLSL;
+#   (c) accept the LunarG SDK as a build dependency, which third_party/vulkan-headers/README.md
+#       deliberately ruled out.
+# (a) is the only one that keeps both earlier decisions intact. It is an external dependency
+# fetch, so it is the user's call, not something to do silently.
+# ############################################################################################ Every configuration this engine currently builds keeps AVER_RHI_D3D12 ON alongside
 # AVER_RHI_VULKAN (scripts/module-matrix.ps1's vulkan-on row layers Vulkan ON TOP of the default
 # set rather than replacing it), so that copy step is always present when this module is. Flagged
 # here so it is not a silent gap the day a Vulkan-only, D3D12-off configuration is asked for.
