@@ -9467,20 +9467,6 @@ private:
     };
     std::unordered_map<u64, MeshLodLadder> meshLods_;
 
-    // Full-detail MeshHandle -> the coarser handle the depth-only passes should draw for it. Built
-    // at load time beside the ladder, never per frame; a handle with no entry has nothing cheaper
-    // and is drawn as-is. Handed to Voxi as a plain function pointer so the renderer stays ignorant
-    // of both Trifactor and this editor.
-    std::unordered_map<rhi::MeshHandle, rhi::MeshHandle> depthProxy_;
-
-    u32 sceneWalkReports_ = 0;     // scene walks so far; the cost split reports at 2^n of them
-    u32 chunkStreamReports_ = 0;   // ditto, for the streamer's main-thread cost
-
-    static rhi::MeshHandle depthProxyLookup(rhi::MeshHandle mesh, void* user) {
-        const auto& m = static_cast<const SandboxApp*>(user)->depthProxy_;
-        const auto it = m.find(mesh);
-        return it == m.end() ? 0 : it->second;
-    }
     // ON by default since the cost of leaving it off was measured: every instance was drawing LOD 0
     // no matter how far away it was, which is the entire thing the Cook builds a ladder to avoid.
     // --no-lod-select restores the old behaviour. See setLodSelect for the numbers.
@@ -9654,6 +9640,27 @@ private:
     LodMeshShaderStats lodMeshShaderStats_{};
     LodMeshShaderStats lastLoggedLodMeshShaderStats_{};
 #endif
+
+    // OUTSIDE EVERY MODULE GUARD, and it has to be. The map is POPULATED beside the Trifactor LOD
+    // ladder, but it is READ from the unguarded call that hands the resolver to Voxi -- so declaring
+    // it next to what fills it put the member behind AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR and
+    // broke both scene-off and trifactor-off. Same mistake, same session, second time: the guard
+    // belongs where a thing is BUILT, never where it is declared, whenever something unguarded can
+    // still ask for it.
+    //
+    // Degrading is the point. With no Trifactor the map is simply empty, every lookup answers 0, and
+    // every pass draws the mesh it was given -- which is exactly what those builds did before.
+    std::unordered_map<rhi::MeshHandle, rhi::MeshHandle> depthProxy_;
+
+    static rhi::MeshHandle depthProxyLookup(rhi::MeshHandle mesh, void* user) {
+        const auto& m = static_cast<const SandboxApp*>(user)->depthProxy_;
+        const auto it = m.find(mesh);
+        return it == m.end() ? 0 : it->second;
+    }
+
+    u32 sceneWalkReports_ = 0;     // scene walks so far; the cost split reports at 2^n of them
+    u32 chunkStreamReports_ = 0;   // ditto, for the streamer's main-thread cost
+
     Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };
 
