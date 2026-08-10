@@ -1165,6 +1165,30 @@ private:
     u32  tsReports_ = 0;
     bool tsEnabled_ = false;
 
+    // ---- redundant-state elision for the feature-overridden scene draw ----
+    //
+    // The scene pass issues one drawMesh per entity -- 1,656 of them on Electric Dreams -- and the
+    // branch below re-sent the SAME pipeline, the SAME table-0 binding set and the SAME frame
+    // constant block on every one of them. The pipeline is the expensive part: setPipeline binds a
+    // root signature, sets a PSO and rebinds every declared root CBV, and rebinding a root signature
+    // per draw makes a GPU re-fetch all root data. The frame CBV is the wasteful part: it copies the
+    // whole block into the upload ring per draw, which is why a 2MB ring exhausts and doubles every
+    // frame on this scene.
+    //
+    // Only ever elided as a GROUP. setPipeline's bindDeclaredRootCbvs resets the FEATURE frame slot
+    // to the zero CBV, which is precisely why the frame block had to be re-sent after it -- so
+    // skipping the constant buffer while still calling setPipeline would leave the shader reading
+    // zeroes. Either all three are skipped or none are.
+    PipelineHandle   fovPso_ = 0;
+    BindingSetHandle fovSet_ = 0;
+    u32              fovCbBytes_ = 0;
+    std::vector<u8>  fovCb_;
+    // Cleared by anything that could have bound something else since the last draw: setPipeline
+    // always, setBindingSet on TABLE 0 only (table 1 is the per-material binding, which legitimately
+    // changes every draw and does not disturb what is cached here), and the start of each frame and
+    // of endFrame's post chain, which set pipelines on the command list directly.
+    bool             fovValid_ = false;
+
     ComPtr<ID3D12RootSignature> rootSig_;
     ComPtr<ID3D12PipelineState> pso_;
     ComPtr<ID3D12PipelineState> skyPso_;
@@ -2640,6 +2664,7 @@ void D3D12Device::beginFrame() {
     // Reset() does not carry descriptor heaps forward either -- a freshly reset command list has
     // none bound until the first SetDescriptorHeaps of the new recording, same as the root signature.
     boundHeap_ = nullptr;
+    fovValid_ = false;   // a reset command list has nothing bound at all
     postCBUsed_ = 0;
     drawBinding_ = defaultDrawBinding_;
 
@@ -2776,12 +2801,27 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         if (!f->overridesScenePipeline() || !rhiContext_) continue;
         const PipelineHandle fp = f->scenePipeline(msActive_ && msPso_, wireframe_);
         if (!fp) break;
-        rhiContext_->setPipeline(fp);
-        if (const BindingSetHandle bs = f->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
-        rhiContext_->setDrawBinding(drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
+        const BindingSetHandle bs = f->sceneBindingSet();
         const void* cb = nullptr; u32 cbBytes = 0;
-        if (f->sceneConstants(&cb, &cbBytes) && cb && cbBytes)
-            rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
+        const bool haveCb = f->sceneConstants(&cb, &cbBytes) && cb && cbBytes;
+
+        // Unchanged since the previous entity? Then the pipeline, its table-0 bindings and the frame
+        // block are all still bound and still correct, and re-sending them is pure cost.
+        const bool same = fovValid_ && fp == fovPso_ && bs == fovSet_ &&
+                          haveCb == (fovCbBytes_ != 0) &&
+                          (!haveCb || (cbBytes == fovCbBytes_ && fovCb_.size() == cbBytes &&
+                                       std::memcmp(fovCb_.data(), cb, cbBytes) == 0));
+        if (!same) {
+            rhiContext_->setPipeline(fp);
+            if (bs) rhiContext_->setBindingSet(bs, 0);
+            if (haveCb) rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
+            // Set AFTER the calls above: setPipeline/setBindingSet clear fovValid_ themselves.
+            fovPso_ = fp; fovSet_ = bs; fovCbBytes_ = haveCb ? cbBytes : 0;
+            if (haveCb) fovCb_.assign(static_cast<const u8*>(cb), static_cast<const u8*>(cb) + cbBytes);
+            else        fovCb_.clear();
+            fovValid_ = true;
+        }
+        rhiContext_->setDrawBinding(drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
         f32 fc[kObjectConstantDwords];
         std::memcpy(fc, world, 16 * sizeof(f32));
         std::memcpy(fc + 16, color, 4 * sizeof(f32));
@@ -3678,6 +3718,7 @@ void D3D12Device::endFrame() {
     // sky, the post chain, the composite/tonemap, the editor's viewport blit, the overlay and ImGui.
     endGpuSpan();
     beginGpuSpan("sky+post+ui");
+    fovValid_ = false;   // the post chain sets pipelines on the command list directly
     ID3D12Resource* bb = renderTargets_[frameIndex_].Get();
 
     // THE DEFERRED SKY DRAW. Every opaque drawMesh call the caller was going to make this frame has
@@ -5310,6 +5351,7 @@ void D3D12RenderContext::setPipeline(PipelineHandle h) {
     }
     dev_->cmdList_->SetPipelineState(p->pso.Get());
     dev_->boundPso_ = p->pso.Get();   // matches what the line above just bound, not a guess
+    dev_->fovValid_ = false;          // a different pipeline is bound now; see fovValid_'s comment
     pipe_ = p;
 
     bindDeclaredRootCbvs(p);
@@ -5421,6 +5463,10 @@ void D3D12RenderContext::setBindingSet(BindingSetHandle set, u32 table) {
     }
     dev_->boundRootSig_ = nullptr;
     dev_->boundPso_ = nullptr;
+    // TABLE 0 ONLY. Table 1 is the per-material binding that applyDrawBinding sets on every single
+    // draw; invalidating on that would mean the cache never once survived to the next entity, which
+    // is the whole point of it. Table 1 does not disturb what table 0 holds.
+    if (table == 0) dev_->fovValid_ = false;
 
     if (s->srvCount && s->srvBaseRegister != pipe_->srvBaseRegister[table])
         AVER_WARN("[RHI.D3D12] binding set was built for t{} but table {} covers t{}",
