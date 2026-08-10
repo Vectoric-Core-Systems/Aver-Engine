@@ -18,6 +18,11 @@ Texture2D gMetalRoughMap : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_1));
 Texture2D gNormalMap     : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_2));
 Texture2D gOcclusionMap  : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_3));
 Texture2D gEmissiveMap   : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_4));
+// The SECOND LAYER, blended in by slope under AVER_MAT_SLOPE_BLEND. Same slot-index-is-register
+// rule as above, continuing pbr::TextureSlot's order.
+Texture2D gL1BaseColorMap  : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_5));
+Texture2D gL1MetalRoughMap : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_6));
+Texture2D gL1NormalMap     : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_7));
 // The one sampler all five maps are read through; the consuming layout declares it and says where.
 SamplerState gMaterialSampler : register(AVER_MAT_JOIN(s, AVER_MATERIAL_SAMPLER));
 #endif
@@ -35,6 +40,12 @@ cbuffer AverMaterial : register(b2) {
     float  gMatReflectance;
     float  gMatF90;
     float  gUvTilesPerCm;   // tiles per centimetre
+    // Second layer. gSlopeBlendLo/Hi are world-normal Z -- 1 flat, 0 vertical -- so `Lo` is the
+    // STEEPER end and layer 1 wins there. Read only under AVER_MAT_SLOPE_BLEND.
+    float  gSlopeBlendLo;
+    float  gSlopeBlendHi;
+    float  gL1UvScale;
+    float  gMatPad0;
 };
 
 // gMaterialFlags bits, mirroring pbr::MaterialFlag.
@@ -47,6 +58,10 @@ cbuffer AverMaterial : register(b2) {
 #define AVER_MAT_ALPHA_BLEND    (1u << 6)
 #define AVER_MAT_TWO_SIDED      (1u << 7)
 #define AVER_MAT_WORLD_UV       (1u << 8)
+#define AVER_MAT_L1_BASECOLOR   (1u << 9)
+#define AVER_MAT_L1_METALROUGH  (1u << 10)
+#define AVER_MAT_L1_NORMAL      (1u << 11)
+#define AVER_MAT_SLOPE_BLEND    (1u << 12)
 
 // Shading model ids. The id arrives per draw in gShadingModel and is dispatched by a uniform switch.
 #define AVER_MODEL_STANDARD 0u   // metallic / roughness, Cook-Torrance GGX
@@ -188,9 +203,42 @@ float3 averPerturbNormal(float3 N, float3 wpos, float2 uv, float3 nTS) {
 }
 
 // Evaluates the material at one point. The light is used only for the half vector.
+// Blends the second layer over the first by SLOPE, and returns the combined maps.
+//
+// SLOPE IS TAKEN FROM THE GEOMETRIC NORMAL, deliberately, not from the normal-mapped one: the
+// question is "is this part of the terrain a cliff", which is a property of the surface, and
+// feeding a normal map into it would make the layer choice flicker with every bump in the detail.
+AverMaps averBlendLayers(AverMaps m, float2 uv, float3 geoN) {
+#ifdef AVER_MATERIAL_SRV
+    if (!(gMaterialFlags & AVER_MAT_SLOPE_BLEND)) return m;
+
+    // World normal Z: 1 on flat ground, 0 on a vertical face. smoothstep(lo, hi, .) is 0 at the
+    // steep end, so `w` is how much of LAYER 1 to take.
+    float flat01 = saturate(abs(geoN.z));
+    float w = 1.0 - smoothstep(gSlopeBlendLo, gSlopeBlendHi, flat01);
+    if (w <= 0.001) return m;
+
+    float2 uv1 = uv * gL1UvScale;
+    if (gMaterialFlags & AVER_MAT_L1_BASECOLOR)
+        m.baseColor = lerp(m.baseColor, gL1BaseColorMap.Sample(gMaterialSampler, uv1), w);
+    if (gMaterialFlags & AVER_MAT_L1_METALROUGH) {
+        float4 mr1 = gL1MetalRoughMap.Sample(gMaterialSampler, uv1);
+        m.metalRough = lerp(m.metalRough, float2(mr1.g, mr1.b), w);
+    }
+    if (gMaterialFlags & AVER_MAT_L1_NORMAL) {
+        float3 n1 = gL1NormalMap.Sample(gMaterialSampler, uv1).xyz * 2.0 - 1.0;
+        // Blended in tangent space then renormalised -- cheap, and correct enough for two layers
+        // that share a tangent frame, which they do here because they share the mesh.
+        m.normalTS = normalize(lerp(m.normalTS, float3(n1.xy * gNormalScale, n1.z), w));
+    }
+#endif
+    return m;
+}
+
 AverSurface averEvalMaterial(AverVertex v, AverLight l) {
     float2 uv = averSurfaceUV(v);
     AverMaps map = averSampleMaps(uv);
+    map = averBlendLayers(map, uv, v.N);
 
     float4 base = gBaseColorFactor * map.baseColor;
 

@@ -18,7 +18,12 @@ constexpr u32 kSlotFlag[kTextureSlotCount] = {
     MaterialFlag_NormalMap,
     MaterialFlag_OcclusionMap,
     MaterialFlag_EmissiveMap,
+    MaterialFlag_Layer1BaseColorMap,
+    MaterialFlag_Layer1MetalRoughMap,
+    MaterialFlag_Layer1NormalMap,
 };
+static_assert(sizeof(kSlotFlag) / sizeof(kSlotFlag[0]) == kTextureSlotCount,
+              "one flag per texture slot; adding a slot without its bit silently disables it");
 } // namespace
 
 // Packs the authored description into the block the GPU reads.
@@ -36,6 +41,10 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     c.alphaCutoff       = d.alphaCutoff;
     c.reflectance       = d.reflectance;
     c.f90               = d.f90;
+    c.slopeBlendLo      = d.slopeBlendLo;
+    c.slopeBlendHi      = d.slopeBlendHi;
+    c.layer1UvScale     = d.layer1UvScale > 1e-4f ? d.layer1UvScale : 1.0f;
+    c.pad0              = 0.0f;
 
     u32 flags = 0;
     for (u32 i = 0; i < kTextureSlotCount; ++i)
@@ -43,6 +52,11 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     if (d.alphaMode == AlphaMode::Mask)  flags |= MaterialFlag_AlphaMask;
     if (d.alphaMode == AlphaMode::Blend) flags |= MaterialFlag_AlphaBlend;
     if (d.twoSided)                      flags |= MaterialFlag_TwoSided;
+    // Only when the author asked AND at least one layer-1 map is actually bound: a slope blend
+    // against nothing would fade the surface to the fallback white texture on every slope.
+    if (d.slopeBlend && (flags & (MaterialFlag_Layer1BaseColorMap | MaterialFlag_Layer1MetalRoughMap |
+                                  MaterialFlag_Layer1NormalMap)))
+        flags |= MaterialFlag_SlopeBlend;
     if (d.uvMode == UvMode::WorldAligned) flags |= MaterialFlag_WorldAlignedUv;
     c.flags = flags;
 

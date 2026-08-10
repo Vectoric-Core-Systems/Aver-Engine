@@ -79,8 +79,10 @@ TexRefParse parseTexRef(std::string_view afterSlot) {
 const char* ocmatColorSpace(TextureSlot s) {
     switch (s) {
         case TextureSlot::BaseColor:
+        case TextureSlot::Layer1BaseColor: return "sRGB";
         case TextureSlot::Emissive:   return "sRGB";
-        case TextureSlot::Normal:     return "normal";
+        case TextureSlot::Normal:
+        case TextureSlot::Layer1Normal: return "normal";
         default:                      return "linear";
     }
 }
@@ -176,6 +178,22 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
             else if (equalsCI(p, "f90"))                  out.f90               = tokF(t, 2, out.f90);
             else if (equalsCI(p, "alphaCutoff"))          out.alphaCutoff       = tokF(t, 2, out.alphaCutoff);
             // World centimetres per tile; a non-positive value is dropped.
+            // slopeBlend <lo> <hi> [layer1UvScale] -- turns the second layer on and says across
+            // which slope band it fades in. lo/hi are world-normal Z: 1 flat, 0 vertical, so LO is
+            // the steeper end and layer 1 wins there.
+            else if (equalsCI(p, "slopeBlend")) {
+                out.slopeBlend   = true;
+                out.slopeBlendLo = tokF(t, 2, out.slopeBlendLo);
+                out.slopeBlendHi = tokF(t, 3, out.slopeBlendHi);
+                const f32 sc = tokF(t, 4, out.layer1UvScale);
+                if (sc > 0.0f) out.layer1UvScale = sc;
+                // Swapped bounds would make smoothstep return garbage rather than fail; order them.
+                if (out.slopeBlendLo > out.slopeBlendHi) {
+                    const f32 tmp = out.slopeBlendLo;
+                    out.slopeBlendLo = out.slopeBlendHi;
+                    out.slopeBlendHi = tmp;
+                }
+            }
             else if (equalsCI(p, "uvTiling")) {
                 const f32 v = tokF(t, 2, out.uvTiling);
                 if (v > 0.0f) out.uvTiling = v;
@@ -276,6 +294,13 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
     s += "PARAM reflectance "       + num(d.reflectance)       + "\n";
     s += "PARAM f90 "               + num(d.f90)               + "\n";
     s += "PARAM uvTiling "          + num(d.uvTiling)          + "\n";
+    // OMITTED WHEN OFF, unlike every PARAM above it, and deliberately: the others are always-present
+    // scalars with meaningful defaults, while this one is a MODE. Writing `slopeBlend 0.55 0.8` into
+    // a material that has no second layer would claim a feature it does not have, and re-reading it
+    // would set MaterialDesc::slopeBlend on a material that never asked for it.
+    if (d.slopeBlend)
+        s += "PARAM slopeBlend " + num(d.slopeBlendLo) + " " + num(d.slopeBlendHi) + " "
+           + num(d.layer1UvScale) + "\n";
 
     bool anyTex = false;
     for (u32 i = 0; i < pbr::kTextureSlotCount; ++i) {

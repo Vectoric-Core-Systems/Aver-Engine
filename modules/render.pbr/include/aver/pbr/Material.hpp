@@ -22,7 +22,25 @@ namespace aver::pbr {
 enum class AlphaMode : u32 { Opaque = 0, Mask, Blend };
 
 // The glTF metallic-roughness texture set. Count is the slot count.
-enum class TextureSlot : u32 { BaseColor = 0, MetalRough, Normal, Occlusion, Emissive, Count };
+// The glTF metallic-roughness set, then a SECOND LAYER of the same maps.
+//
+// THE SECOND LAYER IS WHAT MAKES TERRAIN LOOK LIKE TERRAIN. One material over a heightfield gives
+// one surface everywhere -- leaf litter running up a cliff face, or rock on flat ground. Real
+// terrain is at minimum two surfaces chosen by SLOPE, and every engine that draws landscapes has
+// some form of this.
+//
+// A MATERIAL FEATURE, NOT A LANDSCAPE FEATURE, and that is the design decision worth recording.
+// The obvious alternative was to give Aver.Landscape.Renderer its own pipeline and shader so it
+// could sample several material tables -- but a landscape-owned pipeline takes over the scene PSO
+// wholesale (VoxiRenderer::overridesScenePipeline is all-or-nothing), which would have cost the
+// terrain every bit of Voxi's GI and shadowing. Blending inside the material instead means the
+// landscape keeps drawing through exactly the path it already does, still lit by GI, still using
+// the opaque single-binding seam it already has -- and any MESH can use a layered material too.
+enum class TextureSlot : u32 {
+    BaseColor = 0, MetalRough, Normal, Occlusion, Emissive,
+    Layer1BaseColor, Layer1MetalRough, Layer1Normal,
+    Count
+};
 
 // Where a surface's texture coordinates come from: the mesh's own UVs, or a planar projection.
 // FROZEN: UvMode::WorldAligned, AVER_PBR_UV_WORLD_ALIGNED and the `.ocmat` key `worlduv`.
@@ -74,6 +92,14 @@ struct MaterialDesc {
 
     UvMode uvMode   = UvMode::Mesh;
     f32    uvTiling = 200.0f;   // world CENTIMETRES per tile, read only under WorldAligned
+
+    // ---- the second layer, blended by SLOPE ----
+    // Off unless slopeBlend is true. See MaterialConstants::slopeBlendLo/Hi for the axis: these are
+    // world-normal Z, so 1 is flat ground and 0 is a vertical face, and `lo` is the STEEPER end.
+    bool slopeBlend    = false;
+    f32  slopeBlendLo  = 0.55f;
+    f32  slopeBlendHi  = 0.80f;
+    f32  layer1UvScale = 1.0f;
 
     TextureRef textures[kTextureSlotCount];
 };

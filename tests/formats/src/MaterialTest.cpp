@@ -125,12 +125,70 @@ static void testTolerance() {
     check(fmt::parseOcmat("OCMAT 1\nFLAGS worlduv=1\nPARAM uvTiling 0\n", d, nullptr, &err),
           "PARAM uvTiling 0 is tolerated");
     check(d.uvTiling > 0.0f, "...but not stored: the default survives");
+
+    // The SECOND LAYER: three texture slots plus the slope band they fade in across. This is what
+    // lets terrain be rock on cliffs and litter on flats without the landscape owning a shader.
+    {
+        pbr::MaterialDesc m;
+        check(fmt::parseOcmat("OCMAT 1\nNAME M_Ground\n"
+                              "TEX baseColor {path:a_diff.jpg} uv0 sRGB\n"
+                              "TEX layer1BaseColor {path:rock_diff.jpg} uv0 sRGB\n"
+                              "TEX layer1Normal {path:rock_nor.jpg} uv0 normal\n"
+                              "PARAM slopeBlend 0.5 0.8 2\n", m, nullptr, &err),
+              "a material with a second layer parses");
+        check(m.textures[static_cast<u32>(pbr::TextureSlot::Layer1BaseColor)].path == "rock_diff.jpg",
+              "layer1BaseColor binds by name");
+        check(m.textures[static_cast<u32>(pbr::TextureSlot::Layer1Normal)].path == "rock_nor.jpg",
+              "layer1Normal binds by name");
+        check(m.slopeBlend, "slopeBlend turns the second layer on");
+        check(std::fabs(m.slopeBlendLo - 0.5f) < 1e-6f && std::fabs(m.slopeBlendHi - 0.8f) < 1e-6f,
+              "...and keeps its band");
+        check(std::fabs(m.layer1UvScale - 2.0f) < 1e-6f, "...and layer 1's own uv scale");
+
+        // Bounds the wrong way round are ORDERED, not trusted: smoothstep(hi, lo, x) returns
+        // nonsense rather than failing, so a swapped pair would be a silently wrong surface.
+        pbr::MaterialDesc sw;
+        check(fmt::parseOcmat("OCMAT 1\nTEX layer1BaseColor {path:r.jpg}\nPARAM slopeBlend 0.9 0.2\n",
+                              sw, nullptr, &err), "a reversed slope band parses");
+        check(sw.slopeBlendLo < sw.slopeBlendHi, "...and is put back in order");
+
+        // THE FLAG IS NOT SET WITHOUT A LAYER-1 MAP. Blending against nothing would fade every
+        // slope to the fallback white texture, which reads as a lighting bug rather than a missing
+        // texture -- the worst shape for a defect to have.
+        pbr::MaterialDesc bare;
+        check(fmt::parseOcmat("OCMAT 1\nPARAM slopeBlend 0.5 0.8\n", bare, nullptr, &err),
+              "slopeBlend with no layer-1 texture still parses");
+        const pbr::MaterialConstants bc = pbr::packMaterial(bare);
+        check((bc.flags & pbr::MaterialFlag_SlopeBlend) == 0,
+              "...but packs with the blend OFF, so nothing fades to the fallback");
+        const pbr::MaterialConstants gc = pbr::packMaterial(m);
+        check((gc.flags & pbr::MaterialFlag_SlopeBlend) != 0, "a real second layer packs the bit on");
+        check((gc.flags & pbr::MaterialFlag_Layer1BaseColorMap) != 0, "...and its own slot bit");
+
+        // Round trip: a stated blend survives, an unstated one is not invented.
+        const std::string text = fmt::writeOcmat(m, nullptr);
+        check(text.find("PARAM slopeBlend") != std::string::npos, "the writer emits the band");
+        check(text.find("layer1BaseColor") != std::string::npos, "...and the layer-1 slot");
+        // A material that NEVER MENTIONED the blend. Not `bare` above -- that one did state
+        // slopeBlend, so writing it back is correct round-tripping even though packMaterial
+        // refuses the flag for want of a layer-1 map. The two are different questions and
+        // conflating them is what the first version of this check got wrong.
+        pbr::MaterialDesc plain;
+        check(fmt::parseOcmat("OCMAT 1\nNAME M_Plain\nTEX baseColor {path:a.jpg}\n",
+                              plain, nullptr, &err), "an ordinary single-layer material parses");
+        check(fmt::writeOcmat(plain, nullptr).find("slopeBlend") == std::string::npos,
+              "a material that never mentioned a second layer writes no slopeBlend at all");
+    }
 }
 
-// Checks packMaterial: the 64-byte block the shader reads.
+// Checks packMaterial: the 80-byte block the shader reads.
 static void testPack() {
     AVER_INFO("=== material: the packed GPU block ===");
-    check(sizeof(pbr::MaterialConstants) == 64, "MaterialConstants is still 64 bytes");
+    // 80 since the second (slope-blended) layer was added: 64 plus slopeBlendLo/Hi, layer1UvScale
+    // and one pad. THIS CHECK EARNED ITS KEEP -- it is what caught the size change, and the reason
+    // it matters is that PbrShaders.cpp's `cbuffer AverMaterial` mirrors this struct BY HAND.
+    check(sizeof(pbr::MaterialConstants) == 80, "MaterialConstants is still 80 bytes");
+    check(sizeof(pbr::MaterialConstants) % 16 == 0, "...and a legal constant-buffer size");
 
     pbr::MaterialDesc d;
     pbr::MaterialConstants c = pbr::packMaterial(d);

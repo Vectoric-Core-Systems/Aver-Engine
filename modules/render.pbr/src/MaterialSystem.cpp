@@ -35,8 +35,10 @@ rhi::TextureHandle makePixel(rhi::IResourceFactory& res, const u8 rgba[4], rhi::
 char colourClass(TextureSlot slot) {
     switch (slot) {
         case TextureSlot::BaseColor:
+        case TextureSlot::Layer1BaseColor:
         case TextureSlot::Emissive:  return 'c';   // sRGB
-        case TextureSlot::Normal:    return 'n';   // linear, and never sRGB whatever the options say
+        case TextureSlot::Normal:
+        case TextureSlot::Layer1Normal: return 'n';   // linear, never sRGB whatever the options say
         default:                     return 'd';   // linear data: metal-rough, occlusion
     }
 }
@@ -157,13 +159,22 @@ u32 MaterialSystem::forgetFailedResolves() {
 
 // Writes every SRV of `set`, using the identity texture wherever the material sets nothing.
 void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set, bool retryFailed) {
+    // ONE ENTRY PER SLOT, and the static_assert is why this list is worth reading twice: a short
+    // initialiser list zero-fills the tail rather than failing to compile, so adding a TextureSlot
+    // and forgetting this array binds handle 0 into the new SRVs -- an invalid descriptor under
+    // Tier 1, which is a device-removal-class bug rather than a wrong pixel.
     const rhi::TextureHandle fallback[kTextureSlotCount] = {
         white_,       // BaseColor
         metalRough_,  // MetalRough
         flatNormal_,  // Normal
         white_,       // Occlusion
         black_,       // Emissive
+        white_,       // Layer1BaseColor
+        metalRough_,  // Layer1MetalRough
+        flatNormal_,  // Layer1Normal
     };
+    static_assert(sizeof(fallback) / sizeof(fallback[0]) == kTextureSlotCount,
+                  "every TextureSlot needs a fallback; a short list zero-fills and binds nothing");
     for (u32 i = 0; i < kTextureSlotCount; ++i) {
         const rhi::TextureHandle t = resolveTexture(d.textures[i], static_cast<TextureSlot>(i), retryFailed);
         res_->setSrv(set, i, t ? t : fallback[i]);

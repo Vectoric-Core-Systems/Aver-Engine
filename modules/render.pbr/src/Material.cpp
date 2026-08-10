@@ -204,6 +204,9 @@ const char* MaterialLibrary::textureSlotName(TextureSlot s) {
         case TextureSlot::Normal:     return "normal";
         case TextureSlot::Occlusion:  return "occlusion";
         case TextureSlot::Emissive:   return "emissive";
+        case TextureSlot::Layer1BaseColor:  return "layer1BaseColor";
+        case TextureSlot::Layer1MetalRough: return "layer1MetalRough";
+        case TextureSlot::Layer1Normal:     return "layer1Normal";
         default: return "?";
     }
 }
