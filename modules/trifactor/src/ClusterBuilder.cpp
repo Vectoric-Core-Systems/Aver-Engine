@@ -66,6 +66,9 @@
 // single-use from inside that call and get locked, and nothing would ever simplify.
 
 #include "aver/trifactor/ClusterBuilder.hpp"
+#include "aver/core/Log.hpp"
+
+#include <chrono>
 
 #include <meshoptimizer.h>
 
@@ -354,11 +357,35 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
     // all.
     const f32 meshScale = worldExtentScale(mesh);
 
+    // ---- WHERE THE COOK TIME ACTUALLY GOES ----
+    //
+    // NOTHING IN THIS MODULE WAS TIMED. Not one chrono/steady_clock/elapsed anywhere in
+    // modules/trifactor -- yet this file's own header quotes "13m35s/8m40s real cook times a prior
+    // profiling pass reported" and "~98% of a synthetic 498K-triangle mesh's total buildLodHierarchy
+    // time". Those numbers are narrated, not produced by any code here, so nobody could reproduce
+    // them and nobody could tell whether an optimisation had helped.
+    //
+    // THIS EXISTS TO DECIDE A QUESTION RATHER THAN TO DECORATE A LOG. The question is whether the
+    // loops this module actually owns -- appendGlobalTriangles' index gather and groupExtentScale's
+    // position copy -- are worth hand-vectorising, or whether they are lost inside meshopt_simplify,
+    // which is vendored, scalar (zero SIMD intrinsics in simplifier.cpp), and not ours to change.
+    // Optimising the wrong one of those is how effort gets spent for no measurable result, so the
+    // breakdown is split three ways and reported as PERCENTAGES, which is the form the decision
+    // needs.
+    struct PhaseMs { f64 group = 0, gather = 0, simplify = 0, extent = 0, rest = 0; } phase;
+    const auto tick = []() { return std::chrono::steady_clock::now(); };
+    const auto msSince = [](std::chrono::steady_clock::time_point t0) {
+        return std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    };
+    const auto tWhole = tick();
+
     for (u32 level = 0; level < kMaxLevels; ++level) {
         const std::vector<u32> current = dag.levels[level]; // copy: dag.levels grows below
         if (current.size() <= 1) break;                     // already a single root cluster
 
+        const auto tGroup = tick();
         const auto groups = groupClusters(dag, current, mesh);
+        phase.group += msSince(tGroup);
 
         // Pass 1: simplify every group. Nothing is written to `dag` yet, so if NO group reduced,
         // this level can be abandoned cleanly -- `level` stays the DAG's topmost (root) level rather
@@ -383,7 +410,9 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             for (u32 cid : group) mergedTriIndices += dag.clusters[cid].triangles.size();
             std::vector<u32> mergedIndices;
             mergedIndices.reserve(mergedTriIndices);
+            const auto tGather = tick();
             for (u32 cid : group) appendGlobalTriangles(dag.clusters[cid], mergedIndices);
+            phase.gather += msSince(tGather);
 
             // Target: halve the group's triangle count, floored to a whole number of triangles, with
             // a floor of 2 triangles (6 indices) so a target of zero is never asked for -- UNLESS the
@@ -411,11 +440,13 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             // for the one thing this flag changes that this call site has to correct for.
             std::vector<u32> simplified(mergedIndices.size());
             f32 resultError = 0.0f;
+            const auto tSimplify = tick();
             const usize simplifiedCount = meshopt_simplify(
                 simplified.data(), mergedIndices.data(), mergedIndices.size(),
                 mesh.positions.data(), vertexCount, sizeof(f32) * 3,
                 targetIndexCount, /*target_error=*/1e-2f,
                 meshopt_SimplifyLockBorder | meshopt_SimplifySparse, &resultError);
+            phase.simplify += msSince(tSimplify);
             simplified.resize(simplifiedCount);
 
             if (simplifiedCount < mergedIndices.size()) anyReduction = true;
@@ -428,7 +459,9 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             // group's error or propagated to a parent. Absolute error is scale-invariant (subset
             // extent * subset-relative error == mesh extent * mesh-relative error, both being the
             // same physical distance), so this is an exact unit conversion, not an approximation.
+            const auto tExtent = tick();
             const f32 groupScale = groupExtentScale(mesh, mergedIndices);
+            phase.extent += msSince(tExtent);
             const f32 rescaledError = (meshScale > 0.0f) ? resultError * (groupScale / meshScale) : resultError;
 
             pending.push_back({group, std::move(simplified), rescaledError});
@@ -460,6 +493,19 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
                 }
             }
         }
+    }
+
+    // ONE LINE, ONCE PER COOKED MESH, AS PERCENTAGES -- which is the form the only decision this
+    // supports actually needs: is any loop this module owns worth hand-vectorising, or is it all
+    // inside vendored meshopt_simplify? A breakdown in milliseconds alone would not answer that.
+    {
+        const f64 whole = msSince(tWhole);
+        phase.rest = whole - (phase.group + phase.gather + phase.simplify + phase.extent);
+        const auto pct = [whole](f64 v) { return whole > 0.0 ? (v * 100.0 / whole) : 0.0; };
+        AVER_INFO("[Trifactor] buildLodHierarchy {:.1f}ms -- simplify {:.1f}% | group {:.1f}% | "
+                  "gather {:.1f}% | extent {:.1f}% | rest {:.1f}%",
+                  whole, pct(phase.simplify), pct(phase.group), pct(phase.gather),
+                  pct(phase.extent), pct(phase.rest));
     }
 
     return true;
