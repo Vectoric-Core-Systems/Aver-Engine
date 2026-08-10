@@ -216,6 +216,24 @@ const std::string& sceneShaderSource() {
 // which is the one place this backend's shape most sharply diverges from D3D12's raw root-SRV bind
 // and from section 4's own "push constants carry the mesh geometry" text.
 bool patchPushConstants(std::string& src, bool mesh) {
+    // THE ANNOTATION DOES NOT GO ON A cbuffer, and the first version of this function put it there.
+    // DXC accepts `[[vk::push_constant]]` only on a global variable of STRUCT type; on a cbuffer
+    // block it rejects the shader outright with
+    //     error: 'push_constant' attribute only applies to global variables of struct type
+    // That was invisible for as long as the engine had no SPIR-V-capable dxcompiler.dll, because
+    // compilation died earlier on "SPIR-V CodeGen not available" and never reached the attribute.
+    // Vendoring a compiler that can actually emit SPIR-V is what surfaced it.
+    //
+    // The shape DXC does accept is a struct plus a ConstantBuffer of it. The fields then live inside
+    // that struct rather than at global scope, which would break every `gWorld` in the shared
+    // prelude -- so each is aliased straight back out to a global of the same name. HLSL scopes
+    // struct members separately from globals, so `static float4x4 gWorld = gAverPc.gWorld;` is legal
+    // and every existing reference keeps resolving with the prelude untouched.
+    //
+    // THE ALIAS LIST IS HARDCODED AGAINST THE PRELUDE, matching what this function already did with
+    // its exact-text needles: if RHIShaders.cpp's PerObject gains or loses a field, this stops
+    // matching and says so, rather than silently compiling a block whose layout no longer agrees
+    // with PushConstantLayout.
     const std::string needle = "cbuffer PerObject : register(b1) {";
     const size_t pos = src.find(needle);
     if (pos == std::string::npos) {
@@ -224,23 +242,46 @@ bool patchPushConstants(std::string& src, bool mesh) {
                    "drifted and this backend's fixed pipelines cannot compile correctly");
         return false;
     }
-    src.replace(pos, needle.size(), "[[vk::push_constant]] cbuffer PerObject : register(b1) {");
-    if (!mesh) return true;
+    const size_t close = src.find("};", pos);
+    if (close == std::string::npos) {
+        AVER_ERROR("[RHI.Vulkan] PerObject cbuffer has no closing brace; the shared prelude has drifted");
+        return false;
+    }
+    // The field declarations, verbatim and comments included -- they become the struct's body
+    // unchanged, so the byte layout PushConstantLayout assumes is preserved exactly.
+    const size_t bodyBegin = pos + needle.size();
+    std::string body = src.substr(bodyBegin, close - bodyBegin);
 
+    // MeshCB folded into the SAME block: SPIR-V permits at most one PushConstant interface block per
+    // entry point and MSMain statically uses fields from both. Its own declaration is deleted below.
     const std::string meshNeedle = "cbuffer MeshCB : register(b5) { uint gTriCount; uint3 _msPad; }";
-    const size_t meshPos = src.find(meshNeedle);
-    if (meshPos == std::string::npos) {
+    const bool haveMesh = mesh && src.find(meshNeedle) != std::string::npos;
+    if (mesh && !haveMesh) {
         AVER_ERROR("[RHI.Vulkan] shader source no longer contains the exact MeshCB cbuffer text this "
                    "backend's push-constant patch matches against");
         return false;
     }
-    // Deleted outright: its two fields are re-declared on the tail of PerObject's own block below,
-    // so MSMain's use of gTriCount still resolves, but from the ONE merged push-constant block.
-    src.erase(meshPos, meshNeedle.size());
-    const std::string objNeedle2 = "[[vk::push_constant]] cbuffer PerObject : register(b1) {";
-    const size_t objPos2 = src.find(objNeedle2);
-    if (objPos2 == std::string::npos) return false;   // cannot happen; just replaced it above
-    src.insert(objPos2 + objNeedle2.size(), " uint gTriCount; uint3 _msPad;");
+    if (haveMesh) body += "\n    uint gTriCount; uint3 _msPad;\n";
+
+    std::string repl = "struct AverPcBlock {" + body + "};\n";
+    repl += "[[vk::push_constant]] ConstantBuffer<AverPcBlock> gAverPc;\n";
+    // One alias per field, so the prelude's own gWorld/gBaseColor/... keep resolving unchanged.
+    repl += "static float4x4 gWorld        = gAverPc.gWorld;\n";
+    repl += "static float4   gBaseColor    = gAverPc.gBaseColor;\n";
+    repl += "static float4   gMaterial     = gAverPc.gMaterial;\n";
+    repl += "static uint     gShadingModel = gAverPc.gShadingModel;\n";
+    repl += "static float    gReflectance  = gAverPc.gReflectance;\n";
+    repl += "static float    gF90          = gAverPc.gF90;\n";
+    repl += "static float4   gEmissive     = gAverPc.gEmissive;\n";
+    if (haveMesh) repl += "static uint gTriCount = gAverPc.gTriCount;\n";
+
+    src.replace(pos, (close + 2) - pos, repl);
+
+    // Delete MeshCB's own block now that its fields live in AverPcBlock.
+    if (haveMesh) {
+        const size_t meshPos = src.find(meshNeedle);
+        if (meshPos != std::string::npos) src.erase(meshPos, meshNeedle.size());
+    }
     return true;
 }
 

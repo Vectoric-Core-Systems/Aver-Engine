@@ -160,11 +160,23 @@ bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderSta
         // backend's VulkanDevice already requires of the device.
         L"-fspv-target-env=vulkan1.3",
         L"-fvk-u-shift", uShift.c_str(), L"0",
-        // HLSL's clip space is [0,1] depth and y-down NDC is Vulkan's; the engine's matrices are
-        // built for D3D conventions, so ask DXC to invert Y in the generated code rather than
-        // flipping every projection matrix per backend.
-        L"-fvk-invert-y",
     };
+    // -fvk-invert-y ONLY ON THE STAGES THAT WRITE SV_Position. Vulkan's NDC is y-down where D3D's is
+    // y-up, and the engine's projection matrices are built for D3D -- so the flip has to happen
+    // somewhere, and doing it in codegen keeps one set of matrices for both backends. DXC refuses
+    // the flag anywhere else outright:
+    //     error: -fvk-invert-y can only be used in VS/DS/GS/MS/Lib
+    // which is why it cannot simply be passed on every compile. A pixel or compute shader has no
+    // position to invert.
+    switch (stage) {
+        case ShaderStage::Vertex:
+        case ShaderStage::Geometry:
+        case ShaderStage::Mesh:
+            args.push_back(L"-fvk-invert-y");
+            break;
+        default:
+            break;   // Pixel, Compute, Amplification: nothing to invert
+    }
     for (const std::wstring& d : wDefines) { args.push_back(L"-D"); args.push_back(d.c_str()); }
 
     auto* compiler = static_cast<IDxcCompiler3*>(compiler_);
