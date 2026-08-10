@@ -36,6 +36,14 @@ public:
     // doing. A no-op once the splash has closed, and in headless or capture runs where there never
     // was one, so a caller never has to ask whether it is safe to call.
     void setLoadingStatus(const std::string& stage);
+    // Whether a loading splash is CURRENTLY up -- i.e. whether setLoadingStatus above will actually
+    // show anything. True only between show() and close() during startup.
+    //
+    // It exists so a long blocking operation that can run EITHER during startup or later (opening a
+    // project is the one that matters: from the command line it lands inside onInit, from the
+    // browser it lands frames later) can reuse this splash when there is one and create its own only
+    // when there is not. Two overlapping top-most splash windows is the failure this prevents.
+    bool loadingScreenActive() const { return splashForApp_ != nullptr; }
 
 private:
     // One frame: sync swapchain to the window size, update, render, present.

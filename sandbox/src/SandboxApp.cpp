@@ -3,6 +3,7 @@
 
 #include "aver/runtime/EntryPoint.hpp"
 #include "aver/platform/Window.hpp"
+#include "aver/platform/Splash.hpp"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/platform/Image.hpp"
 #include "aver/rhi/RHI.hpp"
@@ -2941,11 +2942,66 @@ public:
 
 private:
     // Adopts the project the browser or command line loaded, and refreshes everything keyed to it.
+    // Opening a project is the longest blocking thing the editor does after startup: it releases and
+    // reloads every material and every mesh, cooks LOD pipelines, loads the start map and its
+    // landscape, and starts the script host. All of it on the main thread, all of it between two
+    // frames -- so the window stopped painting, Windows greyed it out and titled it "Not Responding",
+    // and there was nothing on screen to say what was happening or that anything still was.
+    //
+    // THE SPLASH ALREADY SOLVED THIS ONCE, for engine startup, and its own header says why: "with a
+    // static image there is no way to tell a slow start from a hung one. Naming the current stage
+    // costs almost nothing and turns 'it froze' into 'it is compiling shaders'." The same window,
+    // the same status line, reused for the same problem one layer up. setStatus repaints
+    // SYNCHRONOUSLY and pump() drains the queue, which together are what keep it responsive while
+    // the main window is busy.
+    //
+    // Scoped to the load: it appears when one starts and is destroyed when it ends, so nothing has
+    // to remember to close it on an early return.
+    struct LoadingScreen {
+        Splash splash;
+        bool on = false;
+        Engine* borrowed = nullptr;   // non-null when reusing the engine's startup splash
+
+        // `eng` is borrowed rather than owned when its startup splash is STILL UP. Opening a project
+        // from the command line lands inside onInit, where that splash is showing; opening one from
+        // the browser lands frames later, where it is long gone. Creating a second top-most window
+        // over the first is the case this distinguishes.
+        LoadingScreen(Engine& eng, bool enable, const std::string& png) {
+            if (!enable) return;
+            if (eng.loadingScreenActive()) { borrowed = &eng; return; }
+            on = splash.show(png);
+        }
+        void stage(const char* text) {
+            if (borrowed) { borrowed->setLoadingStatus(text); return; }
+            if (!on) return;
+            splash.setStatus(text);
+            splash.pump();
+        }
+        ~LoadingScreen() {
+            // No minimum visible time: a project that loads instantly should not be made to look
+            // like it did not. Startup uses one because a splash that flashes reads as a glitch;
+            // here the main window is already up behind it.
+            // A borrowed splash belongs to Engine::run, which closes it when startup finishes.
+            if (on) splash.close(0);
+        }
+    };
+
     void applyProject(Engine& e) {
+        // Never in a capture or headless run: those have no splash at startup either, and a
+        // top-most window would land in the middle of a screenshot.
+        // e.window() IS the test: a headless run has no window, and a --frames capture opens one
+        // unactivated (see Engine::run) but should not have a top-most splash land in a screenshot.
+        // browserActive_ is false by then, so a capture run reaches applyProject only via an
+        // explicit project path, which is exactly the case to stay silent for.
+        LoadingScreen loading(e, e.window() != nullptr && maxFrames_ == 0,
+                              executableDir() + "\splash.png");
+        loading.stage("Opening project");
+
         project_ = browser_.project();
         editor::setActorEditorContentRoot(project_.contentDir());
 
         editor::setAnimEditorContentRoot(project_.contentDir());
+        loading.stage("Applying project settings");
         applyProjectRenderSettings();
         startContentWatch();
         pendingUpgrade_ = editor::inspectProject(project_);
@@ -2957,11 +3013,13 @@ private:
         if (e.window())
             e.window()->setTitle("Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + project_.name);
 #if AVER_MODULE_PBR
+        loading.stage("Loading materials");
         releaseProjectMaterials();
         rebuildContentIndex();
         loadProjectMaterials();
 #endif
 #if AVER_MODULE_SCENE
+        loading.stage("Loading meshes");
         releaseProjectMeshes(e);
         loadProjectMeshes(e);
 #endif
@@ -2971,12 +3029,15 @@ private:
         // reentrancy with an in-flight command list was unverified. This runs exactly once regardless
         // (lodMeshPipelineTried_ latches), so calling it here instead of every onRender changes only
         // WHEN the one real attempt happens, not whether it does.
+        loading.stage("Building virtualized-geometry pipelines");
         ensureLodMeshPipeline(e);
 #endif
 #if AVER_MODULE_SCENE
+        loading.stage("Loading level");
         loadStartMap(e);
 #endif
 #if AVER_MODULE_SCRIPTING
+        loading.stage("Starting scripts");
         if (scripts_.ready() && scriptsDir_.empty() && project_.valid()) {
             const std::string bin = editor::scriptsBinaryDir(project_);
             const i32 n = scripts_.loadScripts(bin);
