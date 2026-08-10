@@ -3563,7 +3563,19 @@ private:
 
     bool autoCompile_ = false;
     int focusLevelAt_ = 0;
-    int chunkStreamAutoFrames_ = 0;   // --chunk-stream: frames left before auto-enabling, 0 = off
+    // Frames left before chunk streaming auto-enables; 0 = off. ON BY DEFAULT, at the same 5-frame
+    // delay a bare --chunk-stream asks for.
+    //
+    // IT USED TO DEFAULT TO OFF, and that made the editor open on an empty world: without streaming
+    // nothing runs the scatter generator, so a level with a 33-species palette showed its terrain,
+    // its 14 hand-placed pines, and nothing else. The level looked broken and the flag that fixed it
+    // was undiscoverable -- opt-in is right for a feature that costs something a user might not want,
+    // and wrong for the one that puts the world in the world.
+    //
+    // The delay is not cosmetic: streaming keys off the camera, and frameCameraOn moves it on level
+    // load, so enabling on frame 0 would stream a ring around wherever the camera happened to start
+    // and immediately evict it. --no-chunk-stream turns it off for a static scene.
+    int chunkStreamAutoFrames_ = 5;
     int droneAutoFrames_ = 0;        // --drone: frames left before auto-enabling, 0 = off
     static constexpr int kAutoCompileQuietMs = 500;
     std::chrono::steady_clock::time_point autoCompileDue_{};
@@ -9226,6 +9238,12 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--chunk-stream")) {
             chunkStream = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 5;
         }
+        // --no-chunk-stream: the counterpart to streaming now being ON by default. A negative value
+        // is the "explicitly off" signal, distinct from the 0 that means "the flag was not given" --
+        // without that distinction the app cannot tell a user who wants a static scene from one who
+        // said nothing, and the default would be unturnoffable. Wanted by anything measuring a fixed
+        // scene: a frame-time comparison whose triangle count is still climbing is not a comparison.
+        else if (!std::strcmp(argv[i],"--no-chunk-stream")) chunkStream = -1;
         // --fog-match [opacity] ties fog density to the streaming radius, the same thing the Height
         // Fog panel's checkbox does. A flag as well as a checkbox because the feature is invisible
         // without one: it is opt-in by design (it makes the world markedly foggier), so a headless
@@ -9400,7 +9418,11 @@ Application* createApplication(int argc, char** argv) {
     app->setFocusCompileMenu(focusCompileMenu);
     if (!droneGraph.empty()) app->setDroneGraph(droneGraph);
     if (!landscapePath.empty()) app->setLandscapePath(landscapePath);
-    if (chunkStream > 0) app->setChunkStreamAuto(chunkStream);
+    // Three states, not two: >0 is an explicit delay, <0 is --no-chunk-stream, and 0 is "the flag was
+    // never given" -- which now LEAVES THE MEMBER'S OWN DEFAULT ALONE rather than meaning off. See
+    // chunkStreamAutoFrames_'s declaration for why the default is on.
+    if (chunkStream > 0)      app->setChunkStreamAuto(chunkStream);
+    else if (chunkStream < 0) app->setChunkStreamAuto(0);
     if (fogMatch) app->setFogMatchToStreamRadius(true, fogMatchOpacity);
     if (droneAuto > 0) app->setDroneAuto(droneAuto);
 #if AVER_MODULE_MCP
