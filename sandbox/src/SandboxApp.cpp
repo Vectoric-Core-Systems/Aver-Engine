@@ -1313,6 +1313,13 @@ public:
             chunkStreamLastCamPos_ = camPos_;
             chunkStreamHaveLastPos_ = true;
 
+            // The other half of the CPU/GPU question above, and the answer to a specific suspicion:
+            // the streamer reports a pending backlog in the hundreds for the first few seconds, which
+            // reads like it is generating every frame forever. It is not -- the backlog drains and
+            // this settles to 0.7ms at pending=0. Worth measuring rather than assuming, since
+            // "streaming is really laggy" was a live complaint and this is where it would show.
+            const auto tStream0 = std::chrono::steady_clock::now();
+
             std::vector<i32> freed;
 #if AVER_MODULE_SCRIPTING
             if (droneEntity_ != scene::kInvalidEntity && droneGraphLoaded_) {
@@ -1342,6 +1349,15 @@ public:
                     accumulateStreamStats(chunkStreamStats_,
                                           extra->update(scene::World::instance(), camPos_, vel, t.dt, &freed));
                 }
+            }
+            {
+                const f64 streamMs = std::chrono::duration<f64, std::milli>(
+                    std::chrono::steady_clock::now() - tStream0).count();
+                if ((chunkStreamReports_ & (chunkStreamReports_ + 1)) == 0)
+                    AVER_INFO("[Sandbox] chunk stream update {:.1f}ms on the main thread "
+                              "(resident {}, pending {})", streamMs,
+                              chunkStreamStats_.residentChunks, chunkStreamStats_.pendingLoads);
+                ++chunkStreamReports_;
             }
 #if AVER_MODULE_PHYSICS
             for (const i32 b : freed) if (b >= 0) aver_phys_remove_body(b);
@@ -2075,6 +2091,15 @@ public:
                     pl[5][i] = m.m[i][3] - m.m[i][2];   // far
                 }
             }
+            // IS THE FRAME CPU-BOUND OR GPU-BOUND? Establishing that took a dozen capture runs and
+            // three wrong guesses, because --frame-time reports WHOLE frames from the CPU and a CPU
+            // number that includes waiting for the GPU looks exactly like CPU work. Two timers
+            // answer it directly and cost two clock reads a frame: this one, and the streamer's
+            // below. The answer on Electric Dreams is 8.2ms of walk and 0.7ms of streaming inside a
+            // 76ms frame -- so it is GPU-bound, and nothing done to this loop can matter.
+            const auto tWalk0 = std::chrono::steady_clock::now();
+            f64 dispatchMs = 0.0;
+
             const u32 n = w.count();
             for (u32 i = 0; i < n; ++i) {
                 const scene::Entity ent = w.at(i);
@@ -2224,11 +2249,14 @@ public:
                             consts[25] = 0.04f; consts[26] = 1.0f; consts[27] = 0.0f;
                             consts[28] = consts[29] = consts[30] = consts[31] = 0.0f;
 
+                            const auto tDis0 = std::chrono::steady_clock::now();
                             ctx->setPipeline(lodMeshPipeline_);
                             ctx->setBindingSet(gpu.bindingSet, 0);
                             ctx->setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
                             ctx->setConstantBuffer(rhi::kFeatureFrameConstantRegister, &frameCb, sizeof(frameCb));
                             ctx->dispatchMeshClusters(mesh, gpu.clusterCount);
+                            dispatchMs += std::chrono::duration<f64, std::milli>(
+                                std::chrono::steady_clock::now() - tDis0).count();
                             clusterDispatched = true;
 
                             ++lodMeshShaderStats_.instancesTested;
@@ -2422,6 +2450,17 @@ public:
                 if (sel_ == kSelScene && ent == selEntity_)
                     selectionOutline_ = wm, selectionMesh_ = mesh, hasSelection_ = true;
                 ++drawn;
+            }
+            {
+                const f64 walkMs = std::chrono::duration<f64, std::milli>(
+                    std::chrono::steady_clock::now() - tWalk0).count();
+                if ((sceneWalkReports_ & (sceneWalkReports_ + 1)) == 0)
+                    AVER_INFO("[Sandbox] scene walk {:.1f}ms -- {:.1f}ms in cluster dispatch across {} "
+                              "drawn ({:.1f}us each), {:.1f}ms in the rest over {} entities",
+                              walkMs, dispatchMs, drawn,
+                              drawn ? dispatchMs * 1000.0 / static_cast<f64>(drawn) : 0.0,
+                              walkMs - dispatchMs, n);
+                ++sceneWalkReports_;
             }
             if (drawn != lastSceneDrawn_ || culled != lastSceneCulled_) {
                 AVER_INFO("[Sandbox] scene-render: {} spawned CMeshRenderer entit{} drawn, {} frustum-culled",
@@ -9433,6 +9472,9 @@ private:
     // and is drawn as-is. Handed to Voxi as a plain function pointer so the renderer stays ignorant
     // of both Trifactor and this editor.
     std::unordered_map<rhi::MeshHandle, rhi::MeshHandle> depthProxy_;
+
+    u32 sceneWalkReports_ = 0;     // scene walks so far; the cost split reports at 2^n of them
+    u32 chunkStreamReports_ = 0;   // ditto, for the streamer's main-thread cost
 
     static rhi::MeshHandle depthProxyLookup(rhi::MeshHandle mesh, void* user) {
         const auto& m = static_cast<const SandboxApp*>(user)->depthProxy_;
