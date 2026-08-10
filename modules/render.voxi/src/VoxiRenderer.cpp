@@ -731,7 +731,46 @@ bool VoxiRenderer::giSnapshotUnchanged() const {
     // to SkyAtmosphere later cannot silently fall outside the check.
     rhi::SkyAtmosphere now{};
     now = dev_->skyAtmosphere();
-    if (std::memcmp(&now, &giSky_, sizeof(now)) != 0) return reject(3, "sky/sun changed");
+    // CLOUDTIME IS A CLOCK, AND IT IS WHY THIS GATE NEVER ONCE PASSED. It counts accumulated
+    // seconds, so it differs on every tick by construction; comparing it byte-for-byte meant a
+    // static scene under a still camera rebuilt the entire 128^3 volume every giUpdateInterval
+    // frames forever, on the grounds that the sky had "changed". Measured: byte 240 of 248, 3.01e-05
+    // on the snapshot against 19.19752 live.
+    //
+    // Normalised out of BOTH SIDES rather than compared field-by-field, so the property the byte
+    // comparison was chosen for survives -- a field added to SkyAtmosphere later still cannot
+    // silently fall outside the check. Only this one named field is excused, and it is excused
+    // here where the reason is written down.
+    rhi::SkyAtmosphere was{};
+    was = giSky_;
+    const f32 cloudTimeDelta = std::fabs(now.cloudTime - was.cloudTime);
+    now.cloudTime = was.cloudTime = 0.0f;
+
+    if (std::memcmp(&now, &was, sizeof(now)) != 0) {
+        // WHICH BYTE, not just "something". This rejection was diagnosed twice from a plain
+        // "sky/sun changed" and guessed wrong both times; the offset costs nothing to report and
+        // turns a guess into an answer -- map it against the field order in rhi::SkyAtmosphere.
+        const auto* a = reinterpret_cast<const u8*>(&now);
+        const auto* b = reinterpret_cast<const u8*>(&was);
+        usize off = 0;
+        while (off < sizeof(now) && a[off] == b[off]) ++off;
+        f32 fa = 0, fb = 0;
+        if (off + sizeof(f32) <= sizeof(now)) {
+            std::memcpy(&fa, a + off, sizeof(f32));
+            std::memcpy(&fb, b + off, sizeof(f32));
+        }
+        if (!(giGateWhyMask_ & (1u << 3)))
+            AVER_INFO("[Voxi] GI rebuild gate: sky/sun differs first at byte {} of {} "
+                      "(as f32: now {} vs snapshot {})", off, sizeof(now), fa, fb);
+        return reject(3, "sky/sun changed");
+    }
+
+    // Excusing the clock is not the same as ignoring the clouds. A drifting layer really does change
+    // how much sky reaches the ground, so the bake is allowed to go stale by a bounded amount rather
+    // than indefinitely: past this, the sky counts as changed after all. Only when there are clouds
+    // to drift -- a clear sky holds its bake for as long as nothing else moves.
+    constexpr f32 kGiCloudStaleSeconds = 2.0f;
+    if (now.cloudsEnabled && cloudTimeDelta > kGiCloudStaleSeconds) return reject(5, "clouds drifted");
     if (giDrawsKey() != giDrawsKey_) return reject(4, "draw list changed");
     return true;
 }
