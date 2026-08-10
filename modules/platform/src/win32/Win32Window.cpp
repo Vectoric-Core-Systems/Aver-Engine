@@ -209,8 +209,23 @@ bool Window::create(const WindowDesc& desc) {
 
     const std::wstring title = utf8ToWide(desc.title);
 
+    // WS_EX_NOACTIVATE on a non-interactive run: a capture or gate window must never take the
+    // keyboard focus away from whatever the person is actually doing.
+    //
+    // SW_SHOWNOACTIVATE ALONE WAS NOT ENOUGH, which is the part worth writing down. It stops the
+    // window taking FOCUS, but a freshly shown top-level window still lands at the top of the
+    // Z-ORDER -- so it sits in front of the editor, unfocused, and has to be clicked away. The
+    // ex-style stops the activation; the HWND_BOTTOM push after ShowWindow below stops the
+    // stacking. Both are needed.
+    //
+    // NOT WS_EX_TOOLWINDOW, tempting as it is for keeping this out of the taskbar: a tool window
+    // has a different caption height, AdjustWindowRect would hand back a different client size,
+    // and every recorded gate probe is a pixel at a fixed rect in that client area. Keeping the
+    // frame byte-identical between interactive and capture runs is what makes the two comparable.
+    const DWORD exStyle = desc.activate ? 0 : WS_EX_NOACTIVATE;
+
     HWND hwnd = CreateWindowExW(
-        0, kClassName, title.c_str(), style,
+        exStyle, kClassName, title.c_str(), style,
         CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top,
         nullptr, nullptr, inst, this);
 
@@ -244,6 +259,11 @@ bool Window::create(const WindowDesc& desc) {
     }
 
     ShowWindow(hwnd, desc.activate ? SW_SHOW : SW_SHOWNOACTIVATE);
+    // Push a capture window to the BOTTOM of the stack. SWP_NOMOVE|SWP_NOSIZE is load-bearing: the
+    // centring SetWindowPos above already placed it, and a gate probe is a pixel at a fixed rect in
+    // a client area of a fixed size, so this call may change the Z order and nothing else.
+    if (!desc.activate)
+        SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     UpdateWindow(hwnd);
     AVER_INFO("[Platform] window '{}' {}x{} created", desc.title, desc.width, desc.height);
     return true;
