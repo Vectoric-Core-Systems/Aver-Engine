@@ -81,6 +81,15 @@ if(TARGET Aver.Trifactor)
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# Guarded on the target for the same reason as Trifactor above: -DAVER_MODULE_UPGRADE=OFF is a
+# configuration the matrix checks, and it has to keep configuring even though this test cannot exist.
+if(TARGET Aver.Upgrade)
+  add_executable(UpgradeTest src/UpgradeTest.cpp)
+  target_link_libraries(UpgradeTest PRIVATE Aver.Upgrade Aver.Core Aver.Platform)
+  set_target_properties(UpgradeTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # MaterialTest — the .ocmat reader/writer and the mip filter. A SECOND executable rather than more
 # cases in FormatTest, because it is the only one that needs the material DLL: a machine where
 # Aver.Render.PBR.dll fails to load would otherwise report the .ocbeam parser as broken.

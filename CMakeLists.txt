@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(AverEngine VERSION 0.1.2 LANGUAGES C CXX RC)
+project(AverEngine VERSION 0.2.0 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # Aver Engine — permissively-licensed, modular 3D engine (see docs/ARCHITECTURE.md).
@@ -58,7 +58,7 @@ set_property(CACHE AVER_EDITION PROPERTY STRINGS standard slim full)
 # so an explicit -DAVER_MODULE_X=OFF on the command line still wins over the edition.
 # One command per line: CMake has no statement separator, so two set()s on one line is a parse
 # error, not a style question.
-macro(_aver_edition_defaults voxi pbr scripting scene framework physics landscape deform trifactor sr mcp)
+macro(_aver_edition_defaults voxi pbr scripting scene framework physics landscape deform trifactor sr mcp upgrade)
   set(_ed_VOXI      ${voxi})
   set(_ed_PBR       ${pbr})
   set(_ed_SCRIPTING ${scripting})
@@ -70,17 +70,18 @@ macro(_aver_edition_defaults voxi pbr scripting scene framework physics landscap
   set(_ed_TRIFACTOR ${trifactor})
   set(_ed_SR        ${sr})
   set(_ed_MCP       ${mcp})
+  set(_ed_UPGRADE   ${upgrade})
 endmacro()
 
 if(AVER_EDITION STREQUAL "slim")
   # The smallest thing that still runs a game: scene, gameplay, materials, physics, terrain.
   # No voxel GI, no geometry cooking, no sub-bone deformation, no upscaler.
-  _aver_edition_defaults(OFF ON ON ON ON ON ON OFF OFF OFF OFF)
+  _aver_edition_defaults(OFF ON ON ON ON ON ON OFF OFF OFF OFF ON)
 elseif(AVER_EDITION STREQUAL "full")
   # Everything, including the editor control channel that standard deliberately leaves out.
-  _aver_edition_defaults(ON ON ON ON ON ON ON ON ON ON ON)
+  _aver_edition_defaults(ON ON ON ON ON ON ON ON ON ON ON ON)
 elseif(AVER_EDITION STREQUAL "standard")
-  _aver_edition_defaults(ON ON ON ON ON ON ON ON ON ON OFF)
+  _aver_edition_defaults(ON ON ON ON ON ON ON ON ON ON OFF ON)
 else()
   message(FATAL_ERROR "AVER_EDITION '${AVER_EDITION}' is not a known edition (standard, slim, full)")
 endif()
@@ -92,7 +93,7 @@ endif()
 # deliberate -DAVER_MODULE_X=OFF on a later configure of the SAME edition is still respected.
 if(DEFINED AVER_EDITION_APPLIED AND NOT AVER_EDITION_APPLIED STREQUAL AVER_EDITION)
   message(STATUS "Aver: edition ${AVER_EDITION_APPLIED} -> ${AVER_EDITION}, re-deriving module set")
-  foreach(m VOXI PBR SCRIPTING SCENE FRAMEWORK PHYSICS LANDSCAPE DEFORM TRIFACTOR SR MCP)
+  foreach(m VOXI PBR SCRIPTING SCENE FRAMEWORK PHYSICS LANDSCAPE DEFORM TRIFACTOR SR MCP UPGRADE)
     set(AVER_MODULE_${m} ${_ed_${m}} CACHE BOOL "" FORCE)
   endforeach()
 endif()
@@ -132,6 +133,10 @@ option(AVER_MODULE_SR "AverSR upscaler implementations: the built-in spatial res
 # editor that can be driven over a socket unless they asked for it. Even built, it listens only when the
 # app is told to with --mcp.
 option(AVER_MODULE_MCP "Editor control channel over loopback (debugging aid, not needed to run)" ${_ed_MCP})
+# Upgrade: the project migration chain. ON in every edition, including slim -- an engine that
+# cannot open a project made by an older build of itself is not a smaller engine, it is a broken
+# one. Optional only so the matrix can prove the editor still builds and runs without it.
+option(AVER_MODULE_UPGRADE "Project migration chain: upgrade a project from the version it was made in" ${_ed_UPGRADE})
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -184,6 +189,12 @@ endif()
 # Trifactor, beside Deform for the same reason: it needs only Core + Formats and is optional.
 if(AVER_MODULE_TRIFACTOR)
   add_subdirectory(modules/trifactor)
+endif()
+# Upgrade: the project migration chain, from the engine version a project was made in to this one.
+# Needs only Core -- a step edits files on a path it is handed and never sees the manifest struct --
+# so it sits here with the other leaf modules.
+if(AVER_MODULE_UPGRADE)
+  add_subdirectory(modules/upgrade)
 endif()
 # Landscape, above formats because it reads .ocland through it and below anything that draws. The
 # renderer half is a separate target and is not built yet, which is why this needs no RHI.
