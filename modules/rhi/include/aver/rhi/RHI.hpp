@@ -254,6 +254,21 @@ public:
     virtual void addRenderFeature(IRenderFeature* f) { (void)f; }
     virtual void removeRenderFeature(IRenderFeature* f) { (void)f; }
 
+    // The upscaler that turns the scene-resolution colour into the present-resolution image, or
+    // null for none -- which is the default and must stay bit-identical to a build with no upscaler
+    // module at all (docs/AVERSR.md's own invariant for quality Off).
+    //
+    // NON-OWNING, exactly like addRenderFeature above: the caller keeps it alive, and the composition
+    // root is the only place that knows a concrete type. That is what lets Aver.Render.Sr be linked
+    // by the HOST and by no engine module -- the rule docs/AVERSR.md states and modules/render.voxi
+    // already follows.
+    //
+    // A DEFAULTED NO-OP, so every other IDevice implementation compiles unchanged. The Vulkan
+    // backend implements this same interface and is mid-bring-up; a pure virtual here would break
+    // its build for a feature it does not yet have.
+    virtual void setUpscaler(IUpscaler* u) { (void)u; }
+    virtual IUpscaler* upscaler() const { return nullptr; }
+
     // The SCENE colour target's format, which a backend running a post chain does not present
     // directly. Pipelines drawing into the scene must match it.
     virtual Format backbufferFormat() const { return Format::Unknown; }

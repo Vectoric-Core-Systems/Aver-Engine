@@ -2876,9 +2876,27 @@ public:
     // Idempotent -- cheap to call every time the quality combo changes, not just once. See
     // logAverSrActive()'s comment for what constructing it does and does not buy today.
     void ensureAverSrUpscaler(rhi::IDevice* dev) {
-        if (!dev || averSrUpscaler_) return;
-        if (rhi::IResourceFactory* res = dev->resources())
-            averSrUpscaler_ = std::make_unique<aver::sr::SpatialUpscaler>(*res);
+        if (!dev) return;
+        if (!averSrUpscaler_) {
+            if (rhi::IResourceFactory* res = dev->resources())
+                averSrUpscaler_ = std::make_unique<aver::sr::SpatialUpscaler>(*res);
+        }
+        // HANDED TO THE DEVICE, which is the step that was missing: it was constructed, correct
+        // against the seam, and reachable from the editor -- and nothing ever called execute(),
+        // because IDevice had no slot to put it in. It does now.
+        //
+        // NULL WHEN Off, and that is the whole of how the bit-identical invariant is kept: the
+        // backend branches on upscaler() != nullptr, so Off takes the untouched single-pass
+        // composite path a build without this module would take.
+        //
+        // Non-owning on the device's side -- averSrUpscaler_ outlives it here, and the device is
+        // told nullptr before this object goes away (see clearAverSrUpscaler).
+        dev->setUpscaler(averSrQuality_ == aver::sr::Quality::Off ? nullptr : averSrUpscaler_.get());
+    }
+
+    // Detaches before destruction, so the device can never hold a dangling upscaler.
+    void clearAverSrUpscaler(rhi::IDevice* dev) {
+        if (dev) dev->setUpscaler(nullptr);
     }
 
     // Logs the [AverSR] brand-tag line docs/AVERSR.md's naming table specifies, plus the one honest
