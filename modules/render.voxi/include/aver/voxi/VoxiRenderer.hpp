@@ -372,6 +372,41 @@ private:
                   "cbuffer VoxiFrame in VoxiShaders.hpp mirrors this byte for byte");
     static_assert(sizeof(FrameConstants) % 16 == 0, "must be a legal constant-buffer size");
 
+    // ---- the GI rebuild gate: skip a revoxelisation whose result would be bit-identical ----
+    //
+    // giUpdateInterval AMORTISES the rebuild; it never removes one. At interval 4 a wholly static
+    // scene still pays the full ~108 ms of voxelizePass+filterMips every fourth frame to compute
+    // exactly what it computed last time, and at Epic (interval 1) it pays it every frame.
+    //
+    // This is the same trick buildGeometryTable already uses for the ray-tracing geometry table
+    // (see its `key == rtGeometryKey_` early-out): hash what the result depends on, and if nothing
+    // moved, keep the result. The volume texture is already resolved and mip-filtered and nothing
+    // has touched it, so reusing it is not an approximation -- it is the identical answer.
+    //
+    // WHY THIS AND NOT A STATIC/DYNAMIC SPLIT OR AN ON-DISK CACHE. Both were designed and both were
+    // rejected on correctness: PSVoxel bakes LIGHTING into each voxel (albedo * sun * visibility +
+    // sky), not material, so a static voxel's stored radiance goes stale when a DYNAMIC occluder
+    // moves through the sun's path over it -- which a static/dynamic split cannot see. An on-disk
+    // cache additionally has no readback path in this RHI and a key that includes the sun, which is
+    // a live editor slider. Gating the whole pass has neither problem: any change to the draw list,
+    // the sun, or the volume placement changes the comparison and falls straight through to the
+    // existing, already-correct full rebuild. It can only ever skip work whose output is identical.
+    //
+    // WHAT IT DOES NOT BUY: a camera streaming new chunks, or someone dragging the time-of-day
+    // slider, changes the inputs every tick and gets exactly today's behaviour. The win is real
+    // only while the scene is actually still, which for an editor is most of the time.
+    bool giSnapshotUnchanged() const;
+    void takeGiSnapshot();
+    u64 giDrawsKey() const;
+
+    u64 giDrawsKey_ = 0;
+    rhi::SkyAtmosphere giSky_{};
+    f32 giSnapCenter_[3] = {};
+    f32 giSnapExtent_ = -1.0f;   // negative = no snapshot yet, so the first tick always rebuilds
+    bool giSnapValid_ = false;
+    u64 giSkipped_ = 0, giRebuilt_ = 0;   // for the one-time report; counts, not impressions
+    bool giGateLogged_ = false;
+
     // Builds this frame's cascade matrices and splits. Returns the usable cascade count, 0 if none.
     u32 fitCascades();
     // Builds the GI-only shadow map's matrix, fitted to the GI volume. Writes cb_.giShadowViewProj/

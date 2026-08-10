@@ -458,14 +458,34 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
         // rebuilt. giUpdateInterval_ == 1 (the default) takes the fast path every frame, identical to
         // the code before this knob existed.
         if (giUpdateInterval_ <= 1 || ((rtFrameIndex_ - 1) % giUpdateInterval_) == 0) {
-            // BEFORE voxelizePass, and inside this gate on purpose. PSVoxel samples the GI-only map
-            // through giShadowFactor, so it has to exist before injection reads it -- and it is
-            // pointless to rebuild on the frames injection is skipped, which is 3 in 4 at the
-            // default interval. That cadence is half the saving; the other half is that the camera
-            // cascades no longer carry the volume at all (see fitCascades).
-            giShadowPass(ctx);
-            voxelizePass(ctx);
-            filterMips(ctx);
+            // THE REBUILD GATE. Everything below recomputes a function of (draw list, sun, volume
+            // placement); when none of those moved, the volume texture already holds the answer and
+            // is still sitting there fully resolved and mip-filtered. See giSnapshotUnchanged.
+            if (giSnapshotUnchanged()) {
+                ++giSkipped_;
+            } else {
+                ++giRebuilt_;
+                takeGiSnapshot();
+                // BEFORE voxelizePass, and inside this gate on purpose. PSVoxel samples the GI-only
+                // map through giShadowFactor, so it has to exist before injection reads it -- and it
+                // is pointless to rebuild on the frames injection is skipped, which is 3 in 4 at the
+                // default interval. That cadence is half the saving; the other half is that the
+                // camera cascades no longer carry the volume at all (see fitCascades).
+                giShadowPass(ctx);
+                voxelizePass(ctx);
+                filterMips(ctx);
+            }
+            // Said ONCE, and as a ratio rather than a feeling: "GI rebuilt 3 of 170 ticks" is the
+            // difference between this gate paying for itself and it being a hash walk that never
+            // hits. A run that reports 100% rebuilt is a run where the saving is zero, and that is
+            // worth seeing rather than assuming.
+            if (!giGateLogged_ && (giSkipped_ + giRebuilt_) >= 64) {
+                giGateLogged_ = true;
+                AVER_INFO("[Voxi] GI rebuild gate (once): {} rebuilt, {} skipped of {} update tick(s) "
+                          "-- {}% of revoxelisations avoided",
+                          giRebuilt_, giSkipped_, giSkipped_ + giRebuilt_,
+                          (giSkipped_ * 100) / (giSkipped_ + giRebuilt_));
+            }
         }
     }
     endShadowHistory();
@@ -602,6 +622,67 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
 
 // Builds one orthographic light frustum per cascade, fitted to a slice of the camera's view, and
 // writes the matrices and splits into cb_. Returns the usable cascade count, 0 if there is no camera.
+// An order-sensitive hash of what voxelizePass would rasterise: every draw's mesh and its full
+// world transform. Deliberately the same FNV-style mix buildGeometryTable uses over rtInstanceMesh_,
+// and deliberately order-sensitive -- a reordered draw list produces a different injection order
+// into the atomic accumulator, so it is NOT the same result and must not be treated as one.
+//
+// The transform is hashed as its raw float BITS, not compared with a tolerance. A cache that
+// tolerates "almost the same" transform is a cache that shows the wrong lighting for a while and
+// then stops; either it is the identical input or it rebuilds.
+u64 VoxiRenderer::giDrawsKey() const {
+    u64 key = 1469598103934665603ull;
+    for (const Draw& d : drawsPrev_) {
+        key ^= static_cast<u64>(d.mesh);
+        key *= 1099511628211ull;
+        for (u32 i = 0; i < 16; ++i) {
+            u32 bits = 0;
+            std::memcpy(&bits, &d.world[i], sizeof(bits));
+            key ^= static_cast<u64>(bits);
+            key *= 1099511628211ull;
+        }
+        // Colour and metallic/roughness reach PSVoxel through the object constants and land in the
+        // baked radiance, so a material tweak with no movement must still rebuild.
+        for (u32 i = 0; i < 4; ++i) {
+            u32 bits = 0;
+            std::memcpy(&bits, &d.color[i], sizeof(bits));
+            key ^= static_cast<u64>(bits);
+            key *= 1099511628211ull;
+        }
+        u32 mb = 0, rb = 0;
+        std::memcpy(&mb, &d.metallic, sizeof(mb));
+        std::memcpy(&rb, &d.roughness, sizeof(rb));
+        key ^= (static_cast<u64>(mb) << 32) ^ static_cast<u64>(rb);
+        key *= 1099511628211ull;
+    }
+    return key;
+}
+
+// True when every input to voxelizePass is identical to the last rebuild's.
+bool VoxiRenderer::giSnapshotUnchanged() const {
+    if (!giSnapValid_) return false;
+    if (giSnapExtent_ != extent_) return false;
+    for (u32 i = 0; i < 3; ++i) if (giSnapCenter_[i] != center_[i]) return false;
+    // The whole sky struct, byte for byte. It is where sunDirection, sunColor, sunIntensity, the
+    // ground albedo and the sky-light intensity all live, and PSVoxel reads every one of them
+    // (directly, or through averSunRadiance/averSkyIrradiance). Comparing the bytes rather than a
+    // chosen subset of fields is what keeps this correct when a field is ADDED to SkyAtmosphere --
+    // a hand-picked field list would silently stop covering the new one.
+    if (!dev_) return false;
+    const rhi::SkyAtmosphere now = dev_->skyAtmosphere();
+    if (std::memcmp(&now, &giSky_, sizeof(now)) != 0) return false;
+    return giDrawsKey() == giDrawsKey_;
+}
+
+// Records what the rebuild about to run was computed from.
+void VoxiRenderer::takeGiSnapshot() {
+    giDrawsKey_ = giDrawsKey();
+    if (dev_) giSky_ = dev_->skyAtmosphere();
+    for (u32 i = 0; i < 3; ++i) giSnapCenter_[i] = center_[i];
+    giSnapExtent_ = extent_;
+    giSnapValid_ = true;
+}
+
 u32 VoxiRenderer::fitCascades() {
     f32 invViewProj[16] = {};
     f32 camPos[3] = {};
@@ -1478,6 +1559,27 @@ bool VoxiRenderer::createPipelines() {
     // RHIResources.hpp for why this can't be shared any other way). Optional: shadowPass() falls
     // back to shadowPso_'s one-draw-per-instance path if this failed to build.
     const std::string instDefs = rasterDefs(("AVER_INSTANCE_SRV=" + std::to_string(rhi::declaredSrvCount(gi))).c_str());
+    // SM 6.0 AND DXC, OR NO INSTANCED SHADOWS AT ALL. This gate is a bug fix, not caution.
+    //
+    // The instanced path feeds per-instance transforms through a StructuredBuffer indexed by
+    // SV_InstanceID. Under the FXC / SM 5.1 fallback (--force-caps no-dxc) that entry point still
+    // COMPILES -- so shadowInstancedPso_ came back non-zero and shadowPass took the instanced branch
+    // -- but the per-instance transforms did not arrive, every shadow caster rasterised with a
+    // garbage world matrix, and the shadow simply was not where the geometry was.
+    //
+    // It failed silently and it failed as a picture, not as an error: the gate oracle caught it as
+    // `shadow` reading 90,85,80 against a recorded 23,27,32, i.e. a shadowed floor pixel that had
+    // become exactly as bright as the sunlit one, and the invariant "shadow/sunlit must bracket the
+    // lighting" is what named it. Nothing logged, nothing crashed.
+    //
+    // shadowPass already falls back to shadowPso_'s one-draw-per-instance path whenever this handle
+    // is 0, so refusing to build it here is the whole fix -- the SM 5.1 path goes back to exactly
+    // what it did before instancing existed.
+    const bool instancedShadowsOk = caps_.shaderModel >= 60 && caps_.dxcAvailable;
+    if (!instancedShadowsOk)
+        AVER_INFO("[Voxi] instanced shadows off (SM {}, DXC {}); using one draw per instance",
+                  caps_.shaderModel, caps_.dxcAvailable ? "yes" : "no");
+    if (instancedShadowsOk)
     if (const rhi::ShaderHandle vsInst = compile("VSShadowInstanced", rhi::ShaderStage::Vertex, kBaseSm, instDefs.c_str())) {
         rhi::GraphicsPipelineDesc p;
         p.vs = vsInst;
@@ -1491,7 +1593,7 @@ bool VoxiRenderer::createPipelines() {
         p.slopeScaledDepthBias = 1.5f;
         shadowInstancedPso_ = res_->createGraphicsPipeline(p);
     }
-    if (!shadowInstancedPso_)
+    if (!shadowInstancedPso_ && instancedShadowsOk)
         AVER_WARN("[Voxi] instanced shadow pipeline unavailable; shadowPass falls back to one draw per instance");
 
     // --- 1c. the GI-only depth pass, plain and instanced. Same pipeline state as the cascade pair
@@ -1512,6 +1614,7 @@ bool VoxiRenderer::createPipelines() {
         p.slopeScaledDepthBias = 1.5f;
         giShadowPso_ = res_->createGraphicsPipeline(p);
     }
+    if (instancedShadowsOk)
     if (const rhi::ShaderHandle vsGiInst = compile("VSGiShadowInstanced", rhi::ShaderStage::Vertex,
                                                    kBaseSm, instDefs.c_str())) {
         rhi::GraphicsPipelineDesc p;
