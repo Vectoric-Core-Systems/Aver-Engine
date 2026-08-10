@@ -34,6 +34,13 @@ cbuffer VoxiFrame : register(b4) {
     // here, not at [0,1] of the whole history texture -- the editor docks the 3D view in a sub-rect
     // of the backbuffer. Same validity as gPrevViewProj.
     float4   gSceneViewport;
+    // The GI-ONLY shadow map's light view-projection: one box fitted to the GI VOLUME, not to the
+    // camera. Read only by giShadowFactor (PSVoxel); the cascades above stay camera-fitted and are
+    // what PSMainVoxi samples.
+    float4x4 gGiShadowViewProj;
+    // x = 1/kGiShadowSize, y = 1 once the GI-only map is usable (0 = fall back to unshadowed
+    // indirect), z = normal-offset bias in world units, w unused.
+    float4   gGiShadowParams;
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -52,6 +59,11 @@ RWTexture3D<uint> gVoxelAccum : register(u1);
 // Directional shadow map. Core feature level 11_0, so it works on every DX12 GPU.
 Texture2D<float>          gShadowTex  : register(t1);
 SamplerComparisonState    gShadowSamp : register(s1);
+
+// The GI-only shadow map. OUTSIDE the AVER_RT guard below on purpose: its only reader is PSVoxel,
+// which is compiled without ray tracing, so a declaration inside the guard would vanish exactly
+// where it is needed. Shares gShadowSamp -- same comparison state, different texture.
+Texture2D<float>          gGiShadowTex : register(t8);
 
 #if AVER_RT
 // DXR 1.1 inline ray tracing: traced from the pixel shader, no state objects or binding tables.
@@ -577,6 +589,42 @@ float shadowFactor(float3 wpos, float3 N, float ndl) {
     return 1.0;
 }
 
+// Sun visibility for LIGHT INJECTION, from the GI-only shadow map.
+//
+// A SEPARATE FUNCTION FROM shadowFactor BECAUSE IT ANSWERS A DIFFERENT QUESTION. shadowFactor asks
+// "is this PIXEL in shadow", picks a cascade by distance from the CAMERA, and fades out past the
+// last one -- all correct for something being drawn on screen. A voxel is not on screen. It exists
+// wherever the GI volume is, the volume does not move with the camera, and a voxel the camera is
+// not looking at must still be shadowed correctly or the bounce light it contributes is wrong.
+//
+// Feeding voxels through the cascades is what forced fitCascades to union its last cascade with the
+// whole GI volume, which cost ~14x the area and handed that cascade every draw in the scene. One box
+// over the volume answers it directly: no cascade selection, no camera distance, no fade.
+float giShadowFactor(float3 wpos, float3 N, float ndl) {
+    // Unusable map: fully lit. The volume is still injected, just without sun occlusion -- the same
+    // degradation shadowFactor performs when the atlas is missing, and the reason giShadowTex_ is a
+    // soft dependency rather than an init() failure.
+    if (gGiShadowParams.y < 0.5) return 1.0;
+
+    float slope = saturate(1.0 - ndl);
+    float3 p0 = wpos + N * (gGiShadowParams.z * (1.0 + slope));
+
+    float4 lp = mul(float4(p0, 1.0), gGiShadowViewProj);
+    float3 p = lp.xyz / lp.w;
+    float2 uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+    // OUTSIDE THE BOX IS LIT, NOT SHADOWED. The box covers the whole GI volume by construction, so
+    // landing outside it means the voxel is outside the volume too and its radiance is never read.
+    if (any(uv < 0.0) || any(uv > 1.0) || p.z > 1.0 || p.z < 0.0) return 1.0;
+
+    // No atlas quadrant to inset into: this map is one box filling the whole texture.
+    float t = gGiShadowParams.x;
+    float s = 0.0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x)
+        s += gGiShadowTex.SampleCmpLevelZero(gShadowSamp, uv + float2(x, y) * t, p.z);
+    return s / 9.0;
+}
+
 // Mip level being read by CSMip (b3: b0/b1 are taken by the graphics root signature).
 cbuffer MipCB : register(b3) { uint gSrcMip; uint3 _mipPad; };
 
@@ -719,6 +767,22 @@ float4 VSShadowInstanced(VSIn i, uint instanceID : SV_InstanceID) : SV_POSITION 
 }
 #endif
 
+// The same depth-only pair again, for the GI-ONLY shadow map. Identical to VSShadow/
+// VSShadowInstanced except that they transform into gGiShadowViewProj -- one box over the GI
+// volume -- rather than into a cascade selected by gShadowDraw.x. Separate entry points rather than
+// a branch because the matrix is picked at pipeline level, not per draw, and a depth-only vertex
+// shader is far too hot to spend a dynamic index on.
+float4 VSGiShadow(VSIn i) : SV_POSITION {
+    return mul(mul(float4(i.pos, 1.0), gWorld), gGiShadowViewProj);
+}
+
+#ifdef AVER_INSTANCE_SRV
+float4 VSGiShadowInstanced(VSIn i, uint instanceID : SV_InstanceID) : SV_POSITION {
+    float4x4 world = gInstanceWorlds[instanceID];
+    return mul(mul(float4(i.pos, 1.0), world), gGiShadowViewProj);
+}
+#endif
+
 // ================= Voxi: voxelisation =================
 // The scene is rasterised once per frame with no render target; the pixel shader writes lit
 // radiance straight into the volume.
@@ -819,7 +883,8 @@ void PSVoxel(VoxOut i) {
     AverLight sun;
     sun.direction  = L;
     sun.radiance   = averSunRadiance();
-    sun.visibility = shadowFactor(i.wpos, N, ndl);
+    // THE GI-ONLY MAP, not the cascades -- see giShadowFactor for why a voxel cannot use them.
+    sun.visibility = giShadowFactor(i.wpos, N, ndl);
     AverSurface s = averEvalMaterial(voxelVertexOf(i), sun);
     float3 albedo = averDiffuseAlbedo(s);
     // Exitant radiance, not radiosity: the sun term is an irradiance so it takes the 1/PI, the sky

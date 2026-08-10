@@ -128,6 +128,8 @@ private:
     bool createScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth);
     // Renders the replayed draw list into each cascade of the shadow atlas.
     void shadowPass(rhi::IRenderContext& ctx);
+    // The GI-only depth pass: one box over the GI volume, run on the frames voxelizePass runs.
+    void giShadowPass(rhi::IRenderContext& ctx);
     // Builds a BLAS per referenced mesh and one TLAS over the replayed draw list.
     void buildAccelerationStructures(rhi::IRenderContext& ctx);
     // Clears the accumulator, rasterises the scene into the volume with direct light, resolves it.
@@ -149,6 +151,16 @@ private:
     // VoxiShaders.hpp. 0 on a device/shader-compile combination that couldn't build it; shadowPass()
     // then falls back to shadowPso_'s one-draw-per-instance path automatically.
     rhi::PipelineHandle shadowInstancedPso_ = 0;
+
+    // The GI-only shadow map: one box fitted to the GI VOLUME, never the camera, so the cascades
+    // above are free to stay fitted to what the camera can actually see. Rendered on exactly the
+    // frames voxelizePass runs, because PSVoxel is its only reader.
+    //
+    // A ZERO HANDLE IS A SOFT FAILURE, matching shadowInstancedPso_ above: giShadowFactor falls back
+    // to fully-lit indirect rather than failing init(). Wrong-but-running beats a dead renderer for
+    // a term that only affects bounce light.
+    rhi::TextureHandle  giShadowTex_ = 0;
+    rhi::PipelineHandle giShadowPso_ = 0, giShadowInstancedPso_ = 0;
 
     // Radiance volume: RGBA16F Tex3D, full mip chain. Mip N is the cone footprint at distance N.
     rhi::TextureHandle  voxelTex_ = 0;
@@ -305,6 +317,9 @@ private:
     // at the reset for why clearing `worlds` (not erasing the group) is what makes that stick.
     struct ShadowInstanceGroup { rhi::MeshHandle mesh = 0; std::vector<f32> worlds; };
     std::vector<ShadowInstanceGroup> shadowInstanceGroups_;
+    // The same grouping for the GI-only pass. Its own vector rather than a shared scratch buffer:
+    // giShadowPass and shadowPass run in the same frame and would otherwise stamp on each other.
+    std::vector<ShadowInstanceGroup> giShadowInstanceGroups_;
 
     f32 center_[3] = {0, 0, 0};
     f32 extent_ = 2000.0f;
@@ -339,10 +354,33 @@ private:
         // The reprojected NDC lands in THIS rect, not at [0,1] of the whole history texture: the
         // editor docks the 3D view in a sub-rect of the backbuffer, same as prevViewProj above.
         f32 sceneViewport[4] = {};
+        // The GI-only shadow map's light view-projection, fitted to the GI volume rather than the
+        // camera -- see fitGiShadow(). Read only by PSVoxel through giShadowFactor(); PSMainVoxi
+        // keeps using cascadeViewProj/shadowFactor above for the camera cascades.
+        f32 giShadowViewProj[16] = {};
+        // x = 1/kGiShadowSize, y = 1 once the GI-only map is usable at all (0 falls back to
+        // fully-lit indirect), z = normal-offset bias in world units, w unused.
+        f32 giShadowParams[4] = {};
     } cb_;
+
+    // THE MIRROR THIS FILE HAS ALWAYS HAD AND NEVER GUARDED. `cbuffer VoxiFrame : register(b4)` in
+    // VoxiShaders.hpp repeats every field above by hand, and nothing checked that the two agreed --
+    // the same unguarded-mirror bug already fixed for PathTracer's FrameCB and PcgVolume's VolumeCB.
+    // VoxiFrame was simply the one that never got the assert. Appending here without appending there
+    // reads garbage off the end of the block in every Voxi shader at once.
+    static_assert(sizeof(FrameConstants) == 576,
+                  "cbuffer VoxiFrame in VoxiShaders.hpp mirrors this byte for byte");
+    static_assert(sizeof(FrameConstants) % 16 == 0, "must be a legal constant-buffer size");
 
     // Builds this frame's cascade matrices and splits. Returns the usable cascade count, 0 if none.
     u32 fitCascades();
+    // Builds the GI-only shadow map's matrix, fitted to the GI volume. Writes cb_.giShadowViewProj/
+    // giShadowParams and the cull sphere below.
+    void fitGiShadow();
+    // The GI-only map's own world-space bounding sphere, for giShadowPass's per-draw cull. Separate
+    // from cascadeCentre_/cascadeRadius_ because after this change those are PURELY camera-fitted.
+    f32 giShadowCentre_[3] = {};
+    f32 giShadowRadius_ = 0.0f;
     // Per-cascade world-space bounding sphere, filled in by fitCascades and read by shadowPass to
     // skip a draw in a cascade its own bounds cannot reach. Sized like cb_.cascadeSplit above --
     // kShadowCascades is private to the .cpp, so this repeats its value (4) rather than reach for it.

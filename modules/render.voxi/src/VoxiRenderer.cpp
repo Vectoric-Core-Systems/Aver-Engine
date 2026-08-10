@@ -27,6 +27,21 @@ constexpr u32 kShadowCascadeSize = 2048;
 constexpr u32 kShadowSize        = kShadowCascadeSize * 2;   // 2x2 atlas
 static_assert(kShadowCascades == 4, "the atlas below is laid out as 2x2");
 
+// The GI-only shadow map: ONE box fitted to the GI volume, never to the camera.
+//
+// IT EXISTS SO THE CASCADES DO NOT HAVE TO SERVE TWO MASTERS. Light injection (PSVoxel) samples a
+// shadow map for every voxel it writes, and the voxel volume is not tied to the camera -- so
+// fitCascades() used to UNION the last cascade with the GI volume to cover it. Measured, that made
+// cascade 3's radius 36,744cm against a camera-fitted 9,923cm: 3.7x wider, ~14x the area, and the
+// per-cascade cull then admitted EVERY draw into it (census [3, 4, 5, 27]) on every single frame.
+// It also cost the visible shadows, since a cascade stretched over the whole GI volume spends its
+// texels there instead of on what the camera can see.
+//
+// 1024 because it feeds a voxel grid that is 128 across at the Medium default (512 at Epic) -- 8
+// texels per voxel edge, 2 at Epic. It is 1/16 the texels of the cascade atlas, and it renders only
+// on the frames voxelizePass itself runs (giUpdateInterval, 4 by default) rather than every frame.
+constexpr u32 kGiShadowSize = 1024;
+
 // Cascade split blend: 0 is uniform slabs, 1 is logarithmic (equal ratios).
 constexpr f32 kCascadeSplitLambda = 0.85f;
 
@@ -59,10 +74,14 @@ rhi::PipelineLayout giLayout() {
     rhi::PipelineLayout l{};
     // t0 volume, t1 shadow map, t2 acceleration structure, then the flat geometry a reflection
     // ray reads after a hit: t3 vertices, t4 indices, t5 instances, t6 ray-traced shadow history,
-    // t7 ray-traced reflection history (both last frame's, reprojected). The material table is
-    // BASED on this count rather than at a fixed register, so widening table 0 rebases it
-    // automatically.
-    l.srvCount = 8;
+    // t7 ray-traced reflection history (both last frame's, reprojected), t8 the GI-only shadow map.
+    // The material table is BASED on this count rather than at a fixed register, so widening table 0
+    // rebases it automatically.
+    //
+    // THIS NUMBER IS TYPED TWICE. createVoxelVolume's BindingSetDesc::srvCount must match it exactly,
+    // and nothing at compile time ties the two together -- a mismatch is a descriptor-table error at
+    // draw time or an undefined read at t8, not a build failure. Both were raised 8 -> 9 together.
+    l.srvCount = 9;
     l.uavCount = 4;              // u0 volume mip 0, u1 injection accumulator, u2 shadow history, u3 reflection history (this frame's)
     l.srvCount1 = pbr::kMaterialSrvCount;   // table 1: the material's textures, based at t3
     l.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
@@ -209,17 +228,20 @@ void VoxiRenderer::shutdown() {
     if (bindings_)      res_->destroyBindingSet(bindings_);
     resolveBindings_ = clearBindings_ = bindings_ = 0;
 
-    const rhi::PipelineHandle psos[] = {shadowPso_, voxelPso_, voxelMsPso_, mipPso_, clearPso_,
-                                        resolvePso_, debugPso_, scenePso_, sceneMsPso_, sceneRtPso_,
-                                        sceneMsRtPso_};
+    const rhi::PipelineHandle psos[] = {shadowPso_, shadowInstancedPso_, giShadowPso_,
+                                        giShadowInstancedPso_, voxelPso_, voxelMsPso_, mipPso_,
+                                        clearPso_, resolvePso_, debugPso_, scenePso_, sceneMsPso_,
+                                        sceneRtPso_, sceneMsRtPso_};
     for (rhi::PipelineHandle p : psos) if (p) res_->destroyPipeline(p);
-    shadowPso_ = voxelPso_ = voxelMsPso_ = mipPso_ = clearPso_ = resolvePso_ = debugPso_ = 0;
+    shadowPso_ = shadowInstancedPso_ = giShadowPso_ = giShadowInstancedPso_ = 0;
+    voxelPso_ = voxelMsPso_ = mipPso_ = clearPso_ = resolvePso_ = debugPso_ = 0;
     scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
 
     if (voxelAccumTex_) res_->destroyTexture(voxelAccumTex_);
     if (voxelTex_)  res_->destroyTexture(voxelTex_);
     if (shadowTex_) res_->destroyTexture(shadowTex_);
-    voxelAccumTex_ = voxelTex_ = shadowTex_ = 0;
+    if (giShadowTex_) res_->destroyTexture(giShadowTex_);
+    voxelAccumTex_ = voxelTex_ = shadowTex_ = giShadowTex_ = 0;
 
     // Acceleration structures are released with the factory itself: only the handles are dropped.
     blas_.clear();
@@ -436,6 +458,12 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
         // rebuilt. giUpdateInterval_ == 1 (the default) takes the fast path every frame, identical to
         // the code before this knob existed.
         if (giUpdateInterval_ <= 1 || ((rtFrameIndex_ - 1) % giUpdateInterval_) == 0) {
+            // BEFORE voxelizePass, and inside this gate on purpose. PSVoxel samples the GI-only map
+            // through giShadowFactor, so it has to exist before injection reads it -- and it is
+            // pointless to rebuild on the frames injection is skipped, which is 3 in 4 at the
+            // default interval. That cadence is half the saving; the other half is that the camera
+            // cascades no longer carry the volume at all (see fitCascades).
+            giShadowPass(ctx);
             voxelizePass(ctx);
             filterMips(ctx);
         }
@@ -614,9 +642,6 @@ u32 VoxiRenderer::fitCascades() {
     }
     const Vec3 up = std::fabs(dir.z) > 0.95f ? Vec3{1, 0, 0} : Vec3{0, 0, 1};
 
-    const Vec3 volCentre{center_[0], center_[1], center_[2]};
-    const f32 volRadius = (extent_ > 1.0f ? extent_ : 1.0f) * 1.7320508f;   // the box's circumsphere
-
     f32 sliceNear = zNear;
     for (u32 c = 0; c < kShadowCascades; ++c) {
         const f32 p = static_cast<f32>(c + 1) / static_cast<f32>(kShadowCascades);
@@ -643,22 +668,13 @@ u32 VoxiRenderer::fitCascades() {
         }
         radius = std::ceil(radius * 16.0f) / 16.0f;
 
-        // The last cascade takes the union with the GI volume: the voxelisation pass samples this
-        // same map for every voxel it injects, and the volume is not tied to the camera.
-        if (c == kShadowCascades - 1) {
-            const Vec3 delta = volCentre - centre;
-            const f32 d = delta.size();
-            if (d + volRadius > radius) {                 // the volume is not already inside
-                if (d + radius <= volRadius) {            // ...and the slice is inside the volume
-                    centre = volCentre;
-                    radius = volRadius;
-                } else {
-                    const f32 R = (radius + volRadius + d) * 0.5f;
-                    centre = centre + delta * ((R - radius) / (d > 1e-4f ? d : 1.0f));
-                    radius = R;
-                }
-            }
-        }
+        // NO UNION WITH THE GI VOLUME HERE ANY MORE. It used to widen this last cascade to cover the
+        // whole volume, because light injection sampled these same cascades. Measured on the
+        // ElectricDreams level that made cascade 3's radius 36,744cm against a camera-fitted
+        // 9,923cm -- 3.7x wider, ~14x the area -- so the per-cascade cull admitted every draw in
+        // the scene into it, every frame, and the cascade spent its texels on volume the camera
+        // cannot see. giShadowPass/fitGiShadow now answer the volume separately, and every cascade
+        // here is fitted to the camera and nothing else.
 
         // Persisted for shadowPass's per-draw cull: the same (centre, radius) this cascade's own
         // frustum and cb_.cascadeSplit are built from, before the sub-texel nudge below.
@@ -692,6 +708,55 @@ u32 VoxiRenderer::fitCascades() {
         sliceNear = sliceFar;
     }
     return kShadowCascades;
+}
+
+// Fits the GI-only shadow map to the GI VOLUME, and writes its matrix and cull sphere.
+//
+// This is the half of the old cascade union that was actually needed, extracted so it stops
+// distorting the camera cascades. Where fitCascades slices the view frustum and depends on where
+// the camera looks, this depends on nothing but setVolume(): the same box every frame the volume
+// does not move, which is also why it can be rebuilt on giUpdateInterval's cadence instead of
+// every frame.
+void VoxiRenderer::fitGiShadow() {
+    // The volume's circumsphere -- the same expression the deleted union used, so the box covers
+    // exactly what it always covered.
+    const Vec3 centre{center_[0], center_[1], center_[2]};
+    const f32 radius = (extent_ > 1.0f ? extent_ : 1.0f) * 1.7320508f;
+
+    giShadowCentre_[0] = centre.x; giShadowCentre_[1] = centre.y; giShadowCentre_[2] = centre.z;
+    giShadowRadius_ = radius;
+
+    Vec3 dir = Vec3{sunDir_[0], sunDir_[1], sunDir_[2]}.getSafeNormal();
+    if (dir.sizeSquared() < 0.5f) {
+        const rhi::SkyAtmosphere def{};
+        dir = Vec3{def.sunDirection[0], def.sunDirection[1], def.sunDirection[2]}.getSafeNormal();
+    }
+    const Vec3 up = std::fabs(dir.z) > 0.95f ? Vec3{1, 0, 0} : Vec3{0, 0, 1};
+
+    // Snapped to a whole texel in light space, exactly as the cascades are. The volume does not
+    // move with the camera, so this matters less here than it does there -- but the sun DOES move,
+    // and without the snap a slow sun turn makes every injected voxel's occlusion crawl.
+    const f32 texel = 2.0f * radius / static_cast<f32>(kGiShadowSize);
+    Mat4 view = Mat4::lookAtLH(centre + dir * (radius * 2.0f), centre, up);
+    Vec3 cLs = xformPoint(centre, view);
+    cLs.x = std::floor(cLs.x / texel) * texel;
+    cLs.y = std::floor(cLs.y / texel) * texel;
+    const Vec3 snapped = xformPoint(cLs, view.inverse());
+    view = Mat4::lookAtLH(snapped + dir * (radius * 2.0f), snapped, up);
+
+    Mat4 proj;   // orthographic, row-vector, depth [0,1] -- same form fitCascades builds
+    proj.m[0][0] = 1.0f / radius;
+    proj.m[1][1] = 1.0f / radius;
+    proj.m[2][2] = 1.0f / (radius * 4.0f);
+    proj.m[3][2] = 0.0f;
+    proj.m[3][3] = 1.0f;
+    const Mat4 lvp = view * proj;
+    std::memcpy(cb_.giShadowViewProj, &lvp.m[0][0], sizeof(lvp.m));
+
+    cb_.giShadowParams[0] = 1.0f / static_cast<f32>(kGiShadowSize);
+    cb_.giShadowParams[1] = 1.0f;          // usable; giShadowPass zeroes it when it cannot run
+    cb_.giShadowParams[2] = texel * 1.5f;  // normal-offset bias, world units
+    cb_.giShadowParams[3] = 0.0f;
 }
 
 // Concatenates every referenced mesh's vertices and indices into two flat buffers, and writes the
@@ -921,6 +986,82 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
     }
 
     ctx.textureBarrier(shadowTex_, rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderResource);
+    ctx.popMarker();
+}
+
+// Renders the GI-only shadow map: one box over the GI volume, for light injection alone.
+//
+// Called from prePass INSIDE the giUpdateInterval gate, so it runs on exactly the frames
+// voxelizePass runs -- 1 in 4 at the Medium default. That is the second half of the win: the old
+// arrangement rebuilt volume-wide shadow coverage every single frame, including the 3 in 4 on which
+// no voxel was re-injected and nothing read it.
+void VoxiRenderer::giShadowPass(rhi::IRenderContext& ctx) {
+    const bool useInstancing = giShadowInstancedPso_ != 0;
+    if ((!giShadowPso_ && !giShadowInstancedPso_) || drawsPrev_.empty()) {
+        cb_.giShadowParams[1] = 0.0f;   // unusable: giShadowFactor falls back to fully lit
+        return;
+    }
+    fitGiShadow();                       // sets giShadowParams[1] = 1 and the cull sphere
+
+    ctx.pushMarker("Voxi GI shadow");
+    ctx.textureBarrier(giShadowTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::DepthWrite);
+    ctx.setPipeline(useInstancing ? giShadowInstancedPso_ : giShadowPso_);
+    ctx.setBindingSet(bindings_);        // Tier 1: bind every declared table, read or not
+    ctx.setRenderTargets(nullptr, 0, giShadowTex_);
+    ctx.clearDepth(giShadowTex_, 1.0f);
+    ctx.setViewport(0, 0, kGiShadowSize, kGiShadowSize);
+    ctx.setScissor(0, 0, kGiShadowSize, kGiShadowSize);
+    // Depth-only, no pixel shader: material content is never read, so one binding satisfies Tier 1
+    // for every draw -- the same reasoning shadowPass states above.
+    ctx.setDrawBinding(materials_.fallbackBindingSet(), &materials_.fallbackConstants(),
+                       sizeof(pbr::MaterialConstants));
+    ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+
+    const Vec3 giCentre{giShadowCentre_[0], giShadowCentre_[1], giShadowCentre_[2]};
+
+    u32 submitted = 0;
+    if (useInstancing) {
+        for (ShadowInstanceGroup& g : giShadowInstanceGroups_) g.worlds.clear();
+        for (const Draw& d : drawsPrev_) {
+            // Culled against the VOLUME's sphere, never cascadeCentre_[3]/cascadeRadius_[3] -- those
+            // are camera-fitted now and have nothing to do with what the volume covers.
+            if (d.boundsRadius >= 0.0f && dist(Vec3{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]},
+                                                giCentre) > giShadowRadius_ + d.boundsRadius) continue;
+            ShadowInstanceGroup* group = nullptr;
+            for (ShadowInstanceGroup& g : giShadowInstanceGroups_)
+                if (g.mesh == d.mesh) { group = &g; break; }
+            if (!group) { giShadowInstanceGroups_.push_back({d.mesh, {}}); group = &giShadowInstanceGroups_.back(); }
+            const usize base = group->worlds.size();
+            group->worlds.resize(base + 16);
+            std::memcpy(group->worlds.data() + base, d.world, 16 * sizeof(f32));
+            ++submitted;
+        }
+        for (const ShadowInstanceGroup& g : giShadowInstanceGroups_) {
+            if (g.worlds.empty()) continue;
+            ctx.drawMeshInstanced(g.mesh, g.worlds.data(), static_cast<u32>(g.worlds.size() / 16));
+        }
+    } else {
+        for (const Draw& d : drawsPrev_) {
+            if (d.boundsRadius >= 0.0f && dist(Vec3{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]},
+                                                giCentre) > giShadowRadius_ + d.boundsRadius) continue;
+            f32 consts[rhi::kObjectConstantDwords]{};
+            std::memcpy(consts, d.world, 16 * sizeof(f32));
+            ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
+            ctx.drawMesh(d.mesh);
+            ++submitted;
+        }
+    }
+
+    static bool sGiCensusLogged = false;
+    if (!sGiCensusLogged) {
+        AVER_INFO("[Voxi] giShadowPass census (once): {} draws available, {} submitted into one "
+                  "{}^2 box of radius {:.0f}cm, every {} frame(s)",
+                  static_cast<u32>(drawsPrev_.size()), submitted, kGiShadowSize, giShadowRadius_,
+                  giUpdateInterval_);
+        sGiCensusLogged = true;
+    }
+
+    ctx.textureBarrier(giShadowTex_, rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderResource);
     ctx.popMarker();
 }
 
@@ -1181,6 +1322,19 @@ bool VoxiRenderer::createShadowResources() {
     d.debugName     = "Voxi shadow map";
     shadowTex_ = res_->createTexture(d);
     if (!shadowTex_) AVER_ERROR("[Voxi] shadow map {}^2 could not be created", kShadowSize);
+
+    // The GI-only map: same typeless DSV/SRV trick, same clear value, one box instead of a 2x2
+    // atlas -- so it needs a fraction of the texels. See kGiShadowSize.
+    d.width  = kGiShadowSize;
+    d.height = kGiShadowSize;
+    d.debugName = "Voxi GI shadow map";
+    giShadowTex_ = res_->createTexture(d);
+    if (!giShadowTex_)
+        AVER_WARN("[Voxi] GI-only shadow map {}^2 could not be created; indirect light will be "
+                  "injected unshadowed", kGiShadowSize);
+
+    // A WARNING, NOT A FAILURE, and only shadowTex_ gates the return. The GI map affects bounce
+    // light alone; losing it should degrade the picture, not refuse to start the renderer.
     return shadowTex_ != 0;
 }
 
@@ -1222,7 +1376,9 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
 
     // Main table. Each slot declares its kind because Tier 1 hardware null-fills by dimension.
     rhi::BindingSetDesc bd;
-    bd.srvCount = 8;
+    // 9, matching giLayout()'s l.srvCount exactly -- see the note there: these two literals are the
+    // only thing keeping table 0 consistent, and nothing checks them against each other.
+    bd.srvCount = 9;
     bd.uavCount = 4;
     bd.srvKinds[0] = rhi::SlotKind::Texture3D;              // t0 volume, whole chain
     bd.srvKinds[1] = rhi::SlotKind::Texture2D;              // t1 shadow map
@@ -1234,6 +1390,7 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     bd.srvKinds[5] = rhi::SlotKind::StructuredBuffer;       // t5 per-instance records
     bd.srvKinds[6] = rhi::SlotKind::Texture2D;              // t6 ray-traced shadow history (read)
     bd.srvKinds[7] = rhi::SlotKind::Texture2D;              // t7 ray-traced reflection history (read)
+    bd.srvKinds[8] = rhi::SlotKind::Texture2D;              // t8 GI-only shadow map
     bd.uavKinds[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
     bd.uavKinds[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
     bd.uavKinds[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
@@ -1242,6 +1399,7 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     if (!bindings_) { AVER_ERROR("[Voxi] main binding set could not be created"); return false; }
     res_->setSrv(bindings_, 0, voxelTex_, rhi::kAllMips);
     if (shadowTex_) res_->setSrv(bindings_, 1, shadowTex_);
+    if (giShadowTex_) res_->setSrv(bindings_, 8, giShadowTex_);   // t8, the GI-only shadow map
     res_->setUav(bindings_, 0, voxelTex_, 0);
     res_->setUav(bindings_, 1, voxelAccumTex_, 0);
     // t6/u2 (rtShadowHist_) and t7/u3 (rtReflHist_) are populated once onRenderTargetsChanged
@@ -1335,6 +1493,41 @@ bool VoxiRenderer::createPipelines() {
     }
     if (!shadowInstancedPso_)
         AVER_WARN("[Voxi] instanced shadow pipeline unavailable; shadowPass falls back to one draw per instance");
+
+    // --- 1c. the GI-only depth pass, plain and instanced. Same pipeline state as the cascade pair
+    // above in every respect; only the entry point differs, because the matrix it transforms into
+    // (gGiShadowViewProj vs gCascadeViewProj[gShadowDraw.x]) is baked per pipeline rather than
+    // chosen per draw. Both are OPTIONAL: giShadowPass skips entirely without the plain one, and
+    // falls back to one draw per instance without the instanced one.
+    if (const rhi::ShaderHandle vsGi = compile("VSGiShadow", rhi::ShaderStage::Vertex, kBaseSm,
+                                               rasterDefs(nullptr).c_str())) {
+        rhi::GraphicsPipelineDesc p;
+        p.vs = vsGi;
+        p.layout = gi;
+        p.cull = rhi::CullMode::None;
+        p.depth = {true, true, rhi::CompareOp::Less};
+        p.renderTargetCount = 0;
+        p.depthFormat = rhi::Format::D32Float;
+        p.sampleCount = 1;
+        p.slopeScaledDepthBias = 1.5f;
+        giShadowPso_ = res_->createGraphicsPipeline(p);
+    }
+    if (const rhi::ShaderHandle vsGiInst = compile("VSGiShadowInstanced", rhi::ShaderStage::Vertex,
+                                                   kBaseSm, instDefs.c_str())) {
+        rhi::GraphicsPipelineDesc p;
+        p.vs = vsGiInst;
+        p.layout = gi;
+        p.instanced = true;
+        p.cull = rhi::CullMode::None;
+        p.depth = {true, true, rhi::CompareOp::Less};
+        p.renderTargetCount = 0;
+        p.depthFormat = rhi::Format::D32Float;
+        p.sampleCount = 1;
+        p.slopeScaledDepthBias = 1.5f;
+        giShadowInstancedPso_ = res_->createGraphicsPipeline(p);
+    }
+    if (!giShadowPso_)
+        AVER_WARN("[Voxi] GI-only shadow pipeline unavailable; indirect light is injected unshadowed");
 
     // --- 2/3. voxelisation + light injection: rasterise with NO render target ---
     const rhi::ShaderHandle psVoxel = compile("PSVoxel", rhi::ShaderStage::Pixel, kBaseSm, rasterDefs(nullptr).c_str());
