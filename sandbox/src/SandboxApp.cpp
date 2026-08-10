@@ -657,6 +657,48 @@ public:
             AVER_WARN("[Sandbox] physics failed to start - gameplay will not collide");
         }
 #endif
+
+        // RESOLVED BEFORE THE PROJECT OPENS, AND THAT IS THE WHOLE POINT. This decision used to live
+        // further down onInit, which reads as harmless -- it is the same code, a few hundred lines
+        // later -- and silently disabled the entire GPU per-cluster path for the process lifetime.
+        //
+        // applyProject (below) does two things that consult lodMeshShaderEnabled_ while it was still
+        // its default of false: loadProjectMeshes only builds meshClusterGpu_ under
+        // `if (lodMeshShaderEnabled_)`, so no mesh ever got GPU cluster buffers; and
+        // ensureLodMeshPipeline sets lodMeshPipelineTried_ BEFORE testing the flag, so that one early
+        // call latched "already tried" forever. It is called from exactly one place, so nothing ever
+        // asked again. The symptom was not a warning or a fallback message -- it was total silence:
+        // no [LOD-MESH-SHADER] line of any kind in any log, while [LOD] cheerfully reported the path
+        // "ON by default" a few hundred lines later, describing a flag that no longer reached
+        // anything. Per-cluster frustum and cone culling have therefore never run in this editor.
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+        // OFF UNLESS ASKED FOR, and that is a DOWNGRADE from what this code said it did -- it
+        // claimed "ON by default where the hardware allows". It was never on in any sense that
+        // reached the GPU (see above), and the first run where it actually did revealed why leaving
+        // it that way would have been worse than the bug: the path is 22% faster and renders the
+        // scene WRONG. Frame 76.3ms -> 59.8ms, scene draw 51.7 -> 41.5, triangles 8M -> 2.9M, and
+        // every plant in Electric Dreams draws as a black shredded silhouette. The geometry arrives;
+        // the shading does not. PSClusterMain shades through plainShadeSurface and never receives the
+        // per-draw material binding the ordinary path gets, so the cluster pipeline has no textures.
+        //
+        // So the feature is unfinished, not merely unreachable, and the honest default is off. The
+        // ordering fix above still matters and still lands: --lod-mesh-shader did not work either,
+        // for exactly the same reason, so whoever finishes the shading now has a flag that turns the
+        // path on instead of one that silently does nothing.
+        lodMeshShaderEnabled_ = lodMeshShaderRequest_ > 0;
+        if (lodMeshShaderEnabled_) {
+            const rhi::DeviceCaps mcaps = e.device()->caps();
+            const bool ok = mcaps.meshShaderTier > 0 && mcaps.shaderModel >= 65 && mcaps.dxcAvailable;
+            lodMeshShaderEnabled_ = ok;
+            if (ok) AVER_WARN("[LOD] per-cluster mesh-shader path ON by request (mesh tier {}, SM {}) "
+                              "-- FASTER BUT UNTEXTURED; PSClusterMain has no material binding",
+                              mcaps.meshShaderTier, mcaps.shaderModel);
+            else    AVER_INFO("[LOD] per-cluster mesh-shader path unavailable (mesh tier {}, SM {}, "
+                              "DXC {}); drawing without it", mcaps.meshShaderTier, mcaps.shaderModel,
+                              mcaps.dxcAvailable);
+        }
+#endif
+
         if (!projectPath_.empty()) {
             std::string err;
             if (browser_.open(projectPath_, &err)) applyProject(e);
@@ -992,17 +1034,11 @@ public:
             // AUTO, NOT FORCED: -1 means "decide from caps", and --lod-mesh-shader / --no-lod-mesh-
             // shader pin it either way. The gate is the same one createShader enforces, so a device
             // that would refuse the pipeline never gets asked for it and silently keeps the CPU path.
-#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
-            if (lodMeshShaderRequest_ < 0) {
-                const bool ok = caps.meshShaderTier > 0 && caps.shaderModel >= 65 && caps.dxcAvailable;
-                lodMeshShaderEnabled_ = ok;
-                if (ok) AVER_INFO("[LOD] per-cluster mesh-shader path ON by default (mesh tier {}, SM {})",
-                                  caps.meshShaderTier, caps.shaderModel);
-                else    AVER_INFO("[LOD] per-cluster mesh-shader path unavailable (mesh tier {}, SM {}, "
-                                  "DXC {}); drawing without it", caps.meshShaderTier, caps.shaderModel,
-                                  caps.dxcAvailable);
-            }
-#endif
+            //
+            // THE DECISION ITSELF HAS MOVED, to just before the project opens -- see the comment
+            // there. It has to happen before applyProject, because applyProject is what loads the
+            // meshes whose GPU cluster buffers are built only when this flag is already true.
+            // Deciding it here, after that, is exactly the bug that kept the path dead.
 
             voxi::DeviceInfo di;
             di.msaaMask = caps.msaaMask; di.maxMsaaSamples = caps.maxMsaaSamples;
@@ -1806,8 +1842,14 @@ public:
     // Safe to call every frame; only the first call (with the flag on) does real work.
     void ensureLodMeshPipeline(Engine& e) {
         if (lodMeshPipelineTried_) return;
-        lodMeshPipelineTried_ = true;
+        // THE FLAG IS TESTED BEFORE THE LATCH IS SET, which is the opposite of what it used to do.
+        // Latching first means a single call made while the flag is still false burns the one
+        // attempt this function will ever make, and "we already tried" then answers every later
+        // call for the rest of the process. That is a booby trap for a function whose own comment
+        // above says it is safe to call every frame: the ordering fix that now sets the flag early
+        // makes this unreachable, and this makes a future reordering merely late instead of fatal.
         if (!lodMeshShaderEnabled_) return;
+        lodMeshPipelineTried_ = true;
 
         const rhi::DeviceCaps caps = e.device()->caps();
         if (caps.meshShaderTier == 0 || caps.shaderModel < 65 || !caps.dxcAvailable) {
