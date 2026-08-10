@@ -48,6 +48,11 @@ constexpr f32 kCascadeSplitLambda = 0.85f;
 // How far the cascades reach, as a multiple of the camera's near plane.
 constexpr f32 kShadowRangeFromNear = 4000.0f;
 
+// How small a caster has to get, measured in this cascade's own shadow-map texels, before it stops
+// being drawn into it. ONE texel is the honest floor rather than a tuned number: below it the map
+// has no sample that can hold the object, so the draw cannot change the image it is drawn into.
+constexpr f32 kMinShadowTexels = 1.0f;
+
 // The draw-list cap, and therefore the instance count the TLAS is sized for.
 //
 // 4096 until now, which the Electric Dreams demo passes before it has finished streaming: at ~6,370
@@ -1112,6 +1117,18 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
         const Vec3 cascCentre{cascadeCentre_[c][0], cascadeCentre_[c][1], cascadeCentre_[c][2]};
         const f32 cascRadius = cascadeRadius_[c];
 
+        // WHAT THIS CASCADE CAN ACTUALLY RESOLVE. Each one spends its 2048 texels over its whole
+        // fitted radius, so a far cascade's texel is metres wide while a near one's is centimetres.
+        // An object smaller than a single texel cannot put a shadow into this map -- there is no
+        // sample small enough to hold it -- so rasterising it is work with no possible outcome.
+        //
+        // This scene is the case it was written for: thousands of scattered ankle-height plants, all
+        // of them sub-texel by cascade 2 and all of them being drawn into it anyway. It is a
+        // PER-CASCADE test rather than a global one for the same reason -- the same plant is real
+        // detail in cascade 0 and invisible in cascade 3.
+        const f32 cascTexelWorld = 2.0f * cascRadius / static_cast<f32>(kShadowCascadeSize);
+        const f32 minShadowDiameter = cascTexelWorld * kMinShadowTexels;
+
         u32 submitted = 0;
         if (useInstancing) {
             // Reset capacity, not the group list itself: the mesh set repeats cascade to cascade and
@@ -1127,6 +1144,7 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
                 if (d.boundsRadius >= 0.0f) {
                     const Vec3 dc{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]};
                     if (dist(dc, cascCentre) > cascRadius + d.boundsRadius) continue;
+                    if (2.0f * d.boundsRadius < minShadowDiameter) continue;
                 }
                 ShadowInstanceGroup* group = nullptr;
                 for (ShadowInstanceGroup& g : shadowInstanceGroups_)
@@ -1146,6 +1164,7 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
                 if (d.boundsRadius >= 0.0f) {
                     const Vec3 dc{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]};
                     if (dist(dc, cascCentre) > cascRadius + d.boundsRadius) continue;
+                    if (2.0f * d.boundsRadius < minShadowDiameter) continue;
                 }
                 f32 consts[rhi::kObjectConstantDwords]{};
                 std::memcpy(consts, d.world, 16 * sizeof(f32));   // depth-only: nothing else is read
