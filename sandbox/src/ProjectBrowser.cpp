@@ -166,29 +166,6 @@ void ProjectBrowser::rescan() {
     }
 }
 
-// Copies a whole project tree to a sibling folder named for this engine version.
-std::string ProjectBrowser::copyProjectTree(const std::string& manifestPath, std::string* err) const {
-    std::error_code ec;
-    const std::filesystem::path src = std::filesystem::path(manifestPath).parent_path();
-    const std::string stem = displayName(manifestPath);
-
-    // A NEW NAME RATHER THAN AN OVERWRITE, and a numbered one if that is taken too: the entire
-    // promise of "work on a copy" is that nothing existing is touched, and silently reusing a
-    // directory that already holds somebody's project would break exactly that promise.
-    std::filesystem::path dst = src.parent_path() / (stem + " (" + std::string(kEngineVersion) + ")");
-    for (int n = 2; std::filesystem::exists(dst, ec) && n < 100; ++n)
-        dst = src.parent_path() / (stem + " (" + std::string(kEngineVersion) + ") " + std::to_string(n));
-    if (std::filesystem::exists(dst, ec)) { if (err) *err = "could not find a free folder name"; return {}; }
-
-    std::filesystem::copy(src, dst, std::filesystem::copy_options::recursive, ec);
-    if (ec) { if (err) *err = "copy failed: " + ec.message(); return {}; }
-
-    // The manifest keeps its own file name inside the new folder, so the copy opens like any project.
-    const std::filesystem::path out = dst / std::filesystem::path(manifestPath).filename();
-    if (!std::filesystem::exists(out, ec)) { if (err) *err = "the copy has no manifest"; return {}; }
-    return out.string();
-}
-
 // Opens a project unless it predates this engine's series, in which case the author is asked first.
 bool ProjectBrowser::openOrOfferUpgrade(const std::string& path, std::string* errOut) {
     fmt::ProjectDesc peek;
@@ -469,7 +446,7 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
         // migration chain has no rollback: a step that fails leaves the project as it found it.
         if (ImGui::Button("Upgrade a Copy", ImVec2(190.0f * dpi, 32.0f * dpi))) {
             std::string err;
-            const std::string copied = copyProjectTree(upgradePath_, &err);
+            const std::string copied = copyProjectTree(upgradePath_, std::string(kEngineVersion), &err);
             if (copied.empty()) {
                 upgradeError_ = err;
             } else if (!open(copied, &err)) {

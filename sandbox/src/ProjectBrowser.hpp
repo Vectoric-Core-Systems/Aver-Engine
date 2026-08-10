@@ -62,9 +62,6 @@ private:
     // for its version stamp.
     void rescan();
 
-    // Copies a whole project tree beside itself and returns the new manifest path, or empty.
-    std::string copyProjectTree(const std::string& manifestPath, std::string* err) const;
-
     fmt::ProjectDesc project_;
     std::vector<std::string> recents_;
     std::vector<Card> cards_;

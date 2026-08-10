@@ -68,3 +68,17 @@ target_compile_definitions(GraphEditorLoadSaveTest PRIVATE
   AVER_OCGRAPH_FIXTURE="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/cross_impl_test.ocgraph")
 target_link_libraries(GraphEditorLoadSaveTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(GraphEditorLoadSaveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ProjectCopyTest -- copyProjectTree, the "Upgrade a Copy" branch of the upgrade prompt.
+#
+# Compiles sandbox/src/ProjectScaffold.cpp directly, for EditorPrefsTest's precedent above (Sandbox
+# is add_executable-only). This is why that function was lifted OUT of ProjectBrowser: a private
+# member of an ImGui screen cannot be reached from a test, and this is the one path in the editor
+# that duplicates somebody's project while sitting as the DEFAULT button on a modal whose other
+# option is destructive. It is the branch that most needs proving, so it had to be reachable.
+add_executable(ProjectCopyTest
+  src/ProjectCopyTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/ProjectScaffold.cpp)
+target_include_directories(ProjectCopyTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(ProjectCopyTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(ProjectCopyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -957,4 +957,37 @@ bool applyProjectUpgrade(const fmt::ProjectDesc& proj, const ProjectUpgrade& up,
     return true;
 }
 
+// Copies a whole project tree beside itself. See the header for why it never overwrites.
+std::string copyProjectTree(const std::string& manifestPath, const std::string& versionTag,
+                            std::string* err) {
+    std::error_code ec;
+    const std::filesystem::path src = std::filesystem::path(manifestPath).parent_path();
+    if (!std::filesystem::is_directory(src, ec)) {
+        if (err) *err = "no project folder beside " + manifestPath;
+        return {};
+    }
+    const std::string stem = std::filesystem::path(manifestPath).stem().string();
+
+    std::filesystem::path dst = src.parent_path() / (stem + " (" + versionTag + ")");
+    for (int n = 2; std::filesystem::exists(dst, ec) && n < 100; ++n)
+        dst = src.parent_path() / (stem + " (" + versionTag + ") " + std::to_string(n));
+    if (std::filesystem::exists(dst, ec)) {
+        if (err) *err = "could not find a free folder name beside " + src.string();
+        return {};
+    }
+
+    std::filesystem::copy(src, dst, std::filesystem::copy_options::recursive, ec);
+    if (ec) { if (err) *err = "copy failed: " + ec.message(); return {}; }
+
+    // The manifest keeps its own file name inside the new folder, so the copy opens like any other
+    // project. Checked rather than assumed: a copy that silently produced no manifest would hand
+    // the caller a path to open that cannot be opened.
+    const std::filesystem::path out = dst / std::filesystem::path(manifestPath).filename();
+    if (!std::filesystem::exists(out, ec)) {
+        if (err) *err = "the copy has no manifest at " + out.string();
+        return {};
+    }
+    return out.string();
+}
+
 } // namespace aver::editor

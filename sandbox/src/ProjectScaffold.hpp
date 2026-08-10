@@ -81,4 +81,18 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj);
 // false with `err` set on the first failure, having applied whatever came before it.
 bool applyProjectUpgrade(const fmt::ProjectDesc& proj, const ProjectUpgrade& up, std::string* err);
 
+// Copies a whole project tree to a NEW sibling folder named for `versionTag`, and returns the path
+// of the manifest inside the copy. Empty with `err` set on failure.
+//
+// NEVER OVERWRITES. If the destination exists the name is numbered until one is free, because the
+// entire promise of "work on a copy" is that nothing existing is touched -- silently reusing a
+// directory that already holds somebody's project would break exactly the guarantee that makes
+// copying the safe choice in the upgrade prompt.
+//
+// Lives here rather than in the browser because it is project-tree surgery like everything else in
+// this file, and because a private member of an ImGui screen cannot be tested. It is the branch of
+// the upgrade prompt that MOVES somebody's work, so it is the one that most needs a test.
+std::string copyProjectTree(const std::string& manifestPath, const std::string& versionTag,
+                            std::string* err);
+
 } // namespace aver::editor
