@@ -136,7 +136,18 @@ if (-not (Test-Path -LiteralPath $scriptsBin)) {
     } else {
         $srcDir = Join-Path $contentSrc 'Scripts'
         if (Test-Path -LiteralPath $srcDir) {
+            # AUTHORED SOURCES ONLY -- obj/ and bin/ are excluded, and without that this check can
+            # never pass. MSBuild regenerates .AssemblyInfo.cs / .GlobalUsings.g.cs under
+            # obj/<Config>/<TFM>/ on EVERY build, so one of them is always newer than the assembly
+            # it helped produce. The recursive scan picked those up and reported
+            #     script sources are NEWER than the compiled assemblies (net10.0 > Scripts.dll)
+            # -- "net10.0" being an obj intermediate directory, not anything a person wrote --
+            # which made packaging impossible no matter how many times Compile .NET was run.
+            #
+            # The content copy below already drops obj/bin for exactly the same reason: they are
+            # build output living inside the source tree, not content.
             $newestSrc = (Get-ChildItem -LiteralPath $srcDir -Recurse -Include *.cs, *.fs -ErrorAction SilentlyContinue |
+                          Where-Object { $_.FullName -notmatch '[\\/](obj|bin)[\\/]' } |
                           Sort-Object LastWriteTimeUtc | Select-Object -Last 1)
             if ($newestSrc -and $newestSrc.LastWriteTimeUtc -gt $newestDll.LastWriteTimeUtc) {
                 Fail ("script sources are NEWER than the compiled assemblies " +
