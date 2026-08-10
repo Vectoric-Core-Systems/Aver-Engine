@@ -686,14 +686,31 @@ bool scaffoldProject(const std::string& location, const std::string& name,
     }
     // The F# side. A WARNING AND NOT A FAILURE for the starter map's reason: a project with no F#
     // is perfectly valid, and Scripts.csproj references it only when the file exists.
+    //
+    // WRITTEN ONLY IF Aver.Pcg CAN ACTUALLY BE REFERENCED, which it could not on a shipped build
+    // until the payload started carrying scripting/fsharp. The failure that taught this: the
+    // reference walk returned empty, fsprojText correctly omitted the ProjectReference -- and
+    // Sky.fs was written anyway, still opening Aver.Pcg. A tester's brand-new project failed to
+    // build before he had typed a line of it, with FS0039 naming a namespace he had never heard of.
+    //
+    // Scaffolding source that cannot compile is worse than scaffolding nothing: the author has to
+    // understand a subsystem he did not ask for in order to delete it. So if the reference is not
+    // there, neither is the F#, and the C# project builds exactly as it would for anyone who chose
+    // not to write any. The allowlist entry is the real fix; this is what keeps the next gap in the
+    // payload from reaching an author as a broken project.
     {
         const std::string scriptsDir = content + "\\Scripts";
-        const std::string fsproj = scriptsDir + "\\Scripts.FSharp.fsproj";
-        if (!writeFileText(fsproj, fsprojText(scriptsDir)))
-            AVER_WARN("[Editor] project created, but could not write {}", fsproj);
-        const std::string sky = scriptsDir + "\\Sky.fs";
-        if (!writeFileText(sky, skyScriptText(name)))
-            AVER_WARN("[Editor] project created, but could not write {}", sky);
+        if (engineProjectReference(scriptsDir, "scripting/fsharp/Aver.Pcg/Aver.Pcg.fsproj").empty()) {
+            AVER_WARN("[Editor] no Aver.Pcg to reference from this install, so '{}' gets no F# "
+                      "starter -- the C# side is unaffected", name);
+        } else {
+            const std::string fsproj = scriptsDir + "\\Scripts.FSharp.fsproj";
+            if (!writeFileText(fsproj, fsprojText(scriptsDir)))
+                AVER_WARN("[Editor] project created, but could not write {}", fsproj);
+            const std::string sky = scriptsDir + "\\Sky.fs";
+            if (!writeFileText(sky, skyScriptText(name)))
+                AVER_WARN("[Editor] project created, but could not write {}", sky);
+        }
     }
     {
         const std::string starter = content + "\\Materials\\Surfaces.cs";

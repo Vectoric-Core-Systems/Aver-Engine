@@ -97,6 +97,21 @@ ActorScripts/**
 # into bin\Scripting\*.dll instead of <ProjectReference> to source. Until then, it ships.
 scripting/csharp/**
 
+# AND THE F# TREE, for exactly the same reason, which it did not until a tester hit it.
+#
+# ProjectScaffold.cpp writes an F# project into every new project (fsprojText) referencing
+# scripting/fsharp/Aver.Pcg/Aver.Pcg.fsproj, and scaffolds a Sky.fs that opens Aver.Pcg. The C#
+# half of that pair was reasoned about carefully and shipped; the F# half was not, so on a shipped
+# build the reference walk returned empty, the ProjectReference was quietly omitted -- and Sky.fs
+# was still written, still saying `open Aver.Pcg`. Every project created by a Launcher install was
+# born unable to build: FS0039 "The namespace 'Pcg' is not defined", dotnet build exits 1, on a
+# project the author had not yet touched.
+#
+# 124 KB of source. The reason it was missing is that nothing connected "the scaffold emits F#" to
+# "the payload ships C# only" -- the two decisions live in different files and neither mentions the
+# other. They mention each other now.
+scripting/fsharp/**
+
 # NOT SHIPPED, and both halves of that are deliberate:
 #
 #   cmake/AvModule.cmake + modules/   EngineScaffold.cpp engineRoot() requires BOTH markers before
