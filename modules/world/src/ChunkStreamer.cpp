@@ -106,6 +106,38 @@ StreamStats ChunkStreamer::update(scene::World& w, BodyRegistry& bodies,
     rebuildAnchors();
     if (!source_) return stats_;
 
+    // ---- idle early-out ----
+    // NOTHING MOVED AND NOTHING WAS LEFT PENDING, so neither scan below can produce a different
+    // answer than it did last frame, and both are expensive: the wanted scan is
+    // O(anchors x (2*loadRadius+1)^2 x (2*verticalRadius+1)) -- 1,323 candidate coordinates per
+    // anchor at radius 10 -- and the eviction scan walks every resident chunk, each walk calling
+    // distanceToNearestSource over every anchor. Both ran unconditionally, every frame, for every
+    // field, including for a designer standing perfectly still, which the editor's own comment
+    // calls out as exactly who this feature is for.
+    //
+    // COMPARED AT CHUNK GRANULARITY, not in centimetres: residency is a function of which CHUNK each
+    // anchor is in and nothing finer, so a camera drifting within one chunk genuinely cannot change
+    // either set. Comparing positions would defeat the check on any real input.
+    //
+    // THE PENDING FLAG IS WHAT MAKES THIS SAFE. A scan that hit the load budget left work undone,
+    // and skipping the next one would strand those chunks unloaded forever with the camera still.
+    // So the early-out only fires once the previous scan finished with nothing outstanding.
+    {
+        std::vector<ChunkCoord> nowAnchors;
+        nowAnchors.reserve(anchors_.size());
+        for (const Vec3& p : anchors_) nowAnchors.push_back(splitCm(p, settings_.chunkSizeCm).chunk);
+        if (haveLastScan_ && !lastScanHadPending_ && nowAnchors == lastScanAnchors_) {
+            // Residency is unchanged, so report it rather than leaving the caller with the zeroed
+            // counters at the top of this function.
+            stats_.residentChunks = static_cast<u32>(resident_.size());
+            stats_.residentEntities = 0;
+            for (const auto& kv : resident_) stats_.residentEntities += static_cast<u32>(kv.second.entities.size());
+            return stats_;
+        }
+        lastScanAnchors_ = std::move(nowAnchors);
+        haveLastScan_ = true;
+    }
+
     // ---- what should be resident ----
     // Gathered per source and deduplicated, sorted NEAREST FIRST so a budget spends itself on what
     // the camera is about to see rather than on whatever the iteration order happened to reach.
@@ -136,15 +168,30 @@ StreamStats ChunkStreamer::update(scene::World& w, BodyRegistry& bodies,
     // BEFORE, deliberately: eviction frees entity slots and memory that the loads below may want,
     // and doing it after would peak at resident + loaded rather than at resident.
     {
-        std::vector<ChunkCoord> gone;
-        for (const auto& kv : resident_)
-            if (distanceToNearestSource(kv.first) > settings_.evictRadius) gone.push_back(kv.first);
-        // Furthest first: if the budget cannot take them all, the ones least likely to be wanted
-        // again go first.
-        std::sort(gone.begin(), gone.end(), [this](const ChunkCoord& a, const ChunkCoord& b) {
-            return distanceToNearestSource(a) > distanceToNearestSource(b);
+        // THE DISTANCE IS CARRIED, NOT RECOMPUTED, exactly as the `wanted` list above already does.
+        // It used to gather bare coords and then call distanceToNearestSource AGAIN inside the sort
+        // comparator -- twice per comparison, O(n log n) times, for chunks whose distance had just
+        // been computed and thrown away one line earlier. distanceToNearestSource itself loops over
+        // every anchor (up to 65 of them once the lead corridor kicks in), so that was an O(log n)
+        // multiplier of O(anchors) work per resident chunk, every frame.
+        //
+        // The eviction ORDER is unchanged -- still furthest first, so the ones least likely to be
+        // wanted again go when the budget cannot take them all.
+        std::vector<std::pair<i32, ChunkCoord>> gone;
+        for (const auto& kv : resident_) {
+            const i32 d = distanceToNearestSource(kv.first);
+            if (d > settings_.evictRadius) gone.emplace_back(d, kv.first);
+        }
+        std::sort(gone.begin(), gone.end(), [](const auto& a, const auto& b) {
+            if (a.first != b.first) return a.first > b.first;
+            // A total order, for the same reason `wanted` needs one: equal distances must not make
+            // the eviction sequence depend on unordered_map iteration order.
+            if (a.second.x != b.second.x) return a.second.x < b.second.x;
+            if (a.second.y != b.second.y) return a.second.y < b.second.y;
+            return a.second.z < b.second.z;
         });
-        for (const ChunkCoord& c : gone) {
+        for (const auto& [goneDist, c] : gone) {
+            (void)goneDist;
             if (settings_.evictBudget && stats_.evictedThisUpdate >= settings_.evictBudget) break;
             const auto it = resident_.find(c);
             if (it == resident_.end()) continue;
@@ -203,6 +250,9 @@ StreamStats ChunkStreamer::update(scene::World& w, BodyRegistry& bodies,
         stats_.totalLoadMs += ms;
         ++stats_.totalLoads;
     }
+
+    // What the early-out above tests next frame: a scan that hit the budget must not be skipped.
+    lastScanHadPending_ = stats_.pendingLoads > 0;
 
     stats_.residentChunks = static_cast<u32>(resident_.size());
     stats_.residentEntities = 0;

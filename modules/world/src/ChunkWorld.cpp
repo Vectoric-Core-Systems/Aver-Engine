@@ -63,7 +63,18 @@ StreamStats ChunkWorld::update(scene::World& w, const std::vector<StreamSource>&
     // or `owns()`/`streamedEntities()` below would answer questions about entities the scene has
     // already forgotten belong to it, while `w.valid()` still says they exist.
     w.flush();
-    rebuildOwned();
+    // ONLY WHEN THE RESIDENT SET ACTUALLY CHANGED. rebuildOwned() clears and refills a vector and a
+    // hash set covering EVERY streamed entity, and it used to run unconditionally on every update --
+    // so a designer standing perfectly still paid a full O(residentChunks + residentEntities) rebuild
+    // every frame, for every field. On the ElectricDreams level that is three ChunkWorlds over 6,370
+    // entities: about 19,000 vector pushes and hash inserts per frame to reproduce, exactly, the
+    // answer it produced the frame before.
+    //
+    // loadedThisUpdate/evictedThisUpdate are the complete set of ways the resident set can change --
+    // both counters are incremented in ChunkStreamer::update's own load and evict loops, and nothing
+    // else adds or removes a chunk. A failed load still counts as loaded (it inserts an empty
+    // Resident), so it is covered too.
+    if (stats.loadedThisUpdate || stats.evictedThisUpdate) rebuildOwned();
     return stats;
 }
 

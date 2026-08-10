@@ -159,6 +159,12 @@ private:
     // Where a source's residency is centred: its position, plus its velocity over `leadSeconds`.
     // One entry per source, rebuilt each update so a stale velocity never lingers.
     std::vector<Vec3> anchors_;
+    // The anchor CHUNK COORDS the last full wanted/evict scan ran against, and whether that scan
+    // left anything undone. Together they are the whole precondition for skipping the next one --
+    // see update()'s idle early-out for why chunk granularity is the right resolution to compare at.
+    std::vector<ChunkCoord> lastScanAnchors_;
+    bool lastScanHadPending_ = true;   // true so the very first update always scans
+    bool haveLastScan_ = false;
     void rebuildAnchors();
 
     StreamSettings settings_;
