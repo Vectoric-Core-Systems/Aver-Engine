@@ -1051,6 +1051,24 @@ public:
     void beginFrame() override;
     void endFrame() override;
     void present();
+    void initGpuTiming();
+    u32  gpuStamp();
+    void collectGpuTiming();
+    // The same span bookkeeping pushMarker/popMarker do, for the phases that are NOT inside any
+    // render feature's markers -- the opaque scene draw the caller issues between beginFrame and
+    // endFrame, and the post/composite/UI chain endFrame runs after it. Without these the two
+    // largest items in the frame both land in "unmarked" and the report cannot tell them apart.
+    void beginGpuSpan(const char* label) {
+        if (!tsEnabled_) return;
+        tsSlice_[frameIndex_].push_back({label, gpuStamp(), kMaxGpuStamps});
+        tsOpen_.push_back(static_cast<u32>(tsSlice_[frameIndex_].size() - 1));
+    }
+    void endGpuSpan() {
+        if (!tsEnabled_ || tsOpen_.empty()) return;
+        const u32 i = tsOpen_.back();
+        tsOpen_.pop_back();
+        tsSlice_[frameIndex_][i].end = gpuStamp();
+    }
     void resize(u32 w, u32 h);
     u32 width() const { return width_; }
     u32 height() const { return height_; }
@@ -1106,6 +1124,46 @@ private:
     u64 nextFence_ = 0;
     u32 frameIndex_ = 0;
     u32 rtvSize_ = 0;
+
+    // ---- per-pass GPU timing ----
+    //
+    // WHY THIS EXISTS. Five separate theories about where this engine's frame time goes were argued
+    // from indirect evidence and every one of them was wrong: the shadow cascades, the scene walk,
+    // chunk streaming, volumetric clouds, and the build configuration. The reason they could all
+    // survive so long is that the only number available was a whole-frame CPU delta, and a CPU
+    // number that includes waiting for the GPU is indistinguishable from CPU work. There was no
+    // way to ask which PASS was expensive, so everyone guessed. This is that missing question.
+    //
+    // Rides on the markers that already exist. pushMarker/popMarker bracket every pass, correctly
+    // nested, so a timestamp on each side of them costs one EndQuery per marker -- about a dozen a
+    // frame -- and needs no new call sites in any renderer.
+    //
+    // READ TWO FRAMES LATE, so nothing ever waits. Results are resolved into a per-frame slice of a
+    // readback buffer and read back at the TOP of the next frame that reuses that slice, which
+    // beginFrame has already fenced on. Reading this frame's own timings would mean blocking on the
+    // GPU to ask how fast the GPU was -- the measurement would create the stall it reports.
+    static constexpr u32 kMaxGpuSpans = 64;
+    static constexpr u32 kMaxGpuStamps = kMaxGpuSpans * 2;
+    struct GpuSpan { const char* label = nullptr; u32 begin = 0; u32 end = 0; };
+    ComPtr<ID3D12QueryHeap> tsHeap_;
+    ComPtr<ID3D12Resource>  tsReadback_;
+    u64  tsFrequency_ = 0;              // GPU ticks per second, from the queue
+    u32  tsCount_ = 0;                  // stamps issued so far this frame
+    bool tsWrapped_ = false;            // ran out of slots; say so once rather than silently truncate
+    // ONE SET OF SPANS PER FRAME SLICE, not one shared set. The stamps for a frame are read two
+    // frames after they were issued, so the labels that describe them have to survive that long --
+    // a single shared vector would have been overwritten by the frame in between.
+    std::vector<GpuSpan> tsSlice_[kFrameCount];
+    u32 tsSliceBegin_[kFrameCount] = {};
+    u32 tsSliceEnd_[kFrameCount] = {};
+    std::vector<u32>     tsOpen_;       // slots of markers still open, innermost last
+    // Accumulated across frames so the report is an average rather than one sampled frame.
+    struct GpuAccum { std::string label; f64 ms = 0; };
+    std::vector<GpuAccum> tsAccum_;
+    f64  tsAccumFrameMs_ = 0;
+    u32  tsAccumFrames_ = 0;
+    u32  tsReports_ = 0;
+    bool tsEnabled_ = false;
 
     ComPtr<ID3D12RootSignature> rootSig_;
     ComPtr<ID3D12PipelineState> pso_;
@@ -1700,6 +1758,7 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     D3D12_COMMAND_QUEUE_DESC qd{};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     if (!hrOk(device_->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue_)), "CreateCommandQueue")) return false;
+    initGpuTiming();
 
     if (!hrOk(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)), "CreateFence")) return false;
     fenceEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -2483,6 +2542,90 @@ void D3D12Device::seedSkinTargets() {
     skinSeeds_.clear();
 }
 
+// Creates the timestamp query heap and its readback buffer. Failure is not fatal: every timing
+// call below no-ops when tsEnabled_ is false, so a device that cannot do timestamps still renders.
+void D3D12Device::initGpuTiming() {
+    if (!device_ || !queue_) return;
+    if (FAILED(queue_->GetTimestampFrequency(&tsFrequency_)) || tsFrequency_ == 0) {
+        AVER_INFO("[RHI.D3D12] the queue reports no timestamp frequency; per-pass GPU timing is off");
+        return;
+    }
+    D3D12_QUERY_HEAP_DESC qhd{};
+    qhd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    qhd.Count = kMaxGpuStamps * kFrameCount;
+    if (!hrOk(device_->CreateQueryHeap(&qhd, IID_PPV_ARGS(&tsHeap_)), "timestamp query heap")) return;
+
+    auto rb = heapProps(D3D12_HEAP_TYPE_READBACK);
+    auto rd = bufferDesc(static_cast<u64>(kMaxGpuStamps) * kFrameCount * sizeof(u64));
+    if (!hrOk(device_->CreateCommittedResource(&rb, D3D12_HEAP_FLAG_NONE, &rd,
+              D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tsReadback_)), "timestamp readback")) {
+        tsHeap_.Reset();
+        return;
+    }
+    tsEnabled_ = true;
+    AVER_INFO("[RHI.D3D12] per-pass GPU timing on ({} MHz timestamp clock)", tsFrequency_ / 1000000);
+}
+
+// Issues one timestamp and returns its slot, or kMaxGpuStamps when the frame has run out.
+u32 D3D12Device::gpuStamp() {
+    if (!tsEnabled_ || !cmdList_ || tsCount_ >= kMaxGpuStamps) {
+        if (tsEnabled_ && tsCount_ >= kMaxGpuStamps && !tsWrapped_) {
+            tsWrapped_ = true;
+            AVER_WARN("[RHI.D3D12] more than {} GPU timestamps in one frame; the rest are unmeasured",
+                      kMaxGpuStamps);
+        }
+        return kMaxGpuStamps;
+    }
+    const u32 slot = tsCount_++;
+    cmdList_->EndQuery(tsHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, frameIndex_ * kMaxGpuStamps + slot);
+    return slot;
+}
+
+// Reads the timings this slice carried two frames ago -- already complete, because beginFrame
+// fenced on it before calling here -- and folds them into the running average.
+void D3D12Device::collectGpuTiming() {
+    if (!tsEnabled_ || !tsReadback_ || tsSlice_[frameIndex_].empty()) return;
+    const u64 base = static_cast<u64>(frameIndex_) * kMaxGpuStamps * sizeof(u64);
+    D3D12_RANGE rd{static_cast<SIZE_T>(base), static_cast<SIZE_T>(base + kMaxGpuStamps * sizeof(u64))};
+    void* p = nullptr;
+    if (FAILED(tsReadback_->Map(0, &rd, &p)) || !p) return;
+    const u64* stamps = reinterpret_cast<const u64*>(static_cast<const u8*>(p) + base);
+
+    const auto ms = [&](u64 a, u64 b) {
+        return b > a ? 1000.0 * static_cast<f64>(b - a) / static_cast<f64>(tsFrequency_) : 0.0;
+    };
+    for (const GpuSpan& s : tsSlice_[frameIndex_]) {
+        if (s.begin >= kMaxGpuStamps || s.end >= kMaxGpuStamps) continue;
+        const f64 d = ms(stamps[s.begin], stamps[s.end]);
+        auto it = std::find_if(tsAccum_.begin(), tsAccum_.end(),
+                               [&](const GpuAccum& a) { return a.label == s.label; });
+        if (it == tsAccum_.end()) { tsAccum_.push_back({s.label, d}); }
+        else                      { it->ms += d; }
+    }
+    if (tsSliceBegin_[frameIndex_] < kMaxGpuStamps && tsSliceEnd_[frameIndex_] < kMaxGpuStamps)
+        tsAccumFrameMs_ += ms(stamps[tsSliceBegin_[frameIndex_]], stamps[tsSliceEnd_[frameIndex_]]);
+    D3D12_RANGE none{0, 0};
+    tsReadback_->Unmap(0, &none);
+    ++tsAccumFrames_;
+
+    // Reported on a widening interval and as an AVERAGE over the frames since boot, because one
+    // frame's timings on a streaming world say more about what streamed in than about the renderer.
+    if ((tsReports_ & (tsReports_ + 1)) == 0 && tsAccumFrames_ >= 8) {
+        const f64 n = static_cast<f64>(tsAccumFrames_);
+        f64 accounted = 0;
+        std::string line;
+        for (const GpuAccum& a : tsAccum_) {
+            accounted += a.ms;
+            char buf[96];
+            std::snprintf(buf, sizeof buf, " | %s %.1fms", a.label.c_str(), a.ms / n);
+            line += buf;
+        }
+        AVER_INFO("[RHI.D3D12] GPU {:.1f}ms/frame over {} frames{} | unmarked {:.1f}ms",
+                  tsAccumFrameMs_ / n, tsAccumFrames_, line, (tsAccumFrameMs_ - accounted) / n);
+    }
+    ++tsReports_;
+}
+
 // Opens the frame: waits out the current backbuffer's last frame, resets recording, clears targets.
 void D3D12Device::beginFrame() {
     if (!hasSwapchain_) return;
@@ -2499,6 +2642,15 @@ void D3D12Device::beginFrame() {
     boundHeap_ = nullptr;
     postCBUsed_ = 0;
     drawBinding_ = defaultDrawBinding_;
+
+    // The fence above has retired whatever last used this slice, so its timestamps are readable
+    // now. Collect BEFORE resetting the counters that are about to be reused.
+    collectGpuTiming();
+    tsCount_ = 0;
+    tsOpen_.clear();
+    tsSlice_[frameIndex_].clear();
+    tsSliceBegin_[frameIndex_] = gpuStamp();
+    tsSliceEnd_[frameIndex_] = kMaxGpuStamps;
     // Before any feature's prePass and before any draw: a skin target must never be read in the
     // frame it was created, and this is the only point where that is guaranteed.
     seedSkinTargets();
@@ -2516,6 +2668,10 @@ void D3D12Device::beginFrame() {
     cmdList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
     cmdList_->ClearRenderTargetView(rtv, sceneClear_, 0, nullptr);
     cmdList_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+    // Opened here rather than after the suppressesScene loop below, which can return early: this
+    // must be open on EVERY path out of beginFrame, because endFrame closes it unconditionally.
+    beginGpuSpan("scene draw");
 
     // vpX_/vpY_/vpW_/vpH_ are already scene-space (setViewportRect scales them); the fallback when
     // no sub-rect is set is the whole SCENE target, which this viewport draws into -- not width_/
@@ -3518,6 +3674,10 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
 // Closes the frame: post chain, overlay features, UI, capture, then submit.
 void D3D12Device::endFrame() {
     if (!hasSwapchain_) return;
+    // Closes beginFrame's "scene draw" and opens the one covering everything after it: the deferred
+    // sky, the post chain, the composite/tonemap, the editor's viewport blit, the overlay and ImGui.
+    endGpuSpan();
+    beginGpuSpan("sky+post+ui");
     ID3D12Resource* bb = renderTargets_[frameIndex_].Get();
 
     // THE DEFERRED SKY DRAW. Every opaque drawMesh call the caller was going to make this frame has
@@ -3605,6 +3765,16 @@ void D3D12Device::endFrame() {
         auto toPresent = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
         cmdList_->ResourceBarrier(1, &toPresent);
     }
+    // Last thing before Close: the frame-end stamp, then resolve every stamp issued this frame into
+    // this slice's own region of the readback buffer. ResolveQueryData is a GPU copy -- it does not
+    // wait, and nothing reads the destination until beginFrame has fenced on it two frames later.
+    endGpuSpan();   // "sky+post+ui"
+    tsSliceEnd_[frameIndex_] = gpuStamp();
+    if (tsEnabled_ && tsCount_ > 0)
+        cmdList_->ResolveQueryData(tsHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                                   frameIndex_ * kMaxGpuStamps, tsCount_, tsReadback_.Get(),
+                                   static_cast<u64>(frameIndex_) * kMaxGpuStamps * sizeof(u64));
+
     cmdList_->Close();
     ID3D12CommandList* lists[] = {cmdList_.Get()};
     queue_->ExecuteCommandLists(1, lists);
@@ -5723,10 +5893,21 @@ void D3D12RenderContext::uavBarrierBuffer(BufferHandle h) {
 void D3D12RenderContext::pushMarker(const char* label) {
     if (!label || !dev_->cmdList_) return;
     dev_->cmdList_->BeginEvent(1, label, static_cast<UINT>(std::strlen(label) + 1));
+    // The label is a string LITERAL at every call site, so storing the pointer is safe and keeps
+    // this allocation-free on the hot path -- see GpuSpan's own comment.
+    dev_->tsSlice_[dev_->frameIndex_].push_back(
+        {label, dev_->gpuStamp(), D3D12Device::kMaxGpuStamps});
+    dev_->tsOpen_.push_back(static_cast<u32>(dev_->tsSlice_[dev_->frameIndex_].size() - 1));
 }
 
 void D3D12RenderContext::popMarker() {
-    if (dev_->cmdList_) dev_->cmdList_->EndEvent();
+    if (!dev_->cmdList_) return;
+    if (!dev_->tsOpen_.empty()) {
+        const u32 i = dev_->tsOpen_.back();
+        dev_->tsOpen_.pop_back();
+        dev_->tsSlice_[dev_->frameIndex_][i].end = dev_->gpuStamp();
+    }
+    dev_->cmdList_->EndEvent();
 }
 
 } // namespace
