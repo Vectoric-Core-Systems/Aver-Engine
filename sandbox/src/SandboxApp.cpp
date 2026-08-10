@@ -3859,11 +3859,30 @@ private:
     // While playing, drives the view camera from the pawn's published view node, falling back to the
     // pawn's own matrix. Row 3 is the position, row 0 the forward (+X) axis.
     void drivePlayCamera() {
-        if (aver_fw_play_state() != AVER_FW_PLAY_PLAYING) return;
-        const int32_t pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
-        if (pawn == 0) return;
-        const scene::Entity e = static_cast<scene::Entity>(static_cast<uint32_t>(pawn));
         scene::World& w = scene::World::instance();
+        scene::Entity e = scene::kInvalidEntity;
+
+        if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
+            const int32_t pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+            if (pawn == 0) return;
+            e = static_cast<scene::Entity>(static_cast<uint32_t>(pawn));
+        } else if (dronePlayActive() && droneEntity_ != scene::kInvalidEntity) {
+            // THE DRONE IS THE PAWN WHEN THERE IS NO GameMode, so the camera follows it like one.
+            //
+            // It never was before, and the reason is worth recording: this function gated on
+            // aver_fw_controlled_pawn, the drone fallback never calls aver_fw_begin_play, so that
+            // returned 0 and this returned immediately -- the drone flew and the camera sat wherever
+            // it had been left. That is the whole of what "a viewable window" meant: something to
+            // look at if you happened to be pointing at it, with no possession and no follow.
+            //
+            // Treated as the possessed pawn HERE rather than pushed through aver_fw_begin_play,
+            // because a real possession needs a PlayerController and a pawn CLASS, and the fallback
+            // exists precisely for projects that have declared neither. This gives the behaviour a
+            // possession would give without inventing a fake one.
+            e = droneEntity_;
+        } else {
+            return;
+        }
         if (!w.valid(e)) return;
 
         int32_t mode = AVER_FW_VIEW_THIRD_PERSON; float eye = 160.0f, boom = 450.0f;
@@ -4200,6 +4219,109 @@ private:
             return std::fmax(1.0f, 0.5f * std::fmax(e.x, std::fmax(e.y, e.z)) * s);
         }
         return std::fmax(1.0f, s);
+    }
+
+    // ---- PlayerStart: where the player spawns in ----
+    //
+    // THE LEVEL FORMAT ALREADY HAD THE ANSWER AND NOBODY READ IT. OcWorldData carries
+    // hasSpawn/spawnX/spawnY/spawnZ/spawnYaw; the parser fills it, the writer emits it, and a
+    // repo-wide grep found exactly two production sites -- both of them that parser and that writer.
+    // Nothing consulted it: not aver_fw_begin_play (which passes nullptr for the pawn's position),
+    // not loadLevel (which carries it into levelHeader_ and never looks), not saveLevel (whose own
+    // comment lists SPAWN among the fields that "ride through untouched"). A level could state where
+    // the player starts and be ignored.
+    //
+    // ONE RECORD, SO ONE MARKER. SPAWN is a single scalar record, not a list like placements or
+    // pcgVolumes, so PlayerStart must NOT become a second, independent thing that can disagree with
+    // it. The marker is the editor's live, visible handle onto that one record -- spawned from it on
+    // load, written back into it on save -- exactly the shape hasLevelSun_/hasLevelFog_ already have
+    // for SUN and FOG. Adding a PlayerStart when one exists selects the existing one rather than
+    // creating a rival.
+    //
+    // A TRANSIENT ENTITY, never pushed to levelEntities_, for the same reason the drone is not: it
+    // must not also be saved as a PLACE record, which would make the marker a mesh placement AND a
+    // spawn record at once -- two sources of truth again, one of them invisible.
+    scene::Entity playerStart_ = scene::kInvalidEntity;
+    f32 playerStartYaw_ = 0.0f;
+
+    // The spawn transform a level should use: the marker if one is live, else the loaded SPAWN
+    // record, else nothing. Returns false when the level declares no spawn at all.
+    bool playerStartTransform(Vec3& outPos, f32& outYawDeg) const {
+#if AVER_MODULE_SCENE
+        const scene::World& w = scene::World::instance();
+        if (playerStart_ != scene::kInvalidEntity && w.valid(playerStart_)) {
+            outPos = w.localTransform(playerStart_).position;
+            outYawDeg = playerStartYaw_;
+            return true;
+        }
+#endif
+        if (!levelHeader_.hasSpawn) return false;
+        outPos = Vec3{static_cast<f32>(levelHeader_.spawnX), static_cast<f32>(levelHeader_.spawnY),
+                      static_cast<f32>(levelHeader_.spawnZ)};
+        outYawDeg = static_cast<f32>(levelHeader_.spawnYaw);
+        return true;
+    }
+
+#if AVER_MODULE_SCENE
+    // Creates the marker entity at a world position. Shared by "Add > Player Start" and by the
+    // level loader when a file already carries a SPAWN record.
+    scene::Entity makePlayerStart(const Vec3& at, f32 yawDeg) {
+        scene::World& world = scene::World::instance();
+        Transform xf;
+        xf.position = at;
+        xf.rotation = quatFromEulerDeg(Vec3{0.0f, 0.0f, yawDeg});
+        xf.scale = Vec3{kEditorCubeHalf, kEditorCubeHalf, kEditorCubeHalf};
+
+        // Drawn as the unit cube because that is the only primitive the editor is guaranteed to
+        // have; the NAME is what makes it a PlayerStart. Deliberately not an asset path -- the
+        // marker is never written as a PLACE record, so nothing will try to resolve it as a mesh
+        // file, and the outliner shows a readable word instead of a path.
+        static const std::string kPlayerStartName = "PlayerStart";
+        const scene::Entity e = world.create(kPlayerStartName, scene::kInvalidEntity, xf);
+        if (e == scene::kInvalidEntity) {
+            AVER_WARN("[Editor] Player Start: the world refused a new entity");
+            return scene::kInvalidEntity;
+        }
+        static const std::string kCubeAsset = "Meshes/cube.ocmesh";
+        if (auto* mr = static_cast<scene::CMeshRenderer*>(
+                world.addComponent(e, scene::kComponentMeshRenderer))) {
+            mr->mesh = fnv1a64(std::string_view(kCubeAsset));
+            mr->flags |= scene::kMeshRendererVisible;
+            mr->aabbMin[0] = mr->aabbMin[1] = mr->aabbMin[2] = -1.0f;
+            mr->aabbMax[0] = mr->aabbMax[1] = mr->aabbMax[2] =  1.0f;
+        }
+        entityLabels_[static_cast<u32>(e)] = "Player Start";
+        playerStartYaw_ = yawDeg;
+        return e;
+    }
+#endif
+
+    // "Add > Player Start". One per level: a second call selects the one that exists rather than
+    // creating a rival the save path would have to choose between.
+    void addPlayerStart(Engine&) {
+#if AVER_MODULE_SCENE
+        scene::World& world = scene::World::instance();
+        if (playerStart_ != scene::kInvalidEntity && world.valid(playerStart_)) {
+            sel_ = kSelScene; selEntity_ = playerStart_;
+            cbStatus_ = "This level already has a Player Start -- selected it";
+            AVER_INFO("[Editor] Player Start already exists; selected it rather than adding a second");
+            return;
+        }
+        Vec3 at = camPos_ + camForward() * kAddDistance;
+        if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
+        // Faces the way the camera is facing, which is what someone placing a spawn point means by
+        // "the player starts here": atan2 of the forward vector, in the same +X-forward/+Y-right
+        // frame the level format's yaw is authored in.
+        const Vec3 f = camForward();
+        const f32 yaw = degrees(std::atan2(f.y, f.x));
+        playerStart_ = makePlayerStart(at, yaw);
+        if (playerStart_ == scene::kInvalidEntity) return;
+        sel_ = kSelScene; selEntity_ = playerStart_;
+        AVER_INFO("[Editor] Player Start at ({:.0f}, {:.0f}, {:.0f}) yaw {:.0f}",
+                  at.x, at.y, at.z, yaw);
+#else
+        (void)0;
+#endif
     }
 
     // Spawns a cube in front of the camera, in whichever world owns the viewport, and selects it.
@@ -5195,6 +5317,8 @@ private:
         if (ImGui::BeginPopup("addActor")) {
             ImGui::TextDisabled("Place Actor"); ImGui::Separator();
             if (ImGui::Selectable("Cube"))     spawnCube(e);
+            if (ImGui::Selectable("Player Start")) addPlayerStart(e);
+            uiReg_.track("toolbar.add.playerStart");
             ImGui::Selectable("Sphere",  false, ImGuiSelectableFlags_Disabled);
             ImGui::Selectable("Plane",   false, ImGuiSelectableFlags_Disabled);
             ImGui::Selectable("Point Light", false, ImGuiSelectableFlags_Disabled);
@@ -8147,8 +8271,22 @@ private:
 #endif
         scene::World& world = scene::World::instance();
         Transform xf;
-        xf.position = camPos_ + camForward() * kAddDistance;
-        xf.rotation = Quat{0, 0, 0, 1};
+        // AT THE PLAYER START WHEN THE LEVEL HAS ONE. The drone is what flies when a project
+        // declares no GameMode, so it IS the player for that session, and "where the player spawns
+        // in" is exactly what a Player Start says. Falling back to the camera keeps every level that
+        // has not placed one behaving as before.
+        {
+            Vec3 sp{}; f32 sy = 0.0f;
+            if (playerStartTransform(sp, sy)) {
+                xf.position = sp;
+                xf.rotation = quatFromEulerDeg(Vec3{0.0f, 0.0f, sy});
+                AVER_INFO("[Drone] spawning at the level's Player Start ({:.0f}, {:.0f}, {:.0f})",
+                          sp.x, sp.y, sp.z);
+            } else {
+                xf.position = camPos_ + camForward() * kAddDistance;
+                xf.rotation = Quat{0, 0, 0, 1};
+            }
+        }
         xf.scale = Vec3{kEditorCubeHalf, kEditorCubeHalf, kEditorCubeHalf};
 
         // FROZEN, same as spawnCube: the entity name is the asset path the mesh resolver hashes.
@@ -8358,6 +8496,18 @@ private:
 #endif
         }
 
+        // A level that states where the player starts gets a visible, movable marker for it. Without
+        // this the SPAWN record was invisible in the editor: authored only by hand-editing the file,
+        // and impossible to see or move once written.
+#if AVER_MODULE_SCENE
+        playerStart_ = scene::kInvalidEntity;
+        if (w.hasSpawn) {
+            playerStart_ = makePlayerStart(Vec3{static_cast<f32>(w.spawnX), static_cast<f32>(w.spawnY),
+                                                 static_cast<f32>(w.spawnZ)},
+                                            static_cast<f32>(w.spawnYaw));
+        }
+#endif
+
         if (w.hasFog) {
             levelFog_ = static_cast<f32>(w.fogDensity);
             fogColor_[0] = static_cast<f32>(w.fogColor[0]);
@@ -8509,6 +8659,18 @@ private:
         // the lines below overwrite only what the editor genuinely owns. See levelHeader_.
         fmt::OcWorldData w = levelHeader_;
         w.name = levelName_.empty() ? std::string("untitled") : levelName_;
+        // THE MARKER IS THE TRUTH WHEN THERE IS ONE. saveLevel's own banner used to list SPAWN among
+        // the fields that "ride through untouched" -- correct while nothing could edit it, wrong now
+        // that a Player Start can be placed and dragged. A level with no marker keeps whatever SPAWN
+        // it arrived with, so opening and saving a hand-authored level still cannot lose it.
+        {
+            Vec3 sp{}; f32 sy = 0.0f;
+            if (playerStartTransform(sp, sy)) {
+                w.hasSpawn = true;
+                w.spawnX = sp.x; w.spawnY = sp.y; w.spawnZ = sp.z; w.spawnYaw = sy;
+            }
+        }
+
         w.hasFog = hasLevelFog_;
         w.fogDensity = levelFog_;
         w.fogColor[0] = fogColor_[0]; w.fogColor[1] = fogColor_[1]; w.fogColor[2] = fogColor_[2];
