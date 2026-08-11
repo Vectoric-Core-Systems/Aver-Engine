@@ -681,24 +681,29 @@ public:
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
         // OFF UNLESS ASKED FOR, and that is a DOWNGRADE from what this code said it did -- it
         // claimed "ON by default where the hardware allows". It was never on in any sense that
-        // reached the GPU (see above), and the first run where it actually did revealed why leaving
-        // it that way would have been worse than the bug: the path is 22% faster and renders the
+        // reached the GPU (see above), and the first run where it actually did showed why leaving it
+        // that way would have been worse than the bug: the path was 22% faster and rendered the
         // scene WRONG. Frame 76.3ms -> 59.8ms, scene draw 51.7 -> 41.5, triangles 8M -> 2.9M, and
-        // every plant in Electric Dreams draws as a black shredded silhouette. The geometry arrives;
-        // the shading does not. PSClusterMain shades through plainShadeSurface and never receives the
-        // per-draw material binding the ordinary path gets, so the cluster pipeline has no textures.
+        // every plant in Electric Dreams drew as a black shredded silhouette.
         //
-        // So the feature is unfinished, not merely unreachable, and the honest default is off. The
-        // ordering fix above still matters and still lands: --lod-mesh-shader did not work either,
-        // for exactly the same reason, so whoever finishes the shading now has a flag that turns the
-        // path on instead of one that silently does nothing.
+        // THE SHADING IS FIXED NOW, in two parts: PSClusterMain became a real material shader (see
+        // ClusterMaterialShader.hpp), and the dispatch was taught to hand the material to the
+        // CONTEXT rather than the device (see `ctx->setDrawBinding` beside dispatchMeshClusters).
+        // Foliage on this path is textured, sun-lit and sky-ambient, and was compared side by side
+        // against the ordinary path at the same camera to confirm it.
+        //
+        // IT IS STILL NOT PARITY, which is why the default stays off and the warning below stays a
+        // warning: this pipeline binds the cluster buffers in table 0 and the material in table 1,
+        // and rhi::kBindingTableCount offers no third for Voxi's shadow cascades and GI volume. So
+        // draws on this path cast and receive no shadows and take no bounce light -- leaves turned
+        // away from the sun fall back to sky irradiance alone and read darker than they should.
         lodMeshShaderEnabled_ = lodMeshShaderRequest_ > 0;
         if (lodMeshShaderEnabled_) {
             const rhi::DeviceCaps mcaps = e.device()->caps();
             const bool ok = mcaps.meshShaderTier > 0 && mcaps.shaderModel >= 65 && mcaps.dxcAvailable;
             lodMeshShaderEnabled_ = ok;
             if (ok) AVER_WARN("[LOD] per-cluster mesh-shader path ON by request (mesh tier {}, SM {}) "
-                              "-- FASTER BUT UNTEXTURED; PSClusterMain has no material binding",
+                              "-- faster and textured, but NO SHADOWS AND NO GI on these draws",
                               mcaps.meshShaderTier, mcaps.shaderModel);
             else    AVER_INFO("[LOD] per-cluster mesh-shader path unavailable (mesh tier {}, SM {}, "
                               "DXC {}); drawing without it", mcaps.meshShaderTier, mcaps.shaderModel,
@@ -1957,8 +1962,11 @@ public:
             std::string(rhi::sharedShaderPrelude()) + pbr::materialShaderPrelude();
         // Based at THIS layout's own srvCount, so the material textures land in table 1 at t4 --
         // the same call Voxi makes against giLayout(), just with this layout's numbers.
+        // AVER_CLUSTER_PS_DEBUG=0 is the real shader; 1..3 isolate one input each when this path
+        // renders wrong. See ClusterMaterialShader.hpp for what each one proved.
         const std::string psDefs =
-            pbr::materialShaderDefines(lodMeshLayout_.srvCount, kClusterMaterialSamplerSlot);
+            pbr::materialShaderDefines(lodMeshLayout_.srvCount, kClusterMaterialSamplerSlot) +
+            ";AVER_CLUSTER_PS_DEBUG=0";
         static const std::string kClusterPsSource{sandbox::kClusterMaterialPS};
 
         rhi::ShaderDesc psd;
@@ -2281,10 +2289,22 @@ public:
                     col[0] = look->second.col[0]; col[1] = look->second.col[1]; col[2] = look->second.col[2];
                     metallic = look->second.metallic; roughness = look->second.roughness;
                 }
+                // This entity's material, resolved ONCE and kept in locals because TWO paths below
+                // need it and they consume it through different objects: the ordinary drawMesh()
+                // reads the DEVICE's copy, the cluster dispatch has to be handed the CONTEXT's (see
+                // its own comment). Declared outside the module guard, like `mesh` and
+                // `clusterDispatched`, so the code below compiles with PBR or VOXI switched off --
+                // it just stays zero, which means "no per-draw material", exactly as before.
+                rhi::BindingSetHandle matSet = 0;
+                const void* matConstants = nullptr;
+                u32 matConstantBytes = 0;
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
-                if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready())
-                    e.device()->setDrawBinding(ms.bindingSet(authored), &ms.constants(authored),
-                                               sizeof(pbr::MaterialConstants));
+                if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready()) {
+                    matSet = ms.bindingSet(authored);
+                    matConstants = &ms.constants(authored);   // a reference into the system's own storage
+                    matConstantBytes = sizeof(pbr::MaterialConstants);
+                    e.device()->setDrawBinding(matSet, matConstants, matConstantBytes);
+                }
 #endif
                 // The scene test paints its two entities so a probe can tell which it is looking
                 // at. Only ever active behind --skin-scene-test.
@@ -2362,6 +2382,20 @@ public:
                             const auto tDis0 = std::chrono::steady_clock::now();
                             ctx->setPipeline(lodMeshPipeline_);
                             ctx->setBindingSet(gpu.bindingSet, 0);
+                            // THE MATERIAL, ON THE CONTEXT -- and this line is why the foliage on
+                            // this path drew black. device()->setDrawBinding above records the
+                            // material on the DEVICE, and the device only forwards it to the context
+                            // from inside drawMesh(), which this path deliberately never calls. So
+                            // the table-1 binding and the b2 block that dispatchMeshClusters applies
+                            // were whatever some EARLIER draw happened to leave sticky on the
+                            // context: another entity's textures, or Voxi's fallback set, whose
+                            // metal-rough map is white. metallic = gMaterial.x * gMetallicFactor *
+                            // map.metalRough.y then came out 1, kdAlbedo = (1 - metallic) * albedo
+                            // came out 0, and the whole diffuse lobe vanished -- which reads as
+                            // black even though the textures, the b2 constants and the albedo all
+                            // measured correct, because they were a DIFFERENT material's and
+                            // happened to look plausible.
+                            if (matSet) ctx->setDrawBinding(matSet, matConstants, matConstantBytes);
                             ctx->setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
                             ctx->setConstantBuffer(rhi::kFeatureFrameConstantRegister, &frameCb, sizeof(frameCb));
                             ctx->dispatchMeshClusters(mesh, gpu.clusterCount);
