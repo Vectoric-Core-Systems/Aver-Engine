@@ -279,6 +279,11 @@ void VoxiRenderer::shutdown() {
 // ---------------------------------------------------------------- configuration
 
 void VoxiRenderer::setSettings(const Settings& s) {
+    // Captured BEFORE the assignment. The ray-traced history buffers are allocated on the OFF->on
+    // edge and released on the on->OFF edge, and this is the only place either edge is visible --
+    // onRenderTargetsChanged sees a resize, not a settings change, so waiting for one would leave a
+    // quarter of a gigabyte allocated (or missing) until the window happened to change size.
+    const bool wasWanted = rayTracingWanted();
     settings_ = s;
     // Applied here rather than only through the direct setters, so the editor's Rendering page and
     // the project manifest can drive them the same way every other setting already does; the direct
@@ -286,6 +291,13 @@ void VoxiRenderer::setSettings(const Settings& s) {
     setShadowRays(s.rtShadowRays);
     setPixelsPerRayTile(s.rtPixelsPerRayTile);
     setGiUpdateInterval(s.giUpdateInterval);
+
+    // Guarded on a real size: before the first onRenderTargetsChanged there is nothing to create at,
+    // and that call will apply the current setting itself when it arrives.
+    if (rayTracingWanted() != wasWanted && rtHistWantW_ && rtHistWantH_)
+        if (!ensureShadowHistory(rtHistWantW_, rtHistWantH_))
+            AVER_ERROR("[Voxi] ray-traced history could not follow a ray-tracing setting change at {}x{}",
+                       rtHistWantW_, rtHistWantH_);
 }
 
 // Places the GI volume: centre in world units, half-edge extent.
@@ -1418,6 +1430,10 @@ void VoxiRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rh
     if (!res_ || !giReady_) return;
     if (!createScenePipelines(sampleCount, color, depth))
         AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for {} sample(s)", sampleCount);
+    // Remembered even when the call below decides to allocate nothing: setSettings needs a size to
+    // create at if ray tracing is switched on later, and it is never told one.
+    rtHistWantW_ = width;
+    rtHistWantH_ = height;
     if (!ensureShadowHistory(width, height))
         AVER_ERROR("[Voxi] ray-traced shadow history could not be (re)created at {}x{}", width, height);
 }
@@ -1428,6 +1444,29 @@ void VoxiRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rh
 // agree on whether a previous frame's contents exist at all.
 bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     if (!res_ || !bindings_ || width == 0 || height == 0) return false;
+
+    // NOTHING AT ALL WHEN RAY TRACING IS OFF, which is the shipped default and what most projects
+    // run. These four textures exist solely to carry a previous frame's traced visibility and
+    // reflection colour between frames; with rayTracing at Quality::Off nothing writes them and
+    // nothing reads them, and buildAccelerationStructures has already returned early for the same
+    // reason. This used to allocate regardless, because the only gate above it was `giReady_` --
+    // around 225 MB of VRAM at this machine's 3532x1987, held for a feature that never runs. Teardown
+    // rather than a bare early-out, so switching ray tracing OFF at runtime gives the memory back
+    // instead of stranding it for the process lifetime.
+    if (!rayTracingWanted()) {
+        const bool had = rtShadowHist_[0] || rtReflHist_[0];
+        for (rhi::TextureHandle& t : rtShadowHist_) { if (t) res_->destroyTexture(t); t = 0; }
+        for (rhi::TextureHandle& t : rtReflHist_)   { if (t) res_->destroyTexture(t); t = 0; }
+        rtShadowHistW_ = rtShadowHistH_ = 0;
+        rtHistWriteIdx_ = 0;
+        rtHistValid_ = false;
+        // Idempotent by construction: called from both onRenderTargetsChanged and setSettings, and
+        // the handles are zeroed above, so a second call finds nothing left to destroy. Not an
+        // error -- "allocated nothing because nothing needs it" is success.
+        if (had) AVER_INFO("[Voxi] ray-traced history released; ray tracing is off");
+        return true;
+    }
+
     if (rtShadowHist_[0] && rtShadowHist_[1] && rtReflHist_[0] && rtReflHist_[1] &&
         rtShadowHistW_ == width && rtShadowHistH_ == height)
         return true;

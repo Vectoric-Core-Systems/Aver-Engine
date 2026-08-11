@@ -489,8 +489,21 @@ private:
     f32  prevSceneViewport_[4] = {};
     // (Re)creates BOTH rtShadowHist_ and rtReflHist_ at the given resolution if they do not already
     // match, and resets rtHistValid_ when it does -- the old contents belong to a resolution that
-    // no longer exists.
+    // no longer exists. DESTROYS all four instead when rayTracingWanted() is false; see there.
     bool ensureShadowHistory(u32 width, u32 height);
+    // The size onRenderTargetsChanged last asked for, kept because the histories are created and
+    // destroyed on the ray-tracing on/off edge as well as on a resize -- and setSettings, which is
+    // where that edge is seen, is not told a resolution.
+    u32  rtHistWantW_ = 0, rtHistWantH_ = 0;
+    // Whether anything will EVER write the ray-traced histories under the current settings. Four
+    // textures at the SCENE render size (2x RG32Float + 2x RGBA16F, so 32 bytes per pixel between
+    // them -- 144 MB at this machine's 2750x1639 scene view, 225 MB at a full 3532x1987) used to be
+    // allocated whenever GI came up, with no reference to ray tracing at all. rayTracing defaults to
+    // Quality::Off and a project that never writes a RENDER.RAYTRACING key never turns it on, so the
+    // out-of-the-box configuration paid well over a hundred megabytes of VRAM for a feature switched
+    // off -- and VRAM pressure severe enough to force eviction looks exactly like an unexplained
+    // frame-rate drop, which is the complaint that led here.
+    bool rayTracingWanted() const { return rtSupported_ && settings_.rayTracing != Quality::Off; }
     // Whether PSMainVoxi will actually run its ray-traced-history code path this frame, for EITHER
     // effect. False while RT is inactive or the debug view has taken over the scene -- in either
     // case nothing will write rtShadowHist_ or rtReflHist_, so nothing about either should be
