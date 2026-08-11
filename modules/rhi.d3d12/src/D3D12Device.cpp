@@ -13,6 +13,7 @@
 #include <string>
 #include <wrl/client.h>
 
+#include <algorithm>   // std::find, for the once-per-shape binding warning below
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1188,6 +1189,16 @@ private:
     // changes every draw and does not disturb what is cached here), and the start of each frame and
     // of endFrame's post chain, which set pipelines on the command list directly.
     bool             fovValid_ = false;
+
+    // (set base, table, pipeline base) triples already reported by setBindingSet's register-mismatch
+    // check. ONE BINDING SET LEGITIMATELY SERVES TWO PIPELINES AT TWO BASES: the material system is
+    // shared, and stamps every set with the base of whichever layout initialised it (Voxi's t9),
+    // while the cluster pipeline's own table 1 sits at t4. That is correct -- a descriptor table is
+    // bound by heap index and each pipeline is self-consistent about its own registers -- but the
+    // check has no notion of it, so without this the warning fires on EVERY cluster draw of every
+    // frame and drowns the log. Kept as a once-per-shape diagnostic rather than deleted, because on
+    // a pipeline that only ever has one consumer it still catches a real mistake.
+    std::vector<u64> bindingBaseWarned_;
 
     ComPtr<ID3D12RootSignature> rootSig_;
     ComPtr<ID3D12PipelineState> pso_;
@@ -5468,9 +5479,20 @@ void D3D12RenderContext::setBindingSet(BindingSetHandle set, u32 table) {
     // is the whole point of it. Table 1 does not disturb what table 0 holds.
     if (table == 0) dev_->fovValid_ = false;
 
-    if (s->srvCount && s->srvBaseRegister != pipe_->srvBaseRegister[table])
-        AVER_WARN("[RHI.D3D12] binding set was built for t{} but table {} covers t{}",
-                  s->srvBaseRegister, table, pipe_->srvBaseRegister[table]);
+    // ONCE PER SHAPE, not once per draw -- see bindingBaseWarned_'s own comment for why a mismatch
+    // here is expected on a pipeline that borrows the shared material system's binding sets.
+    if (s->srvCount && s->srvBaseRegister != pipe_->srvBaseRegister[table]) {
+        const u64 key = (static_cast<u64>(s->srvBaseRegister) << 40) |
+                        (static_cast<u64>(table) << 32) |
+                        static_cast<u64>(pipe_->srvBaseRegister[table]);
+        if (std::find(dev_->bindingBaseWarned_.begin(), dev_->bindingBaseWarned_.end(), key) ==
+            dev_->bindingBaseWarned_.end()) {
+            dev_->bindingBaseWarned_.push_back(key);
+            AVER_WARN("[RHI.D3D12] binding set was built for t{} but table {} covers t{} "
+                      "(said once per shape; harmless when one set serves two pipelines)",
+                      s->srvBaseRegister, table, pipe_->srvBaseRegister[table]);
+        }
+    }
 
     if (s->srvCount && pipe_->srvParam[table] >= 0) {
         const D3D12_GPU_DESCRIPTOR_HANDLE h = res_->gpuSlot(s->heapBase);

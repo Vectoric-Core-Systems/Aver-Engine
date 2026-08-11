@@ -96,7 +96,10 @@ rhi::PipelineLayout giLayout() {
     // draw time or an undefined read at t8, not a build failure. Both were raised 8 -> 9 together.
     l.srvCount = 9;
     l.uavCount = 4;              // u0 volume mip 0, u1 injection accumulator, u2 shadow history, u3 reflection history (this frame's)
-    l.srvCount1 = pbr::kMaterialSrvCount;   // table 1: the material's textures, based at t3
+    // Table 1: the material's textures. Based at t9, NOT t3 as this said until it was checked --
+    // the root-signature builder accumulates srvBase across tables, so table 1 starts at whatever
+    // srvCount above is. Anyone deriving a register number from the old comment got a wrong answer.
+    l.srvCount1 = pbr::kMaterialSrvCount;
     l.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
     giSamplers(l);
     return l;
