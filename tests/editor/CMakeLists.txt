@@ -82,3 +82,15 @@ add_executable(ProjectCopyTest
 target_include_directories(ProjectCopyTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(ProjectCopyTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(ProjectCopyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# DumpClusterPs -- prints the composed HLSL (and -D list) for the cluster path's pixel shader, so it
+# can be compiled with dxc offline. A shader here is a C++ string built at runtime from two preludes
+# plus a feature's own source, and the only thing that ever type-checks it is createShader inside a
+# live device -- so without this, "the C++ compiles" is all anyone can say before shipping it.
+if(TARGET Aver.Render.PBR)
+  add_executable(DumpClusterPs ${CMAKE_SOURCE_DIR}/tools/DumpClusterPs.cpp)
+  target_include_directories(DumpClusterPs PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  # PbrShaders.cpp lives in Aver.Render.PBR.Materials, not Aver.Render.PBR.
+  target_link_libraries(DumpClusterPs PRIVATE Aver.RHI Aver.Render.PBR.Materials Aver.Render.PBR Aver.Core)
+  set_target_properties(DumpClusterPs PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

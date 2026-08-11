@@ -1016,7 +1016,18 @@ void MSClusterMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
 // backend-internal kShaderHLSL and is not reachable from a feature module's own shader source
 // (sceneShaderSource() is never exposed outside that file), so this is a separate definition
 // calling the SAME shared prelude function, not a rename of the same symbol.
-float4 PSClusterMain(VSOut i) : SV_TARGET { return plainShadeSurface(i, 1.0, float3(0, 0, 0), 1.0); }
+// PSClusterMain HAS MOVED, to sandbox/src/ClusterMaterialShader.hpp, and the move is the fix.
+//
+// It used to be one line here: plainShadeSurface(i, 1.0, float3(0,0,0), 1.0). That shades from
+// gBaseColor/gMaterial -- per-object constants -- and never samples a material texture, so every
+// textured surface on this path drew as a flat dark silhouette. It could not have done anything
+// else from inside this prelude: rhi::sharedShaderPrelude() is compiled BEFORE
+// pbr::materialShaderPrelude(), so averEvalMaterial does not exist yet at this point in the file.
+//
+// A pixel shader that wants materials therefore cannot live here, and moving it out is the whole
+// change. ASMain and MSClusterMain stay: they touch no material state, and the geometry they emit
+// was never the problem -- MSClusterMain already fills VSOut::uv, which is exactly what the lit
+// shader needed all along.
 #endif // AVER_MS_CLUSTER
 )";
     return s.c_str();

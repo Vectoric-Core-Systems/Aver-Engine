@@ -56,6 +56,11 @@
 
 #include "ProjectBrowser.hpp"
 #include "ProjectScaffold.hpp"
+#include "ClusterMaterialShader.hpp"
+
+// The material sampler register on the cluster pipeline. materialShaderDefines() is told the same
+// number. s0 here rather than Voxi's s2 because this layout declares no volume or shadow sampler.
+namespace { constexpr aver::u32 kClusterMaterialSamplerSlot = 0; }
 #include "ToolsMenu.hpp"
 #include "UiRegistry.hpp"
 
@@ -85,6 +90,8 @@
 #if AVER_MODULE_PBR
 #include "aver/pbr/Material.hpp"
 #include "aver/pbr/MaterialGpu.hpp"
+#include "aver/pbr/MaterialSystem.hpp"
+#include "aver/pbr/PbrShaders.hpp"
 #include "aver/formats/OcMat.hpp"
 #include "aver/formats/MaterialScript.hpp"
 #include "aver/assets/TextureUpload.hpp"
@@ -1865,6 +1872,17 @@ public:
         if (!lodMeshShaderEnabled_) return;
         lodMeshPipelineTried_ = true;
 
+#if !AVER_MODULE_PBR
+        // NO MATERIALS, NO CLUSTER PATH. Its pixel shader evaluates a pbr:: surface, and a build
+        // without the material system has nothing for it to evaluate. Declining here is the honest
+        // degrade rather than a silent one: the alternative -- shading from the per-object colour,
+        // which is what this path did before it had materials -- is precisely the black-foliage bug
+        // this change exists to fix, so shipping it as a fallback would reintroduce it on exactly
+        // the configurations nobody looks at.
+        AVER_INFO("[LOD-MESH-SHADER] built without the PBR module, so the GPU per-cluster path has "
+                  "no materials to shade with; using the CPU paths instead");
+        return;
+#else
         const rhi::DeviceCaps caps = e.device()->caps();
         if (caps.meshShaderTier == 0 || caps.shaderModel < 65 || !caps.dxcAvailable) {
             AVER_WARN("[LOD-MESH-SHADER] this device (meshShaderTier={}, shaderModel={}, dxc={}) "
@@ -1881,18 +1899,35 @@ public:
         }
 
         lodMeshLayout_ = rhi::PipelineLayout{};
-        lodMeshLayout_.srvCount = 4;   // t0..t3: ClusterBounds, ClusterMeshletDesc, verts, tris
-        // b1 (PerObject): the SAME 32-dword root-constants shape drawMesh() itself uses, so
-        // MSClusterMain's shared PSClusterMain (plainShadeSurface, via the prelude) reads real
-        // gWorld/gBaseColor/gMaterial. b4 (kFeatureFrameConstantRegister): a root CBV, exactly the
-        // register the shared convention reserves for "a feature's own per-frame/per-draw data" --
-        // see RHIResources.hpp's own comment on kFeatureFrameConstantRegister.
+        lodMeshLayout_.srvCount = 4;   // table 0, t0..t3: ClusterBounds, ClusterMeshletDesc, verts, tris
+        // TABLE 1 IS THE MATERIAL, and adding it is what stops this path drawing black. The pixel
+        // shader now evaluates a real surface, so it needs the material system's textures bound
+        // somewhere -- and srvCount1 is the second table the RHI already offers, based immediately
+        // above the first at t4.
+        //
+        // NO THIRD TABLE IS NEEDED, which was the thing worth checking before writing any of this.
+        // rhi::kBindingTableCount is 2, and full parity with the ordinary path would want three sets
+        // at once: these cluster buffers, Voxi's GI volume and cascade atlas, and the material
+        // textures. It does NOT need three, because this pipeline deliberately does not sample
+        // Voxi's -- see ClusterMaterialShader.hpp on what that costs.
+        //
+        // The cluster buffers' own registers move from t4/t5 to t12/t13 as a consequence, and
+        // nothing has to be edited for that: rhi::meshGeometryDefines derives them from
+        // declaredSrvCount(layout), which is srvCount + srvCount1.
+        lodMeshLayout_.srvCount1 = pbr::kMaterialSrvCount;
+        lodMeshLayout_.samplers[kClusterMaterialSamplerSlot].filter        = rhi::Filter::Anisotropic;
+        lodMeshLayout_.samplers[kClusterMaterialSamplerSlot].address       = rhi::AddressMode::Wrap;
+        lodMeshLayout_.samplers[kClusterMaterialSamplerSlot].maxAnisotropy = 8;
+        lodMeshLayout_.samplerCount = kClusterMaterialSamplerSlot + 1;
+        // b1 (PerObject): the SAME 32-dword root-constants shape drawMesh() itself uses, so the
+        // cluster shaders read real gWorld/gBaseColor/gMaterial. b4 (kFeatureFrameConstantRegister):
+        // a root CBV, exactly the register the shared convention reserves for "a feature's own
+        // per-frame/per-draw data" -- see RHIResources.hpp's own comment on it.
         lodMeshLayout_.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
         lodMeshLayout_.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;
 
-        // Everything AVER_MS_CLUSTER=1 needs -- ASMain, MSClusterMain, PSClusterMain, and the shared
-        // VSOut/PerFrame/PerObject/plainShadeSurface they all read -- lives inside
-        // sharedShaderPrelude() itself; there is no separate feature-owned HLSL source to append.
+        // AS and MS come from the shared prelude alone: they touch no material state. The PIXEL
+        // shader does not -- see below.
         const std::string defs = std::string("AVER_MS_CLUSTER=1;") + rhi::meshGeometryDefines(lodMeshLayout_);
         static const std::string kEmptySource;
 
@@ -1910,14 +1945,32 @@ public:
         msd.stage = rhi::ShaderStage::Mesh;
         lodMeshMsShader_ = res->createShader(msd);
 
-        rhi::ShaderDesc psd = asd;
+        // THE PIXEL SHADER IS COMPOSED DIFFERENTLY FROM ITS AS/MS SIBLINGS, and that is the point of
+        // this whole change. It is compiled as shared prelude + MATERIAL prelude + its own source,
+        // which is the order PbrShaders.hpp documents and the order Voxi already uses. Its
+        // predecessor lived inside the shared prelude and therefore could not call averEvalMaterial
+        // at all -- the material functions are not declared until the next prelude along.
+        //
+        // AVER_MS_CLUSTER is deliberately NOT defined for it: it needs neither the cluster buffers
+        // nor the AS/MS entry points, only VSOut, which is unguarded.
+        static const std::string kClusterPsPrelude =
+            std::string(rhi::sharedShaderPrelude()) + pbr::materialShaderPrelude();
+        // Based at THIS layout's own srvCount, so the material textures land in table 1 at t4 --
+        // the same call Voxi makes against giLayout(), just with this layout's numbers.
+        const std::string psDefs =
+            pbr::materialShaderDefines(lodMeshLayout_.srvCount, kClusterMaterialSamplerSlot);
+        static const std::string kClusterPsSource{sandbox::kClusterMaterialPS};
+
+        rhi::ShaderDesc psd;
+        psd.prelude = kClusterPsPrelude.c_str();
+        psd.source  = kClusterPsSource.c_str();
         psd.entry = "PSClusterMain";
         psd.stage = rhi::ShaderStage::Pixel;
-        // NOT 60: the shared source string handed to createShader is the WHOLE prelude with
-        // AVER_MS_CLUSTER=1 -- ASMain/MSClusterMain's payload/DispatchMesh/[outputtopology] syntax is
-        // SM6-only and FXC (the SM5.1 compiler createShader would otherwise pick for a plain Pixel
-        // stage) cannot parse it even for an entry point that never calls it. Forcing DXC/SM 6.5 here
-        // too, exactly like the AS/MS compiles, is what keeps FXC from ever seeing that text at all.
+        psd.defines = psDefs.c_str();
+        // SM 6.5 like its siblings. It has no SM6-only syntax of its own any more -- that was a
+        // property of sharing a source string with ASMain's DispatchMesh -- but a pixel shader
+        // paired with an AS/MS pipeline targeting a LOWER model is not something this tree has ever
+        // done, and a release is not the place to find out whether it links.
         psd.minShaderModel = 65;
         lodMeshPsShader_ = res->createShader(psd);
 
@@ -1944,6 +1997,7 @@ public:
         }
         lodMeshPipelineReady_ = true;
         AVER_INFO("[LOD-MESH-SHADER] GPU per-cluster pipeline ready (meshShaderTier={})", caps.meshShaderTier);
+#endif   // AVER_MODULE_PBR: the no-materials build returned above
     }
 #endif
 
