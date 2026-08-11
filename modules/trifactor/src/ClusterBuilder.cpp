@@ -454,6 +454,30 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             // the comment that a tight bound "would silently return far more triangles than
             // requested": it does not terminate. TrifactorTest hangs inside buildLodHierarchy with
             // no error bound to stop the descent, so 1e-2 is load-bearing, not incidental.
+            //
+            // AND A THIRD, WHICH WORKED, and is the reason this comment is no longer a dead end.
+            // Dropping LockBorder here (keeping SimplifySparse, keeping target_error at 1e-2) was
+            // measured with tools/RelodTool over the same 33 demo meshes:
+            //
+            //     fir_sapling         393,157 -> 33          (1.1x -> 13,121x, 13 levels -> 23)
+            //     pine_sapling_small  315,120 -> 27          (1.3x -> 14,746x)
+            //     grass_medium_01      24,514 -> 21          (had TWO levels; now 14)
+            //     pine_tree_01        274,734 -> 1,442       (had ONE level -- no ladder at all)
+            //     corpus coarsest   1,195,431 -> 75,860      (15.8x; 28 of 33 meshes improve)
+            //
+            // So the 1e-2 error bound was NEVER the ceiling -- LockBorder was, exactly as the
+            // paragraph above suspected but could not price. For scale, SimplifyPrune recovered
+            // 5.6% across the same corpus; this recovers 93.7%.
+            //
+            // IT IS NOT SHIPPABLE AS A BARE FLAG REMOVAL, and the same measurement shows why: five
+            // meshes got WORSE, all of them solid rather than shelled -- dead_tree_trunk 100 -> 142,
+            // dead_tree_trunk_02 700 -> 959, rock_07 218 -> 245, rock_09 204 -> 249,
+            // rock_moss_set_02 325 -> 842. On a mesh that IS one connected surface, LockBorder is
+            // doing its real job of holding the group boundary, and removing it lets the simplifier
+            // spend its error budget wrecking seams instead of collapsing interiors. The fix has to
+            // ROUTE: keep this call exactly as it is for groups touching a large shell, and take the
+            // flag off only for buffers that provably contain whole isolated shells and nothing
+            // else. See docs for the shell-partition plan; do not simply delete the flag.
             std::vector<u32> simplified(mergedIndices.size());
             f32 resultError = 0.0f;
             const auto tSimplify = tick();
