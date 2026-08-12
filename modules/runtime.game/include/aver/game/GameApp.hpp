@@ -143,6 +143,33 @@ private:
     // gated on the framework's play state the way tickGameplay is.
     void tickProjectGraphs(f32 dt);
 
+    // THE OTHER HALF OF THE GAP initScripting's header comment names and deliberately leaves open:
+    // "nothing here calls ... aver_fw_begin_play() (which is what would let an actor class ever get
+    // bound to an entity and ticked)". Without it, EVERY piece of the actor framework a project might
+    // author -- AverGameMode, AverCharacter's capsule/mouse-look/view-entity camera, AverPlayerController
+    // possession, Actor.OnTick via the PrePhysics/Physics/PostPhysics groups -- is dead code in a
+    // shipped game: aver_fw_play_state() never leaves AVER_FW_PLAY_EDITOR, so tickGameplay() and
+    // drivePlayCamera() both return on their first line, forever, regardless of what a project declares.
+    //
+    // WHY THIS IS THE RIGHT SIZE OF FIX rather than un-gating tickGameplay/drivePlayCamera themselves:
+    // those two functions are correct AS WRITTEN -- a session should exist before the world simulates
+    // or the camera follows a pawn. What was missing is the one native call that ever MAKES a session
+    // exist. A shipped game has no editor Play button to press, so "boot the game" and "begin playing"
+    // are the same moment for it -- exactly the reasoning tickProjectGraphs' own comment already uses
+    // for why graphs run ungated here ("a scripting-layer feature ... gating it ... would make it
+    // silently inert in exactly the configuration most likely to be the only gameplay a project has").
+    //
+    // WHY THIS IS GENERIC, NOT A FEATURE IN DISGUISE: this function does not know what a GameMode IS,
+    // let alone what any project's GameMode does. It asks the framework, by FLAG bits already defined
+    // in framework_abi.h (AVER_FW_CLASS_GAME_MODE / AVER_FW_CLASS_GAME_INSTANCE) and already resolved
+    // by an existing, general query (aver_fw_find_class_with_flags -- built for exactly this "does
+    // anything declare one of these" question, and unused by any caller in this tree until now),
+    // whether the CURRENTLY LOADED PROJECT declared one. A project with no GameMode gets exactly the
+    // same no-op this engine has always given it: aver_fw_begin_play is never called, play_state stays
+    // EDITOR, and the framework is exactly as inert as it was before this function existed -- the same
+    // "no-graph project is unaffected" shape discoverProjectGraphs already established for graphs.
+    void beginPlayIfGameModeDeclared();
+
     // Drives the camera from the possessed pawn. Must run AFTER World::flush and BEFORE the view
     // matrix is built, or the camera trails the pawn by one frame.
     void drivePlayCamera();

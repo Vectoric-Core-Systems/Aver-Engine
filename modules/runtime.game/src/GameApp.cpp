@@ -526,6 +526,41 @@ void GameApp::tickProjectGraphs(f32 dt) {
 #endif
 }
 
+void GameApp::beginPlayIfGameModeDeclared() {
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCRIPTING
+    if (!scriptsReady_) return;   // no CLR host up -> no classes were ever declared, nothing to find
+
+    // aver_fw_find_class_with_flags already skips abstract rows (FrameworkAbi.cpp), so the base
+    // "GameMode" row DeclareBaseClasses seals at bootstrap is invisible to this query on its own --
+    // only a project's OWN concrete [AverGameMode] subclass makes this return non-zero. That is what
+    // makes "declared" the right word in this function's name: it is asking the registry a project
+    // question, not assuming one.
+    const i32 modeClass = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE);
+    if (modeClass == 0) {
+        AVER_INFO("[Game] no GameMode class declared -- play session not started (the framework stays "
+                  "exactly as inert as it was before this existed; see discoverProjectGraphs for the "
+                  "same shape decided by content instead of by class declarations)");
+        return;
+    }
+    // 0 is a legal, common answer here too -- aver_fw_begin_play already treats "no GameInstance class"
+    // as "skip that spawn" (FrameworkAbi.cpp), so a project with a GameMode but no GameInstance is not
+    // a degraded case, just a project that had nothing worth putting there.
+    const i32 instanceClass = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_INSTANCE);
+    if (aver_fw_begin_play(instanceClass, modeClass)) {
+        AVER_INFO("[Game] play session begun automatically (GameMode class {}) -- a shipped game has no "
+                  "editor Play button, so booting it IS beginning play", modeClass);
+    } else {
+        // Only reachable if something upstream already called aver_fw_begin_play (it refuses a second
+        // session) or the class failed validClass() despite being found, which aver_fw_find_class_with_
+        // flags's own linear scan makes very hard to hit honestly -- logged rather than asserted because
+        // "the game boots with the framework inert" is still a survivable outcome, same as a graph that
+        // fails to compile.
+        AVER_WARN("[Game] aver_fw_begin_play declined for GameMode class {} -- the framework stays in "
+                  "EDITOR state; the world still renders, nothing in it plays", modeClass);
+    }
+#endif
+}
+
 Vec3 GameApp::camForward() const {
     return Vec3{ std::cos(pitch_) * std::cos(yaw_), std::cos(pitch_) * std::sin(yaw_), std::sin(pitch_) };
 }
@@ -706,6 +741,11 @@ void GameApp::onInit(Engine& e) {
         AVER_INFO("[Game] no .ocgraph content and no Scripts assembly -- scripting host not started");
     }
 #endif
+    // AFTER scripting is up (so any project GameMode is declared) and AFTER the graph/behaviour report
+    // just above (so a reader sees what loaded before seeing whether it started playing). See this
+    // function's own comment for why "declares a GameMode" is the generic, content-driven switch this
+    // is gated on, matching the shape haveGraphs/haveScriptAssembly already uses just above.
+    beginPlayIfGameModeDeclared();
     AVER_INFO("[Game] ready");
 }
 
