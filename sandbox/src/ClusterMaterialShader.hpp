@@ -13,6 +13,17 @@
 // which is the composition order PbrShaders.hpp documents and the one Voxi already uses for
 // VoxiShaders.hpp.
 //
+// THE HALF STAGE 3 DID NOT BUY, MEASURED SIDE BY SIDE. This shader can now SAMPLE the cascade map
+// and the voxel volume, and it does. The geometry it draws is still absent FROM both, because
+// IRenderFeature::submitDraw is called from exactly one place -- D3D12Device::drawMesh -- and this
+// path dispatches clusters itself and skips that call by design. So a cluster-drawn plant RECEIVES
+// shadow and GI and CASTS neither. Captured at the same camera on both paths, the difference is
+// obvious rather than subtle: on the ordinary path every plant has a soft contact shadow under it and
+// its leaves shade each other; here the ground beneath is uniformly lit and the leaves carry hard
+// black patches where a neighbour's shadow should have been the soft part. Closing this means getting
+// these instances into the shadow and voxelise passes, which is a scene-submission change, not a
+// shading one -- nothing in this file can fix it.
+//
 // WHAT IT DELIBERATELY DOES NOT DO, STILL, EVEN AFTER STAGE 3. No ray tracing, ever -- shadowFactor()
 // and coneTracedIndirect() (borrowed from Voxi via VoxiGiShaders.hpp's giShaderPrelude(), merged
 // into this pipeline's own table 0 rather than needing a third -- see D3D12Device.cpp's nullFill for

@@ -748,8 +748,18 @@ public:
             lodMeshShaderEnabled_ = ok;
             if (ok) {
 #if AVER_MODULE_VOXI
+                // RECEIVES, DOES NOT CAST -- and the difference is visible, so the warning says both.
+                // Stage 3 merged Voxi's table so this pixel shader can SAMPLE the cascade map and the
+                // voxel volume, and it does. What it cannot do is put its own geometry INTO either:
+                // IRenderFeature::submitDraw is called from exactly one place, D3D12Device::drawMesh,
+                // and this path dispatches clusters directly and skips that call by design (see
+                // `if (!clusterDispatched)` further down). So a cluster-drawn plant is absent from the
+                // shadow cascade render and from the GI voxelisation, and it shows: side by side with
+                // the ordinary path at the same camera, these plants sit on unshadowed ground with no
+                // contact shadow under them, and their own leaves do not shade each other.
                 AVER_WARN("[LOD] per-cluster mesh-shader path ON by request (mesh tier {}, SM {}) "
-                          "-- faster and textured, WITH cascade shadows and voxel-cone GI, but NEVER "
+                          "-- faster and textured, and it RECEIVES cascade shadows and voxel-cone GI, "
+                          "but casts into NEITHER (these draws never reach submitDraw), and is never "
                           "ray traced even when the project has ray tracing on",
                           mcaps.meshShaderTier, mcaps.shaderModel);
 #else
