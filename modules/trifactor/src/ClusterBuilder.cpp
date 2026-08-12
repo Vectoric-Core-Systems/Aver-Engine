@@ -173,6 +173,41 @@ QuantizedCone quantizeConeConservative(const Vec3& rawAxis, f32 cutoff) {
     return q;
 }
 
+// ---- sphere-of-spheres merge (Stage 4, ClusterGroupNode::sphereCenter/sphereRadius) ------------
+//
+// Grows (center, radius) -- initialised to the FIRST child's own sphere by the call site below, then
+// merged with every subsequent one -- to also fully contain a second sphere (c2, r2): the standard
+// "smallest sphere enclosing two spheres" construction. If one sphere already lies entirely inside
+// the other, the smaller merge is a no-op (the containing sphere is returned unchanged); otherwise
+// the new sphere sits on the segment joining the two centres, sized to touch the FAR side of each
+// input sphere exactly, which is what makes the result provably contain both inputs in full rather
+// than merely their centres.
+//
+// THIS IS NOT the minimal bounding sphere of an arbitrary point set -- that needs Welzl's algorithm
+// or an equivalent, and ClusterGroupNode::sphereCenter's own comment does not ask for minimality,
+// only for CONTAINMENT (a traversal that culls on a bound that is merely "bigger than it strictly
+// needed to be" costs a little overdraw; one that culls on a bound that is too SMALL drops geometry
+// that was actually visible -- see that comment for the full asymmetry argument). A group has at
+// most kMaxGroupSize (8) children to fold in here, so this is at most seven sequential two-sphere
+// merges, and the containment property this function guarantees at each step composes: if sphere A
+// contains X and sphere B (A merged with Y) contains A and Y in full, B contains X, Y and A's own
+// prior contents in full too.
+void mergeSphere(Vec3& center, f32& radius, const Vec3& c2, f32 r2) {
+    const Vec3 diff = c2 - center;
+    const f32 d = diff.size();
+    if (d + r2 <= radius) return;                                   // c2's sphere already lies inside
+    if (d + radius <= r2) { center = c2; radius = r2; return; }      // this sphere lies inside c2's
+
+    const f32 newRadius = (d + radius + r2) * 0.5f;
+    // Move from `center` toward `c2` by (newRadius - radius). d > 1e-8f is guaranteed here: a d at or
+    // near zero with differing radii would already have been caught by one of the two early-outs
+    // above (whichever radius is larger swallows the other), so reaching this line with a
+    // near-degenerate `diff` means the radii were also near-equal, and no move is needed either way --
+    // the guard exists to keep the divide well-defined, not to change the result in that case.
+    if (d > 1e-8f) center = center + diff * ((newRadius - radius) / d);
+    radius = newRadius;
+}
+
 // ---- connected-shell classification (task steps 3-4) -------------------------------------------
 //
 // WHY THIS EXISTS. meshopt_SimplifyLockBorder (see the file-level comment above) locks any edge used
@@ -1064,6 +1099,66 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
                     dag.clusters[childId].parents.push_back(parentId);
                 }
             }
+
+            // ---- STAGE 4: the streaming topology this SAME pass also has everything it needs to
+            // produce -- both pg.members (the children this group replaced) and newIds (what it
+            // produced) are in scope right here, with the full group geometry, which is exactly what
+            // Cluster::fallbackAncestorId's own comment says this must be decided with rather than
+            // deferred to a runtime that only ever sees one cluster id at a time. Skipped only if
+            // newIds somehow ended up empty (a group's simplification collapsing to nothing has never
+            // been observed on this engine's demo corpus -- see this file's own header table -- and
+            // nothing above this line rules it out for a pathological input; there is no principled
+            // ClusterGroupNode to record for zero output clusters, and pg.members would already fail
+            // validateLodDag's "every non-root cluster has a parent" check in that case, same as
+            // before this stage existed).
+            if (!newIds.empty()) {
+                // A TRUE sphere-of-spheres over pg.members' OWN, PRE-simplification bounds (mergeSphere,
+                // above in this file) -- never over the group's own (coarser, post-simplification)
+                // clusters, which is the mistake ClusterGroupNode::sphereCenter's own comment
+                // (ClusterBuilder.hpp) spends a paragraph on. Seeded with the first child's own sphere
+                // rather than a degenerate (origin, 0) starting point, so a single-member group's node
+                // gets that child's EXACT sphere back, not an artifact of the seed.
+                Vec3 groupCenter = dag.clusters[pg.members[0]].bounds.sphereCenter;
+                f32  groupRadius = dag.clusters[pg.members[0]].bounds.sphereRadius;
+                for (usize mi = 1; mi < pg.members.size(); ++mi) {
+                    const Cluster& child = dag.clusters[pg.members[mi]];
+                    mergeSphere(groupCenter, groupRadius, child.bounds.sphereCenter, child.bounds.sphereRadius);
+                }
+
+                ClusterGroupNode node;
+                node.id           = static_cast<u32>(dag.groupNodes.size());
+                node.level        = newLevel;
+                node.sphereCenter = groupCenter;
+                node.sphereRadius = groupRadius;
+                // CONTIGUOUS by construction (see ClusterGroupNode::ownClusterRange's own comment):
+                // newIds is exactly what the splitIntoClusters call three lines up just appended to
+                // dag.clusters, back to back, so [newIds.front(), newIds.front()+newIds.size()) names
+                // precisely this group's own output and nothing else's.
+                node.ownClusterStart   = newIds.front();
+                node.ownClusterCount   = static_cast<u32>(newIds.size());
+                node.childClusterStart = static_cast<u32>(dag.groupChildren.size());
+                node.childClusterCount = static_cast<u32>(pg.members.size());
+                dag.groupChildren.insert(dag.groupChildren.end(), pg.members.begin(), pg.members.end());
+                dag.groupNodes.push_back(node);
+
+                for (u32 parentId : newIds) dag.clusters[parentId].ownerGroupId = node.id;
+
+                // PART A: fallbackAncestorId -- for each child this group replaced, the group's own
+                // output cluster (newIds) whose bounding-sphere CENTRE is nearest that child's own
+                // centre. Comparing squared distances avoids a sqrt per (child, candidate) pair; the
+                // comparison's ORDER is unaffected since both sides are non-negative.
+                for (u32 childId : pg.members) {
+                    const Vec3& childCenter = dag.clusters[childId].bounds.sphereCenter;
+                    u32 nearest = newIds[0];
+                    f32 nearestDistSq = (dag.clusters[nearest].bounds.sphereCenter - childCenter).sizeSquared();
+                    for (usize ni = 1; ni < newIds.size(); ++ni) {
+                        const f32 distSq =
+                            (dag.clusters[newIds[ni]].bounds.sphereCenter - childCenter).sizeSquared();
+                        if (distSq < nearestDistSq) { nearestDistSq = distSq; nearest = newIds[ni]; }
+                    }
+                    dag.clusters[childId].fallbackAncestorId = nearest;
+                }
+            }
         }
     }
 
@@ -1180,6 +1275,141 @@ ValidationReport validateLodDag(const fmt::OcMeshData& mesh, const LodDag& dag) 
     return report;
 }
 
+// Containment tolerance for validateClusterHierarchy's sphere check, below. mergeSphere's arithmetic
+// is exact in the mathematical sense (no truncation, just floating-point rounding across at most
+// kMaxGroupSize-1 (7) sequential merges), so this only needs to absorb accumulated f32 rounding, not
+// a real algorithmic slop -- but a fixed epsilon like the 1e-6f error-monotonicity checks elsewhere
+// in this file use would be wrong at this function's scale: those compare meshopt's own
+// mesh-relative error units (near [0,1]), while sphere radii/centres here are in the SAME absolute
+// world units (cm) real assets ship in, which can be centimetres for a small prop or thousands of
+// centimetres for a landscape chunk. Scaling the tolerance to the sphere's own radius keeps this
+// correct at both ends: never so tight that ordinary f32 rounding on a large sphere false-flags, and
+// never so loose that it would paper over a real containment bug on a tiny one.
+constexpr f32 kContainmentEpsilonRel = 1e-4f;
+constexpr f32 kContainmentEpsilonAbs = 1e-3f;
+
+bool validateClusterHierarchy(const LodDag& dag, std::string* why) {
+    const u32 topLevel = dag.levelCount() > 0 ? dag.levelCount() - 1 : 0;
+
+    // ---- every non-root cluster has a VALID fallbackAncestorId, at EXACTLY one level coarser -----
+    for (const Cluster& c : dag.clusters) {
+        const bool isRoot = (c.level == topLevel);
+        if (isRoot) continue;   // a root's fallbackAncestorId is checked implicitly: nothing sets it,
+                                 // and it is never read as a level-coarser reference by anything below
+
+        if (c.fallbackAncestorId == fmt::kInvalidClusterId) {
+            if (why) *why = "cluster " + std::to_string(c.id) + " (level " + std::to_string(c.level) +
+                             ") is non-root but has no fallbackAncestorId -- a streaming system with "
+                             "this cluster's own page missing would have nothing coarser to draw instead";
+            return false;
+        }
+        if (c.fallbackAncestorId >= dag.clusters.size()) {
+            if (why) *why = "cluster " + std::to_string(c.id) + "'s fallbackAncestorId " +
+                             std::to_string(c.fallbackAncestorId) + " is out of range for " +
+                             std::to_string(dag.clusters.size()) + " clusters";
+            return false;
+        }
+        const Cluster& ancestor = dag.clusters[c.fallbackAncestorId];
+        if (ancestor.level != c.level + 1) {
+            if (why) *why = "cluster " + std::to_string(c.id) + " (level " + std::to_string(c.level) +
+                             ")'s fallbackAncestorId " + std::to_string(c.fallbackAncestorId) +
+                             " is at level " + std::to_string(ancestor.level) + ", not " +
+                             std::to_string(c.level + 1) + " -- fallbackAncestorId must be one of THIS "
+                             "child's own group's output clusters, one level coarser, never further";
+            return false;
+        }
+    }
+
+    // ---- every group node's sphere GENUINELY CONTAINS every child cluster's own sphere, checked
+    // NUMERICALLY -- and every range a node carries is in bounds for what it indexes into ----------
+    for (const ClusterGroupNode& g : dag.groupNodes) {
+        if (u64(g.ownClusterStart) + g.ownClusterCount > dag.clusters.size()) {
+            if (why) *why = "group " + std::to_string(g.id) + "'s ownClusterRange runs past " +
+                             std::to_string(dag.clusters.size()) + " clusters";
+            return false;
+        }
+        if (u64(g.childClusterStart) + g.childClusterCount > dag.groupChildren.size()) {
+            if (why) *why = "group " + std::to_string(g.id) + "'s childClusterRange runs past " +
+                             std::to_string(dag.groupChildren.size()) + "-entry groupChildren";
+            return false;
+        }
+
+        const f32 eps = kContainmentEpsilonAbs + g.sphereRadius * kContainmentEpsilonRel;
+        for (u32 k = 0; k < g.childClusterCount; ++k) {
+            const u32 childId = dag.groupChildren[usize(g.childClusterStart) + k];
+            if (childId >= dag.clusters.size()) {
+                if (why) *why = "group " + std::to_string(g.id) + " references child cluster " +
+                                 std::to_string(childId) + ", out of range for " +
+                                 std::to_string(dag.clusters.size()) + " clusters";
+                return false;
+            }
+            const Cluster& child = dag.clusters[childId];
+            if (child.level + 1 != g.level) {
+                if (why) *why = "group " + std::to_string(g.id) + " (level " + std::to_string(g.level) +
+                                 ") references child cluster " + std::to_string(childId) + " at level " +
+                                 std::to_string(child.level) + ", not " + std::to_string(g.level - 1) +
+                                 " -- a group's children must be exactly one level finer than the group";
+                return false;
+            }
+
+            const f32 centreDist = (g.sphereCenter - child.bounds.sphereCenter).size();
+            if (centreDist + child.bounds.sphereRadius > g.sphereRadius + eps) {
+                if (why) *why = "group " + std::to_string(g.id) + "'s sphere (centre (" +
+                                 std::to_string(g.sphereCenter.x) + ", " + std::to_string(g.sphereCenter.y) +
+                                 ", " + std::to_string(g.sphereCenter.z) + "), radius " +
+                                 std::to_string(g.sphereRadius) + ") does not contain child cluster " +
+                                 std::to_string(childId) + "'s own sphere (radius " +
+                                 std::to_string(child.bounds.sphereRadius) + ", centre distance " +
+                                 std::to_string(centreDist) + ") -- centreDist + childRadius exceeds "
+                                 "groupRadius by " +
+                                 std::to_string(centreDist + child.bounds.sphereRadius - g.sphereRadius);
+                return false;
+            }
+        }
+
+        // ---- ownerGroupId round-trips: every cluster THIS group produced points back at it --------
+        for (u32 k = 0; k < g.ownClusterCount; ++k) {
+            const u32 ownId = g.ownClusterStart + k;
+            if (dag.clusters[ownId].ownerGroupId != g.id) {
+                if (why) *why = "cluster " + std::to_string(ownId) + " is in group " + std::to_string(g.id) +
+                                 "'s ownClusterRange but its own ownerGroupId reads " +
+                                 std::to_string(dag.clusters[ownId].ownerGroupId) + ", not " +
+                                 std::to_string(g.id);
+                return false;
+            }
+        }
+    }
+
+    // ---- and the converse: every cluster's ownerGroupId is valid FOR ITS OWN LEVEL -- fmt::kInvalidClusterId
+    // at level 0 (never produced by a group -- see Cluster::ownerGroupId's own comment), a real group
+    // id at THAT cluster's own level for level >= 1 ----------------------------------------------
+    for (const Cluster& c : dag.clusters) {
+        if (c.level == 0) {
+            if (c.ownerGroupId != fmt::kInvalidClusterId) {
+                if (why) *why = "LOD-0 cluster " + std::to_string(c.id) + " has ownerGroupId " +
+                                 std::to_string(c.ownerGroupId) + " set, but LOD 0 is never produced by a group";
+                return false;
+            }
+            continue;
+        }
+        if (c.ownerGroupId == fmt::kInvalidClusterId || c.ownerGroupId >= dag.groupNodes.size()) {
+            if (why) *why = "cluster " + std::to_string(c.id) + " (level " + std::to_string(c.level) +
+                             ") has an invalid ownerGroupId (" + std::to_string(c.ownerGroupId) + " of " +
+                             std::to_string(dag.groupNodes.size()) + " groups) -- every cluster above LOD 0 "
+                             "must have been produced by some group";
+            return false;
+        }
+        if (dag.groupNodes[c.ownerGroupId].level != c.level) {
+            if (why) *why = "cluster " + std::to_string(c.id) + " (level " + std::to_string(c.level) +
+                             ")'s ownerGroupId " + std::to_string(c.ownerGroupId) + " names a group at level " +
+                             std::to_string(dag.groupNodes[c.ownerGroupId].level) + ", not its own";
+            return false;
+        }
+    }
+
+    return true;
+}
+
 f32 worldExtentScale(const fmt::OcMeshData& mesh) {
     const usize vertexCount = mesh.positions.size() / 3;
     if (vertexCount == 0) return 0.0f;
@@ -1285,15 +1515,59 @@ bool validateClusterErrorBounds(const LodDag& dag, const std::vector<ClusterErro
 
 namespace {
 
+// Global cluster id (dag.clusters index) -> the on-disk, LEVEL-LOCAL index every OcMeshMeshlet
+// reference (fallbackAncestorId) and OcMeshClusterGroup range (ownClusterRange, and every value
+// ClusterGroupChildren[] holds) uses. Valid because a level's cluster ids are a CONTIGUOUS,
+// increasing range by construction -- see ClusterGroupNode::ownClusterRange's own comment
+// (ClusterBuilder.hpp) for why: every cluster at a given level is pushed to dag.clusters back to
+// back (either by buildClusters for level 0, or by one splitIntoClusters call per group in
+// buildLodHierarchy's Pass 2 for level >= 1), so dag.levels[level] as a WHOLE is exactly
+// [dag.levels[level].front(), dag.levels[level].front() + dag.levels[level].size()).
+u32 toLevelLocalIndex(const LodDag& dag, u32 globalClusterId) {
+    const u32 level = dag.clusters[globalClusterId].level;
+    return globalClusterId - dag.levels[level].front();
+}
+
+// Per-level ClusterGroupNode::id bookkeeping, the group-side counterpart to dag.levels above --
+// LodDag has no `groupLevels` array the way it has `levels`, so this is built with one pass over
+// dag.groupNodes (cheap: at most a few thousand groups even on this engine's largest demo mesh,
+// computed once per packLodDag call, not per level). Group ids are contiguous within a level for the
+// identical reason cluster ids are: buildLodHierarchy's Pass 2 pushes one ClusterGroupNode per group,
+// in order, for a WHOLE level before the outer loop ever advances to the next one.
+struct GroupLevelIndex {
+    std::vector<u32> firstId;   // per level; fmt::kInvalidClusterId if that level has no group nodes
+    std::vector<u32> count;     // per level; 0 if none
+};
+GroupLevelIndex indexGroupsByLevel(const LodDag& dag) {
+    GroupLevelIndex idx;
+    idx.firstId.assign(dag.levelCount(), fmt::kInvalidClusterId);
+    idx.count.assign(dag.levelCount(), 0);
+    for (const ClusterGroupNode& g : dag.groupNodes) {
+        if (idx.firstId[g.level] == fmt::kInvalidClusterId) idx.firstId[g.level] = g.id;
+        ++idx.count[g.level];
+    }
+    return idx;
+}
+// Global ClusterGroupNode id -> the on-disk, level-local OcMeshClusterGroup[] index
+// OcMeshMeshlet::ownerGroupId stores. Mirrors toLevelLocalIndex above, for groups instead of clusters.
+u32 toGroupLocalIndex(const LodDag& dag, const GroupLevelIndex& groupIdx, u32 globalGroupId) {
+    const u32 level = dag.groupNodes[globalGroupId].level;
+    return globalGroupId - groupIdx.firstId[level];
+}
+
 // Converts one LOD level of a DAG into the on-disk OcMeshMeshlet shape. LIFTED FROM
 // tests/formats/src/ConvertTool.cpp's own toMeshlets (see packLodDag's doc comment in
-// ClusterBuilder.hpp for why this now lives here instead) -- byte-for-byte the same conversion,
-// unchanged, so the corpus numbers this task measured with the old ConvertTool-private copy still
-// apply to this one. `errorBounds` is computeClusterErrorBounds(dag, scale)'s output, indexed by
-// Cluster::id exactly like dag.clusters -- this is where ownError/parentError cross from Trifactor's
-// Cluster into Formats' OcMeshMeshlet, same as it always was.
+// ClusterBuilder.hpp for why this now lives here instead) -- byte-for-byte the same conversion for
+// every field this stage does not touch, so the corpus numbers this task measured with the old
+// ConvertTool-private copy still apply to this one. `errorBounds` is
+// computeClusterErrorBounds(dag, scale)'s output, indexed by Cluster::id exactly like dag.clusters --
+// this is where ownError/parentError cross from Trifactor's Cluster into Formats' OcMeshMeshlet, same
+// as it always was. `groupIdx` is indexGroupsByLevel(dag)'s output, needed only to translate
+// ownerGroupId (fallbackAncestorId translates through toLevelLocalIndex alone, since it names a
+// CLUSTER, not a group).
 std::vector<fmt::OcMeshMeshlet> toMeshlets(const LodDag& dag, u32 level,
-                                            const std::vector<ClusterErrorBounds>& errorBounds) {
+                                            const std::vector<ClusterErrorBounds>& errorBounds,
+                                            const GroupLevelIndex& groupIdx) {
     std::vector<fmt::OcMeshMeshlet> out;
     if (level >= dag.levels.size()) return out;
     out.reserve(dag.levels[level].size());
@@ -1311,9 +1585,49 @@ std::vector<fmt::OcMeshMeshlet> toMeshlets(const LodDag& dag, u32 level,
         ml.coneCutoff   = c.bounds.coneCutoff;
         ml.ownError     = errorBounds[cid].ownError;
         ml.parentError  = errorBounds[cid].parentError;
+        // Stage 4: fmt::kInvalidClusterId passes through UNTRANSLATED -- it is not a real cluster/group id
+        // to look up a level for, it is the sentinel itself, and toLevelLocalIndex/toGroupLocalIndex
+        // would read dag.clusters[0xFFFFFFFF]/dag.groupNodes[0xFFFFFFFF] if handed it directly.
+        ml.fallbackAncestorId = (c.fallbackAncestorId == fmt::kInvalidClusterId)
+                                     ? fmt::kInvalidClusterId : toLevelLocalIndex(dag, c.fallbackAncestorId);
+        ml.ownerGroupId = (c.ownerGroupId == fmt::kInvalidClusterId)
+                               ? fmt::kInvalidClusterId : toGroupLocalIndex(dag, groupIdx, c.ownerGroupId);
         out.push_back(std::move(ml));
     }
     return out;
+}
+
+// Converts one LOD level's ClusterGroupNode entries (dag.groupNodes, restricted to this level via
+// `groupIdx`) into the on-disk OcMeshClusterGroup[] + flat ClusterGroupChildren[] shape -- the group-
+// side counterpart to toMeshlets/toIndices above. Empty for level 0 (no group ever owns a LOD-0
+// cluster) and for any level `groupIdx` recorded no groups at (the DAG never grew past level 0).
+void toGroupNodes(const LodDag& dag, u32 level, const GroupLevelIndex& groupIdx,
+                   std::vector<fmt::OcMeshClusterGroup>& outNodes, std::vector<u32>& outChildren) {
+    outNodes.clear();
+    outChildren.clear();
+    if (level >= groupIdx.count.size() || groupIdx.count[level] == 0) return;
+
+    const u32 first = groupIdx.firstId[level];
+    const u32 count = groupIdx.count[level];
+    outNodes.reserve(count);
+    for (u32 k = 0; k < count; ++k) {
+        const ClusterGroupNode& g = dag.groupNodes[first + k];
+        fmt::OcMeshClusterGroup out;
+        out.sphereCenter = g.sphereCenter;
+        out.sphereRadius = g.sphereRadius;
+        // ownClusterRange is already a contiguous GLOBAL range at level `g.level` (this same level);
+        // its level-local start is just its offset from that level's own first cluster id.
+        out.ownClusterStart = toLevelLocalIndex(dag, g.ownClusterStart);
+        out.ownClusterCount = g.ownClusterCount;
+        // childClusterRange indexes dag.groupChildren (GLOBAL cluster ids, one level finer); each one
+        // is translated and appended to THIS level's own outChildren, which is what
+        // OcMeshLod::groupChildren (a per-level array, not a whole-mesh one) actually stores.
+        out.childClusterStart = static_cast<u32>(outChildren.size());
+        out.childClusterCount = g.childClusterCount;
+        for (u32 ci = 0; ci < g.childClusterCount; ++ci)
+            outChildren.push_back(toLevelLocalIndex(dag, dag.groupChildren[g.childClusterStart + ci]));
+        outNodes.push_back(out);
+    }
 }
 
 // Converts one LOD level's clusters back into a plain GLOBAL-index triangle list -- the level's own
@@ -1365,12 +1679,25 @@ bool packLodDag(const LodDag& dag, fmt::OcMeshData& mesh, std::string* why) {
         return false;
     }
 
-    mesh.meshlets = toMeshlets(dag, 0, errorBounds);
+    // STAGE 4: the streaming topology's own correctness argument, re-checked here for the identical
+    // reason validateClusterErrorBounds is checked above rather than trusted from whichever caller
+    // built `dag` -- a broken fallbackAncestorId or a group sphere that does not genuinely contain its
+    // children must not reach mesh.coarserLods any more than a broken error bound may.
+    std::string hierarchyWhy;
+    if (!validateClusterHierarchy(dag, &hierarchyWhy)) {
+        if (why) *why = "cluster hierarchy invalid: " + hierarchyWhy;
+        return false;
+    }
+
+    const GroupLevelIndex groupIdx = indexGroupsByLevel(dag);
+
+    mesh.meshlets = toMeshlets(dag, 0, errorBounds, groupIdx);
     mesh.coarserLods.clear();
     for (u32 level = 1; level < dag.levelCount(); ++level) {
         fmt::OcMeshLod lod;
         lod.indices  = toIndices(dag, level);
-        lod.meshlets = toMeshlets(dag, level, errorBounds);
+        lod.meshlets = toMeshlets(dag, level, errorBounds, groupIdx);
+        toGroupNodes(dag, level, groupIdx, lod.groupNodes, lod.groupChildren);
         // Every cluster newly created at this level shares the SAME propagatedError (buildLodHierarchy
         // assigns it once per group, to every cluster the group's re-split produced), so max() over
         // the level is defensive rather than strictly necessary -- it stays correct even if a future

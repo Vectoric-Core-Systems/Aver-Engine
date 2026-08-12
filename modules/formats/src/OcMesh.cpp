@@ -39,10 +39,35 @@ constexpr u32 kMaxMeshletTriangles = 124;
 // the effect is the same: an old (v1) file's bytes are read with the old 32 B stride exactly as
 // before, unaffected by this feature existing, and OwnError/ParentError simply default (see
 // OcMeshMeshlet's own defaults) rather than appearing from nowhere.
-constexpr u16 kMlChunkVersionLegacy = 1;   // MeshletBounds 32 B, no OwnError/ParentError
-constexpr u16 kMlChunkVersionErrors = 2;   // MeshletBounds 40 B, + OwnError, ParentError
+//
+// v3 (Stage 4) appends fallbackAncestorId/ownerGroupId (2x u32, 8 B) to MeshletBounds the SAME
+// additive way, making it 48 B, and ALSO grows the chunk with two brand-new per-LOD sub-arrays
+// (ClusterGroupNode[], ClusterGroupChildren[]) that v1/v2 never had at all -- see the GroupTable
+// comment at this chunk's write site below for where those live and how a v1/v2 reader, which never
+// looks for a GroupTable, is unaffected by its presence. AN OLD FILE'S CHUNK VERSION NEVER CHANGES:
+// nothing in this codebase rewrites an .ocmesh's bytes just because a newer writer exists (RelodTool
+// --write is opt-in and writes elsewhere -- see tools/RelodTool.cpp's own header), so a v1 or v2 file
+// on disk today stays v1/v2 forever unless something explicitly re-cooks and re-saves it; this
+// reader's job is only to keep loading it correctly regardless, which the version-gated stride and
+// GroupTable-presence check below both do without needing the file itself to change.
+constexpr u16 kMlChunkVersionLegacy  = 1;   // MeshletBounds 32 B, no OwnError/ParentError
+constexpr u16 kMlChunkVersionErrors  = 2;   // MeshletBounds 40 B, + OwnError, ParentError
+constexpr u16 kMlChunkVersionTopology = 3;  // MeshletBounds 48 B, + FallbackAncestorId/OwnerGroupId,
+                                             // + a per-LOD GroupTable and ClusterGroupNode[]/
+                                             // ClusterGroupChildren[] sub-arrays (see the writer)
 constexpr u32 kMeshletBoundsBytesV1 = 32;
 constexpr u32 kMeshletBoundsBytesV2 = 40;
+constexpr u32 kMeshletBoundsBytesV3 = 48;
+
+// One ClusterGroupNode's on-disk size (FORMAT_SPECS.md 5.7): Sphere (16 B) + OwnClusterStart/Count
+// (8 B) + ChildClusterStart/Count (8 B) = 32 B. A fixed struct, unlike MeshletBounds, because chunk-
+// version 3 is the version that INTRODUCES this sub-array -- there is no earlier layout for it to
+// grow additively out of, so it does not need its own version-gated stride the way MeshletBounds
+// does.
+constexpr u32 kGroupNodeBytes = 32;
+// One GroupTable entry (per LOD level, chunk-version 3 only): GroupNodeOffset (u64, chunk-relative)
+// + GroupNodeCount (u32) + GroupChildOffset (u64, chunk-relative) + GroupChildCount (u32) = 24 B.
+constexpr u32 kGroupTableEntryBytes = 24;
 
 // Stream semantics and formats (§5.2, §5.3).
 constexpr u8 kSemPosition = 0, kSemTangentFrame = 1, kSemUV0 = 2, kSemJoints = 5, kSemWeights = 6;
@@ -175,11 +200,18 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         const std::vector<u32>* indices;
         const std::vector<OcMeshMeshlet>* meshlets;
         f32 screenError;
+        // Both null for LOD 0: OcMeshData has no groupNodes/groupChildren field of its own (LOD 0 is
+        // never produced by a group -- see OcMeshMeshlet::ownerGroupId's own comment), so there is no
+        // member to point at. The MLET writer below treats a null pointer here exactly like an empty
+        // vector (zero group nodes for this level), never dereferencing it.
+        const std::vector<OcMeshClusterGroup>* groupNodes;
+        const std::vector<u32>* groupChildren;
     };
     std::vector<LodView> lods;
     lods.reserve(m.lodCount());
-    lods.push_back({&m.indices, &m.meshlets, 0.0f});   // LOD 0 has no measured error by definition
-    for (const OcMeshLod& cl : m.coarserLods) lods.push_back({&cl.indices, &cl.meshlets, cl.screenErrorThreshold});
+    lods.push_back({&m.indices, &m.meshlets, 0.0f, nullptr, nullptr});   // LOD 0: no measured error, no group data
+    for (const OcMeshLod& cl : m.coarserLods)
+        lods.push_back({&cl.indices, &cl.meshlets, cl.screenErrorThreshold, &cl.groupNodes, &cl.groupChildren});
 
     // ---- per-level validation, before any output buffer is built (fail fast, like the checks
     // below): meshlet limits/ranges over every level's meshlets, and index range/multiple-of-3 over
@@ -219,6 +251,65 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
                     return fail(why, ".ocmesh: LOD " + std::to_string(L) + " meshlet " + std::to_string(mi) +
                                           " has a local triangle index " + std::to_string(t) + " past its own " +
                                           std::to_string(ml.vertices.size()) + " vertices");
+
+            // ---- MLET chunk-version 3: fallbackAncestorId/ownerGroupId, validated for the same
+            // reason every other range in this loop is -- a bad value here would let the group-table
+            // offset arithmetic below (or a future reader) walk off the end of a buffer. See
+            // OcMeshMeshlet's own comment for what these two fields mean and why kInvalidClusterId is
+            // their required value at a level that structurally cannot have a real one. ----
+            const bool isRootLevel = (L + 1 == lods.size());
+            if (isRootLevel) {
+                if (ml.fallbackAncestorId != kInvalidClusterId)
+                    return fail(why, ".ocmesh: LOD " + std::to_string(L) + " meshlet " + std::to_string(mi) +
+                                          " is at the root level but has a fallbackAncestorId set -- a root has "
+                                          "no coarser level to fall back to");
+            } else {
+                const usize nextLevelCount = lods[L + 1].meshlets->size();
+                if (ml.fallbackAncestorId != kInvalidClusterId && ml.fallbackAncestorId >= nextLevelCount)
+                    return fail(why, ".ocmesh: LOD " + std::to_string(L) + " meshlet " + std::to_string(mi) +
+                                          "'s fallbackAncestorId " + std::to_string(ml.fallbackAncestorId) +
+                                          " is past LOD " + std::to_string(L + 1) + "'s " +
+                                          std::to_string(nextLevelCount) + " meshlets");
+            }
+            if (L == 0) {
+                if (ml.ownerGroupId != kInvalidClusterId)
+                    return fail(why, ".ocmesh: LOD 0 meshlet " + std::to_string(mi) +
+                                          " has an ownerGroupId set, but LOD 0 is never produced by a group");
+            } else {
+                const usize groupCount = lods[L].groupNodes ? lods[L].groupNodes->size() : 0;
+                if (ml.ownerGroupId != kInvalidClusterId && ml.ownerGroupId >= groupCount)
+                    return fail(why, ".ocmesh: LOD " + std::to_string(L) + " meshlet " + std::to_string(mi) +
+                                          "'s ownerGroupId " + std::to_string(ml.ownerGroupId) +
+                                          " is past its own level's " + std::to_string(groupCount) + " group nodes");
+            }
+        }
+
+        // ---- MLET chunk-version 3: the group hierarchy itself, one level's worth. Null for LOD 0 by
+        // construction (see LodView's own comment), so this is skipped entirely there rather than
+        // dereferencing a null groupChildren pointer. ----
+        if (lods[L].groupNodes) {
+            const std::vector<OcMeshClusterGroup>& nodes = *lods[L].groupNodes;
+            const std::vector<u32>& children = *lods[L].groupChildren;
+            const usize finerCount = (L > 0) ? lods[L - 1].meshlets->size() : 0;
+            for (usize gi = 0; gi < nodes.size(); ++gi) {
+                const OcMeshClusterGroup& g = nodes[gi];
+                if (u64(g.ownClusterStart) + g.ownClusterCount > mls.size())
+                    return fail(why, ".ocmesh: LOD " + std::to_string(L) + " group " + std::to_string(gi) +
+                                          "'s ownClusterRange runs past this level's " + std::to_string(mls.size()) +
+                                          " meshlets");
+                if (u64(g.childClusterStart) + g.childClusterCount > children.size())
+                    return fail(why, ".ocmesh: LOD " + std::to_string(L) + " group " + std::to_string(gi) +
+                                          "'s childClusterRange runs past its own " + std::to_string(children.size()) +
+                                          "-entry groupChildren array");
+                for (u32 k = 0; k < g.childClusterCount; ++k) {
+                    const u32 childId = children[usize(g.childClusterStart) + k];
+                    if (childId >= finerCount)
+                        return fail(why, ".ocmesh: LOD " + std::to_string(L) + " group " + std::to_string(gi) +
+                                              " references child cluster " + std::to_string(childId) + ", past LOD " +
+                                              std::to_string(L > 0 ? L - 1 : 0) + "'s " + std::to_string(finerCount) +
+                                              " meshlets");
+                }
+            }
         }
     }
 
@@ -317,9 +408,18 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     std::vector<u64> meshletOffsetPerLod(lods.size(), 0);
     std::vector<u32> meshletCountPerLod(lods.size(), 0);
     if (anyMeshlets) {
+        // ---- meshlet section: the same four sub-arrays PER LOD this chunk has always written, now
+        // with MeshletBounds grown to 48 B (chunk version 3: the 40 B version-2 shape, then
+        // FallbackAncestorId/OwnerGroupId appended -- see kMlChunkVersionTopology above). Built into
+        // its OWN buffer first, offsets relative to ITS start, because chunk-version 3 prepends a
+        // GroupTable (below) whose own size is not known until every level's group data has ALSO been
+        // laid out -- exactly the same reason meshletOffsetPerLod ends up needing to be shifted by
+        // `groupTableBytes` once, near the bottom of this block, rather than accumulated directly
+        // against the final chunk buffer the way it was before chunk version 3 existed. ----
+        std::vector<u8> meshletSection;
         for (usize L = 0; L < lods.size(); ++L) {
             const std::vector<OcMeshMeshlet>& mls = *lods[L].meshlets;
-            meshletOffsetPerLod[L] = mlet.size();
+            meshletOffsetPerLod[L] = meshletSection.size();
             meshletCountPerLod[L]  = static_cast<u32>(mls.size());
             if (mls.empty()) continue;   // offset recorded, but nothing to write for this level
 
@@ -338,7 +438,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
                 triCursor += (static_cast<u32>(ml.triangles.size()) + 3u) & ~3u;
             }
 
-            W w{mlet};
+            W w{meshletSection};
             // Sub-array 1: MeshletDesc[] (12 B each).
             for (usize i = 0; i < mls.size(); ++i) {
                 const OcMeshMeshlet& ml = mls[i];
@@ -348,9 +448,9 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
                 w.u8v(static_cast<u8>(ml.triangleCount()));
                 w.u16v(0);   // Pad
             }
-            // Sub-array 2: MeshletBounds[] (40 B each, chunk version 2: the original 32 B Sphere +
-            // ConeApex + ConeAxis/Cutoff, then OwnError, ParentError appended -- see
-            // kMlChunkVersionErrors above).
+            // Sub-array 2: MeshletBounds[] (48 B each, chunk version 3: the 32 B Sphere + ConeApex +
+            // ConeAxis/Cutoff, then OwnError/ParentError (version 2), then FallbackAncestorId/
+            // OwnerGroupId (version 3) appended -- see kMlChunkVersionTopology above).
             for (const OcMeshMeshlet& ml : mls) {
                 w.f32v(ml.sphereCenter.x); w.f32v(ml.sphereCenter.y); w.f32v(ml.sphereCenter.z);
                 w.f32v(ml.sphereRadius);
@@ -359,6 +459,8 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
                 w.u8v(static_cast<u8>(ml.coneAxis[2])); w.u8v(static_cast<u8>(ml.coneCutoff));
                 w.f32v(ml.ownError);
                 w.f32v(ml.parentError);
+                w.u32v(ml.fallbackAncestorId);
+                w.u32v(ml.ownerGroupId);
             }
             // Sub-array 3: MeshletVertices[] (u32 each), all this level's meshlets' vertex lists back
             // to back.
@@ -368,12 +470,71 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
             // to a 4 B boundary -- must match the `triCursor` padding computed above exactly, or
             // every TriangleOffset after the first meshlet whose triangle count isn't a multiple of
             // 4 bytes would point at the wrong meshlet's data.
-            const usize triSectionStart = mlet.size();
+            const usize triSectionStart = meshletSection.size();
             for (const OcMeshMeshlet& ml : mls) {
                 for (u8 t : ml.triangles) w.u8v(t);
-                while ((mlet.size() - triSectionStart) % 4 != 0) w.u8v(0);
+                while ((meshletSection.size() - triSectionStart) % 4 != 0) w.u8v(0);
             }
         }
+
+        // ---- group section: ClusterGroupNode[] then ClusterGroupChildren[] PER LOD, back to back,
+        // in its own buffer for the same reason the meshlet section above is -- its final chunk-
+        // relative offset depends on the GroupTable's size, computed below. Empty (both offset
+        // vectors stay all-zero) for LOD 0 (groupNodes is null there -- see LodView's own comment)
+        // and for any level nobody ever put group data on (a hand-built fixture, or the one-cluster
+        // degenerate case where buildLodHierarchy never ran at all). ----
+        std::vector<u8> groupSection;
+        std::vector<u64> groupNodeOffsetPerLod(lods.size(), 0), groupChildOffsetPerLod(lods.size(), 0);
+        std::vector<u32> groupNodeCountPerLod(lods.size(), 0), groupChildCountPerLod(lods.size(), 0);
+        for (usize L = 0; L < lods.size(); ++L) {
+            if (!lods[L].groupNodes || lods[L].groupNodes->empty()) continue;
+            const std::vector<OcMeshClusterGroup>& nodes = *lods[L].groupNodes;
+            const std::vector<u32>& children = *lods[L].groupChildren;
+
+            groupNodeOffsetPerLod[L] = groupSection.size();
+            groupNodeCountPerLod[L]  = static_cast<u32>(nodes.size());
+            W w{groupSection};
+            for (const OcMeshClusterGroup& g : nodes) {
+                w.f32v(g.sphereCenter.x); w.f32v(g.sphereCenter.y); w.f32v(g.sphereCenter.z);
+                w.f32v(g.sphereRadius);
+                w.u32v(g.ownClusterStart); w.u32v(g.ownClusterCount);
+                w.u32v(g.childClusterStart); w.u32v(g.childClusterCount);
+            }
+
+            groupChildOffsetPerLod[L] = groupSection.size();
+            groupChildCountPerLod[L]  = static_cast<u32>(children.size());
+            for (u32 v : children) w.u32v(v);
+        }
+
+        // ---- assemble: GroupTable, then the meshlet section, then the group section -- in that
+        // order so the GroupTable (whose per-LOD entries name chunk-relative offsets into the OTHER
+        // two sections) can sit at a FIXED, version-gated location (byte 0) that a chunk-version 1/2
+        // reader, which never looks for it, simply never reads. A v1/v2 chunk has no such prefix, so
+        // its own meshletOffsetPerLod entries (computed the OLD way, directly against `mlet`) would
+        // be wrong by exactly `groupTableBytes` if this writer ever emitted anything but version 3 --
+        // it does not (anyMeshlets always writes version 3 now), so that mismatch cannot occur here,
+        // but see decodeMeshlets/decodeGroupNodes in parseOcMesh for the reader half of this contract.
+        const u64 groupTableBytes = u64(kGroupTableEntryBytes) * lods.size();
+        {
+            W w{mlet};
+            for (usize L = 0; L < lods.size(); ++L) {
+                const u64 gnOff = groupNodeCountPerLod[L]
+                    ? groupTableBytes + meshletSection.size() + groupNodeOffsetPerLod[L] : 0;
+                const u64 gcOff = groupChildCountPerLod[L]
+                    ? groupTableBytes + meshletSection.size() + groupChildOffsetPerLod[L] : 0;
+                w.u64v(gnOff);
+                w.u32v(groupNodeCountPerLod[L]);
+                w.u64v(gcOff);
+                w.u32v(groupChildCountPerLod[L]);
+            }
+        }
+        mlet.insert(mlet.end(), meshletSection.begin(), meshletSection.end());
+        mlet.insert(mlet.end(), groupSection.begin(), groupSection.end());
+
+        // meshletOffsetPerLod was computed against meshletSection's own start (0); shift every entry
+        // by the GroupTable's byte length so LodDesc.MeshletOffset (still read as "chunk-relative",
+        // unchanged semantics) lands on the right bytes in the FINAL chunk.
+        for (usize L = 0; L < lods.size(); ++L) meshletOffsetPerLod[L] += groupTableBytes;
     }
 
     // ---- MHDR ----
@@ -481,7 +642,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     // this feature existing at all, and is the backward-compat contract §3.2's "unknown chunks
     // skipped" is built to support (never marked kAvrChunkRequired, so an old reader that doesn't
     // look for MLET is unaffected by its presence in a NEW file either).
-    if (anyMeshlets) f.add(kChunkMLET, std::move(mlet), kAvrChunkGpuUploadable, kMlChunkVersionErrors);
+    if (anyMeshlets) f.add(kChunkMLET, std::move(mlet), kAvrChunkGpuUploadable, kMlChunkVersionTopology);
     return writeAvr1(f, out, why);
 }
 
@@ -678,6 +839,33 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
     };
     if (!decodeIndices(lodDescs[0], out.indices, 0)) return false;
 
+    // ---- MLET chunk-version 3's GroupTable, parsed ONCE for every LOD before decodeMeshlets or
+    // decodeGroupNodes runs for any of them -- decodeMeshlets below needs `groupTable[level]`'s
+    // groupNodeCount for ownerGroupId's own-level bounds check, and needs it available regardless of
+    // when (or whether) decodeGroupNodes for that same level has run yet, so this cannot simply live
+    // inside decodeGroupNodes the way the rest of the group data is read. Left EMPTY (size 0) for a
+    // chunk-version 1/2 file, or a file with no MLET chunk at all -- decodeMeshlets and
+    // decodeGroupNodes both treat that as "no group data for any level" exactly like a v1/v2 file
+    // that never had a GroupTable to begin with.
+    struct GroupTableEntry { u64 groupNodeOffset = 0; u32 groupNodeCount = 0; u64 groupChildOffset = 0; u32 groupChildCount = 0; };
+    std::vector<GroupTableEntry> groupTable;
+    if ((out.flags & kOcMeshMeshlets) != 0) {
+        if (const AvrChunk* mletForTable = f.find(kChunkMLET); mletForTable && mletForTable->version >= kMlChunkVersionTopology) {
+            const u64 tableBytes = u64(kGroupTableEntryBytes) * lodCount;
+            if (tableBytes > mletForTable->data.size())
+                return fail(why, ".ocmesh: MLET is smaller than its own GroupTable requires");
+            groupTable.resize(lodCount);
+            R gr{mletForTable->data.data(), mletForTable->data.data() + tableBytes};
+            for (u8 i = 0; i < lodCount; ++i) {
+                groupTable[i].groupNodeOffset  = gr.u64v();
+                groupTable[i].groupNodeCount   = gr.u32v();
+                groupTable[i].groupChildOffset = gr.u64v();
+                groupTable[i].groupChildCount  = gr.u32v();
+            }
+            if (!gr.ok) return fail(why, ".ocmesh: truncated MLET GroupTable");
+        }
+    }
+
     // ---- meshlets, per LOD, when the file carries them (§5.7). `decodeMeshlets` is shared by LOD 0
     // (into out.meshlets, exactly as before) and every coarser level (below).
     //
@@ -702,10 +890,14 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
 
         // The MeshletBounds stride depends on the CHUNK's version, not this LOD's: v1 files (every
         // MLET written before per-cluster LOD existed) are 32 B/meshlet with no OwnError/ParentError,
-        // v2 files are 40 B/meshlet (see kMlChunkVersionErrors above). Gating on the version rather
-        // than assuming the newer stride is what lets an old .ocmesh keep loading unchanged.
-        const bool hasErrorFields = mlet->version >= kMlChunkVersionErrors;
-        const u32 boundsStride = hasErrorFields ? kMeshletBoundsBytesV2 : kMeshletBoundsBytesV1;
+        // v2 files are 40 B/meshlet, v3 files are 48 B/meshlet with FallbackAncestorId/OwnerGroupId
+        // appended (see kMlChunkVersionTopology above). Gating on the version rather than assuming
+        // the newer stride is what lets an old .ocmesh keep loading unchanged.
+        const bool hasErrorFields    = mlet->version >= kMlChunkVersionErrors;
+        const bool hasTopologyFields = mlet->version >= kMlChunkVersionTopology;
+        const u32 boundsStride = hasTopologyFields ? kMeshletBoundsBytesV3
+                                : hasErrorFields    ? kMeshletBoundsBytesV2
+                                                     : kMeshletBoundsBytesV1;
 
         const u64 descBytes = u64(meshletCount) * 12;
         const u64 boundsBytes = u64(meshletCount) * boundsStride;
@@ -758,8 +950,50 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
                     ml.ownError    = br.f32v();
                     ml.parentError = br.f32v();
                 }
+                // v1/v2 chunks stop here: ml.fallbackAncestorId/ownerGroupId keep OcMeshMeshlet's own
+                // defaults (both kInvalidClusterId) -- see that field's own comment for why "no
+                // fallback / no owner" is the correct, harmless reading of data written before this
+                // feature existed, not merely a convenient one.
+                if (hasTopologyFields) {
+                    ml.fallbackAncestorId = br.u32v();
+                    ml.ownerGroupId       = br.u32v();
+                }
             }
             if (!br.ok) return fail(why, ".ocmesh: truncated MeshletBounds[] for LOD " + std::to_string(level));
+        }
+
+        // ---- chunk-version 3: fallbackAncestorId/ownerGroupId range checks, against the SAME two
+        // per-level counts the writer validated them against (see writeOcMesh's own comment) -- a
+        // reader has no reason to trust a stored value is in range just because the writer once
+        // checked it; the bytes it is reading now could be hand-edited or corrupt. lodDescs and
+        // groupTable are both already fully parsed at this point (lodDescs before this lambda is
+        // even defined; groupTable just above it), so both counts are available regardless of
+        // whether decodeGroupNodes for this or the next level has run yet. ----
+        if (hasTopologyFields) {
+            const bool isRootLevel = (usize(level) + 1 >= lodDescs.size());
+            const u32 nextLevelCount = isRootLevel ? 0 : lodDescs[usize(level) + 1].meshletCount;
+            const u32 ownGroupCount = (usize(level) < groupTable.size()) ? groupTable[level].groupNodeCount : 0;
+            for (u32 i = 0; i < meshletCount; ++i) {
+                const OcMeshMeshlet& ml = dst[i];
+                if (isRootLevel) {
+                    if (ml.fallbackAncestorId != kInvalidClusterId)
+                        return fail(why, ".ocmesh: LOD " + std::to_string(level) + " meshlet " + std::to_string(i) +
+                                              " is at the root level but has a fallbackAncestorId set");
+                } else if (ml.fallbackAncestorId != kInvalidClusterId && ml.fallbackAncestorId >= nextLevelCount) {
+                    return fail(why, ".ocmesh: LOD " + std::to_string(level) + " meshlet " + std::to_string(i) +
+                                          "'s fallbackAncestorId " + std::to_string(ml.fallbackAncestorId) +
+                                          " is past the next level's " + std::to_string(nextLevelCount) + " meshlets");
+                }
+                if (level == 0) {
+                    if (ml.ownerGroupId != kInvalidClusterId)
+                        return fail(why, ".ocmesh: LOD 0 meshlet " + std::to_string(i) +
+                                              " has an ownerGroupId set, but LOD 0 is never produced by a group");
+                } else if (ml.ownerGroupId != kInvalidClusterId && ml.ownerGroupId >= ownGroupCount) {
+                    return fail(why, ".ocmesh: LOD " + std::to_string(level) + " meshlet " + std::to_string(i) +
+                                          "'s ownerGroupId " + std::to_string(ml.ownerGroupId) +
+                                          " is past this level's " + std::to_string(ownGroupCount) + " group nodes");
+                }
+            }
         }
 
         // ---- sub-arrays 3/4 start where 1/2 end, WITHIN THIS LEVEL'S OWN BLOCK. Nothing in the
@@ -820,10 +1054,85 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
     };
     if (!decodeMeshlets(lodDescs[0], out.meshlets, 0)) return false;
 
-    // ---- coarser LODs (level >= 1): each gets its own index buffer (decodeIndices) and its own
-    // meshlet partition of it (decodeMeshlets), sharing LOD 0's vertex buffer throughout. Empty for
-    // a single-LOD file (lodCount == 1) -- the loop below then does not run at all, which combined
-    // with everything above is what makes an old .ocmesh load completely unchanged. ----
+    // ---- chunk-version 3: the group hierarchy for one LOD level, from `groupTable` (parsed once,
+    // above). LOD 0 never calls this (see the coarser-LOD loop below) -- its own groupTable entry is
+    // always zero-count on a file this writer produced, but this function does not special-case
+    // level 0 itself; it is simply never asked to run there. ----
+    auto decodeGroupNodes = [&](u32 level, std::vector<OcMeshClusterGroup>& dstNodes,
+                                 std::vector<u32>& dstChildren) -> bool {
+        dstNodes.clear();
+        dstChildren.clear();
+        if (usize(level) >= groupTable.size()) return true;   // v1/v2 chunk, or no MLET at all
+        const GroupTableEntry& e = groupTable[level];
+        if (e.groupNodeCount == 0) return true;
+
+        const AvrChunk* mlet = f.find(kChunkMLET);
+        if (!mlet) return fail(why, ".ocmesh: LOD " + std::to_string(level) + " has group nodes but there is no MLET chunk");
+        const u8* base = mlet->data.data();
+        const u64 chunkSize = mlet->data.size();
+
+        const u64 nodeBytes = u64(e.groupNodeCount) * kGroupNodeBytes;
+        if (e.groupNodeOffset > chunkSize || nodeBytes > chunkSize - e.groupNodeOffset)
+            return fail(why, ".ocmesh: MLET is smaller than LOD " + std::to_string(level) + "'s ClusterGroupNode[] requires");
+        dstNodes.resize(e.groupNodeCount);
+        {
+            R nr{base + e.groupNodeOffset, base + e.groupNodeOffset + nodeBytes};
+            for (u32 i = 0; i < e.groupNodeCount; ++i) {
+                OcMeshClusterGroup& n = dstNodes[i];
+                n.sphereCenter = Vec3{nr.f32v(), nr.f32v(), nr.f32v()};
+                n.sphereRadius = nr.f32v();
+                n.ownClusterStart = nr.u32v();
+                n.ownClusterCount = nr.u32v();
+                n.childClusterStart = nr.u32v();
+                n.childClusterCount = nr.u32v();
+            }
+            if (!nr.ok) return fail(why, ".ocmesh: truncated ClusterGroupNode[] for LOD " + std::to_string(level));
+        }
+
+        if (e.groupChildCount > 0) {
+            const u64 childBytes = u64(e.groupChildCount) * 4;
+            if (e.groupChildOffset > chunkSize || childBytes > chunkSize - e.groupChildOffset)
+                return fail(why, ".ocmesh: MLET is smaller than LOD " + std::to_string(level) + "'s ClusterGroupChildren[] requires");
+            dstChildren.resize(e.groupChildCount);
+            R cr{base + e.groupChildOffset, base + e.groupChildOffset + childBytes};
+            for (u32 i = 0; i < e.groupChildCount; ++i) dstChildren[i] = cr.u32v();
+            if (!cr.ok) return fail(why, ".ocmesh: truncated ClusterGroupChildren[] for LOD " + std::to_string(level));
+        }
+
+        // Range-check every node's own two ranges NOW, against the two counts this reader already
+        // has to hand: this level's own meshletCount (lodDescs[level]) for ownClusterRange, and the
+        // FINER level's meshletCount (lodDescs[level-1] -- a group's children are always exactly one
+        // level finer than its own, see aver::trifactor::ClusterGroupNode's own comment) for every
+        // value childClusterRange's span pulls out of dstChildren.
+        const u32 ownLevelCount = lodDescs[level].meshletCount;
+        const u32 finerLevelCount = (level > 0) ? lodDescs[usize(level) - 1].meshletCount : 0;
+        for (usize gi = 0; gi < dstNodes.size(); ++gi) {
+            const OcMeshClusterGroup& n = dstNodes[gi];
+            if (u64(n.ownClusterStart) + n.ownClusterCount > ownLevelCount)
+                return fail(why, ".ocmesh: LOD " + std::to_string(level) + " group " + std::to_string(gi) +
+                                      "'s ownClusterRange runs past this level's " + std::to_string(ownLevelCount) +
+                                      " meshlets");
+            if (u64(n.childClusterStart) + n.childClusterCount > dstChildren.size())
+                return fail(why, ".ocmesh: LOD " + std::to_string(level) + " group " + std::to_string(gi) +
+                                      "'s childClusterRange runs past its own " + std::to_string(dstChildren.size()) +
+                                      "-entry ClusterGroupChildren[]");
+            for (u32 k = 0; k < n.childClusterCount; ++k) {
+                const u32 childId = dstChildren[usize(n.childClusterStart) + k];
+                if (childId >= finerLevelCount)
+                    return fail(why, ".ocmesh: LOD " + std::to_string(level) + " group " + std::to_string(gi) +
+                                          " references child cluster " + std::to_string(childId) + ", past LOD " +
+                                          std::to_string(level > 0 ? level - 1 : 0) + "'s " +
+                                          std::to_string(finerLevelCount) + " meshlets");
+            }
+        }
+        return true;
+    };
+
+    // ---- coarser LODs (level >= 1): each gets its own index buffer (decodeIndices), its own meshlet
+    // partition of it (decodeMeshlets), and (chunk-version 3 only) the group hierarchy that produced
+    // it (decodeGroupNodes) -- sharing LOD 0's vertex buffer throughout. Empty for a single-LOD file
+    // (lodCount == 1) -- the loop below then does not run at all, which combined with everything
+    // above is what makes an old .ocmesh load completely unchanged. ----
     out.coarserLods.clear();
     out.coarserLods.resize(lodCount > 0 ? usize(lodCount) - 1 : 0);
     for (u8 i = 1; i < lodCount; ++i) {
@@ -833,6 +1142,7 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
             return fail(why, ".ocmesh: LOD " + std::to_string(i) + " has no indices");
         if (!decodeIndices(lodDescs[i], cl.indices, i)) return false;
         if (!decodeMeshlets(lodDescs[i], cl.meshlets, i)) return false;
+        if (!decodeGroupNodes(i, cl.groupNodes, cl.groupChildren)) return false;
     }
 
     // ---- material slots ----

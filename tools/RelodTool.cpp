@@ -124,9 +124,21 @@ void relod(const std::filesystem::path& path, const std::filesystem::path* write
     // 64/124 limits, cone validity and error monotonicity. It is cheap next to the build that
     // preceded it, so it runs on every mesh rather than behind a flag.
     const trifactor::ValidationReport report = trifactor::validateLodDag(src, dag);
-    if (!report.ok) {
+
+    // STAGE 4: the streaming topology's own invariants (fallbackAncestorId validity, group-sphere
+    // containment, ownerGroupId round-tripping) -- a SEPARATE call, not folded into validateLodDag
+    // itself, for the same reason validateClusterHierarchy is a separate function in the first place
+    // (see its own doc comment): a topology regression should name itself as one, not read as a
+    // generic "DAG invalid" that sends someone hunting through the wrong file. Folded into the SAME
+    // `invalid` counter below, though -- both are "this mesh's DAG cannot be trusted, refuse to write
+    // it", and this tool's summary line has always reported that as one number.
+    std::string hierarchyWhy;
+    const bool hierarchyOk = trifactor::validateClusterHierarchy(dag, &hierarchyWhy);
+
+    if (!report.ok || !hierarchyOk) {
         ++t.invalid;
-        AVER_ERROR("[Relod] {}: DAG INVALID -- {} issue(s)", path.filename().string(), report.issues.size());
+        AVER_ERROR("[Relod] {}: DAG INVALID -- {} issue(s)", path.filename().string(),
+                   report.issues.size() + (hierarchyOk ? 0 : 1));
         // Capped, because one broken invariant on a 49,000-shell mesh can report thousands of times
         // and the first few name the cause just as well as all of them do.
         u32 shown = 0;
@@ -138,6 +150,7 @@ void relod(const std::filesystem::path& path, const std::filesystem::path* write
                 break;
             }
         }
+        if (!hierarchyOk) AVER_ERROR("[Relod]     cluster-hierarchy: {}", hierarchyWhy);
     }
 
     const u32 newLevels = dag.levelCount();
@@ -165,13 +178,15 @@ void relod(const std::filesystem::path& path, const std::filesystem::path* write
     else if (md.builderVersion == 0)                     ++t.unknownCount;
     else                                                  ++t.staleCount;
 
-    // A DAG this run already flagged INVALID (report.ok == false, just reported above) must not be
-    // written: packLodDag would very likely refuse it too (validateClusterErrorBounds re-checks much
-    // of the same ground), but refusing HERE, before even calling it, keeps the reason in the log
-    // right next to the DAG-INVALID block that explains it, rather than behind a second, differently-
-    // worded failure from deeper in the pack path.
-    if (!report.ok) {
-        AVER_ERROR("[Relod] {}: refusing to write -- its DAG failed validateLodDag above", path.filename().string());
+    // A DAG this run already flagged INVALID (report.ok == false or hierarchyOk == false, just
+    // reported above) must not be written: packLodDag would very likely refuse it too
+    // (validateClusterErrorBounds/validateClusterHierarchy re-check much of the same ground), but
+    // refusing HERE, before even calling it, keeps the reason in the log right next to the
+    // DAG-INVALID block that explains it, rather than behind a second, differently-worded failure
+    // from deeper in the pack path.
+    if (!report.ok || !hierarchyOk) {
+        AVER_ERROR("[Relod] {}: refusing to write -- its DAG failed validateLodDag/validateClusterHierarchy above",
+                   path.filename().string());
         ++t.writeFailed;
         return;
     }

@@ -66,6 +66,32 @@ inline constexpr u32 kMaxClusterTriangles = 124;
 // this one from on disk -- 0 already carries that meaning by the paragraph above.
 inline constexpr u32 kBuilderVersion = 1;
 
+// ---- Stage 4: streaming topology (fallbackAncestorId, ownerGroupId, ClusterGroupNode) ----------
+//
+// kBuilderVersion is NOT bumped for this stage, and that is a deliberate reading of the rule two
+// paragraphs up, not an oversight of it. That rule bumps on a change that would produce DIFFERENT
+// meshlets/coarserLods -- different triangles, different bounds, a different ladder -- for some
+// mesh. Stage 4 adds fields (below) that buildClusters/buildLodHierarchy compute ALONGSIDE the
+// existing ladder, from the exact same grouping/simplification decisions version 1 already made; it
+// does not change one triangle, one bounding sphere, or one error value any file cooked at version 1
+// already carries (the corpus-wide proof of that is this stage's own measured numbers: the coarsest
+// total and the five protected meshes are unchanged to the triangle). A file's MLET chunk version
+// (kMlChunkVersionTopology in modules/formats/src/OcMesh.cpp) is the correct, orthogonal signal for
+// "does this file's ladder carry group topology" -- it is readable straight from the chunk header
+// without inferring it from builderVersion, which is what "orthogonal" is buying here: builderVersion
+// keeps meaning exactly what its own comment above says, and does not grow a second meaning by proxy.
+//
+// NO LOCAL ALIAS FOR fmt::kInvalidClusterId IS DECLARED HERE, on purpose: ClusterSelect.hpp (this
+// same module, a concurrent workflow's file this task does not touch -- see this file's own header
+// on why) already declares its OWN `aver::trifactor::kInvalidClusterId` for an unrelated in-memory id
+// space (ClusterView::id), and a second `inline constexpr` of the identical name in the identical
+// namespace is a hard MSVC error (C2374/C2086) in any translation unit that ends up including both
+// headers (ClusterAdapt.cpp does, today). The two sentinels share a numeric value (0xFFFFFFFFu) and a
+// purpose ("no such id") by coincidence of both being the natural u32 "invalid" sentinel, not because
+// either file depends on the other -- so every use of that sentinel below is spelled out fully as
+// `fmt::kInvalidClusterId` (OcMesh.hpp, aver::fmt -- a namespace ClusterSelect.hpp does not touch at
+// all) rather than risk a second collision the next time this module grows another consumer.
+
 // FORMAT_SPECS.md 5.7 MeshletBounds (32 B): Sphere (16 B) + ConeApex f32[3] (12 B) + ConeAxis i8[3]
 // snorm + ConeCutoff i8 snorm. A distinct struct (not the vendor's meshopt_Bounds) so the ON-DISK
 // shape is visible at the type level; the next phase's serializer writes these fields byte for byte.
@@ -165,7 +191,131 @@ struct Cluster {
     std::vector<u32> parents;    // cluster ids one level coarser that this cluster feeds into
     std::vector<u32> children;   // cluster ids one level finer that feed into this cluster
 
+    // ---- Stage 4: streaming topology -----------------------------------------------------------
+    //
+    // fallbackAncestorId: the SINGLE coarser cluster a streaming system should draw instead of this
+    // one when this cluster's own page is not resident. fmt::kInvalidClusterId for a cluster in
+    // dag.levels.back() (the root level -- there is no coarser level to fall back to).
+    //
+    // WHY THIS IS NOT "walk parents[0]", or any runtime walk of `parents` at all -- the question this
+    // stage's own task opens with. `parents` is a MANY-TO-MANY edge set, not a tree: buildLodHierarchy
+    // Pass 2 gives every one of a group's own output clusters (newIds) the group's ENTIRE `pg.members`
+    // list as children, so every one of pg.members ends up with as many parents as the group produced
+    // output clusters -- there is no "the" parent to pick, and parents[0] is simply whichever one
+    // splitIntoClusters happened to push first, a fact about iteration order, not about geometry. A
+    // runtime substituting the wrong one is not a crash: it draws SOME coarser cluster, so nothing
+    // looks broken until the substituted geometry does not cover the same space as the one that went
+    // missing -- a hole or a crack, and only when streaming is actually under memory pressure, which
+    // is exactly the condition under which nobody is watching for a rendering bug. That failure mode
+    // is why this is decided ONCE, offline, in buildLodHierarchy Pass 2, where both pg.members and
+    // newIds are in scope together with the FULL group geometry, rather than deferred to a runtime
+    // that only ever sees one cluster id at a time and has no principled way to break the tie.
+    //
+    // THE CHOICE: for each child in pg.members, the member of newIds (this group's own output
+    // clusters) whose bounding-sphere CENTRE is nearest that child's own centre. This is what
+    // "fallback" needs to mean geometrically: the coarser cluster that best approximates the SAME
+    // region of space the missing child covered, not merely a member of the same group. Nearest-
+    // centre is preferred here over "first parent" (i.e. newIds[0], unconditionally) for exactly the
+    // property first-parent cannot offer: a group re-splits into MULTIPLE output clusters whenever
+    // the simplified geometry still exceeds one meshlet's 64-vertex/124-triangle limit
+    // (splitIntoClusters, called on pg.simplifiedIndices), and those outputs partition the group's
+    // SPACE, not its triangle budget evenly -- newIds[0] is an arbitrary one of them with no reason to
+    // sit anywhere near this particular child. Nearest-centre guarantees every child's fallback is
+    // spatially co-located with what it is substituting for, which is the one property a streaming
+    // system actually needs from a fallback: drawing it in place of a resident page should not leave
+    // a visible gap where the missing detail was.
+    //
+    // BUILD-TIME ONLY like parents/children above, but UNLIKE them, this field IS serialized -- see
+    // OcMeshMeshlet::fallbackAncestorId (aver/formats/OcMesh.hpp) for the on-disk, level-local-index
+    // form packLodDag converts this global cluster id into.
+    u32 fallbackAncestorId = fmt::kInvalidClusterId;
+
+    // ownerGroupId: the id of the ClusterGroupNode (LodDag::groupNodes, below) whose ownClusterRange
+    // contains THIS cluster -- i.e. the group that produced this cluster as one of its own outputs,
+    // not a group this cluster feeds INTO. The back-reference a top-down traversal needs to recurse
+    // past this cluster once it is reached: pop a cluster id off a coarser group's childClusterRange,
+    // look up ITS ownerGroupId, and that group's own childClusterRange is the next, finer set to walk
+    // into. Without this field a walker that only has a coarser group's child-descend range has
+    // nowhere to go from a child cluster id alone -- it can name the child, but not find what
+    // produced it, and so cannot recurse a second hop.
+    //
+    // fmt::kInvalidClusterId for a LOD-0 cluster, BY CONSTRUCTION: buildLodHierarchy's Pass 2 is the
+    // ONLY code that ever creates a ClusterGroupNode, and it starts at level 0 -> level 1, so no
+    // ClusterGroupNode's ownClusterRange can ever contain a level-0 cluster (buildClusters, which
+    // builds level 0, has no notion of "group" at all). This is the same "no meaning yet" default
+    // shellId and smallShellLineage's build-time fields already use, applied to a field where "no
+    // group produced this, because none could have" is the true state, not a placeholder for one that
+    // has not run yet.
+    u32 ownerGroupId = fmt::kInvalidClusterId;
+
     u32 triangleCount() const { return static_cast<u32>(triangles.size() / 3); }
+};
+
+// One ClusterGroupNode: the record buildLodHierarchy Pass 2 produces once per GROUP (not once per
+// cluster) -- one PendingGroup in that loop yields exactly one ClusterGroupNode, whose ownClusterRange
+// names every one of that group's own output clusters (newIds) and whose childClusterRange names
+// every cluster the group replaced (pg.members). This is the record a page-residency-aware traversal
+// actually walks: Cluster::fallbackAncestorId (above) answers "what do I draw instead of ONE missing
+// cluster"; ClusterGroupNode answers "what is the whole next, finer slice of the mesh I should stream
+// in", which a per-cluster field alone cannot -- see childClusterRange's own comment for why a
+// traversal needs the WHOLE group's children in one place, not one fallback id at a time.
+//
+// AN ADVERSARIAL DESIGN REVIEW OF THIS STAGE'S FIRST DRAFT CAUGHT THIS TYPE MISSING HALF ITS FIELDS --
+// a draft that recorded only the sphere bound and childClusterRange, with no way to find the group's
+// OWN output clusters (ownClusterRange) or to find a group AT ALL starting from a cluster id
+// (Cluster::ownerGroupId). Both omissions have the same shape: a walker that can descend one hop
+// (follow childClusterRange down to a finer cluster) has nowhere to write a draw call for what it just
+// reached (no ownClusterRange to read bounds/geometry from) and cannot recurse a SECOND hop (no
+// ownerGroupId to find that finer cluster's own group). Every field below exists because removing it
+// reproduces one of those two failures.
+struct ClusterGroupNode {
+    u32 id    = 0;   // index into LodDag::groupNodes
+    u32 level = 0;   // the level of clusters THIS group produced (ownClusterRange); children live at level-1
+
+    // A TRUE SPHERE-OF-SPHERES: a sphere containing every CHILD cluster's OWN bounding sphere in
+    // full, computed over pg.members' existing Cluster::bounds (the PRE-simplification geometry this
+    // group is about to replace), by iteratively merging those spheres (mergeSphere, ClusterBuilder.cpp)
+    // rather than by taking the group's post-simplification meshopt_computeMeshletBounds result.
+    //
+    // THE SINGLE MOST LIKELY THING IN THIS STAGE TO BE SILENTLY WRONG, per the task that specified it,
+    // and worth spelling out exactly why meshopt_computeMeshletBounds on the SIMPLIFIED geometry is
+    // not a substitute even though every OTHER bound in this file (Cluster::bounds itself) comes from
+    // exactly that call: simplification is a reduction. The coarser cluster(s) this group produces are
+    // a SMALLER, smoothed-out approximation of the region pg.members covered -- meshopt_simplify's
+    // whole job is to remove detail, including detail that stuck OUT past where the smoothed surface
+    // ends up. A bound computed from that reduced result is therefore a bound of the SIMPLIFIED
+    // shape, not of everything that fed into it, and can be smaller than the true extent of the
+    // children it is meant to summarize. A traversal that culls a group using that bound would then
+    // cull away a finer child whose own geometry sticks out beyond the simplified silhouette -- and
+    // because the error is "the bound is too small", not "too large", the failure is invisible in the
+    // common case (looking straight at the object, everything present) and only appears at a grazing
+    // angle where the missing child's contribution would have been visible at the object's silhouette.
+    // That is precisely the "everything still looks fine until geometry pops out" failure mode the
+    // task named -- caught by construction here by building the bound from the CHILDREN's own
+    // spheres, never from the group's own (already coarser) output.
+    Vec3 sphereCenter{0, 0, 0};
+    f32  sphereRadius = 0.0f;
+
+    // The span of newIds (dag.clusters ids) this group produced. CONTIGUOUS by construction, not
+    // merely in practice: splitIntoClusters assigns a new cluster's id as dag.clusters.size() at the
+    // moment it is pushed, and every one of a single splitIntoClusters call's outputs is pushed back
+    // to back before any OTHER code can append to dag.clusters -- so newIds is always exactly
+    // [ownClusterStart, ownClusterStart + ownClusterCount). This is what lets ownClusterRange be a
+    // plain [start,count) rather than needing the same indirection childClusterRange (below) does.
+    u32 ownClusterStart = 0;
+    u32 ownClusterCount = 0;
+
+    // The span, into LodDag::groupChildren (below), of pg.members -- the cluster ids (one level
+    // finer) this group replaced. NOT a direct [start,count) into dag.clusters, unlike
+    // ownClusterRange: pg.members is whatever meshopt_partitionClusters (via groupClusters) assigned
+    // to this group, and partitioning gives no guarantee that a group's members are a contiguous
+    // slice of the finer level's own cluster-id space -- two clusters from opposite ends of that level
+    // can land in the same group. LodDag::groupChildren exists specifically to hold pg.members
+    // verbatim, one group's worth at a time, so this range can still be a cheap [start,count) into
+    // SOMETHING, the same shape the on-disk MeshletDesc's VertexIndexOffset/TriangleOffset already use
+    // to solve the identical problem for a meshlet's own vertex/triangle lists.
+    u32 childClusterStart = 0;
+    u32 childClusterCount = 0;
 };
 
 // The whole hierarchy for one mesh. `clusters` is flat across all levels; `levels[k]` lists the
@@ -198,6 +348,18 @@ struct LodDag {
     // decision) reads as "not small" -- the SAFE direction, since it means "keep LockBorder", never
     // "drop it".
     bool isSmallShell(u32 shellId) const { return shellId < smallShells.size() && smallShells[shellId] != 0; }
+
+    // Stage 4: flat, global storage for the streaming topology -- populated by buildLodHierarchy's
+    // Pass 2 (one ClusterGroupNode appended per group, at every level, in the same order groups are
+    // processed), read by packLodDag when converting this DAG into OcMeshLod::groupNodes/
+    // groupChildren (see packLodDag's own doc comment). Empty for a DAG that never grew past level 0
+    // (buildLodHierarchy either was not called, or found nothing to reduce) -- there being no group
+    // to record is the correct state there, not a gap.
+    std::vector<ClusterGroupNode> groupNodes;
+    // Flat, GLOBAL (dag.clusters-indexed) concatenation of every group's own pg.members, in the same
+    // order groupNodes is appended, one group's worth at a time -- see ClusterGroupNode::
+    // childClusterRange's own comment for why this indirection exists instead of a direct range.
+    std::vector<u32> groupChildren;
 
     u32  levelCount() const { return static_cast<u32>(levels.size()); }
     bool empty() const { return clusters.empty(); }
@@ -263,6 +425,39 @@ struct ValidationReport {
 //  - the DAG is acyclic and every non-root cluster (every cluster not in dag.levels.back()) has at
 //    least one parent
 ValidationReport validateLodDag(const fmt::OcMeshData& mesh, const LodDag& dag);
+
+// ---- Stage 4: validating the streaming topology ------------------------------------------------
+//
+// A SEPARATE function from validateLodDag above, for the same reason validateClusterErrorBounds is
+// separate from it (see that function's own comment): this checks a hierarchy validateLodDag knows
+// nothing about (groupNodes/groupChildren, fallbackAncestorId, ownerGroupId did not exist when that
+// function was written), and folding it in would make a topology regression read as a generic "DAG
+// invalid" instead of naming the specific new invariant that broke.
+//
+// Checks, over every cluster and every group node in `dag`:
+//  - every NON-ROOT cluster (c.level != dag.levelCount() - 1) has a VALID fallbackAncestorId: not
+//    fmt::kInvalidClusterId, in range for dag.clusters, and at EXACTLY c.level + 1 -- the level
+//    buildLodHierarchy Pass 2 always assigns it at, so anything else means the id was computed
+//    against the wrong group's newIds.
+//  - every group node's sphere GENUINELY CONTAINS every child cluster's own sphere -- checked
+//    NUMERICALLY (distance(group.center, child.center) + child.radius <= group.radius, within a
+//    small tolerance for the floating-point error a handful of sequential sphere merges can
+//    introduce -- see mergeSphere's own comment in the .cpp), never eyeballed. This is the backstop
+//    for the single most likely thing in this stage to be silently wrong (see ClusterGroupNode::
+//    sphereCenter's own comment) -- a bound that LOOKS plausible but does not actually contain what
+//    it claims to is exactly the failure mode this check exists to catch before it reaches a file.
+//  - ownerGroupId round-trips: for every group `g`, every cluster in [g.ownClusterStart,
+//    g.ownClusterStart + g.ownClusterCount) has ownerGroupId == g.id -- and every cluster with
+//    level >= 1 has SOME valid ownerGroupId (level 0 must have none -- see Cluster::ownerGroupId's
+//    own comment for why that direction is the one that must hold).
+//  - every group node's own+child ranges are in range for `dag` (ownClusterRange inside
+//    dag.clusters, childClusterRange inside dag.groupChildren, and every id it names inside
+//    dag.clusters at EXACTLY node.level - 1 -- children are always one level finer, by construction).
+//
+// Returns false and sets `why` to the first violation found, in the same "loudly, before it reaches
+// a file" spirit as validateClusterErrorBounds -- packLodDag calls this before packing, exactly like
+// that function.
+bool validateClusterHierarchy(const LodDag& dag, std::string* why = nullptr);
 
 // ---- geometric error -> FORMAT_SPECS' ScreenErrorThreshold ------------------------------------
 //
@@ -407,15 +602,25 @@ bool validateClusterErrorBounds(const LodDag& dag, const std::vector<ClusterErro
 // (validateScreenErrorMonotonic) BEFORE anything is packed -- exactly the ordering addMeshlets always
 // used, so a broken hierarchy still cannot reach mesh.meshlets/coarserLods through this path either.
 //
+// STAGE 4: also populates, on every LOD 1+ entry, OcMeshLod::groupNodes/groupChildren (from
+// dag.groupNodes/dag.groupChildren, translated from this DAG's GLOBAL cluster ids into the on-disk
+// LEVEL-LOCAL indices MLET chunk-version 3 stores -- see the .cpp for that translation) and, on every
+// meshlet at every level, OcMeshMeshlet::fallbackAncestorId/ownerGroupId (same translation, from
+// Cluster::fallbackAncestorId/ownerGroupId). validateClusterHierarchy runs BEFORE any of this is
+// packed, in the same "loudly, before it reaches a file" position validateClusterErrorBounds already
+// occupies -- a broken hierarchy (an invalid fallbackAncestorId, a group sphere that does not
+// genuinely contain its children) must not reach mesh.coarserLods any more than a broken error bound
+// may.
+//
 // On success, also stamps mesh.builderVersion = kBuilderVersion (PART B): this is the ONE call site
 // in the engine that actually cooks a ladder into a mesh's on-disk streams, so it is the one place
 // that gets to say which builder cooked it. On failure, mesh.meshlets/coarserLods/builderVersion are
 // left EXACTLY as they were on entry -- a caller that only conditionally wants clustering (ConvertTool
 // saving "without meshlets" on a pathological input) does not need to remember to roll anything back.
 //
-// Returns false and sets `why` when `dag` is empty (nothing to pack) or when the converted error
-// bounds fail validation; both are the same refusals addMeshlets always made, now made once instead
-// of independently by every caller that packs a DAG.
+// Returns false and sets `why` when `dag` is empty (nothing to pack), when the converted error bounds
+// fail validation, or (Stage 4) when validateClusterHierarchy fails; all three are refusals made once
+// here instead of independently by every caller that packs a DAG.
 bool packLodDag(const LodDag& dag, fmt::OcMeshData& mesh, std::string* why = nullptr);
 
 // Reduces `mesh` in place to roughly `ratio` of its triangles (0 < ratio < 1), rewriting positions,

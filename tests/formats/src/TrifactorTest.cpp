@@ -445,6 +445,163 @@ int main() {
         check(report.ok, "validateLodDag passes on the full hierarchy");
     }
 
+    AVER_INFO("=== Stage 4: fallbackAncestorId is each child's group's own nearest-centre output ===");
+    {
+        const fmt::OcMeshData grid = makeGridMesh(24);
+        trifactor::LodDag dag;
+        std::string why;
+        check(trifactor::buildClusters(grid, dag, &why), "buildClusters: " + why);
+        check(trifactor::buildLodHierarchy(grid, dag, &why), "buildLodHierarchy: " + why);
+        check(dag.levelCount() >= 3, "the fixture needs several levels for this test to be meaningful "
+                                      "(got " + std::to_string(dag.levelCount()) + ")");
+        check(!dag.groupNodes.empty(), "the hierarchy actually produced group nodes to test");
+
+        // ---- every non-root cluster has a VALID fallbackAncestorId, at exactly level+1 ------------
+        const u32 topLevel = dag.levelCount() - 1;
+        bool everyNonRootValid = true, everyRootInvalid = true, everyOneLevelCoarser = true;
+        for (const trifactor::Cluster& c : dag.clusters) {
+            if (c.level == topLevel) {
+                if (c.fallbackAncestorId != fmt::kInvalidClusterId) everyRootInvalid = false;
+                continue;
+            }
+            if (c.fallbackAncestorId == fmt::kInvalidClusterId) { everyNonRootValid = false; continue; }
+            if (c.fallbackAncestorId >= dag.clusters.size()) { everyNonRootValid = false; continue; }
+            if (dag.clusters[c.fallbackAncestorId].level != c.level + 1) everyOneLevelCoarser = false;
+        }
+        check(everyNonRootValid, "every non-root cluster has a valid (in-range) fallbackAncestorId");
+        check(everyRootInvalid, "every root cluster's fallbackAncestorId stays at its default "
+                                 "(kInvalidClusterId) -- a root has no coarser level to fall back to");
+        check(everyOneLevelCoarser, "every fallbackAncestorId names a cluster at EXACTLY one level coarser, "
+                                     "never further, never the same level");
+
+        // ---- THE NEAREST-CENTRE CLAIM ITSELF, recomputed INDEPENDENTLY here (a plain O(members *
+        // ownCount) scan, not a call into anything ClusterBuilder.cpp defines) for every group, and
+        // compared against what buildLodHierarchy actually chose. This is what proves "nearest centre"
+        // is the real rule, not merely documented as one. ----
+        bool everyChoiceIsTrulyNearest = true;
+        u32 childrenChecked = 0;
+        for (const trifactor::ClusterGroupNode& g : dag.groupNodes) {
+            for (u32 k = 0; k < g.childClusterCount; ++k) {
+                const u32 childId = dag.groupChildren[usize(g.childClusterStart) + k];
+                const Vec3& childCenter = dag.clusters[childId].bounds.sphereCenter;
+
+                u32 bestId = fmt::kInvalidClusterId;
+                f32 bestDistSq = std::numeric_limits<f32>::max();
+                for (u32 o = 0; o < g.ownClusterCount; ++o) {
+                    const u32 ownId = g.ownClusterStart + o;
+                    const Vec3 diff = dag.clusters[ownId].bounds.sphereCenter - childCenter;
+                    const f32 distSq = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
+                    if (distSq < bestDistSq) { bestDistSq = distSq; bestId = ownId; }
+                }
+                ++childrenChecked;
+                if (dag.clusters[childId].fallbackAncestorId != bestId) everyChoiceIsTrulyNearest = false;
+            }
+        }
+        check(childrenChecked > 0, "at least one group's children were actually checked");
+        check(everyChoiceIsTrulyNearest,
+              "every child's fallbackAncestorId is EXACTLY the nearest-bounding-sphere-centre member of "
+              "its own group's output clusters, independently recomputed over " +
+                  std::to_string(childrenChecked) + " children -- not merely A member of the group");
+
+        std::string hierWhy;
+        check(trifactor::validateClusterHierarchy(dag, &hierWhy),
+              "validateClusterHierarchy passes on the full hierarchy: " + hierWhy);
+    }
+
+    AVER_INFO("=== Stage 4: a group node's sphere genuinely CONTAINS every child cluster's own sphere ===");
+    {
+        // A DIFFERENT fixture from the plain grid above: the mixed-shell fixture (large grid + many
+        // small disjoint fragments) groups clusters that are spatially FAR APART from each other in
+        // the same DAG (though never the same GROUP -- see groupClusters' own two-bucket comment), so
+        // its group spheres are a much sterner test of genuine containment than a smooth, uniformly
+        // spaced flat grid's would be, where every child sphere sits close to its neighbours anyway.
+        const fmt::OcMeshData mesh = makeMixedShellFixture(/*gridN=*/28, /*fragmentCount=*/12);
+        trifactor::LodDag dag;
+        std::string why;
+        check(trifactor::buildClusters(mesh, dag, &why), "buildClusters on the mixed-shell fixture: " + why);
+        check(trifactor::buildLodHierarchy(mesh, dag, &why), "buildLodHierarchy: " + why);
+        check(!dag.groupNodes.empty(), "the hierarchy actually produced group nodes to test");
+
+        // NUMERIC containment, not eyeballed: centreDist + childRadius must not exceed groupRadius by
+        // more than a tiny slop absorbing the handful of sequential f32 sphere-merges that produced
+        // groupRadius (mergeSphere, ClusterBuilder.cpp) -- see validateClusterHierarchy's own epsilon
+        // comment for why this is scaled to the sphere's own radius rather than a bare constant.
+        bool everyGroupContainsEveryChild = true;
+        f32 worstOverrun = 0.0f;   // how far the WORST violation (if any) exceeded groupRadius, for the report
+        u32 pairsChecked = 0;
+        for (const trifactor::ClusterGroupNode& g : dag.groupNodes) {
+            const f32 eps = 1e-3f + g.sphereRadius * 1e-4f;
+            for (u32 k = 0; k < g.childClusterCount; ++k) {
+                const u32 childId = dag.groupChildren[usize(g.childClusterStart) + k];
+                const trifactor::Cluster& child = dag.clusters[childId];
+                const Vec3 diff = g.sphereCenter - child.bounds.sphereCenter;
+                const f32 centreDist = std::sqrt(diff.x * diff.x + diff.y * diff.y + diff.z * diff.z);
+                const f32 overrun = (centreDist + child.bounds.sphereRadius) - (g.sphereRadius + eps);
+                ++pairsChecked;
+                if (overrun > 0.0f) {
+                    everyGroupContainsEveryChild = false;
+                    worstOverrun = std::max(worstOverrun, overrun);
+                }
+            }
+        }
+        check(pairsChecked > 0, "at least one group/child pair was actually checked (" +
+                                     std::to_string(pairsChecked) + " pairs)");
+        check(everyGroupContainsEveryChild,
+              "every group node's sphere numerically contains every child cluster's own sphere in full, "
+              "over " + std::to_string(pairsChecked) + " group/child pairs (worst overrun " +
+                  std::to_string(worstOverrun) + " if any failed)");
+
+        std::string hierWhy;
+        check(trifactor::validateClusterHierarchy(dag, &hierWhy),
+              "validateClusterHierarchy independently confirms the same containment property: " + hierWhy);
+    }
+
+    AVER_INFO("=== Stage 4: ownerGroupId round-trips between a cluster and the group that produced it ===");
+    {
+        const fmt::OcMeshData grid = makeGridMesh(24);
+        trifactor::LodDag dag;
+        std::string why;
+        check(trifactor::buildClusters(grid, dag, &why), "buildClusters: " + why);
+        check(trifactor::buildLodHierarchy(grid, dag, &why), "buildLodHierarchy: " + why);
+        check(!dag.groupNodes.empty(), "the hierarchy actually produced group nodes to test");
+
+        // ---- LOD 0 is never produced by a group, BY CONSTRUCTION -- every one of its clusters must
+        // carry the default, not merely happen to. ----
+        bool everyLod0Invalid = true;
+        for (const u32 cid : dag.levels[0])
+            if (dag.clusters[cid].ownerGroupId != fmt::kInvalidClusterId) everyLod0Invalid = false;
+        check(everyLod0Invalid, "every LOD-0 cluster's ownerGroupId stays at kInvalidClusterId -- "
+                                 "buildClusters has no notion of a group at all");
+
+        // ---- every cluster with level >= 1 has a VALID ownerGroupId, at its own level, and -- the
+        // actual round trip -- that group's OWN ownClusterRange contains this exact cluster back. ----
+        bool everyDeepClusterValid = true, everyGroupAtOwnLevel = true, everyRoundTripHolds = true;
+        u32 deepClustersChecked = 0;
+        for (const trifactor::Cluster& c : dag.clusters) {
+            if (c.level == 0) continue;
+            ++deepClustersChecked;
+            if (c.ownerGroupId == fmt::kInvalidClusterId || c.ownerGroupId >= dag.groupNodes.size()) {
+                everyDeepClusterValid = false;
+                continue;
+            }
+            const trifactor::ClusterGroupNode& g = dag.groupNodes[c.ownerGroupId];
+            if (g.level != c.level) everyGroupAtOwnLevel = false;
+            const bool inRange = c.id >= g.ownClusterStart && c.id < g.ownClusterStart + g.ownClusterCount;
+            if (!inRange) everyRoundTripHolds = false;
+        }
+        check(deepClustersChecked > 0, "at least one level->=1 cluster was actually checked (" +
+                                            std::to_string(deepClustersChecked) + ")");
+        check(everyDeepClusterValid, "every cluster above LOD 0 has a valid ownerGroupId");
+        check(everyGroupAtOwnLevel, "every ownerGroupId names a group whose OWN level matches the cluster's");
+        check(everyRoundTripHolds,
+              "every cluster's ownerGroupId names the group whose ownClusterRange ACTUALLY CONTAINS that "
+              "same cluster back -- the round trip a traversal's recursion depends on");
+
+        std::string hierWhy;
+        check(trifactor::validateClusterHierarchy(dag, &hierWhy),
+              "validateClusterHierarchy independently confirms the same round trip: " + hierWhy);
+    }
+
     AVER_INFO("=== persisting LOD-0 clusters through .ocmesh (MLET) ===");
     {
         const fmt::OcMeshData grid = makeGridMesh(24);
@@ -633,6 +790,84 @@ int main() {
         check(decodedRootInfinite, "on the round-tripped bytes, every meshlet at the coarsest (root) level has parentError == FLT_MAX");
         check(decodedNonRootFinite, "on the round-tripped bytes, every meshlet below the root level has a finite parentError");
 
+        // ---- Stage 4: fallbackAncestorId/ownerGroupId survive the round trip bit-exact, at every
+        // level including LOD 0 -- the same "src vs back, field for field" style the ownError/
+        // parentError check above already uses, extended to the two new MLET chunk-version-3 fields. ----
+        bool everyTopologyFieldExact = src.meshlets.size() == back.meshlets.size();
+        for (usize mi = 0; mi < src.meshlets.size() && mi < back.meshlets.size(); ++mi)
+            everyTopologyFieldExact = everyTopologyFieldExact &&
+                src.meshlets[mi].fallbackAncestorId == back.meshlets[mi].fallbackAncestorId &&
+                src.meshlets[mi].ownerGroupId == back.meshlets[mi].ownerGroupId;
+        for (usize i = 0; i < src.coarserLods.size() && i < back.coarserLods.size(); ++i) {
+            const fmt::OcMeshLod& a = src.coarserLods[i];
+            const fmt::OcMeshLod& b = back.coarserLods[i];
+            for (usize mi = 0; mi < a.meshlets.size() && mi < b.meshlets.size(); ++mi)
+                everyTopologyFieldExact = everyTopologyFieldExact &&
+                    a.meshlets[mi].fallbackAncestorId == b.meshlets[mi].fallbackAncestorId &&
+                    a.meshlets[mi].ownerGroupId == b.meshlets[mi].ownerGroupId;
+        }
+        check(everyTopologyFieldExact,
+              "every meshlet's fallbackAncestorId/ownerGroupId survive the round trip bit-exact, LOD 0 "
+              "through the coarsest level");
+
+        // ---- ClusterGroupNode[]/groupChildren survive the round trip bit-exact too, per level ------
+        bool everyGroupLevelExact = src.coarserLods.size() == back.coarserLods.size();
+        u32 groupNodesComparedTotal = 0;
+        for (usize i = 0; i < src.coarserLods.size() && everyGroupLevelExact; ++i) {
+            const fmt::OcMeshLod& a = src.coarserLods[i];
+            const fmt::OcMeshLod& b = back.coarserLods[i];
+            if (a.groupNodes.size() != b.groupNodes.size()) { everyGroupLevelExact = false; continue; }
+            groupNodesComparedTotal += static_cast<u32>(a.groupNodes.size());
+            for (usize gi = 0; gi < a.groupNodes.size(); ++gi) {
+                const fmt::OcMeshClusterGroup& ga = a.groupNodes[gi];
+                const fmt::OcMeshClusterGroup& gb = b.groupNodes[gi];
+                everyGroupLevelExact = everyGroupLevelExact &&
+                    ga.sphereCenter.x == gb.sphereCenter.x && ga.sphereCenter.y == gb.sphereCenter.y &&
+                    ga.sphereCenter.z == gb.sphereCenter.z && ga.sphereRadius == gb.sphereRadius &&
+                    ga.ownClusterStart == gb.ownClusterStart && ga.ownClusterCount == gb.ownClusterCount &&
+                    ga.childClusterStart == gb.childClusterStart && ga.childClusterCount == gb.childClusterCount;
+            }
+            if (a.groupChildren != b.groupChildren) everyGroupLevelExact = false;
+        }
+        check(groupNodesComparedTotal > 0, "at least one level's group nodes were actually compared (" +
+                                                std::to_string(groupNodesComparedTotal) + " total)");
+        check(everyGroupLevelExact,
+              "every level's ClusterGroupNode[] and groupChildren survive the round trip bit-exact");
+
+        // ---- SEMANTIC trace-back: decode the persisted, LEVEL-LOCAL fallbackAncestorId of EVERY
+        // meshlet back into the DAG's own global cluster id space (using dag.levels, the same
+        // contiguous-range fact packLodDag's own translation relies on) and confirm it names the SAME
+        // cluster buildLodHierarchy actually chose -- not just that pack/write/read agree with EACH
+        // OTHER (the bit-exact checks above), but that the whole pipeline traces back to the in-memory
+        // decision the earlier "nearest-centre" Stage-4 section already proved was correct. ----
+        bool everyTraceMatches = true;
+        u32 traced = 0;
+        for (u32 level = 0; level < dag.levelCount(); ++level) {
+            const std::vector<u32>& ids = dag.levels[level];
+            const std::vector<fmt::OcMeshMeshlet>& diskLevel =
+                (level == 0) ? back.meshlets : back.coarserLods[usize(level) - 1].meshlets;
+            if (diskLevel.size() != ids.size()) { everyTraceMatches = false; continue; }
+            for (usize mi = 0; mi < ids.size(); ++mi) {
+                const trifactor::Cluster& c = dag.clusters[ids[mi]];
+                const u32 diskFallback = diskLevel[mi].fallbackAncestorId;
+                if (c.fallbackAncestorId == fmt::kInvalidClusterId) {
+                    if (diskFallback != fmt::kInvalidClusterId) everyTraceMatches = false;
+                    continue;
+                }
+                if (level + 1 >= dag.levelCount()) { everyTraceMatches = false; continue; }
+                const std::vector<u32>& nextIds = dag.levels[level + 1];
+                if (diskFallback >= nextIds.size()) { everyTraceMatches = false; continue; }
+                ++traced;
+                if (nextIds[diskFallback] != c.fallbackAncestorId) everyTraceMatches = false;
+            }
+        }
+        check(traced > 0, "at least one cluster's fallbackAncestorId was actually traced back to the DAG (" +
+                               std::to_string(traced) + " traced)");
+        check(everyTraceMatches,
+              "every meshlet's on-disk, level-local fallbackAncestorId decodes back to EXACTLY the global "
+              "cluster id buildLodHierarchy chose, across every level -- the pack/write/read translation "
+              "is correct, not merely internally self-consistent");
+
         // ---- determinism: save -> load -> save is byte-identical, now for a multi-LOD mesh ----
         std::vector<u8> bytes2;
         check(fmt::writeOcMesh(back, bytes2, &why), "re-writes the reloaded multi-LOD mesh: " + why);
@@ -640,15 +875,38 @@ int main() {
                                     std::to_string(bytes.size()) + " vs " + std::to_string(bytes2.size()) + " bytes)");
     }
 
-    AVER_INFO("=== backward compatibility: an old (MLET chunk version 1, no error fields) file still loads ===");
+    AVER_INFO("=== backward compatibility: MLET chunk versions 1 and 2 (pre-Stage-4) still load ===");
     {
-        // Every .ocmesh with meshlets ever written before this feature has a MLET chunk at version 1
-        // (32 B MeshletBounds, no OwnError/ParentError -- see kMlChunkVersionLegacy, OcMesh.cpp).
-        // The CURRENT writer always emits version 2 now, so to prove an old file still loads, one is
-        // reconstructed here: write a real mesh with today's writer (version 2), then splice the
-        // MLET chunk back down to what version 1 actually looked like and re-serialize with the
-        // container's own writeAvr1 -- this exercises the real AVR1 header/CRC/offset machinery
-        // rather than hand-rolling it, and only touches bytes this test computed itself.
+        // Every .ocmesh with meshlets ever written before Stage 2's per-cluster error fields landed
+        // has a MLET chunk at version 1 (32 B MeshletBounds: Sphere+ConeApex+ConeAxis/Cutoff, no
+        // OwnError/ParentError); every one written before THIS stage has version 2 (40 B: +OwnError/
+        // ParentError, no FallbackAncestorId/OwnerGroupId -- see kMlChunkVersionLegacy/Errors,
+        // OcMesh.cpp). The CURRENT writer always emits version 3 now (kMlChunkVersionTopology), so to
+        // prove BOTH older shapes still load, each is reconstructed here the same way: write a real
+        // mesh with today's writer (version 3), then splice the MLET chunk back down to what the
+        // older version actually looked like and re-serialize with the container's own writeAvr1 --
+        // this exercises the real AVR1 header/CRC/offset machinery rather than hand-rolling it, and
+        // only touches bytes this test computed itself.
+        //
+        // LAYOUT FOR ONE MESHLET, ONE LOD, TODAY'S WRITER (version 3), WHICH IS WHAT THE BYTE SURGERY
+        // BELOW IS COMPUTED AGAINST: GroupTable[0..24) (one LOD's worth, all-zero: this fixture's
+        // single LOD-0-only DAG never grows a group -- see LodView's own comment in OcMesh.cpp for why
+        // a null groupNodes still costs 24 B of all-zero table here), MeshletDesc[24..36),
+        // MeshletBounds[36..84) (48 B: 32 B Sphere/Cone + 4 B OwnError [68,72) + 4 B ParentError
+        // [72,76) + 4 B FallbackAncestorId [76,80) + 4 B OwnerGroupId [80,84)), MeshletVertices
+        // [84..96) (3 global indices), MeshletTriangles [96..100) (3 B, padded to 4).
+        //
+        // THE GROUPTABLE'S 24 LEADING BYTES ARE NEVER STRIPPED, on either byte-surgery path below, and
+        // that is deliberate, not an oversight: a version 1/2 reader never looks for a GroupTable
+        // at all (gated on `mlet->version >= kMlChunkVersionTopology`, OcMesh.cpp), and every offset it
+        // computes is relative to `meshletOffset` (from MHDR's LodDesc, a DIFFERENT chunk this test
+        // never touches) rather than assumed to be chunk-byte-0 -- so those 24 B simply sit there as
+        // inert, never-read padding, EXACTLY the shape a real pre-Stage-4 file's own MeshletOffset=0
+        // start would have looked like to a version 1/2 reader if this test had bothered to strip them.
+        // Trimming ONLY MeshletBounds' newer trailing fields (below) is therefore sufficient, and is
+        // the same "erase exactly the extra tail, let the reader's own stride arithmetic land the rest
+        // in the right place" trick this test always used, just at the shifted offsets Stage 4's
+        // GroupTable prefix introduces.
         const fmt::OcMeshData tri = makeSingleTriangle();
         trifactor::LodDag dag;
         std::string why;
@@ -661,41 +919,81 @@ int main() {
         check(trifactor::packLodDag(dag, src, &packWhy), "packLodDag packs the single-triangle DAG: " + packWhy);
         check(src.meshlets.size() == 1, "exactly one meshlet in the MLET chunk");
 
-        std::vector<u8> bytesV2;
-        check(fmt::writeOcMesh(src, bytesV2, &why), "writes with today's writer (chunk version 2): " + why);
+        std::vector<u8> bytesV3;
+        check(fmt::writeOcMesh(src, bytesV3, &why), "writes with today's writer (chunk version 3): " + why);
 
-        fmt::Avr1File container;
-        check(fmt::parseAvr1(bytesV2.data(), bytesV2.size(), container, &why), "parses the v2 container: " + why);
+        const auto findMlet = [&](fmt::Avr1File& container) -> fmt::AvrChunk* {
+            for (fmt::AvrChunk& c : container.chunks) if (c.id == fmt::avrFourCC("MLET")) return &c;
+            return nullptr;
+        };
 
-        fmt::AvrChunk* mlet = nullptr;
-        for (fmt::AvrChunk& c : container.chunks) if (c.id == fmt::avrFourCC("MLET")) mlet = &c;
-        check(mlet != nullptr, "the v2 file has an MLET chunk");
-        check(mlet && mlet->version == 2, "the writer stamped MLET chunk version 2");
-        // Layout for one meshlet, one LOD: MeshletDesc[0..12), MeshletBounds[12..52) (40 B v2:
-        // 32 B bounds/cone + 8 B OwnError/ParentError), MeshletVertices/Triangles after that. The two
-        // error floats are MeshletBounds' trailing 8 B, at [44, 52).
-        check(mlet && mlet->data.size() >= 52, "MLET holds at least one MeshletDesc + one v2 MeshletBounds");
-        if (mlet && mlet->data.size() >= 52) {
-            mlet->data.erase(mlet->data.begin() + 44, mlet->data.begin() + 52);
-            mlet->version = 1;
+        // ---- version 2: trim FallbackAncestorId/OwnerGroupId ([76,84), 8 B) off the bounds tail ----
+        {
+            fmt::Avr1File container;
+            check(fmt::parseAvr1(bytesV3.data(), bytesV3.size(), container, &why), "parses the v3 container: " + why);
+            fmt::AvrChunk* mlet = findMlet(container);
+            check(mlet != nullptr, "the v3 file has an MLET chunk");
+            check(mlet && mlet->version == 3, "the writer stamped MLET chunk version 3");
+            check(mlet && mlet->data.size() >= 84, "MLET holds at least the GroupTable + one MeshletDesc + one v3 MeshletBounds");
+            if (mlet && mlet->data.size() >= 84) {
+                mlet->data.erase(mlet->data.begin() + 76, mlet->data.begin() + 84);
+                mlet->version = 2;
+            }
+
+            std::vector<u8> bytesV2;
+            check(fmt::writeAvr1(container, bytesV2, &why), "re-serializes as a version-2-style MLET container: " + why);
+
+            fmt::OcMeshData backV2;
+            check(fmt::parseOcMesh(bytesV2.data(), bytesV2.size(), backV2, &why),
+                  "the reconstructed old (chunk version 2) file still loads: " + why);
+            check(backV2.meshlets.size() == 1, "the meshlet survives on the v2 file");
+            if (backV2.meshlets.size() == 1) {
+                check(backV2.meshlets[0].vertices == src.meshlets[0].vertices &&
+                      backV2.meshlets[0].triangles == src.meshlets[0].triangles,
+                      "geometry survives on the v2 file, unaffected by the Stage-4 fields' absence");
+                check(backV2.meshlets[0].ownError == src.meshlets[0].ownError &&
+                      backV2.meshlets[0].parentError == src.meshlets[0].parentError,
+                      "ownError/parentError (a version-2 field) survive on the v2 file");
+                check(backV2.meshlets[0].fallbackAncestorId == fmt::kInvalidClusterId,
+                      "a version-2 file's meshlet defaults fallbackAncestorId to kInvalidClusterId "
+                      "(the field was never written)");
+                check(backV2.meshlets[0].ownerGroupId == fmt::kInvalidClusterId,
+                      "...and ownerGroupId too");
+            }
         }
 
-        std::vector<u8> bytesV1;
-        check(fmt::writeAvr1(container, bytesV1, &why), "re-serializes as a version-1-style MLET container: " + why);
+        // ---- version 1: ALSO trim OwnError/ParentError ([68,84), 16 B) off the bounds tail ----
+        {
+            fmt::Avr1File container;
+            check(fmt::parseAvr1(bytesV3.data(), bytesV3.size(), container, &why), "re-parses the v3 container: " + why);
+            fmt::AvrChunk* mlet = findMlet(container);
+            check(mlet != nullptr, "the v3 file has an MLET chunk (second parse)");
+            check(mlet && mlet->data.size() >= 84, "MLET holds at least the GroupTable + one MeshletDesc + one v3 MeshletBounds (second parse)");
+            if (mlet && mlet->data.size() >= 84) {
+                mlet->data.erase(mlet->data.begin() + 68, mlet->data.begin() + 84);
+                mlet->version = 1;
+            }
 
-        fmt::OcMeshData backV1;
-        check(fmt::parseOcMesh(bytesV1.data(), bytesV1.size(), backV1, &why),
-              "the reconstructed old (chunk version 1) file still loads: " + why);
-        check(backV1.meshlets.size() == 1, "the meshlet survives on the old file");
-        if (backV1.meshlets.size() == 1) {
-            check(backV1.meshlets[0].vertices == src.meshlets[0].vertices &&
-                  backV1.meshlets[0].triangles == src.meshlets[0].triangles,
-                  "geometry (vertices/triangles) survives on the old file, unaffected by the newer fields' absence");
-            check(backV1.meshlets[0].ownError == 0.0f,
-                  "a version-1 file's meshlet defaults ownError to 0.0f (the field was never written)");
-            check(backV1.meshlets[0].parentError == std::numeric_limits<f32>::max(),
-                  "...and parentError to FLT_MAX -- the same safe 'always drawable, nothing finer needed' "
-                  "default a root cluster gets, not whatever this test's v2 cook actually computed");
+            std::vector<u8> bytesV1;
+            check(fmt::writeAvr1(container, bytesV1, &why), "re-serializes as a version-1-style MLET container: " + why);
+
+            fmt::OcMeshData backV1;
+            check(fmt::parseOcMesh(bytesV1.data(), bytesV1.size(), backV1, &why),
+                  "the reconstructed old (chunk version 1) file still loads: " + why);
+            check(backV1.meshlets.size() == 1, "the meshlet survives on the v1 file");
+            if (backV1.meshlets.size() == 1) {
+                check(backV1.meshlets[0].vertices == src.meshlets[0].vertices &&
+                      backV1.meshlets[0].triangles == src.meshlets[0].triangles,
+                      "geometry (vertices/triangles) survives on the old file, unaffected by the newer fields' absence");
+                check(backV1.meshlets[0].ownError == 0.0f,
+                      "a version-1 file's meshlet defaults ownError to 0.0f (the field was never written)");
+                check(backV1.meshlets[0].parentError == std::numeric_limits<f32>::max(),
+                      "...and parentError to FLT_MAX -- the same safe 'always drawable, nothing finer needed' "
+                      "default a root cluster gets, not whatever this test's v3 cook actually computed");
+                check(backV1.meshlets[0].fallbackAncestorId == fmt::kInvalidClusterId &&
+                      backV1.meshlets[0].ownerGroupId == fmt::kInvalidClusterId,
+                      "a version-1 file's meshlet also defaults both Stage-4 fields to kInvalidClusterId");
+            }
         }
     }
 

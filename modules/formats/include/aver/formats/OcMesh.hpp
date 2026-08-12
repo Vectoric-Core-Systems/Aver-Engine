@@ -32,6 +32,16 @@ struct OcMeshSubmesh {
 // Bone influences per vertex. Four is the spec's JOINTS/WEIGHTS width (5.3) and the GPU stride.
 inline constexpr u32 kOcMeshInfluences = 4;
 
+// "No such cluster/group" -- the sentinel MLET chunk-version 3's topology fields (OcMeshMeshlet::
+// fallbackAncestorId/ownerGroupId, and every level-local index this format stores from here on) use
+// in place of a valid array index. Defined here, once, rather than duplicated the way
+// kMaxMeshletVertices/kMaxMeshletTriangles are deliberately duplicated in OcMesh.cpp (see that
+// file's own comment on why THOSE are copied rather than shared): this constant has no reverse-
+// dependency problem, because Aver.Trifactor already depends on Aver.Formats (the module DAG runs
+// the other way -- see OcMeshMeshlet's own comment below), so aver::trifactor::ClusterBuilder.hpp
+// aliases this exact symbol instead of naming a second one that could drift out of sync with it.
+inline constexpr u32 kInvalidClusterId = std::numeric_limits<u32>::max();
+
 // One meshlet, matching the on-disk MLET shape byte for byte (FORMAT_SPECS.md 5.7): MeshletDesc's
 // VertexIndexOffset/TriangleOffset/Pad are a WRITE-TIME detail (computed from where this meshlet
 // lands among its siblings), not carried here -- this struct is the DECODED, offset-free form both
@@ -75,7 +85,71 @@ struct OcMeshMeshlet {
     f32 ownError    = 0.0f;
     f32 parentError = std::numeric_limits<f32>::max();
 
+    // MLET chunk-version 3 (FORMAT_SPECS.md 5.7): the streaming topology a page-residency-aware
+    // traversal needs, which Stage 4's own task deliberately does NOT ask a runtime to reconstruct
+    // by walking Aver.Trifactor's Cluster::parents -- see aver::trifactor::Cluster::
+    // fallbackAncestorId's own comment (ClusterBuilder.hpp) for why that list is many-to-MANY (every
+    // cluster a group produces gets the group's ENTIRE child set, so a child has as many parents as
+    // its group has outputs) with no principled runtime tiebreak, and why this field is decided once,
+    // offline, with the full group geometry in hand, instead.
+    //
+    // fallbackAncestorId: a LEVEL-LOCAL index -- like every other MLET offset/count in this format --
+    // into the NEXT-COARSER LOD level's own OcMeshMeshlet[] (LOD 0's meshlet i's fallback lives in LOD
+    // 1's array; LOD k's lives in LOD k+1's), naming the coarser cluster a streaming system should
+    // draw instead when this cluster's own page is not resident. kInvalidClusterId for a ROOT cluster
+    // (the coarsest LOD level has no coarser level to fall back to) -- never 0, which would silently
+    // alias a real cluster and point a stalled root at the wrong geometry.
+    //
+    // ownerGroupId: a LEVEL-LOCAL index into THIS SAME LOD level's own OcMeshClusterGroup[]
+    // (OcMeshLod::groupNodes), the back-reference a traversal needs to recurse PAST this cluster: pop
+    // this cluster's id off a coarser group's childClusterRange, look up its ownerGroupId, and that
+    // group's own childClusterRange is the next, finer set to descend into. kInvalidClusterId for a
+    // LOD-0 cluster: LOD 0 is built directly by buildClusters, never by a group (buildLodHierarchy's
+    // Pass 2, which is the only thing that ever creates a ClusterGroupNode, starts at LOD 1), so LOD
+    // 0 has no owner group BY CONSTRUCTION, not merely because nothing got around to setting it.
+    //
+    // Both default to kInvalidClusterId -- the same "harmless if a consumer that does not know about
+    // this feature yet reaches it anyway" reasoning ownError/parentError's own defaults already use --
+    // and both stay at that default for a chunk-version 1 or 2 file, which never wrote them at all
+    // (see OcMesh.cpp's boundsStride selection).
+    u32 fallbackAncestorId = kInvalidClusterId;
+    u32 ownerGroupId       = kInvalidClusterId;
+
     u32 triangleCount() const { return static_cast<u32>(triangles.size() / 3); }
+};
+
+// One ClusterGroupNode (FORMAT_SPECS.md 5.7, MLET chunk-version 3): the hierarchy a traversal walks
+// to recurse from a coarse LOD level down into the finer clusters it replaced. This is the DECODED,
+// offset-free on-disk shape of aver::trifactor::ClusterGroupNode -- see that type's own comment
+// (modules/trifactor/include/aver/trifactor/ClusterBuilder.hpp) for the full reasoning behind every
+// field here, and OcMeshMeshlet's own comment just above for why this is a distinct Formats type
+// rather than the Trifactor one shared directly (Aver.Formats sits below Aver.Trifactor in the
+// module DAG and must stay loadable with AVER_MODULE_TRIFACTOR=OFF).
+struct OcMeshClusterGroup {
+    // A TRUE sphere-of-spheres: contains every child cluster's OWN bounding sphere in full (not just
+    // its centre), computed at build time over the group's pre-simplification members -- see
+    // aver::trifactor::ClusterGroupNode's own comment for why this must not be confused with (and is
+    // never derived from) the coarser, post-simplification meshopt_computeMeshletBounds result these
+    // clusters also carry in their own MeshletBounds entry.
+    Vec3 sphereCenter{0, 0, 0};
+    f32  sphereRadius = 0.0f;
+
+    // The span of THIS LOD level's own OcMeshMeshlet[] this group produced -- level-local, like every
+    // other MLET index in this format. Contiguous by construction (see the .cpp writer's own comment
+    // on why a group's own output ids never need a separate indirection array the way its CHILDREN,
+    // below, do).
+    u32 ownClusterStart = 0;
+    u32 ownClusterCount = 0;
+
+    // The span, into THIS LOD's own OcMeshLod::groupChildren array, of the finer level's meshlet
+    // indices this group replaced. NOT a plain [start,count) into the finer level's own meshlet array
+    // directly -- a group's members are whatever meshopt_partitionClusters assigned it, which is not
+    // guaranteed to be a contiguous slice of that level's cluster-id space, so this indirects through
+    // a dedicated flat array the same way MeshletDesc's VertexIndexOffset/TriangleOffset already
+    // indirect through MeshletVertices/MeshletTriangles rather than assuming contiguity they cannot
+    // promise either.
+    u32 childClusterStart = 0;
+    u32 childClusterCount = 0;
 };
 
 // One coarser LOD level (level >= 1) of a Trifactor DAG, beyond the base LOD 0 that
@@ -90,6 +164,25 @@ struct OcMeshLod {
     // aver::trifactor::toScreenErrorThreshold (modules/trifactor/include/aver/trifactor/
     // ClusterBuilder.hpp) for the exact formula and the reference viewport/FOV it assumes.
     f32 screenErrorThreshold = 0.0f;
+
+    // MLET chunk-version 3 (FORMAT_SPECS.md 5.7): the group hierarchy that produced THIS level's own
+    // `meshlets` out of the next-finer level's (LOD 0's meshlets for groupNodes here on
+    // coarserLods[0], the previous coarserLods entry's meshlets for every one after). Empty for a
+    // chunk-version 1 or 2 file (an older MLET never wrote group data at all) -- see OcMesh.cpp's
+    // GroupTable, which is what a chunk-version 3 reader looks for and an older one does not know to.
+    //
+    // LOD 0 (OcMeshData::meshlets, not this struct) never gets a groupNodes field of its own: every
+    // ClusterGroupNode's OWN level is >= 1 by construction (buildLodHierarchy's Pass 2, the only thing
+    // that ever creates one, starts at LOD 1 -- see OcMeshMeshlet::ownerGroupId's own comment), so a
+    // LOD-0 groupNodes array would always be empty and there is nothing for it to name.
+    std::vector<OcMeshClusterGroup> groupNodes;
+
+    // Flat, level-local child-cluster-index storage that every OcMeshClusterGroup::childClusterStart/
+    // childClusterCount above indexes into -- see that field's own comment for why a group's children
+    // need this indirection rather than a plain range. One array per LOD level, not one for the whole
+    // mesh, because "level-local index" only means something within the one finer level a group's
+    // children all belong to (a group's own level, minus one).
+    std::vector<u32> groupChildren;
 };
 
 struct OcMeshData {
