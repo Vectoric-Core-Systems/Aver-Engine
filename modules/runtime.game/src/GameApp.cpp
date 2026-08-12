@@ -1,5 +1,7 @@
 #include "aver/game/GameApp.hpp"
 
+#include <filesystem>
+
 #include "aver/runtime/Engine.hpp"
 #include "aver/platform/Window.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -397,6 +399,133 @@ void GameApp::openProject(Engine& e) {
 #endif
 }
 
+void GameApp::initScripting() {
+#if AVER_MODULE_SCRIPTING
+    // WHERE THIS BELONGS, decided and justified here rather than assumed: the C# side of visual
+    // scripting (OcGraphParser, GraphCompiler, GraphHost) lives in Aver.Graph and Aver.Scripting.Bridge
+    // already hosts GraphHost per entity for the editor's graph-driven drone -- but this task's own
+    // scope deliberately excludes editing Aver.Scripting.Bridge or modules/scripting (another agent's
+    // and an already-shared surface), so the choice was never "which of the three owns graph
+    // semantics", it was "who bootstraps the CLR host and drives it from a shipped game's frame loop,
+    // using ONLY what those two already expose publicly". That is a native-runtime question, not a
+    // graph-semantics one -- ScriptHost::init/graphLoad/graphTick are plain C++ calls with no
+    // knowledge of what a graph or a node MEANS, exactly like aver_fw_tick just below has no idea what
+    // an Actor subclass does -- so it belongs here, in Aver.Runtime.Game, beside the other subsystems
+    // this class already owns the lifetime of.
+    //
+    // THIS IS ALSO THE FIRST TIME ANYTHING IN AverGame.exe CALLS INTO THE SCRIPTING HOST AT ALL.
+    // Aver.Scripting.Host has been linked into Aver.Runtime.Game since the CMakeLists.txt comment two
+    // lines above target_link_libraries(... Aver.Scripting.Host) was written ("a game runs the
+    // project's C# gameplay, so it needs the CLR host as much as the editor does -- more, since it has
+    // no other way to run anything"), but nothing ever constructed a ScriptHost or called init() on
+    // one from this executable -- only sandbox/src/SandboxApp.cpp (the editor) did. That gap is
+    // exactly what kept visual scripting -- and, incidentally, the C# actor framework and AverBehaviour
+    // scripts -- confined to the editor's --play-test/--spawn-test harness. Closing it for graphs
+    // necessarily reopens the door for those too: LoadScripts (called inside init(), see HostDesc's own
+    // doc) declares actor classes and runs AverBehaviour.OnStart for anything in Binaries\Scripts, the
+    // same as it always has for the editor. What it does NOT do is drive them: nothing here calls
+    // scripts_.update() (AverBehaviour.OnUpdate) or aver_fw_begin_play() (which is what would let an
+    // actor class ever get bound to an entity and ticked) -- both are a separate, larger gap this task
+    // does not close, and are named rather than silently left implied. See the phase-2 report.
+    scripting::HostDesc hd;
+    hd.bridgeDir = executableDir() + "\\Scripting";
+    // The exact formula sandbox/src/ProjectScaffold.cpp's scriptsBinaryDir(project) uses for the
+    // editor's dev-tree case, reproduced here rather than shared: that helper lives in the sandbox
+    // target, which a game executable cannot link (see this module's own CMakeLists.txt header on why
+    // Aver.Runtime.Game exists at all). scripts/stage-game.ps1's own LAYOUT comment is the other half
+    // of why this is right for a PACKAGED game specifically: "<out>\Binaries\ the project's compiled
+    // scripts and materials", and Game.ocproject is written at <out>, so project_.binariesDir() IS
+    // <out>\Binaries once a game's manifest has been opened.
+    hd.scriptsDir = project_.valid() ? (project_.binariesDir() + "\\Scripts") : std::string();
+    scriptsReady_ = scripts_.init(hd);
+    if (scriptsReady_) {
+        AVER_INFO("[Game] scripting host ready: bridge='{}' scripts='{}' ({} legacy behaviour(s) live)",
+                  hd.bridgeDir, hd.scriptsDir, scripts_.behaviourCount());
+    } else {
+        AVER_INFO("[Game] scripting host unavailable ({}) -- graphs and any other C# gameplay will not run",
+                  scripts_.declineReason());
+    }
+#endif
+}
+
+void GameApp::discoverProjectGraphs() {
+#if AVER_MODULE_SCRIPTING
+    if (!scriptsReady_) return;
+    if (!scripts_.graphAvailable()) {
+        AVER_INFO("[Graph] this build's scripting bridge has no graph hosting -- project .ocgraph "
+                  "files, if any, will not run (see ScriptHost::graphAvailable's own doc)");
+        return;
+    }
+
+    // A NO-GRAPH PROJECT IS ONE OF THE TWO THINGS THIS TASK HAS TO PROVE BEHAVES CORRECTLY. This is
+    // where that is decided: pathsWithExtension over an empty (or graph-free) content tree returns an
+    // empty vector, projectGraphs_ stays empty, and tickProjectGraphs below is a single empty-vector
+    // early-out every frame thereafter -- the same shape of no-op the PBR/VOXI/PHYSICS #if blocks
+    // already are for a tree missing THOSE modules, just decided by content rather than by a build flag.
+    const std::vector<std::string> paths = content_.pathsWithExtension(".ocgraph");
+    if (paths.empty()) {
+        AVER_INFO("[Graph] 0 .ocgraph file(s) under this project's content -- nothing to run");
+        return;
+    }
+
+    // SYNTHETIC, STRICTLY-NEGATIVE entity ids, decreasing from -1000. ScriptHost::graphLoad/graphTick
+    // is an ENTITY-scoped API -- its only caller before this (SandboxApp's graph-driven drone) always
+    // binds a REAL scene::Entity, because a dataflow graph's PARAM entity and its 2-3-OUT position
+    // write are both meant to land on one. A project-level graph is not about any one entity, so it
+    // needs an id that can never collide with a live one AND is safe to hand to that position-write
+    // side effect if the graph declares one anyway (see GraphHost.ApplyResult, C# side). Every native
+    // scene entity handle is a non-negative packed index (World::valid rejects anything else, and
+    // SceneAbi's field accessors all resolve through that same validity check before touching memory
+    // -- SceneAbi.cpp's fieldAddr returns null for an unknown entity, and every get/set is a documented
+    // no-op on null) -- so a negative id is guaranteed unresolvable, and an accidental write from a
+    // project graph is a safe no-op rather than a stray write into whatever real entity shares the
+    // number. -1000 rather than -1 leaves headroom below zero in case something else ever wants small
+    // negative sentinels; the exact value carries no other meaning.
+    i32 nextId = -1000;
+    u32 loaded = 0;
+    for (const std::string& path : paths) {
+        const i32 id = nextId--;
+        const bool ok = scripts_.graphLoad(id, path);
+        projectGraphs_.push_back(ProjectGraph{path, id, ok});
+        if (ok) {
+            ++loaded;
+            AVER_INFO("[Graph] loaded '{}' (synthetic id {})", path, id);
+        } else {
+            // ScriptHost::graphLoad already logged the C# side's [GraphHost] reason (parse/compile
+            // error, or a PARAM shape GraphHost cannot supply) via HostBridge.GraphLoad's own Emit
+            // call, which reaches this process's log the same way every other managed log line does.
+            // This line adds the one thing that log line cannot know on its own: WHICH FILE, by its
+            // full path, so a project with several graphs does not leave the reader guessing which one
+            // is broken. The game continues -- a graph that fails to load is exactly the "must log
+            // clearly and must NOT take the game down" case visual-scripting phase 2 asked for.
+            AVER_WARN("[Graph] '{}' failed to load -- see the [GraphHost] reason above; continuing without it", path);
+        }
+    }
+    AVER_INFO("[Graph] {} of {} project graph(s) loaded", loaded, projectGraphs_.size());
+#endif
+}
+
+void GameApp::tickProjectGraphs(f32 dt) {
+#if AVER_MODULE_SCRIPTING
+    if (!scriptsReady_ || projectGraphs_.empty()) return;
+    // UNGATED ON aver_fw_play_state(), and deliberately so -- unlike tickGameplay() just above this
+    // call's site in onUpdate(). Graphs are a scripting-layer feature: Aver.Graph has no reference to
+    // Aver.Framework at all (check the .csproj), so gating a graph's OnTick on the framework's PLAYING
+    // state would make every graph silently inert in exactly the configuration where it is most likely
+    // to be the ONLY gameplay a project has -- AVER_MODULE_FRAMEWORK off, or on but this project
+    // declares no GameMode (nothing in this task ever calls aver_fw_begin_play from a packaged game;
+    // see initScripting's own comment on that separate, larger, un-closed gap). "OnTick fires every
+    // frame" is read literally: from the first frame this graph loaded successfully, for as long as
+    // the process runs, independent of whether anything else in the game is "playing".
+    for (const ProjectGraph& g : projectGraphs_) {
+        if (!g.loaded) continue;
+        scripts_.graphTick(g.syntheticEntity, dt);
+    }
+#else
+    (void)dt;
+#endif
+}
+
 Vec3 GameApp::camForward() const {
     return Vec3{ std::cos(pitch_) * std::cos(yaw_), std::cos(pitch_) * std::sin(yaw_), std::sin(pitch_) };
 }
@@ -552,6 +681,31 @@ void GameApp::onInit(Engine& e) {
     if (cfg_.pcgVolumeTest) attachPcgTest(e);
     initPhysics();      // BEFORE openProject: level load builds a static body per colliding placement
     openProject(e);
+    // AFTER openProject: the scripts directory this resolves (project_.binariesDir() + "\Scripts")
+    // and the graph discovery below (content_.pathsWithExtension) both read state openProject just
+    // populated. See initScripting's own comment for why bootstrapping the CLR host lives here at
+    // all, and discoverProjectGraphs' for the no-graph-project behaviour this order guarantees.
+    // SCAN BEFORE BOOTSTRAPPING, so a project that needs neither never pays for either. This used to
+    // read `initScripting(); discoverProjectGraphs();` unconditionally, and the graph-count check that
+    // makes a no-graph project a no-op lived one function too late -- it gated the GRAPH side effects
+    // while the CLR host had already been started above it. A reviewer measured the cost on a
+    // genuinely graph-free project: 40-60ms of extra startup (938-965ms against 890-908ms), plus a new
+    // failure surface -- a missing bridge directory or nethost.dll -- that AverGame.exe simply did not
+    // have before, because nothing outside the editor had ever called ScriptHost::init.
+    //
+    // pathsWithExtension only reads the content index openProject already populated, so asking first
+    // is nearly free and needs no live host. A legacy Scripts assembly still forces the bootstrap:
+    // projects predating graphs rely on it and must not silently lose their scripts.
+#if AVER_MODULE_SCRIPTING
+    const bool haveGraphs = !content_.pathsWithExtension(".ocgraph").empty();
+    const bool haveScriptAssembly = std::filesystem::exists(project_.binariesDir() + "\Scripts");
+    if (haveGraphs || haveScriptAssembly) {
+        initScripting();
+        discoverProjectGraphs();
+    } else {
+        AVER_INFO("[Game] no .ocgraph content and no Scripts assembly -- scripting host not started");
+    }
+#endif
     AVER_INFO("[Game] ready");
 }
 
@@ -571,6 +725,9 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 #endif
 
     tickGameplay(t.dt);
+    // BESIDE tickGameplay(), not a parallel loop of its own: this is the same per-frame call site,
+    // just not gated on the same PLAYING check -- see tickProjectGraphs' own comment for why.
+    tickProjectGraphs(t.dt);
 
 #if AVER_MODULE_SCENE
     // The animation clock ticks UNCONDITIONALLY, not from the gameplay groups above. Those are
@@ -694,6 +851,14 @@ void GameApp::onShutdown(Engine& e) {
 #endif
 #if AVER_MODULE_PHYSICS
     aver_phys_shutdown();
+#endif
+#if AVER_MODULE_SCRIPTING
+    // Drains every loaded graph/behaviour and closes the CLR host, if one ever came up. Nothing above
+    // this line depends on the scripting host being alive during its own teardown, so exact ordering
+    // against the physics/scene shutdown just above is not load-bearing the way registration order is
+    // for a render feature -- unlike voxiRenderer_/skinnedScene_, ScriptHost never became a bare
+    // pointer anything else in this class retained.
+    if (scriptsReady_) { scripts_.shutdown(); scriptsReady_ = false; }
 #endif
 
     // Reported unconditionally, including when it is zero. A silent zero is indistinguishable from

@@ -10,6 +10,7 @@
 #endif
 
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -38,6 +39,15 @@ public:
 
     // The native absolute path for an ObjectId, or empty.
     std::string pathFor(u64 id) const;
+
+    // Every indexed asset's absolute path whose extension case-insensitively matches `ext` (pass it
+    // WITH the dot, e.g. ".ocgraph"), sorted for a deterministic order run to run. Built by filtering
+    // the SAME contentIndex_ that adopt() fills with a hardened, error_code-based recursive walk --
+    // added for visual-scripting phase 2's graph discovery (GameApp::discoverProjectGraphs), but
+    // deliberately generic rather than named pathsToGraphs: the walk this reuses already exists and
+    // asking it for a second, easier-to-get-wrong directory scan would be the exact "moved code
+    // doesn't change which #if it's under" mistake this class's own header comment warns against.
+    std::vector<std::string> pathsWithExtension(std::string_view ext) const;
 
     usize size() const { return contentIndex_.size(); }
     const fmt::ProjectDesc& project() const { return project_; }

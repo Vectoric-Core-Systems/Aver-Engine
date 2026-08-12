@@ -3,6 +3,7 @@
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <system_error>
 
@@ -72,6 +73,31 @@ void GameContent::adopt(const fmt::ProjectDesc& project) {
 std::string GameContent::pathFor(u64 id) const {
     const auto it = contentIndex_.find(id);
     return it == contentIndex_.end() ? std::string() : it->second;
+}
+
+std::vector<std::string> GameContent::pathsWithExtension(std::string_view ext) const {
+    std::vector<std::string> out;
+    for (const auto& [id, path] : contentIndex_) {
+        if (path.size() < ext.size()) continue;
+        // Case-insensitive suffix compare, ASCII only -- matches isOcproject's own reasoning in
+        // GameApp.cpp (a project's asset extensions are all plain ASCII, and Windows paths are
+        // case-insensitive on disk but not in a plain string compare).
+        bool match = true;
+        for (usize i = 0; i < ext.size(); ++i) {
+            char a = path[path.size() - ext.size() + i];
+            char b = ext[i];
+            if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = static_cast<char>(b - 'A' + 'a');
+            if (a != b) { match = false; break; }
+        }
+        if (match) out.push_back(path);
+    }
+    // contentIndex_ is an unordered_map: iteration order is not the walk order, and is not even
+    // stable between two runs of the SAME binary over the SAME content. A caller that assigns
+    // anything by position (GameApp's synthetic entity ids, notably) would otherwise get a
+    // reproducibility gap that looks like a bug in whatever the ids are used for.
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 std::string GameContent::resolveAnimAsset(u64 id, void* user) {

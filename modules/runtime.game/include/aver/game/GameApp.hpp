@@ -12,6 +12,9 @@
 #if AVER_MODULE_SCENE
 #  include "aver/render/SkinnedScene.hpp"
 #endif
+#if AVER_MODULE_SCRIPTING
+#  include "aver/scripting/ScriptHost.hpp"
+#endif
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
 #include "aver/game/GameRender.hpp"
@@ -118,6 +121,28 @@ private:
     // Runs the gameplay tick groups around the physics step, when a session is playing.
     void tickGameplay(f32 dt);
 
+    // VISUAL SCRIPTING PHASE 2: a packaged game running any C# at all -- graphs included -- needs the
+    // in-process CLR host bootstrapped somewhere, and nothing did that for AverGame.exe before this
+    // (grep the tree: Aver.Scripting.Host was linked by modules/runtime.game/CMakeLists.txt but never
+    // constructed by anything in it -- only sandbox/src/SandboxApp.cpp, the editor, ever stood up a
+    // ScriptHost). initScripting starts it; discoverProjectGraphs and tickProjectGraphs are the
+    // graph-specific pieces built on top of it. See GameApp.cpp's onInit/onUpdate for where each is
+    // called and why, and the phase-2 report for the fuller "where does this belong" reasoning the
+    // task asked for.
+    void initScripting();
+
+    // Walks the open project's content for *.ocgraph files (via GameContent::pathsWithExtension) and
+    // loads each one through ScriptHost's existing, UNCHANGED entity-scoped graph API -- see its own
+    // definition in GameApp.cpp for why a synthetic id stands in for a real entity here, and why that
+    // is safe. A project with none is a silent, correct no-op: "a no-graph project behaves exactly as
+    // before this feature existed" is one of the two things visual-scripting phase 2 has to prove.
+    void discoverProjectGraphs();
+
+    // Ticks every graph discoverProjectGraphs found. Called every frame from onUpdate(), beside
+    // tickGameplay() rather than in a loop of its own -- see its own definition for why it is NOT
+    // gated on the framework's play state the way tickGameplay is.
+    void tickProjectGraphs(f32 dt);
+
     // Drives the camera from the possessed pawn. Must run AFTER World::flush and BEFORE the view
     // matrix is built, or the camera trails the pawn by one frame.
     void drivePlayCamera();
@@ -178,6 +203,22 @@ private:
     // Counted so "did physics step at all" is answerable from a log rather than a debugger.
     u64 physSteps_ = 0;
     u64 lastReportedSteps_ = 0;
+
+#if AVER_MODULE_SCRIPTING
+    // Owned here, not by GameContent or GameLevel: its lifetime is the WHOLE APPLICATION's, not the
+    // current project's. ScriptHost starts an in-process .NET runtime, which this engine has never
+    // supported tearing down and re-initialising within one process (see ScriptHost.hpp's own "one
+    // per process" phrasing), so this member is constructed once and lives exactly as long as GameApp
+    // does -- never reset on a project change the way content_/level_ are.
+    aver::scripting::ScriptHost scripts_;
+    bool scriptsReady_ = false;
+
+    // One discovered project-level .ocgraph: its absolute path, the synthetic (always-negative, see
+    // discoverProjectGraphs) entity id it was bound to, and whether that load succeeded.
+    struct ProjectGraph { std::string path; i32 syntheticEntity; bool loaded; };
+    std::vector<ProjectGraph> projectGraphs_;
+#endif
+
     std::string echoHeld_, echoLast_;
     fmt::ProjectDesc project_;
     GameContent content_;
