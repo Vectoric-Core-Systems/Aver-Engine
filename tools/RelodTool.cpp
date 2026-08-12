@@ -29,7 +29,7 @@ using namespace aver;
 
 namespace {
 
-struct Totals { u32 files = 0, failed = 0, improved = 0; u64 oldCoarsest = 0, newCoarsest = 0; };
+struct Totals { u32 files = 0, failed = 0, improved = 0, invalid = 0; u64 oldCoarsest = 0, newCoarsest = 0; };
 
 // Triangles in one level of the DAG, summed over its clusters. Cluster::triangles holds LOCAL
 // indices, three per triangle, so the triangle count is its size divided by three.
@@ -76,6 +76,32 @@ void relod(const std::filesystem::path& path, Totals& t) {
     if (!trifactor::buildLodHierarchy(src, dag, &why))
         AVER_WARN("[Relod] {}: buildLodHierarchy: {}", path.filename().string(), why);
 
+    // AND CHECK THE DAG IT JUST BUILT, which this tool did not do and should have. It reported
+    // triangle counts only, so every corpus run in this project's history measured how much a ladder
+    // REDUCES without ever asking whether the ladder is VALID -- and the two are independent. The
+    // shell-routing change in particular makes one specific invariant easier to break: a group whose
+    // simplify collapses entirely to zero triangles produces no parent clusters, leaving its members
+    // permanently parentless, and nothing about a triangle count would show it. validateLodDag tests
+    // exactly that ("every non-root cluster has at least one parent") alongside LOD-0 coverage, the
+    // 64/124 limits, cone validity and error monotonicity. It is cheap next to the build that
+    // preceded it, so it runs on every mesh rather than behind a flag.
+    const trifactor::ValidationReport report = trifactor::validateLodDag(src, dag);
+    if (!report.ok) {
+        ++t.invalid;
+        AVER_ERROR("[Relod] {}: DAG INVALID -- {} issue(s)", path.filename().string(), report.issues.size());
+        // Capped, because one broken invariant on a 49,000-shell mesh can report thousands of times
+        // and the first few name the cause just as well as all of them do.
+        u32 shown = 0;
+        for (const trifactor::ValidationIssue& issue : report.issues) {
+            AVER_ERROR("[Relod]     {}: {}", issue.where, issue.detail);
+            if (++shown >= 5) {
+                if (report.issues.size() > shown)
+                    AVER_ERROR("[Relod]     ... and {} more", report.issues.size() - shown);
+                break;
+            }
+        }
+    }
+
     const u32 newLevels = dag.levelCount();
     const u64 newCoarsest = newLevels ? levelTris(dag, newLevels - 1) : lod0Tris;
 
@@ -112,9 +138,11 @@ int main(int argc, char** argv) {
         relod(root, t);
     }
 
-    AVER_INFO("[Relod] {} file(s), {} failed, {} would get a coarser floor -- "
+    AVER_INFO("[Relod] {} file(s), {} failed, {} invalid, {} would get a coarser floor -- "
               "summed coarsest level {} -> {} triangles",
-              t.files, t.failed, t.improved, t.oldCoarsest, t.newCoarsest);
+              t.files, t.failed, t.invalid, t.improved, t.oldCoarsest, t.newCoarsest);
     AVER_INFO("[Relod] nothing was written; this tool only reports.");
-    return t.failed ? 1 : 0;
+    // A DAG that fails its own invariants is a failure of the run, not a footnote in it: a cook
+    // driven off this ladder would produce cracks. Non-zero exit so a sweep cannot pass silently.
+    return (t.failed || t.invalid) ? 1 : 0;
 }

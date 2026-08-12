@@ -37,6 +37,22 @@
 //      the group's own subset extent instead of the whole mesh's (meshoptimizer.h:471's own doc)
 //      -- groupExtentScale (above appendGlobalTriangles) and the rescale at the call site correct
 //      for that before the error goes anywhere near worldExtentScale/toScreenErrorThreshold.
+//
+//   3. meshopt_SimplifyLockBorder was set unconditionally on every group at every level, which is
+//      correct for a solid mesh but flattens a foliage mesh's ladder to nearly nothing (a fir sapling
+//      is thousands of separate leaf cards, each almost entirely boundary edge -- see
+//      buildLodHierarchy's own comment, and the shell/open-edge measurement further down this file,
+//      for the numbers). Fixed not by removing the flag (that measurably breaks five solid meshes --
+//      same comment) but by ROUTING it per group: computeShellIds classifies the source mesh into
+//      connected shells below; buildClusters (task step 5) splits LOD-0 triangles into a small-shell
+//      stream (built directly, one cluster per shell) and a large-shell stream (the ordinary
+//      meshopt_buildMeshlets path, order-preserving so a zero-small-shell mesh's output is untouched);
+//      groupClusters (task step 6) partitions each stream separately so a group never mixes them; and
+//      buildLodHierarchy's meshopt_simplify call (task step 7) drops LockBorder only for a group made
+//      entirely of small-shell lineage, a fact PendingGroup carries forward every level (task step 8)
+//      so it does not silently stop being true above level 1. See Cluster::smallShellLineage's own
+//      comment (ClusterBuilder.hpp) for the field this all turns on, and the meshopt_simplify call
+//      site below for the corpus numbers this routing actually achieved.
 // ============================================================================================
 //
 // ---- The crack-free invariant, and how this file actually holds it ---------------------------
@@ -212,14 +228,20 @@ struct UnionFind {
     }
 };
 
-// THE NUMBER THE SHELL THEORY SHOULD HAVE BEEN, and the one to design the next attempt against.
+// THE NUMBER THE SHELL THEORY WAS FIRST MISREAD AS NEEDING, and the one this function answers instead.
 //
-// computeShellIds above answers "how many connected components", and running it over the whole demo
-// corpus is what proved the shell-routing design could not work: every one of the 33 meshes reports
-// ZERO small shells, so a rule keyed on small shells never fires. See Cluster::shellId's comment in
-// the header for that measurement in full.
+// computeShellIds above answers "how many connected components", and an early pass over the whole demo
+// corpus was misread as proving the shell-routing design could not work: "every one of the 33 meshes
+// reports ZERO small shells, so a rule keyed on small shells never fires." That reading was wrong -- a
+// shell listing and a ladder listing were compared side by side without checking the rows still lined
+// up after a filter shifted one of them -- and the corrected re-run is what steps 5-8 (buildClusters'
+// routing, buildLodHierarchy's meshopt_simplify call) are actually built on; see Cluster::shellId's
+// comment in the header for the corrected measurement in full, and this file's own header for the
+// routing's own numbers.
 //
-// This answers the question that actually matters instead. meshopt_SimplifyLockBorder locks an edge
+// The MECHANISM below answers a related but different, and genuinely more useful, question: not
+// "how many shells" but "what predicts whether LockBorder freezes a mesh". meshopt_SimplifyLockBorder
+// locks an edge
 // used by exactly ONE triangle in the buffer it is given -- it has no notion of "shell" at all. So
 // what predicts whether the flag freezes a mesh is not how many pieces the mesh is in, it is what
 // FRACTION of its edges are open. A leaf card is a thin sheet: four perimeter edges around two
@@ -340,6 +362,32 @@ static_assert(kTargetGroupSize + kTargetGroupSize / 3 == kMaxGroupSize,
               "kMaxGroupSize documents meshopt_partitionClusters' own target..target+target/3 bound "
               "for kTargetGroupSize -- keep them in sync");
 
+// Runs ONE meshopt_partitionClusters call over exactly the clusters named by `ids`, using `positions`
+// (a buffer already indexed the same way `clusterIndices` is -- groupClusters below is the only
+// caller, and builds that pairing two different ways: global mesh-vertex ids for the large-shell
+// bucket, locally-compacted ids for the small-shell bucket) as the spatial-proximity input. Factored
+// out of groupClusters (task step 6) so the two-bucket split there can call this once per bucket
+// without duplicating the meshopt_partitionClusters call shape or its degenerate-size special cases.
+std::vector<std::vector<u32>> partitionClusterIds(const std::vector<u32>& ids,
+                                                    const std::vector<u32>& clusterIndices,
+                                                    const std::vector<u32>& clusterIndexCounts,
+                                                    const f32* positions, usize vertexCount) {
+    const u32 n = static_cast<u32>(ids.size());
+    if (n == 0) return {};
+    if (n == 1) return {{ids[0]}};   // meshopt_partitionClusters needs no help with this
+
+    std::vector<u32> partitionOf(n);
+    const usize partitionCount = meshopt_partitionClusters(
+        partitionOf.data(), clusterIndices.data(), clusterIndices.size(),
+        clusterIndexCounts.data(), n,
+        positions, vertexCount, sizeof(f32) * 3,
+        kTargetGroupSize);
+
+    std::vector<std::vector<u32>> groups(partitionCount);
+    for (u32 pos = 0; pos < n; ++pos) groups[partitionOf[pos]].push_back(ids[pos]);
+    return groups;
+}
+
 // Groups clusters for joint simplification via meshopt_partitionClusters (meshoptimizer.h:852),
 // which solves exactly this problem -- it was not available when this file was first written (see
 // the file-level comment) and is used here now that meshoptimizer is vendored.
@@ -359,34 +407,90 @@ static_assert(kTargetGroupSize + kTargetGroupSize / 3 == kMaxGroupSize,
 // TrifactorTest's full invariant suite (LOD-0 coverage, cluster limits, error monotonicity,
 // acyclicity, MLET round-trip, the skinned-mesh regression) after this swap, not just argued.
 //
+// TASK STEP 6: TWO SEPARATE meshopt_partitionClusters CALLS, one per small/large-shell-lineage
+// bucket (Cluster::smallShellLineage), NEVER one call over the concatenation of both. The reason is
+// the same spatial-proximity fallback the paragraph above just credited: meshopt_partitionClusters
+// (and, upstream of it, meshopt_buildMeshlets -- see buildDirectCluster's comment) will merge
+// otherwise-unrelated geometry once real adjacency runs out, picking the closest candidate
+// IRRESPECTIVE of what it is (third_party/meshoptimizer/src/clusterizer.cpp's own comment on this).
+// A single call over both buckets would therefore be free to place a large-shell cluster in an
+// otherwise-all-small-shell group -- and task step 7's routing decides LockBorder per GROUP, so that
+// one misplaced cluster would silently take its whole group through the flag-dropped path, right back
+// into the crack this feature exists to prevent. Partitioning each bucket separately makes that
+// impossible BY CONSTRUCTION: meshopt_partitionClusters never sees the other bucket's clusters at all,
+// so it cannot place one of them into a group it has no way to know exists.
+//
 // `mesh` is needed here (the old hand-rolled grouper did not take it) because
 // meshopt_partitionClusters' spatial-fallback pass wants vertex positions, not just the shared-vertex
 // topology dag.clusters[].vertices already carries.
 std::vector<std::vector<u32>> groupClusters(const LodDag& dag, const std::vector<u32>& levelClusterIds,
                                              const fmt::OcMeshData& mesh) {
-    const u32 n = static_cast<u32>(levelClusterIds.size());
-    if (n == 0) return {};
-    if (n == 1) return {{levelClusterIds[0]}};   // meshopt_partitionClusters needs no help with this
+    if (levelClusterIds.empty()) return {};
 
-    std::vector<u32> clusterIndices;
-    std::vector<u32> clusterIndexCounts(n);
-    clusterIndices.reserve(n * kMaxClusterVertices);   // worst case every cluster is full
-    for (u32 pos = 0; pos < n; ++pos) {
-        const std::vector<u32>& verts = dag.clusters[levelClusterIds[pos]].vertices;
-        clusterIndexCounts[pos] = static_cast<u32>(verts.size());
-        clusterIndices.insert(clusterIndices.end(), verts.begin(), verts.end());
+    std::vector<u32> largeIds, smallIds;
+    largeIds.reserve(levelClusterIds.size());
+    smallIds.reserve(levelClusterIds.size());
+    for (u32 cid : levelClusterIds)
+        (dag.clusters[cid].smallShellLineage ? smallIds : largeIds).push_back(cid);
+
+    std::vector<std::vector<u32>> groups;
+
+    // Large-shell bucket: unchanged from before this routing existed -- clusterIndices are GLOBAL
+    // vertex ids straight into `mesh.positions`, exactly as the single-bucket call used to build them.
+    if (!largeIds.empty()) {
+        const u32 n = static_cast<u32>(largeIds.size());
+        std::vector<u32> clusterIndices;
+        std::vector<u32> clusterIndexCounts(n);
+        clusterIndices.reserve(n * kMaxClusterVertices);
+        for (u32 pos = 0; pos < n; ++pos) {
+            const std::vector<u32>& verts = dag.clusters[largeIds[pos]].vertices;
+            clusterIndexCounts[pos] = static_cast<u32>(verts.size());
+            clusterIndices.insert(clusterIndices.end(), verts.begin(), verts.end());
+        }
+        const usize vertexCount = mesh.positions.size() / 3;
+        auto largeGroups = partitionClusterIds(largeIds, clusterIndices, clusterIndexCounts,
+                                                mesh.positions.data(), vertexCount);
+        groups.insert(groups.end(), largeGroups.begin(), largeGroups.end());
     }
 
-    const usize vertexCount = mesh.positions.size() / 3;
-    std::vector<u32> partitionOf(n);
-    const usize partitionCount = meshopt_partitionClusters(
-        partitionOf.data(), clusterIndices.data(), clusterIndices.size(),
-        clusterIndexCounts.data(), n,
-        mesh.positions.data(), vertexCount, sizeof(f32) * 3,
-        kTargetGroupSize);
+    // Small-shell bucket: positions are COMPACTED to exactly the vertices this bucket's clusters
+    // reference, and clusterIndices are remapped to that compacted, LOCAL index space, rather than
+    // passing `mesh.positions`/the whole mesh's vertexCount a second time. This is the scratch-cost
+    // bound task step 6 asks for: meshopt_partitionClusters takes a vertex buffer sized to
+    // `vertexCount`, and with two calls per level instead of one, passing the full mesh both times
+    // would pay that O(whole-mesh-vertex-count) cost TWICE at every level for a bucket whose own
+    // clusters, on the meshes this feature exists for (fir_sapling: 48,991 small shells), reference a
+    // tiny fraction of the mesh's actual vertices.
+    if (!smallIds.empty()) {
+        const u32 n = static_cast<u32>(smallIds.size());
+        std::vector<u32> uniqueVerts;
+        std::unordered_map<u32, u32> globalToLocal;
+        globalToLocal.reserve(n * kMaxClusterVertices);
+        std::vector<u32> clusterIndices;
+        std::vector<u32> clusterIndexCounts(n);
+        clusterIndices.reserve(n * kMaxClusterVertices);
+        for (u32 pos = 0; pos < n; ++pos) {
+            const std::vector<u32>& verts = dag.clusters[smallIds[pos]].vertices;
+            clusterIndexCounts[pos] = static_cast<u32>(verts.size());
+            for (u32 v : verts) {
+                const auto [it, inserted] = globalToLocal.try_emplace(v, static_cast<u32>(uniqueVerts.size()));
+                if (inserted) uniqueVerts.push_back(v);
+                clusterIndices.push_back(it->second);
+            }
+        }
 
-    std::vector<std::vector<u32>> groups(partitionCount);
-    for (u32 pos = 0; pos < n; ++pos) groups[partitionOf[pos]].push_back(levelClusterIds[pos]);
+        std::vector<f32> compactPositions(uniqueVerts.size() * 3);
+        for (usize i = 0; i < uniqueVerts.size(); ++i) {
+            const u32 v = uniqueVerts[i];
+            compactPositions[i * 3 + 0] = mesh.positions[usize(v) * 3 + 0];
+            compactPositions[i * 3 + 1] = mesh.positions[usize(v) * 3 + 1];
+            compactPositions[i * 3 + 2] = mesh.positions[usize(v) * 3 + 2];
+        }
+        auto smallGroups = partitionClusterIds(smallIds, clusterIndices, clusterIndexCounts,
+                                                compactPositions.data(), uniqueVerts.size());
+        groups.insert(groups.end(), smallGroups.begin(), smallGroups.end());
+    }
+
     return groups;
 }
 
@@ -485,6 +589,72 @@ std::vector<u32> splitIntoClusters(const fmt::OcMeshData& mesh, const std::vecto
     return newIds;
 }
 
+// TASK STEP 5, the small-shell half of the routing. Builds ONE cluster directly from a single small
+// shell's own triangles -- `shellVertices` (global vertex ids, in first-seen order) and
+// `localTriangles` (indices into `shellVertices`, the on-disk MLET shape) -- WITHOUT going through
+// meshopt_buildMeshlets at all.
+//
+// WHY NOT JUST CALL splitIntoClusters ON THE SHELL'S OWN TRIANGLES, which would also work and would
+// reuse more code: a small shell (LodDag::isSmallShell) is DEFINED as fitting inside one meshlet's
+// kMaxClusterVertices/kMaxClusterTriangles limits, so meshopt_buildMeshlets' partitioning search --
+// scoring candidate triangles, growing a meshlet, deciding when to start a new one -- has nothing to
+// decide: the answer is always "everything in one meshlet". Paying for that search on what will always
+// be a single-meshlet answer, once per small shell, across meshes with tens of thousands of them
+// (fir_sapling: 48,991), is pure overhead with no output it could ever change.
+//
+// THE OTHER REASON IS NOT PERFORMANCE, IT IS SAFETY, and it is the one that actually matters. If this
+// function instead concatenated several small shells' triangles into one buffer and called
+// meshopt_buildMeshlets on THAT (the way splitIntoClusters is used for the large-shell stream),
+// nothing would stop meshopt_buildMeshlets from putting two DIFFERENT small shells' triangles in the
+// same meshlet -- it has no notion of "shell" and, per groupClusters' comment on
+// meshopt_partitionClusters' identical fallback, actively will once an individual shell's own
+// adjacency runs out. A cluster is not a group, so this would not by itself put LockBorder at risk --
+// but it WOULD break shellId's "exact for a small-shell cluster" guarantee (Cluster::shellId's own
+// comment), which task step 8's lineage propagation is built on trusting without re-deriving. Building
+// one cluster per shell, from exactly that shell's own triangles and nothing else, makes "this
+// cluster's geometry belongs to exactly one shell" true BY CONSTRUCTION rather than by an argument
+// about what meshopt_buildMeshlets happens to do today.
+//
+// Bounds/cone are computed IDENTICALLY to splitIntoClusters -- same meshopt_computeMeshletBounds call
+// shape (global vertex ids + local triangle indices + the WHOLE mesh's position buffer and vertex
+// count, never a local copy of either) and the same quantizeConeConservative rounding -- because the
+// cone culler downstream has no idea whether a cluster came from meshopt_buildMeshlets or from here,
+// and a cheaper or different bounds computation on this path would silently make it get culled wrong.
+u32 buildDirectCluster(const fmt::OcMeshData& mesh, std::vector<u32> shellVertices,
+                        std::vector<u8> localTriangles, u32 shellId, LodDag& dag) {
+    const usize vertexCount = mesh.positions.size() / 3;
+    const u32 triangleCount = static_cast<u32>(localTriangles.size() / 3);
+
+    Cluster c;
+    c.level = 0;
+    c.shellId = shellId;
+    c.smallShellLineage = true;   // task step 5: every direct cluster is, definitionally, one small shell
+
+    const meshopt_Bounds b = meshopt_computeMeshletBounds(
+        shellVertices.data(), localTriangles.data(), triangleCount,
+        mesh.positions.data(), vertexCount, sizeof(f32) * 3);
+
+    c.vertices  = std::move(shellVertices);
+    c.triangles = std::move(localTriangles);
+
+    c.bounds.sphereCenter = {b.center[0], b.center[1], b.center[2]};
+    c.bounds.sphereRadius = b.radius;
+    c.bounds.coneApex     = {b.cone_apex[0], b.cone_apex[1], b.cone_apex[2]};
+    const QuantizedCone q = quantizeConeConservative({b.cone_axis[0], b.cone_axis[1], b.cone_axis[2]}, b.cone_cutoff);
+    c.bounds.coneAxis[0] = q.axis[0];
+    c.bounds.coneAxis[1] = q.axis[1];
+    c.bounds.coneAxis[2] = q.axis[2];
+    c.bounds.coneCutoff  = q.cutoff;
+
+    c.id = static_cast<u32>(dag.clusters.size());
+    const u32 id = c.id;
+    dag.clusters.push_back(std::move(c));
+
+    if (dag.levels.empty()) dag.levels.resize(1);
+    dag.levels[0].push_back(id);
+    return id;
+}
+
 } // namespace
 
 bool buildClusters(const fmt::OcMeshData& mesh, LodDag& dag, std::string* why) {
@@ -507,11 +677,9 @@ bool buildClusters(const fmt::OcMeshData& mesh, LodDag& dag, std::string* why) {
 
     dag = LodDag{};
 
-    // Task steps 2-4: classify `mesh` into connected shells and record the result on the DAG. This is
-    // pure bookkeeping -- see Cluster::shellId's STAGE STATUS comment (ClusterBuilder.hpp) for why the
-    // clustering below is still unconditional and unmodified by it in this stage. One log line per
-    // cooked mesh (RelodTool surfaces it for free) rather than nothing: a future asset change that
-    // silently made one of the five previously-regressed meshes (see this file's header comment)
+    // Task steps 2-4: classify `mesh` into connected shells and record the result on the DAG. One log
+    // line per cooked mesh (RelodTool surfaces it for free) rather than nothing: a future asset change
+    // that silently made one of the five previously-regressed meshes (see this file's header comment)
     // multi-shell, or turned a currently-large shell small, would be exactly the kind of thing that
     // reopens this feature's safety argument, and this is the cheapest possible tripwire for it.
     const ShellIds shellIds = computeShellIds(mesh);
@@ -524,11 +692,92 @@ bool buildClusters(const fmt::OcMeshData& mesh, LodDag& dag, std::string* why) {
               dag.smallShells.size(), smallShellCount, dag.smallShells.size() - smallShellCount,
               openEdges, totalEdges, openFrac * 100.0f);
 
-    const std::vector<u32> ids = splitIntoClusters(mesh, mesh.indices, /*level=*/0, dag);
-    for (u32 id : ids) {
+    // TASK STEP 5: route LOD-0 triangles by their shell's size, BEFORE any clustering call sees them.
+    // A triangle's shell is its first vertex's shell -- computeShellIds unions all three of a
+    // triangle's vertices into the same shell as its very first step (the triangle-edge union, before
+    // the position-remap union that closes UV seams), so every vertex of a given triangle names the
+    // identical shell and any one of them is a valid representative.
+    //
+    // `largeIndices` is built by walking mesh.indices ONCE, in order, and keeping only the triangles
+    // whose shell is NOT small -- so for a mesh with zero small shells (every one of the five
+    // previously-regressed meshes on the real corpus; see this file's header) not a single triangle is
+    // ever removed, and `largeIndices` ends up holding mesh.indices' exact values in their exact
+    // order. That is the order-preservation guarantee ClusterBuilder.hpp's buildClusters doc comment
+    // promises: splitIntoClusters below then receives a buffer identical to mesh.indices and calls the
+    // SAME meshopt_buildMeshlets this function always called on it, so such a mesh's LOD-0 output is
+    // not merely equivalent to what this function produced before this routing existed -- it is the
+    // identical function call on the identical input, byte for byte.
+    const usize triangleCount = mesh.indices.size() / 3;
+    const u32 shellCount = static_cast<u32>(shellIds.isSmall.size());
+    std::vector<u32> largeIndices;
+    largeIndices.reserve(mesh.indices.size());
+    // Indexed by shellId; holds a small shell's own triangles (global vertex ids, 3 per triangle, in
+    // mesh order) until buildDirectCluster below consumes them. Stays empty for every LARGE shell, and
+    // for a small shell that (per computeShellIds' own comment on stray unreferenced positions) turns
+    // out to have no triangles of its own -- both cases are skipped by the `continue` in the loop that
+    // consumes this.
+    std::vector<std::vector<u32>> smallShellTriangles(shellCount);
+    for (usize t = 0; t < triangleCount; ++t) {
+        const u32 i0 = mesh.indices[t * 3 + 0], i1 = mesh.indices[t * 3 + 1], i2 = mesh.indices[t * 3 + 2];
+        const u32 shell = shellIds.vertexShell[i0];
+        if (shellIds.isSmall[shell]) {
+            std::vector<u32>& tris = smallShellTriangles[shell];
+            tris.push_back(i0);
+            tris.push_back(i1);
+            tris.push_back(i2);
+        } else {
+            largeIndices.push_back(i0);
+            largeIndices.push_back(i1);
+            largeIndices.push_back(i2);
+        }
+    }
+
+    // Large-shell stream: the ordinary meshopt_buildMeshlets path, completely unaware that a routing
+    // decision was ever made -- it never sees a small-shell triangle, because largeIndices never
+    // contains one.
+    const std::vector<u32> largeIds = splitIntoClusters(mesh, largeIndices, /*level=*/0, dag);
+    for (u32 id : largeIds) {
         Cluster& c = dag.clusters[id];
+        // A representative, not necessarily this cluster's ONLY shell (meshopt_buildMeshlets may
+        // merge triangles from several distinct LARGE shells into one meshlet) -- see Cluster::shellId's
+        // comment. smallShellLineage is left at its default (false), which is exact here: every
+        // triangle in this cluster came from largeIndices, and largeIndices never holds a small-shell
+        // triangle, so "large" is correct regardless of which specific shell is named.
         c.shellId = shellIds.vertexShell[c.vertices[c.triangles[0]]];
     }
+
+    // Small-shell stream: one direct cluster PER small shell (buildDirectCluster, above in this file),
+    // in increasing shellId order -- not the arrival order of some hash container -- so that
+    // buildClusters' output is a deterministic function of `mesh` alone, exactly like every other path
+    // through this file.
+    for (u32 shell = 0; shell < shellCount; ++shell) {
+        const std::vector<u32>& triIndices = smallShellTriangles[shell];
+        if (triIndices.empty()) continue;
+
+        // A small shell has at most kMaxClusterVertices (64) distinct referenced vertices by
+        // definition (LodDag::isSmallShell), so a linear scan to de-duplicate is a handful of
+        // comparisons per triangle, not a complexity concern -- and it keeps this loop free of another
+        // hash container, which matters here specifically: this function's whole output must be
+        // order-independent of anything BUT `mesh` itself (see the paragraph above).
+        std::vector<u32> shellVertices;
+        std::vector<u8> localTriangles;
+        localTriangles.reserve(triIndices.size());
+        for (u32 v : triIndices) {
+            u8 local = 0;
+            bool found = false;
+            for (usize i = 0; i < shellVertices.size(); ++i) {
+                if (shellVertices[i] == v) { local = static_cast<u8>(i); found = true; break; }
+            }
+            if (!found) {
+                local = static_cast<u8>(shellVertices.size());
+                shellVertices.push_back(v);
+            }
+            localTriangles.push_back(local);
+        }
+
+        buildDirectCluster(mesh, std::move(shellVertices), std::move(localTriangles), shell, dag);
+    }
+
     return true;
 }
 
@@ -585,6 +834,17 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             std::vector<u32> members;
             std::vector<u32> simplifiedIndices;
             f32 resultError = 0.0f;
+            // TASK STEP 8: this group's small-vs-large-shell LINEAGE, carried forward so Pass 2 below
+            // can tag every cluster it creates -- which is what lets groupClusters (task step 6) make
+            // the SAME bucketing decision again at the NEXT level, without ever falling back to
+            // Cluster::shellId (populated at level 0 only; see its own comment for why that would be
+            // unsafe past level 0). True iff EVERY member of this group is itself small-shell lineage
+            // -- see the computation just above the meshopt_simplify call below, which is also what
+            // decides whether this group keeps LockBorder (task step 7). Two-bucket grouping
+            // guarantees a group's members are homogeneous in this field, so "every member" and "any
+            // member" agree in practice; this is computed as "every member" anyway, matching the
+            // task's own wording, rather than trusting that invariant silently.
+            bool allLargeShell = true;
         };
         std::vector<PendingGroup> pending;
         pending.reserve(groups.size());
@@ -668,7 +928,81 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             // spend its error budget wrecking seams instead of collapsing interiors. The fix has to
             // ROUTE: keep this call exactly as it is for groups touching a large shell, and take the
             // flag off only for buffers that provably contain whole isolated shells and nothing
-            // else. See docs for the shell-partition plan; do not simply delete the flag.
+            // else.
+            //
+            // TASK STEP 7, THE ACTUAL FIX: LockBorder stays ON iff EVERY member of this group is
+            // large-shell lineage (Cluster::smallShellLineage, propagated -- see PendingGroup's own
+            // comment); it comes OFF only for a group made ENTIRELY of small-shell clusters. This is
+            // the routing task steps 5-6 exist to feed: task step 5 guarantees a small-shell cluster's
+            // triangles belong to exactly one shell too small to ever be split across a group boundary
+            // (LodDag::isSmallShell's own comment), and task step 6 guarantees a group never mixes a
+            // small-shell cluster with a large-shell one -- so "all members small-shell" is exactly
+            // the condition under which dropping LockBorder here cannot cut through a boundary that
+            // still needs protecting. target_error stays at 1e-2 for both branches -- see the header
+            // comment two paragraphs up for why raising it to FLT_MAX does not terminate; an isolated
+            // small-shell group's own buffer is orders of magnitude smaller than the whole-mesh buffer
+            // that hang was measured on, so the risk may not transfer, but that has not been swept and
+            // measured here, so the constant is left where it was proven safe rather than guessed at.
+            //
+            // MEASURED, with tools/RelodTool over the same 33 demo meshes the bare-removal numbers
+            // above came from -- this is the routing collecting the win those numbers priced without
+            // breaking what they broke:
+            //
+            //     mesh                  coarsest before -> after routing   (ladder before -> after)
+            //     fir_sapling             393,157 -> 1,969                 ( 1.1x  -> 219.9x )
+            //     pine_sapling_small      315,120 -> 1,152                 ( 1.3x  -> 345.6x )
+            //     pine_tree_01            274,734 -> 1,791                 ( 1.0x  -> 153.4x ) *
+            //     grass_medium_01          24,514 -> 2,661                 ( 1.0x  ->   9.3x )
+            //     corpus coarsest       1,195,431 -> 140,489               ( -- summed, all 33 meshes )
+            //
+            //     dead_tree_trunk             100 -> 100    dead_tree_trunk_02   700 -> 700
+            //     rock_07                     218 -> 218    rock_09              204 -> 204
+            //     rock_moss_set_02            325 -> 325
+            //
+            // Every one of the five previously-regressed meshes is BYTE-IDENTICAL to what it was
+            // before this routing existed -- same triangle count, same level count, same ladder --
+            // confirmed by diffing RelodTool's own per-mesh output line, not by re-deriving it from
+            // the shell counts. That is the routing's whole point delivering: the corpus-wide win
+            // 481ee05 measured by dropping the flag outright, MINUS the five-mesh regression that
+            // measurement also found.
+            //
+            // * pine_tree_01's "before" here is 274,734 (1 lv, 1.0x), the figure meshopt_SimplifySparse
+            //   alone produces (RelodTool's own "was" column, the currently-cooked .ocmesh on disk,
+            //   still reads 274,734/1 level -- this asset predates that fix too and has not been
+            //   recooked); the corpus-coarsest total above sums RelodTool's "was" column for
+            //   consistency with 481ee05's 1,195,431 reference figure, which carries that same stale
+            //   entry on both sides of the comparison.
+            //
+            // 1,195,431 -> 140,489 does not reach 75,860 (the bare-removal figure), and should not.
+            // Sorted by why, over all 33 meshes (RelodTool's per-mesh shells: line, cross-checked
+            // against its own coarsest-level line for every one of them, not eyeballed):
+            //
+            //   - 14 meshes report ZERO small shells and are therefore UNCHANGED TO THE TRIANGLE, on
+            //     top of the five protected meshes above: bark_debris_01, boulder_01,
+            //     dry_branches_medium_01, nettle_plant, pine_roots, rock_face_01, rock_moss_set_01,
+            //     root_cluster_01, root_cluster_02, single_root, stone_01, tree_stump_01,
+            //     tree_stump_02, weed_plant_02. LockBorder is correctly still protecting the only
+            //     shells they have -- there is nothing for this routing to do here, by the same
+            //     construction that protects the five.
+            //   - 3 meshes (grass_medium_02, moss_01, shrub_sorrel_01) are ALL small shells (0 large)
+            //     and get the FULL benefit, every group on the flag-dropped path: grass_medium_02
+            //     5,476 -> 29 (188x), shrub_sorrel_01 1,807 -> 123 (14.7x). moss_01's own move (116 ->
+            //     92) looks modest only because the mesh itself is tiny (204 triangles, 3 levels) with
+            //     little left to remove, not because any group of it kept LockBorder.
+            //   - 11 meshes MIX small and large shells (celandine_01, dandelion_01, fern_02,
+            //     fir_sapling, grass_medium_01, pine_sapling_small, pine_tree_01, shrub_01, shrub_02,
+            //     shrub_03, shrub_04): only the groups that end up entirely small-shell ever lose the
+            //     flag, and every group still touching the large shell keeps it -- exactly as
+            //     designed, and the reason this corpus total sits between the two reference points
+            //     instead of matching either one.
+            bool allLargeShell = true;
+            for (u32 cid : group) {
+                if (dag.clusters[cid].smallShellLineage) { allLargeShell = false; break; }
+            }
+            const u32 simplifyFlags = allLargeShell
+                ? (meshopt_SimplifyLockBorder | meshopt_SimplifySparse)
+                : meshopt_SimplifySparse;
+
             std::vector<u32> simplified(mergedIndices.size());
             f32 resultError = 0.0f;
             const auto tSimplify = tick();
@@ -676,7 +1010,7 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
                 simplified.data(), mergedIndices.data(), mergedIndices.size(),
                 mesh.positions.data(), vertexCount, sizeof(f32) * 3,
                 targetIndexCount, /*target_error=*/1e-2f,
-                meshopt_SimplifyLockBorder | meshopt_SimplifySparse, &resultError);
+                simplifyFlags, &resultError);
             phase.simplify += msSince(tSimplify);
             simplified.resize(simplifiedCount);
 
@@ -695,7 +1029,7 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             phase.extent += msSince(tExtent);
             const f32 rescaledError = (meshScale > 0.0f) ? resultError * (groupScale / meshScale) : resultError;
 
-            pending.push_back({group, std::move(simplified), rescaledError});
+            pending.push_back({group, std::move(simplified), rescaledError, allLargeShell});
         }
 
         if (!anyReduction) break;
@@ -718,6 +1052,13 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
 
             for (u32 parentId : newIds) {
                 dag.clusters[parentId].error = propagatedError;
+                // TASK STEP 8: carry the group's small-vs-large-shell lineage forward onto every
+                // cluster it produced, so groupClusters can bucket THIS level's output correctly when
+                // it runs again one level up -- without this, Cluster::smallShellLineage would stay at
+                // its default (false/large) for every cluster past level 0, which groupClusters would
+                // read as "large-shell" regardless of what actually produced it. See PendingGroup's own
+                // comment for why this field, not a re-derivation from shellId, is what gets read.
+                dag.clusters[parentId].smallShellLineage = !pg.allLargeShell;
                 for (u32 childId : pg.members) {
                     dag.clusters[parentId].children.push_back(childId);
                     dag.clusters[childId].parents.push_back(parentId);

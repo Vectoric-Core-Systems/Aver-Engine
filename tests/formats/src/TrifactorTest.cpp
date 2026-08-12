@@ -144,6 +144,30 @@ static fmt::OcMeshData makeUvSeamFixture() {
     return m;
 }
 
+// task step 5-8 fixture: one large connected blob (a grid, `gridN` x `gridN`, far too big to be a
+// small shell) plus `fragmentCount` small DISJOINT fragments -- individual two-triangle quads, each
+// its own connected component, well under the 64-vertex/124-triangle cutoff. Fragments are placed far
+// from the grid AND from each other (a few thousand units apart, against a grid spanning a few
+// thousand units at spacing=100) so meshopt's own spatial-proximity fallbacks (groupClusters' own
+// comment on meshopt_partitionClusters; buildDirectCluster's on meshopt_buildMeshlets) have no
+// geometric reason to ever confuse a fragment for part of the grid, or two fragments for each other --
+// this fixture is testing the SHELL-lineage routing, not relying on it to also paper over ambiguous
+// geometry.
+static fmt::OcMeshData makeMixedShellFixture(u32 gridN, u32 fragmentCount) {
+    fmt::OcMeshData m = makeGridMesh(gridN, /*spacing=*/100.0f);
+    for (u32 f = 0; f < fragmentCount; ++f) {
+        const f32 ox = 100000.0f + static_cast<f32>(f) * 1000.0f;
+        const f32 oy = 100000.0f;
+        const u32 base = m.vertexCount();
+        m.positions.insert(m.positions.end(),
+                            {ox, oy, 0.0f,  ox + 50, oy, 0.0f,  ox + 50, oy + 50, 0.0f,  ox, oy + 50, 0.0f});
+        m.normals.insert(m.normals.end(), {0, 0, 1,  0, 0, 1,  0, 0, 1,  0, 0, 1});
+        m.uvs.insert(m.uvs.end(), {0, 0,  1, 0,  1, 1,  0, 1});
+        m.indices.insert(m.indices.end(), {base, base + 1, base + 2,  base, base + 2, base + 3});
+    }
+    return m;
+}
+
 // Converts one LOD level of a DAG into the on-disk OcMeshMeshlet shape -- the same conversion
 // tests/formats/src/ConvertTool.cpp does, duplicated rather than shared because this file has no
 // header of its own to put a shared helper in. `errorBounds` is
@@ -214,9 +238,9 @@ int main() {
         // classification (task steps 2-4, ClusterBuilder.cpp) has to union vertices by POSITION, not
         // just by shared index, or a UV seam -- two triangles that share an edge geometrically but not
         // through a single shared vertex index, which every real asset with a UV island boundary has
-        // -- would misclassify as two disconnected shells and the eventual routing (not yet built in
-        // this stage -- see Cluster::shellId's STAGE STATUS comment in ClusterBuilder.hpp) could drop
-        // meshopt_SimplifyLockBorder along a seam that is genuinely part of one continuous surface.
+        // -- would misclassify as two disconnected shells, and the routing (task steps 5-8, tested
+        // below) could then drop meshopt_SimplifyLockBorder along a seam that is genuinely part of one
+        // continuous surface.
         const fmt::OcMeshData seam = makeUvSeamFixture();
         trifactor::LodDag dag;
         std::string why;
@@ -229,6 +253,149 @@ int main() {
         check(!dag.smallShells.empty() && dag.isSmallShell(0),
               "the fixture (6 vertices, 2 triangles) is well under the 64-vert/124-tri cutoff, so its "
               "one shell classifies as small");
+    }
+
+    AVER_INFO("=== task step 5: a zero-small-shell mesh's routing is exclusively the large-shell path ===");
+    {
+        // THE PROPERTY THAT PROTECTS dead_tree_trunk, dead_tree_trunk_02, rock_07, rock_09, and
+        // rock_moss_set_02 -- the five meshes that got WORSE when LockBorder was dropped outright (see
+        // this file's own header, and ClusterBuilder.cpp's buildLodHierarchy comment for the actual
+        // numbers), all of which report ZERO small shells on the real corpus. buildClusters' routing
+        // (ClusterBuilder.cpp) is ORDER-PRESERVING: it walks mesh.indices once and removes ONLY
+        // small-shell triangles from the stream handed to meshopt_buildMeshlets, so a mesh with no
+        // small shells at all has NOTHING removed -- that buffer is mesh.indices, verbatim, and the
+        // meshopt_buildMeshlets call downstream is therefore the exact same call (same function, same
+        // input) this file always made, not merely one that happens to agree with it. A 24x24 grid is
+        // one large connected shell, far over the 64-vertex/124-triangle small-shell cutoff.
+        const fmt::OcMeshData grid = makeGridMesh(24);
+        trifactor::LodDag dag;
+        std::string why;
+        check(trifactor::buildClusters(grid, dag, &why), "buildClusters on a single-large-shell mesh: " + why);
+        check(dag.smallShells.size() == 1 && !dag.isSmallShell(0), "the grid is exactly one shell, and it is large");
+
+        bool everyClusterLargeLineage = true;
+        for (u32 cid : dag.levels[0]) if (dag.clusters[cid].smallShellLineage) everyClusterLargeLineage = false;
+        check(everyClusterLargeLineage,
+              "not one LOD-0 cluster took the small-shell direct-build path -- every cluster came from "
+              "the unmodified meshopt_buildMeshlets call on the unmodified large-shell stream");
+
+        // The LOD-0 triangle set (as a sorted multiset of vertex triples -- the same "coverage" form
+        // validateLodDag's own lod0-coverage check and the very first test in this file use, since
+        // meshopt_buildMeshlets itself reorders triangles into meshlets and is not expected to
+        // preserve mesh.indices' literal order) must equal mesh.indices' own triangle set exactly: the
+        // routing must not have gained, lost, or duplicated a single triangle in the process of
+        // deciding that none of them were small-shell.
+        std::vector<std::array<u32, 3>> fromClusters, fromSource;
+        for (u32 cid : dag.levels[0]) {
+            const trifactor::Cluster& c = dag.clusters[cid];
+            for (usize t = 0; t + 2 < c.triangles.size(); t += 3)
+                fromClusters.push_back({c.vertices[c.triangles[t]], c.vertices[c.triangles[t + 1]],
+                                         c.vertices[c.triangles[t + 2]]});
+        }
+        for (usize t = 0; t + 2 < grid.indices.size(); t += 3)
+            fromSource.push_back({grid.indices[t], grid.indices[t + 1], grid.indices[t + 2]});
+        std::sort(fromClusters.begin(), fromClusters.end());
+        std::sort(fromSource.begin(), fromSource.end());
+        check(fromClusters == fromSource,
+              "LOD-0's triangles are exactly mesh.indices' triangles, as a set -- the large-shell "
+              "routing path changed no geometry");
+
+        // Determinism: buildClusters is a pure function of `mesh` -- re-running it produces an
+        // IDENTICAL dag (cluster count, and every cluster's vertices/triangles/shellId/lineage), which
+        // rules out the routing having introduced any hash-container-iteration-order dependency (task
+        // step 5's small-shell bucketing is keyed by shellId, an ascending loop, specifically to avoid
+        // this class of bug -- see buildClusters' own comment).
+        trifactor::LodDag dag2;
+        check(trifactor::buildClusters(grid, dag2, &why), "buildClusters a second time on the same mesh: " + why);
+        bool identical = dag.clusters.size() == dag2.clusters.size() && dag.levels == dag2.levels;
+        for (usize i = 0; identical && i < dag.clusters.size(); ++i) {
+            const trifactor::Cluster &a = dag.clusters[i], &b = dag2.clusters[i];
+            identical = a.vertices == b.vertices && a.triangles == b.triangles && a.shellId == b.shellId &&
+                        a.smallShellLineage == b.smallShellLineage;
+        }
+        check(identical, "buildClusters on the same mesh twice produces an identical LOD-0 DAG");
+    }
+
+    AVER_INFO("=== task step 8: shell lineage survives multiple grouping/simplify passes (mixed fixture) ===");
+    {
+        const fmt::OcMeshData mesh = makeMixedShellFixture(/*gridN=*/28, /*fragmentCount=*/12);
+        trifactor::LodDag dag;
+        std::string why;
+        check(trifactor::buildClusters(mesh, dag, &why), "buildClusters on the mixed-shell fixture: " + why);
+
+        u32 largeShellCount = 0, smallShellCount = 0;
+        for (u32 s = 0; s < dag.smallShells.size(); ++s) (dag.isSmallShell(s) ? smallShellCount : largeShellCount)++;
+        check(largeShellCount == 1,
+              "the fixture has exactly one large shell (the grid) -- got " + std::to_string(largeShellCount));
+        check(smallShellCount == 12,
+              "and exactly twelve small shells (the fragments) -- got " + std::to_string(smallShellCount));
+
+        // At LOD 0, every cluster's lineage must agree with its own (representative) shell's
+        // classification -- see Cluster::shellId's comment for why that agreement is guaranteed at
+        // level 0 specifically (a large cluster can only ever contain large-shell triangles).
+        u32 lod0SmallClusters = 0, lod0LargeClusters = 0;
+        for (u32 cid : dag.levels[0]) {
+            const trifactor::Cluster& c = dag.clusters[cid];
+            check(c.smallShellLineage == dag.isSmallShell(c.shellId),
+                  "LOD-0 cluster " + std::to_string(cid) + "'s lineage flag agrees with its shell's own "
+                  "classification");
+            (c.smallShellLineage ? lod0SmallClusters : lod0LargeClusters)++;
+        }
+        check(lod0SmallClusters == 12, "one direct LOD-0 cluster per small shell (got " +
+                                            std::to_string(lod0SmallClusters) + ")");
+        check(lod0LargeClusters >= 1, "the grid produced at least one large-shell LOD-0 cluster");
+
+        check(trifactor::buildLodHierarchy(mesh, dag, &why), "buildLodHierarchy on the mixed-shell fixture: " + why);
+        check(dag.levelCount() >= 4,
+              "the fixture reaches at least level 3 (got " + std::to_string(dag.levelCount()) +
+                  " levels) -- otherwise the regression test below cannot exercise what it claims to");
+
+        const trifactor::ValidationReport mixedReport = trifactor::validateLodDag(mesh, dag);
+        for (const auto& issue : mixedReport.issues) AVER_ERROR("  validateLodDag: {} -- {}", issue.where, issue.detail);
+        check(mixedReport.ok, "validateLodDag passes on the mixed-shell hierarchy -- the routing did not "
+                               "break coverage, cluster limits, error-monotonicity, or acyclicity");
+
+        // THE STEP-8 REGRESSION TEST ITSELF. Follow one grid-descended (large-shell) LOD-0 cluster's
+        // parents[0] chain upward and confirm smallShellLineage stays false -- i.e. it still routes to
+        // the LockBorder path -- at EVERY level along the way, down to level 3 or deeper. Without
+        // PendingGroup carrying lineage forward in buildLodHierarchy's Pass 2 (see its own comment),
+        // every level >= 1 cluster would keep Cluster::smallShellLineage's default (false) regardless
+        // of what actually produced it -- which would make this exact assertion pass for the WRONG
+        // reason (a coincidental default, not a propagated fact) on a fixture with no small-shell
+        // lineage to diverge against. The block after this one supplies that divergence.
+        u32 largeLeaf = static_cast<u32>(dag.clusters.size());
+        for (u32 cid : dag.levels[0]) {
+            if (!dag.clusters[cid].smallShellLineage) { largeLeaf = cid; break; }
+        }
+        check(largeLeaf < dag.clusters.size(), "found a large-shell LOD-0 cluster to trace");
+
+        u32 cur = largeLeaf;
+        u32 deepestLevelSeen = dag.clusters[cur].level;
+        bool largeLineageHeldThroughout = !dag.clusters[cur].smallShellLineage;
+        for (u32 guard = 0; guard <= dag.levelCount() && !dag.clusters[cur].parents.empty(); ++guard) {
+            cur = dag.clusters[cur].parents[0];
+            deepestLevelSeen = std::max(deepestLevelSeen, dag.clusters[cur].level);
+            if (dag.clusters[cur].smallShellLineage) largeLineageHeldThroughout = false;
+        }
+        check(deepestLevelSeen >= 3,
+              "the traced large-shell chain actually reaches level 3 or deeper (reached " +
+                  std::to_string(deepestLevelSeen) + ") -- the assertion below is meaningless otherwise");
+        check(largeLineageHeldThroughout,
+              "the large-shell lineage held smallShellLineage == false at every level from 0 up "
+              "through " + std::to_string(deepestLevelSeen) + " -- large-shell descendants still route "
+              "to the LockBorder path this deep");
+
+        // AND THE DIVERGING CASE: at least one cluster ABOVE level 0 has smallShellLineage == true,
+        // proving the field is an actually-propagated fact (true for SOME clusters at depth, not
+        // merely "false everywhere, including at its own default") rather than a value the check above
+        // could pass by accident.
+        bool sawPropagatedSmallLineage = false;
+        for (u32 level = 1; level < dag.levelCount() && !sawPropagatedSmallLineage; ++level)
+            for (u32 cid : dag.levels[level])
+                if (dag.clusters[cid].smallShellLineage) { sawPropagatedSmallLineage = true; break; }
+        check(sawPropagatedSmallLineage,
+              "at least one cluster above level 0 has smallShellLineage == true -- lineage is a "
+              "propagated fact, not a name for 'still at its default'");
     }
 
     AVER_INFO("=== simplifyMesh keeps a skinned mesh saveable ===");

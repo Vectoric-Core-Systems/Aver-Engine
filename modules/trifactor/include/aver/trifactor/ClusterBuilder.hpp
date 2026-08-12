@@ -49,89 +49,63 @@ struct Cluster {
     // see computeShellIds in ClusterBuilder.cpp) this cluster is associated with: at level 0, the
     // shell its FIRST triangle's first vertex belongs to.
     //
-    // NOT YET GUARANTEED EXACT, and that is the reason this is a REPRESENTATIVE, not a claim that
-    // every triangle in the cluster shares this shell. buildClusters (task steps 2-4) computes and
-    // records this classification, but does NOT YET route small-shell triangles into their own
-    // clusters ahead of meshopt_buildMeshlets (task step 5) -- every LOD-0 cluster is still built by
-    // meshopt_buildMeshlets over the WHOLE mesh, unconditionally, exactly as before this
-    // classification existed, and meshopt_buildMeshlets has no notion of "shell" at all: it is free to
-    // (and, for spatially-close disconnected geometry such as several small foliage cards, likely
-    // will) put triangles from more than one shell in the same meshlet. shellId becomes exact once
-    // step 5's routing lands -- see the STAGE STATUS note below for why that step is not part of this
-    // one.
+    // EXACT FOR A SMALL-SHELL CLUSTER, A REPRESENTATIVE FOR A LARGE ONE -- and that asymmetry is by
+    // construction, not an oversight. Task step 5's routing (buildClusters, ClusterBuilder.cpp) splits
+    // LOD-0 triangles into two disjoint streams before either ever reaches a clustering call: every
+    // small shell (LodDag::isSmallShell) is built into its OWN cluster directly, containing that
+    // shell's triangles and nothing else, so shellId names its single shell exactly. Every large-shell
+    // triangle instead goes into one shared buffer handed to meshopt_buildMeshlets, which has no
+    // notion of "shell" and is free to (and, for spatially-close large shells, will) put triangles
+    // from more than one LARGE shell in the same meshlet -- so a large cluster's shellId is only ONE
+    // of the shells it may contain. That is harmless for what shellId is actually used for: the
+    // routing below only ever asks "is every shell touching this cluster large?", and a large cluster
+    // can only ever contain LARGE-shell triangles (the small-shell stream never reaches
+    // meshopt_buildMeshlets at all), so the representative's own classification -- large -- is always
+    // the right answer even when the specific shell named is not the only one present. See
+    // smallShellLineage just below for the field that actually drives the routing decision, rather
+    // than relying on this exactness distinction being re-derived at every call site.
     //
-    // STAGE STATUS. This field and LodDag::smallShells below are the classification that WOULD let
-    // buildLodHierarchy drop meshopt_SimplifyLockBorder for groups made entirely of small shells (see
-    // LodDag::smallShells' own comment for the provable reason that is safe) -- but buildLodHierarchy
-    // does not yet consult either field; its meshopt_simplify call still sets LockBorder
-    // unconditionally, exactly as before this classification existed.
+    // shellId is populated at level 0 ONLY (by buildClusters). A level >= 1 cluster's shellId stays at
+    // its default (0) and MUST NOT be read as meaning anything -- unlike shellId, smallShellLineage
+    // IS propagated to every level (see its own comment), which is what buildLodHierarchy's routing
+    // actually consults above level 0.
     //
-    // THE PRECONDITION CHECK FOUND SOMETHING, AND THE STOP CONDITION IT TRIPPED WAS WRONG. The check
-    // was specified as "confirm the five previously-regressed meshes are each a SINGLE connected
-    // shell", and rock_moss_set_02 is not: the shipped AVER_INFO in buildClusters reports it as
-    // 0 small, 7 large. Implementation stopped there, correctly following the instruction it was
-    // given -- but that instruction asked the wrong question, and the answer it got is not actually
-    // an obstacle.
-    //
-    // What the routing needs is NOT that a mesh be one shell. It is that no group ever drops
-    // LockBorder while holding geometry whose boundary is load-bearing -- and the cutoff below
-    // ("small" means it fits inside ONE meshlet, so it can never be split across a group boundary)
-    // is what guarantees that. A mesh of seven independently LARGE shells has zero small shells, so
-    // every one of its groups routes through the unchanged LockBorder path and its output is
-    // byte-identical to today's. rock_moss_set_02 is therefore safe for exactly the reason the design
-    // intended, and the premise that mattered holds. The premise as WORDED did not, which is worth
-    // recording so the next person does not re-derive it: single-shell was a convenient proxy for
-    // no-small-shells, and only the latter is load-bearing.
-    //
-    // AND THEN THE CORPUS MEASUREMENT CONFIRMED THE DESIGN. An earlier pass recorded here that it
-    // had killed it -- that entry was WRONG, and the way it was wrong is worth keeping.
-    //
-    // The claim was "every mesh reports zero small shells, so a rule keyed on small shells never
-    // fires". It came from a shell listing and a ladder listing that were read side by side without
-    // checking they lined up. They did not: the per-mesh diagnostic prints once per mesh, the ladder
-    // report prints once per mesh, and a filter applied to only one of the two silently shifted every
-    // row. The "0 small" figures being read belonged to the single-shell rocks further down the list.
-    //
-    // Re-run with each mesh paired to its OWN line, sorted by how well its ladder currently reduces:
-    //
-    //     mesh                  shells    small  large   open%   ladder
-    //     grass_medium_01         1099     1068     31    52.9     1.0x
-    //     fir_sapling            49200    48991    209    54.8     1.1x
-    //     pine_tree_01          129642   129633      9    71.9     1.3x
-    //     pine_sapling_small     25475    25271    204    46.6     1.3x
-    //     fern_02                   53        1     52    19.2     2.8x
-    //     ...
-    //     rock_moss_set_02           7        0      7     0.0   177.4x
-    //     dead_tree_trunk            1        0      1     0.0  1018.0x
-    //
-    // The separation is about as clean as a measurement gets. Every mesh whose ladder barely reduces
-    // is made of THOUSANDS of small shells -- fir_sapling is 48,991 of them, pine_tree_01 is 129,633.
-    // Every mesh with a good ladder has ZERO. And all five of the meshes that regressed when
-    // LockBorder was dropped outright (dead_tree_trunk, dead_tree_trunk_02, rock_07, rock_09,
-    // rock_moss_set_02) report zero small shells, so the routing leaves every one of their groups on
-    // the unchanged LockBorder path. That is precisely the safety property the design needed, and it
-    // holds on the real corpus rather than in argument.
-    //
-    // The open-edge fraction (see openEdgeFraction in the .cpp) tracks the same axis and explains the
-    // mechanism: a leaf card is a thin sheet whose perimeter is a one-triangle edge, so a mesh built
-    // of them is majority-boundary and LockBorder freezes nearly all of it. A closed solid is near
-    // 0% open and loses nothing to the flag. Both numbers are printed together because either alone
-    // can be read the wrong way round.
-    //
-    // SO STEPS 5-8 ARE THE NEXT WORK AND THEY ARE EXPECTED TO PAY. What is implemented here is the
-    // classification and the two diagnostics; the routing that consumes them is not written yet.
-    //
-    // shellId is currently populated at level 0 only; every level >= 1 cluster is left at its default
-    // (0), which is not yet a claim about anything -- there is no routing consumer to mislead yet, but
-    // do not read meaning into it until buildLodHierarchy is extended to propagate it (this is exactly
-    // the lineage-propagation step an adversarial review of the fuller design flagged as the most
-    // likely thing to be got wrong once that routing exists).
-    //
-    // BUILD-TIME ONLY, like LodDag::smallShells below: a shell is a property of the source mesh's own
-    // topology, re-derivable from mesh.positions/indices at any time, not a fact about the cooked
-    // cluster hierarchy that needs to outlive this build. Never serialized; nothing on disk changes
-    // because this field exists.
+    // BUILD-TIME ONLY: a shell is a property of the source mesh's own topology, re-derivable from
+    // mesh.positions/indices at any time, not a fact about the cooked cluster hierarchy that needs to
+    // outlive this build. Never serialized; nothing on disk changes because this field exists.
     u32 shellId = 0;
+
+    // TRUE iff this cluster is, or descends ENTIRELY from, small-shell geometry -- the field task step
+    // 7's meshopt_simplify call and task step 6's two-bucket grouping actually consult, at EVERY level,
+    // not just level 0. This is deliberately a separate field from shellId above rather than a
+    // "dag.isSmallShell(shellId)" lookup, for the reason step 8 exists to guard against: past level 0,
+    // shellId is not populated (see its own comment), so looking it up at level >= 1 would silently
+    // read a stale default -- and getting the DEFAULT direction of that mistake right is exactly why
+    // this field, not shellId's, is the one the routing reads.
+    //
+    // AT LEVEL 0 (buildClusters): true for a cluster built directly from one small shell (task step
+    // 5), false for a cluster built by meshopt_buildMeshlets from the large-shell stream (which, per
+    // shellId's comment above, can only ever hold large-shell triangles).
+    //
+    // AT LEVEL >= 1 (buildLodHierarchy's Pass 2): copied from the PendingGroup that produced this
+    // cluster -- specifically, `!pg.allLargeShell` (see buildLodHierarchy's own comment on
+    // PendingGroup). A group's members are always homogeneous in this field by construction (task
+    // step 6's two buckets are partitioned separately and never concatenated), so "the group's
+    // lineage" is a single well-defined value, not a per-member vote.
+    //
+    // THE DEFAULT (false) IS THE SAFE DIRECTION, on purpose, matching shellId's own "no meaning yet"
+    // default and validateClusterErrorBounds' root-sentinel convention of failing toward "keep
+    // protecting" rather than "start dropping protection". If this propagation step were ever skipped
+    // or got a level wrong, every affected cluster would default to false -- i.e. get routed through
+    // the LockBorder path regardless of its real lineage -- which only costs back some of the win this
+    // feature exists for. The dangerous direction (a large-shell descendant silently read as
+    // small-shell, and having LockBorder dropped under it) would require this field to default to
+    // TRUE, which it does not. TrifactorTest's mixed-shell multi-level fixture exists specifically to
+    // prove the propagation itself is happening -- not merely relying on this default -- by tracing a
+    // large-shell descendant's lineage down to level 3+ and confirming it never flips.
+    //
+    // BUILD-TIME ONLY, like shellId: never serialized.
+    bool smallShellLineage = false;
 
     std::vector<u32> vertices;    // global vertex indices, size() <= kMaxClusterVertices
     std::vector<u8>  triangles;   // local indices, 3 per triangle, count <= kMaxClusterTriangles*3
@@ -169,8 +143,13 @@ struct LodDag {
     //
     // BUILD-TIME ONLY: populated by buildClusters, and never written to a file -- like Cluster::shellId
     // above, a shell is re-derivable from the source mesh at any time, not a fact the cooked hierarchy
-    // needs to carry. NOT YET CONSULTED by buildLodHierarchy -- see Cluster::shellId's STAGE STATUS
-    // note for why the routing that would read this is not part of this stage.
+    // needs to carry. CONSULTED ONLY AT LEVEL 0, by buildClusters itself, to decide which stream (the
+    // direct small-shell path or the meshopt_buildMeshlets large-shell path) each triangle takes and
+    // to set the resulting cluster's Cluster::smallShellLineage -- buildLodHierarchy's own routing
+    // (task steps 6-7) reads smallShellLineage, not this vector, precisely because a level >= 1 group
+    // can span several small shells at once and "is small" stops being a single shellId lookup once
+    // that happens (see Cluster::smallShellLineage's comment for the propagation that field carries
+    // instead).
     std::vector<u8> smallShells;
 
     // Bounds-checked so a stale or out-of-range shellId (there should never be one, but this is the
@@ -189,12 +168,21 @@ struct LodDag {
 // the .cpp for the rounding argument -- it is the part of this task most likely to be silently
 // gotten wrong). Populates dag.levels[0] only; does not build LOD > 0.
 //
-// Also classifies `mesh` into connected shells (computeShellIds in the .cpp) and populates
-// dag.smallShells and every LOD-0 cluster's shellId from the result -- see Cluster::shellId's STAGE
-// STATUS note for exactly what this stage does and does not do with that classification yet. Every
-// LOD-0 cluster is still built by meshopt_buildMeshlets over the whole mesh, unconditionally, exactly
-// as before this classification existed -- this function's actual clustering output (cluster
-// count/contents/order) is BYTE-FOR-BYTE UNCHANGED by everything this paragraph describes.
+// ALSO CLASSIFIES `mesh` into connected shells (computeShellIds in the .cpp) and ROUTES on the result
+// (task step 5): every small shell (LodDag::isSmallShell) is built into its own cluster directly,
+// bypassing meshopt_buildMeshlets entirely (it is defined to fit inside one meshlet, so partitioning
+// machinery sized for the whole mesh has nothing to add and, worse, meshopt_buildMeshlets is free to
+// pull in a spatially-close but topologically-unrelated shell once a shell's own adjacency runs out --
+// see buildDirectCluster's comment in the .cpp); every large-shell triangle instead goes through the
+// SAME meshopt_buildMeshlets call this function always made, on a triangle stream that is
+// ORDER-PRESERVING with respect to `mesh.indices` (large-shell triangles keep their original relative
+// order; only small-shell triangles are pulled out of it). For a mesh with ZERO small shells -- which
+// covers every one of this engine's demo corpus's previously-LockBorder-protected solid meshes, see
+// the file header's measured table -- that stream is therefore mesh.indices verbatim, so this
+// function's clustering output for such a mesh is EXACTLY what it would have been before this routing
+// existed: not merely equivalent, the identical meshopt_buildMeshlets call on the identical buffer.
+// That equivalence, not a runtime check, is what protects those meshes; TrifactorTest's
+// zero-small-shell fixture exists to keep it true rather than merely argued.
 //
 // Returns false and sets `why` on a malformed mesh (empty positions/indices, an index count not a
 // multiple of 3, or an index out of range for the vertex buffer). Does not otherwise validate mesh
