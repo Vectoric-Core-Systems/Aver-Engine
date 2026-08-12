@@ -18,11 +18,22 @@
 // and giving a freshly-spawned node its initial pins.
 //
 // PROVENANCE: the pin names/types below mirror the shape scripting/csharp/Aver.Graph/GraphCompiler.cs
-// expects (its EmitAdd/EmitSin/etc. methods, and its `switch (node.Type.ToLowerInvariant())` node-type
-// list) as read on 2026-08-08. That file is owned by a concurrent workflow and is NOT included or
-// generated from here -- this table owns its own copy of the vocabulary so a C++ editor build never
-// depends on a C# file. If GraphCompiler.cs's node set has moved since, update this table to match;
-// it is one line per node type by design.
+// and OcGraphParser.cs (AddDefaultPins) expect, as read on 2026-08-13 (updated to add the exec/flow
+// vocabulary: Branch, Sequence, While, ForEach, OnStart, OnTick -- see OcGraphParser.AddDefaultPins'
+// own "flow / exec nodes" section, which this table's flow entries below were copied from field for
+// field, pin for pin, in the same order). Those C# files are owned by a concurrent workflow and are
+// NOT included or generated from here -- this table owns its own copy of the vocabulary so a C++
+// editor build never depends on a C# file. If GraphCompiler.cs's node set has moved since, update this
+// table to match; it is one line per node type by design.
+//
+// EXACT PARITY MATTERS MORE FOR THE FLOW TYPES THAN IT DID BEFORE. A node spawned from this catalog
+// gets its pins written into the file as real PIN records when the editor saves (see the "add node"
+// popup in GraphEditor.cpp, which copies a GraphNodeDesc's pins verbatim onto the new OcGraphNode).
+// Once a node has ANY explicit pins, OcGraphParser.AddDefaultPins skips it entirely (its early-return
+// on `node.Pins.Count > 0`) -- so if this table and AddDefaultPins ever disagree on a flow type's
+// shape, an editor-authored graph gets one pin set and a hand-written or C#-authored graph of the same
+// type gets another, which is exactly the "two implementations agree by coincidence, not by
+// construction" trap the `outputs` field's own comment in OcGraph.hpp warns about.
 //
 // KNOWN GAP, not fixed here: GetField/SetField address a scene field by name via a `field=` NODE-line
 // attribute on the C# side's own reader (scripting/csharp/Aver.Graph/OcGraphParser.cs, "field=" case).
@@ -82,6 +93,47 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    common case, and can be edited per-instance like any other pin since layout/pin-typing
     //    always prefers the node's own recorded pins over this table (see the header comment). --
     t.push_back({"Param", "Param", "Param", {pin("value", "float", true)}});
+
+    // -- flow / exec: control flow, not data flow. "exec" is a PIN TYPE, exactly like "float"/"int"/
+    //    "bool" above -- see modules/formats/include/aver/formats/OcGraph.hpp's comment on
+    //    OcGraphLink for why that alone is the whole format change this needed. Pin sets below match
+    //    scripting/csharp/Aver.Graph/OcGraphParser.cs's AddDefaultPins EXACTLY -- see this file's own
+    //    header comment for why that parity is load-bearing, not cosmetic.
+    //
+    // branch: a bool condition and one incoming exec pulse; exactly one of "true"/"false" fires.
+    //    "tookTrue" is OPT-IN OBSERVABILITY (see GraphCompiler.EmitBranch's comment), not required
+    //    wiring -- present so a graph author (or a test) can inspect which way a branch went.
+    t.push_back({"Branch", "Branch", "Flow", {
+        pin("exec", "exec", false), pin("cond", "bool", false),
+        pin("true", "exec", true), pin("false", "exec", true), pin("tookTrue", "bool", true)}});
+    // sequence: fires each of its exec outputs in file order -- two by default ("then0" then
+    //    "then1"); add more via PIN records to widen it. "fireLog" is opt-in observability, the
+    //    sequence equivalent of branch's "tookTrue" (see GraphCompiler.EmitExecFanOut's comment).
+    t.push_back({"Sequence", "Sequence", "Flow", {
+        pin("exec", "exec", false), pin("then0", "exec", true), pin("then1", "exec", true),
+        pin("fireLog", "int", true)}});
+    // while: "cond" is re-checked every pass (never cached -- see GraphCompiler's PUSH VS PULL
+    //    comment); "loop" is the body, "done" fires once after; "iterations" counts completed passes,
+    //    both a genuinely useful runtime value and the proof a runaway loop's guard actually bit.
+    t.push_back({"While", "While", "Flow", {
+        pin("exec", "exec", false), pin("cond", "bool", false),
+        pin("loop", "exec", true), pin("done", "exec", true), pin("iterations", "int", true)}});
+    // forEach: the COUNTED-REPEAT variant, not a per-element iterator -- the format has no
+    //    array/collection pin type yet, so a real "for each item in a list" cannot be expressed
+    //    today (see GraphCompiler.EmitForEach's comment for the honest "left rough for phase 2"
+    //    note). "count" says how many passes; "index" is the current one, 0..count-1.
+    t.push_back({"ForEach", "For Each (counted)", "Flow", {
+        pin("exec", "exec", false), pin("count", "int", false),
+        pin("loop", "exec", true), pin("index", "int", true), pin("done", "exec", true)}});
+    // onstart / ontick: event entry points -- what actually makes one of these run is a top-level
+    //    ENTRY <nodeId> <eventName> record (OcGraphData::entryPoints), not anything about this node's
+    //    TYPE; these two are just convenience triggers with a single exec output and no inputs of
+    //    their own to place at the head of a chain and mark with ENTRY. Per-tick data (delta time, in
+    //    particular) is deliberately NOT a special pin here -- it is an ordinary PARAM the graph
+    //    declares (e.g. `PARAM deltaTime float`) and reads with a `param` node inside the chain, the
+    //    same plumbing every dataflow graph already uses for `time`/`entity`.
+    t.push_back({"OnStart", "On Start", "Flow", {pin("exec", "exec", true)}});
+    t.push_back({"OnTick", "On Tick", "Flow", {pin("exec", "exec", true)}});
     return t;
 }
 

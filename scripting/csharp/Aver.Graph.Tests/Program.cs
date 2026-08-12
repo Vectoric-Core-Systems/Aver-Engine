@@ -54,6 +54,9 @@ class Program
         // GraphHost: load-once/compile-once hosting, and the drone flight-path graph itself.
         failures += GraphHostTests.RunAll();
 
+        // Exec/flow: branch, sequence, while, forEach, and event entry points (ENTRY/CompileEntryPoint).
+        failures += GraphFlowTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

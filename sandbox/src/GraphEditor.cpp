@@ -47,6 +47,15 @@ inline Vec2 fromIm(ImVec2 v) { return Vec2(v.x, v.y); }
 
 // Pin/link colour by declared type. Falls back to a neutral grey for anything unrecognised -- a type
 // this editor has never seen must still draw, not vanish or assert.
+//
+// "exec" is WHITE, not merely another entry in this list. Blueprint-style editors converged on this
+// convention independently for a reason: it is the one colour no data type here (or plausibly ever
+// added later) also uses, so a white wire reads as "control flow" at a glance without having to
+// remember a legend. Colour ALONE would still leave exec and data pins the same DOT shape, though,
+// which is why the actual pin-drawing loop below also changes the pin's geometry for exec (a diamond,
+// not a circle) -- see that code's own comment for why shape, not just colour, is the point: a
+// colour-blind reader (or a screenshot inspected in greyscale) loses colour information entirely,
+// but a diamond next to a circle is still visibly two different things.
 ImU32 colorForType(const std::string& type) {
     std::string t = type;
     for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -54,7 +63,18 @@ ImU32 colorForType(const std::string& type) {
     if (t == "int")    return IM_COL32(140, 220, 140, 255);
     if (t == "bool")   return IM_COL32(230, 150, 90, 255);
     if (t == "string") return IM_COL32(210, 140, 230, 255);
+    if (t == "exec")   return IM_COL32(245, 245, 245, 255);
     return IM_COL32(190, 190, 190, 255);
+}
+
+// Whether a pin's declared type is "exec" -- the ONE place this string comparison lives, so the
+// diamond-vs-circle drawing choice below and any future exec-specific drawing logic share a single
+// definition of "is this pin control flow" rather than each re-deriving it. Case-insensitive for the
+// same reason colorForType is: nothing in the format requires a specific case for a pin type string.
+bool isExecPinType(const std::string& type) {
+    std::string t = type;
+    for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return t == "exec";
 }
 #endif
 
@@ -594,7 +614,29 @@ void GraphEditor::draw(Engine&) {
             const ImVec2 dot = toScreenAbs(pl.pos);
             const f32 r = style_.pinRadiusPx * dpi * view_.zoom;
             const bool isLinkEnd = (dragMode_ == DragMode::DrawLink && nl.nodeId == linkDragFromNode_ && pl.name == linkDragFromPin_);
-            dl->AddCircleFilled(dot, r, colorForType(pl.type));
+            // EXEC PINS DRAW AS A DIAMOND, DATA PINS AS A CIRCLE -- shape, not just colour (see
+            // colorForType's own comment on why colour alone is not enough). This is the single
+            // change that makes a graph with both dataflow and control flow on the same node body
+            // actually readable at a glance: a wire is either a value or "what runs next", and
+            // mixing the two up is the exact failure the task called out as the biggest usability
+            // risk in a node editor. The four points below are the same radius as the circle they
+            // replace, just rotated 45 degrees into a rhombus, so the two shapes read as siblings of
+            // one pin-drawing language rather than two unrelated conventions.
+            if (isExecPinType(pl.type)) {
+                const ImVec2 diamond[4] = {
+                    ImVec2(dot.x, dot.y - r), ImVec2(dot.x + r, dot.y),
+                    ImVec2(dot.x, dot.y + r), ImVec2(dot.x - r, dot.y),
+                };
+                dl->AddConvexPolyFilled(diamond, 4, colorForType(pl.type));
+                // (points, num_points, col, thickness, flags) -- the CURRENT AddPolyline signature
+                // (imgui.h:3527). An older 1.92.7-and-earlier signature took (col, flags, thickness) in
+                // the other order; this codebase's imconfig.h leaves the compatibility shim enabled
+                // (IMGUI_DISABLE_OBSOLETE_FUNCTIONS is commented out) so either order would technically
+                // link, but writing the current order directly avoids depending on that shim.
+                dl->AddPolyline(diamond, 4, IM_COL32(40, 40, 40, 255), 1.0f * dpi, ImDrawFlags_Closed);
+            } else {
+                dl->AddCircleFilled(dot, r, colorForType(pl.type));
+            }
             if (isLinkEnd) dl->AddCircle(dot, r + 2.0f * dpi, IM_COL32(255, 220, 90, 255), 0, 2.0f * dpi);
             const ImVec2 textSize = ImGui::CalcTextSize(pl.name.c_str());
             const f32 tx = pl.isOutput ? dot.x - textSize.x - r - 3.0f * dpi : dot.x + r + 3.0f * dpi;

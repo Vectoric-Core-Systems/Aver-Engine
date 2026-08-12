@@ -50,6 +50,28 @@ struct OcGraphNode {
 };
 
 // One link connecting an output pin to an input pin.
+//
+// EXEC LINKS, AND WHY THIS STRUCT DID NOT NEED A NEW FIELD TO GET THEM. A link is a DATA link or an
+// EXEC (control-flow) link purely by the TYPE of the two pins it connects -- "exec" is just another
+// pin type string, exactly like "float"/"int"/"bool"/"string" (OcGraphPin::type), so a link between
+// two exec-typed pins already IS an exec link, with zero changes to this struct and zero changes to
+// LINK's own grammar (still `LINK srcnode.srcpin destnode.destpin`, unchanged).
+//
+// Reusing the existing typed-pin mechanism, rather than adding an exec-vs-data flag to OcGraphLink or
+// a second record kind (an `XLINK`), is what makes an OLDER FILE'S BEHAVIOUR GUARANTEED UNCHANGED:
+// nothing in a pre-existing .ocgraph declares a pin of type "exec" (the string carried no special
+// meaning before this), so parseOcgraph produces links identical to what it always produced for such
+// a file, and every consumer that only ever dealt in float/int/bool/string pins keeps working exactly
+// as it did -- there is no new branch in this reader that an old file can even reach.
+//
+// The ONLY code that needs to know "exec" is special is code that walks CONTROL FLOW. Concretely:
+// the editor's link rule (aver::editor::canConnectPins, GraphEditorGeometry.cpp) already refuses to
+// connect two differently-typed pins -- which for free means "an exec pin only connects to another
+// exec pin, never to a data pin" (the task's own requirement), with no additional check written for
+// it. The compiler (scripting/csharp/Aver.Graph/GraphCompiler.cs) is the one place that actually
+// interprets an exec link as "run this next" rather than "read this value" -- see its own PUSH VS
+// PULL comment for how it tells the two apart while walking the same OcGraphLink list this struct
+// describes.
 struct OcGraphLink {
     std::string sourceNode;  // ID of the source node
     std::string sourcePin;   // Name of the output pin on the source node
@@ -77,6 +99,32 @@ struct OcGraphData {
     // agreed on nodes and links and silently disagreed about what a graph RETURNS. Writing it down
     // here is what makes them one format instead of two with the same name.
     std::vector<std::pair<std::string, std::string>> outputs;   // {nodeId, pinName}
+
+    // Which node begins the PUSH/exec chain for a named event: `ENTRY <nodeId> <eventName>`, e.g.
+    // `ENTRY tick_seq OnTick`. This is to CONTROL FLOW what `outputs` above is to DATA FLOW -- a graph
+    // says not just what it computes but where it starts RUNNING and on what trigger -- and it exists
+    // as its own record for the same reason `outputs` does: nothing about a node's own TYPE says
+    // whether it is "the" beginning of a chain (a Sequence node behaves identically whether or not
+    // something calls it), so the format has to say so out loud, in one place, rather than the two
+    // implementations guessing at a convention and silently disagreeing -- exactly the trap the
+    // `outputs` comment above documents and the one this field exists to not repeat for entry points.
+    //
+    // BACKWARD COMPATIBILITY IS BY CONSTRUCTION, THE SAME WAY `outputs` IS. An .ocgraph written before
+    // ENTRY existed has no ENTRY lines; parseOcgraph never populates this vector for such a file --
+    // there is nothing in the grammar that would make it try -- so entryPoints is empty, and
+    // GraphCompiler.Compile() (the pre-existing PULL/dataflow compiler, driven entirely by `outputs`)
+    // runs exactly as it always has. CompileEntryPoint() -- the new PUSH/exec compiler -- is a
+    // SEPARATE method nothing calls unless a caller asks for one specific declared event by name. A
+    // graph can therefore be pure dataflow (the only kind that existed before this change), pure exec
+    // (no `outputs` at all, only ENTRY-triggered side effects), or both at once; the two halves do not
+    // interact, and neither one's absence is an error.
+    //
+    // Two ENTRY records must not name the same eventName (ambiguous -- which node handles it?). That
+    // is checked by the C# runtime's Graph.Validate(), not by this reader, for the same division of
+    // labour LINK already follows: this layer accepts whatever is syntactically well-formed (the named
+    // node exists) and leaves semantic graph rules -- pin type agreement on links, event-name
+    // uniqueness here -- to the layer that actually executes the graph.
+    std::vector<std::pair<std::string, std::string>> entryPoints;   // {nodeId, eventName}
 };
 
 // Parses a graph from memory. Unknown records are ignored during parse but preserved during rewrite.

@@ -257,6 +257,13 @@ GraphLinkCheck canConnectPins(const fmt::OcGraphData& graph,
             return r;
         }
     }
+    // THIS ONE CHECK IS ALSO WHAT ENFORCES "AN EXEC PIN ONLY CONNECTS TO ANOTHER EXEC PIN, NEVER TO
+    // DATA". Nothing exec-specific was added here on purpose: "exec" is just another pin-type string
+    // (see modules/formats/include/aver/formats/OcGraph.hpp's comment on OcGraphLink), so a link from
+    // an exec output to a float/int/bool/string input already fails this same type-equality test a
+    // float-to-bool link always has. Exec pins get their own visual language (a diamond, not a
+    // circle -- see GraphEditor.cpp's colorForType/isExecPinType) so a user can tell them apart before
+    // ever attempting a bad connection, but the RULE that stops the connection is this line, unchanged.
     if (!ciEquals(sp->type, dp->type)) {
         r.reason = GraphLinkReject::TypeMismatch;
         r.message = "type mismatch: '" + sourceNode + "." + sourcePin + "' is " + sp->type

@@ -45,7 +45,7 @@ bool isNumericToken(std::string_view s) {
 // path (see there) to replace each kind in place at its own first occurrence, rather than collapsing
 // every kind into one inserted block. `Other` covers blank lines, comments, and anything writeOcgraph
 // does not model; those are always copied through verbatim, at their original position.
-enum class OwnedLineKind { Header, Name, Description, Node, Pin, Link, Out, Other };
+enum class OwnedLineKind { Header, Name, Description, Node, Pin, Link, Entry, Out, Other };
 
 // `sawHeader` is the caller's running state: only the FIRST line whose key is OCGRAPH counts as the
 // header; a later stray "OCGRAPH ..." line (malformed input, or inside an unrelated unknown record)
@@ -59,6 +59,7 @@ OwnedLineKind classifyLine(std::string_view line, bool sawHeaderYet) {
     if (equalsCI(t[0], "NODE"))        return OwnedLineKind::Node;
     if (equalsCI(t[0], "PIN"))         return OwnedLineKind::Pin;
     if (equalsCI(t[0], "LINK"))        return OwnedLineKind::Link;
+    if (equalsCI(t[0], "ENTRY"))       return OwnedLineKind::Entry;
     if (equalsCI(t[0], "OUT"))         return OwnedLineKind::Out;
     return OwnedLineKind::Other;
 }
@@ -265,6 +266,25 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
                 return false;
             }
             out.outputs.emplace_back(nodeId, pinName);
+        } else if (equalsCI(key, "ENTRY")) {
+            // ENTRY <nodeId> <eventName> -- see OcGraphData::entryPoints for what this means and why
+            // it is a separate record. Validated the same way OUT is validated above (the named node
+            // must exist) and no further: whether an eventName is declared twice is a semantic graph
+            // rule left to the C# runtime's Graph.Validate(), matching how LINK's pin-type agreement
+            // is also left to a higher layer.
+            if (t.size() < 3) {
+                if (err) *err = "ENTRY requires 2 tokens: ENTRY nodeid eventname";
+                return false;
+            }
+            const std::string nodeId(t[1]);
+            const std::string eventName(t[2]);
+            bool entryNodeExists = false;
+            for (const auto& n : out.nodes) if (n.id == nodeId) entryNodeExists = true;
+            if (!entryNodeExists) {
+                if (err) *err = "ENTRY references non-existent node: " + nodeId;
+                return false;
+            }
+            out.entryPoints.emplace_back(nodeId, eventName);
         }
     }
 
@@ -291,7 +311,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // anything) `existing` had. Shared by both branches below.
     const std::string nameLine = "NAME " + (g.name.empty() ? std::string("untitled") : g.name) + "\n";
     const std::string descLine = g.description.empty() ? std::string() : ("DESCRIPTION " + g.description + "\n");
-    std::string nodeBlock, pinBlock, linkBlock, outBlock;
+    std::string nodeBlock, pinBlock, linkBlock, entryBlock, outBlock;
     for (const OcGraphNode& node : g.nodes) {
         // Coordinates only if the node actually had them, then every token this implementation did
         // not interpret, in its original order. Emitting `0 0` for a node that never carried a
@@ -315,6 +335,12 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         linkBlock += "LINK " + link.sourceNode + "." + link.sourcePin +
                      " " + link.destNode + "." + link.destPin + "\n";
     }
+    // Entry points right after links (they describe how the wires above get set in motion) and
+    // BEFORE outputs, which stay last -- see the OUT loop's own comment just below for why outputs
+    // keep the final position they always had.
+    for (const auto& e : g.entryPoints) {
+        entryBlock += "ENTRY " + e.first + " " + e.second + "\n";
+    }
     // Outputs LAST, because they read as the conclusion of the graph -- a human scanning the file
     // looks for them where a return statement would be.
     for (const auto& o : g.outputs) {
@@ -331,6 +357,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         if (!nodeBlock.empty()) { out += "\n"; out += nodeBlock; }
         if (!pinBlock.empty())  { out += "\n"; out += pinBlock; }
         if (!linkBlock.empty()) { out += "\n"; out += linkBlock; }
+        if (!entryBlock.empty()) { out += "\n"; out += entryBlock; }
         if (!outBlock.empty())  { out += "\n"; out += outBlock; }
         return out;
     }
@@ -339,8 +366,9 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // and copy everything else -- comments, blank lines, and any record this format does not model --
     // through untouched, at its original position.
     //
-    // This replaces each kind independently rather than collapsing NAME/DESCRIPTION/NODE/PIN/LINK/OUT
-    // into one block dropped at the first owned line found (the previous strategy here). That single-
+    // This replaces each kind independently rather than collapsing
+    // NAME/DESCRIPTION/NODE/PIN/LINK/ENTRY/OUT into one block dropped at the first owned line found
+    // (the previous strategy here). That single-
     // block approach silently relocated every blank line that separated two record blocks -- e.g. the
     // blank line between the NODE block and the PIN block -- to wherever the scan next found unowned
     // content, because every original owned line between two blank lines got dropped without being
@@ -376,9 +404,10 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     }
 
     bool placedName = false, placedDesc = false, placedNode = false;
-    bool placedPin = false, placedLink = false, placedOut = false;
+    bool placedPin = false, placedLink = false, placedEntry = false, placedOut = false;
     std::string out;
-    out.reserve(existing.size() + nodeBlock.size() + pinBlock.size() + linkBlock.size() + outBlock.size() + 64);
+    out.reserve(existing.size() + nodeBlock.size() + pinBlock.size() + linkBlock.size()
+                + entryBlock.size() + outBlock.size() + 64);
 
     for (usize i = 0; i < lines.size(); ++i) {
         switch (kinds[i]) {
@@ -400,6 +429,9 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         case OwnedLineKind::Link:
             if (!placedLink) { placedLink = true; out += linkBlock; }
             break;
+        case OwnedLineKind::Entry:
+            if (!placedEntry) { placedEntry = true; out += entryBlock; }
+            break;
         case OwnedLineKind::Out:
             if (!placedOut) { placedOut = true; out += outBlock; }
             break;
@@ -419,6 +451,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     if (!placedNode && !nodeBlock.empty()) { out += "\n"; out += nodeBlock; }
     if (!placedPin && !pinBlock.empty())   { out += "\n"; out += pinBlock; }
     if (!placedLink && !linkBlock.empty()) { out += "\n"; out += linkBlock; }
+    if (!placedEntry && !entryBlock.empty()) { out += "\n"; out += entryBlock; }
     if (!placedOut && !outBlock.empty())   { out += "\n"; out += outBlock; }
 
     return out;

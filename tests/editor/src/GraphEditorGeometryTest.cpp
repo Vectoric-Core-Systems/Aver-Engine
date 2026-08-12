@@ -69,6 +69,14 @@ static void testNodeCatalog() {
         check(findGraphNodeDesc(t) != nullptr, std::string("catalog has incoming type '") + t + "'");
     }
 
+    // The exec/flow additions: branch, sequence, while, forEach, and the two event-entry trigger
+    // types. Present in the catalog with the SAME pin shapes OcGraphParser.AddDefaultPins gives them
+    // on the C# side -- see GraphNodeDefs.hpp's own header comment on why that parity matters.
+    const char* flow[] = {"Branch", "Sequence", "While", "ForEach", "OnStart", "OnTick"};
+    for (const char* t : flow) {
+        check(findGraphNodeDesc(t) != nullptr, std::string("catalog has flow type '") + t + "'");
+    }
+
     check(findGraphNodeDesc("NoSuchNodeType") == nullptr, "unknown type resolves to nullptr");
 
     // Case-insensitive lookup, since the fixture file uses "ConstFloat" and GraphCompiler.cs's switch
@@ -93,6 +101,39 @@ static void testNodeCatalog() {
         check(cf->pins.size() == 1 && cf->pins[0].isOutput, "ConstFloat has exactly one output pin");
     } else {
         check(false, "ConstFloat present (shape check skipped)");
+    }
+
+    // Branch's shape: one incoming exec pulse, a bool condition, and two outgoing exec pins -- the
+    // "decide" primitive the whole visual-scripting phase exists to add.
+    const GraphNodeDesc* branch = findGraphNodeDesc("Branch");
+    if (branch) {
+        int execIns = 0, execOuts = 0, dataIns = 0;
+        for (const auto& p : branch->pins) {
+            if (p.type == "exec") (p.isOutput ? execOuts : execIns)++;
+            else if (!p.isOutput) dataIns++;
+        }
+        check(execIns == 1, "Branch has exactly one incoming exec pin");
+        check(execOuts == 2, "Branch has exactly two outgoing exec pins (true/false)");
+        check(dataIns == 1, "Branch has exactly one non-exec input (the bool condition)");
+    } else {
+        check(false, "Branch present (shape check skipped)");
+    }
+
+    // OnStart/OnTick: no inputs at all, one exec output -- the node an ENTRY record points at.
+    for (const char* triggerType : {"OnStart", "OnTick"}) {
+        const GraphNodeDesc* trigger = findGraphNodeDesc(triggerType);
+        if (trigger) {
+            bool anyInput = false;
+            int execOuts = 0;
+            for (const auto& p : trigger->pins) {
+                if (!p.isOutput) anyInput = true;
+                if (p.isOutput && p.type == "exec") ++execOuts;
+            }
+            check(!anyInput, std::string(triggerType) + " has no input pins of its own");
+            check(execOuts == 1, std::string(triggerType) + " has exactly one exec output pin");
+        } else {
+            check(false, std::string(triggerType) + " present (shape check skipped)");
+        }
     }
 }
 
@@ -263,6 +304,56 @@ static void testLinkRules() {
         fmt::OcGraphData g = makeSampleGraph();
         GraphLinkCheck r = canConnectPins(g, "c1", "nope", "sum", "a");
         check(!r.ok && r.reason == GraphLinkReject::UnknownPin, "a nonexistent source pin is rejected");
+    }
+
+    // Exec-to-exec: accepted. "exec" is just another pin type to this function -- see
+    // canConnectPins' own comment above the type-equality check -- so this needs no exec-specific
+    // code path to pass, and that absence is exactly the point being tested.
+    {
+        fmt::OcGraphData g;
+        fmt::OcGraphNode tick;
+        tick.id = "tick"; tick.type = "OnTick"; tick.x = 0; tick.y = 0;
+        tick.pins.push_back({"exec", "exec", true, ""});
+        g.nodes.push_back(tick);
+        fmt::OcGraphNode seq;
+        seq.id = "seq"; seq.type = "Sequence"; seq.x = 200; seq.y = 0;
+        seq.pins.push_back({"exec", "exec", false, ""});
+        seq.pins.push_back({"then0", "exec", true, ""});
+        g.nodes.push_back(seq);
+        GraphLinkCheck r = canConnectPins(g, "tick", "exec", "seq", "exec");
+        check(r.ok, "an exec output connects to an exec input");
+    }
+
+    // Exec-to-data (and data-to-exec): rejected as a type mismatch, the SAME check and the SAME
+    // GraphLinkReject reason a float-to-bool link gets above -- proving the task's "exec pin only
+    // connects to exec pin, never to data" requirement is a free consequence of type equality, not a
+    // separately maintained rule that could drift out of sync with it.
+    {
+        fmt::OcGraphData g;
+        fmt::OcGraphNode tick;
+        tick.id = "tick"; tick.type = "OnTick"; tick.x = 0; tick.y = 0;
+        tick.pins.push_back({"exec", "exec", true, ""});
+        g.nodes.push_back(tick);
+        fmt::OcGraphNode add;
+        add.id = "add"; add.type = "Add"; add.x = 200; add.y = 0;
+        add.pins.push_back({"a", "float", false, ""});
+        add.pins.push_back({"b", "float", false, ""});
+        add.pins.push_back({"result", "float", true, ""});
+        g.nodes.push_back(add);
+        GraphLinkCheck r = canConnectPins(g, "tick", "exec", "add", "a");
+        check(!r.ok && r.reason == GraphLinkReject::TypeMismatch,
+              "an exec output cannot connect to a float input (exec-to-data is refused)");
+
+        // Data-to-exec, with both ends correctly an output and an input respectively (so this isolates
+        // TYPE as the only reason it fails, not directionality): add.result (float, output) into an
+        // exec INPUT pin.
+        fmt::OcGraphNode seq;
+        seq.id = "seq"; seq.type = "Sequence"; seq.x = 400; seq.y = 0;
+        seq.pins.push_back({"exec", "exec", false, ""});
+        g.nodes.push_back(seq);
+        GraphLinkCheck r2 = canConnectPins(g, "add", "result", "seq", "exec");
+        check(!r2.ok && r2.reason == GraphLinkReject::TypeMismatch,
+              "a float output cannot connect to an exec input (data-to-exec is refused)");
     }
 }
 

@@ -324,6 +324,114 @@ static void testMalformedInput() {
     }
 }
 
+// Tests the exec/flow addition: a link can be an EXEC link (control flow) rather than a data link --
+// purely by both pins it connects being type "exec", requiring no new field on OcGraphLink -- and a
+// node can be marked as an event ENTRY point. Covers the round trip (write -> parse -> write must be
+// byte-identical, matching testRoundTrip's own standard above) and the backward-compatibility claim:
+// an OLD graph with no exec pins and no ENTRY records parses and writes exactly as it did before this
+// feature existed, because entryPoints stays empty and nothing about parsing a plain float/int/bool
+// pin changed one bit.
+static void testExecLinksAndEntryPoints() {
+    AVER_INFO("=== .ocgraph exec links and ENTRY points ===");
+    using namespace fmt;
+
+    OcGraphData g;
+    g.version = 1;
+    g.name = "FlowRoundTrip";
+
+    OcGraphNode onTick;
+    onTick.id = "tick"; onTick.type = "OnTick"; onTick.x = 0; onTick.y = 0;
+    onTick.pins.push_back({"exec", "exec", true, ""});
+    g.nodes.push_back(onTick);
+
+    OcGraphNode branch;
+    branch.id = "b"; branch.type = "Branch"; branch.x = 200; branch.y = 0;
+    branch.pins.push_back({"exec", "exec", false, ""});
+    branch.pins.push_back({"cond", "bool", false, ""});
+    branch.pins.push_back({"true", "exec", true, ""});
+    branch.pins.push_back({"false", "exec", true, ""});
+    g.nodes.push_back(branch);
+
+    OcGraphNode setOnTrue;
+    setOnTrue.id = "st"; setOnTrue.type = "SetField"; setOnTrue.x = 400; setOnTrue.y = -40;
+    setOnTrue.pins.push_back({"exec", "exec", false, ""});
+    setOnTrue.pins.push_back({"entity", "int", false, ""});
+    setOnTrue.pins.push_back({"value", "float", false, ""});
+    setOnTrue.pins.push_back({"then", "exec", true, ""});
+    g.nodes.push_back(setOnTrue);
+
+    // The exec link -- output pin "exec" (type exec) on `tick`, feeding input pin "exec" (type exec)
+    // on `b`. Nothing on OcGraphLink itself says "this one is exec"; it IS one purely because both
+    // pins it names are exec-typed. A DATA link (below) has exactly the same shape in the struct.
+    g.links.push_back({"tick", "exec", "b", "exec"});
+    g.links.push_back({"b", "true", "st", "exec"});
+
+    OcGraphNode cnd;
+    cnd.id = "c"; cnd.type = "ConstBool"; cnd.x = 200; cnd.y = 100;
+    cnd.pins.push_back({"value", "bool", true, "true"});
+    g.nodes.push_back(cnd);
+    g.links.push_back({"c", "value", "b", "cond"}); // an ordinary DATA link, same struct, different pin types
+
+    g.entryPoints.emplace_back("tick", "OnTick");
+
+    const std::string text1 = writeOcgraph(g);
+    check(!text1.empty(), "write produces non-empty text for a graph with exec links and an ENTRY record");
+    check(text1.find("ENTRY tick OnTick") != std::string::npos, "the ENTRY record is written");
+    check(text1.find("PIN tick exec out exec") != std::string::npos, "an exec-typed PIN line is written exactly like any other typed pin");
+    check(text1.find("LINK tick.exec b.exec") != std::string::npos, "the exec LINK is written exactly like a data LINK -- same record, same grammar");
+
+    OcGraphData g2;
+    std::string err;
+    check(parseOcgraph(text1, g2, &err), "a graph with exec pins and an ENTRY record parses: " + err);
+    check(g2.entryPoints.size() == 1, "one ENTRY point round-tripped");
+    if (g2.entryPoints.size() == 1) {
+        check(g2.entryPoints[0].first == "tick" && g2.entryPoints[0].second == "OnTick",
+              "the ENTRY point names the right node and event");
+    }
+
+    const std::string text2 = writeOcgraph(g2);
+    check(text1 == text2, "second write of the parsed exec/entry graph reproduces the first byte for byte");
+
+    // ENTRY validation: a record naming a node that does not exist is refused, the same way OUT
+    // already is (modules/formats/src/OcGraph.cpp's OUT branch).
+    {
+        const std::string badEntry = "OCGRAPH 1\nNODE a Add 0 0\nENTRY ghost OnStart\n";
+        OcGraphData bad;
+        std::string badErr;
+        check(!parseOcgraph(badEntry, bad, &badErr), "ENTRY referencing a non-existent node is rejected");
+        check(badErr.find("ghost") != std::string::npos, "the ENTRY error names the bad node id");
+    }
+
+    // BACKWARD COMPATIBILITY, THE REGRESSION TEST THIS FEATURE MOST NEEDS. A graph that predates exec
+    // support entirely -- no exec pins, no ENTRY records, exactly the shape testRoundTrip above
+    // already builds -- must come out of the parser with an EMPTY entryPoints, and must write back
+    // byte-identically. If adding ENTRY/exec ever made an old file's bytes move even one byte, every
+    // .ocgraph already authored (Drone.ocgraph, cross_impl_test.ocgraph) would silently reformat the
+    // moment it was next saved.
+    {
+        const std::string oldStyle =
+            "OCGRAPH 1\n"
+            "NAME OldGraph\n"
+            "\n"
+            "NODE c1 ConstFloat 0 0\n"
+            "NODE sum Add 200 0\n"
+            "\n"
+            "PIN c1 value out float 5\n"
+            "PIN sum a in float\n"
+            "PIN sum result out float\n"
+            "\n"
+            "LINK c1.value sum.a\n"
+            "\n"
+            "OUT sum result\n";
+        OcGraphData old;
+        std::string oldErr;
+        check(parseOcgraph(oldStyle, old, &oldErr), "a pre-exec graph still parses: " + oldErr);
+        check(old.entryPoints.empty(), "a pre-exec graph has zero entry points -- nothing invented one");
+        const std::string oldRewritten = writeOcgraph(old, oldStyle);
+        check(oldRewritten == oldStyle, "a pre-exec graph round-trips byte-identically -- ENTRY never appears for a file that never had it");
+    }
+}
+
 // Tests that the test suite itself runs and reports properly.
 static void testMeta() {
     AVER_INFO("=== .ocgraph test suite metadata ===");
@@ -376,6 +484,38 @@ static fmt::OcGraphData crossFixtureGraph() {
     link("sum", "result", "prod", "a");
     link("c3", "value", "prod", "b");
     g.outputs.emplace_back("prod", "result");
+
+    // AND AN EXEC CHAIN, because a fixture that does not contain the newest feature cannot catch the
+    // newest divergence. This file exists for exactly one reason -- OcGraph.hpp records that the C++
+    // and C# readers once "agreed on nodes and links and silently disagreed about what a graph
+    // RETURNS" -- and when exec pins and ENTRY records were added, this fixture kept testing only the
+    // float dataflow that already worked. Every test of the new records was single-implementation:
+    // C++ wrote and C++ read it back, C# parsed text a human typed. The one thing neither proved is
+    // the thing this fixture is for.
+    //
+    // Sequence rather than Branch on purpose: Branch needs a Bool `cond`, and wiring one in would
+    // make this fixture also a test of default-value handling on an unconnected data pin, which is a
+    // different question and would muddy what a failure here means. Sequence has exec pins only.
+    //
+    // The dataflow above is untouched, so the C# side still evaluates this graph to 36 through the
+    // old Compile() path -- the exec chain rides alongside it and proves the two readers agree on the
+    // new records byte for byte, which is all it is here to do.
+    {
+        OcGraphNode tick; tick.id = "tick"; tick.type = "OnTick"; tick.x = 0;   tick.y = 400;
+        OcGraphPin  tickOut; tickOut.name = "exec"; tickOut.isOutput = true; tickOut.type = "exec";
+        tick.pins.push_back(tickOut);
+        g.nodes.push_back(tick);
+
+        OcGraphNode seq; seq.id = "seq"; seq.type = "Sequence"; seq.x = 200; seq.y = 400;
+        OcGraphPin  seqIn;  seqIn.name  = "exec"; seqIn.isOutput  = false; seqIn.type = "exec";
+        OcGraphPin  seqOut; seqOut.name = "then"; seqOut.isOutput = true;  seqOut.type = "exec";
+        seq.pins.push_back(seqIn);
+        seq.pins.push_back(seqOut);
+        g.nodes.push_back(seq);
+
+        link("tick", "exec", "seq", "exec");
+        g.entryPoints.emplace_back("tick", "OnTick");
+    }
     return g;
 }
 
@@ -472,6 +612,7 @@ int main(int argc, char** argv) {
     testUnknownRecords();
     testDeterministic();
     testMalformedInput();
+    testExecLinksAndEntryPoints();
     // The path is passed in by CMake, so the test does not have to guess the repo layout.
     testCrossFixtureCurrent(AVER_OCGRAPH_FIXTURE);
 

@@ -17,6 +17,17 @@ public enum PinType
     Float,
     Int,
     Bool,
+
+    // EXEC -- a control-flow pin, not a data pin. Written and parsed exactly like any other typed pin
+    // (`PIN node name in exec` / `PIN node name out exec`) -- see
+    // modules/formats/include/aver/formats/OcGraph.hpp's comment on OcGraphLink for the format-level
+    // reasoning. A LINK between two exec pins IS an exec link; there is no separate record for it, and
+    // no format change was needed to add it, because Validate()'s existing type-equality check
+    // (srcPin.Type != tgtPin.Type, below) already refuses to connect an exec pin to anything but
+    // another exec pin, for free, the moment this enum value exists. See GraphCompiler's own PUSH VS
+    // PULL comment for what an exec pin means to the COMPILER, as distinct from what it means here
+    // (just one more pin type a link can agree or disagree about).
+    Exec,
 }
 
 /// A single data input or output on a node.
@@ -93,6 +104,13 @@ public class Graph
     public List<(string NodeId, string PinName)> Outputs { get; set; } = new();
     public List<GraphParameter> Parameters { get; set; } = new();  // Declared via top-level PARAM records; empty means the compiled method takes no arguments, exactly as before this existed.
 
+    // Declared via top-level `ENTRY <nodeId> <eventName>` records -- which node begins the PUSH/exec
+    // chain for a named event (e.g. "OnStart", "OnTick"). Empty for every graph that predates this,
+    // exactly like Parameters was empty before PARAM existed -- see
+    // modules/formats/include/aver/formats/OcGraph.hpp's OcGraphData::entryPoints comment for the full
+    // backward-compatibility argument, which applies here unchanged.
+    public List<(string NodeId, string EventName)> EntryPoints { get; set; } = new();
+
     /// Validates the graph for consistency. Returns false if invalid; sets err to a message.
     /// Note: Comparison is case-sensitive for node IDs. If nodes are added as "1" and referenced as "1",
     /// they must match exactly. The C# parser uses string representations of integer IDs, and the C++ writer
@@ -162,6 +180,27 @@ public class Graph
             if (!paramNames.Add(p.Name))
             {
                 err = $"Duplicate PARAM declaration '{p.Name}'";
+                return false;
+            }
+        }
+
+        // Every ENTRY must name a real node, and two ENTRY records must not claim the same event --
+        // which node handles "OnTick" has to be unambiguous, the same reason two PARAM declarations
+        // can't share a name just above. The node named by ENTRY may be of ANY type (a Sequence, a
+        // SetField given exec pins by hand, even a plain data node with no exec pins at all, which
+        // then just runs once and continues nowhere) -- ENTRY says WHERE a chain starts, not what
+        // shape a starting node must have.
+        var seenEvents = new HashSet<string>();
+        foreach (var (entryNodeId, eventName) in EntryPoints)
+        {
+            if (!Nodes.ContainsKey(entryNodeId))
+            {
+                err = $"ENTRY '{eventName}' names unknown node '{entryNodeId}'";
+                return false;
+            }
+            if (!seenEvents.Add(eventName))
+            {
+                err = $"duplicate ENTRY for event '{eventName}' -- only one node may handle a given event";
                 return false;
             }
         }

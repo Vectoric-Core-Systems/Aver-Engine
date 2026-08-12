@@ -121,6 +121,17 @@ public class OcGraphParser
                     err = $"Unknown parameter type '{paramTypeName}'";
                     return false;
                 }
+                // A PARAM is a DATA argument the compiled method takes; "exec" describes control flow,
+                // which is never something a caller passes IN as a value. Rejected here, at parse
+                // time, rather than left to fail later as a confusing DeclareLocal(typeof(void))
+                // exception three layers into GraphCompiler once something tries to use it.
+                if (paramType == PinType.Exec)
+                {
+                    err = $"PARAM '{paramName}' cannot be declared exec -- PARAM is for data arguments a " +
+                          "graph reads with a 'param' node; an exec entry point is declared with " +
+                          "ENTRY <nodeId> <eventName> instead";
+                    return false;
+                }
 
                 graph.Parameters.Add(new GraphParameter { Name = paramName, Type = paramType });
             }
@@ -374,6 +385,27 @@ public class OcGraphParser
                 string pinName = tokens[2];
                 graph.Outputs.Add((nodeId, pinName));
             }
+            else if (key.Equals("ENTRY", StringComparison.OrdinalIgnoreCase))
+            {
+                // ENTRY <nodeId> <eventName> -- declares which node begins the PUSH/exec chain for a
+                // named event (e.g. "OnStart", "OnTick"). Purely additive, exactly like PARAM above:
+                // an .ocgraph written before this existed has no ENTRY records, graph.EntryPoints
+                // stays empty, and GraphCompiler.Compile() (the PULL/dataflow-only path) runs exactly
+                // as it always has -- CompileEntryPoint() is a SEPARATE method nothing calls unless a
+                // caller asks for a specific event by name. The node named here can be ANY node type;
+                // ENTRY only says WHERE to start walking the exec graph, not what kind of node is
+                // allowed to start it -- adding a future event (e.g. "OnCollide") is one more ENTRY
+                // record naming a different node, with NO format change, exactly the extensibility
+                // the task asked for. Existence of the node and event-name uniqueness are both
+                // checked by Graph.Validate() below, not here -- the same division PARAM/Param-node
+                // checks already follow.
+                if (tokens.Count < 3)
+                {
+                    err = "ENTRY requires a node id and an event name";
+                    return false;
+                }
+                graph.EntryPoints.Add((tokens[1], tokens[2]));
+            }
             // Unknown records are silently skipped (not failed)
         }
 
@@ -473,6 +505,85 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // ---- flow / exec nodes -------------------------------------------------------------
+            // Pin shapes here MUST match sandbox/src/GraphNodeDefs.hpp's catalog entries for the same
+            // types EXACTLY (same names, same order for the exec-output pins the compiler fans out in
+            // pin order). A node spawned in the editor gets these pins written into the file as real
+            // PIN records -- see GraphNodeDefs.hpp's own header comment on why this table exists and
+            // GraphEditor.cpp's "add node" popup, which copies its pins verbatim -- and once a node
+            // has ANY explicit pins, AddDefaultPins is skipped entirely for it (the early-return just
+            // above this switch). So if this list and that C++ table ever disagree, an editor-authored
+            // graph silently gets one shape and a hand-written or C#-only graph gets another, which is
+            // exactly the "two implementations agree by coincidence" trap OcGraph.hpp's own `outputs`
+            // comment warns about.
+            case "branch":
+                // A bool condition and one incoming exec pulse; two outgoing exec pins, exactly one
+                // of which fires. "tookTrue" is OPT-IN OBSERVABILITY, not part of the control-flow
+                // contract -- see GraphCompiler.EmitBranch's own comment for why an exec chain needs
+                // a channel like this to be provable in a test without a live native scene to write
+                // into and read back.
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "cond", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "true", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "false", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "tookTrue", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "sequence":
+                // Two exec outputs by default ("then0" then "then1", fired in that order); add more
+                // via explicit PIN records to widen it -- the compiler reads however many exec-output
+                // pins the node actually has, in node.Pins order, and needs no special case to do it
+                // (see GraphCompiler.EmitExecFanOut). "fireLog" is opt-in observability, like
+                // branch's "tookTrue".
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then0", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then1", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "fireLog", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "while":
+                // "cond" is re-pulled fresh every pass (see GraphCompiler's PUSH VS PULL comment for
+                // why that rules out the old cached-local approach); "iterations" counts completed
+                // passes and survives to be read after the loop -- both a genuinely useful runtime
+                // value and this node's guard-tripped test's proof that the cap actually bites.
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "cond", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "loop", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "done", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "iterations", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "foreach":
+                // The COUNTED-REPEAT variant, not a per-element iterator: the format has no
+                // array/collection pin type yet (only float/int/bool/exec), so "for each element of a
+                // list" cannot be expressed today. `count` says how many times to run; `index` is the
+                // current pass (0..count-1, readable both inside the loop body and, holding its final
+                // value, after it) -- see GraphCompiler.EmitForEach's own comment for the honest
+                // "left rough for phase 2" note on this.
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "count", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "loop", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "index", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "done", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "onstart":
+                // No inputs at all -- an ENTRY record is what makes this node run, once, at the start
+                // of the graph's life. Reads any PARAM it needs (there usually are none for OnStart)
+                // the same way any other node does.
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "ontick":
+                // Also no inputs of its own -- per-tick data (delta time, in particular) is NOT a
+                // special pin on this node type. It is an ordinary PARAM the graph declares (e.g.
+                // `PARAM deltaTime float`) and reads with a `param` node inside the chain, the exact
+                // same plumbing every dataflow graph already uses for `time`/`entity`. That keeps
+                // "what OnTick receives" a property of the graph's own PARAM list -- inspectable and
+                // extensible with no new node type -- rather than baked into this node's shape.
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 break;
 
             case "param":
