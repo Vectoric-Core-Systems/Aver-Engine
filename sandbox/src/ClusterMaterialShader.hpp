@@ -1,5 +1,6 @@
 #pragma once
-// The pixel shader for the GPU per-cluster mesh-shader path, with materials.
+// The pixel shader for the GPU per-cluster mesh-shader path, with materials, and (Stage 3, when
+// AVER_MODULE_VOXI is compiled in) real shadows and real GI.
 //
 // WHY THIS IS NOT IN THE SHARED PRELUDE, where its predecessor lived. rhi::sharedShaderPrelude()
 // is compiled FIRST, before pbr::materialShaderPrelude(), so anything written inside it cannot call
@@ -12,26 +13,37 @@
 // which is the composition order PbrShaders.hpp documents and the one Voxi already uses for
 // VoxiShaders.hpp.
 //
-// WHAT IT DELIBERATELY DOES NOT DO. No shadow-map lookup and no GI cone trace: sun.visibility is
-// 1.0 and the indirect diffuse term is zero. Those live in Voxi's own SRV table, and this pipeline
-// binds the cluster buffers in table 0 and the material textures in table 1 -- both tables the RHI
-// has. Reaching Voxi's volume and cascade atlas as well would need a third, which
-// rhi::kBindingTableCount does not offer. The result is textured, sun-lit, sky-ambient foliage:
-// correct in albedo and correct in direct light, but unshadowed. That is a large step up from black
-// and still NOT parity with the ordinary path -- see the header comment on lodMeshShaderEnabled_.
+// WHAT IT DELIBERATELY DOES NOT DO, STILL, EVEN AFTER STAGE 3. No ray tracing, ever -- shadowFactor()
+// and coneTracedIndirect() (borrowed from Voxi via VoxiGiShaders.hpp's giShaderPrelude(), merged
+// into this pipeline's own table 0 rather than needing a third -- see D3D12Device.cpp's nullFill for
+// why that merge is D3D12 only) are Voxi's OWN non-ray-traced fallback path, the same one PSMainVoxi
+// itself runs when ray tracing is off or its acceleration structure is not built. On a project that
+// DOES have ray tracing on, ordinary draws get ray-traced shadows/reflections and cluster-path draws
+// still get the cascade map and the voxel cone -- a real, visible difference, not merely an
+// unmeasured one. And without AVER_MODULE_VOXI compiled in at all, this file still has no shadow
+// lookup and no GI cone trace to fall back on: sun.visibility is 1.0 and the indirect diffuse term
+// is zero, exactly Stage 2's neutral stand-in. Either way, the result is textured, sun-lit, sky-
+// ambient foliage that is closer to the ordinary path than Stage 2 left it, and still NOT full
+// parity with it -- see the header comment on lodMeshShaderEnabled_.
 #include <string_view>
 
 namespace aver::sandbox {
 
-// Compiled as: rhi::sharedShaderPrelude() + pbr::materialShaderPrelude() + this.
-// Every symbol used below comes from one of those two, and none of them sit behind a feature
-// macro: averSunRadiance/averSkyIrradiance/skyColor/averApplyFog and VSOut are unguarded in the
-// shared prelude, the aver* material entry points are unguarded in the material prelude.
+// Compiled as: rhi::sharedShaderPrelude() + pbr::materialShaderPrelude() +
+// (voxi::giShaderPrelude(), only when AVER_MODULE_VOXI) + this. Every symbol used below comes from
+// one of those, and none of them sit behind a feature macro of their own: averSunRadiance/
+// averSkyIrradiance/skyColor/averApplyFog and VSOut are unguarded in the shared prelude, the aver*
+// material entry points are unguarded in the material prelude, and shadowFactor()/
+// coneTracedIndirect() are unguarded in Voxi's borrowed one -- AVER_CLUSTER_VOXI below is what
+// SandboxApp.cpp defines only when that third prelude was actually appended, so this file is the
+// one place that decides whether to call them at all.
 inline constexpr std::string_view kClusterMaterialPS = R"HLSL(
 // ================= per-cluster mesh-shader path: the lit pixel shader =================
 //
 // The same shading sequence PSMainVoxi runs -- averEvalMaterial, then direct, then indirect, then
-// fog -- with the two terms this pipeline cannot reach held at their neutral values.
+// fog. With AVER_CLUSTER_VOXI, sun.visibility and the indirect diffuse term come from the SAME
+// shadowFactor()/coneTracedIndirect() calls PSMainVoxi's own non-ray-traced fallback makes; without
+// it (no Voxi module compiled in), both stay the neutral values Stage 2 shipped.
 float4 PSClusterMain(VSOut i) : SV_TARGET {
     AverVertex vtx = averVertexOf(i);
     // AVER_CLUSTER_PS_DEBUG isolates one term at a time when this path renders wrong. It stays
@@ -144,9 +156,22 @@ float4 PSClusterMain(VSOut i) : SV_TARGET {
     AverLight sun;
     sun.direction  = normalize(gLightDir.xyz);
     sun.radiance   = averSunRadiance();
+#if AVER_CLUSTER_VOXI
+    // THE REAL SHADOW LOOKUP: Voxi's own shadowFactor(), borrowed via VoxiGiShaders.hpp at whatever
+    // base register ensureLodMeshPipeline's merge gave it (see its register-map comment). Bias uses
+    // vtx.N -- the geometric normal AverVertex already resolved (normalized, and flipped for
+    // two-sided shading; see averVertexOf's own comment) -- rather than the SHADING normal computed
+    // below from averEvalMaterial, because shadowFactor's bias offsets along the surface the shadow
+    // map was rendered against, not the normal-mapped one. gShadowParams.y (no atlas yet / shadows
+    // off) and running out of cascades both degrade shadowFactor() to 1.0 internally -- this call
+    // never needs to re-check either.
+    sun.visibility = shadowFactor(vtx.wpos, vtx.N, saturate(dot(vtx.N, sun.direction)));
+#else
     // NO SHADOW MAP ON THIS PATH. 1.0 means "fully lit", which is what the old one-liner passed
-    // too -- the black foliage was never a shadow problem, it was a missing albedo.
+    // too -- the black foliage was never a shadow problem, it was a missing albedo. True whenever
+    // this file was compiled without Voxi's GI/shadow prelude appended (AVER_MODULE_VOXI off).
     sun.visibility = 1.0;
+#endif
 
     AverSurface s = averEvalMaterial(vtx, sun);
 
@@ -161,11 +186,26 @@ float4 PSClusterMain(VSOut i) : SV_TARGET {
     AverIndirect ind;
     ind.ambient      = averSkyIrradiance(N);
     ind.ambientScale = gAmbient.r;
+#if AVER_CLUSTER_VOXI
+    // THE REAL GI CONE TRACE: Voxi's own coneTracedIndirect(), gated on gVoxelParams.w exactly the
+    // way PSMainVoxi's own call site gates it (coneTracedIndirect itself does not check) -- so a
+    // volume that has not been built yet, or GI that is off in settings, degrades to the SAME
+    // sky-irradiance-only look this path already had before Stage 3, not to a black or garbage one.
+    if (gVoxelParams.w > 0.5) {
+        float ao;
+        ind.diffuse   = coneTracedIndirect(vtx.wpos, N, ao);
+        ind.occlusion = ao;
+    } else {
+        ind.diffuse   = float3(0, 0, 0);
+        ind.occlusion = 1.0;
+    }
+#else
     // NO VOXEL CONE TRACE. Zero rather than an invented approximation: a wrong indirect term is
     // harder to spot than a missing one, and the sky irradiance above already keeps shadowed sides
-    // from going black.
+    // from going black. True whenever this file was compiled without Voxi's prelude appended.
     ind.diffuse      = float3(0, 0, 0);
     ind.occlusion    = 1.0;
+#endif
     ind.specular     = skyColor(reflect(-V, N));
 
     float3 radiance = 0.0;

@@ -59,8 +59,25 @@
 #include "ClusterMaterialShader.hpp"
 
 // The material sampler register on the cluster pipeline. materialShaderDefines() is told the same
-// number. s0 here rather than Voxi's s2 because this layout declares no volume or shadow sampler.
+// number. s0, unconditionally: Voxi's own volume/shadow samplers (below) start at s1 instead of
+// reusing Voxi's own s0/s1, so this slot never has to move depending on whether AVER_MODULE_VOXI
+// is compiled in.
 namespace { constexpr aver::u32 kClusterMaterialSamplerSlot = 0; }
+#if AVER_MODULE_VOXI
+// Stage 3: where the GPU per-cluster pipeline's table 0 puts Voxi's MERGED GI/shadow resources,
+// relative to the 4 cluster-geometry SRVs (t0..t3) that are always there. See
+// ensureLodMeshPipeline's own layout comment for the full register map, and
+// modules/render.voxi/include/aver/voxi/VoxiGiShaders.hpp for what these three numbers feed.
+namespace {
+constexpr aver::u32 kClusterGiSrvBase       = 4;   // t4 the GI volume, t5 the shadow map
+constexpr aver::u32 kClusterGiSamplerBase   = 1;   // s1 volume (linear-clamp), s2 shadow (comparison)
+// b3, NOT kFeatureFrameConstantRegister (b4): the amplification/mesh shader half of this SAME
+// pipeline already owns b4 for ClusterFrameCB (budget/frustum), and a root signature has exactly
+// one cbuffer per register regardless of which stage declares it. b3 is unclaimed by anything else
+// this layout declares -- see ensureLodMeshPipeline's constantDwords[3] assignment.
+constexpr aver::u32 kClusterGiFrameRegister = 3;
+}
+#endif
 #include "ToolsMenu.hpp"
 #include "UiRegistry.hpp"
 
@@ -85,6 +102,9 @@ namespace { constexpr aver::u32 kClusterMaterialSamplerSlot = 0; }
 #if AVER_MODULE_VOXI
 #include "aver/voxi/Voxi.hpp"
 #include "aver/voxi/VoxiRenderer.hpp"
+// Stage 3: the narrow GI/shadow HLSL slice the GPU per-cluster pipeline composes into
+// ClusterMaterialShader.hpp's PSClusterMain. See its own header comment for what this is and is not.
+#include "aver/voxi/VoxiGiShaders.hpp"
 #endif
 
 #if AVER_MODULE_PBR
@@ -692,19 +712,53 @@ public:
         // Foliage on this path is textured, sun-lit and sky-ambient, and was compared side by side
         // against the ordinary path at the same camera to confirm it.
         //
-        // IT IS STILL NOT PARITY, which is why the default stays off and the warning below stays a
-        // warning: this pipeline binds the cluster buffers in table 0 and the material in table 1,
-        // and rhi::kBindingTableCount offers no third for Voxi's shadow cascades and GI volume. So
-        // draws on this path cast and receive no shadows and take no bounce light -- leaves turned
-        // away from the sun fall back to sky irradiance alone and read darker than they should.
+        // STAGE 3 THEN GAVE IT SHADOWS AND GI TOO (still opt-in, still not the default): Voxi's
+        // GI volume and shadow map are MERGED into this pipeline's own table 0 -- see
+        // ensureLodMeshPipeline's register-map comment and D3D12Device.cpp's nullFill for why that
+        // merge, rather than a third binding table, is what rhi::kBindingTableCount staying 2 buys
+        // -- and PSClusterMain (ClusterMaterialShader.hpp) now runs the SAME shadowFactor()/
+        // coneTracedIndirect() calls PSMainVoxi's own non-ray-traced fallback does, through
+        // VoxiGiShaders.hpp's borrowed prelude.
+        //
+        // IT IS STILL NOT PARITY, which is why the default stays off. What is still missing, said
+        // plainly rather than left to be discovered: NO RAY TRACING on this path, ever, even on a
+        // project with ray tracing turned on -- shadows and reflections here are always the cascade
+        // map and the voxel cone, Voxi's own fallback for when ray tracing is off. A project running
+        // WITH ray tracing therefore gets a visibly different (softer, un-reflective) result on
+        // cluster-path draws than on ordinary ones in the SAME frame. D3D12 ONLY, also unconditional:
+        // see D3D12Device.cpp's nullFill for the pre-existing Vulkan defect this merge depends on
+        // this backend not having. And a build without AVER_MODULE_VOXI gets none of this stage at
+        // all -- see the two AVER_WARN branches below, which say which case is true out loud.
         lodMeshShaderEnabled_ = lodMeshShaderRequest_ > 0;
         if (lodMeshShaderEnabled_) {
             const rhi::DeviceCaps mcaps = e.device()->caps();
-            const bool ok = mcaps.meshShaderTier > 0 && mcaps.shaderModel >= 65 && mcaps.dxcAvailable;
+            // AND D3D12, WHICH THE COMMENT ABOVE ALREADY PROMISED AND THE CODE DID NOT KEEP.
+            // Voxi's merge into this pipeline's table 0 puts a Texture3D, an acceleration structure
+            // and structured buffers in a table that Vulkan's descriptorLayout()
+            // (modules/rhi.vulkan/src/VulkanPipeline.cpp) still builds as if every table-0 slot were
+            // a Texture2D -- a defect that predates this merge and is out of its scope to fix, but
+            // one this path would walk straight into. meshShaderTier is NOT a proxy for the backend:
+            // VulkanDevice sets it from VK_EXT_mesh_shader, so a Vulkan device with mesh shaders
+            // passed every test here and selected the merged layout anyway.
+            const bool ok = mcaps.meshShaderTier > 0 && mcaps.shaderModel >= 65 && mcaps.dxcAvailable
+#if AVER_MODULE_VOXI
+                            && e.device()->backend() == rhi::Backend::D3D12
+#endif
+                            ;
             lodMeshShaderEnabled_ = ok;
-            if (ok) AVER_WARN("[LOD] per-cluster mesh-shader path ON by request (mesh tier {}, SM {}) "
-                              "-- faster and textured, but NO SHADOWS AND NO GI on these draws",
-                              mcaps.meshShaderTier, mcaps.shaderModel);
+            if (ok) {
+#if AVER_MODULE_VOXI
+                AVER_WARN("[LOD] per-cluster mesh-shader path ON by request (mesh tier {}, SM {}) "
+                          "-- faster and textured, WITH cascade shadows and voxel-cone GI, but NEVER "
+                          "ray traced even when the project has ray tracing on",
+                          mcaps.meshShaderTier, mcaps.shaderModel);
+#else
+                AVER_WARN("[LOD] per-cluster mesh-shader path ON by request (mesh tier {}, SM {}) "
+                          "-- faster and textured, but NO SHADOWS AND NO GI on these draws (built "
+                          "without AVER_MODULE_VOXI)",
+                          mcaps.meshShaderTier, mcaps.shaderModel);
+#endif
+            }
             else    AVER_INFO("[LOD] per-cluster mesh-shader path unavailable (mesh tier {}, SM {}, "
                               "DXC {}); drawing without it", mcaps.meshShaderTier, mcaps.shaderModel,
                               mcaps.dxcAvailable);
@@ -1834,12 +1888,44 @@ public:
                                 bsd.srvCount = 4;
                                 bsd.srvKinds[0] = bsd.srvKinds[1] = bsd.srvKinds[2] = bsd.srvKinds[3] =
                                     rhi::SlotKind::StructuredBuffer;
+#if AVER_MODULE_VOXI
+                                // STAGE 3: this SAME set is table 0, so it also carries Voxi's merged
+                                // GI/shadow slots at kClusterGiSrvBase.. -- see
+                                // ensureLodMeshPipeline's register-map comment for the full layout.
+                                // Declared here with EXACTLY giLayout()'s own kinds (VoxiRenderer.cpp)
+                                // so this mesh's table 0 has the identical shape Voxi's own table 0
+                                // has, just based four registers higher; the CONTENT (which texture,
+                                // which buffer) is written later, not at mesh-load time -- see the
+                                // per-frame sync next to lodMeshShaderEnabled_'s entity-loop check,
+                                // which is what keeps this current across a live GI-quality or
+                                // shadow-resolution change instead of freezing whatever was bound the
+                                // moment this mesh's cluster data uploaded.
+                                bsd.srvCount = kClusterGiSrvBase + voxi::kGiSrvCount;   // 4 + 9 = 13
+                                bsd.srvKinds[kClusterGiSrvBase + 0] = rhi::SlotKind::Texture3D;           // t4 GI volume
+                                bsd.srvKinds[kClusterGiSrvBase + 1] = rhi::SlotKind::Texture2D;           // t5 shadow map
+                                bsd.srvKinds[kClusterGiSrvBase + 2] = rhi::SlotKind::AccelerationStructure; // t6 TLAS
+                                bsd.srvKinds[kClusterGiSrvBase + 3] = rhi::SlotKind::StructuredBuffer;    // t7 RT verts
+                                bsd.srvKinds[kClusterGiSrvBase + 4] = rhi::SlotKind::StructuredBuffer;    // t8 RT indices
+                                bsd.srvKinds[kClusterGiSrvBase + 5] = rhi::SlotKind::StructuredBuffer;    // t9 RT instances
+                                bsd.srvKinds[kClusterGiSrvBase + 6] = rhi::SlotKind::Texture2D;           // t10 RT shadow hist
+                                bsd.srvKinds[kClusterGiSrvBase + 7] = rhi::SlotKind::Texture2D;           // t11 RT refl hist
+                                bsd.srvKinds[kClusterGiSrvBase + 8] = rhi::SlotKind::Texture2D;           // t12 GI-only shadow
+                                bsd.uavCount = voxi::kGiUavCount;
+                                bsd.uavKinds[0] = rhi::SlotKind::Texture3D;   // u0 volume mip 0
+                                bsd.uavKinds[1] = rhi::SlotKind::Texture3D;   // u1 injection accumulator
+                                bsd.uavKinds[2] = rhi::SlotKind::Texture2D;   // u2 RT shadow hist (write)
+                                bsd.uavKinds[3] = rhi::SlotKind::Texture2D;   // u3 RT refl hist (write)
+#endif
                                 gpu.bindingSet = res->createBindingSet(bsd);
                                 if (gpu.bindingSet) {
                                     res->setSrvBuffer(gpu.bindingSet, 0, gpu.bounds, sizeof(trifactor::MeshClusterView), (u32)gpuBounds.size());
                                     res->setSrvBuffer(gpu.bindingSet, 1, gpu.desc,   sizeof(trifactor::GpuMeshletDesc),  (u32)gpuDesc.size());
                                     res->setSrvBuffer(gpu.bindingSet, 2, gpu.verts,  sizeof(u32), (u32)gpuVerts.size());
                                     res->setSrvBuffer(gpu.bindingSet, 3, gpu.tris,   sizeof(u32), (u32)gpuTris.size());
+                                    // Voxi's slots (t4/t5, kClusterGiSrvBase..) are NOT populated
+                                    // here -- see the per-frame sync's own comment on why binding
+                                    // them once at upload time is the wrong lifetime for a texture
+                                    // that can be resized or recreated at any later frame.
                                     meshClusterGpu_[id] = gpu;
                                 } else {
                                     AVER_WARN("[LOD-MESH-SHADER] '{}' binding set failed; this mesh falls back to the CPU per-cluster path", rel);
@@ -1908,28 +1994,69 @@ public:
         // TABLE 1 IS THE MATERIAL, and adding it is what stops this path drawing black. The pixel
         // shader now evaluates a real surface, so it needs the material system's textures bound
         // somewhere -- and srvCount1 is the second table the RHI already offers, based immediately
-        // above the first at t4.
+        // above the first (at t4 without Voxi below, t13 with it).
         //
-        // NO THIRD TABLE IS NEEDED, which was the thing worth checking before writing any of this.
-        // rhi::kBindingTableCount is 2, and full parity with the ordinary path would want three sets
-        // at once: these cluster buffers, Voxi's GI volume and cascade atlas, and the material
-        // textures. It does NOT need three, because this pipeline deliberately does not sample
-        // Voxi's -- see ClusterMaterialShader.hpp on what that costs.
-        //
-        // The cluster buffers' own registers move from t4/t5 to t12/t13 as a consequence, and
-        // nothing has to be edited for that: rhi::meshGeometryDefines derives them from
-        // declaredSrvCount(layout), which is srvCount + srvCount1.
+        // NO THIRD TABLE IS NEEDED -- STAGE 3'S WHOLE POINT. Full parity with the ordinary path
+        // wants three sets at once: these cluster buffers, Voxi's GI volume and cascade atlas, and
+        // the material textures. rhi::kBindingTableCount is 2 and STAYS 2 (see D3D12Device.cpp's
+        // nullFill for why: the measured slot counts already fit table 0, and a third table would
+        // also cost Vulkan a descriptor set it is not guaranteed to have four of). So instead of
+        // opening one, Voxi's resources are MERGED into table 0 alongside the cluster buffers below;
+        // table 1 stays the material's alone, exactly as it was before this stage.
+#if AVER_MODULE_VOXI
+        // STAGE 3'S REGISTER MAP, established here BEFORE any of it is code -- an off-by-one in this
+        // comment would be a silent mis-sample, not a compile error, so this is what got checked
+        // against giLayout() (VoxiRenderer.cpp) and VoxiGiShaders.hpp before anything below was
+        // written:
+        //   t0..t3   cluster geometry (above, unchanged) -- ClusterBounds/ClusterMeshletDesc/verts/tris
+        //   t4       Voxi's GI volume  (kClusterGiSrvBase+0, Texture3D)  -- giShaderPrelude() reads it
+        //   t5       Voxi's shadow map (kClusterGiSrvBase+1, Texture2D)  -- giShaderPrelude() reads it
+        //   t6..t12  Voxi's TLAS / RT geometry table / RT history / GI-only shadow map -- RESERVED so
+        //            this table-0 union has EXACTLY giLayout()'s shape (kGiSrvCount = 9), but never
+        //            declared by giShaderPrelude(): this pipeline's pixel shader runs Voxi's non-ray-
+        //            traced fallback only and reads none of them. See VoxiGiShaders.hpp's own comment
+        //            on why over-provisioning here is deliberate, not an oversight.
+        //   t13..t20 material (table 1, srvCount1 = pbr::kMaterialSrvCount, now based at t13)
+        //   u0..u3   Voxi's volume-mip / accumulator / RT-history UAVs -- RESERVED, same reason as
+        //            t6..t12: this pixel shader never writes any of them.
+        //   s0       material sampler (kClusterMaterialSamplerSlot, unchanged)
+        //   s1       Voxi's volume sampler (kClusterGiSamplerBase+0, linear-clamp)
+        //   s2       Voxi's shadow sampler (kClusterGiSamplerBase+1, comparison-linear-clamp)
+        //   b1       PerObject (unchanged)
+        //   b3       VoxiFrame (kClusterGiFrameRegister) -- read by the pixel shader only
+        //   b4       ClusterFrameCB (kFeatureFrameConstantRegister, unchanged) -- read by AS/MS only;
+        //            see kClusterGiFrameRegister's own comment on why VoxiFrame could not share it
+        lodMeshLayout_.srvCount += voxi::kGiSrvCount;   // t4..t12
+        lodMeshLayout_.uavCount  = voxi::kGiUavCount;   // u0..u3, reserved; this PS never writes them
+#endif
         lodMeshLayout_.srvCount1 = pbr::kMaterialSrvCount;
         lodMeshLayout_.samplers[kClusterMaterialSamplerSlot].filter        = rhi::Filter::Anisotropic;
         lodMeshLayout_.samplers[kClusterMaterialSamplerSlot].address       = rhi::AddressMode::Wrap;
         lodMeshLayout_.samplers[kClusterMaterialSamplerSlot].maxAnisotropy = 8;
         lodMeshLayout_.samplerCount = kClusterMaterialSamplerSlot + 1;
+#if AVER_MODULE_VOXI
+        // Voxi's own two samplers, at kClusterGiSamplerBase -- the SAME filter/address/compare
+        // values giSamplers() (VoxiRenderer.cpp) gives its own s0/s1, just moved up because s0 here
+        // is already the material's.
+        lodMeshLayout_.samplers[kClusterGiSamplerBase + 0].filter  = rhi::Filter::Linear;
+        lodMeshLayout_.samplers[kClusterGiSamplerBase + 0].address = rhi::AddressMode::Clamp;
+        lodMeshLayout_.samplers[kClusterGiSamplerBase + 1].filter  = rhi::Filter::ComparisonLinear;
+        lodMeshLayout_.samplers[kClusterGiSamplerBase + 1].address = rhi::AddressMode::Clamp;
+        lodMeshLayout_.samplers[kClusterGiSamplerBase + 1].compare = rhi::CompareOp::LessEqual;
+        lodMeshLayout_.samplerCount = kClusterGiSamplerBase + 2;   // 3: material(0), volume(1), shadow(2)
+#endif
         // b1 (PerObject): the SAME 32-dword root-constants shape drawMesh() itself uses, so the
         // cluster shaders read real gWorld/gBaseColor/gMaterial. b4 (kFeatureFrameConstantRegister):
         // a root CBV, exactly the register the shared convention reserves for "a feature's own
-        // per-frame/per-draw data" -- see RHIResources.hpp's own comment on it.
+        // per-frame/per-draw data" -- see RHIResources.hpp's own comment on it. Read by AS/MS
+        // (ClusterFrameCB) only; the pixel shader below never touches it.
         lodMeshLayout_.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
         lodMeshLayout_.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;
+#if AVER_MODULE_VOXI
+        // b3: VoxiFrame, a root CBV the pixel shader alone reads -- see kClusterGiFrameRegister's
+        // own comment on why this cannot share ClusterFrameCB's b4.
+        lodMeshLayout_.constantDwords[kClusterGiFrameRegister] = 0;
+#endif
 
         // AS and MS come from the shared prelude alone: they touch no material state. The PIXEL
         // shader does not -- see below.
@@ -1951,22 +2078,37 @@ public:
         lodMeshMsShader_ = res->createShader(msd);
 
         // THE PIXEL SHADER IS COMPOSED DIFFERENTLY FROM ITS AS/MS SIBLINGS, and that is the point of
-        // this whole change. It is compiled as shared prelude + MATERIAL prelude + its own source,
-        // which is the order PbrShaders.hpp documents and the order Voxi already uses. Its
-        // predecessor lived inside the shared prelude and therefore could not call averEvalMaterial
-        // at all -- the material functions are not declared until the next prelude along.
+        // this whole change. It is compiled as shared prelude + MATERIAL prelude (+ Voxi's GI/shadow
+        // prelude, Stage 3, when AVER_MODULE_VOXI is compiled in) + its own source -- the order
+        // PbrShaders.hpp documents, extended the same way Voxi's own pipeline extends it with its
+        // own HLSL (see voxiShaderPrelude() in VoxiRenderer.cpp). Its predecessor lived inside the
+        // shared prelude and therefore could not call averEvalMaterial at all -- the material
+        // functions are not declared until the next prelude along.
         //
         // AVER_MS_CLUSTER is deliberately NOT defined for it: it needs neither the cluster buffers
         // nor the AS/MS entry points, only VSOut, which is unguarded.
+#if AVER_MODULE_VOXI
+        static const std::string kClusterPsPrelude =
+            std::string(rhi::sharedShaderPrelude()) + pbr::materialShaderPrelude() + voxi::giShaderPrelude();
+#else
         static const std::string kClusterPsPrelude =
             std::string(rhi::sharedShaderPrelude()) + pbr::materialShaderPrelude();
-        // Based at THIS layout's own srvCount, so the material textures land in table 1 at t4 --
-        // the same call Voxi makes against giLayout(), just with this layout's numbers.
-        // AVER_CLUSTER_PS_DEBUG=0 is the real shader; 1..3 isolate one input each when this path
+#endif
+        // Based at THIS layout's own srvCount, so the material textures land in table 1 wherever
+        // Stage 3's merge actually put it (t13 with Voxi compiled in, t4 without) -- the same call
+        // Voxi makes against giLayout(), just with this layout's own number.
+        // AVER_CLUSTER_PS_DEBUG=0 is the real shader; 1..7 isolate one input each when this path
         // renders wrong. See ClusterMaterialShader.hpp for what each one proved.
-        const std::string psDefs =
+        std::string psDefs =
             pbr::materialShaderDefines(lodMeshLayout_.srvCount, kClusterMaterialSamplerSlot) +
             ";AVER_CLUSTER_PS_DEBUG=0";
+#if AVER_MODULE_VOXI
+        // AVER_CLUSTER_VOXI=1 is what switches PSClusterMain from the neutral sun.visibility=1.0 /
+        // zero-indirect stand-in Stage 2 left it with to the real shadowFactor()/coneTracedIndirect()
+        // calls -- see ClusterMaterialShader.hpp's own #if AVER_CLUSTER_VOXI ladder.
+        psDefs += ";AVER_CLUSTER_VOXI=1;" +
+                  voxi::giShaderDefines(kClusterGiSrvBase, kClusterGiSamplerBase, kClusterGiFrameRegister);
+#endif
         static const std::string kClusterPsSource{sandbox::kClusterMaterialPS};
 
         rhi::ShaderDesc psd;
@@ -2194,6 +2336,23 @@ public:
                     }
                 }
             }
+#if AVER_MODULE_VOXI
+            // STAGE 3: re-samples Voxi's CURRENT gVoxelTex_/shadowTex_ handles into every cluster
+            // mesh's table-0 binding set BEFORE any entity is drawn through it this frame -- see
+            // VoxiRenderer::bindGiResources' own comment and the register map in
+            // ensureLodMeshPipeline. ONE PASS OVER meshClusterGpu_, not one call per entity: bounded
+            // by the number of DISTINCT meshes carrying GPU cluster data, not by how many instances
+            // of them are on screen, so it stays cheap with thousands of instances sharing a handful
+            // of meshes. This is also what keeps the merged tables correct across a LIVE GI-quality
+            // or shadow-resolution change: those recreate voxelTex_/shadowTex_ under fresh handles,
+            // and a binding written once at mesh-upload time would never see the new ones.
+            if (lodMeshShaderEnabled_ && lodMeshPipelineReady_) {
+                if (rhi::IResourceFactory* giRes = e.device()->resources())
+                    for (auto& kv : meshClusterGpu_)
+                        if (kv.second.bindingSet)
+                            voxiRenderer_.bindGiResources(*giRes, kv.second.bindingSet, kClusterGiSrvBase);
+            }
+#endif
 #endif
 
             // The six frustum planes, from the camera's viewProj. ENGINE convention: row-vector, so
@@ -2401,6 +2560,19 @@ public:
                             if (matSet) ctx->setDrawBinding(matSet, matConstants, matConstantBytes);
                             ctx->setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
                             ctx->setConstantBuffer(rhi::kFeatureFrameConstantRegister, &frameCb, sizeof(frameCb));
+#if AVER_MODULE_VOXI
+                            // b3: VoxiFrame, the SAME bytes Voxi's own scenePass binds at b4 for the
+                            // ordinary path this frame -- see kClusterGiFrameRegister's own comment
+                            // on why this path cannot reuse b4 itself. Bound every draw rather than
+                            // once per mesh (like the Voxi resource sync above): a root CBV pointer
+                            // set is cheap, and this keeps AVER_CLUSTER_VOXI's shadowFactor()/
+                            // coneTracedIndirect() reading this frame's cascades even if Voxi has not
+                            // finished init() yet (giFrameConstants() still returns a valid, if all-
+                            // zero, block in that case -- shadowFactor/coneTracedIndirect degrade the
+                            // same way Voxi's own gShadowParams.y/gVoxelParams.w checks do).
+                            ctx->setConstantBuffer(kClusterGiFrameRegister, voxiRenderer_.giFrameConstants(),
+                                                   voxiRenderer_.giFrameConstantBytes());
+#endif
                             ctx->dispatchMeshClusters(mesh, gpu.clusterCount);
                             dispatchMs += std::chrono::duration<f64, std::milli>(
                                 std::chrono::steady_clock::now() - tDis0).count();

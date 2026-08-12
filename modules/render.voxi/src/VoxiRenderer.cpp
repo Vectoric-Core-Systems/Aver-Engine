@@ -6,6 +6,7 @@
 #include "aver/core/Math.hpp"   // light-frustum fit: Vec3 / Mat4::lookAtLH
 #include "aver/pbr/MaterialSystem.hpp"
 #include "aver/pbr/PbrShaders.hpp"
+#include "aver/voxi/VoxiGiShaders.hpp"   // kGiSrvCount/kGiUavCount: the "typed twice" fix below
 
 #include "VoxiShaders.hpp"
 
@@ -91,11 +92,15 @@ rhi::PipelineLayout giLayout() {
     // The material table is BASED on this count rather than at a fixed register, so widening table 0
     // rebases it automatically.
     //
-    // THIS NUMBER IS TYPED TWICE. createVoxelVolume's BindingSetDesc::srvCount must match it exactly,
-    // and nothing at compile time ties the two together -- a mismatch is a descriptor-table error at
-    // draw time or an undefined read at t8, not a build failure. Both were raised 8 -> 9 together.
-    l.srvCount = 9;
-    l.uavCount = 4;              // u0 volume mip 0, u1 injection accumulator, u2 shadow history, u3 reflection history (this frame's)
+    // THIS NUMBER USED TO BE TYPED TWICE, as a bare "9" here and again in createVoxelVolume's
+    // BindingSetDesc::srvCount, with nothing at compile time tying the two together -- a mismatch
+    // would have been a descriptor-table error at draw time or an undefined read at t8, not a build
+    // failure (both were raised 8 -> 9 together, by hand). kGiSrvCount/kGiUavCount (VoxiGiShaders.hpp)
+    // exist so this is typed ONCE: that header is also what a caller merging Voxi's table 0 into its
+    // own (the GPU per-cluster path; see its own comment) reserves against, so Voxi's real shape and
+    // what a merged caller thinks Voxi's shape is cannot independently drift either.
+    l.srvCount = kGiSrvCount;
+    l.uavCount = kGiUavCount;   // u0 volume mip 0, u1 injection accumulator, u2 shadow history, u3 reflection history (this frame's)
     // Table 1: the material's textures. Based at t9, NOT t3 as this said until it was checked --
     // the root-signature builder accumulates srvBase across tables, so table 1 starts at whatever
     // srvCount above is. Anyone deriving a register number from the old comment got a wrong answer.
@@ -1651,10 +1656,11 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
 
     // Main table. Each slot declares its kind because Tier 1 hardware null-fills by dimension.
     rhi::BindingSetDesc bd;
-    // 9, matching giLayout()'s l.srvCount exactly -- see the note there: these two literals are the
-    // only thing keeping table 0 consistent, and nothing checks them against each other.
-    bd.srvCount = 9;
-    bd.uavCount = 4;
+    // kGiSrvCount/kGiUavCount, matching giLayout()'s l.srvCount/l.uavCount exactly -- see
+    // VoxiGiShaders.hpp's own comment: this used to be two independent literals ("9"/"4") that
+    // nothing checked agreed, and is now the same two constants both sites read.
+    bd.srvCount = kGiSrvCount;
+    bd.uavCount = kGiUavCount;
     bd.srvKinds[0] = rhi::SlotKind::Texture3D;              // t0 volume, whole chain
     bd.srvKinds[1] = rhi::SlotKind::Texture2D;              // t1 shadow map
     bd.srvKinds[2] = rhi::SlotKind::AccelerationStructure;  // t2 TLAS, filled once one exists
@@ -1713,6 +1719,31 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
         mipBindings_.push_back(s);
     }
     return true;
+}
+
+// THE MODULAR SEAM (Stage 3, GPU per-cluster shading parity): a caller that has merged Voxi's
+// table-0 union into a binding set IT owns (see VoxiGiShaders.hpp's own comment on why, and
+// SandboxApp.cpp's ensureLodMeshPipeline for the one real consumer) asks Voxi to populate the
+// slots it reserved, rather than reaching into voxelTex_/shadowTex_ itself -- Voxi stays the only
+// code that knows those handles are Texture3D/Texture2D or when they are still null, and the
+// caller never has to learn a cluster from this side either.
+//
+// ONLY THE TWO SLOTS giShaderPrelude() DECLARES A SYMBOL FOR: the GI volume at srvBase, the shadow
+// map at srvBase+1. The other kGiSrvCount-2 SRVs and every one of kGiUavCount's UAVs are part of
+// the SAME table-0 union (a caller's layout still reserves all of them, so its register numbers
+// past this pair land where giLayout()'s own do) but exist for Voxi's ray-traced/GI-only-shadow
+// state, which giShaderPrelude() never declares a register for -- there is nothing to bind there
+// because nothing will ever read it. `res` is passed in rather than read from res_ so this compiles
+// and is callable even from a caller that only has an rhi::IResourceFactory&, not a VoxiRenderer's
+// own device handle.
+void VoxiRenderer::bindGiResources(rhi::IResourceFactory& res, rhi::BindingSetHandle set, u32 srvBase) const {
+    // Guarded exactly like bindings_'s own population above: init() may not have finished, or the
+    // volume/shadow resolution may be mid-rebuild, and Tier 1's null-fill is a defined "reads as
+    // empty" for whichever of the two is not ready yet -- not a hazard, and not this function's
+    // problem to report. The caller finds out nothing shadowed/bounced this frame the same way it
+    // would from Voxi's own pipeline: gShadowParams.y and gVoxelParams.w, read inside the shader.
+    if (voxelTex_)  res.setSrv(set, srvBase + 0, voxelTex_, rhi::kAllMips);
+    if (shadowTex_) res.setSrv(set, srvBase + 1, shadowTex_);
 }
 
 // ---------------------------------------------------------------- pipelines

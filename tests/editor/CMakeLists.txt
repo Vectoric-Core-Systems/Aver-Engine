@@ -92,5 +92,14 @@ if(TARGET Aver.Render.PBR)
   target_include_directories(DumpClusterPs PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
   # PbrShaders.cpp lives in Aver.Render.PBR.Materials, not Aver.Render.PBR.
   target_link_libraries(DumpClusterPs PRIVATE Aver.RHI Aver.Render.PBR.Materials Aver.Render.PBR Aver.Core)
+  # STAGE 3: DumpClusterPs also prints the Voxi-merged composition -- see its own header comment --
+  # when this tree has Voxi to link against. Guarded the same way the whole executable already is,
+  # for the same reason: a build without the module has nothing for it to demonstrate. No explicit
+  # AVER_MODULE_VOXI=1 needed here: Aver.Render.Voxi.Renderer PUBLIC-links Aver.Render.Voxi, whose
+  # own PUBLIC compile definition already brings it (same transitive path sandbox/CMakeLists.txt's
+  # own comment on Sandbox's link line describes).
+  if(TARGET Aver.Render.Voxi.Renderer)
+    target_link_libraries(DumpClusterPs PRIVATE Aver.Render.Voxi.Renderer)
+  endif()
   set_target_properties(DumpClusterPs PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()

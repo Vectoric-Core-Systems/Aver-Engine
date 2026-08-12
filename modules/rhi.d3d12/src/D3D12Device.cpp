@@ -4170,6 +4170,19 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12ResourceFactory::gpuSlot(u32 index) const {
 
 // Writes a null view of the declared dimension into every slot of a set. Tier 1 hardware reads
 // undefined data from any descriptor in a bound table that was never written.
+//
+// PER-SLOT SlotKind IS WHAT MAKES A MIXED TABLE 0 POSSIBLE, and it is worth saying so here because
+// the other backend cannot make the same claim. Stage 3's GPU per-cluster path (SandboxApp.cpp's
+// ensureLodMeshPipeline) merges Voxi's table-0 union -- a Texture3D, an AccelerationStructure,
+// three StructuredBuffers, and four more Texture2Ds -- into ITS OWN table 0 alongside the cluster
+// geometry's StructuredBuffers, precisely BECAUSE this loop and setSrv/setUav elsewhere in this file
+// already switch on SlotKind per slot rather than assuming one shape for the whole table.
+// modules/rhi.vulkan/src/VulkanPipeline.cpp's descriptorLayout() does not: it assumes every table-0
+// slot is a Texture2D, which was already wrong for Voxi's own Texture3D/acceleration-structure/
+// structured-buffer slots before this change (a PRE-EXISTING defect, not introduced here, and not
+// fixed here -- that needs a per-slot SlotKind on PipelineLayout, the same information this loop
+// already reads off BindingSetDesc, threaded through to the Vulkan descriptor-set-layout builder).
+// So the merge is D3D12 ONLY, and that is a property of the whole design, not a note in one file.
 void D3D12ResourceFactory::nullFill(const RhiBindingSet& s) {
     for (u32 i = 0; i < s.srvCount; ++i) {
         const SlotKind kind = s.srvKinds[i];

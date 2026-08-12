@@ -117,6 +117,27 @@ public:
     // The GPU residency of the material library, so the app can ask for a draw's binding set.
     pbr::MaterialSystem& materials() { return materials_; }
 
+    // ---- the modular seam: letting a FOREIGN pipeline merge Voxi's table 0 into its own ----
+    // (Stage 3, GPU per-cluster shading parity -- see VoxiGiShaders.hpp for the HLSL half of this
+    // and SandboxApp.cpp's ensureLodMeshPipeline for the one real caller.) Voxi itself never learns
+    // what a cluster is; the caller never learns voxelTex_/shadowTex_'s handles or kind. Both sides
+    // only agree on a shape (VoxiGiShaders.hpp's kGiSrvCount/kGiUavCount) and a base register the
+    // caller picked for itself.
+
+    // Writes the GI volume and the shadow map into `set` at srvBase/srvBase+1 -- see
+    // VoxiGiShaders.hpp's giShaderDefines() for why only these two of the table-0 union get a real
+    // descriptor. `res` is the caller's own IResourceFactory (normally the same one this renderer
+    // was init()ed with, but not assumed to be: nothing here reads res_).
+    void bindGiResources(rhi::IResourceFactory& res, rhi::BindingSetHandle set, u32 srvBase) const;
+
+    // This frame's `cbuffer VoxiFrame` bytes -- the SAME block sceneConstants() hands the backend
+    // for Voxi's own pipeline, byte for byte what VoxiGiShaders.hpp's giShaderPrelude() declares.
+    // A caller binds this at whatever b-register it passed as giShaderDefines()'s
+    // frameConstantRegister, every draw that uses that prelude -- there is no push/pull notification
+    // when cb_ changes, only "read the current one before you draw".
+    const void* giFrameConstants() const { return &cb_; }
+    u32 giFrameConstantBytes() const { return sizeof(cb_); }
+
 private:
     // Creates the cascaded shadow atlas.
     bool createShadowResources();
