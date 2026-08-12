@@ -25,6 +25,47 @@ namespace aver::trifactor {
 inline constexpr u32 kMaxClusterVertices  = 64;
 inline constexpr u32 kMaxClusterTriangles = 124;
 
+// ---- builder version stamp (task: "Stage 2, Part B") -------------------------------------------
+//
+// A single number naming WHICH REVISION of this module's cook algorithm produced a given mesh's
+// meshlets/coarserLods -- persisted on disk in .ocmesh's MHDR.Reserved field (FORMAT_SPECS.md 5.1,
+// repurposed as BuilderVersion; see OcMeshData::builderVersion's own comment in
+// aver/formats/OcMesh.hpp for the write/read side, and packLodDag below for the one place that
+// stamps it). The problem this exists to solve: commit 14ba2b7 changed buildClusters/
+// buildLodHierarchy's own output (the shell-routing fix) without changing one byte of any .ocmesh
+// already on disk -- every cooked file still carries the LADDER IT WAS COOKED WITH, silently. There
+// was no way to ask a file "is your ladder current?" short of re-running buildClusters/
+// buildLodHierarchy on it and diffing the result, which is exactly the expensive round trip a
+// version stamp exists to make unnecessary -- and, per this task's own PART B, "later it is the DDC
+// key": a future derived-data cache needs a cheap comparable fact to decide "recompute" vs "reuse"
+// without ever touching the simplifier.
+//
+// BUMP THIS whenever a change to buildClusters or buildLodHierarchy would produce DIFFERENT
+// meshlets/coarserLods for at least one mesh that used to build cleanly -- a new routing decision
+// (like 14ba2b7's), a changed simplifier flag or target, a changed grouping strategy, a changed
+// quantization. Do NOT bump it for a change that cannot affect cook output: a comment, a log line, a
+// refactor proven output-identical (like this task's own PART A lifting toMeshlets/toIndices into
+// packLodDag below -- same bytes in, same bytes out, so the version they were cooked at is still the
+// same version), or a change confined to validateLodDag/validateClusterErrorBounds (those check the
+// DAG, they do not build it).
+//
+// STARTS AT 1, DELIBERATELY NOT 0. Every .ocmesh written before this field existed has Reserved == 0
+// (FORMAT_SPECS.md 2.3: "Reserved fields are zero", upheld by every prior writer), so 0 is already,
+// unavoidably, "some file from before version stamps existed" -- and this task's own README-in-the-
+// task-block says it plainly: "an OLD file, whose Reserved is 0, reads as unknown/stale and never as
+// current". Starting the real version numbering at 0 would make that impossible to tell apart from a
+// current build that happened to be at version 0; starting at 1 means 0 can ONLY ever mean "no
+// version-aware builder touched this file's ladder", by construction, not by a convention a future
+// bump could accidentally violate.
+//
+// version 1 (this one) IS commit 14ba2b7's shell-routing-aware buildClusters/buildLodHierarchy --
+// the algorithm whose own header comment quotes the corpus numbers (corpus coarsest 1,195,431 ->
+// 140,489; the five protected meshes unmoved) that a file stamped with this version was cooked
+// under. It is also, not incidentally, the FIRST version this field is able to record at all: nothing
+// before this task ever wrote anything but 0 here, so there is no "version 0 algorithm" to distinguish
+// this one from on disk -- 0 already carries that meaning by the paragraph above.
+inline constexpr u32 kBuilderVersion = 1;
+
 // FORMAT_SPECS.md 5.7 MeshletBounds (32 B): Sphere (16 B) + ConeApex f32[3] (12 B) + ConeAxis i8[3]
 // snorm + ConeCutoff i8 snorm. A distinct struct (not the vendor's meshopt_Bounds) so the ON-DISK
 // shape is visible at the type level; the next phase's serializer writes these fields byte for byte.
@@ -334,6 +375,48 @@ std::vector<ClusterErrorBounds> computeClusterErrorBounds(const LodDag& dag, f32
 // alongside its ancestor.
 bool validateClusterErrorBounds(const LodDag& dag, const std::vector<ClusterErrorBounds>& bounds,
                                  std::string* why = nullptr);
+
+// ---- packing a built LodDag back into the on-disk OcMeshData shape (task: "Stage 2, Part A") --------
+//
+// LIFTED FROM tests/formats/src/ConvertTool.cpp's anonymous namespace, where this conversion used to
+// live as ConvertTool's own private toMeshlets/toIndices/addMeshlets -- see this function's own git
+// history for the ORIGINAL comment explaining why it was left there rather than duplicated into
+// RelodTool "in a hurry". It belongs in Aver.Trifactor, not Aver.Formats, for the same reason
+// OcMeshMeshlet's own doc comment gives for why Aver.Formats cannot define a Cluster-shaped type
+// itself: Aver.Formats sits BELOW Aver.Trifactor in the module DAG (cmake/AvModule.cmake,
+// aver_check_module_dag) and must stay loadable with AVER_MODULE_TRIFACTOR=OFF, so it cannot name
+// LodDag/Cluster -- whereas Aver.Trifactor already depends on Aver.Formats (this very header includes
+// aver/formats/OcMesh.hpp) and is the one module allowed to see both types. Putting the conversion
+// here, rather than leaving it to whichever caller needs it first, is what keeps ConvertTool and
+// RelodTool's write path (and TrifactorTest's own MLET round-trip fixtures) calling the SAME code
+// instead of three copies that drift the moment one of them fixes a bug the other two do not know
+// about -- which is the exact failure this lift exists to prevent.
+//
+// `dag` must already hold LOD 0 (buildClusters) and, for more than a single-level result, the coarser
+// levels too (buildLodHierarchy) -- this function does not call either; a caller like RelodTool that
+// already built `dag` for its own reporting is not asked to build it twice just to persist it.
+// `mesh` must be the SAME mesh (or an exact positions/indices-identical copy of it) `dag` was built
+// from: this function reads mesh.positions ONLY to compute worldExtentScale(mesh) for the error
+// conversion, and never touches mesh.positions/indices/submeshes/materialSlots/joints/weights --
+// which is what lets RelodTool's write path (PART C) hand it a full copy of an original mesh and get
+// every OTHER stream back untouched, with only meshlets/coarserLods/builderVersion replaced.
+//
+// Populates mesh.meshlets (LOD 0) and mesh.coarserLods (LOD 1+, each with its own index buffer and
+// ScreenErrorThreshold), computing and validating per-cluster ownError/parentError internally
+// (computeClusterErrorBounds + validateClusterErrorBounds) and re-checking screen-error monotonicity
+// (validateScreenErrorMonotonic) BEFORE anything is packed -- exactly the ordering addMeshlets always
+// used, so a broken hierarchy still cannot reach mesh.meshlets/coarserLods through this path either.
+//
+// On success, also stamps mesh.builderVersion = kBuilderVersion (PART B): this is the ONE call site
+// in the engine that actually cooks a ladder into a mesh's on-disk streams, so it is the one place
+// that gets to say which builder cooked it. On failure, mesh.meshlets/coarserLods/builderVersion are
+// left EXACTLY as they were on entry -- a caller that only conditionally wants clustering (ConvertTool
+// saving "without meshlets" on a pathological input) does not need to remember to roll anything back.
+//
+// Returns false and sets `why` when `dag` is empty (nothing to pack) or when the converted error
+// bounds fail validation; both are the same refusals addMeshlets always made, now made once instead
+// of independently by every caller that packs a DAG.
+bool packLodDag(const LodDag& dag, fmt::OcMeshData& mesh, std::string* why = nullptr);
 
 // Reduces `mesh` in place to roughly `ratio` of its triangles (0 < ratio < 1), rewriting positions,
 // normals, UVs and indices. Returns false and leaves the mesh UNTOUCHED if the input is unusable or

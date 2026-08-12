@@ -168,52 +168,14 @@ static fmt::OcMeshData makeMixedShellFixture(u32 gridN, u32 fragmentCount) {
     return m;
 }
 
-// Converts one LOD level of a DAG into the on-disk OcMeshMeshlet shape -- the same conversion
-// tests/formats/src/ConvertTool.cpp does, duplicated rather than shared because this file has no
-// header of its own to put a shared helper in. `errorBounds` is
-// trifactor::computeClusterErrorBounds(dag, scale)'s output, indexed by Cluster::id.
-static std::vector<fmt::OcMeshMeshlet> toMeshlets(const trifactor::LodDag& dag, u32 level,
-                                                    const std::vector<trifactor::ClusterErrorBounds>& errorBounds) {
-    std::vector<fmt::OcMeshMeshlet> out;
-    if (level >= dag.levels.size()) return out;
-    out.reserve(dag.levels[level].size());
-    for (u32 cid : dag.levels[level]) {
-        const trifactor::Cluster& c = dag.clusters[cid];
-        fmt::OcMeshMeshlet ml;
-        ml.vertices     = c.vertices;
-        ml.triangles    = c.triangles;
-        ml.sphereCenter = c.bounds.sphereCenter;
-        ml.sphereRadius = c.bounds.sphereRadius;
-        ml.coneApex     = c.bounds.coneApex;
-        ml.coneAxis[0]  = c.bounds.coneAxis[0];
-        ml.coneAxis[1]  = c.bounds.coneAxis[1];
-        ml.coneAxis[2]  = c.bounds.coneAxis[2];
-        ml.coneCutoff   = c.bounds.coneCutoff;
-        ml.ownError     = errorBounds[cid].ownError;
-        ml.parentError  = errorBounds[cid].parentError;
-        out.push_back(std::move(ml));
-    }
-    return out;
-}
-
-// Converts one LOD level's clusters into a plain GLOBAL-index triangle list -- the level's own index
-// buffer, for OcMeshLod::indices. A cluster's `triangles` are LOCAL indices into its own `vertices`
-// (the on-disk MLET shape); this undoes that. Duplicated from tests/formats/src/ConvertTool.cpp's
-// own toIndices for the same reason toMeshlets above is duplicated: this file has no header of its
-// own to share one from.
-static std::vector<u32> toIndices(const trifactor::LodDag& dag, u32 level) {
-    std::vector<u32> out;
-    if (level >= dag.levels.size()) return out;
-    for (u32 cid : dag.levels[level]) {
-        const trifactor::Cluster& c = dag.clusters[cid];
-        for (usize t = 0; t + 2 < c.triangles.size(); t += 3) {
-            out.push_back(c.vertices[c.triangles[t + 0]]);
-            out.push_back(c.vertices[c.triangles[t + 1]]);
-            out.push_back(c.vertices[c.triangles[t + 2]]);
-        }
-    }
-    return out;
-}
+// toMeshlets/toIndices, the private per-level DAG-to-OcMeshMeshlet/index-buffer conversion this file
+// used to duplicate from tests/formats/src/ConvertTool.cpp (having no header of its own to share one
+// from), are GONE from here: both this file and ConvertTool now call aver::trifactor::packLodDag
+// (ClusterBuilder.hpp) instead, which is precisely the point of lifting that conversion into the
+// module -- see packLodDag's own doc comment for the full reasoning. Every "persisting ... through
+// .ocmesh" section below builds `src.meshlets`/`src.coarserLods` via a single packLodDag call rather
+// than hand-assembling them, so this file now exercises the SAME code ConvertTool and RelodTool's
+// write path exercise, not a fourth copy that could quietly stop agreeing with the other three.
 
 int main() {
     AVER_INFO("=== buildClusters: LOD-0 coverage and per-cluster limits ===");
@@ -499,8 +461,12 @@ int main() {
               "validateClusterErrorBounds passes on a single-level (all-root) DAG: " + boundsWhy);
 
         fmt::OcMeshData src = grid;
-        src.meshlets = toMeshlets(dag, 0, errorBounds);
+        std::string packWhy;
+        check(trifactor::packLodDag(dag, src, &packWhy), "packLodDag packs the LOD-0-only DAG: " + packWhy);
         check(!src.meshlets.empty(), "the fixture actually has meshlets to persist");
+        check(src.builderVersion == trifactor::kBuilderVersion,
+              "packLodDag stamps builderVersion with the current builder (got " +
+                  std::to_string(src.builderVersion) + ")");
 
         std::vector<u8> bytes;
         check(fmt::writeOcMesh(src, bytes, &why), "writes with meshlets: " + why);
@@ -508,6 +474,7 @@ int main() {
         fmt::OcMeshData back;
         check(fmt::parseOcMesh(bytes.data(), bytes.size(), back, &why), "reads back: " + why);
         check((back.flags & fmt::kOcMeshMeshlets) != 0, "the HasMeshlets flag is set by the writer");
+        check(back.builderVersion == src.builderVersion, "builderVersion survives the round trip bit-exact");
         check(back.meshlets.size() == src.meshlets.size(),
               "meshlet count survives (" + std::to_string(back.meshlets.size()) + " vs " +
                   std::to_string(src.meshlets.size()) + ")");
@@ -577,20 +544,18 @@ int main() {
               "validateClusterErrorBounds passes on the full multi-level hierarchy: " + boundsWhy);
 
         // ---- build the on-disk shape: LOD 0 into meshlets (as ever), every coarser level into
-        // coarserLods with its own index buffer and its converted screen error ----
+        // coarserLods with its own index buffer and its converted screen error -- via packLodDag
+        // (ClusterBuilder.hpp), the same call ConvertTool and RelodTool's write path make, rather
+        // than this file re-assembling the same structs by hand. errorBounds/scale above were
+        // already computed and validated independently for this test's own assertions; packLodDag
+        // recomputes them internally too, which doubles as a check that the two computations agree.
         fmt::OcMeshData src = grid;
-        src.meshlets = toMeshlets(dag, 0, errorBounds);
-        src.coarserLods.clear();
-        for (u32 level = 1; level < dag.levelCount(); ++level) {
-            fmt::OcMeshLod lod;
-            lod.indices  = toIndices(dag, level);
-            lod.meshlets = toMeshlets(dag, level, errorBounds);
-            f32 rawError = 0.0f;
-            for (u32 cid : dag.levels[level]) rawError = std::max(rawError, dag.clusters[cid].error);
-            lod.screenErrorThreshold = trifactor::toScreenErrorThreshold(rawError, scale);
-            src.coarserLods.push_back(std::move(lod));
-        }
+        std::string packWhy;
+        check(trifactor::packLodDag(dag, src, &packWhy), "packLodDag packs the multi-level DAG: " + packWhy);
         check(!src.coarserLods.empty(), "the fixture actually has coarser LODs to persist");
+        check(src.builderVersion == trifactor::kBuilderVersion,
+              "packLodDag stamps builderVersion on a multi-level hierarchy too (got " +
+                  std::to_string(src.builderVersion) + ")");
 
         std::vector<u8> bytes;
         check(fmt::writeOcMesh(src, bytes, &why), "writes the full hierarchy: " + why);
@@ -600,6 +565,8 @@ int main() {
         check(back.lodCount() == src.lodCount(),
               "LOD count survives (" + std::to_string(back.lodCount()) + " vs " + std::to_string(src.lodCount()) + ")");
         check(back.coarserLods.size() == src.coarserLods.size(), "coarser LOD count survives");
+        check(back.builderVersion == src.builderVersion,
+              "builderVersion survives the round trip on a multi-level hierarchy too");
 
         bool everyLevelExact = back.coarserLods.size() == src.coarserLods.size();
         bool everyLevelSelfConsistent = true;   // meshlets reconstruct that level's OWN index buffer
@@ -689,11 +656,9 @@ int main() {
         check(dag.levels[0].size() == 1, "exactly one LOD-0 cluster -- keeps the byte surgery below simple "
                                           "(one MeshletDesc, one MeshletBounds entry)");
 
-        const f32 scale = trifactor::worldExtentScale(tri);
-        const std::vector<trifactor::ClusterErrorBounds> errorBounds = trifactor::computeClusterErrorBounds(dag, scale);
-
         fmt::OcMeshData src = tri;
-        src.meshlets = toMeshlets(dag, 0, errorBounds);
+        std::string packWhy;
+        check(trifactor::packLodDag(dag, src, &packWhy), "packLodDag packs the single-triangle DAG: " + packWhy);
         check(src.meshlets.size() == 1, "exactly one meshlet in the MLET chunk");
 
         std::vector<u8> bytesV2;

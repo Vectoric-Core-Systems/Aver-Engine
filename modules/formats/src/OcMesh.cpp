@@ -397,7 +397,13 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         const f32 rx = m.boundsMax.x - c.x, ry = m.boundsMax.y - c.y, rz = m.boundsMax.z - c.z;
         w.f32v(c.x); w.f32v(c.y); w.f32v(c.z); w.f32v(std::sqrt(rx*rx + ry*ry + rz*rz));
         w.u32v(static_cast<u32>(m.materialSlots.size()));      // MaterialSlotCount
-        w.u32v(0);                                             // Reserved
+        // Reserved, repurposed as BuilderVersion (see OcMeshData::builderVersion's own comment): a
+        // caller that never cooked meshlets through aver::trifactor::packLodDag leaves
+        // m.builderVersion at its default (0), so a plain mesh (or one loaded from an old file and
+        // re-saved untouched) writes exactly the "Reserved fields are zero" byte FORMAT_SPECS.md
+        // always required here -- this field's existence changes nothing for a caller that does not
+        // know about it.
+        w.u32v(m.builderVersion);                              // Reserved / BuilderVersion
 
         // StreamDesc[2] (§5.2)
         const u16 attrStride = 12;   // QTangent 8 + UV0 4
@@ -505,7 +511,7 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
     out.boundsMax = Vec3{r.f32v(), r.f32v(), r.f32v()};
     r.f32v(); r.f32v(); r.f32v(); r.f32v();   // bounds sphere
     const u32 slotCount  = r.u32v();
-    r.u32v();                                 // Reserved
+    out.builderVersion   = r.u32v();          // Reserved / BuilderVersion (0 on any pre-existing file)
     if (!r.ok) return fail(why, ".ocmesh: truncated MHDR");
     if (lodCount < 1) return fail(why, ".ocmesh: LODCount is 0");
     if (submeshCount < 1) return fail(why, ".ocmesh: SubmeshCount is 0");

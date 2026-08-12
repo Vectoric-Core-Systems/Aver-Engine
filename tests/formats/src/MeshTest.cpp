@@ -156,6 +156,49 @@ int main() {
         checkNear(m.boundsMax.z,  1.0f, 1e-6f, "bounds max recomputed on write");
     }
 
+    AVER_INFO("=== .ocmesh MHDR BuilderVersion (formerly Reserved) ===");
+    {
+        // THIS FILE, NOT TrifactorTest, IS WHERE builderVersion'S BASIC CONTRACT LIVES -- reading and
+        // writing a plain u32 field needs no LodDag and no Aver.Trifactor at all (AVER_MODULE_TRIFACTOR
+        // is OFF by default in this tree; see TrifactorTest.cpp's own header), so this file is the one
+        // that actually runs by default and proves the on-disk contract OcMeshData::builderVersion's
+        // own comment describes. aver::trifactor::packLodDag stamping the CURRENT builder's version
+        // in is covered separately, in TrifactorTest.cpp, where kBuilderVersion is actually visible.
+        //
+        // makeCube() never touches builderVersion, so it stays at OcMeshData's own default -- this is
+        // deliberately the same shape as every mesh cooked before this field existed: neither this
+        // fixture nor a caller that predates packLodDag has to know the field exists to write the
+        // spec's "Reserved fields are zero" byte here.
+        const fmt::OcMeshData plain = makeCube();
+        check(plain.builderVersion == 0, "a mesh nobody stamped defaults to builderVersion 0 (unknown/stale)");
+
+        std::vector<u8> bytes;
+        std::string why;
+        check(fmt::writeOcMesh(plain, bytes, &why), "writes with the default (unstamped) builderVersion: " + why);
+        fmt::OcMeshData back;
+        check(fmt::parseOcMesh(bytes.data(), bytes.size(), back, &why), "reads it back: " + why);
+        check(back.builderVersion == 0,
+              "an unstamped mesh reads back as builderVersion 0 -- the same value FORMAT_SPECS.md has "
+              "always required of this offset's Reserved bytes, so this feature existing changes "
+              "nothing about a caller that does not know about it");
+
+        // A caller that DID cook a ladder (packLodDag, in the real pipeline) stamps a nonzero version.
+        // Simulated here without Trifactor, against an arbitrary nonzero value -- MeshTest is not the
+        // place to assert what aver::trifactor::kBuilderVersion's CURRENT value is (that would make
+        // this file need updating every time that constant is bumped for an unrelated reason); it only
+        // needs to prove the field is a plain u32 that survives the round trip bit-exact, whatever
+        // value it holds.
+        fmt::OcMeshData stamped = makeCube();
+        stamped.builderVersion = 7;
+        std::vector<u8> stampedBytes;
+        check(fmt::writeOcMesh(stamped, stampedBytes, &why), "writes with a stamped builderVersion: " + why);
+        fmt::OcMeshData stampedBack;
+        check(fmt::parseOcMesh(stampedBytes.data(), stampedBytes.size(), stampedBack, &why),
+              "reads the stamped mesh back: " + why);
+        check(stampedBack.builderVersion == 7, "a nonzero builderVersion survives the round trip bit-exact (got " +
+                                                    std::to_string(stampedBack.builderVersion) + ")");
+    }
+
     AVER_INFO("=== .ocmesh refuses what it cannot represent ===");
     {
         std::string why;

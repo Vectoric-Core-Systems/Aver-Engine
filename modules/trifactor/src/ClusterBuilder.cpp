@@ -1283,6 +1283,111 @@ bool validateClusterErrorBounds(const LodDag& dag, const std::vector<ClusterErro
     return true;
 }
 
+namespace {
+
+// Converts one LOD level of a DAG into the on-disk OcMeshMeshlet shape. LIFTED FROM
+// tests/formats/src/ConvertTool.cpp's own toMeshlets (see packLodDag's doc comment in
+// ClusterBuilder.hpp for why this now lives here instead) -- byte-for-byte the same conversion,
+// unchanged, so the corpus numbers this task measured with the old ConvertTool-private copy still
+// apply to this one. `errorBounds` is computeClusterErrorBounds(dag, scale)'s output, indexed by
+// Cluster::id exactly like dag.clusters -- this is where ownError/parentError cross from Trifactor's
+// Cluster into Formats' OcMeshMeshlet, same as it always was.
+std::vector<fmt::OcMeshMeshlet> toMeshlets(const LodDag& dag, u32 level,
+                                            const std::vector<ClusterErrorBounds>& errorBounds) {
+    std::vector<fmt::OcMeshMeshlet> out;
+    if (level >= dag.levels.size()) return out;
+    out.reserve(dag.levels[level].size());
+    for (const u32 cid : dag.levels[level]) {
+        const Cluster& c = dag.clusters[cid];
+        fmt::OcMeshMeshlet ml;
+        ml.vertices     = c.vertices;
+        ml.triangles    = c.triangles;
+        ml.sphereCenter = c.bounds.sphereCenter;
+        ml.sphereRadius = c.bounds.sphereRadius;
+        ml.coneApex     = c.bounds.coneApex;
+        ml.coneAxis[0]  = c.bounds.coneAxis[0];
+        ml.coneAxis[1]  = c.bounds.coneAxis[1];
+        ml.coneAxis[2]  = c.bounds.coneAxis[2];
+        ml.coneCutoff   = c.bounds.coneCutoff;
+        ml.ownError     = errorBounds[cid].ownError;
+        ml.parentError  = errorBounds[cid].parentError;
+        out.push_back(std::move(ml));
+    }
+    return out;
+}
+
+// Converts one LOD level's clusters back into a plain GLOBAL-index triangle list -- the level's own
+// index buffer, for OcMeshLod::indices. LIFTED FROM ConvertTool.cpp's own toIndices, unchanged: a
+// cluster's `triangles` are LOCAL indices into its own `vertices` (the on-disk MLET shape); this
+// undoes that, mirroring appendGlobalTriangles above in this same file (private to this TU).
+std::vector<u32> toIndices(const LodDag& dag, u32 level) {
+    std::vector<u32> out;
+    if (level >= dag.levels.size()) return out;
+    for (const u32 cid : dag.levels[level]) {
+        const Cluster& c = dag.clusters[cid];
+        for (usize t = 0; t + 2 < c.triangles.size(); t += 3) {
+            out.push_back(c.vertices[c.triangles[t + 0]]);
+            out.push_back(c.vertices[c.triangles[t + 1]]);
+            out.push_back(c.vertices[c.triangles[t + 2]]);
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+bool packLodDag(const LodDag& dag, fmt::OcMeshData& mesh, std::string* why) {
+    if (dag.empty()) {
+        if (why) *why = "packLodDag: dag has no clusters (call buildClusters first)";
+        return false;
+    }
+
+    // Same scale computation ConvertTool's addMeshlets always made, now made once here instead of by
+    // every caller that wants to pack a DAG -- worldExtentScale reads mesh.positions/vertexCount only,
+    // never mesh.indices/submeshes/materialSlots/joints/weights, which is what lets a caller (RelodTool's
+    // write path) hand this a full copy of an original mesh and trust every OTHER stream stays untouched.
+    const f32 scale = worldExtentScale(mesh);
+
+    std::string monoWhy;
+    if (!validateScreenErrorMonotonic(dag, scale, &monoWhy)) {
+        if (why) *why = "screen-error monotonicity broke after conversion: " + monoWhy;
+        return false;
+    }
+
+    // ownError/parentError -- computed once for the whole DAG, then validated BEFORE anything is
+    // packed: a violation here is exactly the "holes in the mesh" failure mode the local cut test
+    // cannot detect on its own, so it must fail the cook loudly rather than reach a file. Same
+    // ordering addMeshlets always used.
+    const std::vector<ClusterErrorBounds> errorBounds = computeClusterErrorBounds(dag, scale);
+    std::string boundsWhy;
+    if (!validateClusterErrorBounds(dag, errorBounds, &boundsWhy)) {
+        if (why) *why = "per-cluster error bounds invalid: " + boundsWhy;
+        return false;
+    }
+
+    mesh.meshlets = toMeshlets(dag, 0, errorBounds);
+    mesh.coarserLods.clear();
+    for (u32 level = 1; level < dag.levelCount(); ++level) {
+        fmt::OcMeshLod lod;
+        lod.indices  = toIndices(dag, level);
+        lod.meshlets = toMeshlets(dag, level, errorBounds);
+        // Every cluster newly created at this level shares the SAME propagatedError (buildLodHierarchy
+        // assigns it once per group, to every cluster the group's re-split produced), so max() over
+        // the level is defensive rather than strictly necessary -- it stays correct even if a future
+        // change to buildLodHierarchy ever let that stop being true.
+        f32 rawError = 0.0f;
+        for (u32 cid : dag.levels[level]) rawError = std::max(rawError, dag.clusters[cid].error);
+        lod.screenErrorThreshold = toScreenErrorThreshold(rawError, scale);
+        mesh.coarserLods.push_back(std::move(lod));
+    }
+
+    // PART B: stamp which builder cooked this ladder. Only reached once everything above has
+    // succeeded, matching mesh.meshlets/coarserLods themselves only being reachable on success -- a
+    // failed pack leaves builderVersion exactly as it found it, same as every other stream.
+    mesh.builderVersion = kBuilderVersion;
+    return true;
+}
+
 bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
     const auto fail = [&](const char* m) { if (why) *why = m; return false; };
 

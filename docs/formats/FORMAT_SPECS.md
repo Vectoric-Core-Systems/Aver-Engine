@@ -172,13 +172,15 @@ Subtype `'MESH'`. This is the centerpiece. Chunks: `MHDR` (required), `STRT`, `V
 | 0x08 | 24 | AABB | `BoundsAABB` | whole-mesh, engine cm |
 | 0x20 | 16 | Sphere | `BoundsSphere` | whole-mesh |
 | 0x30 | 4 | u32 | `MaterialSlotCount` | == SubmeshCount unless slots shared |
-| 0x34 | 4 | u32 | `Reserved` | 0 |
+| 0x34 | 4 | u32 | `BuilderVersion` (was `Reserved`) | see below |
 | 0x38 | … | StreamDesc[StreamCount] | vertex-stream table | 8 B each (§5.2) |
 | … | … | LodDesc[LODCount] | LOD table | 56 B each (§5.5) |
 | … | … | SubmeshDesc[SubmeshCount] | mesh-level submesh table | 12 B each (§5.6) |
 | … | … | SubmeshRange[LODCount*SubmeshCount] | per-LOD ranges | 40 B each (§5.6) |
 
 `MeshFlags`: bit0 `HasColor`, bit1 `HasUV1`, bit2 `HasMeshlets`, bit3 `Index32` (else 16-bit), bit4 `PositionQuantized`, bit5 `HasSkin` (JOINTS/WEIGHTS streams present — used by `.ocskel`), bit6 `HasCollision`, bit7 `HasCageBind`, bit8 `Deformable` (position stream MUST stay `R32G32B32_FLOAT` + standalone for GPU cage-deform), bit9 `TwoSided`, bit10 `NegativeScaleBaked` (winding pre-reversed for the `bMirrorY` case, recon `arch §1`).
+
+`BuilderVersion`: the offset formerly documented as `Reserved` (and, per §2.3's "Reserved fields are zero" rule, written as `0` by every writer before this one — that history is exactly what makes `0` safe to keep meaning "unknown/stale" rather than requiring a migration). Zero means "no meshlet ladder was ever cooked through a version-stamped builder" — either the file predates this field, or it genuinely carries no meshlets/coarserLods. A nonzero value is `aver::trifactor::kBuilderVersion` (`modules/trifactor/include/aver/trifactor/ClusterBuilder.hpp`) as it stood when `aver::trifactor::packLodDag` last wrote this mesh's `MLET`/coarser-LOD data; that constant is bumped whenever a change to Aver.Trifactor's cook algorithm changes what a re-cook would produce, so a reader compares its own build's `kBuilderVersion` against this field to tell a current ladder from a stale one without re-deriving anything. `kBuilderVersion` itself starts at `1`, never `0`, specifically so an old `Reserved == 0` file can never be misread as "matches the current builder" by coincidence — see `RelodTool`'s `--write` staleness report for the tool that reads this field today.
 
 ### 5.2 `StreamDesc` (8 bytes each)
 | Off | Size | Type | Field | Notes |

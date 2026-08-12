@@ -135,6 +135,23 @@ struct OcMeshData {
     Vec3 boundsMin{0, 0, 0}, boundsMax{0, 0, 0};
     u32  flags = 0;
 
+    // MHDR's Reserved u32 (FORMAT_SPECS.md 5.1, offset 0x34), repurposed: which Aver.Trifactor
+    // builder cooked this mesh's meshlets/coarserLods, so a tool (or later a derived-data cache) can
+    // tell a STALE ladder from a CURRENT one without re-deriving the whole hierarchy just to find out.
+    // Aver.Trifactor owns the actual version constant (aver::trifactor::kBuilderVersion,
+    // ClusterBuilder.hpp) -- Aver.Formats sits below Aver.Trifactor in the module DAG and cannot name
+    // it, so this field is just the plain u32 slot the writer copies that constant into and the
+    // reader hands back untouched; see aver::trifactor::packLodDag for the one place that sets it.
+    //
+    // 0 IS "UNKNOWN/STALE", NEVER "CURRENT", by construction rather than by convention: every .ocmesh
+    // written before this field existed has Reserved == 0 (FORMAT_SPECS.md 5.1's own "Reserved fields
+    // are zero" rule, upheld by every writer that came before this one), and
+    // aver::trifactor::kBuilderVersion starts at 1, not 0 -- so an old file and a current build can
+    // never collide on the same value, and a reader that finds 0 here always has grounds to say "this
+    // ladder's provenance is unknown, and therefore not provably current" rather than lucking into a
+    // false "matches" by accident of an old field defaulting to the same number a new one starts at.
+    u32 builderVersion = 0;
+
     // 1 (just LOD 0) + however many coarser levels are present.
     u32 lodCount() const { return 1u + static_cast<u32>(coarserLods.size()); }
 
