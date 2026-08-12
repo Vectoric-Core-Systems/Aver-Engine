@@ -77,6 +77,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <unordered_map>
 
 namespace aver::trifactor {
 
@@ -210,6 +211,50 @@ struct UnionFind {
         if (a != b) parent[a] = b;
     }
 };
+
+// THE NUMBER THE SHELL THEORY SHOULD HAVE BEEN, and the one to design the next attempt against.
+//
+// computeShellIds above answers "how many connected components", and running it over the whole demo
+// corpus is what proved the shell-routing design could not work: every one of the 33 meshes reports
+// ZERO small shells, so a rule keyed on small shells never fires. See Cluster::shellId's comment in
+// the header for that measurement in full.
+//
+// This answers the question that actually matters instead. meshopt_SimplifyLockBorder locks an edge
+// used by exactly ONE triangle in the buffer it is given -- it has no notion of "shell" at all. So
+// what predicts whether the flag freezes a mesh is not how many pieces the mesh is in, it is what
+// FRACTION of its edges are open. A leaf card is a thin sheet: four perimeter edges around two
+// triangles, so it is almost entirely boundary even when welded into a large connected component.
+// A rock is a closed solid: every edge shared by two triangles, so almost nothing is boundary and
+// LockBorder costs it nothing.
+//
+// Edges are canonicalised through the SAME meshopt_generatePositionRemap that computeShellIds uses,
+// for the same reason: two triangles meeting across a UV seam share a POSITION but not an index, and
+// counting raw indices would call that shared edge two open edges instead of one closed one --
+// inflating exactly the statistic this exists to measure, and by most on the assets that matter.
+f32 openEdgeFraction(const fmt::OcMeshData& mesh, u64& outOpen, u64& outTotal) {
+    outOpen = outTotal = 0;
+    const usize vertexCount = mesh.positions.size() / 3;
+    if (vertexCount == 0 || mesh.indices.size() < 3) return 0.0f;
+
+    std::vector<u32> remap(vertexCount);
+    meshopt_generatePositionRemap(remap.data(), mesh.positions.data(), vertexCount, sizeof(f32) * 3);
+
+    std::unordered_map<u64, u32> edgeUse;
+    edgeUse.reserve(mesh.indices.size());
+    for (usize t = 0; t + 2 < mesh.indices.size(); t += 3) {
+        const u32 v[3] = {remap[mesh.indices[t + 0]], remap[mesh.indices[t + 1]], remap[mesh.indices[t + 2]]};
+        for (u32 e = 0; e < 3; ++e) {
+            u32 a = v[e], b = v[(e + 1) % 3];
+            if (a == b) continue;                 // a degenerate triangle contributes no real edge
+            if (a > b) { const u32 tmp = a; a = b; b = tmp; }
+            ++edgeUse[(static_cast<u64>(a) << 32) | static_cast<u64>(b)];
+        }
+    }
+
+    for (const auto& kv : edgeUse) if (kv.second == 1) ++outOpen;
+    outTotal = edgeUse.size();
+    return outTotal ? static_cast<f32>(outOpen) / static_cast<f32>(outTotal) : 0.0f;
+}
 
 // Per-vertex shell id (dense, 0..shellCount-1) and, per shell, whether it is SMALL -- task step 4:
 // fits inside kMaxClusterVertices/kMaxClusterTriangles, counted over the vertices/triangles the
@@ -473,8 +518,11 @@ bool buildClusters(const fmt::OcMeshData& mesh, LodDag& dag, std::string* why) {
     dag.smallShells = shellIds.isSmall;
     u32 smallShellCount = 0;
     for (u8 s : dag.smallShells) smallShellCount += s ? 1 : 0;
-    AVER_INFO("[Trifactor] computeShellIds: {} shell(s), {} small, {} large",
-              dag.smallShells.size(), smallShellCount, dag.smallShells.size() - smallShellCount);
+    u64 openEdges = 0, totalEdges = 0;
+    const f32 openFrac = openEdgeFraction(mesh, openEdges, totalEdges);
+    AVER_INFO("[Trifactor] shells: {} ({} small, {} large) | open edges: {}/{} = {:.1f}%",
+              dag.smallShells.size(), smallShellCount, dag.smallShells.size() - smallShellCount,
+              openEdges, totalEdges, openFrac * 100.0f);
 
     const std::vector<u32> ids = splitIntoClusters(mesh, mesh.indices, /*level=*/0, dag);
     for (u32 id : ids) {

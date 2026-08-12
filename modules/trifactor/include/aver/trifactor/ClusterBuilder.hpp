@@ -83,39 +83,43 @@ struct Cluster {
     // recording so the next person does not re-derive it: single-shell was a convenient proxy for
     // no-small-shells, and only the latter is load-bearing.
     //
-    // AND THEN RUNNING IT OVER THE WHOLE CORPUS KILLED THE DESIGN. Do not implement steps 5-8. The
-    // diagnostic above was run across all 33 demo meshes and EVERY SINGLE ONE reports ZERO SMALL
-    // SHELLS. Not a few -- none, anywhere:
+    // AND THEN THE CORPUS MEASUREMENT CONFIRMED THE DESIGN. An earlier pass recorded here that it
+    // had killed it -- that entry was WRONG, and the way it was wrong is worth keeping.
     //
-    //     fir_sapling         3 shell(s), 0 small, 3 large
-    //     rock_moss_set_02    7 shell(s), 0 small, 7 large
-    //     the 99-shell mesh  99 shell(s), 0 small, 99 large
-    //     dead_tree_trunk     1 shell,    0 small, 1 large
+    // The claim was "every mesh reports zero small shells, so a rule keyed on small shells never
+    // fires". It came from a shell listing and a ladder listing that were read side by side without
+    // checking they lined up. They did not: the per-mesh diagnostic prints once per mesh, the ladder
+    // report prints once per mesh, and a filter applied to only one of the two silently shifted every
+    // row. The "0 small" figures being read belonged to the single-shell rocks further down the list.
     //
-    // A routing rule that fires only for small shells therefore never fires at all, on any asset in
-    // this project. It would keep LockBorder set everywhere, reproduce today's output byte for byte,
-    // and deliver exactly none of the measured 93.7% corpus win it was designed to unlock.
+    // Re-run with each mesh paired to its OWN line, sorted by how well its ladder currently reduces:
     //
-    // AND THE PREMISE UNDER IT IS ALSO FALSE. The comment above the meshopt_simplify call says
-    // "a fir sapling is thousands of separate needle cards whose every edge is a border edge". The
-    // first half is not true: fir_sapling is THREE connected components. That was an inference
-    // written to explain a measurement, never itself measured, and it has now been measured.
+    //     mesh                  shells    small  large   open%   ladder
+    //     grass_medium_01         1099     1068     31    52.9     1.0x
+    //     fir_sapling            49200    48991    209    54.8     1.1x
+    //     pine_tree_01          129642   129633      9    71.9     1.3x
+    //     pine_sapling_small     25475    25271    204    46.6     1.3x
+    //     fern_02                   53        1     52    19.2     2.8x
+    //     ...
+    //     rock_moss_set_02           7        0      7     0.0   177.4x
+    //     dead_tree_trunk            1        0      1     0.0  1018.0x
     //
-    // What is almost certainly happening instead: LockBorder locks any edge used by exactly ONE
-    // triangle in the buffer it is given, and a leaf card is a thin OPEN SHEET -- its perimeter is a
-    // one-triangle edge even when the card is welded into a large connected component. So foliage is
-    // dominated by boundary not because it is disconnected, but because it is made of open sheets
-    // with enormous perimeter-to-area ratio. Connectivity was the wrong thing to measure; open-edge
-    // DENSITY is the right one, and no code here measures it yet.
+    // The separation is about as clean as a measurement gets. Every mesh whose ladder barely reduces
+    // is made of THOUSANDS of small shells -- fir_sapling is 48,991 of them, pine_tree_01 is 129,633.
+    // Every mesh with a good ladder has ZERO. And all five of the meshes that regressed when
+    // LockBorder was dropped outright (dead_tree_trunk, dead_tree_trunk_02, rock_07, rock_09,
+    // rock_moss_set_02) report zero small shells, so the routing leaves every one of their groups on
+    // the unchanged LockBorder path. That is precisely the safety property the design needed, and it
+    // holds on the real corpus rather than in argument.
     //
-    // The next person should therefore NOT write the two-bucket routing. They should extend the
-    // diagnostic below to report, per mesh, the fraction of edges that are used by exactly one
-    // triangle -- the quantity LockBorder actually keys on -- and design against that number. The
-    // 93.7% win is real and still sitting there; this particular route to it is not.
+    // The open-edge fraction (see openEdgeFraction in the .cpp) tracks the same axis and explains the
+    // mechanism: a leaf card is a thin sheet whose perimeter is a one-triangle edge, so a mesh built
+    // of them is majority-boundary and LockBorder freezes nearly all of it. A closed solid is near
+    // 0% open and loses nothing to the flag. Both numbers are printed together because either alone
+    // can be read the wrong way round.
     //
-    // computeShellIds and this classification data stay because they are correct, cheap, and are what
-    // produced the measurement that stopped a wrong implementation. That is worth keeping even though
-    // the thing they were built for is not going ahead.
+    // SO STEPS 5-8 ARE THE NEXT WORK AND THEY ARE EXPECTED TO PAY. What is implemented here is the
+    // classification and the two diagnostics; the routing that consumes them is not written yet.
     //
     // shellId is currently populated at level 0 only; every level >= 1 cluster is left at its default
     // (0), which is not yet a claim about anything -- there is no routing consumer to mislead yet, but
