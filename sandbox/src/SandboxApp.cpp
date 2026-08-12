@@ -2122,8 +2122,9 @@ public:
             // the landscape loads, but MaterialSystem::ready() also needs its GPU side up, and the
             // two do not have a guaranteed order. A bool test per frame is cheaper than reasoning
             // about that ordering, and it self-heals if the system comes up later.
-            if (!landscapeMaterial_.empty() && !landscapeRenderer_->hasSurfaceBinding())
-                applyLandscapeSurfaceToAll();
+            if (!landscapeMaterial_.empty() &&
+                (!landscapeRenderer_->hasSurfaceBinding() || !landscapeUvTilingResolved_))
+                applyLandscapeSurfaceToAll(e.device());
 
             landscape::SelectParams lp;
             lp.cameraCm[0] = eye_.x; lp.cameraCm[1] = eye_.y; lp.cameraCm[2] = eye_.z;
@@ -2148,7 +2149,8 @@ public:
             // folds originCm in -- see ChunkMesh.cpp), so the transform LandscapeRenderer::draw()
             // applies on top is identity, not a placement matrix.
             static const f32 kIdentity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
-            landscapeRenderer_->draw(*e.device(), landscapeData_, landscapeTree_, lsel, kIdentity);
+            landscapeRenderer_->draw(*e.device(), landscapeData_, landscapeTree_, lsel, kIdentity,
+                                     landscapeUvTilingCm_);
 
             // The ring: every procedural tile currently resident around the camera, each its own
             // section drawn through the SAME select()+draw() pair, sharing the SAME per-tile budget --
@@ -2159,7 +2161,8 @@ public:
                 if (!tile.renderer) continue;
                 landscape::SelectResult rsel;
                 tile.tree.select(lp, rsel);
-                tile.renderer->draw(*e.device(), tile.data, tile.tree, rsel, kIdentity);
+                tile.renderer->draw(*e.device(), tile.data, tile.tree, rsel, kIdentity,
+                                    landscapeUvTilingCm_);
             }
         }
 #endif
@@ -3470,7 +3473,40 @@ private:
         if (!ms.ready()) return;
         const pbr::MaterialHandle h = materialForSurface(landscapeMaterial_);
         if (!h) return;
-        r.setSurfaceBinding(ms.bindingSet(h), &ms.constants(h), sizeof(pbr::MaterialConstants));
+        const pbr::MaterialConstants& mc = ms.constants(h);
+        r.setSurfaceBinding(ms.bindingSet(h), &mc, sizeof(pbr::MaterialConstants));
+
+        // AND THE TEXTURE SCALE, which is the other half of "apply the material" and was missing.
+        // LandscapeRenderer::draw() takes uvTilingCm and bakes it into the chunk mesh's UVs; neither
+        // call site passed one, so every landscape in this editor drew at the parameter's compiled-in
+        // 1000cm default -- ten-metre tiles. M_forest_leaves_02 authors `PARAM uvTiling 150`, and its
+        // own comment says why: the Poly Haven source is a two-metre texture. Ten-metre tiles stretch
+        // it 6.7x past the scale it was made for, which is exactly the pale, washed-out, low-frequency
+        // ground the demo captures show.
+        //
+        // WHY THIS READS uvTilesPerCm RATHER THAN THE DESC. MaterialSystem exposes constants(), not
+        // the MaterialDesc, and the packed block already carries the reciprocal -- so this needs no
+        // new accessor and no new coupling. The host resolving it here is the shape this function's
+        // own header comment describes: Aver.Landscape.Renderer never learns what a pbr:: material is.
+        //
+        // A NOTE ON uvTiling'S DOCUMENTED SCOPE. MaterialDesc calls it "read only under WorldAligned",
+        // and that is true OF THE SHADER: averSurfaceUV only consults gUvTilesPerCm when the material
+        // sets worlduv=1, which this one does not. It is not a contradiction. Both uses mean the same
+        // thing -- world centimetres per tile -- and differ only in who applies it: the shader, by
+        // projecting; or the mesh builder, by baking it into UVs. The landscape is the second kind.
+        //
+        // AND IT MUST BE THE REAL MATERIAL'S NUMBER, NOT THE FALLBACK'S. MaterialSystem::constants()
+        // hands back fallbackConstants_ for any handle MaterialLibrary does not yet consider valid,
+        // and materialForSurface() can create a material in the library on the very frame this runs
+        // -- before MaterialSystem::update() has drained consumeDirty() and built an entry for it.
+        // The fallback is packMaterial(MaterialDesc{}), whose uvTiling is 200, so taking it silently
+        // would latch the landscape at 200cm and look like a plausible number rather than a bug.
+        // Ask the library the same question constants() asks, and only believe the answer when it
+        // says yes; the caller retries until then.
+        if (pbr::MaterialLibrary::get().valid(h) && mc.uvTilesPerCm > 0.0f) {
+            landscapeUvTilingCm_ = 1.0f / mc.uvTilesPerCm;
+            landscapeUvTilingResolved_ = true;
+        }
 #else
         (void)r;
 #endif
@@ -3479,10 +3515,29 @@ private:
     // Re-applies it to the authored section and every resident ring tile at once. Called after a
     // level load, and after the material system becomes ready -- whichever happens second is the one
     // that actually binds anything, and neither is reliably first.
-    void applyLandscapeSurfaceToAll() {
+    void applyLandscapeSurfaceToAll(rhi::IDevice* device = nullptr) {
+        const f32 wasTiling = landscapeUvTilingCm_;
         if (landscapeRenderer_) applyLandscapeSurface(*landscapeRenderer_);
         for (auto& kv : landscapeRingTiles_)
             if (kv.second.renderer) applyLandscapeSurface(*kv.second.renderer);
+
+        // THE CACHED MESHES CARRY THE OLD SCALE, so the eviction belongs here rather than inside
+        // applyLandscapeSurface: that runs once per renderer and updates the shared member on its
+        // first call, so a per-renderer comparison would evict the section and silently leave every
+        // ring tile holding UVs built at the previous tiling. Compare once, around the whole sweep.
+        //
+        // buildChunkMesh bakes uvTilingCm into a node's UVs and draw() caches the result, so nothing
+        // already resident picks up a change on its own. Fires at most once per level -- the frame the
+        // material system finally comes up, when the landscape had already loaded and drawn flat --
+        // and the nodes rebuild lazily on the next draw, exactly as they already do after a sculpt.
+        if (device && landscapeUvTilingCm_ != wasTiling) {
+            if (landscapeRenderer_) landscapeRenderer_->forgetAll(*device);
+            for (auto& kv : landscapeRingTiles_)
+                if (kv.second.renderer) kv.second.renderer->forgetAll(*device);
+            AVER_INFO("[Landscape] texture tiling {:.0f}cm per tile, from material '{}' "
+                      "(was {:.0f}); resident nodes dropped to rebuild",
+                      landscapeUvTilingCm_, landscapeMaterial_, wasTiling);
+        }
     }
 
     void loadLandscapeForLevel(rhi::IDevice* device, const std::string& levelPath,
@@ -3554,7 +3609,7 @@ private:
         }
         rebuildLandscapeCollision();
         applyLandscapeToStreaming();
-        applyLandscapeSurfaceToAll();
+        applyLandscapeSurfaceToAll(device);
     }
 
     // Keeps a small window of PROCEDURAL tiles resident around (cameraXCm, cameraYCm), so the terrain
@@ -8269,6 +8324,17 @@ private:
     // from the name is what lets applyLandscapeSurfaceToAll() be called again later without caring
     // which of the two finished first.
     std::string landscapeMaterial_;
+    // World centimetres per texture tile for the landscape mesh's baked UVs, taken from the resolved
+    // LANDSCAPE material (see applyLandscapeSurface). Unconditional and defaulted to the same 1000
+    // LandscapeRenderer::draw() itself defaults to, so a build without PBR/VOXI -- where nothing ever
+    // assigns it -- draws exactly as it did before this member existed.
+    f32 landscapeUvTilingCm_ = 1000.0f;
+    // False until the tiling above came from a material the library actually considers valid, rather
+    // than from MaterialSystem's fallback. Separate from hasSurfaceBinding() on purpose: the binding
+    // latches on the FIRST successful apply, which can be a frame where the material exists but has
+    // not been drained into the system yet -- so a single latch would freeze the tiling at the
+    // fallback's 200cm and never look again.
+    bool landscapeUvTilingResolved_ = false;
     bool landscapeLoaded_ = false;
     std::string landscapePath_;   // the section actually resident; empty when none is
     bool landscapeDirty_ = false; // true once a sculpt has touched landscapeData_ since the last save
