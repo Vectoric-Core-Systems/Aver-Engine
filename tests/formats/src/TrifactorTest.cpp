@@ -121,6 +121,29 @@ static fmt::OcMeshData makeSingleQuad() {
     return m;
 }
 
+// Two triangles that share an EDGE geometrically (both endpoints occupy the same position) but share
+// NO INDEX -- vertices 3 and 4 sit at the exact same positions as vertices 1 and 2, but are distinct,
+// duplicated vertex-buffer entries, the shape every UV island boundary in a real asset produces
+// (island A and island B need their own UVs along the seam they otherwise share, so the vertex buffer
+// carries two copies of each seam position). Under triangle-EDGE union-find alone this looks like two
+// disconnected shells -- {0,1,2} and {3,4,5} never appear together in a triangle -- and only the
+// meshopt_generatePositionRemap union in computeShellIds (ClusterBuilder.cpp) closes the gap by
+// noticing vertex 3 and vertex 1 (and 4 and 2) occupy the same position. This fixture exists to prove
+// that union is actually wired in, not merely argued for in a comment.
+static fmt::OcMeshData makeUvSeamFixture() {
+    fmt::OcMeshData m;
+    m.positions = {0, 0, 0,    100, 0, 0,    0, 100, 0,      // triangle A: 0, 1, 2
+                   100, 0, 0,  0, 100, 0,    100, 100, 0};   // triangle B: 3, 4, 5 -- 3~1, 4~2 by position
+    m.normals   = {0, 0, 1,    0, 0, 1,      0, 0, 1,
+                   0, 0, 1,    0, 0, 1,      0, 0, 1};
+    m.uvs       = {0, 0,       1, 0,         0, 1,
+                   1, 0,       0, 1,         1, 1};
+    m.indices   = {0, 1, 2,    3, 4, 5};
+    m.submeshes.push_back(fmt::OcMeshSubmesh{"seam", 0, 0, 6, 0, 6});
+    m.materialSlots = {"M"};
+    return m;
+}
+
 // Converts one LOD level of a DAG into the on-disk OcMeshMeshlet shape -- the same conversion
 // tests/formats/src/ConvertTool.cpp does, duplicated rather than shared because this file has no
 // header of its own to put a shared helper in. `errorBounds` is
@@ -183,6 +206,29 @@ int main() {
         const trifactor::ValidationReport report0 = trifactor::validateLodDag(grid, dag);
         for (const auto& issue : report0.issues) AVER_ERROR("  validateLodDag: {} -- {}", issue.where, issue.detail);
         check(report0.ok, "validateLodDag passes on LOD-0-only output (coverage + limits + bounds)");
+    }
+
+    AVER_INFO("=== computeShellIds (via buildClusters): a UV seam is ONE shell, not two ===");
+    {
+        // THE PROPERTY THAT MAKES THE SHELL-AWARE LOCKBORDER FIX SAFE TO BUILD ON. Trifactor's shell
+        // classification (task steps 2-4, ClusterBuilder.cpp) has to union vertices by POSITION, not
+        // just by shared index, or a UV seam -- two triangles that share an edge geometrically but not
+        // through a single shared vertex index, which every real asset with a UV island boundary has
+        // -- would misclassify as two disconnected shells and the eventual routing (not yet built in
+        // this stage -- see Cluster::shellId's STAGE STATUS comment in ClusterBuilder.hpp) could drop
+        // meshopt_SimplifyLockBorder along a seam that is genuinely part of one continuous surface.
+        const fmt::OcMeshData seam = makeUvSeamFixture();
+        trifactor::LodDag dag;
+        std::string why;
+        check(trifactor::buildClusters(seam, dag, &why), "buildClusters on the UV-seam fixture: " + why);
+        check(dag.smallShells.size() == 1,
+              "two triangles sharing a position through DUPLICATE (not shared) indices classify as ONE "
+              "shell (got " + std::to_string(dag.smallShells.size()) + " shell(s)) -- this is what the "
+              "meshopt_generatePositionRemap union in computeShellIds buys; triangle-edge union-find "
+              "alone would see two");
+        check(!dag.smallShells.empty() && dag.isSmallShell(0),
+              "the fixture (6 vertices, 2 triangles) is well under the 64-vert/124-tri cutoff, so its "
+              "one shell classifies as small");
     }
 
     AVER_INFO("=== simplifyMesh keeps a skinned mesh saveable ===");

@@ -156,6 +156,130 @@ QuantizedCone quantizeConeConservative(const Vec3& rawAxis, f32 cutoff) {
     return q;
 }
 
+// ---- connected-shell classification (task steps 3-4) -------------------------------------------
+//
+// WHY THIS EXISTS. meshopt_SimplifyLockBorder (see the file-level comment above) locks any edge used
+// by exactly one triangle in the buffer it is handed. On a SOLID mesh -- one shell -- an edge on the
+// group's true outside really is single-use in that buffer, so LockBorder correctly holds the group
+// boundary and interior detail still simplifies away underneath it. A FOLIAGE mesh is hundreds of
+// DISCONNECTED shells, one sheet per leaf/needle card, so almost every edge looks single-use from
+// inside any buffer that only contains some of those shells, and nothing collapses: measured over the
+// demo corpus with meshopt_SimplifyLockBorder unconditionally set (before this classification
+// existed), fir_sapling's coarsest level was 393,157 triangles out of 433,021 at LOD 0 -- a 1.1x
+// ladder on a mesh that should reduce by orders of magnitude. Dropping the flag entirely fixes that
+// (13,121x) but breaks five solid, single-shell meshes the flag was protecting correctly (see the
+// commit this file's header names). The fix has to be PER SHELL: keep LockBorder for groups made of
+// shells too big to ever fit in one meshlet (a group boundary can genuinely cut through such a shell,
+// so the crack-free guarantee still needs it), drop it for groups made entirely of shells too small
+// to ever be split by a group boundary in the first place (see LodDag::isSmallShell's own comment for
+// why "fits in one meshlet" is the exact, provable line).
+//
+// THIS SECTION COMPUTES WHICH IS WHICH; NOTHING YET ACTS ON IT. buildClusters records the result
+// (Cluster::shellId, LodDag::smallShells) but still builds every LOD-0 cluster through
+// meshopt_buildMeshlets over the whole mesh unconditionally, and buildLodHierarchy's meshopt_simplify
+// call still sets LockBorder unconditionally too -- see Cluster::shellId's STAGE STATUS comment
+// (ClusterBuilder.hpp) for why: this task's own step 1 asked for the five previously-regressed
+// meshes to be confirmed single-shell before any routing got built on that assumption, and one of the
+// five (rock_moss_set_02) is not -- it is seven independently-large shells. Every one of the seven
+// clears the "large" bar by itself, so the routing this task describes would still be safe for this
+// particular mesh, but the premise the task's design leans on is not universally what it was assumed
+// to be, and per the task's own instruction that finding that out is worth more than shipping routing
+// built on it, the routing (steps 5-8) stops here for this stage.
+
+// Union-find over `count` elements, path-halved on find(), union by attaching the second root to the
+// first (no rank/size heuristic). `count` here is at most a mesh's vertex count -- a few hundred
+// thousand at the outside for this engine's demo corpus -- and this runs ONCE per mesh, at LOD-0
+// build time, not per level or per group; a plain compressing find is more than fast enough, and
+// every line of it is auditable, which matters more for a correctness-load-bearing routine than
+// shaving a one-off pass.
+struct UnionFind {
+    std::vector<u32> parent;
+    explicit UnionFind(usize count) : parent(count) {
+        for (usize i = 0; i < count; ++i) parent[i] = static_cast<u32>(i);
+    }
+    u32 find(u32 x) {
+        while (parent[x] != x) {
+            parent[x] = parent[parent[x]];   // path halving
+            x = parent[x];
+        }
+        return x;
+    }
+    void unite(u32 a, u32 b) {
+        a = find(a);
+        b = find(b);
+        if (a != b) parent[a] = b;
+    }
+};
+
+// Per-vertex shell id (dense, 0..shellCount-1) and, per shell, whether it is SMALL -- task step 4:
+// fits inside kMaxClusterVertices/kMaxClusterTriangles, counted over the vertices/triangles the
+// shell's geometry actually references (see the loop below for why "actually references" and not
+// "unioned into" is what gets counted).
+struct ShellIds {
+    std::vector<u32> vertexShell;   // vertexShell[v] -- dense shell id of source-mesh vertex v
+    std::vector<u8>  isSmall;       // isSmall[s] -- true iff shell s is small (see LodDag::smallShells)
+};
+
+// Union-find over triangle edges, THEN union every vertex v with remap[v] from
+// meshopt_generatePositionRemap. That second union is the load-bearing part, not a tidy-up: without
+// it, a UV seam -- two triangles that share a POSITION through DUPLICATED (not shared) vertex
+// indices, which every real asset with a UV island boundary has -- would look disconnected under
+// triangle-edge unioning alone and split into two shells, and this function would then tell the
+// routing below it is safe to drop LockBorder on what is genuinely one continuous surface.
+// meshopt_generatePositionRemap is the exact same position-coincidence hashing meshopt_simplify's own
+// LockBorder decision is built on (both hash the raw vertex_positions bytes -- compare
+// indexgenerator.cpp's meshopt_generatePositionRemap against simplifier.cpp's border classification),
+// so the shells this function computes are never NARROWER than meshoptimizer's own notion of
+// "connected" -- see this file's header comment for why that direction of error, and not the other
+// one, is the safe one to risk.
+ShellIds computeShellIds(const fmt::OcMeshData& mesh) {
+    const usize vertexCount = mesh.positions.size() / 3;
+
+    UnionFind uf(vertexCount);
+    for (usize t = 0; t + 2 < mesh.indices.size(); t += 3) {
+        const u32 i0 = mesh.indices[t + 0], i1 = mesh.indices[t + 1], i2 = mesh.indices[t + 2];
+        uf.unite(i0, i1);
+        uf.unite(i1, i2);
+    }
+
+    if (vertexCount > 0) {
+        std::vector<u32> remap(vertexCount);
+        meshopt_generatePositionRemap(remap.data(), mesh.positions.data(), vertexCount, sizeof(f32) * 3);
+        for (usize v = 0; v < vertexCount; ++v) uf.unite(static_cast<u32>(v), remap[v]);
+    }
+
+    // Dense-pack the union-find roots into 0..shellCount-1 so LodDag::smallShells can be a plain
+    // vector indexed by shellId instead of a sparse map keyed by an arbitrary root vertex index.
+    ShellIds out;
+    out.vertexShell.resize(vertexCount);
+    std::vector<u32> rootToShell(vertexCount, std::numeric_limits<u32>::max());
+    u32 shellCount = 0;
+    for (usize v = 0; v < vertexCount; ++v) {
+        const u32 root = uf.find(static_cast<u32>(v));
+        if (rootToShell[root] == std::numeric_limits<u32>::max()) rootToShell[root] = shellCount++;
+        out.vertexShell[v] = rootToShell[root];
+    }
+
+    // "Small" is counted over vertices/triangles the shell's geometry ACTUALLY references, not every
+    // position that happened to union into it: nothing in this codebase produces an unreferenced
+    // stray position, but nothing guarantees a source asset never will, and such a position must not
+    // make an otherwise-tiny shell look large (or, worse, hide a genuinely-oversized shell as small).
+    std::vector<u8> referenced(vertexCount, 0);
+    for (u32 idx : mesh.indices) referenced[idx] = 1;
+
+    std::vector<u32> shellVerts(shellCount, 0), shellTris(shellCount, 0);
+    for (usize v = 0; v < vertexCount; ++v)
+        if (referenced[v]) ++shellVerts[out.vertexShell[v]];
+    for (usize t = 0; t + 2 < mesh.indices.size(); t += 3)
+        ++shellTris[out.vertexShell[mesh.indices[t]]];   // a triangle's 3 vertices share one shell
+
+    out.isSmall.resize(shellCount);
+    for (u32 s = 0; s < shellCount; ++s)
+        out.isSmall[s] = (shellVerts[s] <= kMaxClusterVertices && shellTris[s] <= kMaxClusterTriangles) ? 1 : 0;
+
+    return out;
+}
+
 // ---- grouping (task step 2a) -------------------------------------------------------------------
 //
 // ~4-8 clusters per group per the task; 6 is the middle of that range, 8 the hard cap.
@@ -337,7 +461,26 @@ bool buildClusters(const fmt::OcMeshData& mesh, LodDag& dag, std::string* why) {
     }
 
     dag = LodDag{};
-    splitIntoClusters(mesh, mesh.indices, /*level=*/0, dag);
+
+    // Task steps 2-4: classify `mesh` into connected shells and record the result on the DAG. This is
+    // pure bookkeeping -- see Cluster::shellId's STAGE STATUS comment (ClusterBuilder.hpp) for why the
+    // clustering below is still unconditional and unmodified by it in this stage. One log line per
+    // cooked mesh (RelodTool surfaces it for free) rather than nothing: a future asset change that
+    // silently made one of the five previously-regressed meshes (see this file's header comment)
+    // multi-shell, or turned a currently-large shell small, would be exactly the kind of thing that
+    // reopens this feature's safety argument, and this is the cheapest possible tripwire for it.
+    const ShellIds shellIds = computeShellIds(mesh);
+    dag.smallShells = shellIds.isSmall;
+    u32 smallShellCount = 0;
+    for (u8 s : dag.smallShells) smallShellCount += s ? 1 : 0;
+    AVER_INFO("[Trifactor] computeShellIds: {} shell(s), {} small, {} large",
+              dag.smallShells.size(), smallShellCount, dag.smallShells.size() - smallShellCount);
+
+    const std::vector<u32> ids = splitIntoClusters(mesh, mesh.indices, /*level=*/0, dag);
+    for (u32 id : ids) {
+        Cluster& c = dag.clusters[id];
+        c.shellId = shellIds.vertexShell[c.vertices[c.triangles[0]]];
+    }
     return true;
 }
 
