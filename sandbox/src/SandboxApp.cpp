@@ -3702,6 +3702,12 @@ private:
         // already resident picks up a change on its own. Fires at most once per level -- the frame the
         // material system finally comes up, when the landscape had already loaded and drawn flat --
         // and the nodes rebuild lazily on the next draw, exactly as they already do after a sculpt.
+        // THIS BLOCK IS NORMALLY SILENT, AND THAT IS NOT A SIGN IT DID NOTHING. The first apply
+        // happens from loadLandscapeForLevel, before a single chunk mesh has been built, so there is
+        // nothing resident to evict and nothing to report -- the tiling simply takes effect on every
+        // mesh built afterwards. Verified by instrumenting draw() directly: it receives 150, from
+        // M_forest_leaves_02's own PARAM uvTiling, rather than the 1000cm parameter default. The
+        // absence of this log was briefly mistaken for the fix not working; it is the opposite.
         if (device && landscapeUvTilingCm_ != wasTiling) {
             if (landscapeRenderer_) landscapeRenderer_->forgetAll(*device);
             for (auto& kv : landscapeRingTiles_)
