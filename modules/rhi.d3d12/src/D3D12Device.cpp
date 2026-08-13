@@ -37,6 +37,16 @@ constexpr u32 kFrameCount = 2;
 constexpr u32 kDefaultSampleCount = 4;
 constexpr DXGI_FORMAT kBackbufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
+// The RESOURCE format the depth buffer is actually created with -- typeless, so it can carry BOTH a
+// D32_FLOAT depth-stencil view (kDepthFormat, used everywhere above) AND an R32_FLOAT shader-resource
+// view (IDevice::sceneDepthTexture(), read by modules/occlusion's HZB seed pass). The identical
+// "one resource, two views" trick VoxiRenderer::createShadowResources already uses for its own shadow
+// map, extended here to a resource that is also allowed to be MULTISAMPLED — a D32_FLOAT-created
+// (non-typeless) resource can only ever be viewed as D32_FLOAT, so before sceneDepthTexture() existed
+// there was no reason for this to be anything but the concrete format, and no consumer had ever asked
+// to read it as a shader resource at all. See createDepthBuffer's own comment for the DSV-side
+// consequence (an explicit view desc, where a bare `nullptr` used to suffice).
+constexpr DXGI_FORMAT kDepthResourceFormat = DXGI_FORMAT_R32_TYPELESS;
 
 // Scene target format: linear HDR radiance, which the post chain tonemaps into the backbuffer.
 constexpr DXGI_FORMAT kSceneColorFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -886,6 +896,10 @@ public:
     // The SCENE colour format, which is what a feature builds its scene pipelines against.
     Format backbufferFormat() const override { return fromDxgiFormat(kSceneColorFormat); }
     Format depthFormat() const override { return fromDxgiFormat(kDepthFormat); }
+    // See RHI.hpp's own comment on this method and kDepthResourceFormat's above. OUT-OF-LINE, same
+    // reason as renderContext()/resources() just below: it calls into D3D12ResourceFactory, whose
+    // complete type is not visible yet at this point in the file.
+    TextureHandle sceneDepthTexture() override;
     IResourceFactory* resources() override;
     // See IDevice::renderContext()'s own comment: the SAME context object the overridesScenePipeline
     // branch of drawMesh() below uses internally, exposed so a caller can interleave its own
@@ -1146,6 +1160,15 @@ private:
     ComPtr<ID3D12Resource> renderTargets_[kFrameCount];
     ComPtr<ID3D12Resource> msaaColor_;
     ComPtr<ID3D12Resource> depthBuffer_;
+    // The generic-RHI wrapper around depthBuffer_ -- see sceneDepthTexture()'s own comment. STABLE
+    // across a resize: adoptExternalDepthTexture re-fills this SAME slot rather than pushing a new
+    // one, so a caller that cached the handle across frames (modules/occlusion does) never has to
+    // notice depthBuffer_ was reallocated underneath it.
+    TextureHandle depthTexHandle_ = 0;
+    // True whenever depthBuffer_ has (re)allocated since depthTexHandle_ was last refreshed --
+    // createDepthBuffer() sets this every time it runs; sceneDepthTexture() clears it once it has
+    // re-adopted the current depthBuffer_.
+    bool depthTexDirty_ = true;
     ComPtr<ID3D12CommandAllocator> allocators_[kFrameCount];
     ComPtr<ID3D12GraphicsCommandList> cmdList_;
     ComPtr<ID3D12Fence> fence_;
@@ -1701,6 +1724,16 @@ public:
     ID3D12Resource* bufferResource(BufferHandle h) {
         return (h == 0 || h > buffers_.size()) ? nullptr : buffers_[h - 1].res.Get();
     }
+    // Wraps a resource this factory did NOT create (D3D12Device::depthBuffer_, made directly via
+    // CreateCommittedResource in createDepthBuffer() because it needs a DSV and a MULTISAMPLE-aware
+    // one at that -- createTexture() never makes either) into an ordinary TextureHandle, so a caller
+    // reaches it through setSrv/textureBarrier exactly like any factory-made texture. Concrete rather
+    // than part of IResourceFactory, same reasoning as bufferResource above: this is the mechanics of
+    // ONE specific adoption, not a general "wrap anything" entry point every backend would need to
+    // grow. `existing`, when non-zero, is REUSED in place rather than allocating a new slot -- see
+    // D3D12Device::depthTexHandle_'s own comment for why the handle has to stay stable across a
+    // resize. Returns the (possibly reused) handle, or 0 if `res` is null.
+    TextureHandle adoptExternalDepthTexture(ID3D12Resource* res, u32 width, u32 height, TextureHandle existing);
     void setUavBuffer(BindingSetHandle set, u32 slot, BufferHandle b, u32 stride, u32 count, u32 firstElement) override;
 
     bool writeBuffer(BufferHandle h, const void* src, u64 bytes, u64 offset) override;
@@ -1969,6 +2002,21 @@ D3D12Device::~D3D12Device() {
 
 IResourceFactory* D3D12Device::resources() { return rhiFactory_; }
 IRenderContext* D3D12Device::renderContext() { return rhiContext_; }
+
+// See RHI.hpp's own comment on IDevice::sceneDepthTexture. Lazily (re)adopts depthBuffer_ into the
+// factory's texture table whenever createDepthBuffer() has run since the last call -- see
+// depthTexDirty_'s own comment for why that flag, not a size comparison, is the trigger: this method
+// has no cheap way to tell "the SAME resource" from "a resource that happens to be the same size" on
+// its own, and createDepthBuffer() already knows exactly when it replaced the resource.
+TextureHandle D3D12Device::sceneDepthTexture() {
+    if (!depthBuffer_ || !rhiFactory_) return 0;
+    if (depthTexDirty_) {
+        depthTexHandle_ = rhiFactory_->adoptExternalDepthTexture(
+            depthBuffer_.Get(), sceneWidth_, sceneHeight_, depthTexHandle_);
+        depthTexDirty_ = false;
+    }
+    return depthTexHandle_;
+}
 
 void D3D12Device::addRenderFeature(IRenderFeature* f) {
     if (!f) return;
@@ -2470,13 +2518,29 @@ bool D3D12Device::createDepthBuffer() {
     td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     td.Width = sceneWidth_; td.Height = sceneHeight_;
     td.DepthOrArraySize = 1; td.MipLevels = 1;
-    td.Format = kDepthFormat; td.SampleDesc.Count = sampleCount_;
+    // TYPELESS (kDepthResourceFormat), not kDepthFormat directly -- see that constant's own comment.
+    td.Format = kDepthResourceFormat; td.SampleDesc.Count = sampleCount_;
     td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
+    // The clear value still names the concrete depth format: a D3D12_CLEAR_VALUE on a typeless
+    // resource must be one of the formats that resource can be VIEWED as, and D32_FLOAT (kDepthFormat)
+    // is the DSV's own view format below, unchanged from before this resource became typeless.
     D3D12_CLEAR_VALUE cv{}; cv.Format = kDepthFormat; cv.DepthStencil.Depth = 1.0f;
     auto def = heapProps(D3D12_HEAP_TYPE_DEFAULT);
     if (!hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv, IID_PPV_ARGS(&depthBuffer_)), "depth buffer")) return false;
-    device_->CreateDepthStencilView(depthBuffer_.Get(), nullptr, dsvHeap_->GetCPUDescriptorHandleForHeapStart());
+    // An EXPLICIT view desc, where a bare `nullptr` used to be enough: CreateDepthStencilView infers
+    // the view format from the resource's own format only when the resource is NOT typeless, and a
+    // typeless resource additionally needs to be told whether it is multisampled -- the dimension is
+    // not otherwise recoverable from a DXGI_FORMAT_R32_TYPELESS resource description alone.
+    D3D12_DEPTH_STENCIL_VIEW_DESC dv{};
+    dv.Format = kDepthFormat;
+    dv.ViewDimension = (sampleCount_ > 1) ? D3D12_DSV_DIMENSION_TEXTURE2DMS : D3D12_DSV_DIMENSION_TEXTURE2D;
+    device_->CreateDepthStencilView(depthBuffer_.Get(), &dv, dsvHeap_->GetCPUDescriptorHandleForHeapStart());
+    // The resource just changed identity (a fresh allocation, possibly at a new size/sample count);
+    // sceneDepthTexture() re-adopts it lazily the next time something asks, rather than eagerly here
+    // where no IResourceFactory call site is guaranteed to be safe yet (this runs during swapchain
+    // (re)creation, ahead of rhiFactory_ existing on the very first call).
+    depthTexDirty_ = true;
     return true;
 }
 
@@ -4457,6 +4521,11 @@ void D3D12ResourceFactory::nullFill(const RhiBindingSet& s) {
             sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
             sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
             sv.Texture3D.MipLevels = 1;
+        } else if (kind == SlotKind::Texture2DMS) {
+            // D3D12_TEX2DMS_SRV is an empty struct (no mip/level fields to set at all) -- see
+            // setSrv's own comment on this dimension.
+            sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
         } else {
             sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
             sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -4835,6 +4904,40 @@ TextureHandle D3D12ResourceFactory::createTexture(const TextureDesc& d) {
     if (d.debugName) t.debugName = d.debugName;
     t.states.assign(mips, d.initialState);
 #endif
+    textures_.push_back(std::move(t));
+    return static_cast<TextureHandle>(textures_.size());
+}
+
+// See this method's own declaration (D3D12ResourceFactory class body) for what it is for.
+TextureHandle D3D12ResourceFactory::adoptExternalDepthTexture(ID3D12Resource* resource, u32 width, u32 height,
+                                                               TextureHandle existing) {
+    if (!resource) return 0;
+    RhiTexture t;
+    t.res = resource;   // ComPtr(T*) AddRefs; ownership is SHARED with dev_->depthBuffer_'s own
+                        // ComPtr, not stolen from it -- both go to zero together when the device does.
+    t.desc.dim = TextureDim::Tex2D;
+    t.desc.width = width; t.desc.height = height; t.desc.depth = 1; t.desc.mips = 1;
+    // R32Typeless, not D32Float: this is the SAME "DSV sees D32Float, SRV sees R32Float" alias
+    // VoxiRenderer's own shadow map uses (see Format::R32Typeless's own doc comment in
+    // RHIResources.hpp), which is exactly why toDxgiSrvFormat below resolves it to R32_FLOAT without
+    // this factory needing to know anything backend-specific about depth formats.
+    t.desc.format = Format::R32Typeless;
+    t.desc.bind = ResourceBind::ShaderResource | ResourceBind::DepthStencil;
+    // Matches physical reality at the moment of adoption: createDepthBuffer() leaves the resource in
+    // DEPTH_WRITE (its CreateCommittedResource call says so explicitly) and nothing transitions it
+    // away from that before the render loop starts using it as a depth target every frame. A caller
+    // wanting to READ it (modules/occlusion) is responsible for the DepthWrite <-> NonPixelShaderResource
+    // round trip via the ordinary textureBarrier — this factory has no idea when that is safe to do.
+    t.desc.initialState = ResourceState::DepthWrite;
+    t.desc.debugName = nullptr;
+#if AVER_RHI_TRACK_STATE
+    t.debugName = "scene depth (adopted)";
+    t.states.assign(1, ResourceState::DepthWrite);
+#endif
+    if (existing) {
+        RhiTexture* slot = texture(existing);
+        if (slot) { *slot = std::move(t); return existing; }
+    }
     textures_.push_back(std::move(t));
     return static_cast<TextureHandle>(textures_.size());
 }
@@ -5327,7 +5430,13 @@ void D3D12ResourceFactory::setSrv(BindingSetHandle set, u32 slot, TextureHandle 
     sv.Format = toDxgiSrvFormat(t->desc.format);
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     const bool whole = (mip == kAllMips);
-    if (t->desc.dim == TextureDim::Tex3D) {
+    if (s->srvKinds[slot] == SlotKind::Texture2DMS) {
+        // A multisampled resource cannot have more than one mip (D3D12_TEX2DMS_SRV carries no
+        // mip/level fields at all, unlike every other dimension below), so `mip` is meaningless here
+        // and simply ignored -- the ONE view this dimension can express already covers the whole
+        // (single-level) resource.
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
+    } else if (t->desc.dim == TextureDim::Tex3D) {
         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
         sv.Texture3D.MostDetailedMip = whole ? 0 : mip;
         sv.Texture3D.MipLevels = whole ? t->desc.mips : 1;

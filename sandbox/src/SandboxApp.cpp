@@ -107,6 +107,10 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/voxi/VoxiGiShaders.hpp"
 #endif
 
+#if AVER_MODULE_OCCLUSION
+#include "aver/occlusion/Occlusion.hpp"
+#endif
+
 #if AVER_MODULE_PBR
 #include "aver/pbr/Material.hpp"
 #include "aver/pbr/MaterialGpu.hpp"
@@ -1208,6 +1212,41 @@ public:
         // The game UI's render feature: overlay pass only, so ordering against scene features is free.
         gameUi_ = aver::render::ui::UiRenderer::create(*e.device());
         if (gameUi_) e.device()->addRenderFeature(gameUi_);
+
+#if AVER_MODULE_OCCLUSION
+        // NOT an IRenderFeature: it has no prePass/scenePass of its own, only two methods
+        // renderSceneEntities() calls directly from inside the CPU entity walk -- see occluder_'s own
+        // member comment. Built unconditionally (whether or not --occlusion-cull was given): it is
+        // cheap to own and every call it drives is already gated on occlusionCullEnabled_.
+        if (rhi::IResourceFactory* occRes = e.device()->resources()) {
+            occluder_ = aver::occlusion::createOcclusionCuller(*occRes);
+            // WARMED UP HERE, NOT LEFT TO ITS FIRST PER-FRAME CALL, and that is not an optimisation --
+            // it is what keeps this safe. ensureSized() is where the module's THREE compute pipelines
+            // actually get built (createComputePipeline, D3D12ResourceFactory::pipelines_.push_back),
+            // and every OTHER feature in this engine builds every one of its own PSOs during init()
+            // too, before any frame is being recorded -- see VoxiRenderer::init calling
+            // createScenePipelines etc. That is not a style preference: D3D12RenderContext caches the
+            // CURRENTLY BOUND pipeline as a raw pointer into that same vector (pipe_, read by
+            // setBindingSet's register-mismatch check on every draw) between one setPipeline() call
+            // and the next, and pipelines_.push_back() reallocating while some OTHER feature's pointer
+            // is still resting on the OLD backing array is a dangling-pointer read -- reached in
+            // practice: calling ensureSized() lazily from inside the scene walk (this module's first
+            // attempt) corrupted Voxi's own cached pipeline pointer mid-frame and crashed the driver's
+            // shader compiler on the very next PSO the corrupted state touched. Warming up here, before
+            // Engine::run's loop ever calls beginFrame() for the first time, means the one-time
+            // allocation that can invalidate pipe_ happens while nothing has a live pointer into
+            // pipelines_ to begin with. A later resize (window resize, --render-scale change) still
+            // rebuilds the pyramid lazily from inside the frame -- accepted for now: it recreates the
+            // SEED pipeline only, not new SLOTS in pipelines_ every frame in steady state (see
+            // OcclusionCuller.cpp's own comment on why only sample-count changes touch that one), and
+            // a resize is already a rare, user-driven event this task's --frames runs never exercise.
+            rhi::TextureDesc occSceneDesc;
+            if (const rhi::TextureHandle occDepth = e.device()->sceneDepthTexture();
+                occDepth && occRes->textureInfo(occDepth, occSceneDesc)) {
+                occluder_->ensureSized(*occRes, occSceneDesc.width, occSceneDesc.height, e.device()->sampleCount());
+            }
+        }
+#endif
 
         // --skin-test: the GPU skinning pass against its CPU reference, on this machine's real
         // device. Registered only when asked for, because it costs a waitIdle and exists to be run
@@ -2555,7 +2594,123 @@ public:
             f64 dispatchMs = 0.0;
 
             const u32 n = w.count();
-            for (u32 i = 0; i < n; ++i) {
+
+#if AVER_MODULE_OCCLUSION
+            // ---- occlusion phase 0: collect every entity's world AABB, and split the walk order ----
+            //
+            // A DEDICATED PRE-WALK, not the main loop's own per-entity box computation, because
+            // occluder_->testBatch() below is ONE GPU dispatch over every candidate at once (see
+            // Occlusion.hpp's own comment on why: a synchronous readback per entity would be 6,370
+            // waitIdle() calls instead of one) and it needs the WHOLE list -- including pass-1
+            // entities, which the main loop reaches only AFTER they are already drawn -- before the
+            // main loop has visited any of them. Degenerate-box entities (no valid AABB) are left out
+            // here exactly as the main loop's own frustum cull leaves them un-culled below: "must not
+            // vanish" applies to occlusion the same way it applies to the frustum.
+            //
+            // pass1Count_ entities -- occlusionWasVisible(ent) true, or never tested -- sort FIRST in
+            // occlusionOrder_ and are drawn UNCONDITIONALLY, exactly as every entity is when this flag
+            // is off; the rest sort after and are gated on this frame's testBatch() result once the
+            // pyramid built from the first group exists. See this file's occlusion module README and
+            // Occlusion.hpp's top comment for the two-pass argument this order encodes.
+            u32 occlusionPass1Count = n;
+            bool occlusionPyramidBuilt = false;
+            if (occlusionCullEnabled_ && occluder_) {
+                occlusionBoxes_.clear();
+                occlusionBoxEntities_.clear();
+                occlusionOrder_.resize(n);
+                u32 head = 0, tail = n;   // pass-1 fills from the front, pass-2 from the back
+                for (u32 k = 0; k < n; ++k) {
+                    const scene::Entity e2 = w.at(k);
+                    (occlusionWasVisible(e2) ? occlusionOrder_[head++] : occlusionOrder_[--tail]) = k;
+
+                    if (w.destroyPending(e2)) continue;
+                    const scene::CMeshRenderer* mr2 =
+                        w.component<scene::CMeshRenderer>(e2, scene::kComponentMeshRenderer);
+                    if (!mr2 || !(mr2->flags & scene::kMeshRendererVisible) || mr2->mesh == 0) continue;
+                    // The SAME static-mesh-bounds override the main loop below applies (search "A
+                    // STATIC entity gets its bounds from the asset") -- MUST run here too, or this
+                    // pre-walk's box disagrees with the one the main loop uses for frustum culling
+                    // the very first frame an entity is visited, before either pass has ever written
+                    // corrected bounds into its CMeshRenderer.
+                    const bool skinned2 = skinnedScene_ && skinnedScene_->drawHandle(e2) != 0;
+                    if (!skinned2)
+                        if (const auto bit2 = meshBounds_.find(mr2->mesh); bit2 != meshBounds_.end()) {
+                            auto* mw2 = const_cast<scene::CMeshRenderer*>(mr2);
+                            mw2->aabbMin[0] = bit2->second.first.x;  mw2->aabbMin[1] = bit2->second.first.y;
+                            mw2->aabbMin[2] = bit2->second.first.z;
+                            mw2->aabbMax[0] = bit2->second.second.x; mw2->aabbMax[1] = bit2->second.second.y;
+                            mw2->aabbMax[2] = bit2->second.second.z;
+                        }
+                    const Vec3 lo2{mr2->aabbMin[0], mr2->aabbMin[1], mr2->aabbMin[2]};
+                    const Vec3 hi2{mr2->aabbMax[0], mr2->aabbMax[1], mr2->aabbMax[2]};
+                    if (!(hi2.x > lo2.x && hi2.y > lo2.y && hi2.z > lo2.z)) continue;   // degenerate
+                    const Mat4& wm2 = w.worldMatrix(e2);
+                    Vec3 wlo2{1e30f, 1e30f, 1e30f}, whi2{-1e30f, -1e30f, -1e30f};
+                    for (u32 c = 0; c < 8; ++c) {
+                        const Vec3 p{(c & 1) ? hi2.x : lo2.x, (c & 2) ? hi2.y : lo2.y, (c & 4) ? hi2.z : lo2.z};
+                        const Vec3 t = xformPoint(wm2, p);
+                        wlo2.x = std::fmin(wlo2.x, t.x); whi2.x = std::fmax(whi2.x, t.x);
+                        wlo2.y = std::fmin(wlo2.y, t.y); whi2.y = std::fmax(whi2.y, t.y);
+                        wlo2.z = std::fmin(wlo2.z, t.z); whi2.z = std::fmax(whi2.z, t.z);
+                    }
+                    aver::occlusion::Aabb box;
+                    box.min[0] = wlo2.x; box.min[1] = wlo2.y; box.min[2] = wlo2.z;
+                    box.max[0] = whi2.x; box.max[1] = whi2.y; box.max[2] = whi2.z;
+                    occlusionBoxes_.push_back(box);
+                    occlusionBoxEntities_.push_back(e2);
+                }
+                // `head` is now exactly the pass-1 count: every index landed on one side or the
+                // other, head counting up from the front and tail down from the back, so head == tail
+                // once the loop above has placed all n.
+                occlusionPass1Count = head;
+                if (rhi::IResourceFactory* occRes = e.device()->resources()) {
+                    rhi::TextureDesc sceneDesc;
+                    // sceneDepthTexture() itself supplies the size (via textureInfo below): asking
+                    // occluder_ to size its pyramid off anything else risks it disagreeing with the
+                    // ACTUAL depth buffer the seed pass is about to read.
+                    if (const rhi::TextureHandle depthTex = e.device()->sceneDepthTexture();
+                        depthTex && occRes->textureInfo(depthTex, sceneDesc)) {
+                        occluder_->ensureSized(*occRes, sceneDesc.width, sceneDesc.height, e.device()->sampleCount());
+                    }
+                }
+            } else {
+                occlusionOrder_.clear();   // empty means "no reordering" -- see the loop below
+            }
+
+            // Runs buildPyramid()+testBatch() ONCE this frame -- either at the pass-1/pass-2 boundary
+            // inside the main loop below (the common case, so pass-2 entities can be gated THIS
+            // frame), or here as a fallback when pass-2 is empty (occlusionPass1Count == n: nothing
+            // to gate this frame, but occlusionVisible_ still has to be refreshed for every entity or
+            // the split above never budges from "everyone is pass-1" and this frame's demotions --
+            // an entity that just became occluded -- would never be discovered).
+            const auto occlusionBuildAndTest = [&]() {
+                if (occlusionPyramidBuilt) return;
+                occlusionPyramidBuilt = true;
+                if (occlusionBoxes_.empty()) return;
+                rhi::IRenderContext* pctx = e.device()->renderContext();
+                rhi::IResourceFactory* occRes = e.device()->resources();
+                const rhi::TextureHandle depthTex = e.device()->sceneDepthTexture();
+                if (!pctx || !occRes || !depthTex) return;
+                occluder_->buildPyramid(*pctx, depthTex, &viewProj_.m[0][0]);
+                occluder_->testBatch(*pctx, *occRes, occlusionBoxes_.data(),
+                                     static_cast<u32>(occlusionBoxes_.size()), occlusionResults_);
+                u32 c = 0, t = 0;
+                occluder_->lastTestCounts(c, t);
+                occlusionCulledAccum_ += c;
+                occlusionTestedAccum_ += t;
+                ++occlusionReportFrames_;
+                for (usize bi = 0; bi < occlusionBoxEntities_.size(); ++bi)
+                    occlusionVisible_[occlusionBoxEntities_[bi]] = occlusionResults_[bi] != 0;
+            };
+#endif
+
+            for (u32 oi = 0; oi < n; ++oi) {
+#if AVER_MODULE_OCCLUSION
+                const u32 i = occlusionOrder_.empty() ? oi : occlusionOrder_[oi];
+                if (occlusionCullEnabled_ && occluder_ && oi == occlusionPass1Count) occlusionBuildAndTest();
+#else
+                const u32 i = oi;
+#endif
                 const scene::Entity ent = w.at(i);
                 if (w.destroyPending(ent)) continue;
                 const scene::CMeshRenderer* mr =
@@ -2609,6 +2764,22 @@ public:
                         if (outside) { ++culled; continue; }
                     }
                 }
+#if AVER_MODULE_OCCLUSION
+                // PASS-2 ONLY: `oi < occlusionPass1Count` entities were drawn unconditionally, before
+                // occlusionBuildAndTest() ever ran -- see the loop header's own comment. Everything
+                // from here down is an entity occlusionBuildAndTest() (triggered right when `oi`
+                // crossed occlusionPass1Count, above) has ALREADY tested against a pyramid built from
+                // every one of those pass-1 draws, so occlusionWasVisible(ent) is this frame's own
+                // fresh answer, not a stale one -- exactly the same-frame guarantee the module's own
+                // top comment argues for. A box excluded from occlusionBoxes_ (degenerate — see the
+                // pre-walk) was never tested and occlusionWasVisible defaults such an entity to
+                // visible, so it reaches here and draws, same as haveWorldBox==false already does for
+                // frustum culling two paragraphs up.
+                if (occlusionCullEnabled_ && occluder_ && oi >= occlusionPass1Count && haveWorldBox &&
+                    !occlusionWasVisible(ent)) {
+                    continue;
+                }
+#endif
                 const i32 mat = mr->material;
                 f32 col[4] = {0.80f, 0.80f, 0.85f, 1.0f};
                 f32 metallic = 0.0f, roughness = 0.5f;
@@ -2961,6 +3132,26 @@ public:
                     selectionOutline_ = wm, selectionMesh_ = mesh, hasSelection_ = true;
                 ++drawn;
             }
+#if AVER_MODULE_OCCLUSION
+            // The pass-2-empty fallback -- see occlusionBuildAndTest's own comment for why this has
+            // to run even when there was nothing left to gate this frame: occlusionVisible_ still
+            // needs a fresh answer for every entity, or a wall walked INTO front of a previously
+            // "visible" entity would never be discovered and that entity would stay in pass 1 (drawn,
+            // wastefully but not incorrectly) forever.
+            if (occlusionCullEnabled_ && occluder_) occlusionBuildAndTest();
+            // Reported on the SAME "power-of-two frame count" cadence D3D12Device's own GPU-timing
+            // report uses (RHIResources.hpp's ScopedGpuStat / D3D12Device::collectGpuTiming), so the
+            // culled-count line and the "HZB build"/"HZB test" GPU spans it names land at roughly the
+            // frame this app was already going to print something at, rather than a second unrelated
+            // rhythm the log has to be read against.
+            if (occlusionCullEnabled_ && occluder_ && occlusionReportFrames_ &&
+                (occlusionReportFrames_ & (occlusionReportFrames_ + 1)) == 0) {
+                const f64 pct = occlusionTestedAccum_ ? 100.0 * static_cast<f64>(occlusionCulledAccum_) /
+                                                        static_cast<f64>(occlusionTestedAccum_) : 0.0;
+                AVER_INFO("[Occlusion] {} of {} tested entities culled ({:.1f}%) over {} frame(s)",
+                          occlusionCulledAccum_, occlusionTestedAccum_, pct, occlusionReportFrames_);
+            }
+#endif
             {
                 const f64 walkMs = std::chrono::duration<f64, std::milli>(
                     std::chrono::steady_clock::now() - tWalk0).count();
@@ -3287,6 +3478,13 @@ public:
 #else
         (void)e;
 #endif
+#if AVER_MODULE_OCCLUSION
+        if (occluder_) {
+            if (rhi::IResourceFactory* occRes = e.device()->resources())
+                aver::occlusion::destroyOcclusionCuller(*occRes, occluder_);
+            occluder_ = nullptr;
+        }
+#endif
 #if AVER_MODULE_SCRIPTING
         scripts_.shutdown();
 #endif
@@ -3467,6 +3665,15 @@ public:
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
     void setDepthPrepassOverride(bool on) { depthPrepassOverride_ = on; }   // --depth-prepass
+#if AVER_MODULE_OCCLUSION
+    // --occlusion-cull: see occlusionCullEnabled_'s own member comment. Unset (the default) never
+    // reorders the entity walk, never calls occluder_ at all, and reproduces today's frame exactly --
+    // the same "off is a no-op, byte for byte" contract depthPrepassOverride_ carries just above.
+    // Guarded the same as the member it assigns (occlusionCullEnabled_, below): with the module OFF,
+    // that member does not exist, so this setter cannot either -- see the CLI parse site's own
+    // #if AVER_MODULE_OCCLUSION for the only caller, which is guarded identically.
+    void setOcclusionCullOverride(bool on) { occlusionCullEnabled_ = on; }
+#endif
     void setGiOverride(int q, bool dbg) { giOverride_ = q; giDebugView_ = dbg; } // --gi / --gi-debug
     void setGiForceOff(bool off) { giForceOff_ = off; }                        // --no-gi
     // --no-gi-cone: the A/B measurement toggle from VoxiRenderer::setConeTraceEnabled's own comment.
@@ -8566,6 +8773,45 @@ private:
     // never calls IDevice::setDepthPrepassEnabled/drawMeshDepthPrepass/setNextDrawPrepassed at all --
     // see renderSceneEntities()'s own comment for the two-walk mechanism this drives.
     bool depthPrepassOverride_ = false;
+#if AVER_MODULE_OCCLUSION
+    // --occlusion-cull: hierarchical-Z two-pass box culling (modules/occlusion). OFF (the default)
+    // never calls occluder_ at all and never reorders the entity walk -- see renderSceneEntities's
+    // own comment for the two-pass mechanism this drives, which mirrors depthPrepassOverride_'s
+    // "own separate walk" shape but reorders IN PLACE rather than duplicating the walk, because the
+    // draw logic it reuses (LOD selection, material binding, the GPU-cluster paths) is what
+    // depthPrepassOverride_'s own walk deliberately does NOT replicate.
+    bool occlusionCullEnabled_ = false;
+    // NON-owning would be wrong here: this module has no registry of its own the way IRenderFeature
+    // does, so SandboxApp owns the one instance for the run and destroys it in onShutdown.
+    aver::occlusion::IOcclusionCuller* occluder_ = nullptr;
+    // Per-entity "the pyramid could not prove this hidden, as of the last time it was tested" bit,
+    // carried across frames -- see Occlusion.hpp's top comment on why this bookkeeping belongs to
+    // the CALLER and not to the culler itself. Absent means "never tested" and defaults to visible
+    // (see occlusionWasVisible below), so a freshly spawned entity is never missing from its first
+    // frame on screen.
+    std::unordered_map<scene::Entity, bool> occlusionVisible_;
+    // This frame's reordering of [0, w.count()) so every PASS-1 (assumed-visible) index precedes
+    // every PASS-2 one -- see renderSceneEntities's own comment for the two-pass shape this builds.
+    // A MEMBER, not a local, purely to reuse its allocation frame to frame rather than reallocating
+    // a several-thousand-entry vector every single frame on a scene this size.
+    std::vector<u32> occlusionOrder_;
+    // This frame's world AABBs, collected in a dedicated pre-walk ahead of the main entity loop --
+    // see that pre-walk's own comment for why occluder_->testBatch() needs ALL of them (not just the
+    // pass-2 subset) in one call, and why that means computing them once, up front, rather than
+    // reusing whatever the main loop's OWN (per-pass-2-entity) box computation produces. Parallel
+    // arrays, kept as members for the same reallocation-avoidance reason occlusionOrder_ is.
+    std::vector<aver::occlusion::Aabb> occlusionBoxes_;
+    std::vector<scene::Entity> occlusionBoxEntities_;
+    std::vector<u8> occlusionResults_;
+    // Diagnostics: accumulated since the process started, and the frame count they cover -- see the
+    // periodic log line in renderSceneEntities for where these are read and reset.
+    u64  occlusionCulledAccum_ = 0, occlusionTestedAccum_ = 0;
+    u32  occlusionReportFrames_ = 0;
+    bool occlusionWasVisible(scene::Entity e) const {
+        const auto it = occlusionVisible_.find(e);
+        return it == occlusionVisible_.end() || it->second;
+    }
+#endif
     int  giOverride_=0;              // --gi: GI quality to apply at startup
     bool giForceOff_=false;          // --no-gi: force it off, whatever the default is
     int  rtOverride_=0;              // --rt: ray tracing quality at startup
@@ -10329,7 +10575,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -10576,6 +10822,11 @@ Application* createApplication(int argc, char** argv) {
         // occluded fragment skips PSMainVoxi's shadow lookup/cone trace/fog entirely. Unset (the
         // default) reproduces pre-existing behaviour exactly -- see setDepthPrepassOverride's comment.
         else if (!std::strcmp(argv[i],"--depth-prepass")) depthPrepass=true;
+        // --occlusion-cull: hierarchical-Z two-pass box culling (modules/occlusion). Unset (the
+        // default) reproduces pre-existing behaviour exactly, bit for bit -- see
+        // setOcclusionCullOverride's own comment, same "off is today's frame back, byte for byte"
+        // contract --depth-prepass and --edge-aa both already carry.
+        else if (!std::strcmp(argv[i],"--occlusion-cull")) occlusionCull=true;
         // --edge-aa: FxaaResolve through the SAME rhi::IUpscaler seam --aversr uses -- see
         // edgeAaEnabled_'s own comment for how the two share one slot. A SETTING, not a hard
         // replacement for MSAA: it runs whatever sample count --msaa already asked for.
@@ -10750,6 +11001,14 @@ Application* createApplication(int argc, char** argv) {
 #endif
     }
     app->setDepthPrepassOverride(depthPrepass);
+    if (occlusionCull) {
+#if AVER_MODULE_OCCLUSION
+        app->setOcclusionCullOverride(true);
+#else
+        AVER_WARN("[Occlusion] --occlusion-cull was given but this build has no Occlusion module "
+                  "(-DAVER_MODULE_OCCLUSION=ON to include it); every entity draws as it always did");
+#endif
+    }
     if (edgeAa) {
 #if AVER_MODULE_SR
         app->setEdgeAaOverride(true);

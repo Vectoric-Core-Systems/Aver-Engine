@@ -301,6 +301,16 @@ enum class SlotKind : u8 {
     // A StructuredBuffer<T> / RWStructuredBuffer<T>. The element stride is given at BIND time
     // rather than declared here, because one slot serves whatever the pass puts in it.
     StructuredBuffer,
+    // A multisampled Texture2D -- SRV slots only, and the view dimension a genuinely multisampled
+    // resource REQUIRES: D3D12 rejects a plain TEXTURE2D SRV over a resource whose SampleDesc.Count
+    // is above 1. createTexture() itself never produces one (every TextureDesc it creates is forced
+    // to 1 sample -- see D3D12ResourceFactory::createTexture), so the only resource that can ever
+    // legally fill a slot declared this way is one a backend adopted from OUTSIDE the ordinary
+    // texture-creation path, the way D3D12Device::sceneDepthTexture() wraps the live scene depth
+    // buffer. modules/occlusion is the one consumer today (its HZB seed pass reads the scene's own,
+    // possibly-multisampled, depth buffer -- see OcclusionCuller.cpp's top comment for why an
+    // ordinary Texture2D read would be invalid there, not merely wrong).
+    Texture2DMS,
 };
 
 // Slots per range. Enforced: counts above this cannot declare a kind.

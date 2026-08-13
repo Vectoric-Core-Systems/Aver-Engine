@@ -137,6 +137,14 @@ option(AVER_MODULE_MCP "Editor control channel over loopback (debugging aid, not
 # cannot open a project made by an older build of itself is not a smaller engine, it is a broken
 # one. Optional only so the matrix can prove the editor still builds and runs without it.
 option(AVER_MODULE_UPGRADE "Project migration chain: upgrade a project from the version it was made in" ${_ed_UPGRADE})
+# Occlusion: hierarchical-Z occlusion culling (modules/occlusion). NOT threaded through the edition
+# macro above like its siblings: it is a generic RHI utility with no gameplay, content or C# ABI
+# dependency of its own -- closer to AverSR (links only Core and RHI) than to a curated feature like
+# Voxi or Physics -- so there is no per-edition judgement call to make about it, and ON is simply the
+# right default for every edition at once. The runtime behaviour stays opt-in regardless of this
+# switch: the module builds by default, but --occlusion-cull (sandbox) defaults OFF, exactly like
+# --depth-prepass and --edge-aa (see modules/occlusion/README.md).
+option(AVER_MODULE_OCCLUSION "Occlusion module: hierarchical-Z pyramid + two-pass box culling" ON)
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -212,6 +220,12 @@ add_subdirectory(modules/rhi)
 # enforced on its own link line, not by where this appears.
 if(AVER_MODULE_LANDSCAPE)
   add_subdirectory(modules/landscape)
+endif()
+# Occlusion, beside Landscape for the identical reason: it needs Aver.RHI (the generic interface,
+# never a backend -- see modules/occlusion/CMakeLists.txt) and nothing else, so it belongs after
+# modules/rhi and does not care what comes after IT.
+if(AVER_MODULE_OCCLUSION)
+  add_subdirectory(modules/occlusion)
 endif()
 if(AVER_RHI_D3D12)
   add_subdirectory(modules/rhi.d3d12)
@@ -384,6 +398,13 @@ if(AVER_BUILD_TESTS)
   add_subdirectory(tests/formats.roslyn)
   if(AVER_MODULE_LANDSCAPE)
     add_subdirectory(tests/landscape)
+  endif()
+  if(AVER_MODULE_OCCLUSION)
+    # The HZB conservative-culling math -- projection, mip selection, the four-corner test. Guarded
+    # by the module because it links Aver.Occlusion; CPU-only, like tests/trifactor, because what it
+    # decides (a box straddling an occluder boundary must never read as hidden) is arithmetic no
+    # screenshot needs to settle first.
+    add_subdirectory(tests/occlusion)
   endif()
   if(AVER_MODULE_VOXI)
     # Voxi's ray-traced sun-disc sampling. Guarded by the module because it reads the module's own

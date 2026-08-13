@@ -237,6 +237,13 @@ if(TARGET Aver.Landscape.Renderer)
   target_link_libraries(Sandbox PRIVATE Aver.Landscape.Renderer)
 endif()
 
+# Occlusion (modules/occlusion): brings AVER_MODULE_OCCLUSION=1 through its link interface, which is
+# what lets SandboxApp.cpp guard --occlusion-cull and the culler it drives with `#if
+# AVER_MODULE_OCCLUSION`, same shape as every other optional module linked on this page.
+if(TARGET Aver.Occlusion)
+  target_link_libraries(Sandbox PRIVATE Aver.Occlusion)
+endif()
+
 # AverSR (docs/AVERSR.md): the built-in upscaler implementations. Optional and named explicitly for
 # the same reason every module above is: it brings AVER_MODULE_SR=1 through its link interface
 # (modules/render.sr/CMakeLists.txt PUBLIC_DEFS), which is what lets SandboxApp.cpp guard the

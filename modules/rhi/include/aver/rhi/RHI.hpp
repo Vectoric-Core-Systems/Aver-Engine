@@ -507,6 +507,21 @@ public:
     // Makes a texture drawable by the UI, returning the identifier the UI layer expects as a plain
     // integer. Cached on the texture. 0 where the backend hosts no UI.
     virtual u64 uiTextureId(TextureHandle t) { (void)t; return 0; }
+
+    // The backend's OWN scene depth target, registered as an ordinary TextureHandle through the SAME
+    // resource-factory table createTexture() populates -- so a caller reaches it with the generic
+    // setSrv/textureBarrier vocabulary exactly as it would any other texture, rather than this
+    // interface growing a bespoke, backend-specific "hand me the raw depth resource" accessor (see
+    // modules/occlusion/include/aver/occlusion/Occlusion.hpp's top comment, point (c), for why that
+    // distinction was a deliberate design-review correction and not a style preference). Declares
+    // ITS OWN sample count as sampleCount() above (a multisampled result needs an SRV slot declared
+    // rhi::SlotKind::Texture2DMS, not Texture2D — see that enum's own comment).
+    //
+    // A DEFAULTED NO-OP, same shape as setUpscaler/setDepthPrepassEnabled above: the Vulkan backend
+    // is mid-bring-up and must keep compiling without implementing this yet, and the Null backend has
+    // no depth buffer to give at all. 0 before the first swapchain resize has run, exactly like every
+    // other size-dependent target this interface exposes.
+    virtual TextureHandle sceneDepthTexture() { return 0; }
 };
 
 // Converts a colour temperature in Kelvin to LINEAR sRGB, normalised so the brightest channel is 1.
