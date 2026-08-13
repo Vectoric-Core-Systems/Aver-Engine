@@ -41,6 +41,31 @@ public:
     // Replaces the scene with a raymarch of the volume.
     void setDebugView(bool on);
 
+    // A/B MEASUREMENT TOGGLE, not a quality setting: OFF forces cb_.voxelParams.w to 0, the same
+    // "gates the cone trace" flag prePass already computes from giEnabled(), so PSMainVoxi's
+    // `if (gVoxelParams.w > 0.5) ind = coneTracedIndirect(...)` (VoxiShaders.hpp) and
+    // ClusterMaterialShader.hpp's identically-gated call both skip the trace and fall back to the
+    // SAME neutral values (ind = 0, ao = 1) the path already uses whenever the volume is not ready --
+    // so the frame stays valid with GI simply absent from it, exactly as it would on a device where
+    // giReady_ never became true.
+    //
+    // DELIBERATELY SEPARATE FROM giEnabled()/Settings::globalIllumination, which this does not touch.
+    // Turning GI off through the existing setting also stops the volume from being BUILT --
+    // voxelizePass/filterMips/giShadowPass never run (see prePass's own giEnabled() gate) -- so an A/B
+    // comparison built on it would be comparing "cone trace on, volume built" against "cone trace off,
+    // volume also not built, three other passes also gone from the frame". That conflates the trace's
+    // own cost with the build passes', which already have their own separate top-level spans in the
+    // GPU timing tree and do not need a second, confounded way to be measured. This toggle changes
+    // NOTHING upstream of the shader read: the volume still voxelises and mip-filters every tick it
+    // normally would, cb_ still carries a fresh cascade and volume placement, giReady_ is unaffected --
+    // the only difference between an A run and a B run is whether the per-pixel forward-shader lookup
+    // that samples the finished volume actually executes. That isolates exactly the thing a GPU
+    // timestamp cannot bracket on its own (see coneTracedIndirect's own comment in VoxiShaders.hpp):
+    // measure the "scene draw" span with this on, then off, same camera, same frame count, and the
+    // delta is the cone trace's cost and nothing else's.
+    void setConeTraceEnabled(bool on) { coneTraceEnabled_ = on; }
+    bool coneTraceEnabled() const { return coneTraceEnabled_; }
+
     // Sets the occlusion rays traced per pixel toward the sun's disc, clamped to [1, kMaxShadowRays].
     //
     // A KNOB RATHER THAN A CONSTANT because the cost of ray-traced shadows was a feeling and had to
@@ -551,6 +576,9 @@ private:
 
     u32  voxelMips_ = 0, voxelResBuilt_ = 0;
     bool giReady_ = false, rtSupported_ = false, rtActive_ = false, debugView_ = false;
+    // See setConeTraceEnabled's own comment. Defaults to true, i.e. bit-identical to every build
+    // before this toggle existed -- nobody who never calls the setter sees any difference at all.
+    bool coneTraceEnabled_ = true;
 };
 
 } // namespace aver::voxi

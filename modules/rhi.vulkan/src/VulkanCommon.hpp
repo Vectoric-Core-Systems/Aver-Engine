@@ -1542,6 +1542,11 @@ public:
     void bufferBarrier(BufferHandle b, ResourceState from, ResourceState to) override;
     void uavBarrierTexture(TextureHandle t) override;
     void uavBarrierBuffer(BufferHandle b) override;
+    // DEBUG LABELS ONLY -- NO GPU TIMING BEHIND THESE, unlike D3D12RenderContext's own pushMarker/
+    // popMarker (D3D12Device.cpp), which also issue a timestamp on each side and feed a per-node GPU
+    // timing tree (GpuSpan/GpuAccum there). See this pair's own long comment in
+    // VulkanRenderContext.cpp for what a real parity implementation would need and why it is a
+    // declared gap here rather than a silent one.
     void pushMarker(const char* label) override;
     void popMarker() override;
 

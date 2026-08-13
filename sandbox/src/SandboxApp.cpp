@@ -1524,6 +1524,10 @@ public:
             voxiRenderer_.setSettings(vs);
             voxiRenderer_.setVolume(c, giExtent_);
             voxiRenderer_.setDebugView(giDebugView_);
+            // --no-gi-cone: see setGiConeTraceOff's own comment. Applied every frame, same as
+            // setDebugView beside it, so the toggle takes effect the instant the flag is set rather
+            // than only at attach time.
+            voxiRenderer_.setConeTraceEnabled(!giConeTraceOff_);
             const Vec3 sd = Vec3{sky_.sunDirection[0], sky_.sunDirection[1],
                                  sky_.sunDirection[2]}.getSafeNormal();
             if (sunAngle_ > 0.0f) sky_.sunAngularDiameterDeg = sunAngle_;
@@ -3275,6 +3279,12 @@ public:
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
     void setGiOverride(int q, bool dbg) { giOverride_ = q; giDebugView_ = dbg; } // --gi / --gi-debug
     void setGiForceOff(bool off) { giForceOff_ = off; }                        // --no-gi
+    // --no-gi-cone: the A/B measurement toggle from VoxiRenderer::setConeTraceEnabled's own comment.
+    // DELIBERATELY NOT --no-gi (which also stops the volume from being built -- see that setter's
+    // comment for why the two must stay separate): this flag alone turns off just the per-pixel
+    // cone-trace READ so a `--frames N` run with it and one without it, same camera, differ in the
+    // "scene draw" GPU span by exactly the trace's own cost and nothing upstream of it.
+    void setGiConeTraceOff(bool off) { giConeTraceOff_ = off; }                // --no-gi-cone
     void setRtOverride(int q) { rtOverride_ = q; }                              // --rt
     void setRtRays(int n) { rtRaysOverride_ = n; }                              // --rt-rays N
     void setRtPixelsPerRay(int n) { rtPixelsPerRayOverride_ = n; }              // --rt-pixels-per-ray N
@@ -8405,6 +8415,7 @@ private:
     // tool ignores it and is always local, because o.scale is per-object-axis by definition.
     bool worldSpace_=true;
     bool giDebugView_=false; Vec3 giCenter_{0,0,300}; f32 giExtent_=1200.0f;   // cm
+    bool giConeTraceOff_=false;   // --no-gi-cone: see setGiConeTraceOff's own comment
 #if AVER_MODULE_VOXI
     voxi::VoxiRenderer voxiRenderer_;
     bool voxiAttached_=false;
@@ -10079,7 +10090,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -10297,6 +10308,10 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--gi")) gi=3;
         else if (!std::strcmp(argv[i],"--no-gi")) noGi=true;
         else if (!std::strcmp(argv[i],"--gi-debug")) { gi=3; giDbg=true; }
+        // --no-gi-cone: the A/B measurement toggle -- see VoxiRenderer::setConeTraceEnabled and
+        // SandboxApp::setGiConeTraceOff's own comments. Distinct from --no-gi, which also stops the
+        // volume from being built; this only stops PSMainVoxi/PSClusterMain from READING it.
+        else if (!std::strcmp(argv[i],"--no-gi-cone")) giConeOff=true;
         else if (!std::strcmp(argv[i],"--rt")) rt=3;
         // The sun occlusion rays per pixel, so the cost of ray-traced shadows can be MEASURED
         // instead of asserted: the sequence is nested, so 1, 2, 4, 8 is one converging series.
@@ -10423,6 +10438,7 @@ Application* createApplication(int argc, char** argv) {
     app->setPost(exposure, bloom, autoExposure);
     app->applyCaptureExposureRule(autoExposure);
     app->setGiForceOff(noGi);
+    app->setGiConeTraceOff(giConeOff);
     if (clouds) app->setClouds(cloudCover);
     if (skyPhysical) app->setSkyPhysical(skyElevation);
     if (skyAuthored) app->setSkyAuthored();

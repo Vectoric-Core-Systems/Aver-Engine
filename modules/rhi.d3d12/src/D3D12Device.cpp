@@ -1059,13 +1059,34 @@ public:
     // render feature's markers -- the opaque scene draw the caller issues between beginFrame and
     // endFrame, and the post/composite/UI chain endFrame runs after it. Without these the two
     // largest items in the frame both land in "unmarked" and the report cannot tell them apart.
+    //
+    // NOT EXPRESSED AS A ScopedGpuStat (RHIResources.hpp), even though these are exactly the
+    // begin/end pairs that class exists to replace, because the two calls here do not share a C++
+    // scope: beginGpuSpan("scene draw") runs at the tail of beginFrame and endGpuSpan() runs at the
+    // top of endFrame, two different functions the caller invokes across an entire frame's worth of
+    // drawMesh calls in between. RAII can only close what a destructor can see go out of scope, and
+    // nothing here goes out of scope between those two calls -- so this pair, and the identical one
+    // bracketing "sky+post+ui" below, stay manual. Every OTHER begin/end and push/pop pair in this
+    // codebase that a reviewer might expect this class to have replaced fits inside one function and
+    // has been converted (VoxiRenderer.cpp's six pass-level markers, one wrapping VoxiRenderer's own
+    // prePass); these two are the genuine exception, not an oversight.
     void beginGpuSpan(const char* label) {
         if (!tsEnabled_) return;
-        tsSlice_[frameIndex_].push_back({label, gpuStamp(), kMaxGpuStamps});
+        // Parent is whatever is already open -- kNoParent if nothing is, i.e. this becomes a
+        // top-level span. Pushed BEFORE tsOpen_ gains this span's own slot, so a span is never its
+        // own parent.
+        // AND THE CAP IS ENFORCED HERE, where it was previously only assumed. Dropping the span is
+        // the right failure: its children reparent to whatever is still open, which is honest
+        // nesting, and one missing row in a profile is far better than a silently wrong tree.
+        if (tsSlice_[frameIndex_].size() >= kMaxGpuSpans) { ++tsDropped_; return; }
+        const u32 parent = tsOpen_.empty() ? kNoParent : tsOpen_.back();
+        tsSlice_[frameIndex_].push_back({label, gpuStamp(), kMaxGpuStamps, parent});
         tsOpen_.push_back(static_cast<u32>(tsSlice_[frameIndex_].size() - 1));
     }
     void endGpuSpan() {
-        if (!tsEnabled_ || tsOpen_.empty()) return;
+        if (!tsEnabled_) return;
+        if (tsDropped_) { --tsDropped_; return; }   // pairs with a refused open; see tsDropped_
+        if (tsOpen_.empty()) return;
         const u32 i = tsOpen_.back();
         tsOpen_.pop_back();
         tsSlice_[frameIndex_][i].end = gpuStamp();
@@ -1139,13 +1160,52 @@ private:
     // nested, so a timestamp on each side of them costs one EndQuery per marker -- about a dozen a
     // frame -- and needs no new call sites in any renderer.
     //
+    // THE MARKERS WERE ALWAYS CORRECTLY NESTED; THE ACCOUNTING WAS NOT. tsOpen_ is a LIFO stack and
+    // has been since this existed, so a marker opened while another was already open was always
+    // recorded as well-formed push/pop pairs -- nothing about the recording was ever wrong. What was
+    // wrong is what collectGpuTiming did with the result: every span, nested or not, was folded into
+    // one flat list keyed only by label, and "unmarked" was computed as the whole frame minus the sum
+    // of ALL of them. That arithmetic is only correct when every span is disjoint. The moment a span
+    // opens while a parent is already open -- which pushMarker/popMarker have always permitted and
+    // which VoxiRenderer::prePass's own outer "Voxi GI update" scope now does on purpose -- the child
+    // gets summed once on its own and a second time as part of its parent's timestamp range, so
+    // "accounted" overshoots and "unmarked" reads low or goes negative. GpuSpan::parent and the tree
+    // GpuAccum now builds (see its own comment) are what let collectGpuTiming tell "nested inside" from
+    // "next to" apart, so summing correctly means summing only the TOP-LEVEL spans.
+    //
     // READ TWO FRAMES LATE, so nothing ever waits. Results are resolved into a per-frame slice of a
     // readback buffer and read back at the TOP of the next frame that reuses that slice, which
     // beginFrame has already fenced on. Reading this frame's own timings would mean blocking on the
     // GPU to ask how fast the GPU was -- the measurement would create the stall it reports.
     static constexpr u32 kMaxGpuSpans = 64;
     static constexpr u32 kMaxGpuStamps = kMaxGpuSpans * 2;
-    struct GpuSpan { const char* label = nullptr; u32 begin = 0; u32 end = 0; };
+    // A span index used as "this span has no parent, it is top-level".
+    //
+    // NOT kMaxGpuSpans, WHICH IS WHAT THIS WAS AND WHY IT WAS WRONG. The original reasoning was that
+    // kMaxGpuSpans can never be a real index because the span vector's own size is capped by it --
+    // except nothing enforced that cap. Neither beginGpuSpan nor pushMarker checks
+    // tsSlice_[frameIndex_].size() before push_back, and the only wrap guard that exists, in
+    // gpuStamp(), bounds tsCount_ against kMaxGpuStamps -- the TIMESTAMP budget, a different number
+    // for a different array. So a 65th span open at once landed at real index 64, bit-identical to
+    // the sentinel, and its children would have been reparented to "top-level" -- which in a tree
+    // report means their time is counted once inside their real parent and again as a root, and
+    // "unmarked" silently absorbs the difference. A profiler that misreports under load is worse
+    // than one that stops.
+    //
+    // Fixed twice over, because either alone would leave the other reader trusting a false premise:
+    // the sentinel is now a value no index can ever take, AND the push is actually bounded below.
+    static constexpr u32 kNoParent = 0xFFFFFFFFu;
+    // WHY A PARENT FIELD AT ALL: begin/end already say how LONG a span took; they say nothing about
+    // WHERE it sits relative to the others. That is fine while every span is disjoint -- sum them and
+    // you have the frame -- but the moment one nests inside another (a feature's own pushMarker calls
+    // inside the pass that wraps them, see VoxiRenderer::prePass's new outer scope), summing every
+    // span double-counts the nested one: once for itself, once again inside its parent. This field is
+    // what lets collectGpuTiming tell "child of X" from "sibling of X" apart, so it can build the
+    // actual tree Unreal's stat GPU reports instead of a flat list that quietly assumes disjointness.
+    // Set from tsOpen_.back() at the moment a span OPENS (beginGpuSpan/pushMarker) -- tsOpen_ is
+    // already the innermost-last stack of everything currently open, so the parent is just whatever
+    // was on top of it a moment before this span's own slot got pushed.
+    struct GpuSpan { const char* label = nullptr; u32 begin = 0; u32 end = 0; u32 parent = kNoParent; };
     ComPtr<ID3D12QueryHeap> tsHeap_;
     ComPtr<ID3D12Resource>  tsReadback_;
     u64  tsFrequency_ = 0;              // GPU ticks per second, from the queue
@@ -1158,9 +1218,33 @@ private:
     u32 tsSliceBegin_[kFrameCount] = {};
     u32 tsSliceEnd_[kFrameCount] = {};
     std::vector<u32>     tsOpen_;       // slots of markers still open, innermost last
-    // Accumulated across frames so the report is an average rather than one sampled frame.
-    struct GpuAccum { std::string label; f64 ms = 0; };
+    // How many span OPENS were refused this frame because the per-frame cap was already reached.
+    // Every close checks this FIRST and consumes one rather than popping tsOpen_, which is what keeps
+    // open/close pairing exact once the cap bites. Without it, a refused open followed by its own
+    // close would pop somebody else's still-open span and stamp an `end` into the wrong row -- a
+    // profiler failure that only appears under load, i.e. exactly when the profile matters.
+    u32                  tsDropped_ = 0;
+    // Accumulated across frames so the report is an average rather than one sampled frame -- now a
+    // TREE, not a flat list, because "unmarked = frame - every span" stopped being correct the moment
+    // spans could nest (see kNoParent's own comment). Each node's `ms` is INCLUSIVE time -- itself
+    // plus everything nested inside it -- accumulated across frames exactly as the old flat entry's
+    // was; what is new is `parent`, an index into this SAME vector (or kNoAccumParent for a top-level
+    // node), which is what makes EXCLUSIVE time and indentation computable at report time instead of
+    // needing to be tracked span by span as the frame is recorded.
+    //
+    // NODES ARE KEYED BY (label, parent), NOT BY LABEL ALONE. Two spans with the same text nested
+    // under two different parents are two different things happening at two different points in the
+    // frame -- collapsing them into one entry would average together numbers that do not belong
+    // together. In this engine that pairing is stable frame to frame (a given pushMarker call site
+    // always nests under the same caller), so in practice this keys exactly the way the old by-label
+    // list did; the (label, parent) pair is what makes that an observation rather than an assumption.
+    static constexpr u32 kNoAccumParent = 0xFFFFFFFFu;
+    struct GpuAccum { std::string label; f64 ms = 0; u32 parent = kNoAccumParent; };
     std::vector<GpuAccum> tsAccum_;
+    // Scratch, reused every call rather than reallocated: frame-local span index -> its GpuAccum
+    // index, so a child processed after its parent (always true -- see the loop in collectGpuTiming)
+    // can look up which accumulator node its own parent folded into.
+    std::vector<u32> tsSpanToAccum_;
     f64  tsAccumFrameMs_ = 0;
     u32  tsAccumFrames_ = 0;
     u32  tsReports_ = 0;
@@ -2617,7 +2701,8 @@ u32 D3D12Device::gpuStamp() {
 }
 
 // Reads the timings this slice carried two frames ago -- already complete, because beginFrame
-// fenced on it before calling here -- and folds them into the running average.
+// fenced on it before calling here -- and folds them into the running TREE (see GpuAccum's own
+// comment for why this is a tree and not the flat list it used to be).
 void D3D12Device::collectGpuTiming() {
     if (!tsEnabled_ || !tsReadback_ || tsSlice_[frameIndex_].empty()) return;
     const u64 base = static_cast<u64>(frameIndex_) * kMaxGpuStamps * sizeof(u64);
@@ -2629,13 +2714,33 @@ void D3D12Device::collectGpuTiming() {
     const auto ms = [&](u64 a, u64 b) {
         return b > a ? 1000.0 * static_cast<f64>(b - a) / static_cast<f64>(tsFrequency_) : 0.0;
     };
-    for (const GpuSpan& s : tsSlice_[frameIndex_]) {
-        if (s.begin >= kMaxGpuStamps || s.end >= kMaxGpuStamps) continue;
+
+    // Folds this frame's spans into the running tree, one accumulator node per (label, parent) pair
+    // -- see GpuAccum's own comment for why that pair and not label alone. PARENTS BEFORE CHILDREN IS
+    // GUARANTEED, not assumed: a span's parent is whatever was already open when the span itself
+    // opened (beginGpuSpan/pushMarker), so a parent always lands in tsSlice_ at a LOWER index than
+    // anything nested inside it, and walking the vector in order always resolves
+    // tsSpanToAccum_[s.parent] before a child needs to read it.
+    tsSpanToAccum_.assign(tsSlice_[frameIndex_].size(), kNoAccumParent);
+    for (u32 i = 0; i < tsSlice_[frameIndex_].size(); ++i) {
+        const GpuSpan& s = tsSlice_[frameIndex_][i];
+        if (s.begin >= kMaxGpuStamps || s.end >= kMaxGpuStamps) continue;   // never closed; drop it
         const f64 d = ms(stamps[s.begin], stamps[s.end]);
-        auto it = std::find_if(tsAccum_.begin(), tsAccum_.end(),
-                               [&](const GpuAccum& a) { return a.label == s.label; });
-        if (it == tsAccum_.end()) { tsAccum_.push_back({s.label, d}); }
-        else                      { it->ms += d; }
+        // A span whose PARENT was itself dropped (mismatched push/pop -- see gpuStamp's wrap warning
+        // for the other way that happens) has nowhere honest to nest; folding it in as top-level, not
+        // silently under whatever accum index happens to be lying in tsSpanToAccum_[s.parent], is
+        // what turns that bug into a visibly wrong "unmarked" instead of a plausible-looking tree.
+        const u32 accumParent = (s.parent == kNoParent) ? kNoAccumParent : tsSpanToAccum_[s.parent];
+        auto it = std::find_if(tsAccum_.begin(), tsAccum_.end(), [&](const GpuAccum& a) {
+            return a.label == s.label && a.parent == accumParent;
+        });
+        if (it == tsAccum_.end()) {
+            tsAccum_.push_back({s.label, d, accumParent});
+            tsSpanToAccum_[i] = static_cast<u32>(tsAccum_.size() - 1);
+        } else {
+            it->ms += d;
+            tsSpanToAccum_[i] = static_cast<u32>(it - tsAccum_.begin());
+        }
     }
     if (tsSliceBegin_[frameIndex_] < kMaxGpuStamps && tsSliceEnd_[frameIndex_] < kMaxGpuStamps)
         tsAccumFrameMs_ += ms(stamps[tsSliceBegin_[frameIndex_]], stamps[tsSliceEnd_[frameIndex_]]);
@@ -2647,16 +2752,60 @@ void D3D12Device::collectGpuTiming() {
     // frame's timings on a streaming world say more about what streamed in than about the renderer.
     if ((tsReports_ & (tsReports_ + 1)) == 0 && tsAccumFrames_ >= 8) {
         const f64 n = static_cast<f64>(tsAccumFrames_);
-        f64 accounted = 0;
-        std::string line;
-        for (const GpuAccum& a : tsAccum_) {
-            accounted += a.ms;
-            char buf[96];
-            std::snprintf(buf, sizeof buf, " | %s %.1fms", a.label.c_str(), a.ms / n);
-            line += buf;
+
+        // Direct-children index, built once per report rather than kept live all the time: this
+        // runs on a widening interval (a handful of times a minute at most), so an O(nodes) pass here
+        // is free next to the cost of formatting the string it feeds.
+        std::vector<std::vector<u32>> children(tsAccum_.size());
+        std::vector<u32> topLevel;
+        for (u32 i = 0; i < tsAccum_.size(); ++i) {
+            if (tsAccum_[i].parent == kNoAccumParent) topLevel.push_back(i);
+            else                                      children[tsAccum_[i].parent].push_back(i);
         }
+
+        // unmarked = frame - TOP-LEVEL spans only, never every span -- summing every span (the old
+        // formula, from when spans could not nest) double-counts anything nested, since a child's ms
+        // is already folded into its parent's. This is the arithmetic fix nesting made mandatory, not
+        // an optional cleanup alongside it -- see kNoParent's own comment on why the two are one change.
+        f64 topLevelMs = 0;
+        for (u32 i : topLevel) topLevelMs += tsAccum_[i].ms;
+
+        // Printed as an indented tree, one line per node: label, INCLUSIVE ms/frame (itself plus
+        // everything nested inside it -- exactly what the begin/end timestamps already measure, no
+        // nesting-aware subtraction needed there), and EXCLUSIVE ms/frame (inclusive minus the sum of
+        // direct children) in parentheses. Exclusive is the number this engine could never print
+        // before nesting existed: it says where a pass's OWN time goes once its children's time is
+        // taken back out, rather than leaving every nested child's cost smeared across its parent's
+        // total the way a flat list always did.
+        //
+        // A LOCAL FUNCTOR, NOT A MEMBER FUNCTION OR std::function: this is the one place in the file
+        // that needs a genuinely recursive local closure, `children`/`tsAccum_`/`n` are all local or
+        // members already in scope, and neither this file nor RHIResources.hpp otherwise reaches for
+        // <functional> -- a hand-rolled struct with operator() calling itself is the smallest thing
+        // that does the job without adding an include for one call site.
+        struct Appender {
+            std::string& line;
+            const std::vector<std::vector<u32>>& children;
+            const std::vector<GpuAccum>& accum;
+            f64 n;
+            void operator()(u32 idx, u32 depth) const {
+                const GpuAccum& a = accum[idx];
+                f64 childMs = 0;
+                for (u32 c : children[idx]) childMs += accum[c].ms;
+                char buf[160];
+                std::snprintf(buf, sizeof buf, "\n%*s%s %.1fms (excl %.1fms)",
+                              static_cast<int>(depth) * 2 + 2, "", a.label.c_str(),
+                              a.ms / n, (a.ms - childMs) / n);
+                line += buf;
+                for (u32 c : children[idx]) (*this)(c, depth + 1);
+            }
+        };
+        std::string line;
+        Appender append{line, children, tsAccum_, n};
+        for (u32 i : topLevel) append(i, 0);
+
         AVER_INFO("[RHI.D3D12] GPU {:.1f}ms/frame over {} frames{} | unmarked {:.1f}ms",
-                  tsAccumFrameMs_ / n, tsAccumFrames_, line, (tsAccumFrameMs_ - accounted) / n);
+                  tsAccumFrameMs_ / n, tsAccumFrames_, line, (tsAccumFrameMs_ - topLevelMs) / n);
     }
     ++tsReports_;
 }
@@ -2684,6 +2833,7 @@ void D3D12Device::beginFrame() {
     collectGpuTiming();
     tsCount_ = 0;
     tsOpen_.clear();
+    tsDropped_ = 0;
     tsSlice_[frameIndex_].clear();
     tsSliceBegin_[frameIndex_] = gpuStamp();
     tsSliceEnd_[frameIndex_] = kMaxGpuStamps;
@@ -5971,18 +6121,32 @@ void D3D12RenderContext::uavBarrierBuffer(BufferHandle h) {
 }
 
 // Opens a debug marker region. Metadata 1 is the ANSI-string form PIX and RenderDoc understand.
+// Also opens a GPU timing span nested under whatever is already open -- pushMarker/popMarker are
+// the mechanism ScopedGpuStat (RHIResources.hpp) wraps, so a caller that used to write a bare
+// pushMarker/popMarker pair by hand should prefer that instead; this pair remains for callers a
+// single C++ scope cannot cover (see beginGpuSpan's own comment on the one place that is true here).
 void D3D12RenderContext::pushMarker(const char* label) {
     if (!label || !dev_->cmdList_) return;
     dev_->cmdList_->BeginEvent(1, label, static_cast<UINT>(std::strlen(label) + 1));
     // The label is a string LITERAL at every call site, so storing the pointer is safe and keeps
     // this allocation-free on the hot path -- see GpuSpan's own comment.
+    //
+    // Parent, same rule as beginGpuSpan: whatever is already open when this marker opens, kNoParent
+    // if this is the first one -- a top-level marker such as VoxiRenderer::prePass's outer "Voxi GI
+    // update" scope, opened before anything else this frame has pushed.
+    if (dev_->tsSlice_[dev_->frameIndex_].size() >= D3D12Device::kMaxGpuSpans) {
+        ++dev_->tsDropped_;   // see tsDropped_: popMarker consumes this instead of popping
+        return;
+    }
+    const u32 parent = dev_->tsOpen_.empty() ? D3D12Device::kNoParent : dev_->tsOpen_.back();
     dev_->tsSlice_[dev_->frameIndex_].push_back(
-        {label, dev_->gpuStamp(), D3D12Device::kMaxGpuStamps});
+        {label, dev_->gpuStamp(), D3D12Device::kMaxGpuStamps, parent});
     dev_->tsOpen_.push_back(static_cast<u32>(dev_->tsSlice_[dev_->frameIndex_].size() - 1));
 }
 
 void D3D12RenderContext::popMarker() {
     if (!dev_->cmdList_) return;
+    if (dev_->tsDropped_) { --dev_->tsDropped_; dev_->cmdList_->EndEvent(); return; }
     if (!dev_->tsOpen_.empty()) {
         const u32 i = dev_->tsOpen_.back();
         dev_->tsOpen_.pop_back();

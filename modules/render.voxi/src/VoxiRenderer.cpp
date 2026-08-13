@@ -490,8 +490,27 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     cb_.voxelParams[0] = static_cast<f32>(voxelResBuilt_);
     cb_.voxelParams[1] = settings_.giIntensity;
     cb_.voxelParams[2] = settings_.giMaxDistance;
-    cb_.voxelParams[3] = (giEnabled() && !debugView_) ? 1.0f : 0.0f;   // gates the cone trace
+    // gates the cone trace -- see setConeTraceEnabled's own comment for why that toggle is ANDed in
+    // here rather than folded into giEnabled(): this is the one place a caller doing the A/B
+    // measurement that comment describes can turn the shader-side read off without changing whether
+    // any of the passes below actually run.
+    cb_.voxelParams[3] = (giEnabled() && !debugView_ && coneTraceEnabled_) ? 1.0f : 0.0f;
 
+    // THE NESTING SHOWCASE. Everything below -- acceleration structures, the shadow cascades, the
+    // GI-only shadow box, voxelise, mip filter -- used to open and close its OWN top-level marker, so
+    // the GPU timing report saw five siblings with no notion that they are all really one feature's
+    // one frame of work. Wrapping them in this outer scope makes every one of pushMarker's calls below
+    // (inside buildAccelerationStructures/shadowPass/giShadowPass/voxelizePass/filterMips) a CHILD of
+    // "Voxi GI update" instead of another top-level entry beside "scene draw" -- which is also what
+    // makes this scope's own EXCLUSIVE time mean something for the first time: whatever GPU time is
+    // left after subtracting all five children's inclusive time from this one's own is
+    // beginShadowHistory/endShadowHistory below, the only GPU work this function issues that is not
+    // already inside one of those five children's own markers. Opened HERE rather than at the top of
+    // the function on purpose: everything above this line is pure CPU bookkeeping (frame-time
+    // sampling, materials_.update(), writing cb_) that records no GPU command at all, so starting the
+    // scope before buildAccelerationStructures means its inclusive time is real GPU work from the
+    // first timestamp to the last, not CPU accounting that happens to run before the marker closes.
+    rhi::ScopedGpuStat voxiGpuStat(ctx, "Voxi GI update");
     buildAccelerationStructures(ctx);   // sets rtActive_, which beginShadowHistory reads
     beginShadowHistory(ctx);
     shadowPass(ctx);                    // fitCascades(), called from here, fills curViewProj_
@@ -561,7 +580,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     cb_.shadowParams[2] = 0.0f;
     if (!rtSupported_ || settings_.rayTracing == Quality::Off || drawsPrev_.empty()) return;
 
-    ctx.pushMarker("Voxi acceleration structures");
+    rhi::ScopedGpuStat gpuStat(ctx, "Voxi acceleration structures");
     std::vector<rhi::TlasInstance> inst;
     inst.reserve(drawsPrev_.size());
     rtInstanceData_.clear();
@@ -633,7 +652,10 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         rtInstanceData_.push_back(ri);
         rtInstanceMesh_.push_back(d.mesh);
     }
-    if (inst.empty()) { ctx.popMarker(); return; }
+    // gpuStat's destructor closes the marker here -- this used to be `ctx.popMarker(); return;`, one
+    // of two exits from this function that both had to remember to pop by hand. See ScopedGpuStat's
+    // own comment for why that duplication was the actual bug this class exists to make impossible.
+    if (inst.empty()) return;
 
     ctx.buildTlas(tlas_, inst.data(), static_cast<u32>(inst.size()));
     rtActive_ = true;
@@ -680,7 +702,6 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
                   static_cast<u32>(blas_.size()));
         lastBlasRebuilds_ = rebuilds;
     }
-    ctx.popMarker();
 }
 
 // Builds one orthographic light frustum per cascade, fitted to a slice of the camera's view, and
@@ -1106,7 +1127,7 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
     cb_.shadowParams[1] = 1.0f;
     cb_.shadowParams[3] = static_cast<f32>(cascades);
 
-    ctx.pushMarker("Voxi shadow");
+    rhi::ScopedGpuStat gpuStat(ctx, "Voxi shadow");
     ctx.textureBarrier(shadowTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::DepthWrite);
     ctx.setPipeline(useInstancing ? shadowInstancedPso_ : shadowPso_);
     ctx.setBindingSet(bindings_);       // Tier 1: bind every declared table, read or not
@@ -1208,7 +1229,6 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
     }
 
     ctx.textureBarrier(shadowTex_, rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderResource);
-    ctx.popMarker();
 }
 
 // Renders the GI-only shadow map: one box over the GI volume, for light injection alone.
@@ -1225,7 +1245,7 @@ void VoxiRenderer::giShadowPass(rhi::IRenderContext& ctx) {
     }
     fitGiShadow();                       // sets giShadowParams[1] = 1 and the cull sphere
 
-    ctx.pushMarker("Voxi GI shadow");
+    rhi::ScopedGpuStat gpuStat(ctx, "Voxi GI shadow");
     ctx.textureBarrier(giShadowTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::DepthWrite);
     ctx.setPipeline(useInstancing ? giShadowInstancedPso_ : giShadowPso_);
     ctx.setBindingSet(bindings_);        // Tier 1: bind every declared table, read or not
@@ -1284,14 +1304,13 @@ void VoxiRenderer::giShadowPass(rhi::IRenderContext& ctx) {
     }
 
     ctx.textureBarrier(giShadowTex_, rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderResource);
-    ctx.popMarker();
 }
 
 // Clears the accumulator, rasterises the scene into it with direct lighting applied, then resolves
 // it into mip 0 of the radiance volume.
 void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     const u32 res = voxelResBuilt_;
-    ctx.pushMarker("Voxi voxelise");
+    rhi::ScopedGpuStat gpuStat(ctx, "Voxi voxelise");
 
     ctx.setPipeline(clearPso_);
     ctx.setBindingSet(clearBindings_);
@@ -1371,13 +1390,12 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     ctx.setPipeline(resolvePso_);
     ctx.setBindingSet(resolveBindings_);
     ctx.dispatch(cg, cg, cg);
-    ctx.popMarker();
 }
 
 // Box-filters each level of the radiance volume into the next, then hands the whole chain back as
 // a shader resource.
 void VoxiRenderer::filterMips(rhi::IRenderContext& ctx) {
-    ctx.pushMarker("Voxi mip filter");
+    rhi::ScopedGpuStat gpuStat(ctx, "Voxi mip filter");
     ctx.uavBarrierTexture(voxelTex_);
     ctx.setPipeline(mipPso_);
     const u32 res = voxelResBuilt_;
@@ -1399,7 +1417,6 @@ void VoxiRenderer::filterMips(rhi::IRenderContext& ctx) {
                        rhi::ResourceState::NonPixelShaderResource, voxelMips_ - 1);
     ctx.textureBarrier(voxelTex_, rhi::ResourceState::NonPixelShaderResource,
                        rhi::ResourceState::ShaderResource);
-    ctx.popMarker();
 }
 
 // Hands the backend Voxi's per-frame constant block.
@@ -1418,14 +1435,13 @@ bool VoxiRenderer::suppressesScene() const { return giReady_ && giEnabled() && d
 // Draws the debug raymarch over the colour target and viewport the backend already bound.
 void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
     if (!debugPso_) return;
-    ctx.pushMarker("Voxi debug view");
+    rhi::ScopedGpuStat gpuStat(ctx, "Voxi debug view");
     ctx.setPipeline(debugPso_);
     ctx.setBindingSet(bindings_);
     // Table 1 is bound outright: this pipeline declares it and Tier 1 populates whole tables.
     ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
     ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
     ctx.drawFullscreen();
-    ctx.popMarker();
 }
 
 // Rebuilds the pipelines that bake the sample count and the target formats, and resizes the

@@ -595,6 +595,37 @@ public:
     virtual void popMarker() {}
 };
 
+// This engine's SCOPED_GPU_STAT: opens a pushMarker region at construction and closes it (via
+// popMarker) at destruction, so a timing scope over a pass is one line at the top of its block and
+// cannot be left open by an early return -- the exact failure mode a hand-written pushMarker/
+// popMarker pair invites the moment the function it brackets grows a second exit. VoxiRenderer::
+// buildAccelerationStructures had exactly one such exit (an early return for "nothing to build this
+// frame") BEFORE this existed, and its popMarker() had to be repeated by hand at that exit as well as
+// at the bottom of the function -- correct only because someone remembered both times. A forgotten
+// one is not cosmetic: it leaves the backend's tsOpen_ stack (D3D12Device.cpp) off by one for the
+// rest of the run, so every span opened afterward inherits a parent that never closes and the frame's
+// own top-level bracket ends up permanently nested one level too deep.
+//
+// PURE RAII, NOT A "MAYBE" ONE: pushMarker/popMarker are declared with inert default bodies above
+// precisely so a backend that has not wired up GPU timing (or a MockContext in a test) can still
+// take this class -- it costs two virtual calls that no-op, not a missing feature.
+//
+// DOES DOUBLE DUTY ON PURPOSE, same as the pushMarker/popMarker pair it wraps: on D3D12 this opens
+// both a PIX/RenderDoc debug-event region AND a GPU timestamp span nested under whatever is already
+// open (see D3D12RenderContext::pushMarker). One call, one scope, one mechanism -- there is
+// deliberately no separate "just the marker" or "just the timing" variant to keep two systems in
+// sync by hand.
+class ScopedGpuStat {
+public:
+    ScopedGpuStat(IRenderContext& ctx, const char* label) : ctx_(ctx) { ctx_.pushMarker(label); }
+    ~ScopedGpuStat() { ctx_.popMarker(); }
+    ScopedGpuStat(const ScopedGpuStat&) = delete;
+    ScopedGpuStat& operator=(const ScopedGpuStat&) = delete;
+
+private:
+    IRenderContext& ctx_;
+};
+
 // ---------------------------------------------------------------- feature modules
 
 // The hook a render-feature module implements; the backend calls these at fixed points.

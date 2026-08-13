@@ -835,6 +835,22 @@ void VulkanRenderContext::uavBarrierBuffer(BufferHandle h) {
 // pushMarker / popMarker -- VK_EXT_debug_utils labels; a silent no-op when the instance did not
 // load the extension (optional, see VulkanCommon.hpp's kOptionalInstanceExtensions), exactly the
 // same shape as these methods' own already-inert IRenderContext defaults.
+//
+// A DECLARED GAP, NOT A SILENT ONE: this pair opens and closes a PIX/RenderDoc-equivalent label and
+// NOTHING ELSE. D3D12RenderContext's own pushMarker/popMarker (D3D12Device.cpp) do that AND issue a
+// GPU timestamp on each side, folding the result into a per-label (now per-node -- see D3D12Device's
+// GpuSpan/GpuAccum) running average an AVER_INFO line prints periodically. This backend has no
+// counterpart: no VkQueryPool of VK_QUERY_TYPE_TIMESTAMP, no vkCmdWriteTimestamp2 either side of the
+// label, no equivalent of D3D12Device::collectGpuTiming reading a resolved query back two frames
+// late. A ScopedGpuStat (RHIResources.hpp) taken through THIS context still compiles and still runs
+// -- it costs two calls into the no-ops above -- but it produces a debug-utils label for RenderDoc/
+// Nsight and reports NO timing anywhere. Building the Vulkan half honestly means a query pool sized
+// like tsHeap_, a write on each side of these two functions, and a resolve-and-average loop shaped
+// like collectGpuTiming's, all of it scoped separately from this change (which was asked to give the
+// D3D12 backend real GPU stats and price the GI cone trace on it, not to build a second timing engine
+// for a backend that currently only paints debug labels). Recorded here loudly, in the file, rather
+// than left to be discovered the day someone asks Vulkan's GPU timing report for a number it does not
+// have -- a divergence this large staying unwritten is worse than the gap itself.
 // ====================================================================================================
 void VulkanRenderContext::pushMarker(const char* label) {
     VkCommandBuffer cb = cmd();
