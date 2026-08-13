@@ -649,10 +649,26 @@ public:
 
     // Whether the scene must be drawn with this feature's pipelines.
     virtual bool           overridesScenePipeline() const { return false; }
-    // The pipeline to draw the scene with.
-    virtual PipelineHandle scenePipeline(bool meshShaders, bool wireframe) const {
-        (void)meshShaders; (void)wireframe; return 0;
+    // The pipeline to draw the scene with. `depthPrepassed` is true for an instance whose depth THIS
+    // SAME FRAME's depthPrepassPipeline() already wrote, via a separate depth-only draw earlier in
+    // the frame -- see D3D12Device::drawMesh's own comment for the whole mechanism (who sets it, and
+    // why it is auto-consumed rather than sticky). DEFAULTED so every pre-existing caller and every
+    // OTHER override compiles and behaves exactly as before: a feature that never looks at the third
+    // argument returns the identical pipeline it always did, prepass or not.
+    virtual PipelineHandle scenePipeline(bool meshShaders, bool wireframe, bool depthPrepassed = false) const {
+        (void)meshShaders; (void)wireframe; (void)depthPrepassed; return 0;
     }
+    // The DEPTH-ONLY pipeline for a same-frame depth prepass. A caller pairs this with
+    // scenePipeline(..., depthPrepassed=true) for the SAME instance later in the frame: this one
+    // writes depth (test=Less, write=true, matching scenePipeline()'s own default depth state
+    // exactly), the other only TESTS it (LessEqual, write=false) and skips shading wherever the two
+    // disagree. THE VERTEX TRANSFORM MUST BE BIT-IDENTICAL BETWEEN THE TWO -- an implementation
+    // should build this from the SAME compiled vertex shader scenePipeline() uses, not a hand-copied
+    // one, or the depth values the two passes produce will not agree and the EQUAL-ish test above
+    // will drop or duplicate pixels. 0 (the default) means this feature offers no prepass, which is
+    // the correct answer for every feature except one that implements this: IDevice::
+    // drawMeshDepthPrepass is then a no-op, and nothing calls scenePipeline with depthPrepassed=true.
+    virtual PipelineHandle depthPrepassPipeline() const { return 0; }
     // Bindings and constants the feature's scene shaders need, applied to every scene draw.
     virtual BindingSetHandle sceneBindingSet() const { return 0; }
     virtual bool sceneConstants(const void** data, u32* bytes) const { (void)data; (void)bytes; return false; }

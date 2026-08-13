@@ -1020,6 +1020,16 @@ public:
     void setDefaultDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override {
         storeDrawBinding(defaultDrawBinding_, set, constants, bytes);
     }
+
+    // ---- same-frame depth prepass -- see IDevice's own comment for the contract ----
+    void setDepthPrepassEnabled(bool on) override { depthPrepassEnabled_ = on; }
+    bool depthPrepassEnabled() const override { return depthPrepassEnabled_; }
+    void drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16]) override;
+    // AUTO-CONSUMED by the very next drawMesh() call, not stored past it -- see the interface
+    // comment. Plain assignment: nothing here decides whether the upcoming draw is ELIGIBLE (a
+    // skinned mesh, say), only what the CALLER already believes about it; drawMesh() itself still
+    // re-checks meshVertexBuffer(mesh) before trusting this, see its own comment.
+    void setNextDrawPrepassed(bool prepassed) override { nextDrawPrepassed_ = prepassed; }
     void setLineDepth(bool testDepth) override { lineDepth_ = testDepth; }
     void setMeshShaders(bool enabled) override {
         const bool want = enabled && msSupported_;
@@ -1307,6 +1317,17 @@ private:
     }
     DrawBinding drawBinding_{}, defaultDrawBinding_{};
     bool drawBindingIgnored_ = false;   // the "backend's own pipeline drops it" warning, said once
+
+    // ---- same-frame depth prepass (see IDevice::setDepthPrepassEnabled and drawMesh below) ----
+    bool depthPrepassEnabled_ = false;   // --depth-prepass; OFF reproduces pre-existing behaviour
+    // AUTO-CONSUMED: read and reset to false by the very next drawMesh() call, whether or not that
+    // call actually used it (a mesh that turns out to be compute-written still clears it) -- see
+    // setNextDrawPrepassed's own interface comment for why this must not be sticky.
+    bool nextDrawPrepassed_ = false;
+    // How many drawMeshDepthPrepass() draws this frame actually issued -- logged on change only,
+    // same discipline as lastSceneDrawn_ below, so --depth-prepass with nothing eligible on screen is
+    // diagnosable from the log rather than looking identical to the flag being ignored.
+    u32 depthPrepassDrawsLastFrame_ = 0, depthPrepassDrawsThisFrame_ = 0;
 
     bool skyEnabled_ = false;
     // Set in beginFrame when a feature suppressed the scene (its own scenePass replaced the whole
@@ -2827,6 +2848,12 @@ void D3D12Device::beginFrame() {
     fovValid_ = false;   // a reset command list has nothing bound at all
     postCBUsed_ = 0;
     drawBinding_ = defaultDrawBinding_;
+    // Carried into *_Last so anything that wants "did --depth-prepass draw anything last frame" can
+    // read a settled number rather than one still being accumulated -- same handoff shape as
+    // lastSceneDrawn_ in SandboxApp.cpp -- then zeroed for the frame about to record.
+    depthPrepassDrawsLastFrame_ = depthPrepassDrawsThisFrame_;
+    depthPrepassDrawsThisFrame_ = 0;
+    nextDrawPrepassed_ = false;   // a reset command list has consumed nothing from last frame either
 
     // The fence above has retired whatever last used this slice, so its timestamps are readable
     // now. Collect BEFORE resetting the counters that are about to be reused.
@@ -2947,7 +2974,74 @@ bool D3D12Device::destroyMesh(MeshHandle mesh) {
     return true;
 }
 
+// Draws `mesh`'s depth only, through whichever feature's depthPrepassPipeline() offers one -- see
+// IDevice's own comment for the contract, and VoxiRenderer::depthPrepassPipeline for the one
+// implementation today. STRUCTURALLY A SMALL COPY OF drawMesh()'s OWN feature-pipeline branch below
+// (pipeline/table-0/frame-CB caching through the SAME fovPso_/fovSet_/fovCbBytes_ trio, the SAME
+// table-1 material rebind, the SAME PerObject world write), because it is doing the same kind of
+// draw through the same seam -- just a different pipeline and no colour/material tail. It is NOT
+// folded into drawMesh() itself: this is called from a SEPARATE, earlier walk over the scene
+// (SandboxApp's prepass phase, before its ordinary colour walk), never interleaved per-instance with
+// colour draws -- interleaving them would split what should be ONE contiguous "depth prepass" GPU
+// span (see the ScopedGpuStat around that walk) into hundreds of one-draw slivers, and this engine's
+// GPU stat tree budgets 64 open spans a frame, not one per entity.
+void D3D12Device::drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16]) {
+    if (!hasSwapchain_ || !depthPrepassEnabled_ || !rhiContext_ || mesh == 0 || mesh > meshes_.size()) return;
+    if (!meshes_[mesh - 1].alive) return;
+    // Compute-written (skinned) meshes are excluded from the prepass -- see IDevice::
+    // drawMeshDepthPrepass's own comment. The primary contract is the CALLER never offering one
+    // (SandboxApp's prepass walk skips skinnedScene_ entities entirely); this is the defensive
+    // second check, same shape as drawMesh()'s own re-derivation of `prepassed` just below.
+    if (meshVertexBuffer(mesh) != 0) return;
+
+    for (IRenderFeature* f : features_) {
+        if (!f->overridesScenePipeline()) continue;
+        const PipelineHandle pp = f->depthPrepassPipeline();
+        if (!pp) return;   // this feature has no prepass PSO; nothing else offers one either today
+        const BindingSetHandle bs = f->sceneBindingSet();
+        const void* cb = nullptr; u32 cbBytes = 0;
+        const bool haveCb = f->sceneConstants(&cb, &cbBytes) && cb && cbBytes;
+
+        // The identical elision drawMesh() uses below, and deliberately the SAME cache variables:
+        // whichever of the prepass PSO or the colour PSO ran last, a switch to the other always
+        // re-sends table 0 and the frame CB even though both are the SAME Voxi resources either way
+        // -- over-conservative, not wrong, and see drawMeshDepthPrepass's own file comment on why
+        // that switch happens on every single eligible instance rather than being batched away.
+        const bool same = fovValid_ && pp == fovPso_ && bs == fovSet_ &&
+                          haveCb == (fovCbBytes_ != 0) &&
+                          (!haveCb || (cbBytes == fovCbBytes_ && fovCb_.size() == cbBytes &&
+                                       std::memcmp(fovCb_.data(), cb, cbBytes) == 0));
+        if (!same) {
+            rhiContext_->setPipeline(pp);
+            if (bs) rhiContext_->setBindingSet(bs, 0);
+            if (haveCb) rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
+            fovPso_ = pp; fovSet_ = bs; fovCbBytes_ = haveCb ? cbBytes : 0;
+            if (haveCb) fovCb_.assign(static_cast<const u8*>(cb), static_cast<const u8*>(cb) + cbBytes);
+            else        fovCb_.clear();
+            fovValid_ = true;
+        }
+        // Table 1: the SAME material binding the caller set via setDrawBinding for this instance's
+        // upcoming colour draw -- PSDepthPrepass reads gBaseColorMap/gAlphaCutoff/gMaterialFlags out
+        // of exactly that set, same registers PSMainVoxi reads them at (both pipelines share `gi`,
+        // VoxiRenderer.cpp's giLayout()).
+        rhiContext_->setDrawBinding(drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
+        f32 fc[kObjectConstantDwords] = {};
+        std::memcpy(fc, world, 16 * sizeof(f32));
+        rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
+        rhiContext_->drawMesh(mesh);
+        ++depthPrepassDrawsThisFrame_;
+        boundRootSig_ = nullptr;
+        boundPso_ = nullptr;
+        return;
+    }
+}
+
 void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) {
+    // AUTO-CONSUME nextDrawPrepassed_ before any early return below, exactly per its own contract:
+    // whether or not THIS call goes on to use it, the flag must not leak onto some later, unrelated
+    // draw just because this one bailed out early (a dead mesh, no swapchain, a suppressed scene).
+    const bool prepassed = nextDrawPrepassed_ && meshVertexBuffer(mesh) == 0;
+    nextDrawPrepassed_ = false;
     if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
     // A destroyed mesh draws NOTHING rather than drawing from a cleared vertex view. This is the
     // other half of not recycling handles: a caller that kept a handle too long gets a visible hole
@@ -2960,7 +3054,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
 
     for (IRenderFeature* f : features_) {
         if (!f->overridesScenePipeline() || !rhiContext_) continue;
-        const PipelineHandle fp = f->scenePipeline(msActive_ && msPso_, wireframe_);
+        const PipelineHandle fp = f->scenePipeline(msActive_ && msPso_, wireframe_, prepassed);
         if (!fp) break;
         const BindingSetHandle bs = f->sceneBindingSet();
         const void* cb = nullptr; u32 cbBytes = 0;

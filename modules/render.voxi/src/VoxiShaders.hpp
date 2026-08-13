@@ -742,6 +742,46 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     return float4(radiance, averOpacity(s));
 }
 
+// ================= depth prepass =================
+// Same-frame depth-only pass -- see VoxiRenderer.hpp's depthPrepassPipeline() and
+// D3D12Device::drawMesh for the whole mechanism. Paired with VSMain (the SAME compiled vertex shader
+// PSMainVoxi's own pipelines use, not a second copy of it), so this writes EXACTLY the depth the
+// colour pass's own rasterisation would have produced for the identical triangle.
+//
+// WRITES NO COLOUR -- the pipeline this compiles into declares renderTargetCount = 0 -- and reads
+// only enough of the material to answer one question: does this fragment survive alpha test. That
+// is deliberately far short of averEvalMaterial(), which this does NOT call: averEvalMaterial also
+// samples the metal-rough, normal, occlusion and emissive maps and does the Fresnel/GGX setup around
+// them, none of which a depth-only fragment has any use for. Calling it here to reach one field
+// (s.alpha) would make the "cheap prepass" pay four texture fetches instead of at most one.
+//
+// STILL NOT FREE, though, and the task this pass exists for says to be honest about the cost: EVERY
+// covered pixel pays a branch on gMaterialFlags (that flag lives in the SAME AverMaterial cbuffer as
+// everything else a material declares, so there is no way to know "is this alpha-tested" without at
+// least reading it), and an alpha-tested material additionally pays one Sample() against
+// gBaseColorMap plus the multiply/compare below. What it buys back is skipping PSMainVoxi entirely --
+// a shadow-cascade lookup, up to eight cone traces, ray-traced-history blending and fog -- on every
+// fragment this pass determines is hidden, which is the entire point: one cheap sample now instead
+// of one expensive shader later, repeated for whatever overdraw sits behind it.
+//
+// DOES NOT EVALUATE AVER_MAT_SLOPE_BLEND's second layer (see averBlendLayers in PbrShaders.cpp): that
+// flag is landscape-only in this codebase, and the landscape is drawn through a wholly separate call
+// site (LandscapeRenderer::draw(), never through IDevice::drawMesh/drawMeshDepthPrepass) that this
+// prepass never reaches in the first place -- see SandboxApp.cpp's own comment on why the landscape
+// is one of this feature's three excluded paths. If a non-landscape material is ever authored with
+// both AVER_MAT_SLOPE_BLEND and AVER_MAT_ALPHA_MASK set, this function's alpha would be the FIRST
+// layer's alone; that combination does not exist in this tree today.
+void PSDepthPrepass(VSOut i) {
+#ifdef AVER_MATERIAL_SRV
+    if (gMaterialFlags & AVER_MAT_ALPHA_MASK) {
+        AverVertex v = averVertexOf(i);
+        float2 uv = averSurfaceUV(v);
+        float alpha = gBaseColor.a * gBaseColorFactor.a * gBaseColorMap.Sample(gMaterialSampler, uv).a;
+        clip(alpha - gAlphaCutoff);
+    }
+#endif
+}
+
 // Depth-only vertex shader for one shadow cascade; which one is in gShadowDraw.x.
 float4 VSShadow(VSIn i) : SV_POSITION {
     return mul(mul(float4(i.pos, 1.0), gWorld), gCascadeViewProj[(uint)gShadowDraw.x]);

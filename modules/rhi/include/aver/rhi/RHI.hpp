@@ -437,6 +437,43 @@ public:
         (void)set; (void)constants; (void)bytes;
     }
 
+    // ---- same-frame depth prepass (see docs/RENDERING.md and D3D12Device::drawMesh) ----
+    //
+    // OFF (the default) is the entire pre-existing render path, unchanged: drawMesh always shades
+    // straight away, drawMeshDepthPrepass is a no-op and setNextDrawPrepassed's flag is never read.
+    // A DEFAULTED NO-OP for the same reason setUpscaler is (see its own comment just above): the
+    // Vulkan backend is mid-bring-up and must keep compiling without implementing this yet.
+    virtual void setDepthPrepassEnabled(bool on) { (void)on; }
+    virtual bool depthPrepassEnabled() const { return false; }
+
+    // Draws `mesh`'s depth ONLY, through whichever registered feature both overridesScenePipeline()
+    // and returns non-zero from depthPrepassPipeline() -- a no-op otherwise, and a no-op whenever
+    // depthPrepassEnabled() is false. `world` is the SAME row-major transform an equivalent drawMesh
+    // call would use; base colour/metallic/roughness are not needed here because nothing this draws
+    // is shaded, only tested and written.
+    //
+    // A CALLER MUST NOT OFFER A COMPUTE-WRITTEN (SKINNED) MESH HERE -- see meshVertexBuffer's own
+    // comment for what that flag means. This entry point checks it defensively and silently declines
+    // rather than trust every future call site to remember, but the caller choosing NOT to call this
+    // for such a mesh in the first place is still the primary contract: a skinned entity is one of
+    // the paths this feature is meant to exclude, not one it is meant to guard against after the fact.
+    virtual void drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16]) { (void)mesh; (void)world; }
+
+    // Marks the VERY NEXT drawMesh() call as one whose depth a prior drawMeshDepthPrepass() call
+    // already wrote for the identical mesh/world THIS SAME FRAME, so the backend can ask the scene
+    // feature for its depth-tested-only pipeline variant (scenePipeline(..., depthPrepassed=true))
+    // instead of the ordinary depth-write one.
+    //
+    // AUTO-CONSUMED, NOT STICKY -- deliberately unlike setDrawBinding just above. setDrawBinding's
+    // material stays correct for every draw until a caller changes it, which is why it is sticky;
+    // this flag means something only about the ONE upcoming draw, and dozens of call sites across
+    // this codebase (the landscape, skinned characters, editor gizmos, the selection outline) call
+    // drawMesh with no idea this flag exists. If it stayed set after being read, the first caller
+    // that forgot to clear it would silently hand every draw AFTER it the wrong depth state. Reset to
+    // false by drawMesh whether or not it was true, so the default -- never having called this at
+    // all -- is exactly today's behaviour everywhere this is not explicitly threaded through.
+    virtual void setNextDrawPrepassed(bool prepassed) { (void)prepassed; }
+
     // Unlit line geometry (grid, gizmos): per-vertex colour, drawn as a line list.
     virtual LineHandle createLineMesh(const LineVertex* verts, u32 count) { (void)verts; (void)count; return 0; }
     virtual void drawLines(LineHandle mesh, const f32 world[16]) { (void)mesh; (void)world; }

@@ -252,11 +252,13 @@ void VoxiRenderer::shutdown() {
     const rhi::PipelineHandle psos[] = {shadowPso_, shadowInstancedPso_, giShadowPso_,
                                         giShadowInstancedPso_, voxelPso_, voxelMsPso_, mipPso_,
                                         clearPso_, resolvePso_, debugPso_, scenePso_, sceneMsPso_,
-                                        sceneRtPso_, sceneMsRtPso_};
+                                        sceneRtPso_, sceneMsRtPso_, depthPrepassPso_,
+                                        scenePsoPrepassed_, sceneRtPsoPrepassed_};
     for (rhi::PipelineHandle p : psos) if (p) res_->destroyPipeline(p);
     shadowPso_ = shadowInstancedPso_ = giShadowPso_ = giShadowInstancedPso_ = 0;
     voxelPso_ = voxelMsPso_ = mipPso_ = clearPso_ = resolvePso_ = debugPso_ = 0;
     scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
+    depthPrepassPso_ = scenePsoPrepassed_ = sceneRtPsoPrepassed_ = 0;
 
     if (voxelAccumTex_) res_->destroyTexture(voxelAccumTex_);
     if (voxelTex_)  res_->destroyTexture(voxelTex_);
@@ -1595,11 +1597,27 @@ void VoxiRenderer::endShadowHistory() {
 }
 
 // Returns the lit pipeline for this frame, or 0 to decline and let the backend use its own.
-rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool wireframe) const {
+rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool wireframe, bool depthPrepassed) const {
     if (wireframe) return 0;
+    // The LessEqual/no-write twin, for an instance a same-frame depthPrepassPipeline() draw already
+    // wrote depth for -- see depthPrepassPipeline()'s own comment and D3D12Device::drawMesh for who
+    // sets this. MESH-SHADER SCENE DRAWS NEVER TAKE THIS BRANCH: the prepass is only ever offered to
+    // the plain drawMesh() path (see the caller), so `depthPrepassed && meshShaders` should never
+    // both be true at once. Falling through to the ordinary mesh-shader pipeline if it somehow
+    // happens is the same "an excluded path just draws normally" answer this feature already gives
+    // skinned meshes, the landscape and the GPU cluster path -- not a special case, the general one.
+    if (depthPrepassed && !meshShaders) {
+        if (rtActive_ && sceneRtPsoPrepassed_) return sceneRtPsoPrepassed_;
+        if (!rtActive_ && scenePsoPrepassed_)  return scenePsoPrepassed_;
+    }
     if (rtActive_) return meshShaders && sceneMsRtPso_ ? sceneMsRtPso_ : sceneRtPso_;
     return meshShaders && sceneMsPso_ ? sceneMsPso_ : scenePso_;
 }
+
+// The depth-only prepass pipeline -- see the header's own comment. 0 (declines) whenever
+// createScenePipelines() never got a compiled PSDepthPrepass, which IDevice::drawMeshDepthPrepass
+// treats identically to "this feature has no prepass at all".
+rhi::PipelineHandle VoxiRenderer::depthPrepassPipeline() const { return depthPrepassPso_; }
 
 // ---------------------------------------------------------------- resources
 
@@ -1948,9 +1966,11 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     const bool msOk = caps_.meshShaderTier > 0 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
     const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
 
-    const rhi::PipelineHandle stale[] = {debugPso_, scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_};
+    const rhi::PipelineHandle stale[] = {debugPso_, scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_,
+                                         depthPrepassPso_, scenePsoPrepassed_, sceneRtPsoPrepassed_};
     for (rhi::PipelineHandle p : stale) if (p) res_->destroyPipeline(p);
     debugPso_ = scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
+    depthPrepassPso_ = scenePsoPrepassed_ = sceneRtPsoPrepassed_ = 0;
 
     ShaderScope compile(*res_);
     const rhi::PipelineLayout gi = giLayout();
@@ -2017,7 +2037,70 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     }
     if (msOk && rtOk && !sceneMsRtPso_) AVER_WARN("[Voxi] mesh-shader + ray-tracing scene variant unavailable");
 
-    // Only the two mandatory ones: scenePipeline() falls back when the optional variants are absent.
+    // --- 11-13. the depth prepass, and the two scene variants that trust it. ---
+    //
+    // PSDepthPrepass (VoxiShaders.hpp) alpha-tests and clips but writes no colour: renderTargetCount
+    // stays 0, so this PSO's only output is depth. PAIRED WITH vsMain -- the SAME compiled vertex
+    // shader handle scenePso_/sceneRtPso_ already use above, not a second copy of its transform --
+    // which is what makes this pass's depth and the real colour pass's depth bit-identical for the
+    // same instance: same MVP, same clip, same rasteriser rounding, because it is literally the same
+    // shader binary doing the same math. depth = {true, true, Less} is the ORDINARY scene depth
+    // state (see `scene.depth` above): this pass WRITES depth like a normal opaque draw would, it
+    // just never runs the expensive PS that would have gone with it.
+    //
+    // COSTS ONE TEXTURE FETCH PER COVERED PIXEL ON EVERY MATERIAL, ALPHA-TESTED OR NOT: PSDepthPrepass
+    // has to read gMaterialFlags before it can know whether THIS material even needs the clip, and
+    // that flag lives in the same AverMaterial cbuffer the base-colour sample is gated behind -- so an
+    // opaque (non-alpha-tested) material pays a branch and a cbuffer read here for nothing, while an
+    // alpha-tested one pays the branch plus one Sample() against gBaseColorMap. Both are still far
+    // cheaper than what they replace: PSMainVoxi's shadow lookup, cone trace and fog on every hidden
+    // fragment behind them. See PSDepthPrepass's own comment for the full accounting.
+    const rhi::ShaderHandle psDepthPrepass =
+        compile("PSDepthPrepass", rhi::ShaderStage::Pixel, kBaseSm, rasterDefs(nullptr).c_str());
+    if (vsMain && psDepthPrepass) {
+        rhi::GraphicsPipelineDesc p;
+        p.vs = vsMain;
+        p.ps = psDepthPrepass;
+        p.layout = gi;                 // SAME table-0 shape as the colour pass -- see the .hpp comment
+        p.cull = rhi::CullMode::None;   // matches `scene.cull`: foliage two-sided, culled the same way
+        p.depth = {true, true, rhi::CompareOp::Less};
+        p.renderTargetCount = 0;        // depth-only: no colour output at all, not even an unused one
+        p.depthFormat = depth;
+        p.sampleCount = sampleCount;
+        depthPrepassPso_ = res_->createGraphicsPipeline(p);
+    }
+    if (!depthPrepassPso_)
+        AVER_WARN("[Voxi] depth prepass pipeline unavailable; --depth-prepass will have no effect");
+
+    // The colour-pass twins that TRUST the prepass: same shaders as scenePso_/sceneRtPso_, LessEqual
+    // depth test with writes OFF instead of Less/write. LessEqual (not Equal) is deliberate -- see
+    // IDevice::drawMeshDepthPrepass's own header comment: with bit-identical geometry between the two
+    // passes, the prepass has already found the true per-pixel minimum depth from this instance's own
+    // triangles, so nothing from the SAME geometry can ever be strictly less than what is already
+    // there, and LessEqual against that minimum behaves exactly like Equal would without needing a
+    // new CompareOp value neither backend's comparison-function table declares today.
+    if (vsMain && psVoxi && depthPrepassPso_) {
+        rhi::GraphicsPipelineDesc p = scene;
+        p.vs = vsMain; p.ps = psVoxi;
+        p.depth = {true, false, rhi::CompareOp::LessEqual};
+        scenePsoPrepassed_ = res_->createGraphicsPipeline(p);
+    }
+    if (depthPrepassPso_ && !scenePsoPrepassed_)
+        AVER_WARN("[Voxi] prepassed scene pipeline unavailable; --depth-prepass will have no effect");
+
+    if (rtOk && vsMain && psRt && depthPrepassPso_) {
+        rhi::GraphicsPipelineDesc p = scene;
+        p.vs = vsMain; p.ps = psRt;
+        p.depth = {true, false, rhi::CompareOp::LessEqual};
+        sceneRtPsoPrepassed_ = res_->createGraphicsPipeline(p);
+    }
+    if (rtOk && depthPrepassPso_ && !sceneRtPsoPrepassed_)
+        AVER_WARN("[Voxi] prepassed ray-traced scene pipeline unavailable; ray tracing keeps its "
+                  "normal depth state under --depth-prepass");
+
+    // Only the two mandatory ones: scenePipeline() falls back when the optional variants are absent,
+    // and that fallback already covers depthPrepassPso_/scenePsoPrepassed_/sceneRtPsoPrepassed_ being
+    // absent -- see scenePipeline() and depthPrepassPipeline()'s own comments.
     return debugPso_ && scenePso_;
 }
 

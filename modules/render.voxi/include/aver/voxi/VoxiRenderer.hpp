@@ -126,8 +126,19 @@ public:
     // Hands the backend Voxi's per-frame constant block.
     bool sceneConstants(const void** data, u32* bytes) const override;
 
-    // Returns the lit pipeline for this frame, or 0 to let the backend use its own.
-    rhi::PipelineHandle scenePipeline(bool meshShaders, bool wireframe) const override;
+    // Returns the lit pipeline for this frame, or 0 to let the backend use its own. `depthPrepassed`
+    // selects the LessEqual/no-write depth-state variant for an instance depthPrepassPipeline()
+    // already wrote depth for this frame -- see IRenderFeature's own comment on the contract, and
+    // createScenePipelines() for how the two are built to agree.
+    rhi::PipelineHandle scenePipeline(bool meshShaders, bool wireframe, bool depthPrepassed = false) const override;
+    // The depth-only prepass pipeline: VSMain (the SAME compiled vertex shader scenePipeline()'s own
+    // non-mesh-shader variants use) paired with PSDepthPrepass, which alpha-tests and clips but
+    // writes no colour -- see VoxiShaders.hpp's PSDepthPrepass for what that costs and why it still
+    // pays for itself. 0 until createScenePipelines() has run once, and 0 forever on a device/shader
+    // combination that could not compile it -- IDevice::drawMeshDepthPrepass degrades to a no-op in
+    // that case, exactly like every other optional Voxi pipeline (mesh-shader, ray-traced) already
+    // degrades when its own compile fails.
+    rhi::PipelineHandle depthPrepassPipeline() const override;
 
     // True while the debug view replaces the scene, including the backend's line draws.
     bool suppressesScene() const override;
@@ -224,6 +235,12 @@ private:
     std::vector<rhi::BindingSetHandle> mipBindings_;
 
     rhi::PipelineHandle scenePso_ = 0, sceneMsPso_ = 0, sceneRtPso_ = 0, sceneMsRtPso_ = 0;
+    // The depth prepass and its two "already prepassed" scene-colour twins -- see
+    // depthPrepassPipeline()'s own comment. NO mesh-shader twins: the prepass is only ever offered to
+    // the plain drawMesh() path (see SandboxApp.cpp's caller), so scenePipeline() never needs a
+    // prepassed variant of sceneMsPso_/sceneMsRtPso_ and this feature does not build one.
+    rhi::PipelineHandle depthPrepassPso_ = 0;
+    rhi::PipelineHandle scenePsoPrepassed_ = 0, sceneRtPsoPrepassed_ = 0;
 
     rhi::TlasHandle tlas_ = 0;
     // One bottom-level structure per referenced mesh. Built once and kept for the run, EXCEPT for a

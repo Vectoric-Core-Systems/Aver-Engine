@@ -128,6 +128,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #if AVER_MODULE_SR
 #include "aver/sr/AverSrQuality.hpp"
 #include "aver/sr/AverSrSpatial.hpp"
+#include "aver/sr/AverSrFxaa.hpp"
 #endif
 
 // physics_abi.h was nested inside AVER_MODULE_FRAMEWORK, but every use site below (aver_phys_init,
@@ -628,7 +629,20 @@ public:
             ensureAverSrUpscaler(e.device());
             logAverSrActive(e.device());
         }
+        // --edge-aa: see edgeAaEnabled_'s own member comment for why this shares AverSR's upscaler
+        // slot and who wins when both are requested. Off (the default) never constructs FxaaResolve
+        // and never touches the slot -- bit-identical to a build without this flag.
+        if (edgeAaEnabled_) ensureEdgeAaUpscaler(e.device());
 #endif
+        // --depth-prepass: a same-frame depth-only pass ahead of the ordinary opaque colour walk --
+        // see the entity loop's own comment (search "depth prepass phase") for the two-walk
+        // mechanism this enables. Generic on IDevice (not gated on any module macro): it is a no-op
+        // on any backend/feature that never implements depthPrepassPipeline(), exactly like
+        // setUpscaler(non-null) is a no-op before any upscaler exists.
+        if (depthPrepassOverride_) {
+            e.device()->setDepthPrepassEnabled(true);
+            AVER_INFO("[Sandbox] depth prepass enabled (--depth-prepass)");
+        }
 
         // Registration order is precedence: the first factory that accepts a path wins.
         assetEditors_.registerFactory(&editor::makeMeshEditor);
@@ -2385,6 +2399,152 @@ public:
                     pl[5][i] = m.m[i][3] - m.m[i][2];   // far
                 }
             }
+#if AVER_MODULE_VOXI
+            // ---- depth prepass phase: a SEPARATE, EARLIER, CONTIGUOUS walk over the SAME entities ----
+            //
+            // Bracketed in exactly ONE ScopedGpuStat, not one per draw: this engine's GPU stat tree
+            // (D3D12Device.cpp's tsSlice_/kMaxGpuSpans) budgets 64 open spans a frame, and Electric
+            // Dreams alone submits over a thousand instances -- one push/pop pair per depth-only draw
+            // would blow that budget on the first few dozen entities and, worse, would not even measure
+            // the right thing: a span's GPU time is everything between its two timestamps IN
+            // SUBMISSION ORDER, so interleaving depth-only and colour draws (prepass_1, colour_1,
+            // prepass_2, colour_2, ...) under per-draw markers would fold colour-pass time into the
+            // "depth prepass" number. A single bracket around a CONTIGUOUS run of depth-only draws,
+            // finished before the first colour draw starts, is what makes the span mean what it says.
+            //
+            // THIS IS ALSO WHY THE WALK RUNS TWICE rather than emitting a prepass draw inline per
+            // instance inside the existing loop below: interleaving would have the identical timing
+            // problem one level down even without markers -- "how much did the prepass cost" would be
+            // inseparable from "how much did the colour draws in between cost" on the GPU timeline.
+            //
+            // EXCLUDED FROM THIS WALK, matching the task's own list: a SKINNED entity (its posed
+            // vertex buffer is compute-written; see IDevice::meshVertexBuffer/drawMeshDepthPrepass's
+            // own defensive re-check), the LANDSCAPE (drawn through LandscapeRenderer::draw(), a
+            // wholly separate call site this loop never reaches at all -- see the AVER_MODULE_LANDSCAPE
+            // block above), and the GPU CLUSTER MESH-SHADER PATH (dispatchMeshClusters draws its own
+            // geometry from an amplification/mesh-shader pair with no depth-only twin here). The
+            // CPU-per-cluster path (--lod-per-cluster) is ALSO excluded, for a narrower reason: its
+            // cache (clusterCutCache_) is rebuilt-or-reused once per frame per entity, and running
+            // that same decision twice (once here, once in the colour walk below) would either
+            // duplicate the rebuild bookkeeping or read a cache the colour walk has not populated yet
+            // depending on which walk runs first -- not unsafe, just not worth the complexity for a
+            // path this task's own measurements never enable. The plain fallback path and the
+            // discrete-LOD-level path (trifactor::chooseLevelCached, a pure function of camera and
+            // entity -- see ClusterAdapt.cpp) both replicate safely here because neither has any
+            // per-frame state a second call could disturb.
+            if (e.device()->depthPrepassEnabled()) {
+                if (rhi::IRenderContext* pctx = e.device()->renderContext()) {
+                    rhi::ScopedGpuStat prepassScope(*pctx, "depth prepass");
+                    const u32 pn = w.count();
+                    for (u32 pi = 0; pi < pn; ++pi) {
+                        const scene::Entity pent = w.at(pi);
+                        if (w.destroyPending(pent)) continue;
+                        const scene::CMeshRenderer* pmr =
+                            w.component<scene::CMeshRenderer>(pent, scene::kComponentMeshRenderer);
+                        if (!pmr || !(pmr->flags & scene::kMeshRendererVisible) || pmr->mesh == 0) continue;
+                        const auto pit = sceneMeshes_.find(pmr->mesh);
+                        if (pit == sceneMeshes_.end()) continue;
+                        // Skinned: excluded (posed, compute-written buffer -- see the block comment).
+                        if (skinnedScene_ && skinnedScene_->drawHandle(pent) != 0) continue;
+#if AVER_MODULE_TRIFACTOR
+                        // GPU cluster mesh-shader path: excluded (see the block comment).
+                        if (lodMeshShaderEnabled_ && lodMeshPipelineReady_ && meshClusterGpu_.count(pmr->mesh)) continue;
+                        // CPU per-cluster path: excluded (see the block comment).
+                        if (lodPerClusterEnabled_ && meshClusterData_.count(pmr->mesh)) continue;
+#endif
+                        const Mat4& pwm = w.worldMatrix(pent);
+                        // The SAME box-cull test the colour walk below runs -- mirrored rather than
+                        // shared because the two walks' loop bodies are otherwise unrelated in shape,
+                        // but this must never disagree with the colour walk about what is visible: a
+                        // pixel this walk skips drawing depth for, that the colour walk goes on to
+                        // draw with the prepassed (LessEqual/no-write) pipeline, would read whatever
+                        // depth happened to already be there -- almost certainly wrong.
+                        // DECLARED OUT HERE, NOT INSIDE THE CULL BLOCK, and that scope is the whole
+                        // bug this once had. The world-space box was computed correctly for the
+                        // frustum test and then went out of scope, so the LOD selection below
+                        // re-derived a sphere from pmr->aabbMin/aabbMax -- which are LOCAL bounds
+                        // (Components.hpp says so) -- and handed them to chooseLevelCached, whose own
+                        // parameter is named worldSphereCenter and is compared against the world-space
+                        // eye. The colour walk a few hundred lines down does it correctly from
+                        // wlo/whi, so the two walks fed the SAME pure function two different inputs
+                        // for the same instance and could pick DIFFERENT LOD levels for it.
+                        //
+                        // That is not a cosmetic mismatch: the prepass then writes depth for one mesh
+                        // while the colour pass draws another, and since the prepassed colour PSO
+                        // tests LessEqual with writes off, every colour fragment behind the wrong
+                        // depth is silently dropped. It measured as fern clumps rendering visibly
+                        // sparser -- 2.81% of pixels differing, falling to 0.04% (noise) with
+                        // --no-lod-select, which is what isolated it.
+                        bool poutside = false;
+                        bool pHaveWorldBox = false;
+                        Vec3 plo{1e30f, 1e30f, 1e30f}, phi{-1e30f, -1e30f, -1e30f};
+                        {
+                            const Vec3 lo{pmr->aabbMin[0], pmr->aabbMin[1], pmr->aabbMin[2]};
+                            const Vec3 hi{pmr->aabbMax[0], pmr->aabbMax[1], pmr->aabbMax[2]};
+                            if (hi.x > lo.x && hi.y > lo.y && hi.z > lo.z) {
+                                pHaveWorldBox = true;
+                                for (u32 c = 0; c < 8; ++c) {
+                                    const Vec3 cp{(c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y, (c & 4) ? hi.z : lo.z};
+                                    const Vec3 t = xformPoint(pwm, cp);
+                                    plo.x = std::fmin(plo.x, t.x); phi.x = std::fmax(phi.x, t.x);
+                                    plo.y = std::fmin(plo.y, t.y); phi.y = std::fmax(phi.y, t.y);
+                                    plo.z = std::fmin(plo.z, t.z); phi.z = std::fmax(phi.z, t.z);
+                                }
+                                for (u32 fi = 0; fi < 6 && !poutside; ++fi) {
+                                    const f32 d = pl[fi][0] * (pl[fi][0] > 0 ? phi.x : plo.x)
+                                                + pl[fi][1] * (pl[fi][1] > 0 ? phi.y : plo.y)
+                                                + pl[fi][2] * (pl[fi][2] > 0 ? phi.z : plo.z)
+                                                + pl[fi][3];
+                                    if (d < 0.0f) poutside = true;
+                                }
+                            }
+                        }
+                        if (poutside) continue;
+
+                        rhi::MeshHandle pmesh = pit->second;
+#if AVER_MODULE_TRIFACTOR
+                        // Discrete per-level LOD: replicated safely (pure function -- see the block
+                        // comment). Same ladder lookup and same chooseLevelCached call the colour
+                        // walk's own `else if (lodSelectEnabled_ ...)` branch makes below.
+                        // GUARDED THE SAME WAY THE COLOUR WALK GUARDS ITS OWN, deliberately: that
+                        // one reads `lodSelectEnabled_ && !skinned && haveWorldBox`, so this one must
+                        // too, or an instance without a usable box takes the ladder here and LOD 0
+                        // there -- the same divergence by a different route.
+                        if (lodSelectEnabled_ && pHaveWorldBox) {
+                            if (const auto plit = meshLods_.find(pmr->mesh); plit != meshLods_.end()) {
+                                const MeshLodLadder& ladder = plit->second;
+                                const Vec3 sphereCenter = (plo + phi) * 0.5f;
+                                const f32 sphereRadius = dist(plo, phi) * 0.5f;   // world space, as
+                                                                                  // chooseLevelCached
+                                                                                  // requires
+                                trifactor::View pview;
+                                pview.eye = eye_;
+                                pview.viewProj = viewProj_;
+                                pview.viewportHeightPx = vpH_;
+                                pview.verticalFovRadians = radians(60.0f);
+                                const u32 plevel = trifactor::chooseLevelCached(
+                                    ladder.errorCm, sphereCenter, sphereRadius, lodErrorThresholdPx_, pview);
+                                pmesh = ladder.handles[plevel];
+                            }
+                        }
+#endif
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+                        {
+                            const i32 pmat = pmr->material;
+                            u32 pauthored = 0;
+                            if (const auto pit2 = surfaceMaterials_.find(pmat); pit2 != surfaceMaterials_.end())
+                                pauthored = pit2->second;
+                            if (pbr::MaterialSystem& pms = voxiRenderer_.materials(); pms.ready())
+                                e.device()->setDrawBinding(pms.bindingSet(pauthored), &pms.constants(pauthored),
+                                                           sizeof(pbr::MaterialConstants));
+                        }
+#endif
+                        e.device()->drawMeshDepthPrepass(pmesh, &pwm.m[0][0]);
+                    }
+                }
+            }
+#endif // AVER_MODULE_VOXI
+
             // IS THE FRAME CPU-BOUND OR GPU-BOUND? Establishing that took a dozen capture runs and
             // three wrong guesses, because --frame-time reports WHOLE frames from the CPU and a CPU
             // number that includes waiting for the GPU looks exactly like CPU work. Two timers
@@ -2775,6 +2935,23 @@ public:
 #endif
                 if (skinnedScene_)
                     if (const rhi::MeshHandle sk = skinnedScene_->drawHandle(ent)) mesh = sk;
+#if AVER_MODULE_VOXI
+                // Mirrors the depth-prepass walk's own exclusions EXACTLY -- skinned, GPU cluster
+                // dispatch, CPU per-cluster -- see that walk's block comment (search "depth prepass
+                // phase") for why each is excluded. This must stay in lockstep with the walk above:
+                // asking for the LessEqual/no-write pipeline on geometry nothing wrote depth for
+                // leaves a hole, and it is exactly this test's job to make sure that never happens.
+                {
+                    bool prepassEligible = e.device()->depthPrepassEnabled() && !clusterDispatched && !skinned;
+#if AVER_MODULE_TRIFACTOR
+                    if (prepassEligible && lodMeshShaderEnabled_ && lodMeshPipelineReady_ &&
+                        meshClusterGpu_.count(mr->mesh)) prepassEligible = false;
+                    if (prepassEligible && lodPerClusterEnabled_ && meshClusterData_.count(mr->mesh))
+                        prepassEligible = false;
+#endif
+                    if (prepassEligible) e.device()->setNextDrawPrepassed(true);
+                }
+#endif
                 // The GPU per-cluster path already dispatched this instance's geometry itself
                 // (DispatchMesh, inside dispatchMeshClusters) -- drawing it again here would be a
                 // double draw, not a fallback.
@@ -3062,10 +3239,22 @@ public:
         textureFactory_ = nullptr;
 #endif
 #if AVER_MODULE_SR
-        // Explicit, while e.device() (and so the rhi::IResourceFactory averSrUpscaler_ was built
-        // against) is still known good -- the same reason the texture teardown above runs here
-        // rather than leaving it to averSrUpscaler_'s own destructor after onShutdown returns.
+        // DETACH FROM THE DEVICE FIRST, THEN DESTROY -- in that order, or not at all. The comment
+        // this replaced said resetting the unique_ptrs here (rather than leaving it to their own
+        // destructors after onShutdown returns) was safe because "e.device() is still known good",
+        // which is true but answers the wrong question: it is `dev->upscaler()` -- a RAW pointer
+        // D3D12Device keeps, set by ensureEdgeAaUpscaler/ensureAverSrUpscaler's own
+        // applyUpscalerSlot() -- that has to stop pointing at this object before the object goes
+        // away, not the device's own liveness. --edge-aa's first --frames run crashed (SIGSEGV) AT
+        // PROCESS EXIT with the tree already fully logged and the screenshot already on disk: the
+        // measurement was never in question, only teardown order was wrong. Whichever of the two
+        // upscalers applyUpscalerSlot last handed to the device is the dangling one; clearing the
+        // slot unconditionally, for BOTH, before either reset() runs, is what closes it for both --
+        // this is the exact bug clearAverSrUpscaler(dev) exists to prevent and was never called
+        // anywhere in this file.
+        e.device()->setUpscaler(nullptr);
         averSrUpscaler_.reset();
+        edgeAaUpscaler_.reset();
 #endif
         if (gameUi_) {
             e.device()->removeRenderFeature(gameUi_);
@@ -3277,6 +3466,7 @@ public:
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
+    void setDepthPrepassOverride(bool on) { depthPrepassOverride_ = on; }   // --depth-prepass
     void setGiOverride(int q, bool dbg) { giOverride_ = q; giDebugView_ = dbg; } // --gi / --gi-debug
     void setGiForceOff(bool off) { giForceOff_ = off; }                        // --no-gi
     // --no-gi-cone: the A/B measurement toggle from VoxiRenderer::setConeTraceEnabled's own comment.
@@ -3312,12 +3502,42 @@ public:
         //
         // Non-owning on the device's side -- averSrUpscaler_ outlives it here, and the device is
         // told nullptr before this object goes away (see clearAverSrUpscaler).
-        dev->setUpscaler(averSrQuality_ == aver::sr::Quality::Off ? nullptr : averSrUpscaler_.get());
+        applyUpscalerSlot(dev);
     }
 
     // Detaches before destruction, so the device can never hold a dangling upscaler.
     void clearAverSrUpscaler(rhi::IDevice* dev) {
         if (dev) dev->setUpscaler(nullptr);
+    }
+
+    void setEdgeAaOverride(bool on) { edgeAaEnabled_ = on; }   // --edge-aa
+
+    // Picks whichever of --edge-aa / --aversr should actually be bound to the device's ONE upscaler
+    // slot -- see edgeAaEnabled_'s own comment on why only one can run at a time. Every call site
+    // that used to hand the device an upscaler directly now goes through this instead, so the two
+    // features can never race to silently overwrite each other's choice.
+    void applyUpscalerSlot(rhi::IDevice* dev) {
+        if (!dev) return;
+        if (edgeAaEnabled_ && edgeAaUpscaler_) { dev->setUpscaler(edgeAaUpscaler_.get()); return; }
+        dev->setUpscaler(averSrQuality_ == aver::sr::Quality::Off ? nullptr : averSrUpscaler_.get());
+    }
+
+    // Constructs FxaaResolve against `dev`'s resource factory if it is not already built, then hands
+    // it to the device through applyUpscalerSlot() -- the same idempotent shape as
+    // ensureAverSrUpscaler just above, for the same rhi::IUpscaler seam, with a different algorithm
+    // behind it. Off (edgeAaEnabled_ never set) never calls this at all.
+    void ensureEdgeAaUpscaler(rhi::IDevice* dev) {
+        if (!dev) return;
+        if (!edgeAaUpscaler_) {
+            if (rhi::IResourceFactory* res = dev->resources())
+                edgeAaUpscaler_ = std::make_unique<aver::sr::FxaaResolve>(*res);
+        }
+        applyUpscalerSlot(dev);
+        if (edgeAaUpscaler_)
+            AVER_INFO("[AverSR] '{}' handed to the device (--edge-aa)", edgeAaUpscaler_->name());
+        else
+            AVER_WARN("[AverSR] --edge-aa requested but FxaaResolve could not be constructed "
+                      "(no resource factory)");
     }
 
     // Logs the [AverSR] brand-tag line docs/AVERSR.md's naming table specifies, plus the one honest
@@ -8341,6 +8561,11 @@ private:
     int  settingsPage_=1;            // 0 Description, 1 Rendering>General, 2 >GI, 3 >Ray Tracing, 4 >Path Tracing
     int  focusVoxi_=0;               // --project-settings: frames left to force the window open
     int  msaaOverride_=0;            // --msaa N: apply a sample count at startup
+    // --depth-prepass: same-frame depth-only pass ahead of the ordinary opaque colour walk, so an
+    // occluded fragment never reaches PSMainVoxi's shadow lookup/cone trace/fog. OFF (the default)
+    // never calls IDevice::setDepthPrepassEnabled/drawMeshDepthPrepass/setNextDrawPrepassed at all --
+    // see renderSceneEntities()'s own comment for the two-walk mechanism this drives.
+    bool depthPrepassOverride_ = false;
     int  giOverride_=0;              // --gi: GI quality to apply at startup
     bool giForceOff_=false;          // --no-gi: force it off, whatever the default is
     int  rtOverride_=0;              // --rt: ray tracing quality at startup
@@ -8360,6 +8585,20 @@ private:
     // satisfied here because it is the SAME rhi::IDevice::resources() the rest of the editor uses
     // for as long as the device exists.
     std::unique_ptr<aver::sr::SpatialUpscaler> averSrUpscaler_;
+    // --edge-aa: constructs and hands the device a real aver::sr::FxaaResolve, the SAME way
+    // averSrUpscaler_ just above does for SpatialUpscaler -- see ensureEdgeAaUpscaler(). OFF (the
+    // default) never constructs one and never calls IDevice::setUpscaler for it, which is what keeps
+    // a build with this flag unused bit-identical to one before this feature existed.
+    //
+    // SHARES ONE rhi::IDevice UPSCALER SLOT WITH AverSR: the interface (IDevice::setUpscaler) takes
+    // one pointer, not a list, so only one of --aversr and --edge-aa can be the thing actually
+    // running on any given frame. applyUpscalerSlot() below is the one place that decides which --
+    // edge AA wins whenever both are requested, since render-scale upscaling (AverSR's job) and edge
+    // AA (this flag's job) are two different reasons to want a full-screen resample and this task
+    // only asked for the second one to exist. Not a limitation this task's own measurements hit:
+    // none of the four configurations use --aversr.
+    bool edgeAaEnabled_ = false;
+    std::unique_ptr<aver::sr::FxaaResolve> edgeAaUpscaler_;
 #endif
     bool frameTimeReport_=false;     // --frame-time: report the frame period, to price the above
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
@@ -10090,7 +10329,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -10333,6 +10572,14 @@ Application* createApplication(int argc, char** argv) {
         // compiled out can still recognise the flag and explain why it did nothing rather than
         // erroring as unknown -- see the AVER_MODULE_SR branch after the parse loop.
         else if (!std::strcmp(argv[i],"--aversr") && i+1<argc) aversrArg=argv[++i];
+        // --depth-prepass: same-frame depth-only pass ahead of the opaque colour walk, so an
+        // occluded fragment skips PSMainVoxi's shadow lookup/cone trace/fog entirely. Unset (the
+        // default) reproduces pre-existing behaviour exactly -- see setDepthPrepassOverride's comment.
+        else if (!std::strcmp(argv[i],"--depth-prepass")) depthPrepass=true;
+        // --edge-aa: FxaaResolve through the SAME rhi::IUpscaler seam --aversr uses -- see
+        // edgeAaEnabled_'s own comment for how the two share one slot. A SETTING, not a hard
+        // replacement for MSAA: it runs whatever sample count --msaa already asked for.
+        else if (!std::strcmp(argv[i],"--edge-aa")) edgeAa=true;
         else if (!std::strcmp(argv[i],"--frame-time")) frameTime=true;
         else if (!std::strcmp(argv[i],"--ms")) ms=true;
         else if (!std::strcmp(argv[i],"--probe") && i+2<argc) { probeX=(u32)std::atoi(argv[++i]); probeY=(u32)std::atoi(argv[++i]); }
@@ -10500,6 +10747,15 @@ Application* createApplication(int argc, char** argv) {
         AVER_WARN("[AverSR] --aversr '{}' was given but this build has no AverSR module "
                   "(-DAVER_MODULE_SR=ON to include it); the editor renders at native resolution "
                   "regardless", aversrArg);
+#endif
+    }
+    app->setDepthPrepassOverride(depthPrepass);
+    if (edgeAa) {
+#if AVER_MODULE_SR
+        app->setEdgeAaOverride(true);
+#else
+        AVER_WARN("[AverSR] --edge-aa was given but this build has no AverSR module "
+                  "(-DAVER_MODULE_SR=ON to include it); MSAA (if any) is the only edge AA applied");
 #endif
     }
     app->setFrameTimeReport(frameTime);
