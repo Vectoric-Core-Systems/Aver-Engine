@@ -35,6 +35,12 @@
          wiring, ClassFlags, Fw, ManagedDispatch, Entity's ctor, AverActor.Self and InvokeBuildModels — so
          the bridge can declare classes and construct/bind actors without duplicating a P/Invoke surface. -->
     <InternalsVisibleTo Include="Aver.Scripting.Bridge" />
+    <!-- Aver.Graph's GraphCompiler emits IL that calls straight through to this assembly's internals:
+         Fw.aver_fw_input_key for the InputKey node, GraphInterop.RaycastForGraph for the Raycast node,
+         by reflection, mirroring exactly how it already calls Aver.Scene.Native's P/Invoke externs for
+         getfield/setfield (see Aver.Scene.csproj's own InternalsVisibleTo grant, added for the same
+         reason). Compile-time access to an internal type from a different assembly needs this. -->
+    <InternalsVisibleTo Include="Aver.Graph" />
   </ItemGroup>
 
 </Project>

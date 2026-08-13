@@ -21,6 +21,10 @@
   <ItemGroup>
     <!-- The graph compiler needs Scene to call P/Invoke functions through the Native binding. -->
     <ProjectReference Include="..\Aver.Scene\Aver.Scene.csproj" />
+    <!-- InputKey (Fw.aver_fw_input_key) and Raycast (GraphInterop.RaycastForGraph) both call straight
+         through to internals of this assembly, exactly like Aver.Scene's Native above; see
+         Aver.Framework.csproj's InternalsVisibleTo("Aver.Graph") grant. -->
+    <ProjectReference Include="..\Aver.Framework\Aver.Framework.csproj" />
   </ItemGroup>
 
 </Project>

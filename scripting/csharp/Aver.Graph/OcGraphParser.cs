@@ -600,6 +600,58 @@ public class OcGraphParser
                     node.Pins.Add(new Pin { Name = "value", Type = declaredParam.Type, IsOutput = true, NodeId = node.Id });
                 break;
             }
+
+            // ---- Select / InputKey / Raycast -----------------------------------------------------
+            // All three have real DATA outputs (unlike branch/while/foreach, see
+            // GraphCompiler.IsExecOnlyNodeType), so Compile() -- the PULL/dataflow compiler -- never
+            // skips them; they are handled by BOTH compilers. See GraphCompiler.cs's own
+            // EmitSelect/EmitInputKey/EmitRaycast comments for exactly how each one differs between
+            // the two.
+
+            case "select":
+                // A pure data node, no exec pins at all -- picks one of two float values by a bool
+                // condition. See GraphCompiler.EmitSelect's own comment for why BOTH ifTrue and
+                // ifFalse are computed regardless of cond in the PULL compiler (not a bug, and not
+                // short-circuiting the way Branch's exec fan-out is).
+                node.Pins.Add(new Pin { Name = "cond", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "ifTrue", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "ifFalse", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "inputkey":
+                // Also a pure data node, no exec pins: reading polled input state is idempotent (no
+                // side effect), so -- like GetField -- it is safe to pull as often as anything wants,
+                // through either compiler, with no _execLocals caching needed. See
+                // GraphCompiler.EmitInputKey.
+                node.Pins.Add(new Pin { Name = "key", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "down", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "raycast":
+                // UNLIKE Select/InputKey, Raycast DOES get exec pins by default: it is a real (if
+                // read-only) native query, and the PUSH compiler wants to run it exactly once per
+                // exec visit rather than once per pull -- see GraphCompiler.EmitExecRaycast and
+                // IsExecCapableQueryType's own comment for why that matters even without a true side
+                // effect. "then" (not "exec", to avoid reusing the input pin's own name for an
+                // unrelated output pin) is this node's single continuation, fired after the native
+                // call completes -- the same "one exec-out, EmitExecFanOut needs no special case"
+                // shape SetField would have if given exec pins by hand.
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "originX", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "originY", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "originZ", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "dirX", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "dirY", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "dirZ", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "maxDist", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "hit", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "pointX", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "pointY", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "pointZ", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
         }
     }
 

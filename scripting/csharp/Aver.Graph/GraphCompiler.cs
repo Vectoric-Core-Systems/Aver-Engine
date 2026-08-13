@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using Aver.Framework;
 using Aver.Scene;
 
 namespace Aver.Graph;
@@ -375,6 +376,18 @@ public class GraphCompiler
                 EmitParam(node);
                 break;
 
+            case "select":
+                EmitSelect(node);
+                break;
+
+            case "inputkey":
+                EmitInputKey(node);
+                break;
+
+            case "raycast":
+                EmitRaycast(node);
+                break;
+
             default:
                 throw new NotSupportedException($"Node type '{node.Type}' is not supported");
         }
@@ -626,6 +639,98 @@ public class GraphCompiler
 
         if (_pinLocals.TryGetValue((node.Id, "value"), out var local))
             _il.Emit(OpCodes.Stloc, local);
+    }
+
+    /// Select(cond, ifTrue, ifFalse) -> result: picks one of two float values by a bool condition.
+    ///
+    /// NOT SHORT-CIRCUITING, DELIBERATELY, AND THIS IS NOT THE SAME THING AS "BOTH ARMS COST
+    /// NOTHING". The Brfalse/Br pair below only decides which LOCAL gets LOADED into `result` --
+    /// ifTrue's and ifFalse's own upstream expressions were already computed by the time this method
+    /// runs, because Compile()'s single topological pass (line ~191) calls EmitNode on EVERY node in
+    /// the graph exactly once, regardless of what any other node's condition turns out to be. Unlike
+    /// Branch's exec fan-out (EmitExecFanOut), which genuinely does not walk into the untaken arm's
+    /// nodes at all, Select cannot skip computing either side -- both source nodes already ran before
+    /// this method was ever called. The branch below is a real optimization (skip the LDLOC, not the
+    /// computation) that would be equally correct as a branchless "compute both, keep one" -- it is
+    /// written as a branch only because that is the shape LoadPin's caching model makes free.
+    private void EmitSelect(Node node)
+    {
+        if (_il == null) return;
+
+        LoadPin(node.Id, "cond");
+
+        var falseLabel = _il.DefineLabel();
+        var endLabel = _il.DefineLabel();
+        _il.Emit(OpCodes.Brfalse, falseLabel);
+
+        LoadPin(node.Id, "ifTrue");
+        _il.Emit(OpCodes.Br, endLabel);
+
+        _il.MarkLabel(falseLabel);
+        LoadPin(node.Id, "ifFalse");
+
+        _il.MarkLabel(endLabel);
+        if (_pinLocals.TryGetValue((node.Id, "result"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+    }
+
+    /// InputKey(key) -> down: reads Aver.Framework's polled input state. Pure data, no exec pins --
+    /// like GetField, reading is idempotent, so this is safe to call as many times as anything pulls
+    /// it (through either compiler) with no _execLocals caching needed, unlike Raycast. aver_fw_input_key
+    /// already returns 0/1 as an int32, which is exactly the bit pattern IL's Stloc expects for a bool
+    /// local -- the same "no explicit conversion needed" property EmitCompare's Cgt result relies on.
+    private void EmitInputKey(Node node)
+    {
+        if (_il == null) return;
+
+        LoadPin(node.Id, "key");
+        _il.Emit(OpCodes.Call, InputKeyMethod);
+
+        if (_pinLocals.TryGetValue((node.Id, "down"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+    }
+
+    /// Raycast(originX,Y,Z, dirX,Y,Z, maxDist) -> hit, entity, pointX,Y,Z: one native call producing
+    /// five results. This compiler (PULL) computes every node exactly once per Compile() regardless of
+    /// how many things read its outputs (see EmitNode's own doc comment), so -- unlike the PUSH
+    /// compiler's EmitExecRaycast, which needs _execLocals to get the same one-call guarantee -- a
+    /// straightforward "one call, five _pinLocals stores" is already correct here with no extra
+    /// mechanism: push the 7 inputs, push the ADDRESS of each of the 5 pre-declared output locals
+    /// (RequirePinLocal/Ldloca), Call. See Aver.Framework.GraphInterop.RaycastForGraph's own comment
+    /// for why the call is shaped as scalar out-params rather than a returned struct.
+    private void EmitRaycast(Node node)
+    {
+        if (_il == null) return;
+
+        LoadPin(node.Id, "originX");
+        LoadPin(node.Id, "originY");
+        LoadPin(node.Id, "originZ");
+        LoadPin(node.Id, "dirX");
+        LoadPin(node.Id, "dirY");
+        LoadPin(node.Id, "dirZ");
+        LoadPin(node.Id, "maxDist");
+
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "hit"));
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "entity"));
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "pointX"));
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "pointY"));
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "pointZ"));
+        _il.Emit(OpCodes.Call, RaycastMethod);
+    }
+
+    /// Raycast's five out-parameters need a LOCAL's ADDRESS on the stack (Ldloca), not a loaded value
+    /// -- unlike every other Emit* method's "load, compute, maybe Stloc" shape, so a missing pin can't
+    /// just be skipped the way LoadPin's callers skip a missing _pinLocals entry (there would be
+    /// nothing to push where the call signature requires an address). Thrown here, at the one call
+    /// site that needs it, rather than silently leaving the IL stack unbalanced.
+    private LocalBuilder RequirePinLocal(Node node, string pinName)
+    {
+        if (!_pinLocals.TryGetValue((node.Id, pinName), out var local))
+            throw new InvalidOperationException(
+                $"Raycast node '{node.Id}' has no output pin '{pinName}' declared -- Raycast needs all " +
+                "five of hit/entity/pointX/pointY/pointZ to run (see OcGraphParser.AddDefaultPins's " +
+                "'raycast' case, or give the node explicit PIN records for all five)");
+        return local;
     }
 
     /// Loads a pin value onto the stack. If the pin is an output of another node, load it
@@ -939,10 +1044,13 @@ public class GraphCompiler
                 default:
                     // Every other node type reached via exec: run its own side effect, if it has one
                     // worth sequencing (today, only SetField does -- see IsExecCapableSideEffectType),
-                    // then fall through to the generic multi-exec-out fan-out, which is what makes a
-                    // plain node with 0, 1, or N exec-output pins behave correctly (no-op passthrough,
-                    // continue, or "sequence") with no special case here at all.
+                    // or its own cached QUERY, if it has one worth running exactly once per visit
+                    // (today, only Raycast does -- see IsExecCapableQueryType), then fall through to
+                    // the generic multi-exec-out fan-out, which is what makes a plain node with 0, 1,
+                    // or N exec-output pins behave correctly (no-op passthrough, continue, or
+                    // "sequence") with no special case here at all.
                     if (IsExecCapableSideEffectType(node.Type)) EmitExecSideEffect(node);
+                    else if (IsExecCapableQueryType(node.Type)) EmitExecRaycast(node);
                     EmitExecFanOut(node);
                     return;
             }
@@ -1159,6 +1267,21 @@ public class GraphCompiler
     private static bool IsExecCapableSideEffectType(string type) =>
         type.Equals("setfield", StringComparison.OrdinalIgnoreCase);
 
+    /// Node types with NO side effect (a plain read, safe to call any number of times with the same
+    /// inputs) that STILL want the exec walk's "compute once per visit, cache into _execLocals" shape
+    /// -- today, only Raycast. Deliberately a SEPARATE predicate from IsExecCapableSideEffectType,
+    /// not a second name for the same list: SetField exists on the exec chain because pulling it twice
+    /// would be WRONG (a write happening twice, silently); Raycast exists on the exec chain because
+    /// pulling it twice would merely be WASTEFUL (an expensive native physics query re-run for no
+    /// reason) -- correctness vs cost is a real distinction worth two names, even though both end up
+    /// calling EmitExecNode's default case and both populate _execLocals the same way. A node in this
+    /// list is safe for EmitPullOutput to compute fresh too (unlike a side-effect type, which
+    /// EmitPullOutput actively refuses) -- Raycast simply has no such fallback today, by choice, not
+    /// because pulling it would be incorrect; see EmitPullOutput's own "raycast has NO case here"
+    /// comment for that choice's reasoning.
+    private static bool IsExecCapableQueryType(string type) =>
+        type.Equals("raycast", StringComparison.OrdinalIgnoreCase);
+
     /// Runs a SetField node's write exactly once, at the point the exec walk reaches it -- mirrors
     /// EmitSetField's own field=/resolver/native-call logic, but pulls its "entity"/"value" inputs
     /// through EmitPullInput rather than LoadPin/_pinLocals (see the section-level comment for why the
@@ -1192,6 +1315,36 @@ public class GraphCompiler
         {
             _il.Emit(OpCodes.Pop); // nothing declared to read the return code; discard it
         }
+    }
+
+    /// Runs a Raycast node's native query exactly once, at the point the exec walk reaches it --
+    /// mirrors EmitRaycast's own "one call, five results" shape, but pulls its 7 inputs through
+    /// EmitPullInput rather than LoadPin/_pinLocals (see the section-level comment for why the two
+    /// input mechanisms are not shared), and stores each of its 5 results into its OWN exec-local via
+    /// GetOrCreateExecLocal -- the same mechanism EmitExecSideEffect uses for SetField's "success", so
+    /// a later `OUT raycastNode hit` (etc) reads the live, already-computed value via
+    /// EmitPullOutput's _execLocals check rather than trying to re-derive it (Raycast has no case of
+    /// its own in EmitPullOutput's switch -- see that method's "raycast has NO case here" comment).
+    /// Called from EmitExecNode's default case, exactly like EmitExecSideEffect, just gated by
+    /// IsExecCapableQueryType instead of IsExecCapableSideEffectType.
+    private void EmitExecRaycast(Node node)
+    {
+        if (_il == null) return;
+
+        EmitPullInput(node, "originX");
+        EmitPullInput(node, "originY");
+        EmitPullInput(node, "originZ");
+        EmitPullInput(node, "dirX");
+        EmitPullInput(node, "dirY");
+        EmitPullInput(node, "dirZ");
+        EmitPullInput(node, "maxDist");
+
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "hit", typeof(bool)));
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "entity", typeof(int)));
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "pointX", typeof(float)));
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "pointY", typeof(float)));
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "pointZ", typeof(float)));
+        _il.Emit(OpCodes.Call, RaycastMethod);
     }
 
     /// Pulls the value linked into `node`'s input pin `pinName` and pushes it onto the IL stack:
@@ -1339,6 +1492,43 @@ public class GraphCompiler
                 _il.Emit(OpCodes.Ldarg, (short)index);
                 return;
             }
+            case "inputkey":
+                EmitPullInput(source, "key"); _il.Emit(OpCodes.Call, InputKeyMethod); return;
+            case "select":
+            {
+                // Mirrors EmitSelect's own branch shape, but PULLED (recursive, uncached) rather than
+                // stored to a _pinLocals entry -- see EmitPullInput/EmitPullOutput's own section header
+                // for why the exec compiler re-emits an upstream expression at every pull site instead
+                // of caching it. UNLIKE EmitSelect's PULL-compiler branch (which only skips which local
+                // gets LOADED, since both arms' upstream nodes already ran during the topological
+                // walk), this branch is a REAL short-circuit: EmitPullInput recursively emits and runs
+                // whichever arm's upstream subgraph is chosen, so only ONE of ifTrue/ifFalse's cost is
+                // ever paid per pull here.
+                EmitPullInput(source, "cond");
+                var elseLabel = _il.DefineLabel();
+                var endLabel = _il.DefineLabel();
+                _il.Emit(OpCodes.Brfalse, elseLabel);
+                EmitPullInput(source, "ifTrue");
+                _il.Emit(OpCodes.Br, endLabel);
+                _il.MarkLabel(elseLabel);
+                EmitPullInput(source, "ifFalse");
+                _il.MarkLabel(endLabel);
+                return;
+            }
+            // "raycast" has NO case here, deliberately. A Raycast node reached VIA THE EXEC CHAIN
+            // populates _execLocals for all five of its outputs (see EmitExecRaycast), and
+            // EmitPullOutput already checks _execLocals before this switch runs (top of this method)
+            // -- so a Raycast visited by the exec walk needs no dispatch code here at all. A Raycast
+            // node that is NEVER visited by exec (only reached by a data LINK, with no incoming exec
+            // edge wired to it, inside a graph CompileEntryPoint is compiling) falls through to the
+            // `default` arm below and reports a clear NotSupportedException -- a deliberate Phase-1
+            // limitation, not an oversight: unlike GetField (EmitPullGetField), Raycast has no
+            // standalone "just call it" pull path in the PUSH compiler, because giving it one would
+            // mean an author-visible node type behaves differently depending on whether it happens to
+            // sit on the exec chain, which is a worse trap than a clear compile error naming the node.
+            // A PURE-PULL graph (no ENTRY at all, see IsExecOnlyNodeType and Compile()'s own foreach)
+            // is unaffected -- it never reaches EmitPullOutput in the first place; EmitRaycast (PULL)
+            // handles it completely on its own.
             default:
                 throw new NotSupportedException(
                     $"node type '{source.Type}' cannot be pulled as a data value inside an exec chain " +
@@ -1421,6 +1611,14 @@ public class GraphCompiler
     private static readonly MethodInfo WarnLoopGuardMethod =
         typeof(GraphCompiler).GetMethod(nameof(WarnLoopGuardTripped), BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("GraphCompiler.WarnLoopGuardTripped was not found by reflection");
+    // Aver.Framework internals, reached the same way as Aver.Scene's Native above -- see
+    // Aver.Framework.csproj's InternalsVisibleTo("Aver.Graph") grant.
+    private static readonly MethodInfo InputKeyMethod =
+        typeof(Fw).GetMethod("aver_fw_input_key", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.Fw.aver_fw_input_key was not found by reflection");
+    private static readonly MethodInfo RaycastMethod =
+        typeof(GraphInterop).GetMethod("RaycastForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.RaycastForGraph was not found by reflection");
 
     /// Called FROM EMITTED IL (see EmitWhile/EmitForEach), not from ordinary C# control flow, when a
     /// loop's iteration count crosses MaxLoopIterations. Logs -- loudly, naming the exact node and

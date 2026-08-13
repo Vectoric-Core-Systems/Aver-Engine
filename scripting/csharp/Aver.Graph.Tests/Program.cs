@@ -57,6 +57,9 @@ class Program
         // Exec/flow: branch, sequence, while, forEach, and event entry points (ENTRY/CompileEntryPoint).
         failures += GraphFlowTests.RunAll();
 
+        // Select, InputKey, Raycast: the three node types this slice adds on top of the exec compiler.
+        failures += NewNodeTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else
