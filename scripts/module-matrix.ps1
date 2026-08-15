@@ -37,6 +37,12 @@ $configs = [ordered]@{
     "scripting-off" = @("-DAVER_MODULE_SCRIPTING=OFF")
     "scene-off"     = @("-DAVER_MODULE_SCENE=OFF", "-DAVER_MODULE_FRAMEWORK=OFF")
     "trifactor-off" = @("-DAVER_MODULE_TRIFACTOR=OFF")
+    # Occlusion (modules/occlusion). Added late: this module has defaulted ON since 0a84819 and had
+    # no row at all until then, so nothing could have caught a regression in it. Its guards are also
+    # the ones most recently disturbed -- every `#if AVER_MODULE_OCCLUSION` in SandboxApp.cpp had to
+    # be paired with AVER_MODULE_SCENE (ba30436's parent) because two of its members are keyed on
+    # scene::Entity, which is exactly the kind of thing this matrix exists to notice.
+    "occlusion-off" = @("-DAVER_MODULE_OCCLUSION=OFF")
     # AverSR (docs/AVERSR.md). The IUpscaler seam lives in Aver.RHI itself, not this module, so no
     # RENDERER may reference Aver.Render.Sr -- only sandbox, as the composition root that constructs
     # the concrete SpatialUpscaler and hands the seam an IUpscaler* it can hold as null, links it
