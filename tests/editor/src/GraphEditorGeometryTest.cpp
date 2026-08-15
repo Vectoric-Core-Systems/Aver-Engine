@@ -69,10 +69,24 @@ static void testNodeCatalog() {
         check(findGraphNodeDesc(t) != nullptr, std::string("catalog has incoming type '") + t + "'");
     }
 
-    // The exec/flow additions: branch, sequence, while, forEach, and the two event-entry trigger
-    // types. Present in the catalog with the SAME pin shapes OcGraphParser.AddDefaultPins gives them
+    // GetFieldVec3/SetFieldVec3: the Vec3 siblings of GetField/SetField -- proving this editor's
+    // palette was kept in parity with scripting/csharp/Aver.Graph/OcGraphParser.cs's own
+    // "getfieldvec3"/"setfieldvec3" cases rather than left as a compiler-only addition (see
+    // GraphNodeDefs.hpp's own header comment on why that parity matters, and its KNOWN GAP note for
+    // what is still NOT true of field= -- readable through the GUI -- even once the catalog knows the
+    // node type exists).
+    const char* vec3Fields[] = {"GetFieldVec3", "SetFieldVec3"};
+    for (const char* t : vec3Fields) {
+        check(findGraphNodeDesc(t) != nullptr, std::string("catalog has Vec3-field type '") + t + "'");
+    }
+
+    // The exec/flow additions: branch, sequence, while, forEach, and the three event-entry trigger
+    // types (OnHit is the on-demand-fired one -- see scripting/csharp/Aver.Graph/GraphHost.cs's own
+    // PHASE 3 comment for what "on-demand" means; this catalog entry is identically-shaped to
+    // OnStart/OnTick because the DIFFERENCE is entirely in how a host drives it, not in the node's own
+    // pins). Present in the catalog with the SAME pin shapes OcGraphParser.AddDefaultPins gives them
     // on the C# side -- see GraphNodeDefs.hpp's own header comment on why that parity matters.
-    const char* flow[] = {"Branch", "Sequence", "While", "ForEach", "OnStart", "OnTick"};
+    const char* flow[] = {"Branch", "Sequence", "While", "ForEach", "OnStart", "OnTick", "OnHit"};
     for (const char* t : flow) {
         check(findGraphNodeDesc(t) != nullptr, std::string("catalog has flow type '") + t + "'");
     }
@@ -103,6 +117,54 @@ static void testNodeCatalog() {
         check(false, "ConstFloat present (shape check skipped)");
     }
 
+    // GetFieldVec3's shape: entity in, x/y/z out, no exec -- matches OcGraphParser.AddDefaultPins's
+    // "getfieldvec3" case pin-for-pin, and mirrors GetField's own shape check just above with a wider
+    // output.
+    const GraphNodeDesc* gv = findGraphNodeDesc("GetFieldVec3");
+    if (gv) {
+        int ins = 0, outs = 0, execPins = 0;
+        for (const auto& p : gv->pins) { (p.isOutput ? outs : ins)++; if (p.type == "exec") ++execPins; }
+        check(ins == 1, "GetFieldVec3 has 1 input pin (entity)");
+        check(outs == 3, "GetFieldVec3 has 3 output pins (x, y, z)");
+        check(execPins == 0, "GetFieldVec3 has no exec pins by default");
+    } else {
+        check(false, "GetFieldVec3 present (shape check skipped)");
+    }
+
+    // SetFieldVec3's shape: entity+x+y+z in, success out, no exec by default -- deliberately, mirroring
+    // SetField's own no-exec-by-default shape (see GraphCompiler.EmitSetFieldVec3's comment for why).
+    const GraphNodeDesc* sv = findGraphNodeDesc("SetFieldVec3");
+    if (sv) {
+        int ins = 0, outs = 0, execPins = 0;
+        for (const auto& p : sv->pins) { (p.isOutput ? outs : ins)++; if (p.type == "exec") ++execPins; }
+        check(ins == 4, "SetFieldVec3 has 4 input pins (entity, x, y, z)");
+        check(outs == 1, "SetFieldVec3 has 1 output pin (success)");
+        check(execPins == 0, "SetFieldVec3 has no exec pins by default");
+    } else {
+        check(false, "SetFieldVec3 present (shape check skipped)");
+    }
+
+    // Spawn: the visual-scripting slice's Spawn node -- proving this editor's palette was kept in
+    // parity with scripting/csharp/Aver.Graph/OcGraphParser.cs's own "spawn" case rather than left
+    // compiler-only (see GraphNodeDefs.hpp's own comment on why it gets exec pins by default here,
+    // unlike GetField/SetField/GetFieldVec3/SetFieldVec3 above).
+    check(findGraphNodeDesc("Spawn") != nullptr, "catalog has 'Spawn'");
+
+    const GraphNodeDesc* spawn = findGraphNodeDesc("Spawn");
+    if (spawn) {
+        int execIns = 0, execOuts = 0, dataIns = 0, dataOuts = 0;
+        for (const auto& p : spawn->pins) {
+            if (p.type == "exec") (p.isOutput ? execOuts : execIns)++;
+            else (p.isOutput ? dataOuts : dataIns)++;
+        }
+        check(execIns == 1, "Spawn has exactly one incoming exec pin");
+        check(execOuts == 1, "Spawn has exactly one outgoing exec pin ('then')");
+        check(dataIns == 3, "Spawn has 3 non-exec input pins (x, y, z)");
+        check(dataOuts == 1, "Spawn has 1 non-exec output pin (entity)");
+    } else {
+        check(false, "Spawn present (shape check skipped)");
+    }
+
     // Branch's shape: one incoming exec pulse, a bool condition, and two outgoing exec pins -- the
     // "decide" primitive the whole visual-scripting phase exists to add.
     const GraphNodeDesc* branch = findGraphNodeDesc("Branch");
@@ -119,8 +181,10 @@ static void testNodeCatalog() {
         check(false, "Branch present (shape check skipped)");
     }
 
-    // OnStart/OnTick: no inputs at all, one exec output -- the node an ENTRY record points at.
-    for (const char* triggerType : {"OnStart", "OnTick"}) {
+    // OnStart/OnTick/OnHit: no inputs at all, one exec output -- the node an ENTRY record points at.
+    // OnHit's shape is identical to the other two on purpose (see the "flow" catalog check above) --
+    // this loop proves that identity rather than assuming it.
+    for (const char* triggerType : {"OnStart", "OnTick", "OnHit"}) {
         const GraphNodeDesc* trigger = findGraphNodeDesc(triggerType);
         if (trigger) {
             bool anyInput = false;

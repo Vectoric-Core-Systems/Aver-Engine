@@ -20,6 +20,18 @@
 // just with a synthetic id standing in for "the project" rather than a real scene entity -- see
 // GameApp.cpp's own comment on why that is safe. No native or Aver.Scripting.Bridge change was
 // needed for that reuse; see the runtime build plan / phase-2 report for the fuller reasoning.
+//
+// PHASE 3 ADDITION (ON-DEMAND events -- "OnHit" is the worked example, not a special case): every
+// event this class knew how to run before now was driven by Tick() -- OnStart once, OnTick every
+// call. That is wrong for an event a HOST fires when something HAPPENS (a hit lands, an overlap
+// begins) rather than on a fixed per-frame cadence, and CompileEntryPoint() already compiled such a
+// thing perfectly well before this addition -- the gap was entirely here, in LoadEventGraph (which
+// refused to load a graph unless one of its ENTRY records literally named "OnStart" or "OnTick") and
+// in the total absence of any method to run a compiled entry point OUTSIDE of Tick(). See Fire()'s
+// own doc comment for the on-demand contract. "OnHit" appears below only as an ILLUSTRATIVE EXAMPLE,
+// in comments -- no branch, switch or string comparison anywhere in this file singles it out from
+// any other non-OnStart/OnTick event name a project might declare. See LoadEventGraph's own comment
+// for exactly how a declared event name sorts into "Tick()-driven" versus "Fire()-able".
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -116,6 +128,15 @@ public class GraphHost
     // absolute time the way a dataflow graph's caller might.
     private float _execSimTime;
 
+    // ---- on-demand (Fire()) path -- new in phase 3 -------------------------------------------------
+    // One compiled delegate per declared event name OTHER than "OnStart"/"OnTick" -- see
+    // LoadEventGraph's own comment for how a name sorts into this bucket versus the Tick()-driven pair
+    // above, and Fire()'s own comment for how one of these gets invoked. Never touched by Tick()/
+    // TickEventGraph, exactly as _onStart/_onTick are never touched by Fire() -- two disjoint sets of
+    // entry points sharing one compiled Graph, the same "the two halves do not interact" property
+    // OcGraph.hpp's own contract already promises for dataflow-vs-exec within a single file.
+    private Dictionary<string, Delegate> _onDemand = new();
+
     private Graph? _graph;
     private readonly PositionSink _positionSink;
 
@@ -128,14 +149,18 @@ public class GraphHost
     /// <summary>Null until a Load() call fails; then the reason, exactly as reported at that time.</summary>
     public string? LoadError { get; private set; }
 
-    /// <summary>True once a graph has compiled successfully and Tick() will actually run it. True for
-    /// EITHER kind of graph: the dataflow delegate, or at least one of OnStart/OnTick.</summary>
-    public bool Ready => _compiled != null || _onStart != null || _onTick != null;
+    /// <summary>True once a graph has compiled successfully and something will actually run it --
+    /// EITHER via Tick() (the dataflow delegate, or at least one of OnStart/OnTick) OR on demand via
+    /// Fire() (at least one other compiled entry point). A graph loaded with ONLY an on-demand event
+    /// (no OnStart/OnTick, no dataflow OUT) is genuinely Ready even though Tick() will do nothing for
+    /// it at all -- see Fire()'s own doc comment; that split is deliberate, not a gap.</summary>
+    public bool Ready => _compiled != null || _onStart != null || _onTick != null || _onDemand.Count > 0;
 
     /// <summary>True for a graph loaded via the event-driven (ENTRY/exec) path rather than the
-    /// original dataflow one. Exposed so a caller that cares (GameApp's discovery log, notably) can
-    /// say which kind of graph it found without re-deriving it from Graph.EntryPoints itself.</summary>
-    public bool IsEventDriven => _onStart != null || _onTick != null;
+    /// original dataflow one -- Tick()-driven, Fire()-able, or both. Exposed so a caller that cares
+    /// (GameApp's discovery log, notably) can say which kind of graph it found without re-deriving it
+    /// from Graph.EntryPoints itself.</summary>
+    public bool IsEventDriven => _onStart != null || _onTick != null || _onDemand.Count > 0;
 
     /// <summary>The parsed graph, for inspection (name/description/node count) -- null until a
     /// successful Load(). Exposed read-only; GraphHost owns compiling it, nothing else should.</summary>
@@ -244,37 +269,69 @@ public class GraphHost
     {
         err = null;
 
-        // Same {"entity" Int, "time" Float} convention the dataflow path uses above, PLUS "deltaTime"
-        // Float. The third name exists only here, not on the dataflow path, because "deltaTime" only
-        // means something to a graph that runs every tick and wants THIS tick's slice rather than an
-        // accumulated clock -- exactly the event-driven case, and exactly what the task that added
-        // this class's phase-2 support asked an OnTick entry point be able to receive. Adding it to
-        // the dataflow slot list too would cost nothing today (no existing dataflow graph declares
-        // it) but would silently change what that path accepts for no graph that needs it yet; kept
-        // separate so the two lists can be read as two independent, honest contracts.
-        var slots = new ParamSlot[graph.Parameters.Count];
-        for (int i = 0; i < graph.Parameters.Count; i++)
-        {
-            var p = graph.Parameters[i];
-            if (p.Type == PinType.Int && p.Name.Equals("entity", StringComparison.OrdinalIgnoreCase))
-                slots[i] = ParamSlot.Entity;
-            else if (p.Type == PinType.Float && p.Name.Equals("time", StringComparison.OrdinalIgnoreCase))
-                slots[i] = ParamSlot.Time;
-            else if (p.Type == PinType.Float && p.Name.Equals("deltaTime", StringComparison.OrdinalIgnoreCase))
-                slots[i] = ParamSlot.DeltaTime;
-            else
-            {
-                LoadError = err = $"PARAM '{p.Name}' ({p.Type}) is not something an event-driven " +
-                                   "GraphHost can supply -- only PARAM entity int, PARAM time float and " +
-                                   "PARAM deltaTime float are wired for OnStart/OnTick";
-                Console.Error.WriteLine($"[GraphHost] {LoadError}");
-                return false;
-            }
-        }
-
         var compiler = new GraphCompiler(graph);
         bool wantsStart = graph.EntryPoints.Any(e => e.EventName == "OnStart");
         bool wantsTick  = graph.EntryPoints.Any(e => e.EventName == "OnTick");
+
+        // EVERY OTHER declared event name -- "OnHit", or anything a future project invents -- is
+        // ON-DEMAND: compiled here, same as OnStart/OnTick, but fired later by a caller through
+        // Fire() rather than driven by this class's own Tick() cadence. Nothing below (or in Fire())
+        // spells out "OnHit" as a name GraphHost recognises -- ANY name that is not "OnStart" or
+        // "OnTick" takes this path, which is what makes a truly new event (not just OnHit) free at
+        // this layer, exactly as ENTRY's own parser comment already promised for the FORMAT.
+        var onDemandNames = graph.EntryPoints.Select(e => e.EventName)
+            .Where(n => n != "OnStart" && n != "OnTick")
+            .Distinct()
+            .ToList();
+
+        // The {"entity" Int, "time" Float, "deltaTime" Float} ParamSlot convention below exists
+        // SOLELY because Tick(entityId, timeSeconds) has a fixed two-argument signature -- those are
+        // the only two values this class can hand OnStart/OnTick without a caller supplying anything
+        // extra. That constraint has no bearing on an ON-DEMAND event, so the check is now gated on
+        // actually wanting OnStart/OnTick rather than applied to every event-driven graph regardless:
+        // a graph with ONLY an on-demand entry (no OnStart/OnTick at all) declares whatever PARAM list
+        // its payload needs -- `otherEntity`, or anything else -- with NOTHING here to reject it. See
+        // Fire()'s own doc comment for why a caller-supplied positional arg list, not a second named-
+        // slot vocabulary, is the right contract for a payload this class cannot anticipate the shape
+        // of. (This is also the fix for the exact failure this class used to have: an on-demand-only
+        // graph declaring `PARAM otherEntity int` used to be rejected HERE, before LoadEventGraph ever
+        // got far enough to notice the graph had no OnStart/OnTick entry to begin with.)
+        //
+        // A graph that mixes an on-demand event with OnStart/OnTick is NOT specially supported either
+        // way -- Parameters is ONE list for the WHOLE FILE (see Graph.cs), shared by every ENTRY in
+        // it, so a PARAM only the on-demand event needs becomes something OnTick's OWN compiled
+        // delegate would also be asked to accept, and Tick() has no value to supply for it. The check
+        // below still runs whenever wantsStart/wantsTick is true and still catches exactly that
+        // mistake, with the message updated to say so -- which is why "one event's payload gets its
+        // own file, separate from any OnStart/OnTick graph" is a real constraint this format enforces
+        // on any project authoring on-demand events, not merely a style preference left to an
+        // author's discipline.
+        var slots = new ParamSlot[graph.Parameters.Count];
+        if (wantsStart || wantsTick)
+        {
+            for (int i = 0; i < graph.Parameters.Count; i++)
+            {
+                var p = graph.Parameters[i];
+                if (p.Type == PinType.Int && p.Name.Equals("entity", StringComparison.OrdinalIgnoreCase))
+                    slots[i] = ParamSlot.Entity;
+                else if (p.Type == PinType.Float && p.Name.Equals("time", StringComparison.OrdinalIgnoreCase))
+                    slots[i] = ParamSlot.Time;
+                else if (p.Type == PinType.Float && p.Name.Equals("deltaTime", StringComparison.OrdinalIgnoreCase))
+                    slots[i] = ParamSlot.DeltaTime;
+                else
+                {
+                    LoadError = err = $"PARAM '{p.Name}' ({p.Type}) is not something an event-driven " +
+                                       "GraphHost can supply to OnStart/OnTick -- only PARAM entity int, " +
+                                       "PARAM time float and PARAM deltaTime float are wired for them. A " +
+                                       "graph that wants a different PARAM must not ALSO declare an " +
+                                       "OnStart or OnTick entry in this same file (PARAM is graph-wide, " +
+                                       "not per-ENTRY) -- give the on-demand event its own file instead, " +
+                                       "fired via Fire(), which places no restriction on PARAM names.";
+                    Console.Error.WriteLine($"[GraphHost] {LoadError}");
+                    return false;
+                }
+            }
+        }
 
         // A GRAPH THAT DOES NOTHING LOOKS EXACTLY LIKE A GRAPH THAT WORKS, and that is the one failure
         // an author cannot diagnose from the log. If the node an ENTRY names has no exec OUTPUT pin --
@@ -320,23 +377,41 @@ public class GraphHost
             }
         }
 
-        if (onStart == null && onTick == null)
+        // Every OTHER declared event name is compiled here too, exactly like OnStart/OnTick just
+        // were, and cached by NAME for Fire() to invoke later. Same all-or-nothing swap philosophy as
+        // OnStart/OnTick above (a compile failure anywhere fails the WHOLE Load(), not just this one
+        // event) -- a graph that sometimes has a working OnHit and sometimes does not, depending on
+        // which other entries happened to compile, is exactly the "half-compiled and inconsistent"
+        // outcome this class's own doc comment already refuses to produce.
+        var onDemand = new Dictionary<string, Delegate>();
+        foreach (var name in onDemandNames)
         {
-            // Reachable when every ENTRY record names an event this host does not drive yet (e.g. a
-            // future "OnCollide") -- not a compile failure of anything, just nothing GraphHost can
-            // turn into a Tick() call. Failing loudly here beats silently accepting a graph that will
-            // never do anything and leaving whoever authored it to wonder why.
-            string events = string.Join(", ", graph.EntryPoints.Select(e => e.EventName).Distinct());
-            LoadError = err = $"graph declares ENTRY record(s) for [{events}] but GraphHost only " +
-                               "drives 'OnStart' and 'OnTick' -- nothing in this graph would ever run";
-            Console.Error.WriteLine($"[GraphHost] {LoadError}");
-            return false;
+            var onDemandCompiled = compiler.CompileEntryPoint(name, out var onDemandErr);
+            if (onDemandCompiled == null)
+            {
+                LoadError = err = $"'{name}' compile error: {onDemandErr}";
+                Console.Error.WriteLine($"[GraphHost] {LoadError}");
+                return false;
+            }
+            onDemand[name] = onDemandCompiled;
         }
 
+        // NO "nothing would ever run" CHECK NEEDED HERE, UNLIKE BEFORE PHASE 3. It used to fire
+        // whenever neither OnStart nor OnTick compiled -- correct THEN, because those were the only
+        // two things this class knew how to run at all, so an ENTRY naming anything else really was
+        // dead weight. That is no longer true: wantsStart, wantsTick and onDemandNames together
+        // partition EVERY distinct event name this graph declares (the two Any() checks and the
+        // Where/Distinct above cover disjoint, exhaustive cases -- Graph.Validate() already refuses a
+        // duplicate ENTRY for the same event name, so there is no fourth bucket for a name to fall
+        // into), and a compile failure in ANY bucket already returned false above. A graph reaching
+        // this line therefore always leaves with at least one thing runnable, either via Tick() or
+        // via Fire() -- which is exactly why LoadFromText only calls this method at all when
+        // graph.EntryPoints.Count > 0.
         _graph = graph;
         _eventArgSlots = slots;
         _onStart = onStart;
         _onTick = onTick;
+        _onDemand = onDemand;
         _startInvoked = false;
         _execSimTime = 0f;
         return true;
@@ -389,11 +464,30 @@ public class GraphHost
         {
             var args = new object[slots.Length];
             for (int i = 0; i < slots.Length; i++)
+                // (object) ON EVERY ARM IS LOAD-BEARING, NOT STYLE. Without it, the switch expression's
+                // arms are `int` (entityId) and two `float`s (_execSimTime/deltaTime) with no explicit
+                // target type here (`args[i]` is `object`, but C# still infers the switch expression's
+                // OWN natural type first) -- the compiler picks the narrowest type every arm converts
+                // TO, which is `float` (int implicitly widens to float; float does not narrow to int).
+                // So `entityId` got silently WIDENED to float and boxed as System.Single, and any graph
+                // whose PARAM list is `entity int` ALONE (found by this slice's own OnHit test -- see
+                // OnHitEventTests.TestOnStartAndOnHitCanShareACompatibleParamList, which failed on this
+                // exact line before this fix) threw ArgumentException: "Object of type 'System.Single'
+                // cannot be converted to type 'System.Int32'" the moment DynamicInvoke tried to bind it
+                // against the compiled delegate's real `int` parameter. Never caught before because no
+                // prior test drove an ENTRY-based graph through GraphHost.Tick() (not
+                // GraphCompiler.CompileEntryPoint() called directly, which every existing Select/
+                // InputKey/Raycast/Spawn test uses instead) with an int-typed PARAM in the mix -- the
+                // OLDER dataflow-args loop just above Tick()'s own branch into this method already casts
+                // both its ternary arms to (object) for the identical reason; this switch just never
+                // got the same treatment when it was added. Casting explicitly here forces the switch
+                // expression's natural type to `object`, so each arm boxes AS ITS OWN TYPE instead of
+                // being unified to a common numeric type first.
                 args[i] = slots[i] switch
                 {
-                    ParamSlot.Entity    => entityId,
-                    ParamSlot.Time      => _execSimTime,
-                    ParamSlot.DeltaTime => deltaTime,
+                    ParamSlot.Entity    => (object)entityId,
+                    ParamSlot.Time      => (object)_execSimTime,
+                    ParamSlot.DeltaTime => (object)deltaTime,
                     _ => throw new InvalidOperationException($"unhandled {nameof(ParamSlot)} {slots[i]}"),
                 };
             return args;
@@ -415,6 +509,58 @@ public class GraphHost
             LogEntryFired("OnTick", entityId, tickResult);
             ApplyResult(entityId, tickResult);
         }
+    }
+
+    /// <summary>Runs ONE already-compiled, ON-DEMAND entry point RIGHT NOW -- the Fire()-side
+    /// counterpart to Tick(), for whatever declared event name is not "OnStart"/"OnTick" (see
+    /// LoadEventGraph's own comment for how a name sorts into this bucket versus the Tick()-driven
+    /// pair). Returns false and leaves <paramref name="result"/> null when <paramref name="eventName"/>
+    /// was never declared by this graph, or Load() never succeeded -- the same "documented no-op, not
+    /// a throw" contract Tick() already has for a graph that failed to compile (see Ready) -- so a
+    /// caller does not have to ask "does this particular actor's graph even have an OnHit?" before
+    /// firing one at every actor uniformly; it can just call Fire() and check the bool back.
+    ///
+    /// NOT PARAMSLOT-BASED, DELIBERATELY, UNLIKE Tick(). Tick() can only ever hand a graph the two
+    /// values it itself receives (entityId, timeSeconds), so LoadEventGraph maps declared PARAM names
+    /// onto a closed, hand-maintained vocabulary of what those two values MEAN ("entity"/"time"/
+    /// "deltaTime") -- seeing a PARAM outside that vocabulary is a load-time error precisely because
+    /// Tick() would have nothing to put there. Fire()'s caller is different in kind: it is the one
+    /// place in this whole class that already HAS whatever a specific event's payload is (who hit me,
+    /// where, how hard -- or, for some future event, something else entirely) at the exact moment it
+    /// calls this method. Inventing a second named-slot vocabulary here to describe payloads this
+    /// class cannot anticipate would only grow forever, one event at a time -- exactly the trap
+    /// LoadEventGraph's own comment already declines for PARAM. So <paramref name="args"/> is
+    /// POSITIONAL, matching the fired entry's declared PARAM list IN FILE ORDER -- the exact same
+    /// contract CompileEntryPoint's own compiled delegate already has (see its doc comment: "the
+    /// compiled method's parameters are exactly the graph's declared PARAM list, in declaration
+    /// order"). GraphHost adds no translation layer on top of that; it only remembers which compiled
+    /// delegate a NAME refers to and forwards the call, the same as Tick() forwards to _onTick.
+    ///
+    /// <paramref name="result"/> is the entry's OUT value on a true return, by the same zero/one/many
+    /// convention Tick()/ApplyResult already use for their own results (null for a void-returning
+    /// graph, the boxed scalar for one OUT, an object[] for two-plus) -- but UNLIKE Tick()'s result,
+    /// it is NOT auto-applied to a PositionSink: an on-demand event has no fixed entity target the way
+    /// Tick(entityId, ...) does (Fire() is not even given one), and a graph that wants to write a
+    /// scene value from inside its own exec chain already can, generically, via a SetField/
+    /// SetFieldVec3 node on its own exec chain -- this class does not need a second mechanism for the
+    /// same thing.</summary>
+    public bool Fire(string eventName, object[] args, out object? result)
+    {
+        result = null;
+        if (!_onDemand.TryGetValue(eventName, out var compiled))
+            return false;
+
+        int wantCount = _graph?.Parameters.Count ?? 0;
+        if (args.Length != wantCount)
+            throw new ArgumentException(
+                $"GraphHost.Fire('{eventName}'): graph '{_graph?.Name}' declares {wantCount} PARAM(s) " +
+                $"but {args.Length} argument(s) were supplied -- args must match the graph's PARAM list " +
+                "positionally, in declaration order, exactly like CompileEntryPoint's own compiled " +
+                "delegate (see this method's own doc comment)", nameof(args));
+
+        result = compiled.DynamicInvoke(args);
+        Console.WriteLine($"[GraphHost] '{_graph?.Name}': {eventName}(fired on demand) -> {DescribeResult(result)}");
+        return true;
     }
 
     // Success-path diagnostic, deliberately distinct from the LoadError family's Console.Error use
@@ -448,6 +594,7 @@ public class GraphHost
         _eventArgSlots = Array.Empty<ParamSlot>();
         _startInvoked = false;
         _execSimTime = 0f;
+        _onDemand = new();
     }
 
     private void ApplyResult(int entityId, object? result)

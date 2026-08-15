@@ -33,10 +33,20 @@ public delegate bool FieldResolver(string qualifiedName, out int fieldId, out in
 /// Compiles a graph to a DynamicMethod and invokes it.
 public class GraphCompiler
 {
-    // aver::scene::FieldKind::F32 (Fields.hpp) -- getfield/setfield only support this kind today.
-    // Reading/writing Vec3/Quat/Mat4 fields (e.g. CLocal.position) needs aver_scene_get_vec/set_vec
-    // and a vector-typed pin the graph format doesn't have yet; out of scope for this slice.
+    // aver::scene::FieldKind (Fields.hpp) values getfield/setfield/getfieldvec3/setfieldvec3 check
+    // against. getfield/setfield only ever accepted F32; getfieldvec3/setfieldvec3 (below) close the
+    // Vec3 half of the gap that comment used to describe as "out of scope" -- CLocal.position,
+    // CLocal.scale, CLight.colour and friends are all FieldKind.Vec3 (Builtins.cpp) and were
+    // previously unreachable from a graph at all. NO NEW PIN TYPE was needed to do this: a Vec3 field
+    // reads/writes as three ordinary Float pins (x/y/z), the same "one native call, several scalar
+    // pins" shape Raycast already established for a five-output native call -- see EmitGetFieldVec3's
+    // own comment for why that is the right size rather than adding PinType.Vec3. Quat (arity 4) and
+    // Mat4 (arity 16) fields remain out of scope -- no known consumer of this vocabulary needs graph
+    // access to either yet -- and RequireVec3Field's own guard (below) is what stops
+    // getfieldvec3/setfieldvec3 from being pointed at one and reading/writing the wrong number of
+    // floats.
     private const int FieldKindF32 = 0;
+    private const int FieldKindVec3 = 1;
 
     private Graph _graph;
     private readonly FieldResolver _fieldResolver;
@@ -353,6 +363,21 @@ public class GraphCompiler
                 EmitSetField(node);
                 break;
 
+            case "getfieldvec3":
+                EmitGetFieldVec3(node);
+                break;
+
+            case "setfieldvec3":
+                // Present here too, exactly like "setfield" above -- Compile()'s topological pass
+                // visits every non-exec-only node EXACTLY ONCE regardless of graph shape, so running
+                // SetFieldVec3's write from here is a single, deterministic write per compiled
+                // delegate invocation, not the double-write EmitPullOutput's refusal (below) guards
+                // against -- that guard is about its OWN recursive, uncached pull mechanism inside the
+                // PUSH compiler, a genuinely different risk. See EmitSetField's own comment for the
+                // full "why SetField is dual-reachable" reasoning, which applies unchanged here.
+                EmitSetFieldVec3(node);
+                break;
+
             case "sin":
                 EmitSin(node);
                 break;
@@ -387,6 +412,25 @@ public class GraphCompiler
             case "raycast":
                 EmitRaycast(node);
                 break;
+
+            case "spawn":
+                // Side-effecting (creates a new scene entity) -- see IsExecCapableSpawnType's own
+                // comment for the fuller story. REFUSED here, explicitly, rather than silently skipped
+                // via IsExecOnlyNodeType (which would give the graph author no signal that nothing
+                // happened) or run unconditionally the way SetField/SetFieldVec3's own PULL-switch cases
+                // are (safe for THEM because Compile()'s topological pass runs each node exactly once
+                // per invocation, and overwriting a field with the same value twice is harmless -- see
+                // the comment on SetFieldVec3's case above). Spawn does not get that same pass: a stray
+                // Spawn node in a no-ENTRY dataflow graph, ticked every frame by GraphHost, would create
+                // a brand NEW entity every single tick with no branch structure available to gate it --
+                // a materially worse hazard than "the same field written twice". Give this node an
+                // ENTRY-driven exec chain and reach it through CompileEntryPoint() instead.
+                throw new InvalidOperationException(
+                    $"Spawn node '{node.Id}' cannot be compiled by Compile() -- spawning an entity is a " +
+                    "side effect with no notion of 'when' in a pure-dataflow graph, and Compile()'s " +
+                    "topological pass would run it unconditionally on every invocation with no way to " +
+                    "gate it. Give this node an ENTRY-driven exec chain and reach it through " +
+                    "CompileEntryPoint() instead.");
 
             default:
                 throw new NotSupportedException($"Node type '{node.Type}' is not supported");
@@ -533,6 +577,83 @@ public class GraphCompiler
         // aver_scene_set_f32 returns 1 on success, 0 on any rejection (unknown entity, read-only
         // field -- e.g. CWorld.matrix -- or missing component). That real return code is now what
         // reaches the "success" pin; the old stub hardcoded 1 regardless of whether anything happened.
+
+        if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+    }
+
+    /// Shared by every getfieldvec3/setfieldvec3 emitter (four call sites: PULL get, PULL set, exec
+    /// set, and the PUSH compiler's own pull-side get) -- resolves field= through the same
+    /// _fieldResolver GetField/SetField use, but requires FieldKindVec3 SPECIFICALLY rather than "not
+    /// F32" the way those two only need to rule out one other kind. That distinction matters here in a
+    /// way it does not for GetField/SetField: GraphInterop.GetFieldVecForGraph/SetFieldVecForGraph
+    /// (Aver.Framework) copy exactly 3 floats through a fixed scratch buffer, so pointing this at a
+    /// Quat (arity 4) or Mat4 (arity 16) field -- both also "not F32" -- would be a buffer overrun
+    /// mistaken for a type error, not merely a wrong number silently returned. Centralised into one
+    /// helper (GetField/SetField duplicate their own version of this three times; this would have been
+    /// a fourth near-identical copy, and drift between four independent wordings of "is this Vec3?" is
+    /// worse than one method four call sites share) rather than inlined again.
+    private int RequireVec3Field(Node node, string nodeTypeLabel)
+    {
+        if (string.IsNullOrEmpty(node.FieldName))
+            throw new InvalidOperationException(
+                $"{nodeTypeLabel} node '{node.Id}' has no field= attribute naming which scene field to address");
+
+        if (!_fieldResolver(node.FieldName, out int fieldId, out int kind))
+            throw new InvalidOperationException(
+                $"{nodeTypeLabel} node '{node.Id}' references unknown scene field '{node.FieldName}'");
+
+        if (kind != FieldKindVec3)
+            throw new InvalidOperationException(
+                $"{nodeTypeLabel} node '{node.Id}' field '{node.FieldName}' is not a Vec3 field (kind={kind}); " +
+                $"{nodeTypeLabel.ToLowerInvariant()} only supports Vec3 fields today (arity 3) -- not F32/Quat/Mat4/etc");
+
+        return fieldId;
+    }
+
+    /// GetFieldVec3(entity) -> x,y,z: reads a Vec3-KIND scene field (CLocal.position, CLocal.scale,
+    /// CLight.colour, ...) as three scalar pins instead of GetField's single F32 -- the gap
+    /// FieldKindF32's own comment (top of this file) names. Pure read, idempotent (no state changes),
+    /// so -- exactly like GetField/InputKey -- safe to pull as often as anything wants, through EITHER
+    /// compiler, with no _execLocals caching needed; see EmitPullGetFieldVec3's own comment for the
+    /// one real cost that idempotence does NOT erase (three separate pulls of x/y/z cost three native
+    /// calls, not one). Silently reads back 0,0,0 on any RUNTIME rejection (unknown entity, absent
+    /// component) -- mirrors GetField's own "0f on any rejection" contract (aver_scene_get_f32's
+    /// convention) rather than inventing a "found" pin GetField itself does not have; the COMPILE-time
+    /// rejection (wrong field, wrong kind) is a hard compile error via RequireVec3Field, same as
+    /// GetField.
+    private void EmitGetFieldVec3(Node node)
+    {
+        if (_il == null) return;
+
+        int fieldId = RequireVec3Field(node, "GetFieldVec3");
+
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Ldc_I4, fieldId);
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "x"));
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "y"));
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "z"));
+        _il.Emit(OpCodes.Call, GetFieldVecMethod);
+    }
+
+    /// SetFieldVec3(entity, x, y, z) -> success: the write half, mirroring EmitSetField exactly --
+    /// including getting NO exec pins by default (see OcGraphParser.AddDefaultPins's "setfieldvec3"
+    /// case), so a graph author who wants it ON the exec chain adds explicit PIN records for them by
+    /// hand, the same convention SetField already established. aver_scene_set_vec's real return code
+    /// (1 on success, 0 on any rejection -- unknown field, wrong arity, read-only, missing component)
+    /// reaches the "success" pin if the node declares one, exactly like SetField's.
+    private void EmitSetFieldVec3(Node node)
+    {
+        if (_il == null) return;
+
+        int fieldId = RequireVec3Field(node, "SetFieldVec3");
+
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Ldc_I4, fieldId);
+        LoadPin(node.Id, "x");
+        LoadPin(node.Id, "y");
+        LoadPin(node.Id, "z");
+        _il.Emit(OpCodes.Call, SetFieldVecMethod);
 
         if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
             _il.Emit(OpCodes.Stloc, local);
@@ -718,18 +839,22 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, RaycastMethod);
     }
 
-    /// Raycast's five out-parameters need a LOCAL's ADDRESS on the stack (Ldloca), not a loaded value
-    /// -- unlike every other Emit* method's "load, compute, maybe Stloc" shape, so a missing pin can't
-    /// just be skipped the way LoadPin's callers skip a missing _pinLocals entry (there would be
-    /// nothing to push where the call signature requires an address). Thrown here, at the one call
-    /// site that needs it, rather than silently leaving the IL stack unbalanced.
+    /// Shared by every Emit* method whose native call takes an OUT-PARAMETER ADDRESS rather than a
+    /// loaded value (Ldloca, not Ldloc) -- Raycast's five, and now GetFieldVec3's three: unlike every
+    /// other Emit* method's "load, compute, maybe Stloc" shape, a missing pin here can't just be
+    /// skipped the way LoadPin's callers skip a missing _pinLocals entry, because there would be
+    /// nothing to push where the call signature requires an address. Thrown here, at the one shared
+    /// call site that needs it, rather than silently leaving the IL stack unbalanced. Originally
+    /// Raycast-only (the message used to hardcode "Raycast needs all five of ..."); generalised to name
+    /// the node's own TYPE and PIN rather than a fixed node kind and a fixed pin count once a second
+    /// caller needed it -- see OcGraphParser.AddDefaultPins for which pins a given type actually needs.
     private LocalBuilder RequirePinLocal(Node node, string pinName)
     {
         if (!_pinLocals.TryGetValue((node.Id, pinName), out var local))
             throw new InvalidOperationException(
-                $"Raycast node '{node.Id}' has no output pin '{pinName}' declared -- Raycast needs all " +
-                "five of hit/entity/pointX/pointY/pointZ to run (see OcGraphParser.AddDefaultPins's " +
-                "'raycast' case, or give the node explicit PIN records for all five)");
+                $"{node.Type} node '{node.Id}' has no output pin '{pinName}' declared -- see " +
+                $"OcGraphParser.AddDefaultPins's '{node.Type.ToLowerInvariant()}' case for the pins this " +
+                "node type needs, or give the node explicit PIN records for all of them");
         return local;
     }
 
@@ -1043,13 +1168,19 @@ public class GraphCompiler
                     return;
                 default:
                     // Every other node type reached via exec: run its own side effect, if it has one
-                    // worth sequencing (today, only SetField does -- see IsExecCapableSideEffectType),
-                    // or its own cached QUERY, if it has one worth running exactly once per visit
-                    // (today, only Raycast does -- see IsExecCapableQueryType), then fall through to
-                    // the generic multi-exec-out fan-out, which is what makes a plain node with 0, 1,
-                    // or N exec-output pins behave correctly (no-op passthrough, continue, or
-                    // "sequence") with no special case here at all.
+                    // worth sequencing (SetField's scalar write -- IsExecCapableSideEffectType -- or
+                    // SetFieldVec3's vector write -- IsExecCapableVecSideEffectType, or Spawn's entity
+                    // creation -- IsExecCapableSpawnType, THREE SEPARATE predicate/emitter pairs rather
+                    // than folded into one, mirroring how Raycast got its own IsExecCapableQueryType
+                    // instead of joining SetField's; see IsExecCapableSpawnType's own comment for the
+                    // same reasoning applied a third time), or its own cached QUERY, if it has one worth
+                    // running exactly once per visit (today, only Raycast does -- see
+                    // IsExecCapableQueryType), then fall through to the generic multi-exec-out fan-out,
+                    // which is what makes a plain node with 0, 1, or N exec-output pins behave correctly
+                    // (no-op passthrough, continue, or "sequence") with no special case here at all.
                     if (IsExecCapableSideEffectType(node.Type)) EmitExecSideEffect(node);
+                    else if (IsExecCapableVecSideEffectType(node.Type)) EmitExecSetFieldVec3(node);
+                    else if (IsExecCapableSpawnType(node.Type)) EmitExecSpawn(node);
                     else if (IsExecCapableQueryType(node.Type)) EmitExecRaycast(node);
                     EmitExecFanOut(node);
                     return;
@@ -1282,6 +1413,33 @@ public class GraphCompiler
     private static bool IsExecCapableQueryType(string type) =>
         type.Equals("raycast", StringComparison.OrdinalIgnoreCase);
 
+    /// SetFieldVec3's own version of IsExecCapableSideEffectType -- a SEPARATE predicate/list rather
+    /// than widening that one, even though both gate "run EmitExecSideEffect-shaped code from
+    /// EmitExecNode's default case": SetField and SetFieldVec3 write through two DIFFERENT native
+    /// wrappers with two DIFFERENT arities and two DIFFERENT field-kind checks (F32 vs Vec3), and
+    /// folding them into one predicate would force EmitExecSideEffect to internally type-switch on
+    /// node.Type to pick which write logic applies -- a worse diff than the one this mirrors
+    /// (IsExecCapableQueryType next to IsExecCapableSideEffectType, not merged into it, when Raycast
+    /// was added). Kept as its own list so a THIRD side-effecting type, if one is ever added, has an
+    /// obvious third place to go rather than an every-growing switch inside one shared emitter.
+    private static bool IsExecCapableVecSideEffectType(string type) =>
+        type.Equals("setfieldvec3", StringComparison.OrdinalIgnoreCase);
+
+    /// Spawn's own version of IsExecCapableSideEffectType/IsExecCapableVecSideEffectType -- a THIRD,
+    /// separate predicate/emitter pair, for a reason that goes a step further than either of the first
+    /// two: SetField/SetFieldVec3 are refused as a PULL because a write must never happen twice
+    /// (EmitPullOutput's refusal, below); Spawn shares that refusal (see the check there, now naming
+    /// all three) but is ALSO refused by the PULL COMPILER'S OWN topological pass entirely -- see
+    /// EmitNode's "spawn" case, above, which SetField/SetFieldVec3 do NOT share (their own cases in that
+    /// same switch run happily). Kept as its own predicate rather than folded into either existing one
+    /// for the same reason IsExecCapableVecSideEffectType was kept separate from
+    /// IsExecCapableSideEffectType when SetFieldVec3 was added: SpawnForGraph is a different native
+    /// surface (Aver.Framework's class registry, not Aver.Scene's field table) with a different
+    /// signature, a different resolution strategy (by NAME at runtime, not a fieldId baked at compile
+    /// time -- see GraphInterop.SpawnForGraph's own comment), and a different failure mode.
+    private static bool IsExecCapableSpawnType(string type) =>
+        type.Equals("spawn", StringComparison.OrdinalIgnoreCase);
+
     /// Runs a SetField node's write exactly once, at the point the exec walk reaches it -- mirrors
     /// EmitSetField's own field=/resolver/native-call logic, but pulls its "entity"/"value" inputs
     /// through EmitPullInput rather than LoadPin/_pinLocals (see the section-level comment for why the
@@ -1314,6 +1472,68 @@ public class GraphCompiler
         else
         {
             _il.Emit(OpCodes.Pop); // nothing declared to read the return code; discard it
+        }
+    }
+
+    /// SetFieldVec3's own version of EmitExecSideEffect -- mirrors EmitSetFieldVec3's field=/resolver/
+    /// native-call logic (RequireVec3Field), but pulls "entity"/"x"/"y"/"z" through EmitPullInput
+    /// rather than LoadPin/_pinLocals, and captures "success" into an exec-local rather than a
+    /// _pinLocals entry, for the same reason EmitExecSideEffect does both of those instead of just
+    /// calling EmitSetFieldVec3 directly: this runs from the exec walk, where nothing was pre-computed
+    /// by a topological pass.
+    private void EmitExecSetFieldVec3(Node node)
+    {
+        if (_il == null) return;
+
+        int fieldId = RequireVec3Field(node, "SetFieldVec3");
+
+        EmitPullInput(node, "entity");
+        _il.Emit(OpCodes.Ldc_I4, fieldId);
+        EmitPullInput(node, "x");
+        EmitPullInput(node, "y");
+        EmitPullInput(node, "z");
+        _il.Emit(OpCodes.Call, SetFieldVecMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+        {
+            var successLocal = GetOrCreateExecLocal(node.Id, "success", typeof(bool));
+            _il.Emit(OpCodes.Stloc, successLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop); // nothing declared to read the return code; discard it
+        }
+    }
+
+    /// Runs a Spawn node's native call exactly once, at the point the exec walk reaches it -- mirrors
+    /// EmitExecSideEffect/EmitExecSetFieldVec3's own shape (pull inputs via EmitPullInput, Call, capture
+    /// -or-discard the result into an exec-local), but "which class to spawn" is class=, resolved by
+    /// GraphInterop.SpawnForGraph at RUNTIME rather than a fieldId baked at compile time the way
+    /// field=/_fieldResolver resolve GetField/SetField's own attribute -- see that method's own comment
+    /// for why. class= is read the same way field=/param= already are (OcGraphParser's generic
+    /// NODE-line key=value parsing, Node.ClassName) -- required at compile time here (an empty class=
+    /// can never spawn anything useful, so failing loudly now beats failing quietly at runtime with
+    /// entity 0 for a reason nobody can see).
+    private void EmitExecSpawn(Node node)
+    {
+        if (_il == null) return;
+        if (string.IsNullOrEmpty(node.ClassName))
+            throw new InvalidOperationException($"Spawn node '{node.Id}' has no class= attribute naming which class to spawn");
+
+        _il.Emit(OpCodes.Ldstr, node.ClassName);
+        EmitPullInput(node, "x");
+        EmitPullInput(node, "y");
+        EmitPullInput(node, "z");
+        _il.Emit(OpCodes.Call, SpawnMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "entity"))
+        {
+            var entityLocal = GetOrCreateExecLocal(node.Id, "entity", typeof(int));
+            _il.Emit(OpCodes.Stloc, entityLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop); // nothing declared to read the new entity id; discard it
         }
     }
 
@@ -1397,7 +1617,14 @@ public class GraphCompiler
     /// for the pull compiler to do with them except fail.
     private static bool IsExecOnlyNodeType(string type) => type.ToLowerInvariant() switch
     {
-        "onstart" or "ontick" or "branch" or "sequence" or "while" or "foreach" => true,
+        // "onhit" sits beside "onstart"/"ontick" here purely because it has the exact same SHAPE (a
+        // bare exec-output trigger with no data value -- see OcGraphParser.AddDefaultPins' "onhit"
+        // case), not because this compiler knows or cares that GraphHost fires it on demand rather
+        // than every tick. That distinction lives one layer up, in GraphHost -- see its own PHASE 3
+        // comment. Any FUTURE trigger-only event node someone adds belongs here for the same reason:
+        // this list is "node types with no data value to pull", not "node types this compiler has
+        // special knowledge of".
+        "onstart" or "ontick" or "onhit" or "branch" or "sequence" or "while" or "foreach" => true,
         _ => false,
     };
 
@@ -1411,11 +1638,19 @@ public class GraphCompiler
             return;
         }
 
-        if (IsExecCapableSideEffectType(source.Type))
+        // Generalised from a SetField-only message ("SetField has a side effect...") the moment a
+        // SECOND side-effecting type (SetFieldVec3) existed -- naming source.Type rather than a fixed
+        // literal is what keeps this accurate for whichever one actually triggered it, and for any
+        // future type IsExecCapableSideEffectType/IsExecCapableVecSideEffectType/IsExecCapableSpawnType
+        // grows to cover. Spawn (a THIRD side-effecting type) added to this check unchanged -- it needs
+        // no new wording, only a new predicate name in the condition, which is exactly the point of
+        // naming source.Type instead of hardcoding one.
+        if (IsExecCapableSideEffectType(source.Type) || IsExecCapableVecSideEffectType(source.Type) ||
+            IsExecCapableSpawnType(source.Type))
             throw new InvalidOperationException(
-                $"'{source.Id}.{pinName}' cannot be read as a data value: SetField has a side effect and " +
-                "must be reached by wiring it directly into the exec chain (give it exec pins), not by " +
-                "pulling its output from somewhere else -- pulling could run its write more than once, " +
+                $"'{source.Id}.{pinName}' cannot be read as a data value: {source.Type} has a side effect " +
+                "and must be reached by wiring it directly into the exec chain (give it exec pins), not " +
+                "by pulling its output from somewhere else -- pulling could run its write more than once, " +
                 "or not at all, depending on what else reads it");
 
         // See _pullVisiting's declaration for why an uncaught cycle here kills the process rather than
@@ -1482,6 +1717,8 @@ public class GraphCompiler
                 return;
             case "getfield":
                 EmitPullGetField(source); return;
+            case "getfieldvec3":
+                EmitPullGetFieldVec3(source, pinName); return;
             case "param":
             case "getparam":
             {
@@ -1591,6 +1828,49 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, GetFieldMethod);
     }
 
+    /// Mirrors EmitGetFieldVec3's own field=/RequireVec3Field checks, but pushes ONE requested
+    /// component rather than storing all three to `_pinLocals` entries -- EmitPullOutput's contract is
+    /// "push the ONE pin asked for", and GetFieldVec3 has three (x/y/z), unlike GetField's one.
+    ///
+    /// NOT FREE, AND NAMED HERE RATHER THAN LEFT IMPLICIT: this makes ONE full native call (all three
+    /// components) and then discards the two the caller did not ask for, every time it runs. A graph
+    /// that reads x, y, AND z of the same GetFieldVec3 node via three separate OUT records (or three
+    /// separate exec-chain readers) costs three native calls for one logical field read, not one. This
+    /// is the exact "shared pure sub-expression pulled from more than one site is recomputed, not
+    /// cached" tradeoff the section-header PUSH VS PULL comment already accepts for this compiler in
+    /// general (point 1) -- not a NEW cost this node type invents. Deliberately NOT given Raycast's
+    /// _execLocals-caching treatment: that machinery exists because a PHYSICS QUERY is expensive enough
+    /// to matter (IsExecCapableQueryType's own comment); a Vec3 field read is a same-cost sibling of
+    /// GetField's own single-float memcpy, not "a costly read" in that sense, so paying for a cache
+    /// mechanism here would be solving a problem this operation does not actually have.
+    private void EmitPullGetFieldVec3(Node node, string pinName)
+    {
+        if (_il == null) return;
+
+        int fieldId = RequireVec3Field(node, "GetFieldVec3");
+
+        EmitPullInput(node, "entity");
+        _il.Emit(OpCodes.Ldc_I4, fieldId);
+
+        var xLocal = _il.DeclareLocal(typeof(float));
+        var yLocal = _il.DeclareLocal(typeof(float));
+        var zLocal = _il.DeclareLocal(typeof(float));
+        _il.Emit(OpCodes.Ldloca, xLocal);
+        _il.Emit(OpCodes.Ldloca, yLocal);
+        _il.Emit(OpCodes.Ldloca, zLocal);
+        _il.Emit(OpCodes.Call, GetFieldVecMethod);
+
+        var wanted = pinName switch
+        {
+            "x" => xLocal,
+            "y" => yLocal,
+            "z" => zLocal,
+            _ => throw new InvalidOperationException(
+                $"GetFieldVec3 node '{node.Id}' has no output pin '{pinName}' (only x/y/z)"),
+        };
+        _il.Emit(OpCodes.Ldloc, wanted);
+    }
+
     // Resolved once, by reflection: Native is internal to Aver.Scene, so these are looked up with
     // BindingFlags.NonPublic rather than a plain method-group reference. (This is independent of the
     // InternalsVisibleTo grant on Aver.Scene.csproj, which is what lets GraphCompiler.cs name the
@@ -1619,6 +1899,15 @@ public class GraphCompiler
     private static readonly MethodInfo RaycastMethod =
         typeof(GraphInterop).GetMethod("RaycastForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.RaycastForGraph was not found by reflection");
+    private static readonly MethodInfo GetFieldVecMethod =
+        typeof(GraphInterop).GetMethod("GetFieldVecForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.GetFieldVecForGraph was not found by reflection");
+    private static readonly MethodInfo SetFieldVecMethod =
+        typeof(GraphInterop).GetMethod("SetFieldVecForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetFieldVecForGraph was not found by reflection");
+    private static readonly MethodInfo SpawnMethod =
+        typeof(GraphInterop).GetMethod("SpawnForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SpawnForGraph was not found by reflection");
 
     /// Called FROM EMITTED IL (see EmitWhile/EmitForEach), not from ordinary C# control flow, when a
     /// loop's iteration count crosses MaxLoopIterations. Logs -- loudly, naming the exact node and

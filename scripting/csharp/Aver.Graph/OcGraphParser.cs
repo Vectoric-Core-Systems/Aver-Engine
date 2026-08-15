@@ -188,6 +188,13 @@ public class OcGraphParser
                     {
                         node.FieldName = v;
                     }
+                    // class= names the registered class a "spawn" node creates an instance of (see
+                    // Node.ClassName). Resolved by NAME at invocation time (GraphInterop.SpawnForGraph),
+                    // not baked to a handle here or at compile time -- see that method's own comment.
+                    else if (k == "class")
+                    {
+                        node.ClassName = v;
+                    }
                 }
 
                 nodes[nodeId] = node;
@@ -487,6 +494,28 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // getfieldvec3/setfieldvec3: GetField/SetField's Vec3 siblings -- a Vec3-kind scene field
+            // (CLocal.position, CLocal.scale, CLight.colour, ...) read or written as three ORDINARY
+            // float pins rather than one new pin TYPE. field= is reused verbatim (same NODE-line
+            // attribute, same generic key=value parsing above -- nothing here is Vec3-specific about
+            // how the attribute survives to GraphCompiler). No exec pins by default on EITHER, mirroring
+            // getfield/setfield exactly, INCLUDING setfieldvec3 (a write) having none -- see
+            // GraphCompiler.EmitSetFieldVec3's own comment for why that is deliberate, not an oversight.
+            case "getfieldvec3":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "y", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "z", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "setfieldvec3":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "y", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "z", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
             case "sin":
             case "cos":
                 node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
@@ -586,6 +615,20 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 break;
 
+            case "onhit":
+                // Same bare-trigger shape as onstart/ontick -- one exec-output pin, no inputs -- for
+                // the same reason: this node TYPE is just a labeled starting point an ENTRY record
+                // points at; it carries no data of its own. What makes THIS trigger fire ON DEMAND
+                // (a caller invoking Aver.Graph.GraphHost.Fire, rather than the fixed Tick() cadence
+                // OnStart/OnTick get) lives one layer up, in GraphHost -- nothing about the FORMAT or
+                // this parser treats "onhit" as special versus any other non-OnStart/OnTick ENTRY
+                // event name a project might declare (see ENTRY's own comment, above, for why a new
+                // event name is free at this layer). A payload this event wants to carry (who hit
+                // whom, where, how hard) is an ordinary PARAM the graph declares and reads with a
+                // `param` node, exactly like OnTick's deltaTime -- not a special pin here either.
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                break;
+
             case "param":
             case "getparam":
             {
@@ -651,6 +694,27 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "pointX", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "pointY", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "pointZ", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // ---- Spawn ---------------------------------------------------------------------------
+            // SIDE-EFFECTING (creates a new scene entity), so -- UNLIKE getfieldvec3/setfieldvec3
+            // above, which get no exec pins by default -- this DOES get exec pins by default, mirroring
+            // raycast: the README's own spec frames this as "a Spawn(className, x, y, z) exec node",
+            // and GraphCompiler.IsExecCapableSpawnType's own comment explains why it is refused by the
+            // PULL-only compiler ENTIRELY, more strictly than SetField/SetFieldVec3 are -- a stray Spawn
+            // in a no-ENTRY dataflow graph would create a new entity on every single invocation, with no
+            // branch structure available to gate it. class= names which registered class to spawn (the
+            // same generic key=value NODE-line attribute field=/param= already use -- see the NODE
+            // parsing loop above) -- NOT a pin, because a class name is something the graph AUTHOR
+            // chooses at edit time, not something an upstream node computes at runtime, mirroring how
+            // field= is not a pin on GetField/SetField either.
+            case "spawn":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "y", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "z", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
                 break;
         }
     }

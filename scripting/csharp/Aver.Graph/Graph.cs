@@ -79,6 +79,15 @@ public class Node
     // is resolved to a dense field id at COMPILE time (GraphCompiler), not here -- resolution needs
     // the live scene's field table, which the format layer has no access to.
     public string? FieldName { get; set; }
+
+    // Which registered class a "spawn" node creates an instance of, e.g. "Widget". Set from the NODE
+    // line's "class=<name>" attribute -- the same generic key=value mechanism FieldName/ParamName
+    // already use. Null for every other node type. UNLIKE FieldName, this is deliberately NOT resolved
+    // to a handle here or at compile time -- see GraphInterop.SpawnForGraph's own comment for why a
+    // project's actor classes (declared by that project's own Scripts.dll, at a point in the host's
+    // boot order that field ids' engine-global table never has to worry about) are resolved by NAME at
+    // invocation time instead.
+    public string? ClassName { get; set; }
 }
 
 /// One parameter the compiled method accepts -- e.g. the entity a graph drives, or the current

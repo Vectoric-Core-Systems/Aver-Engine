@@ -35,12 +35,23 @@
 // type gets another, which is exactly the "two implementations agree by coincidence, not by
 // construction" trap the `outputs` field's own comment in OcGraph.hpp warns about.
 //
-// KNOWN GAP, not fixed here: GetField/SetField address a scene field by name via a `field=` NODE-line
-// attribute on the C# side's own reader (scripting/csharp/Aver.Graph/OcGraphParser.cs, "field=" case).
-// The shared C++ .ocgraph grammar (modules/formats/src/OcGraph.cpp, NODE line) has no key=value
-// attribute syntax at all -- only `NODE id type x y` -- so there is currently no way for THIS editor to
-// read, show, or write which field a GetField/SetField node addresses. That is a file-format gap, not
-// an editor bug, and is out of scope for this geometry core; flagging it for the human.
+// KNOWN GAP, not fixed here: GetField/SetField (and their Vec3 siblings GetFieldVec3/SetFieldVec3
+// below) address a scene field by name via a `field=` NODE-line attribute on the C# side's own reader
+// (scripting/csharp/Aver.Graph/OcGraphParser.cs, "field=" case). Spawn (below) addresses a registered
+// class the same way, via `class=` -- same reader, same generic key=value mechanism, same gap.
+//
+// THIS COMMENT USED TO CLAIM "the shared C++ .ocgraph grammar has no key=value attribute syntax at
+// all" -- CHECKED AGAINST THE CODE (as of this note) AND FOUND STALE, per the task that asked whoever
+// next touched this file to verify it: modules/formats/src/OcGraph.cpp's NODE-line parsing (see
+// isNumericToken's callers) reads only what parses as a numeric x/y coordinate as position; every
+// OTHER trailing token -- `field=CLocal.position`, `param=time`, anything -- is captured VERBATIM into
+// OcGraphNode::extraTokens (modules/formats/include/aver/formats/OcGraph.hpp) and re-emitted on save.
+// So `field=` genuinely DOES survive an editor load/save round trip today; the grammar was never the
+// gap. The REAL gap is narrower and still true: this editor has no property/inspector panel for ANY
+// node (grep sandbox/src for ImGui::Input*/Drag*/Combo* -- zero matches), so extraTokens round-trips
+// opaquely but is not READABLE or EDITABLE from the GUI -- a GetField/SetField/GetFieldVec3/
+// SetFieldVec3 node's `field=` can be carried through the editor but not authored or inspected by it.
+// That is a property-panel gap, not a file-format gap; still flagging it for the human, corrected.
 #include <string>
 #include <vector>
 
@@ -89,6 +100,17 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     // -- scene field access: entity id in, value in/out. See the KNOWN GAP note above re: field=. --
     t.push_back({"GetField", "Get Field", "Scene", {pin("entity", "int", false), pin("value", "float", true)}});
     t.push_back({"SetField", "Set Field", "Scene", {pin("entity", "int", false), pin("value", "float", false), pin("success", "bool", true)}});
+    // -- GetField/SetField's Vec3 siblings: a Vec3-kind scene field (CLocal.position, CLight.colour,
+    //    ...) as three ordinary float pins rather than one new pin TYPE -- see
+    //    scripting/csharp/Aver.Graph/GraphCompiler.cs's FieldKindVec3/RequireVec3Field comments for why
+    //    that shape was chosen over adding a "vec3" pin type. Pin sets copied field for field from
+    //    OcGraphParser.AddDefaultPins's "getfieldvec3"/"setfieldvec3" cases, same as GetField/SetField
+    //    above. No exec pins on either by default (mirrors GetField/SetField exactly).
+    t.push_back({"GetFieldVec3", "Get Field (Vec3)", "Scene", {
+        pin("entity", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true)}});
+    t.push_back({"SetFieldVec3", "Set Field (Vec3)", "Scene", {
+        pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false),
+        pin("success", "bool", true)}});
     // -- graph parameter read, another concurrent-workflow addition; type defaults to float, the
     //    common case, and can be edited per-instance like any other pin since layout/pin-typing
     //    always prefers the node's own recorded pins over this table (see the header comment). --
@@ -134,6 +156,26 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    same plumbing every dataflow graph already uses for `time`/`entity`.
     t.push_back({"OnStart", "On Start", "Flow", {pin("exec", "exec", true)}});
     t.push_back({"OnTick", "On Tick", "Flow", {pin("exec", "exec", true)}});
+    // onhit: same bare-trigger shape as onstart/ontick above -- a labelled starting point an ENTRY
+    //    record points at, nothing more. What makes it fire ON DEMAND (a host calling
+    //    Aver.Graph.GraphHost.Fire, rather than the fixed per-frame Tick() cadence OnStart/OnTick get)
+    //    is entirely a scripting/csharp/Aver.Graph/GraphHost.cs concept -- this editor, like the C#
+    //    parser's own AddDefaultPins, treats "OnHit" as nothing more than one more ENTRY event name; a
+    //    project inventing a different one needs no new catalog entry to place ITS trigger node, only
+    //    a differently-named NODE of type OnStart/OnTick/OnHit (any bare-trigger type already
+    //    suffices) and its own ENTRY record naming the event.
+    t.push_back({"OnHit", "On Hit", "Flow", {pin("exec", "exec", true)}});
+
+    // Spawn: SIDE-EFFECTING (creates a new scene entity), so -- unlike GetField/SetField/GetFieldVec3/
+    //    SetFieldVec3 above -- it gets exec pins by default, mirroring Raycast's own reasoning. See
+    //    scripting/csharp/Aver.Graph/GraphCompiler.cs's IsExecCapableSpawnType comment for why it is
+    //    refused by the pure-dataflow (PULL) compiler even more strictly than SetField is. class= names
+    //    which registered class to spawn -- the same generic key=value NODE-line attribute field=/
+    //    param= already use; this table has no property panel to author it from either, same KNOWN GAP
+    //    as field= above.
+    t.push_back({"Spawn", "Spawn", "Actor", {
+        pin("exec", "exec", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false),
+        pin("then", "exec", true), pin("entity", "int", true)}});
     return t;
 }
 

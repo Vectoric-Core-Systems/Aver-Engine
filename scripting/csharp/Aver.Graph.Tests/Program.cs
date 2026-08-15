@@ -60,6 +60,24 @@ class Program
         // Select, InputKey, Raycast: the three node types this slice adds on top of the exec compiler.
         failures += NewNodeTests.RunAll();
 
+        // GetFieldVec3/SetFieldVec3: the Vec3 half of GetField/SetField's own FieldKindF32 gap.
+        failures += Vec3FieldTests.RunAll();
+
+        // Spawn: the README's "Spawning/destroying an entity" row -- wraps Actors.Spawn, exec-only,
+        // more strictly refused by the PULL compiler than any prior side-effecting node.
+        failures += SpawnNodeTests.RunAll();
+
+        // OnHit: the README's "Was I just hit" row -- a third, HOST-FIRED-ON-DEMAND entry point
+        // (GraphHost.Fire), plus the widened PARAM contract that lets a hit's payload actually reach
+        // the graph. See GraphHost.cs's own PHASE 3 comment.
+        failures += OnHitEventTests.RunAll();
+
+        // Independent adversarial pass over OnHit/Fire(), written separately from OnHitEventTests.cs
+        // above: empty graph, missing node, duplicate ENTRY, missing attribute, a backwards LINK, a
+        // duplicated node id, an exec cycle, event-name case sensitivity, and the Tick()/Fire()
+        // disjointness boundary approached from the OnTick side instead of the OnHit side.
+        failures += OnHitAdversarialTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else
