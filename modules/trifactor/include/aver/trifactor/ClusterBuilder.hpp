@@ -100,8 +100,12 @@ struct ClusterBounds {
     f32  sphereRadius = 0.0f;
     Vec3 coneApex{0, 0, 0};
     i8   coneAxis[3] = {0, 0, 0};   // snorm8: value/127.0 -> [-1,1]
-    i8   coneCutoff  = -127;        // snorm8; -127 (not -128) is the conservative "never cull" value,
-                                     // symmetric with +127 so it decodes back to exactly -1.0
+    i8   coneCutoff  = 127;         // snorm8; +127 (not +128, which snorm8 cannot represent anyway)
+                                     // is the conservative "never cull" value -- see
+                                     // ClusterBuilder.cpp's quantizeConeConservative for the runtime
+                                     // cull formula this must agree with (cutoff -> +1 means "cull
+                                     // from nowhere", NOT -1; this default was the wrong sign until
+                                     // the commit that added this comment)
 };
 
 // One meshlet/cluster. `vertices`/`triangles` are stored EXACTLY as FORMAT_SPECS.md 5.7 wants them

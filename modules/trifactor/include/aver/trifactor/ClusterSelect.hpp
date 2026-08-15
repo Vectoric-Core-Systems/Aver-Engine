@@ -42,20 +42,32 @@
 //     the sign convention is measured, not just read.
 //
 //     THAT MEASUREMENT FOUND A REAL DISAGREEMENT, and it is worth being loud about it rather than
-//     quietly working around it. ClusterBuilder.cpp's quantizeConeConservative stores -127 (decodes to
-//     -1.0f) as its "this cone can never safely cull anything" sentinel, on the reasoning that -127 is
-//     the most CONSERVATIVE end of the encoding. Under the formula above, that reasoning is backwards:
-//     the cull region `{d : dot(d,axis) >= cutoff}` GROWS as cutoff falls toward -1 and SHRINKS to a
-//     single unreachable direction as cutoff rises toward +1, so cutoff = -1 is actually "cull from
-//     every direction" and +1 is "never cull". ClusterView's own coneCutoff default is +1.0f for
-//     exactly this reason (see its comment) -- this file's "never cull" sentinel and
-//     ClusterBuilder.cpp's are NOT the same value, and an adapter that decodes ClusterBuilder.cpp's
-//     -127 straight into this file's coneCutoff would get every degenerate-cone cluster backface-
-//     culled, unconditionally, forever. ClusterBuilder.cpp is out of this file's file-ownership (see
-//     above) so this is reported, not fixed here; the fix, if this reading holds up under a second
-//     look, is a one-value change at ClusterBuilder.cpp's three `-127` sentinel sites (currently
-//     quantizeConeConservative's degenerate-axis branch, its post-quantization-collapse branch, and
-//     its widened-past-a-hemisphere branch) to `127` instead.
+//     quietly working around it. ClusterBuilder.cpp's quantizeConeConservative USED TO store -127
+//     (decodes to -1.0f) as its "this cone can never safely cull anything" sentinel, on the reasoning
+//     that -127 was the most CONSERVATIVE end of the encoding. Under the formula above, that reasoning
+//     was backwards: the cull region `{d : dot(d,axis) >= cutoff}` GROWS as cutoff falls toward -1 and
+//     SHRINKS to a single unreachable direction as cutoff rises toward +1, so cutoff = -1 is actually
+//     "cull from every direction" and +1 is "never cull". ClusterView's own coneCutoff default is
+//     +1.0f for exactly this reason (see its comment). This was the root cause of a real, shipped
+//     defect (every pine_tree_01 cluster whose axis quantized near-degenerate, or whose true cone
+//     plus quantization error exceeded a hemisphere, went permanently backface-culled -- the mesh
+//     rendered with zero foliage in the GPU cluster path).
+//
+//     FIXED IN TWO PLACES, DELIBERATELY, not one. ClusterBuilder.cpp's quantizeConeConservative was
+//     corrected (its whole widen-then-floor-toward-(-1) scheme was the same backwards sign, not just
+//     the three sentinel constants -- see that function's own header comment for the corrected
+//     derivation) so FUTURE cooks consistently push cutoff toward +1, never -1. That alone does
+//     nothing for an .ocmesh already sitting on disk with the old encoding baked in -- and re-cooking
+//     every already-cooked asset (irreplaceable source art, a slow and irreversible-feeling operation)
+//     just to pick up a sign fix is not a cost this bug should force on anyone. So coneCull below ALSO
+//     honours cutoff <= -1.0f as "never cull", symmetrically with the +1.0f default that already
+//     worked with no special case -- see coneCull's own comment for exactly what that does and does
+//     not change. This is not a violation of this file's decoupling from ClusterBuilder.cpp/
+//     ClusterAdapt.cpp (the file still does not include either): it is this file's own runtime
+//     interpretation of a value that arrives through its own decoupled ClusterView::coneCutoff field,
+//     same as the DECODE (value/127.0, straight through, no sign flip) already documented above, which
+//     was and remains correct on its own. clusterConeCull (modules/rhi/src/RHIShaders.cpp) carries the
+//     identical extra check, byte-for-byte, since it is a port of this file's coneCull.
 //
 // THE CUT PREDICATE, and what it actually relies on. `inCut()` is the standard "does this cluster
 // belong in today's cut through the DAG" rule: a cluster is in the cut iff its own projected error is
@@ -176,15 +188,17 @@ struct ClusterView {
     // the same sign convention as meshopt_Bounds::cone_cutoff.
     //
     // +1.0f is "never cull" HERE -- and this is worth being exact about, because it is the OPPOSITE
-    // of what ClusterBuilder.cpp's own comments say its -127 (decoded -1.0f) sentinel means. Verified
-    // empirically (tests/trifactor/src/ClusterSelectTest.cpp's first block, against REAL
+    // of what ClusterBuilder.cpp's own comments USED TO say its -127 (decoded -1.0f) sentinel means.
+    // Verified empirically (tests/trifactor/src/ClusterSelectTest.cpp's first block, against REAL
     // meshopt_computeClusterBounds output, not re-derived by hand): coneCull's cull region is
     // `{d : dot(d,axis) >= cutoff}`, a spherical cap around `axis` that SHRINKS to a single
     // unreachable-in-practice direction as cutoff -> +1 and GROWS to cover every possible view
     // direction as cutoff -> -1. So -1.0f is actually "cull from every direction", and +1.0f is the
-    // sentinel that means "never cull" -- see the file header's HONESTY note for the full account and
-    // exactly where in ClusterBuilder.cpp (which this file cannot edit) the same sentinel is stored
-    // with the sign this file's own testing shows is backwards.
+    // sentinel that means "never cull" -- see the file header's HONESTY note for the full account.
+    // ClusterBuilder.cpp's encoder now agrees (it emits +127, never -127, as of the same fix); coneCull
+    // itself ALSO now treats an incoming -1.0f as "never cull" directly, so that an .ocmesh cooked
+    // before that fix -- still carrying the old -127 encoding on disk -- decodes safely here too,
+    // without needing a re-cook. See coneCull's own comment for the exact boundary of that check.
     Vec3 coneApex{0, 0, 0};
     Vec3 coneAxis{0, 0, 1};
     f32  coneCutoff = 1.0f;
@@ -219,11 +233,15 @@ struct ClusterView {
 // entirely. Exact formula from third_party/meshoptimizer/src/meshoptimizer.h's
 // meshopt_computeClusterBounds documentation (the cone-apex perspective variant), verified against
 // real library output in tests/trifactor/src/ClusterSelectTest.cpp rather than trusted on the
-// citation alone. Returns false (never culls) on a degenerate/near-zero axis or on `eye` coincident
-// with the apex -- a caller feeding this file's OWN default (axis {0,0,1}, cutoff +1.0f -- see
-// ClusterView) gets the safe "never cull" answer without special-casing it. A caller decoding
-// ClusterBuilder.cpp's -127 sentinel straight through does NOT get that: see ClusterView's coneCutoff
-// comment for the empirically-grounded reason those two "never cull" values disagree.
+// citation alone. Returns false (never culls) on a degenerate/near-zero axis, on `eye` coincident
+// with the apex, or on `cutoff <= -1.0f` -- a caller feeding this file's OWN default (axis {0,0,1},
+// cutoff +1.0f -- see ClusterView) gets the safe "never cull" answer without special-casing it, and so
+// does a caller decoding an .ocmesh cooked before ClusterBuilder.cpp's sign fix, whose on-disk cone
+// data still carries the old -127/-1.0f "never cull" encoding: this function now honours BOTH ends of
+// the encoding as "never cull", not just the one ClusterBuilder.cpp currently emits, precisely so an
+// already-cooked asset does not need a re-cook to render correctly. See ClusterView's coneCutoff
+// comment and the file header's HONESTY note for the full account, and clusterConeCull
+// (modules/rhi/src/RHIShaders.cpp) for the byte-for-byte GPU port of this exact check.
 bool coneCull(const ClusterView& c, const Vec3& eye);
 
 // ---------------------------------------------------------------------------------------- LOD + visibility

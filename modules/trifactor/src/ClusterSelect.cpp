@@ -72,6 +72,28 @@ bool coneCull(const ClusterView& c, const Vec3& eye) {
     const Vec3 axis = c.coneAxis.getSafeNormal();
     if (axis.sizeSquared() < 0.5f) return false;   // degenerate/never-cull axis: don't cull
 
+    // THE RUNTIME HALF OF THE SIGN-INVERSION FIX (see ClusterSelect.hpp's file header and
+    // ClusterView::coneCutoff for the full account). cutoff <= -1.0f is reachable in exactly two ways:
+    // (1) a genuinely degenerate cone that ClusterBuilder.cpp's quantizeConeConservative could not
+    // safely widen/shrink a real half-angle for, which -- BEFORE that function's own fix -- it stored
+    // as -127 believing that to be the conservative "never cull" end; and (2) the mathematical limit
+    // case of a real (non-degenerate) cone whose true half-angle is exactly pi, which provides zero
+    // culling information for the same reason a fully degenerate cone does (some triangle in the
+    // cluster faces every possible direction, so no viewpoint is "definitely behind all of them").
+    // Both cases mean the same thing: this cone cannot tell you anything, so don't cull on it.
+    //
+    // Fixed HERE, not only at the cook (ClusterBuilder.cpp), because assets already baked to disk with
+    // the OLD (backwards) encoding still carry -127 -- ClusterBuilder.cpp's own fix only changes what
+    // FUTURE cooks produce, and re-cooking irreplaceable source art on every machine that has an old
+    // .ocmesh is not a cost this fix should force. Honouring the sentinel here, symmetrically with the
+    // +1.0f "never cull" that already works with no special case, repairs every already-cooked asset
+    // with no re-cook required, while leaving every value in between (-127 < cutoff < 127, i.e. every
+    // REAL, non-degenerate cone) running through the exact same formula as before -- this does not
+    // widen or otherwise weaken cone culling for any cluster whose cutoff isn't sitting on this exact
+    // boundary. clusterConeCull (modules/rhi/src/RHIShaders.cpp) is a byte-for-byte port and carries
+    // the identical check; tests/trifactor/src/ClusterSelectTest.cpp asserts this exact behaviour.
+    if (c.coneCutoff <= -1.0f) return false;
+
     const Vec3 toApex = c.coneApex - eye;
     const f32 lenSq = toApex.sizeSquared();
     // The apex-based formula divides by |toApex|; guard the same singularity meshoptimizer's own

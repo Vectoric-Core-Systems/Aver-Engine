@@ -921,8 +921,14 @@ bool clusterInCut(ClusterBounds c, float3 centerWS, float radiusWS, float3 eye, 
 // measured-not-assumed sign convention. `axisWS` here already folds in the CPU path's own
 // getSafeNormal() (zero-length axis -> never cull), matching the transform this shader itself does
 // just before calling this, one line below.
+//
+// cutoff <= -1.0 is the OTHER "never cull" sentinel this port honours, byte-for-byte with coneCull's
+// own check -- see that function's comment for the full account (already-cooked assets on disk still
+// carry ClusterBuilder.cpp's pre-fix -127/-1.0f encoding; this repairs them at read time with no
+// re-cook, without touching the formula for any real, non-degenerate cutoff value).
 bool clusterConeCull(float3 axisWS, float3 apexWS, float3 eye, float cutoff) {
     if (dot(axisWS, axisWS) < 0.25) return false;   // degenerate axis: never cull
+    if (cutoff <= -1.0) return false;                // -127 sentinel (old cook encoding): never cull
     float3 toApex = apexWS - eye;
     float lenSq = dot(toApex, toApex);
     if (lenSq < 1e-8) return false;                  // eye at/near apex: never cull

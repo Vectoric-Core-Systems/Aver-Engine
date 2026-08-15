@@ -3,7 +3,9 @@
 // and, further down, per-CLUSTER selection now that the format carries ownError/parentError).
 #include "aver/trifactor/ClusterAdapt.hpp"
 
+#include <algorithm>
 #include <bit>
+#include <cmath>
 
 namespace aver::trifactor {
 
@@ -244,6 +246,68 @@ ClusterCutResult selectClusterCut(const std::vector<MeshClusterView>& clusters, 
     }
     result.stats.distinctLevels = static_cast<u32>(std::popcount(levelMask));
     return result;
+}
+
+// ---------------------------------------------------------------------- instance-level shortcut ----
+
+void buildMeshClusterLevelBounds(const std::vector<MeshClusterView>& clusters,
+                                  std::vector<MeshClusterLevelBounds>& outLevels) {
+    outLevels.clear();
+    for (const MeshClusterView& c : clusters) {
+        if (c.level >= outLevels.size()) outLevels.resize(c.level + 1);
+        MeshClusterLevelBounds& b = outLevels[c.level];
+        if (b.count == 0) {
+            b.minOwnErrorCm = b.maxOwnErrorCm = c.ownErrorCm;
+            b.minParentErrorCm = b.maxParentErrorCm = c.parentErrorCm;
+        } else {
+            b.minOwnErrorCm = std::min(b.minOwnErrorCm, c.ownErrorCm);
+            b.maxOwnErrorCm = std::max(b.maxOwnErrorCm, c.ownErrorCm);
+            b.minParentErrorCm = std::min(b.minParentErrorCm, c.parentErrorCm);
+            b.maxParentErrorCm = std::max(b.maxParentErrorCm, c.parentErrorCm);
+        }
+        b.triangleCount += c.triangleCount;
+        ++b.count;
+    }
+}
+
+bool provablySingleLevelCut(const std::vector<MeshClusterLevelBounds>& levels, u32 candidateLevel,
+                             const Vec3& instanceSphereCenter, f32 instanceSphereRadius,
+                             f32 maxClusterSphereRadius, f32 thresholdPx, const View& view) {
+    if (candidateLevel >= levels.size() || levels[candidateLevel].count == 0) return false;
+    // Same clamp inLocalCut applies, and for the same reason (kMinClusterBudgetPx's own comment) --
+    // the envelope below must reason about the SAME threshold the real scan would have used.
+    thresholdPx = thresholdPx > kMinClusterBudgetPx ? thresholdPx : kMinClusterBudgetPx;
+
+    const f32 eyeDist = aver::dist(view.eye, instanceSphereCenter);
+    const f32 dMin = std::fmax(0.0f, eyeDist - instanceSphereRadius - maxClusterSphereRadius);
+    const f32 dMax = eyeDist + instanceSphereRadius;
+
+    // Cannot bound distance away from zero: the near-zero regime screenSpaceErrorPx special-cases (a
+    // 1e30 sentinel, "always refine") is not something this linear model reasons about safely --
+    // refuse to prove anything and let the caller fall back to the real scan. 1.0f (one centimetre),
+    // not 1e-3f: a generous margin against that sentinel's own threshold, not a tight one.
+    if (dMin <= 1.0f) return false;
+
+    const f32 ps = projScale(view);
+
+    // `candidateLevel` must be drawn WHOLLY -- see the header derivation. Strict/non-strict boundaries
+    // mirror inLocalCut's own `ownPx >= thresholdPx` / `parentPx >= thresholdPx` exactly, so this can
+    // never disagree with the real scan at the margin.
+    const MeshClusterLevelBounds& L = levels[candidateLevel];
+    if (L.maxOwnErrorCm * ps >= thresholdPx * dMin) return false;      // worst-case own might not clear
+    if (L.minParentErrorCm * ps < thresholdPx * dMax) return false;    // worst-case parent might not clear
+
+    // Every OTHER level must be provably unable to contribute anything, at any distance in the
+    // envelope -- checked directly against each level's own real data, not inferred from adjacency.
+    for (u32 lvl = 0; lvl < levels.size(); ++lvl) {
+        if (lvl == candidateLevel) continue;
+        const MeshClusterLevelBounds& o = levels[lvl];
+        if (o.count == 0) continue;
+        const bool ownAlwaysTooCoarse   = o.minOwnErrorCm * ps >= thresholdPx * dMax;
+        const bool parentAlwaysTooSmall = o.maxParentErrorCm * ps < thresholdPx * dMin;
+        if (!ownAlwaysTooCoarse && !parentAlwaysTooSmall) return false;   // this level MIGHT contribute
+    }
+    return true;
 }
 
 } // namespace aver::trifactor

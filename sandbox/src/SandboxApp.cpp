@@ -766,19 +766,23 @@ public:
             lodMeshShaderEnabled_ = ok;
             if (ok) {
 #if AVER_MODULE_VOXI
-                // RECEIVES, DOES NOT CAST -- and the difference is visible, so the warning says both.
-                // Stage 3 merged Voxi's table so this pixel shader can SAMPLE the cascade map and the
-                // voxel volume, and it does. What it cannot do is put its own geometry INTO either:
-                // IRenderFeature::submitDraw is called from exactly one place, D3D12Device::drawMesh,
-                // and this path dispatches clusters directly and skips that call by design (see
-                // `if (!clusterDispatched)` further down). So a cluster-drawn plant is absent from the
-                // shadow cascade render and from the GI voxelisation, and it shows: side by side with
-                // the ordinary path at the same camera, these plants sit on unshadowed ground with no
-                // contact shadow under them, and their own leaves do not shade each other.
-                AVER_WARN("[LOD] per-cluster mesh-shader path ON by request (mesh tier {}, SM {}) "
-                          "-- faster and textured, and it RECEIVES cascade shadows and voxel-cone GI, "
-                          "but casts into NEITHER (these draws never reach submitDraw), and is never "
-                          "ray traced even when the project has ray tracing on",
+                // RECEIVES AND CASTS -- this used to say only the first half, and that gap is exactly
+                // what the cluster-dispatch branch's own voxiRenderer_.submit() call now closes (search
+                // "DEFECT 2's FIX" further down). IRenderFeature::submitDraw is still called from
+                // exactly one place, D3D12Device::drawMesh, and this path still dispatches clusters
+                // directly and still skips that call (see `if (!clusterDispatched)` further down) -- but
+                // it no longer skips Voxi entirely: it calls VoxiRenderer::submit() itself, the same
+                // public method submitDraw() only forwards to, with the SAME (mesh, world, material)
+                // shape any ordinary drawMesh() instance already hands it. A cluster-drawn plant's
+                // shadow proxy is now in the shadow cascade render and in the GI voxelisation exactly
+                // like every other instance of its mesh; only its LIT geometry stays cluster-dispatched.
+                // Never ray traced, still -- BLAS/RT-instance-table participation is a side effect of
+                // this same fix (submit() is keyed on the FULL mesh handle) but PSClusterMain's own
+                // shading remains fixed-function, per ClusterMaterialShader.hpp's own comment.
+                AVER_INFO("[LOD] per-cluster mesh-shader path ON by request (mesh tier {}, SM {}) "
+                          "-- faster and textured, and casts cascade shadows and voxel-cone GI through "
+                          "its own depth proxy (via voxiRenderer_.submit()), though PSClusterMain's own "
+                          "shading is never ray traced even when the project has ray tracing on",
                           mcaps.meshShaderTier, mcaps.shaderModel);
 #else
                 AVER_WARN("[LOD] per-cluster mesh-shader path ON by request (mesh tier {}, SM {}) "
@@ -1920,8 +1924,14 @@ public:
                 MeshClusterData cd;
                 cd.verts = verts;
                 trifactor::buildMeshClusterViews(md, cd.clusters, cd.clusterIndices);
-                if (!cd.clusters.empty())
+                if (!cd.clusters.empty()) {
+                    // Once per mesh, from data already resident -- see MeshClusterData::levelBounds'
+                    // own comment. Never recomputed per frame or per instance.
+                    trifactor::buildMeshClusterLevelBounds(cd.clusters, cd.levelBounds);
+                    for (const trifactor::MeshClusterView& cv : cd.clusters)
+                        cd.maxSphereRadius = std::max(cd.maxSphereRadius, cv.sphereRadius);
                     meshClusterData_[id] = std::move(cd);
+                }
 
                 // GPU cluster buffers for --lod-mesh-shader, built ONLY when the flag is on, so a run
                 // that never asks for this feature never pays for the extra upload. Uses
@@ -2923,6 +2933,38 @@ public:
                                 std::chrono::steady_clock::now() - tDis0).count();
                             clusterDispatched = true;
 
+#if AVER_MODULE_VOXI
+                            // DEFECT 2's FIX, in full: this instance's LIT pixels already came from
+                            // dispatchMeshClusters above, so the ordinary IDevice::drawMesh() call at
+                            // the bottom of this loop is skipped for it (see `if (!clusterDispatched)`
+                            // there) -- and IRenderFeature::submitDraw is called from EXACTLY ONE place
+                            // in the engine, D3D12Device::drawMesh/VulkanDevice::drawMesh (see this
+                            // file's own [Sandbox] warning a few hundred lines up). Skipping drawMesh()
+                            // therefore also skips submitDraw(), which is the ONLY way geometry reaches
+                            // VoxiRenderer::draws_ -- so this instance never appeared in shadowPass,
+                            // giShadowPass, or voxelizePass. A tree that casts no shadow is not a
+                            // cheaper tree, it is a wrong one.
+                            //
+                            // voxiRenderer_.submit() is VoxiRenderer's own public, non-virtual method
+                            // (submitDraw() is only the IRenderFeature override forwarding to it) and
+                            // does nothing but append one Draw to this frame's list -- no GPU commands,
+                            // no rhiContext_ access, so it is safe to call here regardless of what
+                            // dispatchMeshClusters just bound on `ctx`. Passing `mesh` (this instance's
+                            // FULL-detail handle -- the same one drawMesh() would have used had this
+                            // instance not been cluster-dispatched) rather than a depth proxy directly
+                            // is deliberate: submit() already resolves d.depthMesh through the SAME
+                            // depthProxyFn_ every ordinary instance of this mesh goes through (see
+                            // VoxiRenderer.cpp's submit(), and SandboxApp's own depthProxy_ population
+                            // at mesh-load time, keyed by this exact handle) -- so the depth-only passes
+                            // draw the cheap proxy exactly as they already do for this mesh's discrete
+                            // instances, with no new resolution logic needed here. `mesh`, `col`,
+                            // `metallic`, `roughness`, `matSet`, `matConstants`, `matConstantBytes` are
+                            // all already resolved above (see this block's own comment on why the
+                            // material triple is computed once, outside either draw path).
+                            voxiRenderer_.submit(mesh, &wm.m[0][0], col, metallic, roughness, matSet,
+                                                  matConstants, matConstantBytes);
+#endif
+
                             ++lodMeshShaderStats_.instancesTested;
                             lodMeshShaderStats_.clustersDispatched += gpu.clusterCount;
 
@@ -2930,22 +2972,61 @@ public:
                             // CPU reference (trifactor::selectClusterCut), over the SAME world-space
                             // clusters and budget the GPU dispatch just used, sampled every 64 frames
                             // rather than every frame, per the task's own "sample it" allowance.
-                            if (lodClusterFrame_ % 64 == 0) {
+                            //
+                            // GATED ON lodClusterStatsEnabled_ (--lod-cluster-stats), OFF BY DEFAULT --
+                            // the SAME flag and the SAME reasoning as the per-level path's own
+                            // informational cluster telemetry (see that flag's own comment: "a real,
+                            // extra... CPU cost... must not be conflated when reporting numbers"). THE
+                            // SAMPLE ITSELF USED TO BE A HITCH, even after THE INSTANCE-LEVEL SHORTCUT
+                            // below: measured directly, the handful of instances the shortcut cannot
+                            // prove (genuinely mixed-level, typically the closest/largest-DAG trees) are
+                            // still expensive enough on their own that this block cost ~1.1 SECONDS on
+                            // this sampled frame even with the shortcut applied to everything else --
+                            // and because 64 divides --frames 128 evenly, that sampled frame is
+                            // GUARANTEED to be the last frame of exactly this task's own benchmark
+                            // command, not a rare coincidence. A once-per-second-ish stall is not an
+                            // acceptable cost for a log line no render pass reads, so it no longer runs
+                            // unless a caller explicitly asked for the counters it produces.
+                            if (lodClusterStatsEnabled_ && lodClusterFrame_ % 64 == 0) {
                                 if (const auto cit2 = meshClusterData_.find(mr->mesh); cit2 != meshClusterData_.end()) {
-                                    std::vector<trifactor::MeshClusterView> worldClusters = cit2->second.clusters;
-                                    for (trifactor::MeshClusterView& cv : worldClusters) {
-                                        cv.sphereCenter = xformPoint(wm, cv.sphereCenter);
-                                        cv.sphereRadius *= worldScale;
-                                        cv.coneApex = xformPoint(wm, cv.coneApex);
-                                        cv.coneAxis = xformVec(wm, cv.coneAxis).getSafeNormal();
+                                    const MeshClusterData& mcd = cit2->second;
+                                    bool sampledShortcut = false;
+                                    if (const auto lit2 = meshLods_.find(mr->mesh); lit2 != meshLods_.end()) {
+                                        const MeshLodLadder& ladder2 = lit2->second;
+                                        const Vec3 sphereCenter2 = (wlo + whi) * 0.5f;
+                                        const f32 sphereRadius2 = dist(wlo, whi) * 0.5f;
+                                        const u32 candidateLevel2 = trifactor::chooseLevelCached(
+                                            ladder2.errorCm, sphereCenter2, sphereRadius2,
+                                            lodErrorThresholdPx_, view);
+                                        if (candidateLevel2 < mcd.levelBounds.size() &&
+                                            trifactor::provablySingleLevelCut(
+                                                mcd.levelBounds, candidateLevel2, sphereCenter2, sphereRadius2,
+                                                mcd.maxSphereRadius * worldScale, lodErrorThresholdPx_, view)) {
+                                            lodMeshShaderStats_.survivors += mcd.levelBounds[candidateLevel2].count;
+                                            lodMeshShaderStats_.trianglesDrawn +=
+                                                mcd.levelBounds[candidateLevel2].triangleCount;
+                                            lodMeshShaderStats_.maxDistinctLevelsSeen =
+                                                std::max(lodMeshShaderStats_.maxDistinctLevelsSeen, 1u);
+                                            ++lodMeshShaderStats_.instancesShortcut;
+                                            sampledShortcut = true;
+                                        }
                                     }
-                                    const trifactor::ClusterCutResult cr = trifactor::selectClusterCut(
-                                        worldClusters, lodErrorThresholdPx_, view, true);
-                                    lodMeshShaderStats_.survivors += cr.stats.drawn;
-                                    lodMeshShaderStats_.trianglesDrawn += cr.stats.trianglesAfter;
-                                    if (cr.stats.distinctLevels > 1) ++lodMeshShaderStats_.instancesMixedLevels;
-                                    lodMeshShaderStats_.maxDistinctLevelsSeen =
-                                        std::max(lodMeshShaderStats_.maxDistinctLevelsSeen, cr.stats.distinctLevels);
+                                    if (!sampledShortcut) {
+                                        std::vector<trifactor::MeshClusterView> worldClusters = mcd.clusters;
+                                        for (trifactor::MeshClusterView& cv : worldClusters) {
+                                            cv.sphereCenter = xformPoint(wm, cv.sphereCenter);
+                                            cv.sphereRadius *= worldScale;
+                                            cv.coneApex = xformPoint(wm, cv.coneApex);
+                                            cv.coneAxis = xformVec(wm, cv.coneAxis).getSafeNormal();
+                                        }
+                                        const trifactor::ClusterCutResult cr = trifactor::selectClusterCut(
+                                            worldClusters, lodErrorThresholdPx_, view, true);
+                                        lodMeshShaderStats_.survivors += cr.stats.drawn;
+                                        lodMeshShaderStats_.trianglesDrawn += cr.stats.trianglesAfter;
+                                        if (cr.stats.distinctLevels > 1) ++lodMeshShaderStats_.instancesMixedLevels;
+                                        lodMeshShaderStats_.maxDistinctLevelsSeen =
+                                            std::max(lodMeshShaderStats_.maxDistinctLevelsSeen, cr.stats.distinctLevels);
+                                    }
                                 }
                             }
                         }
@@ -2963,13 +3044,42 @@ public:
                         view.viewProj = viewProj_;
                         view.viewportHeightPx = vpH_;
                         view.verticalFovRadians = radians(60.0f);
+                        const f32 worldScale = xformVec(wm, Vec3{1, 0, 0}).size();
 
+                        // THE INSTANCE-LEVEL SHORTCUT -- see aver::trifactor::ClusterAdapt.hpp's own
+                        // section for the full derivation and TrifactorTest's own sweep proving it
+                        // against the real scan. chooseLevelCached is a handful of float ops (the SAME
+                        // call the per-level path below already makes); if provablySingleLevelCut can
+                        // PROVE the real O(all-DAG-clusters) scan below would select exactly the whole
+                        // of the level it names -- never merely guessed, always proved -- draw that
+                        // level's already-resident ladder handle directly and skip the copy, the
+                        // per-cluster transform, and the scan entirely. Falls through to the real scan,
+                        // unchanged, whenever the proof does not hold (genuinely mixed-level instances,
+                        // or a mesh with no matching MeshLodLadder) -- reproducing this path's
+                        // pre-existing behaviour exactly for those cases.
+                        bool tookShortcut = false;
+                        if (const auto lit = meshLods_.find(mr->mesh); lit != meshLods_.end()) {
+                            const MeshLodLadder& ladder = lit->second;
+                            const Vec3 sphereCenter = (wlo + whi) * 0.5f;
+                            const f32 sphereRadius = dist(wlo, whi) * 0.5f;
+                            const u32 candidateLevel = trifactor::chooseLevelCached(
+                                ladder.errorCm, sphereCenter, sphereRadius, lodErrorThresholdPx_, view);
+                            if (candidateLevel < ladder.handles.size() &&
+                                trifactor::provablySingleLevelCut(
+                                    cd.levelBounds, candidateLevel, sphereCenter, sphereRadius,
+                                    cd.maxSphereRadius * worldScale, lodErrorThresholdPx_, view)) {
+                                mesh = ladder.handles[candidateLevel];
+                                tookShortcut = true;
+                                ++lodClusterStats_.instancesShortcut;
+                            }
+                        }
+
+                        if (!tookShortcut) {
                         // Mesh-local -> world, once per instance per frame, for EVERY cluster of the
                         // mesh's whole DAG at once (all levels) -- the local cut test needs every
                         // cluster's world-space sphere to compare against this frame's camera. Same
                         // uniform-scale approximation the per-level path's informational telemetry
                         // above already uses for radius/axis.
-                        const f32 worldScale = xformVec(wm, Vec3{1, 0, 0}).size();
                         std::vector<trifactor::MeshClusterView> worldClusters = cd.clusters;
                         for (trifactor::MeshClusterView& cv : worldClusters) {
                             cv.sphereCenter = xformPoint(wm, cv.sphereCenter);
@@ -3046,6 +3156,7 @@ public:
                             ++lodClusterStats_.cacheHits;
                         }
                         if (cache.handle) mesh = cache.handle;
+                        }   // !tookShortcut
                     }
                 } else if (!clusterDispatched && lodSelectEnabled_ && !skinned && haveWorldBox) {
                     if (const auto lit = meshLods_.find(mr->mesh); lit != meshLods_.end()) {
@@ -3196,17 +3307,24 @@ public:
             // with extra steps, not virtualized geometry, whatever else changed. `rebuilds`/`hits`
             // and `rebuildMs`/`rebuildIdx` are the CPU-assembly cost this design was told to measure,
             // not guess -- real counts and real wall time from the real createMesh calls above.
+            // `instancesShortcut` is THE INSTANCE-LEVEL SHORTCUT's own count: instances that never ran
+            // the scan at all because provablySingleLevelCut proved it unnecessary -- NOT included in
+            // `instancesTested`/`clustersTested` below (those only count instances that actually ran
+            // the real scan), so `instancesShortcut + instancesTested` is this frame's true instance
+            // total for the per-cluster path.
             if (lodPerClusterEnabled_ &&
                 (lodClusterStats_.instancesTested != lastLoggedLodClusterStats_.instancesTested ||
                  lodClusterStats_.clustersDrawn != lastLoggedLodClusterStats_.clustersDrawn ||
                  lodClusterStats_.trianglesDrawn != lastLoggedLodClusterStats_.trianglesDrawn ||
                  lodClusterStats_.instancesMixedLevels != lastLoggedLodClusterStats_.instancesMixedLevels ||
+                 lodClusterStats_.instancesShortcut != lastLoggedLodClusterStats_.instancesShortcut ||
                  lodClusterStats_.rebuilds != lastLoggedLodClusterStats_.rebuilds)) {
-                AVER_INFO("[LOD-CLUSTER] instances={} clustersTested={} frustumCulled={} coneCulled={} "
-                          "lodRejected={} clustersDrawn={} trisBefore={} trisDrawn={} "
-                          "instancesMixedLevels={} distinctLevelsMax={} rebuilds={} hits={} "
+                AVER_INFO("[LOD-CLUSTER] instances={} instancesShortcut={} clustersTested={} "
+                          "frustumCulled={} coneCulled={} lodRejected={} clustersDrawn={} trisBefore={} "
+                          "trisDrawn={} instancesMixedLevels={} distinctLevelsMax={} rebuilds={} hits={} "
                           "rebuildIdx={} rebuildMs={:.3f}",
-                          lodClusterStats_.instancesTested, lodClusterStats_.clustersTested,
+                          lodClusterStats_.instancesTested, lodClusterStats_.instancesShortcut,
+                          lodClusterStats_.clustersTested,
                           lodClusterStats_.frustumCulled, lodClusterStats_.coneCulled,
                           lodClusterStats_.lodRejected, lodClusterStats_.clustersDrawn,
                           lodClusterStats_.trianglesBeforeLod0, lodClusterStats_.trianglesDrawn,
@@ -3224,14 +3342,15 @@ public:
                 (lodMeshShaderStats_.instancesTested != lastLoggedLodMeshShaderStats_.instancesTested ||
                  lodMeshShaderStats_.clustersDispatched != lastLoggedLodMeshShaderStats_.clustersDispatched ||
                  lodMeshShaderStats_.survivors != lastLoggedLodMeshShaderStats_.survivors ||
-                 lodMeshShaderStats_.instancesMixedLevels != lastLoggedLodMeshShaderStats_.instancesMixedLevels)) {
+                 lodMeshShaderStats_.instancesMixedLevels != lastLoggedLodMeshShaderStats_.instancesMixedLevels ||
+                 lodMeshShaderStats_.instancesShortcut != lastLoggedLodMeshShaderStats_.instancesShortcut)) {
                 AVER_INFO("[LOD-MESH-SHADER] pipelineReady={} instances={} clustersDispatched={} "
                           "survivors(sampled)={} trisDrawn(sampled)={} instancesMixedLevels(sampled)={} "
-                          "distinctLevelsMax(sampled)={}",
+                          "distinctLevelsMax(sampled)={} shortcut(sampled)={}",
                           lodMeshPipelineReady_, lodMeshShaderStats_.instancesTested,
                           lodMeshShaderStats_.clustersDispatched, lodMeshShaderStats_.survivors,
                           lodMeshShaderStats_.trianglesDrawn, lodMeshShaderStats_.instancesMixedLevels,
-                          lodMeshShaderStats_.maxDistinctLevelsSeen);
+                          lodMeshShaderStats_.maxDistinctLevelsSeen, lodMeshShaderStats_.instancesShortcut);
                 lastLoggedLodMeshShaderStats_ = lodMeshShaderStats_;
             }
 #endif
@@ -10413,6 +10532,14 @@ private:
         std::vector<trifactor::MeshClusterView> clusters;   // mesh-local; all levels
         std::vector<std::vector<u32>> clusterIndices;        // [clusterId] -> expanded global indices
         std::vector<rhi::MeshVertex> verts;
+
+        // THE INSTANCE-LEVEL SHORTCUT's own precomputed inputs -- see
+        // aver::trifactor::ClusterAdapt.hpp's "THE INSTANCE-LEVEL SHORTCUT" section for the full
+        // derivation. Both built ONCE here, from `clusters` right above, immediately after
+        // buildMeshClusterViews -- never touched again per frame; the runtime cost of computing them
+        // is O(clusters.size()), paid once at load, the same place `clusters` itself gets built.
+        std::vector<trifactor::MeshClusterLevelBounds> levelBounds;
+        f32 maxSphereRadius = 0.0f;   // mesh-local; largest cluster sphere radius across the whole DAG
     };
     std::unordered_map<u64, MeshClusterData> meshClusterData_;
 
@@ -10453,6 +10580,8 @@ private:
         u32 cacheHits = 0;              // cache hits (cut unchanged) this frame
         u64 rebuildIndices = 0;         // sum of assembled index counts on rebuilds this frame
         f64 rebuildMs = 0.0;            // wall time spent inside createMesh on rebuilds this frame
+        u32 instancesShortcut = 0;      // provablySingleLevelCut fired: the O(all-DAG-clusters) scan,
+                                         // the copy and the transform were all skipped for this instance
     };
     LodClusterStats lodClusterStats_{};
     LodClusterStats lastLoggedLodClusterStats_{};
@@ -10530,6 +10659,12 @@ private:
         u64 trianglesDrawn = 0;
         u32 instancesMixedLevels = 0;
         u32 maxDistinctLevelsSeen = 0;
+        u32 instancesShortcut = 0;       // of the sampled instances, how many used
+                                          // provablySingleLevelCut instead of the real CPU-mirror scan
+                                          // -- see the sampling block's own comment for why this matters
+                                          // far more here than in the CPU per-cluster path's own count:
+                                          // without it, this "sampled every 64 frames" telemetry was
+                                          // itself a multi-SECOND stall once every 64 frames.
     };
     LodMeshShaderStats lodMeshShaderStats_{};
     LodMeshShaderStats lastLoggedLodMeshShaderStats_{};

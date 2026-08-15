@@ -13,16 +13,16 @@
 // which is the composition order PbrShaders.hpp documents and the one Voxi already uses for
 // VoxiShaders.hpp.
 //
-// THE HALF STAGE 3 DID NOT BUY, MEASURED SIDE BY SIDE. This shader can now SAMPLE the cascade map
-// and the voxel volume, and it does. The geometry it draws is still absent FROM both, because
+// THE HALF STAGE 3 DID NOT BUY, NOW CLOSED -- BUT NOT FROM THIS FILE. This shader SAMPLES the cascade
+// map and the voxel volume, and it does. The geometry it draws USED TO be absent FROM both, because
 // IRenderFeature::submitDraw is called from exactly one place -- D3D12Device::drawMesh -- and this
-// path dispatches clusters itself and skips that call by design. So a cluster-drawn plant RECEIVES
-// shadow and GI and CASTS neither. Captured at the same camera on both paths, the difference is
-// obvious rather than subtle: on the ordinary path every plant has a soft contact shadow under it and
-// its leaves shade each other; here the ground beneath is uniformly lit and the leaves carry hard
-// black patches where a neighbour's shadow should have been the soft part. Closing this means getting
-// these instances into the shadow and voxelise passes, which is a scene-submission change, not a
-// shading one -- nothing in this file can fix it.
+// path dispatches clusters itself and skips that call by design. A cluster-drawn plant RECEIVED
+// shadow and GI and CAST neither. That was a scene-submission gap, not a shading one, so nothing in
+// this file could fix it -- and nothing in this file did: SandboxApp.cpp's cluster-dispatch branch now
+// calls VoxiRenderer::submit() itself, right after dispatchMeshClusters (search "DEFECT 2's FIX" in
+// SandboxApp.cpp), handing Voxi the same (mesh, world, material) shape any ordinary drawMesh() instance
+// already does. That gets a cheap depth-only proxy of this geometry into the shadow and voxelise
+// passes without this pixel shader, or PSClusterMain's own lit-pass shading, changing at all.
 //
 // WHAT IT DELIBERATELY DOES NOT DO, STILL, EVEN AFTER STAGE 3. No ray tracing, ever -- shadowFactor()
 // and coneTracedIndirect() (borrowed from Voxi via VoxiGiShaders.hpp's giShaderPrelude(), merged

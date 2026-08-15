@@ -274,4 +274,94 @@ struct ClusterCutResult {
 ClusterCutResult selectClusterCut(const std::vector<MeshClusterView>& clusters, f32 thresholdPx,
                                    const View& view, bool useFrustum = true);
 
+// ================================================================================================
+// THE INSTANCE-LEVEL SHORTCUT -- skipping the O(all-DAG-clusters) scan above without approximating
+// its answer. selectClusterCut is a flat scan over EVERY cluster in a mesh's whole DAG (129,666 for a
+// re-cooked pine_tree_01), and on Electric Dreams it accounts for the large majority of a ~1.9 SECOND
+// per-frame CPU cost in the per-cluster path, while the large majority of instances paying that cost
+// get an answer chooseLevelCached (a handful of float ops) could have produced for a fraction of a
+// percent of the price (measured: 95.3% of instances' cuts collapsed to one distinct level anyway).
+// THIS SECTION EXISTS TO SKIP THE SCAN ONLY WHEN IT IS PROVABLE THE SCAN WOULD HAVE PRODUCED THE SAME
+// ANSWER -- never as a similarity heuristic. See provablySingleLevelCut's own comment for the
+// derivation and exactly what it refuses to assume.
+// ================================================================================================
+
+// Per LOD level, the actual per-cluster error range THIS MESH'S OWN clusters at that level carry --
+// not levelWorldErrorCm's single representative scalar (which per-LEVEL selection uses, and which
+// nothing here re-derives), the REAL min/max of ownErrorCm/parentErrorCm read directly off the
+// cluster data buildMeshClusterViews produced. Computed once, at mesh load time, from data already
+// resident -- never touched again per frame. `count == 0` means this mesh has no cluster at that
+// level (should not happen for a level within range, but a malformed/short DAG fails safe by making
+// the shortcut refuse to fire around that level rather than reading a meaningless min/max).
+struct MeshClusterLevelBounds {
+    u32 count = 0;
+    f32 minOwnErrorCm = 0.0f, maxOwnErrorCm = 0.0f;
+    f32 minParentErrorCm = 0.0f, maxParentErrorCm = 0.0f;
+    u64 triangleCount = 0;   // sum of triangleCount over every cluster at this level -- what drawing
+                             // the WHOLE level costs, the number a caller taking the shortcut needs to
+                             // report the same triangle telemetry the real scan would have.
+};
+
+// Fills one entry per LOD level, indexed by level (`out[c.level]` for every `c` in `clusters`) --
+// `out.size() == 1 + (the highest level any cluster carries)`. O(clusters.size()), meant to run ONCE
+// per mesh at load time, immediately after buildMeshClusterViews, never per frame. Clears `outLevels`
+// first.
+void buildMeshClusterLevelBounds(const std::vector<MeshClusterView>& clusters,
+                                  std::vector<MeshClusterLevelBounds>& outLevels);
+
+// Can the caller SAFELY skip selectClusterCut's full DAG scan and just draw `candidateLevel` (e.g.
+// chooseLevelCached's own answer) whole, trusting that is EXACTLY what the real per-cluster scan
+// would have produced for this instance this frame? Returns true only when that is PROVEN, never when
+// it merely seems likely -- a caller that gets false back MUST run the real scan; this function is
+// allowed to be conservative (refuse to prove a true case) but must never be wrong in the other
+// direction (never claim a false case is provably true).
+//
+// THE PROOF, in full, because asserting it without showing it is exactly what this codebase's own
+// house rules exist to catch:
+//
+// inLocalCut(c) reduces, algebraically, to one inequality chain against a SINGLE per-cluster
+// quantity (see ClusterAdapt.cpp's inLocalCut): c is drawn iff
+//     ownErrorCm(c)  <  thresholdPx * dist(c) / projScale  <=  parentErrorCm(c)
+// where dist(c) is c's OWN distance to the camera (screenSpaceErrorPx's radial distance-to-surface).
+// Both halves compare against the SAME dist(c) -- ownPx and parentPx in inLocalCut share one sphere,
+// one distance, differing only in which error scalar they multiply -- so nothing here needs to reason
+// about a cluster's position beyond bounding where dist(c) can possibly fall.
+//
+// Every cluster in this mesh's DAG lies inside the INSTANCE's own world bounding sphere (the same
+// sphere the per-level path already computes from the entity's world AABB), give or take that
+// cluster's own radius, so for ANY cluster c, regardless of which level or exactly where in the mesh:
+//     dMin <= dist(c) <= dMax
+//     dMin = max(0, dist(eye, instanceCenter) - instanceRadius - maxClusterSphereRadius)
+//     dMax =        dist(eye, instanceCenter) + instanceRadius
+// (dMax needs no cluster-radius term: distance-to-surface only ever shrinks with radius, so the
+// centre-to-centre distance alone is already a valid upper bound on it.)
+//
+// That turns the per-cluster inequality into a per-LEVEL one, because thresholdPx*dist(c)/projScale
+// is monotonic in dist(c) and dist(c) is now bounded, not exact:
+//   - `candidateLevel` is drawn ENTIRELY (every one of its clusters, unconditionally) if even the
+//     WORST-case own-error (maxOwnErrorCm, at the closest possible distance dMin) still clears the
+//     budget, AND even the WORST-case parent-error (minParentErrorCm, at the farthest possible
+//     distance dMax) still exceeds it:
+//         maxOwnErrorCm[L]    * projScale  <  thresholdPx * dMin
+//         minParentErrorCm[L] * projScale  >= thresholdPx * dMax
+//   - every OTHER level L' contributes NOTHING if either its own error is too large everywhere in the
+//     envelope (minOwnErrorCm[L'] * projScale >= thresholdPx * dMax -- even the BEST case, farthest
+//     distance, still fails the own-error test) or its parent error is too small everywhere in the
+//     envelope (maxParentErrorCm[L'] * projScale < thresholdPx * dMin -- even the BEST case, closest
+//     distance, still fails the parent-error test).
+// Checked for EVERY level (not just neighbours of `candidateLevel`): the per-level min/max table is
+// small (a few dozen entries even after today's re-cook) next to the per-cluster scan it replaces, so
+// checking all of them costs nothing next to that -- there is no reason to lean on an unproven "only
+// adjacent levels can matter" assumption to save a few dozen comparisons.
+//
+// WHAT THIS DOES NOT ASSUME, on purpose: nothing about which level a cluster's parent lives in, no DAG
+// topology, no "error is monotonic across levels" beyond what is already documented as a GIVEN
+// invariant elsewhere in this module (not leaned on here at all -- every level is checked
+// independently, on its own actual min/max). If dMin cannot be bounded away from zero (the camera is
+// within `maxClusterSphereRadius` of the instance) this returns false rather than reasoning about the
+// near-zero regime screenSpaceErrorPx special-cases with its own sentinel.
+bool provablySingleLevelCut(const std::vector<MeshClusterLevelBounds>& levels, u32 candidateLevel,
+                             const Vec3& instanceSphereCenter, f32 instanceSphereRadius,
+                             f32 maxClusterSphereRadius, f32 thresholdPx, const View& view);
+
 } // namespace aver::trifactor

@@ -11,12 +11,14 @@
 // actual library output, not against a hand-picked apex/axis/cutoff triple this file also invented.
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
+#include "aver/trifactor/ClusterAdapt.hpp"
 #include "aver/trifactor/ClusterSelect.hpp"
 
 #include <meshoptimizer.h>
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -88,20 +90,39 @@ int main() {
         const bool culledFromBelow = coneCull(c, Vec3{0.5f, 0.5f, -10.0f});
         check(culledFromBelow, "a camera on the opposite side sees only the back face: culled");
 
-        // THE ACTUAL FINDING this block exists to surface: this same formula, applied to
-        // ClusterBuilder.cpp's own "-127 / never cull" sentinel (decoded, cutoff = -1.0f) rather than
-        // to a real measured cutoff, culls from EVERY direction instead of none -- see
-        // ClusterSelect.hpp's file header and ClusterView::coneCutoff for the full account. Checked
-        // right here with the same coneCull this whole file is validating, not asserted separately:
+        // THE ACTUAL FINDING this block exists to surface, and the fix now checked in the same breath.
+        // Applying this same formula NAIVELY to ClusterBuilder.cpp's PRE-FIX "-127 / never cull"
+        // sentinel (decoded, cutoff = -1.0f) culls from EVERY direction instead of none -- see
+        // ClusterSelect.hpp's file header and ClusterView::coneCutoff for the full account. That old
+        // encoding is still what an already-cooked .ocmesh carries on disk (ClusterBuilder.cpp's own
+        // fix only changes FUTURE cooks), so coneCull now special-cases cutoff <= -1.0f as "never
+        // cull" -- checked right here with the same coneCull this whole file is validating, not
+        // asserted separately:
         ClusterView neverCullPerClusterBuilder = c;
         neverCullPerClusterBuilder.coneAxis = {0, 0, 1};
-        neverCullPerClusterBuilder.coneCutoff = -1.0f;   // ClusterBuilder.cpp's -127, decoded
-        check(coneCull(neverCullPerClusterBuilder, Vec3{0.5f, 0.5f, 10.0f}) &&
-                  coneCull(neverCullPerClusterBuilder, Vec3{0.5f, 0.5f, -10.0f}),
-              "ClusterBuilder.cpp's -127 'never cull' sentinel, decoded and run through the real "
-              "formula, culls from BOTH sides -- the opposite of what its own comment claims "
-              "(ClusterBuilder.cpp:114,126,133-136; this file's ClusterView::coneCutoff default is "
-              "+1.0f, not -1.0f, for exactly this reason)");
+        neverCullPerClusterBuilder.coneCutoff = -1.0f;   // ClusterBuilder.cpp's pre-fix -127, decoded
+        check(!coneCull(neverCullPerClusterBuilder, Vec3{0.5f, 0.5f, 10.0f}) &&
+                  !coneCull(neverCullPerClusterBuilder, Vec3{0.5f, 0.5f, -10.0f}),
+              "an already-cooked asset's pre-fix -127 'never cull' sentinel (cutoff=-1.0f) is honoured "
+              "as never-cull from BOTH sides by coneCull itself, with no re-cook required "
+              "(ClusterSelect.cpp's coneCull now special-cases cutoff <= -1.0f, symmetric with the "
+              "+1.0f default that already worked; clusterConeCull in RHIShaders.cpp is a byte-for-byte "
+              "port of the same check)");
+
+        // A cutoff just off that boundary (-0.999f, not -1.0f) must NOT be swept into the special
+        // case -- this is a REAL, if very wide, cone and must still cull wherever the ordinary formula
+        // says to. Guards against a fix that is a fuzzy "cutoff near -1" widening instead of the exact
+        // sentinel value. With axis={0,0,1} and eye straight below the apex, dir=(0,0,1) so
+        // dot(dir,axis)=1, which clears -0.999f (culled, same as it would for almost any cutoff short
+        // of the true +1.0f "never cull" end) -- if the fix had instead swallowed nearby-but-real
+        // values into "never cull", this would incorrectly come back false.
+        ClusterView justAboveSentinel = c;
+        justAboveSentinel.coneAxis = {0, 0, 1};
+        justAboveSentinel.coneCutoff = -0.999f;
+        check(coneCull(justAboveSentinel, Vec3{0.5f, 0.5f, -10.0f}),
+              "a cutoff just off the -1.0f sentinel boundary (-0.999f) still culls normally where the "
+              "ordinary formula says to -- the sentinel fix is an exact boundary, not a fuzzy 'near -1' "
+              "widening of cone culling");
     }
 
     AVER_INFO("=== coneCull edge cases ===");
@@ -445,6 +466,175 @@ int main() {
                                                      std::to_string(result2.stats.frustumCulled) + ")");
         check(result2.stats.coneCulled >= 1, "the cluster whose cone faces away from the eye is cone-culled (" +
                                                   std::to_string(result2.stats.coneCulled) + ")");
+    }
+
+    // ------------------------------------------------------------------------------------------------
+    // provablySingleLevelCut: the SandboxApp scene-walk shortcut this codebase's own runtime-fix task
+    // exists to justify (aver::trifactor::ClusterAdapt.hpp's "THE INSTANCE-LEVEL SHORTCUT" section).
+    // The property under test is a SAFETY property, not a hit-rate one: whenever it returns true, the
+    // real full-DAG selectClusterCut scan MUST agree exactly (same single level, the WHOLE of it,
+    // nothing from any other level) -- checked against selectClusterCut's own real output, never
+    // hand-predicted, across a wide sweep of thresholds and camera positions, including ones chosen to
+    // provoke genuine cross-level mixing (so the sweep exercises both the "safe to shortcut" and the
+    // "must refuse" branches, not just one of them).
+    AVER_INFO("=== provablySingleLevelCut: agrees with the real per-cluster scan whenever it fires ===");
+    {
+        // A 3-level DAG with real spatial spread (mirrors the file header's own "96x24 plank" case:
+        // clusters at different world positions within one mesh instance, so distance -- and therefore
+        // projected error -- genuinely varies across the DAG, not just across levels). Level 0: four
+        // leaves spread along X. Level 1: two clusters, each enclosing two adjacent leaves. Level 2: one
+        // root enclosing everything. Errors monotonic non-decreasing leaf -> parent -> root, per the
+        // Cook's own invariant (ClusterAdapt.hpp's file header).
+        constexpr f32 kE0 = 0.0f, kE1 = 50.0f, kE2 = 500.0f;
+        constexpr f32 kMaxErr = std::numeric_limits<f32>::max();
+
+        std::vector<trifactor::MeshClusterView> clusters(7);
+        auto leaf = [&](u32 i, f32 x) {
+            clusters[i].sphereCenter = {x, 0, 0};
+            clusters[i].sphereRadius = 10.0f;
+            clusters[i].ownErrorCm = kE0;
+            clusters[i].parentErrorCm = kE1;
+            clusters[i].triangleCount = 100;
+            clusters[i].level = 0;
+        };
+        leaf(0, -1500.0f); leaf(1, -500.0f); leaf(2, 500.0f); leaf(3, 1500.0f);
+
+        auto lvl1 = [&](u32 i, f32 x) {
+            clusters[i].sphereCenter = {x, 0, 0};
+            clusters[i].sphereRadius = 600.0f;
+            clusters[i].ownErrorCm = kE1;
+            clusters[i].parentErrorCm = kE2;
+            clusters[i].triangleCount = 100;
+            clusters[i].level = 1;
+        };
+        lvl1(4, -1000.0f); lvl1(5, 1000.0f);
+
+        clusters[6].sphereCenter = {0, 0, 0};
+        clusters[6].sphereRadius = 1700.0f;
+        clusters[6].ownErrorCm = kE2;
+        clusters[6].parentErrorCm = kMaxErr;
+        clusters[6].triangleCount = 100;
+        clusters[6].level = 2;
+
+        std::vector<trifactor::MeshClusterLevelBounds> levels;
+        trifactor::buildMeshClusterLevelBounds(clusters, levels);
+        check(levels.size() == 3, "one MeshClusterLevelBounds entry per level (" +
+                                       std::to_string(levels.size()) + ")");
+        check(levels[0].count == 4 && levels[1].count == 2 && levels[2].count == 1,
+              "per-level counts match the synthetic DAG (4/2/1, got " + std::to_string(levels[0].count) +
+                  "/" + std::to_string(levels[1].count) + "/" + std::to_string(levels[2].count) + ")");
+        check(levels[0].minOwnErrorCm == kE0 && levels[0].maxOwnErrorCm == kE0 &&
+                  levels[0].minParentErrorCm == kE1 && levels[0].maxParentErrorCm == kE1,
+              "level 0's own/parent error bounds match every leaf's identical stored values");
+
+        f32 instanceRadius = 0.0f;
+        for (const trifactor::MeshClusterView& c : clusters)
+            instanceRadius = std::max(instanceRadius, dist(Vec3{0, 0, 0}, c.sphereCenter) + c.sphereRadius);
+        const Vec3 instanceCenter{0, 0, 0};
+        f32 maxClusterRadius = 0.0f;
+        for (const trifactor::MeshClusterView& c : clusters)
+            maxClusterRadius = std::max(maxClusterRadius, c.sphereRadius);
+
+        const std::vector<f32> levelErrTable = {kE0, kE1, kE2};
+
+        u32 provedTrue = 0, provedFalse = 0, sawGenuineMixOrPartial = 0;
+        bool anyDisagreement = false;
+        std::string firstDisagreement;
+
+        // Cameras: dead-on-axis (symmetric -- every leaf equidistant-ish) and off to one side, aligned
+        // with the leftmost leaf (the asymmetric case that can make one leaf's parent qualify while
+        // another's does not, at a shared threshold -- see the block comment above).
+        const Vec3 eyeCentered{0, -4000.0f, 0};
+        const Vec3 eyeOffLeft{-1500.0f, -3000.0f, 0};
+
+        for (const Vec3& eye : {eyeCentered, eyeOffLeft}) {
+            View v;
+            v.eye = eye;
+            v.viewportHeightPx = 1080.0f;
+            v.verticalFovRadians = radians(60.0f);
+            const Mat4 view = Mat4::lookAtLH(eye, Vec3{0, 0, 0}, Vec3{0, 0, 1});
+            const Mat4 proj = Mat4::perspectiveLH(radians(90.0f), 1.0f, 1.0f, 1000000.0f);
+            v.viewProj = view * proj;
+
+            // A wide sweep, not a handful of hand-picked points -- thresholds spanning three orders of
+            // magnitude so the sweep crosses every level's own qualifying boundary many times over.
+            for (int step = 0; step <= 60; ++step) {
+                const f32 thresholdPx = 0.05f * std::pow(10.0f, static_cast<f32>(step) / 15.0f);
+
+                const trifactor::ClusterCutResult exact =
+                    trifactor::selectClusterCut(clusters, thresholdPx, v, true);
+
+                const u32 candidateLevel = trifactor::chooseLevelCached(
+                    levelErrTable, instanceCenter, instanceRadius, thresholdPx, v);
+                const bool proved = trifactor::provablySingleLevelCut(
+                    levels, candidateLevel, instanceCenter, instanceRadius, maxClusterRadius,
+                    thresholdPx, v);
+
+                if (proved) {
+                    ++provedTrue;
+                    const u32 expectedCount = levels[candidateLevel].count;
+                    const bool matches = exact.stats.distinctLevels == 1 &&
+                                          exact.stats.drawn == expectedCount &&
+                                          (exact.drawnIds.empty() ||
+                                           clusters[exact.drawnIds.front()].level == candidateLevel);
+                    if (!matches && !anyDisagreement) {
+                        anyDisagreement = true;
+                        firstDisagreement = "eye=(" + std::to_string(eye.x) + "," + std::to_string(eye.y) +
+                            ") thresholdPx=" + std::to_string(thresholdPx) +
+                            " candidateLevel=" + std::to_string(candidateLevel) +
+                            " exact.drawn=" + std::to_string(exact.stats.drawn) +
+                            " expected=" + std::to_string(expectedCount) +
+                            " exact.distinctLevels=" + std::to_string(exact.stats.distinctLevels);
+                    }
+                } else {
+                    ++provedFalse;
+                    if (exact.stats.distinctLevels != 1) ++sawGenuineMixOrPartial;
+                }
+            }
+        }
+
+        check(!anyDisagreement,
+              "every proved==true case exactly matches the real scan's own output" +
+                  (firstDisagreement.empty() ? "" : (" (first disagreement: " + firstDisagreement + ")")));
+        check(provedTrue > 0, "the sweep actually exercises the shortcut at least once (" +
+                                   std::to_string(provedTrue) + " of " +
+                                   std::to_string(provedTrue + provedFalse) + " points)");
+        check(sawGenuineMixOrPartial > 0,
+              "the sweep also provokes real cross-level mixing at least once, so 'refuses to prove' is "
+              "being tested against an ACTUAL adversarial case, not only trivial ones (" +
+                  std::to_string(sawGenuineMixOrPartial) + " genuinely-mixed point(s) among " +
+                  std::to_string(provedFalse) + " refused)");
+
+        // A camera close enough that dMin cannot be bounded away from zero must refuse outright,
+        // regardless of threshold -- the documented near-zero bailout, exercised directly rather than
+        // only implied by the sweep above.
+        {
+            View vNear;
+            vNear.eye = Vec3{0.1f, 0.1f, 0.1f};   // effectively inside the instance's own bounds
+            vNear.viewportHeightPx = 1080.0f;
+            vNear.verticalFovRadians = radians(60.0f);
+            const Mat4 view = Mat4::lookAtLH(vNear.eye, Vec3{0, 0, 1}, Vec3{0, 1, 0});
+            const Mat4 proj = Mat4::perspectiveLH(radians(90.0f), 1.0f, 1.0f, 1000000.0f);
+            vNear.viewProj = view * proj;
+            const bool provedNear = trifactor::provablySingleLevelCut(
+                levels, /*candidateLevel=*/0, instanceCenter, instanceRadius, maxClusterRadius,
+                /*thresholdPx=*/1.0f, vNear);
+            check(!provedNear, "a camera inside the instance's own bounds refuses to prove anything");
+        }
+
+        // An out-of-range or empty candidate level refuses outright rather than reading past the table.
+        {
+            View v;
+            v.eye = eyeCentered;
+            v.viewportHeightPx = 1080.0f;
+            v.verticalFovRadians = radians(60.0f);
+            const Mat4 view = Mat4::lookAtLH(eyeCentered, Vec3{0, 0, 0}, Vec3{0, 0, 1});
+            const Mat4 proj = Mat4::perspectiveLH(radians(90.0f), 1.0f, 1.0f, 1000000.0f);
+            v.viewProj = view * proj;
+            check(!trifactor::provablySingleLevelCut(levels, static_cast<u32>(levels.size()), instanceCenter,
+                                                       instanceRadius, maxClusterRadius, 1.0f, v),
+                  "an out-of-range candidate level refuses rather than reading past the table");
+        }
     }
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);

@@ -103,35 +103,49 @@ namespace {
 //
 // The cone (apex, axis, cutoff) is a backface-style culler: a cluster can be skipped once the
 // viewer is far enough around the back of its normal cone that NONE of its triangles can face the
-// camera. Quantizing axis/cutoff to i8 snorm necessarily perturbs both, and the failure mode of
-// perturbing WRONG is asymmetric and much worse in one direction: if the stored cone ends up
-// TIGHTER than the true cone, the culler discards clusters that were actually visible -- geometry
-// popping in and out -- and by the time anyone traces that back to a rounding direction in this
-// function it looks like an occlusion bug or a depth bug, not a quantization bug. Discarding too FEW
-// clusters only costs a little overdraw. So every rounding decision below is pushed toward
-// "cull less", never "cull more":
+// camera. The actual runtime test (aver::trifactor::coneCull / the GPU port in RHIShaders.cpp's
+// clusterConeCull, both PORTED from third_party/meshoptimizer/src/meshoptimizer.h's own documented
+// formula and empirically verified against real meshopt output in
+// tests/trifactor/src/ClusterSelectTest.cpp) culls iff `dot(dirToApexFromEye, axis) >= cutoff` --
+// which means the cull region GROWS toward "every direction" as cutoff falls toward -1, and SHRINKS
+// toward "no direction" as cutoff rises toward +1. So +1.0f is "never cull" and -1.0f is "cull from
+// everywhere" -- SEE ClusterSelect.hpp's file header for the full, separately-verified account. (An
+// earlier version of this function had this backwards -- treated cutoff -1 as the conservative
+// "never cull" end -- which is what made every degenerate-cone and every hemisphere-exceeding
+// cluster get backface-culled from EVERY direction instead of none; see the commit that added this
+// paragraph for the write-up.)
+//
+// Quantizing axis/cutoff to i8 snorm necessarily perturbs both, and the failure mode of perturbing
+// WRONG is asymmetric and much worse in one direction: if the stored cone ends up LARGER (covers
+// more view directions) than the true cull cone, the culler discards clusters that were actually
+// visible -- geometry popping in and out, or (at the extreme this bug produced) a whole mesh
+// vanishing -- and by the time anyone traces that back to a rounding direction in this function it
+// looks like an occlusion bug or a depth bug, not a quantization bug. A cull region that is too
+// SMALL only costs a little overdraw. So every rounding decision below is pushed toward shrinking
+// the stored cull region, i.e. toward cutoff = +1, never toward -1:
 //
 //   1. axis is quantized to the nearest snorm8 direction, like any vector quantization -- but that
-//      necessarily rotates the stored axis away from the true axis by some angle thetaErr. A cone
-//      that is honest about direction `axis` and half-angle acos(cutoff) is no longer a superset of
-//      the true visible set once the rotated axis is swapped in, unless the half-angle is widened by
-//      thetaErr to compensate. So cutoff is loosened (half-angle increased, i.e. the cos value moved
-//      toward -1) by thetaErr BEFORE quantizing it.
-//   2. cutoff is then quantized by FLOORING toward -1, never rounding to nearest, because any
-//      residual quantization error on top of the already-widened value must also fall on the
-//      "wider cone" side.
-//   3. the result is clamped into the representable range, and the case where the true cone cannot
-//      cull anything at all (widened past a full hemisphere) is stored as -127 -- the conservative
-//      "never cull" sentinel, symmetric with +127 rather than the asymmetric -128 some snorm8
-//      conventions reserve.
+//      necessarily rotates the stored axis away from the true axis by some angle thetaErr. A cull
+//      cone of half-angle acos(cutoff) around the ROTATED axis is a subset of the true cull cone
+//      around the true axis only if its own half-angle shrinks by at least thetaErr first (triangle
+//      inequality on the sphere: any direction within the shrunk cone of the rotated axis is within
+//      the ORIGINAL half-angle of the true axis). So cutoff is TIGHTENED (half-angle decreased, i.e.
+//      the cos value moved toward +1) by thetaErr BEFORE quantizing it.
+//   2. cutoff is then quantized by CEILING toward +1, never rounding to nearest, because any
+//      residual quantization error on top of the already-tightened value must also fall on the
+//      "smaller cull region" side.
+//   3. the result is clamped into the representable range, and the case where thetaErr alone
+//      consumes the entire true half-angle (the axis rotated further than the cone's own margin, so
+//      no half-angle is left to shrink) is stored as +127 -- the conservative "never cull" sentinel,
+//      symmetric with -127 rather than the asymmetric -128 some snorm8 conventions reserve.
 struct QuantizedCone {
     i8 axis[3];
     i8 cutoff;
 };
 
-i8 quantizeSnorm8Floor(f32 v) {
+i8 quantizeSnorm8Ceil(f32 v) {
     v = std::max(-1.0f, std::min(1.0f, v));
-    return static_cast<i8>(std::floor(v * 127.0f));
+    return static_cast<i8>(std::ceil(v * 127.0f));
 }
 
 i8 quantizeSnorm8Nearest(f32 v) {
@@ -145,9 +159,10 @@ QuantizedCone quantizeConeConservative(const Vec3& rawAxis, f32 cutoff) {
     const Vec3 a = rawAxis.getSafeNormal();
     if (a.sizeSquared() < 0.5f) {
         // Degenerate/zero axis (e.g. a near-planar-both-ways cluster): no direction is safe to cull
-        // on. Store the "never cull" cone rather than guess one.
+        // on. Store the "never cull" cone rather than guess one. +127, not -127: see this function's
+        // own header comment, point 3.
         q.axis[0] = 0; q.axis[1] = 0; q.axis[2] = 127;
-        q.cutoff  = -127;
+        q.cutoff  = 127;
         return q;
     }
 
@@ -157,19 +172,24 @@ QuantizedCone quantizeConeConservative(const Vec3& rawAxis, f32 cutoff) {
     const Vec3 qaNorm = Vec3{qx / 127.0f, qy / 127.0f, qz / 127.0f}.getSafeNormal();
 
     if (qaNorm.sizeSquared() < 0.5f) {
-        // Quantization collapsed the axis toward zero -- maximally conservative: cull nothing.
+        // Quantization collapsed the axis toward zero -- maximally conservative: cull nothing. +127,
+        // not -127: see this function's own header comment, point 3.
         q.axis[0] = qx; q.axis[1] = qy; q.axis[2] = qz;
-        q.cutoff  = -127;
+        q.cutoff  = 127;
         return q;
     }
 
     const f32 thetaErr = std::acos(std::clamp(dot(a, qaNorm), -1.0f, 1.0f));
     const f32 trueHalfAngle = std::acos(std::clamp(cutoff, -1.0f, 1.0f));
-    const f32 widenedHalfAngle = trueHalfAngle + thetaErr;
-    const f32 widenedCutoff = (widenedHalfAngle >= kPi) ? -1.0f : std::cos(widenedHalfAngle);
+    // Shrink, not widen: see this function's own header comment, point 1. thetaErr can exceed
+    // trueHalfAngle outright (a tight true cone paired with a large axis-quantization error) -- that
+    // is exactly the "no safe margin left" case point 3 describes, handled the same way the
+    // degenerate-axis branches above are: store the sentinel rather than a negative half-angle.
+    const f32 shrunkHalfAngle = trueHalfAngle - thetaErr;
+    const f32 shrunkCutoff = (shrunkHalfAngle <= 0.0f) ? 1.0f : std::cos(shrunkHalfAngle);
 
     q.axis[0] = qx; q.axis[1] = qy; q.axis[2] = qz;
-    q.cutoff  = std::max<i8>(quantizeSnorm8Floor(widenedCutoff), -127);
+    q.cutoff  = std::min<i8>(quantizeSnorm8Ceil(shrunkCutoff), 127);
     return q;
 }
 
