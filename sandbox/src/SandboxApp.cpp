@@ -91,6 +91,8 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "GraphEditor.hpp"
 #include "EditorEuler.hpp"
 #include "EditorPrefs.hpp"
+#include "EditorKeybinds.hpp"
+#include "EditorEntitySnapshot.hpp"
 #include "aver/platform/DirectoryWatcher.hpp"
 #if AVER_HAVE_ROSLYN
 #  include "aver/formats/AverDesign.hpp"
@@ -392,6 +394,9 @@ inline constexpr f32 kEditorGridCell  = 100.0f;    // cm
 inline constexpr f32 kEditorGridHalf  = 1000.0f;   // cm
 // How far in front of the camera Add places a new object.
 inline constexpr f32 kAddDistance     = 400.0f;    // cm
+// Duplicate's fallback nudge off the original, when move-snap is off (snapped, it uses moveSnap_
+// instead, so the copy always lands on the same grid the original does).
+inline constexpr f32 kDuplicateOffset = 50.0f;     // cm
 
 // Drag-drop payload carrying a content-browser item's full path as bytes (content browser ->
 // viewport asset placement). Under ImGui's 32-char payload-type limit; not prefixed with '_'.
@@ -1396,7 +1401,8 @@ public:
                 if (io.MouseDown[2]) { camPos_ -= right * io.MouseDelta.x * 0.02f; camPos_ += up * io.MouseDelta.y * 0.02f; }
             }
             // F frames the selection at a distance derived from its radius.
-            if (levelFocused_ && !io.WantCaptureKeyboard && ImGui::IsKeyPressed(ImGuiKey_F) && anySelected()) {
+            if (levelFocused_ && !io.WantCaptureKeyboard &&
+                keybinds_.pressed(editor::CommandId::ViewFrameSelected, io) && anySelected()) {
                 EditXform x;
                 if (selectedXform(x)) {
                     const f32 r = selectedRadius();
@@ -1433,7 +1439,7 @@ public:
                     releasedByUser_ = false;
             }
             const bool wantCapture = playSessionActive() && !releasedByUser_;
-            if (ImGui::IsKeyPressed(ImGuiKey_F1, false) && ImGui::GetIO().KeyShift && playSessionActive())
+            if (keybinds_.pressed(editor::CommandId::PlayReleaseMouse, ImGui::GetIO()) && playSessionActive())
                 releasedByUser_ = !releasedByUser_;
             // ESCAPE STOPS PLAY-IN-EDITOR, the same action as clicking Stop. Checked here rather
             // than in pushInput: this runs once whether or not the mouse is captured, and it must
@@ -1441,7 +1447,7 @@ public:
             // menu should not also race the editor for what the key means.
             // Escape ends a drone stand-in too. Play started it, so Play's exit has to end it, or
             // the only way out is a menu item the user has no reason to think is involved.
-            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && (playSessionActive() || dronePlayActive()))
+            if (keybinds_.pressed(editor::CommandId::PlayStop, ImGui::GetIO()) && (playSessionActive() || dronePlayActive()))
                 stopPlay();
             if (!playSessionActive()) releasedByUser_ = false;
             setMouseCaptured(wantCapture && !ImGui::GetIO().WantTextInput);
@@ -1496,6 +1502,15 @@ public:
         // --chunk-stream immediately below so a --frames capture run can prove it without a human
         // clicking Window > Drone.
         if (droneAutoFrames_ > 0 && --droneAutoFrames_ == 0) setDroneEnabled(true);
+        // --undo-test: fires runUndoTest() N frames in, then the process exits -- see its own
+        // comment for what it proves and why it exits rather than returning. runUndoTest() itself
+        // lives inside the same `#if AVER_WITH_IMGUI` block as deleteSelection/copySelection/
+        // pasteClipboard/duplicateSelection (the commands it is proving), so this call site needs
+        // the same guard.
+#if AVER_WITH_IMGUI
+        if (undoTestAutoFrames_ > 0 && --undoTestAutoFrames_ == 0) runUndoTest(e);
+        if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
+#endif
 #if AVER_MODULE_SCRIPTING
         // Ticks the graph-driven drone, if one is live. Runs BEFORE chunk streaming below so this
         // frame's drone position/velocity are what chunk streaming's extra StreamSource (and the log
@@ -3763,7 +3778,17 @@ public:
     // --chunk-stream. Member and setter are unguarded for the same reason chunkStreamAutoFrames_ is
     // (the countdown in onUpdate is what's actually AVER_MODULE_SCENE-gated).
     void setDroneAuto(int framesIn) { droneAutoFrames_ = framesIn; }
+    // --undo-test [N]: frames left before runUndoTest() fires and the process exits, same shape as
+    // --drone/--chunk-stream. See runUndoTest()'s own comment for what it actually proves.
+    void setUndoTestAuto(int framesIn) { undoTestAutoFrames_ = framesIn; }
+    // --keybind-test write|read [N]: frames left before runKeybindPersistTest(mode) fires and the
+    // process exits. See that function's own comment for what the two modes prove between them.
+    void setKeybindTestAuto(std::string mode, int framesIn) {
+        keybindTestMode_ = std::move(mode); keybindTestAutoFrames_ = framesIn;
+    }
     void setShowEditorPrefs(bool on) { if (on) showEditorPrefs_ = true; }   // --editor-prefs
+    // --scroll-prefs-to-keybinds: see the one-shot flag's own comment in buildEditorPrefs().
+    void setScrollPrefsToKeybinds(bool on) { scrollPrefsToKeybinds_ = on; }
     void setHudTest(int idx) { hudTest_ = idx; }   // --hud-preview <index>
     void setSaveProject(bool on) { saveProject_ = on; }   // --save-project
     // Queues one Content Browser import to run on startup. --import <src> <destDir>.
@@ -4742,6 +4767,9 @@ private:
     // and immediately evict it. --no-chunk-stream turns it off for a static scene.
     int chunkStreamAutoFrames_ = 5;
     int droneAutoFrames_ = 0;        // --drone: frames left before auto-enabling, 0 = off
+    int undoTestAutoFrames_ = 0;     // --undo-test: frames left before runUndoTest() fires, 0 = off
+    int keybindTestAutoFrames_ = 0;  // --keybind-test: frames left before it fires, 0 = off
+    std::string keybindTestMode_;    // "write" or "read"
     static constexpr int kAutoCompileQuietMs = 500;
     std::chrono::steady_clock::time_point autoCompileDue_{};
     int autoCompilePending_ = 0;
@@ -4898,8 +4926,8 @@ private:
         if (releasedByUser_ && playSessionActive()) return;
         ImGuiIO& io = ImGui::GetIO();
         const bool kb = !io.WantCaptureKeyboard;
-        const bool chordSpace = io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Space, false);
-        const bool chordEsc   = drawer_ != Drawer::None && ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+        const bool chordSpace = keybinds_.pressed(editor::CommandId::DrawerToggleContent, io);
+        const bool chordEsc   = drawer_ != Drawer::None && keybinds_.pressed(editor::CommandId::DrawerDismiss, io);
         for (int i = 0; i < 26; ++i) aver_fw_input_set_key(AVER_FW_KEY_A + i, kb && ImGui::IsKeyDown((ImGuiKey)(ImGuiKey_A + i)));
         for (int i = 0; i < 10; ++i) aver_fw_input_set_key(AVER_FW_KEY_0 + i, kb && ImGui::IsKeyDown((ImGuiKey)(ImGuiKey_0 + i)));
         aver_fw_input_set_key(AVER_FW_KEY_SPACE,  kb && !chordSpace && ImGui::IsKeyDown(ImGuiKey_Space));
@@ -5048,19 +5076,30 @@ private:
     // Stable identity for an undoable object, so a command survives the entity being recreated.
     using EditId = u32;
 
-    // One undoable edit: a transform change, a create, or a destroy, with everything needed to
-    // rebuild a destroyed scene entity held by value.
+    // One undoable edit: a transform change, or a create/destroy of either a scene entity or a
+    // placeholder MeshObj (objects_), with everything needed to rebuild what was destroyed held by
+    // value. CreateObj/DestroyObj are the MeshObj-world's own Create/Destroy -- the placeholder path
+    // used to push no undo entry at all for an add or a delete (see deleteSelection()'s objects_
+    // branch below); these two kinds close that gap without forcing MeshObj through the scene-entity
+    // machinery it isn't part of.
+    //
+    // asset/meshId/material, which this struct used to carry directly, are gone: describeEntity()
+    // now captures every component an entity has (not just CMeshRenderer) via EntitySnapshot --
+    // see EditorEntitySnapshot.hpp for why that file exists and what it deliberately does not
+    // capture (hierarchy; CName's internal blob offsets).
     struct EditCmd {
-        enum class Kind { Transform, Create, Destroy };
+        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj };
         Kind kind = Kind::Transform;
         EditId id = 0;            // a scene entity, through the indirection
         int objIndex = -1;        // or an objects_ index, for the placeholder scene
         EditXform before{}, after{};
-        std::string asset, label;
-        u64 meshId = 0;
-        i32 material = 0;
+        std::string label;        // outliner display name; editor-owned bookkeeping, not World's
+#if AVER_MODULE_SCENE
+        editor::EntitySnapshot snap;    // scene entity: asset name, persisted id, every other component
+#endif
         bool hadBody = false;
         Vec3 bodyHalf{0,0,0};
+        MeshObj objSnapshot{};    // CreateObj/DestroyObj payload; MeshObj is trivially copyable
     };
 
     // Returns the edit id bound to an entity, minting one on first use.
@@ -5150,21 +5189,22 @@ private:
     }
 
 #if AVER_MODULE_SCENE
-    // Describes a live entity fully enough to rebuild it after a destroy.
+    // Describes a live entity fully enough to rebuild it after a destroy: its outliner label (the
+    // editor's own bookkeeping, not World's), its transform, its physics-body half-extent if any,
+    // and -- via captureEntity() -- its asset name, persisted object id, and every OTHER component
+    // it carries, generically. Shared by Delete (undo), Copy and Duplicate: all three need exactly
+    // "everything it would take to build this again", just for different reasons.
     EditCmd describeEntity(scene::Entity e) {
         scene::World& w = scene::World::instance();
         EditCmd c;
         c.id = editIdFor(e);
-        c.asset = w.name(e);
         if (const auto it = entityLabels_.find(static_cast<u32>(e)); it != entityLabels_.end()) c.label = it->second;
         if (const auto* loc = w.component<scene::CLocal>(e, scene::kComponentLocal)) {
             c.after.pos = loc->xf.position;
             c.after.rotDeg = eulerDegFromQuat(loc->xf.rotation);
             c.after.scale = loc->xf.scale;
         }
-        if (const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer)) {
-            c.meshId = mr->mesh; c.material = mr->material;
-        }
+        c.snap = editor::captureEntity(w, e);
 #if AVER_MODULE_PHYSICS
         if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
             c.hadBody = true;
@@ -5174,30 +5214,52 @@ private:
         return c;
     }
 
-    // Rebuilds an entity a command destroyed and rebinds its EditId to the new handle.
-    void recreateFrom(const EditCmd& c) {
+    // Builds a scene entity from a snapshot at `xf`, wires it into the editor's own bookkeeping
+    // (levelEntities_, entityLabels_, a physics body if it had one), selects it, and returns it (or
+    // kInvalidEntity if the world refused). This is the shared tail recreateFrom()/pasteClipboard()/
+    // duplicateSelection() all need -- generalized from CMeshRenderer-only to whatever the snapshot
+    // captured, via EditorEntitySnapshot.hpp's instantiateEntity().
+    //
+    // restoreObjectId: true for recreateFrom (undo/redo -- the SAME logical entity must come back
+    // with the SAME persisted identity), false for Paste/Duplicate (a NEW entity, which must NOT
+    // clone the source's objectId -- see instantiateEntity()'s own comment for why that would be
+    // wrong).
+    //
+    // spawnCube()/spawnFromAssetDrop() do NOT go through this: they build a fresh entity with no
+    // prior snapshot to instantiate FROM, and refactoring their own working create tails onto this
+    // path is out of scope here (real regression risk on two paths that already work, for no
+    // required behaviour change) -- see the report this change shipped with.
+    scene::Entity spawnEntityFrom(const editor::EntitySnapshot& snap, const EditXform& xf,
+                                   const std::string& label, bool hadBody, const Vec3& bodyHalf,
+                                   bool restoreObjectId = true) {
         scene::World& w = scene::World::instance();
-        Transform xf; xf.position = c.after.pos; xf.rotation = quatFromEulerDeg(c.after.rotDeg); xf.scale = c.after.scale;
-        const scene::Entity e = w.create(c.asset, scene::kInvalidEntity, xf);
-        if (e == scene::kInvalidEntity) { AVER_WARN("[Editor] undo: the world refused to recreate '{}'", c.asset); return; }
-        if (auto* mr = static_cast<scene::CMeshRenderer*>(w.addComponent(e, scene::kComponentMeshRenderer))) {
-            mr->mesh = c.meshId; mr->material = c.material;
-            mr->flags |= scene::kMeshRendererVisible;
-            mr->aabbMin[0] = mr->aabbMin[1] = mr->aabbMin[2] = -1.0f;
-            mr->aabbMax[0] = mr->aabbMax[1] = mr->aabbMax[2] =  1.0f;
+        Transform t; t.position = xf.pos; t.rotation = quatFromEulerDeg(xf.rotDeg); t.scale = xf.scale;
+        const scene::Entity e = editor::instantiateEntity(w, snap, t, scene::kInvalidEntity, restoreObjectId);
+        if (e == scene::kInvalidEntity) {
+            AVER_WARN("[Editor] the world refused to create '{}'", snap.asset);
+            return e;
         }
         levelEntities_.push_back(e);
-        if (!c.label.empty()) entityLabels_[static_cast<u32>(e)] = c.label;
+        if (!label.empty()) entityLabels_[static_cast<u32>(e)] = label;
 #if AVER_MODULE_PHYSICS
-        if (c.hadBody && aver_phys_ready()) {
-            const int32_t body = aver_phys_add_static_box(xf.position.x, xf.position.y, xf.position.z,
-                                                          c.bodyHalf.x, c.bodyHalf.y, c.bodyHalf.z);
+        if (hadBody && aver_phys_ready()) {
+            const int32_t body = aver_phys_add_static_box(t.position.x, t.position.y, t.position.z,
+                                                          bodyHalf.x, bodyHalf.y, bodyHalf.z);
             levelBodies_.push_back(body);
             entityBodies_[static_cast<u32>(e)] = body;
         }
 #endif
-        rebindEdit(c.id, e);
         sel_ = kSelScene; selEntity_ = e;
+        return e;
+    }
+
+    // Rebuilds an entity a command destroyed and rebinds its EditId to the new handle -- the ONE
+    // caller of spawnEntityFrom that must preserve the original EditId rather than mint a fresh one,
+    // since a later redo/undo of the SAME command needs to keep finding the same logical entity.
+    void recreateFrom(const EditCmd& c) {
+        const scene::Entity e = spawnEntityFrom(c.snap, c.after, c.label, c.hadBody, c.bodyHalf);
+        if (e == scene::kInvalidEntity) return;
+        rebindEdit(c.id, e);
     }
 
     // Removes an entity and everything the editor hung off it, including its static body.
@@ -5221,6 +5283,15 @@ private:
     bool canRedo() const { return !redoStack_.empty(); }
 
     // Reverses the newest command and moves it to the redo stack.
+    //
+    // CreateObj/DestroyObj address objects_ directly by the index captured when the command was
+    // pushed. That index is guaranteed valid when the command is reached: undo/redo only ever pop
+    // the stack's back() (strict LIFO, see pushEdit()), so any entry pushed AFTER this one sits
+    // above it and is necessarily undone first -- the vector is always back in exactly the state it
+    // was in when this entry was captured. This depends on one invariant: nothing outside the undo
+    // path may insert/erase objects_ without also clearing undoStack_/redoStack_ -- already true
+    // today (level load/new-level clears both alongside objects_/levelEntities_), and now documented
+    // as the rule any future objects_-mutating code must keep.
     void undo() {
         if (undoStack_.empty()) return;
         EditCmd c = undoStack_.back(); undoStack_.pop_back();
@@ -5230,14 +5301,24 @@ private:
             case EditCmd::Kind::Create:    destroyEntity(entityForEdit(c.id));
                                            sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
             case EditCmd::Kind::Destroy:   recreateFrom(c); break;
-#else
-            default: break;
 #endif
+            case EditCmd::Kind::CreateObj:   // undo a create: take it back out
+                if (c.objIndex >= 0 && c.objIndex < (int)objects_.size())
+                    objects_.erase(objects_.begin() + c.objIndex);
+                sel_ = -1; selEntity_ = kInvalidId;
+                break;
+            case EditCmd::Kind::DestroyObj:  // undo a destroy: put it back at its old index
+                if (c.objIndex >= 0 && c.objIndex <= (int)objects_.size())
+                    objects_.insert(objects_.begin() + c.objIndex, c.objSnapshot);
+                sel_ = c.objIndex; selEntity_ = kInvalidId;
+                break;
+            default: break;   // Create/Destroy (scene) fall here when AVER_MODULE_SCENE is off
         }
         redoStack_.push_back(std::move(c));
     }
 
-    // Re-applies the newest undone command and moves it back to the undo stack.
+    // Re-applies the newest undone command and moves it back to the undo stack. See undo()'s own
+    // comment for why CreateObj/DestroyObj's raw objIndex addressing is safe.
     void redo() {
         if (redoStack_.empty()) return;
         EditCmd c = redoStack_.back(); redoStack_.pop_back();
@@ -5247,9 +5328,18 @@ private:
             case EditCmd::Kind::Create:    recreateFrom(c); break;
             case EditCmd::Kind::Destroy:   destroyEntity(entityForEdit(c.id));
                                            sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
-#else
-            default: break;
 #endif
+            case EditCmd::Kind::CreateObj:   // redo a create: put it back
+                if (c.objIndex >= 0 && c.objIndex <= (int)objects_.size())
+                    objects_.insert(objects_.begin() + c.objIndex, c.objSnapshot);
+                sel_ = c.objIndex; selEntity_ = kInvalidId;
+                break;
+            case EditCmd::Kind::DestroyObj:  // redo a destroy: take it back out
+                if (c.objIndex >= 0 && c.objIndex < (int)objects_.size())
+                    objects_.erase(objects_.begin() + c.objIndex);
+                sel_ = -1; selEntity_ = kInvalidId;
+                break;
+            default: break;   // Create/Destroy (scene) fall here when AVER_MODULE_SCENE is off
         }
         undoStack_.push_back(std::move(c));
     }
@@ -5438,6 +5528,16 @@ private:
         objects_.push_back(c);
         // Unguarded: the placeholder-world fallback, reached with SCENE off too.
         sel_ = (int)objects_.size() - 1; selEntity_ = kInvalidId;
+        // Pushes a CreateObj undo entry -- this branch used to push NOTHING, which meant adding a
+        // placeholder cube (the DEFAULT path whenever no level is loaded, per this function's own
+        // `hideEditorScene_ || !levelPath_.empty()` guard above) was silently non-undoable. Mirrors
+        // the scene branch's own describeEntity()+pushEdit() tail just above, minus the indirection
+        // through EditId/World that only the scene entity needs.
+        EditCmd edit;
+        edit.kind = EditCmd::Kind::CreateObj;
+        edit.objIndex = sel_;
+        edit.objSnapshot = c;
+        pushEdit(std::move(edit));
     }
 
 #if AVER_WITH_IMGUI
@@ -5725,20 +5825,23 @@ private:
             // 1..4 select a tool WITHIN the active mode, so the same keys mean "the four things this
             // mode does" rather than being a single flat list that grows every time a mode is added.
             // Tab switches mode, which is the one binding that has to mean the same thing in both.
-            if (ImGui::IsKeyPressed(ImGuiKey_Tab)) toggleEditorMode();
+            // Both halves of the 1..4 dispatch are modelled as 4 commands, not 8 (ToolSelect..Scale
+            // and SculptRaise..Flatten), whose scopes never overlap because mode_ can only be one
+            // value at a time -- see EditorKeybinds.hpp's Scope comment.
+            if (keybinds_.pressed(editor::CommandId::ModeToggleLandscape, io)) toggleEditorMode();
 #if AVER_MODULE_LANDSCAPE
             if (mode_ == EditorMode::Landscape) {
-                if (ImGui::IsKeyPressed(ImGuiKey_1)) sculptTool_=SculptTool::Raise;
-                if (ImGui::IsKeyPressed(ImGuiKey_2)) sculptTool_=SculptTool::Lower;
-                if (ImGui::IsKeyPressed(ImGuiKey_3)) sculptTool_=SculptTool::Smooth;
-                if (ImGui::IsKeyPressed(ImGuiKey_4)) sculptTool_=SculptTool::Flatten;
+                if (keybinds_.pressed(editor::CommandId::SculptRaise, io))   sculptTool_=SculptTool::Raise;
+                if (keybinds_.pressed(editor::CommandId::SculptLower, io))   sculptTool_=SculptTool::Lower;
+                if (keybinds_.pressed(editor::CommandId::SculptSmooth, io))  sculptTool_=SculptTool::Smooth;
+                if (keybinds_.pressed(editor::CommandId::SculptFlatten, io)) sculptTool_=SculptTool::Flatten;
             } else
 #endif
             {
-                if (ImGui::IsKeyPressed(ImGuiKey_1)) tool_=Tool::Select;
-                if (ImGui::IsKeyPressed(ImGuiKey_2)) tool_=Tool::Move;
-                if (ImGui::IsKeyPressed(ImGuiKey_3)) tool_=Tool::Rotate;
-                if (ImGui::IsKeyPressed(ImGuiKey_4)) tool_=Tool::Scale;
+                if (keybinds_.pressed(editor::CommandId::ToolSelect, io)) tool_=Tool::Select;
+                if (keybinds_.pressed(editor::CommandId::ToolMove, io))   tool_=Tool::Move;
+                if (keybinds_.pressed(editor::CommandId::ToolRotate, io)) tool_=Tool::Rotate;
+                if (keybinds_.pressed(editor::CommandId::ToolScale, io))  tool_=Tool::Scale;
             }
 #if AVER_MODULE_LANDSCAPE
             if (landscapeLoaded_) {
@@ -5794,12 +5897,17 @@ private:
             }
         }
 
-        if (levelFocused_ && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete, false))
-            deleteSelection();
-
-        if (levelFocused_ && io.KeyCtrl && !io.WantTextInput) {
-            if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) { if (io.KeyShift) redo(); else undo(); }
-            if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) redo();
+        if (levelFocused_ && !io.WantTextInput) {
+            if (keybinds_.pressed(editor::CommandId::EditDelete, io))    deleteSelection();
+            if (keybinds_.pressed(editor::CommandId::EditCopy, io))      copySelection();
+            if (keybinds_.pressed(editor::CommandId::EditPaste, io))     pasteClipboard();
+            if (keybinds_.pressed(editor::CommandId::EditDuplicate, io)) duplicateSelection();
+            if (keybinds_.pressed(editor::CommandId::EditUndo, io)) undo();
+            // Ctrl+Shift+Z: an intentionally NOT-rebindable alternate spelling of Redo (same command,
+            // not a second one) -- kept as a small hardcoded fallback next to the registry-driven
+            // checks, exactly as it was hardcoded before this file existed.
+            if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)) redo();
+            if (keybinds_.pressed(editor::CommandId::EditRedo, io)) redo();
         }
 
         if (dragging_ && anySelected()) {
@@ -5936,7 +6044,13 @@ private:
 #endif
 
 #if AVER_WITH_IMGUI
-    // Removes the selected entity or placeholder object from the world. Pseudo-entries are ignored.
+    // Removes the selected entity or placeholder object from the world, pushing an undo entry
+    // either way. Pseudo-entries (sun/sky/post) are ignored -- sel_ never lands here for them.
+    //
+    // The objects_ branch below now pushes a DestroyObj entry; it used to push nothing at all,
+    // which meant deleting a placeholder object -- the default path whenever no level is loaded,
+    // per spawnCube()'s own `hideEditorScene_ || !levelPath_.empty()` condition -- was silently
+    // non-undoable. Closing that gap is in scope for "Delete", not a new regression.
     void deleteSelection() {
 #if AVER_MODULE_SCENE
         if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity) {
@@ -5954,9 +6068,302 @@ private:
         }
 #endif
         if (sel_ >= 0 && sel_ < (int)objects_.size()) {
+            EditCmd c;
+            c.kind = EditCmd::Kind::DestroyObj;
+            c.objIndex = sel_;
+            c.objSnapshot = objects_[sel_];
             objects_.erase(objects_.begin() + sel_);
+            pushEdit(std::move(c));
             sel_ = -1;
         }
+    }
+
+    // Copies the selection into the editor's own clipboard. A pure read: nothing changes in the
+    // world, so nothing is pushed onto the undo stack. hasScene/hasObject are set exclusively of
+    // each other, mirroring the existing loose pairing of sel_/selEntity_ rather than introducing a
+    // variant type for two cases that are already mutually exclusive by construction.
+    void copySelection() {
+#if AVER_MODULE_SCENE
+        if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selEntity_)) {
+            const EditCmd c = describeEntity(selEntity_);
+            clipboard_.hasScene   = true;
+            clipboard_.sceneSnap  = c.snap;
+            clipboard_.sceneXform = c.after;
+            clipboard_.hadBody    = c.hadBody;
+            clipboard_.bodyHalf   = c.bodyHalf;
+            clipboard_.hasObject  = false;
+            return;
+        }
+#endif
+        if (movableSelected()) {
+            clipboard_.hasObject = true;
+            clipboard_.object = objects_[sel_];
+#if AVER_MODULE_SCENE
+            clipboard_.hasScene = false;
+#endif
+        }
+    }
+
+    // Rebuilds the clipboard's contents in front of the camera -- the SAME "in front of camera"
+    // convention spawnCube() and dropWorldPoint()'s own fallback already use -- and pushes a FRESH
+    // Create/CreateObj entry, independent of whatever undo entry the ORIGINAL copied thing came
+    // from. Does nothing (silently) when the clipboard is empty; the keybind dispatch that calls
+    // this does not gate on clipboard state, so a no-op Paste-with-nothing-copied is expected, not
+    // an error.
+    void pasteClipboard() {
+        Vec3 at = camPos_ + camForward() * kAddDistance;
+        if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
+#if AVER_MODULE_SCENE
+        if (clipboard_.hasScene) {
+            EditXform x = clipboard_.sceneXform;
+            x.pos = at;
+            const std::string label = makeEntityLabel(std::string(), clipboard_.sceneSnap.asset);
+            const scene::Entity e = spawnEntityFrom(clipboard_.sceneSnap, x, label, clipboard_.hadBody, clipboard_.bodyHalf, /*restoreObjectId=*/false);
+            if (e == scene::kInvalidEntity) return;
+            EditCmd c = describeEntity(e);
+            c.kind = EditCmd::Kind::Create;
+            pushEdit(std::move(c));
+            AVER_INFO("[Editor] pasted entity #{}", (u32)e);
+            return;
+        }
+#endif
+        if (clipboard_.hasObject) {
+            MeshObj o = clipboard_.object;
+            o.pos = at;
+            o.name = makeEntityLabel(clipboard_.object.name, clipboard_.object.name);
+            objects_.push_back(o);
+            sel_ = (int)objects_.size() - 1; selEntity_ = kInvalidId;
+            EditCmd c;
+            c.kind = EditCmd::Kind::CreateObj;
+            c.objIndex = sel_;
+            c.objSnapshot = o;
+            pushEdit(std::move(c));
+        }
+    }
+
+    // Rebuilds the SELECTION (not the clipboard) offset by a small fixed delta from where it already
+    // sits -- Duplicate makes a visible sibling next to the original, where Paste restores a place at
+    // the copied transform; the two verbs get separately-reasoned placement rather than sharing one
+    // policy. Never touches clipboard_, so Duplicate does not clobber whatever the user last copied.
+    void duplicateSelection() {
+        const f32 delta = snapMove_ ? moveSnap_ : kDuplicateOffset;
+#if AVER_MODULE_SCENE
+        if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selEntity_)) {
+            const EditCmd src = describeEntity(selEntity_);
+            EditXform x = src.after;
+            x.pos.x += delta; x.pos.y += delta;
+            const std::string label = makeEntityLabel(std::string(), src.snap.asset);
+            const scene::Entity e = spawnEntityFrom(src.snap, x, label, src.hadBody, src.bodyHalf, /*restoreObjectId=*/false);
+            if (e == scene::kInvalidEntity) return;
+            EditCmd c = describeEntity(e);
+            c.kind = EditCmd::Kind::Create;
+            pushEdit(std::move(c));
+            AVER_INFO("[Editor] duplicated entity #{}", (u32)e);
+            return;
+        }
+#endif
+        if (movableSelected()) {
+            MeshObj o = objects_[sel_];
+            o.pos.x += delta; o.pos.y += delta;
+            o.name = makeEntityLabel(objects_[sel_].name, objects_[sel_].name);
+            objects_.push_back(o);
+            sel_ = (int)objects_.size() - 1; selEntity_ = kInvalidId;
+            EditCmd c;
+            c.kind = EditCmd::Kind::CreateObj;
+            c.objIndex = sel_;
+            c.objSnapshot = o;
+            pushEdit(std::move(c));
+        }
+    }
+
+    // --undo-test [N]: a headless, in-process proof that Copy/Paste/Duplicate/Delete/Undo/Redo
+    // actually work at runtime, not just that they compile or that EditorEntitySnapshot's capture/
+    // restore round-trips in isolation (EditorEntitySnapshotTest already covers that). Fires N
+    // frames into a --frames run (see the countdown in onUpdate), calls the REAL private methods
+    // this file implements these commands with against a REAL scene::World and a REAL objects_
+    // vector, asserts the world's actual state after every step, prints one PASS/FAIL line per
+    // assertion tagged [undo-test], and exits the process with 0 (everything held) or 1 (something
+    // didn't) -- never returns, so it never risks a window staying open past the check.
+    //
+    // Two phases, run back to back in one call: Phase A forces the scene-entity branch every editor
+    // command has (hideEditorScene_=true) and exercises describeEntity/spawnEntityFrom/undo/redo
+    // through it; Phase B forces the placeholder-object branch (hideEditorScene_=false, no level)
+    // and exercises the SAME six commands against objects_/MeshObj -- the path that, before this
+    // change, silently pushed no undo entry for Create or Destroy at all (see deleteSelection()'s
+    // own comment). Phase B runs even with AVER_MODULE_SCENE off, since objects_ needs it.
+    void runUndoTest(Engine& eng) {
+        int failures = 0;
+        auto check = [&](bool cond, const char* what) {
+            if (cond) AVER_INFO("[undo-test] PASS: {}", what);
+            else      { AVER_ERROR("[undo-test] FAIL: {}", what); ++failures; }
+        };
+
+#if AVER_MODULE_SCENE
+        {
+            scene::World& w = scene::World::instance();
+            // flush() is what actually retires a destroy() and makes count()/valid() see it --
+            // World.cpp: destroy() only sets a pending bit and queues the entity; the slot stays
+            // "live" until the next flush() runs (that is also why an undo of the SAME destroy still
+            // works: recreateFrom() doesn't need the slot freed, it just creates a new one and
+            // rebinds the EditId). The normal per-frame loop calls flush() once a frame on its own
+            // (see the call site above onUpdate's own doc comment); this test crams several destroys
+            // into ONE frame, so it has to call flush() itself after each one to see the same
+            // eventually-consistent state a human clicking Delete across several real frames would.
+            const u32 base = w.count();
+            hideEditorScene_ = true;   // forces spawnCube()'s scene-entity branch, see its own `if`
+
+            spawnCube(eng);
+            w.flush();
+            const scene::Entity a1 = selEntity_;
+            check(sel_ == kSelScene && w.valid(a1) && w.count() == base + 1, "spawnCube creates one scene entity");
+
+            // A custom object id, deliberately NOT the fnv1a64(asset name) a fresh create() assigns
+            // on its own -- World::create()/setName both compute that same default hash regardless
+            // of restoreObjectId (confirmed against World.cpp/OcWorld.cpp), so two entities sharing
+            // an asset name naturally share a default objectId. Only a CUSTOM value distinguishes
+            // "this id was deliberately carried over" (undo/redo) from "this id is just whatever a
+            // fresh create() computes" (paste/duplicate) -- which is exactly the distinction
+            // restoreObjectId exists to make, so the test has to force it into being observable.
+            const u64 customId = 0x00A5EA55u;
+            w.setObjectId(a1, customId);
+            check(w.objectId(a1) == customId, "setObjectId sets the custom id the rest of this phase checks for");
+
+            deleteSelection();
+            w.flush();
+            check(!w.valid(a1) && w.count() == base, "deleteSelection removes the scene entity");
+
+            undo();
+            w.flush();
+            const scene::Entity a2 = selEntity_;
+            check(sel_ == kSelScene && w.valid(a2) && w.count() == base + 1, "undo restores the deleted entity");
+            check(w.valid(a2) && w.objectId(a2) == customId, "undo restores the SAME (custom) persisted object id");
+
+            redo();
+            w.flush();
+            check(w.count() == base, "redo re-deletes the restored entity");
+
+            undo();
+            w.flush();
+            const scene::Entity a3 = selEntity_;
+            check(sel_ == kSelScene && w.valid(a3) && w.count() == base + 1, "a second undo restores it again");
+            check(w.valid(a3) && w.objectId(a3) == customId, "the custom object id survives a second undo too");
+
+            copySelection();
+            pasteClipboard();
+            w.flush();
+            const scene::Entity b1 = selEntity_;   // pasteClipboard() selects the pasted copy
+            check(w.valid(b1) && b1 != a3 && w.count() == base + 2, "paste creates a second, distinct entity");
+            check(w.valid(b1) && w.objectId(b1) != customId,
+                  "paste's copy does NOT clone a's custom object id (see instantiateEntity's restoreObjectId)");
+
+            duplicateSelection();   // duplicates b1, the current selection
+            w.flush();
+            const scene::Entity c1 = selEntity_;
+            check(w.valid(c1) && c1 != b1 && w.count() == base + 3, "duplicate creates a third, distinct entity");
+            check(w.valid(c1) && w.objectId(c1) != customId, "duplicate's copy also does not clone the custom object id");
+
+            undo(); w.flush(); check(w.count() == base + 2, "unwind 1/3: undoes duplicate's Create");
+            undo(); w.flush(); check(w.count() == base + 1, "unwind 2/3: undoes paste's Create");
+            undo(); w.flush(); check(w.count() == base,     "unwind 3/3: undoes the original spawn's Create");
+        }
+#else
+        AVER_INFO("[undo-test] AVER_MODULE_SCENE is off; skipping the scene-entity phase");
+#endif
+        {
+            const usize objBase = objects_.size();
+            hideEditorScene_ = false;   // forces spawnCube()'s placeholder-object branch instead
+            sel_ = -1; selEntity_ = kInvalidId;
+
+            spawnCube(eng);
+            check(sel_ >= 0 && (usize)sel_ < objects_.size() && objects_.size() == objBase + 1,
+                  "spawnCube (placeholder branch) adds one object");
+
+            deleteSelection();
+            check(objects_.size() == objBase, "deleteSelection removes the placeholder object");
+
+            undo();
+            check(objects_.size() == objBase + 1 && sel_ >= 0 && (usize)sel_ < objects_.size(),
+                  "undo restores the deleted placeholder object -- THIS DID NOT EXIST before this change");
+
+            redo();
+            check(objects_.size() == objBase, "redo re-deletes the placeholder object");
+
+            undo();
+            check(objects_.size() == objBase + 1, "a second undo restores the placeholder object again");
+
+            copySelection();
+            pasteClipboard();
+            check(objects_.size() == objBase + 2, "paste creates a second placeholder object");
+
+            duplicateSelection();
+            check(objects_.size() == objBase + 3, "duplicate creates a third placeholder object");
+
+            undo(); check(objects_.size() == objBase + 2, "unwind 1/3: undoes duplicate's CreateObj");
+            undo(); check(objects_.size() == objBase + 1, "unwind 2/3: undoes paste's CreateObj");
+            undo(); check(objects_.size() == objBase,     "unwind 3/3: undoes the original spawn's CreateObj");
+        }
+
+        AVER_INFO("[undo-test] {} failure(s)", failures);
+        std::exit(failures == 0 ? 0 : 1);
+    }
+
+    // --keybind-test write|read: a TWO-PROCESS proof that a keybind rebind survives a restart, and
+    // that conflict detection actually refuses rather than silently stealing a chord -- the task's
+    // own "write a bind, exit, relaunch, read it back" requirement, which a single process cannot
+    // demonstrate (its in-memory KeybindRegistry would just keep working whether or not anything
+    // reached disk). Run once with "write", then AGAIN as a genuinely separate process with "read":
+    //   write: rebinds Edit.Copy to the free chord Ctrl+K (checking it really is Ctrl+C and really
+    //          is free first), and separately attempts to rebind Edit.Paste onto Ctrl+Z -- Edit.
+    //          Undo's own default chord -- which conflictWith() must refuse. Saves and exits.
+    //   read:  a FRESH process, whose keybinds_ has only ever loaded from editor.ini (never called
+    //          rebind() itself), checks Edit.Copy comes back as Ctrl+K -- proving the rebind
+    //          persisted -- and Edit.Paste comes back as its default Ctrl+V, not Ctrl+Z -- proving
+    //          the REFUSED rebind never reached disk in the first place.
+    void runKeybindPersistTest(const std::string& mode) {
+        int failures = 0;
+        auto check = [&](bool cond, const char* what) {
+            if (cond) AVER_INFO("[keybind-test] PASS: {}", what);
+            else      { AVER_ERROR("[keybind-test] FAIL: {}", what); ++failures; }
+        };
+        using editor::CommandId;
+        using editor::Chord;
+
+        if (mode == "write") {
+            check(editor::chordToString(keybinds_.chordFor(CommandId::EditCopy)) == "Ctrl+C",
+                  "Edit.Copy starts at its compiled-in default (Ctrl+C)");
+
+            const Chord ctrlZ{ImGuiKey_Z, true, false, false};   // Edit.Undo's own default chord
+            const bool blocked = !keybinds_.rebind(CommandId::EditPaste, ctrlZ);
+            check(blocked, "rebinding Edit.Paste to Ctrl+Z is REFUSED (Edit.Undo already holds it)");
+            check(editor::chordToString(keybinds_.chordFor(CommandId::EditPaste)) == "Ctrl+V",
+                  "the refused rebind left Edit.Paste's chord unchanged");
+
+            const Chord ctrlK{ImGuiKey_K, true, false, false};   // not any command's default
+            check(keybinds_.conflictWith(CommandId::EditCopy, ctrlK,
+                                          editor::keybindDef(CommandId::EditCopy).scope) == CommandId::Count,
+                  "Ctrl+K is free before the rebind");
+            check(keybinds_.rebind(CommandId::EditCopy, ctrlK), "rebinding Edit.Copy to the free chord Ctrl+K succeeds");
+            check(editor::chordToString(keybinds_.chordFor(CommandId::EditCopy)) == "Ctrl+K",
+                  "Edit.Copy now reads back as Ctrl+K in THIS process' memory");
+
+            keybinds_.saveToPrefs();
+            editor::flushEditorPrefs();
+            AVER_INFO("[keybind-test] wrote keybind.edit.copy=Ctrl+K to {}", editor::editorPrefsPath());
+        } else if (mode == "read") {
+            // loadEditorPreferences() already ran earlier this frame (see prefsLoaded_) and called
+            // keybinds_.loadFromPrefs() -- everything below checks what THAT load produced, in a
+            // process that has never called rebind() at all.
+            check(editor::chordToString(keybinds_.chordFor(CommandId::EditCopy)) == "Ctrl+K",
+                  "a FRESH process reads Edit.Copy back as Ctrl+K from editor.ini -- the rebind persisted");
+            check(editor::chordToString(keybinds_.chordFor(CommandId::EditPaste)) == "Ctrl+V",
+                  "Edit.Paste is still Ctrl+V in a fresh process -- the REFUSED rebind never reached disk");
+        } else {
+            AVER_ERROR("[keybind-test] unknown mode '{}' (want write|read)", mode);
+            ++failures;
+        }
+
+        AVER_INFO("[keybind-test] {} failure(s)", failures);
+        std::exit(failures == 0 ? 0 : 1);
     }
 
     // Unprojects a screen-space point within the viewport rect into a world-space ray. Shared by
@@ -6213,9 +6620,9 @@ private:
         {
             const ImGuiIO& io = ImGui::GetIO();
             if (!io.WantTextInput && !io.WantCaptureKeyboard) {
-                if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Space, false)) toggleDrawer(Drawer::Content);
+                if (keybinds_.pressed(editor::CommandId::DrawerToggleContent, io)) toggleDrawer(Drawer::Content);
                 if (drawer_ != Drawer::None && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
-                    ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+                    keybinds_.pressed(editor::CommandId::DrawerDismiss, io))
                     drawer_ = Drawer::None;
             }
         }
@@ -6283,10 +6690,22 @@ private:
                         const bool open_edit = ImGui::BeginMenu("Edit");
             uiReg_.track("menu.edit");
             if (open_edit){
-                if (ImGui::MenuItem("Undo", "Ctrl+Z", false, canUndo())) undo();
+                if (ImGui::MenuItem("Undo", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditUndo)).c_str(), false, canUndo())) undo();
                 uiReg_.track("edit.undo");
-                if (ImGui::MenuItem("Redo", "Ctrl+Y", false, canRedo())) redo();
+                if (ImGui::MenuItem("Redo", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditRedo)).c_str(), false, canRedo())) redo();
                 uiReg_.track("edit.redo");
+                ImGui::Separator();
+                // Shortcut hints are read from the SAME registry the keypress dispatch in
+                // handleManip() reads from, so a rebind can never leave the menu and the keyboard
+                // disagreeing about what a chord does.
+                if (ImGui::MenuItem("Copy", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditCopy)).c_str(), false, anySelected())) copySelection();
+                uiReg_.track("edit.copy");
+                if (ImGui::MenuItem("Paste", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditPaste)).c_str(), false, clipboard_.hasScene || clipboard_.hasObject)) pasteClipboard();
+                uiReg_.track("edit.paste");
+                if (ImGui::MenuItem("Duplicate", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditDuplicate)).c_str(), false, anySelected())) duplicateSelection();
+                uiReg_.track("edit.duplicate");
+                if (ImGui::MenuItem("Delete", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditDelete)).c_str(), false, anySelected())) deleteSelection();
+                uiReg_.track("edit.delete");
                 ImGui::Separator();
                 if (ImGui::MenuItem("Editor Preferences...")) showEditorPrefs_ = true;
                 uiReg_.track("edit.editorPreferences");
@@ -8055,6 +8474,8 @@ private:
             prefsDevice_->setVSync(prefBool("display.vsync", prefsDevice_->vsync()));
         if (prefsDevice_ && renderScaleOverride_ == 1.0f)   // --render-scale on the command line wins
             prefsDevice_->setRenderScale(prefFloat("display.renderScale", prefsDevice_->renderScale()));
+
+        keybinds_.loadFromPrefs();
     }
 
     // Resolves the stored IDE name to an index, once the async scan has produced the list.
@@ -8092,6 +8513,8 @@ private:
         if (prefsDevice_)
             setPrefFloat("display.renderScale", prefsDevice_->renderScale());
 
+        keybinds_.saveToPrefs();
+
         flushEditorPrefs();
     }
 
@@ -8100,7 +8523,10 @@ private:
         resolvePreferredIdeFromPrefs();
         if (!showEditorPrefs_) return;
         const ImGuiViewport* mv = ImGui::GetMainViewport();
-        ImGui::SetNextWindowSize(ImVec2(560.0f*dpi_, 460.0f*dpi_), ImGuiCond_FirstUseEver);
+        // 460 -> 640: six sections (the Keybinds table added a sixth) no longer fit the old height
+        // on a typical monitor without immediately scrolling; still just a FirstUseEver default, so
+        // anyone who has already resized this window keeps their own size.
+        ImGui::SetNextWindowSize(ImVec2(560.0f*dpi_, 640.0f*dpi_), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowPos(ImVec2(mv->GetCenter().x, mv->GetCenter().y), ImGuiCond_FirstUseEver, ImVec2(0.5f,0.5f));
         if (!ImGui::Begin("Editor Preferences", &showEditorPrefs_, ImGuiWindowFlags_NoDocking)) { ImGui::End(); return; }
 
@@ -8181,6 +8607,15 @@ private:
             ImGui::SliderFloat("Fly speed (cm/s)", &flySpeed_, 20.0f, 20000.0f, "%.0f",
                                ImGuiSliderFlags_Logarithmic);
             ImGui::SliderFloat("Look sensitivity", &lookSpeed_, 0.001f, 0.02f, "%.4f");
+        }
+        // --scroll-prefs-to-keybinds: a one-shot verification aid, same idea as --drawer's own
+        // "put the UI in a state useful for a screenshot" precedent -- Preferences has grown to six
+        // DefaultOpen sections, more than fit one screen at a normal window size, and there is no
+        // human here to scroll. Fires once (consumes its own flag) so it never fights a person who
+        // scrolls the window themselves.
+        if (scrollPrefsToKeybinds_) { ImGui::SetScrollHereY(0.0f); scrollPrefsToKeybinds_ = false; }
+        if (ImGui::CollapsingHeader("Keybinds", ImGuiTreeNodeFlags_DefaultOpen)) {
+            keybinds_.drawPreferencesSection(dpi_);
         }
         ImGui::Separator();
         ImGui::TextDisabled("Preferences apply immediately and are saved for next time.");
@@ -8834,6 +9269,29 @@ private:
     EditXform editBefore_{};
     bool editBeforeValid_ = false;
 
+    // Copy/Duplicate's source, and what Paste rebuilds from. hasScene/hasObject are set exclusively
+    // of each other by copySelection() -- mirrors the existing loose pairing of sel_/selEntity_
+    // rather than a variant type for two cases already mutually exclusive by construction.
+    struct EditorClipboard {
+        bool hasScene = false;
+#if AVER_MODULE_SCENE
+        editor::EntitySnapshot sceneSnap;
+#endif
+        EditXform sceneXform{};
+        bool hadBody = false;
+        Vec3 bodyHalf{0, 0, 0};
+
+        bool hasObject = false;
+        MeshObj object{};
+    };
+    EditorClipboard clipboard_;
+
+    // What chord means what command, defaults matching every hardcoded key this file used before
+    // this registry existed. See EditorKeybinds.hpp for why it lives in its own file.
+#if AVER_WITH_IMGUI
+    editor::KeybindRegistry keybinds_;
+#endif
+
     // Builds an outliner label from a surface name plus an ordinal: "M_Wall" -> "Wall 3". Falls back
     // to the asset's stem.
     std::string makeEntityLabel(const std::string& surface, const std::string& asset) {
@@ -8961,6 +9419,7 @@ private:
     bool showProjectSettings_=false; // Edit > Project Settings window
     bool showWorldSettings_=false;   // Window > World Settings (per-LEVEL settings)
     bool showEditorPrefs_=false;     // Edit > Editor Preferences window
+    bool scrollPrefsToKeybinds_=false;   // --scroll-prefs-to-keybinds, one-shot
     int  settingsPage_=1;            // 0 Description, 1 Rendering>General, 2 >GI, 3 >Ray Tracing, 4 >Path Tracing
     int  focusVoxi_=0;               // --project-settings: frames left to force the window open
     int  msaaOverride_=0;            // --msaa N: apply a sample count at startup
@@ -10803,7 +11262,7 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -10960,6 +11419,8 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--focus-level-at") && i+1<argc) focusLevelAt=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
         else if (!std::strcmp(argv[i],"--editor-prefs")) showPrefs=true;
+        // --scroll-prefs-to-keybinds: see buildEditorPrefs()'s own comment on the flag it sets.
+        else if (!std::strcmp(argv[i],"--scroll-prefs-to-keybinds")) scrollPrefsToKeybinds=true;
         else if (!std::strcmp(argv[i],"--hud-preview") && i+1<argc) hudTest=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--save-project")) saveProject=true;
         else if (!std::strcmp(argv[i],"--import") && i+2<argc) { importSrc=argv[++i]; importDst=argv[++i]; }
@@ -11010,6 +11471,19 @@ Application* createApplication(int argc, char** argv) {
         // reason as --chunk-stream just above: proves it headlessly without a human clicking the menu.
         else if (!std::strcmp(argv[i],"--drone")) {
             droneAuto = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 5;
+        }
+        // --undo-test [N]: fires runUndoTest() N frames in (default 10), then EXITS THE PROCESS
+        // with 0/1 -- see runUndoTest()'s own comment. Same "wait a few frames to settle" shape as
+        // --chunk-stream/--drone, just with a longer default: it needs a live scene::World, and
+        // giving the rest of startup a few extra frames costs nothing in a one-shot test run.
+        else if (!std::strcmp(argv[i],"--undo-test")) {
+            undoTestAuto = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 10;
+        }
+        // --keybind-test write|read [N]: fires runKeybindPersistTest(mode) N frames in (default 10),
+        // then EXITS THE PROCESS with 0/1 -- see that function's own comment.
+        else if (!std::strcmp(argv[i],"--keybind-test") && i+1<argc) {
+            keybindTestMode = argv[++i];
+            keybindTestAuto = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 10;
         }
         // --drawer log|content[:<sub>] opens a bottom drawer, optionally in a Content subfolder.
         else if (!std::strcmp(argv[i],"--drawer") && i+1<argc) {
@@ -11179,6 +11653,7 @@ Application* createApplication(int argc, char** argv) {
     app->setAutoCompile(autoCompile);
     app->setFocusLevelAt(focusLevelAt);
     app->setShowEditorPrefs(showPrefs);
+    app->setScrollPrefsToKeybinds(scrollPrefsToKeybinds);
     app->setHudTest(hudTest);
     app->setSaveProject(saveProject);
     app->setImportOnce(importSrc, importDst);
@@ -11202,6 +11677,8 @@ Application* createApplication(int argc, char** argv) {
     else if (chunkStream < 0) app->setChunkStreamAuto(0);
     if (fogMatch) app->setFogMatchToStreamRadius(true, fogMatchOpacity);
     if (droneAuto > 0) app->setDroneAuto(droneAuto);
+    if (undoTestAuto > 0) app->setUndoTestAuto(undoTestAuto);
+    if (keybindTestAuto > 0) app->setKeybindTestAuto(keybindTestMode, keybindTestAuto);
 #if AVER_MODULE_MCP
     app->setMcpPort(mcpPort);
 #else

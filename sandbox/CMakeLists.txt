@@ -15,6 +15,8 @@ add_executable(Sandbox
   src/ToolsMenu.cpp
   src/GraphEditorGeometry.cpp
   src/GraphEditor.cpp
+  src/EditorKeybinds.cpp
+  src/EditorEntitySnapshot.cpp
   Sandbox.rc)
 target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
 

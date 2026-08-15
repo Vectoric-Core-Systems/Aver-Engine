@@ -83,6 +83,26 @@ target_include_directories(ProjectCopyTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/s
 target_link_libraries(ProjectCopyTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(ProjectCopyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# EditorEntitySnapshotTest -- EditorEntitySnapshot.hpp/.cpp: capture a live entity's components,
+# destroy it, rebuild it from the snapshot, and check the rebuild is byte-exact where it should be
+# and deliberately different where it should be (the transform, which is supplied at instantiate
+# time; the object id, when restoreObjectId=false). This is the lower layer describeEntity()/
+# recreateFrom()/copySelection()/pasteClipboard()/duplicateSelection() in SandboxApp.cpp all build
+# on; --undo-test (Sandbox's own CLI flag, see runUndoTest()'s comment) proves those six commands
+# themselves work end to end through the real undo stack. Needs Aver.Scene for real (a live
+# scene::World, not a fake), unlike EditorPrefsTest/GraphEditorGeometryTest's Sandbox .cpp files,
+# which are why this is its own target rather than folded into one of those.
+if(TARGET Aver.Scene)
+  add_executable(EditorEntitySnapshotTest
+    src/EditorEntitySnapshotTest.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/EditorEntitySnapshot.cpp)
+  target_include_directories(EditorEntitySnapshotTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  # AVER_MODULE_SCENE=1 arrives PUBLIC through Aver.Scene itself (modules/scene/CMakeLists.txt) --
+  # no need to define it a second time here.
+  target_link_libraries(EditorEntitySnapshotTest PRIVATE Aver.Scene Aver.Core Aver.Platform)
+  set_target_properties(EditorEntitySnapshotTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # DumpClusterPs -- prints the composed HLSL (and -D list) for the cluster path's pixel shader, so it
 # can be compiled with dxc offline. A shader here is a C++ string built at runtime from two preludes
 # plus a feature's own source, and the only thing that ever type-checks it is createShader inside a
