@@ -688,6 +688,27 @@ public:
     // Draws the replacement scene, after the colour target is bound.
     virtual void scenePass(IRenderContext& ctx) { (void)ctx; }
 
+    // Draws depth-tested, blended geometry into the SCENE colour target, after every opaque drawMesh
+    // call this frame AND after the deferred sky -- see D3D12Device::endFrame's own comment for
+    // exactly where this sits and why (particles DECIDED 4's own investigation moved it here, from an
+    // original position BEFORE the sky, after finding that ordering silently erased any particle not
+    // also backed by an opaque occluder -- the sky's own opaque, depth-EQUAL-clear fill overwrote it).
+    // THE ENGINE'S FIRST DEPTH-TESTED TRANSPARENT PASS, and the seam particles (smoke, dust, rain,
+    // sparks -- anything that must sit IN the scene, tested against real occluders, rather than pasted
+    // over it the way overlayPass is) will use. A SEAM, not a special case: nothing about "particle"
+    // appears anywhere near this declaration, and any feature may implement it.
+    //
+    // The scene colour AND depth targets are already bound, and the viewport/scissor already set to
+    // the scene rect -- the same contract overlayPass documents for the backbuffer. What is NOT preset
+    // is the pipeline: draw here with a pipeline of your own (ctx.setPipeline), because the standard
+    // opaque scene pipeline is exactly that -- opaque -- and has no blend state that would do anything
+    // useful. Depth-test that pipeline WITH depth-write OFF; see D3D12Device::endFrame's comment at the
+    // call site for what depth-write ON would break, and why.
+    //
+    // DEFAULTED TO A NO-OP, so every feature this engine ships today -- none of which override it --
+    // draws nothing here and the frame is exactly what it always was.
+    virtual void transparentPass(IRenderContext& ctx) { (void)ctx; }
+
     // Draws onto the BACKBUFFER after the camera post chain, before the editor's own UI. The
     // backbuffer is already bound as the sole render target, viewport and scissor already set.
     virtual void overlayPass(IRenderContext& ctx, u32 width, u32 height) {

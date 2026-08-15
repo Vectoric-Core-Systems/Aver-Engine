@@ -44,6 +44,12 @@ void componentDefaultBytes(u32 type, u8* out, usize n) {
         case kComponentCamera:       { CCamera d{};       put(&d, sizeof d); break; }
         case kComponentSkeletalMesh: { CSkeletalMesh d{}; put(&d, sizeof d); break; }
         case kComponentAnimator:     { CAnimator d{};     put(&d, sizeof d); break; }
+        // Every field of CParticleEmitter default-initialises to zero (see Components.hpp's own
+        // comment on why kParticleEmitterStopped is a NEGATIVE flag), so this case is a behavioural
+        // no-op today -- the memset above already produced the right bytes. Listed anyway, matching
+        // every other built-in component here: the day one of those defaults stops being zero, this
+        // switch is what keeps a directly-attached CParticleEmitter from silently reading wrong.
+        case kComponentParticleEmitter: { CParticleEmitter d{}; put(&d, sizeof d); break; }
         default: break;
     }
 }

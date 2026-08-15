@@ -1,0 +1,17 @@
+OCPARTICLE 1
+NAME Snowfall
+# Steady falling snow -- the expressiveness-test case slice 2/4 flagged as checked analytically only,
+# never rendered. Same fields as every other effect in this format: emission shape/rate, lifetime,
+# initial velocity/spread, gravity, damping, size and colour over life, blend mode. No new code.
+SHAPE box 400 400 15
+BLEND alphablend
+EMISSION 140 0 700
+LIFETIME 7 10
+DIRECTION 0 0 -1 10
+SPEED 25 40
+GRAVITY 0 0 -3
+DAMPING 0.4
+SIZE 3 4
+COLOR start 1 1 1 0.85
+COLOR end 1 1 1 0.6
+GI on

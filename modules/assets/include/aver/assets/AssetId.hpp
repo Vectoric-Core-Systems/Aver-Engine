@@ -26,6 +26,7 @@ enum class AssetType : u32 {
     Anim,     // .ocanim
     Prefab,   // .ocprefab
     Aero,     // .ocaero
+    Particle, // .ocparticle
 };
 
 // Maps a filename to an AssetType. Case-insensitive on the extension.

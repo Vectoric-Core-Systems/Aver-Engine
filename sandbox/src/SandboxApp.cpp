@@ -114,6 +114,13 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/occlusion/Occlusion.hpp"
 #endif
 
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+#include "aver/particles/ParticleEffectLibrary.hpp"
+#include "aver/particles/ParticleRenderer.hpp"
+#include "aver/particles/ParticleSystem.hpp"
+#include "aver/formats/OcParticle.hpp"
+#endif
+
 #if AVER_MODULE_PBR
 #include "aver/pbr/Material.hpp"
 #include "aver/pbr/MaterialGpu.hpp"
@@ -1290,6 +1297,251 @@ public:
         }
 #endif
 
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+        // Registered unconditionally (like skinnedScene_ above), whether or not --particle-test was
+        // given: a project with its own CParticleEmitter placements must draw them without needing a
+        // command-line flag, exactly the reasoning voxiRenderer_'s own registration comment gives.
+        // The process-global system resolves effect ids through the process-global library --
+        // both singletons, matching scene::World::instance()/anim::animSystem() -- so a
+        // registerEffect() anywhere in this process reaches whatever ticks CParticleEmitter,
+        // whether or not particleRenderer_ itself came up (a device with no GPU resource factory
+        // still simulates; it just has nothing to draw with).
+        particles::particleSystem().setEffectLibrary(&particles::particleEffects());
+        if (particleRenderer_.init(*e.device())) {
+            particleRenderer_.setSystem(&particles::particleSystem());
+            e.device()->addRenderFeature(&particleRenderer_);
+            particlesAttached_ = true;
+#if AVER_MODULE_VOXI
+            // DECIDED 4's seam, installed only once Voxi has actually attached (voxiAttached_) -- see
+            // particleGiPrepare/particleGiBind's own comment for the whole contract. particleRenderer_
+            // never learns Voxi's name; this is the one call site that hands it a way to reach it.
+            // --no-particle-gi is the A/B toggle the PROOF asks for: the SAME scene, the SAME Voxi
+            // volume, with only this one line skipped, so a screenshot difference is attributable to
+            // nothing but this seam.
+            if (voxiAttached_ && !noParticleGi_) {
+                particles::ParticleRenderer::GiSeam seam;
+                seam.prepare = &SandboxApp::particleGiPrepare;
+                seam.bind = &SandboxApp::particleGiBind;
+                seam.user = this;
+                particleRenderer_.setGiSeam(seam);
+            }
+#endif
+        } else {
+            AVER_ERROR("[Particles] renderer unavailable on this device");
+        }
+
+        // --particle-test: a dust cloud (DECIDED: not a weapon effect) straddling an opaque cube, so
+        // the transparent pass's own depth test (DECIDED 1) is visible in one screenshot -- some
+        // particles nearer the camera than the cube, some farther and hidden behind it. Author's own
+        // test content, nowhere near either demo project.
+        if (particleTest_) {
+            objects_.clear();
+            sel_ = -1;
+
+            MeshObj occluderCube;
+            occluderCube.name = "ParticleTest.Occluder";
+            occluderCube.mesh = unitCubeMesh_;
+            occluderCube.pos = Vec3{600.0f, 0.0f, 50.0f};
+            occluderCube.scale = Vec3{80.0f, 80.0f, 80.0f};
+            occluderCube.color[0] = 0.55f; occluderCube.color[1] = 0.5f; occluderCube.color[2] = 0.45f;
+            occluderCube.roughness = 0.8f;
+            occluderCube.aabbMin = Vec3{512.0f, -88.0f, -38.0f};
+            occluderCube.aabbMax = Vec3{688.0f,  88.0f, 138.0f};
+            objects_.push_back(occluderCube);
+
+            // A slow-drifting dust cloud, EmitterShape::Box spanning well in front of AND behind the
+            // cube above along the camera's forward axis (+X) -- see this block's own comment for why
+            // that spread is what makes the occlusion visible in a single static frame rather than
+            // needing the camera or the particles to move.
+            particles::ParticleEffect fx;
+            fx.shape = particles::EmitterShape::Box;
+            fx.shapeSize = Vec3{350.0f, 60.0f, 90.0f};
+            fx.emissionRate = 150.0f;
+            fx.burstCount = 0;
+            fx.maxParticles = 400;
+            fx.lifetimeMin = 3.0f;
+            fx.lifetimeMax = 5.0f;
+            fx.direction = Vec3{0.0f, 0.0f, 1.0f};
+            fx.spreadDeg = 60.0f;
+            fx.speedMin = 5.0f;
+            fx.speedMax = 15.0f;
+            fx.gravity = Vec3{0.0f, 0.0f, -5.0f};
+            fx.damping = 0.3f;
+            fx.sizeStart = 25.0f;
+            fx.sizeEnd = 45.0f;
+            fx.colorStart[0] = 0.75f; fx.colorStart[1] = 0.70f; fx.colorStart[2] = 0.62f; fx.colorStart[3] = 0.35f;
+            fx.colorEnd[0]   = 0.75f; fx.colorEnd[1]   = 0.70f; fx.colorEnd[2]   = 0.62f; fx.colorEnd[3]   = 0.0f;
+            fx.blend = rhi::BlendMode::PremultipliedAlpha;
+            constexpr u64 kDustCloudEffectId = 0x50415254'44550001ull;   // arbitrary, non-zero
+            particles::particleEffects().set(kDustCloudEffectId, fx);
+
+            scene::World& world = scene::World::instance();
+            Transform xf;
+            xf.position = occluderCube.pos;
+            const scene::Entity emitter = world.create("ParticleTest.DustCloud", scene::kInvalidEntity, xf);
+            if (auto* emitterComp = static_cast<scene::CParticleEmitter*>(
+                    world.addComponent(emitter, scene::kComponentParticleEmitter))) {
+                emitterComp->effect = kDustCloudEffectId;
+            }
+            AVER_INFO("[Particles] --particle-test: dust cloud entity {} around effect 0x{:016X}",
+                      emitter, kDustCloudEffectId);
+
+            // A second emitter, DECIDED 4's own proof of the opposite half of the seam: a small
+            // stream of embers (an effect that IS its own light source -- see ParticleEffect::
+            // receivesGI's own comment), receivesGI = false, additive, beside the cube rather than
+            // inside the dust so the two never overlap in one screenshot. Same GI seam, same run,
+            // same --no-particle-gi toggle -- if the dust cloud's brightness changes between the two
+            // screenshots and this does not, that difference is the seam working, not a coincidence
+            // of which effect happened to be lit.
+            particles::ParticleEffect emberFx;
+            emberFx.shape = particles::EmitterShape::Sphere;
+            emberFx.shapeSize = Vec3{10.0f, 0.0f, 0.0f};
+            emberFx.emissionRate = 80.0f;
+            emberFx.burstCount = 0;
+            emberFx.maxParticles = 200;
+            emberFx.lifetimeMin = 1.0f;
+            emberFx.lifetimeMax = 1.6f;
+            emberFx.direction = Vec3{0.0f, 0.0f, 1.0f};
+            emberFx.spreadDeg = 35.0f;
+            emberFx.speedMin = 40.0f;
+            emberFx.speedMax = 80.0f;
+            emberFx.gravity = Vec3{0.0f, 0.0f, -25.0f};
+            emberFx.damping = 0.1f;
+            emberFx.sizeStart = 22.0f;
+            emberFx.sizeEnd = 6.0f;
+            emberFx.colorStart[0] = 1.0f; emberFx.colorStart[1] = 0.55f; emberFx.colorStart[2] = 0.12f; emberFx.colorStart[3] = 1.0f;
+            emberFx.colorEnd[0]   = 1.0f; emberFx.colorEnd[1]   = 0.15f; emberFx.colorEnd[2]   = 0.02f; emberFx.colorEnd[3] = 0.0f;
+            emberFx.blend = rhi::BlendMode::Additive;
+            emberFx.receivesGI = false;   // DECIDED 4: an ember is its own light source
+            constexpr u64 kEmberEffectId = 0x50415254'45420001ull;   // arbitrary, non-zero
+            particles::particleEffects().set(kEmberEffectId, emberFx);
+
+            // High above the dust cloud's own top (Z 50+90=140) and well clear of its X/Y footprint,
+            // so the two effects never overlap in the frame -- rising embers over a settling dust
+            // column, not a gun effect (DECIDED, and see this block's own opening comment).
+            //
+            // OPEN SKY, NO OCCLUDER BEHIND IT -- and that is deliberate, not incidental: this exact
+            // placement is what first exposed the transparent-pass/sky ordering bug this slice found
+            // and fixed (see D3D12Device::endFrame's own comment on the reorder). Before that fix, a
+            // particle not also backed by real opaque depth was silently overdrawn by the sky pass's
+            // own opaque, depth-EQUAL-clear fill -- confirmed by reprojecting this emitter's own
+            // particle positions into NDC and finding them well inside the visible range regardless,
+            // and reproduced with the dust cloud above disabled so only this emitter drew. Leaving it
+            // here, rather than moving it back beside the cube, is itself part of the proof: an
+            // emitter with nothing opaque behind it is the common case for smoke, snow, rain and mist,
+            // not the exception, and it has to render correctly without one.
+            Transform emberXf;
+            emberXf.position = occluderCube.pos + Vec3{0.0f, 0.0f, 220.0f};
+            const scene::Entity emberEmitter =
+                world.create("ParticleTest.Embers", scene::kInvalidEntity, emberXf);
+            if (auto* emberComp = static_cast<scene::CParticleEmitter*>(
+                    world.addComponent(emberEmitter, scene::kComponentParticleEmitter))) {
+                emberComp->effect = kEmberEffectId;
+            }
+            AVER_INFO("[Particles] --particle-test: ember entity {} around effect 0x{:016X} (receivesGI=false)",
+                      emberEmitter, kEmberEffectId);
+        }
+        // --particle-stress <N> <M>: VERIFICATION-ONLY test content for the parity-and-price
+        // adversarial pass, not part of any particles slice. One fog/mist effect (DECIDED 3: effects
+        // are shared, edited once) referenced by N emitter entities laid out on a grid, each capped
+        // at M particles, so emitter count and per-emitter particle count can each be varied
+        // independently to price the system. No weapon vocabulary, no occluder (this content exists
+        // to measure cost, not to re-demonstrate the depth test --particle-test already proved).
+        else if (particleStressEmitters_ > 0) {
+            objects_.clear();
+            sel_ = -1;
+
+            particles::ParticleEffect fx;
+            fx.shape = particles::EmitterShape::Box;
+            fx.shapeSize = Vec3{350.0f, 60.0f, 90.0f};
+            fx.emissionRate = 150.0f;   // a steady fog/mist emission rate, not a weapon effect
+            fx.maxParticles = static_cast<u32>(particleStressMaxParticles_ > 0 ? particleStressMaxParticles_ : 400);
+            // PRICE MEASUREMENT: burst the whole cap on frame 1 so steady-state population (and its
+            // CPU/GPU cost) is reached immediately, instead of waiting emissionRate-many seconds for
+            // the accumulator to fill it -- a --particle-stress-only choice, not authored-effect data.
+            fx.burstCount = fx.maxParticles;
+            // PRICE MEASUREMENT: a long, near-constant lifetime keeps the burst-filled population
+            // steady for the whole capture window instead of decaying mid-run (a short 3-5s lifetime
+            // dies out inside a few hundred frames and contaminates the price with a shrinking
+            // population) -- again a stress-harness-only choice, not authored-effect data.
+            fx.lifetimeMin = 120.0f;
+            fx.lifetimeMax = 120.0f;
+            fx.direction = Vec3{0.0f, 0.0f, 1.0f};
+            fx.spreadDeg = 60.0f;
+            fx.speedMin = 5.0f;
+            fx.speedMax = 15.0f;
+            fx.gravity = Vec3{0.0f, 0.0f, -5.0f};
+            fx.damping = 0.3f;
+            fx.sizeStart = 25.0f;
+            fx.sizeEnd = 45.0f;
+            fx.colorStart[0] = 0.75f; fx.colorStart[1] = 0.70f; fx.colorStart[2] = 0.62f; fx.colorStart[3] = 0.35f;
+            fx.colorEnd[0]   = 0.75f; fx.colorEnd[1]   = 0.70f; fx.colorEnd[2]   = 0.62f; fx.colorEnd[3]   = 0.0f;
+            fx.blend = rhi::BlendMode::PremultipliedAlpha;
+            constexpr u64 kStressEffectId = 0x50415254'53545301ull;   // "PART" + "STS\1", arbitrary
+            particles::particleEffects().set(kStressEffectId, fx);
+
+            scene::World& world = scene::World::instance();
+            const int n = particleStressEmitters_;
+            const int cols = static_cast<int>(std::ceil(std::sqrt(static_cast<f64>(n))));
+            const f32 spacing = 140.0f;
+            for (int idx = 0; idx < n; ++idx) {
+                const int col = idx % cols;
+                const int row = idx / cols;
+                Transform xf;
+                xf.position = Vec3{600.0f,
+                                    (static_cast<f32>(col) - static_cast<f32>(cols - 1) * 0.5f) * spacing,
+                                    50.0f + static_cast<f32>(row) * spacing};
+                const scene::Entity emitter =
+                    world.create("ParticleStress.Emitter", scene::kInvalidEntity, xf);
+                if (auto* stressComp = static_cast<scene::CParticleEmitter*>(
+                        world.addComponent(emitter, scene::kComponentParticleEmitter))) {
+                    stressComp->effect = kStressEffectId;
+                }
+            }
+            AVER_INFO("[Particles] --particle-stress: {} emitter(s), {} max particles each, effect 0x{:016X}",
+                      n, fx.maxParticles, kStressEffectId);
+
+            // --particle-stress2: VERIFICATION-ONLY, adds a second, differently-blended (additive)
+            // small sparks-like emitter alongside the box mist above, so the price measurement can
+            // also cover a scene mixing both blend pipelines in one frame, not just one.
+            if (particleStressSecondEmitter_) {
+                particles::ParticleEffect fx2;
+                fx2.shape = particles::EmitterShape::Sphere;
+                fx2.shapeSize = Vec3{10.0f, 0.0f, 0.0f};
+                fx2.emissionRate = 80.0f;
+                fx2.burstCount = 0;
+                fx2.maxParticles = 200;
+                fx2.lifetimeMin = 1.0f;
+                fx2.lifetimeMax = 1.6f;
+                fx2.direction = Vec3{0.0f, 0.0f, 1.0f};
+                fx2.spreadDeg = 35.0f;
+                fx2.speedMin = 40.0f;
+                fx2.speedMax = 80.0f;
+                fx2.gravity = Vec3{0.0f, 0.0f, -25.0f};
+                fx2.damping = 0.1f;
+                fx2.sizeStart = 22.0f;
+                fx2.sizeEnd = 6.0f;
+                fx2.colorStart[0] = 1.0f; fx2.colorStart[1] = 0.55f; fx2.colorStart[2] = 0.12f; fx2.colorStart[3] = 1.0f;
+                fx2.colorEnd[0]   = 1.0f; fx2.colorEnd[1]   = 0.15f; fx2.colorEnd[2]   = 0.02f; fx2.colorEnd[3] = 0.0f;
+                fx2.blend = rhi::BlendMode::Additive;
+                fx2.receivesGI = false;
+                constexpr u64 kStressEffect2Id = 0x50415254'53545302ull;
+                particles::particleEffects().set(kStressEffect2Id, fx2);
+
+                Transform xf2;
+                xf2.position = Vec3{600.0f, 0.0f, 270.0f};
+                const scene::Entity emitter2 =
+                    world.create("ParticleStress.Emitter2", scene::kInvalidEntity, xf2);
+                if (auto* c2 = static_cast<scene::CParticleEmitter*>(
+                        world.addComponent(emitter2, scene::kComponentParticleEmitter))) {
+                    c2->effect = kStressEffect2Id;
+                }
+                AVER_INFO("[Particles] --particle-stress: diag second emitter {} effect 0x{:016X}",
+                          emitter2, kStressEffect2Id);
+            }
+        }
+#endif
+
         // --skin-test: the GPU skinning pass against its CPU reference, on this machine's real
         // device. Registered only when asked for, because it costs a waitIdle and exists to be run
         // deliberately -- typically alongside --debug-layer, which is what catches a malformed
@@ -1494,6 +1746,20 @@ public:
         // groups are gated on PLAYING, so hanging this off them would freeze every preview the
         // moment the editor was not in play -- which is exactly when somebody is looking at one.
         anim::animSystem().tick(scene::World::instance(), t.dt);
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+        // Same "unconditionally, not from the gameplay tick" reasoning as the animation clock just
+        // above: a preview outside Play mode should still show its effects playing.
+        // VERIFICATION-ONLY: the steady_clock pair brackets ONLY the CPU simulation call, isolating
+        // it from the GPU draw the --frame-time GPU-marker report already separately accounts for
+        // ("Aver.Particles" in that report is the DRAW pass; this is the sim). See
+        // particleTickAccumSec_'s own comment.
+        {
+            const auto tickStart = std::chrono::steady_clock::now();
+            particles::particleSystem().tick(scene::World::instance(), t.dt);
+            particleTickAccumSec_ += std::chrono::duration<f64>(std::chrono::steady_clock::now() - tickStart).count();
+            ++particleTickFrames_;
+        }
+#endif
         // AFTER the tick and BEFORE anything draws: update() is what creates the per-entity skin
         // targets the draw pass is about to ask for, and what copies this frame's matrices out of
         // the AnimSystem -- whose skinning() is only valid until the next tick.
@@ -1757,6 +2023,42 @@ public:
     }
 
 #endif  // AVER_MODULE_PBR -- the material-specific helpers end here.
+
+#if AVER_MODULE_VOXI && AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    // ---- particles DECIDED 4: the two halves of particles::ParticleRenderer::GiSeam ----
+    //
+    // Both static (like resolveMaterialTexture/depthProxyLookup just above and below): the ONLY
+    // members these read are voxiRenderer_'s, reached through `user`, never `this` implicitly -- so
+    // installing them below as `&SandboxApp::particleGiPrepare, this` is the exact same idiom
+    // setDepthProxy/setTextureResolver already use. modules/particles never sees this file, this
+    // class, or the fact that "voxi" is the name on the other end of its GiSeam -- these two
+    // functions are that entire boundary.
+
+    // PIPELINE-BUILD TIME half. giShaderPrelude()/giShaderDefines() are pure functions of the
+    // register numbers ParticleRenderer::buildPipelines hands in -- see VoxiGiShaders.hpp -- so this
+    // never actually needs to dereference `user`; it exists to keep the signature uniform with
+    // particleGiBind below, which does.
+    static bool particleGiPrepare(u32 srvBase, u32 samplerBase, u32 cbRegister,
+                                  std::string* outPrelude, std::string* outDefines, void* user) {
+        (void)user;
+        if (!outPrelude || !outDefines) return false;
+        *outPrelude = voxi::giShaderPrelude();
+        *outDefines = voxi::giShaderDefines(srvBase, samplerBase, cbRegister);
+        return true;
+    }
+
+    // PER-FRAME half. Forwards straight to voxiRenderer_'s own bindGiResources/giFrameConstants --
+    // see those methods' own comments for why a null volume/shadow texture or a not-yet-ready Voxi
+    // degrades safely rather than needing a readiness check here.
+    static void particleGiBind(rhi::IResourceFactory& res, rhi::BindingSetHandle set, u32 srvBase,
+                               const void** outCbData, u32* outCbBytes, void* user) {
+        auto* self = static_cast<SandboxApp*>(user);
+        if (!self || !outCbData || !outCbBytes) return;
+        self->voxiRenderer_.bindGiResources(res, set, srvBase);
+        *outCbData = self->voxiRenderer_.giFrameConstants();
+        *outCbBytes = self->voxiRenderer_.giFrameConstantBytes();
+    }
+#endif  // AVER_MODULE_VOXI && AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 
     // ---- content and mesh loading: NOT material work, and no longer guarded as if it were --------
     //
@@ -2342,6 +2644,55 @@ public:
         for (const auto& kv : materialAssets_) if (kv.second) pbr::MaterialLibrary::get().destroy(kv.second);
         materialAssets_.clear();
         surfaceMaterials_.clear();
+    }
+#endif
+
+    // DECIDED 3 + slice 5: loads every .ocparticle under the project's content root into
+    // particles::particleEffects(), keyed by fnv1a64(relative path) -- the SAME id space
+    // contentIndex_/loadProjectMeshes already use for every other project asset, so a
+    // CParticleEmitter::effect a level or a script names resolves the identical way a
+    // CMeshRenderer::mesh or CAnimator::clip does. Recursive over the whole content root, matching
+    // loadProjectMeshes rather than loadProjectMaterials' Content\Materials convention: DECIDED 3
+    // gave .ocparticle no such folder rule.
+    //
+    // particles::particleEffects() is cleared first, matching anim::animSystem().clear()'s own reason
+    // just above rebuildContentIndex: a stale id from a PREVIOUSLY open project must not keep
+    // resolving once a different project supplies a different file at the same relative path. Safe
+    // for --particle-test specifically because applyProject() (this function's only caller) runs
+    // BEFORE the --particle-test block below registers its own hardcoded effects, not after -- see
+    // that block's own comment for the ordering this relies on.
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    void loadProjectParticleEffects() {
+        particles::particleEffects().clear();
+        const std::string dir = project_.contentDir();
+        if (dir.empty()) return;
+        std::error_code ec;
+        if (!std::filesystem::exists(dir, ec)) return;
+
+        u32 loaded = 0, failed = 0;
+        for (std::filesystem::recursive_directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
+            if (ec) break;
+            if (!it->is_regular_file(ec)) continue;
+            const std::string full = it->path().string();
+            if (assetTypeFromPath(full) != AssetType::Particle) continue;
+
+            std::string rel = std::filesystem::relative(it->path(), dir, ec).string();
+            if (ec) continue;
+            for (char& c : rel) if (c == '\\') c = '/';
+
+            particles::ParticleEffect fx;
+            std::string err;
+            if (!fmt::loadOcparticle(full, fx, nullptr, &err)) {
+                AVER_WARN("[Particles] {}", err);
+                ++failed;
+                continue;
+            }
+            particles::particleEffects().set(fnv1a64(std::string_view(rel)), fx);
+            ++loaded;
+        }
+        if (loaded || failed)
+            AVER_INFO("[Particles] {} project effect(s) loaded from {}{}", loaded, dir,
+                      failed ? (", " + std::to_string(failed) + " failed") : "");
     }
 #endif
 
@@ -3659,6 +4010,22 @@ public:
 #else
         (void)e;
 #endif
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+        // VERIFICATION-ONLY: prints the CPU simulation cost this run measured, once, before teardown
+        // -- see particleTickAccumSec_'s own comment.
+        if (particleTickFrames_ > 0) {
+            u32 totalLive = 0, liveEmitters = particles::particleSystem().liveEmitters();
+            particles::particleSystem().forEachEmitter([&](const particles::EmitterView& ev) {
+                totalLive += ev.particles ? static_cast<u32>(ev.particles->size()) : 0;
+            });
+            AVER_INFO("[Particles] CPU tick: {:.2f}us/frame avg over {} frame(s) ({:.3f}ms total), "
+                      "{} emitter(s) / {} live particle(s) at shutdown",
+                      (particleTickAccumSec_ / static_cast<f64>(particleTickFrames_)) * 1e6,
+                      particleTickFrames_, particleTickAccumSec_ * 1e3, liveEmitters, totalLive);
+        }
+        if (particlesAttached_) { e.device()->removeRenderFeature(&particleRenderer_); particlesAttached_ = false; }
+        particleRenderer_.shutdown();
+#endif
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
         if (occluder_) {
             if (rhi::IResourceFactory* occRes = e.device()->resources())
@@ -3838,6 +4205,19 @@ public:
 #endif
     void setSkinTest() { skinTest_ = true; }                                       // --skin-test
     void setSkinDrawTest() { skinDrawTest_ = true; }                               // --skin-draw-test
+    void setParticleTest() { particleTest_ = true; }                               // --particle-test
+    // --no-particle-gi: the A/B toggle particles DECIDED 4's own proof needs -- same scene, same Voxi
+    // volume, only whether particleRenderer_.setGiSeam is ever called differs. Distinct from --no-gi
+    // (which stops the volume from being BUILT at all) and --no-gi-cone (which stops the OPAQUE
+    // scene's own cone-trace read) -- this one leaves both of those alone and only ever touches
+    // whether PARTICLES sample the (otherwise unaffected) result.
+    void setNoParticleGi() { noParticleGi_ = true; }                               // --no-particle-gi
+    // --particle-stress <N> <M>: verification-only, see particleStressEmitters_'s own comment.
+    void setParticleStress(int emitters, int maxParticles) {
+        particleStressEmitters_ = emitters;
+        particleStressMaxParticles_ = maxParticles;
+    }
+    void setParticleStressSecondEmitter() { particleStressSecondEmitter_ = true; }   // --particle-stress2
     void setReflTest() { reflTest_ = true; }                                       // --refl-test
     void setFurnaceTest() { furnaceTest_ = true; }                                 // --furnace-test
     void setFurnaceSun() { furnaceTest_ = true; furnaceSun_ = true; }              // --furnace-sun
@@ -4080,6 +4460,10 @@ private:
         loading.stage("Loading meshes");
         releaseProjectMeshes(e);
         loadProjectMeshes(e);
+#endif
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+        loading.stage("Loading particle effects");
+        loadProjectParticleEffects();
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
         // Moved here from onRender's per-frame call: pipeline/shader creation belongs at a project-
@@ -5596,9 +5980,19 @@ private:
     void spawnFromAssetDrop(Engine& e, const std::string& full, f32 screenX, f32 screenY) {
         const std::string ext = lowerExt(std::filesystem::path(full));
         const std::string fileName = std::filesystem::path(full).filename().string();
-        if (ext != ".ocmesh") {
+        const bool isMesh = ext == ".ocmesh";
+        bool isParticle = false;
+#if AVER_MODULE_PARTICLES
+        isParticle = ext == ".ocparticle";
+#endif
+        if (!isMesh && !isParticle) {
+#if AVER_MODULE_PARTICLES
+            cbStatus_ = "'" + fileName + "' can't be placed in the level (only .ocmesh/.ocparticle assets can)";
+            AVER_WARN("[Editor] drop: '{}' is not a placeable asset (need .ocmesh or .ocparticle)", full);
+#else
             cbStatus_ = "'" + fileName + "' can't be placed in the level (only .ocmesh assets can)";
             AVER_WARN("[Editor] drop: '{}' is not a placeable asset (need .ocmesh)", full);
+#endif
             return;
         }
         if (!(hideEditorScene_ || !levelPath_.empty())) {
@@ -5617,6 +6011,62 @@ private:
             return;
         }
         for (char& c : rel) if (c == '\\') c = '/';
+
+#if AVER_MODULE_PARTICLES
+        if (isParticle) {
+            // A drop-to-place entry point for DECIDED 3's format, mirroring the .ocmesh path below
+            // rather than growing its own copy of the drop-target/level-active checks above. Loaded
+            // directly (not through loadProjectParticleEffects' whole-tree walk) so an effect just
+            // authored -- possibly before any project (re)load has indexed it -- resolves immediately,
+            // the same "the drop the user just made actually lands" reasoning the mesh path's own
+            // comment gives for reloading synchronously rather than waiting a frame.
+            particles::ParticleEffect fx;
+            std::string err;
+            if (!fmt::loadOcparticle(full, fx, nullptr, &err)) {
+                cbStatus_ = "Could not load '" + fileName + "': " + err;
+                AVER_WARN("[Editor] drop: {}", err);
+                return;
+            }
+            const u64 effectId = fnv1a64(std::string_view(rel));
+            particles::particleEffects().set(effectId, fx);
+
+            const Vec3 at = dropWorldPoint(screenX, screenY);
+            if (!(std::isfinite(at.x) && std::isfinite(at.y) && std::isfinite(at.z))) {
+                cbStatus_ = "Could not find a valid drop position";
+                AVER_WARN("[Editor] drop: computed a non-finite world position for '{}'", rel);
+                return;
+            }
+
+            scene::World& world = scene::World::instance();
+            Transform xf;
+            xf.position = at;
+            if (snapMove_) for (int k=0;k<3;++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], moveSnap_);
+
+            const scene::Entity ent = world.create(rel, scene::kInvalidEntity, xf);
+            if (ent == scene::kInvalidEntity) {
+                cbStatus_ = "The world refused to place '" + rel + "'";
+                AVER_WARN("[Editor] drop: the world refused a new entity for '{}'", rel);
+                return;
+            }
+            if (auto* pe = static_cast<scene::CParticleEmitter*>(
+                    world.addComponent(ent, scene::kComponentParticleEmitter))) {
+                pe->effect = effectId;
+            }
+            levelEntities_.push_back(ent);
+            entityLabels_[static_cast<u32>(ent)] = makeEntityLabel(std::string(), rel);
+            sel_ = kSelScene; selEntity_ = ent;
+            {
+                EditCmd c = describeEntity(ent);
+                c.kind = EditCmd::Kind::Create;
+                pushEdit(std::move(c));
+            }
+            cbStatus_ = "Placed " + fileName;
+            AVER_INFO("[Editor] placed particle emitter entity #{} from '{}' around effect 0x{:016X} "
+                      "at ({:.0f}, {:.0f}, {:.0f})",
+                      (u32)ent, rel, effectId, xf.position.x, xf.position.y, xf.position.z);
+            return;
+        }
+#endif
 
         const u64 meshId = fnv1a64(std::string_view(rel));
         if (sceneMeshes_.find(meshId) == sceneMeshes_.end()) {
@@ -7686,6 +8136,19 @@ private:
         return ext;
     }
 
+    // Every extension the Content Browser will let a user drag into the level -- the single gate
+    // BOTH its grid view and its list view check before calling BeginDragDropSource, so a new
+    // placeable asset type needs changing here once rather than drifting between the two views.
+    // spawnFromAssetDrop is the other half of this contract: it must accept every extension this
+    // says yes to, and nothing else.
+    static bool isPlaceableAssetExt(const std::string& ext) {
+        if (ext == ".ocmesh") return true;
+#if AVER_MODULE_PARTICLES
+        if (ext == ".ocparticle") return true;
+#endif
+        return false;
+    }
+
     // True when hay contains needle, ignoring case. An empty needle matches.
     static bool containsNoCase(const std::string& hay, const char* needle) {
         if (!needle || !*needle) return true;
@@ -7741,9 +8204,9 @@ private:
                         if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !cbDoubleClickEnter_))
                             cbOpenEntry(e.full, e.isDir);
                     }
-                    // Only .ocmesh assets are placeable (see spawnFromAssetDrop) -- only they start a
-                    // drag, so the viewport drop target never has to reject a payload it received.
-                    if (!e.isDir && lowerExt(e.path) == ".ocmesh" && ImGui::BeginDragDropSource()) {
+                    // Only placeable assets start a drag (see isPlaceableAssetExt/spawnFromAssetDrop),
+                    // so the viewport drop target never has to reject a payload it received.
+                    if (!e.isDir && isPlaceableAssetExt(lowerExt(e.path)) && ImGui::BeginDragDropSource()) {
                         ImGui::SetDragDropPayload(kAssetDragDropType, e.full.c_str(), e.full.size() + 1);
                         ImGui::TextUnformatted(e.name.c_str());
                         ImGui::EndDragDropSource();
@@ -7801,9 +8264,9 @@ private:
                     if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !cbDoubleClickEnter_))
                         cbOpenEntry(e.full, e.isDir);
                 }
-                // Only .ocmesh assets are placeable (see spawnFromAssetDrop) -- only they start a
-                // drag, so the viewport drop target never has to reject a payload it received.
-                if (!e.isDir && lowerExt(e.path) == ".ocmesh" && ImGui::BeginDragDropSource()) {
+                // Only placeable assets start a drag (see isPlaceableAssetExt/spawnFromAssetDrop),
+                // so the viewport drop target never has to reject a payload it received.
+                if (!e.isDir && isPlaceableAssetExt(lowerExt(e.path)) && ImGui::BeginDragDropSource()) {
                     ImGui::SetDragDropPayload(kAssetDragDropType, e.full.c_str(), e.full.size() + 1);
                     ImGui::TextUnformatted(e.name.c_str());
                     ImGui::EndDragDropSource();
@@ -8251,6 +8714,54 @@ private:
                     ImGui::TextDisabled("mesh id 0x%llx", (unsigned long long)mr->mesh);
                 }
             }
+#if AVER_MODULE_PARTICLES
+            // The authoring surface DECIDED components need: visible and editable the same way
+            // CMeshRenderer just above is. No picker widget beyond drag-drop exists for CMeshRenderer::
+            // mesh either (assignment happens by placing a NEW entity via spawnFromAssetDrop), so an
+            // emitter's own effect id follows that same, already-established shape rather than
+            // inventing a combo-box asset browser for this one field.
+            if (auto* pe = w.component<scene::CParticleEmitter>(selEntity_, scene::kComponentParticleEmitter)) {
+                if (ImGui::CollapsingHeader("Particle Emitter", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    bool stopped = (pe->flags & scene::kParticleEmitterStopped) != 0;
+                    if (ImGui::Checkbox("Stopped", &stopped)) {
+                        if (stopped) pe->flags |=  scene::kParticleEmitterStopped;
+                        else         pe->flags &= ~scene::kParticleEmitterStopped;
+                    }
+                    ImGui::TextDisabled("effect id 0x%llx", (unsigned long long)pe->effect);
+                    // Drop a .ocparticle from the Content Browser directly onto this row to point this
+                    // emitter at it -- the SAME id space loadProjectParticleEffects() populates (this
+                    // very panel's own fnv1a64(relative path)), so a freshly authored effect resolves
+                    // the moment it lands here, mirroring how dropping a .ocmesh on the viewport
+                    // (spawnFromAssetDrop) places one.
+                    if (ImGui::BeginDragDropTarget()) {
+                        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kAssetDragDropType)) {
+                            const std::string dropped(
+                                static_cast<const char*>(payload->Data),
+                                payload->DataSize > 0 ? static_cast<usize>(payload->DataSize - 1) : usize(0));
+                            if (lowerExt(std::filesystem::path(dropped)) == ".ocparticle") {
+                                const std::string content = project_.contentDir();
+                                std::error_code ec;
+                                std::string rel = content.empty() ? std::string()
+                                    : std::filesystem::relative(dropped, content, ec).string();
+                                if (!content.empty() && !ec && !rel.empty()) {
+                                    for (char& c : rel) if (c == '\\') c = '/';
+                                    pe->effect = fnv1a64(std::string_view(rel));
+                                    cbStatus_ = "Assigned " + std::filesystem::path(dropped).filename().string();
+                                    AVER_INFO("[Particles] entity {} effect set to 0x{:016X} ('{}')",
+                                              selEntity_, pe->effect, rel);
+                                } else {
+                                    cbStatus_ = "Could not resolve the dropped effect to a project-relative path";
+                                }
+                            } else {
+                                cbStatus_ = "Only a .ocparticle asset can be assigned to an emitter";
+                            }
+                        }
+                        ImGui::EndDragDropTarget();
+                    }
+                    ImGui::TextDisabled("age %.2fs   seed 0x%08x", pe->age, pe->seed);
+                }
+            }
+#endif
 #endif
         } else if (sel_==-2){
             ImGui::TextUnformatted("Directional Light (Sun)"); ImGui::Separator();
@@ -9573,6 +10084,12 @@ private:
     voxi::VoxiRenderer voxiRenderer_;
     bool voxiAttached_=false;
 #endif
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    // Registration is non-owning, same contract as voxiRenderer_ just above: particleRenderer_ must
+    // outlive the device, torn down in onShutdown.
+    particles::ParticleRenderer particleRenderer_;
+    bool particlesAttached_=false;
+#endif
 #if AVER_MODULE_SCRIPTING
     scripting::ScriptHost scripts_;
 #endif
@@ -9589,6 +10106,24 @@ private:
 #endif
     std::string skinSceneDir_;    // --skin-scene-test <dir>: where the cooked rig lives
     std::unique_ptr<aver::editor::SkinSceneTest> skinScene_;
+    bool particleTest_ = false;   // --particle-test: a dust cloud straddling an opaque occluder, so
+                                   // the transparent pass's own depth test shows in one screenshot
+    bool noParticleGi_ = false;   // --no-particle-gi: see setNoParticleGi's own comment
+    // VERIFICATION-ONLY INSTRUMENTATION (not part of the particles slices): --particle-stress <N> <M>
+    // spawns N grid-arranged dust-style emitters, each capped at M particles, purely to price the
+    // system at a chosen emitter/particle count for the parity-and-price adversarial pass. See
+    // setParticleStress's own comment.
+    int  particleStressEmitters_ = 0;
+    int  particleStressMaxParticles_ = 0;
+    bool particleStressSecondEmitter_ = false;   // --particle-stress2: diag, see its own comment
+    // Same purpose: direct CPU wall-clock timing around particles::particleSystem().tick(), since no
+    // existing --frame-time/GPU-marker path measures CPU simulation separately from the GPU draw.
+    // Accumulated every frame the particle module is compiled in and printed once at shutdown; the
+    // std::chrono::steady_clock call itself costs single-digit nanoseconds and is not gated behind a
+    // flag because leaving it always-on is what proves it did not skew any of this session's own
+    // earlier probes (see the price section of this pass's report for that check).
+    f64  particleTickAccumSec_ = 0.0;
+    u64  particleTickFrames_ = 0;
     bool reflTest_ = false;       // --refl-test: are ray-traced reflections global?
     bool furnaceTest_ = false;    // --furnace-test: does the shading model conserve energy?
     bool furnaceSun_ = false;     // --furnace-sun: the variant where only the DIRECT term is lit
@@ -11268,7 +11803,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -11574,6 +12109,15 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--play-test")) playTest=true;
         else if (!std::strcmp(argv[i],"--skin-test")) skinTest=true;
         else if (!std::strcmp(argv[i],"--skin-draw-test")) skinDrawTest=true;
+        else if (!std::strcmp(argv[i],"--particle-test")) particleTest=true;
+        // --no-particle-gi: see SandboxApp::setNoParticleGi's own comment.
+        else if (!std::strcmp(argv[i],"--no-particle-gi")) noParticleGi=true;
+        // --particle-stress <N> <M>: VERIFICATION-ONLY, see setParticleStress's own comment.
+        else if (!std::strcmp(argv[i],"--particle-stress") && i+2<argc) {
+            particleStressEmitters=std::atoi(argv[++i]);
+            particleStressMaxParticles=std::atoi(argv[++i]);
+        }
+        else if (!std::strcmp(argv[i],"--particle-stress2")) particleStressSecondEmitter=true;
         else if (!std::strcmp(argv[i],"--refl-test")) reflTest=true;
         else if (!std::strcmp(argv[i],"--furnace-test")) furnaceTest=true;
         else if (!std::strcmp(argv[i],"--furnace-sun")) furnaceSun=true;
@@ -11787,6 +12331,10 @@ Application* createApplication(int argc, char** argv) {
     if (playTest) app->setPlayTest();
     if (skinTest) app->setSkinTest();
     if (skinDrawTest) app->setSkinDrawTest();
+    if (particleTest) app->setParticleTest();
+    if (noParticleGi) app->setNoParticleGi();
+    if (particleStressEmitters > 0) app->setParticleStress(particleStressEmitters, particleStressMaxParticles);
+    if (particleStressSecondEmitter) app->setParticleStressSecondEmitter();
     if (reflTest) app->setReflTest();
     if (furnaceTest) app->setFurnaceTest();
     if (furnaceSun) app->setFurnaceSun();

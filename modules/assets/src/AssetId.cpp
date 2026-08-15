@@ -33,6 +33,7 @@ AssetType assetTypeFromPath(std::string_view path) {
     if (e == "ocanim") return AssetType::Anim;
     if (e == "ocprefab") return AssetType::Prefab;
     if (e == "ocaero") return AssetType::Aero;
+    if (e == "ocparticle") return AssetType::Particle;
     return AssetType::Unknown;
 }
 

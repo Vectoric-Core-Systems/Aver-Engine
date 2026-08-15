@@ -29,6 +29,11 @@
 #  endif
 #endif
 
+#if AVER_MODULE_PARTICLES
+#  include "aver/formats/OcParticle.hpp"
+#  include "aver/particles/ParticleEffectLibrary.hpp"
+#endif
+
 namespace aver::game {
 
 void GameContent::adopt(const fmt::ProjectDesc& project) {
@@ -397,5 +402,43 @@ pbr::MaterialHandle GameContent::authoredFor(i32 token) const {
     return it == surfaceMaterials_.end() ? 0 : it->second;
 }
 #endif
+
+#if AVER_MODULE_PARTICLES
+void GameContent::loadProjectParticleEffects() {
+    const std::string dir = project_.contentDir();
+    if (dir.empty()) return;
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec)) return;
+
+    u32 loaded = 0, failed = 0;
+    for (std::filesystem::recursive_directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec)) continue;
+        const std::string full = it->path().string();
+        if (assetTypeFromPath(full) != AssetType::Particle) continue;
+
+        std::string rel = std::filesystem::relative(it->path(), dir, ec).string();
+        if (ec) continue;
+        for (char& c : rel) if (c == '\\') c = '/';
+
+        particles::ParticleEffect fx;
+        std::string err;
+        if (!fmt::loadOcparticle(full, fx, nullptr, &err)) {
+            AVER_WARN("[Particles] {}", err);
+            ++failed;
+            continue;
+        }
+
+        // The SAME id a CParticleEmitter::effect placed by a level or set by a script names --
+        // see this method's own header comment on why that is fnv1a64(relative path) and not
+        // something GameContent invents.
+        particles::particleEffects().set(fnv1a64(std::string_view(rel)), fx);
+        ++loaded;
+    }
+    if (loaded || failed)
+        AVER_INFO("[Particles] {} project effect(s) loaded from {}{}", loaded, dir,
+                  failed ? (", " + std::to_string(failed) + " failed") : "");
+}
+#endif // AVER_MODULE_PARTICLES
 
 } // namespace aver::game

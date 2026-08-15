@@ -64,13 +64,20 @@ struct EntitySnapshot {
 EntitySnapshot captureEntity(scene::World& world, scene::Entity e);
 
 // Rebuilds an entity from a snapshot at `xf`, parented under `parent` (root by default -- see the
-// CHierarchy note above). Reattaches every captured component by raw byte copy -- EXCEPT
-// CMeshRenderer, which gets one deliberate touch-up afterward: `dirty` is GPU-upload bookkeeping,
-// not editor state, and a byte-for-byte copy of an entity the renderer had already uploaded would
-// restore dirty=0, and the rebuilt copy would never reach the GPU. Forcing the visible bit too
-// matches what the hardcoded recreateFrom() this replaces already did unconditionally. This is the
-// one named exception, not a general post-processing hook, because it is the one component this
-// editor's OWN rendering path depends on being freshly marked dirty.
+// CHierarchy note above). Reattaches every captured component by raw byte copy -- EXCEPT two named
+// touch-ups afterward, not a general post-processing hook:
+//   - CMeshRenderer: `dirty` is GPU-upload bookkeeping, not editor state, and a byte-for-byte copy of
+//     an entity the renderer had already uploaded would restore dirty=0, and the rebuilt copy would
+//     never reach the GPU. Forcing the visible bit too matches what the hardcoded recreateFrom() this
+//     replaces already did unconditionally.
+//   - CParticleEmitter: `seed` is derived, not authored -- ParticleSystem::tick assigns one from the
+//     entity's own handle only while the field reads 0 (see ParticleSystem.cpp's seedFor). A raw copy
+//     carries the SOURCE's already-nonzero seed onto a DIFFERENT entity, and two emitters seeded
+//     identically draw bit-identical particle streams -- a duplicate that visibly moves in lockstep
+//     with its original. Resetting to 0 makes the copy re-derive its own on its first tick. GATED ON
+//     restoreObjectId=false (Paste/Duplicate) ONLY -- restoreObjectId=true (Undo/Redo) is the SAME
+//     logical entity coming back, and must round-trip seed byte-exact like every other field, not
+//     re-derive a different one from whatever handle undo happens to allocate.
 //
 // restoreObjectId: true propagates the snapshot's objectId onto the new entity via setObjectId();
 // false leaves whatever World::create() assigned on its own (fnv1a64 of the name -- see

@@ -280,3 +280,20 @@ endif()
 if(TARGET Aver.Render.Sr)
   target_link_libraries(Sandbox PRIVATE Aver.Render.Sr)
 endif()
+
+# Particles (modules/particles): brings AVER_MODULE_PARTICLES=1 through its link interface, which is
+# what lets SandboxApp.cpp guard the feature and --particle-test with `#if AVER_MODULE_PARTICLES`,
+# same shape as every other optional module linked on this page. Aver.Scene is already linked above
+# when this target exists at all (Aver.Particles PUBLIC-links it), named again there for the reason
+# every other optional module's own dependency is: the executable is what the C# layer P/Invokes.
+if(TARGET Aver.Particles)
+  target_link_libraries(Sandbox PRIVATE Aver.Particles)
+endif()
+# .ocparticle reader/writer (DECIDED 3, slice 3): only meaningful once Aver.Particles exists (it
+# parses straight into particles::ParticleEffect), so it hangs off the SAME guard rather than its own
+# AVER_MODULE_PARTICLES check -- exactly Aver.Formats.Material's relationship to AVER_MODULE_PBR two
+# blocks up. Lets SandboxApp.cpp's loadProjectParticleEffects() (slice 5) resolve a real .ocparticle
+# on disk instead of only ever seeing the --particle-test harness's hardcoded structs.
+if(TARGET Aver.Formats.Particles)
+  target_link_libraries(Sandbox PRIVATE Aver.Formats.Particles)
+endif()

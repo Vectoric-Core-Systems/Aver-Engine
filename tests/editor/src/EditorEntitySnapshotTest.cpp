@@ -120,6 +120,82 @@ int main() {
     check(w.objectId(pasted) != kCustomObjectId,
           "restoreObjectId=false does NOT clone the source's custom object id (Paste/Duplicate's own identity)");
 
+    // ------------------------------------------------------- particles slice 5: CParticleEmitter.seed
+    // Verifying, not assuming (this session's own standing rule): the generic mechanism above was
+    // written before CParticleEmitter existed, and the component's own field registry entry alone
+    // does not prove copy/paste treats it correctly -- see EditorEntitySnapshot.cpp's own comment on
+    // why `seed` specifically needed a named touch-up, matching CMeshRenderer's `dirty` two blocks up.
+    const Entity emitterSrc = w.create("ParticleEmitterSnapshotTest", kInvalidEntity, xf0);
+    check(emitterSrc != kInvalidEntity, "particle emitter source entity created");
+    auto* pe = static_cast<CParticleEmitter*>(w.addComponent(emitterSrc, kComponentParticleEmitter));
+    check(pe != nullptr, "source entity got a CParticleEmitter");
+    if (pe) {
+        pe->effect = 0x1122334455667788ull;
+        pe->age = 4.5f;
+        pe->seed = 0xCAFEBABEu;   // as if ParticleSystem::tick had already assigned one
+        pe->flags = kParticleEmitterStopped;
+    }
+    const EntitySnapshot peSnap = aver::editor::captureEntity(w, emitterSrc);
+    const auto* capturedPe = findComp(peSnap, kComponentParticleEmitter);
+    check(capturedPe != nullptr && capturedPe->bytes.size() == sizeof(CParticleEmitter),
+          "captureEntity copied a CParticleEmitter of the right size");
+
+    w.destroy(emitterSrc);
+    w.flush();
+
+    // restoreObjectId=false is the Paste/Duplicate shape -- the one this fix actually protects,
+    // since Undo-of-delete (restoreObjectId=true) puts back the SAME logical entity a seed collision
+    // cannot be wrong for.
+    const Entity emitterPasted =
+        aver::editor::instantiateEntity(w, peSnap, xf1, kInvalidEntity, /*restoreObjectId=*/false);
+    check(emitterPasted != kInvalidEntity, "instantiateEntity rebuilt the particle emitter entity");
+    const auto* rPe = w.component<CParticleEmitter>(emitterPasted, kComponentParticleEmitter);
+    check(rPe != nullptr, "the rebuilt entity has a CParticleEmitter");
+    if (rPe) {
+        check(rPe->effect == 0x1122334455667788ull, "CParticleEmitter.effect round-tripped byte-exact");
+        check(rPe->age == 4.5f, "CParticleEmitter.age round-tripped byte-exact (not a named exception)");
+        check(rPe->flags == kParticleEmitterStopped, "CParticleEmitter.flags round-tripped byte-exact");
+        check(rPe->seed == 0,
+              "CParticleEmitter.seed is reset to 0 on paste, so the copy re-derives its OWN seed at its "
+              "first tick instead of drawing the identical particle stream as its source");
+    }
+
+    // -------------------------------------------- restoreObjectId=true (Undo-of-delete / Redo-of-create)
+    // ADVERSARIAL FOLLOW-UP: the check above only ever exercised restoreObjectId=false (Paste/
+    // Duplicate). The seed=0 fixup lives in the SAME generic instantiateEntity() both branches share,
+    // so "correct for paste" does not by itself prove "correct for undo" -- and a probe against the
+    // pre-fix code showed it was NOT: seed came back 0 here too, even though effect/age/flags all
+    // round-tripped byte-exact, meaning an undone delete re-derived a DIFFERENT particle stream than
+    // the one on screen before the delete. instantiateEntity() now gates the reset on
+    // !restoreObjectId (see its own comment); this is the regression check for that gate.
+    const Entity emitterSrc2 = w.create("ParticleEmitterUndoSnapshotTest", kInvalidEntity, xf0);
+    check(emitterSrc2 != kInvalidEntity, "second particle emitter source entity created");
+    auto* pe2 = static_cast<CParticleEmitter*>(w.addComponent(emitterSrc2, kComponentParticleEmitter));
+    check(pe2 != nullptr, "second source entity got a CParticleEmitter");
+    if (pe2) {
+        pe2->effect = 0x99AA99AA99AA99AAull;
+        pe2->age    = 12.75f;
+        pe2->seed   = 0x5EED1234u;   // as if ParticleSystem::tick had already assigned one
+        pe2->flags  = 0;             // playing, not stopped
+    }
+    const EntitySnapshot peSnap2 = aver::editor::captureEntity(w, emitterSrc2);
+    w.destroy(emitterSrc2);
+    w.flush();
+
+    const Entity emitterUndone =
+        aver::editor::instantiateEntity(w, peSnap2, xf1, kInvalidEntity, /*restoreObjectId=*/true);
+    check(emitterUndone != kInvalidEntity, "instantiateEntity(restoreObjectId=true) rebuilt the emitter");
+    const auto* uPe = w.component<CParticleEmitter>(emitterUndone, kComponentParticleEmitter);
+    check(uPe != nullptr, "the undone entity has a CParticleEmitter");
+    if (uPe) {
+        check(uPe->effect == 0x99AA99AA99AA99AAull, "undo: CParticleEmitter.effect round-tripped byte-exact");
+        check(uPe->age == 12.75f, "undo: CParticleEmitter.age round-tripped byte-exact");
+        check(uPe->seed == 0x5EED1234u,
+              "undo: CParticleEmitter.seed round-trips byte-exact too (restoreObjectId=true is the SAME "
+              "logical entity coming back, not a new one -- it must reproduce the same particle stream, "
+              "unlike paste/duplicate above)");
+    }
+
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;
 }

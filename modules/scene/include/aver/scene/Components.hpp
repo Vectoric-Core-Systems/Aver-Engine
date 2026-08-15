@@ -1,4 +1,4 @@
-// The eight built-in component structs and their fixed dense type ids.
+// The eleven built-in component structs and their fixed dense type ids.
 #pragma once
 #include "aver/core/Math.hpp"
 #include "aver/core/Types.hpp"
@@ -17,7 +17,8 @@ inline constexpr u32 kComponentLight        = 7;
 inline constexpr u32 kComponentCamera       = 8;
 inline constexpr u32 kComponentSkeletalMesh = 9;
 inline constexpr u32 kComponentAnimator     = 10;
-inline constexpr u32 kComponentBuiltinMax   = 10;
+inline constexpr u32 kComponentParticleEmitter = 11;
+inline constexpr u32 kComponentBuiltinMax   = 11;
 
 // Authored local transform, plus the revision the world-matrix pass compares against.
 struct CLocal {
@@ -113,16 +114,44 @@ struct CAnimator {
     u32 flags       = 0;
 };
 
+// THE FLAGS ARE NEGATIVE AGAIN, for the identical reason CAnimator's are: World::addComponent hands
+// back zero-filled storage when a CParticleEmitter is attached directly (not through the framework's
+// spawn path), so a POSITIVE "playing" bit would attach a component that silently does nothing --
+// exactly CMeshRenderer's visible-bit mistake, repeated. Zero now means "emitting".
+inline constexpr u32 kParticleEmitterStopped = 0x1;
+
+// One emitter INSTANCE: an opaque effect id plus this entity's own playback clock. The effect's
+// actual parameters -- emission shape and rate, lifetime, velocity, gravity, damping, size and
+// colour over life, blend mode -- are NOT here; they are shared, authored data an effect id
+// resolves to (DECIDED 3: a .ocparticle asset, one per EFFECT, read by a tier above modules/scene --
+// see CSkeletalMesh's own comment on why an opaque id and not a loaded asset lives on the
+// component). Two emitters can point at the same effect and each keeps its own clock, exactly as
+// two CAnimator entities can share one clip.
+//
+// Everything belonging to a LIVE particle -- its position, velocity, age -- is deliberately NOT
+// here either: a component has a fixed stride, and an emitter's particle count varies and can be in
+// the thousands, so that state lives in aver::particles::ParticleSystem's own side table, keyed by
+// Entity, the same way AnimSystem keeps posed skeletons OUT of CAnimator (see AnimSystem.hpp's
+// `posed_` and its comment on why).
+struct CParticleEmitter {
+    u64 effect    = 0;      // .ocparticle ObjectId (opaque; see CAnimator::clip for the idiom)
+    f32 age       = 0.0f;   // seconds since this emitter last transitioned stopped -> playing
+    f32 emitAccum = 0.0f;   // fractional particles owed by emissionRate*dt, carried frame to frame
+    u32 seed      = 0;      // this emitter's RNG stream; 0 = "not yet assigned" (a system picks one)
+    u32 flags     = 0;      // bit 0: kParticleEmitterStopped
+};
+
 // Field order is chosen so neither struct gets padding: World::verifyComponent is byte-exact and
 // turns a mismatch into an abort inside World's constructor, so a padded component kills the editor
 // at startup rather than failing a test.
 static_assert(sizeof(CSkeletalMesh) == 16, "CSkeletalMesh must be padding-free");
 static_assert(sizeof(CAnimator) == 24, "CAnimator must be padding-free");
+static_assert(sizeof(CParticleEmitter) == 24, "CParticleEmitter must be padding-free");
 
 class World;
 
 namespace detail {
-// Registers the ten built-ins. Called once by World's constructor.
+// Registers the eleven built-ins. Called once by World's constructor.
 void registerBuiltinComponents(World& world);
 } // namespace detail
 

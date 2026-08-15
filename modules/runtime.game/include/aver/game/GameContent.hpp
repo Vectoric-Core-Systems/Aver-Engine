@@ -119,6 +119,21 @@ public:
     const SurfaceLook* lookFor(i32 material) const;
 #endif
 
+#if AVER_MODULE_PARTICLES
+    // Loads every .ocparticle under the project's content root into particles::particleEffects(),
+    // keyed by fnv1a64(relative path) -- the SAME id space contentIndex_ already uses for every other
+    // project asset (adopt()'s own "FROZEN" comment), so a CParticleEmitter::effect a level or a
+    // script names resolves the identical way a CMeshRenderer::mesh or CAnimator::clip does. Recursive
+    // over the whole content root, matching loadProjectMeshes rather than loadProjectMaterials'
+    // Content\Materials convention: DECIDED 3 gave .ocparticle no such folder rule.
+    //
+    // particles::particleEffects() is the SAME process-global table SandboxApp.cpp's
+    // loadProjectParticleEffects() fills and --particle-test's hardcoded content calls set() on
+    // directly -- there is no GameContent-owned cache to keep in sync, matching resolveAnimAsset's
+    // relationship to aver::anim::animSystem() one block up.
+    void loadProjectParticleEffects();
+#endif
+
 private:
     fmt::ProjectDesc project_;
     std::unordered_map<u64, std::string> contentIndex_;

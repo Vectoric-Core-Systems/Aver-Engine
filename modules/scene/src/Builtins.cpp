@@ -1,4 +1,4 @@
-// Registers the ten built-in components and their field tables, through the same public API a
+// Registers the eleven built-in components and their field tables, through the same public API a
 // script-declared component uses.
 #include "aver/scene/Components.hpp"
 
@@ -109,6 +109,15 @@ void registerBuiltinComponents(World& world) {
             .field("blendWeight", FieldKind::F32, static_cast<u16>(offsetof(CAnimator, blendWeight)))
             .field("flags", FieldKind::I32, static_cast<u16>(offsetof(CAnimator, flags)));
         expect(b.verify(sizeof(CAnimator)), b.typeId(), kComponentAnimator, "CAnimator");
+    }
+    {
+        auto b = world.registerComponent<CParticleEmitter>("CParticleEmitter");
+        b.field("effect", FieldKind::I64, static_cast<u16>(offsetof(CParticleEmitter, effect)))
+            .field("age", FieldKind::F32, static_cast<u16>(offsetof(CParticleEmitter, age)))
+            .field("emitAccum", FieldKind::F32, static_cast<u16>(offsetof(CParticleEmitter, emitAccum)), 0, /*readOnly*/ true)
+            .field("seed", FieldKind::I32, static_cast<u16>(offsetof(CParticleEmitter, seed)))
+            .field("flags", FieldKind::I32, static_cast<u16>(offsetof(CParticleEmitter, flags)));
+        expect(b.verify(sizeof(CParticleEmitter)), b.typeId(), kComponentParticleEmitter, "CParticleEmitter");
     }
 }
 

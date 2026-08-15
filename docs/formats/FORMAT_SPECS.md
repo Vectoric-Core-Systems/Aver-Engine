@@ -32,6 +32,7 @@ Status: authoritative design spec, v1. Target repo: `C:/Users/User/Documents/Ave
 | `.ocprefab` | Prefab | **text** | none | Reusable node tree + component list + asset refs + overrides | **NEW** |
 | `.ocworld` | Native scene/world | **text** (cooked → `WRLD` chunk) | none / `AVR1` | **Superset of `.ocmap`** — scene graph, streaming, lighting, terrain, prefab instances | **NEW** |
 | `.ocpak` | Cooked package | **binary** | `AVR1`/`PAK ` | Bundle of cooked assets for shipping (DDC output) | **NEW** |
+| `.ocparticle` | Particle effect | **text** | none | Emitter shape/rate, lifetime, direction+spread, speed, gravity, damping, size- and colour-over-life, blend mode, GI opt-in | **NEW** |
 
 Rationale for text vs binary: **graphs and small authoring data stay text** (materials, prefabs, worlds, the legacy family) — diffable, hand-editable, mergeable in VCS, matching OC ergonomics. **Bulk geometry/pixel/track data is binary** (mesh, texture, skeletal, animation) — mmap-able, GPU-uploadable, compact. Text formats have a *cooked* binary projection (a chunk inside `.ocpak`) for shipping; the text form remains the source of truth.
 
@@ -457,6 +458,47 @@ TERRAIN heightfield {guid:0x…} extent 800000 800000
 ```
 
 Notes: `PLACE` (asset-name + transform, `.ocmap` style) and `PLACEG` (GUID + non-uniform scale) coexist; `DEFORM` unchanged (soft-body barriers). `LAYER`/`NODE`/`CELL`/`STREAM` give hierarchical + streamable worlds without the monolithic-level bloat. `GEOREF`/`TERRAIN` are the georeferenced-world hook the recon flagged as the likely dormant-Cesium role (`arch §6/§8`) — specified but engine-optional. Cooked `.ocworld` → `WRLD` chunk (flattened instance/cell/light tables) + a BLAKE3 Merkle `ROOT` computed over placements and referenced asset content hashes (the recon-intended real ROOT), and a `mapContentId` for the net map-parity gate (`net §4`).
+
+---
+
+## 11a. `.ocparticle` — particle effect (text)
+
+Text, for the reason §1 gives: an effect is small authoring data an artist tunes by hand and diffs in
+review, not bulk data a GPU maps. One `key value` record per line, `#` comments and blank lines
+ignored, unknown records preserved verbatim through a load/save cycle (the `.ocgraph` rule — a file
+written by a newer tool must survive being opened and saved by an older one).
+
+```
+OCPARTICLE 1
+NAME Snowfall
+SHAPE box 400 400 15          # point | box x y z | sphere r
+BLEND alphablend              # opaque | alphablend | premultiplied | additive
+EMISSION 140 0 700            # rate/sec, one-shot burst count, pool cap
+LIFETIME 7 10                 # seconds, min max -- drawn per particle at spawn
+DIRECTION 0 0 -1 10           # cone axis, then half-angle in degrees
+SPEED 25 40                   # cm/s, min max
+GRAVITY 0 0 -3                # cm/s^2, a constant -- NOT a physics query
+DAMPING 0.4                   # fraction of velocity removed per second, [0,1)
+SIZE 3 4                      # cm, birth then death
+COLOR start 1 1 1 0.85        # straight (non-premultiplied) rgba
+COLOR end   1 1 1 0.6
+TEX {guid:0x…}                # optional; untextured is a soft round sprite
+GI on                         # off for self-lit effects -- see below
+```
+
+`GI` is the one field whose default is worth stating outright. With it on, the particle is modulated
+by the scene's indirect light, so smoke and dust sit in the world instead of reading as pasted on.
+Self-lit effects — sparks, embers, anything additive — should set `GI off`: a spark is its own light
+source, and dimming it by the ambient around it is simply wrong.
+
+**Ranges are enforced at parse time, not clamped.** `DAMPING` outside `[0,1)`, a colour component
+outside `[0,1]`, an inverted `LIFETIME`, or a spread outside `[0,180]` are all refused with an error
+naming the record. This is not pedantry: the simulator trusts these, and a negative `DAMPING` is a
+velocity multiplier greater than one, so a mistyped sign does not damp gently — it accelerates every
+particle until the effect fills the screen.
+
+A parse failure leaves the caller's effect at this format's own defaults, never at the partial state
+of a file that failed halfway.
 
 ---
 

@@ -32,6 +32,10 @@ aver_add_module(Aver.Runtime.Game
     Aver.Platform
     Aver.Core
 )
+# stb_image_write, for GameApp.cpp's --screenshot (captureScreenshotIfDue). Matching
+# sandbox/CMakeLists.txt's own `target_include_directories(Sandbox PRIVATE .../third_party/stb)` --
+# see GameApp.cpp's own comment on why a second STB_IMAGE_WRITE_IMPLEMENTATION is fine here.
+target_include_directories(Aver.Runtime.Game PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
 
 # The optional half of the link interface, mirroring sandbox/CMakeLists.txt.
 #
@@ -81,4 +85,21 @@ if(TARGET Aver.Scripting.Host)
 endif()
 if(TARGET Aver.Trifactor)
   target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Trifactor)
+endif()
+# Particles (modules/particles): brings AVER_MODULE_PARTICLES=1 through its link interface, so
+# GameApp.cpp's `#if AVER_MODULE_PARTICLES` reads as a real zero, not an accidental always-off, in a
+# build with the module disabled -- the exact bug this whole block exists to prevent (see its header
+# comment). Without this line the game runtime would tick and register nothing a project's
+# CParticleEmitter placements could ever draw through, the same gap aee2404 fixed for four other seams.
+if(TARGET Aver.Particles)
+  target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Particles)
+endif()
+# .ocparticle reader/writer (DECIDED 3, slice 3): same guard as Aver.Particles itself, for
+# Aver.Formats.Material's exact reason above -- it parses straight into particles::ParticleEffect, so
+# it is only meaningful once that target exists. Without this a packaged game could register and tick
+# CParticleEmitter placements but never resolve one to a real authored effect on disk (GameContent::
+# loadProjectParticleEffects, slice 5), the same "wired in the editor, never in the game" gap aee2404
+# closed for four other seams.
+if(TARGET Aver.Formats.Particles)
+  target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Formats.Particles)
 endif()

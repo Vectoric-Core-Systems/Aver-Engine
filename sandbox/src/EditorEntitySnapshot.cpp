@@ -60,6 +60,33 @@ scene::Entity instantiateEntity(scene::World& world, const EntitySnapshot& snap,
             mr->flags |= scene::kMeshRendererVisible;
             mr->dirty = 1;
         }
+        // VERIFIED, NOT ASSUMED (particles slice 5's own instruction) -- and an adversarial re-check
+        // (post-slice-5 review) found the first version of this fixup fired unconditionally, which
+        // over-corrected: the generic byte-copy above is otherwise correct for CParticleEmitter --
+        // there is no GPU handle to re-flag, matching CMeshRenderer's case, or blob offset to fix up,
+        // matching why CName is excluded entirely -- BUT for restoreObjectId=false (Paste/Duplicate,
+        // a NEW distinct entity) it carries the SOURCE entity's already-derived `seed` verbatim onto a
+        // DIFFERENT entity. ParticleSystem::tick only ever assigns a seed when the field is still 0
+        // (see ParticleSystem.cpp's seedFor), so a paste/duplicate landed here with seed nonzero skips
+        // that assignment and both emitters' EmitterState::rng end up seeded identically -- bit-for-
+        // bit the same spawn offsets, speeds and lifetimes every frame. A duplicated dust cloud would
+        // visibly move in lockstep with its original instead of reading as a second, independent one.
+        // Resetting to 0 makes the paste re-derive its own seed from ITS OWN entity handle at its
+        // first tick, exactly as a freshly-placed emitter does.
+        //
+        // GATED ON !restoreObjectId, matching the objectId precedent immediately above in this same
+        // function: restoreObjectId=true is Undo-of-delete / Redo-of-create -- the SAME logical entity
+        // coming back, not a new one -- and every OTHER field on this component (effect, age, flags)
+        // restores byte-exact for that case. Resetting seed unconditionally (the first version of this
+        // fix) silently broke that for CParticleEmitter alone: an undone delete would re-derive a
+        // fresh seed from whatever entity handle undo happened to allocate, so a deleted-then-undone
+        // emitter's particle stream would visibly diverge from what was on screen before the delete,
+        // even though nothing else about the entity changed. Confirmed with a standalone probe calling
+        // this exact function with restoreObjectId=true before this gate existed: seed came back 0,
+        // not the source's preserved value, while effect/age/flags all round-tripped byte-exact.
+        if (c.type == scene::kComponentParticleEmitter && !restoreObjectId) {
+            static_cast<scene::CParticleEmitter*>(dst)->seed = 0;
+        }
     }
     return e;
 }

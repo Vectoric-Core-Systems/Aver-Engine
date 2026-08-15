@@ -145,6 +145,12 @@ option(AVER_MODULE_UPGRADE "Project migration chain: upgrade a project from the 
 # switch: the module builds by default, but --occlusion-cull (sandbox) defaults OFF, exactly like
 # --depth-prepass and --edge-aa (see modules/occlusion/README.md).
 option(AVER_MODULE_OCCLUSION "Occlusion module: hierarchical-Z pyramid + two-pass box culling" ON)
+# Particles: CPU-simulated billboard particles, depth-tested against the scene through
+# IRenderFeature::transparentPass (see modules/particles/README.md). Optional for the same reason
+# Occlusion is: the engine builds, links and renders with it off. It DOES depend on the scene
+# (scene::CParticleEmitter drives it), unlike Occlusion/AverSR, which is why the force-off guard
+# beside AVER_MODULE_FRAMEWORK's exists just below -- see it for what happens with the scene off.
+option(AVER_MODULE_PARTICLES "Particle system: CPU-simulated billboard particles, depth-tested against the scene" ON)
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -281,6 +287,13 @@ if(AVER_MODULE_FRAMEWORK AND NOT AVER_MODULE_SCENE)
   message(STATUS "Aver: the framework stands on the scene and cannot be built without it - forcing AVER_MODULE_FRAMEWORK=OFF")
   set(AVER_MODULE_FRAMEWORK OFF)
 endif()
+# scene::CParticleEmitter is declared IN modules/scene (Builtins.cpp), but the module that TICKS and
+# DRAWS it links Aver.Scene, not the other way round -- with the scene off there is no component for
+# it to read, exactly the shape AVER_MODULE_FRAMEWORK's guard above already has.
+if(AVER_MODULE_PARTICLES AND NOT AVER_MODULE_SCENE)
+  message(STATUS "Aver: particles are driven by a scene component and cannot be built without the scene - forcing AVER_MODULE_PARTICLES=OFF")
+  set(AVER_MODULE_PARTICLES OFF)
+endif()
 if(AVER_MODULE_SCENE)
   add_subdirectory(modules/scene)         # optional: the entity/component world + C ABI for C#
   # The scene/animation join. Guarded on BOTH, because it is the edge between them and neither owns
@@ -290,6 +303,14 @@ endif()
 if(AVER_MODULE_FRAMEWORK)
   add_subdirectory(modules/framework)     # optional: gameplay vocabulary over the world
 endif()
+if(AVER_MODULE_PARTICLES)
+  add_subdirectory(modules/particles)     # optional: CPU particle simulation + the billboard renderer
+endif()
+# The .ocparticle reader/writer (DECIDED 3), unconditionally added right after Particles for
+# modules/formats.roslyn's exact reason one dependency hop over: it depends on a target this file
+# only just (conditionally) defined, and its own CMakeLists.txt guards itself with
+# `if(TARGET Aver.Particles)` rather than re-deriving AVER_MODULE_PARTICLES's cascade here.
+add_subdirectory(modules/formats.particles)
 # Unconditional and Core-only: it produces a draw list and renders nothing itself, so there is no
 # device, no backend and no render feature it could depend on. A build with every optional module off
 # still gets a working UI system, which is what makes it testable.
@@ -437,5 +458,12 @@ if(AVER_BUILD_TESTS)
   endif()
   if(AVER_MODULE_FRAMEWORK)
     add_subdirectory(tests/framework)
+  endif()
+  if(AVER_MODULE_PARTICLES)
+    # The CPU simulation only -- spawn rate, lifetime, gravity/damping integration. Guarded by the
+    # module because it links Aver.Particles/Aver.Scene, CPU-only because what it decides (a particle
+    # count and a position after N seconds) is arithmetic no screenshot needs to settle first, the
+    # same reasoning tests/occlusion and tests/trifactor give for their own CPU-only suites.
+    add_subdirectory(tests/particles)
   endif()
 endif()

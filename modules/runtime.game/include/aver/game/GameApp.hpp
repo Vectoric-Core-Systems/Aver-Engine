@@ -12,6 +12,9 @@
 #if AVER_MODULE_SCENE
 #  include "aver/render/SkinnedScene.hpp"
 #endif
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+#  include "aver/particles/ParticleRenderer.hpp"
+#endif
 #if AVER_MODULE_SCRIPTING
 #  include "aver/scripting/ScriptHost.hpp"
 #endif
@@ -45,6 +48,22 @@ struct GameConfig {
     // exits. The only way to check the HLSL against its reference: HLSL compiles at RUNTIME, so a
     // green build says nothing about whether the shader agrees with anything.
     bool pcgVolumeTest = false;
+    // particles DECIDED 4's A/B toggle -- see sandbox/src/SandboxApp.cpp's setNoParticleGi for the
+    // full contract; this is the same flag, just read here instead of set through a member function
+    // (GameApp has no other CLI setters -- see parseArgs, which fills this struct directly).
+    bool noParticleGi = false;
+    // Slice 5's own proof content: the SAME dust cloud + ember burst sandbox/src/SandboxApp.cpp's
+    // --particle-test spawns (same shapes, same effect data, same relative placement), rebuilt over
+    // this executable's own ECS entity + CMeshRenderer path since GameApp has no editor-only object
+    // list to borrow. Exists so "particles render in both executables" has a screenshot from each
+    // that shows the same effect rather than two different scenes that merely both have particles.
+    bool particleTest = false;
+    // AverGame.exe had no screenshot mechanism at all before this -- sandbox/src/SandboxApp.cpp's own
+    // --screenshot (its shot_ member) is editor-only, built on top of viewport/probe bookkeeping a
+    // game does not have. This is the minimal equivalent: e.device()->requestCapture/getFrameImage
+    // are plain RHI calls, not an editor feature, so a --frames run can write a PNG here the same way.
+    // Empty = no screenshot requested (the default, and the only behaviour before this field existed).
+    std::string screenshotPath;
 };
 
 // Parses the arguments a game executable accepts. Unknown arguments are ignored rather than fatal:
@@ -106,6 +125,19 @@ private:
     // Creates and registers the skinning feature. Registered FIRST of all render features, so its
     // prePass stages this frame's bone matrices before anything asks for a posed handle.
     void attachSkinning(Engine&);
+
+    // Initialises and registers the particle renderer, and points it at the process-global
+    // ParticleSystem (matching aver::anim::animSystem()) -- the same seam SandboxApp.cpp wires, so a
+    // project's CParticleEmitter placements draw identically in the editor and the shipped game.
+    void attachParticles(Engine&);
+
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    // --particle-test only. Spawns the same dust-cloud + ember-burst content SandboxApp.cpp's own
+    // --particle-test does (an occluder cube plus two emitters) as scene entities, and points the
+    // default camera at it. See GameApp.cpp's definition for why the ECS shape differs from the
+    // editor's objects_-based version despite the effect data being identical.
+    void spawnParticleTestContent(rhi::IDevice& device);
+#endif
 
     // Attaches the density-volume builder and queues a build. --pcg-volume-test only.
     void attachPcgTest(Engine&);
@@ -177,6 +209,11 @@ private:
     // Pushes the camera, sky, fog and post settings to the device for this frame.
     void pushFrame(Engine&);
 
+    // --screenshot only, and only on a bounded (--frames N) run: requests a capture a few frames
+    // before the run ends and writes it to cfg_.screenshotPath once the RHI has it ready. See
+    // GameApp.cpp's definition for why capture and readback cannot both happen on the same frame.
+    void captureScreenshotIfDue(Engine&);
+
     // Applies the loaded level's sun and sky settings to the sky atmosphere.
     void applyLevelSky();
     void fitGiVolumeToLevel();
@@ -186,6 +223,18 @@ private:
 
     // Depth proxy resolver for shadow/voxel passes using LOD data.
     static rhi::MeshHandle depthProxyLookup(rhi::MeshHandle mesh, void* user);
+
+#if AVER_MODULE_VOXI && AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    // particles DECIDED 4: the two halves of particles::ParticleRenderer::GiSeam, installed in
+    // attachParticles once Voxi has already attached -- see GameApp.cpp's definitions for the whole
+    // contract (identical to sandbox/src/SandboxApp.cpp's own pair of the same name; this module has
+    // no shared home for them to live in without either side gaining a dependency the other must
+    // not have, so each composition root repeats this small amount of glue).
+    static bool particleGiPrepare(u32 srvBase, u32 samplerBase, u32 cbRegister,
+                                  std::string* outPrelude, std::string* outDefines, void* user);
+    static void particleGiBind(rhi::IResourceFactory& res, rhi::BindingSetHandle set, u32 srvBase,
+                               const void** outCbData, u32* outCbBytes, void* user);
+#endif
 
     GameConfig cfg_;
     InputState input_;
@@ -234,6 +283,14 @@ private:
     // Null is a LEGAL state: skinned entities then draw at their rest pose rather than not at all.
     std::unique_ptr<render::SkinnedScene> skinnedScene_;
 #endif
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    // BY VALUE and registered NON-OWNING, same reasoning as voxiRenderer_ just above.
+    particles::ParticleRenderer particleRenderer_;
+    bool particlesAttached_ = false;
+#endif
+    // --screenshot bookkeeping (captureScreenshotIfDue). Latched true once the PNG is written, so a
+    // capture requested near the end of a run is not re-requested every remaining frame.
+    bool screenshotDone_ = false;
     // OUTSIDE the scene guard, and it was inside it. Aver.Render.Pcg is linked UNCONDITIONALLY
     // (modules/runtime.game/CMakeLists.txt), there is no AVER_MODULE_PCG switch, and this header
     // already includes aver/pcg/PcgVolume.hpp outside every guard -- so the members had no business

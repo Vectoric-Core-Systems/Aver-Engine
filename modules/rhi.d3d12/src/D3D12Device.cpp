@@ -4008,33 +4008,94 @@ void D3D12Device::endFrame() {
     fovValid_ = false;   // the post chain sets pipelines on the command list directly
     ID3D12Resource* bb = renderTargets_[frameIndex_].Get();
 
-    // THE DEFERRED SKY DRAW. Every opaque drawMesh call the caller was going to make this frame has
-    // already happened by the time endFrame runs -- this is the last point before runPostChain's own
-    // first GPU work (the MSAA resolve, right below) reads the scene render target, so it is also the
-    // last point at which drawing into that target still means anything. Viewport and root signature
-    // are re-set explicitly rather than trusted to still be whatever beginFrame left them as: a
-    // feature's own passes, or setPipeline/setBindingSet from a render feature's own draw calls, can
-    // legitimately change either between beginFrame and here, and both calls are cheap and idempotent
-    // when nothing actually needs to change (bindGraphicsRoot already no-ops on a matching signature).
-    // The render target and depth buffer are NOT re-bound: nothing between beginFrame and here ever
-    // rebinds them away from the scene target, which every opaque drawMesh call this frame already
-    // depended on being true.
+    // Same scene-space rect (and fallback to the scene target, not the present one) as beginFrame --
+    // shared by the transparent pass and the sky draw just below, both of which land on the SAME
+    // still-bound scene colour/depth targets and so want the identical viewport and scissor.
+    const f32 rx = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
+    const f32 ry = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
+    const f32 rw = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(sceneWidth_);
+    const f32 rh = vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(sceneHeight_);
+    D3D12_VIEWPORT sceneVp{rx, ry, rw, rh, 0.0f, 1.0f};
+    D3D12_RECT sceneSc{static_cast<LONG>(rx), static_cast<LONG>(ry), static_cast<LONG>(rx + rw), static_cast<LONG>(ry + rh)};
+
+    // ---- THE DEFERRED SKY DRAW, NOW BEFORE THE TRANSPARENT PASS ----
+    //
+    // REORDERED FROM THIS PASS'S ORIGINAL SHAPE (particles DECIDED 4's own investigation found this:
+    // a --particle-test emitter placed anywhere that was NOT also over an opaque occluder rendered
+    // nothing at all -- confirmed with a CPU-side reprojection of its own particle positions into NDC,
+    // landing well inside [-1,1], and STILL invisible, which is what actually forced this file open).
+    // The ORIGINAL comment here reasoned that running the sky first would mean "a particle drawn over
+    // it would be blending onto sky that can never be un-drawn" and called that worse than testing
+    // against real depth -- but blending a translucent particle over the sky IS the correct picture
+    // for a particle in open air, and the ordering that comment defended has the opposite defect: sky
+    // draws OPAQUE (BlendState left at its D3D12 default, BlendEnable=FALSE -- see skyPso_'s own
+    // creation site), so with the transparent pass running FIRST and depth-WRITE off (still correct;
+    // see that pipeline contract's own comment below), every pixel a particle touched with no opaque
+    // occluder behind it was LEFT AT THE CLEAR DEPTH (1.0) by design -- and the sky's own DepthFunc
+    // EQUAL test (skyPso_'s own comment) then matched that exact pixel and overwrote the particle's
+    // blended colour with a flat, un-blended sky sample. A smoke column, falling snow or a waterfall's
+    // mist -- every expressiveness-test case this module's own report checked ANALYTICALLY rather than
+    // by rendering -- would have been invisible against open sky the moment it shipped, and nothing in
+    // slice 1-3's own proof caught it because every screenshot through slice 3 happened to place its
+    // test particles directly in front of an opaque cube, where real depth was always present.
+    //
+    // WHY THIS ORDER FIXES IT WITHOUT REOPENING THE PROBLEM THE OLD COMMENT WAS SOLVING. Sky still
+    // draws ONLY where depth is still at the clear value (its own EQUAL test, unchanged) -- since
+    // nothing has touched the depth buffer between beginFrame and here except opaque geometry, sky
+    // fills in exactly the same set of pixels it always did, REGARDLESS of this reorder. The
+    // transparent pass then draws AFTER it: for a pixel with a real occluder, the depth test still
+    // rejects a particle that is further away, exactly as before (occlusion is untouched by this
+    // change -- see the pipeline contract two paragraphs down). For a pixel with NO occluder, the sky
+    // has already painted a real colour there, so a particle's blend now composites onto that colour
+    // instead of onto whatever the opaque pass's own background happened to leave, and since the sky
+    // ALSO never writes depth (DepthWriteMask ZERO), the particle's own depth test still runs against
+    // the same clear value it always did and still passes. Nothing about occlusion, sort order, or the
+    // depth-write-off contract changes; only what colour a particle blends ONTO in open sky does.
     if (skyEnabled_ && !sceneSuppressed_) {
-        // Same scene-space rect (and fallback to the scene target, not the present one) as beginFrame.
-        const f32 rx = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
-        const f32 ry = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
-        const f32 rw = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(sceneWidth_);
-        const f32 rh = vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(sceneHeight_);
-        D3D12_VIEWPORT vp{rx, ry, rw, rh, 0.0f, 1.0f};
-        D3D12_RECT sc{static_cast<LONG>(rx), static_cast<LONG>(ry), static_cast<LONG>(rx + rw), static_cast<LONG>(ry + rh)};
-        cmdList_->RSSetViewports(1, &vp);
-        cmdList_->RSSetScissorRects(1, &sc);
+        cmdList_->RSSetViewports(1, &sceneVp);
+        cmdList_->RSSetScissorRects(1, &sceneSc);
         bindGraphicsRoot(rootSig_.Get());
         cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         cmdList_->SetPipelineState(skyPso_.Get());
         boundPso_ = skyPso_.Get();
         cmdList_->IASetVertexBuffers(0, 0, nullptr);
         cmdList_->DrawInstanced(3, 1, 0, 0);
+    }
+
+    // ---- THE TRANSPARENT PASS ----
+    // IRenderFeature::transparentPass, called here: every opaque drawMesh call this frame, AND the
+    // deferred sky draw just above, have already happened, so the depth buffer already holds every
+    // real occluder's depth and the render target already holds real colour everywhere (an occluder's
+    // own shading, or the sky) -- nothing in this scene is still "unpainted" by the time this runs, so
+    // a particle drawn here always blends onto something real rather than a background colour the sky
+    // would otherwise have overwritten it with (see the sky draw's own comment just above for the
+    // failure mode that used to cause, and this reorder's fix). The loop costs one virtual call per
+    // registered feature and nothing else -- the default implementation is an empty inline, so a
+    // feature that does not override it (every feature this engine ships except particles) leaves the
+    // target exactly as the sky pass left it and this frame is bit-for-bit what it always was.
+    //
+    // DEPTH-TEST ON, DEPTH-WRITE OFF is the pipeline every feature drawing here is expected to build
+    // (GraphicsPipelineDesc::depth = {true, false, ...}), and write-OFF is still correct, unchanged by
+    // the reorder above: with back-to-front sorting (see the particle module's own comment on why --
+    // inter-emitter order is not sorted at all, only within one emitter), the FURTHEST fragment at a
+    // pixel draws FIRST. If that first, furthest fragment also wrote depth, every fragment meant to
+    // blend UNDER it -- every particle actually further away, drawn later at the same pixel -- would
+    // fail the depth test outright and be silently dropped instead of blended: a translucent smoke
+    // plume would render as a single opaque-looking slice at its nearest layer. Depth-WRITE stays off;
+    // depth-TEST stays on, so a particle behind a wall is still correctly hidden by it, exactly as
+    // before this pass moved.
+    //
+    // Viewport and scissor are preset to the scene rect (the same contract IRenderFeature::overlayPass
+    // documents for the backbuffer); the pipeline is NOT preset; see transparentPass's own comment for
+    // why a feature drawing here always binds one of its own. Root signature and viewport are re-set
+    // explicitly (not trusted to still be whatever the sky draw above left them) for the same reason
+    // the sky draw itself re-sets them rather than trusting beginFrame: cheap, idempotent, and correct
+    // regardless of what ran in between.
+    if (rhiContext_ && !sceneSuppressed_) {
+        cmdList_->RSSetViewports(1, &sceneVp);
+        cmdList_->RSSetScissorRects(1, &sceneSc);
+        bindGraphicsRoot(rootSig_.Get());
+        for (IRenderFeature* f : features_) f->transparentPass(*rhiContext_);
     }
 
     runPostChain(bb);

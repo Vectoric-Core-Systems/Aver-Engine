@@ -26,6 +26,20 @@ target_compile_definitions(OcGraphTest PRIVATE
 set_target_properties(OcGraphTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# OcParticleTest -- the .ocparticle format (particles DECIDED 3). Round-tripping, unknown-record and
+# comment preservation, strict malformed-input rejection, and a real on-disk malformed file. Guarded
+# on the TARGET rather than on AVER_MODULE_PARTICLES for MaterialTest's exact reason below: an
+# AVER_MODULE_PARTICLES=OFF (or scene-off, which cascades to it) tree simply has no
+# Aver.Formats.Particles target to link, and the guard has to ask the question CMake can actually
+# answer at this point rather than re-deriving the option's cascade by hand.
+if(TARGET Aver.Formats.Particles)
+  add_executable(OcParticleTest src/OcParticleTest.cpp)
+  target_link_libraries(OcParticleTest PRIVATE
+    Aver.Formats.Particles Aver.Formats Aver.Particles Aver.Core Aver.Platform)
+  set_target_properties(OcParticleTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # MeshTest — the AVR1 container and .ocmesh. A THIRD executable rather than more cases in FormatTest
 # because FormatTest takes file paths on the command line and reports usage with none, so a binary
 # format that must be exercised from memory would never run in a plain `MeshTest.exe` invocation.

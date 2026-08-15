@@ -1,0 +1,13 @@
+OCPROJECT 1
+# Slice 5 test content -- lives in the worktree, not a demo project, and is not a weapon effect.
+# Proves particles DECIDED 3's real asset-resolution path (loadProjectParticleEffects, both
+# composition roots) end to end: a real .ocparticle file on disk resolving through the SAME id space
+# (fnv1a64 of its content-relative path) a level or a script would use.
+NAME ParticleDemo
+ENGINE Aver 0.1.2
+CREATEDWITH 0.2.0
+CONTENT Content
+# No STARTMAP: this project exists to be opened with --particle-test, whose own hardcoded content
+# (see GameApp::spawnParticleTestContent / SandboxApp's particleTest_ block) is the render proof; the
+# .ocparticle file under Content/Particles is the asset-RESOLUTION proof, evidenced by the
+# "[Particles] N project effect(s) loaded" log line rather than by anything this project places.

@@ -7,12 +7,36 @@
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Log.hpp"
 
+// --screenshot (captureScreenshotIfDue). A SECOND STB_IMAGE_WRITE_IMPLEMENTATION relative to
+// sandbox/src/SandboxApp.cpp's own is fine -- tests/formats/CMakeLists.txt's MakeFoliage target
+// already establishes the precedent: AverGame.exe and Sandbox.exe are separate binaries, so there is
+// no duplicate symbol to collide, unlike modules/platform/src/Image.cpp's STB_IMAGE_IMPLEMENTATION,
+// which every module ultimately links into BOTH executables and therefore may only be defined once.
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
 #if AVER_MODULE_SCENE
 #  include "aver/scene/World.hpp"
 #  include "aver/anim/AnimSystem.hpp"
 #endif
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+#  include "aver/particles/ParticleSystem.hpp"
+// --particle-test's own content (spawnParticleTestContent, below) needs the component types,
+// aver_scene_material and fnv1a64 directly -- everything else in this file reaches the scene only
+// through GameContent/GameLevel/GameRender, none of which needed any of the three until now.
+#  include "aver/scene/Components.hpp"
+#  include "aver/scene/scene_abi.h"
+#  include "aver/core/Hash.hpp"
+#endif
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/Voxi.hpp"
+#endif
+#if AVER_MODULE_VOXI && AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+// particles DECIDED 4's GI seam glue (particleGiPrepare/particleGiBind, below) is the ONLY reason
+// this translation unit needs Voxi's borrowed-HLSL header -- see VoxiGiShaders.hpp's own comment on
+// what it is: "the NARROW slice of Voxi's HLSL a foreign pipeline is allowed to borrow". Guarded
+// identically to the two functions that use it, and to nothing else in this file.
+#  include "aver/voxi/VoxiGiShaders.hpp"
 #endif
 #if AVER_MODULE_PHYSICS
 #  include "aver/physics/physics_abi.h"
@@ -52,6 +76,9 @@
 #endif
 #ifndef AVER_MODULE_TRIFACTOR
 #  define AVER_MODULE_TRIFACTOR 0
+#endif
+#ifndef AVER_MODULE_PARTICLES
+#  define AVER_MODULE_PARTICLES 0
 #endif
 
 namespace aver::game {
@@ -117,6 +144,9 @@ GameConfig parseArgs(int argc, char** argv) {
         else if (std::strcmp(a, "--input-echo") == 0)  { c.inputEcho = true; }
         else if (std::strcmp(a, "--trace-opens") == 0) { c.traceOpens = true; }
         else if (std::strcmp(a, "--pcg-volume-test") == 0) { c.pcgVolumeTest = true; }
+        else if (std::strcmp(a, "--no-particle-gi") == 0)  { c.noParticleGi = true; }
+        else if (std::strcmp(a, "--particle-test") == 0)   { c.particleTest = true; }
+        else if (std::strcmp(a, "--screenshot") == 0)      { c.screenshotPath = valueAfter(argc, argv, i, ""); ++i; }
         // A bare path ending .ocproject is the project, so double-clicking one or dropping it on the
         // exe works. A packaged game is launched with no arguments at all and finds its manifest in
         // its own directory instead -- see openProject.
@@ -367,6 +397,165 @@ void GameApp::attachVoxi(Engine& e) {
 #endif
 }
 
+void GameApp::attachParticles(Engine& e) {
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    rhi::IDevice* dev = e.device();
+    if (!dev) return;
+
+    // Both process-global singletons, matching anim::animSystem() above: the system resolves
+    // CParticleEmitter::effect through the library, and without this line it never resolves
+    // anything -- effects_ defaults to null and every tick sees "no effect", silently spawning
+    // nothing (see ParticleSystem::tick's own early-out).
+    particles::particleSystem().setEffectLibrary(&particles::particleEffects());
+    if (particleRenderer_.init(*dev)) {
+        particleRenderer_.setSystem(&particles::particleSystem());
+        dev->addRenderFeature(&particleRenderer_);
+        particlesAttached_ = true;
+#if AVER_MODULE_VOXI
+        // DECIDED 4's seam, installed only once Voxi has actually attached this run (attachVoxi runs
+        // before attachParticles -- see onInit's call order) and only unless --no-particle-gi asked
+        // for the A/B comparison this decision's own proof needs. See particleGiPrepare/particleGiBind
+        // above for the whole contract; particleRenderer_ never learns Voxi's name.
+        if (voxiAttached_ && !cfg_.noParticleGi) {
+            particles::ParticleRenderer::GiSeam seam;
+            seam.prepare = &GameApp::particleGiPrepare;
+            seam.bind = &GameApp::particleGiBind;
+            seam.user = this;
+            particleRenderer_.setGiSeam(seam);
+        }
+#endif
+        AVER_INFO("[Game] particles attached");
+    } else {
+        AVER_WARN("[Game] particle renderer unavailable on this device; CParticleEmitter placements draw nothing");
+    }
+#else
+    (void)e;
+#endif
+}
+
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+void GameApp::spawnParticleTestContent(rhi::IDevice& device) {
+    // STANDALONE BY DESIGN, matching sandbox/src/SandboxApp.cpp's own --particle-test: no project and
+    // no Game.ocproject are required. registerBuiltins is normally openProject's job, run only once a
+    // project's content dir resolves (see openProject's own AVER_MODULE_SCENE block) -- a bare
+    // `AverGame.exe --particle-test` never opens one, so this guarantees the builtin unit cube this
+    // test draws through exists regardless. Guarded on the lookup rather than called unconditionally,
+    // so a run THAT does have a project (e.g. `--project <path> --particle-test`) does not create a
+    // second, orphaned GPU mesh behind the one openProject already made.
+    const u64 cubeId = fnv1a64(std::string_view("Meshes/cube.ocmesh"));
+    if (!content_.meshFor(cubeId)) content_.registerBuiltins(device);
+
+    scene::World& world = scene::World::instance();
+
+    // THE SAME OCCLUDER, THE SAME DUST CLOUD, THE SAME EMBER BURST sandbox/src/SandboxApp.cpp's own
+    // --particle-test spawns (SandboxApp.cpp, the particleTest_ block: identical positions, identical
+    // effect data) -- rebuilt over this executable's own ECS entity + CMeshRenderer path rather than
+    // the editor's objects_ list, which GameApp has no equivalent of (GameRender.cpp draws only
+    // CMeshRenderer entities; see its own header comment on what a game deliberately does not carry
+    // over from the editor). A screenshot from each executable is then evidence about the SAME scene
+    // rendering correctly twice, not about two different scenes that both merely happen to show
+    // something.
+    const Vec3 cubePos{600.0f, 0.0f, 50.0f};
+    {
+        Transform xf;
+        xf.position = cubePos;
+        xf.scale = Vec3{80.0f, 80.0f, 80.0f};
+        const scene::Entity occ = world.create("ParticleTest.Occluder", scene::kInvalidEntity, xf);
+        if (auto* mr = static_cast<scene::CMeshRenderer*>(
+                world.addComponent(occ, scene::kComponentMeshRenderer))) {
+            mr->mesh = cubeId;
+            mr->flags |= scene::kMeshRendererVisible;
+            mr->aabbMin[0] = mr->aabbMin[1] = mr->aabbMin[2] = -1.0f;
+            mr->aabbMax[0] = mr->aabbMax[1] = mr->aabbMax[2] =  1.0f;
+            // A builtin surface token registerBuiltins already interned (GameContent.cpp) -- crate-
+            // brown, metallic 0.02, roughness 0.78. Not invented for this test: reusing an existing
+            // named surface keeps this from becoming its own little material feature.
+            mr->material = aver_scene_material(0, "M_Crate");
+        }
+    }
+
+    particles::ParticleEffect fx;
+    fx.shape = particles::EmitterShape::Box;
+    fx.shapeSize = Vec3{350.0f, 60.0f, 90.0f};
+    fx.emissionRate = 150.0f;
+    fx.burstCount = 0;
+    fx.maxParticles = 400;
+    fx.lifetimeMin = 3.0f;
+    fx.lifetimeMax = 5.0f;
+    fx.direction = Vec3{0.0f, 0.0f, 1.0f};
+    fx.spreadDeg = 60.0f;
+    fx.speedMin = 5.0f;
+    fx.speedMax = 15.0f;
+    fx.gravity = Vec3{0.0f, 0.0f, -5.0f};
+    fx.damping = 0.3f;
+    fx.sizeStart = 25.0f;
+    fx.sizeEnd = 45.0f;
+    fx.colorStart[0] = 0.75f; fx.colorStart[1] = 0.70f; fx.colorStart[2] = 0.62f; fx.colorStart[3] = 0.35f;
+    fx.colorEnd[0]   = 0.75f; fx.colorEnd[1]   = 0.70f; fx.colorEnd[2]   = 0.62f; fx.colorEnd[3]   = 0.0f;
+    fx.blend = rhi::BlendMode::PremultipliedAlpha;
+    constexpr u64 kDustCloudEffectId = 0x50415254'44550001ull;   // arbitrary, non-zero
+    particles::particleEffects().set(kDustCloudEffectId, fx);
+
+    {
+        Transform xf;
+        xf.position = cubePos;
+        const scene::Entity emitter = world.create("ParticleTest.DustCloud", scene::kInvalidEntity, xf);
+        if (auto* c = static_cast<scene::CParticleEmitter*>(
+                world.addComponent(emitter, scene::kComponentParticleEmitter))) {
+            c->effect = kDustCloudEffectId;
+        }
+        AVER_INFO("[Game] --particle-test: dust cloud entity {} around effect 0x{:016X}",
+                  emitter, kDustCloudEffectId);
+    }
+
+    // DECIDED 4's own proof of the opposite half of the seam: receivesGI = false, additive, well
+    // clear of the dust cloud's footprint so the two never overlap in one screenshot -- see
+    // SandboxApp.cpp's own comment on why this sits in open sky with nothing opaque behind it.
+    particles::ParticleEffect emberFx;
+    emberFx.shape = particles::EmitterShape::Sphere;
+    emberFx.shapeSize = Vec3{10.0f, 0.0f, 0.0f};
+    emberFx.emissionRate = 80.0f;
+    emberFx.burstCount = 0;
+    emberFx.maxParticles = 200;
+    emberFx.lifetimeMin = 1.0f;
+    emberFx.lifetimeMax = 1.6f;
+    emberFx.direction = Vec3{0.0f, 0.0f, 1.0f};
+    emberFx.spreadDeg = 35.0f;
+    emberFx.speedMin = 40.0f;
+    emberFx.speedMax = 80.0f;
+    emberFx.gravity = Vec3{0.0f, 0.0f, -25.0f};
+    emberFx.damping = 0.1f;
+    emberFx.sizeStart = 22.0f;
+    emberFx.sizeEnd = 6.0f;
+    emberFx.colorStart[0] = 1.0f; emberFx.colorStart[1] = 0.55f; emberFx.colorStart[2] = 0.12f; emberFx.colorStart[3] = 1.0f;
+    emberFx.colorEnd[0]   = 1.0f; emberFx.colorEnd[1]   = 0.15f; emberFx.colorEnd[2]   = 0.02f; emberFx.colorEnd[3] = 0.0f;
+    emberFx.blend = rhi::BlendMode::Additive;
+    emberFx.receivesGI = false;   // DECIDED 4: an ember is its own light source
+    constexpr u64 kEmberEffectId = 0x50415254'45420001ull;   // arbitrary, non-zero
+    particles::particleEffects().set(kEmberEffectId, emberFx);
+
+    {
+        Transform xf;
+        xf.position = cubePos + Vec3{0.0f, 0.0f, 220.0f};
+        const scene::Entity emberEmitter = world.create("ParticleTest.Embers", scene::kInvalidEntity, xf);
+        if (auto* c = static_cast<scene::CParticleEmitter*>(
+                world.addComponent(emberEmitter, scene::kComponentParticleEmitter))) {
+            c->effect = kEmberEffectId;
+        }
+        AVER_INFO("[Game] --particle-test: ember entity {} around effect 0x{:016X} (receivesGI=false)",
+                  emberEmitter, kEmberEffectId);
+    }
+
+    // THE SAME CAMERA sandbox/src/SandboxApp.cpp's own --particle-test proof used
+    // (`--cam 0 0 50 0 0`): camForward() composes {cosP cosY, cosP sinY, sinP}, so yaw=pitch=0 looks
+    // down +X, directly at the occluder and both emitters above.
+    camPos_ = Vec3{0.0f, 0.0f, 50.0f};
+    yaw_ = 0.0f;
+    pitch_ = 0.0f;
+    AVER_INFO("[Game] --particle-test: camera set to (0,0,50) looking down +X");
+}
+#endif
+
 void GameApp::openProject(Engine& e) {
     // A PACKAGED GAME IS LAUNCHED WITH NO ARGUMENTS. stage-game.ps1 writes Game.ocproject beside
     // AverGame.exe, so when nothing was named on the command line, look there -- and look beside the
@@ -403,6 +592,12 @@ void GameApp::openProject(Engine& e) {
         content_.registerBuiltins(*dev);
         content_.loadProjectMeshes(*dev);
     }
+#if AVER_MODULE_PARTICLES
+    // Same order rule as the mesh load two lines up: a placed CParticleEmitter's effect id must be
+    // able to resolve before anything might read it. Unlike meshes this needs no device -- an effect
+    // is CPU-only data (particles DECIDED 2) -- so it runs whether or not e.device() succeeded above.
+    content_.loadProjectParticleEffects();
+#endif
     level_.loadStartMap(project_, content_);
     // Apply the level's sun and sky settings
     applyLevelSky();
@@ -586,6 +781,30 @@ rhi::MeshHandle GameApp::depthProxyLookup(rhi::MeshHandle mesh, void* user) {
     return 0;
 #endif
 }
+
+#if AVER_MODULE_VOXI && AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+// particles DECIDED 4: the two halves of particles::ParticleRenderer::GiSeam. IDENTICAL in shape and
+// reasoning to sandbox/src/SandboxApp.cpp's own pair of the same name -- see that file's comment for
+// the full contract. modules/particles never includes this file, this class, or voxi/VoxiRenderer.hpp;
+// this pair of functions, installed from attachParticles below, is the entire boundary.
+bool GameApp::particleGiPrepare(u32 srvBase, u32 samplerBase, u32 cbRegister,
+                                std::string* outPrelude, std::string* outDefines, void* user) {
+    (void)user;   // giShaderPrelude()/giShaderDefines() are pure functions of the register numbers
+    if (!outPrelude || !outDefines) return false;
+    *outPrelude = voxi::giShaderPrelude();
+    *outDefines = voxi::giShaderDefines(srvBase, samplerBase, cbRegister);
+    return true;
+}
+
+void GameApp::particleGiBind(rhi::IResourceFactory& res, rhi::BindingSetHandle set, u32 srvBase,
+                             const void** outCbData, u32* outCbBytes, void* user) {
+    auto* self = static_cast<GameApp*>(user);
+    if (!self || !outCbData || !outCbBytes) return;
+    self->voxiRenderer_.bindGiResources(res, set, srvBase);
+    *outCbData = self->voxiRenderer_.giFrameConstants();
+    *outCbBytes = self->voxiRenderer_.giFrameConstantBytes();
+}
+#endif
 
 void GameApp::applyLevelSky() {
 #if AVER_MODULE_SCENE
@@ -823,16 +1042,26 @@ void GameApp::onInit(Engine& e) {
     // subsystem lifted out of SandboxApp is wrapped in one of these #ifs; if the link interface is
     // wrong they are all false, the lifted code compiles to nothing, and the only symptom is a game
     // that draws an empty world -- which looks exactly like a broken renderer.
-    AVER_INFO("[Game] modules: PBR={} SCENE={} VOXI={} PHYSICS={} FRAMEWORK={} SCRIPTING={}",
+    AVER_INFO("[Game] modules: PBR={} SCENE={} VOXI={} PHYSICS={} FRAMEWORK={} SCRIPTING={} PARTICLES={}",
               AVER_MODULE_PBR, AVER_MODULE_SCENE, AVER_MODULE_VOXI,
-              AVER_MODULE_PHYSICS, AVER_MODULE_FRAMEWORK, AVER_MODULE_SCRIPTING);
+              AVER_MODULE_PHYSICS, AVER_MODULE_FRAMEWORK, AVER_MODULE_SCRIPTING, AVER_MODULE_PARTICLES);
     // FIRST of the render features. Its prePass stages this frame's bone matrices, and the scene
     // pass then asks drawHandle() for a posed handle that must already exist.
     attachSkinning(e);
     attachVoxi(e);
+    attachParticles(e);
     if (cfg_.pcgVolumeTest) attachPcgTest(e);
     initPhysics();      // BEFORE openProject: level load builds a static body per colliding placement
     openProject(e);
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    // AFTER openProject: needs registerBuiltins' unit cube (or spawns it itself when no project ever
+    // reached that call -- see spawnParticleTestContent's own comment) and overrides the camera
+    // openProject/applyLevelSky may already have touched.
+    if (cfg_.particleTest) {
+        if (rhi::IDevice* dev = e.device()) spawnParticleTestContent(*dev);
+        else AVER_WARN("[Game] --particle-test: no device, nothing spawned");
+    }
+#endif
     // AFTER openProject: the scripts directory this resolves (project_.binariesDir() + "\Scripts")
     // and the graph discovery below (content_.pathsWithExtension) both read state openProject just
     // populated. See initScripting's own comment for why bootstrapping the CLR host lives here at
@@ -891,6 +1120,10 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // gated on PLAYING, and hanging animation off them would freeze every animated thing the moment
     // a session was not running. Deliberate asymmetry, copied from the editor.
     anim::animSystem().tick(scene::World::instance(), t.dt);
+#if AVER_MODULE_PARTICLES
+    // Same "unconditionally, not from the gameplay tick" reasoning as the animation clock above.
+    particles::particleSystem().tick(scene::World::instance(), t.dt);
+#endif
     // Retires deferred destroys, rebuilds the topological order and recomposes stale world
     // matrices. Without it World::worldMatrix reads uncomposed matrices and the draw walk in C7
     // would place everything at the origin -- which looks like a broken transform pipeline and is
@@ -956,8 +1189,7 @@ void GameApp::onRender(Engine& e) {
         drawWorld(*dev, viewProj_, content_, drawStats_, ms, skinnedScene_.get());
     }
 #endif
-    // Nothing drawn yet: Engine::frameStep() already does beginFrame/endFrame around this, so the
-    // swapchain is cleared and presented. The world draw walk lands here in a later slice.
+    captureScreenshotIfDue(e);
 
     // ROLLING THE INPUT EDGES IS THE LAST THING THE FRAME DOES, and the ordering is not arbitrary.
     // Engine::run pumps the window at the TOP of the loop:
@@ -972,6 +1204,30 @@ void GameApp::onRender(Engine& e) {
     input_.newFrame();
 }
 
+void GameApp::captureScreenshotIfDue(Engine& e) {
+    if (cfg_.screenshotPath.empty() || screenshotDone_ || cfg_.maxFrames == 0) return;
+    rhi::IDevice* dev = e.device();
+    if (!dev) return;
+
+    // requestCapture/getFrameImage are a REQUEST/POLL pair (see RHI.hpp's own comment: getFrameImage
+    // only has data "after a requestCapture completes"), so asking and reading cannot happen on the
+    // SAME frame -- sandbox/src/SandboxApp.cpp's captureCheck asks a few frames before the run ends
+    // for the identical reason. The x,y passed to requestCapture is irrelevant here (this only wants
+    // the full frame image, not the single-pixel probe Sandbox also reads).
+    const u64 f = e.time().frame;
+    const u64 sf = cfg_.maxFrames > 8 ? cfg_.maxFrames - 3 : (cfg_.maxFrames > 1 ? cfg_.maxFrames - 1 : 0);
+    if (f == sf) { dev->requestCapture(0, 0); return; }
+    if (f <= sf) return;
+
+    std::vector<u8> img; u32 iw = 0, ih = 0;
+    if (dev->getFrameImage(img, iw, ih) && iw && ih &&
+        stbi_write_png(cfg_.screenshotPath.c_str(), static_cast<int>(iw), static_cast<int>(ih), 4,
+                       img.data(), static_cast<int>(iw) * 4)) {
+        AVER_INFO("[Game] screenshot: {} ({}x{})", cfg_.screenshotPath, iw, ih);
+        screenshotDone_ = true;
+    }
+}
+
 void GameApp::onShutdown(Engine& e) {
     // EXACT REVERSE REGISTRATION ORDER. The device holds bare pointers to every render feature, so
     // a feature that outlives its removal is a dangling call and one removed out of order can be
@@ -981,6 +1237,15 @@ void GameApp::onShutdown(Engine& e) {
     rhi::IDevice* dev = e.device();
     if (dev && pcgAttached_) { dev->removeRenderFeature(&pcgVolume_); pcgAttached_ = false; }
     pcgVolume_.shutdown();
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    // Registered LAST of onInit's render features (after skinning and Voxi), so removed first among
+    // them here.
+    if (dev && particlesAttached_) {
+        dev->removeRenderFeature(&particleRenderer_);
+        particlesAttached_ = false;
+    }
+    particleRenderer_.shutdown();
+#endif
 #if AVER_MODULE_SCENE
     // Reverse registration order: skinning went in FIRST, so it comes out LAST of the two.
     // Removed before the device goes, because the device holds a bare pointer to it.

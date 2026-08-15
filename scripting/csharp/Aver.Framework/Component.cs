@@ -28,4 +28,6 @@ public enum Component
     SkeletalMesh = 9,
     /// <summary>A clip and the clock running it.</summary>
     Animator = 10,
+    /// <summary>An effect id and this entity's own emission clock.</summary>
+    ParticleEmitter = 11,
 }

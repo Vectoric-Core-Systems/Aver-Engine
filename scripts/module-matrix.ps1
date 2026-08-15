@@ -43,6 +43,12 @@ $configs = [ordered]@{
     # be paired with AVER_MODULE_SCENE (ba30436's parent) because two of its members are keyed on
     # scene::Entity, which is exactly the kind of thing this matrix exists to notice.
     "occlusion-off" = @("-DAVER_MODULE_OCCLUSION=OFF")
+    # Particles (modules/particles). Depends on the scene (scene::CParticleEmitter), so this row
+    # alone does not exercise the AVER_MODULE_SCENE=OFF interaction -- that is already covered by
+    # scene-off below, which forces this module off too via its own AVER_MODULE_SCENE guard in the
+    # root CMakeLists.txt. This row is what proves the engine builds, links and renders with
+    # particles off ON ITS OWN, same shape as occlusion-off just above.
+    "particles-off" = @("-DAVER_MODULE_PARTICLES=OFF")
     # AverSR (docs/AVERSR.md). The IUpscaler seam lives in Aver.RHI itself, not this module, so no
     # RENDERER may reference Aver.Render.Sr -- only sandbox, as the composition root that constructs
     # the concrete SpatialUpscaler and hands the seam an IUpscaler* it can hold as null, links it
