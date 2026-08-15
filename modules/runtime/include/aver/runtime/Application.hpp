@@ -28,6 +28,14 @@ class Application {
 public:
     virtual ~Application() = default;
     virtual BootConfig config() const { return {}; }
+
+    // Fires once, right after the RHI device exists but BEFORE Engine::run creates the swapchain or
+    // calls IDevice::uiInit -- the one point at which an app can plug a backend-specific UI toolkit
+    // into the device (see aver::rhi::d3d12::installUiBackend) in time for that uiInit call to find
+    // one installed. onInit() itself runs too late for this: by the time it is called, uiInit has
+    // already run. Empty default, so only an app that overrides it (the editor) pays for it existing.
+    virtual void onDeviceCreated(Engine&) {}
+
     virtual void onInit(Engine&) {}
     virtual void onUpdate(Engine&, const Timestep&) {}
     virtual void onRender(Engine&) {}

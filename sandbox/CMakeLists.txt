@@ -17,6 +17,28 @@ add_executable(Sandbox
   src/GraphEditor.cpp
   Sandbox.rc)
 target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
+
+# Dear ImGui: the editor's own UI. Aver.RHI.D3D12 no longer knows this exists -- see its own
+# CMakeLists.txt and include/aver/rhi/d3d12/UiBackend.hpp for the seam it exposes instead -- so the
+# editor, which is the thing that actually wants ImGui, links it itself: Aver.RHI.D3D12.ImGui for the
+# DX12/Win32 render backend, and `imgui` a second time, directly, for the ~90 call sites across
+# sandbox/src/*.cpp that build panels and docking with raw ImGui:: calls (that surface was never
+# inside D3D12Device.cpp and has nothing to do with the split). Both PRIVATE: Sandbox is a leaf
+# executable with nothing further to propagate to.
+#
+# AVER_WITH_IMGUI is defined HERE now, not inherited through the RHI -- and gated on
+# Aver.RHI.D3D12.ImGui existing, NOT on AVER_ENABLE_UI alone. That distinction matters for exactly one
+# configuration: AVER_RHI_D3D12=OFF with AVER_ENABLE_UI still ON (module-matrix.ps1's d3d12-off row).
+# `imgui` itself builds there (third_party/imgui is gated on AVER_ENABLE_UI alone), but
+# Aver.RHI.D3D12.ImGui does not (it DEPS on Aver.RHI.D3D12), and this file's own AVER_WITH_IMGUI code
+# below needs that module's types. Gating on AVER_ENABLE_UI alone would define the macro in a tree
+# that cannot compile SandboxApp.cpp's ImGui backend wiring; gating on the module being present
+# reproduces exactly the pre-split behaviour, where AVER_WITH_IMGUI only ever reached Sandbox by
+# riding along on Aver.RHI.D3D12 actually being built.
+if(TARGET Aver.RHI.D3D12.ImGui)
+  target_link_libraries(Sandbox PRIVATE Aver.RHI.D3D12.ImGui imgui)
+  target_compile_definitions(Sandbox PRIVATE AVER_WITH_IMGUI=1)
+endif()
 # The level/world runtime. The editor and the game runtime BOTH link this, which is the whole reason
 # it is not inside Aver.Runtime.Game: turning a .ocworld placement into an entity used to be written
 # out twice, and every future change to it -- chunk ownership first -- would have had to be made

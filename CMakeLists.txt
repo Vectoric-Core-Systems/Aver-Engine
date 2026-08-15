@@ -229,6 +229,14 @@ if(AVER_MODULE_OCCLUSION)
 endif()
 if(AVER_RHI_D3D12)
   add_subdirectory(modules/rhi.d3d12)
+  # The concrete Dear ImGui implementation of that module's IUiBackend seam -- see
+  # modules/rhi.d3d12.imgui/CMakeLists.txt. Nested here (it DEPS on Aver.RHI.D3D12) and additionally
+  # gated on AVER_ENABLE_UI, since there is nothing for it to back when UI is off. Only Sandbox links
+  # it -- see sandbox/CMakeLists.txt's matching if(TARGET Aver.RHI.D3D12.ImGui), which is also what
+  # decides whether Sandbox gets AVER_WITH_IMGUI defined at all.
+  if(AVER_ENABLE_UI)
+    add_subdirectory(modules/rhi.d3d12.imgui)
+  endif()
 endif()
 if(AVER_RHI_D3D11)
   add_subdirectory(modules/rhi.d3d11)
@@ -329,10 +337,12 @@ endif()
 # The standalone game runtime. Separate from the sandbox switch because they are opposites: one is
 # the editor, one is what a shipped game runs, and a tree may reasonably want either alone.
 #
-# NOTE FOR PACKAGING: an AverGame.exe built from a tree with AVER_ENABLE_UI=ON has ImGui linked into
-# it, because Aver.RHI.D3D12 links imgui PUBLIC and Aver.Runtime links that backend PUBLIC. Such a
-# binary is fine to run and must NOT be shipped; the staging script reads AVER_ENABLE_UI out of
-# CMakeCache.txt and refuses it. Making the exclusion structural is the ImGui/RHI split, later.
+# NOTE FOR PACKAGING, UPDATED BY THE IMGUI/RHI SPLIT: an AverGame.exe built from a tree with
+# AVER_ENABLE_UI=ON no longer has ImGui linked into it. Aver.RHI.D3D12 never links imgui (see its own
+# CMakeLists.txt and include/aver/rhi/d3d12/UiBackend.hpp); the concrete Dear ImGui implementation
+# lives in the separate Aver.RHI.D3D12.ImGui module, which only Sandbox links regardless of this
+# switch. scripts/stage-game.ps1 now proves this against the actual staged binary rather than
+# refusing the whole configuration on principle -- see its own comment.
 if(AVER_BUILD_GAME)
   add_subdirectory(game)
 endif()

@@ -6,10 +6,20 @@
 # the game executable grows. The lift is a COPY: sandbox/src/SandboxApp.cpp is not edited by it, so
 # the editor cannot regress. De-duplication is a later slice, proven by the gates staying identical.
 #
-# It links NO UI. That is the whole point of the module existing, and it is currently true by
-# construction rather than by enforcement: ImGui is linked PUBLIC from Aver.RHI.D3D12, so an
-# AVER_ENABLE_UI=ON tree propagates it here regardless. scripts/stage-game.ps1 is what refuses to
-# ship a binary built that way, until the ImGui/RHI split makes it structural.
+# It links NO UI, and now that is true BY CONSTRUCTION, not merely by scripts/stage-game.ps1's
+# refusal. Aver.RHI.D3D12 no longer links imgui at all, in any configuration (see its own
+# CMakeLists.txt and include/aver/rhi/d3d12/UiBackend.hpp) -- the concrete Dear ImGui implementation
+# lives in the separate Aver.RHI.D3D12.ImGui module, which only Sandbox links. An AVER_ENABLE_UI=ON
+# tree's AverGame.exe is therefore clean regardless of this switch.
+#
+# VERIFIED BY BYTE-SCANNING THE BINARY, not by dumpbin /imports and not inferred from the CMake edit.
+# The distinction matters and cost a review round to pin down: imgui is a STATIC library, so neither
+# executable ever carries an imgui*.dll import entry whether or not ImGui code is compiled in --
+# dumpbin /imports answers a different question and would have passed either way. Scanning the built
+# files for the symbol/string names themselves is what actually settles it. From one
+# AVER_ENABLE_UI=ON tree: Sandbox.exe has ImGui_ImplDX12_Init x3, ImGui_ImplWin32_Init x2,
+# "Dear ImGui" x6 and "docking" x30; AverGame.exe has zero of each, and its single case-insensitive
+# "imgui" hit is the embedded PDB path naming the build directory, not code.
 aver_add_module(Aver.Runtime.Game
   SOURCES
     src/GameApp.cpp

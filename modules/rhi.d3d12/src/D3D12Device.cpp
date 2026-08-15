@@ -21,12 +21,10 @@
 #include <utility>
 #include <vector>
 
-#if AVER_WITH_IMGUI
-#include "imgui.h"
-#include "backends/imgui_impl_win32.h"
-#include "backends/imgui_impl_dx12.h"
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-#endif
+// The abstract seam a UI toolkit's D3D12 backend plugs into. This file has no ImGui include and no
+// ImGui symbol anywhere in it -- see UiBackend.hpp for why, and modules/rhi.d3d12.imgui for where
+// Dear ImGui itself now lives.
+#include "aver/rhi/d3d12/UiBackend.hpp"
 
 using Microsoft::WRL::ComPtr;
 
@@ -203,50 +201,11 @@ D3D12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE type) {
     return p;
 }
 
-#if AVER_WITH_IMGUI
-// Feeds one window message to ImGui. True when ImGui consumed it.
-static bool imguiWndProc(void* hwnd, u32 msg, u64 w, i64 l) {
-    return ImGui_ImplWin32_WndProcHandler(static_cast<HWND>(hwnd), static_cast<UINT>(msg),
-                                          static_cast<WPARAM>(w), static_cast<LPARAM>(l)) != 0;
-}
-
-// Slots in the UI descriptor pool. ImGui 1.92 keeps several atlas textures alive at once.
-static constexpr u32 kUiSrvCount = 16;
-
-namespace {
-// The UI's shader-visible descriptor slots and which of them are in use.
-struct UiSrvPool {
-    ID3D12DescriptorHeap* heap = nullptr;
-    u64 cpuBase = 0;
-    u64 gpuBase = 0;
-    u32 stride = 0;
-    bool used[kUiSrvCount] = {};
-};
-UiSrvPool g_uiSrv;
-} // namespace
-
-// Hands ImGui a free descriptor from the UI pool.
-static void uiSrvAlloc(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* cpu,
-                       D3D12_GPU_DESCRIPTOR_HANDLE* gpu) {
-    for (u32 i = 0; i < kUiSrvCount; ++i) {
-        if (g_uiSrv.used[i]) continue;
-        g_uiSrv.used[i] = true;
-        cpu->ptr = static_cast<SIZE_T>(g_uiSrv.cpuBase + u64(i) * g_uiSrv.stride);
-        gpu->ptr = g_uiSrv.gpuBase + u64(i) * g_uiSrv.stride;
-        return;
-    }
-    AVER_ERROR("[RHI.D3D12] UI SRV descriptor pool exhausted ({} in use)", kUiSrvCount);
-    cpu->ptr = 0; gpu->ptr = 0;
-}
-
-// Returns a descriptor to the UI pool.
-static void uiSrvFree(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE cpu,
-                      D3D12_GPU_DESCRIPTOR_HANDLE) {
-    if (!g_uiSrv.stride || cpu.ptr < g_uiSrv.cpuBase) return;
-    const u64 slot = (u64(cpu.ptr) - g_uiSrv.cpuBase) / g_uiSrv.stride;
-    if (slot < kUiSrvCount) g_uiSrv.used[slot] = false;
-}
-#endif
+// The former imguiWndProc/UiSrvPool/uiSrvAlloc/uiSrvFree lived here, gated on #if AVER_WITH_IMGUI.
+// They moved to modules/rhi.d3d12.imgui/src/ImGuiUiBackend.cpp -- this file has no ImGui symbol left
+// to gate. The single live UI backend's Win32 thunk and the descriptor-pool sharing it used to do
+// directly now go through d3d12::IUiBackend (UiBackend.hpp); see uiBackendWndProcThunk and
+// D3D12ResourceFactory::uiDescriptor further down for where each half landed.
 
 // Writes the default shading model and its parameters into the tail of a per-draw b1 block.
 void writeShadingConstants(f32* block) {
@@ -888,6 +847,12 @@ public:
     bool uiWantsKeyboard() const override;
     u64 uiTextureId(TextureHandle t) override;
 
+    // Plugs a UI toolkit's D3D12 backend into this device -- see aver::rhi::d3d12::installUiBackend's
+    // own comment (UiBackend.hpp) for why this exists and who calls it. NOT part of IDevice: only a
+    // caller that already knows this is a D3D12Device (through that free function's own backend()
+    // check) can reach it. Non-owning, same as setUpscaler.
+    void setUiBackend(d3d12::IUiBackend* backend) { uiBackend_ = backend; }
+
     Backend backend() const override { return Backend::D3D12; }
     const char* adapterName() const override { return adapterName_.c_str(); }
     DeviceCaps caps() const override { return caps_; }
@@ -1398,7 +1363,10 @@ private:
     std::vector<u8> frameImage_;
     u32 frameImageW_ = 0, frameImageH_ = 0;
 
-    ComPtr<ID3D12DescriptorHeap> uiSrvHeap_;
+    // Non-owning; see UiBackend.hpp and setUiBackend above. Null in every game build and in an editor
+    // tree configured AVER_ENABLE_UI=OFF -- the only two states this file's own compilation ever needs
+    // to know about, since it never names Dear ImGui itself.
+    d3d12::IUiBackend* uiBackend_ = nullptr;
     bool uiActive_ = false;
 
     std::vector<GpuMesh> meshes_;
@@ -1482,7 +1450,7 @@ private:
     // all: this backend only ever has ONE generic heap (res_->heap_), so a scene of thousands of
     // draws through a render feature calls SetDescriptorHeaps with the identical single-entry array
     // every single draw. Every direct SetDescriptorHeaps call that bypasses setBindingSet (the post
-    // chain's postSrvHeap_, ImGui's uiSrvHeap_) must update this immediately after, the same
+    // chain's postSrvHeap_, the installed UI backend's own heap) must update this immediately after, the same
     // discipline boundRootSig_/boundPso_ already follow, or a later setBindingSet call would wrongly
     // believe res_->heap_ was still the one visible to the command list.
     ID3D12DescriptorHeap* boundHeap_ = nullptr;
@@ -1543,10 +1511,10 @@ struct RhiTexture {
     // One entry per mip; a subresource index is a mip index here.
     std::vector<ResourceState> states;
 #endif
-#if AVER_WITH_IMGUI
-    // The descriptor uiTextureId() handed to the UI. Zero until the UI first asks.
+    // The descriptor uiTextureId() handed to the UI. Zero until the UI first asks, and forever zero
+    // in a build with no UI backend installed -- unconditional now, not gated on AVER_WITH_IMGUI: this
+    // file no longer knows that macro exists (see UiBackend.hpp).
     u64 uiSrvCpu = 0, uiSrvGpu = 0;
-#endif
 };
 
 // A buffer, its description, and its persistent mapping.
@@ -4101,18 +4069,16 @@ void D3D12Device::endFrame() {
         }
     }
 
-#if AVER_WITH_IMGUI
-    if (uiActive_) {
-        ImGui::Render();
+    // The installed UI backend's own draw, after every overlay feature above and before capture.
+    // uiActive_ is false in a build with no UI backend installed -- a game, or an editor tree
+    // configured AVER_ENABLE_UI=OFF -- so this is a no-op there, same as the block it replaces always
+    // was under #if AVER_WITH_IMGUI, just decided at runtime instead of at compile time.
+    if (uiActive_ && uiBackend_) {
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
         rtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
         cmdList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-        ID3D12DescriptorHeap* heaps[] = {uiSrvHeap_.Get()};
-        cmdList_->SetDescriptorHeaps(1, heaps);
-        boundHeap_ = uiSrvHeap_.Get();
-        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmdList_.Get());
+        boundHeap_ = uiBackend_->render(cmdList_.Get());
     }
-#endif
     if (captureReq_ && captureBuf_) {
         auto toCopy = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
         cmdList_->ResourceBarrier(1, &toCopy);
@@ -4240,102 +4206,66 @@ void D3D12Device::waitForGpu() {
     waitFence(v);
 }
 
-// Brings up ImGui on this device and window.
+// The single live UI backend, for the free-function Win32 message thunk below -- mirrors this
+// engine's existing "one process-wide window-message handler" model (registerUiWndProc itself takes
+// only one function pointer, no user-data slot) and this file's own former g_uiSrv global before it.
+// Set in uiInit, cleared in uiShutdown.
+static d3d12::IUiBackend* g_activeUiBackend = nullptr;
+
+// Feeds one window message to the installed UI backend. True when it consumed it.
+static bool uiBackendWndProcThunk(void* hwnd, u32 msg, u64 w, i64 l) {
+    return g_activeUiBackend && g_activeUiBackend->wndProc(hwnd, msg, w, l);
+}
+
+// Brings up the installed UI backend (see UiBackend.hpp) on this device and window. False if none
+// was installed (setUiBackend was never called -- every game build, and an editor tree configured
+// AVER_ENABLE_UI=OFF) or if it failed to initialise; either way every uiXxx() below then behaves
+// exactly as IDevice's own no-op defaults do.
 bool D3D12Device::uiInit(void* hwnd) {
-#if AVER_WITH_IMGUI
     if (uiActive_) return true;
-    if (!device_ || !hwnd) return false;
+    if (!uiBackend_ || !device_ || !hwnd) return false;
 
-    D3D12_DESCRIPTOR_HEAP_DESC sh{};
-    sh.NumDescriptors = kUiSrvCount;
-    sh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    sh.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    if (!hrOk(device_->CreateDescriptorHeap(&sh, IID_PPV_ARGS(&uiSrvHeap_)), "UI SRV heap")) return false;
-    g_uiSrv = UiSrvPool{};
-    g_uiSrv.heap = uiSrvHeap_.Get();
-    g_uiSrv.cpuBase = uiSrvHeap_->GetCPUDescriptorHandleForHeapStart().ptr;
-    g_uiSrv.gpuBase = uiSrvHeap_->GetGPUDescriptorHandleForHeapStart().ptr;
-    g_uiSrv.stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    d3d12::UiBackendInitDesc desc;
+    desc.device = device_.Get();
+    desc.commandQueue = queue_.Get();
+    desc.frameCount = kFrameCount;
+    desc.rtvFormat = kBackbufferFormat;
+    if (!uiBackend_->init(hwnd, desc)) return false;
 
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    io.IniFilename = nullptr;
-    ImGui::StyleColorsDark();
-
-    if (!ImGui_ImplWin32_Init(hwnd)) { AVER_ERROR("[RHI.D3D12] ImGui_ImplWin32_Init failed"); return false; }
-
-    ImGui_ImplDX12_InitInfo info{};
-    info.Device = device_.Get();
-    info.CommandQueue = queue_.Get();
-    info.NumFramesInFlight = static_cast<int>(kFrameCount);
-    info.RTVFormat = kBackbufferFormat;
-    info.SrvDescriptorHeap = uiSrvHeap_.Get();
-    info.SrvDescriptorAllocFn = &uiSrvAlloc;
-    info.SrvDescriptorFreeFn = &uiSrvFree;
-    if (!ImGui_ImplDX12_Init(&info)) {
-        AVER_ERROR("[RHI.D3D12] ImGui_ImplDX12_Init failed");
-        return false;
-    }
-    registerUiWndProc(&imguiWndProc);
+    g_activeUiBackend = uiBackend_;
+    registerUiWndProc(&uiBackendWndProcThunk);
     uiActive_ = true;
-    AVER_INFO("[RHI.D3D12] ImGui UI initialised (docking)");
+    AVER_INFO("[RHI.D3D12] UI backend initialised");
     return true;
-#else
-    (void)hwnd;
-    return false;
-#endif
 }
 
-// Starts an ImGui frame.
+// Starts the UI backend's frame.
 void D3D12Device::uiNewFrame() {
-#if AVER_WITH_IMGUI
-    if (!uiActive_) return;
-    ImGui_ImplDX12_NewFrame();
-    ImGui_ImplWin32_NewFrame();
-    ImGui::NewFrame();
-#endif
+    if (!uiActive_ || !uiBackend_) return;
+    uiBackend_->newFrame();
 }
 
-// Tears ImGui down.
+// Tears the UI backend down.
 void D3D12Device::uiShutdown() {
-#if AVER_WITH_IMGUI
-    if (!uiActive_) return;
-    ImGui_ImplDX12_Shutdown();
-    ImGui_ImplWin32_Shutdown();
-    ImGui::DestroyContext();
+    if (!uiActive_ || !uiBackend_) return;
+    uiBackend_->shutdown();
     registerUiWndProc(nullptr);
-    g_uiSrv = UiSrvPool{};
+    g_activeUiBackend = nullptr;
     uiActive_ = false;
-#endif
 }
 
 bool D3D12Device::uiWantsMouse() const {
-#if AVER_WITH_IMGUI
-    return uiActive_ && ImGui::GetIO().WantCaptureMouse;
-#else
-    return false;
-#endif
+    return uiActive_ && uiBackend_ && uiBackend_->wantsMouse();
 }
 
 bool D3D12Device::uiWantsKeyboard() const {
-#if AVER_WITH_IMGUI
-    return uiActive_ && ImGui::GetIO().WantCaptureKeyboard;
-#else
-    return false;
-#endif
+    return uiActive_ && uiBackend_ && uiBackend_->wantsKeyboard();
 }
 
 // The shader-visible descriptor the UI draws texture `t` with.
 u64 D3D12Device::uiTextureId(TextureHandle t) {
-#if AVER_WITH_IMGUI
     if (!uiActive_ || !rhiFactory_) return 0;
     return rhiFactory_->uiDescriptor(t);
-#else
-    (void)t;
-    return 0;
-#endif
 }
 
 // Clears an 8x8 offscreen to `in` and reads one texel back into `out`.
@@ -5336,13 +5266,10 @@ TlasHandle D3D12ResourceFactory::createTlas(u32 maxInstances) {
 void D3D12ResourceFactory::destroyTexture(TextureHandle h) {
     RhiTexture* t = texture(h);
     if (!t) return;
-#if AVER_WITH_IMGUI
-    if (t->uiSrvCpu) {
-        D3D12_CPU_DESCRIPTOR_HANDLE cpu{static_cast<SIZE_T>(t->uiSrvCpu)};
-        uiSrvFree(nullptr, cpu, D3D12_GPU_DESCRIPTOR_HANDLE{});
+    if (t->uiSrvCpu && dev_->uiBackend_) {
+        dev_->uiBackend_->freeTextureSrv(t->uiSrvCpu);
         t->uiSrvCpu = t->uiSrvGpu = 0;
     }
-#endif
     retire(t->res);
     retire(t->rtvHeap);
     retire(t->dsvHeap);
@@ -5571,9 +5498,11 @@ void D3D12ResourceFactory::waitIdle() {
     collect();
 }
 
-// The descriptor the UI draws a texture with, allocated in the UI's own heap on first use.
+// The descriptor the UI draws a texture with, allocated from the installed UI backend's own pool on
+// first use (see IUiBackend::allocTextureSrv's comment for why it must be THAT pool). Zero with no
+// backend installed, same as before this delegated rather than calling ImGui's pool directly.
 u64 D3D12ResourceFactory::uiDescriptor(TextureHandle h) {
-#if AVER_WITH_IMGUI
+    if (!dev_->uiBackend_) return 0;
     RhiTexture* t = texture(h);
     if (!t || !t->res) return 0;
     if (t->uiSrvGpu) return t->uiSrvGpu;
@@ -5582,25 +5511,19 @@ u64 D3D12ResourceFactory::uiDescriptor(TextureHandle h) {
         return 0;
     }
 
-    D3D12_CPU_DESCRIPTOR_HANDLE cpu{};
-    D3D12_GPU_DESCRIPTOR_HANDLE gpu{};
-    uiSrvAlloc(nullptr, &cpu, &gpu);
-    if (!gpu.ptr) return 0;
+    u64 cpu = 0, gpu = 0;
+    if (!dev_->uiBackend_->allocTextureSrv(&cpu, &gpu) || !gpu) return 0;
 
     D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
     sv.Format = toDxgiSrvFormat(t->desc.format);
     sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.Texture2D.MipLevels = t->desc.mips;
-    dev_->device_->CreateShaderResourceView(t->res.Get(), &sv, cpu);
+    dev_->device_->CreateShaderResourceView(t->res.Get(), &sv, D3D12_CPU_DESCRIPTOR_HANDLE{static_cast<SIZE_T>(cpu)});
 
-    t->uiSrvCpu = cpu.ptr;
-    t->uiSrvGpu = gpu.ptr;
+    t->uiSrvCpu = cpu;
+    t->uiSrvGpu = gpu;
     return t->uiSrvGpu;
-#else
-    (void)h;
-    return 0;
-#endif
 }
 
 // Compute shader for the factory self-test: fills a volume with a constant.
@@ -6359,6 +6282,17 @@ void D3D12RenderContext::popMarker() {
 }
 
 } // namespace
+
+namespace d3d12 {
+// See UiBackend.hpp for the full contract. Defined here, not there, because only this translation
+// unit has D3D12Device's full definition to reach through the static_cast below -- the header only
+// ever hands out a pointer through IDevice, never the concrete type.
+bool installUiBackend(IDevice* device, IUiBackend* backend) {
+    if (!device || device->backend() != Backend::D3D12) return false;
+    static_cast<D3D12Device*>(device)->setUiBackend(backend);
+    return true;
+}
+} // namespace d3d12
 
 namespace detail {
 // Creates and initialises the D3D12 device, or returns null.

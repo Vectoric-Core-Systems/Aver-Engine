@@ -9,12 +9,13 @@ aver_add_module(Aver.RHI.D3D12
 # runtime HLSL->DXBC (SM5.1) compilation; DXC/SM6 is a later upgrade.
 target_link_libraries(Aver.RHI.D3D12 PUBLIC d3d12 dxgi dxguid d3dcompiler)
 
-# In-window UI: this backend hosts Dear ImGui. PUBLIC so the include dirs + the
-# AVER_WITH_IMGUI define propagate to the sandbox (which builds the editor widgets).
-if(AVER_ENABLE_UI)
-  target_link_libraries(Aver.RHI.D3D12 PUBLIC imgui)
-  target_compile_definitions(Aver.RHI.D3D12 PUBLIC AVER_WITH_IMGUI=1)
-endif()
+# In-window UI: this backend used to host Dear ImGui directly and link `imgui` PUBLIC here, which
+# meant AverGame.exe got ImGui compiled in whenever a tree was configured AVER_ENABLE_UI=ON -- it
+# links this module through Aver.Runtime regardless of that switch. This module now knows only the
+# abstract seam a UI toolkit's D3D12 backend plugs into (include/aver/rhi/d3d12/UiBackend.hpp) and
+# never links imgui or defines AVER_WITH_IMGUI itself. The concrete Dear ImGui implementation lives in
+# the separate Aver.RHI.D3D12.ImGui module (modules/rhi.d3d12.imgui), which only Sandbox links -- see
+# its CMakeLists.txt and sandbox/CMakeLists.txt for the rest of the split.
 
 # DXC redistributables. dxcompiler.dll (compiler) and dxil.dll (signing - drivers reject unsigned
 # DXIL) ship with the Windows SDK but NOT with Windows, so copy them beside the executable.

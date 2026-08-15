@@ -495,8 +495,11 @@ public:
     // Full captured frame (tight RGBA8, top-to-bottom) after a requestCapture completes.
     virtual bool getFrameImage(std::vector<u8>& outRGBA, u32& w, u32& h) { (void)outRGBA; (void)w; (void)h; return false; }
 
-    // Initialises ImGui on this device for a native window. False if the backend has no UI support.
-    // Widgets are built between uiNewFrame() and endFrame().
+    // Initialises in-window UI on this device for a native window. False if the backend has no UI
+    // support, or has UI support but nothing was installed for it to host -- see, for the D3D12
+    // backend, aver::rhi::d3d12::IUiBackend and installUiBackend (UiBackend.hpp): this interface is
+    // deliberately silent about WHICH UI toolkit a backend hosts, Dear ImGui or otherwise. Widgets are
+    // built between uiNewFrame() and endFrame().
     virtual bool uiInit(void* windowHandle) { (void)windowHandle; return false; }
     virtual void uiNewFrame() {}
     virtual void uiShutdown() {}

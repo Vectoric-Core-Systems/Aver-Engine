@@ -175,6 +175,12 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #if AVER_WITH_IMGUI
 #include "imgui.h"
 #include "imgui_internal.h"
+// The seam + the concrete Dear ImGui backend that plugs into it -- see UiBackend.hpp (Aver.RHI.D3D12)
+// for the contract and ImGuiUiBackend.hpp (Aver.RHI.D3D12.ImGui, this file's other new link) for the
+// factory. Needed here, not just inside the RHI, because installing a backend is the one thing only
+// the app (not the RHI, which must not know ImGui exists) can decide to do.
+#include "aver/rhi/d3d12/UiBackend.hpp"
+#include "aver/rhi/d3d12/ImGuiUiBackend.hpp"
 #endif
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -601,6 +607,17 @@ public:
         AVER_INFO("[Sandbox] {} decoded from {} ({}x{}, {} tiles, aspect {:.3f})",
                   debugName, path, img.width, img.height, tiles, outAspect);
         return true;
+    }
+#endif
+
+#if AVER_WITH_IMGUI
+    // Plugs the editor's Dear ImGui backend into the device BEFORE Engine::run's own uiInit() call
+    // runs against it -- see Application::onDeviceCreated's own comment for why this hook exists and
+    // why onInit() (below) is too late. installUiBackend is a no-op if e.device() somehow is not a
+    // D3D12 device (checked through IDevice::backend(), not assumed).
+    void onDeviceCreated(Engine& e) override {
+        uiBackend_.reset(rhi::d3d12::imgui_backend::create());
+        rhi::d3d12::installUiBackend(e.device(), uiBackend_.get());
     }
 #endif
 
@@ -8904,6 +8921,18 @@ private:
     f32 dpi_=1.0f;
 #if AVER_WITH_IMGUI
     ImFont* fontMedium_=nullptr; // Roboto Medium, for the menu bar; null if only the fallback loaded
+    // The editor's Dear ImGui backend, constructed in onDeviceCreated (above) and installed into the
+    // device non-owning, the same std::unique_ptr-owns/raw-pointer-on-the-device shape
+    // averSrUpscaler_/edgeAaUpscaler_ use for IDevice::setUpscaler. UNLIKE those two, onShutdown below
+    // deliberately does NOT reset() this early: the device's own uiShutdown() (called from
+    // ~D3D12Device, which runs between onShutdown returning and EntryPoint.hpp's `delete app` --
+    // see Engine::run) needs this object still alive when IT runs, not detached beforehand. Resetting
+    // it in onShutdown would reproduce the exact dangling-raw-pointer bug averSrUpscaler_'s own
+    // teardown-order comment describes, just earlier: the device's raw uiBackend_ would outlive the
+    // object it points to for the remainder of the device's life, not just until destroyDevice.
+    // Natural destruction order (this object dies only when SandboxApp itself does, well after the
+    // device is gone) is what keeps this safe with no explicit detach at all.
+    std::unique_ptr<rhi::d3d12::IUiBackend> uiBackend_;
 #endif
     // 3D viewport rect, in backbuffer pixels. Latched by buildUI, consumed the next frame.
     f32 vpX_=0, vpY_=0, vpW_=1600, vpH_=900;

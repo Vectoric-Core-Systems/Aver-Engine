@@ -66,7 +66,7 @@ if (-not (Test-Path -LiteralPath $Project)) { throw "[game] no project manifest 
 $projectDir = Split-Path -Parent (Resolve-Path -LiteralPath $Project).Path
 
 # ---------------------------------------------------------------------------------------------
-# 1. The build tree's identity, and the one refusal that makes the ImGui workaround safe.
+# 1. The build tree's identity.
 # ---------------------------------------------------------------------------------------------
 $cachePath = Join-Path $tree 'CMakeCache.txt'
 if (-not (Test-Path -LiteralPath $cachePath)) { throw "[game] no CMakeCache.txt in $tree" }
@@ -83,18 +83,19 @@ foreach ($k in @('AVER_MODULE_SCENE','AVER_MODULE_FRAMEWORK','AVER_MODULE_PBR','
     }
 }
 
-# THE REFUSAL THE SECOND BUILD TREE EXISTS FOR.
+# THE BLANKET REFUSAL THAT USED TO LIVE HERE IS GONE. It read "AVER_ENABLE_UI=ON means this tree's
+# AverGame.exe has ImGui in it" straight out of CMakeCache.txt, which was true only because
+# Aver.RHI.D3D12 used to link imgui PUBLIC and Aver.Runtime linked that backend PUBLIC in turn (the
+# ImGui/RHI split closed that: see modules/rhi.d3d12/CMakeLists.txt and
+# include/aver/rhi/d3d12/UiBackend.hpp). A tree configured AVER_ENABLE_UI=ON is no longer evidence of
+# anything about AverGame.exe by itself -- only Sandbox links the concrete ImGui backend now, in every
+# configuration. Refusing to stage from such a tree today would be refusing a perfectly good package
+# on a premise that stopped being true.
 #
-# Aver.RHI.D3D12 links imgui PUBLIC and propagates AVER_WITH_IMGUI=1 PUBLIC, and Aver.Runtime links
-# that backend PUBLIC -- so an AverGame.exe built from an AVER_ENABLE_UI=ON tree HAS ImGui in it. It
-# runs perfectly and must not ship. Two executables with the same name, one shippable and one not,
-# differing by nothing a human can see; without this check the workaround is worse than the problem.
-if ($options['AVER_ENABLE_UI']) {
-    Fail ("this tree is configured AVER_ENABLE_UI=ON, so its AverGame.exe links Dear ImGui and is " +
-          "not shippable. Configure a second tree for games:`n" +
-          "    cmake -S . -B build-game -G Ninja -DCMAKE_BUILD_TYPE=$Config -DAVER_ENABLE_UI=OFF -DAVER_BUILD_SANDBOX=OFF -DAVER_BUILD_TESTS=OFF`n" +
-          "then pass -BuildDir build-game.")
-}
+# What replaces it is refusal 8d, far below: a scan of the ACTUAL STAGED AverGame.exe for ImGui
+# evidence, which is the real thing this script ever needed to guarantee. Kept as a check on the
+# binary rather than removed outright -- belt-and-braces against a future regression of the coupling
+# this file used to work around, caught with real evidence instead of a policy on a config flag.
 if (-not $options['AVER_BUILD_GAME']) {
     Fail "this tree is configured AVER_BUILD_GAME=OFF, so it contains no AverGame.exe to stage."
 }
@@ -411,7 +412,32 @@ foreach ($miss in ($unresolved.Keys | Sort-Object)) {
 if ($unresolved.Count -eq 0) { Note 'import closure OK' }
 
 # 8c. AverGame.exe must actually be there. It is the entry point game.json names.
-if (-not (Test-Path -LiteralPath (Join-Path $outFull 'AverGame.exe'))) { Fail 'AverGame.exe is not in the package' }
+$gameExe = Join-Path $outFull 'AverGame.exe'
+if (-not (Test-Path -LiteralPath $gameExe)) { Fail 'AverGame.exe is not in the package' }
+
+# 8d. AverGame.exe must not contain Dear ImGui. THIS is what makes refusal 1's old blanket
+#     AVER_ENABLE_UI=ON rejection unnecessary rather than merely relaxed: it checks the actual staged
+#     artifact instead of a config flag that used to (but no longer does) imply the same thing.
+#
+#     Dear ImGui is statically linked into the executable -- there is no imgui.dll for
+#     Get-PeImports' import-table walk to find absent, the way section 8b proves the CRT and other
+#     DLL dependencies. The only real evidence for a STATICALLY linked dependency is inside the
+#     binary's own bytes, so this is a plain string search, not an import-table check: every marker
+#     below is a symbol or literal that can only exist in this .exe if ImGui code was compiled into
+#     it. Grounded in an actual scan of a built AverGame.exe from an AVER_ENABLE_UI=ON tree, not
+#     assumed -- see the imgui-split work that added this check for the dumpbin/strings output that
+#     picked these specific markers.
+if (Test-Path -LiteralPath $gameExe) {
+    $exeText = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($gameExe))
+    $imguiMarkers = @('ImGui_ImplDX12_Init', 'ImGui_ImplWin32_Init', 'ImGui_ImplDX12_RenderDrawData', 'Dear ImGui')
+    $found = @($imguiMarkers | Where-Object { $exeText.Contains($_) })
+    if ($found.Count -gt 0) {
+        Fail ("AverGame.exe contains Dear ImGui evidence (" + ($found -join ', ') + ") -- the RHI/UI " +
+              "split is not clean in this build tree. A shipped game must never link the editor's UI toolkit.")
+    } else {
+        Note "AverGame.exe: no Dear ImGui evidence found (checked $($imguiMarkers.Count) markers) -- clean"
+    }
+}
 
 # ---------------------------------------------------------------------------------------------
 Write-Host ''

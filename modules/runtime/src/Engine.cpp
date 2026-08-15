@@ -75,6 +75,11 @@ int Engine::run(Application* app) {
     splash.setStatus("Creating graphics device");
     device_ = rhi::createDevice(dd);
 
+    // The one point at which an app can plug a backend-specific UI toolkit into the device (see
+    // Application::onDeviceCreated's own comment) -- before uiInit below runs against it. A no-op for
+    // an app that never overrides the hook, which is every app except the editor.
+    app->onDeviceCreated(*this);
+
     if (window_) {
         splash.setStatus("Creating swapchain");
         rhi::SwapchainDesc sd;
@@ -83,7 +88,7 @@ int Engine::run(Application* app) {
         sd.height = window_->height();
         swapchain_ = device_->createSwapchain(sd);
 
-        // In-window editor UI (Dear ImGui). Route raw window messages to it.
+        // In-window UI, if the app installed a backend for one above. Route raw window messages to it.
         splash.setStatus("Initialising editor UI");
         if (device_->uiInit(window_->nativeHandle())) {
             window_->setMessageHook(&rhi::uiWndProc);
