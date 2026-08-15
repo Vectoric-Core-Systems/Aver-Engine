@@ -681,11 +681,14 @@ public:
             hooks.drawCompileButton = [this] {
                 tools_.drawCompileButton(project_, dpi_, compileIconUiId_);
             };
+#if AVER_WITH_IMGUI
             hooks.openInIde      = [this](const std::string& p) {
                 const editor::IdeInfo& ide = cbIde();
                 if (!editor::openInIde(ide, p)) AVER_WARN("[Editor] could not open {} in {}", p, ide.name);
             };
             hooks.ideName = cbIde().name;
+#endif  // AVER_WITH_IMGUI -- openInIde/ideName reach the content browser's IDE picker; without a
+            // UI there is no picker and no actor editor to open a file from in the first place.
             editor::setActorEditorHooks(std::move(hooks));
         }
         window_ = e.window();
@@ -693,10 +696,17 @@ public:
 #if AVER_MODULE_MCP
         if (mcpPort_) {
             registerMcpAbis();
+            // THE WIDGET HOOKS ARE UI-ONLY, and say so in the guard rather than by accident. uiReg_
+            // is the ImGui widget registry; with AVER_ENABLE_UI=OFF it does not exist, and there
+            // are no widgets for MCP to resolve or list either. Leaving these unregistered is the
+            // honest answer -- MCP's other ABIs still work, so a UI-less editor keeps its control
+            // channel and simply reports no widgets.
+#if AVER_WITH_IMGUI
             mcp_.setWidgetResolver([this](const std::string& n, f32& x, f32& y) {
                 return uiReg_.centreOf(n, x, y);
             });
             mcp_.setWidgetLister([this] { return uiReg_.describe(); });
+#endif
             if (!mcp_.start(mcpPort_))
                 AVER_WARN("[Mcp] --mcp was given but the channel did not start; the editor is "
                           "unaffected and carries on");
@@ -1216,10 +1226,15 @@ public:
                 voxiAttached_ = true;
                 if (projectRenderPending_) applyProjectRenderSettings();
                 if (saveProject_ && !saveProjectDone_) { saveProjectDone_ = true; seedAndSaveProject(); }
+#if AVER_WITH_IMGUI
+                // --import's deferred handshake, UI-only on purpose: importAsset belongs to the
+                // content-browser half of this file and calls cbIsEditable/cbInvalidate/importModel,
+                // which are the browser's own. A UI-less editor has no browser to import into.
                 if (!importSrc_.empty() && !importDone_) {
                     importDone_ = true;
                     importAsset(importSrc_, importDst_);
                 }
+#endif
 #if AVER_MODULE_PBR
                 textureFactory_ = e.device()->resources();
                 voxiRenderer_.materials().setTextureResolver(&SandboxApp::resolveMaterialTexture, this);
@@ -3409,7 +3424,9 @@ public:
         drawSculptCursor(e);
 #endif
         buildUI(e);
+#if AVER_WITH_IMGUI
         uiReg_.endFrame();
+#endif
         submitGameUi(e);
         // Before captureCheck, because both use the device's single capture slot and the draw test
         // finishes inside the first dozen frames while the ordinary probe fires near the last.
@@ -5423,6 +5440,10 @@ private:
         sel_ = (int)objects_.size() - 1; selEntity_ = kInvalidId;
     }
 
+#if AVER_WITH_IMGUI
+// DRAG-AND-DROP FROM THE CONTENT BROWSER, hence UI-only: spawnFromAssetDrop's sole caller is the
+// viewport's ImGui drop target, and dropWorldPoint exists only to serve it. Both lean on
+// viewportRay/lowerExt, which live in the browser half of this file.
 #if AVER_MODULE_SCENE
     // Finds a finite world point to drop an asset at, from a screen-space mouse position. Order:
     // nearest scene-entity hit, else the ground plane, else a fixed distance along the ray from the
@@ -5550,6 +5571,7 @@ private:
         AVER_INFO("[Editor] placed entity #{} from '{}' at ({:.0f}, {:.0f}, {:.0f})",
                   (u32)ent, rel, xf.position.x, xf.position.y, xf.position.z);
     }
+#endif  // AVER_WITH_IMGUI
 #endif  // AVER_MODULE_SCENE
 
     f32 gizmoLen(const Vec3& origin) const { f32 L = dist(eye_, origin) * 0.17f; return L < 50.0f ? 50.0f : L; }
@@ -6152,9 +6174,15 @@ private:
 
     // Builds the whole editor UI for one frame: menu bar, toolbars, panels, drawers and dialogs.
     void buildUI(Engine& e) {
+#if AVER_WITH_IMGUI
         uiReg_.beginFrame();
+#endif
         prefsDevice_ = e.device();
+#if AVER_WITH_IMGUI
+        // Editor preferences are read/written by the preferences PANEL; a UI-less editor never opens
+        // one, so the defaults compiled into the members stand.
         if (!prefsLoaded_) { prefsLoaded_ = true; loadEditorPreferences(); }
+#endif
 #if AVER_MODULE_SCENE
         if (wantMeshReload_) {
             wantMeshReload_ = false;
@@ -6519,7 +6547,9 @@ private:
         buildProjectSettings();
         buildWorldSettings();
 #if AVER_MODULE_SCENE
+#if AVER_WITH_IMGUI
         buildChunkStreamingPanel();
+#endif
 #endif
         if (!openAsset_.empty() && frameNo_ > 5) {
             const std::string want = openAsset_;
@@ -6670,22 +6700,16 @@ private:
         return false;
     }
 
-#endif  // AVER_WITH_IMGUI -- reopened immediately below; cbIde is deliberately outside it.
     // Returns the IDE the browser opens source with: the user's choice, else the detected preference.
-    //
-    // LIFTED OUT OF THE AVER_WITH_IMGUI BLOCK, because it never belonged in it: this function
-    // touches no ImGui, and neither do its callers. onInit's editor-hook registration
-    // (hooks.openInIde / hooks.ideName) calls it from unguarded code, so a build without ImGui --
-    // which is BOTH the no-ui row AND, less obviously, the d3d12-off row, since ImGui enters the
-    // tree from the D3D12 backend -- lost the definition while keeping the callers.
-    // scripts/module-matrix.ps1 failed both rows on exactly this identifier. Sibling importAsset
-    // is lifted for the same reason.
+    // STAYS INSIDE the UI block with the rest of the content browser. An earlier attempt lifted it
+    // out because it touches no ImGui itself -- true, and beside the point: its neighbours
+    // cbIsEditable/cbInvalidate/importModel do, so lifting one helper only moved the undefined
+    // identifier one call deeper. The callers are guarded instead.
     const editor::IdeInfo& cbIde() const {
         const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
         if (cbIdeChoice_ >= 0 && cbIdeChoice_ < static_cast<int>(ides.size())) return ides[static_cast<usize>(cbIdeChoice_)];
         return editor::preferredIde();
     }
-#if AVER_WITH_IMGUI
 
     // Handles a double-click: enter a folder, open an asset editor, else the IDE, else the shell.
     void cbOpenEntry(const std::string& full, bool isDir) {
@@ -7434,11 +7458,9 @@ private:
         ImGui::EndPopup();
     }
 
-#endif  // AVER_WITH_IMGUI -- reopened after importAsset; see cbIde for why these two are outside it.
     // Imports one asset into destDir: models and audio are converted, everything else is copied.
-    // Lifted out of the ImGui block for the same reason cbIde was: onInit's deferred-import check
-    // (the importSrc_/importDone_ handshake) calls this from unguarded code, so no-ui and d3d12-off
-    // both lost the definition while keeping that caller.
+    // UI-side: calls cbIsEditable/cbInvalidate/importModel/importAudio, all the content browser's.
+    // Its one non-browser caller (--import's deferred handshake in onInit) is guarded instead.
     void importAsset(const std::string& src, const std::string& destDir) {
         std::error_code ec;
         if (!cbIsEditable(destDir)) {
@@ -7468,7 +7490,6 @@ private:
         cbStatus_ = "Imported " + name;
         cbInvalidate(destDir);
     }
-#if AVER_WITH_IMGUI
 
 #if AVER_HAVE_AUDIO_IMPORT
     // Decodes .wav / .mp3 / .m4a / .flac into one .ocaudio in destDir. The source is not copied.
@@ -9707,6 +9728,9 @@ private:
     // A small always-on-while-streaming readout of StreamStats. pendingLoads and failedLoads are
     // singled out because they are the two numbers that tell "working" (pendingLoads draining, zero
     // failures) from "not keeping up" (pendingLoads staying high) or "broken" (failedLoads growing).
+#if AVER_WITH_IMGUI
+// A pure-ImGui debug window. Guarded because uiActive() is a RUNTIME test and cannot make the
+// ImGui:: names exist for the compiler -- see the mouse-capture block in onUpdate for the same trap.
     void buildChunkStreamingPanel() {
         if (!chunkWorld_) return;
         const world::StreamStats& s = chunkStreamStats_;
@@ -9733,6 +9757,7 @@ private:
         ImGui::TextDisabled("%s", chunkWorld_->settings().worldDir.c_str());
         ImGui::End();
     }
+#endif  // AVER_WITH_IMGUI
 
     // Loads an .ocworld into the world as ordinary scene entities: transform, mesh and name.
     //
