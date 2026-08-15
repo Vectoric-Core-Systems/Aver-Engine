@@ -23,11 +23,28 @@ WHAT IT WILL NOT DO, and these are refusals rather than omissions:
     and the user may have their own editor open, which this must not disturb.
   * It never kills a process it did not start.
 
-TRANSPORT: JSON-RPC 2.0, newline-delimited, over stdin/stdout. PURE STDLIB -- no mcp package, no npm
-install. Nothing to provision on a fresh machine, and nothing whose licence has to be vetted against
-this repo's permissive-only rule.
+TRANSPORT: two, both PURE STDLIB -- no mcp package, no npm install, nothing to provision on a fresh
+machine and nothing whose licence has to be vetted against this repo's permissive-only rule.
+
+  1. stdio (default, unchanged). JSON-RPC 2.0, newline-delimited, over stdin/stdout. This is what
+     .mcp.json launches today (`{"command":"python","args":["tools/mcp/aver_mcp.py"]}`) and it is not
+     going anywhere -- plain `python aver_mcp.py`, no arguments, is byte-for-byte the same loop it
+     always was. main() below IS that loop.
+
+  2. HTTP (opt-in: pass --http), a.k.a. MCP "Streamable HTTP". Same JSON-RPC messages, POSTed to
+     /mcp as `application/json`, one request in and one response out -- proved sufficient against a
+     real client (Claude Code) without also implementing the SSE-push half of the spec: a stray GET
+     just gets a 405, and a client that never needed a server-initiated push tolerates that fine. See
+     serve_http() below. Chosen because a bare TCP socket speaking this file's own line-delimited
+     JSON-RPC is NOT one of the transports an MCP client can actually dial (checked: `claude mcp add
+     --help` lists exactly stdio, sse, http) -- so "give it a port" has to mean HTTP or it would be an
+     unreachable transport, which is worse than no transport at all.
+
+  Both transports dispatch through the SAME handle(msg) -- the wire format changes, the protocol and
+  every tool's behaviour do not.
 """
 import base64
+import http.server
 import json
 import os
 import re
@@ -55,6 +72,101 @@ SERVER_VERSION = "0.1.0"
 def log(msg):
     sys.stderr.write("[aver-mcp] %s\n" % msg)
     sys.stderr.flush()
+
+
+# --------------------------------------------------------------------------------------------------
+# mcp.conf: optional, developer-local port assignment. Same file, same grammar, as the one
+# sandbox/src/McpConf.cpp reads for the editor's --mcp control channel (see mcp.conf.example at the
+# repo root) -- this is the Python-side reader for the OTHER key in it, tool_server.port. Kept as a
+# free function rather than folded into ROOT's module-level setup so it can be called with an
+# explicit root/default in a test without touching the real mcp.conf.
+# --------------------------------------------------------------------------------------------------
+
+def _parse_strict_port(v):
+    """Parses `v` as a port the same way the C++ reader's std::from_chars does: ASCII digits only,
+    the whole (already-trimmed) string, nothing else -- no leading '+', no '_' digit-group
+    separators, no leading/trailing junk. Returns an int or None.
+
+    Plain int(v) is NOT equivalent: Python's int() accepts a leading '+' ("+8080") and PEP-515
+    underscore grouping ("8_080") that std::from_chars rejects outright. Both readers' docstrings
+    claim "the same contract" as each other; before this, that claim was false for exactly those two
+    inputs -- the same mcp.conf line was accepted here and rejected (with a warning) on the C++ side,
+    silently giving the editor and the tool server two different ports from one file. Caught by
+    actually running both parsers on the same adversarial input, not by re-reading either one.
+    """
+    if not re.fullmatch(r"[0-9]+", v):
+        return None
+    return int(v)
+
+
+def read_conf_port(root, key, default):
+    """Reads `key` from <root>/mcp.conf as a TCP port (1-65535).
+
+    Same optional, per-key contract as the C++ reader: a missing file, an empty file, or a missing
+    key all fall back to `default` SILENTLY -- that is the normal case, not a problem. A key that IS
+    present but does not parse (not a number, out of range, trailing junk) also falls back to
+    `default`, but logs why, because that one is a typo a developer would otherwise never see.
+
+    Grammar: one `key = value` per line, '#' and blank lines ignored, first occurrence of a
+    duplicate key wins (matching or not -- the first match is authoritative either way, same as the
+    C++ reader). Whitespace around the key and the value is trimmed: mcp.conf is meant to be
+    hand-edited from mcp.conf.example, where every line is aligned with spaces around '=', so this is
+    deliberately more forgiving than editor.ini's own machine-written-and-read grammar.
+
+    Returns (port, source) where source is "mcp.conf" or "built-in default" (the latter possibly
+    annotated with why, for the log line).
+    """
+    path = os.path.join(root, "mcp.conf")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return default, "built-in default"     # no file: the ordinary, silent case
+
+    for raw in text.splitlines():
+        row = raw.rstrip("\r")
+        stripped = row.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in row:
+            continue                            # a line with no '=': skipped, not fatal
+        k, _, v = row.partition("=")
+        k = k.strip()
+        if k != key:
+            continue
+        v = v.strip()
+        port = _parse_strict_port(v)
+        if port is None or not (1 <= port <= 65535):
+            log("mcp.conf: %r = %r is not a usable port (1-65535); falling back to default %s"
+                % (key, v, default))
+            return default, "built-in default (mcp.conf value invalid)"
+        return port, "mcp.conf"                 # first occurrence wins
+    return default, "built-in default"          # key not present: the ordinary, silent case
+
+
+def resolve_tool_server_port(argv):
+    """Explicit `--port` argument > mcp.conf's tool_server.port > built-in default (8787).
+
+    Read once at startup and logged. Only actually BINDS anything when the process is also told
+    --http (see main()/serve_http()) -- over stdio (still the default; see .mcp.json) the resolved
+    value is reported but never opens a socket.
+    """
+    default = 8787
+    cli_port = None
+    for i, a in enumerate(argv):
+        if a == "--port" and i + 1 < len(argv):
+            cli_port = argv[i + 1]
+        elif a.startswith("--port="):
+            cli_port = a.split("=", 1)[1]
+    if cli_port is not None:
+        # Same strict digit-only grammar as read_conf_port, for the same reason: consistency between
+        # this server's own two entry points into the same number, not just with the C++ reader.
+        p = _parse_strict_port(cli_port)
+        if p is not None and 1 <= p <= 65535:
+            return p, "command line"
+        log("--port %r is not a usable port (1-65535); ignoring, falling back to mcp.conf/default"
+            % cli_port)
+    return read_conf_port(ROOT, "tool_server.port", default)
 
 
 def run_powershell(script, timeout):
@@ -541,6 +653,17 @@ def handle(msg):
             # Reported as a tool RESULT rather than a protocol error: a build that blew up is an answer
             # about the build, and a caller should see it as one instead of as a broken server.
             result = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+        # WHICH CHECKOUT THIS PROCESS ACTED IN, on every result, unconditionally -- not just tool_run's
+        # existing binary_provenance (which reports a path RELATIVE to ROOT, so it never actually reveals
+        # which ROOT that was). One long-lived process has exactly one ROOT for its entire lifetime, and
+        # that ROOT is fixed by wherever the *.mcp.json (or whoever else) pointed the interpreter at this
+        # script -- NOT by the caller's own cwd or intent. A stale or hand-edited launcher can point at a
+        # different checkout than the one the caller is scoped to, and until now nothing in the response
+        # said so: the wrong tree answered silently (see the long comment above resolve_tree, and
+        # memory/aver-mcp-tools-wrong-tree.md). This does not choose or fix which tree gets used -- it
+        # makes whichever one was used impossible to miss.
+        if isinstance(result, dict):
+            result.setdefault("root", ROOT)
         payload = json.dumps(result, indent=2)
         return {"jsonrpc": "2.0", "id": mid, "result": {
             "content": [{"type": "text", "text": payload}],
@@ -553,8 +676,9 @@ def handle(msg):
             "error": {"code": -32601, "message": "unsupported method %r" % method}}
 
 
-def main():
-    log("serving from %s" % ROOT)
+def serve_stdio():
+    """The original, and still default, transport. Unchanged: a caller on stdio today gets exactly
+    what it got before this file grew an HTTP option."""
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -570,5 +694,132 @@ def main():
             sys.stdout.flush()
 
 
+# Loopback ONLY -- matches modules/mcp's McpBridge, which binds 127.0.0.1 for the same reason (this is
+# a build/test/package runner with no auth of its own; reachable-from-the-network is a very different
+# risk profile and nothing in this task asked for it). Not configurable by design: the port is the only
+# knob mcp.conf exposes for this server, on purpose.
+_HTTP_HOST = "127.0.0.1"
+_HTTP_PATH = "/mcp"
+
+
+class _McpHTTPHandler(http.server.BaseHTTPRequestHandler):
+    """POST /mcp with a single JSON-RPC message; get back its reply. That's the whole surface.
+
+    Maps handle(msg)'s existing return convention onto HTTP the only way that's consistent with it:
+    a dict reply -> 200 application/json with that dict as the body; None (a notification, e.g.
+    notifications/initialized) -> 202 with an empty body, which is what a real client (Claude Code)
+    was proven to send and accept -- see the protocol transcripts in the Part 2 report. GET is refused
+    with 405: the SSE-push half of Streamable HTTP is not implemented because the live capture showed
+    a client that never needed a server-initiated push tolerates a 405 on that GET without incident.
+    """
+
+    server_version = "aver-mcp-http/1"
+
+    def log_message(self, fmt, *args):
+        log("http %s - %s" % (self.address_string(), (fmt % args)))
+
+    def _reply_json(self, status, obj):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _reply_empty(self, status):
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_POST(self):
+        if self.path.split("?", 1)[0].rstrip("/") != _HTTP_PATH:
+            self._reply_json(404, {"jsonrpc": "2.0", "id": None,
+                                    "error": {"code": -32600, "message": "no such endpoint %r; use %s"
+                                              % (self.path, _HTTP_PATH)}})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            msg = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            self._reply_json(400, {"jsonrpc": "2.0", "id": None,
+                                    "error": {"code": -32700, "message": "parse error: %s" % e}})
+            return
+        try:
+            reply = handle(msg)
+        except Exception as e:
+            self._reply_json(500, {"jsonrpc": "2.0", "id": msg.get("id"),
+                                    "error": {"code": -32603, "message": "%s: %s" % (type(e).__name__, e)}})
+            return
+        if reply is None:
+            self._reply_empty(202)          # a notification: acknowledged, nothing to say back
+        else:
+            self._reply_json(200, reply)
+
+    def do_GET(self):
+        self._reply_empty(405)              # server-initiated push not implemented; see class docstring
+
+
+class _McpHTTPServer(http.server.ThreadingHTTPServer):
+    """ThreadingHTTPServer that REFUSES an already-occupied port instead of quietly sharing it.
+
+    allow_reuse_address defaults to True in socketserver, and on Windows that flag does not mean
+    what it means on Unix: SO_REUSEADDR there permits a genuine second bind to a port another
+    socket is already LISTENING on, rather than only reclaiming a TIME_WAIT one. So the default
+    lets a second `aver_mcp.py --http --port N` start "successfully" beside a first -- two live
+    servers, each possibly rooted at a DIFFERENT checkout, with the OS deciding which one a given
+    connection reaches. That is precisely the wrong-tree confusion this whole change exists to
+    remove, arrived at from the other end: not a build reported against the wrong root, but a
+    client silently talking to the wrong server.
+
+    Refusing costs nothing real. The port only matters while a server holds it, and a stale
+    TIME_WAIT on a loopback listener clears in seconds; an operator who genuinely wants the port
+    back should stop the process holding it, not race it.
+    """
+    allow_reuse_address = False
+
+
+def serve_http(port):
+    try:
+        httpd = _McpHTTPServer((_HTTP_HOST, port), _McpHTTPHandler)
+    except OSError as e:
+        # A BOUND PORT IS AN OPERATOR MISTAKE, NOT A CRASH. Unhandled, this surfaced as a raw
+        # WinError 10013 traceback and exit 1, which reads as a broken server rather than as
+        # "something is already there". The editor's own control channel already answers this
+        # situation by logging why and carrying on (McpBridge::start returns false); a tool server
+        # has nothing to carry on WITH, so it exits -- but it exits saying what is wrong and how to
+        # find the process holding the port.
+        log("cannot serve HTTP on %s:%d -- %s" % (_HTTP_HOST, port, e))
+        log("something is probably already listening there. Find it with: "
+            "netstat -ano | findstr :%d   (then choose another port with --port, or in mcp.conf's "
+            "tool_server.port)" % port)
+        return 2
+    log("serving from %s over http://%s:%d%s (Streamable HTTP; POST only, GET replies 405)"
+        % (ROOT, _HTTP_HOST, port, _HTTP_PATH))
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    port, source = resolve_tool_server_port(argv)
+    if "--http" in argv:
+        return serve_http(port)
+    # Default path, exactly as before --http existed: stdio, no socket opened, nothing about this
+    # process's behaviour on .mcp.json's existing stdio launch has changed.
+    log("serving from %s over stdio (tool_server.port=%d, source=%s -- pass --http to serve over "
+        "HTTP on that port instead)" % (ROOT, port, source))
+    serve_stdio()
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

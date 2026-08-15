@@ -98,6 +98,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #  include "aver/formats/AverDesign.hpp"
 #endif
 #include "EngineScaffold.hpp"
+#include "McpConf.hpp"
 #include "IdeIntegration.hpp"
 #include "ShellIntegration.hpp"
 
@@ -11262,6 +11263,11 @@ static bool isOcproject(const char* p) {
 // Parses the command line and builds the editor application. Some flags do their work and exit.
 Application* createApplication(int argc, char** argv) {
     u16 mcpPort=0;
+    // --mcp was given at all, vs. given WITH an explicit port. Precedence (explicit CLI argument >
+    // mcp.conf > built-in default) needs to tell those apart: an explicit numeric port is resolved
+    // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
+    // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
+    bool mcpRequested = false, mcpPortExplicit = false;
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
@@ -11427,10 +11433,32 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--new-script")) focusScript=true;
         else if (!std::strcmp(argv[i],"--tools-menu")) focusTools=true;
         else if (!std::strcmp(argv[i],"--compile-menu")) focusCompileMenu=true;
-        // --mcp [port] opens the editor control channel. Opt-in: it is a listening socket.
+        // --mcp [port] opens the editor control channel. Opt-in: it is a listening socket. With no
+        // number, the port comes from mcp.conf's editor_bridge.port, or 45123 if that is absent too
+        // -- resolved after this loop, once mcpRequested/mcpPortExplicit are both known for good.
         else if (!std::strcmp(argv[i],"--mcp")) {
-            mcpPort = 45123;
-            if (i+1 < argc && argv[i+1][0] != '-') mcpPort = (u16)std::atoi(argv[++i]);
+            mcpRequested = true;
+            if (i+1 < argc && argv[i+1][0] != '-') {
+                // RANGE-CHECKED, unlike the bare `(u16)std::atoi(...)` this replaces. That cast
+                // silently truncated: `--mcp 99999` bound port 34463 (99999 mod 65536) and logged
+                // 34463 as though the operator had typed it, and `--mcp 0` counted as an explicit
+                // port that then never opened a channel at all, because 0 is also this parser's
+                // "never asked for" value. Both are the same failure the mcp.conf reader already
+                // refuses to commit on its own side -- a port that is not a port should be said
+                // out loud, not quietly turned into a different one.
+                const char* raw = argv[++i];
+                const long  p   = std::strtol(raw, nullptr, 10);
+                if (p >= 1 && p <= 65535) {
+                    mcpPort = (u16)p;
+                    mcpPortExplicit = true;
+                } else {
+                    // Not fatal, and deliberately not: the channel is a debugging aid, and refusing
+                    // to start the whole editor over a mistyped port would be worse than falling
+                    // back the way every other unset value here does.
+                    AVER_WARN("[Mcp] --mcp {} is not a port (1-65535); falling back to mcp.conf or "
+                              "the built-in default", raw);
+                }
+            }
         }
         else if (!std::strcmp(argv[i],"--compile-scripts")) focusCompile=true;
         // --reload-scripts [N] fires Tools > Reload Scripts once, N frames in (default 20).
@@ -11680,10 +11708,37 @@ Application* createApplication(int argc, char** argv) {
     if (undoTestAuto > 0) app->setUndoTestAuto(undoTestAuto);
     if (keybindTestAuto > 0) app->setKeybindTestAuto(keybindTestMode, keybindTestAuto);
 #if AVER_MODULE_MCP
+    // Precedence: explicit --mcp <port> (already resolved above) > mcp.conf's editor_bridge.port >
+    // the module's own built-in default (45123, McpBridge.hpp's own default arg). mcp.conf ONLY ever
+    // supplies the NUMBER used here -- it cannot turn the channel on by itself; --mcp is still
+    // required, same opt-in contract as before this file existed. A missing, empty or malformed
+    // mcp.conf, or a mcp.conf missing this one key, resolves silently to the built-in default: the
+    // editor starts exactly as it always has, and readMcpConfPort has already logged a warning if
+    // the reason was a value it could not parse rather than the ordinary "not set" case.
+    //
+    // The resolved port and its source are logged UNCONDITIONALLY, not only on the fallback path --
+    // matching aver_mcp.py's own "always reported, never on request" provenance instinct (see its
+    // binary_provenance) -- so an explicit --mcp <port> is just as visible in the log as a value
+    // pulled from mcp.conf, and nobody has to infer which one happened from silence.
+    if (mcpRequested) {
+        const char* source = "command line";
+        if (!mcpPortExplicit) {
+            constexpr u16 kDefaultMcpPort = 45123;
+            u16 confPort = 0;
+            if (editor::readMcpConfPort(editor::engineRoot(), "editor_bridge.port", &confPort)) {
+                mcpPort = confPort;
+                source = "mcp.conf";
+            } else {
+                mcpPort = kDefaultMcpPort;
+                source = "built-in default";
+            }
+        }
+        AVER_INFO("[Mcp] control channel requested on port {} (source: {})", mcpPort, source);
+    }
     app->setMcpPort(mcpPort);
 #else
-    if (mcpPort) AVER_WARN("[Mcp] --mcp was given but this build has no control channel "
-                           "(-DAVER_MODULE_MCP=ON to include it); the editor runs regardless");
+    if (mcpRequested) AVER_WARN("[Mcp] --mcp was given but this build has no control channel "
+                                "(-DAVER_MODULE_MCP=ON to include it); the editor runs regardless");
 #endif
     app->setFocusCompile(focusCompile);
     app->setFocusReload(reloadAt);

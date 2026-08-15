@@ -10,6 +10,7 @@ add_executable(Sandbox
   src/ProjectScaffold.cpp
   src/EditorPrefs.cpp
   src/EngineScaffold.cpp
+  src/McpConf.cpp
   src/IdeIntegration.cpp
   src/ShellIntegration.cpp
   src/ToolsMenu.cpp

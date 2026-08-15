@@ -51,3 +51,9 @@ scripting/**/obj/
 
 # Python bytecode, from importing tools/mcp/aver_mcp.py to test it
 __pycache__/
+
+# --- Local machine config ---
+# mcp.conf: developer-local port assignments (mcp.conf.example is the committed template). Untracked
+# on purpose -- see mcp.conf.example's own header -- so each checkout, including each git worktree,
+# can pick its own ports without colliding or needing a merge.
+/mcp.conf
