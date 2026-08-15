@@ -177,6 +177,16 @@ private:
     // Pushes the camera, sky, fog and post settings to the device for this frame.
     void pushFrame(Engine&);
 
+    // Applies the loaded level's sun and sky settings to the sky atmosphere.
+    void applyLevelSky();
+    void fitGiVolumeToLevel();
+
+    // Applies the project's render settings to Voxi.
+    void applyProjectRenderSettings();
+
+    // Depth proxy resolver for shadow/voxel passes using LOD data.
+    static rhi::MeshHandle depthProxyLookup(rhi::MeshHandle mesh, void* user);
+
     GameConfig cfg_;
     InputState input_;
 
@@ -199,6 +209,15 @@ private:
     // Whether a script currently owns the sky. Only so the handover is logged ONCE each way rather
     // than every frame; nothing reads it to decide anything.
     bool scriptSkyReported_ = false;
+
+    // --- GI volume tracking ---
+    // The center and extent of the volume for indirect lighting computation. Tracked from the camera/player position.
+    // The GI volume, fitted to the level by fitGiVolumeToLevel(). The fallback is the EDITOR's own
+    // compiled default (SandboxApp.cpp's `Vec3 giCenter_{0,0,300}; f32 giExtent_=1200.0f;`), so a
+    // level with no placements to fit lands where the editor would have put it rather than on a
+    // number invented here.
+    Vec3 giCenter_{0.0f, 0.0f, 300.0f};
+    f32 giExtent_ = 1200.0f;   // cm
 
     SceneDrawStats drawStats_;
 

@@ -60,8 +60,28 @@ void GameLevel::load(const std::string& path, GameContent& content) {
         fogColor_[2] = static_cast<f32>(w.fogColor[2]);
         hasLevelFog_ = true;
     }
-    // applyLevelSky is C6's business: it writes rhi::SkyAtmosphere, which the game does not push to
-    // the device until the camera commit lands.
+
+    // Load sun settings from the level
+    if (w.hasSun) {
+        hasSun_ = true;
+        sunDir_[0] = w.sunDir[0];
+        sunDir_[1] = w.sunDir[1];
+        sunDir_[2] = w.sunDir[2];
+        sunColor_[0] = w.sunColor[0];
+        sunColor_[1] = w.sunColor[1];
+        sunColor_[2] = w.sunColor[2];
+        sunLux_ = w.sunLux;
+    }
+
+    // Load sky settings from the level
+    if (w.hasSky) {
+        hasSky_ = true;
+        skyPhysical_ = w.skyPhysical;
+        skyMieScatter_ = w.skyMieScatter;
+        skyMultiScatter_ = w.skyMultiScatter;
+        skyViewSteps_ = w.skyViewSteps;
+        skyAerialSteps_ = w.skyAerialSteps;
+    }
 
     // ---- the level's declared density fields ----
     //
@@ -130,6 +150,25 @@ void GameLevel::load(const std::string& path, GameContent& content) {
                       f.boundedSpec.seed, f.boundedSpec.layerCount);
     }
 
+    // The same accumulation the editor's frameCameraOn does over the same records
+    // (SandboxApp.cpp:10408-10420), for the same purpose: fitting the GI volume to the level.
+    // Position +/- absolute scale per axis, because a negative scale is a mirrored placement whose
+    // extent is still positive.
+    for (const fmt::OcWorldPlacement& p : w.placements) {
+        const Vec3 c{static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)};
+        const Vec3 e{static_cast<f32>(std::fabs(p.sx)), static_cast<f32>(std::fabs(p.sy)),
+                     static_cast<f32>(std::fabs(p.sz))};
+        if (!hasBounds_) {
+            boundsLo_ = Vec3{c.x - e.x, c.y - e.y, c.z - e.z};
+            boundsHi_ = Vec3{c.x + e.x, c.y + e.y, c.z + e.z};
+            hasBounds_ = true;
+            continue;
+        }
+        boundsLo_.x = std::fmin(boundsLo_.x, c.x - e.x); boundsHi_.x = std::fmax(boundsHi_.x, c.x + e.x);
+        boundsLo_.y = std::fmin(boundsLo_.y, c.y - e.y); boundsHi_.y = std::fmax(boundsHi_.y, c.y + e.y);
+        boundsLo_.z = std::fmin(boundsLo_.z, c.z - e.z); boundsHi_.z = std::fmax(boundsHi_.z, c.z + e.z);
+    }
+
     levelPath_ = path;
     levelName_ = w.name;
     AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
@@ -161,6 +200,17 @@ const GameLevel::PcgField* GameLevel::pcgField(const std::string& name) const {
     return nullptr;
 }
 
+bool GameLevel::placementBounds(Vec3& lo, Vec3& hi, f32& radius) const {
+    if (!hasBounds_) return false;
+    lo = boundsLo_;
+    hi = boundsHi_;
+    // Half the diagonal, floored at 1cm. The editor's own floor, and it matters: a level of one
+    // zero-scaled placement would otherwise ask Voxi for a volume with no extent at all.
+    const f32 dx = boundsHi_.x - boundsLo_.x, dy = boundsHi_.y - boundsLo_.y, dz = boundsHi_.z - boundsLo_.z;
+    radius = std::fmax(1.0f, 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz));
+    return true;
+}
+
 void GameLevel::unload() {
     scene::World& world = scene::World::instance();
     for (const scene::Entity e : levelEntities_) if (world.valid(e)) world.destroy(e);
@@ -170,6 +220,9 @@ void GameLevel::unload() {
     levelBodies_.clear();
 #endif
     hasLevelFog_ = false;
+    hasSun_ = false;
+    hasSky_ = false;
+    hasBounds_ = false;
     pcgFields_.clear();
     levelPath_.clear();
     levelName_.clear();

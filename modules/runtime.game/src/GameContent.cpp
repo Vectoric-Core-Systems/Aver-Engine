@@ -24,6 +24,9 @@
 #  include "aver/formats/OcMesh.hpp"
 #  include "aver/scene/scene_abi.h"
 #  include "GameMath.hpp"
+#  if AVER_MODULE_TRIFACTOR
+#    include "aver/trifactor/ClusterAdapt.hpp"
+#  endif
 #endif
 
 namespace aver::game {
@@ -190,6 +193,53 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
         sceneMeshes_[id] = h;
         meshBounds_[id] = {md.boundsMin, md.boundsMax};
         projectMeshIds_.push_back(id);
+
+        // THE COARSE STAND-IN THE SHADOW, GI-SHADOW AND VOXELISE PASSES DRAW INSTEAD OF THIS MESH.
+        // Those passes are depth-only -- they resolve a silhouette, never a surface -- so detail a
+        // coarser level drops is detail they were never going to show. Same rule, same threshold and
+        // same reasoning as the editor's ladder (sandbox/src/SandboxApp.cpp's kShadowErrorCm block):
+        // chosen on Trifactor's measured world error in centimetres, not on a triangle ratio, because
+        // how coarse a level is says nothing about how wrong it looks. 20cm is about one shadow-map
+        // texel, below which the silhouette cannot change the shadow.
+        //
+        // WHERE THIS DELIBERATELY DIVERGES FROM THE EDITOR: the editor uploads the WHOLE ladder and
+        // keys the map on every level's handle, because with --lod-select its lit pass submits
+        // whichever level it chose and each of those handles has to resolve. The game has no runtime
+        // LOD selection at all -- GameRender.cpp:56 submits content.meshFor(mr->mesh), which is
+        // sceneMeshes_[id], which is LOD 0's handle and nothing else -- so uploading the rest of the
+        // ladder would be VRAM that nothing can ever look up. The pick needs no upload to compute
+        // (levelWorldErrorCm reads the OcMeshData), so it is computed first and exactly ONE extra
+        // level is uploaded. The day the game learns to select, this becomes the editor's loop again.
+#if AVER_MODULE_TRIFACTOR
+        if (md.lodCount() > 1) {
+            constexpr f32 kShadowErrorCm = 20.0f;
+            u32 pick = 0;
+            for (u32 lvl = 1; lvl < md.lodCount(); ++lvl)
+                if (trifactor::levelWorldErrorCm(md, lvl) <= kShadowErrorCm) pick = lvl;
+
+            // A pick that is not actually cheaper than LOD 0 buys an upload and saves nothing.
+            const u32 tris0 = trifactor::levelTriangleCount(md, 0);
+            if (pick > 0 && trifactor::levelTriangleCount(md, pick) < tris0) {
+                const fmt::OcMeshLod& lod = md.coarserLods[pick - 1];
+                // LOD 0's OWN vertex array: a coarser level owns its index buffer but shares the one
+                // VTXS block (see OcMeshData::coarserLods), which is why `verts` is correct here.
+                const rhi::MeshHandle ph = device.createMesh(verts.data(), (u32)verts.size(),
+                                                             lod.indices.data(), (u32)lod.indices.size());
+                if (ph) {
+                    depthProxyMap_[h] = ph;
+                    AVER_INFO("[Mesh] '{}' depth proxy: LOD {} ({} tris, {:.1f}x less than LOD 0, {:.1f}cm error)",
+                              rel, pick, trifactor::levelTriangleCount(md, pick),
+                              static_cast<f64>(tris0) /
+                                  static_cast<f64>(trifactor::levelTriangleCount(md, pick)),
+                              trifactor::levelWorldErrorCm(md, pick));
+                } else {
+                    AVER_WARN("[Mesh] '{}' depth proxy LOD {} refused by the device; it draws at full detail",
+                              rel, pick);
+                }
+            }
+        }
+#endif
+
         ++loaded;
     }
     if (loaded || failed)

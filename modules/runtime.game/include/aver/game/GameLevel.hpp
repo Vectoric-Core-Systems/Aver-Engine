@@ -59,6 +59,23 @@ public:
     const PcgField* pcgField(const std::string& name) const;
     f32 fogDensity() const { return levelFog_; }
     const f32* fogColor() const { return fogColor_; }
+
+    // Level's sun and sky settings
+    bool hasSun() const { return hasSun_; }
+    const f64* sunDir() const { return sunDir_; }
+    const f64* sunColor() const { return sunColor_; }
+    f64 sunLux() const { return sunLux_; }
+
+    // The level's placement bounds, and the bounding-sphere radius of them. False when the level has
+    // no placements at all, which is the case a caller must not turn into a zero-sized GI volume.
+    bool placementBounds(Vec3& lo, Vec3& hi, f32& radius) const;
+
+    bool hasSky() const { return hasSky_; }
+    bool skyPhysical() const { return skyPhysical_; }
+    f64 skyMieScatter() const { return skyMieScatter_; }
+    f64 skyMultiScatter() const { return skyMultiScatter_; }
+    i32 skyViewSteps() const { return skyViewSteps_; }
+    i32 skyAerialSteps() const { return skyAerialSteps_; }
 #endif
 
 private:
@@ -70,6 +87,25 @@ private:
     f32  levelFog_ = 0.0002f;
     f32  fogColor_[3] = {0.55f, 0.60f, 0.68f};
     std::vector<PcgField> pcgFields_;
+
+    // Sun and sky settings from the level
+    bool hasSun_ = false;
+    f64 sunDir_[3] = {-0.5481, 0.3838, 0.7431};
+    f64 sunColor_[3] = {1.0, 0.98, 0.92};
+    f64 sunLux_ = 100000.0;
+
+    // Placement bounds, accumulated by load(). hasBounds_ stays false for a level with no
+    // placements, which is a real case (an empty start map) and not a zero-sized world.
+    bool hasBounds_ = false;
+    Vec3 boundsLo_{}, boundsHi_{};
+
+    bool hasSky_ = false;
+    bool skyPhysical_ = true;
+    f64 skyMieScatter_ = -1.0;
+    f64 skyMultiScatter_ = -1.0;
+    i32 skyViewSteps_ = 0;
+    i32 skyAerialSteps_ = 0;
+
 #  if AVER_MODULE_PHYSICS
     std::vector<int32_t> levelBodies_;
 #  endif

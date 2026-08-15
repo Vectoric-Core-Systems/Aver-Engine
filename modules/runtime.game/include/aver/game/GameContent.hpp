@@ -106,6 +106,9 @@ public:
     // Bounds as loaded from the .ocmesh, or nullptr. Used by the draw walk to cull.
     const std::pair<Vec3, Vec3>* boundsFor(u64 id) const;
 
+    // Depth proxy map for LOD-based shadow/voxel optimization.
+    const std::unordered_map<rhi::MeshHandle, rhi::MeshHandle>& depthProxyMap() const { return depthProxyMap_; }
+
     // Resolver for aver::render::SkinnedScene. Deliberately the SAME table the draw pass reads: a
     // skin target built from a different upload than the one on screen would be a rig skinning
     // geometry nobody can see.
@@ -125,6 +128,8 @@ private:
     std::unordered_map<u64, std::pair<Vec3, Vec3>> meshBounds_;
     std::vector<u64>                               projectMeshIds_;
     std::unordered_map<i32, SurfaceLook>           surfaceLooks_;
+    // Depth proxy map: LOD meshes used instead of full detail in depth passes
+    std::unordered_map<rhi::MeshHandle, rhi::MeshHandle> depthProxyMap_;
 #endif
 
 #if AVER_MODULE_PBR

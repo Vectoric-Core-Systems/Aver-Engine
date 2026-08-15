@@ -50,6 +50,9 @@
 #ifndef AVER_MODULE_SCRIPTING
 #  define AVER_MODULE_SCRIPTING 0
 #endif
+#ifndef AVER_MODULE_TRIFACTOR
+#  define AVER_MODULE_TRIFACTOR 0
+#endif
 
 namespace aver::game {
 namespace {
@@ -349,6 +352,11 @@ void GameApp::attachVoxi(Engine& e) {
         content_.setTextureFactory(dev->resources());
         voxiRenderer_.materials().setTextureResolver(&GameContent::resolveMaterialTexture, &content_);
 #endif
+        // Install the depth proxy resolver for LOD-based shadow/voxel optimization.
+        // Installed unconditionally even if Trifactor is not linked: depthProxyMap is then empty,
+        // every lookup answers 0, and every pass draws what it drew before.
+        voxiRenderer_.setDepthProxy(&GameApp::depthProxyLookup, this);
+
         AVER_INFO("[Game] Voxi attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}",
                   caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
     } else {
@@ -396,7 +404,12 @@ void GameApp::openProject(Engine& e) {
         content_.loadProjectMeshes(*dev);
     }
     level_.loadStartMap(project_, content_);
+    // Apply the level's sun and sky settings
+    applyLevelSky();
+    fitGiVolumeToLevel();
 #endif
+    // Apply the project's render settings to Voxi
+    applyProjectRenderSettings();
 }
 
 void GameApp::initScripting() {
@@ -561,6 +574,94 @@ void GameApp::beginPlayIfGameModeDeclared() {
 #endif
 }
 
+rhi::MeshHandle GameApp::depthProxyLookup(rhi::MeshHandle mesh, void* user) {
+#if AVER_MODULE_SCENE
+    if (!user) return 0;
+    const GameApp* app = static_cast<const GameApp*>(user);
+    const auto& proxyMap = app->content_.depthProxyMap();
+    const auto it = proxyMap.find(mesh);
+    return it == proxyMap.end() ? 0 : it->second;
+#else
+    (void)mesh; (void)user;
+    return 0;
+#endif
+}
+
+void GameApp::applyLevelSky() {
+#if AVER_MODULE_SCENE
+    if (!level_.hasSun() && !level_.hasSky()) return;
+
+    if (level_.hasSun()) {
+        const f64* sunDir = level_.sunDir();
+        const f64* sunColor = level_.sunColor();
+        for (int i = 0; i < 3; ++i) {
+            sky_.sunDirection[i] = static_cast<f32>(sunDir[i]);
+            sunColor_[i] = static_cast<f32>(sunColor[i]);
+        }
+        // Apply sunLux as a multiplier on the default intensity
+        // OcWorldData defaults to 100000, rhi::SkyAtmosphere defaults to 3.0
+        sky_.sunIntensity = static_cast<f32>(level_.sunLux() / (100000.0 / 3.0));
+        AVER_INFO("[Level] applied sun settings: dir[{:.3f} {:.3f} {:.3f}], intensity {:.2f}",
+                  sunDir[0], sunDir[1], sunDir[2], sky_.sunIntensity);
+    }
+
+    if (level_.hasSky()) {
+        sky_.model = level_.skyPhysical() ? rhi::SkyModel::Physical : rhi::SkyModel::Authored;
+        if (level_.skyMieScatter() >= 0.0) sky_.air.mieScatter = static_cast<f32>(level_.skyMieScatter());
+        if (level_.skyMultiScatter() >= 0.0) sky_.air.multiScatterGain = static_cast<f32>(level_.skyMultiScatter());
+        if (level_.skyViewSteps() > 0) sky_.air.viewSteps = level_.skyViewSteps();
+        if (level_.skyAerialSteps() > 0) sky_.air.aerialSteps = level_.skyAerialSteps();
+        AVER_INFO("[Level] applied sky settings: model={}, mie={:.2f}, multi={:.2f}, view={}, aerial={}",
+                  level_.skyPhysical() ? "physical" : "authored",
+                  level_.skyMieScatter(), level_.skyMultiScatter(),
+                  level_.skyViewSteps(), level_.skyAerialSteps());
+    }
+#endif
+}
+
+// Fits the GI volume to the level, the way the editor's frameCameraOn does when it opens one.
+//
+// THE EXTENT IS THE POINT, not the centre. Voxi voxelises this volume into a fixed grid, so extent
+// alone decides how many centimetres one voxel spans: at the shipped 128^3, a 12m volume gives ~9cm
+// voxels and a 2000m one gives ~15.6m voxels -- a grid in which an entire tree fits inside a single
+// cell and indirect light is uniform mush. The editor's own slider stops at 100000cm for that
+// reason. Fitting the level rather than picking a constant is what makes the shipped image match
+// what the author was looking at when they saved.
+void GameApp::fitGiVolumeToLevel() {
+#if AVER_MODULE_SCENE && AVER_MODULE_VOXI
+    Vec3 lo{}, hi{};
+    f32 radius = 0.0f;
+    if (!level_.placementBounds(lo, hi, radius)) return;   // no placements: keep the editor default
+    giCenter_ = Vec3{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+    giExtent_ = radius;
+    AVER_INFO("[Voxi] GI volume fitted to the level: centre[{:.0f} {:.0f} {:.0f}] extent {:.0f}cm",
+              giCenter_.x, giCenter_.y, giCenter_.z, giExtent_);
+#endif
+}
+
+void GameApp::applyProjectRenderSettings() {
+#if AVER_MODULE_VOXI
+    if (!project_.valid() || !project_.hasRenderSettings()) return;
+    if (!voxiAttached_) return;
+
+    voxi::Renderer& vx = voxi::Renderer::get();
+    voxi::Settings s = vx.settings();
+    if (project_.giQuality >= 0) s.globalIllumination = static_cast<voxi::Quality>(project_.giQuality);
+    if (project_.rayTracing >= 0) s.rayTracing = static_cast<voxi::Quality>(project_.rayTracing);
+    if (project_.pathTracing >= 0) s.pathTracing = static_cast<voxi::Quality>(project_.pathTracing);
+    if (project_.voxelResolution > 0) s.voxelResolution = static_cast<u32>(project_.voxelResolution);
+    if (project_.giIntensity >= 0.0f) s.giIntensity = project_.giIntensity;
+    if (project_.giMaxDistance >= 0.0f) s.giMaxDistance = project_.giMaxDistance;
+    if (project_.rtShadowRays >= 0) s.rtShadowRays = static_cast<u32>(project_.rtShadowRays);
+    if (project_.rtPixelsPerRayTile >= 0) s.rtPixelsPerRayTile = static_cast<u32>(project_.rtPixelsPerRayTile);
+    vx.setSettings(s);
+    voxiRenderer_.setSettings(vx.settings());
+    AVER_INFO("[Project] applied render settings: gi={}, rt={}, pt={}, voxelRes={}, giIntensity={}, giDist={}",
+              static_cast<int>(s.globalIllumination), static_cast<int>(s.rayTracing),
+              static_cast<int>(s.pathTracing), s.voxelResolution, s.giIntensity, s.giMaxDistance);
+#endif
+}
+
 Vec3 GameApp::camForward() const {
     return Vec3{ std::cos(pitch_) * std::cos(yaw_), std::cos(pitch_) * std::sin(yaw_), std::sin(pitch_) };
 }
@@ -676,6 +777,22 @@ void GameApp::pushFrame(Engine& e) {
     // says the app owns it, and a clock that never advances gives a sky that is procedural and
     // completely static, which reads as a painted backdrop.
     sky_.cloudTime         = cloudTime_;
+
+#if AVER_MODULE_VOXI
+    if (voxiAttached_) {
+        // The volume the editor would be showing, pushed every frame exactly as the editor pushes it
+        // (SandboxApp.cpp:1641). Centre and extent are the LEVEL's, fitted once at load by
+        // fitGiVolumeToLevel -- deliberately not the camera's. A camera-following volume is a
+        // different feature, for worlds bigger than one volume, and it would re-voxelise on every
+        // move and give the shipped game a different image from the editor preview, which is the one
+        // thing this whole change exists to stop.
+        voxiRenderer_.setVolume(&giCenter_.x, giExtent_);
+        const Vec3 sd = Vec3{sky_.sunDirection[0], sky_.sunDirection[1],
+                             sky_.sunDirection[2]}.getSafeNormal();
+        voxiRenderer_.setSunDirection(&sd.x);
+    }
+#endif
+
     dev->setSkyAtmosphere(sky_);
     // NOT the editor's 0.055 chrome grey. Nothing outside a game's viewport is chrome, because a
     // game has no outside -- anything the sky does not cover is a bug the player should see as
