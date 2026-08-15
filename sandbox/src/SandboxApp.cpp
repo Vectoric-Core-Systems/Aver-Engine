@@ -107,7 +107,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/voxi/VoxiGiShaders.hpp"
 #endif
 
-#if AVER_MODULE_OCCLUSION
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
 #include "aver/occlusion/Occlusion.hpp"
 #endif
 
@@ -1217,7 +1217,7 @@ public:
         gameUi_ = aver::render::ui::UiRenderer::create(*e.device());
         if (gameUi_) e.device()->addRenderFeature(gameUi_);
 
-#if AVER_MODULE_OCCLUSION
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
         // NOT an IRenderFeature: it has no prePass/scenePass of its own, only two methods
         // renderSceneEntities() calls directly from inside the CPU entity walk -- see occluder_'s own
         // member comment. Built unconditionally (whether or not --occlusion-cull was given): it is
@@ -1383,6 +1383,15 @@ public:
 #endif
 #if AVER_MODULE_FRAMEWORK
         const bool interactive = maxFrames_ == 0 && !playTest_;
+        // THE #if IS NOT REDUNDANT WITH uiActive(). uiActive() is a RUNTIME question -- "is an ImGui
+        // frame open right now" -- and it answers false on a UI-less build, which is why this block
+        // was correct at runtime and still failed to COMPILE without ImGui: the ImGuiIO/ImGui::
+        // names below have to exist for the translation unit regardless of what the branch decides.
+        // scripts/module-matrix.ps1's no-ui and d3d12-off rows both failed here (d3d12-off because
+        // ImGui enters the tree from the D3D12 backend, so turning that backend off removes it too).
+        // Guarding the whole block rather than each call keeps the mouse/keyboard capture policy in
+        // one piece; a UI-less build has no ImGui to arbitrate capture with in the first place.
+#if AVER_WITH_IMGUI
         if (e.device()->uiActive() && interactive) {
             // Clicking the viewport puts the mouse back in the game. Tested before wantCapture below.
             {
@@ -1405,6 +1414,9 @@ public:
             if (!playSessionActive()) releasedByUser_ = false;
             setMouseCaptured(wantCapture && !ImGui::GetIO().WantTextInput);
         }
+#else
+        (void)interactive;   // no ImGui to arbitrate mouse/keyboard capture with
+#endif
         pollCapturedMouse();
         pushInput(e.device()->uiActive());
         // The UI frame opens before gameplay ticks, because ticking is when a game draws its HUD.
@@ -2605,7 +2617,7 @@ public:
 
             const u32 n = w.count();
 
-#if AVER_MODULE_OCCLUSION
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
             // ---- occlusion phase 0: collect every entity's world AABB, and split the walk order ----
             //
             // A DEDICATED PRE-WALK, not the main loop's own per-entity box computation, because
@@ -2715,7 +2727,7 @@ public:
 #endif
 
             for (u32 oi = 0; oi < n; ++oi) {
-#if AVER_MODULE_OCCLUSION
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
                 const u32 i = occlusionOrder_.empty() ? oi : occlusionOrder_[oi];
                 if (occlusionCullEnabled_ && occluder_ && oi == occlusionPass1Count) occlusionBuildAndTest();
 #else
@@ -2774,7 +2786,7 @@ public:
                         if (outside) { ++culled; continue; }
                     }
                 }
-#if AVER_MODULE_OCCLUSION
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
                 // PASS-2 ONLY: `oi < occlusionPass1Count` entities were drawn unconditionally, before
                 // occlusionBuildAndTest() ever ran -- see the loop header's own comment. Everything
                 // from here down is an entity occlusionBuildAndTest() (triggered right when `oi`
@@ -3243,7 +3255,7 @@ public:
                     selectionOutline_ = wm, selectionMesh_ = mesh, hasSelection_ = true;
                 ++drawn;
             }
-#if AVER_MODULE_OCCLUSION
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
             // The pass-2-empty fallback -- see occlusionBuildAndTest's own comment for why this has
             // to run even when there was nothing left to gate this frame: occlusionVisible_ still
             // needs a fresh answer for every entity, or a wall walked INTO front of a previously
@@ -3597,7 +3609,7 @@ public:
 #else
         (void)e;
 #endif
-#if AVER_MODULE_OCCLUSION
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
         if (occluder_) {
             if (rhi::IResourceFactory* occRes = e.device()->resources())
                 aver::occlusion::destroyOcclusionCuller(*occRes, occluder_);
@@ -3784,7 +3796,7 @@ public:
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
     void setDepthPrepassOverride(bool on) { depthPrepassOverride_ = on; }   // --depth-prepass
-#if AVER_MODULE_OCCLUSION
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
     // --occlusion-cull: see occlusionCullEnabled_'s own member comment. Unset (the default) never
     // reorders the entity walk, never calls occluder_ at all, and reproduces today's frame exactly --
     // the same "off is a no-op, byte for byte" contract depthPrepassOverride_ carries just above.
@@ -6641,12 +6653,22 @@ private:
         return false;
     }
 
+#endif  // AVER_WITH_IMGUI -- reopened immediately below; cbIde is deliberately outside it.
     // Returns the IDE the browser opens source with: the user's choice, else the detected preference.
+    //
+    // LIFTED OUT OF THE AVER_WITH_IMGUI BLOCK, because it never belonged in it: this function
+    // touches no ImGui, and neither do its callers. onInit's editor-hook registration
+    // (hooks.openInIde / hooks.ideName) calls it from unguarded code, so a build without ImGui --
+    // which is BOTH the no-ui row AND, less obviously, the d3d12-off row, since ImGui enters the
+    // tree from the D3D12 backend -- lost the definition while keeping the callers.
+    // scripts/module-matrix.ps1 failed both rows on exactly this identifier. Sibling importAsset
+    // is lifted for the same reason.
     const editor::IdeInfo& cbIde() const {
         const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
         if (cbIdeChoice_ >= 0 && cbIdeChoice_ < static_cast<int>(ides.size())) return ides[static_cast<usize>(cbIdeChoice_)];
         return editor::preferredIde();
     }
+#if AVER_WITH_IMGUI
 
     // Handles a double-click: enter a folder, open an asset editor, else the IDE, else the shell.
     void cbOpenEntry(const std::string& full, bool isDir) {
@@ -7395,7 +7417,11 @@ private:
         ImGui::EndPopup();
     }
 
+#endif  // AVER_WITH_IMGUI -- reopened after importAsset; see cbIde for why these two are outside it.
     // Imports one asset into destDir: models and audio are converted, everything else is copied.
+    // Lifted out of the ImGui block for the same reason cbIde was: onInit's deferred-import check
+    // (the importSrc_/importDone_ handshake) calls this from unguarded code, so no-ui and d3d12-off
+    // both lost the definition while keeping that caller.
     void importAsset(const std::string& src, const std::string& destDir) {
         std::error_code ec;
         if (!cbIsEditable(destDir)) {
@@ -7425,6 +7451,7 @@ private:
         cbStatus_ = "Imported " + name;
         cbInvalidate(destDir);
     }
+#if AVER_WITH_IMGUI
 
 #if AVER_HAVE_AUDIO_IMPORT
     // Decodes .wav / .mp3 / .m4a / .flac into one .ocaudio in destDir. The source is not copied.
@@ -8892,7 +8919,19 @@ private:
     // never calls IDevice::setDepthPrepassEnabled/drawMeshDepthPrepass/setNextDrawPrepassed at all --
     // see renderSceneEntities()'s own comment for the two-walk mechanism this drives.
     bool depthPrepassOverride_ = false;
-#if AVER_MODULE_OCCLUSION
+// AND AVER_MODULE_SCENE, not just OCCLUSION -- and every OTHER `#if AVER_MODULE_OCCLUSION` in this
+// file carries the same pair, deliberately. Two members below are keyed on scene::Entity
+// (occlusionVisible_ and occlusionBoxEntities_), so a tree with OCCLUSION on and SCENE off had this
+// block naming a type that does not exist; scripts/module-matrix.ps1's scene-off and all-off rows
+// both failed there. Occlusion culls SCENE ENTITIES -- without a scene there is nothing for it to
+// cull -- so requiring both is the honest condition rather than a workaround.
+//
+// THE PAIR HAS TO BE WRITTEN OUT AT ALL NINE SITES rather than just here. None of the occlusion
+// blocks in this file is nested inside an AVER_MODULE_SCENE region (checked, all nine are
+// top-level), so guarding only the members would leave their readers compiling against members
+// that had vanished -- which is the exact split-guard shape this file has been bitten by
+// repeatedly, just moved one step along.
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
     // --occlusion-cull: hierarchical-Z two-pass box culling (modules/occlusion). OFF (the default)
     // never calls occluder_ at all and never reorders the entity walk -- see renderSceneEntities's
     // own comment for the two-pass mechanism this drives, which mirrors depthPrepassOverride_'s
@@ -11137,7 +11176,7 @@ Application* createApplication(int argc, char** argv) {
     }
     app->setDepthPrepassOverride(depthPrepass);
     if (occlusionCull) {
-#if AVER_MODULE_OCCLUSION
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
         app->setOcclusionCullOverride(true);
 #else
         AVER_WARN("[Occlusion] --occlusion-cull was given but this build has no Occlusion module "
