@@ -1,0 +1,24 @@
+OCPROJECT 1
+# Engine test content for visual scripting. NOT a demo project and not a game -- it exists so the
+# graph vocabulary can be proven against a real running executable without reaching into anyone's
+# irreplaceable project, and so the sample graph under Content/Scripts is provably free of any
+# project's assumptions.
+#
+# WHAT IT PROVES. AverGame's project-graph auto-discovery ticks every .ocgraph under a project's
+# Content against its own entity. IdleMotion.ocgraph seeds itself from whatever entity it is handed
+# and writes that entity's position directly, so running this project is the end-to-end evidence
+# that a single graph file can drive an entity with no host code, no position sink and no OUT
+# convention -- the thing that previously required bespoke per-entity C# in every project that
+# wanted more than one of something.
+NAME GraphDemo
+ENGINE Aver 0.1.2
+CREATEDWITH 0.2.0
+CONTENT Content
+# STARTMAP: GRAPH-AS-CLASS needs a real placed entity to prove itself against (a graph cannot drive
+# an entity that does not exist), so Maps/OrbitDemo.ocmap places two AN_Orbiter instances -- see
+# that file's own header for what it proves. IdleMotion.ocgraph itself is unchanged in spirit: still
+# the same self-seeding, host-code-free graph the auto-discovery path already ran; it just now ALSO
+# carries a CLASS record, so it is discovered twice over -- once as the class OrbitDemo.ocmap's
+# placements instantiate, and (for any OTHER .ocgraph a future addition drops in this project with no
+# CLASS record) still via the original synthetic-entity auto-discovery, unaffected.
+STARTMAP Maps/OrbitDemo.ocmap

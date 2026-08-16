@@ -117,6 +117,21 @@ public abstract class AverCharacter : AverPawn
     protected void DriveWithInput(float dt) =>
         Drive(dt, Input.MoveAxis, Input.MouseDeltaX * TurnSpeed, -Input.MouseDeltaY * TurnSpeed);
 
+    /// <summary>Runs one frame of character control from graph-supplied move and look values --
+    /// Aver.Graph's own entry point onto <see cref="Drive"/>, reached through
+    /// GraphInterop.CharacterMoveForGraph. <c>internal</c>, not <c>protected</c>, and that is
+    /// deliberate: GraphInterop lives in this SAME assembly (so <c>internal</c> is reachable) but is
+    /// a DIFFERENT class from AverCharacter, so even same-assembly code cannot reach a
+    /// <c>protected</c> member through a plain reference the way a subclass could -- a cast
+    /// (<c>((AverCharacter)actor).Drive(...)</c>) does not compile across that boundary either. This
+    /// is a same-assembly forwarding call for Aver.Framework's OWN graph-interop surface, the same
+    /// reason <see cref="AverActor.OnUnbound"/> is <c>internal</c> rather than <c>public</c> --  not
+    /// a new public API a project's Scripts.dll could call to bypass its own subclass's OnTick.
+    /// <see cref="Drive"/> itself is untouched: the pitch clamp and the capsule stay in the one
+    /// tested place, exactly as the task requires.</summary>
+    internal void DriveFromGraph(float dt, Vec3 moveAxis, float yawDeltaDeg, float pitchDeltaDeg) =>
+        Drive(dt, moveAxis, yawDeltaDeg, pitchDeltaDeg);
+
     /// <summary>Runs one frame of character control from supplied move and look values.</summary>
     /// <param name="moveAxis">X = forward intent, Y = right intent, each -1..1.</param>
     protected void Drive(float dt, Vec3 moveAxis, float yawDeltaDeg, float pitchDeltaDeg)

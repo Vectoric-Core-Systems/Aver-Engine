@@ -1,0 +1,187 @@
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Developed by Vectoric-Core-Systems. All rights reserved.
+// Proprietary. See LICENSE.md at the repository root.
+// Tests for the CLASS record -- GRAPH-AS-CLASS's format half: a .ocgraph declaring itself a
+// spawnable actor class. See OcGraphParser.cs's "CLASS" case and Graph.cs's ClassName/ClassParent/
+// ClassMesh/ClassMaterial fields for what these tests are proving parses correctly. Registration
+// (aver_fw_class_declare) and per-instance binding are Aver.Scripting.Bridge's job (HostBridge.cs's
+// "graph classes" region) and are NOT reachable from this bare test process -- see
+// CharacterMoveNodeTests.cs's own header comment for the general "no native scripting host in this
+// process" limitation this suite already lives with. These tests are parse-level only, by design.
+using System;
+using Aver.Graph;
+
+static class GraphClassRecordTests
+{
+    public static int RunAll()
+    {
+        int failures = 0;
+
+        failures += TestClassRecordDefaultsParentToActor();
+        failures += TestClassRecordWithExplicitParent();
+        failures += TestClassRecordWithMeshAndMaterial();
+        failures += TestGraphWithNoClassRecordHasNullClassName();
+        failures += TestDuplicateClassRecordIsRejected();
+        failures += TestClassRecordWithNoNameIsRejected();
+
+        return failures;
+    }
+
+    private static int TestClassRecordDefaultsParentToActor()
+    {
+        Console.WriteLine("Test: CLASS with no parent token defaults ClassParent to 'Actor'");
+        try
+        {
+            var text = "OCGRAPH 1\nCLASS AN_Fixture\nNODE seed OnStart\n";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            if (graph.ClassName != "AN_Fixture" || graph.ClassParent != "Actor")
+            {
+                Console.WriteLine($"  FAIL: ClassName='{graph.ClassName}' ClassParent='{graph.ClassParent}'");
+                return 1;
+            }
+            Console.WriteLine("  PASS: ClassName='AN_Fixture', ClassParent defaulted to 'Actor'");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: threw {ex}");
+            return 1;
+        }
+    }
+
+    private static int TestClassRecordWithExplicitParent()
+    {
+        Console.WriteLine("Test: CLASS <name> <parent> carries the explicit parent through");
+        try
+        {
+            var text = "OCGRAPH 1\nCLASS AN_Guard Pawn\nNODE seed OnStart\n";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            if (graph.ClassName != "AN_Guard" || graph.ClassParent != "Pawn")
+            {
+                Console.WriteLine($"  FAIL: ClassName='{graph.ClassName}' ClassParent='{graph.ClassParent}'");
+                return 1;
+            }
+            Console.WriteLine("  PASS: ClassName='AN_Guard', ClassParent='Pawn'");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: threw {ex}");
+            return 1;
+        }
+    }
+
+    private static int TestClassRecordWithMeshAndMaterial()
+    {
+        Console.WriteLine("Test: CLASS mesh=/material= attributes parse independently of the parent slot");
+        try
+        {
+            var text = "OCGRAPH 1\nCLASS AN_Prop Actor mesh=Content/Meshes/Prop.ocmesh material=M_Prop\n" +
+                       "NODE seed OnStart\n";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            bool ok = graph.ClassName == "AN_Prop" && graph.ClassParent == "Actor" &&
+                      graph.ClassMesh == "Content/Meshes/Prop.ocmesh" && graph.ClassMaterial == "M_Prop";
+            if (!ok)
+            {
+                Console.WriteLine($"  FAIL: ClassName='{graph.ClassName}' ClassParent='{graph.ClassParent}' " +
+                                   $"ClassMesh='{graph.ClassMesh}' ClassMaterial='{graph.ClassMaterial}'");
+                return 1;
+            }
+            Console.WriteLine("  PASS: mesh and material both parsed");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: threw {ex}");
+            return 1;
+        }
+    }
+
+    // BACKWARD COMPATIBILITY: this is the overwhelmingly common case -- every graph that predates
+    // CLASS, including the checked-in cross-implementation fixture -- and it must stay a plain
+    // project-utility/dataflow graph, not silently become a class.
+    private static int TestGraphWithNoClassRecordHasNullClassName()
+    {
+        Console.WriteLine("Test: a graph with no CLASS record leaves ClassName/ClassParent null");
+        try
+        {
+            var text = "OCGRAPH 1\nNAME Plain\nPARAM entity int\n";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            if (graph.ClassName != null || graph.ClassParent != null)
+            {
+                Console.WriteLine($"  FAIL: ClassName='{graph.ClassName}' ClassParent='{graph.ClassParent}' (expected both null)");
+                return 1;
+            }
+            Console.WriteLine("  PASS: ClassName and ClassParent are both null");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: threw {ex}");
+            return 1;
+        }
+    }
+
+    private static int TestDuplicateClassRecordIsRejected()
+    {
+        Console.WriteLine("Test: a second CLASS record in one file is rejected, naming the reason");
+        try
+        {
+            var text = "OCGRAPH 1\nCLASS AN_First\nCLASS AN_Second\nNODE seed OnStart\n";
+            if (OcGraphParser.Parse(text, out _, out var err))
+            {
+                Console.WriteLine("  FAIL: expected a parse failure for a duplicate CLASS record");
+                return 1;
+            }
+            if (err == null || !err.Contains("duplicate CLASS", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine($"  FAIL: error message does not name the duplicate-CLASS reason: '{err}'");
+                return 1;
+            }
+            Console.WriteLine($"  PASS: {err}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: threw {ex}");
+            return 1;
+        }
+    }
+
+    private static int TestClassRecordWithNoNameIsRejected()
+    {
+        Console.WriteLine("Test: a bare 'CLASS' line with no name is rejected, not silently ignored");
+        try
+        {
+            var text = "OCGRAPH 1\nCLASS\nNODE seed OnStart\n";
+            if (OcGraphParser.Parse(text, out _, out var err))
+            {
+                Console.WriteLine("  FAIL: expected a parse failure for CLASS with no name");
+                return 1;
+            }
+            Console.WriteLine($"  PASS: {err}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: threw {ex}");
+            return 1;
+        }
+    }
+}

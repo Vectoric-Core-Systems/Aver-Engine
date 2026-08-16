@@ -57,6 +57,8 @@ using hud_draw_fn      = int32_t(__cdecl*)(int32_t, float);
 using graph_load_fn    = int32_t(__cdecl*)(int32_t entity, const char* utf8Path);
 using graph_tick_fn    = void(__cdecl*)(int32_t entity, float timeSeconds);
 using graph_unload_fn  = void(__cdecl*)(int32_t entity);
+using declare_graph_classes_fn = int32_t(__cdecl*)(const char* utf8ContentDir);
+using tick_graph_class_instances_fn = void(__cdecl*)(float dt);
 
 // Converts UTF-8 to UTF-16.
 std::wstring widen(const std::string& s) {
@@ -102,6 +104,8 @@ struct ScriptHost::Impl {
     graph_load_fn   graphLoad   = nullptr;
     graph_tick_fn   graphTick   = nullptr;
     graph_unload_fn graphUnload = nullptr;
+    declare_graph_classes_fn      declareGraphClasses    = nullptr;
+    tick_graph_class_instances_fn tickGraphClassInstances = nullptr;
 };
 
 ScriptHost::ScriptHost() = default;
@@ -215,6 +219,15 @@ bool ScriptHost::init(const HostDesc& desc) {
         AVER_WARN("[Scripting] the bridge exports no Graph entry points; graph hosting is unavailable");
     }
 
+    // GRAPH-AS-CLASS is optional too, same reasoning: a bridge built before DeclareGraphClasses/
+    // GraphTickBoundInstances existed still boots, and graphClassesAvailable() just reports false.
+    if (!bind(L"DeclareGraphClasses", reinterpret_cast<void**>(&impl_->declareGraphClasses)) ||
+        !bind(L"GraphTickBoundInstances", reinterpret_cast<void**>(&impl_->tickGraphClassInstances))) {
+        impl_->declareGraphClasses = nullptr;
+        impl_->tickGraphClassInstances = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no graph-class entry points; graph-as-class is unavailable");
+    }
+
     AverScriptHostApi api{};
     api.structBytes = static_cast<int32_t>(sizeof(AverScriptHostApi));
     api.contractVersion = AVER_SCRIPTING_CONTRACT_VERSION;
@@ -307,6 +320,24 @@ void ScriptHost::graphUnload(i32 entity) {
     impl_->graphUnload(entity);
 }
 
+// Whether the staged bridge exports the graph-class entry points -- see the optional-bind block in init().
+bool ScriptHost::graphClassesAvailable() const {
+    return ready_ && impl_ && impl_->declareGraphClasses && impl_->tickGraphClassInstances;
+}
+
+// Declares one framework class per CLASS-bearing .ocgraph under `contentDir`. 0 when unavailable or
+// the directory has none.
+i32 ScriptHost::declareGraphClasses(const std::string& contentDir) {
+    if (!graphClassesAvailable()) return 0;
+    return impl_->declareGraphClasses(contentDir.c_str());
+}
+
+// Ticks every live graph-class instance once. A no-op when unavailable.
+void ScriptHost::tickGraphClassInstances(f32 dt) {
+    if (!graphClassesAvailable()) return;
+    impl_->tickGraphClassInstances(dt);
+}
+
 // Drains the behaviours, unloads the context and closes the host context. Safe twice.
 void ScriptHost::shutdown() {
     if (!impl_) return;
@@ -345,6 +376,9 @@ bool ScriptHost::graphAvailable() const { return false; }
 bool ScriptHost::graphLoad(i32, const std::string&) { return false; }
 void ScriptHost::graphTick(i32, f32) {}
 void ScriptHost::graphUnload(i32) {}
+bool ScriptHost::graphClassesAvailable() const { return false; }
+i32  ScriptHost::declareGraphClasses(const std::string&) { return 0; }
+void ScriptHost::tickGraphClassInstances(f32) {}
 
 #endif
 

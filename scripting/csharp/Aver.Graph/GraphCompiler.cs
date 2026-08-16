@@ -488,6 +488,22 @@ public class GraphCompiler
                     "gate it. Give this node an ENTRY-driven exec chain and reach it through " +
                     "CompileEntryPoint() instead.");
 
+            case "charactermove":
+                // Side-effecting (drives a real actor: yaw, pitch, capsule velocity, all mutated by
+                // AverCharacter.Drive every single call) -- see IsExecCapableCharacterMoveType's own
+                // comment. Refused here for the identical reason "spawn" is refused just above:
+                // Compile()'s topological pass runs every node exactly once per invocation with no
+                // branch structure to gate it, which is exactly wrong for a call that must only run
+                // when the graph author's own exec chain actually reaches it (typically once per
+                // OnTick, not once per arbitrary data pull). Give this node an ENTRY-driven exec
+                // chain and reach it through CompileEntryPoint() instead.
+                throw new InvalidOperationException(
+                    $"CharacterMove node '{node.Id}' cannot be compiled by Compile() -- driving a " +
+                    "character is a side effect with no notion of 'when' in a pure-dataflow graph, " +
+                    "and Compile()'s topological pass would run it unconditionally on every " +
+                    "invocation with no way to gate it. Give this node an ENTRY-driven exec chain " +
+                    "and reach it through CompileEntryPoint() instead.");
+
             case "getvar":
                 // A pure read -- see IsExecCapableVarSideEffectType's own comment -- so, unlike SetVar,
                 // it is welcome in the PULL-only compiler exactly like GetField.
@@ -1453,6 +1469,7 @@ public class GraphCompiler
                     else if (IsExecCapableSetNameType(node.Type)) EmitExecSetName(node);
                     else if (IsExecCapableSetMeshType(node.Type)) EmitExecSetMesh(node);
                     else if (IsExecCapableSetMaterialType(node.Type)) EmitExecSetMaterial(node);
+                    else if (IsExecCapableCharacterMoveType(node.Type)) EmitExecCharacterMove(node);
                     EmitExecFanOut(node);
                     return;
             }
@@ -1778,6 +1795,22 @@ public class GraphCompiler
     private static bool IsExecCapableSetMaterialType(string type) =>
         type.Equals("setmaterial", StringComparison.OrdinalIgnoreCase);
 
+    /// CharacterMove's own version of IsExecCapableSpawnType -- a SIXTH, separate predicate/emitter
+    /// pair, refused by the PULL compiler's topological pass ENTIRELY (see EmitNode's "charactermove"
+    /// case, above), the same stricter-than-SetField treatment Spawn gets and SetParent/SetViewEntity/
+    /// SetName/SetMesh/SetMaterial do NOT: those five write through an idempotent "same value twice is
+    /// harmless" ABI call, but CharacterMoveForGraph -> AverCharacter.Drive mutates _yaw/_pitch and the
+    /// physics capsule's velocity on every single call, exactly the "running it twice, or not gating it
+    /// at all, is a materially worse hazard than a stray field overwrite" reasoning Spawn's own comment
+    /// already established for entity creation. Kept as its own predicate rather than folded into
+    /// IsExecCapableSpawnType for the identical reason IsExecCapableSpawnType itself was kept separate
+    /// from IsExecCapableSideEffectType when it was added: CharacterMoveForGraph is a different native
+    /// surface (AverCharacter/Actors, not the class registry) with a different signature (six scalars
+    /// in, one bool out) and a different failure mode (a runtime type check -- not a character, or no
+    /// actor at all -- rather than an unresolved class name).
+    private static bool IsExecCapableCharacterMoveType(string type) =>
+        type.Equals("charactermove", StringComparison.OrdinalIgnoreCase);
+
     /// Runs a SetField node's write exactly once, at the point the exec walk reaches it -- mirrors
     /// EmitSetField's own field=/resolver/native-call logic, but pulls its "entity"/"value" inputs
     /// through EmitPullInput rather than LoadPin/_pinLocals (see the section-level comment for why the
@@ -1872,6 +1905,36 @@ public class GraphCompiler
         else
         {
             _il.Emit(OpCodes.Pop); // nothing declared to read the new entity id; discard it
+        }
+    }
+
+    /// Runs a CharacterMove node's native call exactly once, at the point the exec walk reaches it --
+    /// mirrors EmitExecSpawn's own shape (pull inputs via EmitPullInput, Call, capture-or-discard the
+    /// result into an exec-local), but with no attribute check at the top: UNLIKE Spawn's class=
+    /// (an edit-time NODE-line attribute, required before anything can be emitted), every one of
+    /// CharacterMoveForGraph's six parameters is an ordinary pin here -- see
+    /// OcGraphParser.AddDefaultPins's "CharacterMove" comment for why -- so there is nothing to
+    /// validate before pulling inputs and calling.
+    private void EmitExecCharacterMove(Node node)
+    {
+        if (_il == null) return;
+
+        EmitPullInput(node, "entity");
+        EmitPullInput(node, "dt");
+        EmitPullInput(node, "forward");
+        EmitPullInput(node, "right");
+        EmitPullInput(node, "yawDelta");
+        EmitPullInput(node, "pitchDelta");
+        _il.Emit(OpCodes.Call, CharacterMoveMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+        {
+            var successLocal = GetOrCreateExecLocal(node.Id, "success", typeof(bool));
+            _il.Emit(OpCodes.Stloc, successLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop); // nothing declared to read the return code; discard it
         }
     }
 
@@ -2159,7 +2222,7 @@ public class GraphCompiler
             IsExecCapableSpawnType(source.Type) || IsExecCapableVarSideEffectType(source.Type) ||
             IsExecCapableSetParentType(source.Type) || IsExecCapableSetViewEntityType(source.Type) ||
             IsExecCapableSetNameType(source.Type) || IsExecCapableSetMeshType(source.Type) ||
-            IsExecCapableSetMaterialType(source.Type))
+            IsExecCapableSetMaterialType(source.Type) || IsExecCapableCharacterMoveType(source.Type))
             throw new InvalidOperationException(
                 $"'{source.Id}.{pinName}' cannot be read as a data value: {source.Type} has a side effect " +
                 "and must be reached by wiring it directly into the exec chain (give it exec pins), not " +
@@ -2481,6 +2544,12 @@ public class GraphCompiler
     private static readonly MethodInfo SetMaterialMethod =
         typeof(GraphInterop).GetMethod("SetMaterialForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetMaterialForGraph was not found by reflection");
+    // CharacterMove: the last Blueprint-parity node, reflected the same way every other GraphInterop
+    // wrapper above is -- see GraphInterop.CharacterMoveForGraph's own comment for why this call, not
+    // a cast onto AverCharacter.Drive, is the seam.
+    private static readonly MethodInfo CharacterMoveMethod =
+        typeof(GraphInterop).GetMethod("CharacterMoveForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.CharacterMoveForGraph was not found by reflection");
 
     // GraphVarStore's own typed accessors -- PUBLIC instance methods on a plain class in THIS assembly
     // (unlike Native/Fw/GraphInterop above, which are internal members of a DIFFERENT assembly reached

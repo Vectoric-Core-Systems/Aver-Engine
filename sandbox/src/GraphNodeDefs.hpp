@@ -250,6 +250,25 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("then", "exec", true), pin("entity", "int", true)},
         {attr("class", "Class")}});
 
+    // CharacterMove: the last Blueprint-parity node -- ONE coarse, exec-only wrapper around
+    //    AverCharacter.Drive (via AverCharacter.DriveFromGraph -> GraphInterop.CharacterMoveForGraph),
+    //    matching the owner's own literal signature: CharacterMove(entity, dt, forward, right,
+    //    yawDelta, pitchDelta) -> then, success. See
+    //    scripting/csharp/Aver.Graph/GraphCompiler.cs's IsExecCapableCharacterMoveType comment for why
+    //    it is refused by the pure-dataflow (PULL) compiler exactly as strictly as Spawn is. UNLIKE
+    //    Spawn's class= above, this node has NO NODE-line attribute at all: every input the native
+    //    call needs is an ordinary pin, because a graph author computes dt/forward/right/yawDelta/
+    //    pitchDelta at RUNTIME (a PARAM, a MoveAxis, a MouseDelta), never chooses them at edit time
+    //    the way a class name is chosen. "success" is a real outcome -- false, with a log line, never
+    //    a throw and never a silent no-op -- when the entity is not a live actor, or is a live actor
+    //    that is not an AverCharacter; see GraphInterop.CharacterMoveForGraph's own comment.
+    t.push_back({"CharacterMove", "Character Move", "Actor", {
+        pin("exec", "exec", false),
+        pin("entity", "int", false), pin("dt", "float", false),
+        pin("forward", "float", false), pin("right", "float", false),
+        pin("yawDelta", "float", false), pin("pitchDelta", "float", false),
+        pin("then", "exec", true), pin("success", "bool", true)}});
+
     // GetVar / SetVar: graph-local PERSISTENT variables -- the "nothing survives between ticks" gap,
     // closed by storage the GraphHost driving a compiled graph owns per instance (see
     // scripting/csharp/Aver.Graph/GraphVarStore.cs's own comment for the full contract). var= names

@@ -60,6 +60,21 @@ public:
     // Drops the graph bound to `entity`, if any.
     void graphUnload(i32 entity);
 
+    // GRAPH-AS-CLASS: bound OPTIONALLY, exactly like the graph three just above -- a bridge built
+    // before these existed still boots; graphClassesAvailable() is false and both calls below are
+    // documented no-ops.
+    bool graphClassesAvailable() const;
+    // Scans `contentDir` recursively for *.ocgraph files and declares one framework class per file
+    // that carries a CLASS record, through the same aver_fw_class_declare/set_flags(MANAGED)/seal
+    // sequence a C# actor class goes through (see HostBridge.cs's DeclareGraphClasses). Returns the
+    // number of classes declared, or 0 when unavailable/the directory has none. Idempotent to call
+    // again (e.g. a second project open): aver_fw_class_declare is idempotent by name.
+    i32 declareGraphClasses(const std::string& contentDir);
+    // Ticks every live graph-class instance once (see HostBridge.cs's GraphTickBoundInstances for the
+    // full "why UNGATED on aver_fw_play_state()" reasoning) -- call once a frame from BOTH composition
+    // roots, beside their own equivalent of tickProjectGraphs. A no-op when unavailable.
+    void tickGraphClassInstances(f32 dt);
+
     bool ready() const { return ready_; }
     // Behaviours that were discovered, constructed and survived OnStart. Zero is normal.
     i32 behaviourCount() const { return behaviours_; }

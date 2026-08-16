@@ -79,6 +79,46 @@ public static class HostBridge
     // hands bind().
     private static readonly Dictionary<long, ClassInfo> s_classes = new();
 
+    // ---- graph classes: a .ocgraph with a CLASS record, registered the SAME way a C# actor class
+    // is (see DeclareGraphClasses, below) --------------------------------------------------------
+
+    // One declared graph class: which file to (re)compile a fresh GraphHost from, per instance, and
+    // whether that graph wants ticking at all (declares an OnStart or OnTick ENTRY). Deliberately NOT
+    // a compiled Graph/delegate cache -- see DispBind's own comment for why every spawned instance
+    // reloads and recompiles the file fresh, exactly the same "each GraphHost gets its own compile"
+    // shape the drone and every other GraphHost caller already has.
+    private sealed class GraphClassInfo
+    {
+        public required string Path;
+        public required string Name;
+        public required bool Ticks;
+    }
+
+    // Declared graph classes, keyed by fnv1a64 of the class name -- the SAME hash native spawn hands
+    // bind(), and the SAME table shape as s_classes just above (a disjoint key space: a class name is
+    // registered as EITHER a C# actor class OR a graph class, never both, since aver_fw_class_declare
+    // is one flat registry by name).
+    private static readonly Dictionary<long, GraphClassInfo> s_graphClasses = new();
+
+    // One graph-class INSTANCE: its own GraphHost (so its VAR storage is independent of every other
+    // instance of the same class -- see GraphVarStore's own "two hosts, two stores" comment) and
+    // whether it wants automatic per-frame ticking.
+    private sealed class GraphInstanceLive
+    {
+        public required GraphHost Host;
+        public required bool Ticks;
+    }
+
+    // Every LIVE graph-class instance, keyed by entity -- populated by DispBind, dropped by
+    // DispUnbind. Walked once a frame by GraphTickBoundInstances (see its own comment for why that
+    // walk is UNGATED on aver_fw_play_state(), unlike the C# actor tick buckets above). Deliberately a
+    // SEPARATE table from s_graphs (below): s_graphs is the drone/MCP-harness "a caller manages this
+    // entity's graph by hand" table, ticked only when that caller explicitly calls GraphTick: mixing a
+    // class-spawned instance into it would either double-tick it (once here, once by
+    // GraphTickBoundInstances) or require every existing s_graphs caller to start filtering out
+    // entities it never bound itself.
+    private static readonly Dictionary<int, GraphInstanceLive> s_graphInstances = new();
+
     /// <summary>One discovered [AverHud]: its instance, its display name, and the Draw it promised.</summary>
     private sealed class LiveHud
     {
@@ -218,6 +258,8 @@ public static class HostBridge
         s_actorsByEntity.Clear();
         foreach (List<ActorLive> bucket in s_tickBuckets) bucket.Clear();
         s_classes.Clear();
+        s_graphClasses.Clear();
+        s_graphInstances.Clear();
 
         ScriptLoadContext? ctx = s_context;
         s_context = null;
@@ -380,6 +422,171 @@ public static class HostBridge
     public static void GraphUnload(int entity)
     {
         try { s_graphs.Remove(entity); } catch { }
+    }
+
+    // ------------------------------------------------------------------ graph classes
+    //
+    // GRAPH-AS-CLASS: a .ocgraph carrying a CLASS record becomes a real registered actor class,
+    // exactly the way DeclareActorClass registers a C# type -- same aver_fw_class_declare /
+    // set_flags(MANAGED) / seal sequence, same class registry the framework spawns out of. What is
+    // different is WHAT gets bound to a spawned instance: DeclareActorClass's DispBind constructs a
+    // C# AverActor; a graph class's DispBind (see its own comment, below) constructs a fresh GraphHost
+    // per instance instead, bound to that instance's own real entity.
+
+    /// <summary>Scans <paramref name="utf8ContentDir"/> recursively for *.ocgraph files and declares
+    /// one framework class per file that carries a CLASS record (see OcGraphParser's own comment on
+    /// that record, and Graph.ClassName). Returns the number of classes declared. A file with no
+    /// CLASS record is silently skipped here -- it is not this pass's concern; GameApp's own
+    /// discoverProjectGraphs (native side) is what drives a CLASS-less graph, against a synthetic
+    /// entity, exactly as it always has.
+    ///
+    /// SAFE TO CALL WITH NO GRAPHS, OR NO DIRECTORY AT ALL: returns 0, changes nothing else -- the
+    /// same "empty is a no-op, not an error" contract LoadScripts already has for an empty/missing
+    /// scripts directory.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int DeclareGraphClasses(IntPtr utf8ContentDir)
+    {
+        try
+        {
+            string? dir = Marshal.PtrToStringUTF8(utf8ContentDir);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
+                return 0;
+
+            int declared = 0;
+            // Sorted, like LoadScripts' own assembly enumeration: deterministic declare order matters
+            // when two files disagree about the same class name (aver_fw_class_declare is idempotent
+            // by name -- the LAST declare wins), so which one wins must not depend on the filesystem's
+            // own enumeration order.
+            foreach (string path in Directory.EnumerateFiles(dir, "*.ocgraph", SearchOption.AllDirectories)
+                                              .OrderBy(p => p, StringComparer.Ordinal))
+            {
+                string text;
+                try { text = File.ReadAllText(path); }
+                catch (Exception ex)
+                {
+                    Emit((int)Log.Level.Warn, $"[Graph] could not read '{path}': {Describe(ex)}");
+                    continue;
+                }
+
+                if (!OcGraphParser.Parse(text, out Aver.Graph.Graph graph, out string? parseErr))
+                {
+                    // Only worth a warning when the file LOOKS like it wanted to declare a class --
+                    // a plain parse failure in an ordinary (non-class) graph is discoverProjectGraphs'
+                    // own concern, and it already reports it when it tries to load the same file.
+                    if (text.Contains("\nCLASS ", StringComparison.OrdinalIgnoreCase) ||
+                        text.StartsWith("CLASS ", StringComparison.OrdinalIgnoreCase))
+                        Emit((int)Log.Level.Warn,
+                             $"[Graph] '{path}' looks like it declares a CLASS but failed to parse: {parseErr}");
+                    continue;
+                }
+
+                if (string.IsNullOrEmpty(graph.ClassName))
+                    continue;   // no CLASS record -- not this pass's file
+
+                string parent = string.IsNullOrEmpty(graph.ClassParent) ? "Actor" : graph.ClassParent;
+                int c = Fw.aver_fw_class_declare(graph.ClassName, parent);
+                if (c == 0)
+                {
+                    Emit((int)Log.Level.Error, $"[Graph] could not declare class '{graph.ClassName}' from '{path}'");
+                    continue;
+                }
+
+                // Same seams the C# actor path uses (DeclareActorClass, above): a ClassBuilder for the
+                // optional mesh/material class defaults, then MANAGED so DispBind actually fires on
+                // spawn, then seal.
+                var builder = new ClassBuilder(c);
+                if (!string.IsNullOrEmpty(graph.ClassMesh))
+                    builder.Mesh(graph.ClassMesh, graph.ClassMaterial ?? "");
+
+                Fw.aver_fw_class_set_flags(c, Fw.aver_fw_class_get_flags(c) | ClassFlags.Managed);
+
+                if (Fw.aver_fw_class_seal(c) == 0)
+                {
+                    Emit((int)Log.Level.Warn,
+                         $"[Graph] class '{graph.ClassName}' (from '{path}') did not seal -- check its "
+                         + $"parent '{parent}' is a declared class");
+                    continue;
+                }
+
+                // Ticks (has an OnStart or OnTick ENTRY) decides whether GraphTickBoundInstances drives
+                // this class's instances every frame -- see that method's own comment for why that walk
+                // is a flat, UNGATED-on-play-state loop rather than a tick-group bucket the way a C#
+                // actor class's Ticks/TickGroup pair would be: a graph-only project (this feature's own
+                // reason to exist) never calls aver_fw_begin_play at all (no C# GameMode to find --
+                // see GameApp.hpp's beginPlayIfGameModeDeclared comment), so aver_fw_play_state() would
+                // stay EDITOR forever and a tick-group-routed instance would never once run OnTick --
+                // exactly the "silently inert in exactly the configuration most likely to be the only
+                // gameplay a project has" trap tickProjectGraphs' own comment already names for the
+                // synthetic-entity path. The SAME reasoning applies here, one layer down the stack.
+                bool ticks = graph.EntryPoints.Any(e => e.EventName == "OnStart" || e.EventName == "OnTick");
+
+                // TWO FILES CLAIMING ONE CLASS NAME IS SAID OUT LOUD. The declare order above is
+                // sorted so that WHICH file wins is deterministic rather than filesystem-dependent,
+                // but determinism is not the same as visibility: without this, both files logged an
+                // identical-looking "declared class" line, the count said two classes were declared,
+                // and only the alphabetically-last graph ever ran. Nothing distinguished that from
+                // two independent classes declaring successfully, so the symptom -- one graph simply
+                // never executing -- looked like a bug in the graph rather than in the naming.
+                //
+                // A warning rather than a refusal: the last-wins behaviour is aver_fw_class_declare's
+                // own (it is idempotent by name), it is deterministic here, and refusing both would
+                // turn a rename-in-progress into a level that cannot load at all.
+                long classKey = unchecked((long)Fnv1a64(graph.ClassName));
+                if (s_graphClasses.TryGetValue(classKey, out GraphClassInfo prior))
+                    Emit((int)Log.Level.Warn,
+                         $"[Graph] class '{graph.ClassName}' is declared by more than one graph: "
+                         + $"'{prior.Path}' is superseded by '{path}'. Only the latter will run -- "
+                         + "rename one of them.");
+                s_graphClasses[classKey] =
+                    new GraphClassInfo { Path = path, Name = graph.ClassName, Ticks = ticks };
+                ++declared;
+                Emit((int)Log.Level.Info,
+                     $"[Graph] declared class '{graph.ClassName}' (parent '{parent}'{(ticks ? ", ticks" : "")}) from '{path}'");
+            }
+            return declared;
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error, $"[Graph] class declaration scan failed: {Describe(ex)}");
+            return 0;
+        }
+    }
+
+    /// <summary>Ticks every LIVE graph-class instance (see s_graphInstances) once. Called every frame
+    /// from BOTH composition roots, UNGATED on aver_fw_play_state() -- see DeclareGraphClasses' own
+    /// comment on `ticks` for exactly why: a graph-only project has no C# GameMode to ever begin a
+    /// play session with, so gating this on PLAYING would make graph-as-class silently inert in the
+    /// one configuration it exists for. A per-instance exception unloads just that instance (drops it
+    /// from s_graphInstances) rather than the whole walk, mirroring GraphTick's own per-entity
+    /// isolation.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void GraphTickBoundInstances(float dt)
+    {
+        if (s_graphInstances.Count == 0) return;
+
+        // A SNAPSHOT, not the live table -- mirrors DispTickAll's own reasoning exactly: an instance
+        // destroyed (DispUnbind) earlier in THIS walk must not be ticked, and one spawned during this
+        // walk should tick next frame, not this one. The ReferenceEquals re-check below additionally
+        // catches an entity id reused by a new spawn within the same tick, the identical hazard
+        // DispTickAll's own comment documents.
+        var snapshot = s_graphInstances.ToArray();
+        foreach (var kv in snapshot)
+        {
+            int entity = kv.Key;
+            if (!kv.Value.Ticks) continue;
+            if (!s_graphInstances.TryGetValue(entity, out GraphInstanceLive? cur) || !ReferenceEquals(cur, kv.Value))
+                continue;
+            try
+            {
+                cur.Host.Tick(entity, dt);
+            }
+            catch (Exception ex)
+            {
+                Emit((int)Log.Level.Error,
+                     $"[Graph] class instance entity {entity}: tick threw: {Describe(ex)} - unloaded");
+                s_graphInstances.Remove(entity);
+            }
+        }
     }
 
     // ------------------------------------------------------------------ loading
@@ -750,30 +957,59 @@ public static class HostBridge
     // ------------------------------------------------------------------ dispatch thunks
     // The ten entries of AvManagedDispatch. No managed exception may cross back into native code.
 
-    // Constructs the managed instance for a spawned entity. Returns 1 when one was bound.
+    // Constructs the managed instance for a spawned entity. Returns 1 when one was bound. Checks
+    // s_classes (a C# actor class) FIRST and s_graphClasses (a CLASS-declaring .ocgraph) on a miss --
+    // the two share one flat aver_fw_class_declare registry by name, so a class-name hash can only
+    // ever match one of the two tables, never both.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int DispBind(long classNameHash, int entity)
     {
         try
         {
-            if (!s_classes.TryGetValue(classNameHash, out ClassInfo? info))
-                return 0;
-
-            var instance = (AverActor)Activator.CreateInstance(info.Type)!;
-            instance.Self = new Entity(entity);
-
-            var live = new ActorLive
+            if (s_classes.TryGetValue(classNameHash, out ClassInfo? info))
             {
-                Instance = instance,
-                Entity = entity,
-                TickGroup = info.TickGroup,
-                Ticks = info.Ticks,
-                Name = info.RegistryName,
-            };
-            s_actorsByEntity[entity] = live;
-            if (live.Ticks && live.TickGroup >= 0 && live.TickGroup < TickGroupCount)
-                s_tickBuckets[live.TickGroup].Add(live);
-            return 1;
+                var instance = (AverActor)Activator.CreateInstance(info.Type)!;
+                instance.Self = new Entity(entity);
+
+                var live = new ActorLive
+                {
+                    Instance = instance,
+                    Entity = entity,
+                    TickGroup = info.TickGroup,
+                    Ticks = info.Ticks,
+                    Name = info.RegistryName,
+                };
+                s_actorsByEntity[entity] = live;
+                if (live.Ticks && live.TickGroup >= 0 && live.TickGroup < TickGroupCount)
+                    s_tickBuckets[live.TickGroup].Add(live);
+                return 1;
+            }
+
+            if (s_graphClasses.TryGetValue(classNameHash, out GraphClassInfo? ginfo))
+            {
+                // A FRESH GraphHost PER SPAWNED INSTANCE, reloaded and recompiled from disk here --
+                // not a shared compiled-Graph cache reused across instances. This is what gives two
+                // instances of the same graph class independent VAR storage: GraphVarStore.CreateFor
+                // is called once per Load() (see GraphHost's own doc comment on "two hosts, two
+                // stores"), so two separate GraphHost objects are the entire mechanism, with nothing
+                // extra needed here to keep them apart. The cost is re-parsing and re-JITing the same
+                // file once per instance; a hot path spawning many instances of one graph class would
+                // want a compiled-Graph cache shared across GraphHosts (mirroring ClassInfo's own
+                // one-declare-many-bind shape) -- a real, named limitation this slice accepts rather
+                // than hides, since the scale visual scripting targets today is tens of instances, not
+                // thousands.
+                var host = new GraphHost();
+                if (!host.Load(ginfo.Path, out string? err))
+                {
+                    Emit((int)Log.Level.Error,
+                         $"[Graph] class '{ginfo.Name}' entity {entity}: its graph failed to load: {err}");
+                    return 0;
+                }
+                s_graphInstances[entity] = new GraphInstanceLive { Host = host, Ticks = ginfo.Ticks };
+                return 1;
+            }
+
+            return 0;
         }
         catch (Exception ex)
         {
@@ -886,16 +1122,27 @@ public static class HostBridge
         catch (Exception ex) { DisableActor(live, "OnPostLogin", ex); }
     }
 
-    // Drops the instance from the entity map and its tick bucket, then calls its OnUnbound.
+    // Drops the instance from the entity map and its tick bucket, then calls its OnUnbound. Also the
+    // teardown edge for a graph-class instance (see DispBind's own comment): a graph class carries
+    // ClassFlags.Managed, so aver_fw_destroy/aver_fw_end_play's sweep call this exactly as they would
+    // for a C# actor -- dropping it from s_graphInstances is what stops GraphTickBoundInstances from
+    // ticking a destroyed entity, and what releases its GraphHost (and, with it, its VAR storage) for
+    // collection. GraphHost has no OnUnbound-equivalent hook to call -- an event-driven graph's only
+    // declared entry points are OnStart/OnTick(/on-demand), none of which mean "I am being destroyed".
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispUnbind(int entity)
     {
-        if (!s_actorsByEntity.Remove(entity, out ActorLive? live)) return;
-        if (live.Ticks && live.TickGroup >= 0 && live.TickGroup < TickGroupCount)
-            s_tickBuckets[live.TickGroup].Remove(live);
+        if (s_actorsByEntity.Remove(entity, out ActorLive? live))
+        {
+            if (live.Ticks && live.TickGroup >= 0 && live.TickGroup < TickGroupCount)
+                s_tickBuckets[live.TickGroup].Remove(live);
 
-        try { live.Instance.OnUnbound(); }
-        catch (Exception ex) { Emit(3, $"[bridge] OnUnbound threw for entity {entity}: {ex.Message}"); }
+            try { live.Instance.OnUnbound(); }
+            catch (Exception ex) { Emit(3, $"[bridge] OnUnbound threw for entity {entity}: {ex.Message}"); }
+            return;
+        }
+
+        s_graphInstances.Remove(entity);
     }
 
     // ------------------------------------------------------------------ log marshalling

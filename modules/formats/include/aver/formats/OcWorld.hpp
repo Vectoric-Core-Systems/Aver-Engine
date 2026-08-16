@@ -33,6 +33,22 @@ struct OcWorldPlacement {
     // dependency graph of a text parser.
     bool snapToGround = false;
 
+    // Which spawnable CLASS this placement instantiates, by NAME -- resolved through
+    // aver_fw_class_find/aver_fw_spawn at load time. Mirrors OcWorldData::gameMode's own "by name,
+    // empty means no override" contract (see that field's comment, same file) for the identical
+    // reason: framework classes are declared at runtime (aver_fw_class_declare) and their handles are
+    // process-local, so only a NAME survives a save/load round trip.
+    //
+    // EMPTY MEANS AN ORDINARY MESH PLACEMENT, exactly as every placement has always been -- a level
+    // authored before this field existed has className empty on every placement and instantiates
+    // byte-for-byte identically. A NON-EMPTY className is a CLASS INSTANCE instead:
+    // aver::world::instantiate skips building the raw mesh/physics entity for it (see
+    // LevelInstance.cpp), and the host's own post-instantiate pass spawns the named class at this
+    // placement's transform instead (see GameLevel::load). `asset`/`material` are simply unused for a
+    // class placement -- the class's own defaults (and whatever its graph's OnStart/OnTick/SetMesh do)
+    // decide how it looks, not this record.
+    std::string className;
+
     bool uniform() const { return sx == sy && sy == sz; }
 };
 

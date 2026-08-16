@@ -194,6 +194,42 @@ public class Graph
     // backward-compatibility argument, which applies here unchanged.
     public List<(string NodeId, string EventName)> EntryPoints { get; set; } = new();
 
+    // Declared via an OPTIONAL top-level `CLASS <name> [parentName] [mesh=<path>] [material=<name>]`
+    // record -- this is what turns a plain .ocgraph into a spawnable actor CLASS, the way a Blueprint
+    // asset carries a parent class and class defaults alongside its event graph. Null when the graph
+    // declares no CLASS record (every graph that predates this, and every ordinary project-utility
+    // graph that only computes values against GameApp's synthetic-entity discovery -- see
+    // GameApp.cpp's discoverProjectGraphs) -- that is the overwhelmingly common case and stays
+    // completely unaffected: nothing about VAR/PARAM/ENTRY/NODE parsing or GraphHost.Tick() changes
+    // for a CLASS-less graph. A NEW record, not an unknown one, for the identical reason PARAM/VAR's
+    // own comments give: the C++ reader (OcGraph.cpp's classifyLine) has no "Class" case, so a CLASS
+    // line falls into the same OwnedLineKind::Other bucket PARAM/VAR already ride through on, and
+    // round-trips byte-for-byte through a same-path load->save with zero C++ reader changes needed --
+    // verified against a hand-written fixture via OcGraphTest.exe's --roundtrip diagnostic.
+    //
+    // WHO CONSUMES THIS: not this format layer, and not GraphHost -- a CLASS record is read by
+    // Aver.Scripting.Bridge's HostBridge (the same file that already declares C# actor classes
+    // through the framework ABI), which registers ClassName as a real aver_fw_class_declare(...) row
+    // with ClassParent as its parent, then gives EVERY SPAWNED INSTANCE its own GraphHost bound to
+    // its own real entity. See HostBridge.cs's "graph classes" region for the full registration and
+    // per-instance binding story.
+    public string? ClassName { get; set; }
+
+    // The declared parent's class name, e.g. "Actor" or a project's own C# actor class. Defaults to
+    // "Actor" when the CLASS record omits it (see OcGraphParser's CLASS-record comment) -- mirroring
+    // HostBridge's own BaseRegistryName default for a plain, component-less AverActor. Meaningless
+    // (and left null) when ClassName is null.
+    public string? ClassParent { get; set; }
+
+    // Optional mesh/material the class's own entity gets as class DEFAULTS (via
+    // aver_fw_class_add_component(CMeshRenderer) + aver_fw_class_set_default_i64/i32), so a
+    // class-placed instance has a visible default look even before its own graph's OnStart/OnTick
+    // (e.g. a SetMesh node) has run -- notably, before aver_fw_spawn_preview, which never dispatches
+    // OnBeginPlay at all. Both null when the CLASS record states neither; ClassMaterial is only ever
+    // meaningful alongside a non-null ClassMesh.
+    public string? ClassMesh { get; set; }
+    public string? ClassMaterial { get; set; }
+
     /// Validates the graph for consistency. Returns false if invalid; sets err to a message.
     /// Note: Comparison is case-sensitive for node IDs. If nodes are added as "1" and referenced as "1",
     /// they must match exactly. The C# parser uses string representations of integer IDs, and the C++ writer

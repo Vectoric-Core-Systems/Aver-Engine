@@ -4,6 +4,7 @@
 // A scalar-signature interop surface Aver.Graph's IL compiler calls by reflection.
 
 using Aver.Scene;
+using Aver.Scripting;
 
 namespace Aver.Framework;
 
@@ -208,4 +209,47 @@ internal static class GraphInterop
     /// which applies unchanged here (Entity.SetMaterial composes EnsureMeshRenderer() +
     /// aver_scene_material(0, name) + SetInt, EntityScene.cs).</summary>
     internal static bool SetMaterialForGraph(int entity, string materialName) => new Entity(entity).SetMaterial(materialName);
+
+    /// <summary>CharacterMove's own surface: the last Blueprint-parity node, one coarse exec call
+    /// wrapping <see cref="AverCharacter"/>.DriveFromGraph -- itself a one-line forward to the
+    /// existing <c>protected</c> Drive(dt, moveAxis, yawDeltaDeg, pitchDeltaDeg), which owns the
+    /// pitch clamp, the view mode and the capsule. NOT a reimplementation of Drive, and NOT a cast or
+    /// a reflection hack around its protection -- see DriveFromGraph's own comment for why a seam
+    /// method is required rather than either.
+    ///
+    /// <paramref name="entity"/> is resolved through <see cref="Actors"/>.Get, the SAME runtime
+    /// entity-to-instance lookup a C# caller would use (Actors.cs), not a baked handle -- mirroring
+    /// SpawnForGraph's own "resolved at invocation time, not compile time" reasoning, just for a
+    /// lookup rather than a class name.
+    ///
+    /// FAILS VISIBLY, NEVER SILENTLY, on either of the two ways this can go wrong -- a real `false`
+    /// on the return value (the node's "success" pin) AND a Log.Warn line, so a controller bound to
+    /// the wrong entity is distinguishable from a broken one, exactly as the task requires:
+    ///   * no live actor is bound to <paramref name="entity"/> at all (dead entity, never spawned as
+    ///     a managed actor, or Actors.Resolver itself not installed in this host) -- Actors.Get
+    ///     returns null;
+    ///   * a live actor IS bound, but it is not an <see cref="AverCharacter"/> (some other actor
+    ///     class entirely) -- the pattern match below fails.
+    /// These are reported as two DIFFERENT messages (not collapsed into one generic "can't move"),
+    /// because they are different authoring mistakes: the first is usually a bad entity id reaching
+    /// the graph, the second is usually a class field/level pointing this node at the wrong actor.
+    ///
+    /// Returns true, with no further reporting, on success -- mirrors
+    /// SetFieldVecForGraph/SetMeshForGraph's own "surface the real return code" convention rather
+    /// than SpawnForGraph's "0 means nothing happened" sentinel, since this method already returns a
+    /// bool with nothing left to invent.</summary>
+    internal static bool CharacterMoveForGraph(int entity, float dt, float forward, float right, float yawDeltaDeg, float pitchDeltaDeg)
+    {
+        Entity e = new Entity(entity);
+        AverActor? actor = Actors.Get(e);
+        if (actor is not AverCharacter character)
+        {
+            Log.Warn(actor is null
+                ? $"[Graph] CharacterMove: entity {entity} cannot be driven -- no live actor is bound to it"
+                : $"[Graph] CharacterMove: entity {entity} cannot be driven -- its actor is a {actor.GetType().Name}, not an AverCharacter");
+            return false;
+        }
+        character.DriveFromGraph(dt, new Vec3(forward, right, 0f), yawDeltaDeg, pitchDeltaDeg);
+        return true;
+    }
 }

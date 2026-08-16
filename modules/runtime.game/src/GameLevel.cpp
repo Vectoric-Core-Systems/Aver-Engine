@@ -16,6 +16,9 @@
 #if AVER_MODULE_PHYSICS
 #  include "aver/physics/physics_abi.h"
 #endif
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_abi.h"
+#endif
 
 namespace aver::game {
 
@@ -52,6 +55,15 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     levelEntities_ = inst.entities;
 #if AVER_MODULE_PHYSICS
     levelBodies_ = inst.bodies;
+#endif
+
+#if AVER_MODULE_FRAMEWORK
+    // COLLECTED HERE, SPAWNED LATER -- see classPlacements_'s own comment (GameLevel.hpp) for exactly
+    // why load() itself must not call aver_fw_spawn: scripting (and with it, any graph-declared
+    // class) is not ready yet at this point in EITHER composition root's boot sequence.
+    classPlacements_.clear();
+    for (const fmt::OcWorldPlacement& p : w.placements)
+        if (!p.className.empty()) classPlacements_.push_back(p);
 #endif
 
     if (w.hasFog) {
@@ -231,6 +243,49 @@ void GameLevel::loadStartMap(const fmt::ProjectDesc& project, GameContent& conte
     load(path, content);
 }
 
+#if AVER_MODULE_FRAMEWORK
+void GameLevel::spawnClassPlacements() {
+    // SPAWNED FOR REAL (aver_fw_spawn, not aver_fw_spawn_preview): a shipped game has no separate
+    // "loaded but not yet playing" state for its own level content (see
+    // GameApp::beginPlayIfGameModeDeclared's own comment -- "boot the game" and "begin playing" are
+    // the same moment for it), so there is no later moment to promote a preview into. BeginPlay/
+    // OnStart fire immediately, at this call.
+    //
+    // NO GROUND SNAP HERE, UNLIKE THE EDITOR'S OWN LEVEL LOAD: `snap` support needs
+    // InstantiateOptions::groundHeightAt, a landscape query this file's own load() never wires up for
+    // the game runtime today (grep this file -- opt.groundHeightAt is never assigned here, only in
+    // SandboxApp.cpp) -- a PRE-EXISTING gap for every ordinary mesh placement too, not something this
+    // slice introduces or narrows.
+    for (const fmt::OcWorldPlacement& p : classPlacements_) {
+        const int32_t c = aver_fw_class_find(p.className.c_str());
+        if (c == 0) {
+            AVER_WARN("[Level] placement names class '{}', which is not declared -- skipped", p.className);
+            continue;
+        }
+
+        const f32 pos3[3]  = {static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)};
+        const Quat rot     = world::quatFromEulerDeg(Vec3{static_cast<f32>(p.roll),
+                                                           static_cast<f32>(p.pitch),
+                                                           static_cast<f32>(p.yaw)});
+        const f32 quat4[4]  = {rot.x, rot.y, rot.z, rot.w};
+        const f32 scale3[3] = {static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz)};
+
+        const int32_t e = aver_fw_spawn(c, p.className.c_str(), pos3, quat4, scale3);
+        if (e == 0) {
+            AVER_WARN("[Level] class '{}' failed to spawn at ({:.0f}, {:.0f}, {:.0f})",
+                      p.className, pos3[0], pos3[1], pos3[2]);
+            continue;
+        }
+        levelClassInstances_.push_back(e);
+    }
+    if (!levelClassInstances_.empty())
+        AVER_INFO("[Level] {} class instance(s) placed -- an entity exists for each; whether its graph "
+                  "COMPILED is reported per instance above, because aver_fw_spawn returns a live entity "
+                  "even when the managed bind behind it failed, so this count is placement, not success",
+                  levelClassInstances_.size());
+}
+#endif
+
 const GameLevel::PcgField* GameLevel::pcgField(const std::string& name) const {
     for (const PcgField& f : pcgFields_) if (f.name == name) return &f;
     return nullptr;
@@ -248,6 +303,15 @@ bool GameLevel::placementBounds(Vec3& lo, Vec3& hi, f32& radius) const {
 }
 
 void GameLevel::unload() {
+#if AVER_MODULE_FRAMEWORK
+    // BEFORE the raw-entity loop below, and through aver_fw_destroy rather than world.destroy(): a
+    // class instance needs its managed-dispatch unbind hook to actually fire (HostBridge.cs's
+    // DispUnbind), which is what releases its GraphHost/VAR storage and drops it out of
+    // GraphTickBoundInstances' walk -- world.destroy() alone would leak both.
+    for (const int32_t e : levelClassInstances_) aver_fw_destroy(e);
+    levelClassInstances_.clear();
+    classPlacements_.clear();   // in case unload() runs before spawnClassPlacements() ever did
+#endif
     scene::World& world = scene::World::instance();
     for (const scene::Entity e : levelEntities_) if (world.valid(e)) world.destroy(e);
     levelEntities_.clear();

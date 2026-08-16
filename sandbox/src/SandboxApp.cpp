@@ -1169,6 +1169,29 @@ public:
             hd.scriptsDir = resolveScriptsDir();
             scripts_.init(hd);
 
+            // GRAPH-AS-CLASS CATCH-UP, for a project opened from the COMMAND LINE. applyProject's own
+            // "Starting scripts" stage already tries scripts_.declareGraphClasses/spawnClassPlacements
+            // (see that function's own comment), but a project named on argv is opened at ~line 850,
+            // ABOVE this block -- BEFORE the scripting host bootstraps at all, so scripts_.ready() was
+            // false and that attempt was a documented no-op. This is the SAME pre-existing ordering
+            // gap applyProject's own `if (scripts_.ready() && scriptsDir_.empty() ...)` guard already
+            // has for a project's own compiled C# scripts (unaffected by this change, and out of this
+            // slice's scope to fix generally) -- but graph classes are new with this slice and must not
+            // silently inherit a defect neither modules/runtime.game/src/GameApp.cpp (which has no such
+            // two-phase boot order) nor a project opened through the in-editor browser (already past
+            // this point in onInit by the time a human can click anything) ever exhibits. Both calls
+            // are idempotent (aver_fw_class_declare by name; spawnClassPlacements only touches
+            // classPlacements_, cleared by unloadLevel/loadLevel), so calling them again here even when
+            // applyProject's own attempt already succeeded changes nothing.
+#if AVER_MODULE_FRAMEWORK
+            if (scripts_.ready() && project_.valid()) {
+                const i32 graphClasses = scripts_.declareGraphClasses(project_.contentDir());
+                if (graphClasses > 0)
+                    AVER_INFO("[Graph] {} graph class(es) declared from '{}'", graphClasses, project_.contentDir());
+                spawnClassPlacements();
+            }
+#endif
+
 #if AVER_MODULE_VOXI
         // Hand the GPU's real capabilities to Voxi so its settings reflect this hardware.
         {
@@ -1803,6 +1826,12 @@ public:
                 }
             }
         }
+        // GRAPH-AS-CLASS instances -- UNGATED on Play state, same reasoning as the drone tick just
+        // above and as modules/runtime.game/src/GameApp.cpp's own tickGraphClassInstances call site:
+        // a graph-only project never calls aver_fw_begin_play (no C# GameMode to find), so gating this
+        // on aver_fw_play_state() would make a class-placed graph instance's OnTick never run at all
+        // while merely browsing a level -- see ScriptHost::tickGraphClassInstances' own comment.
+        scripts_.tickGraphClassInstances(t.dt);
 #endif
         // --chunk-stream: switches streaming on N frames in, on its own, so a --frames capture run
         // can prove it happened without a human clicking Window > Chunk Streaming.
@@ -4492,6 +4521,41 @@ private:
             if (n > 0) AVER_INFO("[Scripting] {} project behaviour(s) live from {}", n, bin);
             else AVER_INFO("[Scripting] no built scripts in {} - use Tools > Reload Scripts", bin);
         }
+        // GRAPH-AS-CLASS: registration, for composition-root parity with
+        // modules/runtime.game/src/GameApp.cpp's own initScripting() call -- a seam wired in one root
+        // and not the other is the exact defect aee2404 exists to fix. Independent of scriptsDir_/the
+        // --scripts override just above: a graph class lives under the project's CONTENT directory,
+        // not its compiled Scripts binaries, so it is declared regardless of which C# behaviour source
+        // (if any) just loaded.
+        if (scripts_.ready() && project_.valid()) {
+            const i32 graphClasses = scripts_.declareGraphClasses(project_.contentDir());
+            if (graphClasses > 0)
+                AVER_INFO("[Graph] {} graph class(es) declared from '{}'", graphClasses, project_.contentDir());
+        }
+#endif
+#if AVER_MODULE_FRAMEWORK
+        // AFTER graph classes are declared (just above), and AFTER "Loading level" already collected
+        // classPlacements_ (loadStartMap -> loadLevel) -- see that member's own comment for why this
+        // is a separate, later call rather than inline in loadLevel. GATED ON scripts_.ready(), unlike
+        // GameApp's own equivalent call site: a project opened from the COMMAND LINE reaches this
+        // point BEFORE the scripting host ever bootstraps (see the scripts_.init(hd) call site's own
+        // "GRAPH-AS-CLASS CATCH-UP" comment for why), and attempting a spawn before any class could
+        // possibly be declared would only manufacture a "not declared" warning per placement for
+        // nothing -- the catch-up call there is what actually spawns them, once scripting is real.
+        //
+        // The scripts_.ready() half is ITSELF under #if AVER_MODULE_SCRIPTING, separately from the
+        // #if AVER_MODULE_FRAMEWORK this whole block already sits inside -- AVER_MODULE_FRAMEWORK's
+        // only enforced dependency is AVER_MODULE_SCENE (see the root CMakeLists.txt), not
+        // AVER_MODULE_SCRIPTING, so `scripts_` (a member that exists only under
+        // AVER_MODULE_SCRIPTING) is not a name this block may touch unconditionally. A scripting-off
+        // tree has no graph classes to have declared either way (declareGraphClasses is itself under
+        // AVER_MODULE_SCRIPTING, just above), so the call below degrades to the same harmless
+        // "not declared" warning path spawnClassPlacements already has for a class placement naming
+        // an undeclared class -- matching GameApp's own equivalent call site's unconditional shape.
+#if AVER_MODULE_SCRIPTING
+        if (scripts_.ready())
+#endif
+            spawnClassPlacements();
 #endif
     }
 
@@ -7096,7 +7160,24 @@ private:
                 ImGui::BeginDisabled(!haveProject);
                 if (ImGui::MenuItem("New Level")) { unloadLevel(e); levelName_ = "untitled"; }
                 uiReg_.track("file.newLevel");
-                if (ImGui::MenuItem("Open Level")) loadStartMap(e);
+                if (ImGui::MenuItem("Open Level")) {
+                    loadStartMap(e);
+                    // GRAPH-AS-CLASS / any other class placement: loadStartMap -> loadLevel already
+                    // collects classPlacements_ (see that member's own comment), but does not spawn
+                    // them -- applyProject's own "Starting scripts" stage is normally what calls
+                    // spawnClassPlacements() after a fresh project open. This menu item reloads the
+                    // level WITHOUT going through applyProject at all, so without this call a level
+                    // with class placements would load with none of them spawned and no warning
+                    // either -- silent, and exactly the failure mode this whole slice exists to avoid.
+                    // Scripting (and any graph class it declared) is already up by the time a human can
+                    // click this menu, so no CLI-style catch-up ordering concern applies here.
+#if AVER_MODULE_FRAMEWORK
+#if AVER_MODULE_SCRIPTING
+                    if (scripts_.ready())
+#endif
+                        spawnClassPlacements();
+#endif
+                }
                 uiReg_.track("file.openLevel");
                 if (ImGui::MenuItem("Save Level", "Ctrl+S") && !levelPath_.empty()) saveLevel(levelPath_);
                 uiReg_.track("file.saveLevel");
@@ -10889,6 +10970,17 @@ private:
 #endif
         }
 
+#if AVER_MODULE_FRAMEWORK
+        // GRAPH-AS-CLASS / any other class placement -- collected here, SPAWNED LATER by
+        // spawnClassPlacements(), for the identical ordering reason GameLevel.hpp's classPlacements_
+        // documents: applyProject's own "Loading level" stage (this function) runs BEFORE its
+        // "Starting scripts" stage, so a class declared from a .ocgraph is not registered yet at this
+        // point -- aver_fw_class_find would always miss it if called from inside loadLevel itself.
+        classPlacements_.clear();
+        for (const fmt::OcWorldPlacement& p : w.placements)
+            if (!p.className.empty()) classPlacements_.push_back(p);
+#endif
+
         // A level that states where the player starts gets a visible, movable marker for it. Without
         // this the SPAWN record was invisible in the editor: authored only by hand-editing the file,
         // and impossible to see or move once written.
@@ -10920,6 +11012,60 @@ private:
         AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
 
     }
+
+#if AVER_MODULE_FRAMEWORK
+    // GRAPH-AS-CLASS / any other class placement: mirrors GameLevel::spawnClassPlacements (the game
+    // runtime's own copy of this same pass) -- see that method's own comment for the full "why a
+    // separate, later call rather than inline in loadLevel" story. Spawned FOR REAL
+    // (aver_fw_spawn), not previewed: there is no existing "placed-in-level class instance, live in
+    // edit mode, promoted at Play" precedent anywhere in this tree (aver_fw_spawn_preview's only
+    // caller is the single-instance Actor Editor) to build on instead, and this is consistent with
+    // how every ORDINARY mesh placement already behaves in this editor -- live immediately on load,
+    // with no separate "inert until Play" state. The accepted consequence, same as GameLevel's own
+    // copy: browsing a level with a placed class in it runs that class's OnTick immediately, even
+    // outside Play.
+    void spawnClassPlacements() {
+        for (const fmt::OcWorldPlacement& p : classPlacements_) {
+            const int32_t c = aver_fw_class_find(p.className.c_str());
+            if (c == 0) {
+                AVER_WARN("[Level] placement names class '{}', which is not declared -- skipped", p.className);
+                continue;
+            }
+
+            f64 pz = p.z;
+#if AVER_MODULE_LANDSCAPE
+            // Same ground query loadLevel's own opt.groundHeightAt uses -- not persisted from there
+            // (opt is local to loadLevel), so re-expressed here rather than threaded through as a
+            // member for one caller.
+            if (p.snapToGround && landscapeLoaded_) {
+                f32 gz = 0.0f;
+                if (landscape::surfaceHeightAt(landscapeData_, static_cast<f32>(p.x),
+                                               static_cast<f32>(p.y), gz))
+                    pz = static_cast<f64>(gz) + p.z;
+            }
+#endif
+            const f32 pos3[3]  = {static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(pz)};
+            const Quat rot     = world::quatFromEulerDeg(Vec3{static_cast<f32>(p.roll),
+                                                               static_cast<f32>(p.pitch),
+                                                               static_cast<f32>(p.yaw)});
+            const f32 quat4[4]  = {rot.x, rot.y, rot.z, rot.w};
+            const f32 scale3[3] = {static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz)};
+
+            const int32_t e = aver_fw_spawn(c, p.className.c_str(), pos3, quat4, scale3);
+            if (e == 0) {
+                AVER_WARN("[Level] class '{}' failed to spawn at ({:.0f}, {:.0f}, {:.0f})",
+                          p.className, pos3[0], pos3[1], pos3[2]);
+                continue;
+            }
+            levelClassInstances_.push_back(e);
+        }
+        if (!levelClassInstances_.empty())
+            AVER_INFO("[Level] {} class instance(s) placed -- an entity exists for each; whether its graph "
+                      "COMPILED is reported per instance above, because aver_fw_spawn returns a live entity "
+                      "even when the managed bind behind it failed, so this count is placement, not success",
+                      levelClassInstances_.size());
+    }
+#endif
 
     // Applies a level's SUN and SKY records to the live atmosphere.
     //
@@ -11049,6 +11195,14 @@ private:
     // Destroys the loaded level's entities and everything keyed to them: labels, bodies, undo.
     void unloadLevel(Engine& eng) {
         (void)eng;   // only read under AVER_MODULE_LANDSCAPE, at the end of this function
+#if AVER_MODULE_FRAMEWORK
+        // BEFORE the raw-entity loop below, and through aver_fw_destroy rather than world.destroy() --
+        // see GameLevel::unload's identical comment for why (the managed-dispatch unbind hook is what
+        // releases a graph-class instance's GraphHost/VAR storage).
+        for (const int32_t e : levelClassInstances_) aver_fw_destroy(e);
+        levelClassInstances_.clear();
+        classPlacements_.clear();
+#endif
         scene::World& world = scene::World::instance();
         for (const scene::Entity e : levelEntities_) if (world.valid(e)) world.destroy(e);
         levelEntities_.clear();
@@ -11156,6 +11310,15 @@ private:
     bool hasLevelSky_ = false;
     bool hasLevelFog_ = false;
     f32  levelFog_ = 0.0002f;
+
+#if AVER_MODULE_FRAMEWORK
+    // GRAPH-AS-CLASS / any other class placement -- see loadLevel's own comment (where
+    // classPlacements_ is populated) and spawnClassPlacements' (where it is consumed and
+    // levelClassInstances_ is filled) for the full ordering story. Mirrors GameLevel.hpp's own pair
+    // of members, one for one.
+    std::vector<fmt::OcWorldPlacement> classPlacements_;
+    std::vector<int32_t> levelClassInstances_;
+#endif
 
     // ---------------- chunk streaming (opt-in, Window > Chunk Streaming) ----------------
     // Owned only while streaming is switched on -- created by setChunkStreamingEnabled(true),

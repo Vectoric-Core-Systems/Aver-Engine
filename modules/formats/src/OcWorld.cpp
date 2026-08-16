@@ -203,6 +203,10 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 // word would be swallowed as a surface name -- which is how a trailing bare
                 // token silently becomes a material called "snap".
                 else if (equalsCI(t[i], "snap")) p.snapToGround = true;
+                // `class <name>`, ALSO before the material fallback, for the identical reason: a
+                // keyword-plus-argument pair, not a bare flag, so the argument token is consumed
+                // (`++i`) rather than falling through and being read back as a material name.
+                else if (equalsCI(t[i], "class") && i + 1 < t.size()) { p.className = std::string(t[++i]); }
                 else if (p.material.empty()) p.material = std::string(t[i]);
             }
             p.objectId = fnv1a64(std::string_view(p.asset));
@@ -363,6 +367,8 @@ std::string writeOcworld(const OcWorldData& w) {
         if (!p.material.empty()) { s += " "; s += p.material; }
         if (!p.collide) s += " nocollide";
         if (p.snapToGround) s += " snap";
+        // Omitted when empty, same "no override is the default" rule as GAMEMODE above.
+        if (!p.className.empty()) { s += " class "; s += p.className; }
         s += "\n";
     }
     return s;

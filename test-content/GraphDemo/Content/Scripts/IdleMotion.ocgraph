@@ -1,0 +1,155 @@
+OCGRAPH 1
+# A SELF-SEEDING IDLE MOTION, and the point of it is that it belongs to no project.
+#
+# One .ocgraph file, driving any number of entities, each animating around ITS OWN starting point.
+# Nothing about a game, a genre or a level appears below: it reads whatever entity it is handed,
+# remembers where that entity was when play began, and moves it in a small orbit around there.
+# Drop it on a sign, a lantern, a fish, a shooting-range target -- it does not know or care.
+#
+# WHAT THIS REPLACES, AND WHY IT IS A DESIGN CHANGE RATHER THAN A PORT. The shape this pattern grew
+# out of could only ever emit an OFFSET: the graph had no way to learn its own entity's position, so
+# the host had to add the entity's spawn point back on afterwards. That meant every project driving
+# several entities from one shared graph had to supply a bespoke per-entity position sink in C#, and
+# any project that forgot got every entity stacked on the world origin. Two engine additions remove
+# the need for that entirely:
+#   GetFieldVec3 (75be56b) lets a graph READ its own transform, and
+#   VAR/SetVar/GetVar (a45e32f) lets it REMEMBER what it read.
+# So the graph writes absolute positions itself, needs no OUT records, and no host code at all.
+#
+# WHY OnStart AND NOT A first-tick BRANCH. GraphHost.Tick fires OnStart once, in the same tick, and
+# strictly BEFORE OnTick (GraphHost.cs, the _startInvoked block) -- and both entry points share one
+# variable pool, because storage lives on the host rather than per entry point. So the seed lands
+# before the first read of it, with no "have I initialised yet" flag and no one-frame glitch where
+# the entity snaps to the origin. There is no NOT node in the vocabulary today either, which would
+# have made the branch form awkward as well as unnecessary.
+#
+# WHAT IT CAPTURES, stated because it is a semantic and not an accident: home is where the entity
+# sat when PLAY BEGAN, not where it was spawned and not where it is now. Move the entity by other
+# means afterwards and it will keep orbiting the old spot. That is the same behaviour a spawn-time
+# position sink had, so nothing regressed -- but it is a choice, and a graph that wanted to follow
+# a moving anchor would re-seed rather than seed once.
+NAME IdleMotion
+DESCRIPTION Remembers its entity's position at play start, then orbits it. Self-contained: any entity, no host code, no position sink.
+
+# CLASS <name> [parent] -- OPTIONAL, and additive: everything above and below this line is
+# unchanged from the file's original synthetic-entity-discovery shape. Declaring this turns the
+# SAME graph into a real, spawnable actor class (AN_ prefix, per this engine's Aver Node class
+# convention) -- a level can PLACE ... class AN_Orbiter and get a real entity whose own
+# OnStart/OnTick this file drives, with its own independent VAR storage (see the a45e32f note
+# above on GraphVarStore) instead of the synthetic negative id GameApp's own project-graph
+# discovery uses. See HostBridge.cs's "graph classes" region for exactly how a CLASS record is
+# registered and bound.
+CLASS AN_Orbiter Actor
+
+# entity and time are two of the three names an event-driven GraphHost will supply (the third is
+# deltaTime). A VAR is the opposite of a PARAM: the caller owns a PARAM, the graph owns a VAR.
+PARAM entity int
+PARAM time float
+
+VAR homeX float 0
+VAR homeY float 0
+VAR homeZ float 0
+
+# ---- tunables. Amplitudes in centimetres, speeds in radians/second. ----------------------------
+NODE bob_amp ConstFloat
+PIN bob_amp value out float 9.0
+NODE bob_speed ConstFloat
+PIN bob_speed value out float 1.7
+NODE drift_amp ConstFloat
+PIN drift_amp value out float 5.0
+NODE drift_speed ConstFloat
+PIN drift_speed value out float 0.72
+# 0.72 / 1.7 is deliberately not a simple ratio, so the vertical and horizontal motions are never
+# both at a turning point on the same tick and the combined path does not visibly repeat.
+
+NODE t Param param=time
+NODE ent Param param=entity
+
+# ---- seed: run once, before the first OnTick ----------------------------------------------------
+ENTRY seed OnStart
+NODE seed OnStart
+
+NODE here GetFieldVec3 field=CLocal.position
+LINK ent.value here.entity
+
+# Chained through each SetVar's own `then` rather than through Sequence, which has only two exec
+# outputs -- three writes would otherwise need two nested Sequence nodes to say the same thing.
+NODE setHomeX SetVar var=homeX
+NODE setHomeY SetVar var=homeY
+NODE setHomeZ SetVar var=homeZ
+LINK seed.exec setHomeX.exec
+LINK here.x setHomeX.value
+LINK setHomeX.then setHomeY.exec
+LINK here.y setHomeY.value
+LINK setHomeY.then setHomeZ.exec
+LINK here.z setHomeZ.value
+
+# ---- tick: orbit the remembered point ------------------------------------------------------------
+ENTRY tick OnTick
+NODE tick OnTick
+
+NODE bob_phase Multiply
+LINK t.value bob_phase.a
+LINK bob_speed.value bob_phase.b
+NODE bob_sin Sin
+LINK bob_phase.result bob_sin.a
+NODE bob Multiply
+LINK bob_amp.value bob.a
+LINK bob_sin.result bob.b
+
+NODE drift_phase Multiply
+LINK t.value drift_phase.a
+LINK drift_speed.value drift_phase.b
+NODE drift_cos Cos
+LINK drift_phase.result drift_cos.a
+NODE drift Multiply
+LINK drift_amp.value drift.a
+LINK drift_cos.result drift.b
+
+NODE homeX GetVar var=homeX
+NODE homeY GetVar var=homeY
+NODE homeZ GetVar var=homeZ
+
+NODE outX Add
+LINK homeX.value outX.a
+LINK drift.result outX.b
+NODE outZ Add
+LINK homeZ.value outZ.a
+LINK bob.result outZ.b
+
+# No drift toward or away from anything: Y stays exactly where it was seeded. A graph that wanted a
+# full 3D wander would add a third phase here; two axes is enough to read as alive.
+NODE place SetFieldVec3 field=CLocal.position
+# EVERY pin spelled out, including the ones the parser would have supplied. SetFieldVec3's default
+# shape has NO exec pins -- like SetField, it is reachable as a pure data write -- and the moment a
+# node carries any explicit PIN record the parser stops adding defaults to it at all. So declaring
+# exec here means declaring the other five too, or they vanish.
+PIN place exec in exec
+PIN place entity in int
+PIN place x in float
+PIN place y in float
+PIN place z in float
+PIN place then out exec
+PIN place success out bool
+LINK tick.exec place.exec
+LINK ent.value place.entity
+LINK outX.result place.x
+LINK homeY.value place.y
+LINK outZ.result place.z
+
+# THREE OUT RECORDS, NAMING THE SAME EXPRESSIONS `place` ALREADY WRITES -- added for GRAPH-AS-CLASS's
+# own acceptance evidence, not required by the graph's own logic (this graph had already written its
+# position itself via `place`, and still does; OUT is a SEPARATE, free readback of the identical
+# numbers, not a second decision about what to write). CompileEntryPoint pulls these as a pure DATA
+# expression at the end of whichever entry it compiles -- OnStart included, since Outputs is a
+# graph-wide list, not per-entry -- so OnStart's own compiled delegate also returns one (harmless,
+# idempotent: OnStart and OnTick run in the same Tick() call, in that order, so OnStart's own
+# OUT-triggered write is immediately superseded by OnTick's identical-formula write moments later).
+# What this buys: GraphHost.ApplyResult sees a 2+-element result and calls the PositionSink itself
+# (redundant with `place`'s own write, same numbers), AND GraphHost.LogEntryFired prints
+# "OnTick -> [x, y, z]" instead of "OnTick -> (void)" -- turning a log line that only proves the
+# graph TICKED into one that proves WHAT IT WROTE, on stdout, for every entity, every frame, with no
+# native readback tool needed.
+OUT outX result
+OUT homeY value
+OUT outZ result

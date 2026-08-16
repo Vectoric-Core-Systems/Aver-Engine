@@ -112,6 +112,45 @@ void onWindowEvent(void* user, const Event& e) {
     static_cast<InputState*>(user)->onEvent(e);
 }
 
+// True when an .ocgraph file's text declares itself a spawnable class via a top-level CLASS record
+// (see Aver.Graph's Graph.ClassName / OcGraphParser's own comment on that record). A LIGHTWEIGHT
+// TEXT SCAN, not a parse: the C++ side has no .ocgraph reader that understands CLASS at all --
+// PARAM/VAR/CLASS all ride through OcGraph.cpp's classifyLine as OwnedLineKind::Other, by design, so
+// there is no native parser to ask. discoverProjectGraphs only needs a yes/no answer to decide
+// whether THIS file is already being driven by the class-registration/spawn path (skip it, so it is
+// never ALSO ticked against a synthetic entity in parallel with its real spawned instances) or is an
+// ordinary project-utility graph (drive it against a synthetic entity, exactly as always). Matches
+// OcGraphParser's own "a '#' starts a comment only at the START of a line" rule closely enough for
+// that yes/no purpose -- a false positive/negative here only affects which of two harmless paths one
+// specific file takes, never correctness of either path itself.
+bool ocgraphDeclaresClass(const std::string& text) {
+    usize pos = 0;
+    while (pos <= text.size()) {
+        usize nl = text.find('\n', pos);
+        if (nl == std::string::npos) nl = text.size();
+        std::string_view line(text.data() + pos, nl - pos);
+        pos = nl + 1;
+
+        const usize start = line.find_first_not_of(" \t\r");
+        if (start == std::string_view::npos) continue;
+        line.remove_prefix(start);
+        if (line.empty() || line[0] == '#') continue;
+
+        const usize end = line.find_first_of(" \t\r");
+        const std::string_view key = end == std::string_view::npos ? line : line.substr(0, end);
+        if (key.size() != 5) continue;
+        static const char kClass[5] = {'C', 'L', 'A', 'S', 'S'};
+        bool match = true;
+        for (usize i = 0; i < 5; ++i) {
+            char c = key[i];
+            if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+            if (c != kClass[i]) { match = false; break; }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
 // True for a path ending in ".ocproject", case-insensitively. Lifted from SandboxApp.cpp:5562.
 bool isOcproject(const char* p) {
     const usize n = std::strlen(p);
@@ -649,6 +688,15 @@ void GameApp::initScripting() {
     if (scriptsReady_) {
         AVER_INFO("[Game] scripting host ready: bridge='{}' scripts='{}' ({} legacy behaviour(s) live)",
                   hd.bridgeDir, hd.scriptsDir, scripts_.behaviourCount());
+        // GRAPH-AS-CLASS: declare one framework class per CLASS-bearing .ocgraph under the project's
+        // content, BEFORE discoverProjectGraphs runs (see that function's own comment on why it must
+        // skip a file this pass already claimed). Placed right after scripts_.init() rather than
+        // folded into it, mirroring how HUD/graph hosting are each their own optional capability
+        // rather than baked into init() itself -- a bridge with no graph-class support still boots and
+        // this call is simply a documented no-op (declareGraphClasses returns 0).
+        const i32 graphClasses = scripts_.declareGraphClasses(project_.contentDir());
+        if (graphClasses > 0)
+            AVER_INFO("[Graph] {} graph class(es) declared from '{}'", graphClasses, project_.contentDir());
     } else {
         AVER_INFO("[Game] scripting host unavailable ({}) -- graphs and any other C# gameplay will not run",
                   scripts_.declineReason());
@@ -691,7 +739,23 @@ void GameApp::discoverProjectGraphs() {
     // negative sentinels; the exact value carries no other meaning.
     i32 nextId = -1000;
     u32 loaded = 0;
+    u32 skippedAsClasses = 0;
     for (const std::string& path : paths) {
+        // GRAPH-AS-CLASS: a file carrying a CLASS record was already claimed by
+        // scripts_.declareGraphClasses (called from initScripting, before this function runs) -- it
+        // is now driven by aver_fw_spawn'd, per-instance GraphHosts (see ScriptHost::
+        // tickGraphClassInstances), not by this synthetic-entity path. Loading it AGAIN here would tick
+        // the same file twice: once correctly, against every real spawned instance, and once uselessly,
+        // against an unresolvable synthetic id that writes nowhere (see the comment above this loop) --
+        // harmless, but noisy, and it would double the [GraphHost] log lines this task's own evidence
+        // rule leans on for a clean per-entity trajectory. See ocgraphDeclaresClass's own comment for
+        // why this is a lightweight text scan rather than a real parse.
+        std::string text;
+        if (readFileText(path, text) && ocgraphDeclaresClass(text)) {
+            ++skippedAsClasses;
+            continue;
+        }
+
         const i32 id = nextId--;
         const bool ok = scripts_.graphLoad(id, path);
         projectGraphs_.push_back(ProjectGraph{path, id, ok});
@@ -709,7 +773,8 @@ void GameApp::discoverProjectGraphs() {
             AVER_WARN("[Graph] '{}' failed to load -- see the [GraphHost] reason above; continuing without it", path);
         }
     }
-    AVER_INFO("[Graph] {} of {} project graph(s) loaded", loaded, projectGraphs_.size());
+    AVER_INFO("[Graph] {} of {} project graph(s) loaded ({} skipped -- declared as classes instead)",
+              loaded, projectGraphs_.size(), skippedAsClasses);
 #endif
 }
 
@@ -1087,6 +1152,13 @@ void GameApp::onInit(Engine& e) {
         AVER_INFO("[Game] no .ocgraph content and no Scripts assembly -- scripting host not started");
     }
 #endif
+#if AVER_MODULE_FRAMEWORK
+    // AFTER initScripting/declareGraphClasses (whichever branch above ran), and DELIBERATELY not
+    // folded into openProject's own level load, which already ran ABOVE this point in this same
+    // function -- see GameLevel.hpp's classPlacements_ comment for the ordering reason this two-step
+    // split exists at all: a class placement's class is not declared until this line has run.
+    level_.spawnClassPlacements();
+#endif
     // AFTER scripting is up (so any project GameMode is declared) and AFTER the graph/behaviour report
     // just above (so a reader sees what loaded before seeing whether it started playing). See this
     // function's own comment for why "declares a GameMode" is the generic, content-driven switch this
@@ -1114,6 +1186,15 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // BESIDE tickGameplay(), not a parallel loop of its own: this is the same per-frame call site,
     // just not gated on the same PLAYING check -- see tickProjectGraphs' own comment for why.
     tickProjectGraphs(t.dt);
+#if AVER_MODULE_SCRIPTING
+    // GRAPH-AS-CLASS instances, same "beside tickGameplay(), not gated on PLAYING" placement and
+    // reasoning as tickProjectGraphs immediately above -- see ScriptHost::tickGraphClassInstances'
+    // own comment (and DeclareGraphClasses' `ticks` comment on the C# side) for exactly why: a
+    // graph-only project never calls aver_fw_begin_play (no C# GameMode to find), so gating a
+    // spawned class instance's OnTick on aver_fw_play_state() would make graph-as-class silently
+    // inert in precisely the "no C# at all" configuration it exists to serve.
+    scripts_.tickGraphClassInstances(t.dt);
+#endif
 
 #if AVER_MODULE_SCENE
     // The animation clock ticks UNCONDITIONALLY, not from the gameplay groups above. Those are

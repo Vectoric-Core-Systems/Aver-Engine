@@ -22,6 +22,18 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
     for (usize i = 0; i < w.placements.size(); ++i) {
         const fmt::OcWorldPlacement& p = w.placements[i];
 
+        // A CLASS INSTANCE, not an ordinary mesh placement -- see OcWorldPlacement::className's own
+        // comment. Skipped here, FRAMEWORK-FREE (this module deliberately does not and should not
+        // link Aver.Framework -- see this file's own CMakeLists.txt), so it produces no raw
+        // world::create()/CMeshRenderer/static-body entity at all. The host that DOES link the
+        // framework (GameLevel::load for the game, SandboxApp's own level-load path for the editor)
+        // is what actually spawns it, through aver_fw_class_find/aver_fw_spawn, as a POST-PASS over
+        // these same placements -- see that function's own comment for why a second pass rather than
+        // a callback threaded through here. Without this `continue`, a class placement would get BOTH
+        // a raw mesh/physics entity from this loop AND a real class instance from the post-pass,
+        // silently overlapping.
+        if (!p.className.empty()) continue;
+
         // THE NARROWING LIVES HERE NOW, once. OcWorldData carries f64 but every consumer has always
         // narrowed at the point of use, in two separate copies of this loop -- so the f64 was never
         // observable and the two copies were free to drift apart. See docs/CHUNKS.md B8 for why the

@@ -10,6 +10,7 @@
 
 #if AVER_MODULE_SCENE
 #  include "aver/scene/World.hpp"
+#  include "aver/formats/OcWorld.hpp"
 #endif
 
 namespace aver::game {
@@ -37,6 +38,17 @@ public:
 
     // Destroys the level's entities and its physics bodies.
     void unload();
+
+#if AVER_MODULE_FRAMEWORK
+    // GRAPH-AS-CLASS / any other class placement: spawns (aver_fw_spawn) one real actor per
+    // placement load() found with a non-empty className, at its placement transform. SEPARATE from
+    // load() ITSELF, deliberately -- see this class's own classPlacements_ comment for the ordering
+    // reason. A no-op when load() found no class placements, or when scripting never became ready
+    // (aver_fw_class_find simply finds nothing and each is skipped with a warning -- the same
+    // "content that cannot resolve degrades to a warning, not a crash" contract every other
+    // placement lookup in this file already has).
+    void spawnClassPlacements();
+#endif
 
     usize entityCount() const { return levelEntities_.size(); }
     const std::string& name() const { return levelName_; }
@@ -108,6 +120,30 @@ private:
 
 #  if AVER_MODULE_PHYSICS
     std::vector<int32_t> levelBodies_;
+#  endif
+
+    // GRAPH-AS-CLASS / any other class placement: entities spawned (aver_fw_spawn) by
+    // spawnClassPlacements() -- DISJOINT from levelEntities_, which only ever holds RAW
+    // mesh-placement entities (see LevelInstance.cpp's own "skip, framework-free" comment for why a
+    // class placement never becomes one of those). Torn down through aver_fw_destroy, not
+    // world.destroy(), so a graph-class instance's managed-dispatch unbind hook actually fires (see
+    // HostBridge.cs's DispUnbind) and its GraphHost/VAR storage is released rather than merely
+    // orphaned.
+#  if AVER_MODULE_FRAMEWORK
+    std::vector<int32_t> levelClassInstances_;
+
+    // The placements load() found with a non-empty className, held here rather than spawned
+    // immediately FROM load() -- ORDERING, not style: BOTH composition roots load their start level
+    // BEFORE the scripting host declares graph classes (GameApp::openProject runs before
+    // GameApp::initScripting/declareGraphClasses in onInit; SandboxApp::applyProject's own "Loading
+    // level" stage runs before its "Starting scripts" stage, identically). Calling aver_fw_class_find
+    // from inside load() itself would therefore ALWAYS miss a graph class, silently, on every single
+    // project -- this is exactly the "seam wired in the wrong order looks like it works until you
+    // check" trap aee2404 already exists to name. Collecting here and spawning from a SEPARATE,
+    // explicitly-later call (spawnClassPlacements(), called once scripting is ready) is what keeps
+    // "load the level" and "spawn its class instances" as two ordered steps rather than one that
+    // silently assumes an ordering neither root actually has.
+    std::vector<fmt::OcWorldPlacement> classPlacements_;
 #  endif
 #endif
 };

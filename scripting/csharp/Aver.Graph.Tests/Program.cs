@@ -93,6 +93,17 @@ class Program
         // or dies on -- see VarIsolationTests.cs's own header comment.
         failures += VarIsolationTests.RunAll();
 
+        // CharacterMove: the last Blueprint-parity node -- one coarse, exec-only wrapper around
+        // AverCharacter.Drive. See CharacterMoveNodeTests.cs's own header comment for why its two
+        // failure paths (no actor / wrong actor type) are genuine end-to-end behavioural proofs,
+        // unlike every prior GraphInterop wrapper's own tests.
+        failures += CharacterMoveNodeTests.RunAll();
+
+        // GRAPH-AS-CLASS: the CLASS record's format half (parse-level only -- registration and
+        // per-instance binding live in Aver.Scripting.Bridge, unreachable from this bare process; see
+        // GraphClassRecordTests.cs's own header comment).
+        failures += GraphClassRecordTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

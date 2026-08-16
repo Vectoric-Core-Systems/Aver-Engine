@@ -207,6 +207,63 @@ public class OcGraphParser
 
                 graph.Variables.Add(new GraphVariable { Name = varName, Type = varType, Default = varDefault });
             }
+            else if (key.Equals("CLASS", StringComparison.OrdinalIgnoreCase))
+            {
+                // CLASS <name> [parentName] [mesh=<path>] [material=<name>]
+                //
+                // Declares that THIS GRAPH FILE IS A SPAWNABLE ACTOR CLASS -- the Aver Node analogue
+                // of a Blueprint asset carrying a parent class, not a component that references a
+                // graph. See Graph.ClassName's own doc comment for the full "who consumes this and
+                // why" story; this block owns only the FORMAT half.
+                //
+                // A NEW record, not an unknown one, for the identical reason PARAM/VAR's own comments
+                // give (see those, just below/above): the C++ reader has no "Class" case, so it rides
+                // through as an OwnedLineKind::Other line and round-trips verbatim.
+                if (tokens.Count < 2)
+                {
+                    err = "CLASS requires a name";
+                    return false;
+                }
+                if (!string.IsNullOrEmpty(graph.ClassName))
+                {
+                    err = "duplicate CLASS record -- a graph may declare itself as at most one class";
+                    return false;
+                }
+
+                string className = tokens[1];
+                // Defaults to "Actor" when omitted -- mirrors HostBridge's own BaseRegistryName
+                // default for a plain, component-less AverActor, so `CLASS Foo` alone (no parent
+                // token at all) is a complete, sealable, spawnable declaration.
+                string classParent = "Actor";
+                string? classMesh = null;
+                string? classMaterial = null;
+                for (int i = 2; i < tokens.Count; i++)
+                {
+                    var token = tokens[i];
+                    if (token.Contains('='))
+                    {
+                        var parts = token.Split('=', 2);
+                        if (parts.Length != 2) continue;
+                        if (parts[0] == "mesh") classMesh = parts[1];
+                        else if (parts[0] == "material") classMaterial = parts[1];
+                        // An unrecognised key=value attribute is ignored rather than failing the
+                        // whole graph -- mirrors NODE's own key=value loop, just below.
+                    }
+                    else if (i == 2)
+                    {
+                        // The one positional token right after the name, if it is not itself a
+                        // key=value pair, is the parent class name.
+                        classParent = token;
+                    }
+                    // A stray bare token past position 2 (not key=value, not the parent slot) is
+                    // ignored -- malformed input should not fail a graph that otherwise parses fine.
+                }
+
+                graph.ClassName = className;
+                graph.ClassParent = classParent;
+                graph.ClassMesh = classMesh;
+                graph.ClassMaterial = classMaterial;
+            }
             else if (key.Equals("NODE", StringComparison.OrdinalIgnoreCase))
             {
                 // NODE <id> <type> [key=value ...]
@@ -852,6 +909,37 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "z", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // ---- CharacterMove -----------------------------------------------------------------------
+            // The last Blueprint-parity node: ONE coarse, exec-only wrapper around
+            // AverCharacter.Drive (reached via AverCharacter.DriveFromGraph ->
+            // GraphInterop.CharacterMoveForGraph -- see that method's own comment), matching the
+            // owner's chosen signature exactly: CharacterMove(entity, dt, forward, right, yawDelta,
+            // pitchDelta) -> then, success. UNLIKE Spawn just above, there is NO NODE-line attribute
+            // here at all -- every one of the six inputs is an ordinary pin, because a graph author
+            // computes dt/forward/right/yawDelta/pitchDelta at RUNTIME (a PARAM, a MoveAxis, a
+            // MouseDelta), never chooses them at edit time the way Spawn's class= names a class.
+            //
+            // SIDE-EFFECTING (moves a real actor, mutates its yaw/pitch/capsule state every call), so
+            // -- like Spawn/SetVar, unlike GetField/SetField -- this gets exec pins BY DEFAULT; see
+            // GraphCompiler.IsExecCapableCharacterMoveType's own comment for why it is refused by the
+            // pure-dataflow (PULL) compiler exactly as strictly as Spawn is.
+            //
+            // "success" is a REAL outcome, never a fake always-true stub: false (with a Log.Warn line,
+            // never a throw, never a silent no-op) when the entity is not a live actor at all, or is a
+            // live actor that is not an AverCharacter -- see GraphInterop.CharacterMoveForGraph's own
+            // comment for the two distinct failure messages.
+            case "charactermove":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "dt", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "forward", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "right", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "yawDelta", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "pitchDelta", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
             // ---- GetVar / SetVar -------------------------------------------------------------------
