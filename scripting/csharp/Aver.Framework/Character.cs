@@ -18,8 +18,30 @@ public enum CameraView
 }
 
 /// <summary>A pawn for a walking character, first- or third-person, driven by WASD and the mouse.</summary>
-/// <remarks>The entity's origin is the character's FEET, not the capsule centre.</remarks>
-public abstract class AverCharacter : AverPawn
+/// <remarks>The entity's origin is the character's FEET, not the capsule centre.
+///
+/// CONCRETE, DELIBERATELY -- this is the framework's own spawnable "Character" registry row (see
+/// DeclareBaseClasses in HostBridge.cs), not just a C# base a project subclasses. Everything else the
+/// framework hands out as a lineage root (Actor/Pawn/PlayerController/GameMode/GameInstance) is an
+/// ABSTRACT anchor with no behaviour of its own -- a project or a graph must always supply a concrete
+/// child. A character is different: the capsule, the view node, the pitch clamp and Drive/DriveFromGraph
+/// ARE the useful behaviour, none of it project-specific, and there is no reason a `CLASS AN_Player
+/// Character` graph -- or a bare level placement of "Character" itself -- should have to wait for a
+/// project to write a C# subclass just to re-declare machinery this file already owns. Unreal's
+/// ACharacter is concrete for the identical reason; a second, near-empty concrete subclass purely to
+/// dodge the word "abstract" would be ceremony, not a different design.
+///
+/// A graph parented (directly or through other graph classes) to "Character" gets a REAL instance of
+/// exactly this class constructed alongside its GraphHost -- see DispBind's own comment in HostBridge.cs
+/// for the two-tables-one-entity mechanism that makes that true, and CharacterMoveForGraph, below, for
+/// what finds it.
+///
+/// [AverClass]'s Parent is stated EXPLICITLY as "Pawn" rather than left at its own "Actor" default:
+/// the default would route through HostBridge.BaseRegistryName, which (deliberately, for every OTHER
+/// AverCharacter subclass) resolves an AverCharacter-assignable type to "Character" itself -- exactly
+/// wrong for THIS declaration, which IS "Character" and must not parent to itself.</remarks>
+[AverClass("Character", Parent = "Pawn")]
+public class AverCharacter : AverPawn
 {
     /// <summary>Ground move speed, centimetres per second.</summary>
     public float MoveSpeed = 350f;

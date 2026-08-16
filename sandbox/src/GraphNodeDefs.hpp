@@ -269,6 +269,24 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("yawDelta", "float", false), pin("pitchDelta", "float", false),
         pin("then", "exec", true), pin("success", "bool", true)}});
 
+    // FireEvent: GAP 3, cross-entity events -- fires a DECLARED event (event=, e.g. "OnHit") on
+    //    ANOTHER entity's own graph. SIDE-EFFECTING (runs a stranger's whole exec chain, not a scalar
+    //    write) -- exec pins by default, mirroring Spawn/CharacterMove above rather than SetField; see
+    //    scripting/csharp/Aver.Graph/GraphCompiler.cs's IsExecCapableFireEventType comment for why it
+    //    is refused by the pure-dataflow (PULL) compiler entirely, the same strictness Spawn/
+    //    CharacterMove get. "target" is an ordinary int PIN (computed at runtime -- a Spawn's own
+    //    entity output, a VAR, a Raycast's entity pin), NOT a NODE-line attribute, unlike event=:
+    //    which entity to fire at is runtime data, exactly the same "pin vs attribute" split Spawn's
+    //    x/y/z-pins-vs-class=-attribute already established. "fired" is a real outcome -- false, with
+    //    a log line, never a silent true -- when the target has no live graph at all, or one that
+    //    never declared this event; see Aver.Graph/GraphEvents.cs's own comment for the full failure-
+    //    mode table and the reentrancy guard that keeps a self-fire or a fire cycle between graphs
+    //    from stack-overflowing the process.
+    t.push_back({"FireEvent", "Fire Event", "Actor", {
+        pin("exec", "exec", false), pin("target", "int", false),
+        pin("then", "exec", true), pin("fired", "bool", true)},
+        {attr("event", "Event")}});
+
     // GetVar / SetVar: graph-local PERSISTENT variables -- the "nothing survives between ticks" gap,
     // closed by storage the GraphHost driving a compiled graph owns per instance (see
     // scripting/csharp/Aver.Graph/GraphVarStore.cs's own comment for the full contract). var= names

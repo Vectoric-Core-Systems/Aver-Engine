@@ -504,6 +504,22 @@ public class GraphCompiler
                     "invocation with no way to gate it. Give this node an ENTRY-driven exec chain " +
                     "and reach it through CompileEntryPoint() instead.");
 
+            case "fireevent":
+                // Side-effecting (runs ANOTHER ENTITY'S WHOLE EXEC CHAIN, not merely a scalar write)
+                // -- see IsExecCapableFireEventType's own comment. Refused here for the identical
+                // reason "spawn"/"charactermove" are refused just above, only with a materially worse
+                // hazard if it were allowed to slip through: Compile()'s topological pass runs every
+                // node exactly once per invocation with no branch structure to gate it, so an ungated
+                // FireEvent in a no-ENTRY dataflow graph would run a STRANGER's OnHit handler on every
+                // single pull, with nothing able to stop it. Give this node an ENTRY-driven exec chain
+                // and reach it through CompileEntryPoint() instead.
+                throw new InvalidOperationException(
+                    $"FireEvent node '{node.Id}' cannot be compiled by Compile() -- firing an event " +
+                    "runs another entity's exec chain and is a side effect with no notion of 'when' " +
+                    "in a pure-dataflow graph, and Compile()'s topological pass would run it " +
+                    "unconditionally on every invocation with no way to gate it. Give this node an " +
+                    "ENTRY-driven exec chain and reach it through CompileEntryPoint() instead.");
+
             case "getvar":
                 // A pure read -- see IsExecCapableVarSideEffectType's own comment -- so, unlike SetVar,
                 // it is welcome in the PULL-only compiler exactly like GetField.
@@ -1470,6 +1486,7 @@ public class GraphCompiler
                     else if (IsExecCapableSetMeshType(node.Type)) EmitExecSetMesh(node);
                     else if (IsExecCapableSetMaterialType(node.Type)) EmitExecSetMaterial(node);
                     else if (IsExecCapableCharacterMoveType(node.Type)) EmitExecCharacterMove(node);
+                    else if (IsExecCapableFireEventType(node.Type)) EmitExecFireEvent(node);
                     EmitExecFanOut(node);
                     return;
             }
@@ -1811,6 +1828,18 @@ public class GraphCompiler
     private static bool IsExecCapableCharacterMoveType(string type) =>
         type.Equals("charactermove", StringComparison.OrdinalIgnoreCase);
 
+    /// FireEvent's own version of IsExecCapableSpawnType -- a SEVENTH, separate predicate/emitter
+    /// pair, refused by the PULL compiler's topological pass ENTIRELY (see EmitNode's "fireevent"
+    /// case, above), the same stricter-than-SetField treatment Spawn/CharacterMove get. Kept as its
+    /// own predicate rather than folded into any existing one for the identical reason each prior
+    /// addition to this family gives: GraphEvents.FireEventForGraph is yet another different native-
+    /// adjacent surface (a managed router into a DIFFERENT GraphHost entirely, not a P/Invoke call and
+    /// not this compiler's own GraphVarStore) with a different signature (int target, string event
+    /// name in; bool "did it run" out) and a different failure mode (no live graph bound to the
+    /// target, or a live graph that never declared this event -- neither is a native ABI rejection).
+    private static bool IsExecCapableFireEventType(string type) =>
+        type.Equals("fireevent", StringComparison.OrdinalIgnoreCase);
+
     /// Runs a SetField node's write exactly once, at the point the exec walk reaches it -- mirrors
     /// EmitSetField's own field=/resolver/native-call logic, but pulls its "entity"/"value" inputs
     /// through EmitPullInput rather than LoadPin/_pinLocals (see the section-level comment for why the
@@ -1935,6 +1964,37 @@ public class GraphCompiler
         else
         {
             _il.Emit(OpCodes.Pop); // nothing declared to read the return code; discard it
+        }
+    }
+
+    /// Runs a FireEvent node's call exactly once, at the point the exec walk reaches it -- mirrors
+    /// EmitExecSpawn/EmitExecCharacterMove's own shape (pull inputs via EmitPullInput, Call, capture-
+    /// or-discard the result into an exec-local), but "which event to fire" is event=, an edit-time
+    /// NODE-line attribute (see Node.EventName) required non-empty at COMPILE time -- mirrors class='s
+    /// own required-at-compile-time treatment for Spawn (an empty event= can never fire anything
+    /// useful, so failing loudly now beats a silent no-op refusal at runtime for a reason nobody can
+    /// see). UNLIKE class=, "which entity to fire at" (target) IS an ordinary pin, not a second
+    /// attribute -- a graph author computes the target at RUNTIME (a Spawn's own entity output, a
+    /// VAR, a Raycast's entity pin), never chooses it at edit time the way an event NAME is chosen.
+    private void EmitExecFireEvent(Node node)
+    {
+        if (_il == null) return;
+        if (string.IsNullOrEmpty(node.EventName))
+            throw new InvalidOperationException(
+                $"FireEvent node '{node.Id}' has no event= attribute naming which event to fire");
+
+        EmitPullInput(node, "target");
+        _il.Emit(OpCodes.Ldstr, node.EventName);
+        _il.Emit(OpCodes.Call, FireEventMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "fired"))
+        {
+            var firedLocal = GetOrCreateExecLocal(node.Id, "fired", typeof(bool));
+            _il.Emit(OpCodes.Stloc, firedLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop); // nothing declared to read the outcome; discard it
         }
     }
 
@@ -2222,7 +2282,8 @@ public class GraphCompiler
             IsExecCapableSpawnType(source.Type) || IsExecCapableVarSideEffectType(source.Type) ||
             IsExecCapableSetParentType(source.Type) || IsExecCapableSetViewEntityType(source.Type) ||
             IsExecCapableSetNameType(source.Type) || IsExecCapableSetMeshType(source.Type) ||
-            IsExecCapableSetMaterialType(source.Type) || IsExecCapableCharacterMoveType(source.Type))
+            IsExecCapableSetMaterialType(source.Type) || IsExecCapableCharacterMoveType(source.Type) ||
+            IsExecCapableFireEventType(source.Type))
             throw new InvalidOperationException(
                 $"'{source.Id}.{pinName}' cannot be read as a data value: {source.Type} has a side effect " +
                 "and must be reached by wiring it directly into the exec chain (give it exec pins), not " +
@@ -2550,6 +2611,16 @@ public class GraphCompiler
     private static readonly MethodInfo CharacterMoveMethod =
         typeof(GraphInterop).GetMethod("CharacterMoveForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.CharacterMoveForGraph was not found by reflection");
+    // FireEvent: GAP 3, the cross-entity event node -- reflected differently from every wrapper above.
+    // GraphEvents lives in THIS SAME ASSEMBLY (Aver.Graph), and its Router-dispatching method is
+    // PUBLIC (see GraphEvents.cs's own comment for why a public static router, mirroring
+    // Actors.Resolver's shape one assembly down), so an ordinary public GetMethod lookup suffices --
+    // no BindingFlags.NonPublic, the same "public method, same assembly" shape the GraphVarStore
+    // accessors below already use, not the "internal member of a different assembly" shape Native/Fw/
+    // GraphInterop above need.
+    private static readonly MethodInfo FireEventMethod =
+        typeof(GraphEvents).GetMethod(nameof(GraphEvents.FireEventForGraph))
+        ?? throw new InvalidOperationException("Aver.Graph.GraphEvents.FireEventForGraph was not found by reflection");
 
     // GraphVarStore's own typed accessors -- PUBLIC instance methods on a plain class in THIS assembly
     // (unlike Native/Fw/GraphInterop above, which are internal members of a DIFFERENT assembly reached

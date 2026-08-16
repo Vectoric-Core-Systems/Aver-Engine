@@ -104,6 +104,12 @@ class Program
         // GraphClassRecordTests.cs's own header comment).
         failures += GraphClassRecordTests.RunAll();
 
+        // GAP 3: FireEvent -- cross-entity events. The router (Aver.Graph.GraphEvents) lives in THIS
+        // assembly, so unlike every prior GraphInterop wrapper's own tests, the reentrancy-guard tests
+        // here are genuine end-to-end, value-asserting proofs with real compiled IL and real GraphHost
+        // instances -- see FireEventNodeTests.cs's own header comment.
+        failures += FireEventNodeTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

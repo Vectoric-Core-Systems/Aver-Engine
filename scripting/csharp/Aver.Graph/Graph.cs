@@ -120,6 +120,15 @@ public class Node
     // "material=<name>" attribute -- same mechanism as MeshPath immediately above. Null for every
     // other node type.
     public string? MaterialName { get; set; }
+
+    // Which declared event a "fireevent" node fires on ANOTHER entity's graph, e.g. "OnHit". Set
+    // from the NODE line's "event=<name>" attribute -- the same generic key=value NODE-line
+    // mechanism NameValue/MeshPath/MaterialName already use (PinType has no String member, so this
+    // remains the only route a string reaches this node -- see NameValue's own comment for the full
+    // "carries data, not a lookup key" reasoning, which applies unchanged here: EventName is the
+    // literal event name FireEventForGraph passes to the target's GraphHost.Fire, not something
+    // resolved against a table this file knows about). Null for every other node type.
+    public string? EventName { get; set; }
 }
 
 /// One parameter the compiled method accepts -- e.g. the entity a graph drives, or the current

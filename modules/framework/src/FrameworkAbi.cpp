@@ -280,11 +280,50 @@ bool flatten(int32_t c, Archetype& outResolved) {
     return true;
 }
 
+// The AVER_FW_CLASS_* bits a child inherits from its ancestors' rows rather than declaring itself.
+// ABSTRACT, MANAGED, TICKS and TICK_IN_EDITOR are each a per-declarer decision (an abstract base's
+// children are not themselves unspawnable; a C# class's own Configure/Ticks call, or a graph class's
+// own OnStart/OnTick scan, decides ticking independent of its parent) and so are deliberately NOT in
+// this mask -- only the four "what KIND of row is this" bits propagate.
+constexpr int32_t kInheritableKindFlags =
+    AVER_FW_CLASS_PAWN | AVER_FW_CLASS_CONTROLLER | AVER_FW_CLASS_GAME_MODE | AVER_FW_CLASS_GAME_INSTANCE;
+
+// The kind flags `c` inherits from its ANCESTORS (never including c's own row) -- the union of every
+// ancestor's kind bits, walking the same parentName chain flatten() already validated for this seal.
+// A cycle or dangling parent simply stops the walk early rather than failing it a second time; seal
+// already refused those via flatten() before this ever runs, so this walk exists to gather flags, not
+// to re-validate the chain.
+//
+// WHY THIS EXISTS: a graph class parented to "GameMode" (or "Character", or any other base row)
+// carries none of that base's kind bits on its own -- DeclareGraphClasses only ever ORs in MANAGED
+// (HostBridge.cs), and a C# class's own ResolveClassIdentity/BaseFlagsOf pair only reads the C# TYPE
+// hierarchy, which a graph class has none of. Without this, aver_fw_find_class_with_flags(GAME_MODE)
+// can never find a graph-declared GameMode (see beginPlayIfGameModeDeclared's own comment on why that
+// query is what decides whether a play session ever starts), and aver_fw_possess refuses a
+// graph-declared Pawn/Controller outright. This is called from sealClass, which every declared class
+// -- C# or graph -- already passes through, so one fix covers every declarer, not just graphs.
+int32_t inheritedKindFlags(int32_t c) {
+    int32_t flags = 0;
+    std::unordered_map<int32_t, bool> seen;
+    int32_t cur = c;
+    while (validClass(cur) && !seen[cur]) {
+        seen[cur] = true;
+        const ClassRecord& r = classes()[static_cast<usize>(cur)];
+        if (r.parentName.empty()) break;
+        const int32_t p = findClass(r.parentName);
+        if (p == 0) break;
+        flags |= (classes()[static_cast<usize>(p)].flags & kInheritableKindFlags);
+        cur = p;
+    }
+    return flags;
+}
+
 // Flattens the class and resolves its GameMode wiring by name. False on a bad parent chain.
 bool sealClass(int32_t c) {
     ClassRecord* r = rec(c);
     if (!r) return false;
     if (!flatten(c, r->resolved)) return false;
+    r->flags |= inheritedKindFlags(c);
     r->defaultPawn      = r->defaultPawnName.empty()      ? 0 : findClass(r->defaultPawnName);
     r->playerController = r->playerControllerName.empty() ? 0 : findClass(r->playerControllerName);
     r->sealed = true;

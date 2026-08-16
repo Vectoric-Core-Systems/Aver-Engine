@@ -94,6 +94,37 @@ public static class HostBridge
         public required bool Ticks;
     }
 
+    // Walks the NATIVE parent chain from `className` (via aver_fw_class_parent, not this graph's OWN
+    // declared-parent string) until it finds a name registered in s_classes, or runs out of chain.
+    // Native rather than a precomputed field on GraphClassInfo, and resolved at BIND time rather than
+    // DECLARE time, because a graph's parent may itself be another graph class not yet declared when
+    // DeclareGraphClasses processes this file (declare order is file-path-sorted, not
+    // parent-before-child) -- exactly the same "resolved by name, not by declare order" contract
+    // aver_fw_class_seal's own flatten() already relies on. By bind time every class -- C# or graph --
+    // that will ever exist this session has been declared and sealed, so the walk cannot dead-end on
+    // an ordering accident.
+    //
+    // THIS IS THE MECHANISM THAT MAKES "CLASS AN_Player Character" PRODUCE A REAL, DRIVABLE CHARACTER:
+    // a graph class carries no C# type of its own, so without this, CharacterMoveForGraph's
+    // Actors.Get(entity) would always resolve null for a graph-declared entity, exactly as it did
+    // before this change (see this method's own probe evidence in the out-of-box design notes). One
+    // C# ancestor at most is constructed -- the NEAREST one -- mirroring single inheritance: a graph
+    // parented to a graph parented to "Character" still finds Character, not some closer non-C# link
+    // in between.
+    private static Type? FindNativeAncestorType(string className)
+    {
+        var visited = new HashSet<int>();
+        int walk = Fw.aver_fw_class_parent(Fw.aver_fw_class_find(className));
+        while (walk != 0 && visited.Add(walk))
+        {
+            string name = Fw.Str(Fw.aver_fw_class_name(walk));
+            if (s_classes.TryGetValue(unchecked((long)Fnv1a64(name)), out ClassInfo? info))
+                return info.Type;
+            walk = Fw.aver_fw_class_parent(walk);
+        }
+        return null;
+    }
+
     // Declared graph classes, keyed by fnv1a64 of the class name -- the SAME hash native spawn hands
     // bind(), and the SAME table shape as s_classes just above (a disjoint key space: a class name is
     // registered as EITHER a C# actor class OR a graph class, never both, since aver_fw_class_declare
@@ -118,6 +149,18 @@ public static class HostBridge
     // GraphTickBoundInstances) or require every existing s_graphs caller to start filtering out
     // entities it never bound itself.
     private static readonly Dictionary<int, GraphInstanceLive> s_graphInstances = new();
+
+    // ---- GAP 3: FireEvent's entity-to-GraphHost router ------------------------------------------
+    //
+    // (entity, eventName) pairs this process has already logged a "no live graph" / "no such event"
+    // refusal for, so an OnTick-driven FireEvent aimed at a permanently-dead target warns exactly
+    // ONCE rather than flooding the log every single frame thereafter -- a real hazard the design
+    // phase for this slice named explicitly (a stray FireEvent on an OnTick chain, aimed at a target
+    // that will never exist, is exactly the shape a level author is most likely to actually author by
+    // mistake). Cleared per-entity in DispUnbind: an entity id can be REUSED by a later spawn within
+    // the same session, and a fresh occupant of that id deserves its own first warning, not silence
+    // inherited from whatever used to live there.
+    private static readonly HashSet<(int Entity, string EventName)> s_fireWarnedOnce = new();
 
     /// <summary>One discovered [AverHud]: its instance, its display name, and the Draw it promised.</summary>
     private sealed class LiveHud
@@ -728,6 +771,18 @@ public static class HostBridge
             // Resolves an Entity back to its live managed instance. Disabled instances resolve to null.
             Actors.Resolver = handle =>
                 s_actorsByEntity.TryGetValue(handle, out ActorLive? live) && !live.Disabled ? live.Instance : null;
+            // GAP 3: installs the FireEvent router -- see GraphEvents.Router's own doc comment for why
+            // this indirection exists at all (Aver.Graph cannot see this file). Mirrors Actors.Resolver
+            // immediately above in shape (a closure over this file's own tables, installed once at
+            // bootstrap) but checks TWO tables, in a deliberate order: s_graphInstances (a class-
+            // spawned instance's own GraphHost -- see the "graph classes" region above) FIRST, then
+            // s_graphs (the drone/MCP-harness/project-graph table -- see the "graph hosting" region).
+            // Collision between the two is structurally impossible for GameApp's own project graphs
+            // (GameApp.discoverProjectGraphs keys s_graphs with strictly NEGATIVE synthetic ids, never
+            // a real entity), but SandboxApp's own graph-driven drone CAN legitimately hold a real,
+            // positive entity id in s_graphs, so the order is still a real, stated choice: a class-
+            // spawned instance's own host wins if an id were ever to appear in both.
+            GraphEvents.Router = FireEventRouter;
         }
         catch (Exception ex)
         {
@@ -768,7 +823,12 @@ public static class HostBridge
         return ok;
     }
 
-    // Declares the five framework base types as lineage roots. Abstract, and never MANAGED.
+    // Declares the five framework base types as lineage roots. Abstract, and never MANAGED. Then
+    // declares "Character" the SAME way a project's own [AverClass] type would (DeclareActorClass,
+    // below) -- it is the one base row that is CONCRETE rather than an anchor, so it goes through the
+    // real actor-class path (Configure, flags, seal, s_classes registration) instead of DeclareBase's
+    // bare declare-and-seal. See AverCharacter's own class comment for why concretising it, rather than
+    // shipping a second empty subclass, is the shape this engine uses.
     private static void DeclareBaseClasses()
     {
         DeclareBase("Actor", "", ClassFlags.Abstract);
@@ -776,6 +836,7 @@ public static class HostBridge
         DeclareBase("PlayerController", "Actor", ClassFlags.Controller | ClassFlags.Abstract);
         DeclareBase("GameMode", "Actor", ClassFlags.GameMode | ClassFlags.Abstract);
         DeclareBase("GameInstance", "Actor", ClassFlags.GameInstance | ClassFlags.Abstract);
+        DeclareActorClass(typeof(AverCharacter));
     }
 
     // Declares and seals one base class row.
@@ -925,6 +986,14 @@ public static class HostBridge
 
     private static string BaseRegistryName(Type type)
     {
+        // Checked AHEAD of the plain Pawn arm: AverCharacter itself derives AverPawn, so without this a
+        // character subclass (DemoPawn, say) would resolve to the abstract "Pawn" row and never pick up
+        // "Character" 's own archetype/flags. NOT reached by AverCharacter's OWN declaration: its
+        // [AverClass("Character", Parent = "Pawn")] states an explicit, non-"Actor" parent, so
+        // ResolveClassIdentity never calls BaseRegistryName for it at all -- if it did, this arm would
+        // be reflexively true for AverCharacter itself (IsAssignableFrom accepts the exact type) and
+        // Character would parent to Character. See Character.cs's own comment on that attribute.
+        if (typeof(AverCharacter).IsAssignableFrom(type)) return "Character";
         if (typeof(AverPawn).IsAssignableFrom(type)) return "Pawn";
         if (typeof(AverPlayerController).IsAssignableFrom(type)) return "PlayerController";
         if (typeof(AverGameMode).IsAssignableFrom(type)) return "GameMode";
@@ -1005,6 +1074,32 @@ public static class HostBridge
                          $"[Graph] class '{ginfo.Name}' entity {entity}: its graph failed to load: {err}");
                     return 0;
                 }
+
+                // THE OTHER HALF OF THE GRAPH BRANCH, AND THE REASON A GRAPH CLASS CAN NOW END UP
+                // "BOTH TABLES, ONE ENTITY": if this graph's native parent chain reaches a class C#
+                // actually declared (s_classes) -- today, in practice, "Character" -- construct that
+                // C# type too and bind it into s_actorsByEntity exactly as the plain C# branch above
+                // does, so CharacterMoveForGraph's Actors.Get(entity) finds a real AverCharacter with a
+                // capsule and a view, not nothing. Ticks is hardcoded FALSE here, never info.Ticks off
+                // some ClassInfo -- there is no ClassInfo for an on-the-fly ancestor construction, and
+                // deliberately so: the GRAPH owns the tick (GraphTickBoundInstances), and AverCharacter
+                // overrides no OnTick of its own (see FindNativeAncestorType's own comment) -- a
+                // bound-but-never-bucketed instance is exactly enough for DriveFromGraph to reach.
+                Type? ancestorType = FindNativeAncestorType(ginfo.Name);
+                if (ancestorType is not null)
+                {
+                    var ancestor = (AverActor)Activator.CreateInstance(ancestorType)!;
+                    ancestor.Self = new Entity(entity);
+                    s_actorsByEntity[entity] = new ActorLive
+                    {
+                        Instance = ancestor,
+                        Entity = entity,
+                        TickGroup = 0,
+                        Ticks = false,
+                        Name = ginfo.Name,
+                    };
+                }
+
                 s_graphInstances[entity] = new GraphInstanceLive { Host = host, Ticks = ginfo.Ticks };
                 return 1;
             }
@@ -1139,10 +1234,57 @@ public static class HostBridge
 
             try { live.Instance.OnUnbound(); }
             catch (Exception ex) { Emit(3, $"[bridge] OnUnbound threw for entity {entity}: {ex.Message}"); }
-            return;
         }
 
+        // NOT an "else" and NOT an early return after the block above: DispBind's graph branch can now
+        // populate BOTH s_actorsByEntity (a Character-parented graph's constructed ancestor) AND
+        // s_graphInstances (its own GraphHost) for the SAME entity. This used to be `if (...Remove(...))
+        // { ...; return; }` then unconditionally remove from s_graphInstances -- correct when the two
+        // tables were mutually exclusive, but with both populated for one entity that early return
+        // skipped this line entirely: the GraphHost (and its VAR storage) leaked, and worse,
+        // GraphTickBoundInstances' snapshot walk had no way to know the entity died, so it kept calling
+        // Host.Tick(entity, dt) against a destroyed entity every frame thereafter.
         s_graphInstances.Remove(entity);
+
+        // Drop this entity's own warn-once memory (see s_fireWarnedOnce's own comment) -- an entity id
+        // CAN be reused by a later spawn within the same session, and whatever occupies it next
+        // deserves its own first FireEvent warning, not silence left over from whoever used to live
+        // here. RemoveWhere over a HashSet<(int,string)> has no per-entity index to key off, but this
+        // set only ever holds entries for entities a FireEvent node has actually misfired at, which in
+        // practice is a handful at most -- not a hot path worth a second index.
+        s_fireWarnedOnce.RemoveWhere(pair => pair.Entity == entity);
+    }
+
+    // GAP 3: FireEvent's router -- installed onto Aver.Graph.GraphEvents.Router by SetupManagedActors
+    // (see that method's own comment for why the installation lives there and why the two tables are
+    // checked in this order). Logs (once per distinct (entity, event) pair -- see s_fireWarnedOnce)
+    // and returns false on refusal; never throws -- GraphEvents.FireEventForGraph is itself called
+    // from inside compiled IL with no surrounding try/catch of its own, so an exception escaping THIS
+    // closure would propagate out of whatever Tick()/Fire() call is currently running, exactly the
+    // same "runtime errors are not swallowed" contract GraphHost's own class comment already documents
+    // for every other node -- this method simply never manufactures one of its own to swallow.
+    private static bool FireEventRouter(int targetEntity, string eventName)
+    {
+        GraphHost? host = null;
+        if (s_graphInstances.TryGetValue(targetEntity, out GraphInstanceLive? instanceLive))
+            host = instanceLive.Host;
+        else if (s_graphs.TryGetValue(targetEntity, out GraphHost? bareHost))
+            host = bareHost;
+
+        if (host == null)
+        {
+            if (s_fireWarnedOnce.Add((targetEntity, eventName)))
+                Emit((int)Log.Level.Warn,
+                     $"[Graph] FireEvent: entity {targetEntity} has no live graph to fire '{eventName}' at");
+            return false;
+        }
+
+        bool ok = host.FireForEntity(eventName, targetEntity, out _, out string? refusal);
+        if (!ok && s_fireWarnedOnce.Add((targetEntity, eventName)))
+            Emit((int)Log.Level.Warn,
+                 $"[Graph] FireEvent: entity {targetEntity}: " +
+                 (refusal ?? $"no on-demand event '{eventName}'"));
+        return ok;
     }
 
     // ------------------------------------------------------------------ log marshalling

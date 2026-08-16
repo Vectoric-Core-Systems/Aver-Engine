@@ -632,6 +632,74 @@ public class GraphHost
         return true;
     }
 
+    /// <summary>GAP 3's own entry point: the FireEvent-node counterpart to Fire(), for a caller that
+    /// does NOT already know this graph's PARAM payload the way Fire()'s own positional-args contract
+    /// assumes -- see Fire()'s own doc comment for why args are positional there. A FireEvent node's
+    /// router (Aver.Graph.GraphEvents, installed by HostBridge) has only two things in hand at the
+    /// call site: which entity to fire at, and which event name -- it does not, and should not, know
+    /// the SHAPE of whatever that target graph's own PARAM list happens to be. So this method builds
+    /// the positional args ITSELF, from a small, closed vocabulary this class already owns for the
+    /// Tick()-driven path (see LoadEventGraph's own "entity"/"time"/"deltaTime" comment): "entity" is
+    /// <paramref name="entityId"/> -- the TARGET's OWN entity (not the firer's), so it means exactly
+    /// what OnTick's own "entity" PARAM already means inside this same file, for consistency an author
+    /// reading either entry point can rely on; "time" is this host's own accumulated sim clock
+    /// (_execSimTime, the same value OnTick's "time" PARAM reads); "deltaTime" is always 0f -- an
+    /// on-demand event has no duration to report, unlike a per-frame tick.
+    ///
+    /// ANY OTHER PARAM NAME IS A VISIBLE REFUSAL (refusal names the graph, the event, and the specific
+    /// PARAM), NEVER A GUESS. Guessing is the one thing this method must not do: GraphHost.Fire itself
+    /// happily WIDENS a mismatched-kind argument rather than rejecting it (a boxed int silently reads
+    /// back as a float for a Float-typed PARAM -- confirmed empirically while designing this feature),
+    /// so a router that filled an unrecognised PARAM with, say, the firing entity's id regardless of
+    /// what that PARAM was actually FOR could silently feed a nonsense value into a graph's own logic
+    /// with no error anywhere. Refusing by name instead is the same "fail loudly now beats a silent
+    /// wrong answer nobody can trace" reasoning every NODE-line required-attribute check in this
+    /// codebase already applies (class=/field=/event=).
+    ///
+    /// Returns false with a non-null <paramref name="refusal"/> in two disjoint cases: this graph
+    /// never declared <paramref name="eventName"/> at all (mirrors Fire()'s own false/null contract
+    /// for an undeclared name -- <paramref name="refusal"/> still names it, so a caller does not have
+    /// to re-derive the reason), or it declared the event but ALSO declares a PARAM outside the
+    /// {entity, time, deltaTime} vocabulary above (this method never even attempts Fire() in that
+    /// case -- failing before touching DynamicInvoke at all). Returns true, with
+    /// <paramref name="result"/> set to whatever Fire() itself returns (null for a void-returning
+    /// event, exactly like Fire()'s own contract), otherwise.</summary>
+    public bool FireForEntity(string eventName, int entityId, out object? result, out string? refusal)
+    {
+        result = null;
+        refusal = null;
+
+        if (_graph == null || !_onDemand.ContainsKey(eventName))
+        {
+            refusal = $"graph '{_graph?.Name}' has no on-demand event '{eventName}'";
+            return false;
+        }
+
+        var args = new object[_graph.Parameters.Count];
+        for (int i = 0; i < _graph.Parameters.Count; i++)
+        {
+            var p = _graph.Parameters[i];
+            if (p.Type == PinType.Int && p.Name.Equals("entity", StringComparison.OrdinalIgnoreCase))
+                args[i] = entityId;
+            else if (p.Type == PinType.Float && p.Name.Equals("time", StringComparison.OrdinalIgnoreCase))
+                args[i] = _execSimTime;
+            else if (p.Type == PinType.Float && p.Name.Equals("deltaTime", StringComparison.OrdinalIgnoreCase))
+                args[i] = 0f;
+            else
+            {
+                refusal = $"graph '{_graph.Name}' PARAM '{p.Name}' ({p.Type}) is not something FireEvent " +
+                           "can supply -- only entity (int), time (float) and deltaTime (float) are wired " +
+                           "for it, the same vocabulary OnStart/OnTick's own PARAM list is restricted to " +
+                           "(see LoadEventGraph's own comment). Give this event its own PARAM-free-of-that-" +
+                           "restriction file if it needs a real payload, and reach it through Fire() " +
+                           "directly instead, with a caller that knows the shape.";
+                return false;
+            }
+        }
+
+        return Fire(eventName, args, out result);
+    }
+
     // Success-path diagnostic, deliberately distinct from the LoadError family's Console.Error use
     // above: this is not a failure, so it goes to stdout. A shipped AverGame.exe is a WIN32-subsystem
     // process with no console of its own, but .NET's Console class still writes to whatever stdout

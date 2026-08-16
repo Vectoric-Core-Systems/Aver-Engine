@@ -351,6 +351,15 @@ public class OcGraphParser
                     {
                         node.MaterialName = v;
                     }
+                    // event= names which event a "fireevent" node fires on another entity's graph (see
+                    // Node.EventName) -- the value itself (an event name, e.g. "OnHit"), not a lookup
+                    // key, the same "carries data" treatment name=/mesh=/material= already get. Nothing
+                    // to resolve at parse time; GraphCompiler.EmitExecFireEvent requires it non-empty at
+                    // COMPILE time, mirroring class='s own required-at-compile-time treatment for Spawn.
+                    else if (k == "event")
+                    {
+                        node.EventName = v;
+                    }
                 }
 
                 nodes[nodeId] = node;
@@ -940,6 +949,30 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "pitchDelta", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // ---- FireEvent -------------------------------------------------------------------------
+            // GAP 3: the cross-entity event node. SIDE-EFFECTING (runs ANOTHER entity's whole exec
+            // chain, not merely a scalar write) -- exec pins by default, mirroring Spawn/CharacterMove
+            // rather than SetField, and refused by the pure-dataflow (PULL) compiler entirely, for
+            // the identical "no notion of 'when'" reasoning IsExecCapableSpawnType's own comment
+            // gives, only stronger: firing an event mid-pull would run a stranger's exec chain on
+            // every single invocation with no branch structure to gate it.
+            //
+            // "target" is the entity whose graph should receive the event -- an ordinary int PIN
+            // (computed at runtime: a Spawn's entity output, a VAR, a Raycast's own entity pin),
+            // unlike event=, which is edit-time data (see NODE-line parsing above, Node.EventName) --
+            // exactly the same "pin vs attribute" split Spawn's x/y/z-pins-vs-class=-attribute already
+            // established. "fired" is a REAL outcome, never a hardcoded true: false (with a Log.Warn
+            // naming the entity and event) when the target has no live graph at all, or has one that
+            // never declared this event -- see GraphEvents.FireEventForGraph's own comment for the
+            // full failure-mode table and the reentrancy guard that keeps a self-fire or a mutual-fire
+            // cycle from stack-overflowing the process.
+            case "fireevent":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "target", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "fired", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
             // ---- GetVar / SetVar -------------------------------------------------------------------
