@@ -426,6 +426,14 @@ from the world (never cached).
 | `[Editable]` | A field editable in the Details panel and stored in native storage (survives Play/Stop and hot reload). Optional `Min` / `Max`. |
 | `[Model]` | Marks a model-tree field the editor manages. |
 
+**`[AverClass]` is not the only door into this registry.** A `.ocgraph` file can declare itself a
+class too — a top-level `CLASS <name> [parent]` record, registered through the identical
+`aver_fw_class_declare` / `aver_fw_class_seal` sequence an `[AverClass]` type goes through.
+`ActorClass.Find("AN_Whatever")` and `Spawn(...)` cannot tell, and do not need to, whether the class
+they resolved came from a C# type or a graph with no C# behind it at all. See
+[`docs/VISUAL_SCRIPTING.md`](VISUAL_SCRIPTING.md) for that model, and
+[`docs/formats/FORMAT_SPECS.md` §10a](formats/FORMAT_SPECS.md) for the `CLASS` record's grammar.
+
 ---
 
 ## 12. Enums

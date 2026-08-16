@@ -622,6 +622,20 @@ private:
 } // namespace aver::fw
 ```
 
+> **This registry's *behaviour* shipped, not this header.** There is no
+> `include/aver/framework/ClassRegistry.hpp` in the tree — the real thing is a few hundred lines of
+> free functions and module-static state in `modules/framework/src/FrameworkAbi.cpp`
+> (`aver_fw_class_declare`/`_find`/`_seal`, a plain `struct ClassRecord`, no `ClassRegistry` class),
+> a plainer shape than this section's `class ClassRegistry` sketch. But the *contract* this section
+> describes — declare is idempotent by name, a name resolves its parent rather than a compile-time
+> reference, `seal` flattens the parent chain into a spawn archetype — is exactly what runs, for
+> **two** kinds of declarant: a C# type carrying `[AverClass(...)]` (`docs/SCRIPTING_API.md` §11)
+> and, as of `41d6566`, a `.ocgraph` file declaring itself a class with a top-level `CLASS` record
+> (`docs/VISUAL_SCRIPTING.md` §2, `docs/formats/FORMAT_SPECS.md` §10a). Both go through
+> `Aver.Scripting.Bridge`'s `HostBridge` into the identical `declare`/`set_flags(Managed)`/`seal`
+> sequence; nothing downstream of `seal` can tell which kind of source produced a given class
+> handle.
+
 ### 4.2 The five framework objects — all the same mechanism, differentiated by a flag
 
 **GameInstance.** Process lifetime, and the only thing that outlives a world. `class Framework` owns

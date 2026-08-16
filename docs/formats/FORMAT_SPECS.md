@@ -30,7 +30,8 @@ Status: authoritative design spec, v1. Target repo: `C:/Users/User/Documents/Ave
 | `.ocskel` | Skeletal mesh + skeleton | **binary** | `AVR1`/`SKEL` | Bones + skin binding + embedded `.ocmesh` geometry | **NEW** |
 | `.ocanim` | Animation clip | **binary** | `AVR1`/`ANIM` | Full-fidelity keyframe TRS tracks (fixes 30fps/cubic loss) | **NEW** |
 | `.ocprefab` | Prefab | **text** | none | Reusable node tree + component list + asset refs + overrides | **NEW** |
-| `.ocworld` | Native scene/world | **text** (cooked → `WRLD` chunk) | none / `AVR1` | **Superset of `.ocmap`** — scene graph, streaming, lighting, terrain, prefab instances | **NEW** |
+| `.ocgraph` | Visual scripting graph (Aver Node) | **text** | none | Nodes/pins/links for dataflow or event-driven behaviour; optionally declares itself a spawnable actor class | **NEW** |
+| `.ocworld` | Native scene/world | **text** (cooked → `WRLD` chunk) | none / `AVR1` | **Superset of `.ocmap`** — scene graph, streaming, lighting, terrain, prefab instances, class-instance placement | **NEW** |
 | `.ocpak` | Cooked package | **binary** | `AVR1`/`PAK ` | Bundle of cooked assets for shipping (DDC output) | **NEW** |
 | `.ocparticle` | Particle effect | **text** | none | Emitter shape/rate, lifetime, direction+spread, speed, gravity, damping, size- and colour-over-life, blend mode, GI opt-in | **NEW** |
 
@@ -411,6 +412,162 @@ Rules: nodes form a tree via `parent=`; components are named + typed with key=va
 
 ---
 
+## 10a. `.ocgraph` — visual scripting graph (Aver Node, text)
+
+First line `OCGRAPH 1`. The one format in this family with **two independent readers**: a C++ one
+(`modules/formats/src/OcGraph.cpp`, used by the node editor to load/save) and a C# one
+(`scripting/csharp/Aver.Graph/OcGraphParser.cs`, used by everything that actually *runs* a graph —
+`GraphHost`, `HostBridge`). They agree on the load-bearing records but not on every corner of their
+grammar, and §10a.3 below is about exactly where they part ways. For what a graph's nodes and
+records mean at runtime — the class model, `PARAM` vs `VAR`, entry-point ordering — see
+[`VISUAL_SCRIPTING.md`](../VISUAL_SCRIPTING.md); for every node type's pin shape, see
+[`AVER_NODE_NODES.md`](../AVER_NODE_NODES.md). This section documents the **file grammar** only.
+
+```
+OCGRAPH 1
+# A minimal spawnable actor class: orbits the point it started at.
+NAME AN_Orbiter
+DESCRIPTION Orbits the point it started at.
+
+CLASS AN_Orbiter Actor mesh=Meshes/sphere.ocmesh
+
+PARAM entity int
+PARAM time float
+
+VAR homeX float 0
+
+NODE tick OnTick
+ENTRY tick OnTick
+
+NODE t Param param=time
+NODE speed ConstFloat value=1.0
+NODE phase Multiply
+LINK t.value phase.a
+LINK speed.value phase.b
+
+NODE homeVal GetVar var=homeX
+NODE result Add
+LINK homeVal.value result.a
+LINK phase.result result.b
+
+NODE write SetVar var=homeX
+PIN write exec in exec
+PIN write value in float
+PIN write then out exec
+LINK tick.exec write.exec
+LINK result.result write.value
+
+OUT result result
+```
+
+### 10a.1 Records
+
+| Record | Grammar | Notes |
+|---|---|---|
+| `OCGRAPH` | `OCGRAPH <version>` | Header, must be the first non-comment line. `version` defaults to `1` if omitted. |
+| `NAME` | `NAME <name>` | Single token, no spaces. Empty/absent writes back as `untitled`. |
+| `DESCRIPTION` | `DESCRIPTION <rest of line>` | Free text, taken from the **raw** line, not the comment-truncated one — a literal `#` inside a description is data, not a comment marker (both readers agree on this; it was a real bug in the C++ reader, fixed once both sides used the same rule). |
+| `CLASS` | `CLASS <name> [parentName] [mesh=<path>] [material=<name>]` | Optional; **at most one per file** (a second `CLASS` line is a parse error). Declares the graph itself a spawnable actor class. `parentName` defaults to `"Actor"` when omitted. `mesh=`/`material=` become the class's own default `CMeshRenderer`, not a per-tick write. |
+| `PARAM` | `PARAM <name> <type>` | Declares one argument the compiled graph accepts, in declaration order. `type` ∈ `float`\|`int`\|`bool` — `exec` is rejected at parse time with an explicit error (a parameter is data, not control flow). |
+| `VAR` | `VAR <name> <type> [default]` | Declares one variable the graph remembers between ticks (see [`VISUAL_SCRIPTING.md` §4](../VISUAL_SCRIPTING.md) for the storage/lifetime contract). Same three types as `PARAM`, same `exec` rejection. An unparseable `[default]` falls back to the type's zero value rather than failing the graph. |
+| `ENTRY` | `ENTRY <nodeId> <eventName>` | Declares which node begins the exec chain for a named event (`OnStart`, `OnTick`, or any project-invented name). The node may be of any type — `ENTRY` is what makes it a starting point, not the node's own type. |
+| `NODE` | `NODE <id> <type> [x y] [key=value ...]` | One node. `x`/`y` (editor canvas position) are optional and read only if the next token actually parses as a number — an unnumbered `key=value` token is never mistaken for a coordinate. Recognised `key=value` attributes: `value=` (constant literal), `param=`, `field=`, `class=`, `var=`, `name=`, `mesh=`, `material=` — one node type reads each, per [`AVER_NODE_NODES.md`](../AVER_NODE_NODES.md). An unrecognised `key=value` is ignored, not fatal. |
+| `PIN` | `PIN <nodeId> <name> <in\|out> <type> [default]` | An explicit pin declaration. **The moment a node has even one explicit `PIN` line, its entire built-in default pin set is skipped for it** — not merged, replaced — see `AVER_NODE_NODES.md`'s "three traps" for why this matters in practice. |
+| `LINK` | `LINK <srcNode>.<srcPin> <destNode>.<destPin>` | Connects an output pin to an input pin. A `LINK` between two `exec`-typed pins *is* a control-flow wire — `exec` is an ordinary pin type, not a second kind of record. |
+| `OUT` | `OUT <nodeId> <pinName>` | Declares one value the graph hands back when pulled as pure dataflow. Order matters — it is the return order of the compiled method. |
+
+### 10a.2 What the C++ reader owns, and the hazard that follows from it
+
+`OcGraph.cpp`'s `classifyLine` recognises exactly eight record kinds as its own:
+**`OCGRAPH`, `NAME`, `DESCRIPTION`, `NODE`, `PIN`, `LINK`, `ENTRY`, `OUT`.** Only these have a field
+in `OcGraphData` (`modules/formats/include/aver/formats/OcGraph.hpp`) — the struct that C++ code
+actually holds in memory.
+
+**`CLASS`, `PARAM` and `VAR` are invisible to the C++ side.** They are not malformed input and not
+rejected; they simply fall into the same catch-all `Other` bucket as a comment or a blank line, and
+`OcGraphData` has no field that could hold a class name, a parameter list or a variable declaration
+even if the reader wanted to keep one. (A twelfth record, `PINVAL <nodeId> <pinName> <value>` — a
+fallback constant for an unconnected input pin — rides through the same way; it is C#-only too, and
+not part of this section's closed list because nothing in this engine's toolchain writes one from a
+level or a class declaration.)
+
+This is why `writeOcgraph`'s `existing` parameter is load-bearing, not a convenience:
+
+- Called with the file's original text as `existing` (`writeOcgraph(g, existing)`), every `CLASS`/
+  `PARAM`/`VAR` line in that original text is copied through **verbatim, at its original position**
+  — the same whole-file "preserve what you don't understand" contract that protects a stray comment.
+  `saveOcgraph()` (`OcGraph.cpp`) reads whatever is already on disk at the target path before writing
+  for exactly this reason — and correspondingly, `saveOcgraph()` at a path that does not exist yet
+  (a brand-new file) starts from empty `existing`, has nothing to preserve, and needs nothing to
+  preserve for the same reason.
+- Called with **no** original text — `writeOcgraph(g)` with its default empty `existing`, or any
+  caller that builds an `OcGraphData` from scratch (in memory, never parsed from the file it is about
+  to overwrite) and hands it straight to `writeOcgraph` — every `CLASS`/`PARAM`/`VAR` line that used
+  to be in that file **is gone from the output**, silently. There is no error, because from the C++
+  side's point of view nothing was lost: those records were never modelled as data to begin with, so
+  there is nothing to notice missing.
+
+**Where a reader will actually meet this:** the C++ node editor (`sandbox/src/GraphEditor.cpp`)
+protects itself correctly — it always calls `writeOcgraph(graph_, originalText_)` with the text it
+loaded, per its own file-header comment, so opening and saving an *existing* graph that declares a
+class, a parameter or a variable is safe. But the same fact cuts the other way: because `OcGraphData`
+has no field for any of the three, **the C++ editor has no way to create or edit a `CLASS`/`PARAM`/
+`VAR` record at all** — only to silently carry one through if the file already had it. Declaring a
+graph as a class, or changing its parameter/variable list, is a text edit today (or done from the C#
+side, which does model all three) — not something the node editor's GUI can do, node-attribute panel
+included. Any future C++ tool that constructs a fresh `.ocgraph` programmatically and calls
+`writeOcgraph` without first loading the file it is replacing will reproduce the drop described above
+for real.
+
+### 10a.3 Where the two readers disagree
+
+Both readers accept the same *common* subset of well-formed files, but they are not one grammar
+implemented twice — a file that only one side would accept is a file the other side's tooling cannot
+safely round-trip. Known divergences, in the order a hand-editor is likely to hit them:
+
+- **`OCGRAPH` version enforcement.** The C++ reader accepts any integer after `OCGRAPH` with no
+  check at all (`out.version = t.size() > 1 ? parseI32(t[1], 1) : 1;`). The C# reader — the one that
+  actually compiles and runs a graph — rejects anything but `1` outright (`"Unsupported OCGRAPH
+  version {version}"`). A file the C++ editor opens and saves without complaint can still fail to
+  load at runtime if its header says anything other than `OCGRAPH 1`.
+- **Forward-reference ordering — a real one, not a hypothetical.** The C++ reader is a single
+  left-to-right pass: `LINK`, `ENTRY` and `OUT` each check their named node against the nodes parsed
+  *so far*, and fail — `"ENTRY references non-existent node: …"` — if the node has not appeared yet.
+  The C# reader defers that check to `Graph.Validate()`, run only after the whole file is read, so it
+  tolerates a node referenced before it is declared. This is not a theoretical divergence:
+  `test-content/GraphDemo/Content/Scripts/IdleMotion.ocgraph` — this repository's own worked example
+  — writes `ENTRY seed OnStart` *before* `NODE seed OnStart`, and `ENTRY tick OnTick` before `NODE
+  tick OnTick` (both entry points, both nodes declared later than the `ENTRY` line naming them). The
+  C# side loads and runs this file without complaint — confirmed by actually running it (see
+  [`VISUAL_SCRIPTING.md` §7](../VISUAL_SCRIPTING.md)) — and the C++ side really does reject it:
+  `build/bin/OcGraphTest.exe --roundtrip Content/Scripts/IdleMotion.ocgraph` (the C++ reader's own
+  test binary, exercising the identical `parseOcgraph` call the node editor's own load path uses —
+  `GraphEditor.cpp:106`) fails with exactly `parse: ENTRY references non-existent node: seed`. This
+  is a confirmed, reproduced interoperability gap between this repository's own flagship worked
+  example and its C++ reader, not a theoretical one — the node editor cannot open
+  `IdleMotion.ocgraph` today. (Both readers require a `NODE` line to precede any `PIN` line for that
+  node — that part agrees.)
+- **Duplicate node IDs.** A second `NODE` line reusing an already-seen `id` is a parse error in the
+  C++ reader. The C# reader has no such check — it silently overwrites the dictionary entry, and any
+  `PIN` line that arrived between the two `NODE` lines stays attached to the now-orphaned first node
+  object.
+- **`LINK`'s grammar.** The C++ reader accepts only the dot form, `LINK src.pin dest.pin`, and treats
+  a missing `.` as a parse error. The C# reader additionally accepts a four-token space-separated
+  form, `LINK srcNode srcPin destNode destPin` — a file authored in that form parses in C# and fails
+  to parse in C++.
+- **`PIN`'s direction token.** The C++ reader accepts only `in`/`out` (case-insensitive) and rejects
+  anything else. The C# reader also accepts the long forms `input`/`output`, and does not reject an
+  unrecognised token at all — it is silently read as `in`. Write `in`/`out` for a file both sides
+  agree on.
+
+None of this is a defect in either reader considered alone — each is internally consistent and does
+what its own consumer needs. It is a property of having two independent implementations of one text
+grammar with no shared parser, the same shape of risk the legacy `.ocmap`/`.ocbeam` family already
+carries (§4), and worth knowing before hand-editing a graph rather than after a save silently narrows
+what it says.
+
+---
+
 ## 11. `.ocworld` — native scene/world (superset of `.ocmap`)
 
 First line `OCWORLD 1`. **Every `.ocmap` record is a legal `.ocworld` record** (identity/env/placement lines parse identically), so an `.ocmap` is a valid — if minimal — `.ocworld`, and the round-trip in §4.4 holds. On top of `.ocmap`, `.ocworld` adds a scene graph, streaming, lighting/environment, terrain/georef, and prefab instancing.
@@ -437,6 +594,9 @@ SPAWN 0 0 100 0
 DEFORM tyre_barrier.ocbeam 12000.0 800.0 0.0 90.0 0.0 0.0 rubber
 PLACE  kerb_4m 1200.0 400.0 0.0 0.0 0.0 0.0 1.000
 
+# --- NEW: class-instance placement -- spawns a registered actor class instead of a mesh ---
+PLACE  none 5000.0 -800.0 0.0 0.0 0.0 0.0 1.000 class AN_Orbiter
+
 # --- NEW: scene graph, non-uniform scale, prefab instances, GUID refs ---
 LAYER static
 NODE grandstand parent=world  T 5000 -800 0  R 0 0 0 1  S 1 1 1
@@ -459,14 +619,27 @@ TERRAIN heightfield {guid:0x…} extent 800000 800000
 
 Notes: `PLACE` (asset-name + transform, `.ocmap` style) and `PLACEG` (GUID + non-uniform scale) coexist; `DEFORM` unchanged (soft-body barriers). `LAYER`/`NODE`/`CELL`/`STREAM` give hierarchical + streamable worlds without the monolithic-level bloat. `GEOREF`/`TERRAIN` are the georeferenced-world hook the recon flagged as the likely dormant-Cesium role (`arch §6/§8`) — specified but engine-optional. Cooked `.ocworld` → `WRLD` chunk (flattened instance/cell/light tables) + a BLAKE3 Merkle `ROOT` computed over placements and referenced asset content hashes (the recon-intended real ROOT), and a `mapContentId` for the net map-parity gate (`net §4`).
 
+**The `class` keyword-argument** on `PLACE`/`PLACEG` (`modules/formats/src/OcWorld.cpp`: parsed at
+the trailing-token loop, written only when non-empty, same "no override is the default" rule
+`GAMEMODE` follows) turns a placement into a **class instance** instead of an ordinary mesh: `class
+<ClassName>` names any class already registered through the framework's class registry — a C#
+`[AverClass(...)]` type (`docs/SCRIPTING_API.md` §11) or a graph that declared itself one with a
+top-level `CLASS` record (`.ocgraph`, §10a above) — the placement format does not, and cannot, tell
+which. When `class` is present, the leading asset column is **never read**: no mesh/physics entity is
+built for that placement at all (this is the one case where a `PLACE` line's own asset name is
+inert), and what the instance looks like is entirely up to the named class's own defaults and its own
+`OnStart`/`OnTick`. See [`VISUAL_SCRIPTING.md` §6](../VISUAL_SCRIPTING.md) for the full load-time
+pipeline (parse → skip the raw entity → collect → spawn once scripting is ready) and for a real,
+running two-instance example.
+
 ---
 
 ## 11a. `.ocparticle` — particle effect (text)
 
 Text, for the reason §1 gives: an effect is small authoring data an artist tunes by hand and diffs in
 review, not bulk data a GPU maps. One `key value` record per line, `#` comments and blank lines
-ignored, unknown records preserved verbatim through a load/save cycle (the `.ocgraph` rule — a file
-written by a newer tool must survive being opened and saved by an older one).
+ignored, unknown records preserved verbatim through a load/save cycle (the `.ocgraph` rule, §10a
+above — a file written by a newer tool must survive being opened and saved by an older one).
 
 ```
 OCPARTICLE 1

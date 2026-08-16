@@ -1,148 +1,361 @@
-# Visual scripting: feasibility, and a plan
+# Aver Node
 
-> **STATUS: PLAN ONLY. No code has been written.** Produced 2026-08-08 from a feasibility survey
-> (six readers over the scripting stack, the ABI surface, the editor UI, the formats, the frame loop
-> and the constraints) followed by a design pass over the four areas that decide the cost.
->
-> Two claims the agents produced are **corrected below rather than carried forward**. Both are
-> flagged in place. Re-check anything load-bearing before relying on it.
+A graph you build in the editor can, since `41d6566`, declare itself an actor class and drive a
+real, level-placed entity — no C# involved at all. This page is the guide: what the system is, how
+its class model works, how it maps to Blueprints for readers who know them, and a worked example
+you can run verbatim. For the full per-node pin catalog, see
+**[the node reference](AVER_NODE_NODES.md)** — this page links to it rather than repeating it. For
+the `.ocgraph` file grammar itself — every record's exact syntax, and where the C++ and C# readers
+disagree — see **[`formats/FORMAT_SPECS.md` §10a](formats/FORMAT_SPECS.md)**; this page is about
+what a graph *means*, that one is about what a graph *says*.
 
----
-
-## 1. The finding that reorders everything
-
-**The graph canvas is not the expensive part. The node glue is.**
-
-There are 207+ hand-written `extern "C"` ABI entry points across seven headers, and **no reflective
-by-name call mechanism anywhere** — `abi/README.md:19-20` states the C# bindings are hand-written
-rather than generated, and `docs/ABI.md`'s own checklist for adding an entry point is entirely
-manual. So every node that calls engine functionality needs hand-written marshalling.
-
-A plan whose first slices are all UI is therefore avoiding the risky part. The canvas is roughly
-500 lines of solved ImGui work; the glue is the unknown. **If the glue is intolerable, a beautiful
-canvas is a tool for nothing.**
-
-### The one lever that matters
-
-`modules/scene` has a complete, tested, name-indexed **component field registry** — `FieldDesc` with
-name, component id, kind, offset and a read-only flag (`Fields.hpp:42-51`), every built-in component
-registered through `ComponentBuilder` (`Builtins.cpp:28-113`), and the same public API that
-script-declared components use.
-
-That collapses what would be **80+ hand-written per-field nodes** (get/set health, ammo, mesh,
-material, …) into exactly **two generic nodes**: `GetComponentField(entity, fieldName)` and
-`SetComponentField(entity, fieldName, value)`, resolving the field id once at bind time.
-
-This is the single biggest lever on the cost, and it is the reason the answer is "feasible" rather
-than "not worth it". It covers a graph's **data** side. It does not cover the **call** side — spawn,
-destroy, possess, raycast and friends still need one wrapper each, and about **25** of them buy
-roughly 80% of gameplay scripting.
+Every claim below was checked against the parser, the compiler, the bridge and the level-loading
+code that actually run it, not against an earlier design doc — several already turned out to be
+stale (see the note at the bottom). Where this page shows a `.ocgraph`/`.ocworld` fragment, it is
+lifted from a real file in `test-content/GraphDemo`, not invented for the example.
 
 ---
 
-## 2. Two corrections to the agents' own output
+## 1. What Aver Node is
 
-**The Scene API is not missing.** The feasibility synthesis claimed "the Scene API (object spawn,
-physics, components) is not implemented … only material/rendering scripting works today". **That is
-false.** `tests/scene` has 538 passing assertions, `tests/framework` 228; actors spawn, possess and
-tick; the physics ABI creates bodies and raycasts. The claim appears to come from reading
-`docs/STATUS.md` rather than the code, and the study's *own* survey agent contradicted it. It was
-corrected before it could shape the plan.
+`.ocgraph` is a line-based text format, in the same family as `.ocworld`/`.ocmap` — diffable,
+hand-editable, and read by both a C++ reader (`modules/formats/src/OcGraph.cpp`) and a C# one
+(`Aver.Graph/OcGraphParser.cs`). A graph is nodes, typed pins (`float`/`int`/`bool`/`exec`) and
+`LINK` records between them; the editor's canvas (`sandbox/src/GraphNodeDefs.hpp` drives its
+palette) is one way to produce that text, but the text is the format, not the canvas.
 
-**The native interpreter is not mandatory.** The plan called a native fallback interpreter "high
-risk" and "mandatory for non-Windows support", on the grounds that the CLR host is Windows-only.
-The CLR host *is* Windows-only — but so is the engine. `modules/platform/src/win32/Win32Window.cpp`
-carries **zero** `#if defined(_WIN32)` guards and is listed unconditionally in the platform module's
-`SOURCES`, so a non-Windows build does not fail at the script host; it fails at the window.
+**Execution is direct IL, not generated C#.** `GraphCompiler` emits CLR IL straight from the graph
+via `System.Reflection.Emit` — there is no `Graph → C# source → Roslyn` step anywhere in the
+pipeline, and no collectible `AssemblyLoadContext` involved. Compilation happens once, inside
+`GraphHost.Load()`, the first time a graph is loaded — which for a class instance is *every time
+one is spawned* (§2). A shipped game never needs a C# compiler on the player's machine; it needs
+this IL emitter, which is already linked in.
 
-> **Therefore the CLR's Windows-only limitation adds no constraint the engine does not already
-> have**, and building a second executor for a platform that cannot compile the platform layer is
-> speculative work. Slice 4 below is **deferred**, not mandatory. Revisit it when — and only when —
-> the engine itself becomes cross-platform, at which point the graph *format* is already portable
-> and only the backend needs writing.
+A graph is exactly one of two shapes, decided once from whether it has any `ENTRY` record
+(`GraphHost.LoadFromText`, `GraphHost.cs:248-254`):
 
-That correction removes the highest-risk slice in the plan.
+- **No `ENTRY` at all** — a pure dataflow graph. `PARAM entity int` / `PARAM time float` go in,
+  0–3 `OUT` floats come out, pulled fresh every tick with no memory between calls. This is the
+  original shape, predates everything else in this guide, and still works unchanged.
+- **One or more `ENTRY` records** — an event-driven graph, walked from `OnStart`/`OnTick`/any
+  other named event. This is the shape the rest of this guide is about, because it is the shape
+  that can declare a `CLASS` and drive a real entity.
+
+The two never mix in one file. A graph either computes values on request, or it runs as a small
+state machine with entry points — never both.
+
+## 2. The class model: a graph *is* a class
+
+A top-level record turns a plain graph into a spawnable actor class:
+
+```
+CLASS AN_Orbiter Actor
+```
+
+`CLASS <name> [parentName] [mesh=<path>] [material=<name>]` (`OcGraphParser.cs:210-266`). This is
+the Blueprint model, not a component that references a graph: **the graph file is the class
+asset.** `Aver.Scripting.Bridge`'s `HostBridge` reads it and registers it through the *exact same*
+`aver_fw_class_declare` / `aver_fw_class_set_flags(Managed)` / `aver_fw_class_seal` sequence a C#
+`[AverClass]` type goes through (`HostBridge.cs:427-434, 486-509`) — one flat registry, so
+`ActorClass.Find("AN_Orbiter")` cannot tell, and does not need to, whether what it found came from
+a graph or from C#.
+
+A few things worth knowing before you rely on this:
+
+- **The parent defaults to `"Actor"`** if you omit it — `CLASS AN_Orbiter` alone is already a
+  complete, sealable, spawnable declaration. `Actor` is one of five abstract base classes
+  (`Actor`/`Pawn`/`PlayerController`/`GameMode`/`GameInstance`) the engine declares and seals at
+  scripting bootstrap, *before* any project script or graph scan runs (`HostBridge.cs:771-793`) —
+  so there is always something for a bare `CLASS Foo` to parent to.
+- **`mesh=`/`material=` on the `CLASS` line are class *defaults***, registered as a default
+  `CMeshRenderer` component on the class itself (`Graph.cs:224-231`) — not the same mechanism as a
+  `SetMesh`/`SetMaterial` *node*'s own `mesh=`/`material=` attribute, which is a per-invocation
+  write. The class default is what a spawned instance looks like before its own `OnStart` has run
+  even once; a node's write is what happens after.
+- **Every spawned instance gets its own, freshly loaded `GraphHost`.** Binding a class instance
+  (`DispBind`, `HostBridge.cs:988-1010`) parses and compiles the `.ocgraph` file again from disk,
+  per spawn — it is not a shared compiled graph reused across instances. That cost buys the thing
+  the worked example in §7 exists to prove: two instances of one class carry **independent** `VAR`
+  storage automatically, because independence falls out of "two `GraphHost` objects" with no extra
+  code. The named, accepted cost is re-parsing and re-JITing per spawn — fine at the tens of
+  instances this slice targets, a real limitation at thousands.
+- **An undeclared or misspelled parent fails almost silently.** `aver_fw_class_seal` returns 0 on a
+  cycle or an unresolvable parent name, and `HostBridge` reports it as a single `WARN` naming the
+  file and the parent (`HostBridge.cs:503-509`) — the graph is not registered as a class, and it
+  is *also* not picked up by the older CLASS-less project-graph discovery, because that path skips
+  any file whose text merely looks like it declares a `CLASS` (`GameApp.cpp`'s
+  `ocgraphDeclaresClass` text scan). A broken parent does not degrade to old behaviour: the graph
+  runs nowhere, with one log line as the only trace.
+- **Parenting a graph class to another graph class is file-sort-order fragile.**
+  `DeclareGraphClasses` does one linear pass over `*.ocgraph`, ordered alphabetically by path, with
+  no forward-declare step (`HostBridge.cs:456-461`). A child graph class whose filename sorts
+  *before* its graph-class parent's fails to seal, even though the parent declares moments later in
+  the same scan. Parenting to a C# class or a bootstrap base never has this problem, because both
+  are declared earlier, during script load, before the graph scan starts at all.
+
+## 3. Mapping to Blueprints
+
+If you know Unreal's Blueprints, most of Aver Node reads directly:
+
+| Blueprint | Aver Node | What's different |
+|---|---|---|
+| A Blueprint asset, parent class | `CLASS <name> [parent]` at the top of a `.ocgraph` | The graph file *is* the asset — no separate wrapper. |
+| Event BeginPlay | `OnStart` entry | Fires once, on the graph's own first `Tick()` call — not inside `Load()`, and not a separate editor-preview construction phase (§5). |
+| Event Tick | `OnTick` entry | Fires every `Tick()` call, always strictly after `OnStart` in the tick where both run. |
+| A custom event | Any `ENTRY` name other than `OnStart`/`OnTick`, fired via `Fire()` | See §5 — `OnHit` is the one demonstrated example, and it is not wired to anything today. |
+| A Blueprint variable | `VAR` | Float/Int/Bool only, no struct/array/object reference (§4, §8). |
+| A function/event input | `PARAM` | Closed vocabulary, and it differs by which entry points the file wants (§4) — not free-form the way a Blueprint's own inputs are. |
+| SpawnActorFromClass | `Spawn` node, `class=` attribute | Resolved **by name** at invocation time, not baked to a handle at compile time. |
+| Get/Set on a component variable | `GetField`/`SetField` (scalar), `GetFieldVec3`/`SetFieldVec3` (vector) | Addressed by a `field=` string naming a scene field (e.g. `CLocal.position`), not a live pin reference to a component instance. |
+| Branch / Sequence / For Loop / While Loop | `Branch` / `Sequence` / `ForEach` / `While` | `ForEach` is counted-repeat only — there is no array pin type, so no per-element iterator (§8). |
+
+**Where it deliberately differs, structurally:** one file is one graph, one class at most, no
+collapsed/macro sub-graphs and no separate event-graph-vs-function-graph split — `ENTRY` records
+just mark which nodes are starting points inside the one flat file. There is no Construction
+Script equivalent either; see §5 for why the difference is more interesting than a missing
+feature.
+
+## 4. `PARAM` versus `VAR`: why a variable is not a parameter
+
+The short version, in the file's own words (`IdleMotion.ocgraph:45`): *"A VAR is the opposite of a
+PARAM: the caller owns a PARAM, the graph owns a VAR."*
+
+**`PARAM`** is supplied fresh by the caller on every invocation, and which names are legal depends
+on which entry points the *whole file* wants — `Parameters` is one list for the file, not one per
+entry point (`Graph.cs`):
+
+- A dataflow graph (no `ENTRY` at all) accepts exactly `entity` (int) and `time` (float),
+  case-insensitively — anything else fails at `Load()`, naming the offending `PARAM`
+  (`GraphHost.cs:256-275`).
+- A graph wanting `OnStart` or `OnTick` accepts exactly `entity`, `time`, and `deltaTime`
+  (`GraphHost.cs:326-373`).
+- A graph with **only** an on-demand event (no `OnStart`/`OnTick`) is unconstrained — it declares
+  whatever `PARAM` list its own payload needs, because `Fire()`'s args are positional, matching
+  declaration order, not drawn from a named-slot vocabulary (`GraphHost.cs:580-604`).
+
+The sharp edge here: mix an on-demand event into a file that *also* wants `OnStart`/`OnTick`, and
+every `PARAM` in that file — including the ones only the on-demand event reads — gets checked
+against the `OnStart`/`OnTick` vocabulary, because it is one shared list. **An on-demand event with
+a custom payload needs its own file**, separate from any `OnStart`/`OnTick` graph, not a design
+preference but a real constraint this format enforces.
+
+**`VAR`** is owned by the graph/host and survives from one `Tick()`/`Fire()` invocation to the
+next — but only on the same `GraphHost` instance. It does not survive a `Load()` call (hot-reload
+included), and it does not survive a process restart (§8). Storage is one `Dictionary<string,
+object>` per `GraphHost` (`GraphVarStore.cs`), seeded from each `VAR`'s own declared default the
+moment the graph loads — which is what makes "read before any write" deterministic rather than
+undefined.
+
+## 5. Entry points and their ordering
+
+An `ENTRY <nodeId> <eventName>` record is what makes a node run at all on the event-driven path —
+the node type (`OnStart`, `OnTick`, `OnHit`, or any other type with no inputs) is just a labelled,
+no-input starting shape the `ENTRY` record points at. Nothing in the parser or compiler special-
+cases the string `"OnHit"`; it sorts into "on-demand" the same way any project-invented event name
+would (`OcGraphParser.cs:774-786`).
+
+**`OnStart` fires exactly once, on the graph's own first `Tick()` call** — not inside `Load()`.
+That is deliberate: `Load()` can run long before the game loop's first real frame (a project's
+graphs are all discovered and compiled at project open), while "OnStart fires once when play
+begins" reads most literally as "the first time something actually ticks this graph". One
+consequence worth knowing: a *compile* error surfaces at `Load()` time (project open, early), but
+an `OnStart` *runtime* error only surfaces at the first real `Tick()` (frame 1) — the same
+load/runtime split the rest of this system already has.
+
+**`OnTick` fires every `Tick()` call, strictly after `OnStart` in the tick where both run** — and
+`_execSimTime` (the clock a graph's `PARAM time` reads) accumulates once per `Tick()` call, not
+once per entry fired, so `OnStart` and `OnTick` see the *identical* time value on the frame where
+both run (`GraphHost.cs:125-138, 553-568`).
+
+**Both class instances and CLASS-less project graphs tick every frame, ungated on play state.**
+Deliberately: a pure-graph project has no C# `GameMode` to ever call `aver_fw_begin_play`, so
+gating a class instance's tick on "is the game playing" would make graph-as-class silently inert
+in exactly the configuration it exists to serve. The consequence is real and worth knowing in the
+editor specifically: **a class instance's `OnTick` runs the moment it is placed, in the editor,
+whether or not you have pressed Play** — unlike an ordinary C# actor, which is gated on Play. This
+is also the closest thing to a Construction-Script moment Aver Node has, and it is not a separate
+phase at all — it is the same `OnStart`/`OnTick` a spawned instance always runs.
+
+**Any other `ENTRY` name is on-demand**, compiled the same way but invoked later via
+`GraphHost.Fire(eventName, args, out result)` rather than driven by `Tick()`'s own cadence.
+`Fire()`'s `args` are **positional**, matching the fired entry's declared `PARAM` list in file
+order — a deliberately different contract from `Tick()`'s named `entity`/`time`/`deltaTime`
+vocabulary, because the caller firing an on-demand event already knows its specific payload shape,
+and a second growing named-slot vocabulary would only recreate the trap `PARAM` itself avoids
+(`GraphHost.cs:580-604`). `Fire()`'s result is **not** auto-applied to the entity's position the
+way `Tick()`'s is — an on-demand event has no fixed target the way `Tick(entityId, …)` does.
+
+**There is no teardown entry point.** `DispUnbind` is the only teardown hook for a class instance:
+it drops the instance from the live table (stopping it from ticking) and releases its `GraphHost`
+and `VAR` storage for GC. No `OnStart`/`OnTick`/on-demand entry means "I am being destroyed" — a
+graph cannot run its own cleanup logic.
+
+## 6. How an instance reaches a level
+
+A `PLACE`/`PLACEG` line in an `.ocworld`/`.ocmap` gets an optional trailing `class <ClassName>`
+keyword-argument:
+
+```
+PLACE none 0 0 0 0 0 0 1 class AN_Orbiter
+```
+
+(`test-content/GraphDemo/Content/Maps/OrbitDemo.ocmap:17`). The leading asset column (`none`,
+above) is never read for a class placement — the parser consumes `class <name>` as a keyword pair,
+not a bare flag, so the argument token is captured rather than misread as a material name
+(`OcWorld.cpp:206-211`).
+
+The pipeline from there is the same shape in both composition roots (the shipped game and the
+editor):
+
+1. **Parse**: the placement's `className` is set; non-empty means "this is a class instance, not
+   an ordinary mesh".
+2. **Skip the raw entity**: `aver::world::instantiate` builds no mesh/physics entity for a
+   non-empty `className` — a class instance is framework-free by design; whatever it looks like is
+   the class's own `mesh=`/`material=` defaults, or whatever its own graph does.
+3. **Collect, don't spawn yet**: level load gathers every class placement (`classPlacements_`) but
+   does not spawn them — scripting is not ready that early in either root's boot order.
+4. **Spawn for real**: a later call, `spawnClassPlacements()`, resolves each placement's class
+   name via `aver_fw_class_find` and spawns it via `aver_fw_spawn` — not `aver_fw_spawn_preview`.
+   There is no "placed, live in edit mode, promoted at Play" precedent for a class placement the
+   way there might be for an ordinary actor; `OnBeginPlay`/`OnStart` fire immediately, at this
+   call, in both roots.
+5. **An unresolvable class name** (never declared, or failed to seal per §2) gets one `WARN` and
+   produces **no entity at all** — not even a fallback mesh (`GameLevel.cpp:259-286`).
+
+**Authoring one today is a text edit, not a palette drag.** There is no editor UI that places a
+class instance the way dragging a mesh from the content browser places one — you write
+`class AN_Foo` into the `.ocworld`/`.ocmap` file yourself, exactly like `OrbitDemo.ocmap` above.
+The editor's **File ▸ Open Level** does call `spawnClassPlacements()` so a class placement appears
+after loading a level that has one — but see §8 for what **Save** does to it.
+
+## 7. Worked example: two orbiting entities, no C#
+
+`test-content/GraphDemo` is a small, self-contained project built to prove exactly this feature —
+not a demo of a game, a genre-neutral fixture. It has one graph and one map:
+
+**`Content/Scripts/IdleMotion.ocgraph`** declares itself class `AN_Orbiter`, remembers where its
+own entity started (`OnStart` reads `CLocal.position` via `GetFieldVec3` and stores it in three
+`VAR`s), then every `OnTick` orbits that remembered point:
+
+```
+CLASS AN_Orbiter Actor
+
+PARAM entity int
+PARAM time float
+
+VAR homeX float 0
+VAR homeY float 0
+VAR homeZ float 0
+
+ENTRY seed OnStart
+NODE seed OnStart
+NODE here GetFieldVec3 field=CLocal.position
+LINK ent.value here.entity
+NODE setHomeX SetVar var=homeX
+LINK seed.exec setHomeX.exec
+LINK here.x setHomeX.value
+# ...setHomeY, setHomeZ chained the same way through each SetVar's own `then`
+
+ENTRY tick OnTick
+NODE tick OnTick
+# ...bob/drift computed from PARAM time, then added to the remembered home position...
+NODE place SetFieldVec3 field=CLocal.position
+PIN place exec in exec
+PIN place entity in int
+PIN place x in float
+PIN place y in float
+PIN place z in float
+PIN place then out exec
+PIN place success out bool
+LINK tick.exec place.exec
+```
+
+The full file explains its own choices in its header comments — including why `OnStart` was
+chosen over a first-tick `Branch` (there is no `NOT` node in the vocabulary, which would have made
+that awkward) and why `place`'s pins are spelled out by hand (see [Trap
+1](AVER_NODE_NODES.md#read-this-first--three-traps) in the node reference — `SetFieldVec3`'s
+default shape has no exec pins at all).
+
+**`Content/Maps/OrbitDemo.ocmap`** places two instances of that one class at different starting
+points — the point being that *placement*, by itself, proves independent `VAR` state: if the two
+instances shared one store, both would orbit whichever entity's `OnStart` ran last.
+
+```
+PLACE none 0 0 0 0 0 0 1 class AN_Orbiter
+PLACE none 400 0 0 0 0 0 1 class AN_Orbiter
+```
+
+**Run it** — this is a real command against a real build, not a hypothetical:
+
+```
+build/bin/AverGame.exe --headless --frames 5 --project test-content/GraphDemo/Game.ocproject
+```
+
+The actual output (captured against this repository, trimmed to the relevant lines):
+
+```
+[INFO ] [Graph] declared class 'AN_Orbiter' (parent 'Actor', ticks) from '...IdleMotion.ocgraph'
+[INFO ] [Graph] 1 graph class(es) declared from '...Content'
+[INFO ] [Level] 2 class instance(s) placed -- an entity exists for each; whether its graph COMPILED
+        is reported per instance above, ...
+[GraphHost] 'IdleMotion' entity 16777217: OnStart -> [5, 0, 6.12E-06]
+[GraphHost] 'IdleMotion' entity 16777217: OnTick  -> [5, 0, 6.12E-06]
+[GraphHost] 'IdleMotion' entity 16777218: OnStart -> [405, 0, 6.12E-06]
+[GraphHost] 'IdleMotion' entity 16777218: OnTick  -> [405, 0, 6.12E-06]
+...
+[GraphHost] 'IdleMotion' entity 16777217: OnTick -> [4.9999776, 0, 0.063581675]
+[GraphHost] 'IdleMotion' entity 16777218: OnTick -> [404.99997, 0, 0.063581675]
+```
+
+Two things this proves, directly, not by design intent: **`OnStart` and `OnTick` share one clock**
+— entity `16777217`'s first `OnStart` and first `OnTick` line are numerically identical, because
+both ran inside the same `Tick()` call before the sim clock advanced again. And **the two
+instances never converge** — one settles orbiting `x≈5`, the other `x≈405` — which is only
+possible if each entity's `VAR homeX/Y/Z` seeded from *its own* `GetFieldVec3` read and never
+leaked into the other's store.
+
+## 8. Honest limits
+
+Aver Node is a real way to build gameplay without C# — the example above is the whole chain,
+running. It is also new, and smaller than what it resembles. Specifically:
+
+- **No cross-entity event dispatch.** A graph can *receive* an on-demand event (`OnHit`, or any
+  other name a caller fires) via `Fire()`, but there is no node anywhere in the catalog that lets
+  one entity's graph raise an event *on a different entity's* graph. `Fire()` is something a host
+  calls into one specific `GraphHost`; it is not something a node can invoke.
+- **No HUD or 2D drawing from a graph.** Nothing in the 36-node vocabulary reaches `Aver.UI`.
+- **No `String` pin.** `PinType` has exactly four members — `Float`, `Int`, `Bool`, `Exec`. Every
+  string a node needs (`field=`, `class=`, `var=`, `name=`, `mesh=`, `material=`) arrives as a
+  `NODE`-line attribute, never as data an upstream node computes or a pin carries.
+- **`VAR` is Float/Int/Bool only, and does not survive a level reload.** Storage is one object per
+  `GraphHost`, created fresh at `Load()` time and seeded from each `VAR`'s declared default —
+  reloading the graph (hot-reload included), respawning the instance, or restarting the process
+  all reset every `VAR` to its default. There is no persistence layer underneath it.
+- **A graph class needs an already-declared parent, and for a character that still means one
+  trivial C# class.** `CLASS Foo` alone parents to the bootstrap `Actor` base for free — but the
+  `CharacterMove` node only succeeds against an entity that is (or descends from) `AverCharacter`,
+  an *abstract* C# type nothing in this vocabulary can construct on its own. A project that wants a
+  graph-driven character still needs one minimal, concrete C# class deriving from `AverCharacter`
+  for the graph's `CLASS` line to name as its parent — see `Aver.Framework.SampleActor`'s
+  `DemoPawn : AverCharacter` (`[AverClass("AN_Pawn")]`) for how small that class can be. Graph
+  authoring removes the *gameplay* logic from C#, not the one-time class-registration boilerplate.
+- **The editor's Save does not round-trip a class placement.** `saveLevel()` rebuilds every
+  `PLACE` line it writes by walking only the raw mesh/physics entities the ordinary placement path
+  creates — and a class placement, by design (§6, step 2), never gets one of those. Opening a
+  level that has a class placement and hitting Save silently drops that placement's *entire* line,
+  not merely its `class` attribute — there is no raw entity left to reconstruct it from. Until this
+  is fixed, treat a level with class placements as **edit the `.ocworld`/`.ocmap` text directly**,
+  not **load it in the editor and Save**.
+
+A few smaller, related edges, already covered in more depth above: an undeclared/misspelled
+`CLASS` parent fails almost silently (§2), parenting one graph class to another is file-sort-order
+fragile (§2), and `Fire("OnHit", …)` is a demonstrated mechanism with no engine-side collision
+system wired to call it yet (§5). None of these are fixed in this pass — this page documents them
+so the next person does not have to rediscover them by reading source.
 
 ---
 
-## 3. Decisions
-
-| Decision | Consequence |
-|---|---|
-| **Prove the glue before building the canvas.** | Slice 0 is five nodes and no UI at all. If it is tedious, the plan dies in a week instead of after the canvas. |
-| **Two generic field nodes over the field registry**, plus ~25 hand-written ABI wrappers. | Removes 80+ nodes of repetition. The registry is already tested, so this leans on something real. |
-| **No code generation from headers.** | P/Invoke signatures are stable once written; a header parser is a fragile step that buys nothing. Write them once, by hand, with tests. |
-| **No reflective by-name call mechanism.** | 207 fixed entry points do not need one, and adding one is complexity plus cost for a problem that does not exist. |
-| **`.ocgraph` is TEXT**, in the `OC` dialect (`OCGRAPH 1`, then records). | Diffable, mergeable, hand-editable — the same reasons `.ocworld` is text. |
-| **Custom ImGui canvas**, not a vendored node library. | ~500 lines, full schema control, and no new dependency under the permissive-only rule. Vendor later if maintenance exceeds integration. |
-| **Compile in the editor, never at runtime.** | A shipped game has no compiler. Assets package the compiled form. |
-| **Windows-first, and said out loud.** | Execution is Roslyn compile-to-C# through the existing escalation path. See §2 for why that is not the limitation it looks like. |
-
-### The trap `.ocworld` already fell into
-
-`OcWorld`'s parser **skips unknown records**, and the editor **rebuilds the file from its own
-state** — so anything the editor does not model is silently dropped on the next save. `PCGVOLUME`
-hit exactly this and is worked around by stashing the records verbatim at load
-(`SandboxApp.cpp:5478`). A graph format must carry unknown records through by construction, not by
-remembering to.
-
----
-
-## 4. Slices
-
-**Slice 0 — five nodes, no UI.** `Aver.Scripting.Nodes` with `GetComponentField`, `SetComponentField`,
-`SpawnActor`, `DestroyActor`, `Raycast`, each a hand-written P/Invoke over the existing ABI.
-*Done when:* `GetComponentField(entity, "CLocal.position")` returns a float matching the entity's
-actual position to six decimals, `SetComponentField`'s write is visible through `aver_scene_field`,
-and `SpawnActor` returns a valid handle. **This slice decides the plan.** If five nodes take three
-weeks instead of one, the glue hypothesis is wrong and the architecture is reconsidered.
-
-**Slice 1 — the `.ocgraph` format.** `parseOcgraph`/`serializeOcgraph`, asset type, content browser.
-*Done when:* ten graphs (empty, single node, branching, cyclic, every pin type) round-trip
-**bit-identically**, and injected unknown records survive a parse-serialise cycle rather than being
-dropped.
-
-**Slice 2 — the canvas.** An `AssetEditor` subclass: nodes, pins, bezier links, pan/zoom, selection,
-connection, and undo on the editor's existing stack.
-*Done when:* a hand-authored 5-node graph saves and reopens with layout preserved to ±10 px, and a
-20-node graph renders without hitching.
-
-**Slice 3 — execution, Roslyn backend.** Graph → C# source → the existing two-tier compile path →
-a collectible ALC, dispatched through the framework's existing table.
-*Done when:* a graph that spawns an actor, reads a field, modifies it and destroys it produces the
-same entity state as the equivalent hand-written C# actor.
-
-**Slice 4 — native interpreter. DEFERRED, not mandatory.** See §2. Revisit when the engine is
-cross-platform; the format is portable already, so only the backend is owed.
-
-**Slice 5 — the other ~20 ABI wrappers.** Framework, physics, PBR.
-*Done when:* ≥25 node classes with unit tests, and a 10-node multi-branch graph executes.
-
-**Slice 6 — node discovery.** A registry driving the Add-Node menu and pin type validation.
-*Done when:* invalid connections are refused (five mismatched pairs tested), and read-only fields
-are shown as read-only rather than silently failing — the ABI returns 0 on a read-only write, and a
-user must not read that as "it worked".
-
-**Slice 7 — hot reload.** Graphs through the `ScriptHost` unload/load cycle.
-*Done when:* an edited graph is live after reload with no restart, and in-flight ticks do not
-deadlock. Note `HostBridge`'s unload is a **request**, not a guarantee — a graph holding a reference
-into the old ALC prevents collection.
-
----
-
-## 5. What I would not do
-
-1. **Do not build the canvas first.** It inverts risk against value.
-2. **Do not vendor a node-graph library yet.** The permissive-only rule limits the field, and ~500
-   lines of ImGui keeps schema control. Revisit when maintenance exceeds integration.
-3. **Do not generate P/Invoke from headers.** A fragile parsing step for a one-time cost.
-4. **Do not invent reflective by-name calling.**
-5. **Do not build the native interpreter now** (§2).
-6. **Do not support nested subgraphs in v1.** Flat dataflow compiles, debugs and versions far more
-   simply; separate `.ocgraph` files are enough reuse to start.
-7. **Do not compile at runtime.** A shipped game has no compiler.
-8. **Do not hide read-only fields from `SetComponentField`.** Show the failure; a silent no-op reads
-   as a bug in the graph.
-9. **Do not add a hook to the framework dispatch table without budgeting for it.** It is exactly ten
-   entries; adding one bumps `AVER_FW_DISPATCH_VERSION` and breaks the managed binding until it is
-   regenerated.
+*For every node's pin shape, attribute and compile-path behaviour, see [the node
+reference](AVER_NODE_NODES.md). This page previously described a pre-implementation feasibility
+plan (dated 2026-08-08, Roslyn-based, predating the class model entirely); that plan is superseded
+by what is written above, which describes the system as it actually shipped through `41d6566`.*
