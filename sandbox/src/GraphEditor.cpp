@@ -23,9 +23,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <utility>
 
 #if AVER_WITH_IMGUI
 #  include "imgui.h"
@@ -332,6 +334,63 @@ void GraphEditor::commitLink(const std::string& srcNode, const std::string& srcP
     dirty_ = true;
 }
 
+void GraphEditor::selectNode(const std::string& nodeId) {
+    for (const auto& n : graph_.nodes) {
+        if (n.id != nodeId) continue;
+        selectedNodes_ = {nodeId};
+        selectedLink_ = -1;
+        return;
+    }
+}
+
+bool GraphEditor::setAttribute(const std::string& nodeId, const std::string& key, const std::string& value) {
+    // ADVERSARIAL-VERIFICATION FIX: the .ocgraph NODE line has no quoting on either side (OcGraph.cpp's
+    // splitWhitespace, matched token-for-token by OcGraphParser.cs's own SplitWhitespace, whose doc
+    // comment says "respecting no quoting"). Writing a value containing whitespace here would produce a
+    // NODE line that reads back as MULTIPLE raw tokens: the value silently truncates at the first space
+    // (both getNodeAttribute here and OcGraphParser.cs's NODE case take only the text up to the next
+    // whitespace), and the remainder becomes permanently-invisible junk tokens -- no '=', so
+    // computeAttributeRows never surfaces them again, and OcGraphParser.cs's own NODE loop just skips
+    // any token without '=' outright. Net effect, reproduced empirically: a compiled graph would run
+    // silently on a truncated field=/class=/param= value with no error at any layer. Refusing here (a
+    // no-op, same contract as the nonexistent-node case below) stops the editor's own authoring surface
+    // from ever writing something this format cannot represent -- it is the narrowest fix that does not
+    // touch the shared reader/writer or add quoting/escaping to the file format itself.
+    //
+    // ADVERSARIAL-VERIFICATION FOLLOW-UP: the check above named OcGraph.cpp's splitWhitespace as its
+    // authority but only tested 4 of the 6 characters that function's own isSpace() (TextScan.hpp)
+    // treats as delimiters -- '\v' and '\f' were missing, so a value containing either would have
+    // passed this guard and then hit the exact same silent-truncation bug the guard exists to prevent.
+    // Widened to match isSpace()'s full set exactly, character for character. NOT covered here (a
+    // genuine remaining gap, not chased further): OcGraphParser.cs's own SplitWhitespace splits on
+    // char.IsWhiteSpace, which recognises Unicode whitespace (e.g. U+00A0 NBSP) that C++'s isSpace()
+    // does not -- such a value would still round-trip correctly through THIS editor (C++ writer/reader
+    // agree) but corrupt on the C# side. Closing that would mean picking one language's whitespace
+    // definition as authoritative for both, or adding real quoting to the format -- a design decision,
+    // not a small fix.
+    if (value.find_first_of(" \t\r\n\v\f") != std::string::npos) return false;
+    for (auto& n : graph_.nodes) {
+        if (n.id != nodeId) continue;
+        pushUndo();
+        setNodeAttribute(n, key, value); // GraphEditorGeometry.hpp -- the order-preserving read/write
+        dirty_ = true;
+        return true;
+    }
+    return false;
+}
+
+bool GraphEditor::clearAttribute(const std::string& nodeId, const std::string& key) {
+    for (auto& n : graph_.nodes) {
+        if (n.id != nodeId) continue;
+        if (!getNodeAttribute(n, key).found) return false; // nothing to clear is not an edit
+        pushUndo();
+        removeNodeAttribute(n, key);
+        dirty_ = true;
+        return true;
+    }
+    return false;
+}
+
 void GraphEditor::reportLinkRejection(const GraphLinkCheck& check) {
     lastRejectMsg_ = check.message.empty() ? "connection refused" : check.message;
 #if AVER_WITH_IMGUI
@@ -406,9 +465,16 @@ void GraphEditor::draw(Engine&) {
 
     recomputeLayouts(dpi);
 
-    // ---- canvas -----------------------------------------------------------------------------------
+    // ---- canvas + details columns -------------------------------------------------------------------
+    // The canvas gives up a fixed-width strip on the right for the details panel (Gap B). Every
+    // downstream canvas calculation (originIm, canvasSize, mouse-to-canvas conversion) is derived from
+    // GetContentRegionAvail() called AFTER ##graphCanvas's BeginChild below, so it automatically sees
+    // the narrowed region rather than the full window -- nothing past this point needed to change for
+    // that to hold.
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    ImGui::BeginChild("##graphCanvas", ImVec2(avail.x, std::max(avail.y, 80.0f * dpi)), true,
+    const float detailsW = std::clamp(260.0f * dpi, 180.0f * dpi, std::max(avail.x * 0.45f, 120.0f * dpi));
+    const float canvasW = std::max(avail.x - detailsW - ImGui::GetStyle().ItemSpacing.x, 40.0f * dpi);
+    ImGui::BeginChild("##graphCanvas", ImVec2(canvasW, std::max(avail.y, 80.0f * dpi)), true,
                        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     const ImVec2 originIm = ImGui::GetCursorScreenPos();
@@ -703,6 +769,74 @@ void GraphEditor::draw(Engine&) {
         ImGui::EndPopup();
     }
 
+    ImGui::EndChild();
+
+    // ---- details panel: a selected node's attributes (Gap B) -----------------------------------------
+    // Thin ImGui glue only -- the actual model (which rows to show, how a key=value token is read and
+    // written) lives in GraphEditorGeometry.hpp's getNodeAttribute/setNodeAttribute/removeNodeAttribute/
+    // computeAttributeRows, exercised headlessly by GraphEditorGeometryTest and GraphEditorLoadSaveTest.
+    ImGui::SameLine();
+    ImGui::BeginChild("##graphDetails", ImVec2(detailsW, std::max(avail.y, 80.0f * dpi)), true);
+    if (selectedNodes_.size() != 1) {
+        ImGui::TextDisabled(selectedNodes_.empty() ? "Select a node to edit its attributes."
+                                                     : "Select a single node to edit its attributes.");
+    } else {
+        const std::string& nodeId = selectedNodes_.front();
+        fmt::OcGraphNode* node = nullptr;
+        for (auto& n : graph_.nodes) if (n.id == nodeId) { node = &n; break; }
+        if (!node) {
+            ImGui::TextDisabled("Selected node no longer exists.");
+        } else {
+            const GraphNodeDesc* desc = findGraphNodeDesc(node->type);
+            ImGui::TextUnformatted(node->id.c_str());
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%s)", node->type.c_str());
+            ImGui::Separator();
+
+            std::vector<std::pair<std::string, std::string>> declared;
+            if (desc) {
+                declared.reserve(desc->attributes.size());
+                for (const GraphAttributeSpec& a : desc->attributes) declared.emplace_back(a.key, a.label);
+            }
+            const std::vector<GraphAttributeRow> rows = computeAttributeRows(*node, declared);
+
+            if (rows.empty()) {
+                ImGui::TextDisabled("This node type has no attributes.");
+            }
+            bool drewLeftoverHeader = false;
+            for (const GraphAttributeRow& row : rows) {
+                if (!row.declared && !drewLeftoverHeader) {
+                    if (!declared.empty()) ImGui::Separator();
+                    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+                    ImGui::TextDisabled("Other attributes (not recognised by this editor build, preserved on save):");
+                    ImGui::PopTextWrapPos();
+                    drewLeftoverHeader = true;
+                }
+
+                const std::string rowKey = node->id + "\x1f" + row.key;
+                char buf[512];
+                if (attrEditRowKey_ == rowKey) {
+                    std::snprintf(buf, sizeof buf, "%s", attrEditBuf_);
+                } else {
+                    std::snprintf(buf, sizeof buf, "%s", row.value.c_str());
+                }
+
+                ImGui::PushID(rowKey.c_str());
+                const bool changed = ImGui::InputText(row.label.c_str(), buf, sizeof buf);
+                if (ImGui::IsItemActivated()) attrEditRowKey_ = rowKey;
+                if (changed && attrEditRowKey_ == rowKey) std::snprintf(attrEditBuf_, sizeof attrEditBuf_, "%s", buf);
+                if (ImGui::IsItemDeactivatedAfterEdit()) {
+                    const std::string newValue = attrEditBuf_;
+                    if (newValue.empty()) clearAttribute(node->id, row.key);
+                    else setAttribute(node->id, row.key, newValue);
+                    attrEditRowKey_.clear();
+                } else if (ImGui::IsItemDeactivated()) {
+                    attrEditRowKey_.clear();
+                }
+                ImGui::PopID();
+            }
+        }
+    }
     ImGui::EndChild();
 #endif
 }

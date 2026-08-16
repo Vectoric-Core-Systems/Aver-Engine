@@ -201,4 +201,78 @@ CanvasTransform zoomAroundScreenPoint(const CanvasTransform& t, f32 newZoom, Vec
 std::unordered_map<std::string, Vec2> autoLayoutPositions(const fmt::OcGraphData& graph,
                                                             const GraphLayoutStyle& style, f32 scale);
 
+// ---------------------------------------------------------------------------------------------------
+// Node attributes (extraTokens) -- Gap B: the editor's authoring surface for a node's key=value
+// attributes (param=/field=/class=, and anything future).
+// ---------------------------------------------------------------------------------------------------
+//
+// aver::fmt::OcGraphNode::extraTokens is a flat, order-preserving list of trailing NODE-line tokens
+// this C++ reader does not interpret (see OcGraph.hpp's own comment on why it exists at all). Most of
+// them are `key=value` attributes the C# side's OcGraphParser.cs reads -- param= naming a declared
+// PARAM, field= naming a scene field, class= naming a spawnable class -- but the vector itself is
+// untyped text, and nothing before this section ever read or wrote the key=value convention from the
+// C++ side. These three functions are the ONE place that does, so the editor (and its tests) do not
+// each reimplement the split and risk disagreeing with the C# reader's own contract
+// (scripting/csharp/Aver.Graph/OcGraphParser.cs: `token.Split('=', 2)`) -- only the FIRST '=' in a
+// token delimits key from value, so a value that itself contains '=' is preserved whole, not re-split.
+// A token with no '=' at all is never touched by any of the three (there is no key to match), which is
+// exactly what makes it survive an edit to a DIFFERENT attribute on the same node -- the entire point
+// of extraTokens (see OcGraph.hpp) applied to this narrower, still-load-bearing case.
+//
+// FIRST MATCH WINS on read; a well-formed file carries at most one token per key (nothing in this
+// format enforces that, so a hand-edited file COULD carry two, in which case getNodeAttribute reads
+// the first and setNodeAttribute overwrites the first, leaving a stray second one alone -- a corrupt
+// input's fault, not silently "fixed" by guessing which the author meant).
+
+// One key=value attribute read from a node's extraTokens, or absent (found == false) if the node
+// carries no token for that key.
+struct GraphNodeAttribute {
+    std::string key;
+    std::string value;
+    bool found = false;
+};
+
+// Reads the value of `key` from `node.extraTokens`. found == false, value == "" if absent.
+GraphNodeAttribute getNodeAttribute(const fmt::OcGraphNode& node, const std::string& key);
+
+// Sets `key=value` on `node.extraTokens`, IN PLACE where a `key=...` token already sits (so every
+// OTHER token keeps its exact original order and content), or appended at the end if the key was not
+// present before. This is the whole contract extraTokens exists for, applied to an edit: a token this
+// editor build does not recognise -- matched key or not, `=`-shaped or not -- must survive an edit to
+// a different attribute on the same node.
+void setNodeAttribute(fmt::OcGraphNode& node, const std::string& key, const std::string& value);
+
+// Removes the `key=...` token from `node.extraTokens`, if present; a no-op otherwise. Used when an
+// author clears an attribute's field back to empty -- deleting the token outright (rather than writing
+// `key=`) is the more truthful of the two ways to say "this was never set," and both round-trip
+// safely through writeOcgraph regardless.
+void removeNodeAttribute(fmt::OcGraphNode& node, const std::string& key);
+
+// One row a details/inspector panel should draw for a selected node: either one of the attributes its
+// TYPE declares (see GraphNodeDefs.hpp's GraphNodeDesc::attributes) -- shown even when `present` is
+// false, so an author sees an attribute like `class` is expected before typing anything -- or a
+// leftover `key=value`-shaped extraToken this build's catalog does not declare for that type, shown
+// generically so it stays visible AND editable rather than opaque.
+struct GraphAttributeRow {
+    std::string key;
+    std::string label;    // the catalog's friendly label for a declared row; equals `key` for a leftover row
+    std::string value;    // current value; "" if `present` is false
+    bool present = false; // whether node.extraTokens actually carries a `key=...` token right now
+    bool declared = false; // true: one of `declaredKeyLabels` below; false: a leftover extraToken
+};
+
+// Builds the rows a details panel should show for `node`. `declaredKeyLabels` is a list of (key,
+// label) pairs in display order -- deliberately NOT the GraphNodeDefs.hpp GraphNodeDesc type itself,
+// the same reason computeNodeLayout above takes `title` as a plain string rather than looking it up:
+// this function's whole point is not needing to know the catalog exists, so a headless test (or a
+// future caller with a different node-type table) can call it with any list of keys it likes.
+//
+// Order: one row per entry in `declaredKeyLabels`, in that order, ALWAYS present (whether or not the
+// node currently carries a token for it) -- then one row per remaining extraToken that IS `key=value`
+// shaped but whose key is not one of `declaredKeyLabels`, in the node's own file order. A token with
+// no '=' at all produces no row (there is nothing to label it with), and is therefore never touched by
+// an edit made through these rows -- it survives precisely because nothing here ever looks at it.
+std::vector<GraphAttributeRow> computeAttributeRows(
+    const fmt::OcGraphNode& node, const std::vector<std::pair<std::string, std::string>>& declaredKeyLabels);
+
 } // namespace aver::editor

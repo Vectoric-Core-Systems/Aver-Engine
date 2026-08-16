@@ -35,24 +35,25 @@
 // type gets another, which is exactly the "two implementations agree by coincidence, not by
 // construction" trap the `outputs` field's own comment in OcGraph.hpp warns about.
 //
-// KNOWN GAP, not fixed here: GetField/SetField (and their Vec3 siblings GetFieldVec3/SetFieldVec3
-// below) address a scene field by name via a `field=` NODE-line attribute on the C# side's own reader
+// GetField/SetField (and their Vec3 siblings GetFieldVec3/SetFieldVec3 below) address a scene field by
+// name via a `field=` NODE-line attribute on the C# side's own reader
 // (scripting/csharp/Aver.Graph/OcGraphParser.cs, "field=" case). Spawn (below) addresses a registered
-// class the same way, via `class=` -- same reader, same generic key=value mechanism, same gap.
-//
-// THIS COMMENT USED TO CLAIM "the shared C++ .ocgraph grammar has no key=value attribute syntax at
-// all" -- CHECKED AGAINST THE CODE (as of this note) AND FOUND STALE, per the task that asked whoever
-// next touched this file to verify it: modules/formats/src/OcGraph.cpp's NODE-line parsing (see
-// isNumericToken's callers) reads only what parses as a numeric x/y coordinate as position; every
-// OTHER trailing token -- `field=CLocal.position`, `param=time`, anything -- is captured VERBATIM into
-// OcGraphNode::extraTokens (modules/formats/include/aver/formats/OcGraph.hpp) and re-emitted on save.
-// So `field=` genuinely DOES survive an editor load/save round trip today; the grammar was never the
-// gap. The REAL gap is narrower and still true: this editor has no property/inspector panel for ANY
-// node (grep sandbox/src for ImGui::Input*/Drag*/Combo* -- zero matches), so extraTokens round-trips
-// opaquely but is not READABLE or EDITABLE from the GUI -- a GetField/SetField/GetFieldVec3/
-// SetFieldVec3 node's `field=` can be carried through the editor but not authored or inspected by it.
-// That is a property-panel gap, not a file-format gap; still flagging it for the human, corrected.
+// class the same way, via `class=`; Param (below) names a declared PARAM via `param=`. Same reader,
+// same generic key=value mechanism (modules/formats/src/OcGraph.cpp's NODE-line parsing reads only
+// what parses as a numeric x/y coordinate as position; every OTHER trailing token is captured VERBATIM
+// into OcGraphNode::extraTokens -- modules/formats/include/aver/formats/OcGraph.hpp -- and re-emitted
+// on save), so `field=`/`param=`/`class=` all genuinely DO survive an editor load/save round trip; the
+// grammar was never the gap. The FORMER gap, NOW CLOSED (see GraphNodeDesc::attributes below and
+// sandbox/src/GraphEditor.cpp's details panel): this editor used to have no property/inspector panel
+// for ANY node, so extraTokens round-tripped opaquely but was not READABLE or EDITABLE from the GUI. A
+// node type's `attributes` list below is what the details panel reads to know which key=value tokens
+// to show as labelled, always-present rows for that type; anything else the node's extraTokens still
+// carries -- a key this table doesn't declare, on ANY node type -- is shown too, as a generic row, by
+// GraphEditorGeometry.hpp's computeAttributeRows (see its own header comment for why that split is a
+// hybrid, not a fully generic key=value editor: a node TYPE still gets to say what it expects, the way
+// it already says what pins it has, but nothing the table doesn't know about is ever dropped).
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace aver::editor {
@@ -66,18 +67,34 @@ struct GraphPinSpec {
     std::string defaultValue; // only meaningful for input pins; empty = none
 };
 
+// One NODE-line key=value attribute a node type declares -- param=/field=/class= today. Deliberately
+// just (key, label): the details panel that reads this needs nothing more to draw a labelled,
+// always-present InputText row (see GraphEditorGeometry.hpp's computeAttributeRows, which takes a
+// plain vector<pair<string,string>> rather than this type directly, for the same "stay decoupled from
+// the catalog" reason computeNodeLayout takes `title` as a parameter -- see that function's comment).
+struct GraphAttributeSpec {
+    std::string key;   // matches the extraTokens `key=` half exactly, e.g. "class"
+    std::string label; // shown in the details panel, e.g. "Class"
+};
+
 // One entry in the node palette / spawn table.
 struct GraphNodeDesc {
     std::string typeId;                // matches OcGraphNode::type; looked up case-insensitively
     std::string displayName;           // node header / palette label
     std::string category;              // palette grouping
     std::vector<GraphPinSpec> pins;    // inputs and outputs mixed; isOutput distinguishes which
+    std::vector<GraphAttributeSpec> attributes; // NODE-line key=value attributes this type takes;
+                                                 // empty for every type that has none (most of them).
 };
 
 namespace detail {
 
 inline GraphPinSpec pin(std::string name, std::string type, bool isOutput, std::string def = {}) {
     return GraphPinSpec{std::move(name), std::move(type), isOutput, std::move(def)};
+}
+
+inline GraphAttributeSpec attr(std::string key, std::string label) {
+    return GraphAttributeSpec{std::move(key), std::move(label)};
 }
 
 // One line per node type. This is the "one entry" the build task and Slice 6 both call for.
@@ -97,9 +114,12 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"Cos", "Cos", "Math", {pin("a", "float", false), pin("result", "float", true)}});
     // -- logic --
     t.push_back({"Compare", "Compare", "Logic", {pin("a", "float", false), pin("b", "float", false), pin("result", "bool", true)}});
-    // -- scene field access: entity id in, value in/out. See the KNOWN GAP note above re: field=. --
-    t.push_back({"GetField", "Get Field", "Scene", {pin("entity", "int", false), pin("value", "float", true)}});
-    t.push_back({"SetField", "Set Field", "Scene", {pin("entity", "int", false), pin("value", "float", false), pin("success", "bool", true)}});
+    // -- scene field access: entity id in, value in/out. field= names which scene field -- see the
+    //    header comment above and this table's `attributes` field. --
+    t.push_back({"GetField", "Get Field", "Scene", {pin("entity", "int", false), pin("value", "float", true)},
+        {attr("field", "Field")}});
+    t.push_back({"SetField", "Set Field", "Scene", {pin("entity", "int", false), pin("value", "float", false), pin("success", "bool", true)},
+        {attr("field", "Field")}});
     // -- GetField/SetField's Vec3 siblings: a Vec3-kind scene field (CLocal.position, CLight.colour,
     //    ...) as three ordinary float pins rather than one new pin TYPE -- see
     //    scripting/csharp/Aver.Graph/GraphCompiler.cs's FieldKindVec3/RequireVec3Field comments for why
@@ -107,14 +127,33 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    OcGraphParser.AddDefaultPins's "getfieldvec3"/"setfieldvec3" cases, same as GetField/SetField
     //    above. No exec pins on either by default (mirrors GetField/SetField exactly).
     t.push_back({"GetFieldVec3", "Get Field (Vec3)", "Scene", {
-        pin("entity", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true)}});
+        pin("entity", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true)},
+        {attr("field", "Field")}});
     t.push_back({"SetFieldVec3", "Set Field (Vec3)", "Scene", {
         pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false),
-        pin("success", "bool", true)}});
+        pin("success", "bool", true)},
+        {attr("field", "Field")}});
+    // -- MouseDelta / MoveAxis: continuous input -- look and move, the two things a first-person
+    //    controller is made of, neither of which InputKey's digital key state can express. Both get
+    //    exec pins by default (unlike GetField/SetField/GetFieldVec3/SetFieldVec3 above, mirroring
+    //    Spawn/Raycast instead) -- see scripting/csharp/Aver.Graph/GraphCompiler.cs's
+    //    IsExecCapableMouseDeltaType/IsExecCapableMoveAxisType comments for why: one frame's input
+    //    must cost exactly one native call regardless of how many output pins a graph reads, and that
+    //    guarantee needs the same exec-visit-cached shape Raycast already established, even though
+    //    neither read is expensive the way a physics query is. Pin sets copied field for field from
+    //    OcGraphParser.AddDefaultPins's "mousedelta"/"moveaxis" cases. MoveAxis has no "z" pin --
+    //    Input.MoveAxis's own Z is hardcoded 0 always (Aver.Framework/Input.cs).
+    t.push_back({"MouseDelta", "Mouse Delta", "Input", {
+        pin("exec", "exec", false), pin("then", "exec", true),
+        pin("deltaX", "float", true), pin("deltaY", "float", true), pin("wheel", "float", true)}});
+    t.push_back({"MoveAxis", "Move Axis", "Input", {
+        pin("exec", "exec", false), pin("then", "exec", true),
+        pin("forward", "float", true), pin("right", "float", true)}});
     // -- graph parameter read, another concurrent-workflow addition; type defaults to float, the
     //    common case, and can be edited per-instance like any other pin since layout/pin-typing
-    //    always prefers the node's own recorded pins over this table (see the header comment). --
-    t.push_back({"Param", "Param", "Param", {pin("value", "float", true)}});
+    //    always prefers the node's own recorded pins over this table (see the header comment).
+    //    param= names which declared PARAM this node reads. --
+    t.push_back({"Param", "Param", "Param", {pin("value", "float", true)}, {attr("param", "Param Name")}});
 
     // -- flow / exec: control flow, not data flow. "exec" is a PIN TYPE, exactly like "float"/"int"/
     //    "bool" above -- see modules/formats/include/aver/formats/OcGraph.hpp's comment on
@@ -171,11 +210,11 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    scripting/csharp/Aver.Graph/GraphCompiler.cs's IsExecCapableSpawnType comment for why it is
     //    refused by the pure-dataflow (PULL) compiler even more strictly than SetField is. class= names
     //    which registered class to spawn -- the same generic key=value NODE-line attribute field=/
-    //    param= already use; this table has no property panel to author it from either, same KNOWN GAP
-    //    as field= above.
+    //    param= already use.
     t.push_back({"Spawn", "Spawn", "Actor", {
         pin("exec", "exec", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false),
-        pin("then", "exec", true), pin("entity", "int", true)}});
+        pin("then", "exec", true), pin("entity", "int", true)},
+        {attr("class", "Class")}});
     return t;
 }
 

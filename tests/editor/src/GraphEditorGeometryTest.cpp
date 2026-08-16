@@ -165,6 +165,43 @@ static void testNodeCatalog() {
         check(false, "Spawn present (shape check skipped)");
     }
 
+    // MouseDelta/MoveAxis: the continuous-input pair -- proving this editor's palette was kept in
+    // parity with scripting/csharp/Aver.Graph/OcGraphParser.cs's own "mousedelta"/"moveaxis" cases,
+    // exactly like the GetFieldVec3/SetFieldVec3/Spawn checks above. Both get exec pins by default
+    // (mirroring Spawn/Raycast, unlike GetFieldVec3/SetFieldVec3) -- see GraphNodeDefs.hpp's own
+    // comment on why.
+    check(findGraphNodeDesc("MouseDelta") != nullptr, "catalog has 'MouseDelta'");
+    const GraphNodeDesc* mouseDelta = findGraphNodeDesc("MouseDelta");
+    if (mouseDelta) {
+        int execIns = 0, execOuts = 0, dataIns = 0, dataOuts = 0;
+        for (const auto& p : mouseDelta->pins) {
+            if (p.type == "exec") (p.isOutput ? execOuts : execIns)++;
+            else (p.isOutput ? dataOuts : dataIns)++;
+        }
+        check(execIns == 1, "MouseDelta has exactly one incoming exec pin");
+        check(execOuts == 1, "MouseDelta has exactly one outgoing exec pin ('then')");
+        check(dataIns == 0, "MouseDelta has no non-exec input pins");
+        check(dataOuts == 3, "MouseDelta has 3 non-exec output pins (deltaX, deltaY, wheel)");
+    } else {
+        check(false, "MouseDelta present (shape check skipped)");
+    }
+
+    check(findGraphNodeDesc("MoveAxis") != nullptr, "catalog has 'MoveAxis'");
+    const GraphNodeDesc* moveAxis = findGraphNodeDesc("MoveAxis");
+    if (moveAxis) {
+        int execIns = 0, execOuts = 0, dataIns = 0, dataOuts = 0;
+        for (const auto& p : moveAxis->pins) {
+            if (p.type == "exec") (p.isOutput ? execOuts : execIns)++;
+            else (p.isOutput ? dataOuts : dataIns)++;
+        }
+        check(execIns == 1, "MoveAxis has exactly one incoming exec pin");
+        check(execOuts == 1, "MoveAxis has exactly one outgoing exec pin ('then')");
+        check(dataIns == 0, "MoveAxis has no non-exec input pins");
+        check(dataOuts == 2, "MoveAxis has 2 non-exec output pins (forward, right) -- no 'z' pin");
+    } else {
+        check(false, "MoveAxis present (shape check skipped)");
+    }
+
     // Branch's shape: one incoming exec pulse, a bool condition, and two outgoing exec pins -- the
     // "decide" primitive the whole visual-scripting phase exists to add.
     const GraphNodeDesc* branch = findGraphNodeDesc("Branch");
@@ -576,6 +613,169 @@ static void testAutoLayout() {
     check(emptyPos.empty(), "an empty graph produces an empty layout with no crash");
 }
 
+// ============================================================================= node attributes (Gap B) =
+// The pure, headless half of the node-attribute authoring surface: reading/writing a NODE line's
+// key=value extraTokens, and composing the rows a details panel would show. GraphEditorLoadSaveTest
+// covers the same functions again end to end (through GraphEditor's real save() path, to a real file on
+// disk); these tests isolate the model itself, one property at a time, with no file I/O at all.
+static void testNodeAttributeCatalog() {
+    AVER_INFO("=== node attribute catalog (GraphNodeDesc::attributes) ===");
+
+    // Exactly the six types the task brief names: param=/field=/field=/field=/field=/class=.
+    struct Expect { const char* type; const char* key; };
+    const Expect expected[] = {
+        {"Param", "param"}, {"GetField", "field"}, {"SetField", "field"},
+        {"GetFieldVec3", "field"}, {"SetFieldVec3", "field"}, {"Spawn", "class"},
+    };
+    for (const auto& e : expected) {
+        const GraphNodeDesc* d = findGraphNodeDesc(e.type);
+        if (!d) { check(false, std::string(e.type) + " present (attribute check skipped)"); continue; }
+        check(d->attributes.size() == 1 && d->attributes[0].key == e.key,
+              std::string(e.type) + " declares exactly one attribute, key='" + e.key + "'");
+        check(!d->attributes[0].label.empty(), std::string(e.type) + "'s attribute has a non-empty display label");
+    }
+
+    // A type with no attributes at all declares an empty list, not a list with an empty entry --
+    // computeAttributeRows below relies on this to draw nothing extra for a plain Add node.
+    const char* noAttrs[] = {"Add", "ConstFloat", "Branch", "OnTick", "MouseDelta", "MoveAxis"};
+    for (const char* t : noAttrs) {
+        const GraphNodeDesc* d = findGraphNodeDesc(t);
+        if (d) check(d->attributes.empty(), std::string(t) + " declares no attributes");
+        else check(false, std::string(t) + " present (attribute check skipped)");
+    }
+}
+
+static void testNodeAttributeReadWrite() {
+    AVER_INFO("=== getNodeAttribute / setNodeAttribute / removeNodeAttribute ===");
+
+    // Absent key: found == false, value == "".
+    {
+        fmt::OcGraphNode n; n.id = "s"; n.type = "Spawn";
+        const GraphNodeAttribute a = getNodeAttribute(n, "class");
+        check(!a.found && a.value.empty(), "getNodeAttribute on a node with no extraTokens: not found, empty value");
+    }
+
+    // Present key, found and value read back correctly.
+    {
+        fmt::OcGraphNode n; n.id = "s"; n.type = "Spawn";
+        n.extraTokens = {"class=Widget"};
+        const GraphNodeAttribute a = getNodeAttribute(n, "class");
+        check(a.found && a.value == "Widget", "getNodeAttribute reads a present key=value token");
+    }
+
+    // A value containing '=' is preserved WHOLE -- only the FIRST '=' delimits key from value, matching
+    // OcGraphParser.cs's own `token.Split('=', 2)` contract exactly.
+    {
+        fmt::OcGraphNode n; n.id = "gv"; n.type = "GetFieldVec3";
+        n.extraTokens = {"field=Some.Weird==Path"};
+        const GraphNodeAttribute a = getNodeAttribute(n, "field");
+        check(a.found && a.value == "Some.Weird==Path",
+              "a value containing '=' round-trips whole: only the first '=' in the token is the delimiter");
+    }
+
+    // setNodeAttribute: new key is APPENDED, existing tokens keep their exact order.
+    {
+        fmt::OcGraphNode n; n.id = "s"; n.type = "Spawn";
+        n.extraTokens = {"debugLabel=marker"};
+        setNodeAttribute(n, "class", "Widget");
+        check(n.extraTokens.size() == 2 && n.extraTokens[0] == "debugLabel=marker" && n.extraTokens[1] == "class=Widget",
+              "setNodeAttribute appends a new key after every existing token, none reordered");
+    }
+
+    // setNodeAttribute: EXISTING key is updated IN PLACE, neighbours untouched -- the core "an edit to
+    // one attribute must not disturb another" guarantee.
+    {
+        fmt::OcGraphNode n; n.id = "gv"; n.type = "GetFieldVec3";
+        n.extraTokens = {"zzz_unknown=hello", "field=CLocal.position", "another_unknown=42"};
+        setNodeAttribute(n, "field", "CLight.colour");
+        check(n.extraTokens.size() == 3, "setNodeAttribute on an existing key does not change the token COUNT");
+        check(n.extraTokens[0] == "zzz_unknown=hello", "the token BEFORE the edited one is untouched");
+        check(n.extraTokens[1] == "field=CLight.colour", "the edited token is updated in place, same position");
+        check(n.extraTokens[2] == "another_unknown=42", "the token AFTER the edited one is untouched");
+    }
+
+    // A no-'=' token (a bare flag, not a key=value attribute at all) is never a match and is never
+    // touched by setNodeAttribute -- it isn't even representable as an attribute, so nothing here can
+    // corrupt it.
+    {
+        fmt::OcGraphNode n; n.id = "s"; n.type = "Spawn";
+        n.extraTokens = {"someBareFlag", "class=Old"};
+        setNodeAttribute(n, "class", "New");
+        check(n.extraTokens.size() == 2 && n.extraTokens[0] == "someBareFlag" && n.extraTokens[1] == "class=New",
+              "a bare (no '=') token is left exactly where it was");
+        check(!getNodeAttribute(n, "someBareFlag").found, "a bare token is never readable as an attribute (it has no value half)");
+    }
+
+    // removeNodeAttribute: deletes exactly the matching token, leaves everything else, no-op if absent.
+    {
+        fmt::OcGraphNode n; n.id = "s"; n.type = "Spawn";
+        n.extraTokens = {"debugLabel=marker", "class=Widget"};
+        removeNodeAttribute(n, "class");
+        check(n.extraTokens.size() == 1 && n.extraTokens[0] == "debugLabel=marker",
+              "removeNodeAttribute deletes exactly the matching token, nothing else");
+        removeNodeAttribute(n, "class"); // already absent
+        check(n.extraTokens.size() == 1, "removeNodeAttribute on an absent key is a no-op, not a crash or a wrong deletion");
+    }
+}
+
+static void testComputeAttributeRows() {
+    AVER_INFO("=== computeAttributeRows ===");
+
+    // Declared-but-absent: the row still appears, present == false, value == "" -- so an author sees
+    // 'class' is expected on a freshly-spawned Spawn node before typing anything into it.
+    {
+        fmt::OcGraphNode n; n.id = "s"; n.type = "Spawn";
+        const auto rows = computeAttributeRows(n, {{"class", "Class"}});
+        check(rows.size() == 1, "one declared attribute produces exactly one row, even when absent");
+        if (!rows.empty()) {
+            check(rows[0].key == "class" && rows[0].label == "Class" && !rows[0].present && rows[0].value.empty() && rows[0].declared,
+                  "the absent declared row: key/label set, present=false, value empty, declared=true");
+        }
+    }
+
+    // Declared-and-present: value/present reflect the real token.
+    {
+        fmt::OcGraphNode n; n.id = "s"; n.type = "Spawn";
+        n.extraTokens = {"class=Widget"};
+        const auto rows = computeAttributeRows(n, {{"class", "Class"}});
+        check(rows.size() == 1 && rows[0].present && rows[0].value == "Widget", "a present declared attribute reports its real value");
+    }
+
+    // A leftover key=value token the declared list doesn't name still produces a row (declared=false),
+    // in file order, AFTER the declared rows -- so it stays visible and editable, not opaque.
+    {
+        fmt::OcGraphNode n; n.id = "s"; n.type = "Spawn";
+        n.extraTokens = {"class=Widget", "debugLabel=marker"};
+        const auto rows = computeAttributeRows(n, {{"class", "Class"}});
+        check(rows.size() == 2, "one declared row plus one leftover row");
+        if (rows.size() == 2) {
+            check(rows[0].key == "class" && rows[0].declared, "declared row comes first");
+            check(rows[1].key == "debugLabel" && rows[1].value == "marker" && !rows[1].declared && rows[1].present,
+                  "the leftover row carries the uncatalogued key, its value, and declared=false");
+        }
+    }
+
+    // A bare (no '=') token produces NO row at all -- it cannot be labelled, and (per
+    // testNodeAttributeReadWrite above) is never touched by an edit through these rows either.
+    {
+        fmt::OcGraphNode n; n.id = "s"; n.type = "Spawn";
+        n.extraTokens = {"someBareFlag"};
+        const auto rows = computeAttributeRows(n, {});
+        check(rows.empty(), "a bare token with no declared attributes produces zero rows");
+    }
+
+    // An unrecognised node type (no declared attributes at all, the caller passes an empty list) still
+    // surfaces its own leftover tokens as generic rows -- computeAttributeRows never needs to know
+    // whether the TYPE was known, only what the node's own extraTokens say.
+    {
+        fmt::OcGraphNode n; n.id = "weird"; n.type = "SomeFutureNodeType";
+        n.extraTokens = {"future_attr=123"};
+        const auto rows = computeAttributeRows(n, {});
+        check(rows.size() == 1 && rows[0].key == "future_attr" && !rows[0].declared,
+              "an unrecognised node type's own key=value extraTokens still show up as generic rows");
+    }
+}
+
 int main() {
     AVER_INFO("======== GraphEditorGeometryTest ========");
     testNodeCatalog();
@@ -585,6 +785,9 @@ int main() {
     testCycleDetection();
     testCanvasTransform();
     testAutoLayout();
+    testNodeAttributeCatalog();
+    testNodeAttributeReadWrite();
+    testComputeAttributeRows();
     AVER_INFO("======== {} failure(s) ========", g_failures);
     return g_failures;
 }

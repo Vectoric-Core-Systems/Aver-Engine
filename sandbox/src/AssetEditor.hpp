@@ -52,6 +52,12 @@ public:
     // fall back to the shell.
     bool open(const std::string& path);
 
+    // The already-open editor for `path`, or nullptr. For a caller that needs to reach past the
+    // AssetEditor interface into a concrete editor's own extra surface (e.g. SandboxApp's
+    // --open-asset/--graph-select test hook selecting a node right after opening a .ocgraph) --
+    // open() itself deliberately returns only bool, so this is the other half.
+    AssetEditor* find(const std::string& path);
+
     // Draws every open editor, docking a newly opened one into `dockInto`. Returns true if any is
     // open. `dpi` scales the fallback size of an undocked window.
     bool draw(Engine& e, unsigned dockInto = 0, float dpi = 1.0f);

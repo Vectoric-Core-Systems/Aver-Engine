@@ -696,6 +696,44 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "pointZ", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // ---- MouseDelta / MoveAxis (continuous input) -----------------------------------------
+            // The gap InputKey does NOT close: InputKey covers digital key state, but look and move --
+            // the two things a first-person controller is made of -- are CONTINUOUS, not a single
+            // this-frame-or-not bit. Both wrap ONE call into Aver.Framework's polled input (see
+            // Aver.Framework.GraphInterop.MouseDeltaForGraph/MoveAxisForGraph's own comments) as a
+            // handful of ordinary float pins, the same "one native call, several scalar pins" shape
+            // GetFieldVec3/Raycast already established -- no new pin TYPE needed here either.
+            //
+            // BOTH get exec pins by default, mirroring Raycast rather than GetFieldVec3/SetFieldVec3
+            // (which get none) -- see GraphCompiler.IsExecCapableMouseDeltaType/
+            // IsExecCapableMoveAxisType's own comments for exactly why: even though neither read has
+            // Raycast's kind of per-call COST (both are memcpy/GetKey-class, the same cost class
+            // GetFieldVec3 itself reads under without caching), this slice's own requirement is that
+            // one frame's input costs exactly one native call regardless of how many output pins a
+            // graph reads, and the PUSH compiler only has one mechanism that guarantees that:
+            // _execLocals caching keyed to a single exec visit, exactly like Raycast's.
+
+            case "mousedelta":
+                // Zero data inputs -- nothing to read before the call. "then" (not "exec", for the
+                // same reason Raycast's own continuation pin isn't named "exec" either -- see that
+                // case's comment) is this node's single continuation, fired once the read completes.
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "deltaX", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "deltaY", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "wheel", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "moveaxis":
+                // Same shape as mousedelta above. Z is deliberately NOT a pin: Input.MoveAxis's own Z
+                // component is hardcoded 0 always (Aver.Framework/Input.cs), so a pin that could only
+                // ever read a compile-time-known constant would add noise, not information.
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "forward", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "right", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
             // ---- Spawn ---------------------------------------------------------------------------
             // SIDE-EFFECTING (creates a new scene entity), so -- UNLIKE getfieldvec3/setfieldvec3
             // above, which get no exec pins by default -- this DOES get exec pins by default, mirroring

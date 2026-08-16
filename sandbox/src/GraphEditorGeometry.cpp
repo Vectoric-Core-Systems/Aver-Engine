@@ -469,4 +469,93 @@ std::unordered_map<std::string, Vec2> autoLayoutPositions(const fmt::OcGraphData
     return out;
 }
 
+// ---------------------------------------------------------------------------------------------------
+// Node attributes (extraTokens)
+// ---------------------------------------------------------------------------------------------------
+
+namespace {
+
+// Locates the extraTokens entry for `key`, if any -- the ONE place that implements the "only the
+// first '=' delimits key from value" rule (matching OcGraphParser.cs's `token.Split('=', 2)`), shared
+// by all three public functions below so they cannot silently disagree with one another.
+// Returns node.extraTokens.size() if not found.
+usize findAttributeToken(const fmt::OcGraphNode& node, const std::string& key) {
+    for (usize i = 0; i < node.extraTokens.size(); ++i) {
+        const std::string& tok = node.extraTokens[i];
+        const usize eq = tok.find('=');
+        if (eq == std::string::npos) continue; // no '=' at all: not a key=value token, never a match
+        if (tok.compare(0, eq, key) == 0) return i;
+    }
+    return node.extraTokens.size();
+}
+
+} // namespace
+
+GraphNodeAttribute getNodeAttribute(const fmt::OcGraphNode& node, const std::string& key) {
+    GraphNodeAttribute a;
+    a.key = key;
+    const usize i = findAttributeToken(node, key);
+    if (i >= node.extraTokens.size()) return a; // found stays false, value stays ""
+    const std::string& tok = node.extraTokens[i];
+    const usize eq = tok.find('=');
+    a.value = tok.substr(eq + 1);
+    a.found = true;
+    return a;
+}
+
+void setNodeAttribute(fmt::OcGraphNode& node, const std::string& key, const std::string& value) {
+    const usize i = findAttributeToken(node, key);
+    const std::string token = key + "=" + value;
+    if (i < node.extraTokens.size()) {
+        node.extraTokens[i] = token; // in place: every OTHER token keeps its exact position
+    } else {
+        node.extraTokens.push_back(token); // new attribute: appended, nothing existing reordered
+    }
+}
+
+void removeNodeAttribute(fmt::OcGraphNode& node, const std::string& key) {
+    const usize i = findAttributeToken(node, key);
+    if (i < node.extraTokens.size()) node.extraTokens.erase(node.extraTokens.begin() + static_cast<isize>(i));
+}
+
+std::vector<GraphAttributeRow> computeAttributeRows(
+    const fmt::OcGraphNode& node, const std::vector<std::pair<std::string, std::string>>& declaredKeyLabels) {
+    std::vector<GraphAttributeRow> rows;
+    rows.reserve(declaredKeyLabels.size() + node.extraTokens.size());
+
+    // Declared rows first, in catalog order, always present so an author sees what's expected.
+    for (const auto& kv : declaredKeyLabels) {
+        GraphAttributeRow row;
+        row.key = kv.first;
+        row.label = kv.second;
+        row.declared = true;
+        const GraphNodeAttribute a = getNodeAttribute(node, kv.first);
+        row.present = a.found;
+        row.value = a.value;
+        rows.push_back(std::move(row));
+    }
+
+    // Leftover key=value-shaped tokens the declared list above doesn't name, in the node's own file
+    // order -- so an attribute this build's catalog has never heard of is still visible and editable,
+    // not merely opaque.
+    for (const std::string& tok : node.extraTokens) {
+        const usize eq = tok.find('=');
+        if (eq == std::string::npos) continue; // no '=': not representable as a row; left untouched
+        const std::string key = tok.substr(0, eq);
+        bool isDeclared = false;
+        for (const auto& kv : declaredKeyLabels)
+            if (kv.first == key) { isDeclared = true; break; }
+        if (isDeclared) continue; // already emitted above
+        GraphAttributeRow row;
+        row.key = key;
+        row.label = key;
+        row.value = tok.substr(eq + 1);
+        row.present = true;
+        row.declared = false;
+        rows.push_back(std::move(row));
+    }
+
+    return rows;
+}
+
 } // namespace aver::editor

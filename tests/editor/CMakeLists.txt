@@ -65,7 +65,15 @@ add_executable(GraphEditorLoadSaveTest
 target_include_directories(GraphEditorLoadSaveTest PRIVATE
   ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_compile_definitions(GraphEditorLoadSaveTest PRIVATE
-  AVER_OCGRAPH_FIXTURE="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/cross_impl_test.ocgraph")
+  AVER_OCGRAPH_FIXTURE="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/cross_impl_test.ocgraph"
+  # attribute_edit_test.ocgraph -- the Gap B (node-attribute authoring) round-trip fixture. This test
+  # edits a COPY of it (never the checked-in original -- see testAttributeEditRoundTrip's own comment)
+  # and writes the result back into the SAME C# test project directory under a different, generated
+  # filename, so scripting/csharp/Aver.Graph.Tests's own test suite can load and COMPILE exactly what
+  # this C++ editor actually wrote, not a hand-eyeballed copy of it. One definition of "where the
+  # source fixture lives," matching AVER_OCGRAPH_FIXTURE's own precedent just above.
+  AVER_OCGRAPH_ATTR_FIXTURE="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/attribute_edit_test.ocgraph"
+  AVER_OCGRAPH_ATTR_FIXTURE_OUTPUT="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/attribute_edit_test.output.ocgraph")
 target_link_libraries(GraphEditorLoadSaveTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(GraphEditorLoadSaveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 

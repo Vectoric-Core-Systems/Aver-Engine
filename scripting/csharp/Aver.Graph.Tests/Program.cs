@@ -78,6 +78,12 @@ class Program
         // disjointness boundary approached from the OnTick side instead of the OnHit side.
         failures += OnHitAdversarialTests.RunAll();
 
+        // Gap B cross-language proof: reads attribute_edit_test.output.ocgraph, the file
+        // tests/editor/src/GraphEditorLoadSaveTest.cpp's testAttributeEditRoundTrip() writes from a
+        // REAL GraphEditor::setAttribute()/save() call -- not a fixture this suite authored itself. See
+        // AttributeEditRoundTripTests.cs's own header comment; run GraphEditorLoadSaveTest.exe first.
+        failures += AttributeEditRoundTripTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

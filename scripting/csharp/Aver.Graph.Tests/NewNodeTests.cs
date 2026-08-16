@@ -1,10 +1,12 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
-// Tests for the three node types added on top of the exec/PUSH compiler (a9038da): Select, InputKey,
-// Raycast. See GraphCompiler.cs's EmitSelect/EmitInputKey/EmitRaycast/EmitExecRaycast comments for the
-// design these tests are proving, and OcGraphParser.cs's "Select / InputKey / Raycast" section for the
-// pin shapes.
+// Tests for the node types added on top of the exec/PUSH compiler (a9038da): Select, InputKey,
+// Raycast, and -- the continuous-input pair closing the visual-scripting README's remaining
+// engine-side gap -- MouseDelta, MoveAxis. See GraphCompiler.cs's EmitSelect/EmitInputKey/EmitRaycast/
+// EmitExecRaycast/EmitMouseDelta/EmitExecMouseDelta/EmitMoveAxis/EmitExecMoveAxis comments for the
+// design these tests are proving, and OcGraphParser.cs's "Select / InputKey / Raycast" and
+// "MouseDelta / MoveAxis" sections for the pin shapes.
 //
 // SELECT is fully testable end to end -- pure data, no native surface, so both PULL (Compile()) and
 // PUSH (CompileEntryPoint()) tests below actually invoke the compiled delegate and check real numbers.
@@ -69,6 +71,20 @@ static class NewNodeTests
         failures += TestRaycastMissingOutputPinFailsCompileWithClearError();
         failures += TestRaycastPulledWithoutExecVisitFailsClearly();
         failures += TestRaycastCoexistsWithPureDataPullWhenGraphHasNoEntryAtAll();
+
+        // ---- MouseDelta ----
+        failures += TestMouseDeltaDefaultPinsShape();
+        failures += TestMouseDeltaEmitsRealNativeCallPull();
+        failures += TestMouseDeltaEmitsRealNativeCallPush();
+        failures += TestMouseDeltaPulledWithoutExecVisitFailsClearly();
+        failures += TestMouseDeltaCoexistsWithPureDataPullWhenGraphHasNoEntryAtAll();
+
+        // ---- MoveAxis ----
+        failures += TestMoveAxisDefaultPinsShape();
+        failures += TestMoveAxisEmitsRealNativeCallPull();
+        failures += TestMoveAxisEmitsRealNativeCallPush();
+        failures += TestMoveAxisPulledWithoutExecVisitFailsClearly();
+        failures += TestMoveAxisCoexistsWithPureDataPullWhenGraphHasNoEntryAtAll();
 
         return failures;
     }
@@ -733,6 +749,478 @@ OUT rc hit
                     return 1;
                 }
                 Console.WriteLine($"  PASS: pure-PULL compile succeeded, real call reached Aver.Physics: {dnfEx.Message}");
+                return 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {ex.Message}");
+            return 1;
+        }
+    }
+
+    // =================================================================================================
+    // MOUSEDELTA / MOVEAXIS
+    //
+    // The continuous-input pair (see GraphCompiler.EmitExecMouseDelta/EmitExecMoveAxis and
+    // Aver.Framework.GraphInterop.MouseDeltaForGraph/MoveAxisForGraph for the design). Both are wired
+    // through Raycast's exec-cached shape, not GetFieldVec3's uncached one -- see those comments for
+    // why -- so the test shapes below mirror RAYCAST's five tests (pin shape, PULL real-call, PUSH
+    // real-call, pulled-without-exec-visit refusal, coexistence with a pure-PULL graph) rather than
+    // InputKey's two. Same INHERITED LIMITATION this file's header comment already names for
+    // InputKey/Raycast: this process cannot load a live native Aver.Framework, so
+    // EntryPointNotFoundException naming the real P/Invoke symbol -- not a stub-shaped return -- is
+    // the correct, strongest thing provable here. aver_fw_input_mouse is the symbol MouseDelta's
+    // single native call reaches; MoveAxis's own wrapper reaches aver_fw_input_key instead (the SAME
+    // symbol InputKey's own tests already name), since Input.MoveAxis is built from GetKey() calls,
+    // not a dedicated native entry point of its own.
+    // =================================================================================================
+
+    private static int TestMouseDeltaDefaultPinsShape()
+    {
+        Console.WriteLine("Test: MouseDelta's default pins are exec-in, then(exec-out), deltaX/deltaY/wheel:float-out");
+        try
+        {
+            var text = "OCGRAPH 1\nNODE m MouseDelta\nOUT m deltaX\n";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            var node = graph.Nodes["m"];
+            bool ok =
+                node.Pins.Find(p => p.Name == "exec" && !p.IsOutput && p.Type == PinType.Exec) != null &&
+                node.Pins.Find(p => p.Name == "then" && p.IsOutput && p.Type == PinType.Exec) != null &&
+                node.Pins.Find(p => p.Name == "deltaX" && p.IsOutput && p.Type == PinType.Float) != null &&
+                node.Pins.Find(p => p.Name == "deltaY" && p.IsOutput && p.Type == PinType.Float) != null &&
+                node.Pins.Find(p => p.Name == "wheel" && p.IsOutput && p.Type == PinType.Float) != null &&
+                node.Pins.Count == 5;
+            if (!ok)
+            {
+                Console.WriteLine($"  FAIL: unexpected pin set ({node.Pins.Count} pins): [{string.Join(", ", node.Pins.ConvertAll(p => $"{p.Name}:{p.Type}:{(p.IsOutput ? "out" : "in")}"))}]");
+                return 1;
+            }
+            Console.WriteLine("  PASS: 5 pins (1 exec-in, 1 exec-out, 3 float-out), types match spec");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {ex.Message}");
+            return 1;
+        }
+    }
+
+    private static string MouseDeltaGraphText() => @"
+OCGRAPH 1
+NODE m MouseDelta
+OUT m deltaX
+OUT m deltaY
+OUT m wheel
+";
+
+    // PULL: Compile() computes all three outputs with ONE call -- see EmitMouseDelta's own comment for
+    // why the PULL compiler needs no _execLocals-style mechanism to get that guarantee (Compile()'s
+    // single topological pass gives it for free, exactly like Raycast/GetFieldVec3). Invoking the
+    // compiled delegate is what proves the emitted call is real.
+    private static int TestMouseDeltaEmitsRealNativeCallPull()
+    {
+        Console.WriteLine("Test: MouseDelta (PULL/Compile()) emits a real native call, not a stub");
+        try
+        {
+            if (!OcGraphParser.Parse(MouseDeltaGraphText(), out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            var compiler = new GraphCompiler(graph);
+            var compiled = compiler.Compile(out var compileErr);
+            if (compiled is not Func<object[]> fn)
+            {
+                Console.WriteLine($"  FAIL: Compile error: {compileErr ?? "(wrong delegate shape)"}");
+                return 1;
+            }
+            try
+            {
+                object[] unused = fn();
+                Console.WriteLine($"  FAIL: expected invoking this to throw (see this file's header comment) but it returned [{string.Join(", ", unused)}]");
+                return 1;
+            }
+            catch (EntryPointNotFoundException epEx)
+            {
+                if (!epEx.Message.Contains("aver_fw_input_mouse"))
+                {
+                    Console.WriteLine($"  FAIL: threw EntryPointNotFoundException, but not naming aver_fw_input_mouse: {epEx.Message}");
+                    return 1;
+                }
+                Console.WriteLine($"  PASS: real call attempted 'aver_fw_input_mouse': {epEx.Message}");
+                return 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {ex.Message}");
+            return 1;
+        }
+    }
+
+    // PUSH: MouseDelta reached via the exec chain -- EmitExecMouseDelta's ONE native call, results
+    // captured into _execLocals, read back via OUT after the chain finishes. Same real-call proof as
+    // the PULL test above, through the OTHER mechanism.
+    private static int TestMouseDeltaEmitsRealNativeCallPush()
+    {
+        Console.WriteLine("Test: MouseDelta (PUSH/CompileEntryPoint, via the exec chain) emits a real native call, not a stub");
+        try
+        {
+            var text = @"
+OCGRAPH 1
+NODE tick OnTick
+NODE m MouseDelta
+LINK tick.exec m.exec
+ENTRY tick OnTick
+OUT m deltaX
+OUT m deltaY
+OUT m wheel
+";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            var compiler = new GraphCompiler(graph);
+            var compiled = compiler.CompileEntryPoint("OnTick", out var compileErr);
+            if (compiled is not Func<object[]> fn)
+            {
+                Console.WriteLine($"  FAIL: Compile error: {compileErr ?? "(wrong delegate shape)"}");
+                return 1;
+            }
+            try
+            {
+                object[] unused = fn();
+                Console.WriteLine($"  FAIL: expected invoking this to throw but it returned [{string.Join(", ", unused)}]");
+                return 1;
+            }
+            catch (EntryPointNotFoundException epEx)
+            {
+                if (!epEx.Message.Contains("aver_fw_input_mouse"))
+                {
+                    Console.WriteLine($"  FAIL: threw EntryPointNotFoundException, but not naming aver_fw_input_mouse: {epEx.Message}");
+                    return 1;
+                }
+                Console.WriteLine($"  PASS: real call attempted 'aver_fw_input_mouse' via the PUSH compiler too: {epEx.Message}");
+                return 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {ex.Message}");
+            return 1;
+        }
+    }
+
+    // A DELIBERATE limitation, tested directly, mirroring TestRaycastPulledWithoutExecVisitFailsClearly
+    // exactly: a MouseDelta node inside an ENTRY graph that is wired into NO exec chain at all has no
+    // _execLocals entry for anything OUT tries to read back, and "mousedelta" has no case of its own in
+    // EmitPullOutput's switch -- so this must fail with a clear NotSupportedException naming the node
+    // type, not silently return 0 or crash. This is the price of guaranteeing "one native call, however
+    // many pins are read" -- see IsExecCapableMouseDeltaType's own comment.
+    private static int TestMouseDeltaPulledWithoutExecVisitFailsClearly()
+    {
+        Console.WriteLine("Test: MouseDelta never wired into the exec chain, but pulled via OUT, fails clearly (not silently 0)");
+        try
+        {
+            var text = @"
+OCGRAPH 1
+NODE start OnStart
+NODE m MouseDelta
+ENTRY start OnStart
+OUT m deltaX
+";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            var compiler = new GraphCompiler(graph);
+            var compiled = compiler.CompileEntryPoint("OnStart", out var compileErr);
+            if (compiled != null)
+            {
+                Console.WriteLine("  FAIL: expected CompileEntryPoint to fail (m.deltaX pulled with no exec visit ever reaching m), but it succeeded");
+                return 1;
+            }
+            if (compileErr == null || compileErr.IndexOf("MouseDelta", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                Console.WriteLine($"  FAIL: expected an error naming the MouseDelta node type, got: {compileErr}");
+                return 1;
+            }
+            Console.WriteLine($"  PASS: {compileErr}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {ex.Message}");
+            return 1;
+        }
+    }
+
+    // Both mechanisms coexist without interfering, mirroring TestRaycastCoexistsWithPureDataPullWhenGraphHasNoEntryAtAll.
+    private static int TestMouseDeltaCoexistsWithPureDataPullWhenGraphHasNoEntryAtAll()
+    {
+        Console.WriteLine("Test: a pure-PULL graph (no ENTRY at all) still computes MouseDelta's outputs via EmitNode, unaffected by the PUSH-only restriction above");
+        try
+        {
+            if (!OcGraphParser.Parse(MouseDeltaGraphText(), out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            if (graph.EntryPoints.Count != 0)
+            {
+                Console.WriteLine($"  FAIL: expected zero ENTRY records, got {graph.EntryPoints.Count}");
+                return 1;
+            }
+            var compiler = new GraphCompiler(graph);
+            var compiled = compiler.Compile(out var compileErr);
+            if (compiled is not Func<object[]> fn)
+            {
+                Console.WriteLine($"  FAIL: Compile error: {compileErr ?? "(wrong delegate shape)"}");
+                return 1;
+            }
+            try
+            {
+                object[] unused = fn();
+                Console.WriteLine($"  FAIL: expected invoking this to throw but it returned [{string.Join(", ", unused)}]");
+                return 1;
+            }
+            catch (EntryPointNotFoundException epEx)
+            {
+                if (!epEx.Message.Contains("aver_fw_input_mouse"))
+                {
+                    Console.WriteLine($"  FAIL: threw EntryPointNotFoundException, but not naming aver_fw_input_mouse: {epEx.Message}");
+                    return 1;
+                }
+                Console.WriteLine($"  PASS: pure-PULL compile succeeded, real call attempted 'aver_fw_input_mouse': {epEx.Message}");
+                return 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {ex.Message}");
+            return 1;
+        }
+    }
+
+    // =================================================================================================
+    // MOVEAXIS -- same five tests as MouseDelta above, same shape, different symbol
+    // (aver_fw_input_key, shared with InputKey -- see this section's header comment).
+    // =================================================================================================
+
+    private static int TestMoveAxisDefaultPinsShape()
+    {
+        Console.WriteLine("Test: MoveAxis's default pins are exec-in, then(exec-out), forward/right:float-out (no 'z')");
+        try
+        {
+            var text = "OCGRAPH 1\nNODE m MoveAxis\nOUT m forward\n";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            var node = graph.Nodes["m"];
+            bool ok =
+                node.Pins.Find(p => p.Name == "exec" && !p.IsOutput && p.Type == PinType.Exec) != null &&
+                node.Pins.Find(p => p.Name == "then" && p.IsOutput && p.Type == PinType.Exec) != null &&
+                node.Pins.Find(p => p.Name == "forward" && p.IsOutput && p.Type == PinType.Float) != null &&
+                node.Pins.Find(p => p.Name == "right" && p.IsOutput && p.Type == PinType.Float) != null &&
+                node.Pins.Find(p => p.Name == "z") == null &&
+                node.Pins.Count == 4;
+            if (!ok)
+            {
+                Console.WriteLine($"  FAIL: unexpected pin set ({node.Pins.Count} pins): [{string.Join(", ", node.Pins.ConvertAll(p => $"{p.Name}:{p.Type}:{(p.IsOutput ? "out" : "in")}"))}]");
+                return 1;
+            }
+            Console.WriteLine("  PASS: 4 pins (1 exec-in, 1 exec-out, 2 float-out), no 'z' pin, types match spec");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {ex.Message}");
+            return 1;
+        }
+    }
+
+    private static string MoveAxisGraphText() => @"
+OCGRAPH 1
+NODE m MoveAxis
+OUT m forward
+OUT m right
+";
+
+    private static int TestMoveAxisEmitsRealNativeCallPull()
+    {
+        Console.WriteLine("Test: MoveAxis (PULL/Compile()) emits a real native call, not a stub");
+        try
+        {
+            if (!OcGraphParser.Parse(MoveAxisGraphText(), out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            var compiler = new GraphCompiler(graph);
+            var compiled = compiler.Compile(out var compileErr);
+            if (compiled is not Func<object[]> fn)
+            {
+                Console.WriteLine($"  FAIL: Compile error: {compileErr ?? "(wrong delegate shape)"}");
+                return 1;
+            }
+            try
+            {
+                object[] unused = fn();
+                Console.WriteLine($"  FAIL: expected invoking this to throw but it returned [{string.Join(", ", unused)}]");
+                return 1;
+            }
+            catch (EntryPointNotFoundException epEx)
+            {
+                if (!epEx.Message.Contains("aver_fw_input_key"))
+                {
+                    Console.WriteLine($"  FAIL: threw EntryPointNotFoundException, but not naming aver_fw_input_key: {epEx.Message}");
+                    return 1;
+                }
+                Console.WriteLine($"  PASS: real call attempted 'aver_fw_input_key': {epEx.Message}");
+                return 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {ex.Message}");
+            return 1;
+        }
+    }
+
+    private static int TestMoveAxisEmitsRealNativeCallPush()
+    {
+        Console.WriteLine("Test: MoveAxis (PUSH/CompileEntryPoint, via the exec chain) emits a real native call, not a stub");
+        try
+        {
+            var text = @"
+OCGRAPH 1
+NODE tick OnTick
+NODE m MoveAxis
+LINK tick.exec m.exec
+ENTRY tick OnTick
+OUT m forward
+OUT m right
+";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            var compiler = new GraphCompiler(graph);
+            var compiled = compiler.CompileEntryPoint("OnTick", out var compileErr);
+            if (compiled is not Func<object[]> fn)
+            {
+                Console.WriteLine($"  FAIL: Compile error: {compileErr ?? "(wrong delegate shape)"}");
+                return 1;
+            }
+            try
+            {
+                object[] unused = fn();
+                Console.WriteLine($"  FAIL: expected invoking this to throw but it returned [{string.Join(", ", unused)}]");
+                return 1;
+            }
+            catch (EntryPointNotFoundException epEx)
+            {
+                if (!epEx.Message.Contains("aver_fw_input_key"))
+                {
+                    Console.WriteLine($"  FAIL: threw EntryPointNotFoundException, but not naming aver_fw_input_key: {epEx.Message}");
+                    return 1;
+                }
+                Console.WriteLine($"  PASS: real call attempted 'aver_fw_input_key' via the PUSH compiler too: {epEx.Message}");
+                return 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {ex.Message}");
+            return 1;
+        }
+    }
+
+    private static int TestMoveAxisPulledWithoutExecVisitFailsClearly()
+    {
+        Console.WriteLine("Test: MoveAxis never wired into the exec chain, but pulled via OUT, fails clearly (not silently 0)");
+        try
+        {
+            var text = @"
+OCGRAPH 1
+NODE start OnStart
+NODE m MoveAxis
+ENTRY start OnStart
+OUT m forward
+";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            var compiler = new GraphCompiler(graph);
+            var compiled = compiler.CompileEntryPoint("OnStart", out var compileErr);
+            if (compiled != null)
+            {
+                Console.WriteLine("  FAIL: expected CompileEntryPoint to fail (m.forward pulled with no exec visit ever reaching m), but it succeeded");
+                return 1;
+            }
+            if (compileErr == null || compileErr.IndexOf("MoveAxis", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                Console.WriteLine($"  FAIL: expected an error naming the MoveAxis node type, got: {compileErr}");
+                return 1;
+            }
+            Console.WriteLine($"  PASS: {compileErr}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {ex.Message}");
+            return 1;
+        }
+    }
+
+    private static int TestMoveAxisCoexistsWithPureDataPullWhenGraphHasNoEntryAtAll()
+    {
+        Console.WriteLine("Test: a pure-PULL graph (no ENTRY at all) still computes MoveAxis's outputs via EmitNode, unaffected by the PUSH-only restriction above");
+        try
+        {
+            if (!OcGraphParser.Parse(MoveAxisGraphText(), out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            if (graph.EntryPoints.Count != 0)
+            {
+                Console.WriteLine($"  FAIL: expected zero ENTRY records, got {graph.EntryPoints.Count}");
+                return 1;
+            }
+            var compiler = new GraphCompiler(graph);
+            var compiled = compiler.Compile(out var compileErr);
+            if (compiled is not Func<object[]> fn)
+            {
+                Console.WriteLine($"  FAIL: Compile error: {compileErr ?? "(wrong delegate shape)"}");
+                return 1;
+            }
+            try
+            {
+                object[] unused = fn();
+                Console.WriteLine($"  FAIL: expected invoking this to throw but it returned [{string.Join(", ", unused)}]");
+                return 1;
+            }
+            catch (EntryPointNotFoundException epEx)
+            {
+                if (!epEx.Message.Contains("aver_fw_input_key"))
+                {
+                    Console.WriteLine($"  FAIL: threw EntryPointNotFoundException, but not naming aver_fw_input_key: {epEx.Message}");
+                    return 1;
+                }
+                Console.WriteLine($"  PASS: pure-PULL compile succeeded, real call attempted 'aver_fw_input_key': {epEx.Message}");
                 return 0;
             }
         }

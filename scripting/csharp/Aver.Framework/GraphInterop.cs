@@ -132,4 +132,58 @@ internal static class GraphInterop
         if (!c.IsValid) return 0;
         return Actors.Spawn(c, new Vec3(x, y, z)).Handle;
     }
+
+    /// <summary>Reads this frame's mouse delta and wheel as three scalars from ONE call to
+    /// aver_fw_input_mouse -- the LOOK half of continuous input (the other half is
+    /// MoveAxisForGraph, below). Deliberately does NOT go through Input.MouseDeltaX/MouseDeltaY/
+    /// MouseWheel: each of those three PROPERTIES independently calls aver_fw_input_mouse in its own
+    /// getter (Input.cs), so wiring GraphCompiler's emitted IL straight at them -- one call per pin,
+    /// as InputKey's own single-scalar shape would naturally suggest -- would cost three native calls
+    /// for one frame's worth of state instead of one. This wrapper reads the packed {dx,dy,wheel}
+    /// buffer once (reusing Entity.Scratch3, exactly like GetFieldVecForGraph does for
+    /// aver_scene_get_vec) and unpacks all three, mirroring GetFieldVecForGraph's own shape one level
+    /// up: a float[]-taking P/Invoke reshaped into scalar out-params so hand-emitted IL never has to
+    /// allocate or index an array on the stack -- the same "cannot cheaply construct/unpack" problem
+    /// this file's own header comment names for Raycast/Vec3.
+    ///
+    /// CALLED AT MOST ONCE PER EXEC VISIT ON THE PUSH COMPILER, NOT PER PIN -- and this is a
+    /// DELIBERATE DEPARTURE from GetFieldVec3's own "no _execLocals caching, a Vec3 read is a
+    /// same-cost sibling of GetField's single-float memcpy" precedent (see
+    /// GraphCompiler.EmitPullGetFieldVec3's comment). aver_fw_input_mouse IS exactly that same cost
+    /// class -- FrameworkAbi.cpp's implementation is a three-float struct-field copy, nothing more --
+    /// so cost alone would argue for GetFieldVec3's uncached shape here too. The reason this method is
+    /// instead wired through Raycast's exec-cached shape (see GraphCompiler.EmitExecMouseDelta /
+    /// IsExecCapableMouseDeltaType) is a DIFFERENT, EXPLICIT requirement this slice was built against:
+    /// one frame's mouse state must cost exactly one native call regardless of how many of
+    /// deltaX/deltaY/wheel a graph reads back, not "cheap enough that repeating it doesn't matter."
+    /// Idempotent within a frame either way (aver_fw_input_new_frame() only mutates the underlying
+    /// state once per real engine frame, before any graph runs), so nothing here is UNSAFE to call
+    /// more than once -- only wasteful, which is exactly what the exec-cached shape avoids.</summary>
+    internal static void MouseDeltaForGraph(out float deltaX, out float deltaY, out float wheel)
+    {
+        float[] o = Entity.Scratch3;
+        Fw.aver_fw_input_mouse(o);
+        deltaX = o[0]; deltaY = o[1]; wheel = o[2];
+    }
+
+    /// <summary>Reads this frame's WASD/arrow movement axis as two scalars -- the MOVE half of
+    /// continuous input, see MouseDeltaForGraph's own comment for the LOOK half and for why both are
+    /// wired through the exec-cached (Raycast-shaped) PUSH-compiler path rather than GetFieldVec3's
+    /// uncached one. Unpacks Input.MoveAxis's X (forward) and Y (right) components; Z is NOT a
+    /// parameter here -- Input.MoveAxis's own doc says Z is hardcoded 0 always (Input.cs), so a third
+    /// out-param that could only ever read a compile-time-known constant would add noise, not
+    /// information, to every graph that uses this node.
+    ///
+    /// Unlike MouseDeltaForGraph's single P/Invoke, Input.MoveAxis itself makes roughly eight separate
+    /// aver_fw_input_key calls (one GetKey per WASD/arrow key) to assemble its Vec3 -- an existing cost
+    /// inherent to MoveAxis's own definition, unchanged by wrapping it for a graph. What THIS wrapper
+    /// guarantees is that those eight calls happen at most ONCE per exec visit (one call to THIS
+    /// method, not one per output pin) rather than doubling to ~16 if a graph reads forward AND right
+    /// independently -- the same "one wrapper call, however many pins" property MouseDeltaForGraph
+    /// gives its own single native call.</summary>
+    internal static void MoveAxisForGraph(out float forward, out float right)
+    {
+        Vec3 v = Input.MoveAxis;
+        forward = v.X; right = v.Y;
+    }
 }

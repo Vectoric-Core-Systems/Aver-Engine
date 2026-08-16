@@ -65,6 +65,44 @@ public:
     bool save(std::string* why) override;
     void onFileChanged() override;
 
+    // ---- read access for the details panel and for headless tests ----------------------------------
+    // The real data model -- read-only. Exposed (unlike graph_ itself) so GraphEditorLoadSaveTest can
+    // inspect the result of an attribute edit through the exact same public surface draw()'s details
+    // panel reads from, with no ImGui context required.
+    const fmt::OcGraphData& graph() const { return graph_; }
+    const std::vector<std::string>& selectedNodes() const { return selectedNodes_; }
+
+    // Selects exactly `nodeId` (clearing any link selection), the same end state a canvas click on
+    // that node reaches -- a no-op if `nodeId` does not name a node currently in the graph. Not an
+    // "edit" (no pushUndo(), no dirty_): selection is display state, not data, exactly like
+    // displayPos_. Public so a caller other than the canvas's own click handling can drive selection
+    // -- SandboxApp's --open-asset/--graph-select test hook uses this to prove the details panel
+    // renders a real, populated node without a human clicking the canvas.
+    void selectNode(const std::string& nodeId);
+
+    // ---- attribute editing (Gap B) -------------------------------------------------------------------
+    // A selected node's NODE-line key=value attributes -- param=/field=/class= today, anything else
+    // tomorrow. See GraphEditorGeometry.hpp's getNodeAttribute/setNodeAttribute/removeNodeAttribute for
+    // the underlying order-preserving, unknown-survives contract; these two just add the same
+    // pushUndo()/dirty_ bookkeeping every other edit path in this file already has (deleteSelection,
+    // commitLink). PUBLIC, unlike those two, specifically so GraphEditorLoadSaveTest can prove the
+    // save()/C#-compiles round trip without an ImGui context -- draw()'s details panel below calls
+    // these exact same two methods a headless caller would. Both return false (no-op, no undo entry)
+    // if `nodeId` does not name a node currently in the graph. setAttribute ALSO returns false, with no
+    // edit applied, if `value` contains any whitespace: the NODE line is whitespace-tokenised with no
+    // quoting on either the C++ writer or the C# reader side (OcGraph.cpp's writeOcgraph joins
+    // extraTokens with a bare space; OcGraphParser.cs re-splits on whitespace), so a value containing a
+    // space cannot round-trip -- it would silently re-split into extra bare tokens on the next load and
+    // read back truncated to its first word. Refusing here is the same "not an edit" shape
+    // clearAttribute already uses for a no-op target, rather than writing something the very next load
+    // would read back differently.
+    bool setAttribute(const std::string& nodeId, const std::string& key, const std::string& value);
+    // Clears (deletes) the `key=...` token outright rather than writing `key=` -- see
+    // GraphEditorGeometry.hpp's removeNodeAttribute comment for why. Returns false (no-op, no undo
+    // entry) if the node doesn't exist OR the attribute wasn't set to begin with -- clearing something
+    // already absent is not an edit.
+    bool clearAttribute(const std::string& nodeId, const std::string& key);
+
 private:
     // ---- identity / data model ---------------------------------------------------------------
     std::string path_;
@@ -151,6 +189,17 @@ private:
 
     // Right-click "add node" palette.
     Vec2 pendingSpawnCanvasPos_{};
+
+    // ---- details panel (Gap B: attribute editing) -------------------------------------------------
+    // Which attribute InputText, if any, is mid-edit right now -- "" \x1f key when nothing is active.
+    // Only ONE field can hold ImGui keyboard focus at a time, so a single slot (not a per-row map) is
+    // enough: it exists so setAttribute()/clearAttribute() -- and the pushUndo() inside them -- fire
+    // ONCE per edit SESSION (on IsItemDeactivatedAfterEdit), not once per keystroke, the same
+    // activate/apply-live/deactivate shape SandboxApp.cpp's own transform DragFloat3 fields use for
+    // their own undo boundary. Live keystrokes are held in attrEditBuf_ only; graph_ is untouched until
+    // the field is deactivated.
+    std::string attrEditRowKey_;
+    char attrEditBuf_[512] = {};
 
     // ---- helpers (implemented in the .cpp, next to the input handling that uses them) -------------
     void loadFromDisk();

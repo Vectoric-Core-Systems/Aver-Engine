@@ -413,6 +413,14 @@ public class GraphCompiler
                 EmitRaycast(node);
                 break;
 
+            case "mousedelta":
+                EmitMouseDelta(node);
+                break;
+
+            case "moveaxis":
+                EmitMoveAxis(node);
+                break;
+
             case "spawn":
                 // Side-effecting (creates a new scene entity) -- see IsExecCapableSpawnType's own
                 // comment for the fuller story. REFUSED here, explicitly, rather than silently skipped
@@ -839,6 +847,35 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, RaycastMethod);
     }
 
+    /// MouseDelta() -> deltaX, deltaY, wheel: one native call (aver_fw_input_mouse) producing this
+    /// frame's mouse movement/wheel as three float pins, mirroring EmitGetFieldVec3's "one call,
+    /// several _pinLocals stores" shape for the PULL compiler -- Compile()'s single topological pass
+    /// (EmitNode's own doc comment) already guarantees this runs exactly once per Compile()
+    /// invocation no matter how many things read deltaX/deltaY/wheel, so no extra machinery is needed
+    /// HERE for that guarantee; see GraphInterop.MouseDeltaForGraph's own comment for why the PUSH
+    /// compiler (below) needs more. Zero data inputs -- there is nothing to pull before the call.
+    private void EmitMouseDelta(Node node)
+    {
+        if (_il == null) return;
+
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "deltaX"));
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "deltaY"));
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "wheel"));
+        _il.Emit(OpCodes.Call, MouseDeltaMethod);
+    }
+
+    /// MoveAxis() -> forward, right: MouseDelta's MOVE-input sibling -- see EmitMouseDelta's own
+    /// comment, which applies unchanged here, and GraphInterop.MoveAxisForGraph's comment for why Z
+    /// is not a pin.
+    private void EmitMoveAxis(Node node)
+    {
+        if (_il == null) return;
+
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "forward"));
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "right"));
+        _il.Emit(OpCodes.Call, MoveAxisMethod);
+    }
+
     /// Shared by every Emit* method whose native call takes an OUT-PARAMETER ADDRESS rather than a
     /// loaded value (Ldloca, not Ldloc) -- Raycast's five, and now GetFieldVec3's three: unlike every
     /// other Emit* method's "load, compute, maybe Stloc" shape, a missing pin here can't just be
@@ -1182,6 +1219,8 @@ public class GraphCompiler
                     else if (IsExecCapableVecSideEffectType(node.Type)) EmitExecSetFieldVec3(node);
                     else if (IsExecCapableSpawnType(node.Type)) EmitExecSpawn(node);
                     else if (IsExecCapableQueryType(node.Type)) EmitExecRaycast(node);
+                    else if (IsExecCapableMouseDeltaType(node.Type)) EmitExecMouseDelta(node);
+                    else if (IsExecCapableMoveAxisType(node.Type)) EmitExecMoveAxis(node);
                     EmitExecFanOut(node);
                     return;
             }
@@ -1413,6 +1452,24 @@ public class GraphCompiler
     private static bool IsExecCapableQueryType(string type) =>
         type.Equals("raycast", StringComparison.OrdinalIgnoreCase);
 
+    /// MouseDelta's own version of IsExecCapableQueryType -- a SEPARATE predicate/emitter pair rather
+    /// than widening Raycast's list, for the same reason IsExecCapableVecSideEffectType stayed
+    /// separate from IsExecCapableSideEffectType when SetFieldVec3 was added: MouseDeltaForGraph is a
+    /// different native surface (Aver.Framework's polled input, not a physics query) with a different
+    /// arity (3 out-params, not 5) and a different underlying cost (a memcpy-class struct-field copy,
+    /// not a BVH walk) -- see GraphInterop.MouseDeltaForGraph's own comment for the full accounting of
+    /// why this node is given Raycast's CACHING SHAPE despite NOT sharing Raycast's CACHING REASON.
+    /// Kept as its own list, like Raycast's, so a future continuous-input type has an obvious spot to
+    /// go rather than an ever-growing shared switch.
+    private static bool IsExecCapableMouseDeltaType(string type) =>
+        type.Equals("mousedelta", StringComparison.OrdinalIgnoreCase);
+
+    /// MoveAxis's own version of IsExecCapableMouseDeltaType -- see that predicate's comment; kept
+    /// separate for the identical reason (a different native surface -- Input.MoveAxis's ~8 GetKey
+    /// reads, not one aver_fw_input_mouse call -- with a different arity, 2 out-params not 3).
+    private static bool IsExecCapableMoveAxisType(string type) =>
+        type.Equals("moveaxis", StringComparison.OrdinalIgnoreCase);
+
     /// SetFieldVec3's own version of IsExecCapableSideEffectType -- a SEPARATE predicate/list rather
     /// than widening that one, even though both gate "run EmitExecSideEffect-shaped code from
     /// EmitExecNode's default case": SetField and SetFieldVec3 write through two DIFFERENT native
@@ -1565,6 +1622,34 @@ public class GraphCompiler
         _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "pointY", typeof(float)));
         _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "pointZ", typeof(float)));
         _il.Emit(OpCodes.Call, RaycastMethod);
+    }
+
+    /// Runs a MouseDelta node's native read exactly once, at the point the exec walk reaches it --
+    /// mirrors EmitExecRaycast's own "one call, N results into N exec-locals" shape (zero inputs to
+    /// pull first, since MouseDelta takes none), gated by IsExecCapableMouseDeltaType instead of
+    /// IsExecCapableQueryType. See GraphInterop.MouseDeltaForGraph's comment for why this node needs
+    /// this exec-cached shape (a "cost" node would not) and EmitPullOutput's "no case for
+    /// mousedelta/moveaxis" comment for what happens if a MouseDelta node is never visited by exec at
+    /// all.
+    private void EmitExecMouseDelta(Node node)
+    {
+        if (_il == null) return;
+
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "deltaX", typeof(float)));
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "deltaY", typeof(float)));
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "wheel", typeof(float)));
+        _il.Emit(OpCodes.Call, MouseDeltaMethod);
+    }
+
+    /// MoveAxis's own version of EmitExecMouseDelta -- see that method's comment, which applies
+    /// unchanged here.
+    private void EmitExecMoveAxis(Node node)
+    {
+        if (_il == null) return;
+
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "forward", typeof(float)));
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "right", typeof(float)));
+        _il.Emit(OpCodes.Call, MoveAxisMethod);
     }
 
     /// Pulls the value linked into `node`'s input pin `pinName` and pushes it onto the IL stack:
@@ -1752,7 +1837,9 @@ public class GraphCompiler
                 _il.MarkLabel(endLabel);
                 return;
             }
-            // "raycast" has NO case here, deliberately. A Raycast node reached VIA THE EXEC CHAIN
+            // "raycast" (and, for the identical reason, "mousedelta"/"moveaxis" -- see
+            // IsExecCapableMouseDeltaType/IsExecCapableMoveAxisType and their EmitExec* emitters) has
+            // NO case here, deliberately. A Raycast node reached VIA THE EXEC CHAIN
             // populates _execLocals for all five of its outputs (see EmitExecRaycast), and
             // EmitPullOutput already checks _execLocals before this switch runs (top of this method)
             // -- so a Raycast visited by the exec walk needs no dispatch code here at all. A Raycast
@@ -1765,7 +1852,14 @@ public class GraphCompiler
             // sit on the exec chain, which is a worse trap than a clear compile error naming the node.
             // A PURE-PULL graph (no ENTRY at all, see IsExecOnlyNodeType and Compile()'s own foreach)
             // is unaffected -- it never reaches EmitPullOutput in the first place; EmitRaycast (PULL)
-            // handles it completely on its own.
+            // handles it completely on its own. MouseDelta/MoveAxis inherit this exact shape even
+            // though -- UNLIKE Raycast -- neither has a genuine per-call cost that would justify
+            // refusing a standalone pull path on cost grounds alone; they are refused here anyway
+            // because the "one call regardless of how many pins are read" guarantee this slice was
+            // built to satisfy has no other enforcement point in the PUSH compiler, and a node that
+            // silently behaved differently (cached vs re-read) depending on whether it happened to sit
+            // on the exec chain would be exactly the kind of trap Raycast's own comment already argues
+            // against.
             default:
                 throw new NotSupportedException(
                     $"node type '{source.Type}' cannot be pulled as a data value inside an exec chain " +
@@ -1908,6 +2002,12 @@ public class GraphCompiler
     private static readonly MethodInfo SpawnMethod =
         typeof(GraphInterop).GetMethod("SpawnForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SpawnForGraph was not found by reflection");
+    private static readonly MethodInfo MouseDeltaMethod =
+        typeof(GraphInterop).GetMethod("MouseDeltaForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.MouseDeltaForGraph was not found by reflection");
+    private static readonly MethodInfo MoveAxisMethod =
+        typeof(GraphInterop).GetMethod("MoveAxisForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.MoveAxisForGraph was not found by reflection");
 
     /// Called FROM EMITTED IL (see EmitWhile/EmitForEach), not from ordinary C# control flow, when a
     /// loop's iteration count crosses MaxLoopIterations. Logs -- loudly, naming the exact node and

@@ -31,6 +31,12 @@ bool AssetEditorHost::open(const std::string& path) {
     return false;
 }
 
+// The already-open editor for `path`, or nullptr.
+AssetEditor* AssetEditorHost::find(const std::string& path) {
+    for (const auto& ed : editors_) if (ed->path() == path) return ed.get();
+    return nullptr;
+}
+
 // True if any open editor has unsaved changes.
 bool AssetEditorHost::anyDirty() const {
     for (const auto& ed : editors_) if (ed->dirty()) return true;
