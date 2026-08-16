@@ -11,7 +11,7 @@ namespace Aver.Framework.SampleActor;
 // Pressing Play (or --play-test) spawns all four and possesses the pawn.
 
 /// <summary>Process-lifetime state. Spawned first, torn down last.</summary>
-[AverClass("BP_GameInstance")]
+[AverClass("AN_GameInstance")]
 public sealed class DemoGameInstance : AverGameInstance
 {
     /// <summary>Logs the start of the session.</summary>
@@ -22,7 +22,7 @@ public sealed class DemoGameInstance : AverGameInstance
 }
 
 /// <summary>The rules for a play session. Names its pawn and controller by string.</summary>
-[AverGameMode("BP_GameMode", DefaultPawnClass = "BP_Pawn", PlayerControllerClass = "BP_Controller")]
+[AverGameMode("AN_GameMode", DefaultPawnClass = "AN_Pawn", PlayerControllerClass = "AN_Controller")]
 public sealed class DemoGameMode : AverGameMode
 {
     /// <summary>Spawns a rotated sphere and a second sphere attached to it as a child.</summary>
@@ -46,7 +46,7 @@ public sealed class DemoGameMode : AverGameMode
 }
 
 /// <summary>The player's controller. Possesses the pawn.</summary>
-[AverClass("BP_Controller")]
+[AverClass("AN_Controller")]
 public sealed class DemoController : AverPlayerController
 {
     /// <summary>Gives this bare actor a mesh and logs what came back.</summary>
@@ -64,7 +64,7 @@ public sealed class DemoController : AverPlayerController
 
 /// <summary>The possessed pawn: a character walked with WASD and turned with the mouse, V toggles
 /// first/third person.</summary>
-[AverClass("BP_Pawn")]
+[AverClass("AN_Pawn")]
 public sealed class DemoPawn : AverCharacter
 {
     private int _ticks;

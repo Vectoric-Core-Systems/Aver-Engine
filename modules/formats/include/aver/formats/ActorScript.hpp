@@ -68,7 +68,7 @@ struct ActorValueSpan {
 
 // One actor class as declared in hand-written C#, with a span for every editable value.
 struct ActorClassInfo {
-    std::string className;      // from [AverClass("BP_Thing")] / [AverGameMode(...)]
+    std::string className;      // from [AverClass("AN_Thing")] / [AverGameMode(...)]
     std::string typeName;       // the C# class the attribute is on
     std::string baseType;       // the C# base it derives, verbatim
     ActorKind   kind = ActorKind::Unknown;

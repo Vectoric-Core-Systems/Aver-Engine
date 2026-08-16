@@ -228,13 +228,13 @@ int main() {
         const char* src = R"(using Aver.Framework;
 namespace Demo;
 
-[AverClass("BP_Crate")]
+[AverClass("AN_Crate")]
 public sealed class Crate : AverActor
 {
     public static void Configure(ClassBuilder b) => b.Mesh("Meshes/cube.ocmesh", "M_Wood");
 }
 
-[AverClass("BP_Hero")]
+[AverClass("AN_Hero")]
 public sealed class Hero : AverCharacter
 {
     public float Height = 180f;
@@ -249,7 +249,7 @@ public sealed class Hero : AverCharacter
         check(rp.script.status == fmt::ActorParseStatus::NoRegion, "which has no generated region");
         check(rp.classes.size() == 2, "and declares two actors");
         if (rp.classes.size() == 2) {
-            check(rp.classes[0].className == "BP_Crate", "the first is named by its attribute");
+            check(rp.classes[0].className == "AN_Crate", "the first is named by its attribute");
             check(rp.classes[0].typeName == "Crate", "and knows its C# type name");
             check(rp.classes[0].kind == fmt::ActorKind::Actor, "and is classified from its base");
             check(rp.classes[0].hasMesh && rp.classes[0].meshPath == "Meshes/cube.ocmesh",

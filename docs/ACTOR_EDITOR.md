@@ -402,10 +402,10 @@ Measured against SkyForge with `--open-asset <file> --actor-live`:
 
 | File | Class Live spawned | Result |
 |---|---|---|
-| `Target.cs` | `BP_Target` | 1 model, `Meshes/sphere.ocmesh` |
-| `Gun.cs` | `BP_GunPart` | 1 model, `Meshes/cube.ocmesh` |
-| `FpsGameMode.cs` | `BP_Block` | 1 model, `Meshes/cube.ocmesh` |
-| `FpsCharacter.cs` | `BP_FpsCharacter` | 0 models; capsule 180×34 cm from source |
+| `Target.cs` | `AN_Target` | 1 model, `Meshes/sphere.ocmesh` |
+| `Gun.cs` | `AN_GunPart` | 1 model, `Meshes/cube.ocmesh` |
+| `FpsGameMode.cs` | `AN_Block` | 1 model, `Meshes/cube.ocmesh` |
+| `FpsCharacter.cs` | `AN_FpsCharacter` | 0 models; capsule 180×34 cm from source |
 
 ---
 

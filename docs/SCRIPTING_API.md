@@ -53,7 +53,7 @@ using Aver.Scripting;  // Log
 
 namespace MyGame;
 
-[AverClass("BP_Rotator")]
+[AverClass("AN_Rotator")]
 public sealed class Rotator : AverActor
 {
     // The class RECIPE — run once per class at load, never per instance. Declares components + tick.
@@ -388,13 +388,13 @@ instance** (or null if the class isn't declared); the `ActorClass` forms return 
 | `static void Destroy(Entity other)` / `static void Destroy(AverActor? other)` | Destroy another. |
 
 **`ActorClass`** — the `Spawn<T>` forms name the class by *type*; the `Spawn(ActorClass, …)` forms take a
-class **handle**, for when the class is chosen at runtime. Get one with `ActorClass.Find("BP_Coin")` (an
+class **handle**, for when the class is chosen at runtime. Get one with `ActorClass.Find("AN_Coin")` (an
 invalid handle if no such class is declared — check `IsValid`); `Entity.Class` gives the class an entity is
 an instance of. An `ActorClass` is a `readonly struct` with `int Handle`, `bool IsValid`, and `string Name`
 (`0 == invalid`).
 
 ```csharp
-ActorClass coin = ActorClass.Find("BP_Coin");
+ActorClass coin = ActorClass.Find("AN_Coin");
 if (coin.IsValid)
     for (int i = 0; i < count; i++)
         Spawn(coin, new Vec3(i * 100f, 0f, 20f));   // class picked at runtime
@@ -580,7 +580,7 @@ the number that was subtracted.
 using Aver.Framework;
 using Aver.UI;
 
-[AverClass("BP_PlayerHud")]
+[AverClass("AN_PlayerHud")]
 public sealed class PlayerHud : AverActor
 {
     // PostPhysics: draw what the frame settled on, not what it was asked for.
@@ -705,7 +705,7 @@ the slot's space into the `TEX` line and the reader validates it, so the two can
 ### A player character (WASD + mouse, first/third person)
 
 ```csharp
-[AverClass("BP_Hero")]
+[AverClass("AN_Hero")]
 public sealed class Hero : AverCharacter
 {
     public static void Configure(ClassBuilder b)
@@ -727,7 +727,7 @@ public sealed class Hero : AverCharacter
 ### A GameMode that hands out that character
 
 ```csharp
-[AverGameMode("BP_GameMode", DefaultPawnClass = "BP_Hero", PlayerControllerClass = "PlayerController")]
+[AverGameMode("AN_GameMode", DefaultPawnClass = "AN_Hero", PlayerControllerClass = "PlayerController")]
 public sealed class MyGameMode : AverGameMode
 {
     public override void OnPostLogin(Entity controller) =>
@@ -738,7 +738,7 @@ public sealed class MyGameMode : AverGameMode
 ### A spawner that scatters pickups and tags them
 
 ```csharp
-[AverClass("BP_Spawner")]
+[AverClass("AN_Spawner")]
 public sealed class Spawner : AverActor
 {
     const uint Pickup = 0x1;
@@ -754,7 +754,7 @@ public sealed class Spawner : AverActor
     }
 }
 
-[AverClass("BP_Coin")]
+[AverClass("AN_Coin")]
 public sealed class Coin : AverActor
 {
     public static void Configure(ClassBuilder b) => b.Mesh("Meshes/coin.ocmesh");

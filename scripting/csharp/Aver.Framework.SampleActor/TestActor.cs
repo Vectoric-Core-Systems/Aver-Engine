@@ -9,7 +9,7 @@ namespace Aver.Framework.SampleActor;
 // The sample actor used by --spawn-test: it logs every lifecycle hook it receives.
 
 /// <summary>The smallest actor that proves the C# actor lifecycle fires end to end.</summary>
-[AverClass("BP_TestActor")]
+[AverClass("AN_TestActor")]
 public sealed class TestActor : AverActor
 {
     private int _ticks;

@@ -137,7 +137,7 @@ const MeshFields& meshFields() {
 std::string actorDisplayName(const fmt::ActorClassInfo& k, std::string_view fileStem = {}) {
     if (!k.typeName.empty()) return k.typeName;
     if (!k.className.empty()) {
-        if (k.className.rfind("BP_", 0) == 0 && k.className.size() > 3) return k.className.substr(3);
+        if (k.className.rfind("AN_", 0) == 0 && k.className.size() > 3) return k.className.substr(3);
         return k.className;
     }
     return std::string(fileStem);
@@ -400,7 +400,7 @@ private:
         const auto namesFile = [&](const fmt::ActorClassInfo& k) {
             if (!stem.empty() && k.typeName == stem) return true;
             if (!stem.empty() && k.className == stem) return true;
-            if (!stem.empty() && k.className.rfind("BP_", 0) == 0 &&
+            if (!stem.empty() && k.className.rfind("AN_", 0) == 0 &&
                 k.className.compare(3, std::string::npos, stem) == 0) return true;
             return false;
         };

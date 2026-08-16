@@ -53,7 +53,7 @@ and exactly what the same thing costs in an engine where a static mesh is an `AA
 
 A **spawn-class / archetype** model — class defaults with per-instance overrides, a GameMode naming
 its `DefaultPawnClass` by name, an Add menu built from the live class registry, and
-`Spawn(ActorClass.Find("BP_Spinner"), pos)` producing a complete actor — built on a **two-target
+`Spawn(ActorClass.Find("AN_Spinner"), pos)` producing a complete actor — built on a **two-target
 split**: `Aver.Scene` (SHARED, Core + Assets) and `Aver.Framework` (SHARED, Core + Assets + Scene),
 with **two separate ABI headers**.
 
@@ -1280,7 +1280,7 @@ using Aver.Scripting;
 // The attribute NAMES the class and its parent; it never names a hook. Hooks stay compiler-checked
 // overrides for exactly the reason Behaviour.cs already argues: a misspelt OnUpate must not compile
 // cleanly and then simply never run.
-[AverClass("BP_Spinner", Parent = "StaticMeshActor")]
+[AverClass("AN_Spinner", Parent = "StaticMeshActor")]
 public sealed class Spinner : AverActor
 {
     // Editable fields are class defaults with per-instance overrides, and the override is stored
@@ -1326,7 +1326,7 @@ public sealed class Spinner : AverActor
     }
 }
 
-[AverClass("BP_FlyPawn", Parent = "Pawn")]
+[AverClass("AN_FlyPawn", Parent = "Pawn")]
 public sealed class FlyPawn : AverPawn
 {
     [Editable] public float SpeedCmPerSec = 600.0f;   // centimetres, per the coordinate contract
@@ -1343,12 +1343,12 @@ public sealed class FlyPawn : AverPawn
 
 // Pawn and controller are named BY CLASS NAME and resolved at seal time, so these three files never
 // reference each other's types and can be authored in any order.
-[AverGameMode("GM_Sandbox", DefaultPawnClass = "BP_FlyPawn", PlayerControllerClass = "PlayerController")]
+[AverGameMode("GM_Sandbox", DefaultPawnClass = "AN_FlyPawn", PlayerControllerClass = "PlayerController")]
 public sealed class SandboxMode : AverGameMode
 {
     public override void OnBeginPlay(BeginReason reason)
     {
-        Spawn(ActorClass.Find("BP_Spinner"), new Vec3(0, 0, 150));
+        Spawn(ActorClass.Find("AN_Spinner"), new Vec3(0, 0, 150));
         Spawn<Spinner>(new Vec3(200, 0, 150));   // sugar: the type carries its own class name
     }
     public override void OnPostLogin(Entity controller) => Log.Info($"player joined: {controller.Name}");

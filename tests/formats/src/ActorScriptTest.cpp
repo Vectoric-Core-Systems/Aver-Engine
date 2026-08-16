@@ -50,14 +50,14 @@ static void testClassLevelActor() {
         "using Aver.Framework;\n"
         "namespace SkyForge;\n"
         "\n"
-        "[AverClass(\"BP_Gun\")]\n"
+        "[AverClass(\"AN_Gun\")]\n"
         "public sealed class Gun : AverActor\n"
         "{\n"
         "    public static void Configure(ClassBuilder b) => b.Mesh(\"Meshes/cube.ocmesh\");\n"
         "}\n";
 
     const fmt::ActorClassInfo g = fmt::parseActorClass(kGun);
-    check(g.className == "BP_Gun", "the bound name is read from [AverClass]");
+    check(g.className == "AN_Gun", "the bound name is read from [AverClass]");
     check(g.hasMesh, "a class-level mesh is found");
     check(g.meshPath == "Meshes/cube.ocmesh", "with its path");
     check(g.anything(), "so the file is previewable");
@@ -65,7 +65,7 @@ static void testClassLevelActor() {
           "and no generated region, which is legal");
 
     static const char* kWithMat =
-        "[AverClass(\"BP_Crate\")]\n"
+        "[AverClass(\"AN_Crate\")]\n"
         "public sealed class Crate : AverActor {\n"
         "    public static void Configure(ClassBuilder b) {\n"
         "        b.Mesh(\"Meshes/box.ocmesh\", \"M_Crate\");\n"
@@ -76,13 +76,13 @@ static void testClassLevelActor() {
     check(c.hasMesh && c.material == "M_Crate", "a block-bodied Configure is read too, with material");
 
     static const char* kMode =
-        "[AverGameMode(\"BP_FpsGameMode\", DefaultPawnClass = \"BP_FpsCharacter\")]\n"
+        "[AverGameMode(\"AN_FpsGameMode\", DefaultPawnClass = \"AN_FpsCharacter\")]\n"
         "public sealed class FpsGameMode : AverGameMode { }\n";
-    check(fmt::parseActorClass(kMode).className == "BP_FpsGameMode",
+    check(fmt::parseActorClass(kMode).className == "AN_FpsGameMode",
           "[AverGameMode] carries a bound name too");
 
     static const char* kRig =
-        "[AverClass(\"BP_Rig\")]\n"
+        "[AverClass(\"AN_Rig\")]\n"
         "public sealed class Rig : AverPawn {\n"
         "    public static void Configure(ClassBuilder b) {\n"
         "        b.Camera(70f, 5f, 100000f);\n"
@@ -96,7 +96,7 @@ static void testClassLevelActor() {
     check(r.anything(), "so a camera-only actor is still worth opening");
 
     static const char* kConst =
-        "[AverClass(\"BP_C\")]\n"
+        "[AverClass(\"AN_C\")]\n"
         "public sealed class C : AverActor {\n"
         "    public static void Configure(ClassBuilder b) => b.Camera(Fov, 1f, 2f);\n"
         "}\n";
@@ -289,7 +289,7 @@ static void testEveryActorShape() {
 
     const Case cases[] = {
         {"a plain attributed actor",
-         "using Aver.Framework;@[AverClass(\"BP_Crate\")]@public sealed class Crate : AverActor {@"
+         "using Aver.Framework;@[AverClass(\"AN_Crate\")]@public sealed class Crate : AverActor {@"
          "  public static void Configure(ClassBuilder b) => b.Mesh(\"Meshes/cube.ocmesh\");@}",
          fmt::ActorKind::Actor, true},
 
@@ -299,7 +299,7 @@ static void testEveryActorShape() {
          fmt::ActorKind::Actor, true},
 
         {"a pawn",
-         "using Aver.Framework;@[AverClass(\"BP_Drone\")]@public sealed class Drone : AverPawn {@}",
+         "using Aver.Framework;@[AverClass(\"AN_Drone\")]@public sealed class Drone : AverPawn {@}",
          fmt::ActorKind::Pawn, true},
 
         {"a character, which has a capsule and no mesh",
@@ -312,7 +312,7 @@ static void testEveryActorShape() {
          fmt::ActorKind::PlayerController, true},
 
         {"a game mode",
-         "using Aver.Framework;@[AverGameMode(\"BP_Rules\")]@public sealed class Rules : AverGameMode {@}",
+         "using Aver.Framework;@[AverGameMode(\"AN_Rules\")]@public sealed class Rules : AverGameMode {@}",
          fmt::ActorKind::GameMode, true},
 
         {"a game instance",
@@ -325,7 +325,7 @@ static void testEveryActorShape() {
          fmt::ActorKind::Pawn, true},
 
         {"a class with an unrecognised base that still DECLARES a mesh",
-         "using Aver.Framework;@[AverClass(\"BP_Odd\")]@public sealed class Odd : SomethingElse {@"
+         "using Aver.Framework;@[AverClass(\"AN_Odd\")]@public sealed class Odd : SomethingElse {@"
          "  public static void Configure(ClassBuilder b) => b.Mesh(\"Meshes/cube.ocmesh\");@}",
          fmt::ActorKind::Unknown, true},
 
@@ -357,8 +357,8 @@ static void testEveryActorShape() {
 
     {
         std::string src =
-            "using Aver.Framework;@[AverGameMode(\"BP_Mode\")]@public sealed class Mode : AverGameMode {@}@"
-            "[AverClass(\"BP_Block\")]@public sealed class Block : AverActor {@"
+            "using Aver.Framework;@[AverGameMode(\"AN_Mode\")]@public sealed class Mode : AverGameMode {@}@"
+            "[AverClass(\"AN_Block\")]@public sealed class Block : AverActor {@"
             "  public static void Configure(ClassBuilder b) => b.Mesh(\"Meshes/cube.ocmesh\");@}@"
             "public sealed class Watcher : AverGameInstance {@}";
         for (char& ch : src) if (ch == '@') ch = 0x0A;

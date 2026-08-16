@@ -9,7 +9,7 @@ namespace Sample.Game;
 
 /// <summary>A drivable car. This is the hand-written half; the models and their transforms live in
 /// the editor-owned <c>Car.Designer.cs</c>, which this half only reads.</summary>
-[AverClass("BP_Car", Parent = "Pawn")]
+[AverClass("AN_Car", Parent = "Pawn")]
 public sealed partial class Car : AverPawn
 {
     [Editable] public float MaxSpeedCmPerSec = 1500.0f;

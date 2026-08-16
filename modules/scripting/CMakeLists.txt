@@ -110,7 +110,7 @@ add_dependencies(Aver.Scripting.Host Aver.Scripting.SampleBehaviour)
 
 # A sample ACTOR assembly, the counterpart of the behaviour sample above, staged to bin/ActorScripts/ so
 # it is NOT loaded by a default editor run. It exists to prove the step-11 actor loop end to end:
-#   Sandbox.exe --headless --frames 5 --scripts ActorScripts --spawn-test BP_TestActor
+#   Sandbox.exe --headless --frames 5 --scripts ActorScripts --spawn-test AN_TestActor
 # spawns a declared managed actor and ticks it, so OnBeginPlay / OnTick reach the engine log. Depends on
 # the bridge outputs so the run has a bridge that speaks the actor dispatch.
 set(AVER_ACTOR_PROJ ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/Aver.Framework.SampleActor.csproj)

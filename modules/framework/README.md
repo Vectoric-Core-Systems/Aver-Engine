@@ -23,7 +23,7 @@ So the concepts become **data** instead of base types:
   defaults — declared by name, so a C# script can add one without a C++ edit
 - **game instance** and **game mode** are singleton records, not objects with a vtable each
 
-What this buys is that "spawn a `BP_Spinner`" stays a memcpy of a defaults blob into pools, while
+What this buys is that "spawn a `AN_Spinner`" stays a memcpy of a defaults blob into pools, while
 the user-facing shape — class defaults, per-instance overrides, a game mode naming its default pawn
 class — is the one someone arriving from Unreal expects.
 
