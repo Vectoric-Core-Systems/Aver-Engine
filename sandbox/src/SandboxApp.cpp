@@ -10968,15 +10968,50 @@ private:
     // Puts the editor camera where the whole level is visible, and fits the fly speed and the GI
     // volume to its bounds.
     void frameCameraOn(const fmt::OcWorldData& w) {
+        // THE MESH BOX, SCALED AND ROTATED -- not p.sx/sy/sz used as if it were a size. This loop
+        // read fabs(p.sx/sy/sz) directly as a half-extent in centimetres, and sx/sy/sz is a
+        // dimensionless SCALE MULTIPLIER: modules/world/src/LevelInstance.cpp assigns it straight to
+        // Transform::scale and nothing converts it to a size. An ordinary PLACE leaves it at 1.0, so
+        // every prop in the level contributed a 1cm cube and this "bounds" was really the point
+        // cloud of placement POSITIONS -- which framed the camera on where things were dropped
+        // rather than on how big they are, and (since giExtent_ is set from the same radius below)
+        // handed Voxi a volume sized the same way.
+        //
+        // It looked right because of one coincidence: PLACEG is conventionally used with a unit-cube
+        // mesh for a ground slab, and for a mesh spanning +/-1 a scale and a half-extent are the
+        // same number. That is a property of that mesh, not of the format.
+        //
+        // Kept identical to modules/runtime.game/src/GameLevel.cpp's placementBounds, deliberately:
+        // the editor's preview and the shipped game must fit the same volume to the same level, and
+        // these two loops have already drifted once.
+        static const Vec3 kCorner[8] = {{-1,-1,-1},{1,-1,-1},{-1,1,-1},{1,1,-1},
+                                        {-1,-1, 1},{1,-1, 1},{-1,1, 1},{1,1, 1}};
         Vec3 lo{1e9f, 1e9f, 1e9f}, hi{-1e9f, -1e9f, -1e9f};
         for (const fmt::OcWorldPlacement& p : w.placements) {
             const Vec3 c{static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)};
-            const Vec3 e{static_cast<f32>(std::fabs(p.sx)), static_cast<f32>(std::fabs(p.sy)),
-                         static_cast<f32>(std::fabs(p.sz))};
-            lo.x = std::fmin(lo.x, c.x - e.x); hi.x = std::fmax(hi.x, c.x + e.x);
-            lo.y = std::fmin(lo.y, c.y - e.y); hi.y = std::fmax(hi.y, c.y + e.y);
-            lo.z = std::fmin(lo.z, c.z - e.z); hi.z = std::fmax(hi.z, c.z + e.z);
+            // An asset with no loaded bounds contributes its position only: it occupies no space we
+            // can prove, and inventing one would let a single bad line inflate the whole volume.
+            Vec3 mlo{0,0,0}, mhi{0,0,0};
+            const auto itB = meshBounds_.find(fnv1a64(std::string_view(p.asset)));
+            if (itB != meshBounds_.end()) { mlo = itB->second.first; mhi = itB->second.second; }
+            const Vec3 mc{(mlo.x+mhi.x)*0.5f, (mlo.y+mhi.y)*0.5f, (mlo.z+mhi.z)*0.5f};
+            const Vec3 mh{(mhi.x-mlo.x)*0.5f, (mhi.y-mlo.y)*0.5f, (mhi.z-mlo.z)*0.5f};
+            const Quat rot = world::quatFromEulerDeg(Vec3{static_cast<f32>(p.roll),
+                                                          static_cast<f32>(p.pitch),
+                                                          static_cast<f32>(p.yaw)});
+            for (const Vec3& k : kCorner) {
+                const Vec3 local{(mc.x + k.x*mh.x) * static_cast<f32>(p.sx),
+                                 (mc.y + k.y*mh.y) * static_cast<f32>(p.sy),
+                                 (mc.z + k.z*mh.z) * static_cast<f32>(p.sz)};
+                const Vec3 wpt = c + rot.rotate(local);
+                lo.x = std::fmin(lo.x, wpt.x); hi.x = std::fmax(hi.x, wpt.x);
+                lo.y = std::fmin(lo.y, wpt.y); hi.y = std::fmax(hi.y, wpt.y);
+                lo.z = std::fmin(lo.z, wpt.z); hi.z = std::fmax(hi.z, wpt.z);
+            }
         }
+        // Every placement missing and the sentinels never moved: a level with no placements at all.
+        // Guarded because the radius below would otherwise be computed from 1e9-(-1e9).
+        if (w.placements.empty() || lo.x > hi.x) { lo = Vec3{0,0,0}; hi = Vec3{0,0,0}; }
         const Vec3 centre{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
         const f32 radius = std::fmax(1.0f, 0.5f * std::sqrt((hi.x-lo.x)*(hi.x-lo.x) +
                                                             (hi.y-lo.y)*(hi.y-lo.y) +

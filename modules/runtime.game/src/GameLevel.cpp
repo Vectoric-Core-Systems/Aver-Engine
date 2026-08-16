@@ -1,6 +1,7 @@
 #include "aver/game/GameLevel.hpp"
 
 #include "aver/game/GameContent.hpp"
+#include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
@@ -150,23 +151,58 @@ void GameLevel::load(const std::string& path, GameContent& content) {
                       f.boundedSpec.seed, f.boundedSpec.layerCount);
     }
 
-    // The same accumulation the editor's frameCameraOn does over the same records
-    // (SandboxApp.cpp:10408-10420), for the same purpose: fitting the GI volume to the level.
-    // Position +/- absolute scale per axis, because a negative scale is a mirrored placement whose
-    // extent is still positive.
+    // MESH EXTENT TIMES SCALE, not scale on its own. This loop first shipped copying the editor's
+    // frameCameraOn, which uses fabs(p.sx/sy/sz) DIRECTLY as a half-extent in centimetres -- and
+    // that is wrong for both record kinds, because sx/sy/sz is a dimensionless SCALE MULTIPLIER in
+    // both. LevelInstance.cpp assigns it straight to Transform::scale; nothing anywhere converts it
+    // to a size. An ordinary PLACE leaves it at 1.0, so every placement contributed a 1cm cube and
+    // the "level bounds" were really just the point cloud of placement POSITIONS. A level holding
+    // one large mesh at the origin got a 1cm GI volume.
+    //
+    // It read as plausible because of one coincidence: PLACEG is conventionally used with a unit-
+    // cube mesh (see any level's ground slab, `PLACEG Meshes/cube.ocmesh ... 3000 3000 10`), and for
+    // a mesh that spans +/-1 a scale and a half-extent are numerically the same thing. That is a
+    // property of that one mesh, not of the format.
+    //
+    // THE MESH BOX IS SCALED, ROTATED AND RE-BOUNDED, corner by corner, rather than approximated by
+    // a rotation-proof sphere. The sphere was the first version here and it is worse on exactly the
+    // geometry every level has: a ground slab is enormous in X and Y and almost flat in Z, and
+    // giving it one radius inflates its 20cm thickness to its 60m width. On this project's own
+    // level that alone made the fitted volume 5196cm where the real content is 4243cm -- a 22%
+    // over-estimate of the thing that decides voxel density, bought for nothing, since the eight
+    // corners cost eight rotations per placement, once, at load.
+    const Vec3 kCorner[8] = {{-1,-1,-1},{1,-1,-1},{-1,1,-1},{1,1,-1},
+                             {-1,-1, 1},{1,-1, 1},{-1,1, 1},{1,1, 1}};
     for (const fmt::OcWorldPlacement& p : w.placements) {
         const Vec3 c{static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)};
-        const Vec3 e{static_cast<f32>(std::fabs(p.sx)), static_cast<f32>(std::fabs(p.sy)),
-                     static_cast<f32>(std::fabs(p.sz))};
-        if (!hasBounds_) {
-            boundsLo_ = Vec3{c.x - e.x, c.y - e.y, c.z - e.z};
-            boundsHi_ = Vec3{c.x + e.x, c.y + e.y, c.z + e.z};
-            hasBounds_ = true;
-            continue;
+        // An asset this content set never loaded (a typo, or a mesh the cook skipped) has no bounds
+        // to ask for. Contributing just its position is right: it occupies no space we can prove,
+        // and inventing a size for it would let one bad line inflate the whole volume.
+        const std::pair<Vec3, Vec3>* mb = content.boundsFor(fnv1a64(std::string_view(p.asset)));
+        const Vec3 mlo = mb ? mb->first  : Vec3{0, 0, 0};
+        const Vec3 mhi = mb ? mb->second : Vec3{0, 0, 0};
+        // The mesh box's own centre and half-size. NOT assumed to straddle the origin: a mesh
+        // authored with its feet at z=0 -- which every character in every pack is -- has a box
+        // whose centre sits half its height up, and folding that offset in is what puts the volume
+        // around the model instead of around the point it was dropped at.
+        const Vec3 mc{(mlo.x + mhi.x) * 0.5f, (mlo.y + mhi.y) * 0.5f, (mlo.z + mhi.z) * 0.5f};
+        const Vec3 mh{(mhi.x - mlo.x) * 0.5f, (mhi.y - mlo.y) * 0.5f, (mhi.z - mlo.z) * 0.5f};
+        const Vec3 sc{static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz)};
+        const Quat rot = world::quatFromEulerDeg(Vec3{static_cast<f32>(p.roll),
+                                                      static_cast<f32>(p.pitch),
+                                                      static_cast<f32>(p.yaw)});
+        for (const Vec3& k : kCorner) {
+            // Scale then rotate then translate -- the same order LevelInstance builds the real
+            // transform in, so this box bounds where the instance actually ends up.
+            const Vec3 local{(mc.x + k.x * mh.x) * sc.x,
+                             (mc.y + k.y * mh.y) * sc.y,
+                             (mc.z + k.z * mh.z) * sc.z};
+            const Vec3 wpt = c + rot.rotate(local);
+            if (!hasBounds_) { boundsLo_ = boundsHi_ = wpt; hasBounds_ = true; continue; }
+            boundsLo_.x = std::fmin(boundsLo_.x, wpt.x); boundsHi_.x = std::fmax(boundsHi_.x, wpt.x);
+            boundsLo_.y = std::fmin(boundsLo_.y, wpt.y); boundsHi_.y = std::fmax(boundsHi_.y, wpt.y);
+            boundsLo_.z = std::fmin(boundsLo_.z, wpt.z); boundsHi_.z = std::fmax(boundsHi_.z, wpt.z);
         }
-        boundsLo_.x = std::fmin(boundsLo_.x, c.x - e.x); boundsHi_.x = std::fmax(boundsHi_.x, c.x + e.x);
-        boundsLo_.y = std::fmin(boundsLo_.y, c.y - e.y); boundsHi_.y = std::fmax(boundsHi_.y, c.y + e.y);
-        boundsLo_.z = std::fmin(boundsLo_.z, c.z - e.z); boundsHi_.z = std::fmax(boundsHi_.z, c.z + e.z);
     }
 
     levelPath_ = path;
