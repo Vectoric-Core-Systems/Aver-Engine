@@ -98,6 +98,17 @@ public class GraphCompiler
     // emitted from deep inside EmitWhile/EmitForEach can name which entry point misbehaved.
     private string _currentEventName = "";
 
+    // ---- graph-local persistent variables (VAR / GraphVarStore) -----------------------------------
+
+    // Argument index of the trailing GraphVarStore parameter this compiled delegate takes, or -1 when
+    // this graph declares no VAR records at all -- the overwhelmingly common case, and the entire
+    // reason appending this parameter is additive rather than a breaking change: a VAR-less graph's
+    // delegate shape (Func<...>/Action<...> arity and argument types) is byte-for-byte identical to
+    // what it was before VAR existed, because paramTypes only grows when _graph.Variables.Count > 0.
+    // Set once per Compile()/CompileEntryPoint() call, from _graph.Variables.Count, BEFORE any node is
+    // emitted -- EmitGetVar/EmitPullGetVar/EmitExecSetVar are the only readers.
+    private int _varStoreArgIndex = -1;
+
     public GraphCompiler(Graph graph, FieldResolver? fieldResolver = null)
     {
         _graph = graph;
@@ -167,6 +178,20 @@ public class GraphCompiler
             }
 
             Type[] paramTypes = _graph.Parameters.Select(p => PinTypeToCLRType(p.Type)).ToArray();
+
+            // Append a trailing GraphVarStore parameter iff this graph declares at least one VAR --
+            // see _varStoreArgIndex's own comment for why this is additive, never mixed into the
+            // declared PARAM list itself (constraint: PARAM is caller-supplied, VAR is graph-owned,
+            // and reusing one slot for both would erase that distinction for whatever read the IL back).
+            if (_graph.Variables.Count > 0)
+            {
+                _varStoreArgIndex = paramTypes.Length;
+                paramTypes = paramTypes.Append(typeof(GraphVarStore)).ToArray();
+            }
+            else
+            {
+                _varStoreArgIndex = -1;
+            }
 
             var method = new DynamicMethod(
                 "CompiledGraph",
@@ -435,6 +460,30 @@ public class GraphCompiler
                 // ENTRY-driven exec chain and reach it through CompileEntryPoint() instead.
                 throw new InvalidOperationException(
                     $"Spawn node '{node.Id}' cannot be compiled by Compile() -- spawning an entity is a " +
+                    "side effect with no notion of 'when' in a pure-dataflow graph, and Compile()'s " +
+                    "topological pass would run it unconditionally on every invocation with no way to " +
+                    "gate it. Give this node an ENTRY-driven exec chain and reach it through " +
+                    "CompileEntryPoint() instead.");
+
+            case "getvar":
+                // A pure read -- see IsExecCapableVarSideEffectType's own comment -- so, unlike SetVar,
+                // it is welcome in the PULL-only compiler exactly like GetField.
+                EmitGetVar(node);
+                break;
+
+            case "setvar":
+                // A WRITE IS A SIDE EFFECT. REFUSED here for the identical reason "spawn" is refused
+                // just above -- Compile()'s topological pass has no branch structure to gate a write
+                // with, so an ungated SetVar in a no-ENTRY dataflow graph would overwrite the variable
+                // on every single invocation with nothing able to stop it. UNLIKE SetField/SetFieldVec3
+                // (whose PULL-switch cases run happily -- overwriting a native field with the same value
+                // twice is harmless, so there is no reason to refuse them), a variable write has no such
+                // "already safe to repeat" excuse: it is exactly as much a real side effect as a native
+                // write, and the task's own instruction is explicit that the PULL path must refuse it
+                // rather than fall back. Give this node an ENTRY-driven exec chain and reach it through
+                // CompileEntryPoint() instead.
+                throw new InvalidOperationException(
+                    $"SetVar node '{node.Id}' cannot be compiled by Compile() -- writing a variable is a " +
                     "side effect with no notion of 'when' in a pure-dataflow graph, and Compile()'s " +
                     "topological pass would run it unconditionally on every invocation with no way to " +
                     "gate it. Give this node an ENTRY-driven exec chain and reach it through " +
@@ -770,6 +819,36 @@ public class GraphCompiler
             _il.Emit(OpCodes.Stloc, local);
     }
 
+    /// GetVar(var=name) -> value: reads one of this graph's own persistent VAR slots (see
+    /// GraphVariable and GraphVarStore). A PURE READ -- reading twice is always safe, there is no
+    /// notion of "reached by mistake" the way SetVar's write has -- so, exactly like GetField/EmitParam,
+    /// this is welcome in EITHER compiler; EmitPullGetVar (below) is this method's PULL-recursive
+    /// twin for the exec compiler's own EmitPullOutput switch.
+    ///
+    /// Graph.Validate() (run at the top of every Compile()/CompileEntryPoint(), and again by the
+    /// parser) already checked var= is present and names a declared VAR with an agreeing pin type; this
+    /// repeats the lookup defensively rather than trusting a check made in a different method, the same
+    /// pattern EmitParam just above already follows for PARAM.
+    private void EmitGetVar(Node node)
+    {
+        if (_il == null) return;
+
+        var declared = _graph.Variables.FirstOrDefault(v => v.Name == node.VarName);
+        if (declared == null)
+            throw new InvalidOperationException($"GetVar node '{node.Id}' references undeclared variable '{node.VarName}'");
+        if (_varStoreArgIndex < 0)
+            throw new InvalidOperationException(
+                $"GetVar node '{node.Id}' needs a variable store argument, but this graph declares no " +
+                "VAR records (internal error -- Graph.Validate() should already have refused this graph)");
+
+        _il.Emit(OpCodes.Ldarg, (short)_varStoreArgIndex);
+        _il.Emit(OpCodes.Ldstr, node.VarName!);
+        _il.Emit(OpCodes.Call, VarGetMethodFor(declared.Type));
+
+        if (_pinLocals.TryGetValue((node.Id, "value"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+    }
+
     /// Select(cond, ifTrue, ifFalse) -> result: picks one of two float values by a bool condition.
     ///
     /// NOT SHORT-CIRCUITING, DELIBERATELY, AND THIS IS NOT THE SAME THING AS "BOTH ARMS COST
@@ -1032,13 +1111,18 @@ public class GraphCompiler
     /// comment above for how this differs from Compile()'s PULL/dataflow-only compilation, which this
     /// method does not touch, call, or depend on.
     ///
-    /// The compiled method's parameters are exactly the graph's declared PARAM list, in declaration
-    /// order -- the SAME convention Compile() already uses for its own delegate. This is deliberately
-    /// how an OnTick entry point receives delta time: the graph declares `PARAM deltaTime float` and
-    /// reads it with an ordinary `param` node inside the exec chain, rather than this compiler
-    /// inventing a special "OnTick's second pin is always delta time" rule. No new node type is needed
-    /// for "the current tick's delta time," and no format change is needed to add a future event that
-    /// wants different arguments -- it just declares different PARAMs.
+    /// The compiled method's parameters are the graph's declared PARAM list, in declaration order --
+    /// the SAME convention Compile() already uses for its own delegate -- PLUS one trailing
+    /// GraphVarStore parameter, present iff the graph declares at least one VAR record (see
+    /// _varStoreArgIndex's own field comment). That trailing parameter is an internal wiring detail
+    /// between this compiler and GraphHost, which appends it to every DynamicInvoke call itself; it
+    /// does not change the PUBLIC positional-argument contract a CALLER of Fire()/Tick() sees, which
+    /// remains exactly the declared PARAM list. This is deliberately how an OnTick entry point receives
+    /// delta time: the graph declares `PARAM deltaTime float` and reads it with an ordinary `param`
+    /// node inside the exec chain, rather than this compiler inventing a special "OnTick's second pin
+    /// is always delta time" rule. No new node type is needed for "the current tick's delta time," and
+    /// no format change is needed to add a future event that wants different arguments -- it just
+    /// declares different PARAMs.
     ///
     /// THE RETURN VALUE follows the exact same OUT convention Compile() already established -- zero
     /// OUT records means void, one means that pin's own CLR type, two or more means a boxed object[]
@@ -1108,6 +1192,19 @@ public class GraphCompiler
             }
 
             Type[] paramTypes = _graph.Parameters.Select(p => PinTypeToCLRType(p.Type)).ToArray();
+
+            // Same additive trailing-parameter rule as Compile() -- see that method's own comment and
+            // _varStoreArgIndex's field comment.
+            if (_graph.Variables.Count > 0)
+            {
+                _varStoreArgIndex = paramTypes.Length;
+                paramTypes = paramTypes.Append(typeof(GraphVarStore)).ToArray();
+            }
+            else
+            {
+                _varStoreArgIndex = -1;
+            }
+
             var method = new DynamicMethod(
                 $"CompiledGraphEvent_{eventName}",
                 returnType,
@@ -1207,10 +1304,11 @@ public class GraphCompiler
                     // Every other node type reached via exec: run its own side effect, if it has one
                     // worth sequencing (SetField's scalar write -- IsExecCapableSideEffectType -- or
                     // SetFieldVec3's vector write -- IsExecCapableVecSideEffectType, or Spawn's entity
-                    // creation -- IsExecCapableSpawnType, THREE SEPARATE predicate/emitter pairs rather
-                    // than folded into one, mirroring how Raycast got its own IsExecCapableQueryType
-                    // instead of joining SetField's; see IsExecCapableSpawnType's own comment for the
-                    // same reasoning applied a third time), or its own cached QUERY, if it has one worth
+                    // creation -- IsExecCapableSpawnType, or SetVar's variable write --
+                    // IsExecCapableVarSideEffectType, FOUR SEPARATE predicate/emitter pairs rather than
+                    // folded into one, mirroring how Raycast got its own IsExecCapableQueryType instead
+                    // of joining SetField's; see IsExecCapableSpawnType's own comment for the same
+                    // reasoning applied again), or its own cached QUERY, if it has one worth
                     // running exactly once per visit (today, only Raycast does -- see
                     // IsExecCapableQueryType), then fall through to the generic multi-exec-out fan-out,
                     // which is what makes a plain node with 0, 1, or N exec-output pins behave correctly
@@ -1218,6 +1316,7 @@ public class GraphCompiler
                     if (IsExecCapableSideEffectType(node.Type)) EmitExecSideEffect(node);
                     else if (IsExecCapableVecSideEffectType(node.Type)) EmitExecSetFieldVec3(node);
                     else if (IsExecCapableSpawnType(node.Type)) EmitExecSpawn(node);
+                    else if (IsExecCapableVarSideEffectType(node.Type)) EmitExecSetVar(node);
                     else if (IsExecCapableQueryType(node.Type)) EmitExecRaycast(node);
                     else if (IsExecCapableMouseDeltaType(node.Type)) EmitExecMouseDelta(node);
                     else if (IsExecCapableMoveAxisType(node.Type)) EmitExecMoveAxis(node);
@@ -1497,6 +1596,21 @@ public class GraphCompiler
     private static bool IsExecCapableSpawnType(string type) =>
         type.Equals("spawn", StringComparison.OrdinalIgnoreCase);
 
+    /// SetVar's own version of IsExecCapableSideEffectType -- a FOURTH, separate predicate/emitter pair,
+    /// for the same reason SetFieldVec3 and Spawn each got their own rather than being folded into an
+    /// existing list: SetVar writes through a different surface again (GraphVarStore, an in-process
+    /// object this compiler itself created no wrapper around -- not a native P/Invoke call at all) with
+    /// its own type-to-accessor dispatch (VarSetMethodFor). Sharing SetField's list would force
+    /// EmitExecSideEffect to internally branch on node.Type to pick which write logic applies -- a worse
+    /// diff than one more predicate. A write into GraphVarStore has NO runtime failure mode the way a
+    /// native field write does (unknown entity, read-only field, missing component -- see
+    /// EmitExecSetVar's own comment for why that means no "success" pin is needed either), which is a
+    /// real difference from every other predicate in this family, but it does not change WHERE this
+    /// belongs: SetVar shares the PULL refusal (EmitPullOutput's refusal check, below, and EmitNode's
+    /// "setvar" case) every side-effecting type in this family shares, for the identical reason.
+    private static bool IsExecCapableVarSideEffectType(string type) =>
+        type.Equals("setvar", StringComparison.OrdinalIgnoreCase);
+
     /// Runs a SetField node's write exactly once, at the point the exec walk reaches it -- mirrors
     /// EmitSetField's own field=/resolver/native-call logic, but pulls its "entity"/"value" inputs
     /// through EmitPullInput rather than LoadPin/_pinLocals (see the section-level comment for why the
@@ -1592,6 +1706,38 @@ public class GraphCompiler
         {
             _il.Emit(OpCodes.Pop); // nothing declared to read the new entity id; discard it
         }
+    }
+
+    /// Runs a SetVar node's write exactly once, at the point the exec walk reaches it -- mirrors
+    /// EmitExecSideEffect/EmitExecSetFieldVec3/EmitExecSpawn's own shape (pull inputs via EmitPullInput,
+    /// Call, capture-or-discard the result), but "which variable" is var=, checked directly against
+    /// _graph.Variables (no _fieldResolver/native lookup at all -- a VAR is declared in THIS graph file,
+    /// not a scene-wide or class-wide registry the way field=/class= are).
+    ///
+    /// NO "success" PIN, AND THAT IS A REAL DIFFERENCE FROM EmitExecSideEffect/EmitExecSetFieldVec3, NOT
+    /// A MISSING FEATURE: SetField/SetFieldVec3's "success" reflects a REAL native return code (unknown
+    /// entity, read-only field, missing component are all real runtime rejections aver_scene_set_f32/
+    /// aver_scene_set_vec can report). A write into GraphVarStore's in-process Dictionary, keyed by a
+    /// name Graph.Validate() has ALREADY confirmed is declared with a matching type, has nothing left to
+    /// fail at runtime -- there is no "success" a caller could ever meaningfully receive false from.
+    private void EmitExecSetVar(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.VarName))
+            throw new InvalidOperationException($"SetVar node '{node.Id}' has no var= attribute naming which variable to write");
+        var declared = _graph.Variables.FirstOrDefault(v => v.Name == node.VarName);
+        if (declared == null)
+            throw new InvalidOperationException($"SetVar node '{node.Id}' references undeclared variable '{node.VarName}'");
+        if (_varStoreArgIndex < 0)
+            throw new InvalidOperationException(
+                $"SetVar node '{node.Id}' needs a variable store argument, but this graph declares no " +
+                "VAR records (internal error -- Graph.Validate() should already have refused this graph)");
+
+        _il.Emit(OpCodes.Ldarg, (short)_varStoreArgIndex);
+        _il.Emit(OpCodes.Ldstr, node.VarName);
+        EmitPullInput(node, "value");
+        _il.Emit(OpCodes.Call, VarSetMethodFor(declared.Type));
     }
 
     /// Runs a Raycast node's native query exactly once, at the point the exec walk reaches it --
@@ -1726,12 +1872,14 @@ public class GraphCompiler
         // Generalised from a SetField-only message ("SetField has a side effect...") the moment a
         // SECOND side-effecting type (SetFieldVec3) existed -- naming source.Type rather than a fixed
         // literal is what keeps this accurate for whichever one actually triggered it, and for any
-        // future type IsExecCapableSideEffectType/IsExecCapableVecSideEffectType/IsExecCapableSpawnType
-        // grows to cover. Spawn (a THIRD side-effecting type) added to this check unchanged -- it needs
-        // no new wording, only a new predicate name in the condition, which is exactly the point of
-        // naming source.Type instead of hardcoding one.
+        // future type IsExecCapableSideEffectType/IsExecCapableVecSideEffectType/IsExecCapableSpawnType/
+        // IsExecCapableVarSideEffectType grows to cover. Spawn (a THIRD) and SetVar (a FOURTH) added to
+        // this check unchanged -- neither needed new wording, only a new predicate name in the
+        // condition, which is exactly the point of naming source.Type instead of hardcoding one. SetVar
+        // sharing this refusal is the direct proof of the task's own instruction ("the PULL path must
+        // REFUSE it... rather than fall back") -- see TestSetVarPulledWithoutExecVisitFailsClearly.
         if (IsExecCapableSideEffectType(source.Type) || IsExecCapableVecSideEffectType(source.Type) ||
-            IsExecCapableSpawnType(source.Type))
+            IsExecCapableSpawnType(source.Type) || IsExecCapableVarSideEffectType(source.Type))
             throw new InvalidOperationException(
                 $"'{source.Id}.{pinName}' cannot be read as a data value: {source.Type} has a side effect " +
                 "and must be reached by wiring it directly into the exec chain (give it exec pins), not " +
@@ -1804,6 +1952,8 @@ public class GraphCompiler
                 EmitPullGetField(source); return;
             case "getfieldvec3":
                 EmitPullGetFieldVec3(source, pinName); return;
+            case "getvar":
+                EmitPullGetVar(source); return;
             case "param":
             case "getparam":
             {
@@ -1922,6 +2072,28 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, GetFieldMethod);
     }
 
+    /// Mirrors EmitGetVar's own var=/declared-type lookup, but pushes the read value rather than
+    /// storing it to a `_pinLocals` entry -- see EmitPullGetField's identical shape for GetField, the
+    /// pattern this method copies. Reading a variable is idempotent (GraphVarStore.GetFloat/Int/Bool
+    /// have no side effect), so, exactly like GetField, this is safe to pull as many times as anything
+    /// wants -- no _execLocals caching needed.
+    private void EmitPullGetVar(Node node)
+    {
+        if (_il == null) return;
+
+        var declared = _graph.Variables.FirstOrDefault(v => v.Name == node.VarName);
+        if (declared == null)
+            throw new InvalidOperationException($"GetVar node '{node.Id}' references undeclared variable '{node.VarName}'");
+        if (_varStoreArgIndex < 0)
+            throw new InvalidOperationException(
+                $"GetVar node '{node.Id}' needs a variable store argument, but this graph declares no " +
+                "VAR records (internal error -- Graph.Validate() should already have refused this graph)");
+
+        _il.Emit(OpCodes.Ldarg, (short)_varStoreArgIndex);
+        _il.Emit(OpCodes.Ldstr, node.VarName!);
+        _il.Emit(OpCodes.Call, VarGetMethodFor(declared.Type));
+    }
+
     /// Mirrors EmitGetFieldVec3's own field=/RequireVec3Field checks, but pushes ONE requested
     /// component rather than storing all three to `_pinLocals` entries -- EmitPullOutput's contract is
     /// "push the ONE pin asked for", and GetFieldVec3 has three (x/y/z), unlike GetField's one.
@@ -2008,6 +2180,50 @@ public class GraphCompiler
     private static readonly MethodInfo MoveAxisMethod =
         typeof(GraphInterop).GetMethod("MoveAxisForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.MoveAxisForGraph was not found by reflection");
+
+    // GraphVarStore's own typed accessors -- PUBLIC instance methods on a plain class in THIS assembly
+    // (unlike Native/Fw/GraphInterop above, which are internal members of a DIFFERENT assembly reached
+    // only through NonPublic|Static reflection), so an ordinary public GetMethod lookup suffices; no
+    // BindingFlags.NonPublic needed here.
+    private static readonly MethodInfo VarGetFloatMethod =
+        typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.GetFloat))
+        ?? throw new InvalidOperationException("Aver.Graph.GraphVarStore.GetFloat was not found by reflection");
+    private static readonly MethodInfo VarSetFloatMethod =
+        typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.SetFloat))
+        ?? throw new InvalidOperationException("Aver.Graph.GraphVarStore.SetFloat was not found by reflection");
+    private static readonly MethodInfo VarGetIntMethod =
+        typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.GetInt))
+        ?? throw new InvalidOperationException("Aver.Graph.GraphVarStore.GetInt was not found by reflection");
+    private static readonly MethodInfo VarSetIntMethod =
+        typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.SetInt))
+        ?? throw new InvalidOperationException("Aver.Graph.GraphVarStore.SetInt was not found by reflection");
+    private static readonly MethodInfo VarGetBoolMethod =
+        typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.GetBool))
+        ?? throw new InvalidOperationException("Aver.Graph.GraphVarStore.GetBool was not found by reflection");
+    private static readonly MethodInfo VarSetBoolMethod =
+        typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.SetBool))
+        ?? throw new InvalidOperationException("Aver.Graph.GraphVarStore.SetBool was not found by reflection");
+
+    /// Picks GraphVarStore's read accessor for a declared VAR's type -- EmitGetVar/EmitPullGetVar's
+    /// shared dispatch, the same "one switch, both callers" shape VarSetMethodFor below has for writes.
+    private static MethodInfo VarGetMethodFor(PinType t) => t switch
+    {
+        PinType.Float => VarGetFloatMethod,
+        PinType.Int => VarGetIntMethod,
+        PinType.Bool => VarGetBoolMethod,
+        _ => throw new InvalidOperationException(
+            $"VAR type {t} has no GraphVarStore read accessor -- VAR only supports Float/Int/Bool"),
+    };
+
+    /// Picks GraphVarStore's write accessor for a declared VAR's type -- EmitExecSetVar's own dispatch.
+    private static MethodInfo VarSetMethodFor(PinType t) => t switch
+    {
+        PinType.Float => VarSetFloatMethod,
+        PinType.Int => VarSetIntMethod,
+        PinType.Bool => VarSetBoolMethod,
+        _ => throw new InvalidOperationException(
+            $"VAR type {t} has no GraphVarStore write accessor -- VAR only supports Float/Int/Bool"),
+    };
 
     /// Called FROM EMITTED IL (see EmitWhile/EmitForEach), not from ordinary C# control flow, when a
     /// loop's iteration count crosses MaxLoopIterations. Logs -- loudly, naming the exact node and

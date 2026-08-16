@@ -249,6 +249,28 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("exec", "exec", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false),
         pin("then", "exec", true), pin("entity", "int", true)},
         {attr("class", "Class")}});
+
+    // GetVar / SetVar: graph-local PERSISTENT variables -- the "nothing survives between ticks" gap,
+    // closed by storage the GraphHost driving a compiled graph owns per instance (see
+    // scripting/csharp/Aver.Graph/GraphVarStore.cs's own comment for the full contract). var= names
+    // which declared VAR the node addresses, the same generic key=value NODE-line attribute mechanism
+    // field=/param=/class= already use.
+    //
+    // GetVar: a PURE READ, so -- like GetField/GetFieldVec3 above -- no exec pins. Pin type defaults to
+    // float here (adjustable per-instance, same convention Param's own catalog entry documents, since
+    // layout/pin-typing always prefers a node's own recorded pins over this table -- see the header
+    // comment).
+    t.push_back({"GetVar", "Get Var", "Var", {pin("value", "float", true)}, {attr("var", "Var Name")}});
+    // SetVar: A WRITE IS A SIDE EFFECT (see GraphCompiler.IsExecCapableVarSideEffectType's own comment),
+    // so -- UNLIKE GetField/SetField/GetFieldVec3/SetFieldVec3, which get NO exec pins by default --
+    // this DOES get exec pins by default, mirroring Spawn/Raycast rather than SetField: SetVar has no
+    // legitimate non-exec path at all, so a freshly palette-spawned node needs to already be usable, not
+    // require an author to hand-add exec pins before it does anything useful. No "success" pin -- a
+    // write into an in-process store has no runtime failure mode a native field write does (unknown
+    // entity, read-only field, missing component), so there is nothing left to report.
+    t.push_back({"SetVar", "Set Var", "Var", {
+        pin("exec", "exec", false), pin("value", "float", false), pin("then", "exec", true)},
+        {attr("var", "Var Name")}});
     return t;
 }
 

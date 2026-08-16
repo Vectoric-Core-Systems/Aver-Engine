@@ -32,6 +32,15 @@
 // in comments -- no branch, switch or string comparison anywhere in this file singles it out from
 // any other non-OnStart/OnTick event name a project might declare. See LoadEventGraph's own comment
 // for exactly how a declared event name sorts into "Tick()-driven" versus "Fire()-able".
+//
+// VARIABLES ADDITION (graph-local persistent state -- "nothing survives between ticks" closed): every
+// compiled delegate before this addition was a pure function of its declared PARAMs -- a graph could
+// not hold a score, an ammo count, or a cooldown, because nothing outside the DynamicMethod's own
+// arguments lived longer than one invocation. See _varStore's own field comment for the storage this
+// class now owns, one instance per GraphHost, and GraphVariable/GraphVarStore's own comments for the
+// full contract. This is a GraphHost-level addition, same as Phase 2/3 above: GraphCompiler only knows
+// how to accept and use a GraphVarStore argument; deciding that ONE instance lives for the lifetime of
+// a GraphHost and gets passed to every Tick()/Fire() call on it is entirely this file's own job.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -136,6 +145,30 @@ public class GraphHost
     // entry points sharing one compiled Graph, the same "the two halves do not interact" property
     // OcGraph.hpp's own contract already promises for dataflow-vs-exec within a single file.
     private Dictionary<string, Delegate> _onDemand = new();
+
+    // ---- graph-local persistent variables (VAR) -- new in the variables slice -----------------------
+    // ONE INSTANCE FIELD, PER GraphHost OBJECT -- this is the entire storage/lifetime contract from
+    // this class's side (GraphVarStore itself owns the "how"; see its own comment). Created fresh in
+    // LoadFromText(), right after a successful parse and before either compile path runs, from
+    // GraphVarStore.CreateFor(graph) -- which seeds every declared VAR at its own default, so a read
+    // before any write is always deterministic (see GraphVarStore.CreateFor's own comment). Null when
+    // the loaded graph declares no VAR records (the overwhelmingly common case), so Tick()/Fire() below
+    // append nothing extra to a VAR-less graph's DynamicInvoke args -- byte-for-behavior-identical to
+    // before VAR existed.
+    //
+    // TWO GraphHost INSTANCES OVER THE SAME .ocgraph FILE THEREFORE GET TWO INDEPENDENT STORES, with no
+    // extra work: each host's own LoadFromText() call constructs its own GraphVarStore, and nothing in
+    // this class (or GraphVarStore, or GraphCompiler) ever keys storage by file path or shares a static
+    // table. This is exactly the property that already stops several actors sharing one idle-motion
+    // .ocgraph from stacking at the origin via their own separate PositionSink closures -- VAR's
+    // independence rides the same "one GraphHost, one everything" architecture, not a new mechanism.
+    // See Aver.Graph.Tests/GraphVarTests.cs's TestTwoGraphHostsOverSameGraphFileHaveIndependentVariables.
+    //
+    // RELOADING THE SAME GRAPH (a second Load()/LoadFromText() call on this same host) replaces this
+    // field with a BRAND NEW store, seeded fresh from declared defaults -- ResetCompiledState() clears
+    // it to null first, exactly like every other compiled-state field on this class, so a hot-reloaded
+    // graph's variables reset rather than carrying over stale values from whatever compiled before.
+    private GraphVarStore? _varStore;
 
     private Graph? _graph;
     private readonly PositionSink _positionSink;
@@ -252,6 +285,12 @@ public class GraphHost
         _graph = graph;
         _argSlots = slots;
         _compiled = compiled;
+        // Committed at the SAME point as _graph/_compiled above, not earlier -- see _varStore's own
+        // field comment. A compile failure above already returned false without touching _varStore, so
+        // this host keeps whatever it had before (null, after ResetCompiledState(), for a first Load()),
+        // preserving the "each call fully replaces whatever compiled before it, all at once" contract
+        // this class's own doc comment already promises for every other field.
+        _varStore = graph.Variables.Count > 0 ? GraphVarStore.CreateFor(graph) : null;
         return true;
     }
 
@@ -414,6 +453,13 @@ public class GraphHost
         _onDemand = onDemand;
         _startInvoked = false;
         _execSimTime = 0f;
+        // Committed at the SAME point as _graph/_onStart/_onTick/_onDemand above, not earlier -- see
+        // the dataflow path's identical comment on this same line shape, and _varStore's own field
+        // comment. Shared by OnStart, OnTick AND every on-demand event this file compiles: storage lives
+        // at the host/graph level, not per entry point, so Fire("OnHit", ...) and Tick()-driven OnTick
+        // in the same file see the SAME variable pool -- the score/ammo/cooldown shape "nothing survives
+        // between ticks" was blocking.
+        _varStore = graph.Variables.Count > 0 ? GraphVarStore.CreateFor(graph) : null;
         return true;
     }
 
@@ -441,9 +487,15 @@ public class GraphHost
         }
         if (_compiled == null) return;
 
-        var args = new object[_argSlots.Length];
+        // One extra trailing slot for _varStore, appended AFTER every declared PARAM -- see
+        // GraphCompiler's own "trailing GraphVarStore parameter" comment for why the compiled
+        // delegate's argument order puts it last, never mixed into the PARAM slots above. Zero extra
+        // slots (and zero extra work) for the overwhelmingly common VAR-less graph, where _varStore is
+        // null and this array is exactly the same shape it always was.
+        var args = new object[_argSlots.Length + (_varStore != null ? 1 : 0)];
         for (int i = 0; i < _argSlots.Length; i++)
             args[i] = _argSlots[i] == ParamSlot.Entity ? (object)entityId : (object)timeSeconds;
+        if (_varStore != null) args[_argSlots.Length] = _varStore;
 
         // DynamicInvoke, not a statically-typed Func<> call: GraphHost does not know at compile
         // time (of THIS C# file) how many PARAMs a given graph declares, so it cannot cast to a
@@ -462,7 +514,11 @@ public class GraphHost
 
         object[] BuildArgs(ParamSlot[] slots)
         {
-            var args = new object[slots.Length];
+            // Same trailing _varStore slot Tick()'s own dataflow-args loop appends, above -- see that
+            // comment. OnStart and OnTick share ONE _varStore (this class's own field, not a per-entry
+            // one), which is exactly what lets an OnHit-shaped handler increment a VAR and OnTick read
+            // it back later, or vice versa.
+            var args = new object[slots.Length + (_varStore != null ? 1 : 0)];
             for (int i = 0; i < slots.Length; i++)
                 // (object) ON EVERY ARM IS LOAD-BEARING, NOT STYLE. Without it, the switch expression's
                 // arms are `int` (entityId) and two `float`s (_execSimTime/deltaTime) with no explicit
@@ -490,6 +546,7 @@ public class GraphHost
                     ParamSlot.DeltaTime => (object)deltaTime,
                     _ => throw new InvalidOperationException($"unhandled {nameof(ParamSlot)} {slots[i]}"),
                 };
+            if (_varStore != null) args[slots.Length] = _varStore;
             return args;
         }
 
@@ -558,7 +615,19 @@ public class GraphHost
                 "positionally, in declaration order, exactly like CompileEntryPoint's own compiled " +
                 "delegate (see this method's own doc comment)", nameof(args));
 
-        result = compiled.DynamicInvoke(args);
+        // Same trailing _varStore slot Tick()/TickEventGraph append -- appended HERE, internally, so
+        // the "args must match the graph's PARAM list positionally" contract just checked above stays
+        // literally true from the CALLER's perspective; the caller never has to know or care that a
+        // variables-store argument exists.
+        object[] callArgs = args;
+        if (_varStore != null)
+        {
+            callArgs = new object[args.Length + 1];
+            Array.Copy(args, callArgs, args.Length);
+            callArgs[args.Length] = _varStore;
+        }
+
+        result = compiled.DynamicInvoke(callArgs);
         Console.WriteLine($"[GraphHost] '{_graph?.Name}': {eventName}(fired on demand) -> {DescribeResult(result)}");
         return true;
     }
@@ -595,6 +664,7 @@ public class GraphHost
         _startInvoked = false;
         _execSimTime = 0f;
         _onDemand = new();
+        _varStore = null;
     }
 
     private void ApplyResult(int entityId, object? result)

@@ -84,6 +84,15 @@ class Program
         // AttributeEditRoundTripTests.cs's own header comment; run GraphEditorLoadSaveTest.exe first.
         failures += AttributeEditRoundTripTests.RunAll();
 
+        // Graph-local persistent variables (VAR/GetVar/SetVar/GraphVarStore): closes "nothing survives
+        // between ticks" -- see GraphVarTests.cs's own header comment.
+        failures += GraphVarTests.RunAll();
+
+        // REVIEWER'S OWN independent adversarial pass, written separately from GraphVarTests.cs above,
+        // targeting specifically the per-host-instance-not-per-graph-file sharing bug this design lives
+        // or dies on -- see VarIsolationTests.cs's own header comment.
+        failures += VarIsolationTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

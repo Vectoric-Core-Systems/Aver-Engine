@@ -624,11 +624,13 @@ static void testAutoLayout() {
 static void testNodeAttributeCatalog() {
     AVER_INFO("=== node attribute catalog (GraphNodeDesc::attributes) ===");
 
-    // Exactly the six types the task brief names: param=/field=/field=/field=/field=/class=.
+    // The six types an earlier task brief named (param=/field=/field=/field=/field=/class=), plus
+    // GetVar/SetVar's own var= -- graph-local persistent variables, added later.
     struct Expect { const char* type; const char* key; };
     const Expect expected[] = {
         {"Param", "param"}, {"GetField", "field"}, {"SetField", "field"},
         {"GetFieldVec3", "field"}, {"SetFieldVec3", "field"}, {"Spawn", "class"},
+        {"GetVar", "var"}, {"SetVar", "var"},
     };
     for (const auto& e : expected) {
         const GraphNodeDesc* d = findGraphNodeDesc(e.type);

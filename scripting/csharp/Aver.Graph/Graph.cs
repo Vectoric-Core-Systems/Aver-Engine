@@ -88,6 +88,13 @@ public class Node
     // boot order that field ids' engine-global table never has to worry about) are resolved by NAME at
     // invocation time instead.
     public string? ClassName { get; set; }
+
+    // Which declared VAR a "getvar"/"setvar" node addresses, e.g. "score". Set from the NODE line's
+    // "var=<name>" attribute -- the same generic key=value mechanism ParamName/FieldName/ClassName
+    // already use. Null for every other node type. UNLIKE FieldName, there is no external table to
+    // resolve this against (a VAR is declared in THIS graph file, not a scene-wide registry), so
+    // Graph.Validate() checks it directly against Variables -- see that block's own comment.
+    public string? VarName { get; set; }
 }
 
 /// One parameter the compiled method accepts -- e.g. the entity a graph drives, or the current
@@ -101,6 +108,41 @@ public class GraphParameter
     public required PinType Type { get; init; }
 }
 
+/// One variable a GRAPH remembers between ticks -- e.g. a hit count, a cooldown timer, a round state.
+/// Declared with a top-level `VAR <name> <type> [default]` record, mirroring GraphParameter/PARAM
+/// immediately above -- but the two are opposites, not siblings: a PARAM is the CALLER-supplies-this
+/// contract (GraphHost.LoadEventGraph maps it onto entity/time/deltaTime, and refuses anything else,
+/// because Tick()/Fire() are the only things that can ever hand a value in). A VAR is never supplied
+/// by a caller at all; the graph OWNS it. Storage lives on the GraphHost instance driving this graph
+/// (see GraphVarStore), created once at Load() time and persisting across every subsequent
+/// Tick()/Fire() call on that SAME host -- two hosts sharing one .ocgraph file (the ordinary case: one
+/// idle-motion graph driving several actors, each with its own GraphHost) get independent storage, not
+/// one shared pool. A node reads or writes one by naming it in a GetVar/SetVar node's `var=<name>`
+/// attribute (see Node.VarName), the same generic key=value NODE-line attribute mechanism
+/// ParamName/FieldName/ClassName already use.
+///
+/// TYPE SET: Float/Int/Bool only, mirroring PARAM's own restriction (PinType has no String or Vec3 at
+/// all -- see the PinType enum above) -- Exec is rejected at parse time, the same reasoning PARAM's own
+/// Exec rejection already gives (a variable is data a graph remembers, not control flow).
+///
+/// WHAT IS NOT PERSISTED: a VAR's value does NOT survive a process restart, an Unload+Load cycle (a
+/// level/scene reload does this to every script-hosted entity today), or any Load() call replacing a
+/// still-live graph (hot-reloading the file while playing resets every VAR to its declared default).
+/// That is the owner's explicitly accepted trade-off for this shape over a scene-scratch component --
+/// see GraphVarStore's own comment for the deterministic "read before any write" contract this implies.
+public class GraphVariable
+{
+    public required string Name { get; init; }
+    public required PinType Type { get; init; }
+
+    // The value a fresh GraphVarStore seeds this variable with. Always a concrete float/int/bool of
+    // the DECLARED type by the time OcGraphParser is done with it (never null) -- an omitted or
+    // unparseable `[default]` token falls back to the type's own zero value there, exactly like PIN's
+    // own default-value convention (see OcGraphParser's VAR-parsing comment). Typed `object` rather
+    // than three separate nullable fields for the same reason ConstantOutput/PinnedValue already do.
+    public required object Default { get; init; }
+}
+
 /// A complete graph: nodes, links, pinned values, and output pins to evaluate.
 public class Graph
 {
@@ -112,6 +154,13 @@ public class Graph
     public List<PinnedValue> PinnedValues { get; set; } = new();
     public List<(string NodeId, string PinName)> Outputs { get; set; } = new();
     public List<GraphParameter> Parameters { get; set; } = new();  // Declared via top-level PARAM records; empty means the compiled method takes no arguments, exactly as before this existed.
+
+    // Declared via top-level `VAR <name> <type> [default]` records -- see GraphVariable's own comment
+    // for the full storage/lifetime contract. Empty for every graph that predates this (including
+    // every existing .ocgraph and PARAM's own checked-in fixtures), exactly like Parameters was empty
+    // before PARAM existed -- GraphCompiler only appends a GraphVarStore argument to the compiled
+    // delegate when this list is non-empty, so a VAR-less graph's delegate shape is unchanged.
+    public List<GraphVariable> Variables { get; set; } = new();
 
     // Declared via top-level `ENTRY <nodeId> <eventName>` records -- which node begins the PUSH/exec
     // chain for a named event (e.g. "OnStart", "OnTick"). Empty for every graph that predates this,
@@ -193,6 +242,19 @@ public class Graph
             }
         }
 
+        // Check VAR declarations are unique -- the same reason two PARAM declarations can't share a
+        // name, above: two variables with the same name would make "which one does a GetVar/SetVar
+        // node's var= attribute mean" ambiguous.
+        var varNames = new HashSet<string>();
+        foreach (var v in Variables)
+        {
+            if (!varNames.Add(v.Name))
+            {
+                err = $"Duplicate VAR declaration '{v.Name}'";
+                return false;
+            }
+        }
+
         // Every ENTRY must name a real node, and two ENTRY records must not claim the same event --
         // which node handles "OnTick" has to be unambiguous, the same reason two PARAM declarations
         // can't share a name just above. The node named by ENTRY may be of ANY type (a Sequence, a
@@ -248,6 +310,45 @@ public class Graph
             if (valuePin != null && valuePin.Type != declared.Type)
             {
                 err = $"Node '{node.Id}' declares output pin 'value' as {valuePin.Type} but parameter '{node.ParamName}' is {declared.Type}";
+                return false;
+            }
+        }
+
+        // Check every GetVar/SetVar node names a variable that was actually declared, and that if it
+        // already has an explicit 'value' pin (a hand-written PIN record, rather than the parser's
+        // default-pins path) that pin's type agrees with the VAR's declared type. Mirrors the Param-node
+        // block immediately above in shape and reasoning -- including running BEFORE the Outputs check
+        // below for the identical reason that block gives: an undeclared var= produces no default pin
+        // (see OcGraphParser.AddDefaultPins' "getvar"/"setvar" cases), so a LINK/OUT touching it should
+        // fail with the real reason, not a generic "no pin" message.
+        //
+        // GetVar's 'value' pin is an OUTPUT; SetVar's is an INPUT -- `p.IsOutput == isGetVar` picks the
+        // right one for whichever node type is being checked without two near-duplicate blocks.
+        foreach (var node in Nodes.Values)
+        {
+            bool isGetVar = node.Type.Equals("getvar", System.StringComparison.OrdinalIgnoreCase);
+            bool isSetVar = node.Type.Equals("setvar", System.StringComparison.OrdinalIgnoreCase);
+            if (!isGetVar && !isSetVar) continue;
+
+            string kind = isGetVar ? "GetVar" : "SetVar";
+
+            if (string.IsNullOrEmpty(node.VarName))
+            {
+                err = $"Node '{node.Id}' is a {kind} node but has no var= attribute naming which variable it addresses";
+                return false;
+            }
+
+            var declaredVar = Variables.FirstOrDefault(v => v.Name == node.VarName);
+            if (declaredVar == null)
+            {
+                err = $"Node '{node.Id}' references undeclared variable '{node.VarName}' -- add 'VAR {node.VarName} <type>'";
+                return false;
+            }
+
+            var valuePin2 = node.Pins.FirstOrDefault(p => p.Name == "value" && p.IsOutput == isGetVar);
+            if (valuePin2 != null && valuePin2.Type != declaredVar.Type)
+            {
+                err = $"Node '{node.Id}' declares {(isGetVar ? "output" : "input")} pin 'value' as {valuePin2.Type} but variable '{node.VarName}' is {declaredVar.Type}";
                 return false;
             }
         }

@@ -135,6 +135,78 @@ public class OcGraphParser
 
                 graph.Parameters.Add(new GraphParameter { Name = paramName, Type = paramType });
             }
+            else if (key.Equals("VAR", StringComparison.OrdinalIgnoreCase))
+            {
+                // VAR <name> <type> [default]
+                //
+                // Declares one variable the GRAPH remembers between ticks -- the opposite of PARAM
+                // immediately above: a PARAM is supplied fresh by the CALLER on every invocation; a VAR
+                // is owned by the graph/host and its value survives from one compiled-delegate
+                // invocation to the next, on the SAME GraphHost instance. See GraphVariable's own
+                // comment (Graph.cs) and GraphVarStore's own comment for the full storage/lifetime
+                // contract -- this parser owns only the FORMAT half of that story.
+                //
+                // A NEW record, not an unknown one, for the identical reason PARAM's own comment gives:
+                // the C++ side does not parse VAR at all today, so a VAR line classifies as an unowned
+                // "Other" line in OcGraph.cpp's classifyLine and round-trips verbatim, in place, through
+                // the same whole-file unknown-record preservation PARAM already relies on -- verified by
+                // building and running OcGraphTest.exe's --roundtrip diagnostic against a hand-written
+                // fixture carrying VAR records, not merely by reading the C++ source (see
+                // tests/formats/src/OcGraphTest.cpp's testVarRecordsSurviveRoundTrip for the checked-in
+                // version of that proof).
+                if (tokens.Count < 3)
+                {
+                    err = "VAR requires a name and a type";
+                    return false;
+                }
+
+                string varName = tokens[1];
+                string varTypeName = tokens[2];
+                if (!Enum.TryParse<PinType>(varTypeName, true, out var varType))
+                {
+                    err = $"Unknown variable type '{varTypeName}'";
+                    return false;
+                }
+                // VAR is DATA a graph remembers between ticks, not control flow -- rejected here, at
+                // parse time, for the identical reason PARAM rejects Exec just above (a confusing
+                // runtime failure three layers into GraphCompiler beats a clear one right here).
+                if (varType == PinType.Exec)
+                {
+                    err = $"VAR '{varName}' cannot be declared exec -- VAR is for data a graph " +
+                          "remembers between ticks, not control flow; control flow is expressed with " +
+                          "exec pins and LINK records, not a stored variable";
+                    return false;
+                }
+
+                // TYPED BY THE DECLARED TYPE, NOT BY THE LITERAL'S SHAPE -- the exact lesson PIN's own
+                // default-value parsing paid for already (see that comment, below). UNLIKE PIN's hard
+                // "no default at all" fallback, an unparseable VAR default falls back to the type's own
+                // zero value instead: GraphVarStore.CreateFor needs a concrete Default to seed from
+                // (never null), and a graph author fat-fingering a default is far more likely than the
+                // whole record being garbage -- the graph should still load, just with 0/0f/false for
+                // that one variable.
+                object varDefault = varType switch
+                {
+                    PinType.Bool => false,
+                    PinType.Int => 0,
+                    _ => 0f, // PinType.Float (Exec already rejected above)
+                };
+                if (tokens.Count > 3)
+                {
+                    string defaultStr = tokens[3];
+                    if (varType == PinType.Bool && bool.TryParse(defaultStr, out var b))
+                        varDefault = b;
+                    else if (varType == PinType.Int && int.TryParse(defaultStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i))
+                        varDefault = i;
+                    else if (varType == PinType.Float && float.TryParse(defaultStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var f))
+                        varDefault = f;
+                    // else: the literal did not parse as the declared type -- keep the zero-value
+                    // fallback already assigned above rather than failing the whole graph over one
+                    // malformed default.
+                }
+
+                graph.Variables.Add(new GraphVariable { Name = varName, Type = varType, Default = varDefault });
+            }
             else if (key.Equals("NODE", StringComparison.OrdinalIgnoreCase))
             {
                 // NODE <id> <type> [key=value ...]
@@ -194,6 +266,13 @@ public class OcGraphParser
                     else if (k == "class")
                     {
                         node.ClassName = v;
+                    }
+                    // var= names which declared VAR a "getvar"/"setvar" node addresses (see
+                    // Node.VarName). No external table to resolve against -- Graph.Validate() checks it
+                    // directly against Variables, not here.
+                    else if (k == "var")
+                    {
+                        node.VarName = v;
                     }
                 }
 
@@ -754,6 +833,49 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
                 break;
+
+            // ---- GetVar / SetVar -------------------------------------------------------------------
+            // Graph-local persistent variables -- see GraphVariable's own comment (Graph.cs) and
+            // GraphVarStore's own comment for the full storage/lifetime story; this is only the pin
+            // shape. var= names which declared VAR the node addresses (see Node.VarName), the same
+            // generic key=value NODE-line attribute mechanism field=/param=/class= already use.
+            //
+            // GetVar: a PURE READ (reading twice is always safe -- no side effect), so, unlike SetVar,
+            // it gets NO exec pins and is reachable from BOTH compilers, exactly like GetField. Only ONE
+            // output pin, 'value', typed to the declared VAR's type -- not a fixed type the way most
+            // other default-pin cases have one, mirroring "param"/"getparam" immediately above. If var=
+            // is missing or names an undeclared variable, add NO pin at all: Graph.Validate() (run right
+            // after this loop, and again at the start of every Compile()/CompileEntryPoint()) reports
+            // the specific reason, more useful than a generic "no output pin 'value'" from whatever
+            // LINK/OUT touches this node next -- the exact same reasoning "param"/"getparam" already
+            // follows.
+            case "getvar":
+            {
+                var declaredVar = graph.Variables.FirstOrDefault(v => v.Name == node.VarName);
+                if (declaredVar != null)
+                    node.Pins.Add(new Pin { Name = "value", Type = declaredVar.Type, IsOutput = true, NodeId = node.Id });
+                break;
+            }
+
+            // SetVar: A WRITE IS A SIDE EFFECT (see GraphCompiler.IsExecCapableVarSideEffectType's own
+            // comment), so -- UNLIKE GetField/SetField/GetFieldVec3/SetFieldVec3, which get no exec pins
+            // by default -- this DOES get exec pins BY DEFAULT, mirroring Spawn/Raycast rather than
+            // SetField: SetVar has no legitimate non-exec path at all (there is no "overwriting the same
+            // value twice is harmless" excuse the way SetField's own idempotent field write has), so a
+            // freshly palette-spawned node needs to already be usable, not require an author to hand-add
+            // exec pins before it does anything. 'value' is typed to the declared VAR's type, the same
+            // conditional-add-or-nothing rule as GetVar's own output above -- present only when var=
+            // resolves, so an undeclared-variable graph still gets Graph.Validate()'s specific error
+            // rather than a mistyped default pin masking it.
+            case "setvar":
+            {
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                var declaredVar = graph.Variables.FirstOrDefault(v => v.Name == node.VarName);
+                if (declaredVar != null)
+                    node.Pins.Add(new Pin { Name = "value", Type = declaredVar.Type, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                break;
+            }
         }
     }
 

@@ -196,6 +196,43 @@ static void testUnknownRecords() {
     check(again == rewritten, "second rewrite of preserved data is bit-identical");
 }
 
+// Tests that VAR records (graph-local persistent variables, a C#-side-only concept -- see
+// scripting/csharp/Aver.Graph/OcGraphParser.cs's own VAR-parsing comment) survive a round trip even
+// though this C++ reader has no VAR case at all. classifyLine (above) has no "Var" branch, so a VAR
+// line falls into OwnedLineKind::Other -- exactly the same path a comment or an unrecognised record
+// like MYSTERY (testUnknownRecords, above) already takes -- and is copied through verbatim, in place,
+// on every write. This is the checked-in, permanent version of the proof that was first established
+// with an ad hoc scratch fixture and the --roundtrip diagnostic below: NO C++ reader change was needed
+// for VAR to round-trip.
+static void testVarRecordsSurviveRoundTrip() {
+    AVER_INFO("=== .ocgraph VAR records (graph-local persistent variables) ===");
+    using namespace fmt;
+
+    const std::string original =
+        "OCGRAPH 1\n"
+        "NAME VarTest\n"
+        "VAR score int 0\n"
+        "VAR cooldown float 1.5\n"
+        "NODE gv GetVar var=score\n"
+        "OUT gv value\n";
+
+    OcGraphData g;
+    std::string err;
+    check(parseOcgraph(original, g, &err), "graph with VAR records parses (VAR is simply invisible to this reader)");
+    check(g.name == "VarTest", "known fields still parse alongside unrecognised VAR records");
+
+    const std::string rewritten = writeOcgraph(g, original);
+    check(rewritten.find("VAR score int 0") != std::string::npos, "VAR 'score' survives a write");
+    check(rewritten.find("VAR cooldown float 1.5") != std::string::npos, "VAR 'cooldown' survives a write");
+    check(rewritten.find("var=score") != std::string::npos,
+          "GetVar's var= attribute survives a write (via the SAME extraTokens mechanism field=/param=/class= use)");
+
+    OcGraphData g2;
+    check(parseOcgraph(rewritten, g2, &err), "rewritten graph (with VAR records) parses");
+    const std::string again = writeOcgraph(g2, rewritten);
+    check(again == rewritten, "second rewrite of VAR-bearing data is bit-identical");
+}
+
 // Tests that output is deterministic: same data written twice produces identical output.
 static void testDeterministic() {
     AVER_INFO("=== .ocgraph deterministic output ===");
@@ -610,6 +647,7 @@ int main(int argc, char** argv) {
     testBasicParse();
     testRoundTrip();
     testUnknownRecords();
+    testVarRecordsSurviveRoundTrip();
     testDeterministic();
     testMalformedInput();
     testExecLinksAndEntryPoints();
