@@ -1,0 +1,12 @@
+OCWORLD 1
+NAME Range
+SUN elev 48.0 azim 130.0 color 1 0.97 0.92 lux 90000
+SKY model physical
+# The game mode. Placed like anything else -- a graph class is a class, so it is placed, not
+# registered by some separate mechanism.
+PLACE none 0 0 0 0 0 0 1 class AN_Rules
+# The player. Parented to Character, so this placement gets a real capsule and view.
+PLACE none 0 0 100 0 0 0 1 class AN_Player
+# Two targets from ONE graph file, to show their hit counts stay independent.
+PLACE none 300 400 60 0 0 0 1 class AN_Target
+PLACE none -300 400 60 0 0 0 1 class AN_Target

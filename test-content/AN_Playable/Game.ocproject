@@ -1,0 +1,13 @@
+OCPROJECT 1
+# ZERO C#. This project directory contains no .cs file at all -- verify with `find . -name '*.cs'`
+# and expect nothing back. Everything it does is in Content/Scripts/*.ocgraph.
+#
+# It exists to prove the claim the engine now makes: that Aver Node works out of the box, the way
+# Blueprints does, without a project first writing a C# class to give it something to stand on. Three
+# graphs: a game mode that starts the play session, a character driven by polled input, and a target
+# that counts events fired at it by another graph.
+NAME AN_Playable
+ENGINE Aver 0.1.2
+CREATEDWITH 0.2.0
+CONTENT Content
+STARTMAP Maps/Range.ocmap

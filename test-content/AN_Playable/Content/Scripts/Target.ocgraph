@@ -1,0 +1,50 @@
+OCGRAPH 1
+# A THING THAT REACTS TO BEING HIT, and remembers how often. Still no C# anywhere in this project.
+#
+# Two capabilities meet here. ENTRY OnHit has existed since 75be56b, but until 6d7ff99 nothing could
+# SEND one from a graph -- GraphHost.Fire was reachable only from C#, so a graph could declare a
+# reaction it had no way of ever receiving. And VAR (a45e32f) is what lets the count survive the
+# tick, stored per GraphHost instance, so two targets placed from this one file keep separate scores
+# rather than sharing one.
+NAME Target
+DESCRIPTION Counts the hits it receives. One file, any number of instances, independent counts.
+
+CLASS AN_Target Actor
+
+PARAM entity int
+
+# FLOAT, not int, and the engine told me why: Add takes float pins and there is no integer
+# Add in the palette, so an int VAR wired into one fails at load with
+#   "Link prev.value (Int) to next.a (Float): type mismatch"
+# -- a good error, caught before anything ran rather than counting wrongly at runtime.
+VAR hits float 0
+
+# ---- the reaction --------------------------------------------------------------------------------
+# An ENTRY is not a node type: it names which node begins a chain, and OnHit differs from OnStart and
+# OnTick only in that nobody calls it for you. A host -- or, since 6d7ff99, another graph's FireEvent
+# -- has to fire it by name.
+ENTRY hit OnHit
+NODE hit OnHit
+
+NODE one ConstFloat
+PIN one value out float 1.0
+
+NODE prev GetVar var=hits
+NODE next Add
+LINK prev.value next.a
+LINK one.value next.b
+
+NODE store SetVar var=hits
+LINK hit.exec store.exec
+LINK next.result store.value
+
+# ---- reporting -----------------------------------------------------------------------------------
+# A SEPARATE GetVar, deliberately not the `prev` node above. An OUT record pulls a pure data
+# expression, and pulling `prev` would report the count as it was BEFORE this hit was stored -- an
+# off-by-one that looks like a lost hit. Reading through its own node after the write is the honest
+# shape, and the same trap caught a reviewer building acceptance evidence for this very feature.
+ENTRY tick OnTick
+NODE tick OnTick
+NODE report GetVar var=hits
+
+OUT report value

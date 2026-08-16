@@ -1,0 +1,112 @@
+OCGRAPH 1
+# A PLAYABLE CHARACTER WITH NO C# ANYWHERE. This project contains not one .cs file; everything below
+# is the whole of it.
+#
+# Parenting to `Character` is what makes it work, and that row only became reachable from content in
+# 6d7ff99. Before that, `Character` was not a declared class at all -- AverCharacter was abstract, no
+# concrete row existed, and the only way to obtain a spawnable character was for a PROJECT to write
+# its own C# subclass. That one file was the last thing standing between a project and being entirely
+# graph-driven.
+#
+# WHAT PARENTING GIVES US, and what it does not. The instance gets a real managed AverCharacter
+# behind it -- the capsule, the view entity, the yaw/pitch state with its clamp -- which is what
+# CharacterMove reaches through. It does NOT get any behaviour from a parent GRAPH class, because
+# graph classes inherit native registry flags and kind bits, never another graph's nodes. There is no
+# Blueprint-style logic inheritance here and this file does not pretend otherwise.
+NAME Player
+DESCRIPTION A character driven entirely from a graph: polled input into CharacterMove, no C# at all.
+
+CLASS AN_Player Character
+
+# The three names an event-driven host will supply. Asking for anything else is refused BY NAME at
+# load, which is a good error to meet early rather than a mystery at runtime.
+PARAM entity int
+PARAM deltaTime float
+
+NODE ent Param param=entity
+NODE dt Param param=deltaTime
+
+# Look sensitivity, degrees per unit of mouse delta. Separate from move because a mouse delta and a
+# key axis are different units and pretending otherwise is how a controller ends up feeling wrong.
+NODE look_scale ConstFloat
+PIN look_scale value out float 0.15
+
+ENTRY tick OnTick
+NODE tick OnTick
+
+# ---- read input, then drive, in ONE exec chain ---------------------------------------------------
+# MoveAxis and MouseDelta both carry exec pins for a reason worth knowing: each reads a frame's input
+# in a single native call and caches the result for the visit, so reading three of MouseDelta's pins
+# costs one call rather than three. That guarantee only holds when the node is REACHED BY THE EXEC
+# WALK -- a node hanging off a data link alone is refused rather than sampled at an undefined moment.
+NODE move MoveAxis
+NODE mouse MouseDelta
+LINK tick.exec move.exec
+LINK move.then mouse.exec
+
+NODE yaw Multiply
+LINK mouse.deltaX yaw.a
+LINK look_scale.value yaw.b
+NODE pitch Multiply
+LINK mouse.deltaY pitch.a
+LINK look_scale.value pitch.b
+
+# CharacterMove is deliberately COARSE -- one node, not a kit of primitives -- for the same reason
+# Blueprints' own AddMovementInput is: the pitch clamp, the view entity and the capsule stay in one
+# tested place instead of becoming every graph author's problem to reassemble correctly.
+NODE drive CharacterMove
+LINK mouse.then drive.exec
+LINK ent.value drive.entity
+LINK dt.value drive.dt
+LINK move.forward drive.forward
+LINK move.right drive.right
+LINK yaw.result drive.yawDelta
+LINK pitch.result drive.pitchDelta
+
+# ---- reach another entity's graph ----------------------------------------------------------------
+# The player spawns one target of its own at OnStart and remembers its entity id, then fires OnHit at
+# it every tick. Spawn-and-remember is the ONLY way to obtain a target id today: Raycast's `entity`
+# output is a PHYSICS BODY handle and no body-to-entity mapping exists anywhere in the engine, so a
+# graph can learn THAT it hit something but not WHAT. That is the one gap still standing between this
+# and graph-driven shooting, and it is named here rather than papered over.
+# INT here, where Target.ocgraph's counter had to be FLOAT -- an entity id is an Int and
+# Spawn.entity is an Int pin, while Add only takes Floats. There is no conversion node, so a
+# VAR's type must match whatever consumes it exactly. Both mismatches were caught at LOAD
+# with the offending link named, which is the right time to find out.
+VAR victim int 0
+
+ENTRY seed OnStart
+NODE seed OnStart
+
+NODE sx ConstFloat
+PIN sx value out float 250.0
+NODE sy ConstFloat
+PIN sy value out float 600.0
+NODE sz ConstFloat
+PIN sz value out float 60.0
+
+NODE make Spawn class=AN_Target
+LINK seed.exec make.exec
+LINK sx.value make.x
+LINK sy.value make.y
+LINK sz.value make.z
+
+NODE remember SetVar var=victim
+LINK make.then remember.exec
+LINK make.entity remember.value
+
+NODE who GetVar var=victim
+NODE poke FireEvent event=OnHit
+LINK drive.then poke.exec
+LINK who.value poke.target
+
+# NO OUT RECORDS, and this one is worth understanding before you write your own multi-entry graph.
+# OUT is a GRAPH-WIDE list, not a per-entry one, so EVERY entry point's compiled delegate pulls every
+# OUT record. `OUT drive success` was fine while OnTick was the only entry -- adding the OnStart entry
+# above made OnStart's own delegate try to pull `drive`, a CharacterMove sitting on OnTick's chain,
+# and side-effecting nodes are refused when pulled as data:
+#   'drive.success' cannot be read as a data value: CharacterMove has a side effect and must be
+#   reached by wiring it directly into the exec chain
+# That refusal is correct -- pulling could run the write more than once, or not at all. The lesson is
+# that OUT belongs to graphs with ONE entry, or to nodes on no exec chain at all. `success` and
+# `fired` are still checked; they simply are not reported, and nothing needs them to be.

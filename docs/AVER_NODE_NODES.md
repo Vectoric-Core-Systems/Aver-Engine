@@ -318,6 +318,18 @@ where it happens).
 | `Spawn` | `exec` (in), `x`/`y`/`z` (in, float), `then` (out), `entity` (out, int) | `class=` | P | Creates a new entity of a registered class. |
 | `CharacterMove` | `exec` (in), `entity` (in, int), `dt`/`forward`/`right`/`yawDelta`/`pitchDelta` (in, float), `then` (out), `success` (out, bool) | — | P | Drives an `AverCharacter`'s yaw/pitch and capsule velocity for one call. |
 | `SetViewEntity` | `entity` (in, int) — **no output pin at all** | — | W | `aver_fw_set_view_entity(entity)`. |
+| `FireEvent` | `exec` (in), `target` (in, int), `then` (out), `fired` (out, bool) | `event=` | P | Fires a named `ENTRY` event on **another entity's** graph. |
+
+`FireEvent` is how one graph talks to another. It carries **no payload**: the receiving `ENTRY` gets
+the same closed `PARAM` vocabulary every entry gets (`entity`, `time`, `deltaTime`) and nothing else,
+so anything the sender wants understood must be staged into the target's own `VAR`s first — which is
+order-sensitive and worth designing deliberately rather than discovering.
+
+`fired` is false, with a warning naming the reason, when the target does not exist, has no graph, or
+declares no such event. The warning is emitted **once per (target, event) pair**, not once per tick,
+because a mis-wired `FireEvent` on an `OnTick` chain would otherwise bury the log. Reentrancy is
+bounded by a depth guard: a graph firing at itself, two graphs firing at each other, and a three-deep
+cycle all terminate rather than overflowing the stack.
 
 `Spawn` and `CharacterMove` are refused by `Compile()` **outright**, not merely skipped: a stray,
 even unreachable, `Spawn`/`CharacterMove` node anywhere in a no-`ENTRY` dataflow graph fails to
