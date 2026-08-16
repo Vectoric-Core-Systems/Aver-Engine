@@ -15,8 +15,26 @@ struct GltfImportResult {
     std::vector<OcMeshData> meshes;          // one per glTF mesh, submeshes per primitive
     std::vector<std::string> meshNames;      // parallel to `meshes`; "" where the source had none
 
-    // One per glTF skin. Bone order IS the skin's joint order, which is what a mesh's JOINTS_0
-    // indices refer to, so the two are usable together without a remap.
+    // Parallel to `meshes`: which `skeletons` entry a mesh's JOINTS_0/WEIGHTS_0 stream addresses,
+    // or -1 when the mesh carries no skin. glTF puts the mesh-to-skin edge on the NODE that
+    // instances a mesh, not on the mesh itself, so this is resolved while walking the scene graph
+    // (Gltf::run()), not read off the mesh JSON directly.
+    //
+    // TWO MESHES WITH THE SAME meshSkinIndex SHARE ONE BONE-INDEX SPACE: their JOINTS_0 streams
+    // have both already been remapped (in importSkins()) into the SAME skeletons[] entry's bone
+    // order, so a caller may concatenate those streams directly, with no further remap -- see
+    // `skeletons`' own comment below for why two glTF skin OBJECTS can resolve to the same entry.
+    std::vector<i32> meshSkinIndex;
+
+    // One entry per DISTINCT resolved skeleton. Bone order IS the skin's (post-sort) joint order,
+    // which is what a mesh's JOINTS_0 indices refer to after importSkins()'s remap, so the two are
+    // usable together with no further remap.
+    //
+    // NOT necessarily one entry per glTF skin OBJECT: when two or more skins name the exact same
+    // joints in the exact same order -- the shape a Kenney/Blender "one armature, exported as a
+    // separate per-mesh Armature-modifier skin" file produces -- they collapse to ONE entry here,
+    // because they are provably the same skeleton (see importSkins()'s own comment). `meshSkinIndex`
+    // above, not the count of this array, is what tells two meshes' bone spaces apart.
     std::vector<OcSkeleton>  skeletons;
     std::vector<std::string> skeletonNames;
 

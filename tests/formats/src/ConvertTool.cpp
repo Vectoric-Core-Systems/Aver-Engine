@@ -128,18 +128,31 @@ int main(int argc, char** argv) {
     // AVER_MODULE_TRIFACTOR=OFF and =ON code paths save two DIFFERENT objects, which is exactly the
     // kind of divergence that only shows up once someone diffs the two builds' output.
     fmt::OcMeshData m = res.meshes[0];
+    usize mergedCount = 1;
+    // The skin every mesh merged into `m` so far shares (an index into res.skeletons), or -1 if
+    // `m` itself is unskinned. Fixed at mesh 0's own skin: a same-skin merge never changes which
+    // skeleton the combined joints/weights streams address, so later comparisons keep comparing
+    // against this rather than something that could drift.
+    const i32 accSkin = res.meshSkinIndex.empty() ? -1 : res.meshSkinIndex[0];
     for (usize mi = 1; mi < res.meshes.size(); ++mi) {
         const fmt::OcMeshData& src = res.meshes[mi];
         if (src.positions.empty() || src.indices.empty()) continue;
 
-        // SKIN IS THE ONE THING THAT CANNOT BE MERGED BLIND. Two meshes' JOINTS_0 indices address
-        // their own skin's joint order, so concatenating them would silently bind vertices to the
-        // wrong bones -- a rig that looks intact and animates wrongly. A rigged file keeps the
-        // old first-mesh-only behaviour, and says so.
-        if (src.hasSkin() || m.hasSkin()) {
-            AVER_WARN("'{}' is skinned; merging additional meshes would remap its joints wrongly, so "
-                      "only the first mesh was imported ({} of {} meshes)",
-                      res.meshNames[mi], 1, res.meshes.size());
+        // SKIN CANNOT BE MERGED BLIND -- unless the two meshes' JOINTS_0 indices already agree.
+        // Two meshes bound to DIFFERENT skeletons address their JOINTS_0 through different index
+        // spaces, so concatenating them would silently bind vertices to the wrong bones -- a rig
+        // that looks intact and animates wrongly, which is why that case still refuses and keeps
+        // only what was merged before it. But two meshes bound to the SAME skeleton (same
+        // res.meshSkinIndex, which importGltf's importSkins() only assigns equal when it proved
+        // the underlying skins are identical -- see GltfImport.cpp's own comment on why) are
+        // already expressed in one shared bone-index space with zero remapping needed, so their
+        // joints/weights streams merge exactly like positions/normals/uvs below.
+        const i32 srcSkin = mi < res.meshSkinIndex.size() ? res.meshSkinIndex[mi] : -1;
+        const bool sameSkeleton = src.hasSkin() && m.hasSkin() && accSkin >= 0 && srcSkin == accSkin;
+        if ((src.hasSkin() || m.hasSkin()) && !sameSkeleton) {
+            AVER_WARN("'{}' is skinned by a different skeleton than the {} mesh(es) merged so far; "
+                      "merging it would remap its joints wrongly, so only {} of {} meshes were imported",
+                      res.meshNames[mi], mergedCount, mergedCount, res.meshes.size());
             break;
         }
 
@@ -148,6 +161,10 @@ int main(int argc, char** argv) {
         m.positions.insert(m.positions.end(), src.positions.begin(), src.positions.end());
         m.normals.insert(m.normals.end(), src.normals.begin(), src.normals.end());
         m.uvs.insert(m.uvs.end(), src.uvs.begin(), src.uvs.end());
+        if (sameSkeleton) {
+            m.joints.insert(m.joints.end(), src.joints.begin(), src.joints.end());
+            m.weights.insert(m.weights.end(), src.weights.begin(), src.weights.end());
+        }
         for (const u32 idx : src.indices) m.indices.push_back(idx + base);
 
         // The source's material slots move across with it, and its submeshes are re-pointed at the
@@ -172,11 +189,12 @@ int main(int argc, char** argv) {
                            std::min(m.boundsMin.z, src.boundsMin.z)};
         m.boundsMax = Vec3{std::max(m.boundsMax.x, src.boundsMax.x), std::max(m.boundsMax.y, src.boundsMax.y),
                            std::max(m.boundsMax.z, src.boundsMax.z)};
+        ++mergedCount;
     }
 
     AVER_INFO("imported '{}'{}: {} verts, {} tris, skin {}, bounds ({:.1f},{:.1f},{:.1f})..({:.1f},{:.1f},{:.1f})",
               res.meshNames[0],
-              res.meshes.size() > 1 ? " (+" + std::to_string(res.meshes.size() - 1) + " more merged)" : "",
+              mergedCount > 1 ? " (+" + std::to_string(mergedCount - 1) + " more merged)" : "",
               m.vertexCount(), m.indices.size() / 3, m.hasSkin() ? "yes" : "no",
               m.boundsMin.x, m.boundsMin.y, m.boundsMin.z, m.boundsMax.x, m.boundsMax.y, m.boundsMax.z);
 

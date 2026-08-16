@@ -92,6 +92,11 @@ private:
     // Old joint index -> new, from the parents-before-children sort of skin 0. Meshes and animation
     // channels both address joints by the FILE's order, so both have to be rewritten through this.
     std::vector<i32> jointRemap_;
+    // Parallel to r_.meshes: which d_["skins"] entry (by RAW file index, before importSkins()'s
+    // dedup) the owning node named, or -1. Read off the node in run()'s scene walk -- the skin
+    // association lives there, not on the mesh -- and consumed by importSkins() to know which
+    // meshes to remap for each skin, and to fill in the PUBLIC, POST-DEDUP r_.meshSkinIndex.
+    std::vector<i32> meshRawSkin_;
 
     // Records an unsupported feature, once each.
     void note(const std::string& what) {
@@ -422,17 +427,34 @@ void mul(const f32 a[16], const f32 b[16], f32 out[16]) {
         }
 }
 
-// One OcSkeleton per glTF skin. Bone order IS the skin's joint order, so a mesh's JOINTS_0 indices
-// address the result directly with no remap.
+// One OcSkeleton per DISTINCT glTF skin. Bone order IS the skin's joint order, so a mesh's
+// JOINTS_0 indices address the result directly once importSkins() has remapped them (below).
+//
+// "Distinct" rather than "one per skin OBJECT": a Kenney/Blender export routinely emits one skin
+// per mesh even when every mesh shares a single armature, because Blender's glTF exporter builds
+// a skin from whichever Armature modifier touched that mesh, with no notion of "this is the same
+// skin as that other mesh's". The result is two (or more) skin objects that name the EXACT SAME
+// joints in the EXACT SAME order -- provably the same skeleton, not merely similar ones. Detected
+// by comparing each skin's raw (pre-sort) joint node-index sequence: since `sorted` below is a
+// pure function of that sequence plus the shared `nodes` array (identical for every skin in the
+// file), an identical sequence guarantees a bit-identical `sorted` with no need to compare the
+// derived bones themselves. Where two skins collapse, `meshSkinIndex` (GltfImportResult.hpp) is
+// what still tells their meshes apart -- it is set per mesh below, independent of the collapse.
 bool Gltf::importSkins(std::string* why) {
     const JsonValue& skins = d_["skins"];
     const JsonValue& nodes = d_["nodes"];
     if (skins.size() == 0) return true;
 
+    // Raw joint sequence behind each entry already pushed to r_.skeletons, parallel to it.
+    std::vector<std::vector<i64>> skeletonJoints;
+
     for (usize s = 0; s < skins.size(); ++s) {
         const JsonValue& skin = skins[s];
         const JsonValue& joints = skin["joints"];
         if (joints.size() == 0) { note("a skin with no joints"); continue; }
+
+        std::vector<i64> rawJoints(joints.size());
+        for (usize j = 0; j < joints.size(); ++j) rawJoints[j] = joints[j].asInt(-1);
 
         // node index -> bone index, so a parent can be found by walking the node tree.
         std::vector<i32> boneOfNode(nodes.size(), -1);
@@ -537,18 +559,41 @@ bool Gltf::importSkins(std::string* why) {
                 for (int cc = 0; cc < 4; ++cc) sorted.bones[i].inverseBind[rr * 4 + cc] = inv.m[rr][cc];
         }
 
-        // The joint reorder has to reach the meshes too, or every JOINTS_0 index now names the
-        // wrong bone. Only skin 0's meshes are remapped, which is the case the result documents.
-        if (s == 0) {
-            for (OcMeshData& m : r_.meshes)
-                for (u16& j : m.joints)
-                    if (usize(j) < newIndexOf.size() && newIndexOf[j] >= 0)
-                        j = static_cast<u16>(newIndexOf[j]);
-            jointRemap_ = newIndexOf;
+        // The joint reorder has to reach every mesh THIS skin owns, or its JOINTS_0 indices now
+        // name the wrong bone -- restricted to those meshes via meshRawSkin_ (set from the owning
+        // node in run()), not applied to every mesh in the file: skin s's raw joint order is not
+        // even the same INDEX SPACE as some other skin's meshes, so remapping them through it
+        // would corrupt, not merely mis-target, their joint indices. (This is the loop-scoping bug
+        // the old `if (s == 0)` version of this block had: it applied skin 0's remap to every mesh
+        // in r_.meshes unconditionally, and no other skin's own remap ever ran at all. Harmless on
+        // a file whose skins are already identical, as importAnimations()'s own skins[0]-only
+        // assumption below remains -- but live corruption on a file with a genuinely different
+        // second skin whose native joint order is not already parents-before-children.)
+        for (usize mi = 0; mi < r_.meshes.size(); ++mi) {
+            if (meshRawSkin_[mi] != static_cast<i32>(s)) continue;
+            for (u16& j : r_.meshes[mi].joints)
+                if (usize(j) < newIndexOf.size() && newIndexOf[j] >= 0)
+                    j = static_cast<u16>(newIndexOf[j]);
         }
+        // importAnimations() still only ever reads skins[0]'s own joint list (see its own comment
+        // for why fixing that is out of scope here), so only skin 0's remap needs to survive.
+        if (s == 0) jointRemap_ = newIndexOf;
 
-        r_.skeletons.push_back(std::move(sorted));
-        r_.skeletonNames.push_back(skin.has("name") ? std::string(skin["name"].asString()) : std::string());
+        // Same skeleton as one already written? Reuse its index rather than writing a duplicate
+        // .ocskel -- see this function's own header comment for why an identical raw joint
+        // sequence proves the two skeletons are identical, not merely similar.
+        i32 finalIdx = -1;
+        for (usize e = 0; e < skeletonJoints.size(); ++e) {
+            if (skeletonJoints[e] == rawJoints) { finalIdx = static_cast<i32>(e); break; }
+        }
+        if (finalIdx < 0) {
+            finalIdx = static_cast<i32>(r_.skeletons.size());
+            r_.skeletons.push_back(std::move(sorted));
+            r_.skeletonNames.push_back(skin.has("name") ? std::string(skin["name"].asString()) : std::string());
+            skeletonJoints.push_back(std::move(rawJoints));
+        }
+        for (usize mi = 0; mi < r_.meshes.size(); ++mi)
+            if (meshRawSkin_[mi] == static_cast<i32>(s)) r_.meshSkinIndex[mi] = finalIdx;
     }
     (void)why;
     return true;
@@ -557,6 +602,14 @@ bool Gltf::importSkins(std::string* why) {
 // One OcAnimation per glTF animation. One OcTrack PER CHANNEL rather than per bone: glTF gives each
 // channel its own time accessor, and merging two channels that do not share a timeline would mean
 // resampling one of them and losing exactly the fidelity .ocanim exists to keep.
+//
+// KNOWN LIMITATION, NOT FIXED HERE: this always resolves a channel's target node against skins[0]
+// ALONE, never against any later skin, even one importSkins() decided was a genuinely distinct
+// skeleton. Harmless for every file in the tree today -- either there is one skin, or (this file's
+// case) every later skin is a DUPLICATE of skin 0 (see importSkins()'s own comment) and so shares
+// its node set exactly -- but it would silently drop a channel targeting a joint that exists only
+// in skin 1+ of a file with genuinely different skins. No asset exercises that case, so fixing it
+// now would be unverifiable; flagged rather than guessed at.
 bool Gltf::importAnimations(std::string* why) {
     const JsonValue& anims = d_["animations"];
     if (anims.size() == 0) return true;
@@ -659,6 +712,8 @@ bool Gltf::run(std::string* why) {
     std::vector<u8> visited(meshes.size(), 0);
     r_.meshes.assign(meshes.size(), OcMeshData{});
     r_.meshNames.assign(meshes.size(), std::string());
+    r_.meshSkinIndex.assign(meshes.size(), -1);
+    meshRawSkin_.assign(meshes.size(), -1);
     for (usize i = 0; i < meshes.size(); ++i)
         if (meshes[i].has("name")) r_.meshNames[i] = std::string(meshes[i]["name"].asString());
 
@@ -695,6 +750,7 @@ bool Gltf::run(std::string* why) {
         if (meshIdx >= 0 && usize(meshIdx) < meshes.size()) {
             if (!importMesh(meshes[usize(meshIdx)], world, r_.meshes[usize(meshIdx)], why)) return false;
             visited[usize(meshIdx)] = 1;
+            if (n.has("skin")) meshRawSkin_[usize(meshIdx)] = static_cast<i32>(n["skin"].asInt(-1));
         }
         const JsonValue& kids = n["children"];
         for (usize i = 0; i < kids.size(); ++i) {

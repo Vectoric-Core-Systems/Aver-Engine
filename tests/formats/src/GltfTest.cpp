@@ -142,6 +142,8 @@ int main() {
         check(res.meshes[0].vertexCount() == 3, "three vertices");
         check(res.meshes[0].indices.size() == 3, "three indices");
         check(res.meshes[0].submeshes.size() == 1, "one submesh per primitive");
+        check(res.meshSkinIndex.size() == 1 && res.meshSkinIndex[0] == -1,
+              "an unskinned mesh's meshSkinIndex is -1");
     }
 
     AVER_INFO("=== .glb with a real binary chunk ===");
@@ -386,6 +388,168 @@ int main() {
                 checkNear(t.values[5], 200.0f, 1e-2f,
                           "and 2 metres along glTF up became 200 cm along engine +Z");
             }
+        }
+    }
+
+    AVER_INFO("=== two glTF skin OBJECTS naming the same joints collapse into ONE skeleton ===");
+    {
+        // Mirrors the shape a Kenney/Blender export produces when one armature is exported as a
+        // separate skin per mesh (see GltfImport.cpp importSkins()'s own comment): two skin
+        // objects, each independently listing the SAME joints in the SAME order. Both meshes reuse
+        // the SAME position/joints/weights/index accessors -- only which skin their node names
+        // (skin 0 vs skin 1) differs, exactly like body-mesh/skin-0 and head-mesh/skin-1 do.
+        std::vector<u8> bin;
+        const usize posOff = bin.size();
+        putF(bin, 0); putF(bin, 0); putF(bin, 0);
+        putF(bin, 1); putF(bin, 0); putF(bin, 0);
+        putF(bin, 0); putF(bin, 0); putF(bin, -1);
+        const usize posLen = bin.size() - posOff;
+
+        const usize jOff = bin.size();
+        // Raw skin-local index 0. In BOTH skins, joints[0] names node 1 ("child"), so a correct
+        // per-skin remap sends every vertex to sorted index 1 regardless of which skin's own
+        // newIndexOf does the remapping.
+        for (int v = 0; v < 3; ++v) { putU16(bin, 0); putU16(bin, 0); putU16(bin, 0); putU16(bin, 0); }
+        const usize jLen = bin.size() - jOff;
+
+        const usize wOff = bin.size();
+        for (int v = 0; v < 3; ++v) { putF(bin, 1); putF(bin, 0); putF(bin, 0); putF(bin, 0); }
+        const usize wLen = bin.size() - wOff;
+
+        const usize iOff = bin.size();
+        putU16(bin, 0); putU16(bin, 1); putU16(bin, 2);
+        const usize iLen = bin.size() - iOff;
+        while (bin.size() % 4) bin.push_back(0);
+
+        auto view = [](usize off, usize len) {
+            return "{\"buffer\":0,\"byteOffset\":" + std::to_string(off) +
+                   ",\"byteLength\":" + std::to_string(len) + "}";
+        };
+        const std::string json = std::string("{")
+          + "\"asset\":{\"version\":\"2.0\"},\"scene\":0,"
+          + "\"scenes\":[{\"nodes\":[0,2,3]}],"
+          + "\"nodes\":["
+            + "{\"name\":\"root\",\"children\":[1]},"
+            + "{\"name\":\"child\",\"translation\":[0,1,0]},"
+            + "{\"name\":\"bodyNode\",\"mesh\":0,\"skin\":0},"
+            + "{\"name\":\"headNode\",\"mesh\":1,\"skin\":1}"
+          + "],"
+          + "\"skins\":[{\"joints\":[1,0]},{\"joints\":[1,0]}],"
+          + "\"meshes\":["
+            + "{\"name\":\"Mesh0\",\"primitives\":[{\"attributes\":"
+              + "{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3}]},"
+            + "{\"name\":\"Mesh1\",\"primitives\":[{\"attributes\":"
+              + "{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3}]}"
+          + "],"
+          + "\"buffers\":[{\"uri\":\"data:application/octet-stream;base64," + b64(bin)
+            + "\",\"byteLength\":" + std::to_string(bin.size()) + "}],"
+          + "\"bufferViews\":[" + view(posOff,posLen) + "," + view(jOff,jLen) + "," + view(wOff,wLen)
+            + "," + view(iOff,iLen) + "],"
+          + "\"accessors\":["
+            + "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+            + "{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"VEC4\"},"
+            + "{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},"
+            + "{\"bufferView\":3,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}"
+          + "]}";
+
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "two identical-shape skins import: " + why);
+
+        check(res.meshes.size() == 2, "two meshes");
+        check(res.skeletons.size() == 1,
+              "the two skin OBJECTS collapsed into ONE skeleton, not two -- they name the same joints");
+        check(res.meshSkinIndex.size() == 2, "meshSkinIndex is parallel to meshes");
+        if (res.meshSkinIndex.size() == 2) {
+            check(res.meshSkinIndex[0] >= 0 && res.meshSkinIndex[0] == res.meshSkinIndex[1],
+                  "both meshes resolve to the SAME skeletons[] entry, even though they named "
+                  "DIFFERENT (0 vs 1) raw glTF skin objects");
+        }
+
+        // THE LOOP-SCOPING REGRESSION CASE: mesh1 is bound to skin INDEX 1 (s != 0), so the old
+        // `if (s == 0)` gate never remapped its joints at all, leaving raw index 0 (= skin-local
+        // "child") unremapped. A correct per-skin remap sends it to sorted index 1 instead, exactly
+        // like mesh0's own (skin-0) case.
+        for (usize mi = 0; mi < res.meshes.size(); ++mi) {
+            const fmt::OcMeshData& m = res.meshes[mi];
+            check(m.hasSkin(), "mesh " + std::to_string(mi) + " comes back skinned");
+            bool remapped = true;
+            for (u32 v = 0; v < m.vertexCount(); ++v)
+                if (m.joints[usize(v) * fmt::kOcMeshInfluences] != 1) remapped = false;
+            check(remapped, "mesh " + std::to_string(mi) +
+                  "'s joint index was remapped through ITS OWN skin's reorder (0 -> 1), not left raw");
+        }
+    }
+
+    AVER_INFO("=== two glTF skins naming DIFFERENT joints do NOT collapse ===");
+    {
+        // The negative control for the test above: skin 1 is genuinely a different (smaller)
+        // skeleton, so it must stay a separate skeletons[] entry, and the two meshes must disagree
+        // on meshSkinIndex -- or ConvertTool's same-skeleton merge check would wrongly treat them
+        // as mergeable and silently bind head-mesh-shaped vertices to body-mesh-shaped bones.
+        std::vector<u8> bin;
+        const usize posOff = bin.size();
+        putF(bin, 0); putF(bin, 0); putF(bin, 0);
+        putF(bin, 1); putF(bin, 0); putF(bin, 0);
+        putF(bin, 0); putF(bin, 0); putF(bin, -1);
+        const usize posLen = bin.size() - posOff;
+
+        const usize jOff = bin.size();
+        for (int v = 0; v < 3; ++v) { putU16(bin, 0); putU16(bin, 0); putU16(bin, 0); putU16(bin, 0); }
+        const usize jLen = bin.size() - jOff;
+
+        const usize wOff = bin.size();
+        for (int v = 0; v < 3; ++v) { putF(bin, 1); putF(bin, 0); putF(bin, 0); putF(bin, 0); }
+        const usize wLen = bin.size() - wOff;
+
+        const usize iOff = bin.size();
+        putU16(bin, 0); putU16(bin, 1); putU16(bin, 2);
+        const usize iLen = bin.size() - iOff;
+        while (bin.size() % 4) bin.push_back(0);
+
+        auto view = [](usize off, usize len) {
+            return "{\"buffer\":0,\"byteOffset\":" + std::to_string(off) +
+                   ",\"byteLength\":" + std::to_string(len) + "}";
+        };
+        const std::string json = std::string("{")
+          + "\"asset\":{\"version\":\"2.0\"},\"scene\":0,"
+          + "\"scenes\":[{\"nodes\":[0,2,3]}],"
+          + "\"nodes\":["
+            + "{\"name\":\"root\",\"children\":[1]},"
+            + "{\"name\":\"child\",\"translation\":[0,1,0]},"
+            + "{\"name\":\"bodyNode\",\"mesh\":0,\"skin\":0},"
+            + "{\"name\":\"headNode\",\"mesh\":1,\"skin\":1}"
+          + "],"
+          // skin 1 has only ONE joint (just "root") -- a genuinely different, smaller skeleton
+          // than skin 0's two bones, not a duplicate of it.
+          + "\"skins\":[{\"joints\":[1,0]},{\"joints\":[0]}],"
+          + "\"meshes\":["
+            + "{\"name\":\"Mesh0\",\"primitives\":[{\"attributes\":"
+              + "{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3}]},"
+            + "{\"name\":\"Mesh1\",\"primitives\":[{\"attributes\":"
+              + "{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3}]}"
+          + "],"
+          + "\"buffers\":[{\"uri\":\"data:application/octet-stream;base64," + b64(bin)
+            + "\",\"byteLength\":" + std::to_string(bin.size()) + "}],"
+          + "\"bufferViews\":[" + view(posOff,posLen) + "," + view(jOff,jLen) + "," + view(wOff,wLen)
+            + "," + view(iOff,iLen) + "],"
+          + "\"accessors\":["
+            + "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+            + "{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"VEC4\"},"
+            + "{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},"
+            + "{\"bufferView\":3,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}"
+          + "]}";
+
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "two differently-shaped skins import: " + why);
+
+        check(res.skeletons.size() == 2, "genuinely different skins stay TWO skeletons, not collapsed");
+        check(res.meshSkinIndex.size() == 2 && res.meshSkinIndex[0] != res.meshSkinIndex[1],
+              "the two meshes disagree on meshSkinIndex -- ConvertTool must refuse to merge their joints");
+        if (res.skeletons.size() == 2) {
+            check(res.skeletons[0].bones.size() == 2 && res.skeletons[1].bones.size() == 1,
+                  "each mesh kept its own skeleton's own, different, bone count");
         }
     }
 
