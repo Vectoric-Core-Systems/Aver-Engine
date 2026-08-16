@@ -149,6 +149,40 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"MoveAxis", "Move Axis", "Input", {
         pin("exec", "exec", false), pin("then", "exec", true),
         pin("forward", "float", true), pin("right", "float", true)}});
+    // -- InputKey: digital key state, the discrete half of input beside MouseDelta/MoveAxis above.
+    //    NO EXEC PINS, and that is the difference from its neighbours rather than an oversight:
+    //    reading one polled key is idempotent and returns the same answer however often it is asked
+    //    within a frame, so there is nothing to cache and no visit to anchor the read to. Its two
+    //    louder neighbours need the exec shape only because they fill several outputs from one call.
+    //    `key` is a plain int -- this format has no symbolic enum lookup, so an author writes the
+    //    numeric value from Aver.Framework's Key enum. --
+    t.push_back({"InputKey", "Input Key", "Input", {
+        pin("key", "int", false), pin("down", "bool", true)}});
+    // -- Select: pick one of two values by a bool. Pure data, no exec pins. In the PULL compiler BOTH
+    //    arms are computed regardless of cond -- see GraphCompiler.EmitSelect, which explains why
+    //    that is correct and not a missing short-circuit. --
+    t.push_back({"Select", "Select", "Logic", {
+        pin("cond", "bool", false), pin("ifTrue", "float", false), pin("ifFalse", "float", false),
+        pin("result", "float", true)}});
+    // -- Raycast: the physics query, and the node whose one-call-per-exec-visit shape MouseDelta and
+    //    MoveAxis were later modelled on. 14 pins: exec in, seven floats of ray, exec out, and five
+    //    results. --
+    t.push_back({"Raycast", "Raycast", "Scene", {
+        pin("exec", "exec", false),
+        pin("originX", "float", false), pin("originY", "float", false), pin("originZ", "float", false),
+        pin("dirX", "float", false), pin("dirY", "float", false), pin("dirZ", "float", false),
+        pin("maxDist", "float", false),
+        pin("then", "exec", true),
+        pin("hit", "bool", true), pin("entity", "int", true),
+        pin("pointX", "float", true), pin("pointY", "float", true), pin("pointZ", "float", true)}});
+    // WHY THESE THREE ARRIVE LATE. Select, InputKey and Raycast were added to OcGraphParser and to
+    // both compilers in 1425b67 and never to this table, so for two slices they were fully supported
+    // by the runtime and completely absent from the Add-Node palette -- authorable only by hand-
+    // editing .ocgraph text. Nothing caught it because this table is a DELIBERATE separate copy of
+    // the vocabulary (see the header comment) with no build-time link to the C# side that would
+    // notice the omission. Adding MouseDelta/MoveAxis is what made it visible: the palette would
+    // have shown an Input category holding the mouse but not the keyboard.
+
     // -- graph parameter read, another concurrent-workflow addition; type defaults to float, the
     //    common case, and can be edited per-instance like any other pin since layout/pin-typing
     //    always prefers the node's own recorded pins over this table (see the header comment).

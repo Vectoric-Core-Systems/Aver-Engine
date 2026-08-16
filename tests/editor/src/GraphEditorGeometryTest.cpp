@@ -11,6 +11,9 @@
 #include "aver/formats/OcGraph.hpp"
 
 #include <cmath>
+#include <fstream>
+#include <iterator>
+#include <vector>
 #include <string>
 
 using namespace aver;
@@ -776,6 +779,63 @@ static void testComputeAttributeRows() {
     }
 }
 
+// THE PALETTE AND THE COMPILER MUST KNOW THE SAME NODES, and until this test existed nothing checked
+// it. GraphNodeDefs.hpp is a deliberate hand-maintained copy of the vocabulary that
+// scripting/csharp/Aver.Graph/OcGraphParser.cs owns -- deliberate because a C++ editor build must not
+// depend on a C# file (see GraphNodeDefs.hpp's own header). The cost of that choice is that adding a
+// node type to the compiler and forgetting the palette produces a node the runtime fully supports and
+// the Add-Node menu has never heard of, authorable only by hand-editing .ocgraph text. That is not
+// hypothetical: Select, InputKey and Raycast landed in 1425b67 and were missing from the palette for
+// two further slices, noticed only when MouseDelta and MoveAxis were added beside them and the Input
+// category would have shown the mouse but not the keyboard.
+//
+// So this reads the .cs as TEXT and extracts its `case "name":` labels. That is a blunt instrument --
+// it would miss a node the parser handles some other way -- but it is the only thing available that
+// can fail when someone updates one side and not the other, and a blunt check that fires beats an
+// elegant one that does not exist.
+static void testNodeCatalogCoversTheCompiler() {
+    AVER_INFO("=== palette vs compiler vocabulary ===");
+    const std::string parser = std::string(AVER_REPO_ROOT) + "/scripting/csharp/Aver.Graph/OcGraphParser.cs";
+    std::ifstream in(parser);
+    if (!in) {
+        // Not silently skipped: a test that cannot find its input must say so, or it passes forever.
+        check(false, "could not open OcGraphParser.cs -- this parity test cannot run");
+        return;
+    }
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+
+    // The node types AddDefaultPins switches on. Its `case "x":` labels are all lowercase.
+    std::vector<std::string> fromCompiler;
+    for (usize i = 0; (i = text.find("case \"", i)) != std::string::npos; ) {
+        const usize b = i + 6;
+        const usize e = text.find('"', b);
+        if (e == std::string::npos) break;
+        const std::string name = text.substr(b, e - b);
+        i = e;
+        if (name.empty()) continue;
+        bool lower = true;
+        for (char c : name) if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) lower = false;
+        if (lower) fromCompiler.push_back(name);
+    }
+    check(fromCompiler.size() > 15,
+          "extracted a plausible node vocabulary from OcGraphParser.cs (guards against the scrape "
+          "silently matching nothing and the test passing vacuously)");
+
+    const std::vector<aver::editor::GraphNodeDesc> cat = aver::editor::graphNodeCatalog();
+    for (const std::string& want : fromCompiler) {
+        // Aliases the parser accepts for one palette entry, and the two records that are not node
+        // types at all. Listed rather than pattern-matched so adding one is a deliberate act.
+        if (want == "sub" || want == "div" || want == "getparam") continue;
+        bool found = false;
+        for (const aver::editor::GraphNodeDesc& d : cat) {
+            std::string lower;
+            for (char c : d.typeId) lower += static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+            if (lower == want) { found = true; break; }
+        }
+        check(found, "the Add-Node palette offers '" + want + "', which the compiler supports");
+    }
+}
+
 int main() {
     AVER_INFO("======== GraphEditorGeometryTest ========");
     testNodeCatalog();
@@ -788,6 +848,7 @@ int main() {
     testNodeAttributeCatalog();
     testNodeAttributeReadWrite();
     testComputeAttributeRows();
+    testNodeCatalogCoversTheCompiler();
     AVER_INFO("======== {} failure(s) ========", g_failures);
     return g_failures;
 }

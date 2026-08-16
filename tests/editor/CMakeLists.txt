@@ -42,6 +42,12 @@ add_executable(GraphEditorGeometryTest
   ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorGeometry.cpp)
 target_include_directories(GraphEditorGeometryTest PRIVATE
   ${CMAKE_SOURCE_DIR}/sandbox/src)
+# The repo root, so testNodeCatalogCoversTheCompiler can READ OcGraphParser.cs and compare the two
+# vocabularies. GraphNodeDefs.hpp is a deliberate hand-maintained copy of the C# side's node set
+# (see its header), which means nothing links the two and an omission is invisible -- Select,
+# InputKey and Raycast sat in the compiler and not in the palette for two whole slices because of
+# exactly that. Reading the .cs as TEXT is ugly, and it is still the only thing that can notice.
+target_compile_definitions(GraphEditorGeometryTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(GraphEditorGeometryTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(GraphEditorGeometryTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
