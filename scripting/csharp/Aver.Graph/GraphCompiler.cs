@@ -403,6 +403,29 @@ public class GraphCompiler
                 EmitSetFieldVec3(node);
                 break;
 
+            case "setparent":
+                // Same dual-reachable reasoning as "setfieldvec3" just above -- see
+                // OcGraphParser.AddDefaultPins's "setparent"/"setviewentity"/"setname" comment for the
+                // full "why SetField-style, not Spawn/SetVar-style" story.
+                EmitSetParent(node);
+                break;
+
+            case "setviewentity":
+                EmitSetViewEntity(node);
+                break;
+
+            case "setname":
+                EmitSetName(node);
+                break;
+
+            case "setmesh":
+                EmitSetMesh(node);
+                break;
+
+            case "setmaterial":
+                EmitSetMaterial(node);
+                break;
+
             case "sin":
                 EmitSin(node);
                 break;
@@ -714,6 +737,111 @@ public class GraphCompiler
 
         if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
             _il.Emit(OpCodes.Stloc, local);
+    }
+
+    /// SetParent(child, parent) -> success: reparents `child` under `parent` (0 makes it a root) --
+    /// wraps aver_scene_set_parent(int32,int32) directly (scene_abi.h:105), the same
+    /// reflect-straight-into-Aver.Scene.Native template GetField/SetField already use, needing no
+    /// GraphInterop wrapper (unlike Raycast/Spawn, whose native surfaces need scalar reshaping this one
+    /// does not). The ABI ALREADY refuses a cycle, a self-parent, and a doomed parent -- returning 0,
+    /// not throwing -- so the real return code is what reaches "success", exactly mirroring
+    /// EmitSetField's own "the old stub hardcoded 1 regardless of whether anything happened" fix: a
+    /// graph author who wires a cycle gets a live false on the success pin, not a silently-ignored
+    /// no-op. See EmitExecSetParent for the mirrored PUSH-compiler version and this file's own
+    /// "setparent" case comment (in EmitNode) for why this is reachable from BOTH compilers.
+    private void EmitSetParent(Node node)
+    {
+        if (_il == null) return;
+
+        LoadPin(node.Id, "child");
+        LoadPin(node.Id, "parent");
+        _il.Emit(OpCodes.Call, SetParentMethod);
+
+        if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+        else
+            _il.Emit(OpCodes.Pop); // nothing declared to read the return code; discard it rather than
+                                    // leaving it on the IL stack for whatever the next node emits.
+    }
+
+    /// SetViewEntity(entity) -> (nothing): publishes which entity the camera follows -- wraps
+    /// aver_fw_set_view_entity(int32) -> void directly (framework_abi.h:206), reflected the same way
+    /// EmitInputKey already reflects into Aver.Framework.Fw. VOID MEANS EXACTLY THAT: no output pin
+    /// exists for this node type at all (see OcGraphParser.AddDefaultPins's "setviewentity" case), so
+    /// there is nothing to Stloc and nothing left on the stack to Pop either -- the call itself is the
+    /// entire effect.
+    private void EmitSetViewEntity(Node node)
+    {
+        if (_il == null) return;
+
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Call, SetViewEntityMethod);
+    }
+
+    /// SetName(entity, name) -> success: writes the entity's name -- wraps aver_scene_set_name
+    /// (int32,const char*)->int32 directly (scene_abi.h:113). `name` is a NODE-line attribute
+    /// (Node.NameValue, from a name= token), not a pin -- PinType has no String member (see the
+    /// PinType enum in Graph.cs), so a NODE-line attribute is the only route a literal string reaches
+    /// any node in this format, exactly the reasoning class= already established for Spawn. Required at
+    /// COMPILE time (an empty name= can never write anything useful), the same "fail loudly now, not
+    /// silently at runtime" rule GetField/SetField/Spawn already apply to field=/class=.
+    private void EmitSetName(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.NameValue))
+            throw new InvalidOperationException($"SetName node '{node.Id}' has no name= attribute naming the string to write");
+
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Ldstr, node.NameValue);
+        _il.Emit(OpCodes.Call, SetNameMethod);
+
+        if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+        else
+            _il.Emit(OpCodes.Pop);
+    }
+
+    /// SetMesh(entity) -> success: sets the drawn mesh by asset path -- wraps
+    /// Aver.Framework.GraphInterop.SetMeshForGraph(int,string), which in turn composes
+    /// EnsureMeshRenderer() + Assets.ObjectIdOf(path) + SetInt64 (EntityScene.cs's own Entity.SetMesh).
+    /// `mesh` is a NODE-line attribute (Node.MeshPath, from a mesh= token), the same "a literal string
+    /// can only reach a node this way" reasoning EmitSetName's own comment gives. Required at compile
+    /// time for the identical reason field=/class=/name= all are.
+    private void EmitSetMesh(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.MeshPath))
+            throw new InvalidOperationException($"SetMesh node '{node.Id}' has no mesh= attribute naming which asset to set");
+
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Ldstr, node.MeshPath);
+        _il.Emit(OpCodes.Call, SetMeshMethod);
+
+        if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+        else
+            _il.Emit(OpCodes.Pop);
+    }
+
+    /// SetMaterial(entity) -> success: sets the material by name -- mirrors EmitSetMesh exactly, see
+    /// that method's comment, wrapping GraphInterop.SetMaterialForGraph(int,string) instead.
+    private void EmitSetMaterial(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.MaterialName))
+            throw new InvalidOperationException($"SetMaterial node '{node.Id}' has no material= attribute naming which material to set");
+
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Ldstr, node.MaterialName);
+        _il.Emit(OpCodes.Call, SetMaterialMethod);
+
+        if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+        else
+            _il.Emit(OpCodes.Pop);
     }
 
     private void EmitSin(Node node)
@@ -1320,6 +1448,11 @@ public class GraphCompiler
                     else if (IsExecCapableQueryType(node.Type)) EmitExecRaycast(node);
                     else if (IsExecCapableMouseDeltaType(node.Type)) EmitExecMouseDelta(node);
                     else if (IsExecCapableMoveAxisType(node.Type)) EmitExecMoveAxis(node);
+                    else if (IsExecCapableSetParentType(node.Type)) EmitExecSetParent(node);
+                    else if (IsExecCapableSetViewEntityType(node.Type)) EmitExecSetViewEntity(node);
+                    else if (IsExecCapableSetNameType(node.Type)) EmitExecSetName(node);
+                    else if (IsExecCapableSetMeshType(node.Type)) EmitExecSetMesh(node);
+                    else if (IsExecCapableSetMaterialType(node.Type)) EmitExecSetMaterial(node);
                     EmitExecFanOut(node);
                     return;
             }
@@ -1611,6 +1744,40 @@ public class GraphCompiler
     private static bool IsExecCapableVarSideEffectType(string type) =>
         type.Equals("setvar", StringComparison.OrdinalIgnoreCase);
 
+    /// SetParent's own version of IsExecCapableSideEffectType -- a FIFTH, separate predicate/emitter
+    /// pair, kept apart from SetField's for the same reason SetFieldVec3/Spawn/SetVar each got their
+    /// own: SetParentForGraph -- here, no wrapper at all, a direct reflect into Aver.Scene.Native --
+    /// writes through a genuinely different ABI call with a different arity (two entity ids, not an
+    /// entity+fieldId+value) and a different refusal contract (a cycle/self-parent/doomed-parent
+    /// rejection baked into the ABI itself, not a missing-component rejection). See
+    /// OcGraphParser.AddDefaultPins's "setparent"/"setviewentity"/"setname" comment for why this type
+    /// (and its two siblings just below) is dispatched SetField-style rather than Spawn/SetVar-style.
+    private static bool IsExecCapableSetParentType(string type) =>
+        type.Equals("setparent", StringComparison.OrdinalIgnoreCase);
+
+    /// SetViewEntity's own version -- see IsExecCapableSetParentType's comment. Its own ABI call
+    /// (aver_fw_set_view_entity) returns void, which is why EmitExecSetViewEntity/EmitSetViewEntity
+    /// have no "capture or discard a return code" branch the other four side-effecting types all share.
+    private static bool IsExecCapableSetViewEntityType(string type) =>
+        type.Equals("setviewentity", StringComparison.OrdinalIgnoreCase);
+
+    /// SetName's own version -- see IsExecCapableSetParentType's comment. The first of this family
+    /// whose write carries a STRING (node.NameValue, from a name= attribute) rather than only scalar
+    /// pins.
+    private static bool IsExecCapableSetNameType(string type) =>
+        type.Equals("setname", StringComparison.OrdinalIgnoreCase);
+
+    /// SetMesh's own version -- see IsExecCapableSetParentType's comment. Unlike SetParent/SetName
+    /// (which reflect straight into Aver.Scene.Native with no wrapper), this one DOES go through a
+    /// GraphInterop wrapper (SetMeshForGraph), the same "needs Entity's internal constructor, which
+    /// only Aver.Framework code can call" reason GetFieldVecForGraph/SetFieldVecForGraph already have.
+    private static bool IsExecCapableSetMeshType(string type) =>
+        type.Equals("setmesh", StringComparison.OrdinalIgnoreCase);
+
+    /// SetMaterial's own version -- see IsExecCapableSetMeshType's comment, which applies unchanged.
+    private static bool IsExecCapableSetMaterialType(string type) =>
+        type.Equals("setmaterial", StringComparison.OrdinalIgnoreCase);
+
     /// Runs a SetField node's write exactly once, at the point the exec walk reaches it -- mirrors
     /// EmitSetField's own field=/resolver/native-call logic, but pulls its "entity"/"value" inputs
     /// through EmitPullInput rather than LoadPin/_pinLocals (see the section-level comment for why the
@@ -1738,6 +1905,116 @@ public class GraphCompiler
         _il.Emit(OpCodes.Ldstr, node.VarName);
         EmitPullInput(node, "value");
         _il.Emit(OpCodes.Call, VarSetMethodFor(declared.Type));
+    }
+
+    /// Runs a SetParent node's write exactly once, at the point the exec walk reaches it -- mirrors
+    /// EmitSetParent's own native-call shape, but pulls "child"/"parent" through EmitPullInput rather
+    /// than LoadPin/_pinLocals (see the section-level comment for why the two input mechanisms are not
+    /// shared), and captures "success" into an exec-local rather than a _pinLocals entry, exactly like
+    /// EmitExecSideEffect/EmitExecSetFieldVec3 do for SetField/SetFieldVec3's own "success".
+    private void EmitExecSetParent(Node node)
+    {
+        if (_il == null) return;
+
+        EmitPullInput(node, "child");
+        EmitPullInput(node, "parent");
+        _il.Emit(OpCodes.Call, SetParentMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+        {
+            var successLocal = GetOrCreateExecLocal(node.Id, "success", typeof(bool));
+            _il.Emit(OpCodes.Stloc, successLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop);
+        }
+    }
+
+    /// Runs a SetViewEntity node's write exactly once, at the point the exec walk reaches it -- mirrors
+    /// EmitSetViewEntity's own native-call shape, but pulls "entity" through EmitPullInput. VOID MEANS
+    /// EXACTLY THAT here too: no "capture or discard a return code" branch, because there is no return
+    /// code -- the Call itself is the entire effect, same as EmitSetViewEntity's own PULL-compiler twin.
+    private void EmitExecSetViewEntity(Node node)
+    {
+        if (_il == null) return;
+
+        EmitPullInput(node, "entity");
+        _il.Emit(OpCodes.Call, SetViewEntityMethod);
+    }
+
+    /// Runs a SetName node's write exactly once, at the point the exec walk reaches it -- mirrors
+    /// EmitSetName's own name=/native-call shape, but pulls "entity" through EmitPullInput and captures
+    /// "success" into an exec-local rather than a _pinLocals entry.
+    private void EmitExecSetName(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.NameValue))
+            throw new InvalidOperationException($"SetName node '{node.Id}' has no name= attribute naming the string to write");
+
+        EmitPullInput(node, "entity");
+        _il.Emit(OpCodes.Ldstr, node.NameValue);
+        _il.Emit(OpCodes.Call, SetNameMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+        {
+            var successLocal = GetOrCreateExecLocal(node.Id, "success", typeof(bool));
+            _il.Emit(OpCodes.Stloc, successLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop);
+        }
+    }
+
+    /// Runs a SetMesh node's write exactly once, at the point the exec walk reaches it -- mirrors
+    /// EmitSetMesh's own mesh=/native-call shape, but pulls "entity" through EmitPullInput and captures
+    /// "success" into an exec-local rather than a _pinLocals entry.
+    private void EmitExecSetMesh(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.MeshPath))
+            throw new InvalidOperationException($"SetMesh node '{node.Id}' has no mesh= attribute naming which asset to set");
+
+        EmitPullInput(node, "entity");
+        _il.Emit(OpCodes.Ldstr, node.MeshPath);
+        _il.Emit(OpCodes.Call, SetMeshMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+        {
+            var successLocal = GetOrCreateExecLocal(node.Id, "success", typeof(bool));
+            _il.Emit(OpCodes.Stloc, successLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop);
+        }
+    }
+
+    /// Runs a SetMaterial node's write exactly once, at the point the exec walk reaches it -- mirrors
+    /// EmitExecSetMesh exactly, see that method's comment.
+    private void EmitExecSetMaterial(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.MaterialName))
+            throw new InvalidOperationException($"SetMaterial node '{node.Id}' has no material= attribute naming which material to set");
+
+        EmitPullInput(node, "entity");
+        _il.Emit(OpCodes.Ldstr, node.MaterialName);
+        _il.Emit(OpCodes.Call, SetMaterialMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+        {
+            var successLocal = GetOrCreateExecLocal(node.Id, "success", typeof(bool));
+            _il.Emit(OpCodes.Stloc, successLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop);
+        }
     }
 
     /// Runs a Raycast node's native query exactly once, at the point the exec walk reaches it --
@@ -1879,7 +2156,10 @@ public class GraphCompiler
         // sharing this refusal is the direct proof of the task's own instruction ("the PULL path must
         // REFUSE it... rather than fall back") -- see TestSetVarPulledWithoutExecVisitFailsClearly.
         if (IsExecCapableSideEffectType(source.Type) || IsExecCapableVecSideEffectType(source.Type) ||
-            IsExecCapableSpawnType(source.Type) || IsExecCapableVarSideEffectType(source.Type))
+            IsExecCapableSpawnType(source.Type) || IsExecCapableVarSideEffectType(source.Type) ||
+            IsExecCapableSetParentType(source.Type) || IsExecCapableSetViewEntityType(source.Type) ||
+            IsExecCapableSetNameType(source.Type) || IsExecCapableSetMeshType(source.Type) ||
+            IsExecCapableSetMaterialType(source.Type))
             throw new InvalidOperationException(
                 $"'{source.Id}.{pinName}' cannot be read as a data value: {source.Type} has a side effect " +
                 "and must be reached by wiring it directly into the exec chain (give it exec pins), not " +
@@ -2180,6 +2460,27 @@ public class GraphCompiler
     private static readonly MethodInfo MoveAxisMethod =
         typeof(GraphInterop).GetMethod("MoveAxisForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.MoveAxisForGraph was not found by reflection");
+    // SetParent/SetName reflect straight into Aver.Scene.Native, the same template GetField/SetField
+    // already use (no GraphInterop wrapper -- their ABI signatures need no scalar reshaping).
+    private static readonly MethodInfo SetParentMethod =
+        typeof(Native).GetMethod("aver_scene_set_parent", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Scene.Native.aver_scene_set_parent was not found by reflection");
+    private static readonly MethodInfo SetNameMethod =
+        typeof(Native).GetMethod("aver_scene_set_name", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Scene.Native.aver_scene_set_name was not found by reflection");
+    // SetViewEntity reflects straight into Aver.Framework.Fw, the same template EmitInputKey already
+    // uses for aver_fw_input_key.
+    private static readonly MethodInfo SetViewEntityMethod =
+        typeof(Fw).GetMethod("aver_fw_set_view_entity", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.Fw.aver_fw_set_view_entity was not found by reflection");
+    // SetMesh/SetMaterial DO go through a GraphInterop wrapper -- see SetMeshForGraph's own comment for
+    // why (Entity's internal constructor is only callable from Aver.Framework code).
+    private static readonly MethodInfo SetMeshMethod =
+        typeof(GraphInterop).GetMethod("SetMeshForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetMeshForGraph was not found by reflection");
+    private static readonly MethodInfo SetMaterialMethod =
+        typeof(GraphInterop).GetMethod("SetMaterialForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetMaterialForGraph was not found by reflection");
 
     // GraphVarStore's own typed accessors -- PUBLIC instance methods on a plain class in THIS assembly
     // (unlike Native/Fw/GraphInterop above, which are internal members of a DIFFERENT assembly reached

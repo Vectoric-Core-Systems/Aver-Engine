@@ -274,6 +274,26 @@ public class OcGraphParser
                     {
                         node.VarName = v;
                     }
+                    // name= carries the literal string a "setname" node writes (see Node.NameValue) --
+                    // the value itself, not a lookup key, unlike field=/class=/var= above. Nothing to
+                    // resolve at parse time; GraphCompiler.EmitSetName/EmitExecSetName require it
+                    // non-empty at COMPILE time (an empty name= can never write anything useful, so
+                    // failing loudly then beats a silent no-op rejection at runtime for a reason nobody
+                    // can see -- mirrors class='s own required-at-compile-time treatment for Spawn).
+                    else if (k == "name")
+                    {
+                        node.NameValue = v;
+                    }
+                    // mesh= names the asset path a "setmesh" node writes (see Node.MeshPath).
+                    else if (k == "mesh")
+                    {
+                        node.MeshPath = v;
+                    }
+                    // material= names the material a "setmaterial" node writes (see Node.MaterialName).
+                    else if (k == "material")
+                    {
+                        node.MaterialName = v;
+                    }
                 }
 
                 nodes[nodeId] = node;
@@ -876,6 +896,73 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 break;
             }
+
+            // ---- SetParent / SetViewEntity / SetName -----------------------------------------------
+            // Three one-ABI-call writes -- see GraphCompiler.cs's IsExecCapableSetParentType/
+            // IsExecCapableSetViewEntityType/IsExecCapableSetNameType comments for the full dispatch
+            // story. ALL THREE ARE DISPATCHED SetField-STYLE, DELIBERATELY, NOT Spawn/SetVar-STYLE: no
+            // exec pins by default (so a graph can wire one into a pure dataflow the same way GetField/
+            // SetField already can), and EmitNode's own "setparent"/"setviewentity"/"setname" cases run
+            // them unconditionally on Compile()'s topological pass, exactly like EmitSetField does for
+            // "setfield". That choice rests on the same excuse SetField's own comment already gives:
+            // aver_scene_set_parent/aver_scene_set_name/aver_fw_set_view_entity are all REPUBLISH
+            // operations -- reparenting to the same parent, renaming to the same name, or republishing
+            // the same view entity every single tick is harmless and idempotent, unlike Spawn (which
+            // creates a NEW entity every call) or SetVar (which has no "safe to repeat" excuse at all).
+            // Still fully refused when PULLED as a bare data value with no exec visit inside an
+            // ENTRY-driven graph -- EmitPullOutput's side-effect refusal names all three, exactly like
+            // it already names SetField/SetFieldVec3/Spawn/SetVar -- so "the PULL path must refuse a
+            // write" holds for these too; only Compile()'s own SEPARATE topological compiler gets the
+            // idempotent-overwrite exception SetField already established.
+            case "setparent":
+                // aver_scene_set_parent(child, parent) -> success. "child"/"parent" name the ABI's own
+                // parameters directly (scene_abi.h:105) rather than "entity"/"target", so the pins read
+                // the same as the native signature they wrap.
+                node.Pins.Add(new Pin { Name = "child", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "parent", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "setviewentity":
+                // aver_fw_set_view_entity(entity) -> void (framework_abi.h:206). NO OUTPUT PIN AT ALL --
+                // deliberately, not an oversight: the ABI returns nothing, so there is no real return
+                // code to surface, and inventing a fake "success" pin here would repeat exactly the
+                // mistake this codebase's own SetField comment says it already fixed once ("the old stub
+                // hardcoded 1 regardless of whether anything happened").
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                break;
+
+            case "setname":
+                // aver_scene_set_name(entity, name) -> success. name= is a NODE-line attribute (see
+                // Node.NameValue), not a pin -- PinType has no String member, so this is the only route
+                // a string reaches this node, the same way class= is the only route Spawn's class name
+                // reaches IT.
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // ---- SetMesh / SetMaterial ---------------------------------------------------------------
+            // Coarse, dedicated nodes wrapping Aver.Framework.Entity.SetMesh/SetMaterial (EntityScene.cs)
+            // through GraphInterop.SetMeshForGraph/SetMaterialForGraph -- NOT a generalised I64-capable
+            // SetField, NOT an exposed asset-path lookup (Assets.ObjectIdOf is a pure local FNV1a64 hash,
+            // no native call, no I/O), and NOT a generic "add a missing component" node: EntityScene's
+            // own EnsureMeshRenderer already does that composition, so the graph node needs nothing new
+            // beyond the string attribute mechanism setname/spawn/getfield already established. Same
+            // SetField-style dispatch as SetParent/SetViewEntity/SetName above -- EnsureMeshRenderer's
+            // own "if already present, do nothing" guard is what makes re-running this every tick
+            // harmless, the identical idempotence excuse SetField's own comment gives.
+            case "setmesh":
+                // mesh= names the asset path (see Node.MeshPath), the same NODE-line-attribute-as-data
+                // mechanism name= established for SetName just above.
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "setmaterial":
+                // material= names the material (see Node.MaterialName).
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
         }
     }
 

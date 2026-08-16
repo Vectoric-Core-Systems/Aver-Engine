@@ -186,4 +186,26 @@ internal static class GraphInterop
         Vec3 v = Input.MoveAxis;
         forward = v.X; right = v.Y;
     }
+
+    /// <summary>SetMesh's own surface: sets the drawn mesh by asset path, adding a mesh renderer if the
+    /// entity has none. NOT a new native ABI and NOT a generalised I64-capable SetField -- this is a
+    /// one-line forward to <see cref="Entity"/>.SetMesh (EntityScene.cs), which already composes
+    /// EnsureMeshRenderer() + Assets.ObjectIdOf(path) + SetInt64 the exact way the C# side of a
+    /// first-person controller would. Constructing an <see cref="Entity"/> from a raw handle needs its
+    /// `internal` constructor (Entity.cs), which this method can call freely -- it lives in the SAME
+    /// assembly, unlike RaycastForGraph/SpawnForGraph's own reshaping of a DIFFERENT surface
+    /// (Aver.Scene.Native / Physics) into scalars. Assets.ObjectIdOf is a PURE LOCAL HASH (FNV1a64 over
+    /// the path's UTF-8 bytes, Aver.Scene/Native.cs) -- no native call, no I/O, no lookup table -- so the
+    /// only native call this method's IL reaches at all is SetInt64's own aver_scene_set_i64. Returns
+    /// SetInt64's real return code (false on an unknown entity or a missing component EnsureMeshRenderer
+    /// somehow failed to add), mirroring GetFieldVecForGraph/SetFieldVecForGraph's own "surface the real
+    /// return code" convention rather than SpawnForGraph's "0 means nothing happened" one -- this method
+    /// already returns a bool, so there is no analogous "invalid sentinel" to invent.</summary>
+    internal static bool SetMeshForGraph(int entity, string meshPath) => new Entity(entity).SetMesh(meshPath);
+
+    /// <summary>SetMaterial's own surface: sets the material by name, adding a mesh renderer if the
+    /// entity has none. Mirrors SetMeshForGraph immediately above exactly -- see that method's comment,
+    /// which applies unchanged here (Entity.SetMaterial composes EnsureMeshRenderer() +
+    /// aver_scene_material(0, name) + SetInt, EntityScene.cs).</summary>
+    internal static bool SetMaterialForGraph(int entity, string materialName) => new Entity(entity).SetMaterial(materialName);
 }

@@ -95,6 +95,31 @@ public class Node
     // resolve this against (a VAR is declared in THIS graph file, not a scene-wide registry), so
     // Graph.Validate() checks it directly against Variables -- see that block's own comment.
     public string? VarName { get; set; }
+
+    // The literal string a "setname" node writes via aver_scene_set_name, e.g. "Held_Weapon". Set
+    // from the NODE line's "name=<value>" attribute -- the same generic key=value mechanism
+    // ParamName/FieldName/ClassName/VarName already use. Null for every other node type. UNLIKE those
+    // four, this is the first NODE-line attribute whose value is used AS DATA (the actual string
+    // written to the entity) rather than as a lookup key into some table -- see GraphCompiler's
+    // EmitSetName/EmitExecSetName for why that distinction does not change how it is parsed or
+    // stored: PinType has no String member (Graph.cs's own PinType enum: Float/Int/Bool/Exec only),
+    // so a NODE-line attribute remains the only route a string reaches ANY node in this format today,
+    // whether it names something (field=/class=/var=) or IS the something (name=).
+    public string? NameValue { get; set; }
+
+    // Which asset path a "setmesh" node writes (via Aver.Framework.GraphInterop.SetMeshForGraph ->
+    // Entity.SetMesh -> Assets.ObjectIdOf), e.g. "Content/Meshes/Prop.ocmesh". Set from the NODE
+    // line's "mesh=<path>" attribute -- same mechanism as NameValue immediately above; the path
+    // string is data the node writes, not a key resolved against any table this parser or compiler
+    // knows about (Assets.ObjectIdOf is a pure local hash, computed at INVOCATION time in
+    // Aver.Framework, not here). Null for every other node type.
+    public string? MeshPath { get; set; }
+
+    // Which material name a "setmaterial" node writes (via GraphInterop.SetMaterialForGraph ->
+    // Entity.SetMaterial -> aver_scene_material), e.g. "M_Weapon". Set from the NODE line's
+    // "material=<name>" attribute -- same mechanism as MeshPath immediately above. Null for every
+    // other node type.
+    public string? MaterialName { get; set; }
 }
 
 /// One parameter the compiled method accepts -- e.g. the entity a graph drives, or the current

@@ -271,6 +271,43 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"SetVar", "Set Var", "Var", {
         pin("exec", "exec", false), pin("value", "float", false), pin("then", "exec", true)},
         {attr("var", "Var Name")}});
+
+    // -- SetParent / SetViewEntity / SetName: three one-ABI-call writes, dispatched SetField-style --
+    //    no exec pins by default (unlike Spawn/SetVar above), reachable from BOTH C# compilers, and
+    //    still refused if pulled as a bare data value with no exec visit -- see
+    //    scripting/csharp/Aver.Graph/OcGraphParser.cs's "SetParent / SetViewEntity / SetName" comment
+    //    for the full "why SetField-style, not Spawn/SetVar-style" reasoning this table's own pin sets
+    //    were copied from field for field.
+    //
+    //    SetParent: aver_scene_set_parent(child, parent) -> success (scene_abi.h:105). Already refuses
+    //    a cycle, a self-parent, and a doomed parent, returning 0 -- surfaced on "success" rather than
+    //    swallowed.
+    t.push_back({"SetParent", "Set Parent", "Scene", {
+        pin("child", "int", false), pin("parent", "int", false), pin("success", "bool", true)}});
+    //    SetViewEntity: aver_fw_set_view_entity(entity) -> void (framework_abi.h:206). NO OUTPUT PIN --
+    //    the ABI returns nothing, so there is no return code to invent one for.
+    t.push_back({"SetViewEntity", "Set View Entity", "Actor", {
+        pin("entity", "int", false)}});
+    //    SetName: aver_scene_set_name(entity, name) -> success (scene_abi.h:113). name= is a NODE-line
+    //    attribute, not a pin -- the string IS the data this node writes, not a lookup key, but PinType
+    //    has no String member (see OcGraphParser.cs's own PinType-has-no-String comment), so a
+    //    NODE-line attribute is still the only route it can reach this node.
+    t.push_back({"SetName", "Set Name", "Scene", {
+        pin("entity", "int", false), pin("success", "bool", true)},
+        {attr("name", "Name")}});
+
+    // -- SetMesh / SetMaterial: coarse, dedicated nodes wrapping Entity.SetMesh/SetMaterial
+    //    (EntityScene.cs) through Aver.Framework.GraphInterop.SetMeshForGraph/SetMaterialForGraph --
+    //    NOT a generalised I64-capable SetField and NOT a generic "add a missing component" node; see
+    //    OcGraphParser.cs's own "SetMesh / SetMaterial" comment. Same SetField-style dispatch as the
+    //    three types just above (EnsureMeshRenderer's own idempotent "add if absent" guard is what
+    //    makes re-running this every tick harmless).
+    t.push_back({"SetMesh", "Set Mesh", "Scene", {
+        pin("entity", "int", false), pin("success", "bool", true)},
+        {attr("mesh", "Mesh")}});
+    t.push_back({"SetMaterial", "Set Material", "Scene", {
+        pin("entity", "int", false), pin("success", "bool", true)},
+        {attr("material", "Material")}});
     return t;
 }
 
