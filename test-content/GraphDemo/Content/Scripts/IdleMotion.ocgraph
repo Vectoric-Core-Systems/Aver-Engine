@@ -14,7 +14,10 @@ OCGRAPH 1
 # the need for that entirely:
 #   GetFieldVec3 (75be56b) lets a graph READ its own transform, and
 #   VAR/SetVar/GetVar (a45e32f) lets it REMEMBER what it read.
-# So the graph writes absolute positions itself, needs no OUT records, and no host code at all.
+# So the graph writes absolute positions itself, and needs no host code at all. It needs no OUT
+# records either, for its own logic -- the three at the very bottom of this file exist ONLY so the
+# tick log prints the numbers it wrote, and deleting them changes nothing about what moves. See their
+# own comment down there before assuming a graph like this owes anyone an output.
 #
 # WHY OnStart AND NOT A first-tick BRANCH. GraphHost.Tick fires OnStart once, in the same tick, and
 # strictly BEFORE OnTick (GraphHost.cs, the _startInvoked block) -- and both entry points share one
