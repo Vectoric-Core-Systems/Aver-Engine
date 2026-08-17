@@ -502,6 +502,12 @@ public static class HostBridge
                 return 0;
 
             int declared = 0;
+            // `pawn=` assignments, applied in a SECOND pass below rather than inline. See Graph.ClassPawn:
+            // aver_fw_class_set_default_pawn resolves the name at SEAL, so a GameMode naming a pawn whose
+            // own class had not been declared yet would resolve to 0 and possess nothing -- and which
+            // graphs suffered that would depend on the filename order this very loop sorts to make
+            // deterministic. Deferring until every class exists removes the ordering question entirely.
+            var pendingRoles = new List<(int Handle, string ClassName, string? Pawn, string? Controller, string Path)>();
             // Sorted, like LoadScripts' own assembly enumeration: deterministic declare order matters
             // when two files disagree about the same class name (aver_fw_class_declare is idempotent
             // by name -- the LAST declare wins), so which one wins must not depend on the filesystem's
@@ -588,10 +594,81 @@ public static class HostBridge
                          + "rename one of them.");
                 s_graphClasses[classKey] =
                     new GraphClassInfo { Path = path, Name = graph.ClassName, Ticks = ticks, View = graph.ClassView };
+                if (!string.IsNullOrEmpty(graph.ClassPawn) || !string.IsNullOrEmpty(graph.ClassController))
+                    pendingRoles.Add((c, graph.ClassName, graph.ClassPawn, graph.ClassController, path));
+
                 ++declared;
                 Emit((int)Log.Level.Info,
                      $"[Graph] declared class '{graph.ClassName}' (parent '{parent}'{(ticks ? ", ticks" : "")}) from '{path}'");
             }
+
+            // ---- second pass: `pawn=`, now that every class name above exists ----------------------
+            //
+            // Re-sealing is the documented way to do this, not a workaround: aver_fw_class_set_default_pawn
+            // clears `sealed` itself precisely so the name can be (re)resolved, and spawning auto-seals
+            // anyway. Sealing here rather than leaving it to the spawn means a bad name is reported NOW,
+            // by this loop, instead of becoming a GameMode that silently possesses nothing at begin-play.
+            foreach (var (handle, className, pawnName, controllerName, path) in pendingRoles)
+            {
+                // GameMode ONLY. Everywhere else these are meaningless -- ClassRecord::defaultPawn and
+                // ::playerController are read by aver_fw_begin_play off the GameMode class and nowhere
+                // else -- so saying so is more useful than silently doing nothing. A warning, not a
+                // refusal, matching how `view=` on a non-Character class is tolerated: one misapplied
+                // attribute should not cost a project its class.
+                if ((Fw.aver_fw_class_get_flags(handle) & ClassFlags.GameMode) == 0)
+                {
+                    Emit((int)Log.Level.Warn,
+                         $"[Graph] class '{className}' (from '{path}') sets pawn=/controller=, but only a "
+                         + "GameMode has those -- the attributes are ignored here");
+                    continue;
+                }
+
+                bool changed = false;
+                if (!string.IsNullOrEmpty(pawnName))
+                {
+                    if (Fw.aver_fw_class_find(pawnName) == 0)
+                        Emit((int)Log.Level.Warn,
+                             $"[Graph] GameMode '{className}' (from '{path}') names pawn='{pawnName}', which "
+                             + "is not a declared class -- nothing will be possessed. Check it against the "
+                             + "CLASS record of the graph that declares it");
+                    else { Fw.aver_fw_class_set_default_pawn(handle, pawnName); changed = true; }
+                }
+                if (!string.IsNullOrEmpty(controllerName))
+                {
+                    if (Fw.aver_fw_class_find(controllerName) == 0)
+                        Emit((int)Log.Level.Warn,
+                             $"[Graph] GameMode '{className}' (from '{path}') names controller="
+                             + $"'{controllerName}', which is not a declared class");
+                    else { Fw.aver_fw_class_set_player_controller(handle, controllerName); changed = true; }
+                }
+
+                if (!changed) continue;
+
+                if (Fw.aver_fw_class_seal(handle) == 0)
+                {
+                    Emit((int)Log.Level.Warn,
+                         $"[Graph] GameMode '{className}' (from '{path}') would not re-seal after pawn/controller");
+                    continue;
+                }
+
+                // THE HALF-WIRED CASE IS CALLED OUT, because it looks correct and does nothing.
+                // aver_fw_begin_play possesses only when it has BOTH ("if (ctrl && pawn)"), and the
+                // built-in PlayerController is ABSTRACT so it cannot be the fallback -- a GameMode with
+                // a pawn and no controller of its own spawns the pawn, never possesses it, and leaves
+                // GameApp's camera following nothing. That is exactly the failure this attribute pair
+                // was added to end, so it must not be reintroduced silently by naming only one of them.
+                if (!string.IsNullOrEmpty(pawnName) && string.IsNullOrEmpty(controllerName))
+                    Emit((int)Log.Level.Warn,
+                         $"[Graph] GameMode '{className}' names a pawn but no controller, so the pawn is "
+                         + "spawned and never possessed (and no camera follows it). Add "
+                         + "controller=<YourController>, declared by a graph whose CLASS parent is "
+                         + "PlayerController");
+
+                Emit((int)Log.Level.Info,
+                     $"[Graph] GameMode '{className}' begins play with pawn='{pawnName ?? "(none)"}' "
+                     + $"controller='{controllerName ?? "(none)"}'");
+            }
+
             return declared;
         }
         catch (Exception ex)

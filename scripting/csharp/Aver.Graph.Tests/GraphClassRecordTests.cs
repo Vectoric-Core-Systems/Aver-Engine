@@ -22,11 +22,71 @@ static class GraphClassRecordTests
         failures += TestClassRecordWithMeshAndMaterial();
         failures += TestClassRecordWithView();
         failures += TestClassRecordWithoutViewLeavesClassViewNull();
+        failures += TestClassRecordWithPawnAndController();
+        failures += TestClassRecordWithoutPawnLeavesBothNull();
         failures += TestGraphWithNoClassRecordHasNullClassName();
         failures += TestDuplicateClassRecordIsRejected();
         failures += TestClassRecordWithNoNameIsRejected();
 
         return failures;
+    }
+
+    // pawn=/controller= are what let a GRAPH GameMode be possessed at all. Parse-level only, like every
+    // other test here -- what HostBridge does with them (resolve by name in a second pass, refuse a
+    // non-GameMode, warn when a pawn is named with no controller) needs the framework ABI, which this
+    // bare process has no host for. See Graph.cs's ClassPawn/ClassController doc comments.
+    //
+    // THE PAIR IS TESTED TOGETHER because they are only useful together: aver_fw_begin_play possesses
+    // when it has BOTH, and the built-in PlayerController is abstract and unspawnable, so a pawn named
+    // alone is spawned and never possessed.
+    private static int TestClassRecordWithPawnAndController()
+    {
+        Console.WriteLine("Test: CLASS pawn=/controller= parse together on a GameMode record");
+        try
+        {
+            var text = "OCGRAPH 1\nCLASS AN_Rules GameMode pawn=AN_Hero controller=AN_Ctrl\nNODE k ConstFloat value=1.0\nOUT k value\n";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            bool ok = graph.ClassName == "AN_Rules"
+                   && graph.ClassParent == "GameMode"
+                   && graph.ClassPawn == "AN_Hero"
+                   && graph.ClassController == "AN_Ctrl";
+            if (!ok)
+            {
+                Console.WriteLine($"  FAIL: name='{graph.ClassName}' parent='{graph.ClassParent}' "
+                                + $"pawn='{graph.ClassPawn}' controller='{graph.ClassController}'");
+                return 1;
+            }
+            Console.WriteLine("  PASS: both parsed, and neither displaced the parent token");
+            return 0;
+        }
+        catch (Exception ex) { Console.WriteLine($"  FAIL: {ex.Message}"); return 1; }
+    }
+
+    private static int TestClassRecordWithoutPawnLeavesBothNull()
+    {
+        Console.WriteLine("Test: a CLASS record with no pawn=/controller= leaves both null");
+        try
+        {
+            var text = "OCGRAPH 1\nCLASS AN_Rules GameMode\nNODE k ConstFloat value=1.0\nOUT k value\n";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            if (graph.ClassPawn != null || graph.ClassController != null)
+            {
+                Console.WriteLine($"  FAIL: expected both null, got pawn='{graph.ClassPawn}' "
+                                + $"controller='{graph.ClassController}'");
+                return 1;
+            }
+            Console.WriteLine("  PASS: both null, so HostBridge's second pass skips this class entirely");
+            return 0;
+        }
+        catch (Exception ex) { Console.WriteLine($"  FAIL: {ex.Message}"); return 1; }
     }
 
     private static int TestClassRecordDefaultsParentToActor()

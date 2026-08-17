@@ -238,6 +238,8 @@ public class OcGraphParser
                 string? classMesh = null;
                 string? classMaterial = null;
                 string? classView = null;
+                string? classPawn = null;
+                string? classController = null;
                 for (int i = 2; i < tokens.Count; i++)
                 {
                     var token = tokens[i];
@@ -251,6 +253,13 @@ public class OcGraphParser
                         // this exists and who consumes it (HostBridge.DispBind, Character ancestors
                         // only). Held as the raw string here, same as mesh/material; validated later.
                         else if (parts[0] == "view") classView = parts[1];
+                        // The GameMode's default pawn CLASS NAME -- see Graph.ClassPawn for why a
+                        // graph GameMode needed a way to say this at all. A class name, not a file
+                        // path: it is resolved against declared classes at seal, not on disk.
+                        else if (parts[0] == "pawn") classPawn = parts[1];
+                        // The GameMode's player-controller class. Needed alongside pawn= for either to
+                        // matter -- see Graph.ClassController for why possession requires both.
+                        else if (parts[0] == "controller") classController = parts[1];
                         // An unrecognised key=value attribute is ignored rather than failing the
                         // whole graph -- mirrors NODE's own key=value loop, just below.
                     }
@@ -269,6 +278,8 @@ public class OcGraphParser
                 graph.ClassMesh = classMesh;
                 graph.ClassMaterial = classMaterial;
                 graph.ClassView = classView;
+                graph.ClassPawn = classPawn;
+                graph.ClassController = classController;
             }
             else if (key.Equals("NODE", StringComparison.OrdinalIgnoreCase))
             {

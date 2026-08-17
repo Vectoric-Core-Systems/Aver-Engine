@@ -258,6 +258,38 @@ public class Graph
     // ancestor happens not to use, the same tolerance an unrecognised NODE-line key=value already gets.
     public string? ClassView { get; set; }
 
+    // Optional default pawn CLASS NAME, from the CLASS record's `pawn=<ClassName>` attribute. Null when
+    // the record omits it. Only meaningful on a GameMode; HostBridge warns and ignores it elsewhere.
+    //
+    // WHY THIS EXISTS: aver_fw_begin_play already spawns a GameMode's controller and pawn and POSSESSES
+    // the pawn -- the machinery is all there, driven by ClassRecord::defaultPawnName, and C# GameModes
+    // reach it through GameModeInfo.DefaultPawnClass. A GRAPH GameMode had no way to name one, so a
+    // graph-only project's character was placed but never possessed. That matters far more than it
+    // sounds: GameApp's camera follows `aver_fw_controlled_pawn(...)` and returns early when there is
+    // none, so a shipped game showed its default camera and no amount of `view=firstperson` reached it.
+    // A first-person template that cannot be seen in first person was the symptom.
+    //
+    // RESOLVED BY NAME AT SEAL (aver_fw_class_set_default_pawn), which is why HostBridge applies these
+    // in a SECOND pass after every graph class has been declared, rather than inline: naming a pawn
+    // whose own class had not been declared yet would resolve to 0 and silently possess nothing, and
+    // which graphs got that treatment would depend on filename order.
+    public string? ClassPawn { get; set; }
+
+    // Optional player-controller CLASS NAME, from the CLASS record's `controller=<ClassName>` attribute.
+    // Only meaningful on a GameMode, like ClassPawn.
+    //
+    // REQUIRED FOR pawn= TO DO ANYTHING, which is why the two arrived together rather than one at a
+    // time. aver_fw_begin_play possesses only when it has BOTH ("if (ctrl && pawn)"), and the built-in
+    // `PlayerController` class is ABSTRACT -- aver_fw_spawn refuses an abstract class outright, so a
+    // GameMode that named no controller of its own got ctrl == 0 and never possessed anything, however
+    // correct its pawn was. Naming a pawn alone would have looked wired up and changed nothing.
+    //
+    // A graph can supply one with no C# at all: ABSTRACT is deliberately NOT inherited (see
+    // kInheritableKindFlags), so `CLASS AN_FPController PlayerController` is a concrete, spawnable class
+    // that still carries the CONTROLLER flag possession checks for -- the same thing a Blueprint
+    // subclass of APlayerController is.
+    public string? ClassController { get; set; }
+
     /// Validates the graph for consistency. Returns false if invalid; sets err to a message.
     /// Note: Comparison is case-sensitive for node IDs. If nodes are added as "1" and referenced as "1",
     /// they must match exactly. The C# parser uses string representations of integer IDs, and the C++ writer
