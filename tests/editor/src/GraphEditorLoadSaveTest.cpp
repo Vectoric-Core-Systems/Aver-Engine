@@ -419,6 +419,290 @@ static void testPathologicalAttributeCases() {
     }
 }
 
+// ===================================================================== variables (Variables panel) ===
+// GraphEditor's addVariable/renameVariable/retypeVariable/setVariableDefault/deleteVariable, exercised
+// through the exact same public surface the Variables panel and the GetVar/SetVar var= picker in
+// draw() call -- no ImGui context needed, exactly like setAttribute/clearAttribute above. See
+// GraphEditor.hpp's own header comment on this block for the bug (a palette-spawned SetVar cannot
+// compile, and the editor previously had no way to declare the variable that would fix it) these
+// methods exist to close.
+//
+// Shared fixture: two REFERENCED variables (score, addressed by 'gv's var=; speed, addressed by
+// 'sv's var=) and one UNREFERENCED variable ('unused') -- so both halves of deleteVariable's
+// "refuse while referenced, otherwise succeed" contract have a real fixture node to exercise against,
+// without every test below hand-rolling its own graph text.
+static std::string variablesFixtureText() {
+    return
+        "OCGRAPH 1\n"
+        "NAME VariablesTest\n"
+        "DESCRIPTION Variables panel fixture: gv/sv address declared variables via var=\n"
+        "\n"
+        "VAR score int 0\n"
+        "VAR speed float 1.5\n"
+        "VAR unused bool false\n"
+        "\n"
+        "NODE tick OnTick 0 0\n"
+        "NODE gv GetVar 200 0 var=score\n"
+        "NODE sv SetVar 200 100 var=speed\n"
+        "\n"
+        "LINK tick.exec sv.exec\n"
+        "\n"
+        "ENTRY tick OnTick\n"
+        "\n"
+        "OUT gv value\n";
+}
+
+static void testVariablesParseAndByteIdenticalRoundTrip() {
+    AVER_INFO("=== variables: parse into GraphEditor::variables() and round-trip byte-identically ===");
+    const std::string text = variablesFixtureText();
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "variables_roundtrip.ocgraph").string();
+    writeFile(tmp, text);
+
+    GraphEditor ed(tmp);
+    check(!ed.dirty(), "freshly loaded editor is not dirty");
+    check(ed.variables().size() == 3, "all three declared variables are visible through variables()");
+    if (ed.variables().size() == 3) {
+        check(ed.variables()[0].name == "score" && ed.variables()[0].type == "int" && ed.variables()[0].defaultValue == "0",
+              "'score' parsed with name/type/default, in file order");
+        check(ed.variables()[1].name == "speed" && ed.variables()[1].type == "float" && ed.variables()[1].defaultValue == "1.5",
+              "'speed' parsed with name/type/default, in file order");
+        check(ed.variables()[2].name == "unused" && ed.variables()[2].type == "bool" && ed.variables()[2].defaultValue == "false",
+              "'unused' parsed with name/type/default, in file order");
+    }
+
+    std::string why;
+    check(ed.save(&why), "save() succeeds on a freshly loaded, unedited graph (why='" + why + "')");
+    check(!ed.dirty(), "editor is not dirty immediately after a successful save");
+    const std::string after = readFile(tmp);
+    check(after == text, "a load -> save with no edits reproduces the VAR-bearing file byte for byte");
+}
+
+static void testAddVariableValidatesAndFallsBack() {
+    AVER_INFO("=== addVariable: validates name/default, refuses duplicates, falls back an invalid type ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "variables_add.ocgraph").string();
+    writeFile(tmp, variablesFixtureText());
+    GraphEditor ed(tmp);
+
+    check(!ed.addVariable("", "float", ""), "an empty name is refused");
+    check(!ed.addVariable("bad name", "float", ""), "a name containing whitespace is refused (this format has no quoting)");
+    check(!ed.addVariable("score", "float", ""), "a name already declared ('score') is refused -- Graph.Validate's own uniqueness rule");
+    check(!ed.dirty(), "none of the refused calls above marked the editor dirty");
+
+    check(ed.addVariable("mana", "bogus-type", ""), "a structurally valid name with an UNRECOGNISED type still succeeds");
+    check(ed.dirty(), "a successful add marks the editor dirty");
+    bool foundMana = false;
+    for (const auto& v : ed.variables()) if (v.name == "mana") { foundMana = true; check(v.type == "float", "an invalid type ('bogus-type') falls back to 'float', the palette's own default"); }
+    check(foundMana, "'mana' is now in variables()");
+
+    check(!ed.addVariable("badDefault", "float", "1 2"), "a default value containing whitespace is refused");
+
+    std::string why;
+    check(ed.save(&why), "save() succeeds after addVariable (why='" + why + "')");
+    const std::string after = readFile(tmp);
+    check(after.find("VAR mana float\n") != std::string::npos,
+          "the new variable is written with no default token (none was given) and the fallback type");
+    check(after.find("badDefault") == std::string::npos, "the refused 'badDefault' add left no trace on disk");
+}
+
+static void testRenameVariableCascadesReferencesAndRefusesCollisions() {
+    AVER_INFO("=== renameVariable: rewrites every var= reference, refuses collisions and bad names ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "variables_rename.ocgraph").string();
+    writeFile(tmp, variablesFixtureText());
+    GraphEditor ed(tmp);
+
+    check(ed.renameVariable("score", "score"), "renaming a variable to its OWN current name succeeds (a harmless no-op)");
+    check(!ed.dirty(), "a same-name rename is a true no-op: it does not mark the editor dirty");
+
+    check(!ed.renameVariable("nope", "whatever"), "renaming an undeclared variable is refused");
+    check(!ed.renameVariable("score", ""), "renaming to an empty name is refused");
+    check(!ed.renameVariable("score", "bad name"), "renaming to a name containing whitespace is refused");
+    check(!ed.renameVariable("score", "speed"), "renaming to a name ALREADY used by a DIFFERENT variable is refused (would collide)");
+    check(!ed.dirty(), "none of the refused renames above marked the editor dirty");
+
+    // Confirm the pre-rename state through the exact same public surface the picker reads, so the
+    // post-rename assertions below are a real before/after, not an assumption.
+    const fmt::OcGraphNode* gvBefore = nullptr;
+    for (const auto& n : ed.graph().nodes) if (n.id == "gv") { gvBefore = &n; break; }
+    check(gvBefore != nullptr, "fixture has node 'gv'");
+    if (gvBefore) check(getNodeAttribute(*gvBefore, "var").value == "score", "before the rename, 'gv' names 'score'");
+
+    check(ed.renameVariable("score", "points"), "renaming 'score' to the unused name 'points' succeeds");
+    check(ed.dirty(), "a real rename marks the editor dirty");
+
+    bool stillHasScore = false, hasPoints = false;
+    for (const auto& v : ed.variables()) {
+        if (v.name == "score") stillHasScore = true;
+        if (v.name == "points") hasPoints = true;
+    }
+    check(!stillHasScore && hasPoints, "the declared variable itself is renamed, not duplicated");
+
+    // THE CASCADE: 'gv's var= must now name 'points', not the old 'score' -- this is the entire
+    // point of renameVariable existing as its own method rather than a bare `var.name = newName`.
+    const fmt::OcGraphNode* gvAfter = nullptr;
+    for (const auto& n : ed.graph().nodes) if (n.id == "gv") { gvAfter = &n; break; }
+    check(gvAfter != nullptr && getNodeAttribute(*gvAfter, "var").value == "points",
+          "'gv's var= attribute was rewritten to the NEW name -- no node is left pointing at 'score'");
+    // 'sv' addresses 'speed', untouched by a rename of 'score' -- the cascade must be scoped to
+    // exactly the renamed variable, not every var= attribute in the graph.
+    const fmt::OcGraphNode* sv = nullptr;
+    for (const auto& n : ed.graph().nodes) if (n.id == "sv") { sv = &n; break; }
+    check(sv != nullptr && getNodeAttribute(*sv, "var").value == "speed",
+          "'sv's var= attribute (a DIFFERENT variable) is untouched by renaming 'score'");
+
+    std::string why;
+    check(ed.save(&why), "save() succeeds after the rename (why='" + why + "')");
+    const std::string after = readFile(tmp);
+    check(after.find("VAR points int 0") != std::string::npos, "the renamed VAR line is written under its new name");
+    check(after.find("VAR score") == std::string::npos, "the old VAR name is gone entirely, not left as a stray second declaration");
+    check(after.find("var=points") != std::string::npos, "'gv's NODE line carries the new var= value");
+    check(after.find("var=score") == std::string::npos, "no NODE line still carries the old var= value");
+    check(after.find("var=speed") != std::string::npos, "'sv's unrelated var=speed survives the rename of 'score' untouched");
+}
+
+static void testRetypeVariableFallsBackAndDoesNotTouchPins() {
+    AVER_INFO("=== retypeVariable: changes the declared type, falls back on garbage, never touches pins ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "variables_retype.ocgraph").string();
+    writeFile(tmp, variablesFixtureText());
+    GraphEditor ed(tmp);
+
+    check(!ed.retypeVariable("nope", "int"), "retyping an undeclared variable is refused");
+    check(ed.retypeVariable("score", "int"), "retyping to the SAME type it already has succeeds (a true no-op)");
+    check(!ed.dirty(), "a no-op retype does not mark the editor dirty");
+
+    check(ed.retypeVariable("score", "bool"), "retyping 'score' from int to bool succeeds");
+    check(ed.dirty(), "a real retype marks the editor dirty");
+    for (const auto& v : ed.variables()) if (v.name == "score") check(v.type == "bool", "'score's declared type is now bool");
+
+    check(ed.retypeVariable("speed", "not-a-real-type"), "an invalid type argument still returns true (falls back, not refused)");
+    for (const auto& v : ed.variables()) if (v.name == "speed") check(v.type == "float", "the invalid type fell back to 'float', leaving 'speed' unchanged (it already was float)");
+
+    // 'gv's own 'value' pin (synthesised from the GetVar catalog entry, since the fixture wrote no
+    // explicit PIN record for it) must NOT have been silently retyped alongside the variable -- see
+    // retypeVariable's own header comment for why that mismatch is left visible rather than patched.
+    const fmt::OcGraphNode* gv = nullptr;
+    for (const auto& n : ed.graph().nodes) if (n.id == "gv") { gv = &n; break; }
+    check(gv != nullptr, "fixture has node 'gv'");
+    if (gv) {
+        const fmt::OcGraphPin* valuePin = nullptr;
+        for (const auto& p : gv->pins) if (p.name == "value") { valuePin = &p; break; }
+        check(valuePin != nullptr && valuePin->type == "float",
+              "'gv's 'value' pin is STILL float (the catalog default) even though 'score' is now bool -- retypeVariable never touches pins");
+    }
+
+    std::string why;
+    check(ed.save(&why), "save() succeeds after the retype (why='" + why + "')");
+    const std::string after = readFile(tmp);
+    check(after.find("VAR score bool 0") != std::string::npos,
+          "the retyped VAR line is written with its new type and its ORIGINAL default text unchanged ('0' is now a bool-looking default, untouched by this layer -- see OcGraphVariable's own comment on why type/default validation is not this layer's job)");
+}
+
+static void testSetVariableDefaultValidatesWhitespace() {
+    AVER_INFO("=== setVariableDefault: refuses whitespace, otherwise lands on disk ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "variables_default.ocgraph").string();
+    writeFile(tmp, variablesFixtureText());
+    GraphEditor ed(tmp);
+
+    check(!ed.setVariableDefault("nope", "5"), "setting a default on an undeclared variable is refused");
+    check(!ed.setVariableDefault("score", "1 2"), "a default value containing whitespace is refused");
+    check(!ed.dirty(), "neither refused call marked the editor dirty");
+
+    check(ed.setVariableDefault("score", "42"), "setVariableDefault('score', '42') succeeds");
+    check(ed.dirty(), "a real default change marks the editor dirty");
+
+    std::string why;
+    check(ed.save(&why), "save() succeeds after setVariableDefault (why='" + why + "')");
+    const std::string after = readFile(tmp);
+    check(after.find("VAR score int 42") != std::string::npos,
+          "the new default text is written verbatim -- this layer does not validate a default against its variable's type (that is the C# side's job, see OcGraphVariable's own comment)");
+}
+
+static void testDeleteVariableRefusesWhileReferencedThenSucceeds() {
+    AVER_INFO("=== deleteVariable: refuses while referenced (names every blocking node), succeeds once clear ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "variables_delete.ocgraph").string();
+    writeFile(tmp, variablesFixtureText());
+    GraphEditor ed(tmp);
+
+    check(!ed.deleteVariable("nope"), "deleting an undeclared variable is refused (nothing to delete)");
+
+    // 'unused' -- nothing in the fixture references it, so deletion must succeed outright.
+    check(ed.deleteVariable("unused"), "deleting the UNREFERENCED variable 'unused' succeeds");
+    check(ed.dirty(), "a real delete marks the editor dirty");
+    bool stillHasUnused = false;
+    for (const auto& v : ed.variables()) if (v.name == "unused") stillHasUnused = true;
+    check(!stillHasUnused, "'unused' is gone from variables()");
+
+    // 'score' -- 'gv' still references it via var=score, so deletion must be REFUSED, not silently
+    // leave 'gv' pointing at a variable that no longer exists.
+    std::vector<std::string> blockedBy;
+    check(!ed.deleteVariable("score", &blockedBy), "deleting 'score' while 'gv' still references it is refused");
+    check(blockedBy.size() == 1 && blockedBy[0] == "gv", "the blocking node id ('gv') is reported back to the caller");
+    bool stillHasScore = false;
+    for (const auto& v : ed.variables()) if (v.name == "score") stillHasScore = true;
+    check(stillHasScore, "the refused delete left 'score' declared -- nothing was silently removed");
+
+    // Clear the reference, then the same delete that was just refused must now succeed.
+    check(ed.clearAttribute("gv", "var"), "clearing 'gv's var= attribute (unrelated to deleteVariable itself) succeeds");
+    check(ed.deleteVariable("score"), "deleting 'score' now succeeds once nothing references it any more");
+
+    std::string why;
+    check(ed.save(&why), "save() succeeds after both deletes (why='" + why + "')");
+    const std::string after = readFile(tmp);
+    check(after.find("VAR unused") == std::string::npos, "'unused's VAR line is gone from the saved file");
+    check(after.find("VAR score") == std::string::npos, "'score's VAR line is gone from the saved file");
+    check(after.find("VAR speed float 1.5") != std::string::npos, "the untouched 'speed' variable survives both deletes");
+    check(after.find("NODE gv GetVar 200 0\n") != std::string::npos,
+          "'gv's NODE line lost its var= token (cleared above) and gained nothing else -- position untouched");
+}
+
+// THE MOTIVATING BUG, closed end to end at the model layer: a SetVar node with NO var= attribute at
+// all -- exactly the shape the Add-Node popup produces (GraphEditor.cpp copies GraphNodeDesc::pins
+// onto a freshly spawned node, but GraphNodeDesc carries no DEFAULT VALUE for an attribute, only that
+// the key exists -- see GraphNodeDefs.hpp's GraphAttributeSpec, which is (key, label) only) -- can be
+// made to compile with exactly the two calls the picker's "Declare '<name>'" button makes: addVariable
+// then setAttribute. This is the non-ImGui half of that button's behaviour; draw()'s own version is
+// the thinnest possible ImGui wrapper around the same two calls (see the "THE PICKER" block comment
+// in draw() for the ImGui side).
+static void testFreshlySpawnedSetVarCanBeFixedByDeclaringOnTheSpot() {
+    AVER_INFO("=== the motivating bug: a var=-less SetVar can be fixed with addVariable + setAttribute ===");
+    const std::string text =
+        "OCGRAPH 1\n"
+        "NAME FreshSetVar\n"
+        "\n"
+        "NODE tick OnTick 0 0\n"
+        "NODE sv SetVar 200 0\n"
+        "\n"
+        "PIN sv exec in exec\n"
+        "PIN sv value in float\n"
+        "PIN sv then out exec\n"
+        "\n"
+        "LINK tick.exec sv.exec\n"
+        "\n"
+        "ENTRY tick OnTick\n";
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "variables_fresh_setvar.ocgraph").string();
+    writeFile(tmp, text);
+
+    GraphEditor ed(tmp);
+    check(ed.variables().empty(), "the graph declares no variables at all yet -- the exact dead end the task brief describes");
+    const fmt::OcGraphNode* sv = nullptr;
+    for (const auto& n : ed.graph().nodes) if (n.id == "sv") { sv = &n; break; }
+    check(sv != nullptr, "fixture has node 'sv'");
+    if (sv) check(!getNodeAttribute(*sv, "var").found, "the freshly-spawned-shaped SetVar has NO var= attribute at all");
+
+    // The fix: guess a type from the node's own 'value' pin (exactly what draw()'s "Declare" button
+    // does), declare it, then point the node at it.
+    std::string guessType = "float";
+    if (sv) for (const auto& p : sv->pins) if (p.name == "value") { guessType = p.type; break; }
+    check(ed.addVariable("score", guessType, ""), "declaring 'score' at the guessed type succeeds");
+    check(ed.setAttribute("sv", "var", "score"), "pointing 'sv' at the newly-declared 'score' succeeds");
+
+    std::string why;
+    check(ed.save(&why), "save() succeeds after both edits (why='" + why + "')");
+    const std::string after = readFile(tmp);
+    check(after.find("VAR score float\n") != std::string::npos, "'score' is now declared in the saved file");
+    check(after.find("NODE sv SetVar 200 0 var=score\n") != std::string::npos,
+          "'sv' now names the declared variable -- this graph is exactly one keystroke of C# compilation away from working, not a dead end");
+}
+
 // ======================================================================================= failures ===
 static void testLoadFailure() {
     AVER_INFO("=== a missing file fails cleanly ===");
@@ -449,6 +733,13 @@ int main() {
     testAttributeEditRoundTrip();
     testUnknownAttributeSurvivesEditingADeclaredOne();
     testPathologicalAttributeCases();
+    testVariablesParseAndByteIdenticalRoundTrip();
+    testAddVariableValidatesAndFallsBack();
+    testRenameVariableCascadesReferencesAndRefusesCollisions();
+    testRetypeVariableFallsBackAndDoesNotTouchPins();
+    testSetVariableDefaultValidatesWhitespace();
+    testDeleteVariableRefusesWhileReferencedThenSucceeds();
+    testFreshlySpawnedSetVarCanBeFixedByDeclaringOnTheSpot();
     testLoadFailure();
     testWrongExtensionIsRejectedByFactory();
 

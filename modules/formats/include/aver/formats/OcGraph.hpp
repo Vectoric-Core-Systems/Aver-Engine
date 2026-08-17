@@ -79,6 +79,25 @@ struct OcGraphLink {
     std::string destPin;     // Name of the input pin on the destination node
 };
 
+// One declared graph-local variable: `VAR <name> <type> [default]`. Storage is per GraphHost
+// INSTANCE at runtime (scripting/csharp/Aver.Graph/GraphVarStore.cs) -- this struct only carries the
+// DECLARATION, the same thing a PARAM record carries for an argument.
+//
+// `type` and `defaultValue` are opaque strings at THIS layer, deliberately, the same division of
+// labour LINK's own pin-type-agreement check already follows (see OcGraphData::entryPoints' comment
+// for the general pattern): the C# side (scripting/csharp/Aver.Graph/OcGraphParser.cs's VAR-parsing
+// block) is the one place that knows PinType is Float/Int/Bool-only, rejects Exec, and falls back an
+// unparseable default to the type's zero value. Duplicating that enum and its validation here would
+// let the two disagree about what a "valid" VAR looks like; this layer instead accepts whatever is
+// syntactically well-formed (a name, a type token, an optional default token) and leaves the semantic
+// rules to the layer that actually executes the graph -- exactly what Graph.Validate()'s own
+// "duplicate VAR" check already does for uniqueness.
+struct OcGraphVariable {
+    std::string name;
+    std::string type;         // e.g. "float" | "int" | "bool" -- not validated here, see above
+    std::string defaultValue; // the literal text after `type`; empty = record carried no 3rd token
+};
+
 // A complete visual scripting graph.
 struct OcGraphData {
     int version = 1;
@@ -87,6 +106,26 @@ struct OcGraphData {
 
     std::vector<OcGraphNode> nodes;
     std::vector<OcGraphLink> links;
+
+    // Declared via top-level `VAR <name> <type> [default]` records, in file order. See
+    // OcGraphVariable's own comment for what each field means and why type/default are opaque
+    // strings here.
+    //
+    // A RECORD MODELLED HERE, NOT AN UNKNOWN ONE -- and that is a change, not the original design.
+    // VAR used to be entirely invisible to this reader: it fell through classifyLine into
+    // OwnedLineKind::Other and rode through a save unread, unmodified, the same path a comment or a
+    // future record type this format has never heard of takes (see tests/formats/src/OcGraphTest.cpp's
+    // testVarRecordsSurviveRoundTrip, whose own comment used to say exactly that -- read it for the
+    // history if this field's presence here is confusing). That was sufficient for the editor to not
+    // silently DESTROY a graph's variables on save, but it meant nothing in C++ could ever answer "what
+    // variables does this graph declare" -- which is the one question a Variables panel (declare/
+    // rename/retype/delete, and a var= picker on GetVar/SetVar) cannot avoid asking. Modelling VAR here
+    // is what makes that panel possible; classifyLine below gained its own `OwnedLineKind::Var` case
+    // and writeOcgraph gained its own placedVar/varBlock pair, the identical shape ENTRY and OUT
+    // already use, so an existing VAR-bearing file still round-trips byte-for-byte -- verified by the
+    // very same testVarRecordsSurviveRoundTrip, now asserting real fields on the parsed struct instead
+    // of only asserting the raw text survived.
+    std::vector<OcGraphVariable> variables;
 
     // Which pins the graph HANDS BACK when it runs: `OUT <nodeId> <pinName>`, in order.
     //

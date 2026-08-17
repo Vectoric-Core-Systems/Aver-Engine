@@ -45,7 +45,7 @@ bool isNumericToken(std::string_view s) {
 // path (see there) to replace each kind in place at its own first occurrence, rather than collapsing
 // every kind into one inserted block. `Other` covers blank lines, comments, and anything writeOcgraph
 // does not model; those are always copied through verbatim, at their original position.
-enum class OwnedLineKind { Header, Name, Description, Node, Pin, Link, Entry, Out, Other };
+enum class OwnedLineKind { Header, Name, Description, Var, Node, Pin, Link, Entry, Out, Other };
 
 // `sawHeader` is the caller's running state: only the FIRST line whose key is OCGRAPH counts as the
 // header; a later stray "OCGRAPH ..." line (malformed input, or inside an unrelated unknown record)
@@ -56,6 +56,7 @@ OwnedLineKind classifyLine(std::string_view line, bool sawHeaderYet) {
     if (!sawHeaderYet && equalsCI(t[0], "OCGRAPH")) return OwnedLineKind::Header;
     if (equalsCI(t[0], "NAME"))        return OwnedLineKind::Name;
     if (equalsCI(t[0], "DESCRIPTION")) return OwnedLineKind::Description;
+    if (equalsCI(t[0], "VAR"))         return OwnedLineKind::Var;
     if (equalsCI(t[0], "NODE"))        return OwnedLineKind::Node;
     if (equalsCI(t[0], "PIN"))         return OwnedLineKind::Pin;
     if (equalsCI(t[0], "LINK"))        return OwnedLineKind::Link;
@@ -114,6 +115,23 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
                 const std::string_view desc = trim(rawLine.substr(keyEnd + 11));
                 if (!desc.empty()) out.description = std::string(desc);
             }
+        } else if (equalsCI(key, "VAR")) {
+            // VAR <name> <type> [default] -- declares one graph-local persistent variable. See
+            // OcGraphVariable's own comment (OcGraph.hpp) for why type/default are opaque strings at
+            // this layer -- semantic validation (type must be Float/Int/Bool, duplicate names, an
+            // unparseable default) is the C# side's job, the same division LINK/ENTRY already follow
+            // for their own semantic rules. Structurally this layer asks only for a name and a type;
+            // an unnamed or type-less VAR line is refused the same way a too-short NODE/PIN/LINK line
+            // already is, rather than silently producing a variable nothing can address.
+            if (t.size() < 3) {
+                if (err) *err = "VAR requires a name and a type: VAR name type [default]";
+                return false;
+            }
+            OcGraphVariable var;
+            var.name = std::string(t[1]);
+            var.type = std::string(t[2]);
+            if (t.size() > 3) var.defaultValue = std::string(t[3]);
+            out.variables.push_back(std::move(var));
         } else if (equalsCI(key, "NODE")) {
             // `NODE id type` is the minimum; x and y are OPTIONAL and default to 0.
             //
@@ -311,7 +329,15 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // anything) `existing` had. Shared by both branches below.
     const std::string nameLine = "NAME " + (g.name.empty() ? std::string("untitled") : g.name) + "\n";
     const std::string descLine = g.description.empty() ? std::string() : ("DESCRIPTION " + g.description + "\n");
-    std::string nodeBlock, pinBlock, linkBlock, entryBlock, outBlock;
+    std::string varBlock, nodeBlock, pinBlock, linkBlock, entryBlock, outBlock;
+    // VAR right after NAME/DESCRIPTION, ahead of NODE -- matching where a graph author naturally
+    // writes it (declare what the graph remembers, then the nodes that read/write it) and where the
+    // checked-in cross-language fixture (tests/formats/src/OcGraphTest.cpp's own VAR test) puts it.
+    for (const OcGraphVariable& v : g.variables) {
+        varBlock += "VAR " + v.name + " " + v.type;
+        if (!v.defaultValue.empty()) varBlock += " " + v.defaultValue;
+        varBlock += "\n";
+    }
     for (const OcGraphNode& node : g.nodes) {
         // Coordinates only if the node actually had them, then every token this implementation did
         // not interpret, in its original order. Emitting `0 0` for a node that never carried a
@@ -354,6 +380,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         out += "# Visual scripting graph, written by the Aver Engine editor.\n";
         out += nameLine;
         out += descLine;
+        if (!varBlock.empty())  { out += "\n"; out += varBlock; }
         if (!nodeBlock.empty()) { out += "\n"; out += nodeBlock; }
         if (!pinBlock.empty())  { out += "\n"; out += pinBlock; }
         if (!linkBlock.empty()) { out += "\n"; out += linkBlock; }
@@ -403,10 +430,10 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         }
     }
 
-    bool placedName = false, placedDesc = false, placedNode = false;
+    bool placedName = false, placedDesc = false, placedVar = false, placedNode = false;
     bool placedPin = false, placedLink = false, placedEntry = false, placedOut = false;
     std::string out;
-    out.reserve(existing.size() + nodeBlock.size() + pinBlock.size() + linkBlock.size()
+    out.reserve(existing.size() + varBlock.size() + nodeBlock.size() + pinBlock.size() + linkBlock.size()
                 + entryBlock.size() + outBlock.size() + 64);
 
     for (usize i = 0; i < lines.size(); ++i) {
@@ -419,6 +446,11 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
             break; // any later duplicate NAME line is dropped, not re-emitted
         case OwnedLineKind::Description:
             if (!placedDesc) { placedDesc = true; out += descLine; } // empty descLine = line removed
+            break;
+        case OwnedLineKind::Var:
+            // Whole current block, once -- same "replace at first occurrence" rule NODE/PIN/LINK/
+            // ENTRY/OUT all use just below.
+            if (!placedVar) { placedVar = true; out += varBlock; }
             break;
         case OwnedLineKind::Node:
             if (!placedNode) { placedNode = true; out += nodeBlock; } // whole current block, once
@@ -448,6 +480,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // line so it does not run directly into whatever came before it.
     if (!placedName) out += nameLine;
     if (!placedDesc && !descLine.empty()) out += descLine;
+    if (!placedVar && !varBlock.empty()) { out += "\n"; out += varBlock; }
     if (!placedNode && !nodeBlock.empty()) { out += "\n"; out += nodeBlock; }
     if (!placedPin && !pinBlock.empty())   { out += "\n"; out += pinBlock; }
     if (!placedLink && !linkBlock.empty()) { out += "\n"; out += linkBlock; }

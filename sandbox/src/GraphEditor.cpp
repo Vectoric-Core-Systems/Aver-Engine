@@ -40,6 +40,29 @@ float g_graphEditorDpi = 1.0f;
 
 f32 vecLen(Vec2 v) { return std::sqrt(v.x * v.x + v.y * v.y); }
 
+// Whether `type` is one of the three concrete variable types the C# side's PinType enum accepts for a
+// VAR record (Enum.TryParse<PinType> is case-insensitive, so this is too) -- Exec is data a graph
+// COMPUTES WITH, never data it REMEMBERS between ticks (see OcGraphParser.cs's own "VAR ... cannot be
+// declared exec" rejection), so it is never offered by addVariable/retypeVariable's fallback, or by
+// the Variables panel's type Combo (draw(), below), even though nothing at the OcGraphVariable/
+// OcGraphData layer would stop a hand-edited file from carrying one -- Graph.Validate() is what
+// actually enforces this at C# compile time; this is only the editor keeping its own authoring
+// surface honest about what it will produce.
+bool isValidVarType(const std::string& type) {
+    std::string t = type;
+    for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return t == "float" || t == "int" || t == "bool";
+}
+
+// Same "this format has no quoting" guard setAttribute's own value check uses (OcGraph.cpp's
+// splitWhitespace / OcGraphParser.cs's own SplitWhitespace both tokenise on bare whitespace with no
+// escaping) -- shared here so a VAR name/type/default gets the identical protection a NODE-line
+// attribute value already has, rather than a second, easier-to-drift-from copy of the same six
+// characters.
+bool containsWhitespace(const std::string& s) {
+    return s.find_first_of(" \t\r\n\v\f") != std::string::npos;
+}
+
 // Everything below is ImGui-typed (ImVec2/ImU32) and used only from draw(), which is itself entirely
 // behind `#if AVER_WITH_IMGUI`. Guarding these too is what lets GraphEditorLoadSaveTest compile this
 // translation unit with no ImGui headers and no ImGui context -- see that test's own file comment.
@@ -368,7 +391,7 @@ bool GraphEditor::setAttribute(const std::string& nodeId, const std::string& key
     // agree) but corrupt on the C# side. Closing that would mean picking one language's whitespace
     // definition as authoritative for both, or adding real quoting to the format -- a design decision,
     // not a small fix.
-    if (value.find_first_of(" \t\r\n\v\f") != std::string::npos) return false;
+    if (containsWhitespace(value)) return false;
     for (auto& n : graph_.nodes) {
         if (n.id != nodeId) continue;
         pushUndo();
@@ -391,12 +414,139 @@ bool GraphEditor::clearAttribute(const std::string& nodeId, const std::string& k
     return false;
 }
 
-void GraphEditor::reportLinkRejection(const GraphLinkCheck& check) {
-    lastRejectMsg_ = check.message.empty() ? "connection refused" : check.message;
+void GraphEditor::showRejectionBanner(const std::string& msg) {
+    lastRejectMsg_ = msg;
 #if AVER_WITH_IMGUI
     lastRejectAtSec_ = ImGui::GetTime();
 #endif
-    AVER_WARN("[GraphEditor] link refused: {}", lastRejectMsg_);
+    AVER_WARN("[GraphEditor] {}", msg);
+}
+
+void GraphEditor::reportLinkRejection(const GraphLinkCheck& check) {
+    // The "Connection refused: " prefix used to live in draw()'s overlay-drawing code, baked onto
+    // EVERY lastRejectMsg_ regardless of what produced it. Once deleteVariable (below) started using
+    // the same banner for an unrelated refusal, that hard-coded prefix would have mislabelled it
+    // ("Connection refused: cannot delete variable ...") -- moved here, onto the one call site that
+    // actually means it, so the banner-drawing code can show lastRejectMsg_ verbatim.
+    showRejectionBanner("Connection refused: " + (check.message.empty() ? std::string("link refused") : check.message));
+}
+
+// ==================================================================================== variables ===
+// See GraphEditor.hpp's own header comment on this block for the bug these five methods close.
+
+std::string GraphEditor::makeUniqueVariableName(const std::string& base) const {
+    for (int i = 1; i < 1000000; ++i) {
+        const std::string candidate = base + std::to_string(i);
+        bool taken = false;
+        for (const auto& v : graph_.variables) if (v.name == candidate) { taken = true; break; }
+        if (!taken) return candidate;
+    }
+    return base + "_x"; // unreachable in practice, mirrors makeUniqueNodeId's own fallback
+}
+
+bool GraphEditor::addVariable(const std::string& name, const std::string& type, const std::string& defaultValue) {
+    if (name.empty() || containsWhitespace(name)) return false;
+    if (containsWhitespace(defaultValue)) return false;
+    for (const auto& v : graph_.variables) if (v.name == name) return false; // Graph.Validate's own uniqueness rule
+    pushUndo();
+    fmt::OcGraphVariable var;
+    var.name = name;
+    var.type = isValidVarType(type) ? type : "float"; // "float": the palette's own GetVar/SetVar default
+    var.defaultValue = defaultValue;
+    graph_.variables.push_back(std::move(var));
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::renameVariable(const std::string& oldName, const std::string& newName) {
+    if (newName.empty() || containsWhitespace(newName)) return false;
+    fmt::OcGraphVariable* var = nullptr;
+    for (auto& v : graph_.variables) if (v.name == oldName) { var = &v; break; }
+    if (!var) return false;
+    if (newName == oldName) return true; // a no-op "rename" is not a failure, just nothing to do
+    for (const auto& v : graph_.variables) {
+        if (&v != var && v.name == newName) return false; // would collide with a DIFFERENT variable
+    }
+    pushUndo();
+    var->name = newName;
+    // THE PART A BARE `var->name = newName` WOULD BE MISSING, AND WHY THAT'S NOT AN ACCEPTABLE
+    // "RENAME": every GetVar/SetVar (or any future var=-carrying node type) that names `oldName`
+    // still names `oldName` after that one-line change -- Graph.Validate()'s "references undeclared
+    // variable" check would then refuse the very next C# compile of a graph that, from the editor's
+    // own Variables panel, LOOKS like it just successfully renamed a variable. Rewriting every
+    // reference here, inside the SAME pushUndo() step as the rename itself, is what makes "rename"
+    // actually mean rename: one edit, one undo entry, no node silently left pointing at a name that
+    // no longer exists.
+    for (auto& n : graph_.nodes) {
+        const GraphNodeAttribute a = getNodeAttribute(n, "var");
+        if (a.found && a.value == oldName) setNodeAttribute(n, "var", newName);
+    }
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::retypeVariable(const std::string& name, const std::string& newType) {
+    fmt::OcGraphVariable* var = nullptr;
+    for (auto& v : graph_.variables) if (v.name == name) { var = &v; break; }
+    if (!var) return false;
+    const std::string t = isValidVarType(newType) ? newType : "float";
+    if (var->type == t) return true; // no-op, not a failure
+    pushUndo();
+    var->type = t;
+    // DELIBERATELY DOES NOT TOUCH ANY NODE'S PINS. A GetVar/SetVar spawned from the palette carries
+    // its own explicit 'value' PIN record (the Add-Node handler below copies GraphNodeDesc::pins
+    // verbatim onto the new node), typed to whatever the catalog's default was (float) at spawn time
+    // -- retyping the VARIABLE after that does not retroactively retype an already-placed pin, so a
+    // node spawned before this retype can end up with a 'value' pin type that disagrees with the
+    // variable's new declared type. Silently rewriting that pin here was considered and rejected: a
+    // pin's type is data the user can see and has possibly already wired a LINK against, and changing
+    // it out from under them could turn one visible edit into a second, invisible mismatch on
+    // whatever was connected to it. Left visible instead -- see the Variables panel's own mismatch
+    // note in draw(), computed fresh every frame from the LIVE pins, so it never goes stale the way a
+    // one-shot warning captured at retype time would.
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::setVariableDefault(const std::string& name, const std::string& defaultValue) {
+    if (containsWhitespace(defaultValue)) return false;
+    fmt::OcGraphVariable* var = nullptr;
+    for (auto& v : graph_.variables) if (v.name == name) { var = &v; break; }
+    if (!var) return false;
+    if (var->defaultValue == defaultValue) return true; // no-op, not a failure
+    pushUndo();
+    var->defaultValue = defaultValue;
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::deleteVariable(const std::string& name, std::vector<std::string>* outBlockedBy) {
+    bool exists = false;
+    for (const auto& v : graph_.variables) if (v.name == name) { exists = true; break; }
+    if (!exists) return false;
+
+    // Refuse rather than silently orphan: see this method's own header comment (GraphEditor.hpp) for
+    // why a delete that leaves nodes pointing at a variable that no longer exists is worse than no
+    // delete at all.
+    std::vector<std::string> referencing;
+    for (const auto& n : graph_.nodes) {
+        const GraphNodeAttribute a = getNodeAttribute(n, "var");
+        if (a.found && a.value == name) referencing.push_back(n.id);
+    }
+    if (!referencing.empty()) {
+        if (outBlockedBy) *outBlockedBy = referencing;
+        std::string msg = "cannot delete variable '" + name + "': still referenced by ";
+        for (usize i = 0; i < referencing.size(); ++i) { if (i) msg += ", "; msg += referencing[i]; }
+        showRejectionBanner(msg);
+        return false;
+    }
+
+    pushUndo();
+    graph_.variables.erase(std::remove_if(graph_.variables.begin(), graph_.variables.end(),
+                                           [&](const fmt::OcGraphVariable& v) { return v.name == name; }),
+                            graph_.variables.end());
+    dirty_ = true;
+    return true;
 }
 
 // ======================================================================================== layout ===
@@ -460,7 +610,12 @@ void GraphEditor::draw(Engine&) {
     if (ImGui::Button("Redo")) redo();
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::TextDisabled("%s  |  %zu nodes, %zu links  |  zoom %.0f%%",
+    // The pan hint lives HERE, on the status line the user is already reading for the zoom percentage,
+    // deliberately instead of a tooltip: a tooltip only reaches someone already hovering the thing it
+    // explains, which is exactly backwards for a gesture whose entire problem is that nobody knew to
+    // reach for it. Lists every gesture that actually works today (this comment is not aspirational --
+    // Right/Middle-drag and Space+drag are both wired in the block below).
+    ImGui::TextDisabled("%s  |  %zu nodes, %zu links  |  zoom %.0f%%  |  pan: right- or middle-drag, or Space+drag",
                          path_.c_str(), graph_.nodes.size(), graph_.links.size(), view_.zoom * 100.0f);
 
     recomputeLayouts(dpi);
@@ -515,11 +670,22 @@ void GraphEditor::draw(Engine&) {
         const bool spacePan = io.KeyShift == false && ImGui::IsKeyDown(ImGuiKey_Space);
         if ((spacePan && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) || ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
             dragMode_ = DragMode::PanCanvas;
+            rightButtonPan_ = false;
             dragStartScreen_ = mouseScreen;
             panAnchorPx_ = view_.panPx;
         } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            // Right button is ambiguous at mouse-DOWN: a plain click must still open Add Node (existing,
+            // relied-on behaviour), but a right-button DRAG is the direct pan gesture this task asked
+            // for -- the button is otherwise idle for the whole rest of the drag, since only the CLICK
+            // was ever taken. Start panning right away (same zero-latency feel as Middle-drag, below)
+            // and remember both the press position (to measure travel) and the press CANVAS point
+            // (pendingSpawnCanvasPos_ -- what the popup would open at) so release can retroactively
+            // decide which gesture this was. See the PanCanvas case below for the other half.
+            dragMode_ = DragMode::PanCanvas;
+            rightButtonPan_ = true;
+            dragStartScreen_ = mouseScreen;
+            panAnchorPx_ = view_.panPx;
             pendingSpawnCanvasPos_ = mouseCanvas;
-            ImGui::OpenPopup("##graphAddNode");
         } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             const GraphHitResult hit = hitTest(graph_, layouts_, mouseCanvas, style_, dpi);
             const bool ctrl = io.KeyCtrl;
@@ -561,10 +727,27 @@ void GraphEditor::draw(Engine&) {
     // ---- input: continue / end the active interaction --------------------------------------------
     switch (dragMode_) {
     case DragMode::PanCanvas: {
-        const bool stillDown = ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseDown(ImGuiMouseButton_Middle);
+        const bool stillDown = ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseDown(ImGuiMouseButton_Middle) ||
+                                ImGui::IsMouseDown(ImGuiMouseButton_Right);
         if (stillDown) {
             view_.panPx = panAnchorPx_ + (mouseScreen - dragStartScreen_);
         } else {
+            // Right button only: resolve the click-vs-drag ambiguity now that the button is up. A
+            // couple of screen pixels of "click threshold" absorbs the involuntary jitter a real mouse
+            // click always has between press and release -- without it, EVERY right click would measure
+            // a nonzero travel and the popup would never open. dpi-scaled (not the bare "3.0f" MoveNodes
+            // uses just below) because mouseScreen is raw device pixels: at 200% DPI the same physical
+            // hand-jitter covers twice as many of them, and an unscaled threshold would make the popup
+            // progressively harder to summon on a high-DPI display.
+            constexpr f32 kRightClickDragThresholdPx = 4.0f;
+            if (rightButtonPan_) {
+                const f32 travelled = vecLen(mouseScreen - dragStartScreen_);
+                if (travelled <= kRightClickDragThresholdPx * dpi) {
+                    view_.panPx = panAnchorPx_; // a click must pan by exactly zero, not by a few stray px
+                    ImGui::OpenPopup("##graphAddNode"); // pendingSpawnCanvasPos_ was set at press time
+                }
+                // else: a real drag happened. The pan already applied above stays; no popup.
+            }
             dragMode_ = DragMode::None;
         }
         break;
@@ -626,10 +809,33 @@ void GraphEditor::draw(Engine&) {
     case DragMode::None: default: break;
     }
 
-    // ---- wheel zoom, centred on the cursor ---------------------------------------------------------
-    if (hovered && io.MouseWheel != 0.0f) {
+    // ---- wheel: zoom by default; Shift+wheel (and MouseWheelH, a genuine horizontal-scroll axis on
+    // trackpads/tilt-wheel mice) pan instead. NOT both newly-bound: MouseWheelH was genuinely never
+    // read anywhere in this file before, but Shift+wheel was not unbound -- the pre-change handler
+    // checked only bare io.MouseWheel with no KeyShift exclusion, so a Shift-held scroll already fell
+    // into that branch and zoomed, identically to a bare scroll (io.MouseWheel carries the same value
+    // regardless of which modifiers are down). Shift+wheel is REPURPOSED here from a redundant alias of
+    // zoom to a distinct pan gesture, not bound from nothing -- and loses nothing by it, since it never
+    // produced an effect a bare wheel didn't already produce. Either way, this is additive to a bare,
+    // unmodified wheel: that path (the `else if` below) is untouched and still zooms exactly as before.
+    if (hovered && io.KeyShift && io.MouseWheel != 0.0f) {
+        // Pan, not zoom, while Shift is held -- a second direct-pan gesture for a mouse-only user (no
+        // middle button, no reach for Space) who is already resting a hand on the wheel. Sign matches
+        // the "content scrolls like a document" convention every other app on the user's desktop
+        // already trained them on: wheel-up (io.MouseWheel > 0) moves the CONTENT down (panPx.y grows),
+        // the same direction scrolling up in a text editor reveals earlier/upper content by pushing the
+        // current view down -- NOT the "camera pans up" reading, which would be the opposite sign.
+        constexpr f32 kWheelPanPxPerNotch = 60.0f;
+        view_.panPx.y += io.MouseWheel * kWheelPanPxPerNotch * dpi;
+    } else if (hovered && io.MouseWheel != 0.0f) {
         const f32 newZoom = std::clamp(view_.zoom * std::pow(1.1f, io.MouseWheel), 0.15f, 4.0f);
         view_ = zoomAroundScreenPoint(view_, newZoom, mouseScreen);
+    }
+    if (hovered && io.MouseWheelH != 0.0f) {
+        // Always horizontal pan, no modifier needed: this axis has no existing zoom meaning to collide
+        // with (the code above only ever reads io.MouseWheel), so it is free in every state.
+        constexpr f32 kWheelPanPxPerNotch = 60.0f;
+        view_.panPx.x -= io.MouseWheelH * kWheelPanPxPerNotch * dpi;
     }
 
     // ---- keyboard: delete selection, undo/redo -----------------------------------------------------
@@ -730,7 +936,12 @@ void GraphEditor::draw(Engine&) {
         dl->AddRect(ImVec2(std::min(a.x, b.x), std::min(a.y, b.y)), ImVec2(std::max(a.x, b.x), std::max(a.y, b.y)), IM_COL32(120, 160, 255, 200));
     }
     if (!lastRejectMsg_.empty() && (ImGui::GetTime() - lastRejectAtSec_) < 4.0) {
-        const std::string msg = "Connection refused: " + lastRejectMsg_;
+        // lastRejectMsg_ already carries its own full message (a link rejection embeds "Connection
+        // refused: " itself; a blocked variable delete embeds "cannot delete variable ...") -- see
+        // showRejectionBanner's own comment for why the prefix moved to the CALLER rather than living
+        // here, where it used to be hard-coded onto every possible rejection reason regardless of
+        // what produced it.
+        const std::string& msg = lastRejectMsg_;
         dl->AddRectFilled(originIm, ImVec2(originIm.x + ImGui::CalcTextSize(msg.c_str()).x + 16.0f * dpi, originIm.y + 22.0f * dpi), IM_COL32(90, 25, 25, 220));
         dl->AddText(ImVec2(originIm.x + 8.0f * dpi, originIm.y + 4.0f * dpi), IM_COL32(255, 210, 210, 255), msg.c_str());
     }
@@ -771,12 +982,128 @@ void GraphEditor::draw(Engine&) {
 
     ImGui::EndChild();
 
-    // ---- details panel: a selected node's attributes (Gap B) -----------------------------------------
-    // Thin ImGui glue only -- the actual model (which rows to show, how a key=value token is read and
-    // written) lives in GraphEditorGeometry.hpp's getNodeAttribute/setNodeAttribute/removeNodeAttribute/
-    // computeAttributeRows, exercised headlessly by GraphEditorGeometryTest and GraphEditorLoadSaveTest.
+    // ---- details panel: Variables (graph-level) above a selected node's attributes (Gap B) -----------
+    // Thin ImGui glue only -- the actual model lives in GraphEditor's own addVariable/renameVariable/
+    // retypeVariable/setVariableDefault/deleteVariable (this file, above) for the Variables panel, and
+    // in GraphEditorGeometry.hpp's getNodeAttribute/setNodeAttribute/removeNodeAttribute/
+    // computeAttributeRows for the per-node attribute rows below it -- both exercised headlessly (no
+    // ImGui context) by GraphEditorGeometryTest and GraphEditorLoadSaveTest.
     ImGui::SameLine();
     ImGui::BeginChild("##graphDetails", ImVec2(detailsW, std::max(avail.y, 80.0f * dpi)), true);
+
+    // ---- Variables panel: declare / rename / retype / delete -----------------------------------------
+    // Lives ABOVE the per-node section below, and is drawn regardless of selection (unlike everything
+    // below it) -- a variable belongs to the GRAPH, not to whichever node happens to be selected, and
+    // the state right after opening a graph (nothing selected) is exactly when an author most needs to
+    // declare one. This is also THE fix for the bug the task brief leads with: a freshly palette-
+    // spawned SetVar has no variable to name yet, and this panel -- not a free-text field somewhere --
+    // is where one gets created.
+    if (ImGui::CollapsingHeader("Variables", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (graph_.variables.empty()) {
+            ImGui::TextDisabled("No variables declared.");
+        }
+        // Snapshot names before iterating: a Delete button pressed on row i mutates graph_.variables
+        // mid-loop (pushUndo() + erase, inside deleteVariable), which would invalidate an iterator or
+        // index into the live vector for every row after it. Looking each one up FRESH by name, every
+        // iteration, tolerates that -- a name deleted by an earlier row this same frame is simply
+        // skipped (continue), rather than read through a dangling reference.
+        std::vector<std::string> varNames;
+        varNames.reserve(graph_.variables.size());
+        for (const auto& v : graph_.variables) varNames.push_back(v.name);
+
+        for (const std::string& vname : varNames) {
+            const fmt::OcGraphVariable* vptr = nullptr;
+            for (const auto& v : graph_.variables) if (v.name == vname) { vptr = &v; break; }
+            if (!vptr) continue; // deleted by an earlier row's Delete button this same frame
+            const fmt::OcGraphVariable& v = *vptr;
+
+            ImGui::PushID(("##var_" + vname).c_str());
+            ImGui::PushItemWidth(70.0f * dpi);
+
+            // ---- name (rename), same activate/apply-live/deactivate shape as attrEditRowKey_/
+            // attrEditBuf_ above, keyed by field+name so a delete elsewhere never bleeds into this
+            // row's in-flight buffer.
+            const std::string nameRowKey = "varname\x1f" + vname;
+            char nameBuf[256];
+            std::snprintf(nameBuf, sizeof nameBuf, "%s", (varEditRowKey_ == nameRowKey) ? varEditBuf_ : v.name.c_str());
+            const bool nameChanged = ImGui::InputText("##name", nameBuf, sizeof nameBuf);
+            if (ImGui::IsItemActivated()) varEditRowKey_ = nameRowKey;
+            if (nameChanged && varEditRowKey_ == nameRowKey) std::snprintf(varEditBuf_, sizeof varEditBuf_, "%s", nameBuf);
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                const std::string newName = varEditBuf_;
+                if (newName != vname && !renameVariable(vname, newName)) {
+                    showRejectionBanner("cannot rename '" + vname + "' to '" + newName +
+                                         "': empty, contains whitespace, or already used by another variable");
+                }
+                varEditRowKey_.clear();
+            } else if (ImGui::IsItemDeactivated()) {
+                varEditRowKey_.clear();
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Rename -- updates every GetVar/SetVar that uses this variable");
+            ImGui::SameLine();
+
+            // ---- type (retype): a Combo, not free text -- VAR only ever declares float/int/bool
+            // (see isValidVarType's own comment), so there is nothing a text field would offer that a
+            // fixed 3-item list doesn't already cover, and a Combo can't typo its way into a 4th.
+            static const char* kVarTypes[] = {"float", "int", "bool"};
+            int typeIdx = 0;
+            for (int i = 0; i < 3; ++i) if (v.type == kVarTypes[i]) { typeIdx = i; break; }
+            if (ImGui::Combo("##type", &typeIdx, kVarTypes, 3)) retypeVariable(vname, kVarTypes[typeIdx]);
+            ImGui::SameLine();
+
+            // ---- default value ------------------------------------------------------------------
+            const std::string defRowKey = "vardefault\x1f" + vname;
+            char defBuf[256];
+            std::snprintf(defBuf, sizeof defBuf, "%s", (varEditRowKey_ == defRowKey) ? varEditBuf_ : v.defaultValue.c_str());
+            const bool defChanged = ImGui::InputText("##default", defBuf, sizeof defBuf);
+            if (ImGui::IsItemActivated()) varEditRowKey_ = defRowKey;
+            if (defChanged && varEditRowKey_ == defRowKey) std::snprintf(varEditBuf_, sizeof varEditBuf_, "%s", defBuf);
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                if (!setVariableDefault(vname, varEditBuf_))
+                    showRejectionBanner("cannot set default for '" + vname + "': value contains whitespace, which this format cannot represent");
+                varEditRowKey_.clear();
+            } else if (ImGui::IsItemDeactivated()) {
+                varEditRowKey_.clear();
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Default value (optional) -- what a fresh GraphHost seeds this variable with");
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+
+            // ---- delete: deleteVariable itself raises the rejection banner (naming every blocking
+            // node) when refused, so there is nothing further to do with its return value here.
+            if (ImGui::Button("X")) deleteVariable(vname);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete -- refused while any GetVar/SetVar still uses this variable");
+
+            // ---- mismatch note: nodes whose OWN 'value' pin type disagrees with this variable's
+            // CURRENT declared type. Computed fresh every frame straight from the live pins -- see
+            // retypeVariable's own comment for why a retype never rewrites those pins itself, and why
+            // this is what makes the resulting mismatch visible instead of silently wrong.
+            {
+                std::vector<std::string> mismatched;
+                for (const auto& n : graph_.nodes) {
+                    const GraphNodeAttribute a = getNodeAttribute(n, "var");
+                    if (!a.found || a.value != vname) continue;
+                    for (const auto& p : n.pins) {
+                        if (p.name == "value" && p.type != v.type) { mismatched.push_back(n.id); break; }
+                    }
+                }
+                if (!mismatched.empty()) {
+                    ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.35f, 1.0f), "  used as %s by a node whose pin type disagrees:", v.type.c_str());
+                    std::string names;
+                    for (usize i = 0; i < mismatched.size(); ++i) { if (i) names += ", "; names += mismatched[i]; }
+                    ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.35f, 1.0f), "  %s", names.c_str());
+                }
+            }
+
+            ImGui::PopID();
+        }
+
+        if (ImGui::Button("+ New Variable")) {
+            addVariable(makeUniqueVariableName("Var"), "float", "");
+        }
+    }
+    ImGui::Separator();
+
     if (selectedNodes_.size() != 1) {
         ImGui::TextDisabled(selectedNodes_.empty() ? "Select a node to edit its attributes."
                                                      : "Select a single node to edit its attributes.");
@@ -814,6 +1141,75 @@ void GraphEditor::draw(Engine&) {
                 }
 
                 const std::string rowKey = node->id + "\x1f" + row.key;
+                ImGui::PushID(rowKey.c_str());
+
+                // ---- THE PICKER: GetVar/SetVar's var= row, special-cased over EVERY other declared
+                // attribute (field=/class=/param=/etc. all keep the generic free-text InputText path
+                // below, unchanged -- see the task brief's own "narrow, not a generic key=value
+                // framework" scoping). `row.declared && row.key == "var"` is reachable ONLY for
+                // GetVar/SetVar: they are the only catalog entries that declare a "var" attribute at
+                // all (GraphNodeDefs.hpp), so this needs no separate node-type check.
+                if (row.declared && row.key == "var") {
+                    const bool known = !row.value.empty() &&
+                        std::any_of(graph_.variables.begin(), graph_.variables.end(),
+                                    [&](const fmt::OcGraphVariable& v) { return v.name == row.value; });
+                    std::string preview = row.value.empty() ? "(none)" : row.value;
+                    if (!row.value.empty() && !known) preview += "  [undeclared!]";
+                    if (ImGui::BeginCombo(row.label.c_str(), preview.c_str())) {
+                        if (ImGui::Selectable("(none)", row.value.empty())) clearAttribute(node->id, "var");
+                        for (const fmt::OcGraphVariable& v : graph_.variables) {
+                            const bool selected = (v.name == row.value);
+                            const std::string itemLabel = v.name + "  (" + v.type + ")";
+                            if (ImGui::Selectable(itemLabel.c_str(), selected)) setAttribute(node->id, "var", v.name);
+                        }
+                        ImGui::EndCombo();
+                    }
+                    if (!row.value.empty() && !known) {
+                        // THE BUG THIS ROW EXISTS FOR: a GetVar/SetVar naming a variable nobody
+                        // declared (a freshly typed-then-later-deleted name, a hand-edited file, or --
+                        // before this picker existed -- simple free-text fat-fingering) does not
+                        // compile (Graph.Validate() refuses it) and used to give no sign anything was
+                        // wrong. Naming the problem AND offering a one-click fix, per the task's own
+                        // "either the variable can be declared on the spot, or the node says exactly
+                        // what is wrong" requirement -- this does both, rather than choosing one.
+                        ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.35f, 1.0f), "'%s' is not a declared variable.", row.value.c_str());
+                        const std::string declareLabel = "Declare '" + row.value + "'";
+                        if (ImGui::Button(declareLabel.c_str())) {
+                            // Guess the type from the node's OWN 'value' pin, if it has one -- a
+                            // freshly palette-spawned GetVar/SetVar always does (GraphNodeDefs.hpp's
+                            // catalog copies its pins onto the node at spawn time), so this declares
+                            // the variable at the type the node is ALREADY wired to expect, needing no
+                            // further retype to compile.
+                            std::string guessType = "float";
+                            for (const auto& p : node->pins) if (p.name == "value") { guessType = p.type; break; }
+                            addVariable(row.value, guessType, "");
+                        }
+                    } else if (row.value.empty() && graph_.variables.empty()) {
+                        // THE BUG'S OTHER HALF: a freshly palette-spawned SetVar has var="" AND the
+                        // graph has no variables declared at all yet, so the combo above has nothing
+                        // to offer but "(none)". Point at the Variables panel above rather than
+                        // leaving a dead end with no next step visible from here.
+                        ImGui::TextDisabled("No variables declared -- add one in the Variables panel above.");
+                    } else if (row.value.empty()) {
+                        // THE GAP THE OTHER TWO BRANCHES MISS: var="" (a freshly palette-spawned node,
+                        // or one just cleared to "(none)" via the Selectable above) in a graph that
+                        // ALREADY has at least one variable declared. Neither branch above fires here --
+                        // `known` is false (row.value is empty, so the any_of never runs) but so is the
+                        // "!row.value.empty()" guard on the undeclared-name branch, and
+                        // graph_.variables.empty() is false too -- so without this branch the combo
+                        // just shows "(none)" as if that were a complete, compilable choice. It is not:
+                        // OcGraphParser.cs refuses a GetVar/SetVar with no var= attribute at all just as
+                        // firmly as one naming an undeclared variable (verified empirically -- see the
+                        // task's verification notes -- not merely asserted). Proven reachable by the
+                        // load/save test suite itself: testDeleteVariableRefusesWhileReferencedThenSucceeds
+                        // clears 'gv's var= to unblock a delete, and the resulting saved file is exactly
+                        // this state -- a GetVar node with var="" in a graph that still declares 'speed'.
+                        ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.35f, 1.0f), "No variable selected -- pick one above; this node will not compile without one.");
+                    }
+                    ImGui::PopID();
+                    continue; // this row is fully drawn; skip the generic InputText path below
+                }
+
                 char buf[512];
                 if (attrEditRowKey_ == rowKey) {
                     std::snprintf(buf, sizeof buf, "%s", attrEditBuf_);
@@ -821,7 +1217,6 @@ void GraphEditor::draw(Engine&) {
                     std::snprintf(buf, sizeof buf, "%s", row.value.c_str());
                 }
 
-                ImGui::PushID(rowKey.c_str());
                 const bool changed = ImGui::InputText(row.label.c_str(), buf, sizeof buf);
                 if (ImGui::IsItemActivated()) attrEditRowKey_ = rowKey;
                 if (changed && attrEditRowKey_ == rowKey) std::snprintf(attrEditBuf_, sizeof attrEditBuf_, "%s", buf);

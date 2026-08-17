@@ -103,6 +103,63 @@ public:
     // already absent is not an edit.
     bool clearAttribute(const std::string& nodeId, const std::string& key);
 
+    // ---- variable editing (graph-level VAR declarations) -------------------------------------------
+    // THE BUG THIS EXISTS TO CLOSE: dragging SetVar out of the palette produced a `var=` attribute
+    // with no picker, no validation, and no way to declare the variable it named -- so the freshly
+    // spawned node could not compile (Graph.Validate() refuses a SetVar/GetVar naming an undeclared
+    // variable) and the editor gave no sign anything was wrong. These five methods, plus draw()'s
+    // Variables panel and its var= picker (both ImGui, both calling straight into these), are what
+    // give that path somewhere useful to end: declare on the spot, or say exactly what's wrong.
+    //
+    // Same public-surface shape as setAttribute/clearAttribute above, and for the identical reason:
+    // GraphEditorLoadSaveTest exercises these directly, with no ImGui context, so the load/save
+    // contract (byte-identical no-op round trip, an edit landing on disk through the real save() path)
+    // is proven against the exact calls the details panel makes, not a hand-simulated approximation of
+    // them.
+    const std::vector<fmt::OcGraphVariable>& variables() const { return graph_.variables; }
+
+    // Declares a new variable. No-op (false, no edit) if `name` is empty, contains whitespace (a VAR
+    // name is a bare token on the NODE-line-adjacent VAR line -- same "this format has no quoting"
+    // constraint setAttribute's own value guard already enforces), or a variable named `name` already
+    // exists: Graph.Validate()'s own "Check VAR declarations are unique" block would reject the
+    // duplicate at C# compile time regardless, so refusing here catches it immediately rather than
+    // only once someone tries to compile the saved file. `type` falls back to "float" (the palette's
+    // own GetVar/SetVar default) if it is not one of float/int/bool -- see isValidVarType in the .cpp.
+    bool addVariable(const std::string& name, const std::string& type, const std::string& defaultValue);
+
+    // Renames `oldName` to `newName`, AND rewrites every node's `var=` attribute that currently names
+    // `oldName` to name `newName` instead, in the SAME undo step (one Ctrl+Z undoes the whole rename,
+    // references included) -- see the .cpp for why a rename that leaves stale references is refused
+    // outright rather than silently shipped. No-op (false, no edit) if oldName isn't declared, newName
+    // is empty or contains whitespace, or newName already names a DIFFERENT declared variable (a
+    // same-name "rename" is accepted as a harmless no-op, not a collision). True but a genuine no-op
+    // when newName == oldName.
+    bool renameVariable(const std::string& oldName, const std::string& newName);
+
+    // Changes the declared type of `name` (falls back to "float" like addVariable if `newType` isn't
+    // float/int/bool). Deliberately does NOT touch any node's pins -- see the .cpp for why a resulting
+    // variable/pin type mismatch is left visible (the Variables panel's own mismatch note, computed
+    // fresh every frame from the live pins) rather than silently patched. No-op (false) if `name`
+    // isn't declared. True but a no-op if newType already matches.
+    bool retypeVariable(const std::string& name, const std::string& newType);
+
+    // Changes the declared default (the literal text after the type in `VAR name type default`). No
+    // format validation here -- same division of labour OcGraphParser.cs's own VAR-parsing comment
+    // describes: an unparseable default is not this layer's problem, it falls back to the type's zero
+    // value on the C# side. No-op (false) if `name` isn't declared or `defaultValue` contains
+    // whitespace (same guard as setAttribute's value, and for the identical reason).
+    bool setVariableDefault(const std::string& name, const std::string& defaultValue);
+
+    // Deletes the variable named `name`. REFUSES (false, no edit) if any node's `var=` attribute
+    // still names it -- silently deleting it would leave those nodes referencing a variable that no
+    // longer exists, an uncompilable graph with no editor-visible symptom until someone runs the C#
+    // compiler, which is exactly the "silently orphaned" failure mode the task brief calls worse than
+    // refusing. `outBlockedBy`, if non-null, receives every referencing node id on refusal (untouched
+    // on success) so a caller can name them without re-deriving the search. The refusal is also
+    // surfaced through the same rejection banner mechanism a rejected link connection uses (see
+    // showRejectionBanner below).
+    bool deleteVariable(const std::string& name, std::vector<std::string>* outBlockedBy = nullptr);
+
 private:
     // ---- identity / data model ---------------------------------------------------------------
     std::string path_;
@@ -165,12 +222,21 @@ private:
     void undo();
     void redo();
 
-    // ---- interaction state machine (left mouse button) -------------------------------------------
+    // ---- interaction state machine -----------------------------------------------------------------
+    // (NOT "left mouse button" despite the field names below being button-agnostic: PanCanvas has
+    // always also fired on Middle-drag, and now on Right-drag too -- see rightButtonPan_.)
     enum class DragMode { None, PanCanvas, MoveNodes, BoxSelect, DrawLink };
     DragMode dragMode_ = DragMode::None;
     Vec2 dragStartScreen_{};       // canvas-local screen space (relative to the canvas child's origin)
     Vec2 dragStartCanvas_{};
     Vec2 panAnchorPx_{};           // view_.panPx at drag start, for PanCanvas
+    // Right-button DRAG now pans (see draw()'s start-interaction block) but a right-button CLICK must
+    // still open the Add Node popup -- that's existing, muscle-memory behaviour this task was told
+    // explicitly not to remove. The two are indistinguishable at mouse-DOWN, so PanCanvas starts
+    // immediately for a zero-latency drag feel (matching Middle-drag), and this flag marks that THIS
+    // particular PanCanvas run needs a click-vs-drag verdict on release -- Space+Left and Middle never
+    // set it, because neither of them has a competing "click" meaning to fall back to.
+    bool rightButtonPan_ = false;
     std::unordered_map<std::string, Vec2> moveStart_;      // per-node displayPos_ at drag start
     bool moveUndoPushed_ = false;   // see .cpp: undo for a move is pushed lazily, only once real
                                      // movement crosses a small threshold, so a plain click-to-select
@@ -201,12 +267,26 @@ private:
     std::string attrEditRowKey_;
     char attrEditBuf_[512] = {};
 
+    // ---- Variables panel edit state -- identical activate/apply-live/deactivate shape attrEditRowKey_/
+    // attrEditBuf_ use just above, applied to the panel's name/default text fields (its type field is a
+    // Combo, which has no comparable "live keystroke" state to buffer -- a selection either fires or it
+    // doesn't). Keyed "field\x1fvariableName" (e.g. "varname\x1fscore") rather than by row index: an
+    // edit that deletes or reorders a variable mid-session must not have some OTHER row inherit an
+    // in-flight edit buffer it never asked for.
+    std::string varEditRowKey_;
+    char varEditBuf_[256] = {};
+
     // ---- helpers (implemented in the .cpp, next to the input handling that uses them) -------------
     void loadFromDisk();
     void runAutoLayoutIfUnpositioned();
     void recomputeLayouts(float dpi);
     std::string makeUniqueNodeId(const std::string& typeId) const;
+    std::string makeUniqueVariableName(const std::string& base) const;
     void deleteSelection();
+    // Sets lastRejectMsg_/lastRejectAtSec_ and logs -- the shared plumbing behind the on-canvas
+    // rejection banner. reportLinkRejection (below) is one caller; deleteVariable's own refusal is
+    // another, added alongside it rather than growing a second, near-duplicate banner mechanism.
+    void showRejectionBanner(const std::string& msg);
     void reportLinkRejection(const GraphLinkCheck& check);
     void commitLink(const std::string& srcNode, const std::string& srcPin,
                      const std::string& dstNode, const std::string& dstPin);

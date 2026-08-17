@@ -196,14 +196,21 @@ static void testUnknownRecords() {
     check(again == rewritten, "second rewrite of preserved data is bit-identical");
 }
 
-// Tests that VAR records (graph-local persistent variables, a C#-side-only concept -- see
-// scripting/csharp/Aver.Graph/OcGraphParser.cs's own VAR-parsing comment) survive a round trip even
-// though this C++ reader has no VAR case at all. classifyLine (above) has no "Var" branch, so a VAR
-// line falls into OwnedLineKind::Other -- exactly the same path a comment or an unrecognised record
-// like MYSTERY (testUnknownRecords, above) already takes -- and is copied through verbatim, in place,
-// on every write. This is the checked-in, permanent version of the proof that was first established
-// with an ad hoc scratch fixture and the --roundtrip diagnostic below: NO C++ reader change was needed
-// for VAR to round-trip.
+// Tests that VAR records (graph-local persistent variables, declared by the C# runtime's own
+// OcGraphParser.cs -- see that file's VAR-parsing comment for the full storage/lifetime contract)
+// both PARSE INTO REAL STRUCTURED FIELDS and survive a round trip.
+//
+// THIS USED TO BE A WEAKER CLAIM. VAR was originally invisible to this C++ reader entirely --
+// classifyLine had no "Var" branch, so a VAR line fell into OwnedLineKind::Other and rode through a
+// write unread, the same path a comment or an unrecognised record like MYSTERY (testUnknownRecords,
+// above) takes. That was enough to prove the editor would not silently DESTROY a graph's variables on
+// save, but g.variables did not exist at all: nothing in C++ could answer "what variables does this
+// graph declare," which is the one question a Variables panel (declare/rename/retype/delete, and a
+// var= picker on GetVar/SetVar) cannot avoid asking. OcGraphData::variables, classifyLine's own
+// OwnedLineKind::Var, and writeOcgraph's placedVar/varBlock pair (OcGraph.cpp) are what closed that
+// gap -- the identical shape ENTRY and OUT already established. This test now asserts BOTH halves:
+// the structured fields a Variables panel would read, and the byte-identical round trip a save must
+// still guarantee.
 static void testVarRecordsSurviveRoundTrip() {
     AVER_INFO("=== .ocgraph VAR records (graph-local persistent variables) ===");
     using namespace fmt;
@@ -218,19 +225,41 @@ static void testVarRecordsSurviveRoundTrip() {
 
     OcGraphData g;
     std::string err;
-    check(parseOcgraph(original, g, &err), "graph with VAR records parses (VAR is simply invisible to this reader)");
-    check(g.name == "VarTest", "known fields still parse alongside unrecognised VAR records");
+    check(parseOcgraph(original, g, &err), "graph with VAR records parses");
+    check(g.name == "VarTest", "known fields still parse alongside VAR records");
+
+    // Structural proof: VAR is a real field now, not merely opaque text that happens to survive.
+    check(g.variables.size() == 2, "both VAR records were parsed into OcGraphData::variables");
+    if (g.variables.size() == 2) {
+        check(g.variables[0].name == "score" && g.variables[0].type == "int" && g.variables[0].defaultValue == "0",
+              "'score' parsed with name/type/default, in file order");
+        check(g.variables[1].name == "cooldown" && g.variables[1].type == "float" && g.variables[1].defaultValue == "1.5",
+              "'cooldown' parsed with name/type/default, in file order");
+    }
 
     const std::string rewritten = writeOcgraph(g, original);
     check(rewritten.find("VAR score int 0") != std::string::npos, "VAR 'score' survives a write");
     check(rewritten.find("VAR cooldown float 1.5") != std::string::npos, "VAR 'cooldown' survives a write");
     check(rewritten.find("var=score") != std::string::npos,
           "GetVar's var= attribute survives a write (via the SAME extraTokens mechanism field=/param=/class= use)");
+    check(rewritten == original, "a load -> save with no edits reproduces this VAR-bearing file byte for byte");
 
     OcGraphData g2;
     check(parseOcgraph(rewritten, g2, &err), "rewritten graph (with VAR records) parses");
+    check(g2.variables.size() == 2, "the re-parsed graph still has both variables");
     const std::string again = writeOcgraph(g2, rewritten);
     check(again == rewritten, "second rewrite of VAR-bearing data is bit-identical");
+
+    // A VAR with no default token at all -- entirely legal (OcGraphParser.cs falls back to the
+    // type's own zero value when the 3rd token is absent); defaultValue must come back empty, not a
+    // placeholder, and the written line must not grow a default nobody wrote.
+    OcGraphData g3;
+    check(parseOcgraph("OCGRAPH 1\nNAME NoDefault\nVAR flag bool\n", g3, &err), "a VAR with no default parses");
+    check(g3.variables.size() == 1 && g3.variables[0].defaultValue.empty(),
+          "a VAR with no 3rd token has an empty defaultValue, not an invented one");
+    const std::string freshWrite = writeOcgraph(g3);
+    check(freshWrite.find("VAR flag bool\n") != std::string::npos,
+          "a fresh write (no `existing`) of a no-default VAR omits the default entirely, rather than writing a stray trailing space");
 }
 
 // Tests that output is deterministic: same data written twice produces identical output.
