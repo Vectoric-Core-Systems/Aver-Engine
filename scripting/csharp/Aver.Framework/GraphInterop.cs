@@ -31,11 +31,14 @@ internal static class GraphInterop
     /// <paramref name="hit"/> is false (and the rest are 0) when nothing is hit within
     /// <paramref name="maxDistCm"/> -- mirrors RaycastHit.Hit's own "check this before reading the
     /// rest" contract, just flattened to the bool/int/float trio GraphCompiler's pin types are built
-    /// from. <paramref name="entity"/> is the hit Body's raw handle (Body.Handle), not a scene entity
-    /// id -- Raycast queries the PHYSICS world, whose bodies are their own handle space (see
-    /// Physics.cs's own Body struct); a graph author who needs the SCENE entity that owns a hit body
-    /// still needs whatever mapping the project itself keeps, exactly as a C# caller of
-    /// Physics.Raycast already would.</summary>
+    /// from. <paramref name="entity"/> is <see cref="RaycastHit.Entity"/> -- the SCENE entity stamped
+    /// on the hit body or character (see Physics.cs's <c>aver_phys_set_entity</c>), NOT the physics
+    /// Body's raw handle. A hit against something no entity owns (the landscape heightfield, today)
+    /// reports <paramref name="hit"/> true and <paramref name="entity"/> 0 -- check
+    /// <paramref name="hit"/> first, since 0 is a real, distinguishable outcome from a miss, not an
+    /// error. This used to hand back Body.Handle, which meant a graph could learn THAT it hit
+    /// something but never WHAT -- see aver/physics/physics_abi.h's "Entity association" section for
+    /// the native side of this fix.</summary>
     internal static void RaycastForGraph(
         float originX, float originY, float originZ,
         float dirX, float dirY, float dirZ,
@@ -44,7 +47,7 @@ internal static class GraphInterop
     {
         RaycastHit result = Physics.Raycast(new Vec3(originX, originY, originZ), new Vec3(dirX, dirY, dirZ), maxDistCm);
         hit = result.Hit;
-        entity = result.Body.Handle;
+        entity = result.Entity.Handle;
         pointX = result.Point.X;
         pointY = result.Point.Y;
         pointZ = result.Point.Z;

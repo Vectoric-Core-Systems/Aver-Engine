@@ -314,17 +314,19 @@ int main() {
         check(body != 0, "the heightfield body is created");
 
         f32 hit[3] = {0,0,0}, nrm[3] = {0,0,0};
+        int32_t entity = -1;
         const int32_t got = aver_phys_raycast(want[0], want[1], 5000.0f, 0.0f, 0.0f, -1.0f,
-                                              20000.0f, hit, nrm);
+                                              20000.0f, hit, nrm, &entity);
         check(got == body, "a ray dropped where the peak is DRAWN hits the collision field");
         check(hit[2] > 600.0f,
               "and lands on the peak rather than the surrounding flat (z=" + std::to_string(hit[2]) + ")");
+        check(entity == 0, "the heightfield was never stamped with an entity, so the hit reports 0");
 
         f32 flat[3];
         d.worldAt(peakIy, peakIx, flat);        // indices swapped: where a plain transpose would put it
         f32 hit2[3] = {0,0,0};
         const int32_t got2 = aver_phys_raycast(flat[0], flat[1], 5000.0f, 0.0f, 0.0f, -1.0f,
-                                               20000.0f, hit2, nrm);
+                                               20000.0f, hit2, nrm, &entity);
         check(got2 == body, "the transposed position is still on the field");
         check(hit2[2] < 100.0f,
               "but it is FLAT there -- a plain transpose would have put the peak here (z=" +

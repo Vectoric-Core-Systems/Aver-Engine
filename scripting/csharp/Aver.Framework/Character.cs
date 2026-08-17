@@ -255,6 +255,9 @@ public class AverCharacter : AverPawn
         Vec3 feet = Self.LocalPosition;
         Vec3 centre = feet + Vec3.Up * (Height * 0.5f);
         _capsule = Phys.aver_phys_character_create(Radius, Height, centre.X, centre.Y, centre.Z);
+        // Without this, a ray fired at this character resolves to entity 0 -- indistinguishable from
+        // hitting something ownerless -- and shooting a character can never identify its target.
+        if (_capsule != 0) Phys.aver_phys_set_entity(_capsule, Self.Handle);
     }
 
     // Copies the settled capsule centre back to the entity origin (the feet).

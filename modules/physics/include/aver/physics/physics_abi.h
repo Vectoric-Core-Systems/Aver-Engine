@@ -94,6 +94,17 @@ AVER_PHYS_API int32_t aver_phys_character_set_position(int32_t ch, float x, floa
 // 1 while standing on ground steep enough to hold.
 AVER_PHYS_API int32_t aver_phys_character_grounded(int32_t ch);
 
+// ---- Entity association ---------------------------------------------------------------------------
+// A body or character is an opaque handle with no notion of "which scene entity this is" -- this is
+// the one seam that ties one back to the other, for anything (Raycast, above all) that must report
+// not just THAT something was hit but WHAT. Works on a body OR a character handle: the two families
+// are drawn from one counter and never collide, so a single call covers both.
+
+// Stamps `handle` (a body OR a character) with `entity`, a scene entity id. 0 clears it back to
+// "unowned". Returns 0 for a dead handle. Backed by Jolt's own per-body user-data field, so it needs
+// no side table and nothing to invalidate when the body or character is destroyed.
+AVER_PHYS_API int32_t aver_phys_set_entity(int32_t handle, int32_t entity);
+
 // ---- Arbitrary collision geometry ------------------------------------------------------------------
 // Raw arrays in the engine's centimetres, laid out xyz,xyz,... -- not a mesh handle.
 
@@ -141,11 +152,19 @@ AVER_PHYS_API int32_t aver_phys_overlap_get(int32_t index, int32_t* outSensor, i
 // ---- Queries -------------------------------------------------------------------------------------
 
 // Cast a ray from `o` along `d` for `maxDistCm`. Returns the hit body handle, or 0 for a miss.
-// `outPoint` / `outNormal` are float[3] and are only written on a hit.
+// `outPoint` / `outNormal` / `outEntity` are only written on a hit -- check the RETURN VALUE for
+// hit/miss, never `*outEntity` alone. `outEntity` is whatever aver_phys_set_entity last stamped the
+// hit handle with, or 0 when nothing ever did: that is a REAL hit against something no entity owns
+// (a landscape heightfield today), not a miss, and the two are told apart by the return value being
+// non-zero either way.
+// A live character IS visible to this query: aver_phys_character_create gives it a broadphase body
+// for exactly this reason, so a raycast can identify a character the same way it identifies any
+// other body, through this same `handle`/`outEntity` pair.
 // Jolt broadphase queries are not deterministic between equidistant bodies.
 AVER_PHYS_API int32_t aver_phys_raycast(float ox, float oy, float oz,
                                         float dx, float dy, float dz,
-                                        float maxDistCm, float* outPoint, float* outNormal);
+                                        float maxDistCm, float* outPoint, float* outNormal,
+                                        int32_t* outEntity);
 
 // Every body whose shape overlaps a sphere. Writes up to `maxBodies` handles into `outBodies` and
 // returns how many were written.

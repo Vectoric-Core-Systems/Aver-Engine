@@ -63,50 +63,49 @@ LINK move.right drive.right
 LINK yaw.result drive.yawDelta
 LINK pitch.result drive.pitchDelta
 
-# ---- reach another entity's graph ----------------------------------------------------------------
-# The player spawns one target of its own at OnStart and remembers its entity id, then fires OnHit at
-# it every tick. Spawn-and-remember is the ONLY way to obtain a target id today: Raycast's `entity`
-# output is a PHYSICS BODY handle and no body-to-entity mapping exists anywhere in the engine, so a
-# graph can learn THAT it hit something but not WHAT. That is the one gap still standing between this
-# and graph-driven shooting, and it is named here rather than papered over.
-# INT here, where Target.ocgraph's counter had to be FLOAT -- an entity id is an Int and
-# Spawn.entity is an Int pin, while Add only takes Floats. There is no conversion node, so a
-# VAR's type must match whatever consumes it exactly. Both mismatches were caught at LOAD
-# with the offending link named, which is the right time to find out.
-VAR victim int 0
+# ---- reach another entity's graph, by raycasting for it -------------------------------------------
+# THIS USED TO SPAWN ITS OWN TARGET AND REMEMBER THE ID IN A VAR, because Raycast's `entity` output
+# used to be a raw PHYSICS BODY handle and no body-to-entity mapping existed anywhere in the engine --
+# a graph could learn THAT it hit something but never WHAT. The raycast-entity slice closed that: every
+# body and character this engine creates is now stamped with the scene entity that owns it
+# (`aver_phys_set_entity`), and `Raycast.entity` reads that stamp back, not a body handle. Spawning a
+# private target and threading its id through a VAR was a workaround for a missing capability, not a
+# design worth keeping once the capability exists -- so this fires a real ray and reads back a real
+# entity id instead, exactly the way `FireEvent.target` was always meant to be fed.
+#
+# A FIXED SHOT, NOT A LIVE AIM. This ray's origin and direction are two constants, computed once by
+# hand from this file's own spawn placement (`0 0 100`, Range.ocmap) and the first AN_Target's
+# (`300 400 60`, Range.ocmap) -- aimed dead-centre at that target's capsule (see Target.ocgraph's own
+# "becoming raycast-visible" comment for why it has one at all). The origin sits at z=290, ABOVE the
+# player's own capsule (which spans z 100..280 at this spawn, `Height=180` centred on `feet+90`)
+# specifically so the ray does not start inside its own shooter and register a self-hit. A mouse-aimed
+# shot would need this graph to track its OWN accumulated look yaw (Sin/Cos plus a VAR, mirroring how
+# Character.cs tracks `_yaw` in C#) -- nothing here does that yet, and this sample does not pretend
+# otherwise; it demonstrates the wiring, not a finished aiming system.
+NODE rox ConstFloat value=0.0
+NODE roy ConstFloat value=0.0
+NODE roz ConstFloat value=290.0
+NODE rdx ConstFloat value=0.577955
+NODE rdy ConstFloat value=0.770606
+NODE rdz ConstFloat value=-0.269712
+NODE rmax ConstFloat value=600.0
 
-ENTRY seed OnStart
-NODE seed OnStart
+NODE ray Raycast
+LINK drive.then ray.exec
+LINK rox.value ray.originX
+LINK roy.value ray.originY
+LINK roz.value ray.originZ
+LINK rdx.value ray.dirX
+LINK rdy.value ray.dirY
+LINK rdz.value ray.dirZ
+LINK rmax.value ray.maxDist
 
-NODE sx ConstFloat
-PIN sx value out float 250.0
-NODE sy ConstFloat
-PIN sy value out float 600.0
-NODE sz ConstFloat
-PIN sz value out float 60.0
-
-NODE make Spawn class=AN_Target
-LINK seed.exec make.exec
-LINK sx.value make.x
-LINK sy.value make.y
-LINK sz.value make.z
-
-NODE remember SetVar var=victim
-LINK make.then remember.exec
-LINK make.entity remember.value
-
-NODE who GetVar var=victim
 NODE poke FireEvent event=OnHit
-LINK drive.then poke.exec
-LINK who.value poke.target
+LINK ray.then poke.exec
+LINK ray.entity poke.target
 
-# NO OUT RECORDS, and this one is worth understanding before you write your own multi-entry graph.
-# OUT is a GRAPH-WIDE list, not a per-entry one, so EVERY entry point's compiled delegate pulls every
-# OUT record. `OUT drive success` was fine while OnTick was the only entry -- adding the OnStart entry
-# above made OnStart's own delegate try to pull `drive`, a CharacterMove sitting on OnTick's chain,
-# and side-effecting nodes are refused when pulled as data:
-#   'drive.success' cannot be read as a data value: CharacterMove has a side effect and must be
-#   reached by wiring it directly into the exec chain
-# That refusal is correct -- pulling could run the write more than once, or not at all. The lesson is
-# that OUT belongs to graphs with ONE entry, or to nodes on no exec chain at all. `success` and
-# `fired` are still checked; they simply are not reported, and nothing needs them to be.
+# NO OUT RECORDS. This file has exactly one ENTRY (OnTick) now that the OnStart-driven spawn is gone,
+# so the multi-entry OUT trap the old version of this comment explained (every entry's delegate pulls
+# every OUT record, and a side-effecting node refuses to be pulled) no longer applies here -- there is
+# only one delegate. `success` and `fired` are still checked by the compiler; they simply are not
+# reported anywhere, and nothing needs them to be.

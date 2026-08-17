@@ -4656,6 +4656,9 @@ private:
         landscapeBody_ = aver_phys_add_heightfield(hf.samples.data(), static_cast<i32>(hf.sampleCount),
                                                    hf.spacingCm, hf.cornerCm[0], hf.cornerCm[1],
                                                    hf.cornerCm[2]);
+        // Deliberately NOT stamped with aver_phys_set_entity: terrain has no owning scene entity in
+        // this engine at all, not merely one this call site forgot to look up. A ray landing on it
+        // is a genuine "hit true, entity 0" -- something WAS hit, nothing owns it -- not a bug.
         if (landscapeBody_ >= 0)
             AVER_INFO("[Landscape] collision body #{} built ({}x{} samples)", landscapeBody_,
                       hf.sampleCount, hf.sampleCount);
@@ -5700,6 +5703,7 @@ private:
         if (hadBody && aver_phys_ready()) {
             const int32_t body = aver_phys_add_static_box(t.position.x, t.position.y, t.position.z,
                                                           bodyHalf.x, bodyHalf.y, bodyHalf.z);
+            if (body) aver_phys_set_entity(body, static_cast<int32_t>(e));
             levelBodies_.push_back(body);
             entityBodies_[static_cast<u32>(e)] = body;
         }
@@ -10615,10 +10619,12 @@ private:
             };
 #endif
 #if AVER_MODULE_PHYSICS
-            restore.createBody = [](scene::Entity, const Vec3& worldPos, const Vec3& halfExtentCm) -> i32 {
+            restore.createBody = [](scene::Entity e, const Vec3& worldPos, const Vec3& halfExtentCm) -> i32 {
                 if (!aver_phys_ready()) return -1;
-                return aver_phys_add_static_box(worldPos.x, worldPos.y, worldPos.z,
-                                                halfExtentCm.x, halfExtentCm.y, halfExtentCm.z);
+                const i32 body = aver_phys_add_static_box(worldPos.x, worldPos.y, worldPos.z,
+                                                          halfExtentCm.x, halfExtentCm.y, halfExtentCm.z);
+                if (body) aver_phys_set_entity(body, static_cast<i32>(e));
+                return body;
             };
 #endif
 

@@ -187,7 +187,7 @@ different cost profiles depending on which compiler reaches it.
 | `SetField` | `entity` (in, int), `value` (in, float), `success` (out, bool) | `field=` | W | Writes a scalar scene field. |
 | `GetFieldVec3` | `entity` (in, int), `x`/`y`/`z` (out, float) | `field=` | D | Reads a Vec3-kind scene field as three floats. |
 | `SetFieldVec3` | `entity` (in, int), `x`/`y`/`z` (in, float), `success` (out, bool) | `field=` | W | Writes a Vec3-kind scene field from three floats. |
-| `Raycast` | `exec` (in), `originX`/`Y`/`Z` (in, float), `dirX`/`Y`/`Z` (in, float), `maxDist` (in, float), `then` (out), `hit` (out, bool), `entity` (out, int), `pointX`/`Y`/`Z` (out, float) — 14 pins | — | W | Casts a ray; reports whether it hit, which entity, and where. |
+| `Raycast` | `exec` (in), `originX`/`Y`/`Z` (in, float), `dirX`/`Y`/`Z` (in, float), `maxDist` (in, float), `then` (out), `hit` (out, bool), `entity` (out, int), `pointX`/`Y`/`Z` (out, float) — 14 pins | — | W | Casts a ray; reports whether it hit, which SCENE ENTITY (not physics body) owns what it hit, and where. |
 | `SetParent` | `child` (in, int), `parent` (in, int), `success` (out, bool) | — | W | `aver_scene_set_parent(child, parent)`. |
 | `SetName` | `entity` (in, int), `success` (out, bool) | `name=` | W | `aver_scene_set_name(entity, name)`. |
 | `SetMesh` | `entity` (in, int), `success` (out, bool) | `mesh=` | W | Ensures a mesh renderer on `entity`, pointed at `mesh=`'s asset path. |
@@ -216,6 +216,17 @@ on every pull" (`GraphCompiler.cs:1689-1702`).
   has no case in `EmitPullOutput` at all, deliberately, so it falls to the `default` arm
   (`GraphCompiler.cs:2333-2360`). The outcome is the same ("wire it into the exec chain"); the error
   text does not say so.
+
+**`Raycast.entity` is a SCENE ENTITY id, not a physics body handle** — `GraphInterop.RaycastForGraph`
+(`Aver.Framework/GraphInterop.cs`) reads `RaycastHit.Entity`, the id `aver_phys_set_entity` stamped on
+whatever body or character the ray hit, not `RaycastHit.Body.Handle`. `entity == 0` on a real hit
+(`hit == true`) means the ray struck something no entity owns — the landscape heightfield is the one
+production example today — and is not the same outcome as a miss, where `hit == false` and `entity`
+is left at its default 0 for the same reason but a different one. Check `hit` first; `entity == 0`
+only tells you "unowned" once you already know the ray landed on something. `entity` is exactly the
+pin `FireEvent.target` wants — `LINK raycastNode.entity fireEventNode.target` is how a graph aims one
+entity's `OnHit` at whatever another entity's ray just found, with no spawn-and-remember `VAR` needed
+to bridge the two.
 
 **`GetField`/`SetField` only address F32-kind fields**, enforced at compile time — pointing either
 node's `field=` at a Vec3/Quat/Bool/I32 field fails with an explicit "not an F32 field" error

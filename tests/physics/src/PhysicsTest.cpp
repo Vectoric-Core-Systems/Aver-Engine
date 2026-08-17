@@ -125,10 +125,12 @@ static void testSimulation() {
           " y=" + std::to_string(p[1]) + ")");
 
     float hit[3] = {0,0,0}, nrm[3] = {0,0,0};
-    const int32_t rayHit = aver_phys_raycast(200.0f, 200.0f, 200.0f, 0, 0, -1, 400.0f, hit, nrm);
+    int32_t hitEntity = -1;
+    const int32_t rayHit = aver_phys_raycast(200.0f, 200.0f, 200.0f, 0, 0, -1, 400.0f, hit, nrm, &hitEntity);
     check(rayHit == floor, "downward ray hit the floor body");
     check(near(hit[2], 0.0f, 2.0f), "hit point is at the floor surface (z=" + std::to_string(hit[2]) + ")");
     check(nrm[2] > 0.9f, "surface normal points UP in engine axes (z=" + std::to_string(nrm[2]) + ")");
+    check(hitEntity == 0, "the floor was never stamped, so the hit reports entity 0 (unmapped, not a miss)");
 
     const int32_t ch = aver_phys_character_create(30.0f, 180.0f, 0, 200.0f, 250.0f);
     check(ch != 0, "character created");
@@ -248,7 +250,7 @@ void testHeightfieldKeepsEverySample() {
                 const float y = static_cast<float>(iy) * spacing;
                 float p[3] = {0,0,0}, nrm[3] = {0,0,0};
                 const int32_t hit = aver_phys_raycast(x, y, 5000.0f, 0.0f, 0.0f, -1.0f,
-                                                      20000.0f, p, nrm);
+                                                      20000.0f, p, nrm, nullptr);
                 zs.push_back(hit ? p[2] : -99999.0f);
             }
         }
@@ -288,6 +290,101 @@ void testHeightfieldKeepsEverySample() {
           "a ray actually landed on the raised last row (" + std::to_string(raisedSeen) + " hit(s))");
 }
 
+// Stamps bodies with aver_phys_set_entity and checks Raycast reports them back correctly: a stamped
+// hit, an unmapped hit told apart from a genuine miss, a dead handle refusing to be stamped, and a
+// removed body's handle never coming back to resolve to someone else's entity.
+static void testEntityAssociation() {
+    AVER_INFO("-- entity association, unmapped vs miss, and handle reuse --");
+    check(aver_phys_init() == 1, "world starts");
+
+    // ---- a stamped body: raycast reports the entity it was stamped with --------------------------
+    const int32_t crate = aver_phys_add_static_box(0, 0, 0, 50, 50, 50);
+    check(crate != 0, "crate created");
+    check(aver_phys_set_entity(crate, 4242) == 1, "stamping a live body succeeds");
+
+    float p[3] = {0,0,0}, n[3] = {0,0,0};
+    int32_t entity = -1;
+    int32_t got = aver_phys_raycast(200, 0, 0, -1, 0, 0, 400, p, n, &entity);
+    check(got == crate, "ray hit the stamped crate");
+    check(entity == 4242, "raycast reports the stamped entity (got " + std::to_string(entity) + ")");
+
+    // ---- unmapped vs miss: a real hit with no owner must not read as "nothing happened" ----------
+    const int32_t bare = aver_phys_add_static_box(0, 1000, 0, 50, 50, 50);   // never stamped
+    check(bare != 0, "unmapped body created");
+    entity = -1;
+    got = aver_phys_raycast(200, 1000, 0, -1, 0, 0, 400, p, n, &entity);
+    check(got == bare, "ray hit the unmapped body -- a REAL hit, not a miss");
+    check(entity == 0, "unmapped body reports entity 0 (\"hit something no entity owns\")");
+
+    entity = -777;   // sentinel: proves outEntity is left untouched, not zeroed, on a genuine miss --
+                      // otherwise a caller could not tell "hit, unmapped" from "missed" by the output
+                      // alone and would have to trust the return value anyway, defeating the point.
+    got = aver_phys_raycast(9000, 9000, 9000, 0, 0, -1, 10.0f, p, n, &entity);
+    check(got == 0, "a ray into empty space is a genuine miss");
+    check(entity == -777, "outEntity is untouched on a miss, unlike the unmapped case above (entity=" +
+                          std::to_string(entity) + ")");
+
+    // ---- a dead handle refuses to be stamped, rather than silently doing nothing -----------------
+    check(aver_phys_set_entity(999999, 1) == 0, "stamping a handle that was never issued fails");
+
+    // ---- handle reuse: nextHandle only ever increments (PhysicsWorld.cpp), so a removed body's
+    // handle is never reissued, and cannot be coerced into resolving to someone else's entity.
+    check(aver_phys_remove_body(crate) == 1, "crate removed");
+    check(aver_phys_set_entity(crate, 9999) == 0,
+          "the now-dead handle can no longer be stamped -- it does not silently succeed");
+
+    const int32_t second = aver_phys_add_static_box(0, 0, 0, 50, 50, 50);   // the SAME spot as `crate`
+    check(second != 0, "a second body created at the same spot");
+    check(second != crate, "its engine handle is NEW, not the removed one (old=" +
+                           std::to_string(crate) + " new=" + std::to_string(second) + ")");
+    check(aver_phys_set_entity(second, 7777) == 1, "the new body can be stamped");
+
+    entity = -1;
+    got = aver_phys_raycast(200, 0, 0, -1, 0, 0, 400, p, n, &entity);
+    check(got == second, "ray now hits the SECOND body at that spot");
+    check(entity == 7777, "and reports the SECOND body's entity, not the removed body's stale 4242 -- "
+                          "resolving to none would be fine, resolving to someone else's entity would "
+                          "not (entity=" + std::to_string(entity) + ")");
+
+    aver_phys_shutdown();
+}
+
+// FIRES A RAY AT A LIVE CHARACTER and reports what actually comes back. aver_phys_character_create
+// hands out a DIFFERENT handle family from a body, and Jolt's CharacterVirtual is documented as
+// invisible to every broadphase query (NarrowPhaseQuery::CastRay among them) unless given an inner
+// body -- this is the proof that the fix in aver_phys_character_create closes that gap, not an
+// argument that it should.
+static void testCharacterIsRaycastVisible() {
+    AVER_INFO("-- a ray fired at a live character --");
+    check(aver_phys_init() == 1, "world starts");
+
+    // No floor and no step: the character's position is exactly the one it was created at (Jolt syncs
+    // the inner body's transform in the CharacterVirtual constructor itself), so the ray target is
+    // known rather than inferred from a settled simulation.
+    const int32_t ch = aver_phys_character_create(30.0f, 180.0f, 500.0f, 0.0f, 100.0f);
+    check(ch != 0, "character created");
+    check(aver_phys_set_entity(ch, 8181) == 1, "character stamped with an entity");
+
+    // Horizontal, through the torso: the capsule is centred at z=100 with an 180cm total height, so
+    // it spans roughly z=[10,190], and a ray at z=100 threading straight through x must catch it.
+    float p[3] = {0,0,0}, n[3] = {0,0,0};
+    int32_t entity = -1;
+    int32_t got = aver_phys_raycast(0.0f, 0.0f, 100.0f, 1.0f, 0.0f, 0.0f, 1000.0f, p, n, &entity);
+    check(got == ch, "the ray's returned handle IS the character's own handle (got " +
+                     std::to_string(got) + ", character is " + std::to_string(ch) + ")");
+    check(entity == 8181, "the ray identifies WHAT it hit, not just THAT it hit something (entity=" +
+                          std::to_string(entity) + ")");
+
+    // Control: the identical ray shape, aimed well clear of the character, must still miss -- proving
+    // the hit above is the character's geometry and not some accident of an always-hit query.
+    entity = -55;
+    got = aver_phys_raycast(0.0f, 5000.0f, 100.0f, 1.0f, 0.0f, 0.0f, 1000.0f, p, n, &entity);
+    check(got == 0, "the same ray, aimed clear of the character, misses (control)");
+    check(entity == -55, "outEntity untouched on that miss too");
+
+    aver_phys_shutdown();
+}
+
 // Runs every suite and returns the failure count.
 int main() {
     testAxisMap();
@@ -296,6 +393,8 @@ int main() {
     testEventsAndQueries();
     testShapes();
     testHeightfieldKeepsEverySample();
+    testEntityAssociation();
+    testCharacterIsRaycastVisible();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;
 }
