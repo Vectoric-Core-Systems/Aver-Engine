@@ -86,7 +86,7 @@ Step 'BUILD RELEASE' { & .\scripts\build.ps1 -Release }
 # covering less and less.
 Write-Host ""
 Write-Host "########## TEST SUITES ##########"
-$skip = @('MakeRig','MakeSamples','MakeFoliage','ActorSweep','AudioProbe','Sandbox','AverGame')
+$skip = @('MakeRig','MakeSamples','MakeFoliage','ActorSweep','AudioProbe','Sandbox')
 $exes = Get-ChildItem (Join-Path $root 'build\bin\*.exe') |
         Where-Object { $_.BaseName -like '*Test' -and $skip -notcontains $_.BaseName } |
         Sort-Object BaseName

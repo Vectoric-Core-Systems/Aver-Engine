@@ -67,7 +67,7 @@ part of what this template is teaching, so read those too, not just this file.
   fields from outside the graph layer (a C# `AverHud`, or a future inspector), not from another graph.
 - **No fire button.** There is no `InputKey` node gating the hit test — proximity alone triggers it.
   This is deliberate, not an oversight: a headless capture run of a shipped game presses no key and
-  moves no mouse (`AverGame.exe --headless` logs "no window, no input", literally), so a mechanic
+  moves no mouse (`Sandbox.exe --headless` logs "no window, no input", literally), so a mechanic
   gated behind a keypress would be *unprovable* by the exact kind of automated run this template was
   proven with. Proximity-only means the mechanic runs and its VARs move whether or not a human is
   attached. Add an `InputKey` + `Branch` for Mouse-left (key code 47 — see

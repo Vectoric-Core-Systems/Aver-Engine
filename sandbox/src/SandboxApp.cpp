@@ -7294,26 +7294,6 @@ private:
                             : "This section has no file path to save back to.");
                 }
 #endif
-                ImGui::Separator();
-                // Packaging. Disabled with a SPECIFIC reason rather than a generic one: "greyed
-                // out" with no explanation is the single most common way an editor wastes somebody's
-                // afternoon. The item is a shell over scripts/stage-game.ps1 and adds nothing of its
-                // own -- a packaging path that exists only behind a button cannot run in CI.
-                {
-                    const bool haveProj = project_.valid();
-                    const bool haveScripts = haveProj &&
-                        std::filesystem::exists(editor::scriptsBinaryDir(project_));
-                    ImGui::BeginDisabled(!haveProj || tools_.compiling());
-                    if (ImGui::MenuItem("Package Project...")) tools_.openPackageProject();
-                    ImGui::EndDisabled();
-                    uiReg_.track("file.packageProject");
-                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                        if (!haveProj)              ImGui::SetTooltip("Open a project first.");
-                        else if (tools_.compiling()) ImGui::SetTooltip("A script build is running; packaging would stage a half-written assembly.");
-                        else if (!haveScripts)       ImGui::SetTooltip("No compiled scripts yet - run Compile .NET first.\nThe packager refuses a project whose Binaries\\Scripts is empty.");
-                        else                         ImGui::SetTooltip("Stage this project into a standalone, runnable game directory.\nRuns scripts/stage-game.ps1, which you can also run from a shell.");
-                    }
-                }
                 ImGui::Separator(); if(ImGui::MenuItem("Exit")) requestExitChecked(e); ImGui::EndMenu(); }
                         const bool open_edit = ImGui::BeginMenu("Edit");
             uiReg_.track("menu.edit");

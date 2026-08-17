@@ -29,7 +29,10 @@ option(AVER_RHI_D3D12  "DirectX 12 backend (primary)" ON)
 option(AVER_RHI_D3D11  "DirectX 11 backend"           ON)
 option(AVER_RHI_VULKAN "Vulkan backend (needs Vulkan SDK)" OFF)
 option(AVER_BUILD_SANDBOX "Build the sandbox sample app" ON)
-option(AVER_BUILD_GAME "Build the standalone game runtime (AverGame.exe)" ON)
+# The game-runtime LIBRARY (Aver.Runtime.Game) and the tests that exercise it. There is no longer a
+# standalone AverGame.exe or a packaged-game staging path: the editor is how a project is run, and the
+# runtime lives on as a library because tests/game drives it directly.
+option(AVER_BUILD_GAME "Build the game runtime library (Aver.Runtime.Game)" ON)
 option(AVER_BUILD_TESTS "Build test executables" ON)
 option(AVER_ENABLE_UI "In-window editor UI (Dear ImGui)" ON)
 
@@ -358,18 +361,12 @@ if(AVER_BUILD_SANDBOX)
   add_subdirectory(sandbox)
 endif()
 
-# The standalone game runtime. Separate from the sandbox switch because they are opposites: one is
-# the editor, one is what a shipped game runs, and a tree may reasonably want either alone.
-#
-# NOTE FOR PACKAGING, UPDATED BY THE IMGUI/RHI SPLIT: an AverGame.exe built from a tree with
-# AVER_ENABLE_UI=ON no longer has ImGui linked into it. Aver.RHI.D3D12 never links imgui (see its own
-# CMakeLists.txt and include/aver/rhi/d3d12/UiBackend.hpp); the concrete Dear ImGui implementation
-# lives in the separate Aver.RHI.D3D12.ImGui module, which only Sandbox links regardless of this
-# switch. scripts/stage-game.ps1 now proves this against the actual staged binary rather than
-# refusing the whole configuration on principle -- see its own comment.
-if(AVER_BUILD_GAME)
-  add_subdirectory(game)
-endif()
+# THERE IS NO STANDALONE GAME EXECUTABLE. `game/` (AverGame.exe) and the packaged-game staging path
+# (scripts/stage-game.ps1, verify-game.ps1, game.allowlist, and the editor's Package Project item)
+# were removed deliberately: the editor is how a project is run, and a second host that rendered a
+# different subset of the scene was a standing source of confusion about what "the game" actually
+# shows. Aver.Runtime.Game survives as a LIBRARY -- tests/game drives it directly -- which is what
+# AVER_BUILD_GAME now switches.
 
 # THE MODULE DAG CHECK, here rather than inside aver_add_module.
 #

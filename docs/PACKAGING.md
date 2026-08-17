@@ -1,11 +1,22 @@
 # Packaging an Aver project into a shippable game
 
-> **STATUS: SLICE 1 IS BUILT, as of 2026-08-02.** `AverGame.exe`, `modules/runtime.game`,
-> `scripts/game.allowlist`, `scripts/stage-game.ps1` and `scripts/verify-game.ps1` all exist. A
-> project packages, runs from a scratch directory with the working directory outside the tree, and
-> **fails correctly when a staged DLL is deleted** (`0xC0000135`). The game half of `SandboxApp` was
-> lifted in eleven commits, C1–C11 — see [GAME-LIFT.md](GAME-LIFT.md). Slices 2 onward are still
-> plan.
+> **STATUS: REMOVED, 2026-08-17. THIS DOCUMENT IS HISTORY, NOT A DESCRIPTION OF THE ENGINE.**
+> `AverGame.exe` (`game/`), `scripts/stage-game.ps1`, `scripts/verify-game.ps1`,
+> `scripts/game.allowlist` and the editor's **Package Project** item have all been deleted. Nothing
+> below can be run today, and the file paths it cites no longer exist. It is kept because the design
+> reasoning — the allowlist split, the `--trace-opens` verification, the ImGui/RHI separation it
+> forced — outlived the feature and is cited from live code comments.
+>
+> **What replaced it: nothing, deliberately.** The editor is how a project is run. A second host that
+> rendered a different subset of the scene was a standing source of confusion about what "the game"
+> actually shows, and it was the reason a graph-only project appeared broken when the real gap was
+> elsewhere. `modules/runtime.game` survives as a LIBRARY, driven by `tests/game`, which is what the
+> `AVER_BUILD_GAME` option now switches.
+>
+> **Was BUILT before removal**, and the record is worth keeping accurate: a project did package, ran
+> from a scratch directory with the working directory outside the tree, and failed correctly when a
+> staged DLL was deleted (`0xC0000135`). The game half of `SandboxApp` was lifted in eleven commits,
+> C1–C11 — see [GAME-LIFT.md](GAME-LIFT.md). Slices 2 onward never left the plan stage.
 >
 > Produced by a planning workflow reading the tree at **`ae47a2f`**, not the `5714ba3` this header
 > originally claimed — which is why its line numbers ran two low against HEAD. Load-bearing claims
