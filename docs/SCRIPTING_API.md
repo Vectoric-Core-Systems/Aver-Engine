@@ -499,8 +499,13 @@ happened in a `PostPhysics` one.
 | `bool RaycastAny(...)` | Just whether anything is in the way. |
 
 **`Body`** — a handle (`0` invalid): `Handle`, `IsValid`, `Position`, `Rotation`, `Velocity`,
-`SetPosition`, `SetVelocity`, `Destroy()`.
-**`RaycastHit`** — `Hit`, `Body`, `Point`, `Normal`.
+`SetPosition`, `SetVelocity`, `Destroy()`, `SetEntity(Entity)` (stamps which scene entity owns this
+body, for a later `Raycast` against it to identify — level placements, characters and editor-dropped
+bodies already have this set; a script's own `AddDynamicBox`/`AddDynamicSphere`/`AddStaticBox` does not).
+**`RaycastHit`** — `Hit`, `Body`, `Entity`, `Point`, `Normal`. `Entity` is whatever `SetEntity` stamped
+the hit body or character with — `Entity.None` (0) means a real hit against something no entity owns
+(a landscape heightfield, say), which is not the same thing as `Hit` being false; check `Hit` first.
+Only `Raycast` resolves it — `SphereCast`'s `RaycastHit.Entity` is always `Entity.None`.
 
 > The backend documents **broadphase queries as non-deterministic** (the broad phase is modified from
 > several threads), and callback ordering likewise. Rely on *whether* something was hit and *where* —

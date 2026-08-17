@@ -38,9 +38,12 @@ internal static class Phys
     [DllImport(Lib)] internal static extern int aver_phys_character_set_position(int ch, float x, float y, float z);
     [DllImport(Lib)] internal static extern int aver_phys_character_grounded(int ch);
 
+    [DllImport(Lib)] internal static extern int aver_phys_set_entity(int handle, int entity);
+
     [DllImport(Lib)] internal static extern int aver_phys_raycast(float ox, float oy, float oz,
                                                                  float dx, float dy, float dz,
-                                                                 float maxDistCm, float[] outPoint, float[] outNormal);
+                                                                 float maxDistCm, float[] outPoint, float[] outNormal,
+                                                                 out int outEntity);
 
     [DllImport(Lib)] internal static extern int aver_phys_add_sensor_box(float cx, float cy, float cz, float hx, float hy, float hz);
     [DllImport(Lib)] internal static extern int aver_phys_add_sensor_sphere(float cx, float cy, float cz, float radius);
@@ -96,6 +99,13 @@ public readonly struct RaycastHit
 {
     /// <summary>The body that was hit; <see cref="Framework.Body.None"/> when nothing was hit.</summary>
     public Body Body { get; }
+    /// <summary>The scene entity that owns the hit body or character, stamped there by whoever created
+    /// it (see <c>aver_phys_set_entity</c>). <see cref="Framework.Entity.None"/> (0) means the hit is
+    /// real but nothing claimed it -- a landscape heightfield today -- which is NOT the same thing as
+    /// <see cref="Hit"/> being false; check <see cref="Hit"/> first. Only populated by
+    /// <see cref="Physics.Raycast"/> -- always <see cref="Framework.Entity.None"/> from
+    /// <see cref="Physics.SphereCast"/>, which does not resolve entities yet.</summary>
+    public Entity Entity { get; }
     /// <summary>Where the ray met the surface, in centimetres.</summary>
     public Vec3 Point { get; }
     /// <summary>The surface normal at that point, unit length.</summary>
@@ -103,9 +113,9 @@ public readonly struct RaycastHit
     /// <summary>True when the ray hit something. Check this before reading the rest.</summary>
     public bool Hit => Body.IsValid;
 
-    /// <summary>Builds a hit from a raw body handle.</summary>
-    internal RaycastHit(int body, Vec3 point, Vec3 normal)
-    { Body = new Body(body); Point = point; Normal = normal; }
+    /// <summary>Builds a hit from a raw body handle and the entity stamped on it.</summary>
+    internal RaycastHit(int body, int entity, Vec3 point, Vec3 normal)
+    { Body = new Body(body); Entity = new Entity(entity); Point = point; Normal = normal; }
 }
 
 /// <summary>A rigid body in the simulation. A handle, not an object: 0 is invalid.</summary>
@@ -160,6 +170,12 @@ public readonly struct Body : IEquatable<Body>
     /// <summary>Removes the body from the world. The handle is dead afterwards.</summary>
     public bool Destroy() => Phys.aver_phys_remove_body(Handle) != 0;
 
+    /// <summary>Stamps this body with the entity that owns it, so a later <see cref="Physics.Raycast"/>
+    /// against it reports <paramref name="e"/> through <see cref="RaycastHit.Entity"/>. Bodies made by
+    /// a level placement, a character, or the editor already have this set; a script creating a body
+    /// of its own (<see cref="Physics.AddDynamicBox"/> and siblings) is the case this is for.</summary>
+    public bool SetEntity(Entity e) => Phys.aver_phys_set_entity(Handle, e.Handle) != 0;
+
     public bool Equals(Body o) => Handle == o.Handle;
     public override bool Equals(object? o) => o is Body b && Equals(b);
     public override int GetHashCode() => Handle;
@@ -197,13 +213,15 @@ public static class Physics
     public static Body AddDynamicSphere(Vec3 centre, float radius, float massKg = 0f) =>
         new(Phys.aver_phys_add_dynamic_sphere(centre.X, centre.Y, centre.Z, radius, massKg));
 
-    /// <summary>Casts a ray up to <paramref name="maxDistanceCm"/> and returns the first hit.</summary>
+    /// <summary>Casts a ray up to <paramref name="maxDistanceCm"/> and returns the first hit, including
+    /// which entity (if any) owns whatever it hit -- see <see cref="RaycastHit.Entity"/>.</summary>
     public static RaycastHit Raycast(Vec3 origin, Vec3 direction, float maxDistanceCm)
     {
         float[] p = new float[3], n = new float[3];
         int body = Phys.aver_phys_raycast(origin.X, origin.Y, origin.Z,
-                                          direction.X, direction.Y, direction.Z, maxDistanceCm, p, n);
-        return body == 0 ? default : new RaycastHit(body, new Vec3(p[0], p[1], p[2]), new Vec3(n[0], n[1], n[2]));
+                                          direction.X, direction.Y, direction.Z, maxDistanceCm, p, n,
+                                          out int entity);
+        return body == 0 ? default : new RaycastHit(body, entity, new Vec3(p[0], p[1], p[2]), new Vec3(n[0], n[1], n[2]));
     }
 
     /// <summary>True if anything lies within <paramref name="maxDistanceCm"/> along the ray.</summary>
@@ -258,13 +276,15 @@ public static class Physics
         return outv;
     }
 
-    /// <summary>Sweeps a sphere and returns the first thing it touches.</summary>
+    /// <summary>Sweeps a sphere and returns the first thing it touches. Unlike <see cref="Raycast"/>,
+    /// <see cref="RaycastHit.Entity"/> is always <see cref="Framework.Entity.None"/> here -- the
+    /// native sweep does not resolve entities yet, so treat it as unknown rather than "unowned".</summary>
     public static RaycastHit SphereCast(Vec3 origin, Vec3 direction, float maxDistanceCm, float radius)
     {
         float[] p = new float[3], n = new float[3];
         int body = Phys.aver_phys_sphere_cast(origin.X, origin.Y, origin.Z,
                                               direction.X, direction.Y, direction.Z,
                                               maxDistanceCm, radius, p, n);
-        return body == 0 ? default : new RaycastHit(body, new Vec3(p[0], p[1], p[2]), new Vec3(n[0], n[1], n[2]));
+        return body == 0 ? default : new RaycastHit(body, 0, new Vec3(p[0], p[1], p[2]), new Vec3(n[0], n[1], n[2]));
     }
 }

@@ -4,7 +4,7 @@
 
 > **Three README files in this tree are stale and should be read as historical.** `abi/README.md:3` describes "Aver.ABI — stable `extern "C"` interop seam … Everything non-C++ binds here". `modules/abi/README.md:7-11` describes "The flat extern "C" seam: opaque handles, out-pointer returns, aver_abi_version(). The single interop boundary C#/Rust bind against", adding that it will be wired into the build "when Phase 7 implements it". Neither describes anything that exists: both directories contain exactly one file — that README — with no header, no source and no `CMakeLists.txt`, and neither is named by an `add_subdirectory` in the top-level `CMakeLists.txt` (verified by directory listing and by grep over the tree). No symbol named `aver_abi_version` exists anywhere; the only hits are those READMEs and `docs/ARCHITECTURE.md:158, 230, 303, 307`, which carries the same sketch and is stale the same way. `interop/README.md:3` promises "Generated P/Invoke (C#) and bindgen (Rust) bindings derived from abi/ headers"; that directory also holds only its README, the C# bindings under `scripting/csharp/` are hand-written, and a search for `*.rs` and `Cargo.toml` over the whole tree returns nothing — there is no Rust in this repository.
 
-**203 exported C functions declared across seven headers**, plus five reverse entry points the script host binds by name. Counts verified by grepping each header for its export macro at line start: scene 35, framework 48, framework hooks 4, physics 36, PBR 48, Voxi 21, UI 11. Read that number as *declared in headers*: the shipped DLLs export 204, because `aver_scene_debug_string_pool_size` is `AVER_SCENE_ABI`-exported from `modules/scene/src/SceneAbi.cpp:111` and declared in no header (§3). A `dumpbin /exports` will therefore show one more than this document lists, and that is the one.
+**204 exported C functions declared across seven headers**, plus five reverse entry points the script host binds by name. Counts verified by grepping each header for its export macro at line start: scene 35, framework 48, framework hooks 4, physics 37, PBR 48, Voxi 21, UI 11. Read that number as *declared in headers*: the shipped DLLs export 205, because `aver_scene_debug_string_pool_size` is `AVER_SCENE_ABI`-exported from `modules/scene/src/SceneAbi.cpp:111` and declared in no header (§3). A `dumpbin /exports` will therefore show one more than this document lists, and that is the one. (Physics moved 36 → 37 when `aver_phys_set_entity` was added to stamp a body or character with the scene entity that owns it — see §6.)
 
 ---
 
@@ -458,13 +458,15 @@ Begin/end reasons are `AVER_FW_BEGIN_SPAWN` / `_PLAY` / `_RELOAD` and `AVER_FW_E
 
 ## 6. `Aver.Physics` — `physics_abi.h`
 
-**Header** `modules/physics/include/aver/physics/physics_abi.h` · **DLL** `Aver.Physics` (SHARED, `PUBLIC Aver.Core`, `PRIVATE Jolt` — `modules/physics/CMakeLists.txt:9, 14`) · **No version macro and no version entry point** · **36 entry points.**
+**Header** `modules/physics/include/aver/physics/physics_abi.h` · **DLL** `Aver.Physics` (SHARED, `PUBLIC Aver.Core`, `PRIVATE Jolt` — `modules/physics/CMakeLists.txt:9, 14`) · **No version macro and no version entry point** · **37 entry points.**
 
 Jolt is linked **private** on purpose: it is an implementation detail, and nothing above should be able to include a `JPH::` header by accident, because the moment something does, swapping the backend stops being a decision about this module and becomes a decision about the whole tree (`modules/physics/CMakeLists.txt:5-8`). Everything here is in the **engine's** contract — centimetres, +X forward, +Y right, +Z up, left-handed — and no caller ever sees a Jolt type, a metre or a +Y-up vector; the translation happens once behind this boundary (`physics_abi.h:5-7`).
 
 **Handles.** `int32_t` for both bodies and characters, drawn from **one** counter so the two families never collide: `int32_t nextHandle = 1;` (`modules/physics/src/PhysicsWorld.cpp:133`). 0 is always invalid. Handles are looked up in `std::unordered_map<int32_t, JPH::BodyID> bodies` and `<int32_t, JPH::Ref<JPH::CharacterVirtual>> characters` (`PhysicsWorld.cpp:131-133`). Jolt's own `BodyID` is a packed index+generation that would satisfy the 0-invalid rule too, but exposing it would leak a Jolt type through an ABI whose entire point is that it does not (`PhysicsWorld.cpp:128-130`).
 
-**Staleness.** Not generational, and it does not need to be: `nextHandle` only ever increments, so a removed body's handle is never reissued and a stale lookup simply misses — reported as 0 with the out-params left untouched (`physics_abi.h:66-67`).
+**Staleness.** Not generational, and it does not need to be: `nextHandle` only ever increments, so a removed body's handle is never reissued and a stale lookup simply misses — reported as 0 with the out-params left untouched (`physics_abi.h:66-67`). That guarantee is what makes entity association (next) safe without generation checks of its own: a dead handle cannot be re-stamped (`aver_phys_set_entity` returns 0 against it, `PhysicsWorld.cpp`), and a NEW body created at the same handle-reissue-free slot always gets a fresh, unstamped user-data field, so a stale handle can resolve to *nothing* but never to *someone else's* entity.
+
+**Entity association.** A body or character means nothing to the rest of the engine by itself. `aver_phys_set_entity(handle, entity)` stamps one — body OR character, since the two handle families share the one counter above and never collide — with a scene entity id, and `aver_phys_raycast`'s `outEntity` reads it back at the hit site. It costs nothing to maintain: the stamp lives on Jolt's own per-body `mUserData` field (`Body.h:333-334`), not a side table, so there is nothing to invalidate when a body is removed or a level unloads. A character's stamp reaches its *inner* body (see the Character controller section below) automatically — `CharacterVirtual::SetUserData` propagates it there itself (`CharacterVirtual.cpp:1349-1354`) — so one call covers both halves of a character. 0 is both the default and the sentinel for "a real hit against something no entity owns" (a landscape heightfield, today, deliberately never stamped — terrain is not a scene entity in this engine); that is NOT the same thing as a miss, which is reported through raycast's **return value**, with `outEntity` left untouched.
 
 ### World lifetime and stepping
 *You are starting the simulation, advancing it, or changing the fixed step before any body exists.*
@@ -518,6 +520,8 @@ AVER_PHYS_API int32_t aver_phys_character_grounded(int32_t ch);
 
 Backed by Jolt's `CharacterVirtual`, which is swept and resolved rather than simulated — which is what makes a character feel controlled (`physics_abi.h:78-81`). `height` is the **total** capsule height including both caps, so a 180 cm character is 180. The velocity you set is the one the character *wants*: horizontal comes from input, the vertical component is managed by the simulation unless you set it, which is how a jump is expressed (`physics_abi.h:89-91`).
 
+**A character is raycast-visible, and it is not visible for free.** `CharacterVirtual` is documented by Jolt itself as invisible to `NarrowPhaseQuery::CastRay` and every other broadphase query, because it is never added to the broad phase (`CharacterVirtual.h:57-60`). `aver_phys_character_create` gives every character a real, Kinematic **inner body** for exactly this reason (`CharacterVirtualSettings::mInnerBodyShape` / `mInnerBodyLayer`, `PhysicsWorld.cpp`), which Jolt creates and re-syncs to the character's position on every `Update`/`ExtendedUpdate` — already called once per fixed step in this module's own stepping loop, so there is nothing extra to drive. `aver_phys_raycast` falls back to a scan of `g_world->characters` for a hit `BodyID` it cannot find in the ordinary body table, specifically because the inner body was never created through `addBody()` and so is not in that table — the returned handle for a character hit is the **character's own handle**, and `outEntity` resolves the same way as for any other body. This inner body is a real solid participating in Jolt's ordinary solver, not a query-only ghost — see the gap noted in §18 before assuming every other query (`overlap_sphere`, `sphere_cast`, contact/sensor events) sees a character the same way, or resolves its entity the way `raycast` now does; only `raycast` is proven here.
+
 ### Arbitrary collision geometry
 *Boxes and spheres have run out and you need a real level — a hull round a prop, exact triangles for architecture, or terrain — from arrays you already hold.*
 
@@ -566,7 +570,8 @@ Polling is a design choice, not a shortcut. Jolt invokes its contact listener fr
 ```c
 AVER_PHYS_API int32_t aver_phys_raycast(float ox, float oy, float oz,
                                         float dx, float dy, float dz,
-                                        float maxDistCm, float* outPoint, float* outNormal);
+                                        float maxDistCm, float* outPoint, float* outNormal,
+                                        int32_t* outEntity);
 AVER_PHYS_API int32_t aver_phys_overlap_sphere(float x, float y, float z, float radius,
                                                int32_t* outBodies, int32_t maxBodies);
 AVER_PHYS_API int32_t aver_phys_sphere_cast(float ox, float oy, float oz,
@@ -576,6 +581,8 @@ AVER_PHYS_API int32_t aver_phys_sphere_cast(float ox, float oy, float oz,
 ```
 
 `raycast` and `sphere_cast` return the hit body handle or 0, writing the out-params only on a hit. `overlap_sphere` returns how many handles were **written**, so a result equal to `maxBodies` means the list was truncated and the caller should ask again with a bigger buffer rather than assume it saw everything (`physics_abi.h:173-175`). A sweep has thickness, which is what a projectile or a step-up probe actually needs, because a ray slips through gaps a moving object could never fit through (`:181-183`).
+
+`raycast` alone also writes `outEntity` — the entity `aver_phys_set_entity` stamped the hit handle with, or 0 for "hit something no entity owns", never for a miss (§6, Entity association). `overlap_sphere` and `sphere_cast` do not have an `outEntity` and do not resolve a character's inner body to a handle either; see §18, "Character raycast-visibility landed; sibling queries did not".
 
 > Jolt documents broadphase queries as **not deterministic** — the broad phase can be modified from several threads. A gate may assert on a hit's existence and position, but must never depend on *which* of several equidistant bodies comes back (`physics_abi.h:166-168`).
 
@@ -1053,6 +1060,13 @@ Rows 4 and 6–12 fail silently and at run time, in whatever feature happens to 
 - **`scripting/csharp/Aver.Framework/Native.cs:16-18`** asserts that "The in-progress `Aver.Scene/Native.cs` currently uses ANSI `LPStr`; that is the defect". No longer true — `Aver.Scene/Native.cs` uses `LPUTF8Str` throughout and decodes with `PtrToStringUTF8` (`:36, 53, 67, 71, 76`). The file that still uses ANSI is `Aver.Scripting/Pbr.cs`.
 - **`scripting/csharp/Aver.Framework/Enums.cs:3-8`** asserts that "framework_abi.h defines no `AVER_FW_BEGIN_*`/`END_*`/`PLAY_STATE_*` macros yet — their native pinning lands when the lifecycle entry points stop being stubs". It has landed: `framework_abi.h:174-176` defines `AVER_FW_PLAY_*` today and `framework_hooks.h:58-65` defines `AVER_FW_BEGIN_*`/`AVER_FW_END_*`, with `framework_hooks.h:51-53` explicitly calling itself "the native side of that pinning the C# header promised". A binding author reading `Enums.cs` first will believe those three enums are free to renumber. They are not.
 
+### Character raycast-visibility landed; sibling queries did not
+`aver_phys_character_create` now gives every character an inner body so `aver_phys_raycast` can see and identify one (§6, Character controller). Deliberately **not** done in the same change, and still open:
+- **`aver_phys_overlap_sphere` and `aver_phys_sphere_cast` do not resolve entities at all** — neither gained an `outEntity` parameter, so a script cannot learn *what* either one found, only *that* something was found (or, for a character specifically, may find nothing at the handle level even though the inner body is geometrically present — see the next point).
+- **Those two queries' HANDLE resolution does not know about a character's inner body either.** Both look the hit `BodyID` up in `g_world->byId`, which — unlike `aver_phys_raycast`'s new character fallback — was not extended to recognise one. A character is now geometrically visible to `overlap_sphere`/`sphere_cast` (it is in the broad phase), but the returned handle is 0, which reads as "found nothing" even when something real was found. This is the same ambiguity `aver_phys_raycast` used to have and no longer does.
+- **Contact and sensor events did not change.** The inner body was deliberately not registered in `g_world->byId`/`bodies` — only recognised by `aver_phys_raycast`'s own character-scan fallback — specifically so `EventListener::OnContactAdded`/`OnContactRemoved` keep behaving exactly as before. A character colliding with a dynamic prop, or standing in a sensor volume, still produces no `ContactEvent`/`OverlapEvent` naming it. Extending that is a bigger, more behaviourally-visible change (it changes what physically obstructs what, not just what a query can see) and was left for a deliberate follow-up rather than arriving as a side effect.
+- `Aver.Framework/Physics.cs`'s `RaycastHit.Entity` is honest about this split: populated by `Physics.Raycast`, always 0 from `Physics.SphereCast` — see that struct's own doc comment.
+
 ### The version boundaries that are not checked
 - **No shipping code path queries any module ABI version.** The two callers are tests. See §14; this is the single most consequential gap in this document.
 - **Three of the six seams have no version to query.** `physics_abi.h`, `pbr_abi.h` and `voxi_abi.h` declare no constant and export no function.
@@ -1080,7 +1094,7 @@ There is genuine C ABI test coverage here, more than this project's history woul
 |---|---|---|---|
 | `Aver.Scene/Native.cs` + `Aver.Framework/Native.cs` (`SceneNative`) | Scene | **34 / 35** | `aver_scene_abi_version` |
 | `Aver.Framework/Native.cs` + `ManagedDispatch.cs` | Framework (+ hooks) | **41 / 50** | `aver_fw_abi_version`, `aver_fw_scene_abi_version`, `aver_fw_scene_abi_matches`, `aver_fw_begin_play`, `aver_fw_end_play`, `aver_fw_set_paused`, `aver_fw_find_class_with_flags`, `aver_fw_view`, `aver_fw_tick` |
-| `Aver.Framework/Physics.cs` | Physics | **29 / 36** | `aver_phys_init`, `_shutdown`, `_step`, `_set_fixed_step`, `_add_convex_hull`, `_add_mesh`, `_add_heightfield` |
+| `Aver.Framework/Physics.cs` | Physics | **30 / 37** | `aver_phys_init`, `_shutdown`, `_step`, `_set_fixed_step`, `_add_convex_hull`, `_add_mesh`, `_add_heightfield` |
 | `Aver.Scripting/Pbr.cs` | PBR | **44 / 48** | `aver_pbr_get_reflectance`, `_set_reflectance`, `_get_f90`, `_set_f90` |
 | `Aver.Scripting/Voxi.cs` | Voxi | **21 / 21** | — the only seam with complete managed coverage |
 

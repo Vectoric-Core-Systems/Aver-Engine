@@ -83,6 +83,9 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
             body = aver_phys_add_static_box(
                 static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(pz),
                 static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz));
+            // The one line that makes this placement's body IDENTIFIABLE later -- a raycast that
+            // hits it can now report `e`, not just an opaque physics handle nothing else understands.
+            if (body) aver_phys_set_entity(body, static_cast<i32>(e));
             out.bodies.push_back(body);
         }
 #  else

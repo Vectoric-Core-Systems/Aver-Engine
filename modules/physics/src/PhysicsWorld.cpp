@@ -468,6 +468,14 @@ int32_t aver_phys_character_create(float radius, float height, float x, float y,
     s->mMaxSlopeAngle = JPH::DegreesToRadians(50.0f);
     // The plane below the feet that stops the capsule catching on its own bottom cap.
     s->mSupportingVolume = JPH::Plane(toJoltUnit(Vec3(0, 0, 1)), -rM);
+    // Gives the character a real, broadphase-visible companion body. Without this a CharacterVirtual
+    // is invisible to every query in this file -- Jolt's own header says so outright ("cannot collide
+    // with CharacterVirtual since it is not added to the broad phase") -- so a ray fired straight
+    // through a live character comes back a clean miss. Jolt creates and re-syncs this body itself
+    // (every Update/ExtendedUpdate, already called once per fixed step below) from the SAME shape, so
+    // there is nothing else to keep in sync here.
+    s->mInnerBodyShape = res.Get();
+    s->mInnerBodyLayer = Layers::MOVING;
     JPH::Ref<JPH::CharacterVirtual> ch =
         new JPH::CharacterVirtual(s, toJolt(Vec3(x, y, z)), JPH::Quat::sIdentity(), 0, &g_world->system);
     const int32_t h = g_world->nextHandle++;
@@ -521,9 +529,27 @@ int32_t aver_phys_character_grounded(int32_t ch) {
     return c->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround ? 1 : 0;
 }
 
+// Stamps a body OR character handle with a scene entity id. Backed by Jolt's own per-body user-data
+// field (Body::SetUserData / CharacterVirtual::SetUserData -- the latter already propagates to the
+// character's inner body, so one call covers both halves of a character). Returns 0 for a dead handle.
+int32_t aver_phys_set_entity(int32_t handle, int32_t entity) {
+    if (!g_world) return 0;
+    if (const JPH::BodyID* id = findBody(handle)) {
+        JPH::BodyLockWrite lock(g_world->system.GetBodyLockInterface(), *id);
+        if (!lock.Succeeded()) return 0;
+        lock.GetBody().SetUserData(static_cast<JPH::uint64>(entity));
+        return 1;
+    }
+    if (JPH::CharacterVirtual* ch = findCharacter(handle)) {
+        ch->SetUserData(static_cast<JPH::uint64>(entity));
+        return 1;
+    }
+    return 0;
+}
+
 // Casts a ray and returns the hit body handle, or 0 for a miss. Outputs are written only on a hit.
 int32_t aver_phys_raycast(float ox, float oy, float oz, float dx, float dy, float dz,
-                          float maxDistCm, float* outPoint, float* outNormal) {
+                          float maxDistCm, float* outPoint, float* outNormal, int32_t* outEntity) {
     if (!g_world) return 0;
     const Vec3 dir(dx, dy, dz);
     const float len = std::sqrt(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
@@ -537,16 +563,29 @@ int32_t aver_phys_raycast(float ox, float oy, float oz, float dx, float dy, floa
 
     int32_t handle = 0;
     for (const auto& [h, id] : g_world->bodies) if (id == hit.mBodyID) { handle = h; break; }
+    if (handle == 0) {
+        // Not a body this module created through addBody() -- the only other broadphase-visible
+        // thing is a character's own inner body (see aver_phys_character_create). g_world->bodies
+        // was never going to contain it: Jolt creates and owns that BodyID internally.
+        for (const auto& [h, ch] : g_world->characters)
+            if (!ch->GetInnerBodyID().IsInvalid() && ch->GetInnerBodyID() == hit.mBodyID) { handle = h; break; }
+    }
 
     if (outPoint) writeVec(outPoint, fromJolt(ray.GetPointOnRay(hit.mFraction)));
-    if (outNormal) {
+    // Gated on outEntity-or-outNormal now (used to be outNormal alone): entity resolution needs this
+    // same lock to read GetUserData(), but a caller asking for neither still pays for no lock at all.
+    if (outEntity || outNormal) {
         JPH::BodyLockRead lock(g_world->system.GetBodyLockInterface(), hit.mBodyID);
         if (lock.Succeeded()) {
-            const JPH::Vec3 n = lock.GetBody().GetWorldSpaceSurfaceNormal(
-                hit.mSubShapeID2, ray.GetPointOnRay(hit.mFraction));
-            writeVec(outNormal, fromJoltUnit(n));
+            if (outEntity) *outEntity = static_cast<int32_t>(lock.GetBody().GetUserData());
+            if (outNormal) {
+                const JPH::Vec3 n = lock.GetBody().GetWorldSpaceSurfaceNormal(
+                    hit.mSubShapeID2, ray.GetPointOnRay(hit.mFraction));
+                writeVec(outNormal, fromJoltUnit(n));
+            }
         } else {
-            writeVec(outNormal, Vec3(0, 0, 1));
+            if (outEntity) *outEntity = 0;
+            if (outNormal) writeVec(outNormal, Vec3(0, 0, 1));
         }
     }
     return handle;
