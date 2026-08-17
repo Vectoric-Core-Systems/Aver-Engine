@@ -1,0 +1,30 @@
+OCWORLD 1
+NAME Range
+# A high-afternoon sun (matches the values ProjectScaffold.cpp's own blank-project starter level
+# uses, so a project built from THIS template opens to the same sky a blank one does -- no surprise
+# retune to explain).
+SUN elev 59.5 azim 53.2 color 1 0.98 0.92 lux 100000
+SKY model physical
+FOG exp density 0.00002 color 0.7 0.78 0.88
+
+# Ground: a big flat slab. A plain PLACE/PLACEG defaults collide=true (modules/formats/include/aver/
+# formats/OcWorld.hpp), so this is a real static body -- something to stand on, not a floating camera.
+PLACEG Meshes/cube.ocmesh 0 0 -10 0 0 0 4000 4000 10 M_Floor
+
+# Two crates -- scene dressing, not required by any graph. Built-in cube + a named surface, same as
+# the floor: this template is kilobytes of text, not megabytes of imported art, and these two lines
+# are the whole of its "set dressing." Move them, delete them, or add more; nothing depends on them.
+PLACE Meshes/cube.ocmesh 250 -150 60 0 0 0 60 M_Crate
+PLACE Meshes/cube.ocmesh -250 -150 60 0 0 0 60 M_Crate
+
+# The game mode. A graph class is a class like any other -- placed, not registered by some separate
+# mechanism. See AN_FPRules.ocgraph's own comment for why you will see TWO of these tick in a
+# headless log despite the single PLACE line here.
+PLACE none 0 0 0 0 0 0 1 class AN_FPRules
+
+# The player. Parented to Character, so this placement gets a real capsule and view -- and, because
+# AN_FPCharacter.ocgraph's own CLASS line carries `view=firstperson`, a first-person camera rather
+# than AverCharacter's own third-person default. It spawns its own two targets from here at OnStart
+# (see AN_FPCharacter.ocgraph) -- neither target is placed directly in this map, because spawning is
+# the only way the character's own graph ever learns a target's entity id.
+PLACE none 0 0 100 0 0 0 1 class AN_FPCharacter

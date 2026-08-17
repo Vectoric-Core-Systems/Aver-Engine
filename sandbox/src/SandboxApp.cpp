@@ -12042,6 +12042,29 @@ Application* createApplication(int argc, char** argv) {
             AVER_ERROR("[Sandbox] could not scaffold '{}': {}", nm, why);
             std::exit(1);
         }
+        // --new-project-template <location> <name> <templateId> scaffolds a project from a shipped
+        // template and exits, touching no device -- the exact --new-project precedent just above,
+        // for the branch the New Project modal's template picker calls. Needs no window or device
+        // because listTemplates()/scaffoldProjectFromTemplate() are pure filesystem, same as
+        // scaffoldProject() itself.
+        else if (!std::strcmp(argv[i],"--new-project-template") && i+3<argc) {
+            const std::string loc = argv[++i], nm = argv[++i], tmplId = argv[++i];
+            const std::vector<editor::TemplateInfo> tmpls = editor::listTemplates();
+            const editor::TemplateInfo* found = nullptr;
+            for (const editor::TemplateInfo& t : tmpls) if (t.id == tmplId) { found = &t; break; }
+            if (!found) {
+                AVER_ERROR("[Sandbox] no template named '{}' ({} found)", tmplId, tmpls.size());
+                std::exit(1);
+            }
+            fmt::ProjectDesc made;
+            std::string why;
+            if (editor::scaffoldProjectFromTemplate(loc, nm, *found, made, &why)) {
+                AVER_INFO("[Sandbox] scaffolded '{}' from template '{}' at {}", nm, tmplId, made.dir);
+                std::exit(0);
+            }
+            AVER_ERROR("[Sandbox] could not scaffold '{}' from template '{}': {}", nm, tmplId, why);
+            std::exit(1);
+        }
         // --upgrade-project <path.ocproject> applies what the prompt would apply, and exits.
         else if (!std::strcmp(argv[i],"--upgrade-project") && i+1<argc) {
             const std::string manifest = argv[++i];

@@ -289,15 +289,16 @@ The manifest names `STARTMAP Maps/Default.ocmap` and **no map file is written**,
 
 ## Driving it from the command line
 
-Flags on `Sandbox.exe`, alongside `--frames`, `--screenshot`, `--probe` and the rest. The three below exist for one reason: each names a path whose only proof was that somebody had clicked it once.
+Flags on `Sandbox.exe`, alongside `--frames`, `--screenshot`, `--probe` and the rest. The four below exist for one reason: each names a path whose only proof was that somebody had clicked it once.
 
 | Flag | What it does |
 |---|---|
 | `--ui-demo` | turns on `View → Game UI Demo` — the hand-written `Aver.UI` draw list, submitted through the C seam and drawn onto the backbuffer by `Aver.Render.UI`. Animated, so a stale vertex buffer cannot look identical to a live one |
-| `--new-project <location> <name>` | scaffolds a project and exits, touching no device. Creation was reachable only from the browser's modal, so a generated `Scripts.csproj` that MSBuild refuses to load is exactly the kind of thing that ships silently — nobody creates a project on the day they change the generator |
+| `--new-project <location> <name>` | scaffolds a Blank project and exits, touching no device. Creation was reachable only from the browser's modal, so a generated `Scripts.csproj` that MSBuild refuses to load is exactly the kind of thing that ships silently — nobody creates a project on the day they change the generator |
+| `--new-project-template <location> <name> <templateId>` | the same, from one of the shipped `templates\` directories (see the New Project modal's template picker) instead of Blank. `templateId` is the template's folder name, e.g. `FirstPerson`. Exits 1 with a clear message if no template by that id is found — the same discovery `listTemplates()` does for the modal, so this is what a test drives instead of clicking a card |
 | `--upgrade-project <path.ocproject>` | applies what the prompt would apply, logs each fix, and exits. The prompt is how a person does this; a flag is the only way a test does, and the apply path edits somebody's build file |
 
-Both project flags are matched before every other argument and call `std::exit`; neither opens a window.
+All four project flags are matched before every other argument and call `std::exit`; none opens a window.
 
 ---
 

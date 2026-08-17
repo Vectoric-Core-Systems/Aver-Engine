@@ -1,0 +1,201 @@
+OCGRAPH 1
+# THE PLAYER. Same move/look shape as test-content/AN_Playable's own Player.ocgraph -- read that
+# file first if you have not; this one only comments on what it does DIFFERENTLY, and leans on that
+# file's own comments for everything it does the same way (MoveAxis/MouseDelta's exec-caching, why
+# CharacterMove is one coarse node rather than a kit of primitives, and so on).
+#
+# `view=firstperson` ON THE CLASS LINE is new in THIS template, and worth understanding before you
+# copy this pattern elsewhere: `AverCharacter.CameraViewMode` is a plain C# field, defaulted to
+# ThirdPerson (Aver.Framework/Character.cs), and until this template existed there was no scene
+# field, no node, and no other CLASS attribute that ever touched it -- a graph-declared `CLASS ...
+# Character` ran in third person, unconditionally, no matter what the graph did. A template CALLED
+# "First Person" that actually ran in third person would be a contradiction, so this template added
+# the smallest fix that fit the shape `mesh=`/`material=` already established: one more CLASS-line
+# attribute, applied once per spawned instance in HostBridge.cs's DispBind. See
+# docs/VISUAL_SCRIPTING.md's CLASS-record section for the full story if you want it.
+# NAME takes exactly one token (OcGraphParser.cs's own NAME record is `tokens[1]`, not "rest of
+# line" the way DESCRIPTION is) -- a two-word name here would silently truncate to its first word
+# with no error, which is a worse trap than a plain single word.
+NAME FPCharacter
+DESCRIPTION The player: polled move/look into CharacterMove, first-person by the CLASS line's own view= attribute.
+
+CLASS AN_FPCharacter Character view=firstperson
+
+PARAM entity int
+PARAM deltaTime float
+
+NODE ent Param param=entity
+NODE dt Param param=deltaTime
+
+# Look sensitivity, degrees per unit of mouse delta -- same value, same reasoning, as AN_Playable's
+# own look_scale.
+NODE look_scale ConstFloat
+PIN look_scale value out float 0.15
+
+ENTRY tick OnTick
+NODE tick OnTick
+
+# ---- read input, then drive, in ONE exec chain (see AN_Playable/Player.ocgraph for why this has to
+# be one chain rather than three separate pulls: MoveAxis/MouseDelta cache their native read to the
+# exec VISIT, not the pull) --------------------------------------------------------------------------
+NODE move MoveAxis
+NODE mouse MouseDelta
+LINK tick.exec move.exec
+LINK move.then mouse.exec
+
+NODE yaw Multiply
+LINK mouse.deltaX yaw.a
+LINK look_scale.value yaw.b
+NODE pitch Multiply
+LINK mouse.deltaY pitch.a
+LINK look_scale.value pitch.b
+
+NODE drive CharacterMove
+LINK mouse.then drive.exec
+LINK ent.value drive.entity
+LINK dt.value drive.dt
+LINK move.forward drive.forward
+LINK move.right drive.right
+LINK yaw.result drive.yawDelta
+LINK pitch.result drive.pitchDelta
+
+# ---- two targets, spawned and remembered ----------------------------------------------------------
+# Spawn-and-remember is still the ONLY way one graph learns another entity's id (Raycast's own
+# `entity` output is a physics BODY handle, and there is still no body-to-entity map anywhere in the
+# engine -- confirmed true as of this template, same as AN_Playable's own Player.ocgraph found).
+# THAT is why this template does not aim with Raycast: there would be no way to turn a successful hit
+# test into a target id to FireEvent at. Proximity substitutes for aim instead -- see the range check
+# below -- and that substitution, not a raycast, is this template's whole "shooting" mechanic. Two
+# targets, not one, so a hit on one PROVABLY does not touch the other's count (see AN_FPTarget.ocgraph
+# for what "count" means and why it is this template's score).
+VAR targetA int 0
+VAR targetB int 0
+
+ENTRY seed OnStart
+NODE seed OnStart
+
+# Target A: close enough to the player's own placement (see Content/Maps/Default.ocmap) to be
+# IN RANGE from the moment it spawns -- see the range check below for why that matters. A headless
+# capture run never presses a key or moves a mouse ("[Game] headless: no window, no input" is a real,
+# literal log line, not a figure of speech), so the ONLY way this template's score is provable without
+# a human playing it is a condition that is already true at OnStart. This is deliberate design, not
+# an accident of where the numbers happened to land.
+NODE ax ConstFloat
+PIN ax value out float 150.0
+NODE ay ConstFloat
+PIN ay value out float 60.0
+NODE az ConstFloat
+PIN az value out float 60.0
+NODE spawnA Spawn class=AN_FPTarget
+LINK seed.exec spawnA.exec
+LINK ax.value spawnA.x
+LINK ay.value spawnA.y
+LINK az.value spawnA.z
+NODE rememberA SetVar var=targetA
+LINK spawnA.then rememberA.exec
+LINK spawnA.entity rememberA.value
+
+# Target B: far enough away to stay OUT of range for the whole run -- the deliberate control, the
+# same role AN_Playable's own map-placed (never-spawned-at, never-hit) targets play for IT. If only
+# target A's count ever moves and target B's count never does, that is the independent-per-instance
+# VAR storage actually working, not a coincidence.
+NODE bx ConstFloat
+PIN bx value out float -150.0
+NODE by ConstFloat
+PIN by value out float 250.0
+NODE bz ConstFloat
+PIN bz value out float 60.0
+NODE spawnB Spawn class=AN_FPTarget
+LINK rememberA.then spawnB.exec
+LINK bx.value spawnB.x
+LINK by.value spawnB.y
+LINK bz.value spawnB.z
+NODE rememberB SetVar var=targetB
+LINK spawnB.then rememberB.exec
+LINK spawnB.entity rememberB.value
+
+# ---- the range check, once per target --------------------------------------------------------------
+# PLANAR (x, y) distance only -- z is left out on purpose. A first-person character's own z bobs with
+# capsule/ground contact in a way that has nothing to do with whether you have walked up to a target,
+# so folding z into the test would make "in range" flicker with the ground rather than track where
+# you are actually standing.
+#
+# Compare is STRICT `a > b` and nothing else (no `<`, no `<=` -- see docs/AVER_NODE_NODES.md's Logic
+# section) so "in range" is written as `rangeSq > distSq`, not `distSq < rangeSq`: same comparison,
+# operands swapped to fit the one operator this vocabulary has.
+NODE rangeSq ConstFloat
+PIN rangeSq value out float 48400.0
+
+NODE selfPos GetFieldVec3 field=CLocal.position
+LINK ent.value selfPos.entity
+
+# An exec output pin drives at most ONE link -- GraphCompiler.FindExecTarget refuses a second one by
+# name, on purpose, rather than silently only honouring the first ("an exec output can only continue
+# to ONE place, unlike a data output pin"). Sequence is the fan-out primitive for exactly this: two
+# independent range checks off the one place in the tick chain that both need to start from.
+NODE fan Sequence
+LINK drive.then fan.exec
+
+# -- target A --
+NODE varA GetVar var=targetA
+NODE posA GetFieldVec3 field=CLocal.position
+LINK varA.value posA.entity
+NODE dxA Subtract
+LINK posA.x dxA.a
+LINK selfPos.x dxA.b
+NODE dyA Subtract
+LINK posA.y dyA.a
+LINK selfPos.y dyA.b
+NODE dx2A Multiply
+LINK dxA.result dx2A.a
+LINK dxA.result dx2A.b
+NODE dy2A Multiply
+LINK dyA.result dy2A.a
+LINK dyA.result dy2A.b
+NODE distA Add
+LINK dx2A.result distA.a
+LINK dy2A.result distA.b
+NODE inRangeA Compare
+LINK rangeSq.value inRangeA.a
+LINK distA.result inRangeA.b
+NODE branchA Branch
+LINK fan.then0 branchA.exec
+LINK inRangeA.result branchA.cond
+NODE hitA FireEvent event=OnHit
+LINK branchA.true hitA.exec
+LINK varA.value hitA.target
+
+# -- target B (identical shape, its own entity id, its own distance) --
+NODE varB GetVar var=targetB
+NODE posB GetFieldVec3 field=CLocal.position
+LINK varB.value posB.entity
+NODE dxB Subtract
+LINK posB.x dxB.a
+LINK selfPos.x dxB.b
+NODE dyB Subtract
+LINK posB.y dyB.a
+LINK selfPos.y dyB.b
+NODE dx2B Multiply
+LINK dxB.result dx2B.a
+LINK dxB.result dx2B.b
+NODE dy2B Multiply
+LINK dyB.result dy2B.a
+LINK dyB.result dy2B.b
+NODE distB Add
+LINK dx2B.result distB.a
+LINK dy2B.result distB.b
+NODE inRangeB Compare
+LINK rangeSq.value inRangeB.a
+LINK distB.result inRangeB.b
+NODE branchB Branch
+LINK fan.then1 branchB.exec
+LINK inRangeB.result branchB.cond
+NODE hitB FireEvent event=OnHit
+LINK branchB.true hitB.exec
+LINK varB.value hitB.target
+
+# NO OUT RECORDS -- the same reason AN_Playable's own Player.ocgraph gives, unchanged: OUT is a
+# GRAPH-WIDE list, so a second ENTRY's compiled delegate would try to pull it too, and CharacterMove
+# (like Spawn, like SetVar) is a side-effecting node that is refused when pulled as data outside its
+# own exec chain. This graph has TWO entries (seed, tick); adding an OUT here would break both the
+# same way adding one to Player.ocgraph would.

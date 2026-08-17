@@ -20,6 +20,8 @@ static class GraphClassRecordTests
         failures += TestClassRecordDefaultsParentToActor();
         failures += TestClassRecordWithExplicitParent();
         failures += TestClassRecordWithMeshAndMaterial();
+        failures += TestClassRecordWithView();
+        failures += TestClassRecordWithoutViewLeavesClassViewNull();
         failures += TestGraphWithNoClassRecordHasNullClassName();
         failures += TestDuplicateClassRecordIsRejected();
         failures += TestClassRecordWithNoNameIsRejected();
@@ -100,6 +102,68 @@ static class GraphClassRecordTests
                 return 1;
             }
             Console.WriteLine("  PASS: mesh and material both parsed");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: threw {ex}");
+            return 1;
+        }
+    }
+
+    // view= is what the First Person template (templates/FirstPerson) added: the CLASS record's only
+    // attribute that targets one specific ancestor type (AverCharacter) rather than every actor alike
+    // -- see Graph.cs's ClassView doc comment for why it exists at all. Parse-level only, same
+    // limitation this whole file's header comment already states: HostBridge's DispBind (the code
+    // that actually reads ginfo.View and sets CameraViewMode) needs a live native+managed bridge this
+    // process does not have.
+    private static int TestClassRecordWithView()
+    {
+        Console.WriteLine("Test: CLASS view=firstperson parses independently of mesh=/material=/parent");
+        try
+        {
+            var text = "OCGRAPH 1\nCLASS AN_Hero Character mesh=Meshes/x.ocmesh view=firstperson\n" +
+                       "NODE seed OnStart\n";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            bool ok = graph.ClassParent == "Character" && graph.ClassMesh == "Meshes/x.ocmesh" &&
+                      graph.ClassView == "firstperson";
+            if (!ok)
+            {
+                Console.WriteLine($"  FAIL: ClassParent='{graph.ClassParent}' ClassMesh='{graph.ClassMesh}' " +
+                                   $"ClassView='{graph.ClassView}'");
+                return 1;
+            }
+            Console.WriteLine("  PASS: view= parsed alongside mesh= and an explicit parent");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: threw {ex}");
+            return 1;
+        }
+    }
+
+    private static int TestClassRecordWithoutViewLeavesClassViewNull()
+    {
+        Console.WriteLine("Test: a CLASS record with no view= leaves ClassView null (the overwhelmingly common case)");
+        try
+        {
+            var text = "OCGRAPH 1\nCLASS AN_Guard Pawn\nNODE seed OnStart\n";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            if (graph.ClassView != null)
+            {
+                Console.WriteLine($"  FAIL: ClassView='{graph.ClassView}' (expected null)");
+                return 1;
+            }
+            Console.WriteLine("  PASS: ClassView stayed null");
             return 0;
         }
         catch (Exception ex)

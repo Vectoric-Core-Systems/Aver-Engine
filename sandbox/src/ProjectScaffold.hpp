@@ -22,6 +22,41 @@ bool writeNewFile(const std::string& path, const std::string& text, std::string*
 bool scaffoldProject(const std::string& location, const std::string& name,
                      fmt::ProjectDesc& out, std::string* err);
 
+// ---------------------------------------------------------------- New Project templates
+
+// One template a New Project can be created from: a display name and description for the picker,
+// an optional preview image, and the start map the scaffolded project's manifest should name.
+struct TemplateInfo {
+    std::string dir;          // absolute path of templates/<id> (or wherever the caller rooted it)
+    std::string id;           // the folder name, e.g. "FirstPerson" -- the manifest carries no id
+    std::string name;         // NAME -- display text in the picker
+    std::string description;  // DESCRIPTION -- one line, rest-of-line free text
+    std::string previewPath;  // absolute path to the preview image, or empty (picker draws a fallback)
+    std::string startMap;     // STARTMAP, defaulted to "Maps/Default.ocmap" when the manifest omits it
+};
+
+// Every valid template found as an immediate subdirectory of `root`: `<sub>\<sub>.octemplate` must
+// exist and parse. A subdirectory without one, or whose manifest fails to parse, is skipped and
+// logged rather than failing the whole scan -- a missing, empty or entirely-malformed root all
+// report zero templates the same way, which is what lets New Project fall back to "blank only"
+// instead of erroring. Exposed separately from listTemplates() so a test can hand it a synthetic
+// root rather than depending on the real shipped layout.
+std::vector<TemplateInfo> listTemplatesIn(const std::string& root);
+
+// listTemplatesIn(), rooted at the templates\ directory found by walking up from the running
+// executable -- the same walk engineProjectReference() (see the .cpp) already uses to find
+// scripting\csharp, so a shipped editor finds templates\ the identical way it finds its C# sources.
+std::vector<TemplateInfo> listTemplates();
+
+// Creates `<location>\<name>\` by copying `tmpl`'s Content tree verbatim and writing a FRESH
+// manifest that names the project. Refuses an existing folder, exactly like scaffoldProject().
+//
+// NOTHING INSIDE THE COPIED TREE IS REWRITTEN: a graph's CLASS name, a level's own NAME, an asset's
+// filename are the template's design, not the project's name -- the only thing genuinely name-bearing
+// is the manifest this function writes fresh, from `name`. See the .cpp for the full reasoning.
+bool scaffoldProjectFromTemplate(const std::string& location, const std::string& name,
+                                 const TemplateInfo& tmpl, fmt::ProjectDesc& out, std::string* err);
+
 // What a generated `.cs` derives, which decides the hooks the engine calls.
 enum class CsKind {
     Behaviour,         // : AverBehaviour  — OnStart/OnUpdate/OnShutdown, runs today

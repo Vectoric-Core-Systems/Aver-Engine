@@ -1,0 +1,45 @@
+OCGRAPH 1
+# THE GAME MODE, as a graph -- identical shape to test-content/AN_Playable's own Rules.ocgraph, kept
+# deliberately unchanged: a round clock in a VAR is already a complete demonstration of "a game mode
+# as a graph, so the play session starts" and there is nothing FirstPerson-specific to add to it. See
+# Rules.ocgraph's own comments for the class-flags history (why `CLASS ... GameMode` genuinely begins
+# play today, and did not always) and for what a graph GameMode still cannot do (name a default
+# pawn/controller -- this template's player is PLACED, same as AN_Playable's).
+#
+# ONE THING WORTH KNOWING BEFORE YOU READ A HEADLESS LOG OF THIS PROJECT: you will see TWO 'FPRules'
+# entities ticking, not one, even though Content/Maps/Default.ocmap places exactly one. That is not
+# this graph misbehaving -- `aver_fw_begin_play` (modules/framework/src/FrameworkAbi.cpp) spawns a
+# FRESH instance of whatever class carries the GameMode flag the moment play begins, unconditionally,
+# with no awareness that the level's own PLACE line already put one down. Both instances tick off the
+# same per-frame deltaTime, so their `elapsed` values track each other exactly -- confirmed against a
+# real headless run of AN_Playable, which places `class AN_Rules` the same way and shows the identical
+# doubling. Harmless (neither instance's state leaks into the other's), but worth naming rather than
+# leaving you to wonder if you miscounted your own placements.
+# NAME is a single token (see AN_FPCharacter.ocgraph's own comment on this record).
+NAME FPRules
+DESCRIPTION The game mode, as a graph. Starts the play session and keeps a round clock in a VAR.
+
+CLASS AN_FPRules GameMode
+
+PARAM deltaTime float
+
+VAR elapsed float 0
+
+NODE dt Param param=deltaTime
+
+ENTRY tick OnTick
+NODE tick OnTick
+
+NODE prev GetVar var=elapsed
+NODE sum Add
+LINK prev.value sum.a
+LINK dt.value sum.b
+
+NODE store SetVar var=elapsed
+LINK tick.exec store.exec
+LINK sum.result store.value
+
+# Read back through its own node after the write, for the reason Target.ocgraph's (and this
+# template's own AN_FPTarget.ocgraph's) comments give.
+NODE report GetVar var=elapsed
+OUT report value

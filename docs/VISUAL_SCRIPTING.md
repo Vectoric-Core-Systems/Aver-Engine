@@ -52,7 +52,8 @@ A top-level record turns a plain graph into a spawnable actor class:
 CLASS AN_Orbiter Actor
 ```
 
-`CLASS <name> [parentName] [mesh=<path>] [material=<name>]` (`OcGraphParser.cs:210-266`). This is
+`CLASS <name> [parentName] [mesh=<path>] [material=<name>] [view=firstperson|thirdperson]`
+(`OcGraphParser.cs:210-270`). This is
 the Blueprint model, not a component that references a graph: **the graph file is the class
 asset.** `Aver.Scripting.Bridge`'s `HostBridge` reads it and registers it through the *exact same*
 `aver_fw_class_declare` / `aver_fw_class_set_flags(Managed)` / `aver_fw_class_seal` sequence a C#
@@ -72,6 +73,13 @@ A few things worth knowing before you rely on this:
   `SetMesh`/`SetMaterial` *node*'s own `mesh=`/`material=` attribute, which is a per-invocation
   write. The class default is what a spawned instance looks like before its own `OnStart` has run
   even once; a node's write is what happens after.
+- **`view=firstperson`/`view=thirdperson` on the `CLASS` line sets the camera default for a
+  `Character`-parented class**, applied once per spawned instance (`HostBridge.cs`'s `DispBind`,
+  the ancestor-construction branch) to `AverCharacter.CameraViewMode` — a plain C# field with no
+  scene-field or node path to it otherwise, so before this existed a graph-declared character could
+  not ask for a first-person camera at all; it always ran in `CameraViewMode`'s own default,
+  `ThirdPerson`. Meaningless (and silently ignored, not an error) on a class whose native ancestor
+  isn't `AverCharacter` — the same tolerance an unrecognised `CLASS`-line attribute already gets.
 - **Every spawned instance gets its own, freshly loaded `GraphHost`.** Binding a class instance
   (`DispBind`, `HostBridge.cs:988-1010`) parses and compiles the `.ocgraph` file again from disk,
   per spawn — it is not a shared compiled graph reused across instances. That cost buys the thing
@@ -331,14 +339,16 @@ running. It is also new, and smaller than what it resembles. Specifically:
   `GraphHost`, created fresh at `Load()` time and seeded from each `VAR`'s declared default —
   reloading the graph (hot-reload included), respawning the instance, or restarting the process
   all reset every `VAR` to its default. There is no persistence layer underneath it.
-- **A graph class needs an already-declared parent, and for a character that still means one
-  trivial C# class.** `CLASS Foo` alone parents to the bootstrap `Actor` base for free — but the
-  `CharacterMove` node only succeeds against an entity that is (or descends from) `AverCharacter`,
-  an *abstract* C# type nothing in this vocabulary can construct on its own. A project that wants a
-  graph-driven character still needs one minimal, concrete C# class deriving from `AverCharacter`
-  for the graph's `CLASS` line to name as its parent — see `Aver.Framework.SampleActor`'s
-  `DemoPawn : AverCharacter` (`[AverClass("AN_Pawn")]`) for how small that class can be. Graph
-  authoring removes the *gameplay* logic from C#, not the one-time class-registration boilerplate.
+- **A graph class needs an already-declared parent, but for a character that no longer means any
+  C# at all.** `CLASS Foo` alone parents to the bootstrap `Actor` base for free, and `CLASS Foo
+  Character` now parents directly to the framework's own concrete `AverCharacter` registry row —
+  `Character` stopped being an abstract type nothing could construct the moment it became a
+  *concrete*, spawnable class (see `Aver.Framework.Character.cs`'s own class comment for why it is
+  concrete rather than an abstract anchor like `Actor`/`Pawn`/`GameMode`). `CharacterMove` succeeds
+  against any such instance with no project C# involved — `test-content/AN_Playable`'s
+  `CLASS AN_Player Character` is exactly this, proven by a headless run. (This paragraph used to say
+  a project still needed one minimal C# subclass for the graph's `CLASS` line to name; that stopped
+  being true once `Character` itself became declarable, and this doc had not caught up.)
 - **The editor's Save does not round-trip a class placement.** `saveLevel()` rebuilds every
   `PLACE` line it writes by walking only the raw mesh/physics entities the ordinary placement path
   creates — and a class placement, by design (§6, step 2), never gets one of those. Opening a

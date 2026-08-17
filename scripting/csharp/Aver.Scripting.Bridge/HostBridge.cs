@@ -92,6 +92,12 @@ public static class HostBridge
         public required string Path;
         public required string Name;
         public required bool Ticks;
+
+        // Raw text of the CLASS record's `view=` attribute (see Graph.ClassView), or null when the
+        // record omitted it. Applied in DispBind, once per spawned instance, to the ancestor's
+        // CameraViewMode -- meaningless (and simply unused) when this class's native ancestor is not
+        // AverCharacter.
+        public string? View;
     }
 
     // Walks the NATIVE parent chain from `className` (via aver_fw_class_parent, not this graph's OWN
@@ -581,7 +587,7 @@ public static class HostBridge
                          + $"'{prior.Path}' is superseded by '{path}'. Only the latter will run -- "
                          + "rename one of them.");
                 s_graphClasses[classKey] =
-                    new GraphClassInfo { Path = path, Name = graph.ClassName, Ticks = ticks };
+                    new GraphClassInfo { Path = path, Name = graph.ClassName, Ticks = ticks, View = graph.ClassView };
                 ++declared;
                 Emit((int)Log.Level.Info,
                      $"[Graph] declared class '{graph.ClassName}' (parent '{parent}'{(ticks ? ", ticks" : "")}) from '{path}'");
@@ -1090,6 +1096,24 @@ public static class HostBridge
                 {
                     var ancestor = (AverActor)Activator.CreateInstance(ancestorType)!;
                     ancestor.Self = new Entity(entity);
+
+                    // view= is the ONLY CLASS attribute that targets a specific ancestor type rather
+                    // than every actor alike (mesh=/material= apply to any class's entity via the
+                    // native component ABI; this one sets a plain C# field that only AverCharacter
+                    // declares). A graph parented to something other than Character simply has no field
+                    // to set here -- `ancestor is AverCharacter` is that check, not an error path.
+                    if (!string.IsNullOrEmpty(ginfo.View) && ancestor is AverCharacter character)
+                    {
+                        if (string.Equals(ginfo.View, "firstperson", StringComparison.OrdinalIgnoreCase))
+                            character.CameraViewMode = CameraView.FirstPerson;
+                        else if (string.Equals(ginfo.View, "thirdperson", StringComparison.OrdinalIgnoreCase))
+                            character.CameraViewMode = CameraView.ThirdPerson;
+                        else
+                            Emit((int)Log.Level.Warn,
+                                 $"[Graph] class '{ginfo.Name}': view='{ginfo.View}' is neither "
+                                 + "'firstperson' nor 'thirdperson' -- camera stays at its C# default");
+                    }
+
                     s_actorsByEntity[entity] = new ActorLive
                     {
                         Instance = ancestor,

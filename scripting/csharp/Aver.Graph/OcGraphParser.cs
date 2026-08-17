@@ -209,7 +209,7 @@ public class OcGraphParser
             }
             else if (key.Equals("CLASS", StringComparison.OrdinalIgnoreCase))
             {
-                // CLASS <name> [parentName] [mesh=<path>] [material=<name>]
+                // CLASS <name> [parentName] [mesh=<path>] [material=<name>] [view=firstperson|thirdperson]
                 //
                 // Declares that THIS GRAPH FILE IS A SPAWNABLE ACTOR CLASS -- the Aver Node analogue
                 // of a Blueprint asset carrying a parent class, not a component that references a
@@ -237,6 +237,7 @@ public class OcGraphParser
                 string classParent = "Actor";
                 string? classMesh = null;
                 string? classMaterial = null;
+                string? classView = null;
                 for (int i = 2; i < tokens.Count; i++)
                 {
                     var token = tokens[i];
@@ -246,6 +247,10 @@ public class OcGraphParser
                         if (parts.Length != 2) continue;
                         if (parts[0] == "mesh") classMesh = parts[1];
                         else if (parts[0] == "material") classMaterial = parts[1];
+                        // firstperson/thirdperson -- see Graph.ClassView's own doc comment for why
+                        // this exists and who consumes it (HostBridge.DispBind, Character ancestors
+                        // only). Held as the raw string here, same as mesh/material; validated later.
+                        else if (parts[0] == "view") classView = parts[1];
                         // An unrecognised key=value attribute is ignored rather than failing the
                         // whole graph -- mirrors NODE's own key=value loop, just below.
                     }
@@ -263,6 +268,7 @@ public class OcGraphParser
                 graph.ClassParent = classParent;
                 graph.ClassMesh = classMesh;
                 graph.ClassMaterial = classMaterial;
+                graph.ClassView = classView;
             }
             else if (key.Equals("NODE", StringComparison.OrdinalIgnoreCase))
             {
