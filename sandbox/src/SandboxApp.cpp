@@ -4466,8 +4466,14 @@ private:
         // unactivated (see Engine::run) but should not have a top-most splash land in a screenshot.
         // browserActive_ is false by then, so a capture run reaches applyProject only via an
         // explicit project path, which is exactly the case to stay silent for.
+        // "\\splash.png", NOT "\splash.png" -- \s is not an escape MSVC knows, so it dropped the
+        // backslash (warning C4129) and this asked for "...binsplash.png", which has never existed.
+        // The loading screen has therefore been drawing with no image since it was written, falling
+        // back silently because a missing splash is not treated as an error. The identical mistake
+        // was in modules/runtime.game/src/GameApp.cpp's script-directory test, found in the same
+        // sweep; both had been reported by the compiler on every build and never read.
         LoadingScreen loading(e, e.window() != nullptr && maxFrames_ == 0,
-                              executableDir() + "\splash.png");
+                              executableDir() + "\\splash.png");
         loading.stage("Opening project");
 
         project_ = browser_.project();

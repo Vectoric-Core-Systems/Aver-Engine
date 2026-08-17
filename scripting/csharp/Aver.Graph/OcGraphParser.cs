@@ -291,19 +291,69 @@ public class OcGraphParser
                     // For any node, value= provides the constant output for Const nodes or constant data.
                     if (k == "value")
                     {
+                        // PARSED BY THE NODE'S DECLARED TYPE, not by the shape of the literal.
+                        //
+                        // This used to guess -- true/false, then int.TryParse, then float.TryParse --
+                        // and the guess silently produced the WRONG CLR TYPE for a value written the
+                        // wrong-looking way. Both compilers read a ConstFloat's constant with a strict
+                        // `is float f` and fall back to 0 when it does not match, with no warning, so:
+                        //
+                        //   NODE speed ConstFloat value=100    boxed an int, compiled to 0.0f
+                        //   NODE n     ConstInt   value=7.0    boxed a float, compiled to 0
+                        //   NODE b     ConstBool  value=1      boxed an int, compiled to false
+                        //
+                        // All three silently, in BOTH the PULL and PUSH compilers. A raycast direction,
+                        // a movement speed or a timer duration written without a decimal point simply
+                        // became zero and nothing said so.
+                        //
+                        // It survived because every sample and test in this tree writes float literals
+                        // with an explicit decimal point by convention, so int.TryParse never got the
+                        // chance to win. It was found twice independently -- once while building
+                        // acceptance evidence for graph variables, and once from a throwaway raycast
+                        // probe whose inputs all silently read zero.
+                        //
+                        // The `PIN <node> value out <type> <literal>` path a few hundred lines below
+                        // never had this problem: it branches on the pin's DECLARED type before
+                        // parsing. This is that same rule, applied where the type is equally well
+                        // known -- nodeType is right there.
                         object? constVal = null;
-                        if (v.Equals("true", StringComparison.OrdinalIgnoreCase))
-                            constVal = true;
-                        else if (v.Equals("false", StringComparison.OrdinalIgnoreCase))
-                            constVal = false;
-                        else if (int.TryParse(v, out var intVal))
-                            constVal = intVal;
-                        else if (float.TryParse(v, CultureInfo.InvariantCulture, out var f))
-                            constVal = f;
+                        var kind = nodeType.ToLowerInvariant();
+                        if (kind == "constbool" || kind == "const_bool")
+                        {
+                            if (bool.TryParse(v, out var b)) constVal = b;
+                        }
+                        else if (kind == "constint" || kind == "const_i32")
+                        {
+                            if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i32))
+                                constVal = i32;
+                        }
+                        else if (kind == "constfloat" || kind == "const_f32")
+                        {
+                            if (float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var f32))
+                                constVal = f32;
+                        }
+                        else
+                        {
+                            // A value= on any OTHER node type keeps the old shape-based inference. It
+                            // has no declared type to consult, and nothing in the vocabulary reads one
+                            // today -- narrowing it would be a guess in the other direction.
+                            if (v.Equals("true", StringComparison.OrdinalIgnoreCase)) constVal = true;
+                            else if (v.Equals("false", StringComparison.OrdinalIgnoreCase)) constVal = false;
+                            else if (int.TryParse(v, out var intVal)) constVal = intVal;
+                            else if (float.TryParse(v, CultureInfo.InvariantCulture, out var f)) constVal = f;
+                        }
 
                         if (constVal != null)
                         {
                             graph.ConstantOutputs.Add(new ConstantOutput { NodeId = nodeId, Value = constVal });
+                        }
+                        else
+                        {
+                            // A Const node whose literal does not parse AS ITS OWN TYPE is refused by
+                            // name rather than left to compile as zero. That silence was the whole bug.
+                            err = $"Node '{nodeId}' ({nodeType}) has value='{v}', which is not a valid "
+                                + "literal for that node's type";
+                            return false;
                         }
                     }
                     // param= names which declared PARAM a "param" node reads (see Node.ParamName).

@@ -288,7 +288,7 @@ PLACE none 400 0 0 0 0 0 1 class AN_Orbiter
 **Run it** — this is a real command against a real build, not a hypothetical:
 
 ```
-build/bin/AverGame.exe --headless --frames 5 --project test-content/GraphDemo/Game.ocproject
+build/bin/Sandbox.exe --headless --frames 5 --project test-content/GraphDemo/Game.ocproject
 ```
 
 The actual output (captured against this repository, trimmed to the relevant lines):

@@ -13,7 +13,78 @@ using Aver.Graph;
 
 class Program
 {
-    static int Main()
+    // THE LITERAL'S SHAPE MUST NOT DECIDE THE CONSTANT'S TYPE. `NODE x ConstFloat value=100` -- no
+// decimal point, which is a perfectly ordinary way to write an integer-valued float -- used to be
+// boxed as an int by the NODE-line value= parser, and both compilers read a ConstFloat's constant
+// with a strict `is float` and fell back to 0 with no warning. So it compiled to 0.0f, silently, in
+// BOTH paths. The mirrors were just as bad: ConstInt value=7.0 became 0, ConstBool value=1 became
+// false. It hid for so long because every sample in this tree writes float literals with a decimal
+// point by convention, so the ambiguity never arose in a test.
+//
+// Asserted through BOTH compilers on purpose: the two constant-reading sites are separate pieces of
+// code (EmitConstFloat and EmitPullOutput's "constfloat" case) and fixing one would not have fixed
+// the other.
+static int TestConstLiteralShapeDoesNotDecideType()
+{
+    int failures = 0;
+    Console.WriteLine("Test: an integer-looking ConstFloat literal keeps its authored value");
+
+    // PULL: a bare dataflow graph, no ENTRY, compiled by Compile().
+    {
+        const string text = "OCGRAPH 1\nNODE k ConstFloat value=100\nOUT k value\n";
+        if (!OcGraphParser.Parse(text, out var g, out var perr))
+        { Console.WriteLine($"  FAIL: parse: {perr}"); return 1; }
+        var fn = new GraphCompiler(g).Compile(out var cerr);
+        if (fn is null) { Console.WriteLine($"  FAIL: compile: {cerr}"); return 1; }
+        var got = fn.DynamicInvoke();
+        if (got is float f && Math.Abs(f - 100f) < 1e-6f)
+            Console.WriteLine("  PASS: PULL compiler reads value=100 as 100.0f, not 0");
+        else { Console.WriteLine($"  FAIL: PULL gave {got}, expected 100"); ++failures; }
+    }
+
+    // PUSH: the same constant pulled through an ENTRY-driven exec graph.
+    {
+        const string text = "OCGRAPH 1\nENTRY t OnTick\nNODE t OnTick\n"
+                          + "NODE k ConstFloat value=100\nOUT k value\n";
+        if (!OcGraphParser.Parse(text, out var g, out var perr))
+        { Console.WriteLine($"  FAIL: parse: {perr}"); return 1; }
+        var fn = new GraphCompiler(g).CompileEntryPoint("OnTick", out var cerr);
+        if (fn is null) { Console.WriteLine($"  FAIL: compile: {cerr}"); return 1; }
+        var got = fn.DynamicInvoke();
+        if (got is float f && Math.Abs(f - 100f) < 1e-6f)
+            Console.WriteLine("  PASS: PUSH compiler reads value=100 as 100.0f, not 0");
+        else { Console.WriteLine($"  FAIL: PUSH gave {got}, expected 100"); ++failures; }
+    }
+
+    // The mirrors, which were equally broken in the other direction.
+    {
+        const string text = "OCGRAPH 1\nNODE i ConstInt value=7\nNODE b ConstBool value=true\n"
+                          + "OUT i value\nOUT b value\n";
+        if (!OcGraphParser.Parse(text, out var g, out var perr))
+        { Console.WriteLine($"  FAIL: parse: {perr}"); return 1; }
+        var fn = new GraphCompiler(g).Compile(out var cerr);
+        if (fn is null) { Console.WriteLine($"  FAIL: compile: {cerr}"); return 1; }
+        var got = fn.DynamicInvoke() as object[];
+        if (got is not null && got.Length == 2 && got[0] is int i7 && i7 == 7 && got[1] is bool bt && bt)
+            Console.WriteLine("  PASS: ConstInt value=7 and ConstBool value=true survive");
+        else { Console.WriteLine("  FAIL: ConstInt/ConstBool did not survive"); ++failures; }
+    }
+
+    // A literal that is not valid FOR ITS OWN TYPE is now refused by name at parse, rather than
+    // compiling to zero. Silence was the bug; an error is the fix.
+    {
+        const string text = "OCGRAPH 1\nNODE k ConstInt value=notanumber\nOUT k value\n";
+        if (OcGraphParser.Parse(text, out _, out var perr))
+        { Console.WriteLine("  FAIL: a bad ConstInt literal parsed successfully"); ++failures; }
+        else if (perr is not null && perr.Contains("value="))
+            Console.WriteLine($"  PASS: refused by name: {perr}");
+        else { Console.WriteLine($"  FAIL: refused, but unhelpfully: {perr}"); ++failures; }
+    }
+
+    return failures;
+}
+
+static int Main()
     {
         int failures = 0;
 
@@ -58,6 +129,7 @@ class Program
         failures += GraphFlowTests.RunAll();
 
         // Select, InputKey, Raycast: the three node types this slice adds on top of the exec compiler.
+        failures += TestConstLiteralShapeDoesNotDecideType();
         failures += NewNodeTests.RunAll();
 
         // GetFieldVec3/SetFieldVec3: the Vec3 half of GetField/SetField's own FieldKindF32 gap.

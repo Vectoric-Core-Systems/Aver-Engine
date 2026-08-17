@@ -1144,7 +1144,17 @@ void GameApp::onInit(Engine& e) {
     // projects predating graphs rely on it and must not silently lose their scripts.
 #if AVER_MODULE_SCRIPTING
     const bool haveGraphs = !content_.pathsWithExtension(".ocgraph").empty();
-    const bool haveScriptAssembly = std::filesystem::exists(project_.binariesDir() + "\Scripts");
+    // "\\Scripts", NOT "\Scripts". MSVC does not recognise \S as an escape, drops the backslash with
+    // warning C4129, and leaves this testing for "...BinariesScripts" -- a path with no separator in
+    // it, which never exists. So haveScriptAssembly was effectively always false, and a project whose
+    // gameplay is compiled C# with no .ocgraph beside it silently skipped bootstrapping the script
+    // host entirely. Line 686 four hundred lines up builds the SAME path correctly; only this test
+    // was wrong, which is why nothing looked broken until someone shipped a graph-free project.
+    //
+    // The compiler said so on every single build. C4129 has been in this tree's warning output the
+    // whole time, unread, next to the C4127s and C4324s nobody triages -- which is the actual lesson
+    // here and worth more than the one character.
+    const bool haveScriptAssembly = std::filesystem::exists(project_.binariesDir() + "\\Scripts");
     if (haveGraphs || haveScriptAssembly) {
         initScripting();
         discoverProjectGraphs();
