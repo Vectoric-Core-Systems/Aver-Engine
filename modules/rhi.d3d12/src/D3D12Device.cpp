@@ -1914,6 +1914,18 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     if (!createPipeline()) return false;
     if (!createPostPipelines()) return false;
 
+    // DXR 1.1 acceleration structures need only caps_ and device_, both already valid here -- same
+    // as VulkanDevice::init(), which calls its own initAccelerationStructures() at this exact point
+    // (right after queryCaps()/createPostPipelines(), before any swapchain exists). This backend used
+    // to call it from createSwapchainResources() instead, gated on cmdList4_, which is itself only
+    // acquired once a swapchain's command list exists. That made "hardware ray tracing works" depend
+    // on "a window was created", so every --headless run silently carried device5_ == null regardless
+    // of what queryCaps() had just measured and logged: createBlas/createTlas would refuse with
+    // "without ray-tracing support" while the caps line above them claimed RT tier 11. Calling it
+    // unconditionally here, before createSwapchainResources ever runs, is what makes D3D12 match
+    // Vulkan's shape and makes device5_ available to a headless process the same as a windowed one.
+    initAccelerationStructures();
+
     rhiFactory_ = new D3D12ResourceFactory(this);
     if (!rhiFactory_->init()) { delete rhiFactory_; rhiFactory_ = nullptr; }
     else rhiContext_ = new D3D12RenderContext(this, rhiFactory_);
@@ -2454,7 +2466,10 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
     cmdList_.As(&cmdList4_);
     cmdList_.As(&cmdList6_);
     cmdList_->Close();
-    if (cmdList4_) initAccelerationStructures();
+    // initAccelerationStructures() already ran unconditionally from init() -- see the comment there.
+    // cmdList4_ itself is still acquired here: buildBlas/buildTlas record onto it, and that recording
+    // genuinely does need the swapchain's per-frame command list, which is a separate requirement
+    // from device5_'s existence.
     if (cmdList6_) initMeshShaders();
 
     D3D12_RESOURCE_DESC bbDesc = renderTargets_[0]->GetDesc();

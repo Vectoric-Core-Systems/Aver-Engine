@@ -46,6 +46,7 @@
 #include "aver/render/ui/UiRenderer.hpp"
 #include "aver/render/SkinSelfTest.hpp"
 #include "aver/pt/PtFurnaceTest.hpp"
+#include "aver/pt/PtSceneView.hpp"
 #include "SkinDrawTest.hpp"
 #include "SkinSceneTest.hpp"
 #include "ReflTest.hpp"
@@ -1583,6 +1584,53 @@ public:
             ptFurnace_ = std::make_unique<aver::pt::PtFurnaceTest>();
             if (ptFurnace_->init(*e.device())) e.device()->addRenderFeature(ptFurnace_.get());
             else { AVER_ERROR("[PT] furnace unavailable on this device"); ptFurnace_.reset(); }
+        }
+
+        // --pt-scene: the path tracer pointed at the REAL scene instead of the furnace's own private
+        // geometry -- a progressive, still-camera reference view that SUPPRESSES the raster scene
+        // while registered (see PtSceneView.hpp: it is only ever registered when this flag is passed,
+        // so an ordinary run costs nothing). It reads the same draw list and camera the raster path
+        // already produces (IRenderFeature::submitDraw / IDevice::camera()) and needs nothing else
+        // from this app to be wired up EXCEPT the material resolver below; everything about what it
+        // can and cannot render is documented on PtSceneView.hpp itself (sky-only lighting, static
+        // geometry only, flat albedo only).
+        if (ptSceneViewFlag_) {
+            ptSceneView_ = std::make_unique<aver::pt::PtSceneView>();
+
+            // THE HOST RESOLVES THE MATERIAL, because the host is the only thing that knows it bound
+            // one -- the same division applyLandscapeSurface() uses, and the reason Aver.Render.
+            // PathTracer can link Aver.RHI and Aver.Core alone. The tracer forwards the opaque
+            // binding it was handed; this decides what it is.
+            //
+            // ownsBindingSet() is the IDENTITY test, not a shape test: a block that merely happens to
+            // be sizeof(MaterialConstants) is not a material, and nothing in the RHI tags a binding
+            // with its type. The size is still checked, but as a corroborating assertion after
+            // identity has already been established, never as the test itself.
+            //
+            // AND THE FALLBACK SET MEANS "NOT AUTHORED". The scene loop calls setDrawBinding()
+            // unconditionally once the material system is ready, passing ms.bindingSet(authored) --
+            // with `authored` zero for any surface painted only through the legacy surfaceLooks_
+            // palette, which resolves to fallbackSet_ and a fallbackConstants_ whose baseColorFactor
+            // is {1,1,1,1}. Reading that would render every non-authored surface white and throw away
+            // the look's real colour, so those draws must fall through to the per-draw baseColor.
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+            ptSceneView_->setAlbedoResolver(
+                [this](aver::rhi::BindingSetHandle set, const void* constants, aver::u32 bytes,
+                       aver::f32 outAlbedo[3]) -> bool {
+                    if (!set || !constants || bytes != sizeof(pbr::MaterialConstants)) return false;
+                    pbr::MaterialSystem& ms = voxiRenderer_.materials();
+                    if (!ms.ready()) return false;
+                    if (set == ms.fallbackBindingSet()) return false;   // un-authored: keep the look's colour
+                    if (!ms.ownsBindingSet(set)) return false;          // not one of ours at all
+                    const auto* mc = static_cast<const pbr::MaterialConstants*>(constants);
+                    outAlbedo[0] = mc->baseColorFactor[0];
+                    outAlbedo[1] = mc->baseColorFactor[1];
+                    outAlbedo[2] = mc->baseColorFactor[2];
+                    return true;
+                });
+#endif
+            if (ptSceneView_->init(*e.device())) e.device()->addRenderFeature(ptSceneView_.get());
+            else { AVER_ERROR("[PT] scene view unavailable on this device"); ptSceneView_.reset(); }
         }
 
             tools_.setAutoCompileFlag(autoCompileFlag());
@@ -4021,6 +4069,10 @@ public:
             e.device()->removeRenderFeature(ptFurnace_.get());
             ptFurnace_.reset();
         }
+        if (ptSceneView_) {
+            e.device()->removeRenderFeature(ptSceneView_.get());
+            ptSceneView_.reset();
+        }
         if (skinDraw_) {
             e.device()->removeRenderFeature(skinDraw_.get());
             skinDraw_.reset();
@@ -4266,6 +4318,7 @@ public:
     // that is where the flag puts it -- the tracer reads the same averFurnaceL() every other
     // shading path does.
     void setPtFurnaceTest() { furnaceTest_ = true; ptFurnaceTest_ = true; }        // --pt-furnace
+    void setPtSceneView() { ptSceneViewFlag_ = true; }                             // --pt-scene
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
@@ -10241,6 +10294,8 @@ private:
     f32  sunAngle_ = -1.0f;       // --sun-angle: negative leaves the sky's own value alone
     bool ptFurnaceTest_ = false;  // --pt-furnace: the same question asked of the path tracer
     std::unique_ptr<aver::pt::PtFurnaceTest> ptFurnace_;
+    bool ptSceneViewFlag_ = false;   // --pt-scene: the path tracer pointed at the real scene
+    std::unique_ptr<aver::pt::PtSceneView> ptSceneView_;
     std::unique_ptr<aver::editor::ReflTest> refl_;
     int  reflBeaconIndex_ = -1;   // which objects_ entry the schedule shows and hides
     rhi::MeshHandle unitCubeMesh_ = 0;   // the editor's own unit cube, half-extent 1
@@ -12034,7 +12089,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string graphSelectNode; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; bool ptScene=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string graphSelectNode; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -12357,6 +12412,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--furnace-sun")) furnaceSun=true;
         else if (!std::strcmp(argv[i],"--sun-angle") && i+1<argc) sunAngle=(f32)std::atof(argv[++i]);
         else if (!std::strcmp(argv[i],"--pt-furnace")) ptFurnace=true;
+        else if (!std::strcmp(argv[i],"--pt-scene")) ptScene=true;
         else if (!std::strcmp(argv[i],"--skin-scene-test") && i+1<argc) skinSceneDir=argv[++i];
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
@@ -12575,6 +12631,7 @@ Application* createApplication(int argc, char** argv) {
     if (furnaceSun) app->setFurnaceSun();
     if (sunAngle > 0.0f) app->setSunAngle(sunAngle);
     if (ptFurnace) app->setPtFurnaceTest();
+    if (ptScene) app->setPtSceneView();
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
     return app;
 }

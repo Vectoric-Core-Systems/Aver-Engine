@@ -290,6 +290,26 @@ bool PathTracer::createTarget(u32 scene, u32 width, u32 height, PtTarget& out) {
     return true;
 }
 
+void PathTracer::resetScene() {
+    if (res_) {
+        if (verts_)       res_->destroyBuffer(verts_);
+        if (indices_)     res_->destroyBuffer(indices_);
+        if (instanceBuf_) res_->destroyBuffer(instanceBuf_);
+        // BLAS handles ARE released (destroyBlas exists and is real on every backend that builds
+        // one). TLAS handles are NOT -- see this method's own header comment for why that is a known,
+        // accepted leak for the intended caller and not something to work around here.
+        for (rhi::BlasHandle b : blas_) if (b) res_->destroyBlas(b);
+    }
+    verts_ = indices_ = instanceBuf_ = 0;
+    surfaces_.clear();
+    instances_.clear();
+    scenes_.clear();
+    blas_.clear();
+    totalVerts_ = totalIndices_ = 0;
+    prepared_ = false;
+    built_ = false;
+}
+
 void PathTracer::destroyTarget(PtTarget& t) {
     if (res_) {
         if (t.accum) res_->destroyBuffer(t.accum);
