@@ -2,6 +2,7 @@
 // The start screen: recent projects, New Project, Open Project. An ImGui screen inside the editor's
 // own window, not a launcher process.
 #include "aver/formats/OcProject.hpp"
+#include "ProjectScaffold.hpp"   // TemplateInfo -- the New Project modal's template picker
 
 #include <string>
 #include <vector>
@@ -85,6 +86,12 @@ private:
     char nameBuf_[96] = {};
     char locBuf_[512] = {};
     char pathBuf_[512] = {};
+
+    // ---- New Project templates ----
+    // Populated once in init(): the shipped templates directory cannot change during a running
+    // session, unlike the user's own projects folder, so this needs no rescan/dirty-flag machinery.
+    std::vector<TemplateInfo> templates_;
+    int newTemplateSel_ = -1;   // -1 = Blank Project (the default); else an index into templates_
 };
 
 } // namespace aver::editor

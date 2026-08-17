@@ -239,6 +239,25 @@ public class Graph
     public string? ClassMesh { get; set; }
     public string? ClassMaterial { get; set; }
 
+    // Optional first-/third-person camera default, from the CLASS record's `view=firstperson` /
+    // `view=thirdperson` attribute (case-insensitive; unrecognised text is warned about and ignored --
+    // see HostBridge.cs's DispBind, the only consumer). Null when the record omits it, which leaves
+    // AverCharacter.CameraViewMode at its own C# default (ThirdPerson).
+    //
+    // WHY THIS EXISTS: AverCharacter.CameraViewMode is a plain public C# field, set only by a project's
+    // own C# (Aver.Framework.SampleActor's PlayDemo, at the time this was added) -- there was no scene
+    // field, no CLASS attribute and no node anywhere that reached it, so a graph-declared `CLASS ...
+    // Character` had no way to ask for a first-person camera at all. That made a graph-only "first
+    // person" template a contradiction in terms: the character would run, but the camera would sit
+    // behind it regardless. `mesh=`/`material=` already prove a CLASS record can hand an actor-kind
+    // attribute down to its spawned instances without a node; `view=` is the same shape applied to the
+    // one C# field a Character-parented graph class had no other way to touch.
+    //
+    // Meaningless for a class whose native ancestor is not Character (or does not derive from it) --
+    // HostBridge silently ignores it there rather than failing the whole class over an attribute one
+    // ancestor happens not to use, the same tolerance an unrecognised NODE-line key=value already gets.
+    public string? ClassView { get; set; }
+
     /// Validates the graph for consistency. Returns false if invalid; sets err to a message.
     /// Note: Comparison is case-sensitive for node IDs. If nodes are added as "1" and referenced as "1",
     /// they must match exactly. The C# parser uses string representations of integer IDs, and the C++ writer

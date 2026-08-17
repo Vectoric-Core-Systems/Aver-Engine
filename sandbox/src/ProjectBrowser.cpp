@@ -110,6 +110,14 @@ void ProjectBrowser::init() {
     }
 
     setBuf(locBuf_, sizeof locBuf_, documentsDir() + "\\Aver Projects");
+
+    // Once per session: the shipped templates directory cannot change while the editor is running,
+    // unlike the projects folder (rescan() re-reads that one every time cardsDirty_ is set). A
+    // missing, empty or entirely-malformed templates\ all resolve to the same empty vector here --
+    // see listTemplates()'s own comment -- so New Project falls back to Blank-only with no error.
+    templates_ = listTemplates();
+    if (!templates_.empty())
+        AVER_INFO("[Editor] {} project template(s) found", templates_.size());
 }
 
 // Writes the recent project list to disk.
@@ -321,6 +329,7 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
     if (ImGui::Button("New Project...", wide)) {
         newError_.clear();
         setBuf(nameBuf_, sizeof nameBuf_, "");
+        newTemplateSel_ = -1;   // always reopens on Blank -- today's only choice stays the default
         openNewModal_ = true;
     }
     if (ImGui::Button("Open Project...", wide)) {
@@ -376,6 +385,49 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
         ImGui::Separator();
         ImGui::Spacing();
 
+        // ---- template picker: Blank Project, then one card per shipped template ----
+        // Cards, not a dropdown: with one template today and room for a handful more, seeing every
+        // option (and its description) at once is more useful than a name to pick blind from a list.
+        // Adding a second template is only ever a new templates\<Id>\ directory -- nothing here
+        // changes to grow the row.
+        ImGui::TextUnformatted("Template");
+        ImGui::Spacing();
+        {
+            const f32 cardW = 172.0f * dpi, cardH = 72.0f * dpi, gap = 10.0f * dpi;
+            const f32 avail = ImGui::GetContentRegionAvail().x;
+            f32 lineX = 0.0f;
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            auto card = [&](int sel, const std::string& title, const std::string& desc) {
+                if (lineX > 0.0f) {
+                    if (lineX + cardW <= avail) ImGui::SameLine(0, gap);
+                    else lineX = 0.0f;
+                }
+                ImGui::PushID(sel);
+                const bool selected = newTemplateSel_ == sel;
+                if (selected) ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.95f, 0.42f, 0.13f, 0.35f));
+                if (ImGui::Selectable("##tmplcard", selected, ImGuiSelectableFlags_None,
+                                      ImVec2(cardW, cardH)))
+                    newTemplateSel_ = sel;
+                if (selected) ImGui::PopStyleColor();
+                const ImVec2 rmin = ImGui::GetItemRectMin();
+                dl->AddText(ImVec2(rmin.x + 10.0f * dpi, rmin.y + 10.0f * dpi),
+                           ImGui::GetColorU32(ImGuiCol_Text), title.c_str());
+                dl->AddText(ImVec2(rmin.x + 10.0f * dpi, rmin.y + 32.0f * dpi),
+                           ImGui::GetColorU32(ImGuiCol_TextDisabled), desc.c_str());
+                ImGui::PopID();
+                lineX += cardW + gap;
+            };
+
+            card(-1, "Blank Project", "An empty project with a starter level.");
+            for (int i = 0; i < (int)templates_.size(); ++i)
+                card(i, templates_[i].name, templates_[i].description);
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
         ImGui::TextUnformatted("Name");
         ImGui::PushItemWidth(-1);
         ImGui::InputText("##newname", nameBuf_, sizeof nameBuf_);
@@ -413,7 +465,13 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
         if (ImGui::Button("Create Project", ImVec2(160.0f * dpi, 0))) {
             fmt::ProjectDesc created;
             newError_.clear();
-            if (scaffoldProject(locBuf_, nameBuf_, created, &newError_)) {
+            // Blank is UNCHANGED: this is the exact call it has always been, still the only branch
+            // reachable when newTemplateSel_ is left at its default of -1.
+            const bool ok = (newTemplateSel_ < 0)
+                ? scaffoldProject(locBuf_, nameBuf_, created, &newError_)
+                : scaffoldProjectFromTemplate(locBuf_, nameBuf_, templates_[newTemplateSel_],
+                                              created, &newError_);
+            if (ok) {
                 std::string err;
                 if (open(created.manifestPath, &err)) {
                     action = BrowserAction::Open;

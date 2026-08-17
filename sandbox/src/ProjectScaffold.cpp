@@ -3,6 +3,7 @@
 
 #include "ProjectScaffold.hpp"
 
+#include "aver/formats/detail/TextScan.hpp"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Version.hpp"
 #include "aver/core/Log.hpp"
@@ -52,6 +53,88 @@ std::string uiProjectReference(const std::string& scriptsDir) {
 // Reference path to Aver.Materials, the material authoring surface.
 std::string materialsProjectReference(const std::string& scriptsDir) {
     return engineProjectReference(scriptsDir, "scripting/csharp/Aver.Materials/Aver.Materials.csproj");
+}
+
+// ---------------------------------------------------------------- New Project templates
+
+// Parses one `<id>.octemplate` manifest. `dir` is the template's own folder (used to resolve PREVIEW
+// to an absolute path). Same OC dialect every other format here uses (`#` comments, `KEY value`, a
+// header line) -- TextScan.hpp's primitives, reused rather than reinvented, and the same line-walk
+// shape writeOcproject()'s own reader uses (modules/formats/src/OcProject.cpp).
+//
+// False (with `err` set) when the file cannot be read, has no TEMPLATE header, or has no NAME -- the
+// two things the picker cannot show a card without. Everything else is optional: DESCRIPTION defaults
+// to empty, PREVIEW to "no image" (the picker falls back to a drawn tile), and STARTMAP to
+// "Maps/Default.ocmap" so a template author does not have to restate the one path every project
+// already assumes.
+bool parseTemplateManifest(const std::string& manifestPath, const std::string& dir,
+                           TemplateInfo& out, std::string* err) {
+    using namespace fmt::detail;
+
+    std::string text;
+    if (!readFileText(manifestPath, text)) {
+        if (err) *err = "cannot read " + manifestPath;
+        return false;
+    }
+
+    bool sawHeader = false;
+    usize pos = 0;
+    while (pos < text.size()) {
+        usize nl = text.find('\n', pos);
+        const bool last = (nl == std::string::npos);
+        if (last) nl = text.size();
+        const std::string_view raw(text.data() + pos, nl - pos);
+        pos = nl + 1;
+
+        const std::string_view line = trim(truncateHash(raw));
+        const std::vector<std::string_view> t = splitWhitespace(line);
+        if (t.empty()) { if (last) break; continue; }
+
+        if (!sawHeader) {
+            if (!equalsCI(t[0], "TEMPLATE")) {
+                if (err) *err = manifestPath + ": expected a TEMPLATE header";
+                return false;
+            }
+            sawHeader = true;
+        } else if (equalsCI(t[0], "NAME")) {
+            out.name = std::string(trim(line.substr(t[0].size())));
+        } else if (equalsCI(t[0], "DESCRIPTION")) {
+            out.description = std::string(trim(line.substr(t[0].size())));
+        } else if (equalsCI(t[0], "PREVIEW") && t.size() >= 2) {
+            out.previewPath = (std::filesystem::path(dir) / std::string(t[1])).string();
+        } else if (equalsCI(t[0], "STARTMAP") && t.size() >= 2) {
+            out.startMap = std::string(t[1]);
+        }
+        if (last) break;
+    }
+
+    if (!sawHeader) { if (err) *err = manifestPath + ": expected a TEMPLATE header"; return false; }
+    if (out.name.empty()) { if (err) *err = manifestPath + ": missing NAME"; return false; }
+    if (out.startMap.empty()) out.startMap = "Maps/Default.ocmap";
+    return true;
+}
+
+// The engine's C# reference walk (engineProjectReference() above) stops at the FIRST directory that
+// matches its markers, because "cmake/AvModule.cmake exists AND modules/ is a directory" is specific
+// enough that a false positive is not a real risk. A bare directory named "templates" is a much
+// weaker signal -- nothing stops an unrelated ancestor from happening to have one -- so this keeps
+// climbing past a "templates" folder that exists but holds zero valid templates, rather than
+// stopping there and reporting none when a real templates\ sits one level further up. That is the
+// one deliberate divergence from the existing precedent this function otherwise follows exactly.
+std::string templatesRoot() {
+    static const std::string cached = [] {
+        std::error_code ec;
+        std::filesystem::path probe = std::filesystem::path(executableDir());
+        for (int up = 0; up < 8 && !probe.empty(); ++up) {
+            const std::filesystem::path candidate = probe / "templates";
+            if (std::filesystem::is_directory(candidate, ec) && !listTemplatesIn(candidate.string()).empty())
+                return candidate.string();
+            if (!probe.has_parent_path() || probe.parent_path() == probe) break;
+            probe = probe.parent_path();
+        }
+        return std::string();
+    }();
+    return cached;
 }
 
 // Builds the .ocproject manifest text.
@@ -724,6 +807,102 @@ bool scaffoldProject(const std::string& location, const std::string& name,
 
     if (!fmt::loadOcproject(manifest, out, err)) return false;
     AVER_INFO("[Editor] created project '{}' at {}", name, root);
+    return true;
+}
+
+// Every valid template one level under `root`. See the header for what "valid" means and why a
+// missing/empty/malformed root all report the same empty list rather than an error.
+std::vector<TemplateInfo> listTemplatesIn(const std::string& root) {
+    std::vector<TemplateInfo> out;
+    std::error_code ec;
+    if (root.empty() || !std::filesystem::is_directory(root, ec)) return out;   // missing entirely
+
+    for (const auto& sub : std::filesystem::directory_iterator(root, ec)) {
+        if (ec) break;
+        if (!sub.is_directory(ec)) continue;
+        const std::string id = sub.path().filename().string();
+        const std::string manifest = (sub.path() / (id + ".octemplate")).string();
+        if (!fileExists(manifest)) continue;   // not a template folder -- silently not counted
+
+        TemplateInfo info;
+        info.dir = sub.path().string();
+        info.id = id;
+        std::string why;
+        if (!parseTemplateManifest(manifest, info.dir, info, &why)) {
+            // LOGGED, NOT FAILED: one bad template must not take New Project down to "no templates
+            // at all, silently" -- the author of THIS template finds out from the log, and every
+            // other template (and Blank, always) keeps working. Same tolerance rescan() already
+            // shows a project whose manifest fails to load (ProjectBrowser.cpp).
+            AVER_WARN("[Editor] template '{}' skipped: {}", id, why);
+            continue;
+        }
+        out.push_back(std::move(info));
+    }
+    return out;
+}
+
+// listTemplatesIn(), rooted at the templates\ directory found by walking up from the executable.
+std::vector<TemplateInfo> listTemplates() {
+    return listTemplatesIn(templatesRoot());
+}
+
+// Creates a new project at location\name by copying a template's Content tree. See the header for
+// the name-bearing contract this keeps.
+bool scaffoldProjectFromTemplate(const std::string& location, const std::string& name,
+                                 const TemplateInfo& tmpl, fmt::ProjectDesc& out, std::string* err) {
+    if (!validateProjectName(name, err)) return false;
+    if (location.empty()) { if (err) *err = "Choose a location."; return false; }
+
+    const std::string root = location + "\\" + name;
+    if (fileExists(root)) {
+        if (err) *err = "A folder already exists at " + root;
+        return false;
+    }
+
+    // ONLY Content is copied -- never the template's own root, which also holds the .octemplate
+    // manifest and its preview image. That is what keeps the manifest and the preview from ever
+    // accidentally landing inside a scaffolded project: there is no "copy everything, then delete
+    // the metadata" step for this design to get wrong, because that step does not exist.
+    const std::filesystem::path srcContent = std::filesystem::path(tmpl.dir) / "Content";
+    std::error_code ec;
+    if (!std::filesystem::is_directory(srcContent, ec)) {
+        if (err) *err = "template '" + tmpl.id + "' has no Content to copy";
+        return false;
+    }
+
+    if (!createDirectories(root)) {
+        if (err) *err = "Could not create " + root;
+        return false;
+    }
+    const std::filesystem::path dstContent = std::filesystem::path(root) / "Content";
+    std::filesystem::copy(srcContent, dstContent, std::filesystem::copy_options::recursive, ec);
+    if (ec) {
+        if (err) *err = "could not copy '" + tmpl.name + "': " + ec.message();
+        return false;
+    }
+
+    // THE ONLY THING NAME-BEARING IS THIS MANIFEST, written fresh rather than copied or textually
+    // rewritten. Everything inside Content survives byte-for-byte: a graph's CLASS name, a level's
+    // own NAME, an asset's filename are the template's DESIGN, not the project's name -- exactly the
+    // way test-content/AN_Playable's own class names are not "AN_Playable". There is deliberately no
+    // find-and-replace pass over the copied tree, so there is no string that could collide with a
+    // class name, a graph name, or bytes inside a binary asset.
+    fmt::ProjectDesc desc;
+    desc.name = name;
+    desc.engineName = std::string(kEngineName);
+    desc.engineMinVersion = std::string(kEngineVersion);
+    desc.createdWith = std::string(kEngineVersion);
+    desc.contentRoot = "Content";
+    desc.startMap = tmpl.startMap;
+
+    const std::string manifest = root + "\\" + name + ".ocproject";
+    if (!writeFileText(manifest, fmt::writeOcproject(desc, ""))) {
+        if (err) *err = "Could not write " + manifest;
+        return false;
+    }
+
+    if (!fmt::loadOcproject(manifest, out, err)) return false;
+    AVER_INFO("[Editor] created project '{}' from template '{}' at {}", name, tmpl.id, root);
     return true;
 }
 

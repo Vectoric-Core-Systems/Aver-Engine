@@ -97,6 +97,24 @@ target_include_directories(ProjectCopyTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/s
 target_link_libraries(ProjectCopyTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(ProjectCopyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# TemplateScaffoldTest -- listTemplatesIn()/listTemplates()/scaffoldProjectFromTemplate(), the New
+# Project template picker's machinery. Same ProjectCopyTest precedent immediately above (Sandbox is
+# add_executable-only, so this compiles ProjectScaffold.cpp directly rather than linking a library);
+# no ImGui, no Engine, no scene:: needed, because template discovery and scaffolding are pure
+# filesystem, same as scaffoldProject() itself.
+#
+# AVER_REPO_ROOT reuses GraphEditorGeometryTest's own precedent above: this test's own executable
+# lands in the same build\bin as Sandbox.exe, so listTemplates()'s real executableDir()-walk already
+# finds the real templates\ directory the identical way a shipped editor would -- AVER_REPO_ROOT lets
+# the test assert that independently, by reading the same directory a second way.
+add_executable(TemplateScaffoldTest
+  src/TemplateScaffoldTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/ProjectScaffold.cpp)
+target_include_directories(TemplateScaffoldTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_compile_definitions(TemplateScaffoldTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(TemplateScaffoldTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(TemplateScaffoldTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # EditorEntitySnapshotTest -- EditorEntitySnapshot.hpp/.cpp: capture a live entity's components,
 # destroy it, rebuild it from the snapshot, and check the rebuild is byte-exact where it should be
 # and deliberately different where it should be (the transform, which is supplied at instantiate
