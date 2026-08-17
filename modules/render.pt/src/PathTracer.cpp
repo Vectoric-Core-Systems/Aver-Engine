@@ -95,11 +95,20 @@ bool PathTracer::init(rhi::IDevice& dev) {
 
 void PathTracer::shutdown() {
     if (res_) {
-        // Acceleration structures are released with the factory itself, as Voxi's do: the RHI has
-        // no destroyBlas/destroyTlas, so only the handles are dropped here.
         if (verts_)       res_->destroyBuffer(verts_);
         if (indices_)     res_->destroyBuffer(indices_);
         if (instanceBuf_) res_->destroyBuffer(instanceBuf_);
+        // BLAS handles ARE released -- destroyBlas exists and resetScene() (just below) has always
+        // used it correctly. THIS FUNCTION DID NOT, until a caller that can shut down and re-init a
+        // PathTracer repeatedly within one process -- a live editor on/off toggle, not just the
+        // process-exit call this used to be the only caller of -- turned a one-time, inert oversight
+        // into a per-toggle BLAS leak. Fixed here by doing exactly what resetScene() already does.
+        for (rhi::BlasHandle b : blas_) if (b) res_->destroyBlas(b);
+        // TLAS handles are NOT released here, or anywhere in this file: the RHI has no destroyTlas at
+        // all (see IResourceFactory), so every TLAS this object ever built leaks for the life of the
+        // DEVICE, not just of this object -- see resetScene()'s own comment for the identical,
+        // pre-existing, ACCEPTED gap. Not a new cost, only a more visible one now that shutdown() can
+        // run many times in one process instead of once.
         if (pipeline_)    res_->destroyPipeline(pipeline_);
         if (cs_)          res_->destroyShader(cs_);
     }

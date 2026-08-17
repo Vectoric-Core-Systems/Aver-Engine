@@ -253,13 +253,13 @@ Froxel-based **volumetric fog** (Bart Wronski's approach, published): scatter/ex
 
 ## 4b. Path tracer scene view (reference renderer)
 
-**Available as:** `--pt-scene` command-line flag (sandbox only). Opt-in; disabled by default.
+**Available as:** the `--pt-scene` command-line flag at startup, OR the editor's own **Project Settings > Rendering > Path Tracing > Quality** control (any value but Off) at any later frame — both requests funnel through the same `SandboxApp::syncPtSceneView` reconciler, so a live editor session can turn this on and off without a relaunch. Opt-in; disabled by default either way.
 
 ### 4b.1 What it is
 
 `PtSceneView` is a **reference still-camera renderer** that points the existing brute-force path tracer at the REAL scene graph — the same geometry and camera the raster pipeline is already drawing. Unlike `PtFurnaceTest`, which brings its own synthetic test geometry to verify the integrator's math in isolation, this captures the scene through the `rhi::IRenderFeature::submitDraw()` hook (the exact interface `VoxiRenderer` uses for draw-list recording) and the real camera via `rhi::IDevice::camera()`, then accumulates a bounded number of samples each frame toward a physically-based ground truth.
 
-It **suppresses the raster scene** while registered and draws its own accumulator instead — a small, fixed-resolution (480×270) target, independent of the viewport. It is only registered when explicitly requested via `--pt-scene`; when unregistered it costs nothing, exactly like the furnace test. **This is a reference tool for validating the raster renderer's output, not a render mode.**
+It **suppresses the raster scene** while registered and draws its own accumulator instead — a small, fixed-resolution (480×270) target, independent of the viewport. It is only registered when explicitly requested — `--pt-scene` at startup, or the editor's own settings-page control at runtime (see 4b.6) — never by default; when unregistered it costs nothing, exactly like the furnace test. **This is a reference tool for validating the raster renderer's output, not a render mode.**
 
 ### 4b.2 How it works
 
@@ -286,6 +286,14 @@ The `PtSceneView::AlbedoResolver` is a `std::function<bool(BindingSetHandle, con
 ### 4b.5 RHI change: acceleration structures no longer require a window
 
 **Prerequisite for headless path-tracer runs:** `D3D12Device::initAccelerationStructures()` was moved from `createSwapchainResources()` to `init()` (commit 43fab37, line 1927 of D3D12Device.cpp). This means DXR 1.1 capability detection and the ray-tracing device (`device5_`) are initialized before any window exists. Previously, headless runs had `device5_ == nullptr` despite RT tier 11 capabilities, silently disabling path tracing. This applies to DX12 only; Vulkan and DX11 have no ray-tracing backend changes (Vulkan already builds structures headless; DX11 has no RT).
+
+### 4b.6 Runtime toggle: no relaunch required
+
+`PtSceneView` used to be constructed and registered exactly once, at Engine startup, only when `--pt-scene` was passed — there was no way to turn it on, see it, or turn it off without relaunching the whole editor. `SandboxApp::syncPtSceneView(IDevice*)` closes that gap: it reconciles `ptSceneView_` (the ACTUAL registration, `nullptr` or not) against `ptSceneViewWantEnabled_` (the REQUESTED state — set once by `--pt-scene` at startup, and from then on by the **Project Settings > Rendering > Path Tracing > Quality** combo on the same page as every other Voxi feature: any value but Off requests the view on, Off requests it off). It is idempotent (a call that finds the two already agreeing does nothing) and is called from `onUpdate()` only — before `IDevice::beginFrame()`, the one point in the frame loop where nothing is mid-recording, since `suppressesScene()` is read live once per `drawMesh()` call all through `onRender()`. `addRenderFeature()`/`removeRenderFeature()` (both pre-existing `IDevice` operations) do the actual RHI work: registering mid-session builds the present pipeline against the swapchain's current render targets for free (`addRenderFeature` calls `onRenderTargetsChanged()` immediately), and unregistering is a plain vector erase with every owned GPU resource released through the resource factory's normal deferred-retire path, safe even with frames still in flight.
+
+The editor surfaces convergence for the first time too: `PtSceneView::samplesAccumulated()`/`sceneReady()` are read on that same settings page, next to an `[active]` / `[unavailable on this device]` badge.
+
+One accepted, pre-existing gap this makes more visible rather than introduces: the RHI has no `destroyTlas` at all (`IResourceFactory`), so every TLAS a `PathTracer` builds leaks for the life of the device. Toggling this view on and off in one long editor session leaks one TLAS per genuine re-arm of the static scene — bounded by how often the scene actually changes while the view is on, not by how many times the checkbox is clicked. `PathTracer::shutdown()`'s BLAS leak (a real, separate bug: `destroyBlas` exists and was simply never called there) was fixed alongside this change, since a toggle can now call `shutdown()` many times in one process instead of once at exit.
 
 ---
 

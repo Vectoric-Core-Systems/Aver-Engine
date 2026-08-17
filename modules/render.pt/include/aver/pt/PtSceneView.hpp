@@ -13,16 +13,23 @@
 // instead of it, at a small FIXED resolution independent of the swapchain, accumulating a bounded
 // number of samples every still frame and resetting the moment the camera moves or the STATIC draw
 // list changes -- an image that keeps accumulating across a camera move is not a reference image, it
-// is a smear. It is registered ONLY when asked for (see SandboxApp's --pt-scene), never by default:
-// while unregistered it costs nothing, exactly like PtFurnaceTest.
+// is a smear. It is registered ONLY when asked for -- SandboxApp's --pt-scene flag at startup, or the
+// editor's own Path Tracing settings-page Quality combo (voxi::Settings::pathTracing, real as of the
+// gap that used to leave it clamped to Off on every device -- see Voxi.cpp's status(Feature::
+// PathTracing)) at any later frame, both funnelled through the SAME syncPtSceneView() reconciler --
+// never by default: while unregistered it costs nothing, exactly like PtFurnaceTest.
 //
 // WHAT IT DELIBERATELY DOES NOT DO, stated here because a first-time user hitting any of these should
 // read this comment before filing a bug:
-//   - LIGHT SOURCE. ptEnvironment() is skyColor() and nothing else (see PtShaders.hpp) -- no CLight,
-//     no emissive term, no next-event estimation. This view is only physically meaningful for scenes
-//     lit by the procedural sky: outdoor levels, or interiors that see sky through real openings.
-//     Pointed at an indoor / artificially-lit level, it will correctly, honestly render BLACK. That
-//     is not a bug in this feature.
+//   - LIGHT SOURCE. Two sources reach this view, and only two. ptEnvironment() (PtShaders.hpp) is
+//     skyColor() and nothing else -- INDIRECT/ambient light, collected when a bounce MISSES.
+//     ptDirectSun() (PtShaders.hpp) is a next-event shadow ray fired at the one authored directional
+//     light on every HIT -- DIRECT sun light, including on surfaces the sky itself cannot see (an
+//     overhang, a wall facing away from open sky). Together that is "outdoors, or an interior that
+//     sees sky and/or sun through a real opening". There is still no CLight (point/spot/area) and no
+//     emissive term: a room lit only by placed lights or glowing materials, with no sky above it and
+//     no line of sight to the sun, still correctly, honestly renders BLACK. That is not a bug in
+//     this feature -- it is exactly what those two sources not existing here means.
 //   - GEOMETRY. Only draws whose mesh has no compute-written vertex buffer are included -- the same
 //     predicate VoxiRenderer::buildAccelerationStructures already applies (VoxiRenderer.cpp, gated on
 //     IDevice::meshVertexBuffer). Skinned characters, particles, and anything else that writes its
