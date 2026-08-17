@@ -1,9 +1,0 @@
-TEMPLATE 1
-# A playable first-person character, two scorable targets and a game mode -- three Aver Node graphs
-# and one map, no C# anywhere, no art anywhere (built-in sphere/cube primitives and named surfaces
-# only). See Content/README.md for what each file does and what this template deliberately does not
-# do yet -- that file is copied into every project scaffolded from this template, so its own owner
-# finds it too, not just whoever reads the template source.
-NAME First Person
-DESCRIPTION A playable first-person character, two scorable targets and a game mode -- no C# anywhere.
-STARTMAP Maps/Default.ocmap

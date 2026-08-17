@@ -194,23 +194,32 @@ int main() {
     }
 
 #ifdef AVER_REPO_ROOT
-    // ---- the real, shipped templates\ directory ----
-    AVER_INFO("=== the real templates/ directory this repo ships ===");
+    // ---- the repo ships NO templates, and that must be a quiet empty list, not a failure ----
+    //
+    // THIS SECTION USED TO ASSERT templates/FirstPerson EXISTS. It was removed from the engine: a
+    // starter template is project content, and the one that was here had been overtaken anyway (it
+    // substituted proximity for aiming, from before a graph could raycast for an entity or ask a
+    // character where it was looking). Asserting a specific shipped template would now be asserting
+    // the presence of content this repo has deliberately stopped carrying.
+    //
+    // What is still worth pinning down is the behaviour that replaced it, because "no templates" is
+    // now the SHIPPED state rather than an edge case: discovery must report an empty list and no
+    // error. ProjectBrowser.cpp's own comment already promises that missing, empty and
+    // entirely-malformed roots all resolve to the same empty vector -- this is the test that the
+    // MISSING case genuinely does, since it is the case a user actually gets today.
+    AVER_INFO("=== an engine that ships no templates ===");
     {
         const std::string realRoot = std::string(AVER_REPO_ROOT) + "/templates";
         const auto found = editor::listTemplatesIn(realRoot);
-        bool sawFirstPerson = false;
-        for (const auto& t : found) if (t.id == "FirstPerson") sawFirstPerson = true;
-        check(sawFirstPerson, "templates/FirstPerson/FirstPerson.octemplate is found and parses");
+        check(found.empty(), "an absent templates/ directory lists as empty rather than failing");
 
-        // This test binary's own executableDir() sits in the same build\bin as Sandbox.exe, so
-        // listTemplates()'s real executableDir()-walk should find the SAME templates\ directory a
-        // shipped editor would, from the identical staged layout (bin\ and templates\ as siblings).
+        // The executableDir()-walk, which is the path a SHIPPED editor takes. It climbs looking for a
+        // templates\ holding valid templates and must come back empty-handed without complaint --
+        // never throwing, and never latching onto some unrelated directory named templates\ further
+        // up the disk.
         const auto walked = editor::listTemplates();
-        bool walkedSawFirstPerson = false;
-        for (const auto& t : walked) if (t.id == "FirstPerson") walkedSawFirstPerson = true;
-        check(walkedSawFirstPerson,
-              "listTemplates()'s executableDir()-walk ALSO finds it -- the shipped-editor discovery path");
+        check(walked.empty(),
+              "listTemplates()'s executableDir()-walk also returns empty -- the shipped-editor path");
     }
 #endif
 

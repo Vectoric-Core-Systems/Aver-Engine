@@ -118,7 +118,6 @@ scripting/fsharp/**
 # shipped install the identical way it already finds <install>\scripting\csharp. Drop this and
 # listTemplates() finds nothing -- not an error, New Project just falls back to Blank-only, the same
 # silent-degrade contract templatesRoot() promises for a missing/empty/malformed root of any kind.
-templates/**
 
 # NOT SHIPPED, and both halves of that are deliberate:
 #
