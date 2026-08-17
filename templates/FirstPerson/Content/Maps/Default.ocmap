@@ -1,0 +1,51 @@
+OCWORLD 1
+# Written by the Aver Engine editor. Centimetres, +X forward, +Y right, +Z up.
+ID 0x122E9F7824A2AF12
+NAME Range
+BUILD 0
+ALGO 3
+SUN dir 0.304027 0.406402 0.861629 color 1 0.98 0.92 lux 100000   # elev 59.5 azim 53.2
+SKY model physical mie 0.0028 multiscatter 1.9 steps 32 aerial 4
+FOG exp density 2e-05 color 0.7 0.78 0.88
+
+# Ground: a big flat slab. A plain PLACE/PLACEG defaults collide=true (OcWorld.hpp), so this is a real
+# static body -- something to stand on, not a floating camera. It matters more here than it looks: the
+# character fires a ray from its own eye, and a floor is what stops that ray leaving the world when
+# you aim down.
+PLACEG Meshes/cube.ocmesh 0 0 -10 0 0 0 4000 4000 10 M_Floor
+
+# Two crates -- set dressing, and also honest raycast targets: ordinary collide=true placements, so
+# shooting one produces a REAL hit whose entity is stamped by LevelInstance's own static-box path. It
+# simply has no graph to react, so nothing scores. Worth seeing at least once: a hit on something that
+# does not care looks different from a miss, and both are visible in the log.
+PLACE  Meshes/cube.ocmesh 250 -150 60 0 0 0 60 M_Crate
+PLACE  Meshes/cube.ocmesh -250 -150 60 0 0 0 60 M_Crate
+
+# The game mode. A graph class is a class like any other -- placed, not registered through some
+# separate mechanism. See AN_FPRules.ocgraph for why a headless log shows TWO of these ticking.
+PLACE none 0 0 0 0 0 0 1 class AN_FPRules
+
+# THE PLAYER IS NOT PLACED HERE, ON PURPOSE. AN_FPRules names it with `pawn=AN_FPCharacter`, and
+# aver_fw_begin_play spawns it and POSSESSES it -- the same division a UE GameMode's DefaultPawnClass
+# uses. Possession is what makes the camera follow it at all, so a placed-but-unpossessed character
+# would render the whole level from a default camera; placing one HERE as well would simply add a
+# second, unpossessed character standing next to the real one.
+
+# THE TARGETS ARE PLACED HERE, LIKE ANY OTHER LEVEL CONTENT -- the single biggest difference from the
+# earlier starter template, which had the character SPAWN its targets and remember their ids in VARs.
+# That was never a design; it was a workaround for a missing capability. Now that `Raycast.entity`
+# returns the owning scene entity, a target is just a thing in the level -- move these, duplicate them,
+# delete one, and the character's graph neither knows nor cares.
+#
+# THEY ARE Character-PARENTED, WHICH LOOKS ODD AND IS DELIBERATE -- see AN_FPTarget.ocgraph's own
+# "becoming shootable" comment. A `class=` placement gets NO physics body from anywhere in this engine
+# (LevelInstance's static-box path is skipped for class placements, and ClassBuilder cannot add a
+# collider), so a plain Actor target would be invisible to the very ray meant to hit it.
+#
+# LAID OUT ALONG +X, WHICH IS WHERE THE PLAYER IS ALREADY LOOKING. A character spawns at yaw 0, and
+# AverCharacter.LookDirection at yaw 0 pitch 0 is exactly (1, 0, 0) -- so +X is dead ahead on the first
+# frame, before the mouse has moved. The middle target is straight down that line on purpose: press
+# Space the instant the level opens and you score, with no hunting for what this template does.
+PLACE none 600 0 100 0 0 0 1 class AN_FPTarget
+PLACE none 600 300 100 0 0 0 1 class AN_FPTarget
+PLACE none 600 -300 100 0 0 0 1 class AN_FPTarget

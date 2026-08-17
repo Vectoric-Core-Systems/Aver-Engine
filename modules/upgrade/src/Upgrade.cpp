@@ -84,12 +84,37 @@ bool step_0_1_to_0_2(const Context& ctx, std::string* err) {
     return true;
 }
 
+// A 0.2 PROJECT NEEDS NOTHING DONE TO IT, and this function exists to say so out loud.
+//
+// Every project-visible change in 0.3 is additive or engine-side. New projects are scaffolded with
+// RENDER.RAYTRACING 2, but a manifest that omits the key parses to -1 -- "not stated" -- and follows
+// the engine default, which is that same Medium tier, so a 0.2 manifest already renders the way a
+// fresh 0.3 one does. The graph reader's ENTRY/OUT forward references, the missing-pin diagnostic
+// and the per-record writer all changed how the engine READS .ocgraph files, not what those files
+// have to contain. Nothing on disk is stale.
+//
+// SO WHY IS IT HERE. planUpgrade walks by SERIES and reports a gap rather than skipping it, on the
+// grounds that a missing link silently strands a project halfway and then tells it it is current.
+// That rule only works if "nothing to repair" and "we forgot" are written differently, and an empty
+// step IS the difference: the chain 0.1 -> 0.2 -> 0.3 stays contiguous, the plan a 0.1 project gets
+// still ends at this engine's series, and the log line names this summary so an author can see that
+// the step ran and chose to do nothing. Deleting it would not simplify anything -- it would make
+// every 0.1-era project fail to open.
+bool step_0_2_to_0_3(const Context& ctx, std::string* err) {
+    (void)ctx;
+    (void)err;
+    return true;
+}
+
 // EVERY STEP EVER SHIPPED, OLDEST FIRST, AND NONE OF THEM EDITED AFTER THE FACT. A project made in
 // 0.1 will still be opened years from now, and it will run exactly this function.
 const std::vector<Step> kSteps = {
     {{0, 1, 0}, {0, 2, 0},
      "Repair the F# starter the 0.1 payload could not reference",
      &step_0_1_to_0_2},
+    {{0, 2, 0}, {0, 3, 0},
+     "Nothing to repair: 0.3's project-visible changes are all additive",
+     &step_0_2_to_0_3},
 };
 
 } // namespace

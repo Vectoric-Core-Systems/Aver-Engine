@@ -1,0 +1,347 @@
+OCGRAPH 1
+# THE PLAYER: walk, look, and SHOOT WHAT YOU ARE LOOKING AT -- with a weapon that has to reload.
+#
+# The move/look half is the same shape test-content/AN_Playable's Player.ocgraph uses; read that file
+# first if you have not. This one comments only on what it does differently.
+#
+# WHAT IS DIFFERENT, AND WHY IT COULD NOT BE WRITTEN BEFORE.
+#
+#   1. WHERE AM I LOOKING -- `GetForward`. AverCharacter keeps _yaw and _pitch private and writes the
+#      result to the scene as a Quat, which neither GetField (F32 fields only) nor GetFieldVec3
+#      (Vec3-kind fields only) can read. A graph could drive a character's look through CharacterMove
+#      and then had no way at all to ask where that look ended up pointing. Rebuilding the direction
+#      graph-side from accumulated mouse deltas with Sin/Cos was possible, and wrong -- it keeps a
+#      second copy of state Character.cs already owns, including the pitch CLAMP inside Drive, and any
+#      drift between the two copies is a shot that does not go where the camera points.
+#   2. WHAT DID I HIT -- `Raycast.entity`. This used to be a raw physics BODY handle with no map back
+#      to a scene entity, so a graph could learn THAT it hit something and never WHAT.
+#   3. WHAT DO I REMEMBER -- `VAR`. A graph had no state that survived a tick, so a weapon could not
+#      have a cooldown and nothing could count anything. See the cooldown chain below: it is the
+#      difference between a trigger and a button.
+#
+# GetForward also returns the EYE POSITION, and the ray starts there rather than at the character's
+# origin -- see the muzzle offset below for why that is not a convenience.
+#
+# NAME takes exactly one token (OcGraphParser's NAME record is tokens[1], not rest-of-line the way
+# DESCRIPTION is) -- a two-word name silently truncates to its first word, with no error.
+NAME FPCharacter
+DESCRIPTION Walks, looks, and shoots what it is looking at, on a cooldown, counting its shots.
+
+CLASS AN_FPCharacter Character view=firstperson
+
+PARAM entity int
+PARAM deltaTime float
+
+# ---- what this character REMEMBERS between ticks -----------------------------------------------------
+# Seconds until the next shot is allowed. Counted down every tick, set back up to kReload on firing.
+#
+# THIS IS WHAT FIXES HOLDING SPACE. InputKey is LEVEL-triggered -- `down` means "held right now", not
+# "pressed this frame" -- so without state the weapon fired every single tick and the score raced. The
+# ABI has aver_fw_input_key_pressed (framework_abi.h) but no node reaches it, so an edge-triggered
+# press is not expressible today. A cooldown is: it is state, and state is what VAR added.
+VAR cooldown float 0
+
+# Purely to have something to show. A graph could not count anything before VAR existed, so a counter
+# is the smallest honest demonstration that the storage is real and per-instance.
+VAR shotsFired float 0
+
+# 0 until the viewmodel has been spawned and parented, 1 after. A ONE-SHOT LATCH, and it has to be
+# state rather than an OnStart because the thing it waits for does not exist at OnStart: the camera
+# node is built lazily by AverCharacter.EnsureView, which does not run until CharacterMove has, so a
+# graph asking for it on the first frame is early rather than wrong. This latches on the first tick
+# where the view actually exists, which is tick 2 in practice and would be tick 1 if that ever changed.
+VAR gunAttached float 0
+
+NODE ent Param param=entity
+NODE dt Param param=deltaTime
+
+# Look sensitivity, degrees per unit of mouse delta.
+NODE look_scale ConstFloat value=0.15
+
+ENTRY tick OnTick
+NODE tick OnTick
+
+# ---- read input, then drive, in ONE exec chain ------------------------------------------------------
+# MoveAxis and MouseDelta cache their native read to the exec VISIT, not to the pull, so they have to
+# sit on the chain rather than being pulled as data -- see AN_Playable/Player.ocgraph for the reasoning.
+NODE move MoveAxis
+NODE mouse MouseDelta
+LINK tick.exec move.exec
+LINK move.then mouse.exec
+
+NODE yaw Multiply
+LINK mouse.deltaX yaw.a
+LINK look_scale.value yaw.b
+# PITCH IS INVERTED relative to yaw, and that is the fix for "up/down feels wrong". Character.cs's
+# own comment says Drive expects -Input.MouseDeltaY so that pushing the mouse FORWARD raises the pitch;
+# this graph was feeding it the raw deltaY, so the vertical axis came out backwards against every other
+# first-person game. Multiplying by a negated sensitivity is the whole correction -- flip the sign on
+# look_scale_pitch to get inverted-look back for anyone who prefers it.
+NODE look_scale_pitch ConstFloat value=-0.15
+NODE pitch Multiply
+LINK mouse.deltaY pitch.a
+LINK look_scale_pitch.value pitch.b
+
+NODE drive CharacterMove
+LINK mouse.then drive.exec
+LINK ent.value drive.entity
+LINK dt.value drive.dt
+LINK move.forward drive.forward
+LINK move.right drive.right
+LINK yaw.result drive.yawDelta
+LINK pitch.result drive.pitchDelta
+
+# ---- tick the cooldown down, every frame, before anything asks about it ------------------------------
+# clamped = max(cooldown - dt, 0), written the long way because this vocabulary has no max: Compare is
+# a STRICT `a > b` and nothing else, and Select picks between two floats on a bool. Both halves of the
+# Select are evaluated regardless of cond (GraphCompiler.EmitSelect says so plainly) -- fine here,
+# since both are pure arithmetic.
+NODE zero ConstFloat value=0.0
+
+NODE prevCd GetVar var=cooldown
+NODE dec Subtract
+LINK prevCd.value dec.a
+LINK dt.value dec.b
+
+NODE positive Compare
+LINK dec.result positive.a
+LINK zero.value positive.b
+
+NODE clamped Select
+LINK positive.result clamped.cond
+LINK dec.result clamped.ifTrue
+LINK zero.value clamped.ifFalse
+
+# TWO THINGS HANG OFF THE DRIVE, so they hang off a Sequence: an exec OUTPUT drives at most one link
+# (GraphCompiler.FindExecTarget refuses a second by name), and both the viewmodel latch and the
+# cooldown need to run every tick. then0 before then1, in that order, every frame.
+NODE fan Sequence
+LINK drive.then fan.exec
+
+NODE cool SetVar var=cooldown
+LINK fan.then1 cool.exec
+LINK clamped.result cool.value
+
+# ---- the viewmodel: spawned once, parented to the CAMERA, then never thought about again -----------
+# Guarded twice, and both guards are load-bearing. The first is the latch (do this once, not every
+# tick). The second is `success` from GetViewEntity: the camera node is built lazily, so on the very
+# first tick it does not exist yet and `view` is 0 -- and parenting to 0 does not fail, it makes the
+# gun a ROOT, which looks like the weapon detaching and floating at the world origin. Waiting a tick
+# costs nothing; parenting to nothing costs the whole illusion.
+NODE half ConstFloat value=0.5
+NODE attachedNow GetVar var=gunAttached
+NODE needsGun Compare
+LINK half.value needsGun.a
+LINK attachedNow.value needsGun.b
+
+NODE attachGate Branch
+LINK fan.then0 attachGate.exec
+LINK needsGun.result attachGate.cond
+
+NODE viewOf GetViewEntity
+LINK ent.value viewOf.entity
+
+NODE viewGate Branch
+LINK attachGate.true viewGate.exec
+LINK viewOf.success viewGate.cond
+
+NODE gunZero ConstFloat value=0.0
+NODE spawnGun Spawn class=AN_FPGun
+LINK viewGate.true spawnGun.exec
+LINK gunZero.value spawnGun.x
+LINK gunZero.value spawnGun.y
+LINK gunZero.value spawnGun.z
+
+# SetParent gets NO exec pins by default (it is a `W` node, like SetField), so reaching it from an
+# exec chain means declaring every pin by hand -- and ANY explicit PIN record suppresses ALL of that
+# node's defaults, so missing one leaves it simply gone rather than defaulted. The same trap
+# AN_FPTarget.ocgraph pays for on its own SetFieldVec3.
+NODE attach SetParent
+PIN attach exec in exec
+PIN attach child in int
+PIN attach parent in int
+PIN attach then out exec
+PIN attach success out bool
+LINK spawnGun.then attach.exec
+LINK spawnGun.entity attach.child
+LINK viewOf.view attach.parent
+
+# WHERE THE GUN SITS, in the CAMERA's local space now that it is parented there: forward, right and a
+# little down, which is where a right-handed viewmodel lives. +X is forward and +Y is right (see
+# AverCharacter.WalkForward/WalkRight), so this is 35cm ahead, 14cm right, 12cm below the eye.
+NODE gunX ConstFloat value=35.0
+NODE gunY ConstFloat value=14.0
+NODE gunZ ConstFloat value=-12.0
+
+NODE place SetFieldVec3 field=CLocal.position
+PIN place exec in exec
+PIN place entity in int
+PIN place x in float
+PIN place y in float
+PIN place z in float
+PIN place then out exec
+PIN place success out bool
+LINK attach.then place.exec
+LINK spawnGun.entity place.entity
+LINK gunX.value place.x
+LINK gunY.value place.y
+LINK gunZ.value place.z
+
+# The Kenney blaster is authored around a unit of roughly a metre while this engine is CENTIMETRES,
+# so at scale 1 it is a speck a centimetre long. Scaled here rather than baked into the .ocmesh so the
+# import stays a faithful copy of the source art and the number that makes it look right stays visible
+# and adjustable in the graph.
+NODE gunScale ConstFloat value=1.0
+NODE size SetFieldVec3 field=CLocal.scale
+PIN size exec in exec
+PIN size entity in int
+PIN size x in float
+PIN size y in float
+PIN size z in float
+PIN size then out exec
+PIN size success out bool
+LINK place.then size.exec
+LINK spawnGun.entity size.entity
+LINK gunScale.value size.x
+LINK gunScale.value size.y
+LINK gunScale.value size.z
+
+NODE oneF ConstFloat value=1.0
+NODE markAttached SetVar var=gunAttached
+LINK size.then markAttached.exec
+LINK oneF.value markAttached.value
+
+# ---- shooting, gated twice: the key is held AND the weapon is ready ----------------------------------
+# TWO NESTED BRANCHES BECAUSE THERE IS NO And NODE. The vocabulary has no boolean and/or/not at all, so
+# a conjunction is written as one Branch inside another -- which is also cheaper than an And would be,
+# since the second condition is never evaluated when the first fails.
+#
+# MOUSE LEFT is Key.MouseLeft = 47 (Aver.Framework/Input.cs), which is where a first-person weapon
+# belongs; Space is now the jump. Both are ordinary key codes to InputKey -- the mouse buttons sit at
+# the end of the same enum -- so neither needed anything new to reach.
+NODE fireKey ConstInt value=47
+NODE firing InputKey
+LINK fireKey.value firing.key
+
+# ---- jump ------------------------------------------------------------------------------------------
+# Wired straight to the key with no grounded check of its own: AverCharacter.Jump already asks the
+# physics character whether it is standing on anything and declines in mid-air, so this gets single
+# jumps and no flight for free. Asking again here would be a second answer to the same question that
+# could disagree with the first.
+NODE jumpKey ConstInt value=36
+NODE jumping InputKey
+LINK jumpKey.value jumping.key
+
+NODE jumpGate Branch
+LINK cool.then jumpGate.exec
+LINK jumping.down jumpGate.cond
+
+NODE doJump Jump
+LINK jumpGate.true doJump.exec
+LINK ent.value doJump.entity
+# REJOINS the fire chain: an exec OUTPUT drives one link, but an exec INPUT accepts several, so both
+# sides of the jump branch continue into the same place. Without this, holding jump would silently
+# stop the weapon firing -- the branch would end the chain on its taken side.
+LINK doJump.then fireGate.exec
+
+NODE fireGate Branch
+LINK jumpGate.false fireGate.exec
+LINK firing.down fireGate.cond
+
+# ready = clamped < epsilon. Written as `epsilon > clamped` because Compare only has the one operator.
+# Reading `clamped` (the value just computed) rather than a fresh GetVar of `cooldown` avoids depending
+# on whether the SetVar above has landed yet -- it is the same number either way, and this way the
+# question does not depend on evaluation order.
+NODE eps ConstFloat value=0.0001
+NODE ready Compare
+LINK eps.value ready.a
+LINK clamped.result ready.b
+
+NODE readyGate Branch
+LINK fireGate.true readyGate.exec
+LINK ready.result readyGate.cond
+
+# ---- the shot itself: reload, count, then trace ------------------------------------------------------
+# Chained through each SetVar's `then` rather than fanned out through a Sequence, because Sequence only
+# has two exec outputs by default and this needs three steps in a definite order.
+NODE kReload ConstFloat value=0.35
+NODE reload SetVar var=cooldown
+LINK readyGate.true reload.exec
+LINK kReload.value reload.value
+
+NODE one ConstFloat value=1.0
+NODE prevShots GetVar var=shotsFired
+NODE shotsNext Add
+LINK prevShots.value shotsNext.a
+LINK one.value shotsNext.b
+
+NODE count SetVar var=shotsFired
+LINK reload.then count.exec
+LINK shotsNext.result count.value
+
+NODE range ConstFloat value=5000.0
+
+# THE MUZZLE OFFSET, AND IT IS NOT COSMETIC -- WITHOUT IT THIS GRAPH SHOOTS ITSELF, EVERY SHOT.
+# The eye is INSIDE the character's own capsule: EyeHeight is 160cm and the capsule spans feet+0 to
+# feet+180 with a 34cm radius (Character.cs), so a ray starting at the eye begins inside its own
+# collider and the nearest thing it can possibly hit is the shooter. That is not a theory -- the first
+# run of this graph fired at the player, every tick, and the only reason it was visible at all is that
+# FPCharacter has no OnHit chain to receive it. Against a target class it would have scored silently
+# and wrongly.
+#
+# So the ray starts one muzzle-length ALONG THE LOOK DIRECTION: origin = eye + dir * 60. 60cm clears
+# the 34cm radius with margin at every pitch, including straight up.
+NODE muzzle ConstFloat value=60.0
+
+NODE aim GetForward
+LINK ent.value aim.entity
+
+NODE offX Multiply
+LINK aim.x offX.a
+LINK muzzle.value offX.b
+NODE offY Multiply
+LINK aim.y offY.a
+LINK muzzle.value offY.b
+NODE offZ Multiply
+LINK aim.z offZ.a
+LINK muzzle.value offZ.b
+
+NODE startX Add
+LINK aim.eyeX startX.a
+LINK offX.result startX.b
+NODE startY Add
+LINK aim.eyeY startY.a
+LINK offY.result startY.b
+NODE startZ Add
+LINK aim.eyeZ startZ.a
+LINK offZ.result startZ.b
+
+NODE ray Raycast
+LINK count.then ray.exec
+LINK startX.result ray.originX
+LINK startY.result ray.originY
+LINK startZ.result ray.originZ
+LINK aim.x ray.dirX
+LINK aim.y ray.dirY
+LINK aim.z ray.dirZ
+LINK range.value ray.maxDist
+
+# GATED ON `hit`, AND THIS GUARD IS LOAD-BEARING. On a miss, `entity` is 0 -- and 0 is not a miss
+# sentinel, it is scene::kInvalidEntity AND the value a REAL hit reports against collision no entity
+# owns (the floor, a crate). Hit and miss are told apart by `hit`, never by the entity alone
+# (physics_abi.h says so explicitly).
+NODE hitGate Branch
+LINK ray.then hitGate.exec
+LINK ray.hit hitGate.cond
+
+NODE poke FireEvent event=OnHit
+LINK hitGate.true poke.exec
+LINK ray.entity poke.target
+
+# ---- what the log shows ------------------------------------------------------------------------------
+# One ENTRY in this graph, so a single OUT is safe: the multi-entry trap (every entry's compiled
+# delegate pulls every OUT record, and a side-effecting node refuses to be pulled) needs two entries to
+# bite. GetVar is a pure read, so pulling it costs nothing and changes nothing -- and it turns the
+# per-tick log line into a live shot counter, which is the cheapest proof the storage works.
+NODE reportShots GetVar var=shotsFired
+OUT reportShots value

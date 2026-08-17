@@ -1,0 +1,58 @@
+OCGRAPH 1
+# THE GAME MODE, as a graph. A round clock in a VAR is already a complete demonstration of "a game mode
+# is a graph class, so the play session starts", and there is nothing first-person-specific to add.
+#
+# YOU WILL SEE TWO OF THESE TICKING in a headless log, not one, even though Default.ocmap places
+# exactly one. That is not this graph misbehaving: aver_fw_begin_play spawns a FRESH instance of
+# whatever class carries the GameMode flag the moment play begins, unconditionally, with no awareness
+# that the level's own PLACE line already put one down. Both tick off the same per-frame deltaTime, so
+# their `elapsed` values track each other exactly. Harmless -- neither instance's state reaches the
+# other's -- but worth naming rather than leaving you to wonder if you miscounted your placements.
+#
+# IT NAMES ITS OWN PAWN AND CONTROLLER, which is what makes this a playable first-person game rather
+# than a level with a character standing in it. `pawn=` and `controller=` are resolved by name at seal
+# and handed to aver_fw_begin_play, which spawns both and POSSESSES the pawn. Possession is the whole
+# point: GameApp's camera follows aver_fw_controlled_pawn() and gives up when there is none, so before
+# these existed the player was placed in the map, never possessed, and the shipped game rendered from
+# a default camera however loudly the character asked for `view=firstperson`.
+#
+# BOTH ARE REQUIRED. begin_play possesses only when it has BOTH, and the built-in PlayerController is
+# ABSTRACT and so unspawnable -- naming a pawn alone spawns it and leaves it unpossessed, which looks
+# wired up and does nothing. AN_FPController.ocgraph exists solely to be the concrete controller.
+#
+# THE PLAYER IS NO LONGER PLACED IN THE MAP. The mode spawns it, exactly the way a UE GameMode spawns
+# its DefaultPawnClass -- leaving the PLACE line in as well would put two characters in the level, one
+# possessed and one not.
+#
+# AND WHY THERE IS NO COMBINED SCORE HERE. Each target owns its own `score` VAR and that is genuinely
+# the score. A single total would need one of two things this engine does not have yet: FireEvent
+# carries NO PAYLOAD (the receiving ENTRY gets entity/time/deltaTime and nothing else, so a target
+# cannot report an amount back), and this mode has no way to enumerate the targets to poll them --
+# they are placed by the map, and nothing hands a graph a list of entities by class. Stating that
+# plainly is better than a total that quietly counts wrong.
+NAME FPRules
+DESCRIPTION The game mode, as a graph. Starts the play session and keeps a round clock in a VAR.
+
+CLASS AN_FPRules GameMode pawn=AN_FPCharacter controller=AN_FPController
+
+PARAM deltaTime float
+
+VAR elapsed float 0
+
+NODE dt Param param=deltaTime
+
+ENTRY tick OnTick
+NODE tick OnTick
+
+NODE prev GetVar var=elapsed
+NODE sum Add
+LINK prev.value sum.a
+LINK dt.value sum.b
+
+NODE store SetVar var=elapsed
+LINK tick.exec store.exec
+LINK sum.result store.value
+
+# Read back through its own node after the write, for the reason AN_FPTarget.ocgraph gives.
+NODE report GetVar var=elapsed
+OUT report value

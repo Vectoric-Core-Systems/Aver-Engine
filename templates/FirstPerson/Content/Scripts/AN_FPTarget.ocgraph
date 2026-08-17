@@ -1,0 +1,121 @@
+OCGRAPH 1
+# A THING THAT SCORES. Placed by the map, hit by the player's ray, counts what it receives.
+#
+# BECOMING SHOOTABLE -- the reason this is `Character` and not `Actor`, which looks wrong until you
+# need it. A `class=` placement gets NO physics body from anywhere in this engine: LevelInstance's
+# static-box path (the one that stamps a level placement's body with its entity) is deliberately
+# skipped for class placements, and nothing in ClassBuilder can add a collider. So a plain Actor target
+# is invisible to a raycast -- the ray passes straight through the thing you can plainly see. Character
+# is the one class whose graph-facing node reaches a real Jolt body: AverCharacter.EnsureCapsule,
+# reached through CharacterMove, which also stamps that capsule with its owning entity the instant it
+# exists. (A CharacterVirtual used to be invisible to queries even then, because Jolt does not put one
+# in the broadphase; aver_phys_character_create now gives every character a real inner body.)
+#
+# ONE CharacterMove CALL, AT OnStart, EVERY MOTION INPUT ZERO. EnsureCapsule is lazy -- first call
+# creates it -- so this has to run once for the target to exist physically at all, and never again.
+# Wiring it into OnTick would re-walk the same zero-motion command every frame for nothing.
+#
+# TWO HONEST CONSEQUENCES, NAMED RATHER THAN HIDDEN. First: these targets STAY WHERE THE MAP PUTS
+# THEM. A CharacterVirtual is only integrated when something drives it, and this graph drives it once
+# at OnStart and never again -- so a target hangs at its placement height instead of falling to the
+# floor. That is convenient here (a target at eye height is what you want on a range) but it is a
+# consequence of not ticking the character, NOT of anything asking it to hover, and a target you give
+# an OnTick CharacterMove to will start falling. Second:
+# AverCharacter.Drive unconditionally publishes a GLOBAL "camera follows this entity" request, so each
+# target briefly asks for the camera as its capsule is made. The player's own CharacterMove runs every
+# OnTick and reclaims it immediately, so the visible effect is at most one frame at startup -- but it
+# is a real shared-global seam, not a thing this file is pretending away.
+NAME FPTarget
+DESCRIPTION Placed in the level, shootable, counts the hits it receives as its own score.
+
+CLASS AN_FPTarget Character mesh=Meshes/sphere.ocmesh material=M_Target
+
+PARAM entity int
+PARAM deltaTime float
+
+NODE ent Param param=entity
+NODE dt Param param=deltaTime
+
+VAR score float 0
+
+ENTRY seed OnStart
+NODE seed OnStart
+
+# ---- make the capsule, so a ray can find this at all ------------------------------------------------
+NODE zero ConstFloat value=0.0
+
+NODE settle CharacterMove
+LINK seed.exec settle.exec
+LINK ent.value settle.entity
+LINK dt.value settle.dt
+LINK zero.value settle.forward
+LINK zero.value settle.right
+LINK zero.value settle.yawDelta
+LINK zero.value settle.pitchDelta
+
+# ---- self-sizing ------------------------------------------------------------------------------------
+# The built-in sphere is generated at radius 1cm, and a 1cm dot is not a target anyone can see or aim
+# at. There is no placement-time scale for a class instance, so a SetFieldVec3 write at OnStart is the
+# only lever this vocabulary has.
+#
+# 25, AND THE NUMBER IS LOAD-BEARING FOR MORE THAN LOOKS. The sphere is centred on the entity ORIGIN,
+# which for a Character is its FEET, while the capsule a ray actually hits spans feet..feet+180
+# (Height). The two can never share a centre without a child transform, so what matters is that the
+# ball sits somewhere a person would aim: at 25 it spans feet-25..feet+25, and with these targets
+# placed at z=100 that is 75..125, comfortably in view and inside the capsule that is actually hit.
+#
+# IT WAS 90, AND 90 BROKE THE RENDERER. Three 1.8-METRE saturated-red spheres under a 100,000-lux sun
+# bounce an enormous amount of red light, and with ray-traced sun shadows ON -- which light them more
+# brightly than the voxel-cone path does -- the global illumination ran away and flooded the entire
+# viewport red, on any hardware, at any resolution. Bisected to exactly this: remove the targets and it
+# renders; drop them to scale 20 and it renders; leave them at 90 and it floods. That the engine
+# degrades this badly rather than clamping is its own defect and is tracked separately -- but a target
+# the size of a person was never the right look, and the fix here is the honest one either way.
+#
+# SetFieldVec3 HAS NO EXEC PINS BY DEFAULT, and this graph compiles PUSH (it has three ENTRY records),
+# where a side-effecting node with no incoming exec edge is refused rather than pulled. Reaching it
+# from OnStart therefore means declaring every one of its seven pins by hand -- any PIN record at all
+# suppresses ALL defaults for that node, so miss one and it is simply gone, not defaulted.
+NODE sx ConstFloat value=25.0
+NODE sy ConstFloat value=25.0
+NODE sz ConstFloat value=25.0
+
+NODE grow SetFieldVec3 field=CLocal.scale
+PIN grow exec in exec
+PIN grow entity in int
+PIN grow x in float
+PIN grow y in float
+PIN grow z in float
+PIN grow then out exec
+PIN grow success out bool
+LINK settle.then grow.exec
+LINK ent.value grow.entity
+LINK sx.value grow.x
+LINK sy.value grow.y
+LINK sz.value grow.z
+
+# ---- the reaction -----------------------------------------------------------------------------------
+# An ENTRY is not a node type: it names which node begins a chain. OnHit differs from OnStart and
+# OnTick only in that nobody calls it for you -- another graph's FireEvent does.
+ENTRY hit OnHit
+NODE hit OnHit
+
+NODE one ConstFloat value=1.0
+
+NODE prev GetVar var=score
+NODE next Add
+LINK prev.value next.a
+LINK one.value next.b
+
+NODE store SetVar var=score
+LINK hit.exec store.exec
+LINK next.result store.value
+
+# ---- reporting --------------------------------------------------------------------------------------
+# A SEPARATE GetVar from `prev`: pulling `prev` here would report the score as it stood BEFORE this
+# tick's hit was stored -- an off-by-one that reads as a lost point.
+ENTRY tick OnTick
+NODE tick OnTick
+NODE report GetVar var=score
+
+OUT report value

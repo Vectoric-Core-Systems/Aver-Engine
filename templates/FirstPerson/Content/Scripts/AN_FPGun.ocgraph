@@ -1,0 +1,21 @@
+OCGRAPH 1
+# THE VIEWMODEL. A mesh, parented to the camera, and nothing else -- this graph has no logic at all
+# and does not tick.
+#
+# WHY IT IS A CLASS RATHER THAN A MESH THE CHARACTER SETS ON ITSELF. `Spawn` names a CLASS, not an
+# asset, so anything a graph spawns needs one; and the gun has to be its OWN entity because it is
+# parented to the CAMERA while the character is not. Parent the character to its own camera and you
+# have a cycle; give the gun to the character's mesh slot and it rides the pawn instead of the view,
+# which for a first-person weapon means it stays level while the world pitches around it.
+#
+# `mesh=` on the CLASS line is enough on its own. There is no OnStart here because there is nothing to
+# do once the archetype carries the mesh -- ClassBuilder applies mesh= and material= at spawn, so the
+# instance already has both before its first tick would have run.
+#
+# THE MESH IS CC0, from Kenney's Blaster Kit -- see Content/Meshes/SOURCES.md for the provenance and
+# Blaster.LICENSE.txt for the licence as shipped. It is 410 triangles and carries no textures, which
+# is why the template is still kilobytes rather than megabytes.
+NAME FPGun
+DESCRIPTION The first-person viewmodel: a CC0 blaster mesh, parented to the camera by AN_FPCharacter.
+
+CLASS AN_FPGun Actor mesh=Meshes/Blaster.ocmesh material=M_Gun
