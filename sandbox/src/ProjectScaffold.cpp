@@ -1048,6 +1048,24 @@ std::vector<std::string> projectReferences(const std::string& xml) {
 
 // Lists what an older project is missing: content folders, the csproj, engine references, dead
 // references and the materials glob.
+// Whether this project contains any C# at all, anywhere under Content. Cheap and conservative: one
+// .cs file is enough to make the csproj machinery relevant, and finding none is what tells
+// inspectProject to leave a graph-only project alone. Errors are swallowed on purpose -- an
+// unreadable directory should report "no C#" and skip an upgrade, never throw out of a UI path.
+bool hasAnyCSharp(const fmt::ProjectDesc& proj) {
+    std::error_code ec;
+    const std::filesystem::path content(proj.contentDir());
+    if (!std::filesystem::is_directory(content, ec)) return false;
+    for (std::filesystem::recursive_directory_iterator it(content, ec), end; it != end; it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec)) continue;
+        std::string ext = it->path().extension().string();
+        for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (ext == ".cs") return true;
+    }
+    return false;
+}
+
 ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
     ProjectUpgrade up;
     if (!proj.valid()) return up;
@@ -1063,6 +1081,21 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
 
     const std::string csproj = scriptsCsprojPath(proj);
     if (csproj.empty()) return up;
+
+    // A PROJECT WITH NO C# IN IT IS NOT MISSING A C# PROJECT FILE.
+    //
+    // Every check below this line is about Scripts.csproj -- creating it, adding engine references to
+    // it, repointing ones that no longer resolve. All of it assumed every project is a C# project,
+    // which stopped being true the moment Aver Node could express a whole game: the FirstPerson
+    // template is four .ocgraph files and a map, deliberately with no .cs anywhere, and opening it
+    // produced an upgrade prompt offering to add a csproj it does not want and has no use for.
+    // Accepting would have scaffolded C# into the one project whose entire premise is not having any.
+    //
+    // So the C# half of the upgrade only applies once there IS C#. A project that grows its first .cs
+    // file later gets the prompt then, because this is re-inspected on open -- nothing is lost by
+    // waiting, and a graph-only project is left alone. The FOLDER fixes above still apply: an empty
+    // Content\Meshes is layout every project has, C# or not.
+    if (!hasAnyCSharp(proj)) return up;
 
     if (!fileExists(csproj)) {
         up.fixes.push_back({ProjectFix::Kind::CreateCsproj,
