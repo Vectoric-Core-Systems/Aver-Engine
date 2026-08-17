@@ -202,17 +202,31 @@ void PtFurnaceTest::prePass(rhi::IRenderContext& ctx) {
                 finished_ = true;
                 return;
             }
-            // THE SUN-ON VARIANT DOES NOT APPLY TO THIS INTEGRATOR, and saying so is the honest
-            // answer rather than reporting six confident zeros. averFurnaceL() drops the environment
-            // to zero in that mode and leaves only the sun, and this path tracer has NO next-event
-            // estimation -- it reaches light only by hitting the environment with a sampled
-            // direction, and a sun of zero angular size is never hit. Everything would read 0 and
-            // every check would fail for a reason that has nothing to do with energy.
+            // THE SUN-ON VARIANT STILL DOES NOT APPLY TO THIS HARNESS -- but no longer because the
+            // integrator cannot reach the sun at all. It now can: PtShaders.hpp's ptDirectSun() fires
+            // a next-event shadow ray at the sun on every hit, precisely so a delta light with no
+            // angular size does not need a BRDF-sampled ray to land on it by chance the way a sampled
+            // bounce would have to. That closed the "reads 0 for a reason that has nothing to do with
+            // energy" hole this comment used to describe.
+            //
+            // WHAT STILL MAKES IT INCONCLUSIVE is a different, more fundamental mismatch: every check
+            // below is an IDENTITY over a UNIFORM environment -- "albedo 1 reads L, REGARDLESS OF
+            // GEOMETRY" -- and that invariance is what a spatially uniform environment gives for free
+            // (whichever way a surface points, the same radiance L arrives from every direction). A
+            // single directional light has no such invariance: the correct reading of a sun-lit quad
+            // is albedo/PI * dot(N,L) * sunRadiance, which DEPENDS on the surface's orientation to the
+            // light -- there is no single number "L" this harness's open/cave scenes could compare
+            // against the way they compare against the uniform-environment furnaceRadiance today.
+            // Checking the sun path for real needs a new expected-value formula that accounts for
+            // that orientation dependence, not just this early return deleted -- real, separable
+            // follow-up work, not a consequence of anything this change touched.
             if (dev_->skyAtmosphere().furnaceSun) {
-                AVER_ERROR("[PT] furnace INCONCLUSIVE: the SUN-ON furnace zeroes the environment and "
-                           "lights only the sun, and this integrator samples the BRDF alone -- with "
-                           "no next-event estimation a delta light is never hit, so every "
-                           "configuration would read 0. Run --pt-furnace without --furnace-sun");
+                AVER_ERROR("[PT] furnace INCONCLUSIVE: the SUN-ON furnace's correct reading depends on "
+                           "surface orientation to the light (albedo/PI * N.L * sunRadiance), unlike "
+                           "the uniform-environment identity every other check here rests on -- this "
+                           "harness has no matching expected-value formula for that yet, even though "
+                           "the integrator itself now reaches the sun via next-event estimation "
+                           "(PtShaders.hpp's ptDirectSun). Run --pt-furnace without --furnace-sun");
                 finished_ = true;
                 return;
             }

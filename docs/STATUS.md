@@ -247,7 +247,7 @@ Owns the project-wide render quality settings and reports, per feature, whether 
   raymarch via the viewport Lit dropdown. ~59 FPS at 128^3.
 - **Ray Tracing — implemented (DXR 1.1 inline `RayQuery`).** Exact hard sun shadows traced from the
   pixel shader; per-mesh BLAS and a per-frame TLAS over the replayed draw list. Falls back to the
-  shadow map when the structure was not built. **Path Tracing — implemented (`PtSceneView`).** A progressive, still-camera reference render via `--pt-scene`, accumulating samples from the real scene (static geometry only, sky-only lighting, flat albedo); suppresses the raster output while active (43fab37).
+  shadow map when the structure was not built. **Path Tracing — implemented (`PtSceneView`).** A progressive, still-camera reference render, accumulating samples from the real scene (static geometry only, sky-only lighting, flat albedo); suppresses the raster output while active (43fab37). Registered via `--pt-scene` at startup OR the editor's own Project Settings > Path Tracing > Quality control at any later frame (both funnel through `SandboxApp::syncPtSceneView`); no longer CLI-only.
 - **Directional shadow map** (2048², 3x3 PCF), used by the lit pass AND by light injection — a
   shadowed surface must not emit sun radiance into the volume or bounce light leaks through walls.
 - Exposed in the editor under **Edit > Project Settings > Rendering** (project-wide, so NOT in

@@ -110,8 +110,21 @@ Status Renderer::status(Feature f) const {
                 return Status::Unsupported;
             return Status::Ready;
         case Feature::PathTracing:
-            if (device_.rayTracingTier == 0) return Status::Unsupported;
-            return Status::NotImplemented;
+            // MIRRORS aver::pt::PathTracer::init()'s own gate field for field (kRayTracingTier=11,
+            // kShaderModel=65, caps.dxcAvailable, caps.computeShaders -- see PathTracer.cpp): this IS
+            // the capability check for modules/render.pt's reference view (PtSceneView), the only
+            // path tracer this engine has ever built. Used to read `return Status::NotImplemented;`
+            // unconditionally here -- true the day this enum was declared, and left true long after
+            // SandboxApp grew a real PtSceneView, so the Path Tracing settings-page combo that reads
+            // this status stayed permanently grey and setSettings() below clamped whatever
+            // Settings::pathTracing held back to Off, on every device, forever, regardless of
+            // hardware -- a persisted, C#-scriptable setting with no relationship whatsoever to the
+            // real path tracer. See SandboxApp.cpp's buildRenderingSettings(page==4), the only reader
+            // of a Ready status here, for what actually reconciles this against PtSceneView now.
+            if (device_.rayTracingTier < 11 || device_.shaderModel < 65 || !device_.dxcAvailable ||
+                !device_.computeShaders)
+                return Status::Unsupported;
+            return Status::Ready;
         case Feature::MeshShaders:
             if (device_.meshShaderTier == 0 || device_.shaderModel < 65 || !device_.dxcAvailable)
                 return Status::Unsupported;

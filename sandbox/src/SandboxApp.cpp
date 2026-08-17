@@ -1588,50 +1588,16 @@ public:
 
         // --pt-scene: the path tracer pointed at the REAL scene instead of the furnace's own private
         // geometry -- a progressive, still-camera reference view that SUPPRESSES the raster scene
-        // while registered (see PtSceneView.hpp: it is only ever registered when this flag is passed,
-        // so an ordinary run costs nothing). It reads the same draw list and camera the raster path
-        // already produces (IRenderFeature::submitDraw / IDevice::camera()) and needs nothing else
-        // from this app to be wired up EXCEPT the material resolver below; everything about what it
-        // can and cannot render is documented on PtSceneView.hpp itself (sky-only lighting, static
-        // geometry only, flat albedo only).
-        if (ptSceneViewFlag_) {
-            ptSceneView_ = std::make_unique<aver::pt::PtSceneView>();
-
-            // THE HOST RESOLVES THE MATERIAL, because the host is the only thing that knows it bound
-            // one -- the same division applyLandscapeSurface() uses, and the reason Aver.Render.
-            // PathTracer can link Aver.RHI and Aver.Core alone. The tracer forwards the opaque
-            // binding it was handed; this decides what it is.
-            //
-            // ownsBindingSet() is the IDENTITY test, not a shape test: a block that merely happens to
-            // be sizeof(MaterialConstants) is not a material, and nothing in the RHI tags a binding
-            // with its type. The size is still checked, but as a corroborating assertion after
-            // identity has already been established, never as the test itself.
-            //
-            // AND THE FALLBACK SET MEANS "NOT AUTHORED". The scene loop calls setDrawBinding()
-            // unconditionally once the material system is ready, passing ms.bindingSet(authored) --
-            // with `authored` zero for any surface painted only through the legacy surfaceLooks_
-            // palette, which resolves to fallbackSet_ and a fallbackConstants_ whose baseColorFactor
-            // is {1,1,1,1}. Reading that would render every non-authored surface white and throw away
-            // the look's real colour, so those draws must fall through to the per-draw baseColor.
-#if AVER_MODULE_PBR && AVER_MODULE_VOXI
-            ptSceneView_->setAlbedoResolver(
-                [this](aver::rhi::BindingSetHandle set, const void* constants, aver::u32 bytes,
-                       aver::f32 outAlbedo[3]) -> bool {
-                    if (!set || !constants || bytes != sizeof(pbr::MaterialConstants)) return false;
-                    pbr::MaterialSystem& ms = voxiRenderer_.materials();
-                    if (!ms.ready()) return false;
-                    if (set == ms.fallbackBindingSet()) return false;   // un-authored: keep the look's colour
-                    if (!ms.ownsBindingSet(set)) return false;          // not one of ours at all
-                    const auto* mc = static_cast<const pbr::MaterialConstants*>(constants);
-                    outAlbedo[0] = mc->baseColorFactor[0];
-                    outAlbedo[1] = mc->baseColorFactor[1];
-                    outAlbedo[2] = mc->baseColorFactor[2];
-                    return true;
-                });
-#endif
-            if (ptSceneView_->init(*e.device())) e.device()->addRenderFeature(ptSceneView_.get());
-            else { AVER_ERROR("[PT] scene view unavailable on this device"); ptSceneView_.reset(); }
-        }
+        // while registered (see PtSceneView.hpp). It reads the same draw list and camera the raster
+        // path already produces (IRenderFeature::submitDraw / IDevice::camera()); everything about
+        // what it can and cannot render is documented on PtSceneView.hpp itself (sky-only lighting,
+        // static geometry only, flat albedo only). setPtSceneView() (the CLI handler) already set
+        // ptSceneViewWantEnabled_; this call is what turns that want into an actual registration,
+        // through the SAME path the editor's own Path Tracing settings-page Quality combo uses at any
+        // later frame -- see syncPtSceneView()'s own comment for the rest of the design (in
+        // particular why it is safe to call outside a frame here, at startup, and every frame from
+        // onUpdate() thereafter, but never from inside onRender()).
+        syncPtSceneView(e.device());
 
             tools_.setAutoCompileFlag(autoCompileFlag());
             tools_.setReloader([this](const std::string& binDir, std::string* status) {
@@ -1662,6 +1628,14 @@ public:
 
     // Advances one frame: MCP commands, camera, gameplay tick, physics, and the render state.
     void onUpdate(Engine& e, const Timestep& t) override {
+        // --pt-scene-toggle-on/-off: verification-only (see the members' own comment). Checked BEFORE
+        // syncPtSceneView() so the same onUpdate() that flips the want-flag is the same one that acts
+        // on it, rather than costing a whole extra frame of lag for no reason.
+        if (ptSceneToggleOnAutoFrames_  > 0 && --ptSceneToggleOnAutoFrames_  == 0) ptSceneViewWantEnabled_ = true;
+        if (ptSceneToggleOffAutoFrames_ > 0 && --ptSceneToggleOffAutoFrames_ == 0) ptSceneViewWantEnabled_ = false;
+        // BEFORE device_->beginFrame() (see Engine::frameStep()) -- the only safe place to add or
+        // remove a render feature. See syncPtSceneView()'s own comment for why.
+        syncPtSceneView(e.device());
 #if AVER_MODULE_MCP
         // One event per frame: a click needs a press frame and a later release frame to register.
         if (mcp_.listening()) mcp_.pump([this](const mcp::Command& c) { applyMcpCommand(c); });
@@ -4069,10 +4043,13 @@ public:
             e.device()->removeRenderFeature(ptFurnace_.get());
             ptFurnace_.reset();
         }
-        if (ptSceneView_) {
-            e.device()->removeRenderFeature(ptSceneView_.get());
-            ptSceneView_.reset();
-        }
+        // Routed through the same reconciler the editor's live toggle uses (rather than a hand-
+        // written removeRenderFeature()+reset() here) so process-exit teardown and a user-driven
+        // "turn it off" are provably the same code path, not two that have to be kept in sync by
+        // hand. onShutdown() runs well outside any frame, so this is exactly as safe as its usual
+        // onUpdate() call site -- see syncPtSceneView()'s own comment for why that matters at all.
+        ptSceneViewWantEnabled_ = false;
+        syncPtSceneView(e.device());
         if (skinDraw_) {
             e.device()->removeRenderFeature(skinDraw_.get());
             skinDraw_.reset();
@@ -4277,6 +4254,10 @@ public:
         if (maxFrames_ != 0 && !explicitlyRequested) post_.autoExposure = false;
     }
     void setFocusVoxi(bool b) { focusVoxi_ = b ? 4 : 0; } // --project-settings
+    // --project-settings-page N: verification-only, jumps straight to sub-page N (see
+    // settingsPage_'s own comment for the index) instead of leaving a screenshot script to navigate
+    // a docked window it cannot click. Implies --project-settings.
+    void setProjectSettingsPage(int page) { focusVoxi_ = 4; settingsPage_ = page; }
     // Opens a drawer fully open on startup, optionally in a Content subfolder. --drawer.
     void setDrawerOpen(int which, std::string sub) {
         if (!which) return;
@@ -4318,7 +4299,12 @@ public:
     // that is where the flag puts it -- the tracer reads the same averFurnaceL() every other
     // shading path does.
     void setPtFurnaceTest() { furnaceTest_ = true; ptFurnaceTest_ = true; }        // --pt-furnace
-    void setPtSceneView() { ptSceneViewFlag_ = true; }                             // --pt-scene
+    // --pt-scene seeds the WANT flag syncPtSceneView() reconciles every frame; see that function's
+    // own comment for why the actual registration happens there and not here.
+    void setPtSceneView() { ptSceneViewWantEnabled_ = true; }   // --pt-scene
+    // --pt-scene-toggle-on/--pt-scene-toggle-off [N]: see ptSceneToggleOnAutoFrames_'s own comment.
+    void setPtSceneToggleOnAuto(int framesIn)  { ptSceneToggleOnAutoFrames_  = framesIn; }
+    void setPtSceneToggleOffAuto(int framesIn) { ptSceneToggleOffAutoFrames_ = framesIn; }
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
@@ -4446,6 +4432,98 @@ public:
         logAverSrActive(dev);
     }
 #endif
+
+    // Reconciles ptSceneView_ (the ACTUAL registration) with ptSceneViewWantEnabled_ (what --pt-scene
+    // at startup, or the editor's own Path Tracing settings-page Quality combo -- voxi::Settings::
+    // pathTracing != Off -- at any later frame, most recently asked for). Idempotent: a call that
+    // finds ptSceneView_ already in the wanted state does nothing, which is what makes it free to
+    // call every single frame rather than only on a change.
+    //
+    // CALLED FROM ONUPDATE() ONLY, and never from inside buildUI()/onRender() where the settings
+    // combo itself lives -- see Engine::frameStep(): onUpdate() runs BEFORE device_->beginFrame(), so
+    // this is the one point in the loop where nothing is mid-recording. That matters because
+    // suppressesScene() is read LIVE, once per drawMesh() call, all through onRender()
+    // (D3D12Device::drawMesh) -- mutating features_ while that loop is still running (which is
+    // exactly what changing the combo mid-onRender would do, since buildUI() runs after this frame's
+    // own scene draws but still inside the same open command list) would let one frame's draws
+    // disagree with each other about whether the scene is suppressed. Deferring the actual mutation
+    // to the NEXT onUpdate() avoids the question rather than reasoning through it.
+    //
+    // addRenderFeature()/removeRenderFeature() are themselves the two RHI calls this whole design
+    // rests on: addRenderFeature() calls onRenderTargetsChanged() immediately, against the device's
+    // CURRENT scene targets (D3D12Device::addRenderFeature), so a feature turned on mid-session
+    // builds its present pipeline against THIS session's swapchain, never a stale one from process
+    // start -- "build resources against the current render targets" is free, not something this
+    // function has to arrange. removeRenderFeature() is a plain vector erase (D3D12Device::
+    // removeRenderFeature) with no waitIdle and no special-cased teardown; the object's own
+    // destroyBuffer/destroyPipeline/destroyBindingSet calls (run via ~PtSceneView, through reset()
+    // below) each retire their resource behind the graphics queue's fence rather than freeing it
+    // immediately (D3D12ResourceFactory::retire), so releasing GPU objects a frame or two still in
+    // flight might be reading is safe. The one gap that is NOT closed here: PathTracer leaks every
+    // TLAS it built (the RHI has no destroyTlas at all -- see PathTracer::shutdown()'s own comment),
+    // so toggling this on and off repeatedly in one long editor session leaks one TLAS per re-arm.
+    // Small, bounded by how often the STATIC scene actually changes while this is on, and a
+    // pre-existing RHI gap rather than something this change introduces -- but real, and worth fixing
+    // in the RHI before this feature sees heavy toggling in practice.
+    void syncPtSceneView(rhi::IDevice* dev) {
+        if (!dev) return;
+        if (ptSceneViewWantEnabled_ == (ptSceneView_ != nullptr)) return;
+
+        if (ptSceneViewWantEnabled_) {
+            ptSceneView_ = std::make_unique<aver::pt::PtSceneView>();
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+            // THE HOST RESOLVES THE MATERIAL, because the host is the only thing that knows it bound
+            // one -- the same division applyLandscapeSurface() uses, and the reason Aver.Render.
+            // PathTracer can link Aver.RHI and Aver.Core alone. The tracer forwards the opaque
+            // binding it was handed; this decides what it is.
+            //
+            // ownsBindingSet() is the IDENTITY test, not a shape test: a block that merely happens to
+            // be sizeof(MaterialConstants) is not a material, and nothing in the RHI tags a binding
+            // with its type. The size is still checked, but as a corroborating assertion after
+            // identity has already been established, never as the test itself.
+            //
+            // AND THE FALLBACK SET MEANS "NOT AUTHORED". The scene loop calls setDrawBinding()
+            // unconditionally once the material system is ready, passing ms.bindingSet(authored) --
+            // with `authored` zero for any surface painted only through the legacy surfaceLooks_
+            // palette, which resolves to fallbackSet_ and a fallbackConstants_ whose baseColorFactor
+            // is {1,1,1,1}. Reading that would render every non-authored surface white and throw away
+            // the look's real colour, so those draws must fall through to the per-draw baseColor.
+            ptSceneView_->setAlbedoResolver(
+                [this](aver::rhi::BindingSetHandle set, const void* constants, aver::u32 bytes,
+                       aver::f32 outAlbedo[3]) -> bool {
+                    if (!set || !constants || bytes != sizeof(pbr::MaterialConstants)) return false;
+                    pbr::MaterialSystem& ms = voxiRenderer_.materials();
+                    if (!ms.ready()) return false;
+                    if (set == ms.fallbackBindingSet()) return false;   // un-authored: keep the look's colour
+                    if (!ms.ownsBindingSet(set)) return false;          // not one of ours at all
+                    const auto* mc = static_cast<const pbr::MaterialConstants*>(constants);
+                    outAlbedo[0] = mc->baseColorFactor[0];
+                    outAlbedo[1] = mc->baseColorFactor[1];
+                    outAlbedo[2] = mc->baseColorFactor[2];
+                    return true;
+                });
+#endif
+            if (ptSceneView_->init(*dev)) {
+                dev->addRenderFeature(ptSceneView_.get());
+                ptSceneViewUnavailable_ = false;
+                AVER_INFO("[PT] scene view enabled");
+            } else {
+                AVER_ERROR("[PT] scene view unavailable on this device");
+                ptSceneView_.reset();
+                ptSceneViewUnavailable_ = true;
+                // Don't retry every frame. NOTE this does NOT reach back into voxi::Settings::
+                // pathTracing -- syncPtSceneView() has no Voxi dependency at all (it must keep
+                // working when AVER_MODULE_VOXI is off, since --pt-scene does not need Voxi), so the
+                // settings-page combo can be left showing a stale non-Off value after this; see its
+                // own BeginDisabled(...||ptSceneViewUnavailable_) for how the UI stays honest anyway.
+            }
+        } else {
+            dev->removeRenderFeature(ptSceneView_.get());
+            ptSceneView_.reset();
+            AVER_INFO("[PT] scene view disabled; raster scene restored");
+        }
+    }
+
     void setFrameTimeReport(bool on) { frameTimeReport_ = on; }                 // --frame-time
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
@@ -5068,6 +5146,18 @@ private:
         if (project_.rtPixelsPerRayTile >= 0) s.rtPixelsPerRayTile = static_cast<u32>(project_.rtPixelsPerRayTile);
         vx.setSettings(s);   // clamps to this device; the manifest keeps what was asked for
         voxiRenderer_.setSettings(vx.settings());
+        // A manifest that names Path Tracing explicitly should actually (de)register PtSceneView at
+        // load, the same way every other feature above already takes effect just by existing in
+        // voxiRenderer_'s own per-frame settings read: PathTracing needs an explicit register/
+        // unregister step instead (see syncPtSceneView(), called later this frame from onInit(), or
+        // on the next onUpdate() for a project opened mid-session via this same function at line
+        // ~4615). Guarded on project_.pathTracing >= 0 -- i.e. RENDER.PATHTRACING is actually PRESENT
+        // in the manifest (see OcProject.hpp) -- so a project that states nothing about it never
+        // silently turns off a view --pt-scene, a toggle-test flag, or the settings combo itself
+        // already asked for this session; reading the CLAMPED vx.settings() (not local `s`) means a
+        // manifest requesting PT on hardware that cannot run it does not try to register it anyway.
+        if (project_.pathTracing >= 0)
+            ptSceneViewWantEnabled_ = (vx.settings().pathTracing != voxi::Quality::Off);
         AVER_INFO("[Project] applied render settings from {}", project_.manifestPath);
     }
 
@@ -9672,14 +9762,62 @@ private:
         }
 
         if (page == 4) {
+            // THIS COMBO IS NOW THE REAL CONTROL. It is voxi::Settings::pathTracing itself --
+            // round-tripped through the .ocproject manifest (RENDER.PATHTRACING) and exposed to C#
+            // scripting via aver_voxi_get/set_quality(PATH_TRACING), exactly like every other feature
+            // on this page -- and it used to have NO relationship whatsoever to modules/render.pt:
+            // Voxi.cpp hard-coded status(Feature::PathTracing) to Status::NotImplemented regardless
+            // of hardware, so BeginDisabled below never unlocked and setSettings() clamped whatever
+            // this held back to Off on every device, forever. status() now mirrors aver::pt::
+            // PathTracer::init()'s own DXR-1.1/SM-6.5/DXC/compute gate field for field (see Voxi.cpp),
+            // so this unlocks exactly when Aver.PathTracer's reference view can actually run, and the
+            // value it holds is what syncPtSceneView() -- called from onUpdate(), never from here, see
+            // that function's own comment for why -- reconciles PtSceneView's registration against.
+            //
+            // PtSceneView HAS NO QUALITY TIERS of its own: kAccumWidth/kAccumHeight/kMaxBounces/
+            // kSamplesPerStep/kMaxSamples (PtSceneView.hpp) are fixed constants, never derived from a
+            // rung the way voxelResolution derives from globalIllumination above. So every value but
+            // Off means exactly the same thing here -- on -- until a real quality ladder exists for
+            // it; stated honestly rather than inventing tiers that would do nothing.
             const Status st = vx.status(Feature::PathTracing);
             ImGui::TextUnformatted(Renderer::featureName(Feature::PathTracing));
             featureStatusBadge(vx, Feature::PathTracing);
-            ImGui::BeginDisabled(st != Status::Ready);
+            // ptSceneViewUnavailable_ is a RUNTIME signal PathTracer::init() itself raised (a DXC
+            // compile failure, say) that the static device caps above did not predict -- see
+            // syncPtSceneView()'s failure branch. Disabling on it too keeps this combo from claiming
+            // a quality that is not actually running; it is NOT reset to Off automatically when that
+            // happens (see syncPtSceneView()'s own comment), so a stale non-Off selection can sit
+            // here, disabled, until the user picks Off explicitly or reopens the project.
+            ImGui::BeginDisabled(st != Status::Ready || ptSceneViewUnavailable_);
             int q = static_cast<int>(s.pathTracing);
             const char* qs[] = {"Off","Low","Medium","High","Epic"};
-            if (ImGui::Combo("Quality", &q, qs, 5)) { s.pathTracing = static_cast<Quality>(q); changed = true; }
+            if (ImGui::Combo("Quality", &q, qs, 5)) {
+                s.pathTracing = static_cast<Quality>(q);
+                changed = true;
+                // THE SEAM: this is the one place a UI event turns into a request for PtSceneView.
+                // syncPtSceneView() performs the actual RHI registration next onUpdate(), never here.
+                ptSceneViewWantEnabled_ = (s.pathTracing != Quality::Off);
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Turns on Aver.PathTracer's reference view: a still-camera, brute-\n"
+                                   "force render of the real scene through modules/render.pt.\n"
+                                   "SUPPRESSES the raster view entirely while on. Sky and sun light\n"
+                                   "only -- no CLight (point/spot/area) and no emissive term --\n"
+                                   "static geometry only, flat albedo only, no denoiser -- see\n"
+                                   "PtSceneView.hpp for the full list of what it deliberately does\n"
+                                   "not do. No tiers yet: any value but Off means on.");
             ImGui::EndDisabled();
+
+            if (ptSceneViewUnavailable_) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[unavailable on this device]");
+            } else if (ptSceneView_) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.45f,0.85f,0.45f,1), "[active]");
+                ImGui::Text("%s, %u sample(s) accumulated",
+                            ptSceneView_->sceneReady() ? "tracing" : "no static geometry captured yet",
+                            ptSceneView_->samplesAccumulated());
+            }
         }
 
         ImGui::PopItemWidth();
@@ -10305,8 +10443,29 @@ private:
     f32  sunAngle_ = -1.0f;       // --sun-angle: negative leaves the sky's own value alone
     bool ptFurnaceTest_ = false;  // --pt-furnace: the same question asked of the path tracer
     std::unique_ptr<aver::pt::PtFurnaceTest> ptFurnace_;
-    bool ptSceneViewFlag_ = false;   // --pt-scene: the path tracer pointed at the real scene
+    // --pt-scene: the path tracer pointed at the real scene. ptSceneViewWantEnabled_ below is the
+    // one flag that matters now (see its own comment) -- there used to be a separate ptSceneViewFlag_
+    // here too, but nothing ever read it once syncPtSceneView() took over registration, so it was
+    // dead weight kept only by the refactor that introduced the want-flag. Removed.
     std::unique_ptr<aver::pt::PtSceneView> ptSceneView_;
+    // ptSceneViewWantEnabled_ is the REQUESTED state (set by --pt-scene at startup, or by the
+    // editor's own Path Tracing settings-page Quality combo -- voxi::Settings::pathTracing != Off --
+    // at any later frame); ptSceneView_ != nullptr is the ACTUAL one. syncPtSceneView() reconciles
+    // the two -- see its own comment for why it only ever runs from onUpdate(), before the frame's
+    // beginFrame(). Deliberately NOT itself a read of voxi::Settings::pathTracing (see
+    // syncPtSceneView()'s failure branch): this flag, and PT's registration, must keep working with
+    // AVER_MODULE_VOXI off, since --pt-scene has never needed Voxi and still must not.
+    bool ptSceneViewWantEnabled_ = false;
+    bool ptSceneViewUnavailable_ = false;   // init() refused once this session -- stop re-asking
+    // --pt-scene-toggle-on/--pt-scene-toggle-off [N]: VERIFICATION ONLY. Simulates a human flipping
+    // the Path Tracing settings-page Quality combo N frames into a bounded run, so a --frames capture can
+    // prove the RUNTIME toggle (register/unregister mid-session, not just --pt-scene's register-
+    // before-frame-1 path) without a human clicking anything -- same idiom and reason as
+    // chunkStreamAutoFrames_/droneAutoFrames_ above. Two independent countdowns from process start,
+    // not "N frames after the ON one", so the caller picks values (e.g. on=5, off=15) rather than
+    // this class reasoning about their order.
+    int ptSceneToggleOnAutoFrames_ = 0;
+    int ptSceneToggleOffAutoFrames_ = 0;
     std::unique_ptr<aver::editor::ReflTest> refl_;
     int  reflBeaconIndex_ = -1;   // which objects_ entry the schedule shows and hides
     rhi::MeshHandle unitCubeMesh_ = 0;   // the editor's own unit cube, half-extent 1
@@ -12102,7 +12261,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; bool ptScene=false; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string graphSelectNode; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string graphSelectNode; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -12284,6 +12443,8 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--auto-compile")) autoCompile=true;
         else if (!std::strcmp(argv[i],"--focus-level-at") && i+1<argc) focusLevelAt=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--project-settings")) focusVoxi=true;
+        // --project-settings-page N: verification-only, see setProjectSettingsPage's own comment.
+        else if (!std::strcmp(argv[i],"--project-settings-page") && i+1<argc) projectSettingsPage=std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--editor-prefs")) showPrefs=true;
         // --scroll-prefs-to-keybinds: see buildEditorPrefs()'s own comment on the flag it sets.
         else if (!std::strcmp(argv[i],"--scroll-prefs-to-keybinds")) scrollPrefsToKeybinds=true;
@@ -12449,6 +12610,14 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--sun-angle") && i+1<argc) sunAngle=(f32)std::atof(argv[++i]);
         else if (!std::strcmp(argv[i],"--pt-furnace")) ptFurnace=true;
         else if (!std::strcmp(argv[i],"--pt-scene")) ptScene=true;
+        // --pt-scene-toggle-on/-off [N]: verification-only, see SandboxApp::ptSceneToggleOnAutoFrames_
+        // for what this proves and why. Same "[N] optional, default given" shape as --chunk-stream.
+        else if (!std::strcmp(argv[i],"--pt-scene-toggle-on")) {
+            ptSceneToggleOn = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 5;
+        }
+        else if (!std::strcmp(argv[i],"--pt-scene-toggle-off")) {
+            ptSceneToggleOff = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 15;
+        }
         else if (!std::strcmp(argv[i],"--skin-scene-test") && i+1<argc) skinSceneDir=argv[++i];
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
@@ -12563,6 +12732,7 @@ Application* createApplication(int argc, char** argv) {
     // The start screen: interactive launches with no project, or --start-screen. Never in a capture run.
     app->armBrowser(startScreen || (!headless && frames == 0 && project.empty()));
     app->setFocusVoxi(focusVoxi);
+    if (projectSettingsPage >= 0) app->setProjectSettingsPage(projectSettingsPage);
     app->setDrawerOpen(drawerOpen, drawerSub);
     app->setFocusScript(focusScript);
     app->setFocusTools(focusTools);
@@ -12668,6 +12838,8 @@ Application* createApplication(int argc, char** argv) {
     if (sunAngle > 0.0f) app->setSunAngle(sunAngle);
     if (ptFurnace) app->setPtFurnaceTest();
     if (ptScene) app->setPtSceneView();
+    if (ptSceneToggleOn > 0)  app->setPtSceneToggleOnAuto(ptSceneToggleOn);
+    if (ptSceneToggleOff > 0) app->setPtSceneToggleOffAuto(ptSceneToggleOff);
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
     return app;
 }

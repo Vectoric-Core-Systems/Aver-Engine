@@ -1,9 +1,12 @@
 #pragma once
 
 // The path tracer's HLSL, compiled as the TAIL of rhi::sharedShaderPrelude(), which already
-// declares PerFrame at b0, PI, srgbToLin, skyColor and the averFurnace* contract. Declaration
-// order is load-bearing: HLSL has no forward declarations, so a helper used before it is written
-// compiles in C++ and fails in DXC, at RUNTIME, on a build that reported success.
+// declares PerFrame at b0 (gLightDir/gLightColor among its fields), PI, srgbToLin, skyColor,
+// averSunRadiance and the averFurnace* contract. Declaration order is load-bearing: HLSL has no
+// forward declarations, so a helper used before it is written compiles in C++ and fails in DXC, at
+// RUNTIME, on a build that reported success. ptDirectSun below reads averSunRadiance/gLightDir from
+// exactly this prelude -- the sun's own light reaches this file through the SAME shared declarations
+// the sky already did, not a new binding: this module still links only Aver.RHI and Aver.Core.
 namespace aver::pt {
 
 inline constexpr const char* kPathTracerHLSL = R"(
@@ -118,12 +121,75 @@ float3 ptCosineHemisphere(float3 n, float u1, float u2) {
 
 // ---- the scene ---------------------------------------------------------------------------------
 
-// The environment: whatever radiance arrives from a direction that hit nothing.
+// The environment: whatever INDIRECT/ambient radiance arrives from a direction that hit nothing.
 //
 // skyColor is the ENGINE's own environment, and it already returns averFurnaceL() when the furnace
 // is on. Asking it rather than carrying a private constant is what makes the furnace an oracle over
 // the shipped path rather than over a test rig: the integrator has no idea it is being measured.
+//
+// NO SUN IN HERE, ON PURPOSE. skyColor()/skyColorFull() (RHIShaders.cpp) draw an authored
+// horizon-to-zenith gradient and a ground term -- there is no visible sun disc anywhere in that
+// function, by design (a disc would need an angular radius and a hard step no BRDF-sampled ray
+// could ever land inside, see ptDirectSun below for the general version of that problem). So a path
+// that MISSES and reads this function is correctly picking up sky and ground light only; the sun's
+// own contribution is added separately, at every HIT, by ptDirectSun -- not here, and the two do
+// not overlap.
 float3 ptEnvironment(float3 dir) { return skyColor(dir); }
+
+// Direct light from the sun, by NEXT-EVENT ESTIMATION rather than by hoping a bounce finds it.
+//
+// THE PROBLEM THIS EXISTS TO FIX. averSunRadiance() (RHIShaders.cpp) is a single direction with no
+// angular size at all -- there is no disc, no cone, nothing a BRDF-sampled ray drawn from a
+// CONTINUOUS density (ptCosineHemisphere below) could ever land inside; the probability is exactly
+// zero. A path tracer that only reaches light by bouncing into the environment therefore renders
+// every sun-lit-but-sky-occluded surface -- an overhang, a wall facing away from open sky, the
+// underside of anything -- as honestly, perfectly BLACK, no matter how bright the sun is. That used
+// to be this integrator's whole story for direct light: none.
+//
+// THE FIX: at every hit, fire ONE shadow ray straight at the light instead of waiting for a
+// scattered ray to find it by chance. This is what "next-event estimation" means -- the next
+// lighting EVENT (the sun) is sampled explicitly rather than left to the BRDF's own sampling to
+// stumble onto, and because the light has a KNOWN direction (not a drawn one), there is no pdf to
+// divide by: sampled with probability one, not weighted by one.
+//
+// WHY THIS DOES NOT DOUBLE-COUNT WITH BRDF-SAMPLED BOUNCES. Exactly because the sun has zero
+// angular size (see above): a bounce can never independently rediscover it, so there is nothing
+// here for indirect sampling to count twice and no MIS weight is needed -- unlike a light with real
+// solid angle, where both strategies can find it and naively adding both would be wrong.
+//
+// HARD SHADOWS ONLY. One ray, not an area sample of a disc -- correct for a delta light (there is
+// no disc to sample, see above), and simpler than VoxiShaders.hpp's own shadow routine, which
+// exists to soften a shadow from a light that DOES have an authored angular radius. If the sun ever
+// grows one here too, this is the function that would need the disc-sampling loop that file already
+// has.
+//
+// COSTS ONE EXTRA RayQuery PER HIT, ALWAYS AGAINST THE SAME gPtScene ALREADY BOUND AT t0 -- no new
+// SRV, no new register, no new dependency: this module still links only Aver.RHI and Aver.Core.
+float3 ptDirectSun(float3 hitPos, float3 nWS, float3 albedo, float bias, float tMax) {
+    float3 L = normalize(gLightDir.xyz);   // "direction TO light" -- see PerFrame in the prelude
+    float ndl = dot(nWS, L);
+    if (!(ndl > 0.0)) return float3(0, 0, 0);   // the light is behind this surface; no ray to fire
+
+    RayDesc r;
+    r.Origin    = hitPos + nWS * bias;   // same normal-offset ptTrace's own callers already use
+    r.Direction = L;
+    r.TMin      = bias;
+    r.TMax      = tMax;
+
+    // ACCEPT_FIRST_HIT_AND_END_SEARCH: this is an OCCLUSION test, not a closest-hit query -- the
+    // first candidate that commits is already a reason to call the sun blocked, so there is nothing
+    // to gain by letting the query keep looking for a closer one.
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
+    q.TraceRayInline(gPtScene, RAY_FLAG_NONE, 0xFF, r);
+    q.Proceed();
+    if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) return float3(0, 0, 0);   // occluded
+
+    // Lambertian BRDF (albedo/PI) times the rendering equation's cosine, times the light's own
+    // radiance. NO PDF DIVISION -- unlike ptScatter, which divides by the density of a DRAWN
+    // direction, this direction was not drawn, it was CHOSEN (the one direction that reaches the
+    // sun), so there is no density over directions here to divide out.
+    return albedo * (1.0 / PI) * ndl * averSunRadiance();
+}
 
 // Traces one ray and resolves the surface it hit. False means the ray left the scene.
 bool ptTrace(float3 org, float3 dir, out float3 hitPos, out float3 nWS, out float3 albedo) {
@@ -228,11 +294,24 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
                 escaped += 1.0;
                 break;
             }
-            // Out of bounces. The path is TRUNCATED and contributes nothing, which is why the
-            // escaped count above is read back: at a finite bounce count the furnace's exact
-            // answer is L times the escaped fraction, and pretending otherwise would need a
-            // terminal environment lookup that ignores occlusion -- a bias that would hide
-            // exactly the sort of error this exists to find.
+
+            // DIRECT LIGHT, AT EVERY HIT, INCLUDING THE LAST ONE THE BOUNCE BUDGET ALLOWS. See
+            // ptDirectSun's own comment for why this is the fix for sky-only lighting: it is a
+            // next-event shadow ray, not a bounce, so it does not compete with the escaped-fraction
+            // identity PtFurnaceTest checks below -- that identity is about what `radiance` collects
+            // on a MISS, and this line only ever runs on a HIT. It also costs the furnace test
+            // nothing to check: averSunRadiance() (RHIShaders.cpp) returns exactly 0 whenever the
+            // furnace is on and the sun is off, which is every configuration PtFurnaceTest actually
+            // asserts a number for, so this term is provably zero there, not just empirically small.
+            radiance += throughput * ptDirectSun(hitPos, nWS, albedo, bias, gPtTrace.y);
+
+            // Out of bounces. The path is TRUNCATED and contributes no further INDIRECT light,
+            // which is why the escaped count above is read back: at a finite bounce count the
+            // furnace's exact answer is L times the escaped fraction, and pretending otherwise
+            // would need a terminal environment lookup that ignores occlusion -- a bias that would
+            // hide exactly the sort of error this exists to find. (The direct-light term just above
+            // is unaffected by that truncation: it is evaluated at every hit, not carried forward by
+            // a bounce that might never happen.)
             if (b == bounce) break;
 
             float3 d = ptCosineHemisphere(nWS, ptRand(rng), ptRand(rng));
