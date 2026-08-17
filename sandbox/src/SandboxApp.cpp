@@ -1229,7 +1229,13 @@ public:
             // --no-gi wins over --gi.
             if (giForceOff_)     s.globalIllumination = voxi::Quality::Off;
             else if (giOverride_) s.globalIllumination = static_cast<voxi::Quality>(giOverride_);
-            if (rtOverride_) s.rayTracing = static_cast<voxi::Quality>(rtOverride_);
+            // --no-rt wins over --rt, mirroring --no-gi above. IT HAS TO EXIST AS ITS OWN FLAG because
+            // rtOverride_ uses 0 for "not given" and Quality::Off is also 0, so there is no value of
+            // --rt that means off. Ray tracing now defaults to Medium, which made the Off rung of the
+            // published cost ladder unreachable from the command line -- the row was measurable only
+            // back when Off was the default and no flag was needed to reach it.
+            if (rtForceOff_)     s.rayTracing = voxi::Quality::Off;
+            else if (rtOverride_) s.rayTracing = static_cast<voxi::Quality>(rtOverride_);
             if (msOverride_) s.meshShaders = true;
             // Applied to `s` (not voxiRenderer_ directly) and BEFORE it reaches the singleton below:
             // voxiRenderer_.setSettings() is called again every frame with whatever
@@ -4328,6 +4334,7 @@ public:
     // "scene draw" GPU span by exactly the trace's own cost and nothing upstream of it.
     void setGiConeTraceOff(bool off) { giConeTraceOff_ = off; }                // --no-gi-cone
     void setRtOverride(int q) { rtOverride_ = q; }                              // --rt
+    void setRtForceOff(bool off) { rtForceOff_ = off; }                         // --no-rt
     void setRtRays(int n) { rtRaysOverride_ = n; }                              // --rt-rays N
     void setRtPixelsPerRay(int n) { rtPixelsPerRayOverride_ = n; }              // --rt-pixels-per-ray N
     void setGiUpdateInterval(int n) { giUpdateIntervalOverride_ = n; }          // --gi-update-interval N
@@ -10307,6 +10314,7 @@ private:
     int  giOverride_=0;              // --gi: GI quality to apply at startup
     bool giForceOff_=false;          // --no-gi: force it off, whatever the default is
     int  rtOverride_=0;              // --rt: ray tracing quality at startup
+    bool rtForceOff_=false;          // --no-rt: force it off, whatever the default is
     int  rtRaysOverride_=0;          // --rt-rays N: sun occlusion rays per pixel (0 = flag not given)
     int  rtPixelsPerRayOverride_=0;  // --rt-pixels-per-ray N: shadow tile edge (0 = flag not given)
     int  giUpdateIntervalOverride_=0; // --gi-update-interval N: GI revoxelise interval (0 = flag not given)
@@ -12281,7 +12289,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string graphSelectNode; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string graphSelectNode; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -12569,6 +12577,9 @@ Application* createApplication(int argc, char** argv) {
         // volume from being built; this only stops PSMainVoxi/PSClusterMain from READING it.
         else if (!std::strcmp(argv[i],"--no-gi-cone")) giConeOff=true;
         else if (!std::strcmp(argv[i],"--rt")) rt=3;
+        // The Off rung of the ray-tracing cost ladder. It needs its own flag because RT is on by
+        // default now and --rt cannot express Off: 0 is rtOverride_'s "not given".
+        else if (!std::strcmp(argv[i],"--no-rt")) noRt=true;
         // The sun occlusion rays per pixel, so the cost of ray-traced shadows can be MEASURED
         // instead of asserted: the sequence is nested, so 1, 2, 4, 8 is one converging series.
         else if (!std::strcmp(argv[i],"--rt-rays") && i+1<argc) rtRays=std::atoi(argv[++i]);
@@ -12809,6 +12820,7 @@ Application* createApplication(int argc, char** argv) {
     app->setRtRays(rtRays);
     app->setRtPixelsPerRay(rtPixelsPerRay);
     app->setGiUpdateInterval(giUpdateInterval);
+    app->setRtForceOff(noRt);
     app->setRenderScale(renderScale);
     if (!aversrArg.empty()) {
 #if AVER_MODULE_SR

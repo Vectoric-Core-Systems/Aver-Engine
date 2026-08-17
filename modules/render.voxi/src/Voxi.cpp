@@ -198,8 +198,18 @@ u32 Renderer::giUpdateIntervalForQuality(Quality q) {
     switch (q) {
         case Quality::Off:    return 1;   // GI is not running; the value is inert either way
         case Quality::Low:    return 8;   // kMaxGiUpdateInterval, the cheapest the clamp allows
-        case Quality::Medium: return 4;
-        case Quality::High:   return 2;
+        // MEDIUM IS 1 -- ALWAYS FRESH -- BECAUSE 4 IS WHAT MAKES LIGHTING TRAIL THE CAMERA. At 4 the
+        // volume is revoxelised every fourth frame and the three in between reuse it, so indirect
+        // light and the shadowing that comes with it lag scene and camera movement by up to three
+        // frames. Standing still it converges to exactly the same image, which is why this reads as a
+        // subtle "shadows lagging behind when moving around" rather than as an obvious fault, and why
+        // it survived being measured: a still-camera benchmark cannot see it at all.
+        //
+        // The trade it was buying is real but belongs a rung down: Low still amortises at 8. Medium is
+        // the default, the default is what people judge the renderer by, and latency in the lighting
+        // is a worse first impression than a few milliseconds.
+        case Quality::Medium: return 1;
+        case Quality::High:   return 1;
         case Quality::Epic:   return 1;   // always fresh -- bit-identical to the old behaviour
         default:              return 1;   // an unknown tier must not silently degrade lighting
     }
@@ -231,10 +241,16 @@ u32 Renderer::rtPixelsPerRayTileForQuality(Quality q) {
     switch (q) {
         case Quality::Off:    return 1;
         case Quality::Low:    return 4;   // one traced pixel per 4x4, the widest amortisation that pays
-        case Quality::Medium: return 2;
-        case Quality::High:   return 2;
-        case Quality::Epic:   return 1;   // every pixel traces every frame -- no history, no denoiser
-        default:              return 2;
+        // 1 FROM MEDIUM UPWARDS: every pixel traces every frame, which is bit-identical to no denoiser
+        // at all -- no tiling, no reprojected history, no temporal blend. Anything above 1 reuses a
+        // reprojected sample for most pixels, and reprojection is what makes a shadow appear to trail
+        // the thing casting it while the camera moves. It is nearly free here anyway (18.19 ms at
+        // tile 1 against 18.36 ms at tile 2, inside the noise), because amortisation saturates early
+        // at one ray per pixel. Low is the only rung that still trades lag for frame time.
+        case Quality::Medium: return 1;
+        case Quality::High:   return 1;
+        case Quality::Epic:   return 1;
+        default:              return 1;   // an unknown tier must not silently reintroduce the history
     }
 }
 

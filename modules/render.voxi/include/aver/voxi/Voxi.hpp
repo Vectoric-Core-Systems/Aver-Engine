@@ -55,12 +55,22 @@ struct Settings {
     // ON BY DEFAULT, AT MEDIUM, AND THE TWO KNOBS BELOW ARE MEDIUM'S RUNGS BY CONSTRUCTION -- see
     // rtShadowRays/rtPixelsPerRayTile for why that sentence is load-bearing rather than decorative.
     //
-    // MEASURED COST (ElectricDreams, windowed, --no-vsync, 200 frames, whole-frame median): 11.73 ms
-    // with RT off, 18.36 ms at this tier's rungs. +57%, and the cheapest honest way to have
-    // ray-traced sun shadows at all -- the naive version of this change (flip the tier, leave the
-    // knobs at 4 rays and no amortisation) measured 23.15 ms, almost exactly double, which is what
-    // Epic now means. One machine, one GPU: the RELATIVE ladder should hold anywhere, the absolute
-    // milliseconds are this card's.
+    // MEASURED COST. Release build, ElectricDreams, windowed at the editor's default 1600x900,
+    // --no-vsync, --frames 200, whole-frame median: 11.86 ms with --no-rt, 18.44 ms at this tier's
+    // rungs. +55%, and the cheapest honest way to have ray-traced sun shadows at all -- the naive
+    // version of this change (flip the tier, leave the knobs at Epic's 4 rays) measures 23.39 ms,
+    // almost exactly double the Off baseline. One machine, one GPU, one window size: the RELATIVE
+    // ladder should hold anywhere, the absolute milliseconds are this card's (RX 7800 XT) and they
+    // move with resolution, so quote the window when quoting the number.
+    //
+    // HOW TO MEASURE THIS WITHOUT MEASURING NOTHING, because that is the trap and it has now been
+    // fallen into twice. The .ocproject path is POSITIONAL -- there is no --project flag, so
+    // `Sandbox.exe --project <path>` silently opens no project at all. And even given the path
+    // correctly, a project whose CREATEDWITH names an older series raises a modal and waits, so a
+    // --frames run scores an EMPTY editor. Both failures look exactly like a successful benchmark:
+    // plausible milliseconds, no error, a screenshot nobody opened. The tell is in the log --
+    // "scene walk ... over 0 entities" means nothing loaded, and the honest baseline here is 14
+    // entities and about 18 ms. Read that line before believing any number out of this ladder.
     //
     // A KNOWN WAY TO MAKE THIS LOOK BROKEN, recorded because it cost an afternoon to bisect: brighter
     // direct light on a surface means more INDIRECT light bounced off it, and the GI here does not
@@ -117,12 +127,17 @@ struct Settings {
     // temporal denoiser hides its own artefacts as readily as the tracer's. Low still amortises, at
     // tile 4, for anyone who wants the frame back.
     //
-    // Measured, so the ladder is not guesswork (ElectricDreams, windowed, --no-vsync, 200 frames,
-    // whole-frame median): rays 1 / tile 4 = 18.07 ms, rays 1 / tile 2 = 18.36 ms, rays 2 / tile 2 =
-    // 19.84 ms, rays 4 / tile 1 = 23.15 ms, against 11.73 ms with rayTracing Off. Note the shape:
-    // going from tile 2 to tile 4 buys almost nothing (0.29 ms), so amortisation saturates early and
-    // the ray count is where the rest of the money is -- which is also why dropping the denoiser
-    // entirely costs less than it sounds like it should at one ray.
+    // Measured, so the ladder is not guesswork. Release build, ElectricDreams, windowed at 1600x900,
+    // --no-vsync, --frames 200, whole-frame median: rays 1 / tile 4 = 18.26 ms, rays 1 / tile 2 =
+    // 18.49 ms, rays 1 / tile 1 = 18.44 ms, rays 2 / tile 1 = 19.99 ms, rays 4 / tile 1 = 23.39 ms,
+    // against 11.86 ms with --no-rt.
+    //
+    // NOTE THE SHAPE, because it is what makes tile 1 defensible as the default rather than merely
+    // preferable: the three tile widths at one ray span 0.23 ms -- they are the same number inside
+    // the run-to-run noise -- while going from one ray to four costs 4.95 ms. Amortisation saturates
+    // immediately and the ray count is where all of the money is, so the temporal history was buying
+    // no frame time in exchange for the latency it introduced. One scene at one resolution; a heavier
+    // one may well disagree, which is what Low's tile 4 is still there for.
     u32 rtPixelsPerRayTile = 1;
 
     // How many frames apart the GI volume is re-voxelised: 1 (the default) revoxelises and re-filters
@@ -133,16 +148,24 @@ struct Settings {
     // one. Clamped to [1, VoxiRenderer::kMaxGiUpdateInterval].
     //
     // DERIVED FROM globalIllumination on a tier change, exactly as voxelResolution above is: Low 8,
-    // Medium 4, High 2, Epic 1. Set it explicitly in the same call that changes the tier to override
+    // Medium 1, High 1, Epic 1. Set it explicitly in the same call that changes the tier to override
     // the derived value.
     //
-    // THE DEFAULT IS 4 BECAUSE THE DEFAULT TIER IS Medium, and the two have to agree by construction
+    // THE DEFAULT IS 1 BECAUSE THE DEFAULT TIER IS Medium, and the two have to agree by construction
     // -- the derivation only fires when the tier CHANGES, so a struct whose defaults contradict each
     // other never reaches the rung it claims. voxelResolution's 128 is Medium's rung for exactly this
-    // reason; 1 here was Epic's, and the result was that the default configuration silently ran the
-    // most expensive revoxelisation rate in the ladder. Measured: it left 187.9 ms on the table
-    // against the 104.5 ms the same scene reaches at interval 4.
-    u32 giUpdateInterval = 4;
+    // reason. This field has now been wrong in BOTH directions for that same reason: it was 1 while
+    // Medium derived to 4, and it would be 4 now that Medium derives to 1.
+    //
+    // MEDIUM MOVED 4 -> 1 BECAUSE 4 IS WHAT MAKES LIGHTING TRAIL THE CAMERA, and the frame time it was
+    // buying is not there to buy. An earlier revision of this comment claimed interval 1 left 187.9 ms
+    // on the table against 104.5 ms at interval 4. Re-measured on the same scene (Release,
+    // ElectricDreams, 1600x900, --no-vsync, --frames 200): intervals 1, 2, 4 and 8 give medians of
+    // 18.54, 18.47, 18.50 and 18.46 ms -- a 0.09 ms spread across the whole range, which is noise.
+    // Whatever made revoxelisation the bottleneck when that pair of numbers was taken is no longer
+    // true, and the figure outlived it; it is quoted here as refuted rather than quietly deleted.
+    // Low still amortises at 8, which is where the trade belongs: not on the default tier.
+    u32 giUpdateInterval = 1;
 };
 
 // Process-wide settings service. Single instance shared by the editor, the runtime and the C ABI.
