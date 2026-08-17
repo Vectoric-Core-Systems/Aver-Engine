@@ -52,14 +52,26 @@ struct DeviceInfo {
 struct Settings {
     Msaa    msaa               = Msaa::X4;
     Quality globalIllumination = Quality::Medium;
-    // ON BY DEFAULT, AT MEDIUM, AND THE TWO KNOBS BELOW ARE MEDIUM'S RUNGS BY CONSTRUCTION -- see
-    // rtShadowRays/rtPixelsPerRayTile for why that sentence is load-bearing rather than decorative.
-    // MEASURED COST on ElectricDreams, windowed, --no-vsync, 200 frames: the whole frame goes from a
-    // median 11.73 ms with RT off to 18.36 ms at this tier's rungs. That is +57%, and it is the
-    // cheapest honest way to have ray-traced sun shadows on at all -- the naive version of this change
-    // (flip the tier, leave the knobs alone at 4 rays and no amortisation) measured 23.15 ms, which is
-    // almost exactly double the RT-off frame and is what Epic now means.
-    Quality rayTracing         = Quality::Medium;
+    // HELD AT Off, AND THIS IS A ONE-WORD CHANGE AWAY FROM Medium THE MOMENT THE BUG BELOW IS FIXED.
+    //
+    // It WAS defaulted to Medium, with the rungs below measured for it and derived from it, and that
+    // half of the work stands. What stopped it shipping on is a rendering defect this change exposes
+    // rather than causes: on a SPARSE scene -- the FirstPerson template, three static bodies and a
+    // handful of character capsules -- turning ray tracing on renders the whole viewport flat red and
+    // drops the draw count from 5 to 3. On a dense one (ElectricDreams, terrain and scatter) the same
+    // setting renders correctly at the measured 18.57 ms. So the tier is not what is broken; something
+    // in the RT sun-shadow path does not survive a nearly-empty acceleration structure, and it fails
+    // by painting rather than by warning -- Voxi logs "ray-traced shadow tile: 2x2" and no error at all.
+    //
+    // A default that renders red on a new project is not shippable, and the person who would hit it
+    // first is someone who just made one. See the tracked bug before flipping this back.
+    //
+    // MEASURED COST, for when it does go back on (ElectricDreams, windowed, --no-vsync, 200 frames,
+    // whole-frame median): 11.73 ms with RT off, 18.36 ms at Medium's rungs -- +57%, and the cheapest
+    // honest way to have ray-traced sun shadows at all. The naive version of the change (flip the tier,
+    // leave the knobs at 4 rays and no amortisation) measured 23.15 ms, almost exactly double, and is
+    // what Epic now means.
+    Quality rayTracing         = Quality::Off;
     Quality pathTracing        = Quality::Off;
     bool    meshShaders        = false;
 
