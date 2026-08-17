@@ -1,8 +1,22 @@
 # Lifting the game half out of SandboxApp
 
-> **STATUS: PLAN.** Produced 2026-08-02 by five parallel readers over `SandboxApp.cpp` plus a
-> refutation pass: 57 risks raised, **2 survived**. Every line number was read, not assumed.
-> Commits C1 onward are being executed against this document.
+> **STATUS: HISTORY, 2026-08-17. THIS DOCUMENT DESCRIBES COMPLETED WORK THAT HAS BEEN REMOVED.**
+> The plan was executed in commits C1–C11 and lifted the game rendering half from `SandboxApp.cpp`
+> to `modules/runtime.game`, creating `AverGame.exe`. That executable and the staging scripts have
+> since been deleted in commit b262c73 ("The packaged game is gone"), leaving only the library.
+> The file paths in sections C1–C11 below no longer exist as an executable; the design reasoning
+> — the re-guarding strategy, the separation of concerns, the framework integration — informed the
+> library that survives and is tested by `tests/game/InputBridgeTest`.
+>
+> **What replaced it: nothing, deliberately.** A second host that rendered a different subset of
+> the scene than the editor was a standing source of confusion; the editor is how a project is run.
+> The library `modules/runtime.game` is still built (controlled by `AVER_BUILD_GAME`) and driven by
+> tests, which is what the plan's architecture enabled.
+>
+> Produced 2026-08-02 by five parallel readers over `SandboxApp.cpp:1,2000` plus a refutation pass:
+> 57 risks raised, **2 survived**. Every line number was read, not assumed. Restored here because
+> the file describes a completed slice, its design still lives in the runtime library, and the
+> traps section (below) documents engine-wide patterns still relevant to any future lift.
 
 ---
 

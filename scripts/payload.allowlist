@@ -112,12 +112,19 @@ scripting/csharp/**
 # other. They mention each other now.
 scripting/fsharp/**
 
-# New Project templates. ProjectScaffold.cpp's templatesRoot() walks up from executableDir() the
-# same way engineProjectReference() does for scripting/csharp above, so staging this as a SIBLING of
-# bin\ (not inside it) is what makes that walk find <install>\templates from <install>\bin on a
-# shipped install the identical way it already finds <install>\scripting\csharp. Drop this and
-# listTemplates() finds nothing -- not an error, New Project just falls back to Blank-only, the same
-# silent-degrade contract templatesRoot() promises for a missing/empty/malformed root of any kind.
+# New Project templates -- DELIBERATELY NOT STAGED TODAY, because the engine currently ships none.
+# templates/ was removed along with the starter template, so a `templates/**` line here would name a
+# directory that does not exist. New Project falls back to Blank-only, which is the documented
+# silent-degrade contract templatesRoot() promises for a missing/empty/malformed root of any kind --
+# so nothing fails, there is simply nothing to offer.
+#
+# PUT THE LINE BACK THE DAY A TEMPLATE SHIPS AGAIN, and put it back HERE rather than under [bin]:
+# ProjectScaffold.cpp's templatesRoot() walks up from executableDir() the same way
+# engineProjectReference() does for scripting/csharp above, so templates\ must be staged as a SIBLING
+# of bin\, not inside it, for that walk to find <install>\templates from <install>\bin on a shipped
+# install. Staged in the wrong place it would be present on disk and invisible to the editor, which
+# is a worse failure than being absent -- absent at least degrades the way the code says it will.
+#     templates/**
 
 # NOT SHIPPED, and both halves of that are deliberate:
 #

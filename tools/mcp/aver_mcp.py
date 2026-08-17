@@ -451,39 +451,51 @@ def tool_gates(args):
 
 
 def tool_package(args):
-    """Stage a project into a runnable game directory, and optionally verify it.
+    """Stage the ENGINE payload, and optionally verify it.
+
+    THIS USED TO PACKAGE A GAME, and every call to it failed once that path was deleted: it shelled
+    out to ./scripts/stage-game.ps1 and ./scripts/verify-game.ps1, which went with AverGame.exe. The
+    engine payload -- the thing the launcher pulls and installs -- is what packaging means here now,
+    so this points at stage-payload.ps1 / verify-payload.ps1 instead of failing on a missing file.
+
+    NO `project` ARGUMENT ANY MORE, and that is the substantive difference rather than a rename: a
+    game package was cut per-project, while a payload is the engine itself and there is no project to
+    name. A caller still passing `project` is told plainly rather than having it ignored.
 
     STAGING IS NOT DESTRUCTIVE to the repo -- it copies into an output directory the caller names --
-    but it DOES overwrite that directory when -Force is passed, so `force` is opt-in here rather
-    than implied. The two scripts are separate on purpose: staging produces a package, verifying
-    proves the package runs somewhere else, and a tool that always did both would make it awkward to
-    inspect the output between the two.
+    but it DOES overwrite that directory when -Force is passed, so `force` stays opt-in. The two
+    scripts stay separate for the same reason as before: staging produces a payload, verifying proves
+    it runs somewhere else, and a tool that always did both would make it awkward to look at the
+    output in between.
     """
-    project = args.get("project") or ""
     out = args.get("out") or ""
-    if not project or not out:
-        return {"ok": False, "error": "both 'project' (a .ocproject) and 'out' are required"}
-    if not project.lower().endswith(".ocproject"):
-        return {"ok": False, "error": "'project' must be a .ocproject manifest"}
-    for label, value in (("project", project), ("out", out)):
-        if '"' in value or "`" in value or ";" in value:
-            return {"ok": False, "error": "suspicious character in '%s'" % label}
+    if not out:
+        return {"ok": False, "error": "'out' is required (the directory to stage the payload into)"}
+    if args.get("project"):
+        return {"ok": False,
+                "error": "packaging is per-ENGINE now, not per-project: there is no packaged-game "
+                         "path any more (AverGame.exe and stage-game.ps1 were removed). Drop "
+                         "'project' and pass only 'out'."}
+    if '"' in out or "`" in out or ";" in out:
+        return {"ok": False, "error": "suspicious character in 'out'"}
 
-    # build-game by default, not build-release. stage-game.ps1 REFUSES a tree configured
-    # AVER_ENABLE_UI=ON, because its AverGame.exe links Dear ImGui and must not ship; defaulting to
-    # the editor tree here would make every call fail with a message about a flag the caller never
-    # passed.
-    build_dir = args.get("build_dir") or "build-game"
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", build_dir):
+    # Release by default, because a payload is what ships. stage-payload.ps1 derives its own build
+    # directory from the config when none is given, so `build_dir` stays optional rather than being
+    # defaulted here to a tree that may not exist.
+    build_dir = args.get("build_dir") or ""
+    if build_dir and not re.fullmatch(r"[A-Za-z0-9_.-]+", build_dir):
         return {"ok": False, "error": "suspicious build_dir"}
 
-    cmd = './scripts/stage-game.ps1 -Project "%s" -Out "%s" -BuildDir %s' % (project, out, build_dir)
-    if args.get("config") in ("Debug", "Release"):
-        cmd += " -Config %s" % args["config"]
+    cmd = './scripts/stage-payload.ps1 -Out "%s"' % out
+    if build_dir:
+        cmd += " -BuildDir %s" % build_dir
+    cmd += " -Config %s" % (args["config"] if args.get("config") in ("Debug", "Release") else "Release")
+    if args.get("with_samples"):
+        cmd += " -WithSamples"
     if args.get("force"):
         cmd += " -Force"
     code, out_text = run_powershell(cmd, timeout=900)
-    lines = [l.strip() for l in out_text.splitlines() if l.strip().startswith("[game]")]
+    lines = [l.strip() for l in out_text.splitlines() if l.strip().startswith("[stage]")]
     result = {
         "ok": code == 0,
         "errors": code,
@@ -493,7 +505,7 @@ def tool_package(args):
     if code != 0 or not args.get("verify"):
         return result
 
-    vcode, vtext = run_powershell('./scripts/verify-game.ps1 -Package "%s"' % out, timeout=900)
+    vcode, vtext = run_powershell('./scripts/verify-payload.ps1 -Payload "%s"' % out, timeout=900)
     vlines = [l.strip() for l in vtext.splitlines() if l.strip().startswith("[verify]")]
     result["ok"] = vcode == 0
     result["verify"] = vlines
@@ -588,19 +600,19 @@ TOOLS = [
     },
     {
         "name": "aver_package",
-        "description": "Package a project into a standalone, runnable game directory with "
-                       "./scripts/stage-game.ps1, and optionally prove it runs outside the tree "
-                       "that built it with ./scripts/verify-game.ps1. Defaults to the build-game "
-                       "tree: staging REFUSES a tree configured AVER_ENABLE_UI=ON, because its "
-                       "AverGame.exe links Dear ImGui and is not shippable.",
+        "description": "Stage the ENGINE payload -- what the Aver Launcher pulls and installs -- with "
+                       "./scripts/stage-payload.ps1, and optionally prove it runs outside the tree "
+                       "that built it with ./scripts/verify-payload.ps1. There is no packaged-GAME "
+                       "path any more: AverGame.exe and stage-game.ps1 were removed, so this takes no "
+                       "project. Defaults to Release, because a payload is what ships.",
         "inputSchema": {"type": "object", "properties": {
-            "project": {"type": "string", "description": "path to the project's .ocproject manifest"},
-            "out": {"type": "string", "description": "output directory for the package"},
-            "build_dir": {"type": "string", "description": "build tree to stage from (default build-game)"},
-            "config": {"type": "string", "description": "Debug or Release"},
+            "out": {"type": "string", "description": "directory to stage the payload into"},
+            "build_dir": {"type": "string", "description": "build tree to stage from (default: derived from config)"},
+            "config": {"type": "string", "description": "Debug or Release (default Release)"},
+            "with_samples": {"type": "boolean", "description": "include the sample content"},
             "force": {"type": "boolean", "description": "replace a non-empty output directory"},
-            "verify": {"type": "boolean", "description": "also run verify-game.ps1 on the result"},
-        }, "required": ["project", "out"]},
+            "verify": {"type": "boolean", "description": "also run verify-payload.ps1 on the result"},
+        }, "required": ["out"]},
         "fn": tool_package,
     },
     {

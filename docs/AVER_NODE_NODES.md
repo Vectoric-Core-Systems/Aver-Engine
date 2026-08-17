@@ -17,7 +17,7 @@ class model, `PARAM`/`VAR`, and entry points, see **[the guide](VISUAL_SCRIPTING
 `.ocgraph` file grammar itself (every record's syntax, and where the C++ and C# readers disagree),
 see **[`formats/FORMAT_SPECS.md` §10a](formats/FORMAT_SPECS.md)**.
 
-**36 node types.** `git log -p` on `OcGraphParser.cs` across its full history shows no `case`
+**37 node types.** `git log -p` on `OcGraphParser.cs` across its full history shows no `case`
 label for a node type ever removed — every commit that touched this file added to the vocabulary,
 never subtracted from it.
 
@@ -186,6 +186,8 @@ different cost profiles depending on which compiler reaches it.
 | `GetField` | `entity` (in, int), `value` (out, float) | `field=` | D | Reads a scalar (F32-kind) scene field by qualified name. |
 | `SetField` | `entity` (in, int), `value` (in, float), `success` (out, bool) | `field=` | W | Writes a scalar scene field. |
 | `GetFieldVec3` | `entity` (in, int), `x`/`y`/`z` (out, float) | `field=` | D | Reads a Vec3-kind scene field as three floats. |
+| `GetForward` *(alias `get_forward`)* | `entity` (in, int), `x`/`y`/`z`/`eyeX`/`eyeY`/`eyeZ` (out, float), `success` (out, bool) | — | D | Reads a character's look direction (x/y/z unit vector) and eye position (eyeX/eyeY/eyeZ); used to fire rays from the character's perspective. |
+| `GetViewEntity` *(alias `get_view_entity`)* | `entity` (in, int), `view` (out, int), `success` (out, bool) | — | D | The camera node a character looks through. Parent a first-person viewmodel to **this**, not to the character — parented to the pawn it stands still while the camera pitches around it. `success` is false, quietly, when the view node does not exist yet: `EnsureView` is lazy, so asking before `CharacterMove` has ever run is early rather than wrong. |
 | `SetFieldVec3` | `entity` (in, int), `x`/`y`/`z` (in, float), `success` (out, bool) | `field=` | W | Writes a Vec3-kind scene field from three floats. |
 | `Raycast` | `exec` (in), `originX`/`Y`/`Z` (in, float), `dirX`/`Y`/`Z` (in, float), `maxDist` (in, float), `then` (out), `hit` (out, bool), `entity` (out, int), `pointX`/`Y`/`Z` (out, float) — 14 pins | — | W | Casts a ray; reports whether it hit, which SCENE ENTITY (not physics body) owns what it hit, and where. |
 | `SetParent` | `child` (in, int), `parent` (in, int), `success` (out, bool) | — | W | `aver_scene_set_parent(child, parent)`. |
@@ -205,7 +207,10 @@ dispatch and the same reasoning — all five wrap ABI calls that are safe to rep
 unchanged value (`OcGraphParser.cs:988-1004`). `Raycast` gets exec pins by
 default *despite* having no side effect, for the opposite reason: a physics query is expensive
 enough that the PUSH compiler wants "compute once per exec visit, cache it" rather than "recompute
-on every pull" (`GraphCompiler.cs:1689-1702`).
+on every pull" (`GraphCompiler.cs:1689-1702`). `GetForward` also gets plain data pins only, sharing
+the same logic as `GetFieldVec3` — both are pure, idempotent reads (reading where a character is
+pointing or a field's value changes nothing) that are safe to pull as often as anything asks, so
+there is no reason to force an exec chain (`GraphCompiler.cs:756-759`).
 
 **Wrong-path behaviour differs by node**, and the difference is worth knowing before you hit it:
 - Pulling `SetField`/`SetFieldVec3`/`SetParent`/`SetName`/`SetMesh`/`SetMaterial` as a bare data

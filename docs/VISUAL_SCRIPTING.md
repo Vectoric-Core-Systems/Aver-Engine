@@ -52,7 +52,7 @@ A top-level record turns a plain graph into a spawnable actor class:
 CLASS AN_Orbiter Actor
 ```
 
-`CLASS <name> [parentName] [mesh=<path>] [material=<name>] [view=firstperson|thirdperson]`
+`CLASS <name> [parentName] [mesh=<path>] [material=<name>] [view=firstperson|thirdperson] [pawn=<className>] [controller=<className>]`
 (`OcGraphParser.cs:210-270`). This is
 the Blueprint model, not a component that references a graph: **the graph file is the class
 asset.** `Aver.Scripting.Bridge`'s `HostBridge` reads it and registers it through the *exact same*
@@ -80,6 +80,17 @@ A few things worth knowing before you rely on this:
   not ask for a first-person camera at all; it always ran in `CameraViewMode`'s own default,
   `ThirdPerson`. Meaningless (and silently ignored, not an error) on a class whose native ancestor
   isn't `AverCharacter` — the same tolerance an unrecognised `CLASS`-line attribute already gets.
+- **`pawn=<className>` and `controller=<className>` on the `CLASS` line set the default pawn and
+  player-controller classes for a `GameMode`-parented class** (`HostBridge.cs:597-623`, `Graph.cs:261-291`).
+  Both attributes are **GameMode-only** — `HostBridge` warns and ignores them on any other class parent
+  (`HostBridge.cs:618-623`). `pawn=` alone does nothing; `aver_fw_begin_play` possesses only when it has
+  *both* a pawn and a controller handle. The built-in `PlayerController` is abstract and cannot be spawned
+  directly, but a graph can declare `CLASS AN_FPController PlayerController` to create a concrete,
+  spawnable controller class with the `CONTROLLER` flag inheritance. Both names are resolved at class-seal
+  time against declared classes (not file paths), so a graph naming a pawn/controller whose own class had
+  not been declared yet would resolve to 0 and silently possess nothing — which is why `HostBridge` applies
+  these in a *second pass* after every graph class is declared, rather than inline, and warns if either
+  name is unresolvable (`HostBridge.cs:629-639`).
 - **Every spawned instance gets its own, freshly loaded `GraphHost`.** Binding a class instance
   (`DispBind`, `HostBridge.cs:988-1010`) parses and compiles the `.ocgraph` file again from disk,
   per spawn — it is not a shared compiled graph reused across instances. That cost buys the thing
@@ -153,6 +164,16 @@ included), and it does not survive a process restart (§8). Storage is one `Dict
 object>` per `GraphHost` (`GraphVarStore.cs`), seeded from each `VAR`'s own declared default the
 moment the graph loads — which is what makes "read before any write" deterministic rather than
 undefined.
+
+**In the editor**, `VAR` records are now modelled as first-class objects. A **Variables panel**
+appears in the graph editor, showing every declared variable with its type and default value —
+you can declare, rename, retype, and delete variables without hand-editing the `.ocgraph` text.
+`GetVar` and `SetVar` nodes take a variable picker instead of free-text `var=` attributes,
+refusing to compile if the named variable does not exist. This was not possible before `VAR`
+became part of the model: `Graph.Validate()` checks undeclared variables and rejects them at
+load time (`Graph.cs:366-375, 462-465`), which meant the editor's graph-loading path could not
+open any file with an undeclared `GetVar`/`SetVar` node; now every real graph round-trips
+without read-only-mode fallbacks.
 
 ## 5. Entry points and their ordering
 

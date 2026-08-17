@@ -153,13 +153,13 @@ needs to build from scratch.
 
 | Decision | Consequence |
 |---|---|
-| Render via a direct call inside `SandboxApp::onRender()`, the same hand-rolled pattern as the existing `objects_` and scene-entity draw loops — not a new `IRenderFeature`, and not routed through `GameRender::drawWorld`/`CMeshRenderer`. | `LandscapeRenderer` has no scene-pipeline hooks and sections are not ECS entities, so forcing either pattern solves a problem this system doesn't have. Visibility in the shipped runtime (`AverGame.exe`) is a second, explicit slice-0 task, not something that falls out of the editor work for free. |
+| Render via a direct call inside `SandboxApp::onRender()`, the same hand-rolled pattern as the existing `objects_` and scene-entity draw loops — not a new `IRenderFeature`, and not routed through `GameRender::drawWorld`/`CMeshRenderer`. | `LandscapeRenderer` has no scene-pipeline hooks and sections are not ECS entities, so forcing either pattern solves a problem this system doesn't have. |
 | The `.ocland` quantisation range becomes authored and pinned at section-creation time, not auto-refit from live data on every save. | A `modules/formats` schema change, coordinated with whoever owns its current in-flight work rather than raced against it. Until it lands, exposing "save" to an artist mid-sculpt is exposing the drift bug (blocker 2) live, so this gates any workflow that encourages repeated saves during one sculpt session. |
 | Full tree and physics-heightfield rebuilds are debounced to stroke-end (pointer-down..pointer-up), mirroring the existing `beginTransformEdit`/`endTransformEdit` gesture-bracket pattern (`SandboxApp.cpp:2417-2436`). | Mid-stroke feedback needs a separate, cheap preview path that patches already-uploaded geometry directly, bypassing the tree and mesh cache — and that preview must be proven, not assumed, never to silently diverge from the authoritative post-rebuild geometry. |
 | A new, landscape-tab-local undo stack, built from scratch rather than extended from `EditCmd`/`undoStack_`. | See §4 — the existing stack is entity-keyed and sized for one fixed transform, with no way to represent a height-sample edit without modelling every touched sample as a fake entity. |
 | An undo entry stores sparse before/after height-sample maps, never a whole-section snapshot. | Undo cost and memory are bounded by the stroke's actual footprint, matching the render/physics rebuild's own bounded-region assumption, and the correctness bar becomes directly testable. |
 | A new `.ocworld` `LANDSCAPE` record, plus `levelLandscapes_`-style pass-through tracking copying the exact `PCGVOLUME` pattern, lands in slice 0 — before any sculpt or import UI exists. | Closes off blocker 7's silent-revert failure mode from day one, rather than deferring the fix until "the editor can actually change it", which is precisely when the `PCGVOLUME` bug bit in the first place. |
-| Landscape collision loads through the same shared `world::instantiate` path both hosts already use (`modules/world/src/LevelInstance.cpp:14-73`), mirroring its existing static-box branch. | Both `Sandbox.exe` and `AverGame.exe` get correct load *and* correct unload for landscape collision from one implementation, not two — the two-copies-of-the-load-loop problem `docs/CHUNKS.md` already fixed once for placements must not be reintroduced here. |
+| Landscape collision loads through the same shared `world::instantiate` path `Sandbox.exe` already uses (`modules/world/src/LevelInstance.cpp:14-73`), mirroring its existing static-box branch. | Landscape collision gets correct load *and* correct unload from the shared path; the two-copies-of-the-load-loop problem `docs/CHUNKS.md` already fixed once for placements must not be reintroduced here. |
 | Texture painting is explicitly deferred past sculpt+save+see-it-in-a-level. | `LandscapeRenderer::draw()`'s single `device.drawMesh(mesh, world, baseColor, metallic, roughness)` call (`LandscapeRenderer.cpp:116`) has no texture/material binding argument at all, so painting is a genuinely new draw path plus a new persisted `.ocland` chunk, not a UI wrapper around sculpting — scoped as its own slice (9) after the sculpt loop is proven. |
 | "New landscape" sample-count entry snaps to the exact geometric sequence `build()` accepts — at the default `nodeQuads = 64`, that is 65, 129, 257, 513, 1025, 2049, 4097, not every value of the form `64k+1` (`LandscapeTree.cpp:76-84`; capped at 4097 by `modules/formats/include/aver/formats/OcLand.hpp:18-19`). | A creation action can never produce a section that fails `build()` after the fact with no earlier warning — the constraint is enforced at the UI boundary, not discovered at runtime. |
 
@@ -214,10 +214,8 @@ first slice of a longer march.**
 
 **Done when:** opening a level with one `LANDSCAPE` record shows terrain at its authored `originCm`
 at interactive framerate with shadow, voxelisation and lit passes all live; closing and reopening the
-same level preserves the reference byte-for-byte, with no revert and no loss; a raycast through the
-collision body lands within one quantisation step of the rendered height at three sample points; and
-`AverGame.exe`, loading the identical level through the same `world::instantiate` call, also shows
-and collides with the terrain.
+same level preserves the reference byte-for-byte, with no revert and no loss; and a raycast through the
+collision body lands within one quantisation step of the rendered height at three sample points.
 
 **Slice 1 — editor tab and content-browser recognition.**
 Register `makeLandscapeEditor` for `.ocland`; add the fourth `assetIconTile` arm and sprite-sheet

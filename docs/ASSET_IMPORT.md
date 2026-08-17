@@ -218,8 +218,7 @@ To bring in a model you have the rights to:
 2. Import it — the editor's importer writes `Content/Meshes/<name>.ocmesh`.
 3. Put the source file under a `Source/` directory. `docs/PACKAGING.md` drops every `**/Source/`
    when staging a game, so editable source does not ship.
-4. Write an `.ocmat` naming the textures. Keep texture paths **relative to the content root**;
-   `stage-game.ps1` fails the package on any absolute path it finds.
+4. Write an `.ocmat` naming the textures. Keep texture paths **relative to the content root**.
 
 ---
 
