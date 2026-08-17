@@ -729,6 +729,23 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "z", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // GetForward(entity) -> x,y,z (unit look direction) + eyeX,eyeY,eyeZ (where to fire FROM)
+            // + success. NO exec pins by default, like GetFieldVec3 and for the same reason: it is a
+            // pure, idempotent read of the character's own state, so it is safe to pull as often as
+            // anything asks. The eye position rides along because a direction with no origin cannot
+            // build a ray -- see GraphInterop.LookDirectionForGraph for why both halves are one call.
+            case "getforward":
+            case "get_forward":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "y", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "z", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "eyeX", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "eyeY", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "eyeZ", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
             case "setfieldvec3":
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = false, NodeId = node.Id });

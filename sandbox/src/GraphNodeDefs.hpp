@@ -133,6 +133,19 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false),
         pin("success", "bool", true)},
         {attr("field", "Field")}});
+    // -- GetForward: where a Character is LOOKING, plus where its eyes are. Filed under Scene beside the
+    //    field readers rather than under Input, because it reads accumulated STATE (the character's own
+    //    yaw/pitch after its clamp) and not this frame's device movement the way MouseDelta does --
+    //    reading it twice in a frame gives the same answer twice, which is the property that decides
+    //    which group a node belongs in here. Six outputs and no exec pins, copied from
+    //    OcGraphParser.AddDefaultPins's "getforward" case; the eye position rides along because a
+    //    direction with no origin cannot build a ray (see GraphInterop.LookDirectionForGraph).
+    t.push_back({"GetForward", "Get Forward (Look)", "Scene", {
+        pin("entity", "int", false),
+        pin("x", "float", true), pin("y", "float", true), pin("z", "float", true),
+        pin("eyeX", "float", true), pin("eyeY", "float", true), pin("eyeZ", "float", true),
+        pin("success", "bool", true)},
+        {}});
     // -- MouseDelta / MoveAxis: continuous input -- look and move, the two things a first-person
     //    controller is made of, neither of which InputKey's digital key state can express. Both get
     //    exec pins by default (unlike GetField/SetField/GetFieldVec3/SetFieldVec3 above, mirroring

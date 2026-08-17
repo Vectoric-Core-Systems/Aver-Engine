@@ -392,6 +392,11 @@ public class GraphCompiler
                 EmitGetFieldVec3(node);
                 break;
 
+            case "getforward":
+            case "get_forward":
+                EmitGetForward(node);
+                break;
+
             case "setfieldvec3":
                 // Present here too, exactly like "setfield" above -- Compile()'s topological pass
                 // visits every non-exec-only node EXACTLY ONCE regardless of graph shape, so running
@@ -746,6 +751,81 @@ public class GraphCompiler
         _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "y"));
         _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "z"));
         _il.Emit(OpCodes.Call, GetFieldVecMethod);
+    }
+
+    /// GetForward(entity) -> x,y,z + eyeX,eyeY,eyeZ + success: the character's own look direction and
+    /// eye position, in one call. Pure and idempotent exactly like GetFieldVec3 -- reading where a
+    /// character is pointing changes nothing -- so it needs none of Raycast's _execLocals caching and
+    /// is safe to pull from as many places as ask.
+    ///
+    /// SIX OUT-PARAMETERS, ONE NATIVE CALL, the same "one call, however many pins" shape
+    /// EmitGetFieldVec3 and EmitRaycast already use: Ldloca per output, never Ldloc, because these are
+    /// written THROUGH by the callee rather than read from.
+    private void EmitGetForward(Node node)
+    {
+        if (_il == null) return;
+
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "x"));
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "y"));
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "z"));
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "eyeX"));
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "eyeY"));
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "eyeZ"));
+        _il.Emit(OpCodes.Call, LookDirectionMethod);
+
+        // The bool return is ALWAYS consumed -- stored when the node declares `success`, popped when an
+        // explicit PIN list left it out. Leaving it on the stack would unbalance the method.
+        if (_pinLocals.TryGetValue((node.Id, "success"), out var local)) _il.Emit(OpCodes.Stloc, local);
+        else                                                            _il.Emit(OpCodes.Pop);
+    }
+
+    /// The PULL half of GetForward, mirroring EmitPullGetFieldVec3: one full native call, then push the
+    /// ONE pin asked for and discard the rest. Same recompute-per-reader cost that emitter already
+    /// documents and accepts -- a graph reading x, y and eyeZ through three separate pulls makes three
+    /// calls. Cheap enough to be the right trade here: this reads two already-computed vectors off a
+    /// managed object, with no physics query behind it.
+    ///
+    /// EXISTS AT ALL because a node implemented only in the PUSH compiler works on an exec chain and
+    /// then silently fails the moment someone reads it through OUT or from a pure graph -- the recurring
+    /// shape of bugs in this file. Both paths, or neither.
+    private void EmitPullGetForward(Node node, string pinName)
+    {
+        if (_il == null) return;
+
+        EmitPullInput(node, "entity");
+
+        var xLocal    = _il.DeclareLocal(typeof(float));
+        var yLocal    = _il.DeclareLocal(typeof(float));
+        var zLocal    = _il.DeclareLocal(typeof(float));
+        var eyeXLocal = _il.DeclareLocal(typeof(float));
+        var eyeYLocal = _il.DeclareLocal(typeof(float));
+        var eyeZLocal = _il.DeclareLocal(typeof(float));
+        _il.Emit(OpCodes.Ldloca, xLocal);
+        _il.Emit(OpCodes.Ldloca, yLocal);
+        _il.Emit(OpCodes.Ldloca, zLocal);
+        _il.Emit(OpCodes.Ldloca, eyeXLocal);
+        _il.Emit(OpCodes.Ldloca, eyeYLocal);
+        _il.Emit(OpCodes.Ldloca, eyeZLocal);
+        _il.Emit(OpCodes.Call, LookDirectionMethod);
+
+        // `success` IS the return value, so it is already the thing on the stack -- every other pin
+        // needs that bool popped first.
+        if (pinName == "success") return;
+        _il.Emit(OpCodes.Pop);
+
+        var wanted = pinName switch
+        {
+            "x"    => xLocal,
+            "y"    => yLocal,
+            "z"    => zLocal,
+            "eyeX" => eyeXLocal,
+            "eyeY" => eyeYLocal,
+            "eyeZ" => eyeZLocal,
+            _ => throw new InvalidOperationException(
+                $"GetForward node '{node.Id}' has no output pin '{pinName}' (only x/y/z, eyeX/eyeY/eyeZ, success)"),
+        };
+        _il.Emit(OpCodes.Ldloc, wanted);
     }
 
     /// SetFieldVec3(entity, x, y, z) -> success: the write half, mirroring EmitSetField exactly --
@@ -2356,6 +2436,9 @@ public class GraphCompiler
                 EmitPullGetField(source); return;
             case "getfieldvec3":
                 EmitPullGetFieldVec3(source, pinName); return;
+            case "getforward":
+            case "get_forward":
+                EmitPullGetForward(source, pinName); return;
             case "getvar":
                 EmitPullGetVar(source); return;
             case "param":
@@ -2611,6 +2694,12 @@ public class GraphCompiler
     private static readonly MethodInfo CharacterMoveMethod =
         typeof(GraphInterop).GetMethod("CharacterMoveForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.CharacterMoveForGraph was not found by reflection");
+    // GetForward: CharacterMove's read-side counterpart -- where the character this graph drives is
+    // actually LOOKING, which nothing in the vocabulary could ask before (Character.cs keeps _yaw and
+    // _pitch private and the scene rotation is a Quat, which neither GetField nor GetFieldVec3 reads).
+    private static readonly MethodInfo LookDirectionMethod =
+        typeof(GraphInterop).GetMethod("LookDirectionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.LookDirectionForGraph was not found by reflection");
     // FireEvent: GAP 3, the cross-entity event node -- reflected differently from every wrapper above.
     // GraphEvents lives in THIS SAME ASSEMBLY (Aver.Graph), and its Router-dispatching method is
     // PUBLIC (see GraphEvents.cs's own comment for why a public static router, mirroring

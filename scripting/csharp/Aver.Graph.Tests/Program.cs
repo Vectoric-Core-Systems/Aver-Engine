@@ -182,6 +182,13 @@ static int Main()
         // instances -- see FireEventNodeTests.cs's own header comment.
         failures += FireEventNodeTests.RunAll();
 
+        // GetForward: CharacterMove's read-side counterpart, and the node a graph-only first-person
+        // template could not exist without. Like CharacterMoveNodeTests these are genuine end-to-end
+        // behavioural proofs rather than compile-only ones -- the unbound-entity path is a graceful,
+        // documented return rather than a crash, so this process can invoke the emitted IL and assert
+        // the real contract. See GetForwardNodeTests.cs's own header comment.
+        failures += GetForwardNodeTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

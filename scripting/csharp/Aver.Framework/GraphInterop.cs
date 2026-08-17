@@ -255,4 +255,51 @@ internal static class GraphInterop
         character.DriveFromGraph(dt, new Vec3(forward, right, 0f), yawDeltaDeg, pitchDeltaDeg);
         return true;
     }
+
+    /// <summary>GetForward's own surface: where a character is LOOKING, and where its eyes are.
+    ///
+    /// WHY THIS EXISTS AT ALL. <see cref="AverCharacter"/> keeps <c>_yaw</c>/<c>_pitch</c> private and
+    /// publishes the aim only as <see cref="AverCharacter.LookDirection"/>; the rotation it writes to
+    /// the scene is a Quat, and the graph vocabulary's two readers cannot see it -- GetField takes F32
+    /// fields only and GetFieldVec3 requires FieldKindVec3 specifically (see RequireVec3Field). So a
+    /// graph could drive a character's look through CharacterMove and then had no way whatsoever to ask
+    /// which way that look ended up pointing. Rebuilding it graph-side from accumulated mouse deltas
+    /// with Sin/Cos was possible but wrong: it would duplicate state Character.cs already owns,
+    /// including the pitch CLAMP applied in Drive (PitchMin/PitchMax), and any drift between the two
+    /// copies shows up as a shot that does not go where the camera points.
+    ///
+    /// BOTH HALVES, ONE CALL, because a direction alone cannot build a ray. The eye position is the
+    /// origin a first-person shot must start from -- and specifically must start ABOVE the shooter's
+    /// own capsule, or the very first thing the ray hits is the character firing it. test-content's
+    /// AN_Playable sample had to hand-compute a constant origin at z=290 for exactly that reason;
+    /// <see cref="AverCharacter.EyePosition"/> is that number, correct for any character at any
+    /// position, and returning it beside the direction is what lets a graph wire Raycast without
+    /// arithmetic.
+    ///
+    /// Fails the same VISIBLE way CharacterMoveForGraph does, with the same two distinguishable
+    /// messages, and leaves every out-parameter at zero. A zero direction makes Raycast a no-op rather
+    /// than firing somewhere arbitrary, which is the failure a graph author can actually see.</summary>
+    internal static bool LookDirectionForGraph(int entity,
+                                              out float dirX, out float dirY, out float dirZ,
+                                              out float eyeX, out float eyeY, out float eyeZ)
+    {
+        dirX = dirY = dirZ = 0f;
+        eyeX = eyeY = eyeZ = 0f;
+
+        Entity e = new Entity(entity);
+        AverActor? actor = Actors.Get(e);
+        if (actor is not AverCharacter character)
+        {
+            Log.Warn(actor is null
+                ? $"[Graph] GetForward: entity {entity} has no look direction -- no live actor is bound to it"
+                : $"[Graph] GetForward: entity {entity} has no look direction -- its actor is a {actor.GetType().Name}, not an AverCharacter");
+            return false;
+        }
+
+        Vec3 dir = character.LookDirection;
+        Vec3 eye = character.EyePosition;
+        dirX = dir.X; dirY = dir.Y; dirZ = dir.Z;
+        eyeX = eye.X; eyeY = eye.Y; eyeZ = eye.Z;
+        return true;
+    }
 }
