@@ -1590,8 +1590,8 @@ public:
         // geometry -- a progressive, still-camera reference view that SUPPRESSES the raster scene
         // while registered (see PtSceneView.hpp). It reads the same draw list and camera the raster
         // path already produces (IRenderFeature::submitDraw / IDevice::camera()); everything about
-        // what it can and cannot render is documented on PtSceneView.hpp itself (sky-only lighting,
-        // static geometry only, flat albedo only). setPtSceneView() (the CLI handler) already set
+        // what it can and cannot render is documented on PtSceneView.hpp itself (sky plus the one
+        // authored sun, static geometry only, flat albedo only). setPtSceneView() (the CLI handler) already set
         // ptSceneViewWantEnabled_; this call is what turns that want into an actual registration,
         // through the SAME path the editor's own Path Tracing settings-page Quality combo uses at any
         // later frame -- see syncPtSceneView()'s own comment for the rest of the design (in
