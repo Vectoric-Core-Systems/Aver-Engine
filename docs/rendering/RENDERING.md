@@ -251,6 +251,44 @@ Froxel-based **volumetric fog** (Bart Wronski's approach, published): scatter/ex
 
 ---
 
+## 4b. Path tracer scene view (reference renderer)
+
+**Available as:** `--pt-scene` command-line flag (sandbox only). Opt-in; disabled by default.
+
+### 4b.1 What it is
+
+`PtSceneView` is a **reference still-camera renderer** that points the existing brute-force path tracer at the REAL scene graph — the same geometry and camera the raster pipeline is already drawing. Unlike `PtFurnaceTest`, which brings its own synthetic test geometry to verify the integrator's math in isolation, this captures the scene through the `rhi::IRenderFeature::submitDraw()` hook (the exact interface `VoxiRenderer` uses for draw-list recording) and the real camera via `rhi::IDevice::camera()`, then accumulates a bounded number of samples each frame toward a physically-based ground truth.
+
+It **suppresses the raster scene** while registered and draws its own accumulator instead — a small, fixed-resolution (480×270) target, independent of the viewport. It is only registered when explicitly requested via `--pt-scene`; when unregistered it costs nothing, exactly like the furnace test. **This is a reference tool for validating the raster renderer's output, not a render mode.**
+
+### 4b.2 How it works
+
+1. **Scene capture (per frame):** Each `submitDraw()` call appends to a draw list. At the start of the next frame, the *previous* frame's list is frozen (to ensure it is complete before the path tracer reads it), and a fresh list begins accumulating the new frame's draws.
+2. **Static filter:** Only meshes with *no* compute-written vertex buffer are included. This excludes skinned characters, particles, and any per-frame vertex pass, because including dynamic geometry would cause the accumulator to reset every frame and never progress past sample 0 (the scene "changes" every frame).
+3. **Scene rebuild:** Every still frame, the draw list is hashed (FNV-1a, bit-exact over floats, the same scheme `VoxiRenderer::giDrawsKey()` uses). If the hash changes or the scene was never built, the path tracer rebuilds its acceleration structures from the static draw list and resets the sample count to 0.
+4. **Camera stability:** If the camera moves (detected by sampling `IDevice::camera()` each frame and comparing inverse-viewproj + eye position), the accumulator resets. The camera derives an internal `PtCamera` with the **accumulator's own fixed 16∶9 aspect ratio, never the real viewport's** — a small reference target is not obliged to match whatever ratio the editor's dockspace happens to be, which changes size far more often than levels do.
+5. **Bounded accumulation:** Once per stable camera pose, up to 8 samples are accumulated per frame (total ~40 RayQuery traces per pixel over 480×270 = ~5.2M traces/dispatch, same order of magnitude as `VoxiRenderer`'s own ray-traced sun shadow, and unlike that shadow, **this dispatch is NOT issued every frame once the image converges** — it stops at 1,600 samples/pixel and does not resume until the camera moves again).
+
+### 4b.3 What it deliberately does NOT do (stated here so the first user does not file a bug)
+
+**LIGHT SOURCE:** `ptEnvironment()` is `skyColor()` only — no `CLight`, no emissive term, no next-event estimation. **This view is only physically meaningful for scenes lit by the procedural sky: outdoor levels or interiors that see sky through real openings.** Pointed at an indoor/artificially-lit level, it will correctly, honestly render BLACK. That is not a bug; that is a feature limitation.
+
+**GEOMETRY:** Includes only static draws (no compute-written vertex buffers, per line 129 of PtSceneView.cpp — the same predicate `IDevice::meshVertexBuffer()` applies). Skinned characters, particles, and anything else that writes its own vertices every frame are silently absent.
+
+**MATERIALS:** Each surface resolves to one flat linear albedo (either from the host's `AlbedoResolver` callback, if installed, or the legacy per-draw base colour otherwise). No textures are sampled, no metallic/roughness (the integrator is pure Lambertian), no emissive term — a textured material renders as its flat, decoded base colour.
+
+**PERFORMANCE:** No denoiser, no importance sampling of lights, no spectral anything. It is a progressive, still-camera-only reference accumulator within bounded GPU cost. See `PtSceneView.hpp` lines 151–175 for the constants: `kAccumWidth=480, kAccumHeight=270, kMaxBounces=4, kSamplesPerStep=8, kMaxSamples=1600`.
+
+### 4b.4 Host integration: the AlbedoResolver seam
+
+The `PtSceneView::AlbedoResolver` is a `std::function<bool(BindingSetHandle, const void* constants, u32 bytes, f32 outAlbedo[3])>` callback the composition root installs to resolve a draw's material binding to a flat linear albedo. **THE HOST RESOLVES, NOT THIS MODULE** — the same division `LandscapeRenderer::setSurfaceBinding()` already uses, because `submitDraw()` is handed a binding handle and raw bytes with no type attached, and only the composition root knows what bound them (PtSceneView.hpp, lines 61–67). This module links `Aver.RHI` and `Aver.Core` only (no PBR material system), so it cannot name a `pbr::` type to check against even if it wanted to. Guessing from the bytes' size instead — "it is a material if the block is the right SIZE" — would silently pass any unrelated block of the same size (only the *symptom* would be a wrong colour, no build error). Left unset, every draw uses its base colour, which is correct for hosts with no material system at all (the furnace test brings its own geometry and never sets one).
+
+### 4b.5 RHI change: acceleration structures no longer require a window
+
+**Prerequisite for headless path-tracer runs:** `D3D12Device::initAccelerationStructures()` was moved from `createSwapchainResources()` to `init()` (commit 43fab37, line 1927 of D3D12Device.cpp). This means DXR 1.1 capability detection and the ray-tracing device (`device5_`) are initialized before any window exists. Previously, headless runs had `device5_ == nullptr` despite RT tier 11 capabilities, silently disabling path tracing. This applies to DX12 only; Vulkan and DX11 have no ray-tracing backend changes (Vulkan already builds structures headless; DX11 has no RT).
+
+---
+
 ## 5. Material / shader system
 
 ### 5.1 Authoring model
@@ -367,7 +405,7 @@ DX11 (Compat) uses **classic discrete LODs** (also generated by meshoptimizer) �
 Rendering is a set of independently buildable CMake targets with narrow interfaces, so the engine avoids Unreal-style monolith bloat:
 
 ```
-Aver.RHI            (interface + RHIFormat + caps)         — depends: core only
+Aver.RHI            (interface + RHIFormat + caps)         — depends: Core, Platform
 Aver.RHI.D3D12                                             — depends: RHI, d3d12, D3D12MA
 Aver.RHI.D3D11                                             — depends: RHI, d3d11
 Aver.RHI.Vulkan     (compiled only if VULKAN_SDK found)    — depends: RHI, vulkan, VMA
@@ -380,6 +418,7 @@ Aver.Renderer.GI       (baked LM; DDGI/Brixelizer optional)— depends: Renderer
 Aver.Renderer.Post     (TAA, FSR, bloom, tonemap)          — depends: Renderer.Core, FidelityFX
 Aver.Renderer.Deform   (cage deform + skinning compute)    — depends: Renderer.Core, physics interop
 Aver.Renderer.Geometry (meshlet GPU-driven; Modern only)   — depends: Renderer.Core, meshoptimizer
+Aver.Render.PathTracer (brute-force reference tracer, PtSceneView scene capture) — depends: RHI, Core
 Aver.Tools.ShaderCompiler (Rust, offline permutations)     — over C ABI → ShaderSystem
 Aver.Tools.LightmapBaker   (Rust/C++, offline)             — Embree, OIDN, xatlas
 ```

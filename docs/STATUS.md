@@ -1,7 +1,7 @@
 # Aver Engine — Status & Handoff
 
-Living record of where the engine stands and what's next. Updated 2026-07-28 at `d04fe1a`
-(195 commits). `git log --oneline | wc -l` and `git rev-parse HEAD` are the authority. The phase
+Living record of where the engine stands and what's next. Updated 2026-08-17 at `cb1d36f`
+(517 commits). `git log --oneline | wc -l` and `git rev-parse HEAD` are the authority. The phase
 recorded here gave a game its own UI, its own audio and its own materials — three C seams and the
 modules behind them — and opened an asset editor for actors (§4o–§4s).
 
@@ -247,7 +247,7 @@ Owns the project-wide render quality settings and reports, per feature, whether 
   raymarch via the viewport Lit dropdown. ~59 FPS at 128^3.
 - **Ray Tracing — implemented (DXR 1.1 inline `RayQuery`).** Exact hard sun shadows traced from the
   pixel shader; per-mesh BLAS and a per-frame TLAS over the replayed draw list. Falls back to the
-  shadow map when the structure was not built. **Path Tracing — declared, not implemented.**
+  shadow map when the structure was not built. **Path Tracing — implemented (`PtSceneView`).** A progressive, still-camera reference render via `--pt-scene`, accumulating samples from the real scene (static geometry only, sky-only lighting, flat albedo); suppresses the raster output while active (43fab37).
 - **Directional shadow map** (2048², 3x3 PCF), used by the lit pass AND by light injection — a
   shadowed surface must not emit sun radiance into the volume or bounce light leaks through walls.
 - Exposed in the editor under **Edit > Project Settings > Rendering** (project-wide, so NOT in
@@ -293,11 +293,11 @@ input and watch a per-frame heartbeat instead.
 
 Dev flags on `Sandbox.exe`: `--frames N`, `--screenshot out.png`, `--tool <select|move|rotate|scale>`,
 `--project-settings`, `--new-script`, `--tools-menu`, `--compile-scripts`, `--reload-scripts [N]`,
-`--start-screen`, `--msaa N`, `--gi`, `--no-gi`, `--gi-debug`, `--rt`, `--ms`, `--probe X Y`,
+`--start-screen`, `--msaa N`, `--gi`, `--no-gi`, `--gi-debug`, `--rt`, `--pt-scene`, `--ms`, `--probe X Y`,
 `--probe-rel U V` (§4n), `--scripts <dir>`, `--force-caps <list>`, `--warp` (§4g),
 `--debug-layer` (§4i), `--no-vsync`, `--ui-demo` (§4o). From the phase this document never wrote up:
 `--headless`, `--drawer`, `--play-test`, `--spawn-test`, `--bloom`, `--exposure`, `--auto-exposure`,
-`--clouds`. That is the complete set as of `d04fe1a`, taken from the argument parser rather than from
+`--clouds`. That is the complete set as of `cb1d36f`, taken from the argument parser rather than from
 this list, which had drifted.
 
 Two more scaffold and **exit without touching a device**, so project creation is reachable from a

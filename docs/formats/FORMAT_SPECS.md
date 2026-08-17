@@ -467,7 +467,7 @@ OUT result result
 | `OCGRAPH` | `OCGRAPH <version>` | Header, must be the first non-comment line. `version` defaults to `1` if omitted. |
 | `NAME` | `NAME <name>` | Single token, no spaces. Empty/absent writes back as `untitled`. |
 | `DESCRIPTION` | `DESCRIPTION <rest of line>` | Free text, taken from the **raw** line, not the comment-truncated one — a literal `#` inside a description is data, not a comment marker (both readers agree on this; it was a real bug in the C++ reader, fixed once both sides used the same rule). |
-| `CLASS` | `CLASS <name> [parentName] [mesh=<path>] [material=<name>]` | Optional; **at most one per file** (a second `CLASS` line is a parse error). Declares the graph itself a spawnable actor class. `parentName` defaults to `"Actor"` when omitted. `mesh=`/`material=` become the class's own default `CMeshRenderer`, not a per-tick write. |
+| `CLASS` | `CLASS <name> [parentName] [mesh=<path>] [material=<name>] [view=firstperson\|thirdperson]` | Optional; **at most one per file** (a second `CLASS` line is a parse error). Declares the graph itself a spawnable actor class. `parentName` defaults to `"Actor"` when omitted. `mesh=`/`material=` become the class's own default `CMeshRenderer`, not a per-tick write. `view=` (for `Character`-parented classes only) sets `CameraViewMode` on the spawned instance; omitted or meaningless when the class's native ancestor is not `AverCharacter`. |
 | `PARAM` | `PARAM <name> <type>` | Declares one argument the compiled graph accepts, in declaration order. `type` ∈ `float`\|`int`\|`bool` — `exec` is rejected at parse time with an explicit error (a parameter is data, not control flow). |
 | `VAR` | `VAR <name> <type> [default]` | Declares one variable the graph remembers between ticks (see [`VISUAL_SCRIPTING.md` §4](../VISUAL_SCRIPTING.md) for the storage/lifetime contract). Same three types as `PARAM`, same `exec` rejection. An unparseable `[default]` falls back to the type's zero value rather than failing the graph. |
 | `ENTRY` | `ENTRY <nodeId> <eventName>` | Declares which node begins the exec chain for a named event (`OnStart`, `OnTick`, or any project-invented name). The node may be of any type — `ENTRY` is what makes it a starting point, not the node's own type. |
@@ -770,8 +770,35 @@ No GPL runtime, no Unreal-derived tech, no proprietary codecs. Every dependency 
 
 ---
 
+---
+
+## A. `.octemplate` — project template manifest (text)
+
+First line `TEMPLATE`. Declares a reusable project template (asset bundle + starter content). Discovered by walking up from the executable to find a `templates/` directory containing valid subdirectories, each with a `<name>.octemplate` manifest. The manifest has these records:
+
+| Record | Grammar | Notes |
+|---|---|---|
+| `TEMPLATE` | `TEMPLATE` | Header, must be first non-comment line. Required. |
+| `NAME` | `NAME <name>` | Single token. Required; manifest parse fails if absent. |
+| `DESCRIPTION` | `DESCRIPTION <rest of line>` | Optional; defaults to empty. |
+| `PREVIEW` | `PREVIEW <relative-path>` | Optional image path (PNG/JPEG), resolved relative to template directory. Defaults to no image. |
+| `STARTMAP` | `STARTMAP <path>` | Optional level path. Defaults to `Maps/Default.ocmap`. |
+
+Example:
+```
+TEMPLATE
+NAME BeautifulScene
+DESCRIPTION A starter level with a sky and terrain
+PREVIEW Thumbnail.png
+STARTMAP Maps/MyStartLevel.ocmap
+```
+
+**Template instantiation:** When a new project is created from a template, only the template's `Content/` directory is copied byte-for-byte into the new project. The project's own `.ocproject` manifest is written fresh with the new project's name — there is no find-and-replace pass over copied content, so template design (class names, graph names, asset filenames) is preserved exactly. The `.octemplate` manifest and its PREVIEW image are never copied into the project (they exist only in the template's root directory, not under `Content/`).
+
+---
+
 ### Deliverable file map (paths this design implies under `C:/Users/User/Documents/Aver Engine`)
-- `docs/formats/` — this spec split per format (container, ocmesh, octex, ocmat, ocskel, ocanim, ocprefab, ocworld, legacy).
+- `docs/formats/` — this spec split per format (container, ocmesh, octex, ocmat, ocskel, ocanim, ocprefab, ocworld, legacy, .octemplate).
 - `engine/assets/` — C++ readers/writers (`libaver_assets`) + C ABI header `include/ocasset.h`.
 - `tools/aver-cook/` — Rust importer/cooker.
 - `editor/` — C# authoring for text formats.
