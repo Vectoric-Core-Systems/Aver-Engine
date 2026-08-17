@@ -81,6 +81,15 @@ void Renderer::setSettings(const Settings& s) {
     if (n.globalIllumination != settings_.globalIllumination && n.giUpdateInterval == settings_.giUpdateInterval)
         n.giUpdateInterval = giUpdateIntervalForQuality(n.globalIllumination);
 
+    // The RT sun-shadow knobs follow their own tier the same way, and for a sharper reason: with RT
+    // on by default there is no longer any configuration in which these are inert, so a tier change
+    // that left them alone would advertise Medium while running whatever the last tier paid for.
+    // Same "only if the caller did not set it explicitly in this call" rule as GI above.
+    if (n.rayTracing != settings_.rayTracing && n.rtShadowRays == settings_.rtShadowRays)
+        n.rtShadowRays = rtShadowRaysForQuality(n.rayTracing);
+    if (n.rayTracing != settings_.rayTracing && n.rtPixelsPerRayTile == settings_.rtPixelsPerRayTile)
+        n.rtPixelsPerRayTile = rtPixelsPerRayTileForQuality(n.rayTracing);
+
     n.voxelResolution = std::clamp(n.voxelResolution, 32u, 512u);
     n.giIntensity     = std::clamp(n.giIntensity, 0.0f, 8.0f);
     n.giMaxDistance   = std::clamp(n.giMaxDistance, 1.0f, 100000.0f);
@@ -193,6 +202,39 @@ u32 Renderer::giUpdateIntervalForQuality(Quality q) {
         case Quality::High:   return 2;
         case Quality::Epic:   return 1;   // always fresh -- bit-identical to the old behaviour
         default:              return 1;   // an unknown tier must not silently degrade lighting
+    }
+}
+
+// The RT sun-shadow rungs. MEASURED, not chosen by feel: ElectricDreams, windowed, --no-vsync, 200
+// frames, whole-frame median, against 11.73 ms with rayTracing Off --
+//   Low    (1 ray,  tile 4) 18.07 ms
+//   Medium (1 ray,  tile 2) 18.36 ms
+//   High   (2 rays, tile 2) 19.84 ms
+//   Epic   (4 rays, tile 1) 23.15 ms
+// Ray-traced sun shadows are not cheap on this hardware at any rung; the ladder buys back what it
+// can. Tile 4 over tile 2 saves only 0.29 ms, so Low differs from Medium mostly in noise rather than
+// cost -- which is why Low takes the wider tile and the same single ray, rather than pretending a
+// meaningful gap exists.
+u32 Renderer::rtShadowRaysForQuality(Quality q) {
+    switch (q) {
+        case Quality::Off:    return 1;   // RT is not running; the value is inert either way
+        case Quality::Low:    return 1;
+        case Quality::Medium: return 1;
+        case Quality::High:   return 2;
+        case Quality::Epic:   return 4;
+        default:              return 1;   // an unknown tier must not silently cost more
+    }
+}
+
+// See rtShadowRaysForQuality for the measurements behind these.
+u32 Renderer::rtPixelsPerRayTileForQuality(Quality q) {
+    switch (q) {
+        case Quality::Off:    return 1;
+        case Quality::Low:    return 4;   // one traced pixel per 4x4, the widest amortisation that pays
+        case Quality::Medium: return 2;
+        case Quality::High:   return 2;
+        case Quality::Epic:   return 1;   // every pixel traces every frame -- no history, no denoiser
+        default:              return 2;
     }
 }
 

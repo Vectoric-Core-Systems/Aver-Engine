@@ -151,6 +151,16 @@ std::string manifestText(const std::string& name) {
     s += "CREATEDWITH " + std::string(kEngineVersion) + "\n";
     s += "CONTENT Content\n";
     s += "STARTMAP Maps/Default.ocmap\n";
+    // WRITTEN EXPLICITLY, not left to the engine default it currently agrees with. A manifest that
+    // states nothing inherits whatever the engine's default happens to be on the day it is opened,
+    // which makes a project's own look a moving target across engine versions and gives its author no
+    // line to edit. Stating it costs one line and makes the setting discoverable in the place someone
+    // would look for it.
+    //
+    // 2 is Medium (0=Off 1=Low 2=Medium 3=High 4=Epic -- OcProject.hpp). It is not free: on
+    // ElectricDreams, Medium's rungs measured 18.36 ms against 11.73 ms with ray tracing off. Turn it
+    // down here if a project would rather have the frame back.
+    s += "RENDER.RAYTRACING 2\n";
     s += "# AUTHOR <your name>\n";
     return s;
 }

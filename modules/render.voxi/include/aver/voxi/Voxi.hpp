@@ -52,7 +52,14 @@ struct DeviceInfo {
 struct Settings {
     Msaa    msaa               = Msaa::X4;
     Quality globalIllumination = Quality::Medium;
-    Quality rayTracing         = Quality::Off;
+    // ON BY DEFAULT, AT MEDIUM, AND THE TWO KNOBS BELOW ARE MEDIUM'S RUNGS BY CONSTRUCTION -- see
+    // rtShadowRays/rtPixelsPerRayTile for why that sentence is load-bearing rather than decorative.
+    // MEASURED COST on ElectricDreams, windowed, --no-vsync, 200 frames: the whole frame goes from a
+    // median 11.73 ms with RT off to 18.36 ms at this tier's rungs. That is +57%, and it is the
+    // cheapest honest way to have ray-traced sun shadows on at all -- the naive version of this change
+    // (flip the tier, leave the knobs alone at 4 rays and no amortisation) measured 23.15 ms, which is
+    // almost exactly double the RT-off frame and is what Epic now means.
+    Quality rayTracing         = Quality::Medium;
     Quality pathTracing        = Quality::Off;
     bool    meshShaders        = false;
 
@@ -66,8 +73,16 @@ struct Settings {
     f32 giMaxDistance   = 4000.0f;  // centimetres
 
     // ---- ray-traced sun shadow: rays per trace, and how many pixels amortise one trace ----
-    u32 rtShadowRays = 4;           // occlusion rays per pixel, when this pixel traces this frame.
-                                     // Clamped to [1, VoxiRenderer::kMaxShadowRays].
+    // Occlusion rays per pixel, when this pixel traces this frame. Clamped to
+    // [1, VoxiRenderer::kMaxShadowRays].
+    //
+    // DERIVED FROM rayTracing on a tier change, exactly as giUpdateInterval is derived from
+    // globalIllumination: Low 1, Medium 1, High 2, Epic 4. THE DEFAULT IS 1 BECAUSE THE DEFAULT TIER
+    // IS Medium -- the derivation only fires when the tier CHANGES, so a struct whose defaults
+    // contradict its own tier never reaches the rung it claims. That is not hypothetical here: this
+    // field defaulted to 4 while rayTracing defaulted to Off, so the moment RT was switched on by
+    // default it would have run Epic's ray count under Medium's name.
+    u32 rtShadowRays = 1;
     // Edge length of the square tile a single traced pixel is amortised over via the ray-traced
     // shadow's temporal history: 1 = every pixel traces every frame (bit-identical to no denoiser
     // at all); N>1 = one pixel in each NxN tile traces per frame, rotating which one so every pixel
@@ -79,7 +94,18 @@ struct Settings {
     // NOTE: this governs the RT (DXR RayQuery) sun-shadow/reflection history and only has any effect
     // while rayTracing != Quality::Off; it does nothing to the voxel cone-trace GI cost below, which
     // is governed instead by giUpdateInterval.
-    u32 rtPixelsPerRayTile = 1;
+    //
+    // ALSO DERIVED FROM rayTracing on a tier change: Low 4, Medium 2, High 2, Epic 1. Defaulting to
+    // 2 for the same by-construction reason rtShadowRays defaults to 1 -- Medium's rung, because
+    // Medium is the default tier.
+    //
+    // Measured, so the ladder is not guesswork (ElectricDreams, windowed, --no-vsync, 200 frames,
+    // whole-frame median): rays 1 / tile 4 = 18.07 ms, rays 1 / tile 2 = 18.36 ms, rays 2 / tile 2 =
+    // 19.84 ms, rays 4 / tile 1 = 23.15 ms, against 11.73 ms with rayTracing Off. Note the shape:
+    // going from tile 2 to tile 4 buys almost nothing (0.29 ms) while going from tile 2 to tile 1
+    // costs a great deal, so the amortisation saturates early and the ray count is where the rest of
+    // the money is.
+    u32 rtPixelsPerRayTile = 2;
 
     // How many frames apart the GI volume is re-voxelised: 1 (the default) revoxelises and re-filters
     // every frame, identical to the original always-fresh behaviour. N>1 reuses the previous frame's
@@ -136,6 +162,10 @@ public:
     // tier change under exactly the same "only if the caller left it untouched" rule as the grid edge
     // above. Epic is 1 -- always fresh -- so the top tier's indirect light is unchanged by this.
     static u32 giUpdateIntervalForQuality(Quality q);
+    // The RT sun-shadow rungs, mirroring giUpdateIntervalForQuality: applied by setSettings when the
+    // rayTracing tier changes and the field arrives unchanged.
+    static u32 rtShadowRaysForQuality(Quality q);
+    static u32 rtPixelsPerRayTileForQuality(Quality q);
 
 private:
     Renderer() = default;
