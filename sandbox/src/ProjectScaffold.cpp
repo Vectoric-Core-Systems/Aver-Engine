@@ -725,6 +725,33 @@ bool writeNewFile(const std::string& path, const std::string& text, std::string*
     return true;
 }
 
+// Removes a project root we created ourselves, unless the scaffold ran to completion.
+//
+// WHY THIS HAS TO EXIST: both scaffolders refuse up front if `root` already exists, and then create
+// it. Every failure AFTER that point used to return false while leaving the root behind -- and
+// `createDirectories(root + "\\Content\\Maps")` creates the root as a PARENT, so failing on the
+// second directory was already enough. The next attempt then hit the up-front check, and the user got
+// "A folder already exists at ..." for a folder they never made, with no way forward but to find and
+// delete it by hand. A transient error (a locked file, a full disk, a virus scanner holding a handle)
+// turned into a permanently un-retryable project name.
+//
+// It is safe to remove the tree precisely because the caller established the root did NOT exist a few
+// lines earlier: everything inside it is ours. `disarm()` is called only on the success path, so any
+// return between construction and that point cleans up, including one added later by someone who
+// never reads this comment.
+namespace {
+struct ScaffoldRootGuard {
+    const std::string* root = nullptr;
+    void disarm() { root = nullptr; }
+    ~ScaffoldRootGuard() {
+        if (!root) return;
+        std::error_code rc;
+        std::filesystem::remove_all(std::filesystem::path(*root), rc);
+        if (rc) AVER_WARN("[Editor] could not clean up the partial project at {}: {}", *root, rc.message());
+    }
+};
+} // namespace
+
 // Creates a whole new project at location\name and loads its manifest into `out`.
 bool scaffoldProject(const std::string& location, const std::string& name,
                      fmt::ProjectDesc& out, std::string* err) {
@@ -736,6 +763,7 @@ bool scaffoldProject(const std::string& location, const std::string& name,
         if (err) *err = "A folder already exists at " + root;
         return false;
     }
+    ScaffoldRootGuard guard{&root};
 
     const std::string content = root + "\\Content";
     for (const std::string& d : {content + "\\Maps", content + "\\Meshes", content + "\\Materials",
@@ -806,6 +834,7 @@ bool scaffoldProject(const std::string& location, const std::string& name,
     }
 
     if (!fmt::loadOcproject(manifest, out, err)) return false;
+    guard.disarm();
     AVER_INFO("[Editor] created project '{}' at {}", name, root);
     return true;
 }
@@ -874,6 +903,9 @@ bool scaffoldProjectFromTemplate(const std::string& location, const std::string&
         if (err) *err = "Could not create " + root;
         return false;
     }
+    // Armed only now, AFTER the no-Content check above returned without creating anything. See
+    // ScaffoldRootGuard: from here on, every failure path removes the root it just made.
+    ScaffoldRootGuard guard{&root};
     const std::filesystem::path dstContent = std::filesystem::path(root) / "Content";
     std::filesystem::copy(srcContent, dstContent, std::filesystem::copy_options::recursive, ec);
     if (ec) {
@@ -902,6 +934,7 @@ bool scaffoldProjectFromTemplate(const std::string& location, const std::string&
     }
 
     if (!fmt::loadOcproject(manifest, out, err)) return false;
+    guard.disarm();
     AVER_INFO("[Editor] created project '{}' from template '{}' at {}", name, tmpl.id, root);
     return true;
 }

@@ -5810,6 +5810,26 @@ private:
     // path may insert/erase objects_ without also clearing undoStack_/redoStack_ -- already true
     // today (level load/new-level clears both alongside objects_/levelEntities_), and now documented
     // as the rule any future objects_-mutating code must keep.
+    // Keeps reflBeaconIndex_ pointing at the beacon when objects_ shifts underneath it.
+    //
+    // reflBeaconIndex_ is captured ONCE, as objects_.size()-1 at the moment --refl-test builds its
+    // beacon, and then never maintained. Any erase BELOW it slid every later entry down one, so the
+    // stored index went on addressing whatever had moved into that slot: the schedule at the draw
+    // site then drove SOME OTHER object's `visible` flag on and off, silently, while the real beacon
+    // sat frozen. The bounds check at the draw site keeps that in range, so it never crashed -- it
+    // just measured the wrong thing, which is worse in a diagnostic whose entire job is measuring.
+    //
+    // Erasing the beacon itself invalidates the index rather than sliding it, because there is no
+    // beacon left to point at and -1 is what the draw site already treats as "nothing to drive".
+    void objectsErasedAt(int index) {
+        if (reflBeaconIndex_ < 0) return;
+        if (index == reflBeaconIndex_)     reflBeaconIndex_ = -1;
+        else if (index <  reflBeaconIndex_) --reflBeaconIndex_;
+    }
+    void objectsInsertedAt(int index) {
+        if (reflBeaconIndex_ >= 0 && index <= reflBeaconIndex_) ++reflBeaconIndex_;
+    }
+
     void undo() {
         if (undoStack_.empty()) return;
         EditCmd c = undoStack_.back(); undoStack_.pop_back();
@@ -5821,13 +5841,17 @@ private:
             case EditCmd::Kind::Destroy:   recreateFrom(c); break;
 #endif
             case EditCmd::Kind::CreateObj:   // undo a create: take it back out
-                if (c.objIndex >= 0 && c.objIndex < (int)objects_.size())
+                if (c.objIndex >= 0 && c.objIndex < (int)objects_.size()) {
                     objects_.erase(objects_.begin() + c.objIndex);
+                    objectsErasedAt(c.objIndex);
+                }
                 sel_ = -1; selEntity_ = kInvalidId;
                 break;
             case EditCmd::Kind::DestroyObj:  // undo a destroy: put it back at its old index
-                if (c.objIndex >= 0 && c.objIndex <= (int)objects_.size())
+                if (c.objIndex >= 0 && c.objIndex <= (int)objects_.size()) {
                     objects_.insert(objects_.begin() + c.objIndex, c.objSnapshot);
+                    objectsInsertedAt(c.objIndex);
+                }
                 sel_ = c.objIndex; selEntity_ = kInvalidId;
                 break;
             default: break;   // Create/Destroy (scene) fall here when AVER_MODULE_SCENE is off
@@ -5853,8 +5877,10 @@ private:
                 sel_ = c.objIndex; selEntity_ = kInvalidId;
                 break;
             case EditCmd::Kind::DestroyObj:  // redo a destroy: take it back out
-                if (c.objIndex >= 0 && c.objIndex < (int)objects_.size())
+                if (c.objIndex >= 0 && c.objIndex < (int)objects_.size()) {
                     objects_.erase(objects_.begin() + c.objIndex);
+                    objectsErasedAt(c.objIndex);
+                }
                 sel_ = -1; selEntity_ = kInvalidId;
                 break;
             default: break;   // Create/Destroy (scene) fall here when AVER_MODULE_SCENE is off
@@ -6657,6 +6683,7 @@ private:
             c.objIndex = sel_;
             c.objSnapshot = objects_[sel_];
             objects_.erase(objects_.begin() + sel_);
+            objectsErasedAt(sel_);
             pushEdit(std::move(c));
             sel_ = -1;
         }
