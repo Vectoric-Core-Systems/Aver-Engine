@@ -189,6 +189,12 @@ static int Main()
         // the real contract. See GetForwardNodeTests.cs's own header comment.
         failures += GetForwardNodeTests.RunAll();
 
+        // A node whose required INPUT pin does not exist -- the state any explicit PIN record leaves a
+        // node in, since one hand-written PIN suppresses every default. Both compilers mishandled it
+        // silently rather than refusing; see MissingPinTests.cs's own header for the two different
+        // ways they got it wrong, and for why "absent" has to stay distinct from "unconnected".
+        failures += MissingPinTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

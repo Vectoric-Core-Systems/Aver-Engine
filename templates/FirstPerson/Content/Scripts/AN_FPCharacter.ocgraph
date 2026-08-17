@@ -60,14 +60,22 @@ LINK yaw.result drive.yawDelta
 LINK pitch.result drive.pitchDelta
 
 # ---- two targets, spawned and remembered ----------------------------------------------------------
-# Spawn-and-remember is still the ONLY way one graph learns another entity's id (Raycast's own
-# `entity` output is a physics BODY handle, and there is still no body-to-entity map anywhere in the
-# engine -- confirmed true as of this template, same as AN_Playable's own Player.ocgraph found).
-# THAT is why this template does not aim with Raycast: there would be no way to turn a successful hit
-# test into a target id to FireEvent at. Proximity substitutes for aim instead -- see the range check
-# below -- and that substitution, not a raycast, is this template's whole "shooting" mechanic. Two
-# targets, not one, so a hit on one PROVABLY does not touch the other's count (see AN_FPTarget.ocgraph
-# for what "count" means and why it is this template's score).
+# THIS SECTION IS A WORKAROUND FOR A GAP THAT HAS SINCE BEEN CLOSED, and it is left here honestly
+# labelled rather than silently presented as a design.
+#
+# When this template was written, spawn-and-remember was the ONLY way one graph could learn another
+# entity's id: `Raycast.entity` returned a raw physics BODY handle and no body-to-entity map existed
+# anywhere in the engine, so a hit test could tell you THAT you hit something and never WHAT. That is
+# why this file measures PROXIMITY instead of aiming -- there was no way to turn a hit into a target
+# id to FireEvent at.
+#
+# BOTH HALVES OF THAT ARE NOW FIXED. Every body and character is stamped with its owning scene entity
+# (`aver_phys_set_entity`) and `Raycast.entity` reads that stamp back; and `GetForward` reports the
+# direction a character is actually looking, plus its eye position, which is what a ray needs to start
+# from. A graph can aim properly today, and this file no longer represents the best way to write it.
+#
+# Two targets, not one, so a hit on one PROVABLY does not touch the other's count (see
+# AN_FPTarget.ocgraph for what "count" means and why it is this template's score).
 VAR targetA int 0
 VAR targetB int 0
 

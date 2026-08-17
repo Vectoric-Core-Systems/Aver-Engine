@@ -1255,15 +1255,26 @@ public class GraphCompiler
         // Load a default value based on the pin type.
         var node = _graph.Nodes[nodeId];
         var pin = node.Pins.FirstOrDefault(p => p.Name == pinName);
-        if (pin != null)
-        {
-            if (pin.Type == PinType.Float)
-                _il.Emit(OpCodes.Ldc_R4, 0f);
-            else if (pin.Type == PinType.Int)
-                _il.Emit(OpCodes.Ldc_I4, 0);
-            else if (pin.Type == PinType.Bool)
-                _il.Emit(OpCodes.Ldc_I4, 0);
-        }
+
+        // SAME DEFECT AS EmitPullInput's, IN THE OTHER COMPILER, AND WORSE. See that method's comment
+        // for how a node ends up without a pin an emitter asks for. Where the PULL path at least
+        // pushed something (of the wrong type), this `if (pin != null)` guarded the entire emit -- so a
+        // missing pin pushed NOTHING, and the Call that followed silently consumed whatever was beneath
+        // it on the stack. Wrong operand, or invalid IL, depending on what was there.
+        //
+        // As in the PULL path: absent is refused, merely unconnected still reads zero.
+        if (pin == null)
+            throw new InvalidOperationException(
+                $"node '{nodeId}' ({node.Type}) has no input pin '{pinName}' to read. " +
+                $"A node's default pins are suppressed entirely as soon as it declares ANY pin by hand, " +
+                $"so if this node has PIN records, it needs one for '{pinName}' too (or a LINK into it)");
+
+        if (pin.Type == PinType.Float)
+            _il.Emit(OpCodes.Ldc_R4, 0f);
+        else if (pin.Type == PinType.Int)
+            _il.Emit(OpCodes.Ldc_I4, 0);
+        else if (pin.Type == PinType.Bool)
+            _il.Emit(OpCodes.Ldc_I4, 0);
     }
 
     /// Shared by Compile() and CompileEntryPoint(): an OUT record must name a DATA pin, never an exec
@@ -2307,9 +2318,29 @@ public class GraphCompiler
         }
 
         var pin = node.Pins.FirstOrDefault(p => p.Name == pinName);
-        var t = pin?.Type ?? PinType.Float;
-        if (t == PinType.Bool) _il.Emit(OpCodes.Ldc_I4_0);
-        else if (t == PinType.Int) _il.Emit(OpCodes.Ldc_I4_0);
+
+        // ABSENT IS NOT THE SAME AS UNCONNECTED, and conflating them emitted an INVALID PROGRAM.
+        //
+        // Reaching here with `pin == null` means the emitter asked for an input this node does not
+        // have -- which is the state ANY hand-written PIN record leaves a node in, because one
+        // explicit PIN suppresses every default AddDefaultPins would have added. The old code fell
+        // back to `pin?.Type ?? PinType.Float` and pushed a FLOAT zero, so a missing `entity` (an INT)
+        // put a float32 on the stack where the callee's signature wants an int32. That does not
+        // produce a wrong number, it produces IL the runtime refuses to run at all, and the author
+        // sees "Common Language Runtime detected an invalid program" -- a message that names neither
+        // the node nor the pin nor the PIN record that deleted it.
+        //
+        // A pin that EXISTS but has no incoming link still falls through to zero below, unchanged:
+        // an Add with only `a` wired is a legal graph meaning "a + 0", and every sample in this repo
+        // relies on it.
+        if (pin == null)
+            throw new InvalidOperationException(
+                $"node '{node.Id}' ({node.Type}) has no input pin '{pinName}' to read. " +
+                $"A node's default pins are suppressed entirely as soon as it declares ANY pin by hand, " +
+                $"so if this node has PIN records, it needs one for '{pinName}' too (or a LINK into it)");
+
+        if (pin.Type == PinType.Bool) _il.Emit(OpCodes.Ldc_I4_0);
+        else if (pin.Type == PinType.Int) _il.Emit(OpCodes.Ldc_I4_0);
         else _il.Emit(OpCodes.Ldc_R4, 0f);
     }
 

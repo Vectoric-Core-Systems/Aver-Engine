@@ -8,8 +8,8 @@ OCGRAPH 1
 #    total anywhere (not on the game mode, not anywhere else): FireEvent carries NO PAYLOAD -- the
 #    receiving ENTRY gets only entity/time/deltaTime, nothing an amount or a source could ride on
 #    (docs/AVER_NODE_NODES.md's Actor section says so plainly) -- and AN_FPRules.ocgraph (the game
-#    mode) has no way to learn a target's entity id in the first place: it is PLACED by the map, not
-#    spawned by anything, so spawn-and-remember (this template's only id-discovery mechanism -- see
+#    mode) has no way to learn a target's entity id in the first place: the CHARACTER spawns these,
+#    not the game mode, so spawn-and-remember (this template's only id-discovery mechanism -- see
 #    AN_FPCharacter.ocgraph) never runs for it. A single combined score would need one of those two
 #    gaps closed; this template does not pretend otherwise. Each target's own `score` VAR IS the
 #    score, per instance, exactly as honest as the mechanism actually is.
