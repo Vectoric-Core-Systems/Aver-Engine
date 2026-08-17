@@ -302,4 +302,40 @@ internal static class GraphInterop
         eyeX = eye.X; eyeY = eye.Y; eyeZ = eye.Z;
         return true;
     }
+
+    /// <summary>GetViewEntity's own surface: the CAMERA node a character looks through.
+    ///
+    /// WHY A GRAPH NEEDS THIS. Anything that should sit still relative to the CAMERA rather than the
+    /// character -- a first-person weapon above all -- has to be parented to the view node, not to the
+    /// pawn. Parent a gun to the character and it stays put while the camera pitches around it; parent
+    /// it to the view and it moves with the eye, which is what a viewmodel is.
+    ///
+    /// <see cref="AverCharacter"/> creates that node in EnsureView() and publishes it only as
+    /// <see cref="AverCharacter.View"/>. A graph had `SetParent` and `SetMesh` and no way to NAME the
+    /// thing to parent to -- the same shape of gap as LookDirection before GetForward: state the
+    /// character already owns that no node could read.
+    ///
+    /// Returns 0 with false when there is no character, or when its view node does not exist yet --
+    /// EnsureView is lazy, so a graph asking on the very first OnStart before CharacterMove has run
+    /// legitimately gets nothing. That is a "try again next tick", not an error, which is why it fails
+    /// quietly here rather than warning every frame the way a wrong-actor-type would.</summary>
+    internal static bool ViewEntityForGraph(int entity, out int view)
+    {
+        view = 0;
+
+        Entity e = new Entity(entity);
+        AverActor? actor = Actors.Get(e);
+        if (actor is not AverCharacter character)
+        {
+            Log.Warn(actor is null
+                ? $"[Graph] GetViewEntity: entity {entity} has no view -- no live actor is bound to it"
+                : $"[Graph] GetViewEntity: entity {entity} has no view -- its actor is a {actor.GetType().Name}, not an AverCharacter");
+            return false;
+        }
+
+        Entity v = character.View;
+        if (!v.IsAlive) return false;   // lazy: not built yet, ask again next tick
+        view = v.Handle;
+        return true;
+    }
 }

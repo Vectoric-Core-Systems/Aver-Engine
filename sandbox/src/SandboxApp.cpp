@@ -11531,6 +11531,26 @@ private:
             w.placements.push_back(std::move(p));
         }
 
+        // CLASS PLACEMENTS GO BACK OUT TOO, AND UNTIL NOW THEY DID NOT -- this loop rebuilds a
+        // placement from each entity's SCENE COMPONENTS, and a `class=` placement has none of the
+        // things it reads: no CMeshRenderer, no asset path, nothing that survives the round trip
+        // through the world. They are parsed into classPlacements_ (see spawnClassPlacements, which
+        // is the only other thing that touches it) and were then simply never written, so opening a
+        // level and saving it DELETED every graph class in it.
+        //
+        // That is the whole of a graph-only project. Saving the FirstPerson template's map removed
+        // its game mode and all three targets and left a floor and two crates -- a level that loads
+        // fine, starts no play session, and has no player, with nothing in the log to say why. It is
+        // the same defect as the material token four lines above ("used to be dropped on every
+        // save"), one field further along, and it is worse because the thing dropped is not a
+        // property of an object but the object itself.
+        //
+        // Written from classPlacements_ verbatim rather than rebuilt: the editor cannot currently
+        // EDIT a class placement (there is no entity to select and drag), so the copy it read in is
+        // still the truth, and passing it straight through is both correct and the only honest thing
+        // to do until that changes.
+        for (const fmt::OcWorldPlacement& cp : classPlacements_) w.placements.push_back(cp);
+
         std::string why;
         if (!fmt::saveOcworld(path, w, &why)) { AVER_WARN("[Level] save failed: {}", why); return false; }
         AVER_INFO("[Level] saved {} placement(s) to {}", w.placements.size(), path);

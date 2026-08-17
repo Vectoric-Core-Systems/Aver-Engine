@@ -140,6 +140,13 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    which group a node belongs in here. Six outputs and no exec pins, copied from
     //    OcGraphParser.AddDefaultPins's "getforward" case; the eye position rides along because a
     //    direction with no origin cannot build a ray (see GraphInterop.LookDirectionForGraph).
+    // -- GetViewEntity: the CAMERA node a character looks through. A first-person viewmodel parents to
+    //    this, not to the character -- parent a gun to the pawn and it stays put while the camera
+    //    pitches around it. Filed under Scene beside GetForward for the same reason: it reads state,
+    //    not this frame's input.
+    t.push_back({"GetViewEntity", "Get View Entity", "Scene", {
+        pin("entity", "int", false), pin("view", "int", true), pin("success", "bool", true)},
+        {}});
     t.push_back({"GetForward", "Get Forward (Look)", "Scene", {
         pin("entity", "int", false),
         pin("x", "float", true), pin("y", "float", true), pin("z", "float", true),

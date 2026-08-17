@@ -397,6 +397,11 @@ public class GraphCompiler
                 EmitGetForward(node);
                 break;
 
+            case "getviewentity":
+            case "get_view_entity":
+                EmitGetViewEntity(node);
+                break;
+
             case "setfieldvec3":
                 // Present here too, exactly like "setfield" above -- Compile()'s topological pass
                 // visits every non-exec-only node EXACTLY ONCE regardless of graph shape, so running
@@ -789,6 +794,37 @@ public class GraphCompiler
     /// EXISTS AT ALL because a node implemented only in the PUSH compiler works on an exec chain and
     /// then silently fails the moment someone reads it through OUT or from a pure graph -- the recurring
     /// shape of bugs in this file. Both paths, or neither.
+    /// GetViewEntity(entity) -> view + success. Same shape as EmitGetForward, one out-parameter wide.
+    private void EmitGetViewEntity(Node node)
+    {
+        if (_il == null) return;
+
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Ldloca, RequirePinLocal(node, "view"));
+        _il.Emit(OpCodes.Call, ViewEntityMethod);
+
+        if (_pinLocals.TryGetValue((node.Id, "success"), out var local)) _il.Emit(OpCodes.Stloc, local);
+        else                                                            _il.Emit(OpCodes.Pop);
+    }
+
+    /// The PULL half of GetViewEntity. Both paths, for the reason EmitPullGetForward states.
+    private void EmitPullGetViewEntity(Node node, string pinName)
+    {
+        if (_il == null) return;
+
+        EmitPullInput(node, "entity");
+        var viewLocal = _il.DeclareLocal(typeof(int));
+        _il.Emit(OpCodes.Ldloca, viewLocal);
+        _il.Emit(OpCodes.Call, ViewEntityMethod);
+
+        if (pinName == "success") return;   // the bool return IS that pin
+        _il.Emit(OpCodes.Pop);
+        if (pinName != "view")
+            throw new InvalidOperationException(
+                $"GetViewEntity node '{node.Id}' has no output pin '{pinName}' (only view, success)");
+        _il.Emit(OpCodes.Ldloc, viewLocal);
+    }
+
     private void EmitPullGetForward(Node node, string pinName)
     {
         if (_il == null) return;
@@ -2470,6 +2506,9 @@ public class GraphCompiler
             case "getforward":
             case "get_forward":
                 EmitPullGetForward(source, pinName); return;
+            case "getviewentity":
+            case "get_view_entity":
+                EmitPullGetViewEntity(source, pinName); return;
             case "getvar":
                 EmitPullGetVar(source); return;
             case "param":
@@ -2731,6 +2770,10 @@ public class GraphCompiler
     private static readonly MethodInfo LookDirectionMethod =
         typeof(GraphInterop).GetMethod("LookDirectionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.LookDirectionForGraph was not found by reflection");
+    // GetViewEntity: the camera node a character looks through -- what a viewmodel parents to.
+    private static readonly MethodInfo ViewEntityMethod =
+        typeof(GraphInterop).GetMethod("ViewEntityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.ViewEntityForGraph was not found by reflection");
     // FireEvent: GAP 3, the cross-entity event node -- reflected differently from every wrapper above.
     // GraphEvents lives in THIS SAME ASSEMBLY (Aver.Graph), and its Router-dispatching method is
     // PUBLIC (see GraphEvents.cs's own comment for why a public static router, mirroring

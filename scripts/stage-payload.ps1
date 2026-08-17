@@ -60,9 +60,9 @@ $failures = New-Object System.Collections.Generic.List[string]
 function Fail([string] $msg) { $script:failures.Add($msg); Write-Host "[stage] ERROR $msg" -ForegroundColor Red }
 function Note([string] $msg) { Write-Host "[stage] $msg" }
 
-# The PE import-table helpers and the OS-provided DLL list live in one file shared with
-# stage-game.ps1. Two copies of a PE parser is two copies that drift, and the failure that produces
-# -- one script accepting a payload the other rejects -- looks like a bug in the payload.
+# The PE import-table helpers and the OS-provided DLL list live in their own file. They were shared
+# with stage-game.ps1 until the packaged-game path was removed; see PeImports.ps1's own header for
+# why it stays separate now that this is its only caller.
 . (Join-Path $PSScriptRoot 'PeImports.ps1')
 $osProvided = $AverOsProvidedDlls
 

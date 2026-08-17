@@ -745,6 +745,16 @@ public class OcGraphParser
             // pure, idempotent read of the character's own state, so it is safe to pull as often as
             // anything asks. The eye position rides along because a direction with no origin cannot
             // build a ray -- see GraphInterop.LookDirectionForGraph for why both halves are one call.
+            // GetViewEntity(entity) -> view + success. The CAMERA node a character looks through, which
+            // is what a first-person viewmodel must be parented to -- parent it to the character and it
+            // stays put while the camera pitches around it. Pure read, no exec pins, like GetForward.
+            case "getviewentity":
+            case "get_view_entity":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "view", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
             case "getforward":
             case "get_forward":
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });

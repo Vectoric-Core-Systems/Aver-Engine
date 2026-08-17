@@ -1,6 +1,13 @@
-# Shared PE import-table helpers, dot-sourced by stage-payload.ps1 and stage-game.ps1.
+# Shared PE import-table helpers, dot-sourced by stage-payload.ps1.
 #
-# WHY THIS IS ITS OWN FILE. Both staging scripts must answer the same two questions -- what does this
+# ONE CALLER TODAY, NOT TWO. This was split out when stage-game.ps1 existed alongside it and both
+# staging scripts needed the same PE parser; the packaged-game path was removed with AverGame.exe, so
+# stage-payload.ps1 is the only caller now. Kept as its own file rather than folded back in: the
+# helpers below are the fiddliest part of staging, they are worth testing and reading on their own,
+# and a second consumer (an edition-specific stager, a verifier that wants the same answers) is a
+# likelier future than never needing them again.
+#
+# WHY IT WAS ITS OWN FILE. Both staging scripts had to answer the same two questions -- what does this
 # binary import, and is every one of those imports satisfied -- and the answer must not be allowed to
 # differ between them. A second copy of a PE parser is a second copy that drifts, and the failure it
 # produces (one script accepting a payload the other rejects) looks like a bug in the payload rather
