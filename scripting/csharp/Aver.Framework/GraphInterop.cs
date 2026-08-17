@@ -338,4 +338,31 @@ internal static class GraphInterop
         view = v.Handle;
         return true;
     }
+
+    /// <summary>Jump's own surface: one call into <see cref="AverCharacter.Jump"/>, which refuses in
+    /// mid-air by returning false.
+    ///
+    /// THE GROUNDED CHECK IS NOT THIS NODE'S TO MAKE. Jump() already asks the physics character
+    /// whether it is standing on something (Phys.aver_phys_character_grounded) and declines if not, so
+    /// a graph wiring this straight to a key gets single jumps and no flight for free. Re-testing it
+    /// here would mean a second answer to the same question that could disagree with the first.
+    ///
+    /// THE RETURN IS THE INTERESTING PART, and it is why this reports `jumped` rather than nothing: a
+    /// graph that wants a jump SOUND, an animation, or a counter needs to know whether the jump
+    /// actually happened, and "the key was pressed" is not that. False here means airborne, which is
+    /// ordinary and frequent -- so unlike the wrong-actor case below it is not logged at all. A warning
+    /// every frame the player holds the jump key would be noise, not diagnosis.</summary>
+    internal static bool JumpForGraph(int entity)
+    {
+        Entity e = new Entity(entity);
+        AverActor? actor = Actors.Get(e);
+        if (actor is not AverCharacter character)
+        {
+            Log.Warn(actor is null
+                ? $"[Graph] Jump: entity {entity} cannot jump -- no live actor is bound to it"
+                : $"[Graph] Jump: entity {entity} cannot jump -- its actor is a {actor.GetType().Name}, not an AverCharacter");
+            return false;
+        }
+        return character.Jump();
+    }
 }

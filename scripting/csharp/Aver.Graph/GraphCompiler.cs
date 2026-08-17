@@ -794,6 +794,18 @@ public class GraphCompiler
     /// EXISTS AT ALL because a node implemented only in the PUSH compiler works on an exec chain and
     /// then silently fails the moment someone reads it through OUT or from a pure graph -- the recurring
     /// shape of bugs in this file. Both paths, or neither.
+    /// Jump(entity) -> jumped. A side effect, so it lives on the exec chain and is refused when pulled
+    /// as data -- see IsExecCapableSideEffectType. The bool is stored when the node declares `jumped`
+    /// and popped otherwise, because the stack has to balance either way.
+    private void EmitJump(Node node)
+    {
+        if (_il == null) return;
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Call, JumpMethod);
+        if (_pinLocals.TryGetValue((node.Id, "jumped"), out var local)) _il.Emit(OpCodes.Stloc, local);
+        else                                                           _il.Emit(OpCodes.Pop);
+    }
+
     /// GetViewEntity(entity) -> view + success. Same shape as EmitGetForward, one out-parameter wide.
     private void EmitGetViewEntity(Node node)
     {
@@ -1613,6 +1625,7 @@ public class GraphCompiler
                     else if (IsExecCapableSetMeshType(node.Type)) EmitExecSetMesh(node);
                     else if (IsExecCapableSetMaterialType(node.Type)) EmitExecSetMaterial(node);
                     else if (IsExecCapableCharacterMoveType(node.Type)) EmitExecCharacterMove(node);
+                    else if (IsExecCapableJumpType(node.Type)) EmitJump(node);
                     else if (IsExecCapableFireEventType(node.Type)) EmitExecFireEvent(node);
                     EmitExecFanOut(node);
                     return;
@@ -1954,6 +1967,13 @@ public class GraphCompiler
     /// actor at all -- rather than an unresolved class name).
     private static bool IsExecCapableCharacterMoveType(string type) =>
         type.Equals("charactermove", StringComparison.OrdinalIgnoreCase);
+
+    /// Jump gets its OWN predicate rather than joining CharacterMove's, following the one-per-
+    /// side-effect-type shape the six above already use: it is a different call, with a different
+    /// emitter and a different failure mode (declined in mid-air, which is ordinary), and a predicate
+    /// matching two unrelated node types is one whose name has stopped describing what it matches.
+    private static bool IsExecCapableJumpType(string type) =>
+        type.Equals("jump", StringComparison.OrdinalIgnoreCase);
 
     /// FireEvent's own version of IsExecCapableSpawnType -- a SEVENTH, separate predicate/emitter
     /// pair, refused by the PULL compiler's topological pass ENTIRELY (see EmitNode's "fireevent"
@@ -2430,7 +2450,7 @@ public class GraphCompiler
             IsExecCapableSetParentType(source.Type) || IsExecCapableSetViewEntityType(source.Type) ||
             IsExecCapableSetNameType(source.Type) || IsExecCapableSetMeshType(source.Type) ||
             IsExecCapableSetMaterialType(source.Type) || IsExecCapableCharacterMoveType(source.Type) ||
-            IsExecCapableFireEventType(source.Type))
+            IsExecCapableFireEventType(source.Type) || IsExecCapableJumpType(source.Type))
             throw new InvalidOperationException(
                 $"'{source.Id}.{pinName}' cannot be read as a data value: {source.Type} has a side effect " +
                 "and must be reached by wiring it directly into the exec chain (give it exec pins), not " +
@@ -2771,6 +2791,10 @@ public class GraphCompiler
         typeof(GraphInterop).GetMethod("LookDirectionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.LookDirectionForGraph was not found by reflection");
     // GetViewEntity: the camera node a character looks through -- what a viewmodel parents to.
+    // Jump: one call into AverCharacter.Jump, which declines in mid-air on its own.
+    private static readonly MethodInfo JumpMethod =
+        typeof(GraphInterop).GetMethod("JumpForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.JumpForGraph was not found by reflection");
     private static readonly MethodInfo ViewEntityMethod =
         typeof(GraphInterop).GetMethod("ViewEntityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.ViewEntityForGraph was not found by reflection");

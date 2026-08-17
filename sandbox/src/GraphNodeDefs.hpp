@@ -140,6 +140,13 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    which group a node belongs in here. Six outputs and no exec pins, copied from
     //    OcGraphParser.AddDefaultPins's "getforward" case; the eye position rides along because a
     //    direction with no origin cannot build a ray (see GraphInterop.LookDirectionForGraph).
+    // -- Jump: one call into AverCharacter.Jump, which declines in mid-air by itself, so a graph
+    //    wiring this straight to a key gets single jumps and no flight without testing anything.
+    //    `jumped` reports whether it actually happened, which "the key was pressed" is not.
+    t.push_back({"Jump", "Jump", "Actor", {
+        pin("exec", "exec", false), pin("entity", "int", false),
+        pin("then", "exec", true), pin("jumped", "bool", true)},
+        {}});
     // -- GetViewEntity: the CAMERA node a character looks through. A first-person viewmodel parents to
     //    this, not to the character -- parent a gun to the pawn and it stays put while the camera
     //    pitches around it. Filed under Scene beside GetForward for the same reason: it reads state,

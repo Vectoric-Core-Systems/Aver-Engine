@@ -106,17 +106,24 @@ struct Settings {
     // while rayTracing != Quality::Off; it does nothing to the voxel cone-trace GI cost below, which
     // is governed instead by giUpdateInterval.
     //
-    // ALSO DERIVED FROM rayTracing on a tier change: Low 4, Medium 2, High 2, Epic 1. Defaulting to
-    // 2 for the same by-construction reason rtShadowRays defaults to 1 -- Medium's rung, because
+    // ALSO DERIVED FROM rayTracing on a tier change: Low 4, Medium 1, High 1, Epic 1. Defaulting to
+    // 1 for the same by-construction reason rtShadowRays defaults to 1 -- Medium's rung, because
     // Medium is the default tier.
+    //
+    // MEDIUM IS 1, WHICH MEANS NO DENOISING BY DEFAULT. 1 is "every pixel traces every frame", which
+    // the paragraph above calls bit-identical to no denoiser at all: no tiling, no reprojected
+    // history, no temporal blend. What you see is what was traced this frame. It costs more than the
+    // amortised rungs and it is the honest default for a renderer people are evaluating, because a
+    // temporal denoiser hides its own artefacts as readily as the tracer's. Low still amortises, at
+    // tile 4, for anyone who wants the frame back.
     //
     // Measured, so the ladder is not guesswork (ElectricDreams, windowed, --no-vsync, 200 frames,
     // whole-frame median): rays 1 / tile 4 = 18.07 ms, rays 1 / tile 2 = 18.36 ms, rays 2 / tile 2 =
     // 19.84 ms, rays 4 / tile 1 = 23.15 ms, against 11.73 ms with rayTracing Off. Note the shape:
-    // going from tile 2 to tile 4 buys almost nothing (0.29 ms) while going from tile 2 to tile 1
-    // costs a great deal, so the amortisation saturates early and the ray count is where the rest of
-    // the money is.
-    u32 rtPixelsPerRayTile = 2;
+    // going from tile 2 to tile 4 buys almost nothing (0.29 ms), so amortisation saturates early and
+    // the ray count is where the rest of the money is -- which is also why dropping the denoiser
+    // entirely costs less than it sounds like it should at one ray.
+    u32 rtPixelsPerRayTile = 1;
 
     // How many frames apart the GI volume is re-voxelised: 1 (the default) revoxelises and re-filters
     // every frame, identical to the original always-fresh behaviour. N>1 reuses the previous frame's

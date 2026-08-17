@@ -745,6 +745,17 @@ public class OcGraphParser
             // pure, idempotent read of the character's own state, so it is safe to pull as often as
             // anything asks. The eye position rides along because a direction with no origin cannot
             // build a ray -- see GraphInterop.LookDirectionForGraph for why both halves are one call.
+            // Jump(entity) -> jumped. EXEC PINS BY DEFAULT, unlike GetForward/GetViewEntity beside it:
+            // jumping is a side effect with a definite "when", so it belongs on the chain the way
+            // CharacterMove and Spawn do, not pulled as data. `jumped` is false when the character was
+            // airborne -- AverCharacter.Jump refuses in mid-air -- which is ordinary, not an error.
+            case "jump":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "jumped", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
             // GetViewEntity(entity) -> view + success. The CAMERA node a character looks through, which
             // is what a first-person viewmodel must be parented to -- parent it to the character and it
             // stays put while the camera pitches around it. Pure read, no exec pins, like GetForward.
