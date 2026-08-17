@@ -40,6 +40,14 @@ public:
     // The constant block a draw of `h` uses. An unknown or stale handle gets the fallback.
     const MaterialConstants& constants(MaterialHandle h);
 
+    // Whether `s` is one of THIS system's binding sets. The question a consumer has to ask when it
+    // is handed an OPAQUE draw binding (rhi::IRenderFeature::submitDraw forwards a handle plus raw
+    // bytes) and must decide whether those bytes really are a MaterialConstants. The block's SIZE
+    // cannot answer it -- any unrelated block of the same size would pass -- and nothing in the RHI
+    // tags a binding with its type, so identity is the only honest test and this system is the only
+    // thing that can perform it.
+    bool ownsBindingSet(rhi::BindingSetHandle s) const;
+
     // The identity material's set: white base colour, flat normal, full roughness, no metal.
     rhi::BindingSetHandle fallbackBindingSet() const { return fallbackSet_; }
     const MaterialConstants& fallbackConstants() const { return fallbackConstants_; }

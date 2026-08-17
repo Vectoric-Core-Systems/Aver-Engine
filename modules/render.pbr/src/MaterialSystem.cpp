@@ -239,6 +239,24 @@ rhi::BindingSetHandle MaterialSystem::bindingSet(MaterialHandle h) {
     return s ? s : fallbackSet_;
 }
 
+// Whether `s` is one of ours. Deliberately const and lookup-only: it must NOT go through entryFor(),
+// which builds an entry on first use -- this answers a question about sets that already exist, and
+// materialising one to answer it would be a side effect of asking.
+//
+// A linear scan over the resident materials. The caller is a per-draw path, but `entries_` holds one
+// entry per material actually drawn this level (tens, not thousands) and the alternative -- a second
+// set-keyed index to maintain -- would have to be kept in step with every create and evict for no
+// measurable gain. The fallback is checked first because the un-authored case is the common one.
+bool MaterialSystem::ownsBindingSet(rhi::BindingSetHandle s) const {
+    if (!s) return false;
+    if (s == fallbackSet_) return true;
+    for (const auto& [handle, entry] : entries_) {
+        (void)handle;
+        if (entry.set == s) return true;
+    }
+    return false;
+}
+
 // The constant block a draw of `h` uses. Falls back for an unknown or stale handle.
 const MaterialConstants& MaterialSystem::constants(MaterialHandle h) {
     if (!res_ || !MaterialLibrary::get().valid(h)) return fallbackConstants_;

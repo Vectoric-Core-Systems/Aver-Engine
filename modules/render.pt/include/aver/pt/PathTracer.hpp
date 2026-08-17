@@ -110,6 +110,31 @@ public:
     bool createTarget(u32 scene, u32 width, u32 height, PtTarget& out);
     void destroyTarget(PtTarget& t);
 
+    // Clears every SURFACE, SCENE and the flat geometry table -- everything shutdown() clears, MINUS
+    // the compiled integrator (cs_/pipeline_), which survives. addSurface()/addScene()/prepare()/
+    // buildScenes() can all be called again afterwards, exactly as if this were a freshly-init()ed
+    // PathTracer, but with no DXC recompile.
+    //
+    // WHY THIS EXISTS: prepare()/buildScenes() are a ONE-SHOT contract -- exactly right for
+    // PtFurnaceTest, which declares its geometry once and never again, and wrong for a caller that
+    // streams a scene from a running level (PtSceneView). resetScene() is the seam that turns
+    // "declare a scene once" into "re-arm on a new snapshot".
+    //
+    // ANY PtTarget FROM BEFORE THIS CALL IS NOW INVALID and must be destroyTarget()ed: its binding
+    // set was written against the SCENE INDEX this call just discarded (createTarget() calls
+    // setSrvTlas against scenes_[scene].tlas at creation time), and a scene rebuilt after this returns
+    // fresh TlasHandle values that may reuse the same small integer scene index with a DIFFERENT
+    // underlying acceleration structure.
+    //
+    // A KNOWN, ACCEPTED COST: the RHI has no destroyTlas (see IResourceFactory -- BLAS has one,
+    // TLAS does not), so every TLAS this call discards is NOT released; it leaks for the life of the
+    // device. BLAS handles ARE released here, since destroyBlas exists. This is fine for the intended
+    // caller -- a reference view that re-arms on a genuine STATIC scene change, which for a level that
+    // has finished streaming is rare to never -- and would NOT be fine for a caller that rebuilds every
+    // frame; nothing in this module enforces that distinction, so a future caller doing the latter
+    // would need a real destroyTlas added to the RHI first.
+    void resetScene();
+
     // One accumulation step. The target's buffer is left in Common, because a buffer's state does
     // not survive the command list.
     void accumulate(rhi::IRenderContext& ctx, const PtTarget& t, const PtCamera& cam,

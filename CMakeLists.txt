@@ -329,9 +329,12 @@ add_subdirectory(modules/render.actorpreview)
 # GPU skinning. Down here rather than beside modules/anim because it needs the RHI, and generic
 # enough to exist in every configuration for the same reason the preview does.
 add_subdirectory(modules/render.skin)
-# The path tracer and its white-furnace oracle. Unconditional and RHI-only, like the two above: it
-# owns its own geometry and scenes, so there is no world, material system or render feature it could
-# depend on, and it declines at init() on a device without DXR 1.1.
+# The path tracer, its white-furnace oracle, and PtSceneView (the reference view over a REAL scene).
+# Unconditional and RHI-only, like the two above -- PathTracer owns its own geometry and PtSceneView
+# takes a real level's authored colour through a host-installed callback rather than a material type,
+# so there is no world, material system or render feature this must depend on, and it declines at
+# init() on a device without DXR 1.1. Its position in this file therefore carries no ordering
+# requirement; it sits here only because that is where it was added.
 add_subdirectory(modules/render.pt)
 # The audio seam. Added down HERE rather than beside the mixer because it links the WAV reader,
 # which is a target inside modules/formats and so does not exist until that has been added.
