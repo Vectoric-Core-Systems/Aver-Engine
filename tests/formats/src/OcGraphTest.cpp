@@ -301,6 +301,84 @@ static void testForwardReferencedEntryAndOut() {
           "the same holds for OUT");
 }
 
+static void testInterleavedRecordsStayPut() {
+    AVER_INFO("=== a save keeps every record where its author put it ===");
+    using namespace fmt;
+
+    // A HAND-WRITTEN GRAPH INTERLEAVES ITS RECORDS, in commented sections, each holding the nodes
+    // and links that belong together. The merge used to emit a whole KIND at that kind's first line
+    // and drop the rest, which hauled every NODE up to the first one -- so opening AN_Playable's
+    // Rules.ocgraph and saving it unchanged moved `NODE tick OnTick` six lines up, away from the
+    // comment written directly above it. Nothing was lost, which is exactly what made it dangerous:
+    // the file still parsed and still ran, and no longer said what its author meant.
+    const std::string original =
+        "OCGRAPH 1\n"
+        "NAME Interleaved\n"
+        "\n"
+        "# the first thing\n"
+        "NODE a ConstFloat value=1.0\n"
+        "\n"
+        "# the second thing, which the comment above belongs to\n"
+        "NODE b ConstFloat value=2.0\n"
+        "LINK a.value b.x\n"
+        "\n"
+        "# and the third\n"
+        "NODE c Add\n"
+        "OUT c result\n";
+
+    OcGraphData g;
+    std::string err;
+    check(parseOcgraph(original, g, &err), "the interleaved graph parses");
+    check(writeOcgraph(g, original) == original,
+          "an edit-free save is byte-identical -- no record hauled up to its kind's first line");
+
+    // A record REMOVED from the graph loses its line, and nothing else moves.
+    OcGraphData minusB = g;
+    minusB.nodes.erase(std::remove_if(minusB.nodes.begin(), minusB.nodes.end(),
+                                      [](const OcGraphNode& n) { return n.id == "b"; }),
+                       minusB.nodes.end());
+    const std::string afterDelete = writeOcgraph(minusB, original);
+    check(afterDelete.find("NODE b ") == std::string::npos, "a deleted node's line is gone");
+    check(afterDelete.find("# the second thing") != std::string::npos,
+          "...and the comment that sat above it is untouched, still where the author left it");
+    check(afterDelete.find("NODE a ") != std::string::npos && afterDelete.find("NODE c ") != std::string::npos,
+          "...and its neighbours did not move");
+
+    // A record ADDED has no line to claim, so it is appended rather than invented into the middle.
+    OcGraphData plusD = g;
+    OcGraphNode d; d.id = "d"; d.type = "Multiply";
+    plusD.nodes.push_back(d);
+    const std::string afterAdd = writeOcgraph(plusD, original);
+    check(afterAdd.find("NODE d Multiply") != std::string::npos, "a new node is written");
+    check(afterAdd.find("NODE a ConstFloat") < afterAdd.find("NODE d Multiply"),
+          "...after the records that already had a place, not spliced among them");
+}
+
+static void testLineEndingsSurvive() {
+    AVER_INFO("=== a CRLF graph is saved as a CRLF graph ===");
+    using namespace fmt;
+
+    // Records are regenerated with "\n" while unknown lines are copied verbatim, so a CRLF file used
+    // to come back MIXED -- CRLF on the lines the writer did not touch, LF on exactly the records the
+    // author had been editing. Every graph in this repo is LF, which is why nobody noticed; a graph
+    // written by a Windows editor is not.
+    const std::string crlf =
+        "OCGRAPH 1\r\n"
+        "NAME Windows\r\n"
+        "\r\n"
+        "# a comment\r\n"
+        "NODE k ConstFloat value=3.0\r\n"
+        "OUT k value\r\n";
+
+    OcGraphData g;
+    std::string err;
+    check(parseOcgraph(crlf, g, &err), "a CRLF graph parses");
+    const std::string out = writeOcgraph(g, crlf);
+    check(out == crlf, "an edit-free save of a CRLF file is byte-identical");
+    check(out.find("\n\n") == std::string::npos || out.find("\r\n\r\n") != std::string::npos,
+          "no bare LF was introduced among the CRLFs");
+}
+
 static void testDeterministic() {
     AVER_INFO("=== .ocgraph deterministic output ===");
     using namespace fmt;
@@ -716,6 +794,8 @@ int main(int argc, char** argv) {
     testUnknownRecords();
     testVarRecordsSurviveRoundTrip();
     testForwardReferencedEntryAndOut();
+    testInterleavedRecordsStayPut();
+    testLineEndingsSurvive();
     testDeterministic();
     testMalformedInput();
     testExecLinksAndEntryPoints();

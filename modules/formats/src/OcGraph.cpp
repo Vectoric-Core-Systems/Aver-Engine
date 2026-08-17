@@ -352,49 +352,67 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // anything) `existing` had. Shared by both branches below.
     const std::string nameLine = "NAME " + (g.name.empty() ? std::string("untitled") : g.name) + "\n";
     const std::string descLine = g.description.empty() ? std::string() : ("DESCRIPTION " + g.description + "\n");
+    // ONE ENTRY PER RECORD, not one string per KIND, because the merge path below matches existing
+    // lines to records INDIVIDUALLY -- see it for why. `key` is whatever identifies this record in a
+    // line of existing text; `used` is set once a line has claimed it, so a record is emitted exactly
+    // once even if the file names it twice.
+    struct Rec { std::string key; std::string text; bool used = false; };
+    std::vector<Rec> varRecs, nodeRecs, pinRecs, linkRecs, entryRecs, outRecs;
     std::string varBlock, nodeBlock, pinBlock, linkBlock, entryBlock, outBlock;
     // VAR right after NAME/DESCRIPTION, ahead of NODE -- matching where a graph author naturally
     // writes it (declare what the graph remembers, then the nodes that read/write it) and where the
     // checked-in cross-language fixture (tests/formats/src/OcGraphTest.cpp's own VAR test) puts it.
     for (const OcGraphVariable& v : g.variables) {
-        varBlock += "VAR " + v.name + " " + v.type;
-        if (!v.defaultValue.empty()) varBlock += " " + v.defaultValue;
-        varBlock += "\n";
+        std::string line = "VAR " + v.name + " " + v.type;
+        if (!v.defaultValue.empty()) line += " " + v.defaultValue;
+        line += "\n";
+        varRecs.push_back({v.name, line, false});
     }
     for (const OcGraphNode& node : g.nodes) {
         // Coordinates only if the node actually had them, then every token this implementation did
         // not interpret, in its original order. Emitting `0 0` for a node that never carried a
         // position would change a file merely by opening and saving it; dropping the extras would
         // strip the C# side's `param=`/`field=` attributes and silently break the graph.
-        nodeBlock += "NODE " + node.id + " " + node.type;
-        if (node.hasPosition) nodeBlock += " " + num(node.x) + " " + num(node.y);
-        for (const std::string& extra : node.extraTokens) nodeBlock += " " + extra;
-        nodeBlock += "\n";
+        std::string line = "NODE " + node.id + " " + node.type;
+        if (node.hasPosition) line += " " + num(node.x) + " " + num(node.y);
+        for (const std::string& extra : node.extraTokens) line += " " + extra;
+        line += "\n";
+        nodeRecs.push_back({node.id, line, false});
     }
     for (const OcGraphNode& node : g.nodes) {
         for (const OcGraphPin& pin : node.pins) {
-            pinBlock += "PIN " + node.id + " " + pin.name + " ";
-            pinBlock += pin.isOutput ? "out" : "in";
-            pinBlock += " " + pin.type;
-            if (!pin.defaultValue.empty()) pinBlock += " " + pin.defaultValue;
-            pinBlock += "\n";
+            std::string line = "PIN " + node.id + " " + pin.name + " ";
+            line += pin.isOutput ? "out" : "in";
+            line += " " + pin.type;
+            if (!pin.defaultValue.empty()) line += " " + pin.defaultValue;
+            line += "\n";
+            pinRecs.push_back({node.id + " " + pin.name, line, false});
         }
     }
     for (const OcGraphLink& link : g.links) {
-        linkBlock += "LINK " + link.sourceNode + "." + link.sourcePin +
-                     " " + link.destNode + "." + link.destPin + "\n";
+        const std::string src = link.sourceNode + "." + link.sourcePin;
+        const std::string dst = link.destNode + "." + link.destPin;
+        linkRecs.push_back({src + " " + dst, "LINK " + src + " " + dst + "\n", false});
     }
     // Entry points right after links (they describe how the wires above get set in motion) and
     // BEFORE outputs, which stay last -- see the OUT loop's own comment just below for why outputs
     // keep the final position they always had.
     for (const auto& e : g.entryPoints) {
-        entryBlock += "ENTRY " + e.first + " " + e.second + "\n";
+        entryRecs.push_back({e.first + " " + e.second, "ENTRY " + e.first + " " + e.second + "\n", false});
     }
     // Outputs LAST, because they read as the conclusion of the graph -- a human scanning the file
     // looks for them where a return statement would be.
     for (const auto& o : g.outputs) {
-        outBlock += "OUT " + o.first + " " + o.second + "\n";
+        outRecs.push_back({o.first + " " + o.second, "OUT " + o.first + " " + o.second + "\n", false});
     }
+    // The per-KIND blocks the fresh-write branch below emits are simply those records concatenated,
+    // so there is exactly one place that knows how a record is formatted.
+    for (const Rec& r : varRecs)   varBlock   += r.text;
+    for (const Rec& r : nodeRecs)  nodeBlock  += r.text;
+    for (const Rec& r : pinRecs)   pinBlock   += r.text;
+    for (const Rec& r : linkRecs)  linkBlock  += r.text;
+    for (const Rec& r : entryRecs) entryBlock += r.text;
+    for (const Rec& r : outRecs)   outBlock   += r.text;
 
     // If no existing content, build from scratch with header, comment, and formatting: a blank line
     // ahead of each non-empty section, so a freshly-written file reads in visually separated blocks.
@@ -453,8 +471,46 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         }
     }
 
-    bool placedName = false, placedDesc = false, placedVar = false, placedNode = false;
-    bool placedPin = false, placedLink = false, placedEntry = false, placedOut = false;
+    // EACH RECORD IS REPLACED AT ITS OWN LINE, not each KIND at its kind's first line.
+    //
+    // The previous rule emitted a kind's WHOLE block wherever that kind first appeared and dropped
+    // every later line of it. On a file whose records are interleaved -- which is every hand-written
+    // graph in this repo, because a graph is written as commented sections, each with the nodes,
+    // links and entries that belong to it -- that hauled every NODE in the file up to the first one
+    // and left the rest of the file to close up behind them. Opening AN_Playable's Rules.ocgraph and
+    // saving it unchanged moved `NODE tick OnTick` six lines up, away from the comment written
+    // directly above it to explain it. Nothing was lost, and that is the trap: the file still parsed,
+    // still ran, and no longer said what its author meant.
+    //
+    // Matching per record keeps every line where its author put it. A record whose line is gone from
+    // `g` (deleted in the editor) simply is not re-emitted, and a record with no line at all (newly
+    // added) falls through to the append pass below.
+    const auto keyOf = [](OwnedLineKind k, std::string_view line) -> std::string {
+        const std::vector<std::string_view> t = splitWhitespace(trim(truncateHash(line)));
+        const auto tok = [&](usize i) { return i < t.size() ? std::string(t[i]) : std::string(); };
+        switch (k) {
+        case OwnedLineKind::Var:
+        case OwnedLineKind::Node:  return tok(1);
+        case OwnedLineKind::Pin:
+        case OwnedLineKind::Link:
+        case OwnedLineKind::Entry:
+        case OwnedLineKind::Out:   return tok(1) + " " + tok(2);
+        default:                   return std::string();
+        }
+    };
+    // First UNUSED record with this key. Unused, not merely first, so a file that names the same
+    // record twice consumes it once and drops the duplicate rather than emitting it twice.
+    const auto claim = [](std::vector<Rec>& recs, const std::string& key, std::string& sink) {
+        for (Rec& r : recs) {
+            if (r.used || r.key != key) continue;
+            r.used = true;
+            sink += r.text;
+            return;
+        }
+        // No record answers to this key: it was deleted. Emitting nothing is the deletion.
+    };
+
+    bool placedName = false, placedDesc = false;
     std::string out;
     out.reserve(existing.size() + varBlock.size() + nodeBlock.size() + pinBlock.size() + linkBlock.size()
                 + entryBlock.size() + outBlock.size() + 64);
@@ -470,26 +526,12 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         case OwnedLineKind::Description:
             if (!placedDesc) { placedDesc = true; out += descLine; } // empty descLine = line removed
             break;
-        case OwnedLineKind::Var:
-            // Whole current block, once -- same "replace at first occurrence" rule NODE/PIN/LINK/
-            // ENTRY/OUT all use just below.
-            if (!placedVar) { placedVar = true; out += varBlock; }
-            break;
-        case OwnedLineKind::Node:
-            if (!placedNode) { placedNode = true; out += nodeBlock; } // whole current block, once
-            break;
-        case OwnedLineKind::Pin:
-            if (!placedPin) { placedPin = true; out += pinBlock; }
-            break;
-        case OwnedLineKind::Link:
-            if (!placedLink) { placedLink = true; out += linkBlock; }
-            break;
-        case OwnedLineKind::Entry:
-            if (!placedEntry) { placedEntry = true; out += entryBlock; }
-            break;
-        case OwnedLineKind::Out:
-            if (!placedOut) { placedOut = true; out += outBlock; }
-            break;
+        case OwnedLineKind::Var:   claim(varRecs,   keyOf(kinds[i], lines[i]), out); break;
+        case OwnedLineKind::Node:  claim(nodeRecs,  keyOf(kinds[i], lines[i]), out); break;
+        case OwnedLineKind::Pin:   claim(pinRecs,   keyOf(kinds[i], lines[i]), out); break;
+        case OwnedLineKind::Link:  claim(linkRecs,  keyOf(kinds[i], lines[i]), out); break;
+        case OwnedLineKind::Entry: claim(entryRecs, keyOf(kinds[i], lines[i]), out); break;
+        case OwnedLineKind::Out:   claim(outRecs,   keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Other:
             out += lines[i];
             out += '\n';
@@ -497,19 +539,41 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         }
     }
 
-    // A kind that never appeared in `existing` at all (a brand-new section on a file that never had
-    // one -- e.g. the first node added to a graph that used to have none) has no in-place position to
-    // take; append it, in the same order the fresh-write branch above uses, each preceded by a blank
-    // line so it does not run directly into whatever came before it.
+    // Whatever no line claimed: records ADDED since this file was written, plus whole kinds the file
+    // never had. Appended in the same order the fresh-write branch uses, each group preceded by a
+    // blank line so it does not run into whatever came before. There is no better position available
+    // -- the file says nothing about where a record it has never seen belongs.
+    const auto appendUnused = [&out](const std::vector<Rec>& recs) {
+        std::string block;
+        for (const Rec& r : recs) if (!r.used) block += r.text;
+        if (!block.empty()) { out += "\n"; out += block; }
+    };
     if (!placedName) out += nameLine;
     if (!placedDesc && !descLine.empty()) out += descLine;
-    if (!placedVar && !varBlock.empty()) { out += "\n"; out += varBlock; }
-    if (!placedNode && !nodeBlock.empty()) { out += "\n"; out += nodeBlock; }
-    if (!placedPin && !pinBlock.empty())   { out += "\n"; out += pinBlock; }
-    if (!placedLink && !linkBlock.empty()) { out += "\n"; out += linkBlock; }
-    if (!placedEntry && !entryBlock.empty()) { out += "\n"; out += entryBlock; }
-    if (!placedOut && !outBlock.empty())   { out += "\n"; out += outBlock; }
+    appendUnused(varRecs);
+    appendUnused(nodeRecs);
+    appendUnused(pinRecs);
+    appendUnused(linkRecs);
+    appendUnused(entryRecs);
+    appendUnused(outRecs);
 
+    // KEEP THE FILE'S OWN LINE ENDINGS. Records are regenerated with "\n" while unknown lines are
+    // copied verbatim, so a CRLF file came back with CRLF on the lines this writer did not touch and
+    // LF on every line it did -- a save that silently rewrote the line endings of exactly the records
+    // the author had been editing, and left the file mixed. Every graph in this repo happens to be
+    // LF, which is why it went unnoticed; a graph written by a Windows editor is not.
+    //
+    // Decided by what `existing` actually uses rather than by platform: this is the file's property,
+    // not the machine's. A file with no CRLF at all is left exactly as built.
+    if (existing.find("\r\n") != std::string_view::npos) {
+        std::string crlf;
+        crlf.reserve(out.size() + out.size() / 32);
+        for (usize i = 0; i < out.size(); ++i) {
+            if (out[i] == '\n' && (i == 0 || out[i - 1] != '\r')) crlf += '\r';
+            crlf += out[i];
+        }
+        return crlf;
+    }
     return out;
 }
 
