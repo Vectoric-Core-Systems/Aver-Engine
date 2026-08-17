@@ -275,14 +275,8 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
             }
             const std::string nodeId(t[1]);
             const std::string pinName(t[2]);
-            // Validated against the nodes seen so far, like LINK is, so a typo is refused here
-            // rather than surfacing as a null result when something tries to run the graph.
-            bool outNodeExists = false;
-            for (const auto& n : out.nodes) if (n.id == nodeId) outNodeExists = true;
-            if (!outNodeExists) {
-                if (err) *err = "OUT references non-existent node: " + nodeId;
-                return false;
-            }
+            // NOT validated here -- see the deferred check after the parse loop for why the node it
+            // names is allowed to appear later in the file than this record does.
             out.outputs.emplace_back(nodeId, pinName);
         } else if (equalsCI(key, "ENTRY")) {
             // ENTRY <nodeId> <eventName> -- see OcGraphData::entryPoints for what this means and why
@@ -296,13 +290,42 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
             }
             const std::string nodeId(t[1]);
             const std::string eventName(t[2]);
-            bool entryNodeExists = false;
-            for (const auto& n : out.nodes) if (n.id == nodeId) entryNodeExists = true;
-            if (!entryNodeExists) {
-                if (err) *err = "ENTRY references non-existent node: " + nodeId;
-                return false;
-            }
+            // NOT validated here either -- deferred, immediately below the loop.
             out.entryPoints.emplace_back(nodeId, eventName);
+        }
+    }
+
+    // ---- deferred reference checks -----------------------------------------------------------------
+    // ENTRY AND OUT NAME THEIR NODE, AND THE NODE IS ALLOWED TO COME LATER IN THE FILE. These were
+    // checked inline, against the nodes seen SO FAR, which quietly made this reader stricter than the
+    // C# one it is supposed to agree with: OcGraphParser defers the same checks until the whole file is
+    // read, so a graph written `ENTRY tick OnTick` / `NODE tick OnTick` -- the order every graph in this
+    // repo uses, because it reads as a heading followed by its node -- parsed fine in the runtime and
+    // was REFUSED here.
+    //
+    // The cost of that divergence was not theoretical: it made the C++ node editor unable to open
+    // test-content/AN_Playable's three graphs, GraphDemo's IdleMotion.ocgraph and every graph of the
+    // FirstPerson template -- that is, essentially every real graph in existence. The format
+    // documentation had recorded it (docs/formats/FORMAT_SPECS.md 10a.3, "Forward-reference ordering")
+    // as a known gap rather than a bug, which is why it survived: writing it down made it look decided.
+    //
+    // Checking after the loop is what the two readers already had in common everywhere else, and it
+    // keeps the error itself -- a typo'd node id is still refused, with the same message, just once the
+    // file is known to be complete.
+    for (const auto& e : out.entryPoints) {
+        bool exists = false;
+        for (const auto& n : out.nodes) if (n.id == e.first) { exists = true; break; }
+        if (!exists) {
+            if (err) *err = "ENTRY references non-existent node: " + e.first;
+            return false;
+        }
+    }
+    for (const auto& o : out.outputs) {
+        bool exists = false;
+        for (const auto& n : out.nodes) if (n.id == o.first) { exists = true; break; }
+        if (!exists) {
+            if (err) *err = "OUT references non-existent node: " + o.first;
+            return false;
         }
     }
 

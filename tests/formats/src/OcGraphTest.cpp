@@ -263,6 +263,44 @@ static void testVarRecordsSurviveRoundTrip() {
 }
 
 // Tests that output is deterministic: same data written twice produces identical output.
+static void testForwardReferencedEntryAndOut() {
+    AVER_INFO("=== ENTRY/OUT may name a node declared later in the file ===");
+    using namespace fmt;
+
+    // EVERY REAL GRAPH IN THIS REPO IS WRITTEN THIS WAY -- an ENTRY line reads as a heading over the
+    // node it names, so it is written above it. This reader validated the reference inline, against
+    // the nodes seen SO FAR, while the C# reader defers until the file is read; the divergence meant
+    // the C++ node editor could not open test-content/AN_Playable's graphs, GraphDemo's IdleMotion,
+    // or any FirstPerson template graph. It had been written down as a known gap rather than fixed,
+    // which is exactly why it lasted.
+    const std::string forward =
+        "OCGRAPH 1\n"
+        "ENTRY tick OnTick\n"
+        "NODE tick OnTick\n"
+        "OUT k value\n"
+        "NODE k ConstFloat value=2.5\n";
+
+    OcGraphData g;
+    std::string err;
+    check(parseOcgraph(forward, g, &err), "an ENTRY above its own NODE parses");
+    check(g.entryPoints.size() == 1 && g.entryPoints[0].first == "tick", "the forward ENTRY was captured");
+    check(g.outputs.size() == 1 && g.outputs[0].first == "k", "the forward OUT was captured");
+
+    // THE CHECK MOVED, IT DID NOT GO AWAY. A node id that never appears anywhere is still refused,
+    // and the message still names it -- otherwise this fix would have traded a false rejection for a
+    // silent acceptance, which is the worse of the two.
+    OcGraphData bad;
+    std::string badErr;
+    check(!parseOcgraph("OCGRAPH 1\nENTRY ghost OnTick\nNODE real OnTick\n", bad, &badErr),
+          "an ENTRY naming a node that never appears is still refused");
+    check(badErr.find("ghost") != std::string::npos, "and the error names the missing node");
+
+    OcGraphData bad2;
+    std::string badErr2;
+    check(!parseOcgraph("OCGRAPH 1\nNODE real OnTick\nOUT ghost value\n", bad2, &badErr2),
+          "the same holds for OUT");
+}
+
 static void testDeterministic() {
     AVER_INFO("=== .ocgraph deterministic output ===");
     using namespace fmt;
@@ -677,6 +715,7 @@ int main(int argc, char** argv) {
     testRoundTrip();
     testUnknownRecords();
     testVarRecordsSurviveRoundTrip();
+    testForwardReferencedEntryAndOut();
     testDeterministic();
     testMalformedInput();
     testExecLinksAndEntryPoints();
