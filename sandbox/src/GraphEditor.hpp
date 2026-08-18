@@ -72,6 +72,14 @@ public:
     const fmt::OcGraphData& graph() const { return graph_; }
     const std::vector<std::string>& selectedNodes() const { return selectedNodes_; }
 
+    // Forces the Viewport tab to the front on the next draw, exactly as clicking it would.
+    //
+    // Public for the same reason selectNode is (see its comment below): a capture run needs to
+    // prove the component tree DRAWS, and an inner tab is not reachable from the command line any
+    // other way. Display state, so no pushUndo() and no dirty_ -- and one-shot, so a human who
+    // then clicks Event Graph is not fought with every frame afterwards.
+    void showViewportTab() { forceViewportTab_ = true; }
+
     // Selects exactly `nodeId` (clearing any link selection), the same end state a canvas click on
     // that node reaches -- a no-op if `nodeId` does not name a node currently in the graph. Not an
     // "edit" (no pushUndo(), no dirty_): selection is display state, not data, exactly like
@@ -117,6 +125,35 @@ public:
     // is proven against the exact calls the details panel makes, not a hand-simulated approximation of
     // them.
     const std::vector<fmt::OcGraphVariable>& variables() const { return graph_.variables; }
+    const std::vector<fmt::OcGraphComponent>& components() const { return graph_.components; }
+    const std::string& selectedComponent() const { return selectedComponent_; }
+
+    // ---- component tree edits ---------------------------------------------------------------------
+    // Each pushes undo and sets dirty_, exactly like the variable edits below, and each is PUBLIC
+    // for the same reason those are: every one of them can produce a file the parser then refuses
+    // to open -- a duplicate id, a child orphaned by a delete, a parent cycle made by a reparent --
+    // and the only honest way to know they do not is to drive them headlessly and reload the
+    // result. That is GraphEditorLoadSaveTest, which has no ImGui context at all.
+
+    // Adds one component of `kind`, id derived from the kind and made unique, parented to whatever
+    // is currently selected. Selects it.
+    void addComponent(const std::string& kind);
+    // Deletes `id` AND EVERYTHING UNDER IT. A child left behind would name a parent that no longer
+    // exists, which the parser refuses -- deleting one component would make the file unopenable.
+    void deleteComponentSubtree(const std::string& id);
+    // Reparents `id` under `parentId` (empty = the actor's own entity). A no-op when `parentId` is
+    // `id` or below it, since that would be a cycle.
+    void setComponentParent(const std::string& id, const std::string& parentId);
+    // Sets one key=value on a component; an empty value removes the key. Refuses a value containing
+    // whitespace, for the reason setAttribute's own comment gives -- this format has no quoting.
+    void setComponentAttribute(const std::string& id, const std::string& key, const std::string& value);
+    // Renames a component, rewriting every child's parent= to match. Refuses an empty name, a name
+    // with whitespace, and a name already taken.
+    void renameComponent(const std::string& id, const std::string& newId);
+    // True when `maybeAncestor` is `id` itself or anywhere above it.
+    bool componentIsAncestorOf(const std::string& maybeAncestor, const std::string& id) const;
+    // The component's world matrix, walking its parent chain. Identity for an unknown id.
+    void componentWorldMatrix(const std::string& id, float out[16]) const;
 
     // Declares a new variable. No-op (false, no edit) if `name` is empty, contains whitespace (a VAR
     // name is a bare token on the NODE-line-adjacent VAR line -- same "this format has no quoting"
@@ -204,6 +241,29 @@ private:
     static std::string pinKey(const std::string& nodeId, const std::string& pin, bool isOutput) {
         return nodeId + "\x1f" + pin + "\x1f" + (isOutput ? "1" : "0");
     }
+
+    // ---- the two tab bodies ---------------------------------------------------------------------
+    // draw() is the tab bar; these are what it switches between. See draw() for why the split.
+    void drawEventGraph(float dpi);
+    void drawViewport(Engine& e, float dpi);
+
+    // The Viewport tab's pieces, in the order they draw.
+    void drawComponentToolbar(float dpi);
+    void drawComponentTree(float dpi);
+    void drawComponentTreeNode(const std::string& id, float dpi);
+    void drawComponentDetails(float dpi);
+    void buildComponentPreview(Engine& e);
+
+
+    // ---- component tree state -------------------------------------------------------------------
+    std::string selectedComponent_;   // by id; empty = nothing selected
+    bool forceViewportTab_ = false;   // one-shot, cleared the frame it is honoured
+    // In-flight text edit for a component field, keyed id \x1f key, mirroring attrEditRowKey_.
+    std::string compEditRowKey_;
+    char compEditBuf_[256] = {};
+    // Whether the shared preview has been pointed at this tree yet. Reset by any edit that
+    // changes where things are, so adding a component that lands off-screen still gets framed.
+    bool previewFramed_ = false;
 
     // ---- view state -----------------------------------------------------------------------------
     CanvasTransform view_;

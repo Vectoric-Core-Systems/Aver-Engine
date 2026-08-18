@@ -15,15 +15,27 @@
 //      writeOcgraph(graph_, originalText_) and writes THAT string, so any unrecognised line the
 //      parser skipped (a comment, a future record type) rides through untouched, the same guarantee
 //      testUnknownRecords exercises (tests/formats/src/OcGraphTest.cpp:183).
+#include "EditorTransform.hpp"
 #include "GraphEditor.hpp"
 #include "GraphNodeDefs.hpp"
+#if AVER_WITH_IMGUI
+// The Viewport tab only. Behind the guard because tests/editor compiles THIS FILE with no ImGui,
+// no preview module and a three-library link -- see tests/editor/CMakeLists.txt, which says so.
+#  include "ActorEditor.hpp"   // sharedPreview / sharedPreviewMeshes / actorEditorContentRoot
+#endif
 
 #include "aver/core/Log.hpp"
+#if AVER_WITH_IMGUI
+#  include "aver/runtime/Engine.hpp"
+#  include "aver/render/preview/ActorPreview.hpp"
+#  include "aver/render/preview/PreviewMeshCache.hpp"
+#endif
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -398,6 +410,15 @@ void GraphEditor::selectNode(const std::string& nodeId) {
         selectedLink_ = -1;
         return;
     }
+    // FALLS BACK TO A COMPONENT, because a graph now holds two kinds of selectable thing and the
+    // caller naming one by id should not have to know which kind it is. Node ids and component ids
+    // live in separate namespaces -- nothing stops a graph having a NODE `gun` and a COMP `gun` --
+    // so nodes are tried FIRST and this only runs when no node answered.
+    for (const auto& c : graph_.components) {
+        if (c.id != nodeId) continue;
+        selectedComponent_ = nodeId;
+        return;
+    }
 }
 
 bool GraphEditor::setAttribute(const std::string& nodeId, const std::string& key, const std::string& value) {
@@ -609,7 +630,7 @@ void GraphEditor::recomputeLayouts(float dpi) {
 
 // ========================================================================================== draw ===
 
-void GraphEditor::draw(Engine&) {
+void GraphEditor::draw(Engine& e) {
 #if AVER_WITH_IMGUI
     const float dpi = g_graphEditorDpi;
     // An auto-laid-out graph is spaced for one DPI. If that changed since -- the asset opened before
@@ -652,6 +673,39 @@ void GraphEditor::draw(Engine&) {
     ImGui::TextDisabled("%s  |  %zu nodes, %zu links  |  zoom %.0f%%  |  pan: right- or middle-drag, or Space+drag",
                          path_.c_str(), graph_.nodes.size(), graph_.links.size(), view_.zoom * 100.0f);
 
+    // ---- the two tabs an actor gets: what it DOES, and what it IS ------------------------------
+    // Blueprint's own split, and the reason for it is not organisational. A class graph now carries
+    // both an exec graph and a COMPONENT TREE (see fmt::OcGraphComponent), and those are answers to
+    // different questions: one is behaviour over time, the other is a thing assembled in space. They
+    // do not share a canvas, a selection, or a unit -- so they do not share a view.
+    //
+    // A NON-CLASS GRAPH STILL GETS BOTH TABS, deliberately. Hiding Viewport until a CLASS record
+    // exists would mean the way to discover that a graph can BE an actor is to already know. The tab
+    // says so instead, in the one place someone would look for it.
+    if (ImGui::BeginTabBar("##graphInnerTabs", ImGuiTabBarFlags_None)) {
+        if (ImGui::BeginTabItem("Event Graph")) {
+            drawEventGraph(dpi);
+            ImGui::EndTabItem();
+        }
+        const ImGuiTabItemFlags viewportFlags =
+            forceViewportTab_ ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
+        forceViewportTab_ = false;
+        if (ImGui::BeginTabItem("Viewport", nullptr, viewportFlags)) {
+            drawViewport(e, dpi);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+#else
+    (void)e;
+#endif
+}
+
+// The Event Graph tab: the node canvas and its details column. Lifted out of draw() unchanged when
+// the Viewport tab arrived -- draw() is now the tab bar and nothing else, which is the only way
+// either tab's body stays readable.
+void GraphEditor::drawEventGraph(float dpi) {
+#if AVER_WITH_IMGUI
     recomputeLayouts(dpi);
 
     // ---- canvas + details columns -------------------------------------------------------------------
@@ -1329,8 +1383,616 @@ void GraphEditor::draw(Engine&) {
         }
     }
     ImGui::EndChild();
+#else
+    (void)dpi;
 #endif
 }
+
+
+// ================================================================================================
+// The Viewport tab: a class graph's COMPONENT TREE, and a preview of the actor it assembles.
+// ================================================================================================
+//
+// WHY THIS LIVES BESIDE THE NODE CANVAS AND NOT IN ITS OWN EDITOR. A .ocgraph carrying a CLASS record
+// is one asset that answers two questions -- what the actor DOES and what it IS -- and both are
+// edited into the same file. Two tabs over one document is the arrangement that keeps a single save
+// path, a single undo stack and a single dirty flag; two editors over one file would need all three
+// duplicated and reconciled.
+//
+// THE PREVIEW IS THE ONE THE ACTOR EDITOR ALREADY OWNS. sharedPreview() exists precisely so every
+// asset tab draws through one render feature (see ActorEditor.hpp's comment on why a second one would
+// draw into this one's target), and previewComposeTransform is exported from that file so an actor
+// assembled from COMP records and one assembled from designer placements cannot disagree about what
+// "yaw 90" means.
+
+namespace {
+
+// The kinds this tab can create, in the order the Add menu lists them. `blurb` is the tooltip: what
+// the kind is FOR, not what it is called, since the name is already on the row.
+struct GraphComponentKind {
+    const char* name;
+    const char* blurb;
+};
+constexpr GraphComponentKind kGraphComponentKinds[] = {
+    {"Scene",        "A named transform and nothing else -- a muzzle, a socket, an attach point."},
+    {"Mesh",         "A drawn mesh. `mesh=` is content-relative, e.g. Meshes/Blaster.ocmesh."},
+    {"SkeletalMesh", "A mesh plus the skeleton that poses it."},
+    {"Animator",     "A clip and the clock running it, on whatever this is parented to."},
+    {"Particles",    "One emitter instance, playing a .ocparticle effect."},
+    {"Camera",       "Camera parameters. Stored correctly; no renderer reads CCamera yet."},
+    {"Light",        "A light. Stored correctly; no renderer reads CLight yet."},
+};
+
+// The kind-specific attribute rows the details panel shows, per kind. Everything not listed here is
+// still preserved in the file (extraTokens keeps it verbatim) -- this table only decides what gets a
+// labelled row, so an attribute this build has never heard of survives being edited around.
+struct GraphComponentAttrRow {
+    const char* key;
+    const char* label;
+    const char* hint;
+};
+struct GraphComponentAttrSet {
+    const char* kind;
+    const GraphComponentAttrRow* rows;
+    int count;
+};
+constexpr GraphComponentAttrRow kMeshRows[] = {
+    {"mesh", "Mesh", "Meshes/Blaster.ocmesh"},
+    {"material", "Material", "M_Gun"},
+};
+constexpr GraphComponentAttrRow kSkelRows[] = {
+    {"mesh", "Mesh", "Meshes/Hero.ocmesh"},
+    {"material", "Material", "M_Hero"},
+    {"skeleton", "Skeleton", "Skeletons/Hero.ocskel"},
+};
+constexpr GraphComponentAttrRow kAnimRows[] = {
+    {"clip", "Clip", "Anims/Idle.ocanim"},
+    {"speed", "Speed", "1"},
+    {"weight", "Blend weight", "1"},
+};
+constexpr GraphComponentAttrRow kParticleRows[] = {
+    {"effect", "Effect", "Effects/Muzzle.ocparticle"},
+    {"seed", "Seed", "0"},
+};
+constexpr GraphComponentAttrRow kCameraRows[] = {
+    {"fov", "FoV (deg)", "60"},
+    {"near", "Near (cm)", "10"},
+    {"far", "Far (cm)", "100000"},
+    {"priority", "Priority", "0"},
+};
+constexpr GraphComponentAttrRow kLightRows[] = {
+    {"kind", "Kind", "point | spot | directional"},
+    {"r", "Red", "1"}, {"g", "Green", "1"}, {"b", "Blue", "1"},
+    {"intensity", "Intensity (lux)", "100000"},
+    {"range", "Range (cm)", "800"},
+    {"inner", "Inner cone (deg)", "0"},
+    {"outer", "Outer cone (deg)", "45"},
+};
+constexpr GraphComponentAttrSet kGraphComponentAttrs[] = {
+    {"Mesh", kMeshRows, 2},
+    {"SkeletalMesh", kSkelRows, 3},
+    {"Animator", kAnimRows, 3},
+    {"Particles", kParticleRows, 2},
+    {"Camera", kCameraRows, 4},
+    {"Light", kLightRows, 8},
+};
+
+// The rows for a kind, or an empty set. Case-insensitive, because the parser does not care and an
+// author typing `mesh` rather than `Mesh` should still get a details panel.
+const GraphComponentAttrSet* attrSetFor(const std::string& kind) {
+    for (const auto& set : kGraphComponentAttrs) {
+        if (kind.size() != std::strlen(set.kind)) continue;
+        bool same = true;
+        for (usize i = 0; i < kind.size(); ++i) {
+            const char a = static_cast<char>(std::tolower(static_cast<unsigned char>(kind[i])));
+            const char b = static_cast<char>(std::tolower(static_cast<unsigned char>(set.kind[i])));
+            if (a != b) { same = false; break; }
+        }
+        if (same) return &set;
+    }
+    return nullptr;
+}
+
+// SHORTEST ROUND-TRIPPING TEXT for a number, not "%f". A component transform is written straight back
+// into the file, so `pos=12,0,-8` has to stay `pos=12,0,-8` and not become `pos=12.000000,0.000000,
+// -8.000000` the first time someone opens the Viewport tab -- that is a diff on every component of
+// every graph anyone looks at.
+std::string compNum(f32 v) {
+    char buf[40];
+    std::snprintf(buf, sizeof buf, "%g", static_cast<double>(v));
+    return buf;
+}
+
+std::string compVec3(const f32 v[3]) {
+    return compNum(v[0]) + "," + compNum(v[1]) + "," + compNum(v[2]);
+}
+
+// Reads `x,y,z` into `out`, leaving any component it cannot read alone. Same fallback direction as
+// the C# parser's own ParseVec3, and for the same reason: `out` arrives holding the identity value,
+// so a half-typed scale gives 2,1,2 rather than an actor flattened on one axis.
+void compParseVec3(std::string_view text, f32 out[3]) {
+    int axis = 0;
+    usize at = 0;
+    while (axis < 3 && at <= text.size()) {
+        const usize comma = text.find(',', at);
+        const std::string_view part = text.substr(at, comma == std::string_view::npos ? std::string_view::npos
+                                                                                       : comma - at);
+        if (!part.empty()) {
+            char buf[64];
+            const usize n = part.size() < sizeof buf - 1 ? part.size() : sizeof buf - 1;
+            std::memcpy(buf, part.data(), n);
+            buf[n] = '\0';
+            char* endp = nullptr;
+            const double parsed = std::strtod(buf, &endp);
+            if (endp != buf) out[axis] = static_cast<f32>(parsed);
+        }
+        ++axis;
+        if (comma == std::string_view::npos) break;
+        at = comma + 1;
+    }
+}
+
+
+// The three transform attributes, read off a component into arrays already holding the identity.
+void compReadTransform(const fmt::OcGraphComponent& c, f32 pos[3], f32 rot[3], f32 scale[3]) {
+    pos[0] = pos[1] = pos[2] = 0.0f;
+    rot[0] = rot[1] = rot[2] = 0.0f;
+    scale[0] = scale[1] = scale[2] = 1.0f;
+    compParseVec3(fmt::componentAttr(c, "pos"), pos);
+    compParseVec3(fmt::componentAttr(c, "rot"), rot);
+    compParseVec3(fmt::componentAttr(c, "scale"), scale);
+}
+
+} // namespace
+
+// ---------------------------------------------------------------- tree queries
+
+bool GraphEditor::componentIsAncestorOf(const std::string& maybeAncestor, const std::string& id) const {
+    if (maybeAncestor == id) return true;
+    std::string at = id;
+    // Bounded by the component count, the same guard the parser's own cycle check uses: this runs on
+    // a tree that is ALREADY valid, but it also runs mid-edit, in the frame where a reparent combo is
+    // being evaluated -- which is exactly when a cycle would exist if this were the thing allowing it.
+    for (usize hops = 0; hops <= graph_.components.size(); ++hops) {
+        const fmt::OcGraphComponent* c = nullptr;
+        for (const auto& o : graph_.components) if (o.id == at) { c = &o; break; }
+        if (!c) return false;
+        const std::string_view parent = fmt::componentAttr(*c, "parent");
+        if (parent.empty()) return false;
+        if (parent == maybeAncestor) return true;
+        at = std::string(parent);
+    }
+    return false;
+}
+
+void GraphEditor::componentWorldMatrix(const std::string& id, float out[16]) const {
+    constexpr f32 kIdentity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    std::memcpy(out, kIdentity, sizeof kIdentity);
+
+    const fmt::OcGraphComponent* c = nullptr;
+    for (const auto& o : graph_.components) if (o.id == id) { c = &o; break; }
+    if (!c) return;
+
+    f32 pos[3], rot[3], scale[3];
+    compReadTransform(*c, pos, rot, scale);
+    composeEditorTransform(pos, rot, scale, out);
+
+    const std::string_view parent = fmt::componentAttr(*c, "parent");
+    if (parent.empty()) return;
+    // Recursive rather than iterative because the depth is a handful and the recursive form is the
+    // one that reads as the definition: a component's world matrix is its local matrix times its
+    // parent's world matrix. The parser has already proved the chain terminates.
+    f32 parentWorld[16];
+    componentWorldMatrix(std::string(parent), parentWorld);
+    f32 combined[16];
+    multiplyEditorTransform(out, parentWorld, combined);
+    std::memcpy(out, combined, sizeof combined);
+}
+
+// ---------------------------------------------------------------- tree edits
+
+void GraphEditor::addComponent(const std::string& kind) {
+    // A UNIQUE ID WITHOUT ASKING. The parser refuses duplicates, so an editor that offered `Mesh`
+    // twice and produced two `mesh` records would author a file it cannot then open -- the worst
+    // possible failure for a create button.
+    std::string base;
+    for (char ch : kind) base += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    std::string id = base;
+    for (int n = 1; n < 10000; ++n) {
+        bool taken = false;
+        for (const auto& c : graph_.components) if (c.id == id) { taken = true; break; }
+        if (!taken) break;
+        id = base + std::to_string(n);
+    }
+
+    pushUndo();
+    fmt::OcGraphComponent c;
+    c.id = id;
+    c.kind = kind;
+    // Parented to whatever is selected, which is what a component tree editor is expected to do:
+    // building a hierarchy means adding under the thing just clicked, not at the root every time.
+    if (!selectedComponent_.empty()) fmt::setComponentAttr(c, "parent", selectedComponent_);
+    graph_.components.push_back(std::move(c));
+    selectedComponent_ = id;
+    dirty_ = true;
+    previewFramed_ = false;
+}
+
+void GraphEditor::deleteComponentSubtree(const std::string& id) {
+    if (id.empty()) return;
+    bool found = false;
+    for (const auto& c : graph_.components) if (c.id == id) { found = true; break; }
+    if (!found) return;
+
+    pushUndo();
+    // THE WHOLE SUBTREE, not just the one record. A child left behind would name a parent that no
+    // longer exists, and the parser refuses that on the next load -- deleting one component would
+    // make the file unopenable. Blueprint deletes the subtree too, so this is also what an author
+    // expects to happen.
+    std::vector<fmt::OcGraphComponent> kept;
+    kept.reserve(graph_.components.size());
+    for (const auto& c : graph_.components)
+        if (!componentIsAncestorOf(id, c.id)) kept.push_back(c);
+    graph_.components = std::move(kept);
+    if (selectedComponent_ == id || !std::any_of(graph_.components.begin(), graph_.components.end(),
+                                                  [&](const fmt::OcGraphComponent& c) { return c.id == selectedComponent_; }))
+        selectedComponent_.clear();
+    dirty_ = true;
+    previewFramed_ = false;
+}
+
+void GraphEditor::setComponentParent(const std::string& id, const std::string& parentId) {
+    // Refusing rather than silently correcting: the combo below never OFFERS a descendant, so
+    // reaching this with one means a caller went around the UI, and the honest answer is nothing.
+    if (!parentId.empty() && componentIsAncestorOf(id, parentId)) return;
+    for (auto& c : graph_.components) {
+        if (c.id != id) continue;
+        pushUndo();
+        fmt::setComponentAttr(c, "parent", parentId);
+        dirty_ = true;
+        previewFramed_ = false;
+        return;
+    }
+}
+
+void GraphEditor::setComponentAttribute(const std::string& id, const std::string& key,
+                                         const std::string& value) {
+    // Same no-quoting guard the NODE attribute editor uses, and for the identical reason -- see
+    // setAttribute's comment. A COMP line splits on whitespace exactly as a NODE line does, so a
+    // value with a space in it truncates silently and leaves junk tokens behind.
+    if (containsWhitespace(value)) return;
+    for (auto& c : graph_.components) {
+        if (c.id != id) continue;
+        pushUndo();
+        fmt::setComponentAttr(c, key, value);
+        dirty_ = true;
+        if (key == "pos" || key == "rot" || key == "scale") previewFramed_ = false;
+        return;
+    }
+}
+
+void GraphEditor::renameComponent(const std::string& id, const std::string& newId) {
+    if (newId.empty() || newId == id || containsWhitespace(newId)) return;
+    for (const auto& c : graph_.components) if (c.id == newId) return;   // taken
+
+    bool found = false;
+    for (const auto& c : graph_.components) if (c.id == id) { found = true; break; }
+    if (!found) return;
+
+    pushUndo();
+    for (auto& c : graph_.components) {
+        if (c.id == id) c.id = newId;
+        // EVERY CHILD FOLLOWS. A rename that left children pointing at the old id would produce a
+        // file the parser refuses -- the same unopenable-file failure deleting a subtree avoids.
+        if (fmt::componentAttr(c, "parent") == id) fmt::setComponentAttr(c, "parent", newId);
+    }
+    if (selectedComponent_ == id) selectedComponent_ = newId;
+    dirty_ = true;
+}
+
+#if AVER_WITH_IMGUI
+
+// ---------------------------------------------------------------- the tab
+
+void GraphEditor::drawViewport(Engine& e, float dpi) {
+    drawComponentToolbar(dpi);
+
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const float panelW = std::clamp(300.0f * dpi, 200.0f * dpi, std::max(avail.x * 0.5f, 140.0f * dpi));
+    const float previewW = std::max(avail.x - panelW - ImGui::GetStyle().ItemSpacing.x, 40.0f * dpi);
+    const float rowH = std::max(avail.y, 120.0f * dpi);
+
+    ImGui::BeginChild("##compPanel", ImVec2(panelW, rowH), true);
+    drawComponentTree(dpi);
+    ImGui::Separator();
+    drawComponentDetails(dpi);
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+    ImGui::BeginChild("##compPreview", ImVec2(previewW, rowH), true);
+    buildComponentPreview(e);
+
+    render::preview::ActorPreview* preview = sharedPreview(e);
+    if (!preview || !preview->uiTextureId()) {
+        // NOT AN ERROR, and it says which of the two reasons it is. A headless or software backend
+        // has no preview feature at all; a fresh one has no texture until its first pass runs.
+        ImGui::TextDisabled(preview ? "The preview has not rendered a frame yet."
+                                     : "This backend has no GPU preview -- the tree above still edits the file.");
+    } else {
+        const ImVec2 region = ImGui::GetContentRegionAvail();
+        const f32 texW = static_cast<f32>(preview->width());
+        const f32 texH = static_cast<f32>(preview->height());
+        // Fit, never stretch: the preview target's aspect is its own, and letting ImGui scale it to
+        // the panel would make a wide panel report a shape the actor does not have.
+        const f32 fit = std::min(region.x / std::max(texW, 1.0f), region.y / std::max(texH, 1.0f));
+        const ImVec2 size(std::max(texW * fit, 16.0f), std::max(texH * fit, 16.0f));
+        ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()), size);
+
+        if (ImGui::IsItemHovered()) {
+            ImGuiIO& io = ImGui::GetIO();
+            if (io.MouseWheel != 0.0f) preview->camera().addZoom(io.MouseWheel > 0.0f ? 0.88f : 1.0f / 0.88f);
+            if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                const ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+                preview->camera().addOrbit(-d.x * 0.4f, d.y * 0.4f);
+            }
+            if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+                const ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Middle);
+                ImGui::ResetMouseDragDelta(ImGuiMouseButton_Middle);
+                preview->camera().panPixels(d.x, d.y, static_cast<f32>(preview->height()));
+            }
+        }
+    }
+    ImGui::EndChild();
+}
+
+void GraphEditor::drawComponentToolbar(float dpi) {
+    if (ImGui::Button("Add Component")) ImGui::OpenPopup("##addComponent");
+    if (ImGui::BeginPopup("##addComponent")) {
+        for (const auto& k : kGraphComponentKinds) {
+            if (ImGui::MenuItem(k.name)) addComponent(k.name);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", k.blurb);
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(selectedComponent_.empty());
+    if (ImGui::Button("Delete")) deleteComponentSubtree(selectedComponent_);
+    ImGui::EndDisabled();
+    if (!selectedComponent_.empty() && ImGui::IsItemHovered())
+        ImGui::SetTooltip("Deletes '%s' and everything under it.", selectedComponent_.c_str());
+
+    ImGui::SameLine();
+    if (ImGui::Button("Frame All")) previewFramed_ = false;
+
+    ImGui::SameLine();
+    // THE CLASS RECORD IS THE POINT OF THIS TAB, so its absence is stated here rather than left for
+    // someone to discover when their carefully built tree spawns nothing. C++ does not model CLASS
+    // (it rides through as an unknown record), so this asks the raw text -- the same question
+    // GameApp's own ocgraphDeclaresClass asks, for the same yes/no purpose.
+    const bool declaresClass = originalText_.rfind("CLASS ", 0) == 0 ||
+                               originalText_.find("\nCLASS ") != std::string::npos;
+    if (declaresClass) {
+        ImGui::TextDisabled("%zu component(s)", graph_.components.size());
+    } else {
+        ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.35f, 1.0f),
+                            "%zu component(s) -- but this graph has no CLASS record, so nothing spawns them",
+                            graph_.components.size());
+    }
+    (void)dpi;
+}
+
+void GraphEditor::drawComponentTree(float dpi) {
+    ImGui::TextDisabled("Components");
+    if (graph_.components.empty()) {
+        ImGui::TextWrapped("No components. Add one to give this class a body: a Mesh to draw, a Scene "
+                            "node to hang things off, a Camera to look through.");
+        return;
+    }
+
+    // The actor's own entity is the root every parentless component hangs off. Drawn as a real row
+    // rather than implied, because "attached to the actor itself" is a choice an author makes and a
+    // tree with no visible root makes that choice look like an accident.
+    const bool rootOpen = ImGui::TreeNodeEx("##compRoot", ImGuiTreeNodeFlags_DefaultOpen |
+                                             ImGuiTreeNodeFlags_SpanAvailWidth, "Actor (self)");
+    if (ImGui::IsItemClicked()) selectedComponent_.clear();
+    if (rootOpen) {
+        for (const auto& c : graph_.components)
+            if (fmt::componentAttr(c, "parent").empty()) drawComponentTreeNode(c.id, dpi);
+        ImGui::TreePop();
+    }
+}
+
+void GraphEditor::drawComponentTreeNode(const std::string& id, float dpi) {
+    const fmt::OcGraphComponent* c = nullptr;
+    for (const auto& o : graph_.components) if (o.id == id) { c = &o; break; }
+    if (!c) return;
+
+    bool hasChild = false;
+    for (const auto& o : graph_.components)
+        if (fmt::componentAttr(o, "parent") == id) { hasChild = true; break; }
+
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_DefaultOpen |
+                                ImGuiTreeNodeFlags_SpanAvailWidth;
+    if (!hasChild) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+    if (selectedComponent_ == id) flags |= ImGuiTreeNodeFlags_Selected;
+
+    const bool open = ImGui::TreeNodeEx(id.c_str(), flags, "%s", id.c_str());
+    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) selectedComponent_ = id;
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%s)", c->kind.c_str());
+
+    if (open && hasChild) {
+        for (const auto& o : graph_.components)
+            if (fmt::componentAttr(o, "parent") == id) drawComponentTreeNode(o.id, dpi);
+        ImGui::TreePop();
+    }
+}
+
+void GraphEditor::drawComponentDetails(float dpi) {
+    if (selectedComponent_.empty()) {
+        ImGui::TextDisabled("Select a component to edit it.");
+        return;
+    }
+    const fmt::OcGraphComponent* sel = nullptr;
+    for (const auto& o : graph_.components) if (o.id == selectedComponent_) { sel = &o; break; }
+    if (!sel) { selectedComponent_.clear(); return; }
+    const fmt::OcGraphComponent& c = *sel;
+
+    ImGui::PushItemWidth(150.0f * dpi);
+
+    // ---- name ------------------------------------------------------------------------------------
+    // Same activate / apply-on-enter / discard-on-deactivate shape the node attribute rows use, keyed
+    // by field and id so switching selection never bleeds one row's in-flight text into another.
+    {
+        const std::string rowKey = "compid\x1f" + c.id;
+        char buf[256];
+        std::snprintf(buf, sizeof buf, "%s", (compEditRowKey_ == rowKey) ? compEditBuf_ : c.id.c_str());
+        if (ImGui::InputText("Name", buf, sizeof buf)) {
+            compEditRowKey_ = rowKey;
+            std::snprintf(compEditBuf_, sizeof compEditBuf_, "%s", buf);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            renameComponent(c.id, compEditBuf_);
+            compEditRowKey_.clear();
+        } else if (ImGui::IsItemDeactivated()) {
+            compEditRowKey_.clear();
+        }
+    }
+
+    // ---- kind ------------------------------------------------------------------------------------
+    if (ImGui::BeginCombo("Kind", c.kind.c_str())) {
+        for (const auto& k : kGraphComponentKinds) {
+            const bool selected = c.kind == k.name;
+            if (ImGui::Selectable(k.name, selected) && !selected) {
+                // Changing a kind KEEPS the old kind's attributes rather than clearing them. They
+                // stay in the file, this panel stops showing them, and switching back brings them
+                // straight back -- which beats destroying a mesh path because someone clicked the
+                // wrong row of a combo.
+                for (auto& target : graph_.components) {
+                    if (target.id != c.id) continue;
+                    pushUndo();
+                    target.kind = k.name;
+                    dirty_ = true;
+                    break;
+                }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", k.blurb);
+        }
+        ImGui::EndCombo();
+    }
+
+    // ---- parent ----------------------------------------------------------------------------------
+    {
+        const std::string_view parent = fmt::componentAttr(c, "parent");
+        const std::string label = parent.empty() ? "Actor (self)" : std::string(parent);
+        if (ImGui::BeginCombo("Attach to", label.c_str())) {
+            if (ImGui::Selectable("Actor (self)", parent.empty())) setComponentParent(c.id, "");
+            for (const auto& o : graph_.components) {
+                // A DESCENDANT IS NOT OFFERED, which is how a cycle is prevented rather than
+                // detected: the parser refuses a cycle on load, so an editor that let one be made
+                // would author a file it cannot reopen.
+                if (componentIsAncestorOf(c.id, o.id)) continue;
+                if (ImGui::Selectable(o.id.c_str(), parent == o.id)) setComponentParent(c.id, o.id);
+            }
+            ImGui::EndCombo();
+        }
+    }
+
+    ImGui::Separator();
+
+    // ---- transform -------------------------------------------------------------------------------
+    // Written back only on release (IsItemDeactivatedAfterEdit), NOT every frame of the drag: each
+    // write pushes an undo entry, so a live write would fill the undo stack with one entry per frame
+    // and make Ctrl-Z useless for exactly the edit most likely to need it.
+    f32 pos[3], rot[3], scale[3];
+    compReadTransform(c, pos, rot, scale);
+    const struct { const char* label; f32* v; const char* fmtStr; const char* key; } rows[] = {
+        {"Position", pos, "%.1f", "pos"},
+        {"Rotation", rot, "%.1f", "rot"},
+        {"Scale", scale, "%.3f", "scale"},
+    };
+    ImGui::PushItemWidth(190.0f * dpi);
+    for (const auto& row : rows) {
+        ImGui::DragFloat3(row.label, row.v, 0.5f, 0.0f, 0.0f, row.fmtStr);
+        if (ImGui::IsItemDeactivatedAfterEdit()) setComponentAttribute(c.id, row.key, compVec3(row.v));
+    }
+    ImGui::PopItemWidth();
+    ImGui::TextDisabled("cm  |  degrees, yaw/pitch/roll  |  multiplier");
+
+    // ---- kind-specific ---------------------------------------------------------------------------
+    if (const GraphComponentAttrSet* set = attrSetFor(c.kind)) {
+        ImGui::Separator();
+        for (int i = 0; i < set->count; ++i) {
+            const GraphComponentAttrRow& row = set->rows[i];
+            const std::string rowKey = std::string("compattr\x1f") + c.id + "\x1f" + row.key;
+            const std::string_view current = fmt::componentAttr(c, row.key);
+            char buf[256];
+            std::snprintf(buf, sizeof buf, "%.*s",
+                          (compEditRowKey_ == rowKey) ? 0 : static_cast<int>(current.size()),
+                          current.data());
+            if (compEditRowKey_ == rowKey) std::snprintf(buf, sizeof buf, "%s", compEditBuf_);
+
+            ImGui::PushID(row.key);
+            if (ImGui::InputTextWithHint(row.label, row.hint, buf, sizeof buf)) {
+                compEditRowKey_ = rowKey;
+                std::snprintf(compEditBuf_, sizeof compEditBuf_, "%s", buf);
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                setComponentAttribute(c.id, row.key, compEditBuf_);
+                compEditRowKey_.clear();
+            } else if (ImGui::IsItemDeactivated()) {
+                compEditRowKey_.clear();
+            }
+            ImGui::PopID();
+        }
+    }
+
+    ImGui::PopItemWidth();
+}
+
+void GraphEditor::buildComponentPreview(Engine& e) {
+    render::preview::ActorPreview* preview = sharedPreview(e);
+    if (!preview || !e.device()) return;
+
+    render::preview::PreviewMeshCache& meshes = sharedPreviewMeshes();
+    meshes.setContentRoot(*e.device(), actorEditorContentRoot());
+
+    std::vector<render::preview::PreviewDraw> draws;
+    draws.reserve(graph_.components.size());
+    for (const auto& c : graph_.components) {
+        const std::string_view meshPath = fmt::componentAttr(c, "mesh");
+        // ONLY WHAT HAS GEOMETRY. A Scene node, a Camera and an Animator have nothing to draw, and
+        // inventing a placeholder box for them would make the preview disagree with the game -- the
+        // one thing a preview must never do. Their transforms are still real; they are simply
+        // invisible here exactly as they are invisible there.
+        if (meshPath.empty()) continue;
+        render::preview::PreviewDraw d;
+        d.mesh = meshes.resolve(*e.device(), meshPath, &d.boundsRadius);
+        if (d.mesh == 0) continue;   // missing or unloadable; meshes.missing() already records it
+        componentWorldMatrix(c.id, d.world);
+        d.selected = (c.id == selectedComponent_);
+        draws.push_back(d);
+    }
+
+    preview->setDrawList(std::move(draws));
+    if (!previewFramed_) {
+        preview->frameAll();
+        previewFramed_ = true;
+    }
+}
+
+#else   // !AVER_WITH_IMGUI
+
+void GraphEditor::drawViewport(Engine&, float) {}
+void GraphEditor::drawComponentToolbar(float) {}
+void GraphEditor::drawComponentTree(float) {}
+void GraphEditor::drawComponentTreeNode(const std::string&, float) {}
+void GraphEditor::drawComponentDetails(float) {}
+void GraphEditor::buildComponentPreview(Engine&) {}
+
+#endif  // AVER_WITH_IMGUI
 
 // ------------------------------------------------------------------------------------------ factory
 

@@ -21,11 +21,17 @@ render::preview::ActorPreview* sharedPreview(Engine& e);
 // The mesh registry that preview shares, for the same reason.
 render::preview::PreviewMeshCache& sharedPreviewMeshes();
 
+
 // Creates an actor editor for a `.Designer.cs` that carries a generated region, else nullptr.
 std::unique_ptr<AssetEditor> makeActorEditor(const std::string& path);
 
 // Sets the project's content root, which mesh paths in a designer file are relative to.
 void setActorEditorContentRoot(std::string root);
+
+// The content root last set, so another tab resolving mesh paths through sharedPreviewMeshes()
+// uses the SAME root rather than deriving its own from an asset path -- a graph in
+// Content/Scripts and a designer file elsewhere would otherwise disagree about where Content is.
+const std::string& actorEditorContentRoot();
 
 // What the tab's toolbar does. Any hook may be left empty; its button is then disabled.
 struct ActorEditorHooks {

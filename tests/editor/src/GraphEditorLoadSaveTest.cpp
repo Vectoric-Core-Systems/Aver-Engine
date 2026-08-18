@@ -17,6 +17,7 @@
 #include "aver/core/Log.hpp"
 
 #include <cstdio>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -704,6 +705,122 @@ static void testFreshlySpawnedSetVarCanBeFixedByDeclaringOnTheSpot() {
 }
 
 // ======================================================================================= failures ===
+// The COMPONENT TREE fixture: a small class graph whose parent is written BELOW its child, which is
+// how a real one reads (the interesting part first) and which the parser deliberately allows.
+static std::string componentFixtureText() {
+    return
+        "OCGRAPH 1\n"
+        "NAME AN_Rig\n"
+        "CLASS AN_Rig Actor\n"
+        "\n"
+        "COMP gun Mesh parent=body mesh=Meshes/Blaster.ocmesh pos=12,0,-8\n"
+        "COMP muzzle Scene parent=gun pos=0,40,0\n"
+        "COMP body Mesh mesh=Meshes/Body.ocmesh\n"
+        "\n"
+        "NODE start OnStart\n"
+        "ENTRY start OnStart\n";
+}
+
+static void testComponentTreeParsesAndRoundTripsByte() {
+    AVER_INFO("=== a graph with COMP records loads, and an untouched save is byte-identical ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "components_roundtrip.ocgraph").string();
+    writeFile(tmp, componentFixtureText());
+    GraphEditor ed(tmp);
+
+    check(ed.components().size() == 3, "three components loaded");
+    check(ed.components()[0].id == "gun" && ed.components()[0].kind == "Mesh", "in FILE order, not tree order");
+
+    std::string why;
+    check(ed.save(&why), "save() of an untouched graph succeeds (why='" + why + "')");
+    check(readFile(tmp) == componentFixtureText(),
+          "and changes nothing -- the transform is not re-serialised from floats, so pos=12,0,-8 stays that");
+}
+
+static void testComponentEditsCannotProduceAnUnopenableFile() {
+    AVER_INFO("=== add / rename / reparent / delete, each checked by RELOADING what they wrote ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "components_edit.ocgraph").string();
+    writeFile(tmp, componentFixtureText());
+    GraphEditor ed(tmp);
+
+    // ---- add: a unique id without asking, parented to the selection --------------------------
+    ed.selectNode("body");   // falls through to the component of that name
+    check(ed.selectedComponent() == "body", "selectNode reaches a component when no node answers to the id");
+    ed.addComponent("Mesh");
+    check(ed.components().size() == 4, "the component was added");
+    check(ed.selectedComponent() == "mesh", "its id is the kind, lowercased, and it is now selected");
+    ed.addComponent("Mesh");
+    check(ed.selectedComponent() == "mesh1",
+          "a SECOND Mesh does not reuse the id -- a duplicate id is a file the parser refuses to open");
+
+    // ---- reparent: a cycle is not offered, and not accepted -----------------------------------
+    check(ed.componentIsAncestorOf("body", "muzzle"), "body is an ancestor of muzzle (body -> gun -> muzzle)");
+    check(!ed.componentIsAncestorOf("muzzle", "body"), "and muzzle is not an ancestor of body");
+    check(ed.componentIsAncestorOf("gun", "gun"), "a component counts as its own ancestor, so it cannot be its own parent");
+    ed.setComponentParent("body", "muzzle");
+    check(fmt::componentAttr(ed.components()[2], "parent").empty(),
+          "reparenting body under its own descendant is refused, leaving it at the root");
+
+    // ---- rename: every child follows ----------------------------------------------------------
+    ed.renameComponent("gun", "weapon");
+    bool muzzleFollows = false;
+    for (const auto& c : ed.components())
+        if (c.id == "muzzle") muzzleFollows = fmt::componentAttr(c, "parent") == "weapon";
+    check(muzzleFollows, "the child's parent= was rewritten -- an orphan would be a file that will not load");
+    ed.renameComponent("weapon", "body");
+    check(ed.components()[0].id == "weapon", "renaming onto a name already taken is refused");
+    ed.renameComponent("weapon", "two words");
+    check(ed.components()[0].id == "weapon", "and a name with whitespace is refused -- this format has no quoting");
+
+    // ---- attribute edits ----------------------------------------------------------------------
+    ed.setComponentAttribute("weapon", "pos", "1,2,3");
+    check(fmt::componentAttr(ed.components()[0], "pos") == "1,2,3", "an existing key is replaced");
+    ed.setComponentAttribute("weapon", "pos", "1 2 3");
+    check(fmt::componentAttr(ed.components()[0], "pos") == "1,2,3", "a value with whitespace is refused");
+    ed.setComponentAttribute("weapon", "material", "");
+    check(fmt::componentAttr(ed.components()[0], "material").empty(), "an empty value removes the key");
+
+    // ---- delete takes the subtree -------------------------------------------------------------
+    ed.deleteComponentSubtree("weapon");
+    for (const auto& c : ed.components())
+        check(c.id != "muzzle", "deleting a component deletes its children too, rather than orphaning them");
+
+    // ---- THE CLAIM THAT MATTERS: what all of that wrote still loads ---------------------------
+    std::string why;
+    check(ed.save(&why), "save() after the whole sequence succeeds (why='" + why + "')");
+    fmt::OcGraphData reread;
+    std::string err;
+    check(fmt::parseOcgraph(readFile(tmp), reread, &err),
+          "and the file it wrote parses -- err='" + err + "'");
+
+    // The unknown record rode through untouched, as it does for every other edit in this file.
+    check(readFile(tmp).find("CLASS AN_Rig Actor") != std::string::npos,
+          "the CLASS record, which this reader does not model, survived every component edit");
+}
+
+static void testComponentWorldMatrixWalksTheParentChain() {
+    AVER_INFO("=== a component's world matrix is its local matrix times its parent's ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "components_world.ocgraph").string();
+    // Two translations and nothing else, so the expected answer is arithmetic rather than a matrix
+    // identity -- a test that has to compose the rotation itself to state its expectation is a test
+    // that passes when the code and the test are wrong in the same way.
+    writeFile(tmp,
+              "OCGRAPH 1\nNAME W\n"
+              "COMP a Scene pos=10,0,0\n"
+              "COMP b Scene parent=a pos=0,5,0\n"
+              "COMP c Scene parent=b pos=0,0,2\n");
+    GraphEditor ed(tmp);
+
+    float m[16];
+    ed.componentWorldMatrix("c", m);
+    check(std::fabs(m[12] - 10.0f) < 1e-4f && std::fabs(m[13] - 5.0f) < 1e-4f &&
+          std::fabs(m[14] - 2.0f) < 1e-4f,
+          "three nested translations accumulate: c lands at (10, 5, 2)");
+
+    ed.componentWorldMatrix("nothing-by-that-name", m);
+    check(m[12] == 0.0f && m[13] == 0.0f && m[14] == 0.0f && m[0] == 1.0f,
+          "an unknown id gives identity rather than whatever was in the caller's buffer");
+}
+
 static void testLoadFailure() {
     AVER_INFO("=== a missing file fails cleanly ===");
     const std::string missing = (std::filesystem::path(scratchDir()) / "does_not_exist.ocgraph").string();
@@ -740,6 +857,9 @@ int main() {
     testSetVariableDefaultValidatesWhitespace();
     testDeleteVariableRefusesWhileReferencedThenSucceeds();
     testFreshlySpawnedSetVarCanBeFixedByDeclaringOnTheSpot();
+    testComponentTreeParsesAndRoundTripsByte();
+    testComponentEditsCannotProduceAnUnopenableFile();
+    testComponentWorldMatrixWalksTheParentChain();
     testLoadFailure();
     testWrongExtensionIsRejectedByFactory();
 

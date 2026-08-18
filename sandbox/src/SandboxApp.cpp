@@ -4182,6 +4182,10 @@ public:
     // every other CLI test-proof flag in this file (--undo-test, --keybind-test, --hud-preview): a
     // plain setter here, the actual work happens once in onGui() below.
     void setGraphSelectNode(std::string id) { graphSelectNode_ = std::move(id); }
+    // --graph-tab viewport: brings the graph tab's inner Viewport tab to the front, on the same
+    // frame budget --graph-select uses. Only "viewport" does anything; Event Graph is already the
+    // one in front, so there is nothing for the other value to do.
+    void setGraphTab(std::string tab) { graphTab_ = std::move(tab); }
     void setInputProbe(bool on) { inputProbe_ = on; }
     void setAutoCompile(bool on) { autoCompile_ = on; }   // --auto-compile, and the Tools menu
     void setFocusLevelAt(int frame) { focusLevelAt_ = frame; }   // --focus-level-at <N>
@@ -7732,6 +7736,22 @@ private:
                 AVER_ERROR("[Editor] --graph-select: no open editor for '{}'", lastOpenAssetPath_);
             }
         }
+        // --graph-tab <name>: same one-frame-after-open timing as --graph-select above, and the
+        // same dynamic_cast, because the same thing is true -- only a graph editor has inner tabs.
+        if (!graphTab_.empty() && frameNo_ > 6) {
+            const std::string tab = graphTab_;
+            graphTab_.clear();
+            if (auto* ed = assetEditors_.find(lastOpenAssetPath_)) {
+                if (auto* ge = dynamic_cast<editor::GraphEditor*>(ed)) {
+                    if (tab == "viewport") { ge->showViewportTab(); AVER_INFO("[Editor] --graph-tab viewport"); }
+                    else AVER_WARN("[Editor] --graph-tab: only 'viewport' is selectable, got '{}'", tab);
+                } else {
+                    AVER_ERROR("[Editor] --graph-tab: '{}' is not a graph editor", lastOpenAssetPath_);
+                }
+            } else {
+                AVER_ERROR("[Editor] --graph-tab: no open editor for '{}'", lastOpenAssetPath_);
+            }
+        }
         pumpContentWatch();
         assetEditors_.draw(e, centralDock_, dpi_);
         tools_.drawModals(project_, dpi_);
@@ -10547,7 +10567,8 @@ private:
     std::string openAsset_;
     std::string lastOpenAssetPath_;  // last path --open-asset opened; openAsset_ itself is cleared
                                       // once consumed, so --graph-select needs its own copy to find it
-    std::string graphSelectNode_; // --graph-select <nodeId>; see setGraphSelectNode's own comment
+    std::string graphSelectNode_;
+    std::string graphTab_; // --graph-select <nodeId>; see setGraphSelectNode's own comment
 
     editor::ProjectUpgrade pendingUpgrade_;
     bool        upgradeAsked_ = false;
@@ -12349,7 +12370,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string graphSelectNode; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -12521,6 +12542,9 @@ Application* createApplication(int argc, char** argv) {
         }
         // --open-asset <path> opens a file through the same host a double-click goes through.
         else if (!std::strcmp(argv[i],"--open-asset") && i+1<argc) openAsset=argv[++i];
+        // --graph-tab viewport: front the graph editor's inner Viewport tab (component tree +
+        // preview) so a capture run can prove it draws.
+        else if (!std::strcmp(argv[i],"--graph-tab") && i+1<argc) graphTab=argv[++i];
         // --graph-select <nodeId>: select a node in the just-opened .ocgraph, one frame later -- see
         // SandboxApp::setGraphSelectNode's own comment for why.
         else if (!std::strcmp(argv[i],"--graph-select") && i+1<argc) graphSelectNode=argv[++i];
@@ -12816,6 +12840,7 @@ Application* createApplication(int argc, char** argv) {
     if (lodMeshShader >= 0) app->setLodMeshShader(lodMeshShader != 0, lodErrorPx);
     app->setUiDemo(uiDemo);
     app->setOpenAsset(openAsset);
+    app->setGraphTab(graphTab);
     app->setGraphSelectNode(graphSelectNode);
     app->setInputProbe(inputProbe);
     app->setAutoCompile(autoCompile);

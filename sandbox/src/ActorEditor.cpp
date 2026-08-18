@@ -2,6 +2,7 @@
 
 #include "ActorEditor.hpp"
 #include "EditorEuler.hpp"
+#include "EditorTransform.hpp"
 #include "ToolGlyphs.hpp"
 #include "EditorPrefs.hpp"
 
@@ -144,22 +145,13 @@ std::string actorDisplayName(const fmt::ActorClassInfo& k, std::string_view file
 }
 
 // Composes position, yaw/pitch/roll degrees and scale into a row-vector matrix.
+// MOVED, NOT CHANGED. The arithmetic now lives in EditorTransform.hpp, because the graph editor's
+// Viewport tab composes COMP-record component transforms into the same PreviewDraw::world and a
+// second copy of this would be a second chance to disagree about what "yaw 90" means -- exactly
+// what localAxisWorldDir below warns about, one level up. This wrapper keeps every call site here
+// unchanged.
 void composeTransform(const f32 pos[3], const f32 rotDeg[3], const f32 scale[3], f32 out[16]) {
-    constexpr f32 kPi = 3.14159265358979f;
-    const f32 y = rotDeg[0] * kPi / 180.0f, p = rotDeg[1] * kPi / 180.0f, r = rotDeg[2] * kPi / 180.0f;
-    const f32 cy = std::cos(y), sy = std::sin(y);
-    const f32 cp = std::cos(p), sp = std::sin(p);
-    const f32 cr = std::cos(r), sr = std::sin(r);
-
-    // Z then Y then X, the order the framework applies them.
-    const f32 m00 = cy * cp,  m01 = sy * cp,  m02 = -sp;
-    const f32 m10 = cy * sp * sr - sy * cr, m11 = sy * sp * sr + cy * cr, m12 = cp * sr;
-    const f32 m20 = cy * sp * cr + sy * sr, m21 = sy * sp * cr - cy * sr, m22 = cp * cr;
-
-    out[0]  = m00 * scale[0]; out[1]  = m01 * scale[0]; out[2]  = m02 * scale[0]; out[3]  = 0.0f;
-    out[4]  = m10 * scale[1]; out[5]  = m11 * scale[1]; out[6]  = m12 * scale[1]; out[7]  = 0.0f;
-    out[8]  = m20 * scale[2]; out[9]  = m21 * scale[2]; out[10] = m22 * scale[2]; out[11] = 0.0f;
-    out[12] = pos[0];         out[13] = pos[1];         out[14] = pos[2];         out[15] = 1.0f;
+    composeEditorTransform(pos, rotDeg, scale, out);
 }
 
 // The world-space direction of the placement's own local axis 0/1/2 (X/Y/Z). Deliberately the exact
@@ -1504,6 +1496,8 @@ void setActorEditorContentRoot(std::string root) {
 #endif
     g_contentRoot = std::move(root);
 }
+
+const std::string& actorEditorContentRoot() { return g_contentRoot; }
 
 void setActorEditorHooks(ActorEditorHooks hooks) { g_hooks = std::move(hooks); }
 
