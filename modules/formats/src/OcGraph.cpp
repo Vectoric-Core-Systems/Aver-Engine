@@ -74,8 +74,16 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
     bool sawHeader = false;
 
     // First pass: collect nodes to validate link references.
-    std::unordered_map<std::string, std::unordered_set<std::string>> nodeOutputPins;
-    std::unordered_map<std::string, std::unordered_set<std::string>> nodeInputPins;
+    // PIN records are BUFFERED rather than applied where they are read, for the same reason the
+    // ENTRY/OUT/LINK checks at the bottom of this function happen there: a record may name a node
+    // that appears later in the file. Applying them after the loop costs one pass and makes record
+    // order irrelevant, which is what the format actually promises -- the writer reorders records
+    // freely, so any rule this reader infers from position is a rule the writer will break.
+    //
+    // The order of pins WITHIN a node is still the file's order, because this vector preserves it.
+    // That matters: an explicit PIN record suppresses a node's default pins entirely, so the file
+    // is the only thing that says what order they draw in.
+    std::vector<std::pair<std::string, OcGraphPin>> pendingPins;
 
     usize pos = 0;
     while (pos <= text.size()) {
@@ -184,19 +192,6 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
             const std::string pinType = t.size() > 4 ? std::string(t[4]) : std::string();
             std::string defaultValue = t.size() > 5 ? std::string(t[5]) : std::string();
 
-            // Find the node.
-            OcGraphNode* node = nullptr;
-            for (auto& n : out.nodes) {
-                if (n.id == nodeId) {
-                    node = &n;
-                    break;
-                }
-            }
-            if (!node) {
-                if (err) *err = "PIN references non-existent node: " + nodeId;
-                return false;
-            }
-
             OcGraphPin pin;
             pin.name = pinName;
             pin.type = pinType;
@@ -207,14 +202,10 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
             }
             pin.defaultValue = defaultValue;
 
-            node->pins.push_back(pin);
-
-            // Track pins for link validation.
-            if (pin.isOutput) {
-                nodeOutputPins[nodeId].insert(pinName);
-            } else {
-                nodeInputPins[nodeId].insert(pinName);
-            }
+            // Attached to its node after the whole file is read -- see pendingPins above. The
+            // structural checks (token count, direction spelling) still happen HERE, on the line
+            // that is wrong, because they need nothing but the line itself.
+            pendingPins.emplace_back(nodeId, pin);
         } else if (equalsCI(key, "LINK")) {
             if (t.size() < 3) {
                 if (err) *err = "LINK requires at least 3 tokens: LINK sourcenode.sourcepin destnode.destpin";
@@ -241,24 +232,17 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
             const std::string destNode = destFull.substr(0, destDot);
             const std::string destPin = destFull.substr(destDot + 1);
 
-            // Validate that nodes exist.
-            bool sourceNodeExists = false, destNodeExists = false;
-            for (const auto& n : out.nodes) {
-                if (n.id == sourceNode) sourceNodeExists = true;
-                if (n.id == destNode) destNodeExists = true;
-            }
-            if (!sourceNodeExists) {
-                if (err) *err = "LINK references non-existent source node: " + sourceNode;
-                return false;
-            }
-            if (!destNodeExists) {
-                if (err) *err = "LINK references non-existent dest node: " + destNode;
-                return false;
-            }
-
-            // At this point, we don't validate that the pins exist yet because we may not have seen
-            // all PIN records. We could do a second pass, but for now accept that links reference
-            // unknown pins (they will be caught at runtime).
+            // Node existence is checked after the loop, not here. This used to be an inline check
+            // against the nodes seen SO FAR, and it is the same forward-reference bug ENTRY and OUT
+            // were already fixed for -- it just outlived that fix by one record type. It refused
+            // AN_FPCharacter.ocgraph, the FirstPerson template's main graph, which rejoins its jump
+            // branch into `fireGate` three lines before `NODE fireGate` appears. The C# runtime
+            // parses that file, so the template RAN and only the editor could not open it, which is
+            // why it shipped in 0.3.0.
+            //
+            // Pins are not validated at all, here or later: a link may name a default pin this
+            // reader never sees, because default pins come from the node TYPE and only the C# side
+            // knows the type table.
 
             OcGraphLink link;
             link.sourceNode = sourceNode;
@@ -312,6 +296,30 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
     // Checking after the loop is what the two readers already had in common everywhere else, and it
     // keeps the error itself -- a typo'd node id is still refused, with the same message, just once the
     // file is known to be complete.
+    for (const auto& pp : pendingPins) {
+        OcGraphNode* node = nullptr;
+        for (auto& n : out.nodes) if (n.id == pp.first) { node = &n; break; }
+        if (!node) {
+            if (err) *err = "PIN references non-existent node: " + pp.first;
+            return false;
+        }
+        node->pins.push_back(pp.second);
+    }
+    for (const auto& l : out.links) {
+        bool sourceExists = false, destExists = false;
+        for (const auto& n : out.nodes) {
+            if (n.id == l.sourceNode) sourceExists = true;
+            if (n.id == l.destNode) destExists = true;
+        }
+        if (!sourceExists) {
+            if (err) *err = "LINK references non-existent source node: " + l.sourceNode;
+            return false;
+        }
+        if (!destExists) {
+            if (err) *err = "LINK references non-existent dest node: " + l.destNode;
+            return false;
+        }
+    }
     for (const auto& e : out.entryPoints) {
         bool exists = false;
         for (const auto& n : out.nodes) if (n.id == e.first) { exists = true; break; }

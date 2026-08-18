@@ -301,6 +301,81 @@ static void testForwardReferencedEntryAndOut() {
           "the same holds for OUT");
 }
 
+static void testForwardReferencedLinkAndPin() {
+    AVER_INFO("=== LINK/PIN may name a node declared later in the file ===");
+    using namespace fmt;
+
+    // THE ENTRY/OUT FIX ABOVE STOPPED ONE RECORD TYPE SHORT. LINK kept its inline check, so a
+    // graph that branches and then REJOINS -- writing `LINK a.then merge.exec` above the section
+    // that declares `NODE merge` -- was still refused. That is the FirstPerson template's main
+    // character graph, whose jump branch rejoins the fire chain exactly that way: the C# runtime
+    // parsed it, so the template ran and only the editor could not open it, and it shipped in
+    // 0.3.0 that way. The shape below is that graph, reduced.
+    const std::string rejoin =
+        "OCGRAPH 1\n"
+        "ENTRY tick OnTick\n"
+        "NODE tick OnTick\n"
+        "NODE gate Branch\n"
+        "LINK tick.then gate.exec\n"
+        "LINK gate.true merge.exec\n"        // forward: `merge` is two lines below
+        "LINK gate.false merge.exec\n"
+        "NODE merge Print\n"
+        "PIN merge text in string hello\n";
+
+    OcGraphData g;
+    std::string err;
+    check(parseOcgraph(rejoin, g, &err), "a LINK above the node it targets parses");
+    check(g.links.size() == 3, "all three links were captured");
+    check(g.links[1].destNode == "merge" && g.links[2].destNode == "merge",
+          "both branch sides point at the forward-declared node");
+
+    // A PIN record is applied to its node after the file is read, so it may also be written above
+    // its NODE -- and, more importantly, the pins of one node must still land in FILE order,
+    // because an explicit PIN suppresses that node's defaults and nothing else says what order
+    // they draw in.
+    const std::string pinsFirst =
+        "OCGRAPH 1\n"
+        "PIN n first in float 1\n"
+        "PIN n second in float 2\n"
+        "PIN n result out float\n"
+        "NODE n Add\n";
+
+    OcGraphData pg;
+    std::string pErr;
+    check(parseOcgraph(pinsFirst, pg, &pErr), "PIN records above their own NODE parse");
+    check(pg.nodes.size() == 1 && pg.nodes[0].pins.size() == 3, "all three pins reached the node");
+    check(pg.nodes[0].pins[0].name == "first" && pg.nodes[0].pins[1].name == "second" &&
+          pg.nodes[0].pins[2].name == "result",
+          "and they kept the order the file wrote them in, not the order they resolved in");
+    check(pg.nodes[0].pins[2].isOutput && !pg.nodes[0].pins[0].isOutput,
+          "direction survived the deferral");
+
+    // THE CHECKS MOVED, THEY DID NOT GO AWAY -- same standard the ENTRY/OUT test above holds to.
+    OcGraphData bad;
+    std::string badErr;
+    check(!parseOcgraph("OCGRAPH 1\nNODE real OnTick\nLINK real.then ghost.exec\n", bad, &badErr),
+          "a LINK naming a node that never appears is still refused");
+    check(badErr.find("ghost") != std::string::npos, "and the error names the missing node");
+
+    OcGraphData bad2;
+    std::string badErr2;
+    check(!parseOcgraph("OCGRAPH 1\nNODE real OnTick\nLINK ghost.then real.exec\n", bad2, &badErr2),
+          "the same holds for a LINK source");
+
+    OcGraphData bad3;
+    std::string badErr3;
+    check(!parseOcgraph("OCGRAPH 1\nNODE real OnTick\nPIN ghost p in float\n", bad3, &badErr3),
+          "and for a PIN");
+    check(badErr3.find("ghost") != std::string::npos, "naming it too");
+
+    // A malformed PIN is still refused on the line that is wrong, because that check needs nothing
+    // but the line -- deferring the NODE lookup must not defer the spelling of the direction.
+    OcGraphData bad4;
+    std::string badErr4;
+    check(!parseOcgraph("OCGRAPH 1\nNODE real OnTick\nPIN real p sideways float\n", bad4, &badErr4),
+          "a PIN direction that is neither in nor out is still refused");
+}
+
 static void testInterleavedRecordsStayPut() {
     AVER_INFO("=== a save keeps every record where its author put it ===");
     using namespace fmt;
@@ -794,6 +869,7 @@ int main(int argc, char** argv) {
     testUnknownRecords();
     testVarRecordsSurviveRoundTrip();
     testForwardReferencedEntryAndOut();
+    testForwardReferencedLinkAndPin();
     testInterleavedRecordsStayPut();
     testLineEndingsSurvive();
     testDeterministic();
