@@ -7727,8 +7727,14 @@ private:
             graphSelectNode_.clear();
             if (auto* ed = assetEditors_.find(lastOpenAssetPath_)) {
                 if (auto* ge = dynamic_cast<editor::GraphEditor*>(ed)) {
-                    ge->selectNode(nodeId);
-                    AVER_INFO("[Editor] --graph-select selected node '{}'", nodeId);
+                    // The message follows the RESULT, not the call. It used to say "selected node"
+                    // unconditionally, which is how a capture run against a node id that does not
+                    // exist reported success and proved nothing.
+                    if (ge->selectNode(nodeId))
+                        AVER_INFO("[Editor] --graph-select selected '{}'", nodeId);
+                    else
+                        AVER_ERROR("[Editor] --graph-select: '{}' names no node or component in {}",
+                                   nodeId, lastOpenAssetPath_);
                 } else {
                     AVER_ERROR("[Editor] --graph-select: '{}' is not a graph editor", lastOpenAssetPath_);
                 }

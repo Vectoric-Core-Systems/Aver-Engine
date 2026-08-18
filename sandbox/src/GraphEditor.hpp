@@ -86,7 +86,12 @@ public:
     // displayPos_. Public so a caller other than the canvas's own click handling can drive selection
     // -- SandboxApp's --open-asset/--graph-select test hook uses this to prove the details panel
     // renders a real, populated node without a human clicking the canvas.
-    void selectNode(const std::string& nodeId);
+    // RETURNS WHETHER IT SELECTED ANYTHING, and the return value is not decoration. This is void
+    // no longer because --graph-select logged "selected node 'write'" for a graph with no node
+    // called `write` -- the caller logged success next to a call that could not report failure, so
+    // a capture run "verifying" a details panel proved nothing and said it had. That is the exact
+    // failure mode this repo keeps paying for; a hook that cannot fail cannot verify.
+    bool selectNode(const std::string& nodeId);
 
     // ---- attribute editing (Gap B) -------------------------------------------------------------------
     // A selected node's NODE-line key=value attributes -- param=/field=/class= today, anything else

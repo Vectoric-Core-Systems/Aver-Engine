@@ -451,12 +451,12 @@ void GraphEditor::commitLink(const std::string& srcNode, const std::string& srcP
     dirty_ = true;
 }
 
-void GraphEditor::selectNode(const std::string& nodeId) {
+bool GraphEditor::selectNode(const std::string& nodeId) {
     for (const auto& n : graph_.nodes) {
         if (n.id != nodeId) continue;
         selectedNodes_ = {nodeId};
         selectedLink_ = -1;
-        return;
+        return true;
     }
     // FALLS BACK TO A COMPONENT, because a graph now holds two kinds of selectable thing and the
     // caller naming one by id should not have to know which kind it is. Node ids and component ids
@@ -465,8 +465,9 @@ void GraphEditor::selectNode(const std::string& nodeId) {
     for (const auto& c : graph_.components) {
         if (c.id != nodeId) continue;
         selectedComponent_ = nodeId;
-        return;
+        return true;
     }
+    return false;
 }
 
 bool GraphEditor::setAttribute(const std::string& nodeId, const std::string& key, const std::string& value) {
