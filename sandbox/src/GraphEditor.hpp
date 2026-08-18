@@ -128,6 +128,21 @@ public:
     const std::vector<fmt::OcGraphComponent>& components() const { return graph_.components; }
     const std::string& selectedComponent() const { return selectedComponent_; }
 
+    // Adds one node of `typeId` from the catalog at `canvasPos`, with that type's default pins --
+    // and, for a node in the catalog's "Event" category, the top-level ENTRY record without which
+    // it would never run. Returns the new node's id, or empty when the catalog has no such type.
+    //
+    // LIFTED OUT OF THE PALETTE POPUP, which is why it exists as a method at all: the popup is
+    // reachable only with an ImGui context, so "does adding an On Tick actually produce a graph
+    // that runs" was a question no test could ask. It is the same split this file already draws
+    // for the Variables panel and the component tree -- thin ImGui glue, model in the class.
+    std::string addNodeFromCatalog(const std::string& typeId, Vec2 canvasPos);
+
+    // Deletes every selected node and link, along with the links, ENTRY records and OUT records
+    // that name them -- all three would otherwise be dangling references the parser refuses on the
+    // next load. Public for the same reason addNodeFromCatalog is.
+    void deleteSelection();
+
     // ---- component tree edits ---------------------------------------------------------------------
     // Each pushes undo and sets dirty_, exactly like the variable edits below, and each is PUBLIC
     // for the same reason those are: every one of them can produce a file the parser then refuses
@@ -342,7 +357,6 @@ private:
     void recomputeLayouts(float dpi);
     std::string makeUniqueNodeId(const std::string& typeId) const;
     std::string makeUniqueVariableName(const std::string& base) const;
-    void deleteSelection();
     // Sets lastRejectMsg_/lastRejectAtSec_ and logs -- the shared plumbing behind the on-canvas
     // rejection banner. reportLinkRejection (below) is one caller; deleteVariable's own refusal is
     // another, added alongside it rather than growing a second, near-duplicate banner mechanism.

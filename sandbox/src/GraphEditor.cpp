@@ -352,6 +352,39 @@ std::string GraphEditor::makeUniqueNodeId(const std::string& typeId) const {
     return base + "_x"; // unreachable in practice
 }
 
+std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canvasPos) {
+    const GraphNodeDesc* desc = findGraphNodeDesc(typeId);
+    if (!desc) return {};
+
+    pushUndo();
+    fmt::OcGraphNode node;
+    node.id = makeUniqueNodeId(desc->typeId);
+    node.type = desc->typeId;
+    node.x = canvasPos.x;
+    node.y = canvasPos.y;
+    for (const auto& ps : desc->pins)
+        node.pins.push_back(fmt::OcGraphPin{ps.name, ps.type, ps.isOutput, ps.defaultValue});
+    graph_.nodes.push_back(node);
+
+    // AN EVENT NODE WITHOUT AN `ENTRY` RECORD NEVER RUNS. The node type is only a label -- what
+    // actually starts an exec chain is a top-level `ENTRY <nodeId> <eventName>` line, which
+    // docs/AVER_NODE_NODES.md's Flow section says in as many words. Dropping an On Tick from the
+    // palette used to produce the node and nothing else, so the graph looked complete, saved, ran,
+    // and did nothing, with no error at any layer.
+    //
+    // The event name is the node TYPE, which is what every ENTRY record in this repo already says
+    // -- `ENTRY tick OnTick`. Driven off the catalog's own "Event" category rather than a second
+    // hand-maintained list of type names, for the reason GraphNodeDefs.hpp's header gives: there is
+    // one place a node type is registered.
+    if (desc->category == "Event") graph_.entryPoints.emplace_back(node.id, desc->typeId);
+
+    displayPos_[node.id] = canvasPos;
+    selectedNodes_ = {node.id};
+    selectedLink_ = -1;
+    dirty_ = true;
+    return node.id;
+}
+
 void GraphEditor::deleteSelection() {
     if (selectedNodes_.empty() && selectedLink_ < 0) return;
     pushUndo();
@@ -381,6 +414,21 @@ void GraphEditor::deleteSelection() {
             keptNodes.push_back(std::move(n));
         }
         graph_.nodes = std::move(keptNodes);
+
+        // ENTRY AND OUT RECORDS NAMING A DELETED NODE GO TOO, for the identical reason the links
+        // above do -- and this half was missing. Both are validated on load, so deleting the node
+        // an `ENTRY tick OnTick` points at left a file that SAVED cleanly and then refused to open
+        // with "ENTRY references non-existent node: tick". The editor produced a graph it could not
+        // then read back, which is the worst failure an authoring surface has.
+        const auto wasDeleted = [&](const std::string& id) {
+            return std::find(selectedNodes_.begin(), selectedNodes_.end(), id) != selectedNodes_.end();
+        };
+        std::vector<std::pair<std::string, std::string>> keptEntries;
+        for (const auto& e : graph_.entryPoints) if (!wasDeleted(e.first)) keptEntries.push_back(e);
+        graph_.entryPoints = std::move(keptEntries);
+        std::vector<std::pair<std::string, std::string>> keptOutputs;
+        for (const auto& o : graph_.outputs) if (!wasDeleted(o.first)) keptOutputs.push_back(o);
+        graph_.outputs = std::move(keptOutputs);
     }
 
     selectedNodes_.clear();
@@ -1108,21 +1156,10 @@ void GraphEditor::drawEventGraph(float dpi) {
             if (ImGui::BeginMenu(cat.c_str())) {
                 for (const auto& d : graphNodeCatalog()) {
                     if (d.category != cat) continue;
-                    if (ImGui::MenuItem(d.displayName.c_str())) {
-                        pushUndo();
-                        fmt::OcGraphNode node;
-                        node.id = makeUniqueNodeId(d.typeId);
-                        node.type = d.typeId;
-                        node.x = pendingSpawnCanvasPos_.x;
-                        node.y = pendingSpawnCanvasPos_.y;
-                        for (const auto& ps : d.pins)
-                            node.pins.push_back(fmt::OcGraphPin{ps.name, ps.type, ps.isOutput, ps.defaultValue});
-                        graph_.nodes.push_back(node);
-                        displayPos_[node.id] = pendingSpawnCanvasPos_;
-                        selectedNodes_ = {node.id};
-                        selectedLink_ = -1;
-                        dirty_ = true;
-                    }
+                    // Thin glue: everything the drop actually DOES is addNodeFromCatalog, so it can
+                    // be driven by a test with no ImGui context.
+                    if (ImGui::MenuItem(d.displayName.c_str()))
+                        addNodeFromCatalog(d.typeId, pendingSpawnCanvasPos_);
                 }
                 ImGui::EndMenu();
             }

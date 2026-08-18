@@ -821,6 +821,73 @@ static void testComponentWorldMatrixWalksTheParentChain() {
           "an unknown id gives identity rather than whatever was in the caller's buffer");
 }
 
+static void testAddingAnEventNodeAlsoDeclaresItsEntry() {
+    AVER_INFO("=== adding an event node from the catalog writes the ENTRY record that makes it run ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "entry_add.ocgraph").string();
+    writeFile(tmp, "OCGRAPH 1\nNAME E\n");
+    GraphEditor ed(tmp);
+
+    check(ed.graph().entryPoints.empty(), "the fixture starts with no entry points");
+
+    // THE BUG THIS EXISTS FOR: the node type is only a LABEL. What starts an exec chain is the
+    // top-level ENTRY record, so an On Tick dropped from the palette used to produce a graph that
+    // looked complete, saved, ran, and did nothing, with no error at any layer.
+    const std::string tickId = ed.addNodeFromCatalog("OnTick", Vec2{40.0f, 40.0f});
+    check(!tickId.empty(), "the catalog knows OnTick");
+    check(ed.graph().entryPoints.size() == 1, "adding it declared exactly one entry point");
+    check(ed.graph().entryPoints[0].first == tickId && ed.graph().entryPoints[0].second == "OnTick",
+          "which names the new node and the event, the way every ENTRY record in this repo reads");
+
+    // A NON-EVENT NODE MUST NOT GET ONE. An ENTRY on an Add node would make the compiler treat a
+    // pure expression as the start of an exec chain.
+    const std::string addId = ed.addNodeFromCatalog("Add", Vec2{80.0f, 40.0f});
+    check(!addId.empty(), "the catalog knows Add");
+    check(ed.graph().entryPoints.size() == 1, "adding a Math node declared no entry point");
+
+    check(ed.addNodeFromCatalog("NoSuchNodeType", Vec2{0.0f, 0.0f}).empty(),
+          "a type the catalog does not have adds nothing and returns empty");
+    check(ed.graph().nodes.size() == 2, "and left the graph at two nodes");
+
+    std::string why;
+    check(ed.save(&why), "save() succeeds (why='" + why + "')");
+    check(readFile(tmp).find("ENTRY " + tickId + " OnTick") != std::string::npos,
+          "and the ENTRY record reached the file");
+}
+
+static void testDeletingANodeTakesItsEntryAndOutRecords() {
+    AVER_INFO("=== deleting a node removes the ENTRY and OUT records naming it ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "entry_delete.ocgraph").string();
+    writeFile(tmp,
+              "OCGRAPH 1\nNAME E\n"
+              "NODE tick OnTick\n"
+              "NODE k ConstFloat value=2.5\n"
+              "ENTRY tick OnTick\n"
+              "OUT k value\n");
+    GraphEditor ed(tmp);
+    check(ed.graph().entryPoints.size() == 1 && ed.graph().outputs.size() == 1,
+          "the fixture has one of each");
+
+    // THE FAILURE THIS PREVENTS is not a lost record, it is an UNLOADABLE FILE: both records are
+    // validated on load, so deleting the node an ENTRY points at used to save cleanly and then
+    // refuse to reopen with "ENTRY references non-existent node: tick". The editor produced a graph
+    // it could not read back.
+    ed.selectNode("tick");
+    ed.deleteSelection();
+    check(ed.graph().entryPoints.empty(), "the ENTRY naming the deleted node went with it");
+    check(ed.graph().outputs.size() == 1, "and the unrelated OUT record did not");
+
+    ed.selectNode("k");
+    ed.deleteSelection();
+    check(ed.graph().outputs.empty(), "the same holds for OUT");
+
+    std::string why;
+    check(ed.save(&why), "save() succeeds (why='" + why + "')");
+    fmt::OcGraphData reread;
+    std::string err;
+    check(fmt::parseOcgraph(readFile(tmp), reread, &err),
+          "and what it wrote RELOADS -- err='" + err + "'");
+}
+
 static void testLoadFailure() {
     AVER_INFO("=== a missing file fails cleanly ===");
     const std::string missing = (std::filesystem::path(scratchDir()) / "does_not_exist.ocgraph").string();
@@ -860,6 +927,8 @@ int main() {
     testComponentTreeParsesAndRoundTripsByte();
     testComponentEditsCannotProduceAnUnopenableFile();
     testComponentWorldMatrixWalksTheParentChain();
+    testAddingAnEventNodeAlsoDeclaresItsEntry();
+    testDeletingANodeTakesItsEntryAndOutRecords();
     testLoadFailure();
     testWrongExtensionIsRejectedByFactory();
 
