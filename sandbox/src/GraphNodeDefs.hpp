@@ -293,8 +293,14 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    particular) is deliberately NOT a special pin here -- it is an ordinary PARAM the graph
     //    declares (e.g. `PARAM deltaTime float`) and reads with a `param` node inside the chain, the
     //    same plumbing every dataflow graph already uses for `time`/`entity`.
-    t.push_back({"OnStart", "On Start", "Flow", {pin("exec", "exec", true)}});
-    t.push_back({"OnTick", "On Tick", "Flow", {pin("exec", "exec", true)}});
+    // "Event", NOT "Flow", and the distinction is the whole point of colouring by category. These
+    // are where execution ENTERS the graph -- nothing upstream drives them, an ENTRY record does --
+    // whereas Branch and Sequence merely reorder execution that is already running. Grouping them
+    // with flow control made the palette read as though OnTick were a kind of Branch, and gave the
+    // one node a reader most wants to find at a glance the same colour as the most common node on
+    // the canvas.
+    t.push_back({"OnStart", "On Start", "Event", {pin("exec", "exec", true)}});
+    t.push_back({"OnTick", "On Tick", "Event", {pin("exec", "exec", true)}});
     // onhit: same bare-trigger shape as onstart/ontick above -- a labelled starting point an ENTRY
     //    record points at, nothing more. What makes it fire ON DEMAND (a host calling
     //    Aver.Graph.GraphHost.Fire, rather than the fixed per-frame Tick() cadence OnStart/OnTick get)
@@ -303,7 +309,7 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    project inventing a different one needs no new catalog entry to place ITS trigger node, only
     //    a differently-named NODE of type OnStart/OnTick/OnHit (any bare-trigger type already
     //    suffices) and its own ENTRY record naming the event.
-    t.push_back({"OnHit", "On Hit", "Flow", {pin("exec", "exec", true)}});
+    t.push_back({"OnHit", "On Hit", "Event", {pin("exec", "exec", true)}});
 
     // Spawn: SIDE-EFFECTING (creates a new scene entity), so -- unlike GetField/SetField/GetFieldVec3/
     //    SetFieldVec3 above -- it gets exec pins by default, mirroring Raycast's own reasoning. See

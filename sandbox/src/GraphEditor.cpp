@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <utility>
 
@@ -81,14 +82,47 @@ inline Vec2 fromIm(ImVec2 v) { return Vec2(v.x, v.y); }
 // not a circle) -- see that code's own comment for why shape, not just colour, is the point: a
 // colour-blind reader (or a screenshot inspected in greyscale) loses colour information entirely,
 // but a diamond next to a circle is still visibly two different things.
+// The node HEADER colour, by palette category. Unlike the pin colours above -- which follow
+// Blueprint so the pin language is portable -- these are the engine's own tokens, the same
+// orange/steel pair the editor chrome and the website use.
+//
+// THE RULE IS WARM VERSUS COOL, not one hue per category, because a reader should be able to
+// tell what a node DOES from across the canvas without learning seven colours. Warm (orange)
+// means it reaches outside the graph: an event arriving, or the world being changed. Cool
+// (steel) means pure computation that could be deleted without the world noticing. Grey is
+// control flow, which is neither -- it decides ORDER and touches nothing.
+//
+// Unrecognised categories fall back to the cool default rather than asserting, for the same
+// reason colorForType has a grey fallback: a category this editor has not seen must still draw.
+ImU32 headerColorForCategory(const std::string& category) {
+    std::string c = category;
+    for (char& ch : c) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    // Warm: something outside the graph is involved.
+    if (c == "event")    return IM_COL32(242, 101,  34, 255);  // Aver orange -- entry points
+    if (c == "scene" || c == "actor" || c == "material" || c == "mesh" || c == "name")
+                         return IM_COL32(150,  74,  40, 255);  // banked orange -- world writes
+    if (c == "input")    return IM_COL32(190,  90,  45, 255);  // device in, between the two
+    // Neutral: ordering only.
+    if (c == "flow")     return IM_COL32( 74,  82,  96, 255);  // slate
+    // Cool: pure computation.
+    if (c == "var")      return IM_COL32( 78, 104, 168, 255);  // steel, darkened -- storage
+    return IM_COL32( 91, 141, 239, 255);                        // Aver steel -- math, logic, const
+}
+
 ImU32 colorForType(const std::string& type) {
     std::string t = type;
     for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    if (t == "float")  return IM_COL32(120, 200, 255, 255);
-    if (t == "int")    return IM_COL32(140, 220, 140, 255);
-    if (t == "bool")   return IM_COL32(230, 150, 90, 255);
-    if (t == "string") return IM_COL32(210, 140, 230, 255);
-    if (t == "exec")   return IM_COL32(245, 245, 245, 255);
+    // THESE ARE UNREAL'S PIN COLOURS ON PURPOSE, and it is the one place in this editor that
+    // deliberately does not use the engine's own palette. Pin colour is a LEARNED LANGUAGE, not
+    // a branding surface: someone who has used Blueprints reads green-as-float and red-as-bool
+    // without looking at a legend, and spending that recognition to be visually distinctive
+    // would cost every one of those readers something and buy nothing back. The node chrome
+    // around them (headerColorForCategory below) is where this engine looks like itself.
+    if (t == "float")  return IM_COL32( 91, 255,  15, 255);  // yellow-green
+    if (t == "int")    return IM_COL32( 14, 242, 183, 255);  // turquoise
+    if (t == "bool")   return IM_COL32(200,  40,  40, 255);  // red
+    if (t == "string") return IM_COL32(255,   0, 168, 255);  // magenta
+    if (t == "exec")   return IM_COL32(245, 245, 245, 255);  // white -- see above
     return IM_COL32(190, 190, 190, 255);
 }
 
@@ -850,6 +884,18 @@ void GraphEditor::draw(Engine&) {
     // splitter is exactly what it exists for, per third_party/imgui/imgui.h's own recommendation).
     dl->ChannelsSplit(2);
 
+    // WHICH PINS ARE WIRED UP, built once for the whole frame rather than searched per pin. Both
+    // ends of every link count, because "is this pin connected" is a question about the pin, not
+    // about which direction the wire leaves it. The drawing below uses it to fill a connected pin
+    // and leave an unconnected one hollow -- which is the one piece of information a node editor
+    // can show for free and which this one was throwing away: an unwired `exec` input means the
+    // node never runs, and that was previously indistinguishable from a wired one.
+    std::set<std::pair<std::string, std::string>> connectedPins;
+    for (const auto& link : graph_.links) {
+        connectedPins.emplace(link.sourceNode, link.sourcePin);
+        connectedPins.emplace(link.destNode, link.destPin);
+    }
+
     dl->ChannelsSetCurrent(0); // links
     for (usize i = 0; i < graph_.links.size(); ++i) {
         const auto& link = graph_.links[i];
@@ -859,8 +905,13 @@ void GraphEditor::draw(Engine&) {
         const GraphBezier b = linkBezier(sp->pos, dp->pos);
         const bool selected = (static_cast<int>(i) == selectedLink_);
         const ImU32 col = selected ? IM_COL32(255, 220, 90, 255) : colorForType(sp->type);
+        // Exec wires are drawn HEAVIER than data wires. In a graph with both, the exec chain is
+        // the spine -- the order things happen in -- and everything else is an argument being
+        // fetched. Weight says which is which from across the canvas, at a distance where the
+        // white-versus-coloured difference is still legible but the shapes are not.
+        const f32 baseWidth = isExecPinType(sp->type) ? 3.0f : 2.0f;
         dl->AddBezierCubic(toScreenAbs(b.p1), toScreenAbs(b.p2), toScreenAbs(b.p3), toScreenAbs(b.p4),
-                            col, (selected ? 3.0f : 2.0f) * dpi, 24);
+                            col, (selected ? baseWidth + 1.0f : baseWidth) * dpi, 24);
     }
 
     dl->ChannelsSetCurrent(1); // nodes
@@ -870,13 +921,37 @@ void GraphEditor::draw(Engine&) {
         const ImVec2 pMax = toScreenAbs(nl.max);
         const f32 headerH = style_.headerHeightPx * dpi * view_.zoom;
 
-        dl->AddRectFilled(pMin, pMax, IM_COL32(52, 52, 58, 235), 4.0f * dpi);
-        dl->AddRectFilled(pMin, ImVec2(pMax.x, pMin.y + headerH), IM_COL32(70, 90, 120, 255), 4.0f * dpi, ImDrawFlags_RoundCornersTop);
-        dl->AddRect(pMin, pMax, selected ? IM_COL32(255, 220, 90, 255) : IM_COL32(15, 15, 18, 255), 4.0f * dpi, 0, selected ? 2.5f * dpi : 1.0f * dpi);
-
+        // The descriptor is resolved BEFORE the header is drawn, because the header now takes
+        // its colour from the node's category. It used to be looked up afterwards, purely for
+        // the label, and every node got the same slate-blue bar.
         const fmt::OcGraphNode* srcNode = nullptr;
         for (const auto& n : graph_.nodes) if (n.id == nl.nodeId) { srcNode = &n; break; }
         const GraphNodeDesc* desc = srcNode ? findGraphNodeDesc(srcNode->type) : nullptr;
+        const ImU32 headerCol = headerColorForCategory(desc ? desc->category : std::string());
+
+        // A soft drop shadow, offset down-right, before anything else in the node. It is what makes
+        // a node read as sitting ABOVE the wire layer instead of being punched out of it -- worth
+        // more here than in most UIs, because the canvas behind a node is not empty background but
+        // a mesh of bright wires, and without it the eye has no cue for which is in front.
+        const f32 shadowOff = 3.0f * dpi;
+        dl->AddRectFilled(ImVec2(pMin.x + shadowOff, pMin.y + shadowOff),
+                          ImVec2(pMax.x + shadowOff, pMax.y + shadowOff),
+                          IM_COL32(0, 0, 0, 90), 6.0f * dpi);
+
+        // Body in the engine's own card colour rather than a generic dark grey, so a node reads
+        // as part of this editor and not as a floating rectangle.
+        //
+        // FULLY OPAQUE, deliberately. It used to be alpha 240, and at 94% opacity a bright green
+        // data wire passing behind a node showed through its body as a faint diagonal smear --
+        // which reads as a wire crossing IN FRONT, the exact thing the channel split above exists
+        // to prevent. Six percent of translucency bought nothing and undid that.
+        dl->AddRectFilled(pMin, pMax, IM_COL32(21, 25, 32, 255), 5.0f * dpi);
+        dl->AddRectFilled(pMin, ImVec2(pMax.x, pMin.y + headerH), headerCol, 5.0f * dpi, ImDrawFlags_RoundCornersTop);
+        // A hairline under the header. Cheap, and it stops a dark body and a dark header from
+        // reading as one block on the categories whose colour is already close to the body.
+        dl->AddLine(ImVec2(pMin.x, pMin.y + headerH), ImVec2(pMax.x, pMin.y + headerH),
+                    IM_COL32(0, 0, 0, 90), 1.0f * dpi);
+        dl->AddRect(pMin, pMax, selected ? IM_COL32(255, 220, 90, 255) : IM_COL32(12, 14, 18, 255), 5.0f * dpi, 0, selected ? 2.5f * dpi : 1.0f * dpi);
         const std::string label = desc ? desc->displayName : (srcNode ? srcNode->type : nl.nodeId);
         dl->PushClipRect(pMin, ImVec2(pMax.x, pMin.y + headerH), true);
         dl->AddText(ImVec2(pMin.x + 6.0f * dpi, pMin.y + 3.0f * dpi), IM_COL32(255, 255, 255, 255), label.c_str());
@@ -886,28 +961,49 @@ void GraphEditor::draw(Engine&) {
             const ImVec2 dot = toScreenAbs(pl.pos);
             const f32 r = style_.pinRadiusPx * dpi * view_.zoom;
             const bool isLinkEnd = (dragMode_ == DragMode::DrawLink && nl.nodeId == linkDragFromNode_ && pl.name == linkDragFromPin_);
-            // EXEC PINS DRAW AS A DIAMOND, DATA PINS AS A CIRCLE -- shape, not just colour (see
-            // colorForType's own comment on why colour alone is not enough). This is the single
-            // change that makes a graph with both dataflow and control flow on the same node body
-            // actually readable at a glance: a wire is either a value or "what runs next", and
-            // mixing the two up is the exact failure the task called out as the biggest usability
-            // risk in a node editor. The four points below are the same radius as the circle they
-            // replace, just rotated 45 degrees into a rhombus, so the two shapes read as siblings of
-            // one pin-drawing language rather than two unrelated conventions.
+            const bool wired = connectedPins.count({nl.nodeId, pl.name}) != 0;
+            const ImU32 pinCol = colorForType(pl.type);
+            // EXEC PINS DRAW AS A RIGHT-POINTING ARROW, DATA PINS AS A CIRCLE -- shape, not just
+            // colour (see colorForType's own comment on why colour alone is not enough). This is
+            // the single change that makes a graph with both dataflow and control flow on the same
+            // node body actually readable at a glance: a wire is either a value or "what runs
+            // next", and mixing the two up is the exact failure the task called out as the biggest
+            // usability risk in a node editor.
+            //
+            // The arrow POINTS, which a diamond -- what this used to draw -- does not. Execution
+            // has a direction and the shape can say so for free, on both sides of the node: an
+            // input arrow points into the body, an output arrow points out of it, and the chain
+            // reads left-to-right without following a single wire. It is also what Blueprints
+            // draw, and the same argument as the pin colours applies -- this is a learned
+            // language, not a place to be distinctive.
+            //
+            // HOLLOW MEANS UNCONNECTED, for both shapes. An exec input with no wire is a node
+            // that never runs; a data input with no wire falls back to its default. Both are
+            // things an author needs to see without clicking, and both were invisible before.
             if (isExecPinType(pl.type)) {
-                const ImVec2 diamond[4] = {
-                    ImVec2(dot.x, dot.y - r), ImVec2(dot.x + r, dot.y),
-                    ImVec2(dot.x, dot.y + r), ImVec2(dot.x - r, dot.y),
+                // Slightly narrower than tall, so it reads as an arrowhead rather than a wedge.
+                const ImVec2 arrow[3] = {
+                    ImVec2(dot.x - r * 0.85f, dot.y - r),
+                    ImVec2(dot.x + r * 0.95f, dot.y),
+                    ImVec2(dot.x - r * 0.85f, dot.y + r),
                 };
-                dl->AddConvexPolyFilled(diamond, 4, colorForType(pl.type));
+                if (wired) dl->AddConvexPolyFilled(arrow, 3, pinCol);
                 // (points, num_points, col, thickness, flags) -- the CURRENT AddPolyline signature
                 // (imgui.h:3527). An older 1.92.7-and-earlier signature took (col, flags, thickness) in
                 // the other order; this codebase's imconfig.h leaves the compatibility shim enabled
                 // (IMGUI_DISABLE_OBSOLETE_FUNCTIONS is commented out) so either order would technically
                 // link, but writing the current order directly avoids depending on that shim.
-                dl->AddPolyline(diamond, 4, IM_COL32(40, 40, 40, 255), 1.0f * dpi, ImDrawFlags_Closed);
+                //
+                // The outline is drawn in BOTH states: over the fill it is the dark separation that
+                // keeps a white arrow off a white-ish header, and without a fill it IS the pin.
+                dl->AddPolyline(arrow, 3, wired ? IM_COL32(40, 40, 40, 255) : pinCol,
+                                (wired ? 1.0f : 2.0f) * dpi, ImDrawFlags_Closed);
+            } else if (wired) {
+                dl->AddCircleFilled(dot, r, pinCol);
             } else {
-                dl->AddCircleFilled(dot, r, colorForType(pl.type));
+                // Ring, not disc. Drawn a hair inside r so the stroke's outer edge lands where the
+                // filled version's edge does and a pin does not appear to grow when it is wired.
+                dl->AddCircle(dot, r - 1.0f * dpi, pinCol, 0, 2.0f * dpi);
             }
             if (isLinkEnd) dl->AddCircle(dot, r + 2.0f * dpi, IM_COL32(255, 220, 90, 255), 0, 2.0f * dpi);
             const ImVec2 textSize = ImGui::CalcTextSize(pl.name.c_str());
