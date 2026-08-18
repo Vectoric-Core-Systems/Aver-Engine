@@ -18,6 +18,23 @@ public readonly partial struct Entity : IEquatable<Entity>
     /// <summary>The invalid handle. Equivalent to <c>default</c>.</summary>
     public static Entity None => default;
 
+    /// <summary>Creates a fresh scene entity with no parent. It carries <c>CLocal</c>, <c>CWorld</c>,
+    /// <c>CHierarchy</c> and <c>CName</c> from birth (see <c>World::create</c>); add whatever else it
+    /// should be with <see cref="AddComponent"/>, and hang it somewhere with <see cref="SetParent"/>.</summary>
+    /// <remarks>THE FIRST PUBLIC WAY TO MAKE ONE. Creating an entity was reachable only from inside this
+    /// assembly (ActorBuilder.Place and AverCharacter both call the P/Invoke directly), so anything
+    /// outside it -- Aver.Graph building a component tree, notably -- could configure entities but never
+    /// produce one. Every other primitive that job needs was already public here; this was the hole.
+    ///
+    /// A child of an actor does NOT need destroying by hand: World::destroy expands to whole subtrees
+    /// (World.cpp's collectAndRetire), so an entity parented under an actor dies with it.</remarks>
+    public static Entity Create(string name)
+    {
+        int e = SceneNative.aver_scene_create();
+        if (e != 0 && !string.IsNullOrEmpty(name)) SceneNative.aver_scene_set_name(e, name);
+        return new Entity(e);
+    }
+
     public bool IsValid => Handle != 0;
 
     // Per-thread scratch buffers for the ABI float arrays.

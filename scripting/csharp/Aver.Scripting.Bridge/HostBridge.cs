@@ -98,6 +98,17 @@ public static class HostBridge
         // CameraViewMode -- meaningless (and simply unused) when this class's native ancestor is not
         // AverCharacter.
         public string? View;
+
+        // The class graph's COMPONENT TREE, parsed ONCE here at registration and replayed per
+        // spawned instance in DispBind. Empty for a class that declares no COMP records, which is
+        // every class that predates them.
+        //
+        // Kept here rather than re-read from the GraphHost each bind for a reason worth stating: the
+        // host is reloaded and recompiled from disk per instance (see DispBind's own comment on why),
+        // so reaching through it for this would tie the component tree to that per-instance reparse.
+        // A component tree is a property of the CLASS -- every instance gets the same one -- so it is
+        // read where the class is declared.
+        public required List<GraphComponent> Components;
     }
 
     // Walks the NATIVE parent chain from `className` (via aver_fw_class_parent, not this graph's OWN
@@ -593,7 +604,8 @@ public static class HostBridge
                          + $"'{prior.Path}' is superseded by '{path}'. Only the latter will run -- "
                          + "rename one of them.");
                 s_graphClasses[classKey] =
-                    new GraphClassInfo { Path = path, Name = graph.ClassName, Ticks = ticks, View = graph.ClassView };
+                    new GraphClassInfo { Path = path, Name = graph.ClassName, Ticks = ticks, View = graph.ClassView,
+                                         Components = graph.Components };
                 if (!string.IsNullOrEmpty(graph.ClassPawn) || !string.IsNullOrEmpty(graph.ClassController))
                     pendingRoles.Add((c, graph.ClassName, graph.ClassPawn, graph.ClassController, path));
 
@@ -1157,6 +1169,18 @@ public static class HostBridge
                          $"[Graph] class '{ginfo.Name}' entity {entity}: its graph failed to load: {err}");
                     return 0;
                 }
+
+                // THE COMPONENT TREE, BEFORE ANY OF THIS INSTANCE'S OWN CODE RUNS. Ordering matters
+                // in one direction only, and this is it: OnStart may reasonably look up a component
+                // by name (a muzzle to fire from, a mesh to hide), so every child has to exist before
+                // the graph gets a chance to ask. Nothing here depends on the graph having run.
+                //
+                // Not conditional on play state, and deliberately: aver_fw_spawn_preview binds without
+                // dispatching OnBeginPlay, so a preview-spawned instance runs no graph code at all --
+                // and it is exactly the case where seeing what the actor is MADE of matters most,
+                // because that is the editor placing one.
+                if (ginfo.Components.Count > 0)
+                    GraphComponentTree.Build(new Entity(entity), ginfo.Components, ginfo.Name);
 
                 // THE OTHER HALF OF THE GRAPH BRANCH, AND THE REASON A GRAPH CLASS CAN NOW END UP
                 // "BOTH TABLES, ONE ENTITY": if this graph's native parent chain reaches a class C#

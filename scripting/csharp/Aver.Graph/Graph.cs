@@ -188,7 +188,7 @@ public class GraphVariable
 /// this class decides what a Kind is, what units a transform is in, and which attributes a Kind
 /// actually reads.
 ///
-/// UNITS MATCH THE SCENE: centimetres, +Z up, rotation authored in DEGREES as pitch/yaw/roll and
+/// UNITS MATCH THE SCENE: centimetres, +Z up, rotation authored in DEGREES as YAW, PITCH, ROLL -- the order Aver.Scene.Rot itself takes and
 /// stored that way -- unlike CCamera.fovYRad, which stores radians, because a transform is a thing
 /// an author types into a details panel and a field of view is a thing a shader reads.
 public class GraphComponent

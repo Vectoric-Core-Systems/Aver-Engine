@@ -209,7 +209,7 @@ public class OcGraphParser
             }
             else if (key.Equals("COMP", StringComparison.OrdinalIgnoreCase))
             {
-                // COMP <id> <Kind> [parent=<id>] [pos=x,y,z] [rot=p,y,r] [scale=x,y,z] [key=value]...
+                // COMP <id> <Kind> [parent=<id>] [pos=x,y,z] [rot=yaw,pitch,roll] [scale=x,y,z] [key=value]...
                 //
                 // One child entity of a spawned class instance. See GraphComponent (Graph.cs) for
                 // what each field means and why the transform is typed here while the C++ reader

@@ -10,6 +10,10 @@ namespace Aver.Scene;
 public static class SceneIds
 {
     /// <summary>Fixed component ids — constants because the built-ins register first (Components.hpp).</summary>
+    /// <remarks>ALL ELEVEN, not the eight this stopped at. The missing three were the skinned/animated/
+    /// particle trio, and nothing in C# could attach one: a component tree authored in a graph could ask
+    /// for a SkeletalMesh and there was no id to add. Add a constant here whenever Components.hpp gains
+    /// one — the numbers are fixed by that file, so a stale list here is silently short, never wrong.</remarks>
     public const int CLocal = 1;
     public const int CWorld = 2;
     public const int CHierarchy = 3;
@@ -18,6 +22,9 @@ public static class SceneIds
     public const int CMeshRenderer = 6;
     public const int CLight = 7;
     public const int CCamera = 8;
+    public const int CSkeletalMesh = 9;
+    public const int CAnimator = 10;
+    public const int CParticleEmitter = 11;
 
     private static readonly System.Collections.Generic.Dictionary<string, int> s_cache = new();
 
