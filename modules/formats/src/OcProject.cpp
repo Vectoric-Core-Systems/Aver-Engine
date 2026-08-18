@@ -80,6 +80,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.rtShadowRays = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.RTPIXELSPERRAY")) {
             if (t.size() > 1) out.rtPixelsPerRayTile = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.RTSHADOWDENOISE")) {
+            if (t.size() > 1) out.rtShadowDenoise = parseI32(t[1], -1);
         }
     }
 
@@ -147,7 +149,7 @@ bool isOwnedKey(std::string_view line) {
         "NAME", "ENGINE", "CREATEDWITH", "CONTENT", "STARTMAP", "AUTHOR",
         "RENDER.GI", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
-        "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY",
+        "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
     };
     const std::vector<std::string_view> t = splitWhitespace(l);
     if (t.empty()) return false;
@@ -180,6 +182,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.GIDISTANCE",  d.giMaxDistance);
     appendKey(owned, "RENDER.RTSHADOWRAYS",   d.rtShadowRays);
     appendKey(owned, "RENDER.RTPIXELSPERRAY", d.rtPixelsPerRayTile);
+    appendKey(owned, "RENDER.RTSHADOWDENOISE", d.rtShadowDenoise);
 
     if (trim(existing).empty()) {
         std::string out = "OCPROJECT " + std::to_string(d.version > 0 ? d.version : 1) + "\n";

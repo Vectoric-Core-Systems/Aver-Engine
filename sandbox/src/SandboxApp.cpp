@@ -1248,6 +1248,9 @@ public:
             else if (rtRaysOverride_ < 0)
                 AVER_WARN("[Sandbox] --rt-rays {} is not a ray count; the default of {} stands",
                           rtRaysOverride_, s.rtShadowRays);
+            // >= 0, not > 0: 0 is a MEANING here (filter off), not "flag absent" -- the sentinel
+            // is -1, unlike its two neighbours whose valid range starts at 1.
+            if (rtShadowDenoiseOverride_ >= 0) s.rtShadowDenoise = static_cast<u32>(rtShadowDenoiseOverride_);
             if (rtPixelsPerRayOverride_ > 0) s.rtPixelsPerRayTile = static_cast<u32>(rtPixelsPerRayOverride_);
             else if (rtPixelsPerRayOverride_ < 0)
                 AVER_WARN("[Sandbox] --rt-pixels-per-ray {} is not a tile edge; the default of {} stands",
@@ -4347,6 +4350,7 @@ public:
     void setRtForceOff(bool off) { rtForceOff_ = off; }                         // --no-rt
     void setRtRays(int n) { rtRaysOverride_ = n; }                              // --rt-rays N
     void setRtPixelsPerRay(int n) { rtPixelsPerRayOverride_ = n; }              // --rt-pixels-per-ray N
+    void setRtShadowDenoise(int n) { rtShadowDenoiseOverride_ = n; }            // --rt-shadow-denoise N
     void setGiUpdateInterval(int n) { giUpdateIntervalOverride_ = n; }          // --gi-update-interval N
     void setRenderScale(f32 s) { renderScaleOverride_ = s; }                    // --render-scale F
 #if AVER_MODULE_SR
@@ -5177,6 +5181,7 @@ private:
         if (project_.giMaxDistance   >= 0.0f) s.giMaxDistance      = project_.giMaxDistance;
         if (project_.rtShadowRays       >= 0) s.rtShadowRays       = static_cast<u32>(project_.rtShadowRays);
         if (project_.rtPixelsPerRayTile >= 0) s.rtPixelsPerRayTile = static_cast<u32>(project_.rtPixelsPerRayTile);
+        if (project_.rtShadowDenoise    >= 0) s.rtShadowDenoise    = static_cast<u32>(project_.rtShadowDenoise);
         vx.setSettings(s);   // clamps to this device; the manifest keeps what was asked for
         voxiRenderer_.setSettings(vx.settings());
         // A manifest that names Path Tracing explicitly should actually (de)register PtSceneView at
@@ -5213,6 +5218,7 @@ private:
         project_.giMaxDistance   = requested.giMaxDistance;
         project_.rtShadowRays       = static_cast<int>(requested.rtShadowRays);
         project_.rtPixelsPerRayTile = static_cast<int>(requested.rtPixelsPerRayTile);
+        project_.rtShadowDenoise    = static_cast<int>(requested.rtShadowDenoise);
         projectDirty_ = true;
     }
 #else
@@ -5237,6 +5243,7 @@ private:
         if (project_.giMaxDistance   < 0.0f) project_.giMaxDistance   = d.giMaxDistance;
         if (project_.rtShadowRays       < 0) project_.rtShadowRays       = static_cast<int>(d.rtShadowRays);
         if (project_.rtPixelsPerRayTile < 0) project_.rtPixelsPerRayTile = static_cast<int>(d.rtPixelsPerRayTile);
+        if (project_.rtShadowDenoise    < 0) project_.rtShadowDenoise    = static_cast<int>(d.rtShadowDenoise);
 #endif
         std::string why;
         if (saveProjectManifest(&why)) AVER_INFO("[Project] --save-project wrote the manifest");
@@ -9791,6 +9798,28 @@ private:
                                    "Every pixel gets its own turn every N*N frames. Off is bit-for-\n"
                                    "bit identical to having no denoiser; larger tiles trade a real\n"
                                    "cut in rays traced for more frames of lag on fast-moving shadows.");
+
+            // A SECOND, INDEPENDENT DENOISER, and the separate heading is the point: these two get
+            // spoken about as one setting and they fail in opposite directions. The one above reuses
+            // THIS pixel across TIME -- it converges beautifully while the camera is still and
+            // collapses a penumbra to flat shadow the moment one moves. The one below averages
+            // NEIGHBOURS within a single frame and keeps no history whatsoever, so there is nothing
+            // to go stale and camera motion cannot poison it. They compose; they are not
+            // alternatives, and turning one up is not a substitute for the other.
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Denoiser: spatial filter");
+            ImGui::Separator();
+            int denoise = static_cast<int>(s.rtShadowDenoise);
+            if (ImGui::SliderInt("Filter radius (px)", &denoise, 0, 3, denoise == 0 ? "Off" : "%d")) {
+                s.rtShadowDenoise = static_cast<u32>(denoise); changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Averages a (2R+1)^2 neighbourhood of the shadow, weighting each\n"
+                                   "neighbour by how well its depth agrees with this pixel's surface.\n"
+                                   "At one ray per pixel the shadow term is a hard 0 or 1, so a\n"
+                                   "penumbra comes out dithered rather than soft; this is what\n"
+                                   "resolves it without paying for more rays. Keeps no history, so\n"
+                                   "unlike amortisation above it costs nothing in lag under motion.");
             ImGui::EndDisabled();
         }
 
@@ -10343,6 +10372,7 @@ private:
     bool rtForceOff_=false;          // --no-rt: force it off, whatever the default is
     int  rtRaysOverride_=0;          // --rt-rays N: sun occlusion rays per pixel (0 = flag not given)
     int  rtPixelsPerRayOverride_=0;  // --rt-pixels-per-ray N: shadow tile edge (0 = flag not given)
+    int  rtShadowDenoiseOverride_=-1; // --rt-shadow-denoise N: spatial radius (-1 = flag not given)
     int  giUpdateIntervalOverride_=0; // --gi-update-interval N: GI revoxelise interval (0 = flag not given)
     f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
 #if AVER_MODULE_SR
@@ -12319,7 +12349,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string graphSelectNode; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string graphSelectNode; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -12621,6 +12651,10 @@ Application* createApplication(int argc, char** argv) {
         // The ray-traced shadow's temporal amortisation tile edge -- how many pixels share one
         // traced ray, rounded to the nearest power of two. 1 (unset) traces every pixel every frame.
         else if (!std::strcmp(argv[i],"--rt-pixels-per-ray") && i+1<argc) rtPixelsPerRay=std::atoi(argv[++i]);
+        // The SPATIAL filter radius in pixels, 0 = off. Distinct from the tile edge above in every
+        // way that matters: that one amortises over TIME and lags the camera, this one averages
+        // over SPACE and keeps no history at all.
+        else if (!std::strcmp(argv[i],"--rt-shadow-denoise") && i+1<argc) rtShadowDenoise=std::atoi(argv[++i]);
         // How many frames apart the GI volume is revoxelised -- 1 (unset) rebuilds every frame, the
         // original always-fresh behaviour. Measures the voxelise+filter amortisation independently of
         // everything else, per the "measure each change, do not stack guesses" rule.
@@ -12854,6 +12888,7 @@ Application* createApplication(int argc, char** argv) {
     app->setRtOverride(rt);
     app->setRtRays(rtRays);
     app->setRtPixelsPerRay(rtPixelsPerRay);
+    app->setRtShadowDenoise(rtShadowDenoise);
     app->setGiUpdateInterval(giUpdateInterval);
     app->setRtForceOff(noRt);
     app->setCamWobble(camWobbleDeg, camWobblePeriod);

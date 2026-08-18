@@ -166,6 +166,35 @@ struct Settings {
     // true, and the figure outlived it; it is quoted here as refuted rather than quietly deleted.
     // Low still amortises at 8, which is where the trade belongs: not on the default tier.
     u32 giUpdateInterval = 1;
+
+    // SPATIAL denoise radius for the ray-traced sun shadow, in pixels. 0 (the default) is off and
+    // is exactly today's behaviour: the shadow term is whatever this pixel's own rays returned,
+    // unfiltered. N > 0 averages a (2N+1)^2 neighbourhood of the shadow history, weighted by how
+    // well each neighbour's stored depth agrees with this pixel's surface plane.
+    //
+    // WHY THIS EXISTS, AND WHY IT IS NOT THE TILE KNOB ABOVE. rtPixelsPerRayTile amortises over
+    // TIME: a pixel reuses a reprojected value it computed frames ago. That converges beautifully
+    // on a still camera and falls apart the moment one moves -- measured, at a penumbra probe: the
+    // soft edge collapses to flat fully-shadowed under about one degree of yaw over forty frames.
+    // This averages over SPACE instead, and keeps no history at all, so there is nothing to go
+    // stale and camera motion cannot poison it. The two are independent and can be combined, but
+    // they fail in completely different ways and should not be reasoned about as one setting.
+    //
+    // THE PROBLEM IT IS FOR. At one ray per pixel -- which is what Low and Medium both run -- the
+    // shadow term is a hard 0 or 1, so a penumbra is not soft, it is dithered. Measured at a probe
+    // whose converged answer is 34,36,40: one ray reads 61,59,59 and never improves, because the
+    // ray is a pure function of the pixel and repeats forever. Sixteen rays reach 34,36,40 and cost
+    // 30.55 ms against 18.66. Averaging the neighbours instead is the cheap way to the same place,
+    // because rtShadow jitters the ray ORIGIN across the pixel footprint -- so neighbouring pixels
+    // are already sampling different parts of the same receiver, and their mean is a real area
+    // estimate rather than a blur.
+    //
+    // DERIVED FROM rayTracing on a tier change, like the two knobs above, and 0 for every tier
+    // today so the default tier's rung and this default agree by construction. That agreement is
+    // the whole contract: derivation only fires when the tier CHANGES, so a struct default that
+    // contradicts its own tier never reaches the rung it claims -- a trap this file has already
+    // fallen into in both directions with giUpdateInterval.
+    u32 rtShadowDenoise = 0;
 };
 
 // Process-wide settings service. Single instance shared by the editor, the runtime and the C ABI.
@@ -207,6 +236,7 @@ public:
     // rayTracing tier changes and the field arrives unchanged.
     static u32 rtShadowRaysForQuality(Quality q);
     static u32 rtPixelsPerRayTileForQuality(Quality q);
+    static u32 rtShadowDenoiseForQuality(Quality q);
 
 private:
     Renderer() = default;

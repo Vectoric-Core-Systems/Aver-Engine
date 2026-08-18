@@ -938,6 +938,7 @@ void GameApp::applyProjectRenderSettings() {
     if (project_.giMaxDistance >= 0.0f) s.giMaxDistance = project_.giMaxDistance;
     if (project_.rtShadowRays >= 0) s.rtShadowRays = static_cast<u32>(project_.rtShadowRays);
     if (project_.rtPixelsPerRayTile >= 0) s.rtPixelsPerRayTile = static_cast<u32>(project_.rtPixelsPerRayTile);
+    if (project_.rtShadowDenoise >= 0) s.rtShadowDenoise = static_cast<u32>(project_.rtShadowDenoise);
     vx.setSettings(s);
     voxiRenderer_.setSettings(vx.settings());
     AVER_INFO("[Project] applied render settings: gi={}, rt={}, pt={}, voxelRes={}, giIntensity={}, giDist={}",

@@ -89,6 +89,8 @@ void Renderer::setSettings(const Settings& s) {
         n.rtShadowRays = rtShadowRaysForQuality(n.rayTracing);
     if (n.rayTracing != settings_.rayTracing && n.rtPixelsPerRayTile == settings_.rtPixelsPerRayTile)
         n.rtPixelsPerRayTile = rtPixelsPerRayTileForQuality(n.rayTracing);
+    if (n.rayTracing != settings_.rayTracing && n.rtShadowDenoise == settings_.rtShadowDenoise)
+        n.rtShadowDenoise = rtShadowDenoiseForQuality(n.rayTracing);
 
     n.voxelResolution = std::clamp(n.voxelResolution, 32u, 512u);
     n.giIntensity     = std::clamp(n.giIntensity, 0.0f, 8.0f);
@@ -98,6 +100,10 @@ void Renderer::setSettings(const Settings& s) {
     // The renderer's own setters are the authority on the exact contract (kMaxPixelsPerRayTile also
     // rounds to a power of two); this is just enough to keep a wild request off the wire to it.
     n.rtShadowRays       = std::clamp(n.rtShadowRays, 1u, 32u);
+    // 3 is a (2*3+1)^2 = 49-tap neighbourhood, which is already past the point where a wider
+    // kernel buys anything a second iteration would not buy more cheaply. Kept low deliberately:
+    // this runs per FRAGMENT inside the shading shader, so the tap count multiplies by overdraw.
+    n.rtShadowDenoise    = std::clamp(n.rtShadowDenoise, 0u, 3u);
     n.rtPixelsPerRayTile = std::clamp(n.rtPixelsPerRayTile, 1u, 16u);
     // Mirrors VoxiRenderer::kMaxGiUpdateInterval for the same reason as rtPixelsPerRayTile above.
     n.giUpdateInterval   = std::clamp(n.giUpdateInterval, 1u, 8u);
@@ -236,6 +242,29 @@ u32 Renderer::rtShadowRaysForQuality(Quality q) {
     }
 }
 
+// ZERO ON EVERY RUNG, ON PURPOSE, and this is not a placeholder that someone forgot to fill in.
+//
+// The spatial filter this selects is being landed in stages, and this stage is the SETTING ALONE:
+// nothing reads the value yet, so the whole change is provably incapable of moving a pixel. The
+// rung that turns it on arrives with the filter it selects, in the same commit, measured against
+// the penumbra probe -- not before it, where it would be an untested default.
+//
+// It still has to exist NOW rather than later, because Settings::rtShadowDenoise defaults to 0 and
+// the derivation only fires on a tier CHANGE. A field whose default disagrees with its default
+// tier's rung never reaches that rung, and this file has already shipped that bug twice (giUpdate-
+// Interval, in both directions). Declaring the mapping at 0 everywhere keeps the two in agreement
+// by construction from the first commit, so the day a rung becomes non-zero is a one-line change
+// with nothing else to remember.
+u32 Renderer::rtShadowDenoiseForQuality(Quality q) {
+    switch (q) {
+        case Quality::Off:    return 0;   // RT is not running; the filter has nothing to filter
+        case Quality::Low:    return 0;
+        case Quality::Medium: return 0;
+        case Quality::High:   return 0;
+        case Quality::Epic:   return 0;
+        default:              return 0;
+    }
+}
 // See rtShadowRaysForQuality for the measurements behind these.
 u32 Renderer::rtPixelsPerRayTileForQuality(Quality q) {
     switch (q) {
