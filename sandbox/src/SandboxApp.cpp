@@ -1634,6 +1634,16 @@ public:
 
     // Advances one frame: MCP commands, camera, gameplay tick, physics, and the render state.
     void onUpdate(Engine& e, const Timestep& t) override {
+        // FIRST in the frame, so everything downstream -- the view matrix, the reprojection's
+        // gPrevViewProj, the shadow history -- all see one consistent camera for this frame.
+        // Latched base yaw rather than accumulating onto yaw_: accumulating would drift with
+        // floating-point error and never return exactly to the start, which is the one property
+        // this exists to provide.
+        if (camWobbleDeg_ != 0.0f && camWobblePeriod_ > 0) {
+            if (!camWobbleBased_) { camWobbleBaseYaw_ = yaw_; camWobbleBased_ = true; }
+            const f32 phase = 6.2831853f * (f32)(t.frame - 1) / (f32)camWobblePeriod_;
+            yaw_ = camWobbleBaseYaw_ + camWobbleDeg_ * 0.01745329252f * std::sin(phase);
+        }
         // --pt-scene-toggle-on/-off: verification-only (see the members' own comment). Checked BEFORE
         // syncPtSceneView() so the same onUpdate() that flips the want-flag is the same one that acts
         // on it, rather than costing a whole extra frame of lag for no reason.
@@ -4539,6 +4549,22 @@ public:
     // A capture tool, not a feature: every other way into this camera either frames the level (always
     // pitch -31 deg, horizon just off the top edge) or needs a real mouse, so nothing headless could
     // aim at the sky, and the sky is the one thing no gate covers. Applied last, after level framing.
+    // --cam-wobble DEG PERIOD: swing the yaw sinusoidally about wherever the camera is aimed.
+    //
+    // A SINE THAT RETURNS TO ZERO, not a one-way pan, and that is the whole point. Measuring what
+    // camera motion does to a temporally amortised effect means comparing a moving run against a
+    // still one AT THE SAME PIXEL -- and a one-way pan ends somewhere else, so the probe lands on
+    // different geometry and the two numbers are not comparable. sin() is zero at every whole
+    // multiple of the period, so a run whose frame count lands on one ends aimed exactly where it
+    // started: same surface under the probe, same lighting, and the only thing left different is
+    // the history the motion built up.
+    //
+    // Driven off the engine's frame COUNTER, never the clock, so the path is identical on every
+    // machine and every run -- the gate oracle's whole story rests on captures being reproducible.
+    void setCamWobble(f32 degrees, i32 periodFrames) {
+        camWobbleDeg_ = degrees;
+        camWobblePeriod_ = periodFrames > 0 ? periodFrames : 0;
+    }
     void setCamera(Vec3 pos, f32 pitchDeg, f32 yawDeg) {
         camOverride_ = true;
         camPosOverride_ = pos;
@@ -10351,6 +10377,10 @@ private:
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
     f32  probeU_=-1.0f, probeV_=-1.0f;   // --probe-rel U V: a FRACTION of the viewport rect
     bool camOverride_=false;         // --cam X Y Z PITCH YAW: aim the viewport camera outright
+    f32  camWobbleDeg_=0.0f;         // --cam-wobble DEG PERIOD: yaw amplitude, 0 = no motion
+    i32  camWobblePeriod_=0;         // ...and its period in FRAMES; sin is 0 at every multiple
+    f32  camWobbleBaseYaw_=0.0f;     // the yaw to swing about, latched on the first wobbled frame
+    bool camWobbleBased_=false;
     Vec3 camPosOverride_{};
     f32  pitchOverride_=0.0f, yawOverride_=0.0f;   // radians, converted in setCamera
     bool useWarp_=false;             // --warp: run on the D3D12 software rasteriser
@@ -12289,7 +12319,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string graphSelectNode; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string graphSelectNode; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -12580,6 +12610,11 @@ Application* createApplication(int argc, char** argv) {
         // The Off rung of the ray-tracing cost ladder. It needs its own flag because RT is on by
         // default now and --rt cannot express Off: 0 is rtOverride_'s "not given".
         else if (!std::strcmp(argv[i],"--no-rt")) noRt=true;
+        // --cam-wobble DEG PERIOD: see setCamWobble. Measurement-only; 0 degrees is no motion,
+        // so every existing capture is bit-identical without it.
+        else if (!std::strcmp(argv[i],"--cam-wobble") && i+2<argc) {
+            camWobbleDeg=(f32)std::atof(argv[++i]); camWobblePeriod=std::atoi(argv[++i]);
+        }
         // The sun occlusion rays per pixel, so the cost of ray-traced shadows can be MEASURED
         // instead of asserted: the sequence is nested, so 1, 2, 4, 8 is one converging series.
         else if (!std::strcmp(argv[i],"--rt-rays") && i+1<argc) rtRays=std::atoi(argv[++i]);
@@ -12821,6 +12856,7 @@ Application* createApplication(int argc, char** argv) {
     app->setRtPixelsPerRay(rtPixelsPerRay);
     app->setGiUpdateInterval(giUpdateInterval);
     app->setRtForceOff(noRt);
+    app->setCamWobble(camWobbleDeg, camWobblePeriod);
     app->setRenderScale(renderScale);
     if (!aversrArg.empty()) {
 #if AVER_MODULE_SR
