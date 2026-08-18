@@ -6,7 +6,9 @@
 // Links connect pins. Pinned values are constants clamped to a node's input pin. The model carries
 // enough to evaluate the graph once compiled to IL.
 
+using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 
 namespace Aver.Graph;
@@ -177,6 +179,55 @@ public class GraphVariable
     public required object Default { get; init; }
 }
 
+/// One entry in a class graph's COMPONENT TREE, from a `COMP <id> <Kind> [key=value]...` record.
+///
+/// THIS SIDE IS THE SEMANTIC HALF, which is why the fields here are typed and the C++ reader's
+/// OcGraphComponent keeps everything as verbatim tokens. That split is the same one VAR already
+/// follows -- C++ asks for a name and a type token, this side knows PinType is Float/Int/Bool and
+/// rejects Exec. Here it means C++ guarantees a well-formed line whose parent chain is a tree, and
+/// this class decides what a Kind is, what units a transform is in, and which attributes a Kind
+/// actually reads.
+///
+/// UNITS MATCH THE SCENE: centimetres, +Z up, rotation authored in DEGREES as pitch/yaw/roll and
+/// stored that way -- unlike CCamera.fovYRad, which stores radians, because a transform is a thing
+/// an author types into a details panel and a field of view is a thing a shader reads.
+public class GraphComponent
+{
+    public required string Id { get; init; }
+
+    /// The component kind: "Scene", "Mesh", "Light", "Camera", "SkeletalMesh" or "Particles".
+    /// Held as the authored string rather than an enum so an unrecognised kind can be REPORTED by
+    /// name at spawn instead of being silently coerced to a default -- the same tolerance an
+    /// unrecognised NODE-line key=value already gets, but louder, because a component that quietly
+    /// becomes a Scene node is an actor missing a limb with nothing in the log about it.
+    public required string Kind { get; init; }
+
+    /// The id of the component this one hangs off, or null for one attached to the actor's own
+    /// entity. The C++ reader has already proved every non-null parent names a real component and
+    /// that the chain terminates, so a walk over these is a tree and needs no cycle guard.
+    public string? Parent { get; set; }
+
+    /// Local transform relative to the parent. Centimetres; degrees; scale multiplier.
+    public float[] Position { get; set; } = new float[3];
+    public float[] RotationDeg { get; set; } = new float[3];
+    public float[] Scale { get; set; } = { 1f, 1f, 1f };
+
+    /// Every other key=value on the line, by key, with the transform and parent keys REMOVED --
+    /// they are the fields above. Kind-specific: `mesh=`/`material=` on a Mesh, `fov=`/`near=`/
+    /// `far=` on a Camera, `effect=` on Particles. A dictionary rather than a field per attribute
+    /// because the set is open: a Kind added later brings its own keys, and this class should not
+    /// need editing for that to work.
+    public Dictionary<string, string> Attributes { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// Reads an attribute as a float, falling back rather than throwing -- an authored `fov=wide`
+    /// should give a usable camera and a warning, not a class that fails to spawn.
+    public float AttrFloat(string key, float fallback) =>
+        Attributes.TryGetValue(key, out string? v) &&
+        float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out float f) ? f : fallback;
+
+    public string AttrString(string key) => Attributes.TryGetValue(key, out string? v) ? v : "";
+}
+
 /// A complete graph: nodes, links, pinned values, and output pins to evaluate.
 public class Graph
 {
@@ -195,6 +246,17 @@ public class Graph
     // before PARAM existed -- GraphCompiler only appends a GraphVarStore argument to the compiled
     // delegate when this list is non-empty, so a VAR-less graph's delegate shape is unchanged.
     public List<GraphVariable> Variables { get; set; } = new();
+
+    // Declared via top-level `COMP <id> <Kind> [key=value]...` records, in FILE order -- which is
+    // not tree order, because a component may name a parent declared below it. Empty for every
+    // graph that predates this and for every graph that is not a class, exactly as Variables was
+    // empty before VAR existed.
+    //
+    // Only meaningful alongside a non-null ClassName: a component tree describes what a SPAWNED
+    // instance is made of, and a graph nothing spawns has no instance to hang one on. The parser
+    // does not refuse that combination -- a graph mid-edit, with its components authored before
+    // its CLASS line, is a normal state to be in and not an error to report.
+    public List<GraphComponent> Components { get; set; } = new();
 
     // Declared via top-level `ENTRY <nodeId> <eventName>` records -- which node begins the PUSH/exec
     // chain for a named event (e.g. "OnStart", "OnTick"). Empty for every graph that predates this,

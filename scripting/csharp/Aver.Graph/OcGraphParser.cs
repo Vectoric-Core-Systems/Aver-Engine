@@ -207,6 +207,40 @@ public class OcGraphParser
 
                 graph.Variables.Add(new GraphVariable { Name = varName, Type = varType, Default = varDefault });
             }
+            else if (key.Equals("COMP", StringComparison.OrdinalIgnoreCase))
+            {
+                // COMP <id> <Kind> [parent=<id>] [pos=x,y,z] [rot=p,y,r] [scale=x,y,z] [key=value]...
+                //
+                // One child entity of a spawned class instance. See GraphComponent (Graph.cs) for
+                // what each field means and why the transform is typed here while the C++ reader
+                // keeps the whole line as tokens.
+                //
+                // THE STRUCTURAL RULES ARE NOT RE-CHECKED HERE. Duplicate ids, a parent naming
+                // nothing, and a parent cycle are all refused by modules/formats' reader, which is
+                // the one that runs when the editor opens a file. Repeating them would mean two
+                // implementations of the same rule that can drift; what this side owns is the
+                // meaning of a Kind and the units of a transform.
+                if (tokens.Count < 3)
+                {
+                    err = "COMP requires an id and a kind: COMP id Kind [key=value]...";
+                    return false;
+                }
+
+                var comp = new GraphComponent { Id = tokens[1], Kind = tokens[2] };
+                for (int i = 3; i < tokens.Count; i++)
+                {
+                    string[] parts = tokens[i].Split('=', 2);
+                    if (parts.Length != 2) continue;   // a bare token, not an attribute
+                    string k = parts[0];
+                    string v = parts[1];
+                    if (k.Equals("parent", StringComparison.OrdinalIgnoreCase)) comp.Parent = v;
+                    else if (k.Equals("pos", StringComparison.OrdinalIgnoreCase)) ParseVec3(v, comp.Position);
+                    else if (k.Equals("rot", StringComparison.OrdinalIgnoreCase)) ParseVec3(v, comp.RotationDeg);
+                    else if (k.Equals("scale", StringComparison.OrdinalIgnoreCase)) ParseVec3(v, comp.Scale);
+                    else comp.Attributes[k] = v;
+                }
+                graph.Components.Add(comp);
+            }
             else if (key.Equals("CLASS", StringComparison.OrdinalIgnoreCase))
             {
                 // CLASS <name> [parentName] [mesh=<path>] [material=<name>] [view=firstperson|thirdperson]
@@ -1394,6 +1428,21 @@ public class OcGraphParser
             tokens.Add(current.ToString());
 
         return tokens;
+    }
+
+    /// Reads a `x,y,z` attribute value into `into`, leaving any component it cannot read at
+    /// whatever the caller had there. That fallback direction is deliberate: `scale` arrives
+    /// pre-filled with 1,1,1, so a malformed `scale=2,,2` gives 2,1,2 rather than an actor
+    /// collapsed to zero size, and a partially-typed value mid-edit never makes a component vanish.
+    ///
+    /// Fewer than three parts is accepted and fills what is there -- `pos=0,0` is a plausible thing
+    /// to type, and the third axis keeping its default is the least surprising reading of it.
+    private static void ParseVec3(string text, float[] into)
+    {
+        string[] parts = text.Split(',');
+        for (int i = 0; i < parts.Length && i < 3; i++)
+            if (float.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out float f))
+                into[i] = f;
     }
 
     private static int ParseI32(string s, int dflt = 0)

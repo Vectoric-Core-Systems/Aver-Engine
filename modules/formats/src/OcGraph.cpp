@@ -45,7 +45,7 @@ bool isNumericToken(std::string_view s) {
 // path (see there) to replace each kind in place at its own first occurrence, rather than collapsing
 // every kind into one inserted block. `Other` covers blank lines, comments, and anything writeOcgraph
 // does not model; those are always copied through verbatim, at their original position.
-enum class OwnedLineKind { Header, Name, Description, Var, Node, Pin, Link, Entry, Out, Other };
+enum class OwnedLineKind { Header, Name, Description, Var, Comp, Node, Pin, Link, Entry, Out, Other };
 
 // `sawHeader` is the caller's running state: only the FIRST line whose key is OCGRAPH counts as the
 // header; a later stray "OCGRAPH ..." line (malformed input, or inside an unrelated unknown record)
@@ -57,6 +57,7 @@ OwnedLineKind classifyLine(std::string_view line, bool sawHeaderYet) {
     if (equalsCI(t[0], "NAME"))        return OwnedLineKind::Name;
     if (equalsCI(t[0], "DESCRIPTION")) return OwnedLineKind::Description;
     if (equalsCI(t[0], "VAR"))         return OwnedLineKind::Var;
+    if (equalsCI(t[0], "COMP"))        return OwnedLineKind::Comp;
     if (equalsCI(t[0], "NODE"))        return OwnedLineKind::Node;
     if (equalsCI(t[0], "PIN"))         return OwnedLineKind::Pin;
     if (equalsCI(t[0], "LINK"))        return OwnedLineKind::Link;
@@ -69,6 +70,28 @@ OwnedLineKind classifyLine(std::string_view line, bool sawHeaderYet) {
 
 // Parses a .ocgraph from memory. Unknown records are skipped during parse.
 // Validates that all links reference existing nodes and pins.
+std::string_view componentAttr(const OcGraphComponent& c, std::string_view key) {
+    for (const std::string& tokenText : c.extraTokens) {
+        std::string_view t(tokenText);
+        const usize eq = t.find('=');
+        if (eq == std::string_view::npos) continue;   // a bare token, not an attribute
+        if (t.substr(0, eq) == key) return t.substr(eq + 1);
+    }
+    return {};
+}
+
+void setComponentAttr(OcGraphComponent& c, std::string_view key, std::string_view value) {
+    for (usize i = 0; i < c.extraTokens.size(); ++i) {
+        std::string_view t(c.extraTokens[i]);
+        const usize eq = t.find('=');
+        if (eq == std::string_view::npos || t.substr(0, eq) != key) continue;
+        if (value.empty()) c.extraTokens.erase(c.extraTokens.begin() + static_cast<isize>(i));
+        else c.extraTokens[i] = std::string(key) + "=" + std::string(value);
+        return;
+    }
+    if (!value.empty()) c.extraTokens.emplace_back(std::string(key) + "=" + std::string(value));
+}
+
 bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
     out = OcGraphData{};
     bool sawHeader = false;
@@ -140,6 +163,25 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
             var.type = std::string(t[2]);
             if (t.size() > 3) var.defaultValue = std::string(t[3]);
             out.variables.push_back(std::move(var));
+        } else if (equalsCI(key, "COMP")) {
+            // COMP <id> <Kind> [key=value]... -- one entry in a class graph's component tree. See
+            // OcGraphComponent (OcGraph.hpp) for why the kind is an opaque token and every
+            // attribute rides in extraTokens rather than becoming a field here.
+            if (t.size() < 3) {
+                if (err) *err = "COMP requires an id and a kind: COMP id Kind [key=value]...";
+                return false;
+            }
+            OcGraphComponent comp;
+            comp.id = std::string(t[1]);
+            comp.kind = std::string(t[2]);
+            for (usize i = 3; i < t.size(); ++i) comp.extraTokens.emplace_back(t[i]);
+            for (const auto& c : out.components) {
+                if (c.id == comp.id) {
+                    if (err) *err = "duplicate component ID: " + comp.id;
+                    return false;
+                }
+            }
+            out.components.push_back(std::move(comp));
         } else if (equalsCI(key, "NODE")) {
             // `NODE id type` is the minimum; x and y are OPTIONAL and default to 0.
             //
@@ -296,6 +338,37 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
     // Checking after the loop is what the two readers already had in common everywhere else, and it
     // keeps the error itself -- a typo'd node id is still refused, with the same message, just once the
     // file is known to be complete.
+    // A component's parent= must name another component, and following parents must reach a
+    // component with none. Both halves matter and neither is the other: a typo'd parent silently
+    // reparents a gun to the world origin, and a cycle -- two components naming each other -- is
+    // not a tree at all, so the spawn walk that builds child entities from this would not return.
+    // Refusing here is the only place that check can live once and be believed by both readers.
+    for (const auto& c : out.components) {
+        const std::string_view parent = componentAttr(c, "parent");
+        if (parent.empty()) continue;
+        bool exists = false;
+        for (const auto& o : out.components) if (o.id == parent) { exists = true; break; }
+        if (!exists) {
+            if (err) *err = "COMP '" + c.id + "' names a non-existent parent: " + std::string(parent);
+            return false;
+        }
+    }
+    for (const auto& start : out.components) {
+        // Bounded by the component count: a chain longer than that has revisited something, which
+        // is a cycle -- cheaper and simpler than carrying a visited set per start, and this runs
+        // over the handful of components an actor has, not over a graph's nodes.
+        std::string_view at = componentAttr(start, "parent");
+        for (usize hops = 0; !at.empty(); ++hops) {
+            if (hops > out.components.size()) {
+                if (err) *err = "COMP '" + start.id + "' is part of a parent cycle";
+                return false;
+            }
+            std::string_view next;
+            for (const auto& o : out.components) if (o.id == at) { next = componentAttr(o, "parent"); break; }
+            at = next;
+        }
+    }
+
     for (const auto& pp : pendingPins) {
         OcGraphNode* node = nullptr;
         for (auto& n : out.nodes) if (n.id == pp.first) { node = &n; break; }
@@ -365,8 +438,8 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // line of existing text; `used` is set once a line has claimed it, so a record is emitted exactly
     // once even if the file names it twice.
     struct Rec { std::string key; std::string text; bool used = false; };
-    std::vector<Rec> varRecs, nodeRecs, pinRecs, linkRecs, entryRecs, outRecs;
-    std::string varBlock, nodeBlock, pinBlock, linkBlock, entryBlock, outBlock;
+    std::vector<Rec> varRecs, compRecs, nodeRecs, pinRecs, linkRecs, entryRecs, outRecs;
+    std::string varBlock, compBlock, nodeBlock, pinBlock, linkBlock, entryBlock, outBlock;
     // VAR right after NAME/DESCRIPTION, ahead of NODE -- matching where a graph author naturally
     // writes it (declare what the graph remembers, then the nodes that read/write it) and where the
     // checked-in cross-language fixture (tests/formats/src/OcGraphTest.cpp's own VAR test) puts it.
@@ -375,6 +448,16 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         if (!v.defaultValue.empty()) line += " " + v.defaultValue;
         line += "\n";
         varRecs.push_back({v.name, line, false});
+    }
+    // COMP after VAR and before NODE: what the actor IS, then what it remembers, then what it does.
+    // The line is regenerated as `COMP id Kind` plus every attribute token verbatim, in the order
+    // the file had them -- see OcGraphComponent, and OcGraphNode::extraTokens for the identical
+    // reasoning about why reordering them would be a change to a file nobody asked to change.
+    for (const OcGraphComponent& comp : g.components) {
+        std::string line = "COMP " + comp.id + " " + comp.kind;
+        for (const std::string& extra : comp.extraTokens) line += " " + extra;
+        line += "\n";
+        compRecs.push_back({comp.id, line, false});
     }
     for (const OcGraphNode& node : g.nodes) {
         // Coordinates only if the node actually had them, then every token this implementation did
@@ -416,6 +499,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // The per-KIND blocks the fresh-write branch below emits are simply those records concatenated,
     // so there is exactly one place that knows how a record is formatted.
     for (const Rec& r : varRecs)   varBlock   += r.text;
+    for (const Rec& r : compRecs)  compBlock  += r.text;
     for (const Rec& r : nodeRecs)  nodeBlock  += r.text;
     for (const Rec& r : pinRecs)   pinBlock   += r.text;
     for (const Rec& r : linkRecs)  linkBlock  += r.text;
@@ -430,6 +514,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         out += nameLine;
         out += descLine;
         if (!varBlock.empty())  { out += "\n"; out += varBlock; }
+        if (!compBlock.empty()) { out += "\n"; out += compBlock; }
         if (!nodeBlock.empty()) { out += "\n"; out += nodeBlock; }
         if (!pinBlock.empty())  { out += "\n"; out += pinBlock; }
         if (!linkBlock.empty()) { out += "\n"; out += linkBlock; }
@@ -498,6 +583,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         const auto tok = [&](usize i) { return i < t.size() ? std::string(t[i]) : std::string(); };
         switch (k) {
         case OwnedLineKind::Var:
+        case OwnedLineKind::Comp:
         case OwnedLineKind::Node:  return tok(1);
         case OwnedLineKind::Pin:
         case OwnedLineKind::Link:
@@ -520,7 +606,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
 
     bool placedName = false, placedDesc = false;
     std::string out;
-    out.reserve(existing.size() + varBlock.size() + nodeBlock.size() + pinBlock.size() + linkBlock.size()
+    out.reserve(existing.size() + varBlock.size() + compBlock.size() + nodeBlock.size() + pinBlock.size() + linkBlock.size()
                 + entryBlock.size() + outBlock.size() + 64);
 
     for (usize i = 0; i < lines.size(); ++i) {
@@ -535,6 +621,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
             if (!placedDesc) { placedDesc = true; out += descLine; } // empty descLine = line removed
             break;
         case OwnedLineKind::Var:   claim(varRecs,   keyOf(kinds[i], lines[i]), out); break;
+        case OwnedLineKind::Comp:  claim(compRecs,  keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Node:  claim(nodeRecs,  keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Pin:   claim(pinRecs,   keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Link:  claim(linkRecs,  keyOf(kinds[i], lines[i]), out); break;
@@ -559,6 +646,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     if (!placedName) out += nameLine;
     if (!placedDesc && !descLine.empty()) out += descLine;
     appendUnused(varRecs);
+    appendUnused(compRecs);
     appendUnused(nodeRecs);
     appendUnused(pinRecs);
     appendUnused(linkRecs);

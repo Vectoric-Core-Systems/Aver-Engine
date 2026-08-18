@@ -301,6 +301,117 @@ static void testForwardReferencedEntryAndOut() {
           "the same holds for OUT");
 }
 
+static void testComponentTree() {
+    AVER_INFO("=== COMP records describe a class graph's component tree ===");
+    using namespace fmt;
+
+    // The shape this record exists for: a character whose body, held weapon, muzzle point and
+    // camera are four things at four transforms. Before COMP, a CLASS graph could describe
+    // exactly one of them, through `mesh=` on the CLASS line.
+    const std::string text =
+        "OCGRAPH 1\n"
+        "NAME FPCharacter\n"
+        "CLASS FPCharacter Character\n"
+        "COMP body Mesh mesh=Content/Meshes/Body.ocmesh material=M_Body\n"
+        "COMP gun Mesh parent=body mesh=Content/Meshes/Blaster.ocmesh pos=12,0,-8\n"
+        "COMP muzzle Scene parent=gun pos=0,40,0\n"
+        "COMP eye Camera parent=body pos=0,0,70 fov=90\n"
+        "NODE tick OnTick\n"
+        "ENTRY tick OnTick\n";
+
+    OcGraphData g;
+    std::string err;
+    check(parseOcgraph(text, g, &err), "a graph with a component tree parses");
+    check(g.components.size() == 4, "all four components were captured");
+    check(g.components[0].id == "body" && g.components[0].kind == "Mesh", "id and kind are read");
+    check(componentAttr(g.components[1], "parent") == "body", "the gun hangs off the body");
+    check(componentAttr(g.components[2], "parent") == "gun", "the muzzle hangs off the gun");
+    check(componentAttr(g.components[3], "fov") == "90", "a kind-specific attribute survives as a token");
+    check(componentAttr(g.components[0], "parent").empty(),
+          "a component with no parent= reports none, rather than some placeholder root id");
+    check(componentAttr(g.components[0], "nothing").empty(), "an absent key reads empty");
+
+    // ROUND TRIP IS BYTE-FOR-BYTE, which is the whole reason attributes ride in extraTokens
+    // verbatim instead of becoming struct fields: `pos=12,0,-8` is not re-serialised from three
+    // floats, so it cannot come back as `pos=12.000000,0.000000,-8.000000`, and `mesh=` before
+    // `pos=` on one line and after it on another both survive.
+    check(writeOcgraph(g, text) == text, "a load/save round trip changes nothing");
+
+    // AN EDIT KEEPS THE KEY WHERE ITS AUTHOR PUT IT. Appending instead would reflow every line an
+    // editor ever touched, which is the same complaint the record-order work already answered.
+    OcGraphComponent c = g.components[1];
+    setComponentAttr(c, "pos", "0,0,0");
+    check(c.extraTokens.size() == 3 && c.extraTokens[2] == "pos=0,0,0",
+          "an existing key is replaced in place, not appended");
+    setComponentAttr(c, "scale", "2,2,2");
+    check(c.extraTokens.size() == 4 && c.extraTokens[3] == "scale=2,2,2", "a new key appends");
+    setComponentAttr(c, "material", "");
+    check(componentAttr(c, "material").empty() && c.extraTokens.size() == 4,
+          "an empty value REMOVES the attribute rather than leaving `material=` behind");
+
+    // A parent may be declared BELOW its child, the same forward reference LINK and ENTRY allow.
+    OcGraphData fwd;
+    std::string fwdErr;
+    check(parseOcgraph("OCGRAPH 1\nCOMP gun Mesh parent=body\nCOMP body Mesh\n", fwd, &fwdErr),
+          "a component may name a parent declared later in the file");
+
+    // THE TWO STRUCTURAL RULES THIS LAYER OWNS. A typo'd parent silently reparents a gun to the
+    // world origin, and a cycle is not a tree -- the spawn walk that builds child entities from
+    // this would not return.
+    OcGraphData bad;
+    std::string badErr;
+    check(!parseOcgraph("OCGRAPH 1\nCOMP gun Mesh parent=ghost\n", bad, &badErr),
+          "a parent that names nothing is refused");
+    check(badErr.find("ghost") != std::string::npos, "and the error names it");
+
+    OcGraphData cyc;
+    std::string cycErr;
+    check(!parseOcgraph("OCGRAPH 1\nCOMP a Scene parent=b\nCOMP b Scene parent=a\n", cyc, &cycErr),
+          "two components naming each other are refused as a cycle");
+    check(cycErr.find("cycle") != std::string::npos, "and the error says so");
+
+    OcGraphData self;
+    std::string selfErr;
+    check(!parseOcgraph("OCGRAPH 1\nCOMP a Scene parent=a\n", self, &selfErr),
+          "a component parented to itself is the same cycle, caught the same way");
+
+    OcGraphData dup;
+    std::string dupErr;
+    check(!parseOcgraph("OCGRAPH 1\nCOMP a Scene\nCOMP a Mesh\n", dup, &dupErr),
+          "a duplicate component id is refused, as a duplicate NODE id already is");
+
+    OcGraphData shortRec;
+    std::string shortErr;
+    check(!parseOcgraph("OCGRAPH 1\nCOMP lonely\n", shortRec, &shortErr),
+          "COMP without a kind is refused");
+
+    // A FRESH WRITE puts components between the variables and the nodes -- what the actor IS,
+    // then what it remembers, then what it does.
+    OcGraphData built;
+    built.name = "Made";
+    built.variables.push_back({"hp", "float", "100"});
+    OcGraphComponent made;
+    made.id = "root";
+    made.kind = "Mesh";
+    made.extraTokens.push_back("mesh=x.ocmesh");
+    built.components.push_back(made);
+    built.nodes.push_back({"tick", "OnTick", 0.0, 0.0, false, {}, {}});
+    const std::string fresh = writeOcgraph(built, "");
+    const usize varAt = fresh.find("VAR hp");
+    const usize compAt = fresh.find("COMP root");
+    const usize nodeAt = fresh.find("NODE tick");
+    check(varAt != std::string::npos && compAt != std::string::npos && nodeAt != std::string::npos,
+          "a fresh write emits all three record kinds");
+    check(varAt < compAt && compAt < nodeAt, "in the order VAR, COMP, NODE");
+
+    // And a fresh write reparses, which is the only claim that matters about a writer.
+    OcGraphData reread;
+    std::string rereadErr;
+    check(parseOcgraph(fresh, reread, &rereadErr) && reread.components.size() == 1 &&
+          componentAttr(reread.components[0], "mesh") == "x.ocmesh",
+          "and what it wrote parses back to the same component");
+}
+
 static void testForwardReferencedLinkAndPin() {
     AVER_INFO("=== LINK/PIN may name a node declared later in the file ===");
     using namespace fmt;
@@ -870,6 +981,7 @@ int main(int argc, char** argv) {
     testVarRecordsSurviveRoundTrip();
     testForwardReferencedEntryAndOut();
     testForwardReferencedLinkAndPin();
+    testComponentTree();
     testInterleavedRecordsStayPut();
     testLineEndingsSurvive();
     testDeterministic();

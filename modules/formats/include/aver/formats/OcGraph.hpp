@@ -98,6 +98,50 @@ struct OcGraphVariable {
     std::string defaultValue; // the literal text after `type`; empty = record carried no 3rd token
 };
 
+// One entry in a class graph's COMPONENT TREE: `COMP <id> <Kind> [key=value]...`.
+//
+// WHAT THIS IS FOR. A graph that carries a CLASS record is a spawnable actor class -- the Aver
+// Node analogue of a Blueprint asset. Until this record existed, such a class could describe
+// exactly ONE piece of scene content, through `mesh=` on the CLASS line, applied to the class's
+// own entity. A first-person character is a body, a held weapon, a muzzle point and a camera --
+// four things at four transforms -- and the format could say one of them. COMP is the tree that
+// says the rest: each record is one child entity, positioned relative to its parent, carrying
+// one kind of scene component.
+//
+// KIND IS AN OPAQUE STRING HERE, deliberately, exactly as OcGraphVariable::type is. The mapping
+// from a kind name to a scene component id (aver::scene::kComponentMeshRenderer and friends)
+// lives on the side that actually spawns -- scripting/csharp/Aver.Graph plus the framework's
+// component ABI -- and duplicating that table here would let the two disagree about what a valid
+// component is. This layer asks only for an id and a kind token.
+//
+// EVERYTHING ELSE IS A key=value IN extraTokens, VERBATIM AND IN ORDER, which is the same choice
+// OcGraphNode::extraTokens makes and for the stronger version of the same reason. A component's
+// interesting attributes are kind-specific -- `mesh=` on a Mesh, `fov=` on a Camera, `effect=` on
+// Particles -- so a struct with a field per attribute would either be a union of every kind that
+// will ever exist or would silently drop the ones it had not heard of. Reading and editing them
+// goes through componentAttr/setComponentAttr below, which keeps an edited key in the slot its
+// author put it in, so opening a hand-written graph and saving it does not reflow the line.
+//
+// `parent=` is one of those key=values and not a modelled field, for the same reason -- but it is
+// the one this layer validates (see parseOcgraph's post-pass): a parent must name another COMP,
+// and the chain must terminate, because a cycle is not a tree and the spawn walk would not return.
+struct OcGraphComponent {
+    std::string id;    // unique within the graph's components
+    std::string kind;  // e.g. "Scene" | "Mesh" | "Light" | "Camera" -- not validated here
+    std::vector<std::string> extraTokens;
+};
+
+// Reads a `key=value` attribute off a component. Returns an empty view when the key is absent,
+// which is indistinguishable from `key=` with an empty value -- a distinction nothing needs, and
+// pretending to make it would mean an optional<string> at every call site.
+std::string_view componentAttr(const OcGraphComponent& c, std::string_view key);
+
+// Sets `key=value`, REPLACING IN PLACE when the key is already present so the line keeps its
+// author's token order, appending at the end otherwise. An empty `value` REMOVES the attribute,
+// which is what an editor clearing a field should produce -- writing `key=` instead would leave a
+// token whose meaning is "present but blank", and no reader of this format wants that third state.
+void setComponentAttr(OcGraphComponent& c, std::string_view key, std::string_view value);
+
 // A complete visual scripting graph.
 struct OcGraphData {
     int version = 1;
@@ -126,6 +170,15 @@ struct OcGraphData {
     // very same testVarRecordsSurviveRoundTrip, now asserting real fields on the parsed struct instead
     // of only asserting the raw text survived.
     std::vector<OcGraphVariable> variables;
+
+    // Declared via top-level `COMP <id> <Kind> [key=value]...` records, in file order. See
+    // OcGraphComponent above for what a component IS and why its attributes are opaque tokens.
+    //
+    // FILE ORDER IS NOT TREE ORDER and this vector does not sort itself into one. A component may
+    // name a parent declared below it -- the same forward reference LINK and ENTRY already allow --
+    // so anything walking this as a tree resolves parents by id rather than assuming a parent
+    // precedes its children.
+    std::vector<OcGraphComponent> components;
 
     // Which pins the graph HANDS BACK when it runs: `OUT <nodeId> <pinName>`, in order.
     //

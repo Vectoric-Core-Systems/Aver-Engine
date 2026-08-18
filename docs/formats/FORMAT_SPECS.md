@@ -468,6 +468,7 @@ OUT result result
 | `NAME` | `NAME <name>` | Single token, no spaces. Empty/absent writes back as `untitled`. |
 | `DESCRIPTION` | `DESCRIPTION <rest of line>` | Free text, taken from the **raw** line, not the comment-truncated one — a literal `#` inside a description is data, not a comment marker (both readers agree on this; it was a real bug in the C++ reader, fixed once both sides used the same rule). |
 | `CLASS` | `CLASS <name> [parentName] [mesh=<path>] [material=<name>] [view=firstperson\|thirdperson]` | Optional; **at most one per file** (a second `CLASS` line is a parse error). Declares the graph itself a spawnable actor class. `parentName` defaults to `"Actor"` when omitted. `mesh=`/`material=` become the class's own default `CMeshRenderer`, not a per-tick write. `view=` (for `Character`-parented classes only) sets `CameraViewMode` on the spawned instance; omitted or meaningless when the class's native ancestor is not `AverCharacter`. |
+| `COMP` | `COMP <id> <Kind> [parent=<id>] [pos=x,y,z] [rot=p,y,r] [scale=x,y,z] [key=value ...]` | One entry in a class graph's **component tree** — one child entity of a spawned instance. `Kind` ∈ `Scene`\|`Mesh`\|`Light`\|`Camera`\|`SkeletalMesh`\|`Particles`. `parent=` names another `COMP` (absent = attached to the actor's own entity) and **may name one declared later in the file**; the C++ reader refuses a parent that names nothing, a duplicate id, and a parent *cycle*, which is the one structural rule a tree needs and a single left-to-right pass cannot check. Transform is centimetres, degrees (pitch/yaw/roll), and a scale multiplier defaulting to `1,1,1` — an axis that does not parse keeps its default rather than becoming zero, so a half-typed `scale=2,,2` cannot flatten an actor. Every other `key=value` is **kind-specific** and opaque to the format: `mesh=`/`material=` on a `Mesh`, `fov=`/`near=`/`far=` on a `Camera`, `effect=` on `Particles`. This is what `mesh=` on the `CLASS` line was a single-slot stand-in for; the two coexist, and `CLASS mesh=` still applies to the actor's own entity. |
 | `PARAM` | `PARAM <name> <type>` | Declares one argument the compiled graph accepts, in declaration order. `type` ∈ `float`\|`int`\|`bool` — `exec` is rejected at parse time with an explicit error (a parameter is data, not control flow). |
 | `VAR` | `VAR <name> <type> [default]` | Declares one variable the graph remembers between ticks (see [`VISUAL_SCRIPTING.md` §4](../VISUAL_SCRIPTING.md) for the storage/lifetime contract). Same three types as `PARAM`, same `exec` rejection. An unparseable `[default]` falls back to the type's zero value rather than failing the graph. |
 | `ENTRY` | `ENTRY <nodeId> <eventName>` | Declares which node begins the exec chain for a named event (`OnStart`, `OnTick`, or any project-invented name). The node may be of any type — `ENTRY` is what makes it a starting point, not the node's own type. |
@@ -530,23 +531,26 @@ safely round-trip. Known divergences, in the order a hand-editor is likely to hi
   actually compiles and runs a graph — rejects anything but `1` outright (`"Unsupported OCGRAPH
   version {version}"`). A file the C++ editor opens and saves without complaint can still fail to
   load at runtime if its header says anything other than `OCGRAPH 1`.
-- **Forward-reference ordering — a real one, not a hypothetical.** The C++ reader is a single
-  left-to-right pass: `LINK`, `ENTRY` and `OUT` each check their named node against the nodes parsed
-  *so far*, and fail — `"ENTRY references non-existent node: …"` — if the node has not appeared yet.
-  The C# reader defers that check to `Graph.Validate()`, run only after the whole file is read, so it
-  tolerates a node referenced before it is declared. This is not a theoretical divergence:
-  `test-content/GraphDemo/Content/Scripts/IdleMotion.ocgraph` — this repository's own worked example
-  — writes `ENTRY seed OnStart` *before* `NODE seed OnStart`, and `ENTRY tick OnTick` before `NODE
-  tick OnTick` (both entry points, both nodes declared later than the `ENTRY` line naming them). The
-  C# side loads and runs this file without complaint — confirmed by actually running it (see
-  [`VISUAL_SCRIPTING.md` §7](../VISUAL_SCRIPTING.md)) — and the C++ side really does reject it:
-  `build/bin/OcGraphTest.exe --roundtrip Content/Scripts/IdleMotion.ocgraph` (the C++ reader's own
-  test binary, exercising the identical `parseOcgraph` call the node editor's own load path uses —
-  `GraphEditor.cpp:106`) fails with exactly `parse: ENTRY references non-existent node: seed`. This
-  is a confirmed, reproduced interoperability gap between this repository's own flagship worked
-  example and its C++ reader, not a theoretical one — the node editor cannot open
-  `IdleMotion.ocgraph` today. (Both readers require a `NODE` line to precede any `PIN` line for that
-  node — that part agrees.)
+- **Forward-reference ordering — FIXED, and worth reading as a lesson about this document.** Every
+  record that names a node (`ENTRY`, `OUT`, `LINK`, `PIN`) may now name one declared later in the
+  file, in both readers. The C++ reader was a single left-to-right pass that checked each reference
+  against the nodes parsed *so far*; the C# reader deferred the same check until the whole file was
+  read. The divergence was never theoretical — it meant the node editor could not open
+  `test-content/GraphDemo/Content/Scripts/IdleMotion.ocgraph`, this repository's own worked example,
+  because it writes `ENTRY seed OnStart` above `NODE seed OnStart`, which is how every real graph
+  here is written.
+
+  It was fixed in two goes, and the gap between them is the point. `ENTRY` and `OUT` were deferred
+  first; `LINK` and `PIN` kept their inline checks, so a graph that branches and *rejoins* — writing
+  `LINK a.then merge.exec` above the section declaring `NODE merge` — was still refused. That is the
+  FirstPerson template's own character graph, which the C# runtime parses fine, so the template RAN
+  and only the editor could not open its largest file. It shipped in 0.3.0 that way and was found by
+  opening it.
+
+  **Writing a bug down here is not the same as deciding it.** This entry described the ordering gap
+  accurately for months, as a known divergence rather than a defect, and being documented is exactly
+  what let it survive being obviously wrong. A row in this table that says two readers disagree is a
+  bug report, not a specification.
 - **Duplicate node IDs.** A second `NODE` line reusing an already-seen `id` is a parse error in the
   C++ reader. The C# reader has no such check — it silently overwrites the dictionary entry, and any
   `PIN` line that arrived between the two `NODE` lines stays attached to the now-orphaned first node

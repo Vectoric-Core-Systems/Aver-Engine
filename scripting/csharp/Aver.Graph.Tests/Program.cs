@@ -175,6 +175,11 @@ static int Main()
         // per-instance binding live in Aver.Scripting.Bridge, unreachable from this bare process; see
         // GraphClassRecordTests.cs's own header comment).
         failures += GraphClassRecordTests.RunAll();
+        // The COMPONENT TREE half of graph-as-class: what a spawned instance is MADE of, where
+        // the CLASS record above says what it IS. See ComponentTreeTests.cs's own header for why
+        // these are parse-level and deliberately do not re-test the structural rules the C++
+        // reader owns.
+        failures += ComponentTreeTests.RunAll();
 
         // GAP 3: FireEvent -- cross-entity events. The router (Aver.Graph.GraphEvents) lives in THIS
         // assembly, so unlike every prior GraphInterop wrapper's own tests, the reentrancy-guard tests
