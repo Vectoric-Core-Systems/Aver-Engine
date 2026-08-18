@@ -489,6 +489,11 @@ public class GraphCompiler
                 EmitInputKey(node);
                 break;
 
+            case "inputkeypressed":
+            case "inputkeyreleased":
+                EmitInputKeyEdge(node);
+                break;
+
             case "raycast":
                 EmitRaycast(node);
                 break;
@@ -1205,6 +1210,25 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, InputKeyMethod);
 
         if (_pinLocals.TryGetValue((node.Id, "down"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+    }
+
+    /// InputKeyPressed / InputKeyReleased: the rising and falling EDGE of a key, from the framework
+    /// ABI entry points that already answer exactly that. Identical shape to EmitInputKey above --
+    /// one int in, one bool out -- with the node type choosing which of the two calls to make.
+    ///
+    /// The output pin is `triggered`, not `down`, and the difference is the whole point: `down` is
+    /// a state and this is an EVENT. A graph reading `triggered` on a key held for a second gets one
+    /// true and fifty-nine falses, which is what jumping, firing and toggling all actually want.
+    private void EmitInputKeyEdge(Node node)
+    {
+        if (_il == null) return;
+
+        LoadPin(node.Id, "key");
+        _il.Emit(OpCodes.Call, node.Type.ToLowerInvariant() == "inputkeyreleased"
+                                   ? InputKeyReleasedMethod : InputKeyPressedMethod);
+
+        if (_pinLocals.TryGetValue((node.Id, "triggered"), out var local))
             _il.Emit(OpCodes.Stloc, local);
     }
 
@@ -2730,6 +2754,10 @@ public class GraphCompiler
             }
             case "inputkey":
                 EmitPullInput(source, "key"); _il.Emit(OpCodes.Call, InputKeyMethod); return;
+            case "inputkeypressed":
+                EmitPullInput(source, "key"); _il.Emit(OpCodes.Call, InputKeyPressedMethod); return;
+            case "inputkeyreleased":
+                EmitPullInput(source, "key"); _il.Emit(OpCodes.Call, InputKeyReleasedMethod); return;
             case "select":
             {
                 // Mirrors EmitSelect's own branch shape, but PULLED (recursive, uncached) rather than
@@ -3089,6 +3117,15 @@ public class GraphCompiler
     private static readonly MethodInfo InputKeyMethod =
         typeof(Fw).GetMethod("aver_fw_input_key", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.Fw.aver_fw_input_key was not found by reflection");
+    // The edge-triggered pair beside aver_fw_input_key above. Separate ABI entry points rather
+    // than a flag on one, because that is how the framework exposes them and inventing a
+    // three-way selector here would put a second definition of "pressed" in the graph compiler.
+    private static readonly MethodInfo InputKeyPressedMethod =
+        typeof(Fw).GetMethod("aver_fw_input_key_pressed", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.Fw.aver_fw_input_key_pressed was not found by reflection");
+    private static readonly MethodInfo InputKeyReleasedMethod =
+        typeof(Fw).GetMethod("aver_fw_input_key_released", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.Fw.aver_fw_input_key_released was not found by reflection");
     private static readonly MethodInfo RaycastMethod =
         typeof(GraphInterop).GetMethod("RaycastForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.RaycastForGraph was not found by reflection");

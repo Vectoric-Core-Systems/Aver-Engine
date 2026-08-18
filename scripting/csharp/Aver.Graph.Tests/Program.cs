@@ -180,6 +180,9 @@ static int Main()
         // these are parse-level and deliberately do not re-test the structural rules the C++
         // reader owns.
         failures += ComponentTreeTests.RunAll();
+        // InputKeyPressed / InputKeyReleased -- the EDGE of a key, where InputKey gives the
+        // STATE. See EdgeInputNodeTests.cs for why the symbol name is the assertion.
+        failures += EdgeInputNodeTests.RunAll();
 
         // GAP 3: FireEvent -- cross-entity events. The router (Aver.Graph.GraphEvents) lives in THIS
         // assembly, so unlike every prior GraphInterop wrapper's own tests, the reentrancy-guard tests

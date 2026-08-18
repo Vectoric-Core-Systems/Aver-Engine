@@ -224,6 +224,16 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    numeric value from Aver.Framework's Key enum. --
     t.push_back({"InputKey", "Input Key", "Input", {
         pin("key", "int", false), pin("down", "bool", true)}});
+    // -- InputKeyPressed / InputKeyReleased: the EDGE, where InputKey above gives the STATE.
+    //    `down` is true every frame a key is held, which is the wrong answer for jumping, firing
+    //    a semi-auto, or toggling anything -- all of which fire once per press. Building that from
+    //    InputKey needs a DoOnce and a variable per key; the framework ABI has answered it
+    //    directly all along (aver_fw_input_key_pressed / _released). The output pin is named
+    //    `triggered` rather than `down` because it is an EVENT and not a state. --
+    t.push_back({"InputKeyPressed", "Input Key Pressed", "Input", {
+        pin("key", "int", false), pin("triggered", "bool", true)}});
+    t.push_back({"InputKeyReleased", "Input Key Released", "Input", {
+        pin("key", "int", false), pin("triggered", "bool", true)}});
     // -- Select: pick one of two values by a bool. Pure data, no exec pins. In the PULL compiler BOTH
     //    arms are computed regardless of cond -- see GraphCompiler.EmitSelect, which explains why
     //    that is correct and not a missing short-circuit. --

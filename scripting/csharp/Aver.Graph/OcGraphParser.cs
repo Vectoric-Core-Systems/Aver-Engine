@@ -1151,6 +1151,24 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "down", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // ---- edge-triggered input --------------------------------------------------------
+            // THE HALF InputKey CANNOT EXPRESS. `down` answers "is it held", which is the wrong
+            // question for most of what a graph does with a key: jumping, firing a semi-auto,
+            // toggling a light, opening a menu. Held-means-true fires those every frame the key is
+            // down, so a graph author's only recourse was a hand-built DoOnce-and-a-variable
+            // rising-edge detector -- five nodes for a thing the framework ABI has always
+            // answered directly (aver_fw_input_key_pressed / _released, which is what
+            // Input.GetKeyDown/GetKeyUp already wrap for C#).
+            //
+            // Same pin shape as inputkey, and no exec pins for the same reason: the answer is
+            // computed from this frame's and last frame's state, so asking twice within one frame
+            // gives the same answer and there is nothing to cache.
+            case "inputkeypressed":
+            case "inputkeyreleased":
+                node.Pins.Add(new Pin { Name = "key", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "triggered", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
             case "raycast":
                 // UNLIKE Select/InputKey, Raycast DOES get exec pins by default: it is a real (if
                 // read-only) native query, and the PUSH compiler wants to run it exactly once per

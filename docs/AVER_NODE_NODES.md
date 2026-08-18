@@ -143,6 +143,19 @@ on the `Pin` object.
 | `Divide` *(alias `div`)* | `a` (in, float), `b` (in, float), `result` (out, float) | — | D | `a / b`. |
 | `Sin` | `a` (in, float), `result` (out, float) | — | D | `sin(a)`, radians. |
 | `Cos` | `a` (in, float), `result` (out, float) | — | D | `cos(a)`, radians. |
+| `Min` | `a`, `b` (in, float), `result` (out, float) | — | D | `min(a, b)`. |
+| `Max` | `a`, `b` (in, float), `result` (out, float) | — | D | `max(a, b)`. |
+| `Mod` *(alias `modulo`)* | `a`, `b` (in, float), `result` (out, float) | — | D | IL `Rem` — the C# `%`, so the sign follows the dividend. |
+| `Pow` | `a`, `b` (in, float), `result` (out, float) | — | D | `a` to the power `b`. |
+| `Abs` | `a` (in, float), `result` (out, float) | — | D | `|a|`. |
+| `Negate` *(alias `neg`)* | `a` (in, float), `result` (out, float) | — | D | `-a`. |
+| `Sqrt` | `a` (in, float), `result` (out, float) | — | D | Square root. Negative input gives `NaN`, unlike `Divide` — see below. |
+| `Floor` | `a` (in, float), `result` (out, float) | — | D | Round toward negative infinity. |
+| `Ceil` *(alias `ceiling`)* | `a` (in, float), `result` (out, float) | — | D | Round toward positive infinity. |
+| `Round` | `a` (in, float), `result` (out, float) | — | D | `Math.Round` — **banker's rounding**, so 0.5 goes to 0 and 1.5 goes to 2. |
+| `Saturate` | `a` (in, float), `result` (out, float) | — | D | `clamp(a, 0, 1)`, spelled with the same Min/Max `Clamp` uses. |
+| `Clamp` | `a`, `min`, `max` (in, float), `result` (out, float) | — | D | `min(max(a, min), max)`. |
+| `Lerp` | `a`, `b`, `t` (in, float), `result` (out, float) | — | D | `a + (b - a) * t`. **Not clamped** — `t` outside 0..1 extrapolates. |
 
 `Divide`'s zero handling is a deliberate, non-IEEE convention: `b == 0.0` yields `0.0`, never
 `NaN`/`Infinity` (`GraphCompiler.cs:910-919`, `EmitDivide`'s own comment). A bare float divide
@@ -151,6 +164,13 @@ as an object that vanished or exploded, nowhere near the divide that caused it �
 transform pipeline can keep running through. If a graph genuinely needs to detect the
 divide-by-zero condition, there is no signal for it; a `compare-vs-self` `NaN` check would never
 fire, because the result is never `NaN` in the first place.
+
+`Sqrt`, `Pow`, `Floor`, `Ceil` and `Round` are the same shape as `Sin`/`Cos` below: a widen to
+`double` for the `System.Math` call and a narrow back. **`Sqrt` does not inherit `Divide`'s
+no-`NaN` convention** — `sqrt(-1)` really is `NaN` and really does propagate. That inconsistency is
+deliberate rather than overlooked: `Divide` special-cases zero because dividing by a value that
+happens to reach zero is a normal thing for a transform pipeline to do, while taking the root of a
+negative number is a graph that has already computed something wrong.
 
 `Sin`/`Cos` widen to `double` for the `System.Math` call and narrow back — both directions are
 explicit `Conv_R8`/`Conv_R4` IL, called out in `EmitSin`'s own comment as a lesson already paid for
@@ -163,14 +183,30 @@ converting the value).
 |---|---|---|---|---|
 | `Compare` *(alias `compare_f32`)* | `a` (in, float), `b` (in, float), `result` (out, bool) | — | D | `a > b`, strict, via IL `Cgt` (`GraphCompiler.cs:611-624`). |
 | `Select` | `cond` (in, bool), `ifTrue` (in, float), `ifFalse` (in, float), `result` (out, float) | — | D | Picks `ifTrue` or `ifFalse` by `cond`. |
+| `And` | `a`, `b` (in, bool), `result` (out, bool) | — | D | Both. IL `And` — bools are `0`/`1` on the stack, so the bitwise op *is* the logical one. |
+| `Or` | `a`, `b` (in, bool), `result` (out, bool) | — | D | Either. |
+| `Xor` | `a`, `b` (in, bool), `result` (out, bool) | — | D | Exactly one. |
+| `Not` | `a` (in, bool), `result` (out, bool) | — | D | `a == 0`, **not** a bitwise complement — `~1` is `-2`, which is truthy everywhere it would later be tested. |
+| `Greater` | `a`, `b` (in, float), `result` (out, bool) | — | D | `a > b`. Same op as `Compare`, under the name a reader looks for. |
+| `GreaterEqual` | `a`, `b` (in, float), `result` (out, bool) | — | D | `a >= b`, as `!(a < b)` — CIL has no `Cge`. |
+| `Less` | `a`, `b` (in, float), `result` (out, bool) | — | D | `a < b`. |
+| `LessEqual` | `a`, `b` (in, float), `result` (out, bool) | — | D | `a <= b`, as `!(a > b)`. |
+| `Equal` | `a`, `b` (in, float), `result` (out, bool) | — | D | `a == b`. Exact float equality — see below. |
+| `NotEqual` | `a`, `b` (in, float), `result` (out, bool) | — | D | `a != b`, as `!(a == b)`. |
 
-**There is no `>=`, `==`, `<`, and no boolean combinator (`And`/`Or`/`Not`) node at all** — grepped
-across both compile files, zero matches. `Compare` is the only comparison this vocabulary has.
-`IdleMotion.ocgraph`'s own comment notes exactly this gap in the course of explaining why it chose
-`OnStart` over a first-tick branch instead: *"There is no NOT node in the vocabulary today either,
-which would have made the branch form awkward as well as unnecessary"* (`IdleMotion.ocgraph:23-24`).
-A graph that needs `a >= b` today has to build it from `Compare` plus `Select`/`Branch`, or swap
-operand order for the cases that reduce to a strict `>`.
+**`Compare` used to be the only comparison in this vocabulary, and there were no boolean
+combinators at all.** `IdleMotion.ocgraph`'s own comment records the cost of that in the course of
+explaining why it chose `OnStart` over a first-tick branch: *"There is no NOT node in the
+vocabulary today either, which would have made the branch form awkward as well as unnecessary"*
+(`IdleMotion.ocgraph:23-24`). The full set above closes that gap. `Compare` is unchanged and still
+means `a > b`; `Greater` is a separate node type that does the same thing under the name a
+reader looks for, so no existing graph had to be rewritten.
+
+`Equal`/`NotEqual` compare floats **exactly**, with IL `Ceq`. There is no epsilon and no plan for
+one: a tolerance small enough to be safe is too small to help, and one large enough to help is a
+silent behaviour change in every graph that already worked. A graph comparing computed floats
+should subtract, `Abs`, and `Less` against its own chosen epsilon — which is three nodes that say
+what they mean, rather than one that hides the choice.
 
 `Select`'s PULL-compiler behaviour is a genuine, deliberate asymmetry worth knowing: `Compile()`
 computes **both** `ifTrue` and `ifFalse` regardless of `cond` (both upstream subgraphs already ran
@@ -247,10 +283,19 @@ into a second node pair is how a three-float value crosses the format at all, ra
 | `MouseDelta` | `exec` (in), `then` (out), `deltaX`/`deltaY`/`wheel` (out, float) | — | W | One frame's mouse movement and wheel delta. |
 | `MoveAxis` | `exec` (in), `then` (out), `forward`/`right` (out, float) | — | W | Polled forward/right movement axis (WASD-style). |
 | `InputKey` | `key` (in, int), `down` (out, bool) | — | D | Whether a given key code is currently held. |
+| `InputKeyPressed` | `key` (in, int), `triggered` (out, bool) | — | D | True only on the frame the key went **down**. |
+| `InputKeyReleased` | `key` (in, int), `triggered` (out, bool) | — | D | True only on the frame the key came **up**. |
 
 `MoveAxis` has no `z` pin — `Input.MoveAxis`'s own Z component is hardcoded `0` in
 `Aver.Framework/Input.cs`, so a pin that could only ever read a compile-time constant would add
 noise, not information (`OcGraphParser.cs:883-886`).
+
+**`InputKey` answers a STATE and the other two answer an EVENT**, and the output pin names say so:
+`down` versus `triggered`. `down` is true every frame a key is held, which is the wrong answer for
+jumping, firing a semi-auto, or toggling anything — all of which want one true per press. Before
+`InputKeyPressed` existed, building that meant a `DoOnce` and a variable per key, while the
+framework ABI (`aver_fw_input_key_pressed` / `_released`, what `Input.GetKeyDown`/`GetKeyUp` wrap
+for C#) had answered it directly all along.
 
 `InputKey` is the odd one out in this category: no exec pins, `D` path, freely pullable from either
 compiler. Reading one polled key is idempotent — it returns the same answer however often it's
@@ -292,9 +337,26 @@ See trap #3 above for the editor-palette pin-type gap this node shares with `Get
 | `Sequence` | `exec` (in), `then0` (out), `then1` (out), `fireLog` (out, int) | — | X | Fires each exec output in order. |
 | `While` | `exec` (in), `cond` (in, bool), `loop` (out), `done` (out), `iterations` (out, int) | — | X | Loops `loop` while `cond` holds; `cond` is re-checked every pass. |
 | `ForEach` | `exec` (in), `count` (in, int), `loop` (out), `index` (out, int), `done` (out) | — | X | Counted-repeat loop, `count` times. |
+| `DoOnce` | `exec` (in), `reset` (in, bool), `then` (out) | — | X | Fires `then` the first time only. A true `reset` re-arms it. |
+| `Gate` | `exec` (in), `open` (in, bool), `close` (in, bool), `then` (out) | — | X | Passes exec through only while open. Starts **closed**, like Blueprint's own Gate. |
+| `FlipFlop` | `exec` (in), `a` (out), `b` (out), `isA` (out, bool) | — | X | Alternates between `a` and `b`, starting with `a`. |
 | `OnStart` | `exec` (out) | — | X | Entry point: fires once. |
 | `OnTick` | `exec` (out) | — | X | Entry point: fires every tick after `OnStart` has fired. |
 | `OnHit` | `exec` (out) | — | X | Entry point: fires only when something calls `GraphHost.Fire("OnHit", …)`. |
+
+**`DoOnce`, `Gate` and `FlipFlop` REMEMBER something between activations**, which no other node
+here does — `Branch` and `Sequence` decide from their inputs alone. That memory lives in the same
+per-instance `GraphVarStore` a `VAR` uses, under a reserved name built from the node id (`$flow$`
+plus the id, and a `VAR` name cannot contain `$`), so two entities running one graph file gate
+independently. **A graph that declares no `VAR` records has no store at all**, and these three
+refuse to compile in one with a message naming the node: declare any variable to give it one.
+
+`Gate`'s `open`/`close` are **bool inputs, not exec pins**. An exec input can be driven by many
+sources, so three separate exec entries would make "which one fired" unanswerable inside a single
+activation. Both are sampled every activation and applied before the test, so opening and firing in
+one activation works; `close` is applied after `open`, so a graph wiring both true ends closed —
+one stated rule rather than an order that depends on which link the parser read first. `DoOnce`'s
+`reset` is a bool for the same reason.
 
 What actually makes any of `OnStart`/`OnTick`/`OnHit` run is a top-level `ENTRY <nodeId>
 <eventName>` record, not the node's type — the node type is just a labelled, no-input starting
