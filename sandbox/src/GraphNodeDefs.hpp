@@ -112,7 +112,39 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     // -- trig: a in; result out (both concurrent-workflow additions, one line each) --
     t.push_back({"Sin", "Sin", "Math", {pin("a", "float", false), pin("result", "float", true)}});
     t.push_back({"Cos", "Cos", "Math", {pin("a", "float", false), pin("result", "float", true)}});
+    // -- math: the standard library a graph could not previously express ------------
+    // Every one of these is a PURE VALUE node: no exec pins, so it composes into either
+    // compiler. The names are the .ocgraph node types verbatim -- the palette writes what
+    // the parser reads, and a mismatch here produces a node that saves and never loads.
+    t.push_back({"Min", "Min", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
+    t.push_back({"Max", "Max", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
+    t.push_back({"Mod", "Modulo", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
+    t.push_back({"Pow", "Power", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
+    t.push_back({"Abs", "Absolute", "Math", {pin("a", "float", false), pin("result", "float", true)}});
+    t.push_back({"Negate", "Negate", "Math", {pin("a", "float", false), pin("result", "float", true)}});
+    t.push_back({"Sqrt", "Square Root", "Math", {pin("a", "float", false), pin("result", "float", true)}});
+    t.push_back({"Floor", "Floor", "Math", {pin("a", "float", false), pin("result", "float", true)}});
+    t.push_back({"Ceil", "Ceiling", "Math", {pin("a", "float", false), pin("result", "float", true)}});
+    t.push_back({"Round", "Round", "Math", {pin("a", "float", false), pin("result", "float", true)}});
+    t.push_back({"Saturate", "Saturate (0..1)", "Math", {pin("a", "float", false), pin("result", "float", true)}});
+    t.push_back({"Clamp", "Clamp", "Math", {pin("a", "float", false), pin("min", "float", false), pin("max", "float", false), pin("result", "float", true)}});
+    t.push_back({"Lerp", "Lerp", "Math", {pin("a", "float", false), pin("b", "float", false), pin("t", "float", false), pin("result", "float", true)}});
     // -- logic --
+    // BOOLEAN OPERATORS, which this vocabulary did not have at all. Without them "A and B"
+    // is a Branch whose true-exec runs a second Branch, OR is not expressible without
+    // restructuring everything downstream, and NOT requires swapping two exec wires.
+    t.push_back({"And", "AND", "Logic", {pin("a", "bool", false), pin("b", "bool", false), pin("result", "bool", true)}});
+    t.push_back({"Or", "OR", "Logic", {pin("a", "bool", false), pin("b", "bool", false), pin("result", "bool", true)}});
+    t.push_back({"Xor", "XOR", "Logic", {pin("a", "bool", false), pin("b", "bool", false), pin("result", "bool", true)}});
+    t.push_back({"Not", "NOT", "Logic", {pin("a", "bool", false), pin("result", "bool", true)}});
+    // The comparisons `Compare` alone could not make: it is a strict a > b, so >= needed
+    // Compare plus a NOT that did not exist, and equality was simply unreachable.
+    t.push_back({"Greater", "a > b", "Logic", {pin("a", "float", false), pin("b", "float", false), pin("result", "bool", true)}});
+    t.push_back({"GreaterEqual", "a >= b", "Logic", {pin("a", "float", false), pin("b", "float", false), pin("result", "bool", true)}});
+    t.push_back({"Less", "a < b", "Logic", {pin("a", "float", false), pin("b", "float", false), pin("result", "bool", true)}});
+    t.push_back({"LessEqual", "a <= b", "Logic", {pin("a", "float", false), pin("b", "float", false), pin("result", "bool", true)}});
+    t.push_back({"Equal", "a == b", "Logic", {pin("a", "float", false), pin("b", "float", false), pin("result", "bool", true)}});
+    t.push_back({"NotEqual", "a != b", "Logic", {pin("a", "float", false), pin("b", "float", false), pin("result", "bool", true)}});
     t.push_back({"Compare", "Compare", "Logic", {pin("a", "float", false), pin("b", "float", false), pin("result", "bool", true)}});
     // -- scene field access: entity id in, value in/out. field= names which scene field -- see the
     //    header comment above and this table's `attributes` field. --

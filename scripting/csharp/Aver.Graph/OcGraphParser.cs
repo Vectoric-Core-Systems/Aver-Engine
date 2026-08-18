@@ -696,6 +696,147 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "value", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // ---- boolean logic ----------------------------------------------------
+            // THE VOCABULARY HAD NO BOOLEAN OPERATORS AT ALL until these, which is why every
+            // graph in the tree expresses "A and B" as a Branch whose true-exec runs another
+            // Branch. That works and is unreadable, and it cannot express OR or NOT at all
+            // without inverting the whole downstream structure.
+            case "and":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "or":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "xor":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "not":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // ---- the rest of the comparisons ---------------------------------------
+            // `compare` is a strict a > b and nothing else, so a >= b needed Compare plus Not,
+            // and equality was not expressible at all.
+            case "greater":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "greaterequal":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "less":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "lessequal":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "equal":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "notequal":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // ---- arithmetic and the standard library --------------------------------
+            case "min":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "max":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "mod":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "pow":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "abs":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "negate":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "sqrt":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "floor":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "ceil":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "round":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "saturate":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "clamp":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "min", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "max", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "lerp":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "t", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
             case "add":
                 node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });

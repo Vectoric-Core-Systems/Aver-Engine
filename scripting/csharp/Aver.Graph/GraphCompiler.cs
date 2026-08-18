@@ -367,6 +367,28 @@ public class GraphCompiler
                 EmitConstBool(node);
                 break;
 
+            // ---- scalar operators, PUSH path ---------------------------------------
+            // Operands pushed from the node's stored pin locals, then one shared emitter.
+            // The matching PULL arm is in EmitPullOutput; a node present in one and absent
+            // from the other compiles in some graphs and throws in others, which is the
+            // exact defect shape this file has hit repeatedly.
+            case "not": case "abs": case "negate":
+            case "sqrt": case "floor": case "ceil":
+            case "round": case "saturate":
+                EmitScalarUnary(node);
+                break;
+            case "and": case "or":
+            case "xor": case "greater":
+            case "greaterequal": case "less":
+            case "lessequal": case "equal":
+            case "notequal": case "min": case "max":
+            case "mod": case "pow":
+                EmitScalarBinary(node);
+                break;
+            case "clamp": case "lerp":
+                EmitScalarTernary(node);
+                break;
+
             case "add":
                 EmitAdd(node);
                 break;
@@ -2498,6 +2520,25 @@ public class GraphCompiler
                 _il.Emit(OpCodes.Ldc_I4, v ? 1 : 0);
                 return;
             }
+            // ---- scalar operators, PULL path (see the PUSH arm) ---------------------
+            case "not": case "abs": case "negate":
+            case "sqrt": case "floor": case "ceil":
+            case "round": case "saturate":
+                EmitPullInput(source, "a"); EmitScalarOp(source.Type); return;
+            case "and": case "or":
+            case "xor": case "greater":
+            case "greaterequal": case "less":
+            case "lessequal": case "equal":
+            case "notequal": case "min": case "max":
+            case "mod": case "pow":
+                EmitPullInput(source, "a"); EmitPullInput(source, "b");
+                EmitScalarOp(source.Type); return;
+            case "clamp":
+                EmitPullInput(source, "a"); EmitPullInput(source, "min");
+                EmitPullInput(source, "max"); EmitScalarOp(source.Type); return;
+            case "lerp":
+                EmitPullInput(source, "a"); EmitPullInput(source, "b");
+                EmitPullInput(source, "t"); EmitScalarOp(source.Type); return;
             case "add":
                 EmitPullInput(source, "a"); EmitPullInput(source, "b"); _il.Emit(OpCodes.Add); return;
             case "multiply":
@@ -2725,12 +2766,175 @@ public class GraphCompiler
     private static readonly MethodInfo SetFieldMethod =
         typeof(Native).GetMethod("aver_scene_set_f32", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Scene.Native.aver_scene_set_f32 was not found by reflection");
+    // ONE EMITTER, CALLED FROM BOTH COMPILERS. The PUSH path stores each node's result into a
+    // local and the PULL path re-emits the expression at every use, but the arithmetic between
+    // "operands are on the stack" and "result is on the stack" is identical, so it lives once
+    // here and both paths push their operands their own way and then call this. Adding an
+    // operator to one compiler and not the other is the recurring defect shape in this file.
+    // The PUSH-path wrappers: load each declared input from its pin local, run the shared
+    // arithmetic, store the result. Split by arity rather than one variadic helper so a node
+    // wired with the wrong number of inputs fails at compile time in the emitter it named,
+    // rather than silently reading a stale stack slot.
+    private void EmitScalarUnary(Node node)
+    {
+        if (_il == null) return;
+        LoadPin(node.Id, "a");
+        EmitScalarOp(node.Type);
+        if (_pinLocals.TryGetValue((node.Id, "result"), out var local)) _il.Emit(OpCodes.Stloc, local);
+    }
+
+    private void EmitScalarBinary(Node node)
+    {
+        if (_il == null) return;
+        LoadPin(node.Id, "a");
+        LoadPin(node.Id, "b");
+        EmitScalarOp(node.Type);
+        if (_pinLocals.TryGetValue((node.Id, "result"), out var local)) _il.Emit(OpCodes.Stloc, local);
+    }
+
+    private void EmitScalarTernary(Node node)
+    {
+        if (_il == null) return;
+        if (node.Type == "clamp")
+        {
+            LoadPin(node.Id, "a"); LoadPin(node.Id, "min"); LoadPin(node.Id, "max");
+        }
+        else
+        {
+            LoadPin(node.Id, "a"); LoadPin(node.Id, "b"); LoadPin(node.Id, "t");
+        }
+        EmitScalarOp(node.Type);
+        if (_pinLocals.TryGetValue((node.Id, "result"), out var local)) _il.Emit(OpCodes.Stloc, local);
+    }
+
+    private void EmitScalarOp(string type)
+    {
+        if (_il == null) return;   // same guard every emitter in this file opens with
+        // LOWERCASED HERE, not by the callers. Node.Type keeps whatever case the .ocgraph
+        // wrote -- the palette emits "Lerp", a hand-written graph may say "lerp" -- and only
+        // the parser's AddDefaultPins was normalising. Both compilers hand this the raw type,
+        // so doing it once here is what stops "Lerp" compiling and "lerp" not.
+        switch (type.ToLowerInvariant())
+        {
+            // Bools are I4 on the stack, so the bitwise ops ARE the logical ops -- both operands
+            // are guaranteed 0 or 1 because every producer of a Bool pin emits Ceq/Cgt/Clt or a
+            // const, never an arbitrary integer.
+            case "and": _il.Emit(OpCodes.And); break;
+            case "or":   _il.Emit(OpCodes.Or); break;
+            case "xor": _il.Emit(OpCodes.Xor); break;
+            // NOT is "== 0", not a bitwise complement: ~1 is -2, which is truthy everywhere it
+            // would later be tested.
+            case "not": _il.Emit(OpCodes.Ldc_I4_0); _il.Emit(OpCodes.Ceq); break;
+
+            case "greater": _il.Emit(OpCodes.Cgt); break;
+            case "less":    _il.Emit(OpCodes.Clt); break;
+            case "equal":   _il.Emit(OpCodes.Ceq); break;
+            // CIL has no Cge/Cle/Cne, so each is the opposite comparison inverted by "== 0".
+            case "greaterequal":
+                _il.Emit(OpCodes.Clt); _il.Emit(OpCodes.Ldc_I4_0); _il.Emit(OpCodes.Ceq); break;
+            case "lessequal":
+                _il.Emit(OpCodes.Cgt); _il.Emit(OpCodes.Ldc_I4_0); _il.Emit(OpCodes.Ceq); break;
+            case "notequal":
+                _il.Emit(OpCodes.Ceq); _il.Emit(OpCodes.Ldc_I4_0); _il.Emit(OpCodes.Ceq); break;
+
+            case "min": _il.Emit(OpCodes.Call, MathMinMethod); break;
+            case "max": _il.Emit(OpCodes.Call, MathMaxMethod); break;
+            case "mod": _il.Emit(OpCodes.Rem); break;
+            case "abs": _il.Emit(OpCodes.Call, MathAbsMethod); break;
+            case "negate": _il.Emit(OpCodes.Neg); break;
+            case "pow":
+                // Two operands, so BOTH need widening -- and the stack order forbids simply
+                // converting the top one twice. Round-trip through locals rather than guess.
+                {
+                    var pb = _il.DeclareLocal(typeof(float));
+                    _il.Emit(OpCodes.Stloc, pb);
+                    _il.Emit(OpCodes.Conv_R8);
+                    _il.Emit(OpCodes.Ldloc, pb);
+                    _il.Emit(OpCodes.Conv_R8);
+                    _il.Emit(OpCodes.Call, MathPowMethod);
+                    _il.Emit(OpCodes.Conv_R4);
+                }
+                break;
+            case "sqrt":
+                _il.Emit(OpCodes.Conv_R8); _il.Emit(OpCodes.Call, MathSqrtMethod); _il.Emit(OpCodes.Conv_R4); break;
+            case "floor":
+                _il.Emit(OpCodes.Conv_R8); _il.Emit(OpCodes.Call, MathFloorMethod); _il.Emit(OpCodes.Conv_R4); break;
+            case "ceil":
+                _il.Emit(OpCodes.Conv_R8); _il.Emit(OpCodes.Call, MathCeilMethod); _il.Emit(OpCodes.Conv_R4); break;
+            case "round":
+                _il.Emit(OpCodes.Conv_R8); _il.Emit(OpCodes.Call, MathRoundMethod); _il.Emit(OpCodes.Conv_R4); break;
+            // saturate is clamp(x, 0, 1), spelled with the same Min/Max the clamp node uses so
+            // the two cannot disagree about edge behaviour.
+            case "saturate":
+                _il.Emit(OpCodes.Ldc_R4, 1.0f); _il.Emit(OpCodes.Call, MathMinMethod);
+                _il.Emit(OpCodes.Ldc_R4, 0.0f); _il.Emit(OpCodes.Call, MathMaxMethod); break;
+            // clamp takes THREE operands (a, min, max) already on the stack in that order.
+            case "clamp":
+                {
+                    var hi = _il.DeclareLocal(typeof(float));
+                    _il.Emit(OpCodes.Stloc, hi);              // stack: a, min
+                    _il.Emit(OpCodes.Call, MathMaxMethod);    // stack: max(a, min)
+                    _il.Emit(OpCodes.Ldloc, hi);
+                    _il.Emit(OpCodes.Call, MathMinMethod);
+                }
+                break;
+            // lerp(a, b, t) = a + (b - a) * t, with a, b, t on the stack in that order.
+            case "lerp":
+                {
+                    var lt = _il.DeclareLocal(typeof(float));
+                    var lb = _il.DeclareLocal(typeof(float));
+                    var la = _il.DeclareLocal(typeof(float));
+                    _il.Emit(OpCodes.Stloc, lt);
+                    _il.Emit(OpCodes.Stloc, lb);
+                    _il.Emit(OpCodes.Stloc, la);
+                    _il.Emit(OpCodes.Ldloc, la);
+                    _il.Emit(OpCodes.Ldloc, lb);
+                    _il.Emit(OpCodes.Ldloc, la);
+                    _il.Emit(OpCodes.Sub);
+                    _il.Emit(OpCodes.Ldloc, lt);
+                    _il.Emit(OpCodes.Mul);
+                    _il.Emit(OpCodes.Add);
+                }
+                break;
+            default:
+                throw new InvalidOperationException($"EmitScalarOp has no arithmetic for '{type}'");
+        }
+    }
+
     private static readonly MethodInfo MathSinMethod =
         typeof(Math).GetMethod(nameof(Math.Sin), new[] { typeof(double) })
         ?? throw new InvalidOperationException("System.Math.Sin(double) was not found by reflection");
     private static readonly MethodInfo MathCosMethod =
         typeof(Math).GetMethod(nameof(Math.Cos), new[] { typeof(double) })
         ?? throw new InvalidOperationException("System.Math.Cos(double) was not found by reflection");
+    // The double-precision System.Math entry points the scalar nodes call. Every one takes and
+    // returns double, so each call site brackets it with Conv_R8 / Conv_R4 -- the graph value
+    // type is float throughout, and widening at the call rather than storing doubles keeps that
+    // true. Sin and Cos below predate these and use the identical shape.
+    private static readonly MethodInfo MathMinMethod =
+        typeof(Math).GetMethod(nameof(Math.Min), new[] { typeof(float), typeof(float) })
+        ?? throw new InvalidOperationException("System.Math.Min(float,float) was not found by reflection");
+    private static readonly MethodInfo MathMaxMethod =
+        typeof(Math).GetMethod(nameof(Math.Max), new[] { typeof(float), typeof(float) })
+        ?? throw new InvalidOperationException("System.Math.Max(float,float) was not found by reflection");
+    private static readonly MethodInfo MathAbsMethod =
+        typeof(Math).GetMethod(nameof(Math.Abs), new[] { typeof(float) })
+        ?? throw new InvalidOperationException("System.Math.Abs(float) was not found by reflection");
+    private static readonly MethodInfo MathSqrtMethod =
+        typeof(Math).GetMethod(nameof(Math.Sqrt), new[] { typeof(double) })
+        ?? throw new InvalidOperationException("System.Math.Sqrt(double) was not found by reflection");
+    private static readonly MethodInfo MathPowMethod =
+        typeof(Math).GetMethod(nameof(Math.Pow), new[] { typeof(double), typeof(double) })
+        ?? throw new InvalidOperationException("System.Math.Pow(double,double) was not found by reflection");
+    private static readonly MethodInfo MathFloorMethod =
+        typeof(Math).GetMethod(nameof(Math.Floor), new[] { typeof(double) })
+        ?? throw new InvalidOperationException("System.Math.Floor(double) was not found by reflection");
+    private static readonly MethodInfo MathCeilMethod =
+        typeof(Math).GetMethod(nameof(Math.Ceiling), new[] { typeof(double) })
+        ?? throw new InvalidOperationException("System.Math.Ceiling(double) was not found by reflection");
+    private static readonly MethodInfo MathRoundMethod =
+        typeof(Math).GetMethod(nameof(Math.Round), new[] { typeof(double) })
+        ?? throw new InvalidOperationException("System.Math.Round(double) was not found by reflection");
     private static readonly MethodInfo WarnLoopGuardMethod =
         typeof(GraphCompiler).GetMethod(nameof(WarnLoopGuardTripped), BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("GraphCompiler.WarnLoopGuardTripped was not found by reflection");
