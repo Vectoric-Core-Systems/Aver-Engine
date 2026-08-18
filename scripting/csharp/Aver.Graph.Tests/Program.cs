@@ -183,6 +183,9 @@ static int Main()
         // InputKeyPressed / InputKeyReleased -- the EDGE of a key, where InputKey gives the
         // STATE. See EdgeInputNodeTests.cs for why the symbol name is the assertion.
         failures += EdgeInputNodeTests.RunAll();
+        // CustomEvent -- an entry point whose event name is the author's. See CustomEventTests.cs
+        // for why proving it needs NO runtime machinery is worth more than the node itself.
+        failures += CustomEventTests.RunAll();
 
         // GAP 3: FireEvent -- cross-entity events. The router (Aver.Graph.GraphEvents) lives in THIS
         // assembly, so unlike every prior GraphInterop wrapper's own tests, the reentrancy-guard tests

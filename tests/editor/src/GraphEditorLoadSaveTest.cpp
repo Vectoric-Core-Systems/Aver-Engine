@@ -888,6 +888,65 @@ static void testDeletingANodeTakesItsEntryAndOutRecords() {
           "and what it wrote RELOADS -- err='" + err + "'");
 }
 
+// Reads the event name a graph's ENTRY record gives one node, or "" when it has none.
+static std::string entryNameOf(const GraphEditor& ed, const std::string& nodeId) {
+    for (const auto& e : ed.graph().entryPoints) if (e.first == nodeId) return e.second;
+    return {};
+}
+
+static void testCustomEventKeepsItsNameAndEntryInStep() {
+    AVER_INFO("=== a CustomEvent's name= attribute and its ENTRY record are edited together ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "custom_event.ocgraph").string();
+    writeFile(tmp, "OCGRAPH 1\nNAME C\n");
+    GraphEditor ed(tmp);
+
+    const std::string id = ed.addNodeFromCatalog("CustomEvent", Vec2{20.0f, 20.0f});
+    check(!id.empty(), "the catalog knows CustomEvent");
+
+    // A FRESH ONE IS ALREADY NAMED. An ENTRY with no event name is a record this format cannot
+    // express, and a node that fires nothing until someone finds the attribute row is the failure
+    // the palette just stopped shipping for On Tick.
+    const std::string generated = entryNameOf(ed, id);
+    check(!generated.empty(), "it arrives with an ENTRY record, not waiting for one");
+    const fmt::OcGraphNode* node = nullptr;
+    for (const auto& n : ed.graph().nodes) if (n.id == id) node = &n;
+    check(node != nullptr, "the node is in the graph");
+    check(getNodeAttribute(*node, "name").value == generated,
+          "and the NODE line's name= says the same thing the ENTRY record does");
+
+    // A SECOND ONE DOES NOT COLLIDE. Two entry points under one name is a graph where firing it
+    // reaches whichever the compiler happened to match first.
+    const std::string id2 = ed.addNodeFromCatalog("CustomEvent", Vec2{20.0f, 90.0f});
+    check(entryNameOf(ed, id2) != generated, "a second CustomEvent gets a name of its own");
+
+    // THE RENAME IS THE WHOLE POINT. Moving the attribute without the record leaves a graph that
+    // looks renamed, saves, loads, and has silently stopped firing.
+    check(ed.setAttribute(id, "name", "Scored"), "renaming the attribute succeeds");
+    check(entryNameOf(ed, id) == "Scored", "and the ENTRY record moved with it");
+
+    check(!ed.setAttribute(id, "name", "two words"), "a name with whitespace is refused");
+    check(entryNameOf(ed, id) == "Scored", "and the refusal left the ENTRY record alone");
+
+    // Clearing means "this node is no longer an entry point", not "this node is an entry point
+    // with no name" -- the latter is a record the format cannot write.
+    check(ed.clearAttribute(id, "name"), "clearing the attribute succeeds");
+    check(entryNameOf(ed, id).empty(), "and the ENTRY record went with it");
+
+    // A NON-EVENT NODE'S name= IS UNRELATED. SetName carries one too, and touching it must not
+    // invent an entry point.
+    const std::string setName = ed.addNodeFromCatalog("SetName", Vec2{200.0f, 20.0f});
+    check(!setName.empty(), "the catalog knows SetName");
+    check(ed.setAttribute(setName, "name", "Turret"), "its name= sets like any other attribute");
+    check(entryNameOf(ed, setName).empty(), "and declared no entry point");
+
+    std::string why;
+    check(ed.save(&why), "save() succeeds (why='" + why + "')");
+    fmt::OcGraphData reread;
+    std::string err;
+    check(fmt::parseOcgraph(readFile(tmp), reread, &err),
+          "and what it wrote reloads -- err='" + err + "'");
+}
+
 static void testLoadFailure() {
     AVER_INFO("=== a missing file fails cleanly ===");
     const std::string missing = (std::filesystem::path(scratchDir()) / "does_not_exist.ocgraph").string();
@@ -929,6 +988,7 @@ int main() {
     testComponentWorldMatrixWalksTheParentChain();
     testAddingAnEventNodeAlsoDeclaresItsEntry();
     testDeletingANodeTakesItsEntryAndOutRecords();
+    testCustomEventKeepsItsNameAndEntryInStep();
     testLoadFailure();
     testWrongExtensionIsRejectedByFactory();
 

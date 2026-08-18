@@ -1095,6 +1095,20 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 break;
 
+            case "customevent":
+                // A USER-NAMED ENTRY POINT. Identical shape to onstart/ontick/onhit -- a bare exec
+                // output and nothing else -- and identical treatment in the compiler, because the
+                // node type has never been what makes an event fire. The top-level `ENTRY <nodeId>
+                // <eventName>` record is, and this node exists so an author can write one whose
+                // event name is theirs rather than one of three the palette happened to ship.
+                //
+                // The name lives on the ENTRY record, not here. A `name=` attribute on the NODE
+                // line is what the EDITOR shows and keeps in sync (GraphEditor writes both), but
+                // nothing at runtime reads it -- CompileEntryPoint matches on the ENTRY record, so
+                // a graph hand-written with only an ENTRY and no `name=` runs exactly the same.
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                break;
+
             case "onhit":
                 // Same bare-trigger shape as onstart/ontick -- one exec-output pin, no inputs -- for
                 // the same reason: this node TYPE is just a labeled starting point an ENTRY record

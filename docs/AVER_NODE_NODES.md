@@ -343,6 +343,7 @@ See trap #3 above for the editor-palette pin-type gap this node shares with `Get
 | `OnStart` | `exec` (out) | — | X | Entry point: fires once. |
 | `OnTick` | `exec` (out) | — | X | Entry point: fires every tick after `OnStart` has fired. |
 | `OnHit` | `exec` (out) | — | X | Entry point: fires only when something calls `GraphHost.Fire("OnHit", …)`. |
+| `CustomEvent` | `exec` (out) | `name=` | X | Entry point under a name the author chooses. Fires on `GraphHost.Fire("<name>", …)`. |
 
 **`DoOnce`, `Gate` and `FlipFlop` REMEMBER something between activations**, which no other node
 here does — `Branch` and `Sequence` decide from their inputs alone. That memory lives in the same
@@ -357,6 +358,13 @@ activation. Both are sampled every activation and applied before the test, so op
 one activation works; `close` is applied after `open`, so a graph wiring both true ends closed —
 one stated rule rather than an order that depends on which link the parser read first. `DoOnce`'s
 `reset` is a bool for the same reason.
+
+`CustomEvent` adds no runtime machinery at all, and that is the interesting part: the node type
+has never been what makes an event fire, so a graph could always declare `ENTRY mine Whatever`
+against a node of any type. What it could not do was say so from the palette. `name=` on the
+NODE line is what the EDITOR shows and edits; nothing at runtime reads it, and the editor keeps
+it in step with the `ENTRY` record (one function owns that — renaming one without the other
+leaves a graph that looks renamed and has silently stopped firing).
 
 What actually makes any of `OnStart`/`OnTick`/`OnHit` run is a top-level `ENTRY <nodeId>
 <eventName>` record, not the node's type — the node type is just a labelled, no-input starting

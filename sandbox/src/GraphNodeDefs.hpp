@@ -320,6 +320,12 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    a differently-named NODE of type OnStart/OnTick/OnHit (any bare-trigger type already
     //    suffices) and its own ENTRY record naming the event.
     t.push_back({"OnHit", "On Hit", "Event", {pin("exec", "exec", true)}});
+    // -- CustomEvent: an entry point whose event NAME is the author's, not one of three the
+    //    palette happened to ship. Same shape as the three above and the same treatment
+    //    everywhere -- what fires an event has always been the top-level ENTRY record, never the
+    //    node type. The editor keeps a `name=` attribute on the NODE line in step with that
+    //    record so the canvas has something to show and edit; nothing at runtime reads it. --
+    t.push_back({"CustomEvent", "Custom Event", "Event", {pin("exec", "exec", true)}});
 
     // Spawn: SIDE-EFFECTING (creates a new scene entity), so -- unlike GetField/SetField/GetFieldVec3/
     //    SetFieldVec3 above -- it gets exec pins by default, mirroring Raycast's own reasoning. See

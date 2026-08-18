@@ -352,6 +352,36 @@ std::string GraphEditor::makeUniqueNodeId(const std::string& typeId) const {
     return base + "_x"; // unreachable in practice
 }
 
+std::string GraphEditor::makeUniqueEventName(const std::string& base) const {
+    std::string name = base;
+    for (int n = 1; n < 10000; ++n) {
+        bool taken = false;
+        for (const auto& e : graph_.entryPoints) if (e.second == name) { taken = true; break; }
+        if (!taken) return name;
+        name = base + std::to_string(n);
+    }
+    return base;
+}
+
+// THE NODE LINE AND THE ENTRY RECORD ARE TWO PLACES THAT SAY THE SAME THING, and that is not a
+// design this editor chose -- it is what the format is. `ENTRY <nodeId> <eventName>` is the only
+// thing that makes an event fire (CompileEntryPoint matches on it and nothing else), while the
+// canvas needs something to draw and edit on the node itself, which is the `name=` attribute.
+//
+// Two places that must agree is a bug waiting to happen, so there is exactly ONE function that
+// writes the ENTRY side and every path that touches the name goes through it. The failure it
+// prevents is silent in the worst way: rename the attribute alone and the canvas shows the new
+// name, the file saves, the graph loads, and the event that used to fire simply stops.
+void GraphEditor::syncEventEntry(const std::string& nodeId, const std::string& eventName) {
+    for (usize i = 0; i < graph_.entryPoints.size(); ++i) {
+        if (graph_.entryPoints[i].first != nodeId) continue;
+        if (eventName.empty()) graph_.entryPoints.erase(graph_.entryPoints.begin() + static_cast<isize>(i));
+        else graph_.entryPoints[i].second = eventName;
+        return;
+    }
+    if (!eventName.empty()) graph_.entryPoints.emplace_back(nodeId, eventName);
+}
+
 std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canvasPos) {
     const GraphNodeDesc* desc = findGraphNodeDesc(typeId);
     if (!desc) return {};
@@ -376,7 +406,19 @@ std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canv
     // -- `ENTRY tick OnTick`. Driven off the catalog's own "Event" category rather than a second
     // hand-maintained list of type names, for the reason GraphNodeDefs.hpp's header gives: there is
     // one place a node type is registered.
-    if (desc->category == "Event") graph_.entryPoints.emplace_back(node.id, desc->typeId);
+    if (desc->category == "Event") {
+        // CustomEvent is the one event whose name is NOT its type -- that is the whole point of
+        // it. A fresh one gets a unique generated name rather than an empty one, because an ENTRY
+        // with no event name is a record the format cannot express, and a node that silently
+        // fires nothing until someone finds the attribute row is the failure this palette just
+        // stopped shipping for On Tick.
+        std::string eventName = desc->typeId;
+        if (desc->typeId == "CustomEvent") {
+            eventName = makeUniqueEventName("MyEvent");
+            setNodeAttribute(graph_.nodes.back(), "name", eventName);
+        }
+        syncEventEntry(node.id, eventName);
+    }
 
     displayPos_[node.id] = canvasPos;
     selectedNodes_ = {node.id};
@@ -500,6 +542,10 @@ bool GraphEditor::setAttribute(const std::string& nodeId, const std::string& key
         if (n.id != nodeId) continue;
         pushUndo();
         setNodeAttribute(n, key, value); // GraphEditorGeometry.hpp -- the order-preserving read/write
+        // A CustomEvent's `name=` is half of a pair -- see syncEventEntry, which owns the other
+        // half. Renaming the attribute without the record leaves a graph that looks renamed and
+        // has silently stopped firing.
+        if (key == "name" && n.type == "CustomEvent") syncEventEntry(n.id, value);
         dirty_ = true;
         return true;
     }
@@ -512,6 +558,10 @@ bool GraphEditor::clearAttribute(const std::string& nodeId, const std::string& k
         if (!getNodeAttribute(n, key).found) return false; // nothing to clear is not an edit
         pushUndo();
         removeNodeAttribute(n, key);
+        // The ENTRY record goes with it, for setAttribute's reason in reverse: an ENTRY with no
+        // event name is a record this format cannot express, so clearing the name has to mean the
+        // node stops being an entry point rather than becoming a malformed one.
+        if (key == "name" && n.type == "CustomEvent") syncEventEntry(n.id, "");
         dirty_ = true;
         return true;
     }

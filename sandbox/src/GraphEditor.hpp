@@ -362,6 +362,13 @@ private:
     void recomputeLayouts(float dpi);
     std::string makeUniqueNodeId(const std::string& typeId) const;
     std::string makeUniqueVariableName(const std::string& base) const;
+    // An event name no ENTRY record in this graph already uses.
+    std::string makeUniqueEventName(const std::string& base) const;
+    // Points the ENTRY record for `nodeId` at `eventName`, inserting one if there is none and
+    // REMOVING it when `eventName` is empty. The one place the NODE line's `name=` attribute and
+    // the top-level ENTRY record are reconciled -- see its definition for why they can disagree
+    // at all, and what it costs when they do.
+    void syncEventEntry(const std::string& nodeId, const std::string& eventName);
     // Sets lastRejectMsg_/lastRejectAtSec_ and logs -- the shared plumbing behind the on-canvas
     // rejection banner. reportLinkRejection (below) is one caller; deleteVariable's own refusal is
     // another, added alongside it rather than growing a second, near-duplicate banner mechanism.

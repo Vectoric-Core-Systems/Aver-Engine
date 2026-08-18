@@ -2614,7 +2614,10 @@ public class GraphCompiler
         // comment. Any FUTURE trigger-only event node someone adds belongs here for the same reason:
         // this list is "node types with no data value to pull", not "node types this compiler has
         // special knowledge of".
-        "onstart" or "ontick" or "onhit" or "branch" or "sequence" or "while" or "foreach" => true,
+        // "customevent" joins them for exactly the reason the paragraph above states -- it is a
+        // bare exec-output trigger with no data value. Nothing here knows or needs to know that its
+        // event name is author-chosen; that is the ENTRY record's business.
+        "onstart" or "ontick" or "onhit" or "customevent" or "branch" or "sequence" or "while" or "foreach" => true,
         _ => false,
     };
 
