@@ -129,6 +129,13 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"Saturate", "Saturate (0..1)", "Math", {pin("a", "float", false), pin("result", "float", true)}});
     t.push_back({"Clamp", "Clamp", "Math", {pin("a", "float", false), pin("min", "float", false), pin("max", "float", false), pin("result", "float", true)}});
     t.push_back({"Lerp", "Lerp", "Math", {pin("a", "float", false), pin("b", "float", false), pin("t", "float", false), pin("result", "float", true)}});
+    // -- gated flow control: the nodes that REMEMBER between activations -----------
+    // Their state lives in the same per-instance store a VAR uses, so two entities sharing
+    // one graph file gate independently. reset/open/close are BOOL inputs rather than exec
+    // pins because an activation does not carry which pin it arrived on -- see the parser.
+    t.push_back({"DoOnce", "Do Once", "Flow", {pin("exec", "exec", false), pin("reset", "bool", false), pin("then", "exec", true)}});
+    t.push_back({"Gate", "Gate", "Flow", {pin("exec", "exec", false), pin("open", "bool", false), pin("close", "bool", false), pin("then", "exec", true)}});
+    t.push_back({"FlipFlop", "Flip Flop", "Flow", {pin("exec", "exec", false), pin("a", "exec", true), pin("b", "exec", true), pin("isA", "bool", true)}});
     // -- logic --
     // BOOLEAN OPERATORS, which this vocabulary did not have at all. Without them "A and B"
     // is a Branch whose true-exec runs a second Branch, OR is not expressible without

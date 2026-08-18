@@ -1615,6 +1615,17 @@ public class GraphCompiler
                 case "branch":
                     EmitBranch(node);
                     return; // branch owns its own fan-out (exactly one of two arms); no generic fan-out after it
+                // Each owns its own fan-out: it decides which output runs, and generic fan-out
+                // afterwards would run them all again.
+                case "doonce":
+                    EmitDoOnce(node);
+                    return;
+                case "gate":
+                    EmitGate(node);
+                    return;
+                case "flipflop":
+                    EmitFlipFlop(node);
+                    return;
                 case "while":
                     EmitWhile(node);
                     return;
@@ -1756,6 +1767,141 @@ public class GraphCompiler
     /// event) and the loop is stopped exactly as if `cond` had gone false, so a buggy graph loses one
     /// tick's worth of correctness rather than hanging whatever called it. `done` runs once, either
     /// when `cond` genuinely goes false or when the guard trips.
+    // The reserved GraphVarStore key a stateful flow node keeps its memory under. Node ids
+    // are unique within a graph and a VAR name cannot contain '$', so this can never collide
+    // with a variable the author declared.
+    private static string FlowStateKey(Node node) => "$flow$" + node.Id;
+
+    /// Emits `store.GetBool("$flow$<id>")` onto the stack.
+    private void EmitLoadFlowState(Node node)
+    {
+        _il!.Emit(OpCodes.Ldarg, (short)_varStoreArgIndex);
+        _il.Emit(OpCodes.Ldstr, FlowStateKey(node));
+        _il.Emit(OpCodes.Call, VarGetMethodFor(PinType.Bool));
+    }
+
+    /// Emits `store.SetBool("$flow$<id>", <value already on the stack>)`.
+    private void EmitStoreFlowState(Node node)
+    {
+        var tmp = _il!.DeclareLocal(typeof(bool));
+        _il.Emit(OpCodes.Stloc, tmp);
+        _il.Emit(OpCodes.Ldarg, (short)_varStoreArgIndex);
+        _il.Emit(OpCodes.Ldstr, FlowStateKey(node));
+        _il.Emit(OpCodes.Ldloc, tmp);
+        _il.Emit(OpCodes.Call, VarSetMethodFor(PinType.Bool));
+    }
+
+    /// Every stateful flow node needs somewhere to remember. A graph that declares no VAR
+    /// records has no store argument at all, so say which node needs one rather than letting
+    /// the IL reference argument -1.
+    private void RequireFlowState(Node node)
+    {
+        if (_varStoreArgIndex < 0)
+            throw new InvalidOperationException(
+                $"'{node.Type}' node '{node.Id}' remembers state between activations and needs a " +
+                "variable store, but this graph declares no VAR records -- declare any VAR to give it one");
+    }
+
+    /// doOnce: `then` fires the FIRST time exec runs and never again, until `reset` runs.
+    /// The stored bool means "already fired", so a fresh instance starts false and fires.
+    private void EmitDoOnce(Node node)
+    {
+        if (_il == null) return;
+        RequireFlowState(node);
+
+        // RESET IS SAMPLED FIRST, so an activation with reset true re-arms and then fires in the
+        // same pass -- which is what a caller wiring "reset and go" means, and it makes the node
+        // usable from a single exec chain instead of needing two.
+        var afterReset = _il.DefineLabel();
+        EmitPullInput(node, "reset");
+        _il.Emit(OpCodes.Brfalse, afterReset);
+        _il.Emit(OpCodes.Ldc_I4_0);
+        EmitStoreFlowState(node);
+        _il.MarkLabel(afterReset);
+
+        var alreadyFired = _il.DefineLabel();
+        EmitLoadFlowState(node);
+        _il.Emit(OpCodes.Brtrue, alreadyFired);
+
+        _il.Emit(OpCodes.Ldc_I4_1);
+        EmitStoreFlowState(node);
+        Node? then = FindExecTarget(node.Id, "then");
+        if (then != null) EmitExecNode(then);
+
+        _il.MarkLabel(alreadyFired);
+    }
+
+    /// gate: `then` fires only while the gate is open. `open`/`close` are sampled every
+    /// activation and applied BEFORE the test, so opening and firing in one activation works.
+    /// Closed is the default, matching Blueprint's own Gate.
+    private void EmitGate(Node node)
+    {
+        if (_il == null) return;
+        RequireFlowState(node);
+
+        var afterOpen = _il.DefineLabel();
+        EmitPullInput(node, "open");
+        _il.Emit(OpCodes.Brfalse, afterOpen);
+        _il.Emit(OpCodes.Ldc_I4_1);
+        EmitStoreFlowState(node);
+        _il.MarkLabel(afterOpen);
+
+        // close AFTER open, so a graph wiring both true ends closed -- one rule, stated here,
+        // rather than an order that depends on which link the parser happened to read first.
+        var afterClose = _il.DefineLabel();
+        EmitPullInput(node, "close");
+        _il.Emit(OpCodes.Brfalse, afterClose);
+        _il.Emit(OpCodes.Ldc_I4_0);
+        EmitStoreFlowState(node);
+        _il.MarkLabel(afterClose);
+
+        var shut = _il.DefineLabel();
+        EmitLoadFlowState(node);
+        _il.Emit(OpCodes.Brfalse, shut);
+        Node? then = FindExecTarget(node.Id, "then");
+        if (then != null) EmitExecNode(then);
+        _il.MarkLabel(shut);
+    }
+
+    /// flipFlop: alternates between the `a` and `b` exec outputs, starting with `a`, and
+    /// reports which one it just took on `isA`.
+    private void EmitFlipFlop(Node node)
+    {
+        if (_il == null) return;
+        RequireFlowState(node);
+
+        // Stored bool means "b is next". Starts false, so the first activation takes `a`.
+        var takeB = _il.DefineLabel();
+        var done = _il.DefineLabel();
+
+        EmitLoadFlowState(node);
+        _il.Emit(OpCodes.Brtrue, takeB);
+
+        _il.Emit(OpCodes.Ldc_I4_1);
+        EmitStoreFlowState(node);
+        if (_pinLocals.TryGetValue((node.Id, "isA"), out var isATrue))
+        {
+            _il.Emit(OpCodes.Ldc_I4_1);
+            _il.Emit(OpCodes.Stloc, isATrue);
+        }
+        Node? a = FindExecTarget(node.Id, "a");
+        if (a != null) EmitExecNode(a);
+        _il.Emit(OpCodes.Br, done);
+
+        _il.MarkLabel(takeB);
+        _il.Emit(OpCodes.Ldc_I4_0);
+        EmitStoreFlowState(node);
+        if (_pinLocals.TryGetValue((node.Id, "isA"), out var isAFalse))
+        {
+            _il.Emit(OpCodes.Ldc_I4_0);
+            _il.Emit(OpCodes.Stloc, isAFalse);
+        }
+        Node? b = FindExecTarget(node.Id, "b");
+        if (b != null) EmitExecNode(b);
+
+        _il.MarkLabel(done);
+    }
+
     private void EmitWhile(Node node)
     {
         if (_il == null) return;

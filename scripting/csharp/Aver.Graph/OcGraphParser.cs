@@ -983,6 +983,41 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "fireLog", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // ---- gated flow control -------------------------------------------------
+            // These three REMEMBER something between activations, which no node here did
+            // before: Branch and Sequence decide from their inputs alone. The state lives in
+            // the same per-instance GraphVarStore a VAR uses, under a reserved name built
+            // from the node id, so two entities running one graph file gate independently --
+            // the property GraphVarStore's own header calls the one most likely to be
+            // silently undone.
+            case "doonce":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                // reset is a BOOL, not an exec input, and that is forced by the compiler rather
+                // than chosen: an activation reaches a node through EmitExecNode, which is not
+                // told WHICH input pin it arrived on, so two exec inputs would be
+                // indistinguishable inside the emitter. Sampling a bool every activation says
+                // the same thing and can actually be implemented. Same reasoning as Gate.
+                node.Pins.Add(new Pin { Name = "reset", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "gate":
+                // `open`/`close` are BOOL inputs rather than exec pins: an exec input can be
+                // driven by many sources here, so three separate exec entries would make
+                // "which one fired" unanswerable inside one activation.
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "open", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "close", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "flipflop":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "b", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "isA", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
             case "while":
                 // "cond" is re-pulled fresh every pass (see GraphCompiler's PUSH VS PULL comment for
                 // why that rules out the old cached-local approach); "iterations" counts completed
