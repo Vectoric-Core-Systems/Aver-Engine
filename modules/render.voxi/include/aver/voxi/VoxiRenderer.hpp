@@ -278,6 +278,8 @@ private:
     // Tile edge for the shadow's temporal amortisation. See setPixelsPerRayTile / Settings for the
     // contract; 1 traces every pixel every frame.
     u32 rtPixelsPerRayTile_ = 1;
+    // The SPATIAL filter radius, mirrored from Settings::rtShadowDenoise by applySettings.
+    u32 rtShadowDenoise_ = 0;
     // Frames apart the GI volume is rebuilt. See setGiUpdateInterval / Settings for the contract; 1
     // rebuilds every frame. Read against rtFrameIndex_ in prePass() -- see that call site.
     u32 giUpdateInterval_ = 1;
@@ -446,6 +448,11 @@ private:
         // x = 1/kGiShadowSize, y = 1 once the GI-only map is usable at all (0 falls back to
         // fully-lit indirect), z = normal-offset bias in world units, w unused.
         f32 giShadowParams[4] = {};
+        // The SPATIAL shadow denoiser -- mirrored as gRtDenoiseParams. x = filter radius in
+        // pixels (0 = off), y = how much of the filtered value to take (0 discards it while
+        // still paying for the taps, which is how the cost is measured before the filter is
+        // trusted), z/w unused.
+        f32 rtDenoiseParams[4] = {};
     } cb_;
 
     // THE MIRROR THIS FILE HAS ALWAYS HAD AND NEVER GUARDED. `cbuffer VoxiFrame : register(b4)` in
@@ -453,7 +460,7 @@ private:
     // the same unguarded-mirror bug already fixed for PathTracer's FrameCB and PcgVolume's VolumeCB.
     // VoxiFrame was simply the one that never got the assert. Appending here without appending there
     // reads garbage off the end of the block in every Voxi shader at once.
-    static_assert(sizeof(FrameConstants) == 576,
+    static_assert(sizeof(FrameConstants) == 592,
                   "cbuffer VoxiFrame in VoxiShaders.hpp mirrors this byte for byte");
     static_assert(sizeof(FrameConstants) % 16 == 0, "must be a legal constant-buffer size");
 

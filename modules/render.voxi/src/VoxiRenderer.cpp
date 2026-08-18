@@ -297,6 +297,7 @@ void VoxiRenderer::setSettings(const Settings& s) {
     // setters (setShadowRays, setPixelsPerRayTile) still own the actual clamping.
     setShadowRays(s.rtShadowRays);
     setPixelsPerRayTile(s.rtPixelsPerRayTile);
+    rtShadowDenoise_ = s.rtShadowDenoise;
     setGiUpdateInterval(s.giUpdateInterval);
 
     // Guarded on a real size: before the first onRenderTargetsChanged there is nothing to create at,
@@ -1586,6 +1587,23 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     u32 tileBits = 0;
     for (u32 v = rtPixelsPerRayTile_; v > 1; v >>= 1) ++tileBits;
     cb_.rtHistParams[3] = static_cast<f32>(tileBits);
+    // x = the spatial filter's radius in pixels. y = HOW MUCH OF THE FILTERED VALUE TO TAKE, and
+    // it is pinned at 0 for now: the taps run and the result is discarded, which is exactly the
+    // configuration the cost is measured in. lerp(v, f, 0) returns v for any finite f, so the
+    // image is bit-identical while the work is real -- the radius reaching the shader through a
+    // CONSTANT rather than a #define is what stops the loop being optimised away at zero.
+    // This becomes 1 in the same change that earns it, against the penumbra probe.
+    cb_.rtDenoiseParams[0] = static_cast<f32>(rtShadowDenoise_);
+    // MEASURED BEFORE IT WAS TRUSTED, which is why this is 1 now and was 0 for one commit. With the
+    // taps running and the result discarded, 49 of them (radius 3) cost +0.02 ms on ElectricDreams
+    // at 1600x900 -- against a control, in the same batch, where ONE extra ray per pixel cost
+    // +1.69 ms. The filter is about eighty-five times cheaper than the ray it replaces, so the
+    // radius is a quality knob rather than a performance one.
+    //
+    // The control matters as much as the number. An earlier attempt to price this used
+    // --render-scale to force a GPU bound and silently proved nothing: that flag clamps to 1.00 and
+    // the run it 'measured' rendered at the same resolution as the baseline.
+    cb_.rtDenoiseParams[1] = rtShadowDenoise_ > 0 ? 1.0f : 0.0f;
 }
 
 void VoxiRenderer::endShadowHistory() {

@@ -41,6 +41,13 @@ cbuffer VoxiFrame : register(b4) {
     // x = 1/kGiShadowSize, y = 1 once the GI-only map is usable (0 = fall back to unshadowed
     // indirect), z = normal-offset bias in world units, w unused.
     float4   gGiShadowParams;
+    // The SPATIAL shadow denoiser. x = filter radius in pixels (0 = off); y = how much of the
+    // filtered value to take (0 = none, so the taps still run and the result is discarded --
+    // that is the cost-measurement configuration, and lerp(v, f, 0) is v exactly for any finite
+    // f); z and w unused. RADIUS LIVES IN A CONSTANT, not a #define, so the tap loop is dynamic
+    // and cannot be unrolled away when the host asks for zero taps -- a compile-time 0 would
+    // measure nothing and report it as free.
+    float4   gRtDenoiseParams;
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -293,6 +300,87 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
     return true;
 }
 
+// The SPATIAL denoiser: average this pixel's shadow with its neighbours' from the history texture,
+// weighted by how well each neighbour's surface agrees with this one's.
+//
+// WHY IT READS LAST FRAME'S TEXTURE AND WHY THAT IS FINE. t6 and u2 are different textures, ping-
+// ponged per frame, and t6 rests in ShaderResource for the whole colour pass -- so an arbitrary
+// neighbourhood read is a plain load of an immutable texture, needing no barrier and no reordering
+// of anything. The neighbours are one frame old. That is a completely different proposition from
+// the TEMPORAL path above, which reuses a value up to 2^(2*tileBits) frames old AS THE ANSWER:
+// here the centre pixel always contributes its own freshly traced value, and a neighbour only ever
+// adjusts the weighting. A neighbour that fails the plane test is DROPPED from the kernel, never
+// substituted, so the worst case is that every neighbour is rejected and this returns the centre
+// unchanged -- today's noisy-but-correct behaviour. The guide weights the blur; it never supplies
+// the value.
+//
+// WHY AVERAGING NEIGHBOURS IS AN ESTIMATE RATHER THAN A BLUR. rtShadow jitters the ray ORIGIN
+// across the pixel's own footprint (see its `org` line), so neighbouring pixels on one flat
+// receiver are already sampling different points of the same surface. Their mean is a genuine area
+// estimate of the same integral one pixel would need many rays to reach.
+float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDepth) {
+    const int radius = (int)gRtDenoiseParams.x;
+    if (radius <= 0 || gRtHistParams.y < 0.5) return centre;
+
+    float texW, texH;
+    gRtShadowHist.GetDimensions(texW, texH);
+
+    // GATHER AROUND WHERE THIS PIXEL WAS LAST FRAME, NOT AROUND WHERE IT IS NOW. gRtShadowHist is
+    // last frame's texture; while the camera moves, the image has shifted inside it, so a
+    // neighbourhood centred on THIS frame's coordinate samples a patch of a different part of the
+    // scene. Measured before this was added: still, the filter landed within one code of the
+    // sixteen-ray answer -- and under a six-degree wobble it drifted 12 to 32 codes darker,
+    // increasing with radius, which is the signature of a kernel walking off its own surface.
+    //
+    // Same arithmetic as rtReprojectHistory, and deliberately the same in every detail: last
+    // frame's viewProj, mapped into last frame's VIEWPORT RECT rather than [0,1] of the whole
+    // texture (the editor docks the 3D view in a sub-rect), and FLOOR rather than round -- a pixel
+    // that has not moved lands on its own centre at index+0.5, which is exactly the tie round()
+    // breaks half the time in the wrong direction. Both of those are documented landmines in that
+    // function; this one inherits them rather than re-deriving them.
+    float2 centrePx = pixel;
+    if (gRtHistParams.y > 0.5) {
+        const float4 pclip = mul(float4(wpos, 1.0), gPrevViewProj);
+        if (pclip.w > 1e-4) {
+            const float3 pndc = pclip.xyz / pclip.w;
+            if (pndc.z >= 0.0 && pndc.z <= 1.0)
+                centrePx = gSceneViewport.xy +
+                           float2(pndc.x * 0.5 + 0.5, 0.5 - pndc.y * 0.5) * gSceneViewport.zw;
+        }
+    }
+    const int2 base = int2(floor(centrePx));
+
+    // Plane-distance rejection, not a raw depth delta. Centre depth plus its screen-space gradient
+    // defines the receiver's plane; a neighbour on that same plane is kept however far its depth
+    // has slid, while one at the same depth on a DIFFERENT surface is dropped. On a grazing floor a
+    // plain |dz| test rejects almost everything and the filter quietly does nothing.
+    const float dzdx = ddx(curDepth);
+    const float dzdy = ddy(curDepth);
+
+    float acc = centre;
+    float wsum = 1.0;
+    [loop] for (int oy = -radius; oy <= radius; ++oy) {
+        [loop] for (int ox = -radius; ox <= radius; ++ox) {
+            if (ox == 0 && oy == 0) continue;
+            const int2 t = base + int2(ox, oy);
+            if (any(t < 0) || t.x >= (int)texW || t.y >= (int)texH) continue;
+            const float2 st = gRtShadowHist.Load(int3(t, 0));
+            // What this neighbour's depth WOULD be if it sat on the centre's plane.
+            const float predicted = curDepth + dzdx * (float)ox + dzdy * (float)oy;
+            const float tol = max(abs(predicted), 1.0) * 0.02 + 1.0;
+            if (abs(st.y - predicted) > tol) continue;
+            acc  += st.x;
+            wsum += 1.0;
+        }
+    }
+
+    // gRtDenoiseParams.y is how much of the filtered value to take. At 0 the taps above still run --
+    // radius comes from a constant, so the loop is dynamic and survives optimisation -- and this
+    // returns `centre` EXACTLY, because lerp(v, f, 0) is v + 0*(f-v) for any finite f. That is the
+    // configuration the tap cost is measured in, before the filter itself is trusted.
+    return lerp(centre, acc / wsum, saturate(gRtDenoiseParams.y));
+}
+
 // The PRIMARY sun-shadow call only -- rtReflection's own inner rtShadow() call stays exactly as it
 // always has, one ray with no footprint and frameJitter = 0.0, and never touches the history:
 // blending in a reflected surface's shadow would overwrite this pixel's history with a value that
@@ -321,7 +409,14 @@ float rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx
     if (tileBits == 0u) {
         const float fresh = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, 0.0);
         gRtShadowHistOut[uint2(pixel)] = float2(fresh, curDepth);
-        return fresh;
+        // FILTERED HERE TOO, and this branch is the one that matters most. tileBits == 0 is
+        // rtPixelsPerRayTile == 1, which is what Medium -- the DEFAULT tier -- runs, and it is the
+        // only configuration in which the shadow term is a hard 0 or 1 with nothing whatsoever
+        // smoothing it. Returning `fresh` straight from here, as this did, wired the spatial filter
+        // into the amortised path alone and left the default one completely untouched: the penumbra
+        // probe read an unchanged 61,59,59 at every radius, which is what caught it. Two returns,
+        // two call sites -- an early return is exactly how a later edit loses one of them again.
+        return rtShadowSpatial(fresh, wpos, N, pixel, curDepth);
     }
 
     // Which pixel in its tileBits x tileBits tile gets to trace THIS frame -- a bitmask against the
@@ -370,8 +465,15 @@ float rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx
         vis = hist;
     }
 
+    // WRITE THE RAW VALUE, NEVER THE FILTERED ONE, and this is the single most important line in
+    // the whole denoiser. gRtShadowHistOut is what next frame reprojects from; feeding a filtered
+    // value back into it makes this an IIR filter with a spatial kernel -- a TEMPORAL filter by
+    // another name -- and every artefact the spatial path exists to avoid comes straight back,
+    // compounding a little more each frame. The filter is applied on READ, below, and the history
+    // never learns it happened. A later reader will be tempted to "save work" by writing the
+    // filtered value here; that is the bug, not the optimisation.
     gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
-    return vis;
+    return rtShadowSpatial(vis, wpos, N, pixel, curDepth);
 }
 
 // Traces one reflection ray and shades what it hits.
