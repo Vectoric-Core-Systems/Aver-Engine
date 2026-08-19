@@ -299,7 +299,7 @@ void VoxiRenderer::setSettings(const Settings& s) {
     setPixelsPerRayTile(s.rtPixelsPerRayTile);
     rtShadowDenoise_ = s.rtShadowDenoise;
     rtRenderMode_    = s.rtRenderMode;
-    rtBounces_       = s.rtBounces;
+    ptBounces_       = s.ptBounces;
     setGiUpdateInterval(s.giUpdateInterval);
 
     // Guarded on a real size: before the first onRenderTargetsChanged there is nothing to create at,
@@ -1613,8 +1613,12 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // image is bit-identical while the work is real -- the radius reaching the shader through a
     // CONSTANT rather than a #define is what stops the loop being optimised away at zero.
     // This becomes 1 in the same change that earns it, against the penumbra probe.
-    // Only meaningful while the ray-driven path is the one running; PSMainVoxi never reads it.
-    cb_.rtBounceParams[0] = static_cast<f32>(rtBounces_);
+    // PATH TRACING IS GATED HERE, not trusted from the setting. ptBounces is a path-tracing
+    // quantity and pathTracing is the switch that owns it, so with path tracing Off this writes 1
+    // -- one hit, direct lighting, which is RAY tracing -- whatever the stored bounce count says.
+    // Enforcing it at the one place the shader reads means no combination of manifest, CLI
+    // override and quality tier can produce a running path tracer while the setting reads off.
+    cb_.ptBounceParams[0] = static_cast<f32>(pathTracingWanted() ? ptBounces_ : 1u);
     cb_.rtDenoiseParams[0] = static_cast<f32>(rtShadowDenoise_);
     // MEASURED BEFORE IT WAS TRUSTED, which is why this is 1 now and was 0 for one commit. With the
     // taps running and the result discarded, 49 of them (radius 3) cost +0.02 ms on ElectricDreams

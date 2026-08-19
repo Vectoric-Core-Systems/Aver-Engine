@@ -177,7 +177,7 @@ static void checkOcproject() {
     rs.rtPixelsPerRayTile = 1;
     rs.rtShadowDenoise = 0;
     rs.rtRenderMode = 0;
-    rs.rtBounces = 1;
+    rs.ptBounces = 1;
     check(rs.hasRenderSettings(), "a desc stating render settings says so");
 
     const std::string once = writeOcproject(rs, "");
@@ -194,14 +194,14 @@ static void checkOcproject() {
     for (const char* key : {"RENDER.GI ", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
                              "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
                              "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY",
-                             "RENDER.RTSHADOWDENOISE", "RENDER.RTRENDERMODE", "RENDER.RTBOUNCES"}) {
+                             "RENDER.RTSHADOWDENOISE", "RENDER.RTRENDERMODE", "RENDER.PTBOUNCES"}) {
         check(countKey(thrice, key) == 1,
               std::string("after three saves, ") + key + " appears exactly once");
     }
 
     ProjectDesc rb;
     check(parseOcproject(thrice, rb, &err), "the thrice-written manifest still parses");
-    check(rb.rtRenderMode == 0 && rb.rtBounces == 1,
+    check(rb.rtRenderMode == 0 && rb.ptBounces == 1,
           "and the ray-driven keys read back the values they were written with");
     check(rb.rtShadowDenoise == 0 && rb.rtShadowRays == 1,
           "alongside the RT keys that predate them");
@@ -211,7 +211,7 @@ static void checkOcproject() {
     // surface", which is a choice; -1 means the manifest never said.
     ProjectDesc silent;
     check(parseOcproject("OCPROJECT 1\nNAME Quiet\n", silent, &err), "a bare manifest parses");
-    check(silent.rtRenderMode == -1 && silent.rtBounces == -1,
+    check(silent.rtRenderMode == -1 && silent.ptBounces == -1,
           "an absent ray-driven key is -1, not 0 -- 0 would mean 'raster, deliberately'");
     check(!silent.hasRenderSettings(), "and it states no render settings");
 }

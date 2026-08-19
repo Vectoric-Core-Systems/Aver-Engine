@@ -288,8 +288,9 @@ private:
     // ray-driven primary visibility; whether it is HONOURED is rayDrivenActive(), which also
     // requires the device and the pipeline to have cooperated.
     u32 rtRenderMode_ = 0;
-    // Settings::rtBounces. 1 reproduces the single-bounce shading rtReflection already ships.
-    u32 rtBounces_ = 1;
+    // Settings::ptBounces. Spent only while pathTracingWanted() -- see where cb_.ptBounceParams
+    // is filled, which is the one place that decision is made.
+    u32 ptBounces_ = 1;
     // Frames apart the GI volume is rebuilt. See setGiUpdateInterval / Settings for the contract; 1
     // rebuilds every frame. Read against rtFrameIndex_ in prePass() -- see that call site.
     u32 giUpdateInterval_ = 1;
@@ -483,7 +484,7 @@ private:
         // y/z/w unused. Its own float4 rather than a spare slot in gRtDenoiseParams: a field
         // whose name says "denoise" carrying a bounce count is the kind of thing that reads
         // fine for a week and then costs an afternoon.
-        f32 rtBounceParams[4] = {};
+        f32 ptBounceParams[4] = {};
     } cb_;
 
     // THE MIRROR THIS FILE HAS ALWAYS HAD AND NEVER GUARDED. `cbuffer VoxiFrame : register(b4)` in
@@ -605,6 +606,10 @@ private:
     // off -- and VRAM pressure severe enough to force eviction looks exactly like an unexplained
     // frame-rate drop, which is the complaint that led here.
     bool rayTracingWanted() const { return rtSupported_ && settings_.rayTracing != Quality::Off; }
+    // PATH TRACING WANTED, which is a different question from ray tracing wanted and deliberately
+    // asks the other setting. Both need the hardware -- a path tracer is built out of rays -- but
+    // a project may want ray-traced shadows and no path tracing at all, which is the default.
+    bool pathTracingWanted() const { return rtSupported_ && settings_.pathTracing != Quality::Off; }
     // Whether PSMainVoxi will actually run its ray-traced-history code path this frame, for EITHER
     // effect. False while RT is inactive or the debug view has taken over the scene -- in either
     // case nothing will write rtShadowHist_ or rtReflHist_, so nothing about either should be

@@ -48,7 +48,7 @@ cbuffer VoxiFrame : register(b4) {
     // and cannot be unrolled away when the host asks for zero taps -- a compile-time 0 would
     // measure nothing and report it as free.
     float4   gRtDenoiseParams;
-    float4   gRtBounceParams;
+    float4   gPtBounceParams;
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -988,7 +988,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // interior with bounced light off surfaces that do not bounce it.
     float3 throughput = s.kdAlbedo;
 
-    const uint bounces = (uint)max(gRtBounceParams.x, 1.0);
+    const uint bounces = (uint)max(gPtBounceParams.x, 1.0);
     float3 bp = wpos;
     float3 bn = N;
     [loop] for (uint b = 1; b < bounces; ++b) {

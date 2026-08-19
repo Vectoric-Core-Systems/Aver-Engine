@@ -216,15 +216,22 @@ struct Settings {
     // agreement is load-bearing rather than tidy.
     u32 rtRenderMode = 0;
 
-    // How many BOUNCES a ray takes after the first hit. 1 is what ships today: rtReflection
-    // (VoxiShaders.hpp:491) traces one ray from the shaded surface and lights what it finds with
-    // direct sun plus sky ambient, its own comment calling "no second bounce" a stated
-    // approximation rather than an accident. Raising this is what makes the same code a path
-    // tracer -- extra rays on a loop that already exists, not a second renderer.
+    // ---- path tracing -----------------------------------------------------------------------
+    // WHERE RAY TRACING ENDS AND PATH TRACING BEGINS, because this file already draws that line
+    // and this setting was on the wrong side of it. RAY TRACING is discrete rays answering a
+    // specific question -- is this point in shadow, what does this mirror see, what surface does
+    // this pixel see -- and every one of those is one hit and direct lighting. PATH TRACING is the
+    // multi-bounce light-transport solve. They are separate settings (rayTracing / pathTracing
+    // above) because they are separately useful, separately priced and separately supported.
     //
-    // Read only when rtRenderMode is 1. A bounce budget with no ray-driven path to spend it on
-    // would be a setting that silently does nothing, which this file has shipped once already.
-    u32 rtBounces = 1;
+    // This was `rtBounces`, derived from the rayTracing tier, which meant a project with
+    // `pathTracing = Off` could be running a path tracer -- a setting reading "off" while the
+    // thing it names is on. Bounces belong to pathTracing and are derived from it.
+    //
+    // 1 means NO extra bounces: one hit, direct lighting, which is ray tracing. Above 1 is path
+    // tracing, and VoxiRenderer refuses to spend it while pathTracing is Off regardless of what
+    // is stored here -- see ptBounceParams, which is where that is enforced rather than trusted.
+    u32 ptBounces = 1;
 };
 
 // Process-wide settings service. Single instance shared by the editor, the runtime and the C ABI.
@@ -267,10 +274,11 @@ public:
     static u32 rtShadowRaysForQuality(Quality q);
     static u32 rtPixelsPerRayTileForQuality(Quality q);
     static u32 rtShadowDenoiseForQuality(Quality q);
-    // Both 0/1 for every tier today -- ray-driven rendering is opt-in, not something a quality
-    // preset turns on behind the author's back while it is still experimental.
+    // 0 for every tier -- ray-driven PRIMARY VISIBILITY is opt-in, not something a quality preset
+    // turns on behind the author's back while it is still experimental.
     static u32 rtRenderModeForQuality(Quality q);
-    static u32 rtBouncesForQuality(Quality q);
+    // Derived from the PATH TRACING tier, not the ray-tracing one. See Settings::ptBounces.
+    static u32 ptBouncesForQuality(Quality q);
 
 private:
     Renderer() = default;

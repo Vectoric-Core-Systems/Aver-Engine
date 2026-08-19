@@ -944,7 +944,7 @@ void GameApp::applyProjectRenderSettings() {
     // looking different. These two lines are the whole reason the key exists in OcProject rather
     // than in the editor's own preferences.
     if (project_.rtRenderMode >= 0) s.rtRenderMode = static_cast<u32>(project_.rtRenderMode);
-    if (project_.rtBounces >= 0) s.rtBounces = static_cast<u32>(project_.rtBounces);
+    if (project_.ptBounces >= 0) s.ptBounces = static_cast<u32>(project_.ptBounces);
     vx.setSettings(s);
     voxiRenderer_.setSettings(vx.settings());
     AVER_INFO("[Project] applied render settings: gi={}, rt={}, pt={}, voxelRes={}, giIntensity={}, giDist={}",
