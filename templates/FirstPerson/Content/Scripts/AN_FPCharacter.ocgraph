@@ -187,11 +187,21 @@ LINK gunX.value place.x
 LINK gunY.value place.y
 LINK gunZ.value place.z
 
-# The Kenney blaster is authored around a unit of roughly a metre while this engine is CENTIMETRES,
-# so at scale 1 it is a speck a centimetre long. Scaled here rather than baked into the .ocmesh so the
-# import stays a faithful copy of the source art and the number that makes it look right stays visible
-# and adjustable in the graph.
-NODE gunScale ConstFloat value=1.0
+# 0.25 IS MEASURED FROM THE MESH, not chosen by eye. Blaster.ocmesh carries a whole-mesh AABB in its
+# MHDR chunk of x -43..+37, y -9.19..+9.19, z -26.79..+15.30 -- so at scale 1 this gun is EIGHTY
+# CENTIMETRES long, and 0.25 makes it the 20cm blaster a hand would hold.
+#
+# THE PREVIOUS VALUE WAS 1.0 AND THE COMMENT HERE SAID THE OPPOSITE -- that the mesh was metre-
+# authored, so scale 1 left "a speck a centimetre long". It is the other way round: the import already
+# converted to centimetres. The consequence was not subtle. This gun is placed 35cm in front of the
+# eye (see NODE gunX), and an 80cm mesh whose own origin sits 43cm behind its muzzle reaches 8cm
+# BEHIND the camera from there -- so the viewmodel clipped through the near plane and filled the right
+# half of the screen from the day the template shipped. At 0.25 it spans 24cm to 44cm ahead of the eye
+# and clears the near plane by a wide margin.
+#
+# Scaled here rather than baked into the .ocmesh so the import stays a faithful copy of the source art
+# and the number that makes it look right stays visible and adjustable in the graph.
+NODE gunScale ConstFloat value=0.25
 NODE size SetFieldVec3 field=CLocal.scale
 PIN size exec in exec
 PIN size entity in int

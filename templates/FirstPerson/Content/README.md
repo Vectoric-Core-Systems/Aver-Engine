@@ -1,8 +1,8 @@
 # First Person — an Aver Node template
 
 A playable first-person character, three shootable targets and a game mode. **No C# anywhere** — run
-`find . -name '*.cs'` in this project and expect nothing back. Everything here is four text files:
-three `.ocgraph` graphs and one `.ocmap`.
+`find . -name '*.cs'` in this project and expect nothing back. Everything here is six text files:
+five `.ocgraph` graphs and one `.ocmap`.
 
 ## Controls
 
@@ -10,10 +10,15 @@ three `.ocgraph` graphs and one `.ocmap`.
 |---|---|
 | **W A S D** | walk |
 | **Mouse** | look (first person, because `AN_FPCharacter`'s CLASS line carries `view=firstperson`) |
-| **Space** | shoot |
+| **Mouse Left** | shoot |
+| **Space** | jump |
 
-Three targets sit ahead of you along +X, which is the direction a character faces on spawn. Press
-Space as soon as the level opens and you will hit the middle one.
+Both are ordinary key codes to `InputKey`: Space is `Key.Space = 36` and Mouse Left is
+`Key.MouseLeft = 47`, because the mouse buttons sit at the end of the same enum in
+`Aver.Framework/Input.cs`. Neither needed a node of its own.
+
+Three targets sit ahead of you along +X, which is the direction a character faces on spawn. Click
+as soon as the level opens and you will hit the middle one.
 
 ## The files
 
@@ -23,6 +28,7 @@ Space as soon as the level opens and you will hit the middle one.
 | `Scripts/AN_FPTarget.ocgraph` | a target: scales itself up, counts hits as its own score |
 | `Scripts/AN_FPRules.ocgraph` | the game mode: names the pawn and controller, keeps a round clock |
 | `Scripts/AN_FPController.ocgraph` | the player controller. Empty on purpose — see below |
+| `Scripts/AN_FPGun.ocgraph` | the viewmodel: a CC0 blaster mesh, parented to the camera. No logic, does not tick |
 | `Maps/Default.ocmap` | floor, two crates, three targets. **Not** the player |
 
 ## Who spawns the player
@@ -50,10 +56,14 @@ is the interesting part, and its comments explain each decision at the point it 
 
     OnTick
       -> MoveAxis -> MouseDelta -> CharacterMove          walk and look
-      -> Branch (InputKey Space held?)
-           -> Raycast, fired from GetForward              aim
-                -> Branch (did it hit?)
-                     -> FireEvent OnHit at Raycast.entity score
+      -> SetVar cooldown (tick it down by deltaTime)      rate limit
+      -> Branch (InputKey Space held?) -> Jump            both sides continue below
+           -> Branch (InputKey MouseLeft held?)
+                -> Branch (cooldown expired?)             0.35s between shots
+                     -> SetVar cooldown = 0.35
+                     -> Raycast, fired from GetForward    aim
+                          -> Branch (did it hit?)
+                               -> FireEvent OnHit at Raycast.entity   score
 
 `GetForward` returns the character's real look direction **and** its eye position, read from
 `AverCharacter` itself rather than rebuilt in the graph — so the shot always agrees with the camera,
@@ -73,7 +83,11 @@ you get a genuine hit that simply scores nothing, which is worth seeing at least
 
 Named rather than quietly omitted:
 
-- **Firing is level-triggered, not edge-triggered.** Holding Space fires every tick.
+- **Firing is level-triggered, not edge-triggered.** Holding Mouse Left keeps firing; nothing here
+  detects the press itself. What stops it being one shot per tick is a plain rate limit — a
+  `cooldown` VAR set to 0.35 and counted down by `deltaTime` — so held fire is about three shots a
+  second rather than sixty. That is a weapon fire rate, not edge detection, and the difference
+  shows the moment you want a single-shot weapon or a charge-up.
   `aver_fw_input_key_pressed` exists at the ABI but no node reaches it yet, so a real
   once-per-press weapon needs either that node or a VAR remembering last frame's state.
 - **There is no combined score.** Each target owns its own `score`. `FireEvent` carries no payload,
@@ -94,11 +108,18 @@ Named rather than quietly omitted:
 
 ## Verified
 
-Run headlessly against a build of this engine, with the Space gate temporarily bypassed (headless has
-no input at all — `[Game] headless: no window, no input`):
+Run headlessly against a build of this engine, with the FIRE gate bypassed so the chain runs without
+input (headless has none at all — `[Game] headless: no window, no input`). Each target's `OnTick`
+reports its own `score` through the graph's `OUT`, so the scores are read straight from the log:
 
-- the centre target reached **89 hits over 90 frames**, one per tick;
-- both side targets stayed at **0** across the same run.
+- the **centre** target scored, and both **side** targets stayed at **0** for the whole run;
+- 40,000 headless frames advanced the game clock only 0.095 s, so the centre target's count stays
+  in single figures however long the run is.
 
-That second number is the one that matters. It shows the ray hits what it is aimed at rather than
-anything nearby, and that each target's score is genuinely its own.
+**The zeroes are the result, not the total.** They show the ray hits what it is aimed at rather
+than anything near it, and that each target's score is genuinely its own. The centre count is not
+a throughput measure and should not be read as one: firing is gated on a 0.35 s cooldown counted
+in `deltaTime`, and headless frames are far shorter than rendered ones, so the number of shots a
+run fits depends on simulated seconds and not on the frame count at all. An earlier version of
+this file reported 89 hits in 90 frames, one per tick — that predates the cooldown and cannot
+happen now.
