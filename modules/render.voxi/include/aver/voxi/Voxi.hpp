@@ -195,6 +195,36 @@ struct Settings {
     // contradicts its own tier never reaches the rung it claims -- a trap this file has already
     // fallen into in both directions with giUpdateInterval.
     u32 rtShadowDenoise = 0;
+
+    // ---- ray-driven rendering (experimental) -----------------------------------------------
+    // WHICH THING FINDS THE FIRST SURFACE: 0 = the rasteriser (every version of this engine so
+    // far), 1 = a primary ray per pixel. Everything downstream of that first hit is unchanged --
+    // PSMainVoxi already traces the sun shadow, evaluates the material and traces a reflection in
+    // ONE pixel-shader invocation (VoxiShaders.hpp:781-826), so this is not "fusing passes", it is
+    // swapping out the one stage that is still fixed-function.
+    //
+    // MEASURED BEFORE IT WAS BUILT, which is why the number to beat is written down here:
+    // ElectricDreams at 4x MSAA, 2750x1639, Release -- raster primary visibility plus material
+    // shading is 9.2 ms of `scene draw` with RT and GI off, and one additional shadow ray costs
+    // 1.6 ms at the same resolution. A primary ray has to fit inside that difference to be worth
+    // having. It also gives up hardware early-Z, which discards an occluded fragment before the
+    // expensive shader ever runs and which a ray has no equivalent of -- you pay the traversal to
+    // find out the hit was hidden.
+    //
+    // 0 FOR EVERY TIER, deliberately: this is opt-in while it is experimental, and the struct
+    // default agrees with every rung by construction. See rtShadowDenoise above for why that
+    // agreement is load-bearing rather than tidy.
+    u32 rtRenderMode = 0;
+
+    // How many BOUNCES a ray takes after the first hit. 1 is what ships today: rtReflection
+    // (VoxiShaders.hpp:491) traces one ray from the shaded surface and lights what it finds with
+    // direct sun plus sky ambient, its own comment calling "no second bounce" a stated
+    // approximation rather than an accident. Raising this is what makes the same code a path
+    // tracer -- extra rays on a loop that already exists, not a second renderer.
+    //
+    // Read only when rtRenderMode is 1. A bounce budget with no ray-driven path to spend it on
+    // would be a setting that silently does nothing, which this file has shipped once already.
+    u32 rtBounces = 1;
 };
 
 // Process-wide settings service. Single instance shared by the editor, the runtime and the C ABI.
@@ -237,6 +267,10 @@ public:
     static u32 rtShadowRaysForQuality(Quality q);
     static u32 rtPixelsPerRayTileForQuality(Quality q);
     static u32 rtShadowDenoiseForQuality(Quality q);
+    // Both 0/1 for every tier today -- ray-driven rendering is opt-in, not something a quality
+    // preset turns on behind the author's back while it is still experimental.
+    static u32 rtRenderModeForQuality(Quality q);
+    static u32 rtBouncesForQuality(Quality q);
 
 private:
     Renderer() = default;

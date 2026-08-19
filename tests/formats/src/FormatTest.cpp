@@ -154,6 +154,66 @@ static void checkOcproject() {
     ProjectDesc nb;
     check(parseOcproject(fresh, nb, &err), "a manifest written from nothing parses");
     check(nb.name == "Fresh", "and carries its name");
+
+    // EVERY RENDER KEY IS A THIRD LIST AWAY FROM DUPLICATING ITSELF. A key is read in
+    // parseOcproject, written by appendKey, AND named in isOwnedKey -- and only the third one
+    // stops the writer copying the author's existing line through as "unowned text" while
+    // appending its own. Miss it and the manifest grows a second copy of the key on every single
+    // save, which parses fine and looks fine until someone opens the file.
+    //
+    // Checked by COUNTING, and for every render key rather than only the newest two: a test that
+    // asserts the value round-trips passes just as happily with the key present twice.
+    ProjectDesc rs;
+    rs.name = "Rendered";
+    rs.engineName = "Aver";
+    rs.engineMinVersion = "0.1.0";
+    rs.giQuality = 2;
+    rs.rayTracing = 2;
+    rs.pathTracing = 0;
+    rs.voxelResolution = 128;
+    rs.giIntensity = 1.0f;
+    rs.giMaxDistance = 2000.0f;
+    rs.rtShadowRays = 1;
+    rs.rtPixelsPerRayTile = 1;
+    rs.rtShadowDenoise = 0;
+    rs.rtRenderMode = 0;
+    rs.rtBounces = 1;
+    check(rs.hasRenderSettings(), "a desc stating render settings says so");
+
+    const std::string once = writeOcproject(rs, "");
+    const std::string twice = writeOcproject(rs, once);
+    const std::string thrice = writeOcproject(rs, twice);
+    check(twice == once && thrice == twice,
+          "re-saving an unchanged manifest with every render key set is byte-stable");
+
+    const auto countKey = [](const std::string& text, const char* key) {
+        usize n = 0;
+        for (usize at = 0; (at = text.find(key, at)) != std::string::npos; ++at) ++n;
+        return n;
+    };
+    for (const char* key : {"RENDER.GI ", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
+                             "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
+                             "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY",
+                             "RENDER.RTSHADOWDENOISE", "RENDER.RTRENDERMODE", "RENDER.RTBOUNCES"}) {
+        check(countKey(thrice, key) == 1,
+              std::string("after three saves, ") + key + " appears exactly once");
+    }
+
+    ProjectDesc rb;
+    check(parseOcproject(thrice, rb, &err), "the thrice-written manifest still parses");
+    check(rb.rtRenderMode == 0 && rb.rtBounces == 1,
+          "and the ray-driven keys read back the values they were written with");
+    check(rb.rtShadowDenoise == 0 && rb.rtShadowRays == 1,
+          "alongside the RT keys that predate them");
+
+    // A ZERO IS A REAL ANSWER, NOT AN ABSENT KEY -- the same distinction the giQuality check at
+    // the top of this function makes. rtRenderMode 0 means "the rasteriser finds the first
+    // surface", which is a choice; -1 means the manifest never said.
+    ProjectDesc silent;
+    check(parseOcproject("OCPROJECT 1\nNAME Quiet\n", silent, &err), "a bare manifest parses");
+    check(silent.rtRenderMode == -1 && silent.rtBounces == -1,
+          "an absent ray-driven key is -1, not 0 -- 0 would mean 'raster, deliberately'");
+    check(!silent.hasRenderSettings(), "and it states no render settings");
 }
 
 // Checks the .ocworld environment records: SUN in both spellings, the new SKY record, and the

@@ -91,6 +91,10 @@ void Renderer::setSettings(const Settings& s) {
         n.rtPixelsPerRayTile = rtPixelsPerRayTileForQuality(n.rayTracing);
     if (n.rayTracing != settings_.rayTracing && n.rtShadowDenoise == settings_.rtShadowDenoise)
         n.rtShadowDenoise = rtShadowDenoiseForQuality(n.rayTracing);
+    if (n.rayTracing != settings_.rayTracing && n.rtRenderMode == settings_.rtRenderMode)
+        n.rtRenderMode = rtRenderModeForQuality(n.rayTracing);
+    if (n.rayTracing != settings_.rayTracing && n.rtBounces == settings_.rtBounces)
+        n.rtBounces = rtBouncesForQuality(n.rayTracing);
 
     n.voxelResolution = std::clamp(n.voxelResolution, 32u, 512u);
     n.giIntensity     = std::clamp(n.giIntensity, 0.0f, 8.0f);
@@ -104,6 +108,12 @@ void Renderer::setSettings(const Settings& s) {
     // kernel buys anything a second iteration would not buy more cheaply. Kept low deliberately:
     // this runs per FRAGMENT inside the shading shader, so the tap count multiplies by overdraw.
     n.rtShadowDenoise    = std::clamp(n.rtShadowDenoise, 0u, 3u);
+    // 1 is the only mode that exists besides raster; anything else is a manifest typo, and
+    // clamping to 1 rather than 0 would turn a typo into a silent renderer swap.
+    n.rtRenderMode       = n.rtRenderMode > 1u ? 0u : n.rtRenderMode;
+    // 8 is arbitrary but finite: an unbounded bounce count in a shader loop is a hang, and the
+    // useful range for a real-time path tracer is nowhere near it.
+    n.rtBounces          = std::clamp(n.rtBounces, 1u, 8u);
     n.rtPixelsPerRayTile = std::clamp(n.rtPixelsPerRayTile, 1u, 16u);
     // Mirrors VoxiRenderer::kMaxGiUpdateInterval for the same reason as rtPixelsPerRayTile above.
     n.giUpdateInterval   = std::clamp(n.giUpdateInterval, 1u, 8u);
@@ -255,6 +265,21 @@ u32 Renderer::rtShadowRaysForQuality(Quality q) {
 // Interval, in both directions). Declaring the mapping at 0 everywhere keeps the two in agreement
 // by construction from the first commit, so the day a rung becomes non-zero is a one-line change
 // with nothing else to remember.
+// RAY-DRIVEN RENDERING IS OFF AT EVERY RUNG, and will stay that way until it is measured against
+// the 9.2 ms raster baseline recorded in Settings::rtRenderMode's own comment. A quality preset
+// that silently switched which thing finds the first surface would change every pixel of a
+// project that only asked for prettier shadows.
+//
+// It exists NOW rather than later for the same reason rtShadowDenoiseForQuality does: the
+// derivation only fires on a tier CHANGE, so the function and the struct default have to agree
+// from the first commit or the field never reaches the rung it claims.
+u32 Renderer::rtRenderModeForQuality(Quality) { return 0; }
+
+// One bounce is what rtReflection already does. Raising this per tier is a decision for the day
+// bounces are actually wired to a loop; until then every rung reporting 1 keeps the setting
+// honest about doing nothing.
+u32 Renderer::rtBouncesForQuality(Quality) { return 1; }
+
 u32 Renderer::rtShadowDenoiseForQuality(Quality q) {
     switch (q) {
         case Quality::Off:    return 0;   // RT is not running; the filter has nothing to filter

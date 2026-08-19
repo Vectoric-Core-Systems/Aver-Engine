@@ -939,6 +939,12 @@ void GameApp::applyProjectRenderSettings() {
     if (project_.rtShadowRays >= 0) s.rtShadowRays = static_cast<u32>(project_.rtShadowRays);
     if (project_.rtPixelsPerRayTile >= 0) s.rtPixelsPerRayTile = static_cast<u32>(project_.rtPixelsPerRayTile);
     if (project_.rtShadowDenoise >= 0) s.rtShadowDenoise = static_cast<u32>(project_.rtShadowDenoise);
+    // BOTH ROOTS OR NEITHER. A render setting the editor applies and the shipped game ignores is
+    // this repo's most-repeated defect: the project looks right while it is being made and ships
+    // looking different. These two lines are the whole reason the key exists in OcProject rather
+    // than in the editor's own preferences.
+    if (project_.rtRenderMode >= 0) s.rtRenderMode = static_cast<u32>(project_.rtRenderMode);
+    if (project_.rtBounces >= 0) s.rtBounces = static_cast<u32>(project_.rtBounces);
     vx.setSettings(s);
     voxiRenderer_.setSettings(vx.settings());
     AVER_INFO("[Project] applied render settings: gi={}, rt={}, pt={}, voxelRes={}, giIntensity={}, giDist={}",
