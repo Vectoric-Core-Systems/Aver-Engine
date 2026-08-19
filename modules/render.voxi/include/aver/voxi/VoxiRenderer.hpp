@@ -235,6 +235,10 @@ private:
     std::vector<rhi::BindingSetHandle> mipBindings_;
 
     rhi::PipelineHandle scenePso_ = 0, sceneMsPso_ = 0, sceneRtPso_ = 0, sceneMsRtPso_ = 0;
+    // The ray-driven primary-visibility pass: one fullscreen triangle whose pixel shader traces
+    // the camera ray itself. Null unless the device has ray queries, because PSRayDriven only
+    // compiles into the SM 6.5 AVER_RT variant.
+    rhi::PipelineHandle rayDrivenPso_ = 0;
     // The depth prepass and its two "already prepassed" scene-colour twins -- see
     // depthPrepassPipeline()'s own comment. NO mesh-shader twins: the prepass is only ever offered to
     // the plain drawMesh() path (see SandboxApp.cpp's caller), so scenePipeline() never needs a
@@ -280,6 +284,10 @@ private:
     u32 rtPixelsPerRayTile_ = 1;
     // The SPATIAL filter radius, mirrored from Settings::rtShadowDenoise by applySettings.
     u32 rtShadowDenoise_ = 0;
+    // Settings::rtRenderMode, cached at setSettings like the knobs above it. 1 asks for
+    // ray-driven primary visibility; whether it is HONOURED is rayDrivenActive(), which also
+    // requires the device and the pipeline to have cooperated.
+    u32 rtRenderMode_ = 0;
     // Frames apart the GI volume is rebuilt. See setGiUpdateInterval / Settings for the contract; 1
     // rebuilds every frame. Read against rtFrameIndex_ in prePass() -- see that call site.
     u32 giUpdateInterval_ = 1;
@@ -578,9 +586,26 @@ private:
     // effect. False while RT is inactive or the debug view has taken over the scene -- in either
     // case nothing will write rtShadowHist_ or rtReflHist_, so nothing about either should be
     // touched this frame.
+    // The DEBUG RAYMARCH has taken over the scene. Split out from suppressesScene() when a second
+    // reason to suppress arrived -- see rayDrivenActive() directly below, and shadowHistoryActive()
+    // for why conflating the two would have been a bug rather than a tidiness question.
+    bool debugViewActive() const { return giReady_ && giEnabled() && debugView_; }
+    // RAY-DRIVEN PRIMARY VISIBILITY is running this frame: the author asked for it, the device can
+    // trace rays, and PSRayDriven compiled. Any of those failing falls back to the rasteriser,
+    // which is a working image rather than a black one.
+    bool rayDrivenActive() const { return rtActive_ && rtRenderMode_ == 1u && rayDrivenPso_ != 0; }
+
+    // Whether the ray-traced history textures will be read and written this frame.
+    //
+    // TESTS debugViewActive(), NOT suppressesScene(), and the difference is load-bearing. Both
+    // suppress the scene, but for opposite reasons: the debug raymarch replaces the shading
+    // entirely, so nothing touches the history and preparing it would be waste. PSRayDriven calls
+    // rtShadowTemporal exactly as PSMainVoxi does, so it needs the history prepared and bound --
+    // asking suppressesScene() here would leave it sampling and writing resources this frame never
+    // transitioned.
     bool shadowHistoryActive() const {
         return rtActive_ && rtShadowHist_[0] && rtShadowHist_[1] &&
-               rtReflHist_[0] && rtReflHist_[1] && !suppressesScene();
+               rtReflHist_[0] && rtReflHist_[1] && !debugViewActive();
     }
     // Swaps the read/write roles, transitions all four textures, rebinds them and sets
     // cb_.prevViewProj / rtHistParams for this frame. Called before shadowPass() so the UAVs are

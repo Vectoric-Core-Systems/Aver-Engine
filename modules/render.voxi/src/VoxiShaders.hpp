@@ -844,6 +844,108 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     return float4(radiance, averOpacity(s));
 }
 
+// ================= ray-driven primary visibility (experimental) =================
+// THE ONLY THING THIS REPLACES IS "WHAT DID THIS PIXEL SEE". Everything after the first hit is
+// the same work PSMainVoxi does -- a sun shadow ray, sky ambient, fog -- because the rasteriser
+// was never doing any of that. It answered the visibility question and nothing else, and this
+// answers the same question with a ray.
+//
+// WHAT IT GIVES UP, stated here because no amount of tuning recovers it: hardware early-Z. A
+// rasterised fragment that turns out to be hidden is discarded before its shader ever runs; a ray
+// pays the whole traversal to discover the same thing. That is the trade this mode exists to
+// measure, and the number to beat is in Settings::rtRenderMode.
+//
+// UNTEXTURED, DELIBERATELY, in this first version. RtInstance carries a flat albedo and no UV (see
+// its declaration near the top of this file), so a hit cannot sample a material texture -- exactly
+// the approximation rtReflection already ships with. COLOUR WILL DIFFER from the raster image.
+// GEOMETRY MUST NOT, and that is what the side-by-side capture is checking.
+//
+// BEHIND AVER_RT because RayQuery is: this entry point only compiles into the SM 6.5 variant, and
+// VoxiRenderer refuses the mode outright when the device has no ray-query support.
+#if AVER_RT
+struct RayDrivenOut {
+    float4 col   : SV_TARGET;
+    float  depth : SV_DEPTH;
+};
+
+RayDrivenOut PSRayDriven(SkyOut i) {
+    RayDrivenOut o;
+
+    // The same NDC-to-world-ray reconstruction PSVoxelDebug does, through the same gInvViewProj,
+    // so the primary ray and the debug raymarch cannot disagree about where a pixel looks.
+    float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
+    float3 dir = normalize(far.xyz / far.w - gCamPos.xyz);
+
+    RayDesc r;
+    r.Origin    = gCamPos.xyz;
+    r.Direction = dir;
+    r.TMin      = 0.0;
+    r.TMax      = 1.0e7;
+
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, r);
+    q.Proceed();
+
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+        // A miss is the sky at the far plane. Depth 1, not 0 -- this engine's projection is not
+        // reversed, and writing 0 here would put the sky in front of everything drawn after it.
+        o.col   = float4(skyColor(dir), 1.0);
+        o.depth = 1.0;
+        return o;
+    }
+
+    // Surface reconstruction: the same barycentric interpolation and the same ROTATION-ONLY normal
+    // transform rtReflection performs. Its comment explains why the inverse transpose is
+    // deliberately not carried (these are rigid instances); the same holds here, and the two must
+    // agree or a surface would shade differently depending on whether it was seen directly or in a
+    // mirror.
+    RtInstance inst = gRtInstances[q.CommittedInstanceID()];
+    uint tri = inst.firstIndex + q.CommittedPrimitiveIndex() * 3;
+    uint i0  = inst.firstVertex + gRtIndices[tri + 0];
+    uint i1  = inst.firstVertex + gRtIndices[tri + 1];
+    uint i2  = inst.firstVertex + gRtIndices[tri + 2];
+
+    float2 bary = q.CommittedTriangleBarycentrics();
+    float3 w    = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
+    float3 nObj = normalize(gRtVerts[i0].nrm * w.x + gRtVerts[i1].nrm * w.y + gRtVerts[i2].nrm * w.z);
+    float3 N    = normalize(mul(float4(nObj, 0.0), inst.objectToWorld).xyz);
+    if (dot(N, dir) > 0.0) N = -N;   // face the ray, so a back-facing hit is not lit from behind
+
+    float3 wpos = gCamPos.xyz + dir * q.CommittedRayT();
+    float3 L    = normalize(gLightDir.xyz);
+
+    // THE SHADOW RAY IS THE SAME CALL THE RASTER PATH MAKES, temporal wrapper and all, so the two
+    // modes pay identical shadow cost and the timing difference between them is primary visibility
+    // ALONE. It is keyed by pixel, and this pass covers the same pixel grid, so the history buffer
+    // means the same thing here as it does there.
+    //
+    // NO FOOTPRINT DERIVATIVES. ddx/ddy of a ray-traced hit position are garbage across a
+    // silhouette -- neighbouring lanes in the same quad can land on different surfaces entirely --
+    // and feeding that to the disc sampler would widen the penumbra by whatever the depth
+    // discontinuity happened to be. Passing zero asks for the un-spread disc, which is what
+    // rtReflection already passes for the same reason.
+    float sunVis = rtShadowTemporal(wpos, N, L, i.pos.xy, float3(0,0,0), float3(0,0,0),
+                                     (uint)max(gRtParams.y, 1.0));
+
+    // Lambertian exitant radiance, with the /PI on the direct term -- see rtReflection's own
+    // comment for what omitting it cost last time (every sunlit surface 3.14x too bright, which
+    // reads as an exposure bug rather than a units one, and which the white furnace does not catch
+    // because it turns the sun off).
+    float3 direct  = averSunRadiance() * saturate(dot(N, L)) * sunVis / PI;
+    float3 ambient = averSkyIrradiance(N) * gAmbient.r;
+    float3 radiance = inst.albedo * (direct + ambient);
+    radiance = averApplyFog(radiance, wpos);
+
+    // Depth for everything that draws AFTER the scene -- the deferred sky, transparentPass, the
+    // particle pass. Without it they have nothing to test against and sort against a cleared
+    // buffer, which puts smoke in front of walls.
+    float4 clip = mul(float4(wpos, 1.0), gViewProj);
+    o.depth = clip.w > 1e-6 ? saturate(clip.z / clip.w) : 1.0;
+    o.col   = float4(radiance, 1.0);
+    return o;
+}
+#endif  // AVER_RT
+
 // ================= depth prepass =================
 // Same-frame depth-only pass -- see VoxiRenderer.hpp's depthPrepassPipeline() and
 // D3D12Device::drawMesh for the whole mechanism. Paired with VSMain (the SAME compiled vertex shader

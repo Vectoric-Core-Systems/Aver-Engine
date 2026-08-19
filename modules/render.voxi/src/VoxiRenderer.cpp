@@ -298,6 +298,7 @@ void VoxiRenderer::setSettings(const Settings& s) {
     setShadowRays(s.rtShadowRays);
     setPixelsPerRayTile(s.rtPixelsPerRayTile);
     rtShadowDenoise_ = s.rtShadowDenoise;
+    rtRenderMode_    = s.rtRenderMode;
     setGiUpdateInterval(s.giUpdateInterval);
 
     // Guarded on a real size: before the first onRenderTargetsChanged there is nothing to create at,
@@ -1433,10 +1434,25 @@ bool VoxiRenderer::sceneConstants(const void** data, u32* bytes) const {
 bool VoxiRenderer::overridesScenePipeline() const { return giReady_; }
 
 // True while the debug view replaces the scene, including the backend's line draws.
-bool VoxiRenderer::suppressesScene() const { return giReady_ && giEnabled() && debugView_; }
+// TWO REASONS TO REPLACE THE SCENE, and they are not interchangeable -- see shadowHistoryActive()
+// in the header, which asks only about the first.
+bool VoxiRenderer::suppressesScene() const { return debugViewActive() || rayDrivenActive(); }
 
-// Draws the debug raymarch over the colour target and viewport the backend already bound.
+// Draws whichever pass has replaced the scene, over the colour target and viewport the backend
+// already bound. The debug raymarch wins when both are somehow asked for: it is a diagnostic, and
+// a diagnostic that silently did not run because another mode outranked it would be useless.
 void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
+    if (!debugViewActive() && rayDrivenActive()) {
+        // ITS OWN MARKER, so the go/no-go against the rasteriser is a subtraction between two
+        // named spans in the same timing tree rather than a difference of whole frames.
+        rhi::ScopedGpuStat rayStat(ctx, "Voxi ray-driven primary");
+        ctx.setPipeline(rayDrivenPso_);
+        ctx.setBindingSet(bindings_);
+        ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+        ctx.drawFullscreen();
+        return;
+    }
     if (!debugPso_) return;
     rhi::ScopedGpuStat gpuStat(ctx, "Voxi debug view");
     ctx.setPipeline(debugPso_);
@@ -2047,6 +2063,29 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
         sceneRtPso_ = res_->createGraphicsPipeline(p);
     }
     if (rtOk && !sceneRtPso_) AVER_WARN("[Voxi] ray-tracing scene variant unavailable");
+
+    // RAY-DRIVEN PRIMARY VISIBILITY: the fullscreen triangle VSky already feeds the debug
+    // raymarch, paired here with a pixel shader that traces the camera ray instead of marching
+    // the voxel volume. Depth is WRITTEN by the shader (SV_DEPTH), so the state has depth-write on
+    // and the test Always -- there is no prior depth for a fullscreen pass to test against, and
+    // Less would reject every pixel against a cleared far-plane buffer.
+    const rhi::ShaderHandle psRayDriven =
+        rtOk ? compile("PSRayDriven", rhi::ShaderStage::Pixel, 65, rasterDefs("AVER_RT=1").c_str()) : 0;
+    if (vsky && psRayDriven) {
+        rhi::GraphicsPipelineDesc p;
+        p.vs = vsky; p.ps = psRayDriven;
+        p.layout = gi;
+        p.cull = rhi::CullMode::None;
+        p.depth = {true, true, rhi::CompareOp::Always};
+        p.renderTargetCount = 1;
+        p.renderTargets[0] = color;
+        p.depthFormat = depth;
+        p.sampleCount = sampleCount;
+        rayDrivenPso_ = res_->createGraphicsPipeline(p);
+    }
+    // A WARNING, NOT AN ERROR, and the mode simply does not engage: rayDrivenActive() requires the
+    // pipeline, so a device that cannot compile this keeps rasterising rather than going black.
+    if (rtOk && !rayDrivenPso_) AVER_WARN("[Voxi] ray-driven primary-visibility pass unavailable");
 
     if (msMain && psRt) {
         rhi::GraphicsPipelineDesc p = scene;
