@@ -288,6 +288,8 @@ private:
     // ray-driven primary visibility; whether it is HONOURED is rayDrivenActive(), which also
     // requires the device and the pipeline to have cooperated.
     u32 rtRenderMode_ = 0;
+    // Settings::rtBounces. 1 reproduces the single-bounce shading rtReflection already ships.
+    u32 rtBounces_ = 1;
     // Frames apart the GI volume is rebuilt. See setGiUpdateInterval / Settings for the contract; 1
     // rebuilds every frame. Read against rtFrameIndex_ in prePass() -- see that call site.
     u32 giUpdateInterval_ = 1;
@@ -461,6 +463,12 @@ private:
         // still paying for the taps, which is how the cost is measured before the filter is
         // trusted), z/w unused.
         f32 rtDenoiseParams[4] = {};
+        // Ray-driven bounce control -- mirrored as gRtBounceParams. x = how many bounces a ray
+        // takes AFTER the first hit (1 is one bounce, which is what reflections already do);
+        // y/z/w unused. Its own float4 rather than a spare slot in gRtDenoiseParams: a field
+        // whose name says "denoise" carrying a bounce count is the kind of thing that reads
+        // fine for a week and then costs an afternoon.
+        f32 rtBounceParams[4] = {};
     } cb_;
 
     // THE MIRROR THIS FILE HAS ALWAYS HAD AND NEVER GUARDED. `cbuffer VoxiFrame : register(b4)` in
@@ -468,7 +476,7 @@ private:
     // the same unguarded-mirror bug already fixed for PathTracer's FrameCB and PcgVolume's VolumeCB.
     // VoxiFrame was simply the one that never got the assert. Appending here without appending there
     // reads garbage off the end of the block in every Voxi shader at once.
-    static_assert(sizeof(FrameConstants) == 592,
+    static_assert(sizeof(FrameConstants) == 608,
                   "cbuffer VoxiFrame in VoxiShaders.hpp mirrors this byte for byte");
     static_assert(sizeof(FrameConstants) % 16 == 0, "must be a legal constant-buffer size");
 

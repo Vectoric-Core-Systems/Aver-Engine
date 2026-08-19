@@ -48,6 +48,7 @@ cbuffer VoxiFrame : register(b4) {
     // and cannot be unrolled away when the host asks for zero taps -- a compile-time 0 would
     // measure nothing and report it as free.
     float4   gRtDenoiseParams;
+    float4   gRtBounceParams;
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -931,9 +932,79 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // comment for what omitting it cost last time (every sunlit surface 3.14x too bright, which
     // reads as an exposure bug rather than a units one, and which the white furnace does not catch
     // because it turns the sun off).
+    // ---- the bounce loop ----------------------------------------------------------------
+    // PATH TRACING HERE IS EXTRA RAYS ON THE LOOP ABOVE, not a second renderer. The first hit
+    // has already been found and shaded the way rtReflection shades its own hit; every further
+    // bounce repeats exactly that, carrying a throughput and adding what each surface emits
+    // toward the previous one.
+    //
+    // COSINE-WEIGHTED, so the 1/PI of the Lambertian BRDF and the cosine of the rendering
+    // equation cancel against the pdf and the throughput is a plain albedo multiply. Getting
+    // this wrong is the /PI mistake rtReflection already paid for once, in the other direction.
+    //
+    // SCREEN-PINNED HASH, no per-frame jitter, matching rtShadow's own seeding: the gate oracle
+    // compares nine configurations bit-exactly, and a frame counter in the seed makes every one
+    // of them a different image. That means the noise is a fixed dither rather than something
+    // that converges over time -- honest for a first cut, and the thing a temporal accumulator
+    // would fix.
     float3 direct  = averSunRadiance() * saturate(dot(N, L)) * sunVis / PI;
     float3 ambient = averSkyIrradiance(N) * gAmbient.r;
-    float3 radiance = inst.albedo * (direct + ambient);
+    float3 radiance   = inst.albedo * (direct + ambient);
+    float3 throughput = inst.albedo;
+
+    const uint bounces = (uint)max(gRtBounceParams.x, 1.0);
+    float3 bp = wpos;
+    float3 bn = N;
+    [loop] for (uint b = 1; b < bounces; ++b) {
+        // A cosine-weighted direction about the surface normal, from the same rtHash the shadow
+        // disc uses. Two hashes for the two dimensions, decorrelated by offsetting the pixel.
+        float u1 = rtHash(i.pos.xy + float2(b * 17.0, 0.0));
+        float u2 = rtHash(i.pos.xy + float2(0.0, b * 23.0));
+        float r   = sqrt(u1);
+        float phi = 2.0 * PI * u2;
+        float3 t  = normalize(abs(bn.z) < 0.999 ? cross(float3(0,0,1), bn) : cross(float3(1,0,0), bn));
+        float3 bt = cross(bn, t);
+        float3 dirB = normalize(t * (r * cos(phi)) + bt * (r * sin(phi)) + bn * sqrt(max(0.0, 1.0 - u1)));
+
+        RayDesc rb;
+        const float bbias = max(gRtParams.z, 1e-4) * (1.0 + length(bp - gCamPos.xyz) * 5e-4);
+        rb.Origin = bp + bn * bbias;
+        rb.Direction = dirB;
+        rb.TMin = bbias;
+        rb.TMax = 1.0e7;
+
+        RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> qb;
+        qb.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, rb);
+        qb.Proceed();
+
+        if (qb.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+            // The ray escaped: the sky is the last thing it sees, and the path ends there.
+            radiance += throughput * skyColor(dirB) * gAmbient.r;
+            break;
+        }
+
+        RtInstance bi = gRtInstances[qb.CommittedInstanceID()];
+        uint btri = bi.firstIndex + qb.CommittedPrimitiveIndex() * 3;
+        uint b0 = bi.firstVertex + gRtIndices[btri + 0];
+        uint b1 = bi.firstVertex + gRtIndices[btri + 1];
+        uint b2 = bi.firstVertex + gRtIndices[btri + 2];
+        float2 bbary = qb.CommittedTriangleBarycentrics();
+        float3 bw = float3(1.0 - bbary.x - bbary.y, bbary.x, bbary.y);
+        float3 bnObj = normalize(gRtVerts[b0].nrm * bw.x + gRtVerts[b1].nrm * bw.y + gRtVerts[b2].nrm * bw.z);
+        float3 bnWS = normalize(mul(float4(bnObj, 0.0), bi.objectToWorld).xyz);
+        if (dot(bnWS, dirB) > 0.0) bnWS = -bnWS;
+
+        bp = bp + dirB * qb.CommittedRayT();
+        bn = bnWS;
+        throughput *= bi.albedo;
+
+        // ONE shadow ray per bounce, no disc -- the penumbra of a surface seen only through two
+        // diffuse bounces is not resolvable, and this is the single largest cost in the loop.
+        float bshadow = rtShadow(bp, bn, L, i.pos.xy, float3(0,0,0), float3(0,0,0), 1u, 0.0);
+        float3 bdirect = averSunRadiance() * saturate(dot(bn, L)) * bshadow / PI;
+        radiance += throughput * bdirect;
+    }
+
     radiance = averApplyFog(radiance, wpos);
 
     // Depth for everything that draws AFTER the scene -- the deferred sky, transparentPass, the
