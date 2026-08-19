@@ -1503,7 +1503,7 @@ struct GraphComponentKind {
 };
 constexpr GraphComponentKind kGraphComponentKinds[] = {
     {"Scene",        "A named transform and nothing else -- a muzzle, a socket, an attach point."},
-    {"Mesh",         "A drawn mesh. `mesh=` is content-relative, e.g. Meshes/Blaster.ocmesh."},
+    {"Mesh",         "A drawn mesh. `mesh=` is content-relative, e.g. Meshes/cube.ocmesh."},
     {"SkeletalMesh", "A mesh plus the skeleton that poses it."},
     {"Animator",     "A clip and the clock running it, on whatever this is parented to."},
     {"Particles",    "One emitter instance, playing a .ocparticle effect."},
@@ -1524,9 +1524,20 @@ struct GraphComponentAttrSet {
     const GraphComponentAttrRow* rows;
     int count;
 };
+// ENGINE BUILT-INS, NOT ANYTHING A TEMPLATE SHIPS. These two rows used to read
+// "Meshes/Blaster.ocmesh" and "M_Gun", which are the FirstPerson template's own gun and its own
+// material name -- so the editor's palette suggested, to every project on the machine, an asset
+// only one template contains and a material nothing outside it defines. Every other row here
+// (Hero.ocmesh, Idle.ocanim, Muzzle.ocparticle) is an INVENTED illustrative name that belongs to
+// no shipped content at all; the Mesh row was the one that had drifted into naming real files from
+// a template, and the editor must not know a template exists.
+//
+// cube.ocmesh and M_Crate are engine built-ins -- the primitive PreviewMeshCache synthesises and
+// one of the materials SandboxApp registers -- so unlike the invented names these actually resolve
+// in a blank project, which is what a hint should do.
 constexpr GraphComponentAttrRow kMeshRows[] = {
-    {"mesh", "Mesh", "Meshes/Blaster.ocmesh"},
-    {"material", "Material", "M_Gun"},
+    {"mesh", "Mesh", "Meshes/cube.ocmesh"},
+    {"material", "Material", "M_Crate"},
 };
 constexpr GraphComponentAttrRow kSkelRows[] = {
     {"mesh", "Mesh", "Meshes/Hero.ocmesh"},
