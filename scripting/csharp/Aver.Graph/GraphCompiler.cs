@@ -827,7 +827,18 @@ public class GraphCompiler
     private void EmitJump(Node node)
     {
         if (_il == null) return;
-        LoadPin(node.Id, "entity");
+        // EmitPullInput, NOT LoadPin, and the difference is the whole of this node working or not.
+        // LoadPin reads `_pinLocals` -- which the EXEC compiler never populates for data nodes, as
+        // EmitPullInput's own comment says one screen below. Every other exec-path emitter beside this
+        // one (CharacterMove, SetParent, Spawn, FireEvent, SetVar...) pulls its inputs; this one read a
+        // local that nothing had ever stored, so it pushed a zero. Jump therefore received entity 0 on
+        // every single call since it was written, found no actor bound to it, warned, and returned
+        // false. It has never once made a character jump.
+        //
+        // It looked like a once-a-run glitch rather than a dead node because nothing in the shipped
+        // FirstPerson template presses the jump key, and --play-test only synthesises Space from frame
+        // 100 (SandboxApp.cpp). Read the warning as "Jump is broken", not "the first frame is odd".
+        EmitPullInput(node, "entity");
         _il.Emit(OpCodes.Call, JumpMethod);
         if (_pinLocals.TryGetValue((node.Id, "jumped"), out var local)) _il.Emit(OpCodes.Stloc, local);
         else                                                           _il.Emit(OpCodes.Pop);
