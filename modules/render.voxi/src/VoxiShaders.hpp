@@ -80,7 +80,8 @@ RaytracingAccelerationStructure gScene : register(t2);
 // The flat geometry a reflection ray reads after it hits something. Three descriptors for the whole
 // scene rather than one per mesh, because this RHI uses explicit descriptor tables and not bindless.
 struct RtVertex   { float3 pos; float3 nrm; float2 uv; };
-struct RtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo; uint pad; };
+struct RtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo;
+                    float metallic; float roughness; uint pad; };
 StructuredBuffer<RtVertex>   gRtVerts     : register(t3);
 StructuredBuffer<uint>       gRtIndices   : register(t4);
 StructuredBuffer<RtInstance> gRtInstances : register(t5);
@@ -947,10 +948,45 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // of them a different image. That means the noise is a fixed dither rather than something
     // that converges over time -- honest for a first cut, and the thing a temporal accumulator
     // would fix.
-    float3 direct  = averSunRadiance() * saturate(dot(N, L)) * sunVis / PI;
-    float3 ambient = averSkyIrradiance(N) * gAmbient.r;
-    float3 radiance   = inst.albedo * (direct + ambient);
-    float3 throughput = inst.albedo;
+    // THE ENGINE'S OWN BRDF, not a second one written here. averShadeDirect is the same
+    // Cook-Torrance GGX PSMainVoxi shades through; building an AverSurface by hand and handing it
+    // over is what stops the ray image and the raster image disagreeing about what a material
+    // looks like for reasons that are nobody's intent. The /PI lives inside it (kdAlbedo / PI),
+    // which is the divide rtReflection had to learn the hard way.
+    //
+    // TWO CONSTANTS ARE DEFAULTED because they are per-MATERIAL and a ray hit has no material
+    // constant buffer bound: reflectance 0.04 (the dielectric F0 every renderer starts from) and
+    // f90 1.0. A material that authored either differently will shade slightly differently here
+    // than it does under the rasteriser -- a real, bounded difference, and the same one that will
+    // disappear when a hit can reach its own material.
+    AverSurface s = (AverSurface)0;
+    s.N        = N;
+    s.V        = -dir;
+    s.H        = normalize(s.V + L);
+    s.albedo   = inst.albedo;
+    s.metallic = saturate(inst.metallic);
+    s.rough    = clamp(inst.roughness, 0.045, 1.0);   // the same floor averEvalMaterial clamps to
+    s.ndv      = saturate(dot(s.N, s.V));
+    s.f90      = 1.0;
+    s.F0       = lerp((0.04).xxx, s.albedo, s.metallic);
+    s.F        = fresnelSchlick(saturate(dot(s.H, s.V)), s.F0, s.f90);
+    s.kdAlbedo = (1.0 - s.metallic) * s.albedo;
+    s.model    = AVER_MODEL_STANDARD;
+    s.alpha    = 1.0;
+    s.occlusion = 1.0;
+
+    AverLight sun;
+    sun.direction  = L;
+    sun.radiance   = averSunRadiance();
+    sun.visibility = sunVis;
+
+    float3 radiance = averShadeDirect(0.0, s, sun);
+    radiance += s.kdAlbedo * averSkyIrradiance(N) * gAmbient.r;
+
+    // THE BOUNCE CARRIES THE DIFFUSE RESPONSE, not the raw albedo. A metal reflects almost
+    // nothing diffusely, so multiplying a path's throughput by base colour would light an
+    // interior with bounced light off surfaces that do not bounce it.
+    float3 throughput = s.kdAlbedo;
 
     const uint bounces = (uint)max(gRtBounceParams.x, 1.0);
     float3 bp = wpos;
@@ -996,7 +1032,10 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 
         bp = bp + dirB * qb.CommittedRayT();
         bn = bnWS;
-        throughput *= bi.albedo;
+        // Diffuse response again, for the reason stated at the primary hit: a cosine-weighted
+        // bounce is sampling the DIFFUSE lobe, so the throughput is the diffuse albedo and a
+        // metal correctly contributes almost nothing to it.
+        throughput *= (1.0 - saturate(bi.metallic)) * bi.albedo;
 
         // ONE shadow ray per bounce, no disc -- the penumbra of a surface seen only through two
         // diffuse bounces is not resolvable, and this is the single largest cost in the loop.

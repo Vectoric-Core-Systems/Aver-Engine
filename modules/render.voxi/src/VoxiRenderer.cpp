@@ -651,6 +651,9 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         RtInstance ri;
         std::memcpy(ri.objectToWorld, d.world, sizeof(ri.objectToWorld));
         ri.albedo[0] = d.color[0]; ri.albedo[1] = d.color[1]; ri.albedo[2] = d.color[2];
+        // From the same Draw, and available here all along.
+        ri.metallic = d.metallic;
+        ri.roughness = d.roughness;
         // Filled in by buildGeometryTable, which is what knows where each mesh landed.
         ri.firstIndex = 0;
         ri.firstVertex = 0;

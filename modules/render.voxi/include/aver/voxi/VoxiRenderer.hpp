@@ -333,12 +333,27 @@ private:
         u32 firstIndex = 0;      // where this mesh's indices start in the flat table
         u32 firstVertex = 0;     // and its vertices
         f32 albedo[3] = {1, 1, 1};
+        // THE REST OF THE MATERIAL, or as much of it as a ray can reach. A hit used to shade as
+        // pure chalk -- albedo through a Lambertian lobe -- because these two were sitting
+        // unread in the same Draw the albedo is copied from. Metals in particular came out white
+        // instead of dark, since a metal has no diffuse response at all.
+        //
+        // TEXTURES ARE STILL ABSENT and are a separate problem: a hit needs every material's
+        // textures reachable from one shader, and kMaxBindingSlots is 16 against 8 slots per
+        // material with one binding set each. That needs an RHI addition, not another field here.
+        f32 metallic = 0.0f;
+        f32 roughness = 1.0f;
         u32 pad = 0;
     };
-    // 64 + 4 + 4 + 12 + 4. A structured buffer packs tightly with natural alignment, so this is the
-    // same 88 bytes on both sides -- and the stride handed to setSrvBuffer must agree with it or
-    // every instance after the first reads the middle of its neighbour.
-    static_assert(sizeof(RtInstance) == 88, "RtInstance is the HLSL RtInstance ABI");
+    // 64 + 4 + 4 + 12 + 4 + 4 + 4. A structured buffer packs tightly with natural alignment, so
+    // this is the same 96 bytes on both sides -- and the stride handed to setSrvBuffer must agree
+    // with it or every instance after the first reads the middle of its neighbour.
+    //
+    // THREE PLACES HAVE TO AGREE, and the assert only guards two of them: this struct, the HLSL
+    // RtInstance in VoxiShaders.hpp, and the stride. The stride is the one that fails SILENTLY --
+    // no compile error, just every instance past the first reading its neighbour's bytes, which
+    // shows up as reflections and ray hits shading with the wrong surface's colour.
+    static_assert(sizeof(RtInstance) == 96, "RtInstance is the HLSL RtInstance ABI");
 
     rhi::BufferHandle rtVerts_ = 0, rtIndices_ = 0;
     u32  rtVertCapacity_ = 0, rtIndexCapacity_ = 0, rtInstanceCapacity_ = 0;
