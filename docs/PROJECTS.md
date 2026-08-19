@@ -38,6 +38,16 @@ A project is **additive, never required**: the editor runs exactly as well with 
   was named on the command line, or when headless. The verification harness drives the editor
   with `--frames` and reads one probe pixel out of the viewport; a full-screen chooser in front
   of it would take out all 13 oracle gates at once.
+- **Older-series projects need `--open-legacy` in automation**, and the bullet above is exactly
+  why this is easy to miss: the BROWSER is suppressed, but the *upgrade prompt* is a different
+  modal and is not. A project whose `CREATEDWITH` predates the current series is offered an
+  upgrade before it opens — deliberately, since choosing a project by argv rather than by mouse
+  is no reason to migrate it silently — and with a frame limit set there is nobody to answer.
+  The project then never opens and the run renders an **empty editor**, reporting timings, probe
+  pixels and screenshots of nothing. Those numbers look completely ordinary; the only tell is
+  `over 0 entities` in a scene-walk line. A frame-limited run in this state now logs an error
+  saying so, and `--open-legacy` is the fix: it opens the project **as-is, upgrading nothing**,
+  so it is safe to point at content that must be measured exactly as it exists on disk.
 - **Recent projects** persist in `%LOCALAPPDATA%\AverEngine\recent.txt` — one path per line,
   most-recent first, capped at 10, and entries whose file has gone are dropped on read.
 - **New Project** scaffolds `<location>/<Name>/` with the manifest and the `Content/{Maps,
