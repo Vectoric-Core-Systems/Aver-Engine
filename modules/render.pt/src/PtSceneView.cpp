@@ -537,42 +537,6 @@ void PtSceneView::runDenoise(rhi::IRenderContext& ctx) {
     // this on the device it was written on, which is exactly the kind of luck that stops being luck
     // on a different driver.
     ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
-    // THE ACCUMULATOR IS READ HERE AS AN SRV and was last written as a UAV, so it needs an explicit
-    // transition -- the RHI tracks buffer state and does not model D3D12's implicit Common promotion,
-    // the same reason scenePass() barriers what it samples. It happened to read correctly without
-    // this on the device it was written on, which is exactly the kind of luck that stops being luck
-    // on a different driver.
-    ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
-    // THE ACCUMULATOR IS READ HERE AS AN SRV and was last written as a UAV, so it needs an explicit
-    // transition -- the RHI tracks buffer state and does not model D3D12's implicit Common promotion,
-    // the same reason scenePass() barriers what it samples. It happened to read correctly without
-    // this on the device it was written on, which is exactly the kind of luck that stops being luck
-    // on a different driver.
-    ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
-    // THE ACCUMULATOR IS READ HERE AS AN SRV and was last written as a UAV, so it needs an explicit
-    // transition -- the RHI tracks buffer state and does not model D3D12's implicit Common promotion,
-    // the same reason scenePass() barriers what it samples. It happened to read correctly without
-    // this on the device it was written on, which is exactly the kind of luck that stops being luck
-    // on a different driver.
-    ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
-    // THE ACCUMULATOR IS READ HERE AS AN SRV and was last written as a UAV, so it needs an explicit
-    // transition -- the RHI tracks buffer state and does not model D3D12's implicit Common promotion,
-    // the same reason scenePass() barriers what it samples. It happened to read correctly without
-    // this on the device it was written on, which is exactly the kind of luck that stops being luck
-    // on a different driver.
-    ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
-    // THE ACCUMULATOR IS READ HERE AS AN SRV and was last written as a UAV, so it needs an explicit
-    // transition -- the RHI tracks buffer state and does not model D3D12's implicit Common promotion,
-    // the same reason scenePass() barriers what it samples. It happened to read correctly without
-    // this on the device it was written on, which is exactly the kind of luck that stops being luck
-    // on a different driver.
-    ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
-    // THE ACCUMULATOR IS READ HERE AS AN SRV and was last written as a UAV, so it needs an explicit
-    // transition -- the RHI tracks buffer state and does not model D3D12's implicit Common promotion,
-    // the same reason scenePass() barriers what it samples. It happened to read correctly without
-    // this on the device it was written on, which is exactly the kind of luck that stops being luck
-    // on a different driver.
-    ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
     ctx.bufferBarrier(denoiseBuf_[0], rhi::ResourceState::Common, rhi::ResourceState::UnorderedAccess);
     ctx.setPipeline(denoisePso_);
     ctx.setBindingSet(denoiseSetResolve_);
@@ -581,12 +545,6 @@ void PtSceneView::runDenoise(rhi::IRenderContext& ctx) {
     ctx.setConstantBuffer(kPresentConstantRegister, &cb, sizeof(cb));
     ctx.dispatch(gx, gy, 1);
     ctx.bufferBarrier(denoiseBuf_[0], rhi::ResourceState::UnorderedAccess, rhi::ResourceState::Common);
-    ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
-    ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
-    ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
-    ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
-    ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
-    ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
     ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
 
     // FILTER: A -> B -> A -> ..., step doubling each pass. Each dispatch must SEE the previous one's
