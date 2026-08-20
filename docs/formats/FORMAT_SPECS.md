@@ -469,6 +469,7 @@ OUT result result
 | `DESCRIPTION` | `DESCRIPTION <rest of line>` | Free text, taken from the **raw** line, not the comment-truncated one — a literal `#` inside a description is data, not a comment marker (both readers agree on this; it was a real bug in the C++ reader, fixed once both sides used the same rule). |
 | `CLASS` | `CLASS <name> [parentName] [mesh=<path>] [material=<name>] [view=firstperson\|thirdperson]` | Optional; **at most one per file** (a second `CLASS` line is a parse error). Declares the graph itself a spawnable actor class. `parentName` defaults to `"Actor"` when omitted. `mesh=`/`material=` become the class's own default `CMeshRenderer`, not a per-tick write. `view=` (for `Character`-parented classes only) sets `CameraViewMode` on the spawned instance; omitted or meaningless when the class's native ancestor is not `AverCharacter`. |
 | `COMP` | `COMP <id> <Kind> [parent=<id>] [pos=x,y,z] [rot=yaw,pitch,roll] [scale=x,y,z] [key=value ...]` | One entry in a class graph's **component tree** — one child entity of a spawned instance. `Kind` ∈ `Scene`\|`Mesh`\|`Light`\|`Camera`\|`SkeletalMesh`\|`Particles`. `parent=` names another `COMP` (absent = attached to the actor's own entity) and **may name one declared later in the file**; the C++ reader refuses a parent that names nothing, a duplicate id, and a parent *cycle*, which is the one structural rule a tree needs and a single left-to-right pass cannot check. Transform is centimetres, degrees in the engine’s own `Rot` order — **yaw, pitch, roll**, matching `ActorBuilder.Place` rather than inventing a second convention, and a scale multiplier defaulting to `1,1,1` — an axis that does not parse keeps its default rather than becoming zero, so a half-typed `scale=2,,2` cannot flatten an actor. Every other `key=value` is **kind-specific** and opaque to the format: `mesh=`/`material=` on a `Mesh`, `fov=`/`near=`/`far=` on a `Camera`, `effect=` on `Particles`. Asset paths are **content-relative** (`Meshes/Blaster.ocmesh`, not `Content/Meshes/…`) — the id is a hash of the string, so a path with the content root on the front resolves to nothing and the component draws nothing, silently. `CLight` and `CCamera` attach correctly but **no renderer reads them yet**, and the spawn path says so in the log rather than letting an author conclude their transform is wrong. This is what `mesh=` on the `CLASS` line was a single-slot stand-in for; the two coexist, and `CLASS mesh=` still applies to the actor's own entity. |
+| `COMMENT` | `COMMENT <id> <x> <y> <w> <h> <r> <g> <b> <text...>` | One **comment box**: a titled, tinted rectangle drawn behind the nodes, grouping them and saying why they are wired the way they are. Purely editor furniture — nothing compiles it, nothing executes it, and a graph stripped of every `COMMENT` runs identically. It lives in the format anyway because a note kept in a sidecar file is a note that goes stale the first time the graph is copied or renamed by someone who does not know the sidecar exists. `x`/`y`/`w`/`h` are canvas units (logical pixels at zoom 1, the same units `NODE`'s `x y` use); `r`/`g`/`b` are `0`…`255` and are clamped, not wrapped, by the editor's setter. **All eight numbers are required**, so the title always begins at token nine — reading them optionally the way `NODE` reads its `x y` would make `COMMENT c1 Spawning logic` ambiguous between a box with no position and a box at `x=Spawning`. The title is the **rest of the raw line**, exactly as `DESCRIPTION` is: a literal `#` inside it is data (`counts the # of spawners`), not a comment marker. That closes the record on the right — there is no room after free text for a future `key=value`, which is why the colour is spelled out **now** rather than left for later; anything this record grows from here has to arrive as a sibling record. Ids are unique among comments only, and unrelated to node ids. Editor gestures: right-click ▸ *Comment Box*, or **C** to wrap the current selection; drag the **title bar** to move it (every node fully inside comes with it), drag the bottom-right grip to resize, double-click the bar for title/colour/delete. |
 | `PARAM` | `PARAM <name> <type>` | Declares one argument the compiled graph accepts, in declaration order. `type` ∈ `float`\|`int`\|`bool` — `exec` is rejected at parse time with an explicit error (a parameter is data, not control flow). |
 | `VAR` | `VAR <name> <type> [default]` | Declares one variable the graph remembers between ticks (see [`VISUAL_SCRIPTING.md` §4](../VISUAL_SCRIPTING.md) for the storage/lifetime contract). Same three types as `PARAM`, same `exec` rejection. An unparseable `[default]` falls back to the type's zero value rather than failing the graph. |
 | `ENTRY` | `ENTRY <nodeId> <eventName>` | Declares which node begins the exec chain for a named event (`OnStart`, `OnTick`, or any project-invented name). The node may be of any type — `ENTRY` is what makes it a starting point, not the node's own type. |
@@ -479,23 +480,25 @@ OUT result result
 
 ### 10a.2 What the C++ reader owns, and the hazard that follows from it
 
-`OcGraph.cpp`'s `classifyLine` recognises exactly eight record kinds as its own:
-**`OCGRAPH`, `NAME`, `DESCRIPTION`, `NODE`, `PIN`, `LINK`, `ENTRY`, `OUT`.** Only these have a field
-in `OcGraphData` (`modules/formats/include/aver/formats/OcGraph.hpp`) — the struct that C++ code
-actually holds in memory.
+`OcGraph.cpp`'s `classifyLine` recognises eleven record kinds as its own:
+**`OCGRAPH`, `NAME`, `DESCRIPTION`, `VAR`, `COMP`, `COMMENT`, `NODE`, `PIN`, `LINK`, `ENTRY`, `OUT`.**
+Only these have a field in `OcGraphData` (`modules/formats/include/aver/formats/OcGraph.hpp`) — the
+struct that C++ code actually holds in memory. The list has grown three times, and each time for the
+same reason: a record the C++ side can only copy verbatim is a record the **editor cannot edit**, so
+`VAR` moved out of `Other` when the Variables panel needed to declare one, `COMP` when the component
+tree needed to build one, and `COMMENT` when comment boxes needed to be moved and resized.
 
-**`CLASS`, `PARAM` and `VAR` are invisible to the C++ side.** They are not malformed input and not
+**`CLASS` and `PARAM` are still invisible to the C++ side.** They are not malformed input and not
 rejected; they simply fall into the same catch-all `Other` bucket as a comment or a blank line, and
-`OcGraphData` has no field that could hold a class name, a parameter list or a variable declaration
-even if the reader wanted to keep one. (A twelfth record, `PINVAL <nodeId> <pinName> <value>` — a
-fallback constant for an unconnected input pin — rides through the same way; it is C#-only too, and
-not part of this section's closed list because nothing in this engine's toolchain writes one from a
-level or a class declaration.)
+`OcGraphData` has no field that could hold a class name or a parameter list even if the reader wanted
+to keep one. (`PINVAL <nodeId> <pinName> <value>` — a fallback constant for an unconnected input pin
+— rides through the same way; it is C#-only too, and not part of this section's closed list because
+nothing in this engine's toolchain writes one from a level or a class declaration.)
 
 This is why `writeOcgraph`'s `existing` parameter is load-bearing, not a convenience:
 
 - Called with the file's original text as `existing` (`writeOcgraph(g, existing)`), every `CLASS`/
-  `PARAM`/`VAR` line in that original text is copied through **verbatim, at its original position**
+  `PARAM` line in that original text is copied through **verbatim, at its original position**
   — the same whole-file "preserve what you don't understand" contract that protects a stray comment.
   `saveOcgraph()` (`OcGraph.cpp`) reads whatever is already on disk at the target path before writing
   for exactly this reason — and correspondingly, `saveOcgraph()` at a path that does not exist yet
@@ -503,7 +506,7 @@ This is why `writeOcgraph`'s `existing` parameter is load-bearing, not a conveni
   preserve for the same reason.
 - Called with **no** original text — `writeOcgraph(g)` with its default empty `existing`, or any
   caller that builds an `OcGraphData` from scratch (in memory, never parsed from the file it is about
-  to overwrite) and hands it straight to `writeOcgraph` — every `CLASS`/`PARAM`/`VAR` line that used
+  to overwrite) and hands it straight to `writeOcgraph` — every `CLASS`/`PARAM` line that used
   to be in that file **is gone from the output**, silently. There is no error, because from the C++
   side's point of view nothing was lost: those records were never modelled as data to begin with, so
   there is nothing to notice missing.
@@ -511,12 +514,13 @@ This is why `writeOcgraph`'s `existing` parameter is load-bearing, not a conveni
 **Where a reader will actually meet this:** the C++ node editor (`sandbox/src/GraphEditor.cpp`)
 protects itself correctly — it always calls `writeOcgraph(graph_, originalText_)` with the text it
 loaded, per its own file-header comment, so opening and saving an *existing* graph that declares a
-class, a parameter or a variable is safe. But the same fact cuts the other way: because `OcGraphData`
-has no field for any of the three, **the C++ editor has no way to create or edit a `CLASS`/`PARAM`/
-`VAR` record at all** — only to silently carry one through if the file already had it. Declaring a
-graph as a class, or changing its parameter/variable list, is a text edit today (or done from the C#
-side, which does model all three) — not something the node editor's GUI can do, node-attribute panel
-included. Any future C++ tool that constructs a fresh `.ocgraph` programmatically and calls
+class or a parameter is safe. But the same fact cuts the other way: because `OcGraphData` has no field
+for either, **the C++ editor has no way to create or edit a `CLASS` or `PARAM` record at all** — only
+to silently carry one through if the file already had it. Declaring a graph as a class, or changing
+its parameter list, is a text edit today (or done from the C# side, which does model both) — not
+something the node editor's GUI can do, node-attribute panel included. `VAR` used to be in that
+sentence and no longer is: it is modelled now, and the Variables panel declares, renames, retypes and
+deletes one. Any future C++ tool that constructs a fresh `.ocgraph` programmatically and calls
 `writeOcgraph` without first loading the file it is replacing will reproduce the drop described above
 for real.
 

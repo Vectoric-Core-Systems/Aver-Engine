@@ -262,6 +262,82 @@ static void testVarRecordsSurviveRoundTrip() {
           "a fresh write (no `existing`) of a no-default VAR omits the default entirely, rather than writing a stray trailing space");
 }
 
+static void testCommentBoxes() {
+    AVER_INFO("=== .ocgraph COMMENT records (editor comment boxes) ===");
+    using namespace fmt;
+
+    const std::string original =
+        "OCGRAPH 1\n"
+        "NAME CommentTest\n"
+        "\n"
+        "COMMENT cmt1 -40 -60 420 260 200 80 60 Spawning, and why it retries\n"
+        "COMMENT cmt2 500 -60 300 200 60 70 90\n"
+        "\n"
+        "NODE tick OnTick 0 0\n"
+        "ENTRY tick OnTick\n";
+
+    OcGraphData g;
+    std::string err;
+    check(parseOcgraph(original, g, &err), "graph with COMMENT records parses");
+    check(g.comments.size() == 2, "both COMMENT records reached OcGraphData::comments");
+    if (g.comments.size() == 2) {
+        const OcGraphComment& c = g.comments[0];
+        check(c.id == "cmt1", "comment id parsed");
+        check(c.x == -40.0 && c.y == -60.0 && c.w == 420.0 && c.h == 260.0, "position and size parsed, negatives included");
+        check(c.r == 200 && c.g == 80 && c.b == 60, "colour parsed as three 0..255 numbers");
+        // The whole reason the text is taken off the RAW line: it has spaces AND a comma, and a
+        // token-based read would have kept only the first word.
+        check(c.text == "Spawning, and why it retries", "the title is the WHOLE rest of the line, spaces included");
+        check(g.comments[1].text.empty(), "a COMMENT with no text after its numbers has an empty title, not a placeholder");
+    }
+
+    const std::string rewritten = writeOcgraph(g, original);
+    check(rewritten == original, "a load -> save with no edits reproduces a COMMENT-bearing file byte for byte");
+
+    // A # INSIDE THE TITLE IS DATA. This is the exact bug DESCRIPTION had (see its own comment in
+    // OcGraph.cpp): reading the hash-truncated line would silently drop everything after it, and a
+    // comment box is precisely where an author writes "# of spawners".
+    OcGraphData gh;
+    check(parseOcgraph("OCGRAPH 1\nNAME Hash\nCOMMENT c 0 0 100 100 1 2 3 counts the # of spawners\n", gh, &err),
+          "a COMMENT whose title contains a # parses");
+    check(gh.comments.size() == 1 && gh.comments[0].text == "counts the # of spawners",
+          "a literal # inside a comment title is data, not a source-comment marker");
+
+    // Lower case record key. The classifier matches case-insensitively, so the text extraction has
+    // to as well -- locating it with find("COMMENT") would return npos here and lose the title.
+    OcGraphData gl;
+    check(parseOcgraph("OCGRAPH 1\nNAME Lower\ncomment c 0 0 100 100 1 2 3 lower case key\n", gl, &err),
+          "a lower-case `comment` key parses");
+    check(gl.comments.size() == 1 && gl.comments[0].text == "lower case key",
+          "a lower-case `comment` keeps its title");
+
+    // Structurally short records are refused rather than half-read: a box with no size is one the
+    // editor would draw at zero pixels and no author could ever click again.
+    OcGraphData gbad;
+    check(!parseOcgraph("OCGRAPH 1\nNAME Bad\nCOMMENT c 0 0 100\n", gbad, &err),
+          "a COMMENT missing its size and colour is rejected");
+    OcGraphData gdup;
+    check(!parseOcgraph("OCGRAPH 1\nNAME Dup\nCOMMENT c 0 0 1 1 1 1 1\nCOMMENT c 0 0 1 1 1 1 1\n", gdup, &err),
+          "two COMMENTs with the same id are rejected, as two COMPs already are");
+
+    // Fresh write (no `existing`), then re-read: the round trip has to survive with no original
+    // text to copy through, which is the path a brand-new graph takes.
+    OcGraphData gf;
+    OcGraphComment c;
+    c.id = "region"; c.x = 12.5; c.y = -3.25; c.w = 200.0; c.h = 150.0;
+    c.r = 10; c.g = 20; c.b = 30; c.text = "two words";
+    gf.name = "Fresh";
+    gf.comments.push_back(c);
+    const std::string fresh = writeOcgraph(gf);
+    check(fresh.find("COMMENT region 12.5 -3.25 200 150 10 20 30 two words\n") != std::string::npos,
+          "a fresh write emits the COMMENT line in grammar order");
+    OcGraphData gf2;
+    check(parseOcgraph(fresh, gf2, &err), "the freshly written COMMENT parses back");
+    check(gf2.comments.size() == 1 && gf2.comments[0].x == 12.5 && gf2.comments[0].text == "two words",
+          "fractional coordinates and a multi-word title survive a fresh write and re-read");
+    check(writeOcgraph(gf2, fresh) == fresh, "second rewrite of COMMENT data is bit-identical");
+}
+
 // Tests that output is deterministic: same data written twice produces identical output.
 static void testForwardReferencedEntryAndOut() {
     AVER_INFO("=== ENTRY/OUT may name a node declared later in the file ===");
@@ -979,6 +1055,7 @@ int main(int argc, char** argv) {
     testRoundTrip();
     testUnknownRecords();
     testVarRecordsSurviveRoundTrip();
+    testCommentBoxes();
     testForwardReferencedEntryAndOut();
     testForwardReferencedLinkAndPin();
     testComponentTree();

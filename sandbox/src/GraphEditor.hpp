@@ -143,6 +143,43 @@ public:
     // for the Variables panel and the component tree -- thin ImGui glue, model in the class.
     std::string addNodeFromCatalog(const std::string& typeId, Vec2 canvasPos);
 
+    // ---- comment boxes ------------------------------------------------------------------------
+    // A comment box groups nodes visually and says WHY they are wired the way they are. It has no
+    // pins, no links and no effect on what the graph does -- see fmt::OcGraphComment for the format
+    // side. Same public-surface shape as addNodeFromCatalog/deleteSelection above and for the same
+    // reason: the gestures that reach these live behind an ImGui popup, so without a method here
+    // nothing could test that adding a box, moving it and saving actually produces a file that
+    // reloads.
+
+    // Adds one box spanning the canvas rectangle between `a` and `b` (either corner order), with
+    // `text` as its title. Returns the new comment id. A degenerate rectangle is grown to a usable
+    // minimum rather than refused -- a zero-height box would be invisible AND unclickable, which
+    // is an editor state with no way out except a text edit.
+    std::string addComment(Vec2 a, Vec2 b, const std::string& text);
+
+    // Adds one box sized to enclose every currently selected node, with a margin. Returns empty and
+    // does nothing when the selection is empty -- this is the C-key gesture, and wrapping nothing in
+    // a box is not a thing an author ever means.
+    //
+    // TAKES A DPI AND RECOMPUTES THE LAYOUTS ITSELF rather than reading whatever draw() left in
+    // layouts_. Node boxes are sized at a DPI, so "how big is this node" has no answer without
+    // one -- and depending on the last frame would make this callable only from inside a frame,
+    // which is exactly the shape that leaves a method untestable. Recomputing is idempotent and
+    // costs one pass over the nodes.
+    std::string addCommentAroundSelection(float dpi);
+
+    bool deleteComment(const std::string& id);
+    bool setCommentText(const std::string& id, const std::string& text);
+    bool setCommentColor(const std::string& id, int r, int g, int b);
+    const std::vector<fmt::OcGraphComment>& comments() const { return graph_.comments; }
+    const std::string& selectedComment() const { return selectedComment_; }
+
+    // Every node whose layout box sits ENTIRELY inside the comment. That is what a comment box
+    // "contains", and it is decided by geometry every time it is asked rather than stored: a box
+    // that remembered a membership list would disagree with the screen the moment a node was
+    // dragged out of it, and there would be no way for an author to see which answer was live.
+    std::vector<std::string> nodesInsideComment(const std::string& id, float dpi);
+
     // Deletes every selected node and link, along with the links, ENTRY records and OUT records
     // that name them -- all three would otherwise be dangling references the parser refuses on the
     // next load. Public for the same reason addNodeFromCatalog is.
@@ -305,7 +342,7 @@ private:
     // ---- interaction state machine -----------------------------------------------------------------
     // (NOT "left mouse button" despite the field names below being button-agnostic: PanCanvas has
     // always also fired on Middle-drag, and now on Right-drag too -- see rightButtonPan_.)
-    enum class DragMode { None, PanCanvas, MoveNodes, BoxSelect, DrawLink };
+    enum class DragMode { None, PanCanvas, MoveNodes, BoxSelect, DrawLink, MoveComment, ResizeComment };
     DragMode dragMode_ = DragMode::None;
     Vec2 dragStartScreen_{};       // canvas-local screen space (relative to the canvas child's origin)
     Vec2 dragStartCanvas_{};
@@ -355,6 +392,33 @@ private:
     // in-flight edit buffer it never asked for.
     std::string varEditRowKey_;
     char varEditBuf_[256] = {};
+
+    // ---- comment box state ------------------------------------------------------------------------
+    // Selected and drag targets are held BY ID, never by index, for the same reason varEditRowKey_ is
+    // keyed by variable name: deleting a box mid-session must not hand its selection to whichever box
+    // shuffled into its slot.
+    std::string selectedComment_;
+    std::string activeComment_;            // the box being moved or resized right now
+    Vec2 commentDragStartPos_{}, commentDragStartSize_{};
+    // Nodes captured when a MOVE began, and where each of them started. A comment box drags what it
+    // encloses -- that is most of why an author draws one -- and the membership is frozen AT DRAG
+    // START rather than recomputed per frame: recomputing it would let a node the box slid over
+    // halfway through the drag join the convoy, so the set an author saw when they pressed the mouse
+    // is not the set that moved.
+    std::unordered_map<std::string, Vec2> commentCapturedStart_;
+    bool commentUndoPushed_ = false;       // lazy, exactly like moveUndoPushed_ above
+    UndoState pendingCommentSnapshot_;
+    // Which box the properties popup is editing, and its in-flight title text. Same activate/
+    // apply-live/deactivate shape as attrEditBuf_.
+    std::string commentEditId_;
+    char commentEditBuf_[256] = {};
+    bool commentPopupQueued_ = false;      // one-shot: OpenPopup on the frame after the double-click
+    std::string makeUniqueCommentId() const;
+    fmt::OcGraphComment* findComment(const std::string& id);
+    // Which box, if any, is under `canvasPt`, and whether the point is on its RESIZE GRIP rather
+    // than its title bar. Only those two strips are hit-testable: the body of a box must stay
+    // click-through, or a box drawn around six nodes would swallow every click meant for them.
+    std::string commentAtCanvas(Vec2 canvasPt, float dpi, bool* outOnGrip) const;
 
     // ---- helpers (implemented in the .cpp, next to the input handling that uses them) -------------
     void loadFromDisk();

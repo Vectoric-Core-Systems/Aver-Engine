@@ -45,7 +45,7 @@ bool isNumericToken(std::string_view s) {
 // path (see there) to replace each kind in place at its own first occurrence, rather than collapsing
 // every kind into one inserted block. `Other` covers blank lines, comments, and anything writeOcgraph
 // does not model; those are always copied through verbatim, at their original position.
-enum class OwnedLineKind { Header, Name, Description, Var, Comp, Node, Pin, Link, Entry, Out, Other };
+enum class OwnedLineKind { Header, Name, Description, Var, Comp, Comment, Node, Pin, Link, Entry, Out, Other };
 
 // `sawHeader` is the caller's running state: only the FIRST line whose key is OCGRAPH counts as the
 // header; a later stray "OCGRAPH ..." line (malformed input, or inside an unrelated unknown record)
@@ -58,6 +58,7 @@ OwnedLineKind classifyLine(std::string_view line, bool sawHeaderYet) {
     if (equalsCI(t[0], "DESCRIPTION")) return OwnedLineKind::Description;
     if (equalsCI(t[0], "VAR"))         return OwnedLineKind::Var;
     if (equalsCI(t[0], "COMP"))        return OwnedLineKind::Comp;
+    if (equalsCI(t[0], "COMMENT"))     return OwnedLineKind::Comment;
     if (equalsCI(t[0], "NODE"))        return OwnedLineKind::Node;
     if (equalsCI(t[0], "PIN"))         return OwnedLineKind::Pin;
     if (equalsCI(t[0], "LINK"))        return OwnedLineKind::Link;
@@ -182,6 +183,43 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
                 }
             }
             out.components.push_back(std::move(comp));
+        } else if (equalsCI(key, "COMMENT")) {
+            // COMMENT <id> <x> <y> <w> <h> <r> <g> <b> <text...> -- one comment box. See
+            // OcGraphComment (OcGraph.hpp) for why every number is required and why the text runs
+            // to the end of the line.
+            if (t.size() < 9) {
+                if (err) *err = "COMMENT requires an id, x y w h and r g b: COMMENT id x y w h r g b [text...]";
+                return false;
+            }
+            OcGraphComment cmt;
+            cmt.id = std::string(t[1]);
+            cmt.x = parseF64(t[2]);
+            cmt.y = parseF64(t[3]);
+            cmt.w = parseF64(t[4]);
+            cmt.h = parseF64(t[5]);
+            cmt.r = parseI32(t[6], 60);
+            cmt.g = parseI32(t[7], 70);
+            cmt.b = parseI32(t[8], 90);
+            // The text comes off the RAW line for the reason DESCRIPTION does (see its own comment
+            // above): a literal # inside a comment box is the author writing a # and nothing else.
+            // Located by SKIPPING NINE TOKENS from the start of the raw line rather than by
+            // find("COMMENT") -- the record key is matched case-insensitively a few lines up, so a
+            // file that spells it `Comment` would find nothing and silently lose its text.
+            {
+                std::string_view rest = rawLine;
+                for (int skip = 0; skip < 9 && !rest.empty(); ++skip) {
+                    while (!rest.empty() && isSpace(rest.front())) rest.remove_prefix(1);
+                    while (!rest.empty() && !isSpace(rest.front())) rest.remove_prefix(1);
+                }
+                cmt.text = std::string(trim(rest));
+            }
+            for (const auto& c : out.comments) {
+                if (c.id == cmt.id) {
+                    if (err) *err = "duplicate comment ID: " + cmt.id;
+                    return false;
+                }
+            }
+            out.comments.push_back(std::move(cmt));
         } else if (equalsCI(key, "NODE")) {
             // `NODE id type` is the minimum; x and y are OPTIONAL and default to 0.
             //
@@ -438,8 +476,8 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // line of existing text; `used` is set once a line has claimed it, so a record is emitted exactly
     // once even if the file names it twice.
     struct Rec { std::string key; std::string text; bool used = false; };
-    std::vector<Rec> varRecs, compRecs, nodeRecs, pinRecs, linkRecs, entryRecs, outRecs;
-    std::string varBlock, compBlock, nodeBlock, pinBlock, linkBlock, entryBlock, outBlock;
+    std::vector<Rec> varRecs, compRecs, commentRecs, nodeRecs, pinRecs, linkRecs, entryRecs, outRecs;
+    std::string varBlock, compBlock, commentBlock, nodeBlock, pinBlock, linkBlock, entryBlock, outBlock;
     // VAR right after NAME/DESCRIPTION, ahead of NODE -- matching where a graph author naturally
     // writes it (declare what the graph remembers, then the nodes that read/write it) and where the
     // checked-in cross-language fixture (tests/formats/src/OcGraphTest.cpp's own VAR test) puts it.
@@ -458,6 +496,16 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         for (const std::string& extra : comp.extraTokens) line += " " + extra;
         line += "\n";
         compRecs.push_back({comp.id, line, false});
+    }
+    // COMMENT after COMP and before NODE: the regions first, then the nodes that sit in them. Also
+    // keeps NODE/PIN/LINK/ENTRY/OUT -- everything that actually executes -- in one unbroken run.
+    for (const OcGraphComment& c : g.comments) {
+        std::string line = "COMMENT " + c.id + " " + num(c.x) + " " + num(c.y) + " " + num(c.w) +
+                            " " + num(c.h) + " " + std::to_string(c.r) + " " + std::to_string(c.g) +
+                            " " + std::to_string(c.b);
+        if (!c.text.empty()) line += " " + c.text;
+        line += "\n";
+        commentRecs.push_back({c.id, line, false});
     }
     for (const OcGraphNode& node : g.nodes) {
         // Coordinates only if the node actually had them, then every token this implementation did
@@ -500,6 +548,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // so there is exactly one place that knows how a record is formatted.
     for (const Rec& r : varRecs)   varBlock   += r.text;
     for (const Rec& r : compRecs)  compBlock  += r.text;
+    for (const Rec& r : commentRecs) commentBlock += r.text;
     for (const Rec& r : nodeRecs)  nodeBlock  += r.text;
     for (const Rec& r : pinRecs)   pinBlock   += r.text;
     for (const Rec& r : linkRecs)  linkBlock  += r.text;
@@ -515,6 +564,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         out += descLine;
         if (!varBlock.empty())  { out += "\n"; out += varBlock; }
         if (!compBlock.empty()) { out += "\n"; out += compBlock; }
+        if (!commentBlock.empty()) { out += "\n"; out += commentBlock; }
         if (!nodeBlock.empty()) { out += "\n"; out += nodeBlock; }
         if (!pinBlock.empty())  { out += "\n"; out += pinBlock; }
         if (!linkBlock.empty()) { out += "\n"; out += linkBlock; }
@@ -584,6 +634,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         switch (k) {
         case OwnedLineKind::Var:
         case OwnedLineKind::Comp:
+        case OwnedLineKind::Comment:
         case OwnedLineKind::Node:  return tok(1);
         case OwnedLineKind::Pin:
         case OwnedLineKind::Link:
@@ -622,6 +673,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
             break;
         case OwnedLineKind::Var:   claim(varRecs,   keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Comp:  claim(compRecs,  keyOf(kinds[i], lines[i]), out); break;
+        case OwnedLineKind::Comment: claim(commentRecs, keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Node:  claim(nodeRecs,  keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Pin:   claim(pinRecs,   keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Link:  claim(linkRecs,  keyOf(kinds[i], lines[i]), out); break;
@@ -647,6 +699,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     if (!placedDesc && !descLine.empty()) out += descLine;
     appendUnused(varRecs);
     appendUnused(compRecs);
+    appendUnused(commentRecs);
     appendUnused(nodeRecs);
     appendUnused(pinRecs);
     appendUnused(linkRecs);

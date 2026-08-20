@@ -142,6 +142,37 @@ std::string_view componentAttr(const OcGraphComponent& c, std::string_view key);
 // token whose meaning is "present but blank", and no reader of this format wants that third state.
 void setComponentAttr(OcGraphComponent& c, std::string_view key, std::string_view value);
 
+// One COMMENT BOX: a titled, coloured rectangle drawn behind the nodes, grouping them by whatever
+// the author says it groups them by. `COMMENT <id> <x> <y> <w> <h> <r> <g> <b> <text...>`.
+//
+// PURELY EDITOR FURNITURE, and unlike every other record here that is the whole point. Nothing
+// compiles it, nothing executes it, and a graph stripped of every COMMENT line runs identically --
+// which is exactly why it belongs in the FORMAT rather than in a sidecar file the editor keeps to
+// itself. A note about why three nodes are wired the way they are is worth as much as the wiring,
+// and a note that lives somewhere other than the file it explains is a note that goes stale the
+// first time the graph is copied, renamed or committed by anyone who does not know it exists.
+//
+// THE TEXT IS THE REST OF THE LINE, taken from the RAW line exactly as DESCRIPTION takes its own
+// (see parseOcgraph) -- an author writing "# of active spawners" inside a comment box means those
+// words, not a trailing source comment. That choice closes the record on the right: there is no
+// room after the text for a future `key=value`, so anything this record grows later has to arrive
+// as a sibling record rather than a tenth token. That is a deliberate trade and the reason the
+// COLOUR is here NOW, spelled out as three required numbers rather than left for later -- colour
+// is most of what makes a comment box worth having (a red region and a green region say something
+// a title alone does not), and the grammar above has no way to add it afterwards.
+//
+// The eight numbers are all REQUIRED, so the text always begins at token nine. Reading them
+// optionally -- the way NODE reads its x/y -- would make `COMMENT c1 Spawning logic` ambiguous
+// between a box at an unknown position and a box at x=Spawning; a record whose own author cannot
+// tell which is which is worse than one that is slightly tedious to hand-write.
+struct OcGraphComment {
+    std::string id;              // unique among comments; not related to node ids
+    f64 x = 0.0, y = 0.0;        // canvas position of the top-left corner
+    f64 w = 320.0, h = 180.0;    // canvas size
+    i32 r = 60, g = 70, b = 90;  // 0..255 tint; the box is drawn translucent over the grid
+    std::string text;            // free text, may be empty (an untitled box is legal)
+};
+
 // A complete visual scripting graph.
 struct OcGraphData {
     int version = 1;
@@ -179,6 +210,12 @@ struct OcGraphData {
     // so anything walking this as a tree resolves parents by id rather than assuming a parent
     // precedes its children.
     std::vector<OcGraphComponent> components;
+
+    // Comment boxes, in file order. See OcGraphComment for what one IS and why it carries its
+    // colour in the record. Modelled here rather than left in the unknown-record passthrough for
+    // one reason: the editor has to MOVE and RESIZE them, and a record it can only copy verbatim
+    // is a record it cannot edit -- the same argument that moved VAR out of `Other` above.
+    std::vector<OcGraphComment> comments;
 
     // Which pins the graph HANDS BACK when it runs: `OUT <nodeId> <pinName>`, in order.
     //

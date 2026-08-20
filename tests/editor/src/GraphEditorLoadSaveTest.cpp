@@ -947,6 +947,123 @@ static void testCustomEventKeepsItsNameAndEntryInStep() {
           "and what it wrote reloads -- err='" + err + "'");
 }
 
+// ================================================================================ comment boxes ===
+static void testCommentBoxesRoundTripAndCarryTheirContents() {
+    AVER_INFO("=== comment boxes: round trip, creation, contents, and a title that cannot break the file ===");
+    const std::string text =
+        "OCGRAPH 1\n"
+        "NAME CommentBoxes\n"
+        "\n"
+        "COMMENT hand -10 -10 400 300 90 40 120 written by hand, with spaces\n"
+        "\n"
+        "NODE c1 ConstFloat 40 60\n"
+        "NODE c2 ConstFloat 40 200\n";
+
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "comment_boxes.ocgraph").string();
+    writeFile(tmp, text);
+
+    {
+        GraphEditor ed(tmp);
+        check(!ed.dirty(), "a graph with a COMMENT loads clean");
+        check(ed.comments().size() == 1, "the hand-written COMMENT reached the editor");
+        std::string why;
+        check(ed.save(&why), "save() succeeds (why=" + why + ")");
+        check(readFile(tmp) == text, "a COMMENT-bearing file survives an edit-free editor save byte for byte");
+    }
+
+    // ---- creating one, and reloading it in a FRESH editor. The point of the reload is that the
+    // box has to come back off DISK, not out of the editor that made it -- an in-memory check would
+    // pass even if the writer never emitted the record.
+    std::string madeId;
+    {
+        GraphEditor ed(tmp);
+        madeId = ed.addComment(Vec2{500.0f, -20.0f}, Vec2{800.0f, 180.0f}, "Second region");
+        check(!madeId.empty(), "addComment returns an id");
+        check(madeId != "hand", "the new box did not collide with the id already in the file");
+        check(ed.dirty(), "adding a box dirties the editor");
+        std::string why;
+        check(ed.save(&why), "save() after adding a box succeeds (why=" + why + ")");
+    }
+    {
+        GraphEditor ed(tmp);
+        check(ed.comments().size() == 2, "both boxes are there after a reload from disk");
+        const fmt::OcGraphComment* made = nullptr;
+        for (const auto& c : ed.comments()) if (c.id == madeId) made = &c;
+        check(made != nullptr, "the created box came back by id");
+        if (made) {
+            check(made->x == 500.0 && made->y == -20.0 && made->w == 300.0 && made->h == 200.0,
+                  "its rectangle survived the trip through the file");
+            check(made->text == "Second region", "its two-word title survived");
+        }
+        const std::string after = readFile(tmp);
+        check(after.find("COMMENT hand -10 -10 400 300 90 40 120 written by hand, with spaces") != std::string::npos,
+              "the hand-written box is still where its author left it, unreformatted");
+    }
+
+    // ---- what a box CONTAINS is geometry, asked fresh. c1 is at (40,60); a box drawn around it
+    // must report c1 inside it and c2 -- 140 units below -- outside.
+    {
+        GraphEditor ed(tmp);
+        check(ed.selectNode("c1"), "c1 selects");
+        const std::string wrapped = ed.addCommentAroundSelection(1.0f);
+        check(!wrapped.empty(), "addCommentAroundSelection made a box around the selection");
+        const std::vector<std::string> inside = ed.nodesInsideComment(wrapped, 1.0f);
+        check(std::find(inside.begin(), inside.end(), "c1") != inside.end(),
+              "the node the box was drawn around is inside it");
+        check(std::find(inside.begin(), inside.end(), "c2") == inside.end(),
+              "a node the box does not cover is NOT inside it");
+    }
+    {
+        GraphEditor ed(tmp);
+        check(ed.addCommentAroundSelection(1.0f).empty(),
+              "with nothing selected, the wrap gesture does nothing rather than making an empty box");
+        check(!ed.dirty(), "...and does not dirty the file either");
+    }
+
+    // ---- A NEWLINE IN A TITLE WOULD SPLIT THE RECORD. The title runs to the end of the line, so a
+    // pasted two-line title would put its second half on a line of its own, where the parser reads it
+    // as an unknown record and the box silently loses half its title. Folded to a space instead --
+    // and proven by RELOADING, because the failure this guards against is one the writer reports as
+    // success.
+    {
+        GraphEditor ed(tmp);
+        const std::string id = ed.addComment(Vec2{0.0f, 400.0f}, Vec2{300.0f, 560.0f}, "");
+        check(ed.setCommentText(id, "first line\nsecond line"), "setCommentText accepts a two-line title");
+        std::string why;
+        check(ed.save(&why), "save() with a folded title succeeds (why=" + why + ")");
+        GraphEditor re(tmp);
+        check(!re.comments().empty(), "the file still loads after a title that contained a newline");
+        const fmt::OcGraphComment* c = nullptr;
+        for (const auto& k : re.comments()) if (k.id == id) c = &k;
+        check(c != nullptr && c->text == "first line second line",
+              "the newline became a space, so the whole title survived on one line");
+    }
+
+    // ---- deletion removes the record rather than leaving an orphan the next load would draw.
+    {
+        GraphEditor ed(tmp);
+        check(ed.deleteComment("hand"), "deleteComment finds the hand-written box");
+        check(!ed.deleteComment("hand"), "deleting it twice is a no-op, not a crash");
+        std::string why;
+        check(ed.save(&why), "save() after deleting a box succeeds (why=" + why + ")");
+        const std::string after = readFile(tmp);
+        check(after.find("COMMENT hand ") == std::string::npos, "the deleted box is gone from the file");
+        check(after.find("NODE c1 ConstFloat") != std::string::npos, "the nodes it enclosed are untouched");
+    }
+
+    // ---- colour is clamped, not wrapped. A picker cannot produce 300, but setCommentColor is public
+    // and the format has no range check of its own; a value out of range would come back as a
+    // different colour on the next load.
+    {
+        GraphEditor ed(tmp);
+        const std::string id = ed.addComment(Vec2{0.0f, 0.0f}, Vec2{100.0f, 100.0f}, "clamp");
+        check(ed.setCommentColor(id, 300, -5, 128), "setCommentColor accepts out-of-range input");
+        const fmt::OcGraphComment* c = nullptr;
+        for (const auto& k : ed.comments()) if (k.id == id) c = &k;
+        check(c != nullptr && c->r == 255 && c->g == 0 && c->b == 128, "it was clamped to 0..255 on the way in");
+    }
+}
+
 static void testLoadFailure() {
     AVER_INFO("=== a missing file fails cleanly ===");
     const std::string missing = (std::filesystem::path(scratchDir()) / "does_not_exist.ocgraph").string();
@@ -989,6 +1106,7 @@ int main() {
     testAddingAnEventNodeAlsoDeclaresItsEntry();
     testDeletingANodeTakesItsEntryAndOutRecords();
     testCustomEventKeepsItsNameAndEntryInStep();
+    testCommentBoxesRoundTripAndCarryTheirContents();
     testLoadFailure();
     testWrongExtensionIsRejectedByFactory();
 

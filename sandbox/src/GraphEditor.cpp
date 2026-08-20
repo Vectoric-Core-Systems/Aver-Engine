@@ -449,7 +449,159 @@ std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canv
     return node.id;
 }
 
+// ---------------------------------------------------------------- comment boxes
+
+// Bar height and grip size, in CANVAS units. Canvas units are logical pixels at zoom 1, which is why
+// both scale by dpi and NOT by view_.zoom -- the drawing code multiplies by zoom on its way to the
+// screen, so folding zoom in here as well would make the bar twice as tall each time it is asked.
+namespace {
+constexpr float kCommentBarPx  = 24.0f;
+constexpr float kCommentGripPx = 16.0f;
+constexpr float kCommentMinPx  = 60.0f;
+} // namespace
+
+std::string GraphEditor::makeUniqueCommentId() const {
+    for (int i = 1; ; ++i) {
+        const std::string candidate = "cmt" + std::to_string(i);
+        bool taken = false;
+        for (const auto& c : graph_.comments) if (c.id == candidate) { taken = true; break; }
+        if (!taken) return candidate;
+    }
+}
+
+fmt::OcGraphComment* GraphEditor::findComment(const std::string& id) {
+    for (auto& c : graph_.comments) if (c.id == id) return &c;
+    return nullptr;
+}
+
+std::string GraphEditor::addComment(Vec2 a, Vec2 b, const std::string& text) {
+    pushUndo();
+    fmt::OcGraphComment c;
+    c.id = makeUniqueCommentId();
+    c.x = std::min(a.x, b.x);
+    c.y = std::min(a.y, b.y);
+    c.w = std::max(static_cast<f64>(std::abs(b.x - a.x)), static_cast<f64>(kCommentMinPx));
+    c.h = std::max(static_cast<f64>(std::abs(b.y - a.y)), static_cast<f64>(kCommentMinPx));
+    c.text = text;
+    graph_.comments.push_back(c);
+    selectedComment_ = c.id;
+    dirty_ = true;
+    return c.id;
+}
+
+std::string GraphEditor::addCommentAroundSelection(float dpi) {
+    if (selectedNodes_.empty()) return {};
+    recomputeLayouts(dpi);
+    // Measured from the LAYOUTS, not from displayPos_, because a node position is its top-left and a
+    // box drawn to those would clip the right-hand pins off every node on its edge.
+    bool any = false;
+    Vec2 lo{}, hi{};
+    for (const auto& nl : layouts_) {
+        if (std::find(selectedNodes_.begin(), selectedNodes_.end(), nl.nodeId) == selectedNodes_.end()) continue;
+        if (!any) { lo = nl.min; hi = nl.max; any = true; continue; }
+        lo.x = std::min(lo.x, nl.min.x); lo.y = std::min(lo.y, nl.min.y);
+        hi.x = std::max(hi.x, nl.max.x); hi.y = std::max(hi.y, nl.max.y);
+    }
+    if (!any) return {};
+    // Margin on all four sides, and EXTRA on top for the title bar, which is drawn INSIDE the box.
+    // Without it the bar would sit over the first row of nodes and hide their headers.
+    //
+    // BOTH SCALED BY DPI, because the node boxes they are measured against are. computeNodeLayout
+    // sizes a node at the current DPI while its POSITION comes out of the file unscaled, so canvas
+    // space is only half DPI-independent -- a margin left in raw units would be a third of its
+    // intended width beside a 300%-DPI node. That asymmetry belongs to the layout system, not to
+    // this gesture (autoLayoutDpi_ exists to cope with the same thing), and its consequence is
+    // worth stating plainly: a box drawn snugly around six nodes at 300% is a loose box at 100%.
+    // Still the right trade -- the alternative is a box that fails to enclose its own nodes on the
+    // machine that drew it.
+    const float kMargin = 24.0f * dpi;
+    lo.x -= kMargin; hi.x += kMargin;
+    lo.y -= kMargin + kCommentBarPx * dpi; hi.y += kMargin;
+    return addComment(lo, hi, "Comment");
+}
+
+bool GraphEditor::deleteComment(const std::string& id) {
+    for (usize i = 0; i < graph_.comments.size(); ++i) {
+        if (graph_.comments[i].id != id) continue;
+        pushUndo();
+        graph_.comments.erase(graph_.comments.begin() + static_cast<isize>(i));
+        if (selectedComment_ == id) selectedComment_.clear();
+        dirty_ = true;
+        return true;
+    }
+    return false;
+}
+
+bool GraphEditor::setCommentText(const std::string& id, const std::string& text) {
+    fmt::OcGraphComment* c = findComment(id);
+    if (!c) return false;
+    // A newline would end the record early and turn the tail of the title into a line the parser
+    // reads as a whole new record -- so it is folded to a space rather than refused. Refusing would
+    // be the stricter choice and the wrong one here: the text arrives from a paste as often as from
+    // a keystroke, and losing a pasted title is a worse outcome than flattening it.
+    std::string flat = text;
+    for (char& ch : flat) if (ch == 0x0a || ch == 0x0d) ch = 0x20;
+    if (c->text == flat) return true;
+    pushUndo();
+    findComment(id)->text = flat;
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::setCommentColor(const std::string& id, int r, int g, int b) {
+    fmt::OcGraphComment* c = findComment(id);
+    if (!c) return false;
+    const int cr = std::clamp(r, 0, 255), cg = std::clamp(g, 0, 255), cb = std::clamp(b, 0, 255);
+    if (c->r == cr && c->g == cg && c->b == cb) return true;
+    pushUndo();
+    fmt::OcGraphComment* live = findComment(id);
+    live->r = cr; live->g = cg; live->b = cb;
+    dirty_ = true;
+    return true;
+}
+
+std::vector<std::string> GraphEditor::nodesInsideComment(const std::string& id, float dpi) {
+    recomputeLayouts(dpi);
+    std::vector<std::string> out;
+    const fmt::OcGraphComment* c = nullptr;
+    for (const auto& k : graph_.comments) if (k.id == id) { c = &k; break; }
+    if (!c) return out;
+    // The title bar is excluded from the interior: a node overlapping the bar is a node the author
+    // can still see and click, so it is not "in" the box for dragging purposes either.
+    const f64 top = c->y + kCommentBarPx * dpi;
+    for (const auto& nl : layouts_) {
+        if (nl.min.x >= c->x && nl.max.x <= c->x + c->w && nl.min.y >= top && nl.max.y <= c->y + c->h)
+            out.push_back(nl.nodeId);
+    }
+    return out;
+}
+
+std::string GraphEditor::commentAtCanvas(Vec2 canvasPt, float dpi, bool* outOnGrip) const {
+    if (outOnGrip) *outOnGrip = false;
+    // BACK TO FRONT. Boxes draw in file order, so the LAST one drawn is the one on top, and the one
+    // on top is the one a click belongs to. Scanning forwards would hand every click on an
+    // overlapping pair to the box underneath.
+    for (usize i = graph_.comments.size(); i-- > 0; ) {
+        const auto& c = graph_.comments[i];
+        const f64 barH  = kCommentBarPx * dpi;
+        const f64 grip  = kCommentGripPx * dpi;
+        const bool inX  = canvasPt.x >= c.x && canvasPt.x <= c.x + c.w;
+        if (!inX) continue;
+        if (canvasPt.x >= c.x + c.w - grip && canvasPt.y >= c.y + c.h - grip && canvasPt.y <= c.y + c.h) {
+            if (outOnGrip) *outOnGrip = true;
+            return c.id;
+        }
+        if (canvasPt.y >= c.y && canvasPt.y <= c.y + barH) return c.id;
+    }
+    return {};
+}
+
 void GraphEditor::deleteSelection() {
+    // A selected comment box is deleted on its own, BEFORE the node/link work, and then this
+    // returns. Not folded into the same undo step: a box and a node selection are never both
+    // live at once (clicking either clears the other), so there is nothing to combine, and
+    // deleteComment already pushes its own undo.
+    if (!selectedComment_.empty()) { deleteComment(selectedComment_); return; }
     if (selectedNodes_.empty() && selectedLink_ < 0) return;
     pushUndo();
 
@@ -898,6 +1050,7 @@ void GraphEditor::drawEventGraph(float dpi) {
         } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             const GraphHitResult hit = hitTest(graph_, layouts_, mouseCanvas, style_, dpi);
             const bool ctrl = io.KeyCtrl;
+            if (hit.kind != GraphHitKind::None) selectedComment_.clear();
             if (hit.kind == GraphHitKind::Pin) {
                 dragMode_ = DragMode::DrawLink;
                 linkDragFromNode_ = hit.nodeId;
@@ -925,10 +1078,52 @@ void GraphEditor::drawEventGraph(float dpi) {
                 if (!ctrl) selectedNodes_.clear();
                 selectedLink_ = static_cast<int>(hit.linkIndex);
             } else {
-                if (!ctrl) { selectedNodes_.clear(); selectedLink_ = -1; }
-                dragMode_ = DragMode::BoxSelect;
-                dragStartCanvas_ = mouseCanvas;
-                boxSelectCurrentCanvas_ = mouseCanvas;
+                // COMMENT BOXES ARE TESTED LAST, after nodes, pins and links have all missed.
+                // A box is drawn behind everything, so anything drawn on top of it owns the
+                // click -- including a node sitting over its title bar. Testing the box first
+                // would make those nodes unclickable for no visible reason.
+                bool onGrip = false;
+                const std::string cid = commentAtCanvas(mouseCanvas, dpi, &onGrip);
+                if (!cid.empty()) {
+                    selectedNodes_.clear();
+                    selectedLink_ = -1;
+                    selectedComment_ = cid;
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !onGrip) {
+                        // Double-click the bar opens the properties popup (title, colour,
+                        // delete). Queued rather than opened here because BeginPopup for it is
+                        // submitted further down this same frame, after the drawing.
+                        commentEditId_ = cid;
+                        const fmt::OcGraphComment* c = nullptr;
+                        for (const auto& k : graph_.comments) if (k.id == cid) { c = &k; break; }
+                        std::snprintf(commentEditBuf_, sizeof commentEditBuf_, "%s", c ? c->text.c_str() : "");
+                        commentPopupQueued_ = true;
+                    } else {
+                        const fmt::OcGraphComment* c = nullptr;
+                        for (const auto& k : graph_.comments) if (k.id == cid) { c = &k; break; }
+                        if (c) {
+                            dragMode_ = onGrip ? DragMode::ResizeComment : DragMode::MoveComment;
+                            activeComment_ = cid;
+                            dragStartCanvas_ = mouseCanvas;
+                            commentDragStartPos_ = Vec2{static_cast<f32>(c->x), static_cast<f32>(c->y)};
+                            commentDragStartSize_ = Vec2{static_cast<f32>(c->w), static_cast<f32>(c->h)};
+                            commentCapturedStart_.clear();
+                            if (dragMode_ == DragMode::MoveComment) {
+                                for (const auto& nid : nodesInsideComment(cid, dpi)) {
+                                    auto it = displayPos_.find(nid);
+                                    commentCapturedStart_[nid] = it != displayPos_.end() ? it->second : Vec2{};
+                                }
+                            }
+                            pendingCommentSnapshot_ = UndoState{graph_, displayPos_};
+                            commentUndoPushed_ = false;
+                        }
+                    }
+                } else {
+                    if (!ctrl) { selectedNodes_.clear(); selectedLink_ = -1; }
+                    selectedComment_.clear();
+                    dragMode_ = DragMode::BoxSelect;
+                    dragStartCanvas_ = mouseCanvas;
+                    boxSelectCurrentCanvas_ = mouseCanvas;
+                }
             }
         }
     }
@@ -1015,6 +1210,48 @@ void GraphEditor::drawEventGraph(float dpi) {
         }
         break;
     }
+    case DragMode::MoveComment:
+    case DragMode::ResizeComment: {
+        fmt::OcGraphComment* c = findComment(activeComment_);
+        if (!c) { dragMode_ = DragMode::None; break; }
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            const Vec2 delta = mouseCanvas - dragStartCanvas_;
+            // Same lazy undo boundary MoveNodes uses, and the same 3px-of-travel threshold, so a
+            // plain click to select a box does not push an identical state onto the stack.
+            if (!commentUndoPushed_ && vecLen(delta) * view_.zoom > 3.0f) {
+                undoStack_.push_back(pendingCommentSnapshot_);
+                constexpr usize kUndoCap = 200;
+                if (undoStack_.size() > kUndoCap) undoStack_.erase(undoStack_.begin());
+                redoStack_.clear();
+                commentUndoPushed_ = true;
+            }
+            if (dragMode_ == DragMode::MoveComment) {
+                c->x = commentDragStartPos_.x + delta.x;
+                c->y = commentDragStartPos_.y + delta.y;
+                for (const auto& kv : commentCapturedStart_) displayPos_[kv.first] = kv.second + delta;
+            } else {
+                c->w = std::max(static_cast<f64>(commentDragStartSize_.x + delta.x), static_cast<f64>(kCommentMinPx));
+                c->h = std::max(static_cast<f64>(commentDragStartSize_.y + delta.y), static_cast<f64>(kCommentMinPx));
+            }
+        } else {
+            if (commentUndoPushed_) {
+                // The nodes that rode along commit their new positions into graph_, exactly as the
+                // end of a MoveNodes drag does -- displayPos_ alone is not saved.
+                for (const auto& kv : commentCapturedStart_) {
+                    for (auto& n : graph_.nodes) {
+                        if (n.id != kv.first) continue;
+                        const Vec2 p = displayPos_[kv.first];
+                        n.x = p.x; n.y = p.y;
+                        break;
+                    }
+                }
+                dirty_ = true;
+            }
+            commentCapturedStart_.clear();
+            dragMode_ = DragMode::None;
+        }
+        break;
+    }
     case DragMode::None: default: break;
     }
 
@@ -1050,14 +1287,24 @@ void GraphEditor::drawEventGraph(float dpi) {
     // ---- keyboard: delete selection, undo/redo -----------------------------------------------------
     if (canvasFocused) {
         if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) deleteSelection();
+        // C wraps the selection in a comment box -- the same key Blueprint binds it to, and
+        // the reason the gesture is worth having at all: drawing a box by hand around six
+        // nodes and then nudging its edges is enough work that nobody does it.
+        if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_C, false) && !selectedNodes_.empty())
+            addCommentAroundSelection(dpi);
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) { if (io.KeyShift) redo(); else undo(); }
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y, false)) redo();
     }
 
-    // ---- draw: links underneath, nodes on top -- ImDrawListSplitter, not submission order ----------
-    // (submission order would put every link over whichever node happened to draw after it; the
-    // splitter is exactly what it exists for, per third_party/imgui/imgui.h's own recommendation).
-    dl->ChannelsSplit(2);
+    // ---- draw: comment boxes at the back, then links, then nodes -- ImDrawListSplitter, not
+    // submission order (submission order would put every link over whichever node happened to
+    // draw after it; the splitter is exactly what it exists for, per third_party/imgui/imgui.h's
+    // own recommendation).
+    //
+    // THREE channels now, not two. A comment box has to be behind the WIRES as well as behind the
+    // nodes: a box tinted over a wire reads as a pane of glass in front of it, and the whole
+    // point of the box is to be scenery.
+    dl->ChannelsSplit(3);
 
     // WHICH PINS ARE WIRED UP, built once for the whole frame rather than searched per pin. Both
     // ends of every link count, because "is this pin connected" is a question about the pin, not
@@ -1071,7 +1318,38 @@ void GraphEditor::drawEventGraph(float dpi) {
         connectedPins.emplace(link.destNode, link.destPin);
     }
 
-    dl->ChannelsSetCurrent(0); // links
+    dl->ChannelsSetCurrent(0); // comment boxes, behind even the wires
+    for (const auto& c : graph_.comments) {
+        const ImVec2 pMin = toScreenAbs(Vec2{static_cast<f32>(c.x), static_cast<f32>(c.y)});
+        const ImVec2 pMax = toScreenAbs(Vec2{static_cast<f32>(c.x + c.w), static_cast<f32>(c.y + c.h)});
+        const f32 barH = kCommentBarPx * dpi * view_.zoom;
+        const bool sel = (c.id == selectedComment_);
+        const int r = std::clamp(c.r, 0, 255), g = std::clamp(c.g, 0, 255), b = std::clamp(c.b, 0, 255);
+        // BODY AT ALPHA 40. It has to be low enough that the grid and any wire crossing the box are
+        // still readable through it -- a box that obscures what it contains is worse than no box --
+        // and high enough that the region reads as one thing from across a zoomed-out canvas.
+        dl->AddRectFilled(pMin, pMax, IM_COL32(r, g, b, 40), 4.0f * dpi);
+        dl->AddRectFilled(pMin, ImVec2(pMax.x, pMin.y + barH), IM_COL32(r, g, b, 200), 4.0f * dpi,
+                          ImDrawFlags_RoundCornersTop);
+        dl->AddRect(pMin, pMax, sel ? IM_COL32(255, 220, 90, 255) : IM_COL32(r, g, b, 220), 4.0f * dpi, 0,
+                    (sel ? 2.5f : 1.5f) * dpi);
+        // The resize grip, drawn as two short strokes in the bottom-right corner. It is only ever
+        // drawn -- the hit test that matches it lives in commentAtCanvas, in canvas units, so the two
+        // agree at every zoom without either measuring the other.
+        const f32 grip = kCommentGripPx * dpi * view_.zoom;
+        if (grip > 4.0f) {
+            const ImU32 gc = IM_COL32(255, 255, 255, sel ? 200 : 110);
+            dl->AddLine(ImVec2(pMax.x - grip, pMax.y - 2.0f * dpi), ImVec2(pMax.x - 2.0f * dpi, pMax.y - grip), gc, 1.5f * dpi);
+            dl->AddLine(ImVec2(pMax.x - grip * 0.5f, pMax.y - 2.0f * dpi), ImVec2(pMax.x - 2.0f * dpi, pMax.y - grip * 0.5f), gc, 1.5f * dpi);
+        }
+        if (!c.text.empty()) {
+            dl->PushClipRect(pMin, ImVec2(pMax.x, pMin.y + barH), true);
+            dl->AddText(ImVec2(pMin.x + 6.0f * dpi, pMin.y + 4.0f * dpi), IM_COL32(255, 255, 255, 255), c.text.c_str());
+            dl->PopClipRect();
+        }
+    }
+
+    dl->ChannelsSetCurrent(1); // links
     for (usize i = 0; i < graph_.links.size(); ++i) {
         const auto& link = graph_.links[i];
         const GraphPinLayout* sp = findPinLayout(layouts_, link.sourceNode, link.sourcePin);
@@ -1089,7 +1367,7 @@ void GraphEditor::drawEventGraph(float dpi) {
                             col, (selected ? baseWidth + 1.0f : baseWidth) * dpi, 24);
     }
 
-    dl->ChannelsSetCurrent(1); // nodes
+    dl->ChannelsSetCurrent(2); // nodes
     for (const auto& nl : layouts_) {
         const bool selected = std::find(selectedNodes_.begin(), selectedNodes_.end(), nl.nodeId) != selectedNodes_.end();
         const ImVec2 pMin = toScreenAbs(nl.min);
@@ -1217,9 +1495,49 @@ void GraphEditor::drawEventGraph(float dpi) {
         dl->AddText(ImVec2(originIm.x + 8.0f * dpi, originIm.y + 4.0f * dpi), IM_COL32(255, 210, 210, 255), msg.c_str());
     }
 
+    // ---- comment box properties: title, colour, delete. Opened by double-clicking a box's title bar
+    // (see the hit-test above), which is where an author reaches for it first.
+    if (commentPopupQueued_) { ImGui::OpenPopup("##graphCommentProps"); commentPopupQueued_ = false; }
+    if (ImGui::BeginPopup("##graphCommentProps")) {
+        fmt::OcGraphComment* c = findComment(commentEditId_);
+        if (!c) {
+            ImGui::CloseCurrentPopup();
+        } else {
+            ImGui::TextUnformatted("Comment box");
+            ImGui::Separator();
+            ImGui::SetNextItemWidth(220.0f * dpi);
+            // Same activate/apply-live/deactivate boundary the attribute and variable fields use:
+            // graph_ is untouched while keys are landing, and setCommentText -- with its pushUndo --
+            // fires once, when the field is left. Otherwise one typed title would be thirty undo steps.
+            ImGui::InputText("Title", commentEditBuf_, sizeof commentEditBuf_);
+            if (ImGui::IsItemDeactivatedAfterEdit()) setCommentText(commentEditId_, commentEditBuf_);
+            float col[3] = {c->r / 255.0f, c->g / 255.0f, c->b / 255.0f};
+            if (ImGui::ColorEdit3("Colour", col, ImGuiColorEditFlags_NoInputs)) {
+                setCommentColor(commentEditId_, static_cast<int>(col[0] * 255.0f + 0.5f),
+                                static_cast<int>(col[1] * 255.0f + 0.5f),
+                                static_cast<int>(col[2] * 255.0f + 0.5f));
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Delete box")) {
+                deleteComment(commentEditId_);
+                commentEditId_.clear();
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::EndPopup();
+    }
+
     // ---- right-click "add node" palette, built entirely from graphNodeCatalog() -- see
     // GraphNodeDefs.hpp's own header comment for why this is the one place a node type is registered.
     if (ImGui::BeginPopup("##graphAddNode")) {
+        // Above the categories, not inside one: a comment box is not a node, has no pins, and
+        // filing it under a node family would be the first place an author looked and the last
+        // place they found it.
+        if (ImGui::MenuItem("Comment Box", "C")) {
+            const Vec2 a = pendingSpawnCanvasPos_;
+            addComment(a, Vec2{a.x + 320.0f * dpi, a.y + 180.0f * dpi}, "Comment");
+        }
+        ImGui::Separator();
         std::vector<std::string> categories;
         for (const auto& d : graphNodeCatalog()) {
             if (std::find(categories.begin(), categories.end(), d.category) == categories.end())
