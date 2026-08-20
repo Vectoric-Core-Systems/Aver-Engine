@@ -440,6 +440,16 @@ public class GraphCompiler
                 EmitGetVelocity(node);
                 break;
 
+            case "getworldposition":
+            case "getentityforward":
+            case "getentityright":
+            case "getentityup":
+            case "getlocalscale":
+            case "isalive":
+            case "isactor":
+                EmitSimpleApiRead(node);
+                break;
+
             case "inttofloat":
             case "booltofloat":
             case "floattoint":
@@ -959,6 +969,46 @@ public class GraphCompiler
     /// The four writing API calls, which differ only in which method they call and what they push.
     /// The bool every one of them returns is stored into `success` when the node declared it and
     /// popped otherwise, because the stack has to balance either way -- the shape EmitJump uses.
+    /// A three-out-parameter read of an entity, for whichever component the caller asked for.
+    /// `axis` is pushed only when it is not -1, which is how the three orientation nodes share one
+    /// interop surface with the two that take no extra argument.
+    private void EmitPullVec3Read(Node node, string pinName, MethodInfo method, int axis)
+    {
+        if (_il == null) return;
+        EmitPullInput(node, "entity");
+        if (axis >= 0) _il.Emit(OpCodes.Ldc_I4, axis);
+        var xL = _il.DeclareLocal(typeof(float));
+        var yL = _il.DeclareLocal(typeof(float));
+        var zL = _il.DeclareLocal(typeof(float));
+        _il.Emit(OpCodes.Ldloca, xL);
+        _il.Emit(OpCodes.Ldloca, yL);
+        _il.Emit(OpCodes.Ldloca, zL);
+        _il.Emit(OpCodes.Call, method);
+        if (pinName == "success") return;
+        _il.Emit(OpCodes.Pop);
+        _il.Emit(OpCodes.Ldloc, pinName == "x" ? xL : pinName == "y" ? yL : zL);
+    }
+
+    /// The three transform writers. Same shape as EmitExecApiCall: push, call, keep or drop the bool.
+    private void EmitExecTransformWrite(Node node)
+    {
+        if (_il == null) return;
+        EmitPullInput(node, "entity");
+        switch (node.Type.ToLowerInvariant())
+        {
+            case "translate":
+                EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, TranslateMethod); break;
+            case "setlocalscale":
+                EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, SetLocalScaleMethod); break;
+            default:
+                _il.Emit(OpCodes.Call, DestroyEntityMethod); break;
+        }
+        if (_pinLocals.TryGetValue((node.Id, "success"), out var local)) _il.Emit(OpCodes.Stloc, local);
+        else                                                            _il.Emit(OpCodes.Pop);
+    }
+
     private void EmitExecApiCall(Node node)
     {
         if (_il == null) return;
@@ -1889,6 +1939,7 @@ public class GraphCompiler
                     else if (IsExecCapableJumpType(node.Type)) EmitJump(node);
                     else if (IsExecCapablePrintType(node.Type)) EmitExecPrint(node);
                     else if (IsExecCapableApiCallType(node.Type)) EmitExecApiCall(node);
+                    else if (IsExecCapableTransformWriteType(node.Type)) EmitExecTransformWrite(node);
                     else if (IsExecCapableFireEventType(node.Type)) EmitExecFireEvent(node);
                     EmitExecFanOut(node);
                     return;
@@ -2384,6 +2435,14 @@ public class GraphCompiler
     /// these four share EmitExecApiCall entirely -- same shape, same bool return, same handling of
     /// the success pin. A predicate that matches exactly what one emitter handles still describes
     /// what it matches.
+    /// The three transform writers, grouped for the same reason the four API calls above are: they
+    /// share one emitter exactly.
+    private static bool IsExecCapableTransformWriteType(string type)
+    {
+        string t = type.ToLowerInvariant();
+        return t == "translate" || t == "setlocalscale" || t == "destroyentity";
+    }
+
     private static bool IsExecCapableApiCallType(string type)
     {
         string t = type.ToLowerInvariant();
@@ -2869,7 +2928,8 @@ public class GraphCompiler
             IsExecCapableSetNameType(source.Type) || IsExecCapableSetMeshType(source.Type) ||
             IsExecCapableSetMaterialType(source.Type) || IsExecCapableCharacterMoveType(source.Type) ||
             IsExecCapableFireEventType(source.Type) || IsExecCapableJumpType(source.Type) ||
-            IsExecCapablePrintType(source.Type) || IsExecCapableApiCallType(source.Type))
+            IsExecCapablePrintType(source.Type) || IsExecCapableApiCallType(source.Type) ||
+            IsExecCapableTransformWriteType(source.Type))
             throw new InvalidOperationException(
                 $"'{source.Id}.{pinName}' cannot be read as a data value: {source.Type} has a side effect " +
                 "and must be reached by wiring it directly into the exec chain (give it exec pins), not " +
@@ -2979,6 +3039,20 @@ public class GraphCompiler
                 EmitPullGetViewEntity(source, pinName); return;
             case "getvelocity":
                 EmitPullGetVelocity(source, pinName); return;
+            case "getworldposition":
+                EmitPullVec3Read(source, pinName, WorldPositionMethod, -1); return;
+            case "getentityforward":
+                EmitPullVec3Read(source, pinName, EntityAxisMethod, 0); return;
+            case "getentityright":
+                EmitPullVec3Read(source, pinName, EntityAxisMethod, 1); return;
+            case "getentityup":
+                EmitPullVec3Read(source, pinName, EntityAxisMethod, 2); return;
+            case "getlocalscale":
+                EmitPullVec3Read(source, pinName, LocalScaleMethod, -1); return;
+            case "isalive":
+                EmitPullInput(source, "entity"); _il.Emit(OpCodes.Call, IsAliveMethod); return;
+            case "isactor":
+                EmitPullInput(source, "entity"); _il.Emit(OpCodes.Call, IsActorMethod); return;
             // int and bool are both I4 on the CIL stack, so widening either to a float is the same
             // one instruction -- the node types differ so the GRAPH can tell them apart, not the IL.
             case "inttofloat":
@@ -3434,6 +3508,31 @@ public class GraphCompiler
         typeof(GraphInterop).GetMethod("LookDirectionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.LookDirectionForGraph was not found by reflection");
     // GetViewEntity: the camera node a character looks through -- what a viewmodel parents to.
+    // The entity transform surfaces.
+    private static readonly MethodInfo WorldPositionMethod =
+        typeof(GraphInterop).GetMethod("WorldPositionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.WorldPositionForGraph was not found by reflection");
+    private static readonly MethodInfo EntityAxisMethod =
+        typeof(GraphInterop).GetMethod("EntityAxisForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.EntityAxisForGraph was not found by reflection");
+    private static readonly MethodInfo LocalScaleMethod =
+        typeof(GraphInterop).GetMethod("LocalScaleForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.LocalScaleForGraph was not found by reflection");
+    private static readonly MethodInfo TranslateMethod =
+        typeof(GraphInterop).GetMethod("TranslateForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.TranslateForGraph was not found by reflection");
+    private static readonly MethodInfo SetLocalScaleMethod =
+        typeof(GraphInterop).GetMethod("SetLocalScaleForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetLocalScaleForGraph was not found by reflection");
+    private static readonly MethodInfo IsAliveMethod =
+        typeof(GraphInterop).GetMethod("IsAliveForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.IsAliveForGraph was not found by reflection");
+    private static readonly MethodInfo IsActorMethod =
+        typeof(GraphInterop).GetMethod("IsActorForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.IsActorForGraph was not found by reflection");
+    private static readonly MethodInfo DestroyEntityMethod =
+        typeof(GraphInterop).GetMethod("DestroyEntityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.DestroyEntityForGraph was not found by reflection");
     // The engine-API surfaces, reflected the same way every other GraphInterop entry point is.
     private static readonly MethodInfo VelocityMethod =
         typeof(GraphInterop).GetMethod("VelocityForGraph", BindingFlags.NonPublic | BindingFlags.Static)

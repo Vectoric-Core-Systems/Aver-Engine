@@ -468,6 +468,81 @@ internal static class GraphInterop
         return pc.Unpossess();
     }
 
+    /// <summary>Entity.WorldPosition, and the reason it is a node when GetFieldVec3 on
+    /// CLocal.position already exists: LOCAL IS NOT WORLD. A gun parented to a camera has a local
+    /// position of a few centimetres forever, and a graph asking where it actually is in the level
+    /// -- to measure a distance, aim something, place an effect -- wants this one.</summary>
+    internal static bool WorldPositionForGraph(int entity, out float x, out float y, out float z)
+    {
+        Entity e = new Entity(entity);
+        x = y = z = 0.0f;
+        if (!e.IsAlive) return false;
+        Vec3 v = e.WorldPosition;
+        x = v.X; y = v.Y; z = v.Z;
+        return true;
+    }
+
+    /// <summary>One of the entity's WORLD axes: 0 forward, 1 right, 2 up. Three nodes share this
+    /// one surface because they differ only in which axis they ask for, and an axis index chosen by
+    /// the emitter is cheaper than three near-identical methods.
+    ///
+    /// Distinct from the existing GetForward node, which reads an AverCharacter's look direction
+    /// including its pitch clamp. This is the transform's own orientation and works on anything.</summary>
+    internal static bool EntityAxisForGraph(int entity, int axis, out float x, out float y, out float z)
+    {
+        Entity e = new Entity(entity);
+        x = y = z = 0.0f;
+        if (!e.IsAlive) return false;
+        Vec3 v = axis == 0 ? e.WorldForward : axis == 1 ? e.WorldRight : e.WorldUp;
+        x = v.X; y = v.Y; z = v.Z;
+        return true;
+    }
+
+    internal static bool LocalScaleForGraph(int entity, out float x, out float y, out float z)
+    {
+        Entity e = new Entity(entity);
+        x = y = z = 0.0f;
+        if (!e.IsAlive) return false;
+        Vec3 v = e.LocalScale;
+        x = v.X; y = v.Y; z = v.Z;
+        return true;
+    }
+
+    /// <summary>Entity.Translate: an INCREMENTAL offset, not an assignment. A graph nudging
+    /// something every tick wants this rather than reading the position, adding, and writing it
+    /// back through three nodes.</summary>
+    internal static bool TranslateForGraph(int entity, float x, float y, float z)
+    {
+        Entity e = new Entity(entity);
+        if (!e.IsAlive) return false;
+        e.Translate(new Vec3(x, y, z));
+        return true;
+    }
+
+    internal static bool SetLocalScaleForGraph(int entity, float x, float y, float z)
+    {
+        Entity e = new Entity(entity);
+        if (!e.IsAlive) return false;
+        e.SetLocalScale(new Vec3(x, y, z));
+        return true;
+    }
+
+    /// <summary>Entity.IsAlive asks the SCENE whether the handle still names anything; IsValid only
+    /// asks whether it is non-zero. A graph holding a handle across frames wants the first.</summary>
+    internal static bool IsAliveForGraph(int entity) => new Entity(entity).IsAlive;
+
+    /// <summary>True when the entity carries a gameplay CLASS -- an actor -- rather than being a
+    /// plain scene node. What a graph branches on before asking for anything actor-shaped.</summary>
+    internal static bool IsActorForGraph(int entity) => new Entity(entity).IsActor;
+
+    internal static bool DestroyEntityForGraph(int entity)
+    {
+        Entity e = new Entity(entity);
+        if (!e.IsAlive) return false;
+        e.Destroy();
+        return true;
+    }
+
     internal static bool JumpForGraph(int entity)
     {
         Entity e = new Entity(entity);

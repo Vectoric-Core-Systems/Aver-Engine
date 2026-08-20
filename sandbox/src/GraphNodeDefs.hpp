@@ -164,6 +164,21 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"FloatToInt", "Float To Int", "Convert", {pin("a", "float", false), pin("result", "int", true)}});
     // PrintInt exists because Print takes a float and a float cannot hold an entity handle --
     // see the IntToFloat note above. Anything counting entities, indices or ids wants this one.
+    // -- THE ENTITY TRANSFORM, which GetFieldVec3 on CLocal.position only half covered. LOCAL IS
+    //    NOT WORLD: a gun parented to a camera has the same local position forever, and a graph
+    //    measuring a distance or aiming something needs where it actually is. The three axis nodes
+    //    are the transform's own orientation, distinct from the existing GetForward, which reads
+    //    an AverCharacter's look direction and its pitch clamp.
+    t.push_back({"GetWorldPosition", "Get World Position", "Transform", {pin("entity", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
+    t.push_back({"GetEntityForward", "Get Forward Axis", "Transform", {pin("entity", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
+    t.push_back({"GetEntityRight", "Get Right Axis", "Transform", {pin("entity", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
+    t.push_back({"GetEntityUp", "Get Up Axis", "Transform", {pin("entity", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
+    t.push_back({"GetLocalScale", "Get Local Scale", "Transform", {pin("entity", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
+    t.push_back({"IsAlive", "Is Alive", "Transform", {pin("entity", "int", false), pin("alive", "bool", true)}});
+    t.push_back({"IsActor", "Is Actor", "Transform", {pin("entity", "int", false), pin("isActor", "bool", true)}});
+    t.push_back({"Translate", "Translate", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"SetLocalScale", "Set Local Scale", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"DestroyEntity", "Destroy Entity", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"PrintInt", "Print Int", "Debug", {
         pin("exec", "exec", false), pin("value", "int", false), pin("then", "exec", true)}});
     t.push_back({"Print", "Print", "Debug", {
