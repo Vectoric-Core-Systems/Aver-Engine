@@ -3,6 +3,11 @@
 
 #include "ProjectScaffold.hpp"
 
+#if AVER_MODULE_UPGRADE
+#include "aver/upgrade/Upgrade.hpp"
+#endif
+#include <cstring>
+
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Version.hpp"
@@ -1213,6 +1218,108 @@ bool applyProjectUpgrade(const fmt::ProjectDesc& proj, const ProjectUpgrade& up,
 }
 
 // Copies a whole project tree beside itself. See the header for why it never overwrites.
+// Defined below; migrateProject registers the provider before running a chain.
+void installUpgradeResources();
+
+// ENGINE-OWNED FILES THE MIGRATION CHAIN MAY REWRITE.
+//
+// Aver.Upgrade deliberately carries no copies of engine content: a step frozen at its shipping form
+// would otherwise keep rewriting the 0.2-era version of a file forever, and this module would drift
+// from the scaffold that actually owns the text. It asks the host by LOGICAL NAME instead --
+// setResourceProvider is the hook, and it was defined and never called by anybody.
+//
+// The consequence was not a crash. step_0_1_to_0_2 treats "no provider" as "the host has no such
+// resource" and DELETES the F# starter pair, which is a correct outcome for an engine that cannot
+// reference Aver.Pcg -- and the wrong one for this engine, which can. So a 0.1 project upgrading
+// here lost its Sky.fs instead of getting the current one, and the log line said so in words that
+// read like a decision rather than a missing wire.
+#if AVER_MODULE_UPGRADE
+// THE MIGRATION, which is what the "Upgrade Project" prompt was missing entirely.
+//
+// Both of that prompt's buttons used to end in a bare open(): "Convert in Place" opened the project
+// unchanged, and "Upgrade a Copy" copied the folder -- naming it after the NEW version, which the
+// copy did not have -- and opened that unchanged. No step of the migration chain ran in either case,
+// and neither wrote a version stamp, so the copy recorded the OLD version and asked to be upgraded
+// again the moment it opened. Forever. All of it under a dialog reading "Upgrading rewrites files
+// the engine owns. It cannot be undone", which described work that never happened.
+//
+// modules/upgrade -- a documented, tested, ordered step chain -- had no caller outside its own test.
+//
+// THE STAMP IS HALF THE UPGRADE, not bookkeeping after it. CREATEDWITH is defined as "the engine
+// version this project was last opened and stamped by" (OcProject.hpp), so a project whose steps
+// have run and whose stamp still says 0.2 is not an upgraded project -- it is one that will run its
+// steps again next time. Written only on success: a failed chain leaves the old stamp, so the
+// prompt returns and the author is asked again rather than being told a broken project is current.
+bool migrateProject(const std::string& manifestPath, std::string* err) {
+    fmt::ProjectDesc desc;
+    if (!fmt::loadOcproject(manifestPath, desc, err)) return false;
+
+    upgrade::Version from{};
+    if (!upgrade::parseVersion(desc.createdWith, from)) {
+        // No version, or an unparseable one. adoptVersionStamp() owns the empty case on open; there
+        // is nothing to plan a chain FROM here, and guessing a starting series could run steps a
+        // project never needed.
+        if (err) *err = "this project records no engine version to upgrade from";
+        return false;
+    }
+
+    std::vector<const upgrade::Step*> plan;
+    if (!upgrade::planUpgrade(from, plan, err)) return false;   // includes "newer than this engine"
+
+    upgrade::Context ctx;
+    ctx.manifestPath = manifestPath;
+    ctx.projectRoot  = std::filesystem::path(manifestPath).parent_path().string();
+    ctx.contentDir   = ctx.projectRoot + "\\Content";
+    ctx.scriptsDir   = ctx.contentDir + "\\Scripts";
+    ctx.name         = desc.name.empty()
+                         ? std::filesystem::path(manifestPath).stem().string()
+                         : desc.name;
+
+    // Engine-owned files a step may rewrite come from the scaffold, which owns their current text.
+    // Registered here rather than at startup so a build that has the chain but never opens an old
+    // project pays nothing for it.
+    installUpgradeResources();
+
+    if (!upgrade::runUpgrade(ctx, plan, err)) return false;
+
+    std::string existing;
+    if (!readFileText(manifestPath, existing)) {
+        if (err) *err = "the migration ran but " + manifestPath + " could not be re-read to stamp";
+        return false;
+    }
+    desc.createdWith = std::string(kEngineVersion);
+    if (!writeFileText(manifestPath, fmt::writeOcproject(desc, existing))) {
+        if (err) *err = "the migration ran but the version stamp could not be written to " + manifestPath;
+        return false;
+    }
+    AVER_INFO("[Upgrade] '{}': {} step(s) applied, now stamped {}", ctx.name, plan.size(), kEngineVersion);
+    return true;
+}
+#else
+bool migrateProject(const std::string&, std::string* err) {
+    // Unreachable in practice: without the chain compiled in, madeByOlderSeries() is always false
+    // and the prompt this backs is never raised. Present so the call sites need no #if.
+    if (err) *err = "this build has no project migration chain";
+    return false;
+}
+#endif
+
+void installUpgradeResources() {
+#if AVER_MODULE_UPGRADE
+    upgrade::setResourceProvider(
+        [](const char* logicalName, const upgrade::Context& ctx, std::string& out, void*) -> bool {
+            if (std::strcmp(logicalName, "Sky.fs") == 0) {
+                // The CURRENT starter, named for the project it is being written into -- the same
+                // call newProject makes, so an upgraded project gets exactly what a fresh one gets.
+                out = skyScriptText(ctx.name);
+                return true;
+            }
+            return false;   // an unknown name is "the host has nothing under it", which steps handle
+        },
+        nullptr);
+#endif
+}
+
 std::string copyProjectTree(const std::string& manifestPath, const std::string& versionTag,
                             std::string* err) {
     std::error_code ec;

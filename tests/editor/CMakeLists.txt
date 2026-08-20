@@ -107,6 +107,24 @@ set_target_properties(ProjectCopyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAK
 # lands in the same build\bin as Sandbox.exe, so listTemplates()'s real executableDir()-walk already
 # finds the real templates\ directory the identical way a shipped editor would -- AVER_REPO_ROOT lets
 # the test assert that independently, by reading the same directory a second way.
+# ProjectMigrateTest -- migrateProject, the VERSION half of the upgrade prompt.
+#
+# Guarded on the target for UpgradeTest's reason in tests/formats: -DAVER_MODULE_UPGRADE=OFF is a
+# configuration the module matrix checks, and it has to keep configuring even though this test
+# cannot exist there. Linking Aver.Upgrade is also what defines AVER_MODULE_UPGRADE=1 for
+# ProjectScaffold.cpp (the module carries it as a PUBLIC_DEF), so without it migrateProject would
+# compile to its no-chain stub and the test would be asserting on the stub.
+if(TARGET Aver.Upgrade)
+  add_executable(ProjectMigrateTest
+    src/ProjectMigrateTest.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/ProjectScaffold.cpp)
+  target_include_directories(ProjectMigrateTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(ProjectMigrateTest PRIVATE
+    Aver.Upgrade Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(ProjectMigrateTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 add_executable(TemplateScaffoldTest
   src/TemplateScaffoldTest.cpp
   ${CMAKE_SOURCE_DIR}/sandbox/src/ProjectScaffold.cpp)

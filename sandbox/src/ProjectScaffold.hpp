@@ -127,6 +127,15 @@ bool applyProjectUpgrade(const fmt::ProjectDesc& proj, const ProjectUpgrade& up,
 // Lives here rather than in the browser because it is project-tree surgery like everything else in
 // this file, and because a private member of an ImGui screen cannot be tested. It is the branch of
 // the upgrade prompt that MOVES somebody's work, so it is the one that most needs a test.
+// Runs the version migration chain against a project and, on success, stamps its manifest with
+// this engine's version. THE STAMP IS HALF THE UPGRADE -- see the definition. Shared by the
+// browser's upgrade prompt and by --upgrade-project, so the two cannot drift.
+bool migrateProject(const std::string& manifestPath, std::string* err);
+
+// Registers the scaffold as the migration chain's source for engine-owned files. Idempotent and
+// cheap; call it before running a migration. See the definition for what went wrong without it.
+void installUpgradeResources();
+
 std::string copyProjectTree(const std::string& manifestPath, const std::string& versionTag,
                             std::string* err);
 

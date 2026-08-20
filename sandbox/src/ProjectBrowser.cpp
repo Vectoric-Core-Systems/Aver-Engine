@@ -504,8 +504,16 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
         // migration chain has no rollback: a step that fails leaves the project as it found it.
         if (ImGui::Button("Upgrade a Copy", ImVec2(190.0f * dpi, 32.0f * dpi))) {
             std::string err;
+            // The copy is named for the version it is ABOUT to become, which is only true once
+            // the migration below has actually run against it.
             const std::string copied = copyProjectTree(upgradePath_, std::string(kEngineVersion), &err);
             if (copied.empty()) {
+                upgradeError_ = err;
+            } else if (!migrateProject(copied, &err)) {
+                // The ORIGINAL is untouched and the half-migrated copy is left on disk under its
+                // own name, which is the whole reason this path exists: there is no rollback in
+                // the chain, so the thing that can be inspected afterwards must not be the only
+                // copy of the author's work.
                 upgradeError_ = err;
             } else if (!open(copied, &err)) {
                 upgradeError_ = err;
@@ -530,7 +538,9 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
         ImGui::BeginDisabled(!typed);
         if (ImGui::Button("Convert in Place", ImVec2(170.0f * dpi, 0))) {
             std::string err;
-            if (!open(upgradePath_, &err)) {
+            if (!migrateProject(upgradePath_, &err)) {
+                upgradeError_ = err;
+            } else if (!open(upgradePath_, &err)) {
                 upgradeError_ = err;
             } else {
                 cardsDirty_ = true;

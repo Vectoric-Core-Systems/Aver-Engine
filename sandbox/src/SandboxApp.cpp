@@ -12576,7 +12576,15 @@ Application* createApplication(int argc, char** argv) {
             AVER_ERROR("[Sandbox] could not scaffold '{}' from template '{}': {}", nm, tmplId, why);
             std::exit(1);
         }
-        // --upgrade-project <path.ocproject> applies what the prompt would apply, and exits.
+        // --upgrade-project <path.ocproject> applies what the prompt applies, and exits.
+        //
+        // BOTH HALVES, which is what that sentence used to promise and not deliver. There are two
+        // separate things called an upgrade here and this flag only ever ran one of them:
+        //   inspectProject/applyProjectUpgrade repairs SCAFFOLD gaps -- a missing folder, a stale
+        //     .csproj reference -- and is version-independent.
+        //   migrateProject runs the VERSION chain (modules/upgrade) and stamps the manifest.
+        // A project can need either, both, or neither, and running only the first left a 0.2
+        // project reporting "already current" while still stamped 0.2.
         else if (!std::strcmp(argv[i],"--upgrade-project") && i+1<argc) {
             const std::string manifest = argv[++i];
             fmt::ProjectDesc p;
@@ -12586,13 +12594,20 @@ Application* createApplication(int argc, char** argv) {
                 std::exit(1);
             }
             const editor::ProjectUpgrade up = editor::inspectProject(p);
-            if (up.empty()) { AVER_INFO("[Sandbox] '{}' is already current", p.name); std::exit(0); }
             for (const editor::ProjectFix& f : up.fixes)
                 AVER_INFO("  {} : {}", f.summary, f.detail);
-            if (!editor::applyProjectUpgrade(p, up, &why)) {
-                AVER_ERROR("[Sandbox] upgrade failed: {}", why);
+            if (!up.empty() && !editor::applyProjectUpgrade(p, up, &why)) {
+                AVER_ERROR("[Sandbox] scaffold repair failed: {}", why);
                 std::exit(1);
             }
+            // The version chain runs whether or not the scaffold needed anything: they answer
+            // different questions. A failure here is reported and NOT stamped, so the project is
+            // asked again next time rather than being recorded as current.
+            if (!editor::migrateProject(manifest, &why)) {
+                AVER_ERROR("[Sandbox] version migration failed: {}", why);
+                std::exit(1);
+            }
+            AVER_INFO("[Sandbox] '{}' upgraded and stamped {}", p.name, kEngineVersion);
             std::exit(0);
         }
         // --landscape-gen <path> [sampleCount] [spacingCm] writes a synthetic rolling-hill .ocland
