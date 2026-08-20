@@ -775,7 +775,24 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     }
     sum /= wsum; occ /= wsum;
     ao = saturate(1.0 - occ);
-    return sum.rgb * gVoxelParams.y;
+    // THE SAME CEILING THE INJECTION ALREADY HAS, applied AFTER the intensity multiply. Every
+    // voxel this cone gathered was clamped to AVER_VOX_MAXRAD on the way in (see PSVoxel), so
+    // `sum` cannot exceed it either -- and then gVoxelParams.y, the authored giIntensity, is let
+    // as high as 8 (Voxi.cpp clamps it there), which multiplies a bounded quantity straight back
+    // out of its bound: 16 x 8 = 128 units of radiance, out of a volume in which nothing emits
+    // more than 16.
+    //
+    // That is the runaway Voxi.hpp documents -- enough large, saturated, brightly-lit geometry and
+    // the bounce floods the frame with that geometry's colour. The bound is a PHYSICAL statement
+    // rather than a tuned number (a gather cannot hand back more radiance than the brightest thing
+    // it gathered from emits), which is why it reuses the injection's own constant instead of
+    // introducing a second one that would then have to be kept in step with it.
+    //
+    // A CLAMP IS NOT A LIGHTING MODEL. This stops a divergence; it does not make the answer right
+    // at the ceiling, and a scene that reaches it is still asking for more light than the volume
+    // holds. It fires in nothing shipped with this engine -- ElectricDreams, the gate scene and
+    // the furnace were all measured bit-identical across this change.
+    return min(sum.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
 }
 
 // The Voxi lit pixel shader. Voxi supplies light transport only — sun visibility, sky, bounce —
@@ -834,7 +851,10 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     if (gVoxelParams.w > 0.5) {
         float  specAperture = clamp(s.rough * 0.5 + 0.02, 0.02, 0.4);
         float4 sceneSpec    = traceCone(i.wpos, R, specAperture);
-        ind4.specular       = sceneSpec.rgb * gVoxelParams.y + skyColor(R) * (1.0 - sceneSpec.a);
+        // Bounded for the reason coneTracedIndirect is. The sky term is left alone: skyColor is
+        // not a gather out of the volume and carries no runaway of its own.
+        ind4.specular       = min(sceneSpec.rgb * gVoxelParams.y, AVER_VOX_MAXRAD) +
+                              skyColor(R) * (1.0 - sceneSpec.a);
     } else {
         ind4.specular       = skyColor(R);
     }

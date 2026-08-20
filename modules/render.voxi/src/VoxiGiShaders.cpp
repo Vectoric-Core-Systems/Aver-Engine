@@ -27,6 +27,12 @@ const char* giShaderPrelude() {
 // never seen in the same compile as that one, so redefining it here is not a collision.
 #define AVER_SHADOW_CASCADES 4
 
+// The ceiling on voxel radiance, and the same arrangement as the line above: VoxiShaders.hpp
+// defines this identically for the raster path, the two preludes are never in one compile, and
+// the value has to match. It bounds BOTH ends of the volume -- what PSVoxel injects and what
+// coneTracedIndirect hands back -- so a change here is a change to VoxiShaders.hpp too.
+#define AVER_VOX_MAXRAD 16.0
+
 // BYTE FOR BYTE aver::voxi::VoxiRenderer::FrameConstants (VoxiRenderer.hpp), same as Voxi's own
 // `cbuffer VoxiFrame` in VoxiShaders.hpp -- deliberately the FULL block, not a trimmed one, so a
 // caller can bind VoxiRenderer::giFrameConstants()/giFrameConstantBytes() verbatim instead of the
@@ -152,7 +158,11 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     }
     sum /= wsum; occ /= wsum;
     ao = saturate(1.0 - occ);
-    return sum.rgb * gVoxelParams.y;
+    // Bounded exactly as VoxiShaders.hpp's coneTracedIndirect is -- read the long note there
+    // for why the ceiling is the injection's own constant. Two copies of this gather exist, and
+    // clamping one of them only would be a difference between the raster and cluster paths that
+    // nothing in the build would report.
+    return min(sum.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
 }
 )HLSL";
     return s.c_str();
