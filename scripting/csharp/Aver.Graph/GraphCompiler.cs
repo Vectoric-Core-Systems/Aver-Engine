@@ -844,6 +844,18 @@ public class GraphCompiler
         else                                                           _il.Emit(OpCodes.Pop);
     }
 
+    /// Print(value) -> then. Writes one line to the log, labelled with the NODE'S OWN ID, which is
+    /// why it needs no attribute: `NODE muzzleLen Print` prints "muzzleLen = 35" and the author
+    /// already chose that name. The id is pushed as a compile-time constant, so the string costs
+    /// nothing at run time beyond the call.
+    private void EmitExecPrint(Node node)
+    {
+        if (_il == null) return;
+        _il.Emit(OpCodes.Ldstr, node.Id);
+        EmitPullInput(node, "value");
+        _il.Emit(OpCodes.Call, PrintMethod);
+    }
+
     /// GetViewEntity(entity) -> view + success. Same shape as EmitGetForward, one out-parameter wide.
     private void EmitGetViewEntity(Node node)
     {
@@ -1694,6 +1706,7 @@ public class GraphCompiler
                     else if (IsExecCapableSetMaterialType(node.Type)) EmitExecSetMaterial(node);
                     else if (IsExecCapableCharacterMoveType(node.Type)) EmitExecCharacterMove(node);
                     else if (IsExecCapableJumpType(node.Type)) EmitJump(node);
+                    else if (IsExecCapablePrintType(node.Type)) EmitExecPrint(node);
                     else if (IsExecCapableFireEventType(node.Type)) EmitExecFireEvent(node);
                     EmitExecFanOut(node);
                     return;
@@ -2178,6 +2191,11 @@ public class GraphCompiler
     private static bool IsExecCapableJumpType(string type) =>
         type.Equals("jump", StringComparison.OrdinalIgnoreCase);
 
+    /// Print gets its own predicate for the reason every side effect above it does: one per type,
+    /// so a predicate's name never stops describing what it matches.
+    private static bool IsExecCapablePrintType(string type) =>
+        type.Equals("print", StringComparison.OrdinalIgnoreCase);
+
     /// FireEvent's own version of IsExecCapableSpawnType -- a SEVENTH, separate predicate/emitter
     /// pair, refused by the PULL compiler's topological pass ENTIRELY (see EmitNode's "fireevent"
     /// case, above), the same stricter-than-SetField treatment Spawn/CharacterMove get. Kept as its
@@ -2656,7 +2674,8 @@ public class GraphCompiler
             IsExecCapableSetParentType(source.Type) || IsExecCapableSetViewEntityType(source.Type) ||
             IsExecCapableSetNameType(source.Type) || IsExecCapableSetMeshType(source.Type) ||
             IsExecCapableSetMaterialType(source.Type) || IsExecCapableCharacterMoveType(source.Type) ||
-            IsExecCapableFireEventType(source.Type) || IsExecCapableJumpType(source.Type))
+            IsExecCapableFireEventType(source.Type) || IsExecCapableJumpType(source.Type) ||
+            IsExecCapablePrintType(source.Type))
             throw new InvalidOperationException(
                 $"'{source.Id}.{pinName}' cannot be read as a data value: {source.Type} has a side effect " +
                 "and must be reached by wiring it directly into the exec chain (give it exec pins), not " +
@@ -3192,6 +3211,10 @@ public class GraphCompiler
         typeof(GraphInterop).GetMethod("LookDirectionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.LookDirectionForGraph was not found by reflection");
     // GetViewEntity: the camera node a character looks through -- what a viewmodel parents to.
+    // Print: one line to the log, labelled with the node id the emitter pushes.
+    private static readonly MethodInfo PrintMethod =
+        typeof(GraphInterop).GetMethod("PrintForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.PrintForGraph was not found by reflection");
     // Jump: one call into AverCharacter.Jump, which declines in mid-air on its own.
     private static readonly MethodInfo JumpMethod =
         typeof(GraphInterop).GetMethod("JumpForGraph", BindingFlags.NonPublic | BindingFlags.Static)

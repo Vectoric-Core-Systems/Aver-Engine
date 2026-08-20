@@ -106,6 +106,16 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"ConstBool",  "Const Bool",  "Const", {pin("value", "bool",  true, "false")}});
     // -- arithmetic: a, b in; result out --
     t.push_back({"Add",      "Add",      "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
+    // -- Print: the node this vocabulary has never had, and the one a Blueprint author reaches for
+    //    first. There was no way to observe ANYTHING from inside a graph -- no value, no branch
+    //    taken, no event fired -- so debugging one meant adding an OUT record and reading the
+    //    GraphHost tick log, which only works for a value you can route all the way to the
+    //    graph's own output. LABELLED BY NODE ID rather than by an attribute: `NODE muzzleLen
+    //    Print` already names itself, the id is already unique within the graph, and an
+    //    attribute would have needed a parser field, a writer field and an editor row to say
+    //    what the id says for free.
+    t.push_back({"Print", "Print", "Debug", {
+        pin("exec", "exec", false), pin("value", "float", false), pin("then", "exec", true)}});
     t.push_back({"Multiply", "Multiply", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
     t.push_back({"Subtract", "Subtract", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
     t.push_back({"Divide",   "Divide",   "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});

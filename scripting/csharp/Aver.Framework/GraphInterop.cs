@@ -352,6 +352,22 @@ internal static class GraphInterop
     /// actually happened, and "the key was pressed" is not that. False here means airborne, which is
     /// ordinary and frequent -- so unlike the wrong-actor case below it is not logged at all. A warning
     /// every frame the player holds the jump key would be noise, not diagnosis.</summary>
+    /// <summary>Print's surface: one log line, labelled with the graph node's own id.
+    ///
+    /// THE ONLY WAY A GRAPH COULD OBSERVE ITSELF BEFORE THIS was to route a value all the way to
+    /// an OUT record and read it back off GraphHost's per-tick log -- which works for exactly one
+    /// value per graph, has to reach the graph's own output to exist at all, and says nothing about
+    /// which branch was taken or whether a chain ran. A Blueprint author reaches for Print String
+    /// before anything else, and this vocabulary did not have it.
+    ///
+    /// FLOAT, NOT A STRING, because there is no string PIN TYPE -- PinType is Float, Int, Bool and
+    /// Exec, and inventing one for this would touch the parser, the writer, the editor's pin
+    /// colours and Validate's type check. A number and a name covers what a graph is usually asking.</summary>
+    internal static void PrintForGraph(string label, float value)
+    {
+        Log.Info($"[Graph] {label} = {value}");
+    }
+
     internal static bool JumpForGraph(int entity)
     {
         Entity e = new Entity(entity);

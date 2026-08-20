@@ -883,6 +883,15 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // Print(value) -> then. EXEC PINS BY DEFAULT: writing a line to the log is a side
+            // effect with a definite "when", so it belongs on the chain the way SetVar does and
+            // must never be pulled -- a pulled Print would fire once per reader, or not at all.
+            case "print":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "value", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                break;
+
             case "compare":
             case "compare_f32":
                 node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
