@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+#include "aver/core/Hash.hpp"   // fnv1a64: how a component names a socket
+
 using namespace aver;
 
 static int g_failures = 0;
@@ -73,6 +75,10 @@ int main() {
         fmt::OcBone root;  root.name = "root";
         fmt::OcBone child; child.name = "child"; child.parent = 0; child.translation = Vec3{0, 0, 50};
         s.bones = {root, child};
+        // A socket on the ANIMATED bone, offset along X. The clip below slides that bone 100cm
+        // along X over one second, so an attached entity must travel with it -- a socket on the
+        // static root would pass even if the pass ignored the pose entirely.
+        s.sockets.push_back({"Grip", 1, Vec3{0, 0, 20}, Quat{0, 0, 0, 1}, Vec3{1, 1, 1}});
         std::string why;
         check(fmt::saveOcSkel(g_dir + "/rig.ocskel", s, &why), "the fixture rig writes: " + why);
 
@@ -237,6 +243,69 @@ int main() {
         check(sys.skinning(dead, n) == nullptr, "and the dead handle resolves to nothing at all");
 
         w.destroy(reborn);
+        w.flush();
+    }
+
+    AVER_INFO("an entity RIDES a socket on its parent");
+    {
+        const scene::Entity rig = w.create("carrier");
+        auto* sm = static_cast<scene::CSkeletalMesh*>(w.addComponent(rig, scene::kComponentSkeletalMesh));
+        auto* an = static_cast<scene::CAnimator*>(w.addComponent(rig, scene::kComponentAnimator));
+        sm->skeleton = kSkelId;
+        an->clip = kClipId;
+        an->flags |= scene::kAnimatorPaused;   // scrubbed by hand, so the assertions are exact
+        an->time = 0.0f;
+
+        const scene::Entity gun = w.create("gun");
+        auto* at = static_cast<scene::CAttachment*>(w.addComponent(gun, scene::kComponentAttachment));
+        check(at != nullptr, "an attachment attaches");
+        at->socket = fnv1a64("Grip");
+        check(w.setParent(gun, rig), "and the gun is parented to the carrier");
+
+        sys.tick(w, 0.0f);
+        check(sys.attachmentsPlaced() == 1, "the pass placed it");
+        const auto* loc = w.component<scene::CLocal>(gun, scene::kComponentLocal);
+        check(loc != nullptr, "the gun has a local transform");
+        if (loc) {
+            // At t=0 the animated bone is at its rest X of 0 and its own Z of 50; the socket adds 20.
+            checkNear(loc->xf.position.x, 0.0f, 1e-3f, "at t=0 the gun sits at the bone's X");
+            checkNear(loc->xf.position.z, 70.0f, 1e-3f, "and at the bone's Z plus the socket offset");
+        }
+
+        // THE WHOLE POINT: scrub the clip and the gun must MOVE. A pass that resolved the socket
+        // against the REST pose would pass every check above and fail this one.
+        const u32 revBefore = loc ? loc->rev : 0;
+        // 0.5, NOT 1.0. The fixture clip LOOPS, so a clock of exactly one duration wraps back to
+        // zero -- correct behaviour that would read here as "the attachment never moved".
+        an->time = 0.5f;   // the clip slides the animated bone 100cm along X over one second
+        sys.tick(w, 0.0f);
+        loc = w.component<scene::CLocal>(gun, scene::kComponentLocal);
+        if (loc) {
+            checkNear(loc->xf.position.x, 50.0f, 1e-2f,
+                      "scrubbing the clip MOVED the gun -- it rides the POSED bone, not the rest bone");
+            check(loc->rev != revBefore,
+                  "and the revision was bumped, or CWorld would never recompose and nothing would move "
+                  "on screen");
+        }
+
+        // ---- a socket name that matches nothing
+        at = w.component<scene::CAttachment>(gun, scene::kComponentAttachment);
+        at->socket = fnv1a64("NoSuchSocket");
+        const Vec3 held = loc ? loc->xf.position : Vec3{0, 0, 0};
+        an->time = 0.0f;
+        sys.tick(w, 0.0f);
+        loc = w.component<scene::CLocal>(gun, scene::kComponentLocal);
+        check(sys.attachmentsPlaced() == 0, "an unknown socket places nothing");
+        if (loc) checkNear(loc->xf.position.x, held.x, 1e-4f,
+                           "and LEAVES THE ENTITY WHERE IT IS rather than snapping it to the origin");
+
+        // ---- unparented
+        at->socket = fnv1a64("Grip");
+        check(w.setParent(gun, scene::kInvalidEntity), "the gun is unparented");
+        sys.tick(w, 0.0f);
+        check(sys.attachmentsPlaced() == 0, "an attachment with no parent rides nothing");
+
+        w.destroy(gun); w.destroy(rig);
         w.flush();
     }
 

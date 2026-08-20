@@ -1,4 +1,4 @@
-// The eleven built-in component structs and their fixed dense type ids.
+// The twelve built-in component structs and their fixed dense type ids.
 #pragma once
 #include "aver/core/Math.hpp"
 #include "aver/core/Types.hpp"
@@ -18,7 +18,8 @@ inline constexpr u32 kComponentCamera       = 8;
 inline constexpr u32 kComponentSkeletalMesh = 9;
 inline constexpr u32 kComponentAnimator     = 10;
 inline constexpr u32 kComponentParticleEmitter = 11;
-inline constexpr u32 kComponentBuiltinMax   = 11;
+inline constexpr u32 kComponentAttachment   = 12;
+inline constexpr u32 kComponentBuiltinMax   = 12;
 
 // Authored local transform, plus the revision the world-matrix pass compares against.
 struct CLocal {
@@ -141,9 +142,29 @@ struct CParticleEmitter {
     u32 flags     = 0;      // bit 0: kParticleEmitterStopped
 };
 
+// RIDING A SOCKET on this entity's PARENT.
+//
+// It carries the socket and nothing else -- no target entity -- because the target is already
+// answered: the parent link in CHierarchy is what "attached to" means, and SetParent is the call
+// every script and every graph already has. A second, private notion of "who am I on" would be a
+// second thing to keep in step with the hierarchy, and they would drift.
+//
+// WHAT THE UPDATE ACTUALLY WRITES is this entity's own CLocal, from the socket's transform in the
+// parent's MODEL space. The hierarchy pass then composes CWorld = CLocal * parentWorld, which is
+// exactly parentWorld * socketModel -- the right answer, produced by machinery that already exists
+// rather than by a second world-space path that could disagree with the first.
+//
+// A HASH, NOT A NAME, and that is a constraint rather than a preference: a component has a fixed
+// stride and the scene ABI marshals numbers, so the socket is named by fnv1a64 exactly as a mesh
+// names its asset by ObjectId. C# hashes with Assets.ObjectIdOf, which is the same function.
+struct CAttachment {
+    u64 socket = 0;    // fnv1a64 of the socket name; 0 = attached to nothing in particular
+};
+
 // Field order is chosen so neither struct gets padding: World::verifyComponent is byte-exact and
 // turns a mismatch into an abort inside World's constructor, so a padded component kills the editor
 // at startup rather than failing a test.
+static_assert(sizeof(CAttachment) == 8, "CAttachment must be padding-free");
 static_assert(sizeof(CSkeletalMesh) == 16, "CSkeletalMesh must be padding-free");
 static_assert(sizeof(CAnimator) == 24, "CAnimator must be padding-free");
 static_assert(sizeof(CParticleEmitter) == 24, "CParticleEmitter must be padding-free");
@@ -151,7 +172,7 @@ static_assert(sizeof(CParticleEmitter) == 24, "CParticleEmitter must be padding-
 class World;
 
 namespace detail {
-// Registers the eleven built-ins. Called once by World's constructor.
+// Registers the twelve built-ins. Called once by World's constructor.
 void registerBuiltinComponents(World& world);
 } // namespace detail
 

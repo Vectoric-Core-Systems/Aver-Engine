@@ -25,6 +25,7 @@ public static class SceneIds
     public const int CSkeletalMesh = 9;
     public const int CAnimator = 10;
     public const int CParticleEmitter = 11;
+    public const int CAttachment = 12;
 
     private static readonly System.Collections.Generic.Dictionary<string, int> s_cache = new();
 

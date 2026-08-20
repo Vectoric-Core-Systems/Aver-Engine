@@ -25,8 +25,9 @@ extern "C" {
 /* ABI version, as (major << 16) | minor. Major changes break a binding; minor only adds. */
 /* MINOR 1 adds aver_scene_material_name. Additive only -- no existing binding changes. */
 /* MINOR 2 adds AVER_SCENE_COMP_PARTICLE_EMITTER (11th built-in). Additive only. */
+/* MINOR 3 adds AVER_SCENE_COMP_ATTACHMENT (12th built-in). Additive only. */
 #define AVER_SCENE_ABI_VERSION_MAJOR 1
-#define AVER_SCENE_ABI_VERSION_MINOR 2
+#define AVER_SCENE_ABI_VERSION_MINOR 3
 #define AVER_SCENE_ABI_VERSION \
     ((AVER_SCENE_ABI_VERSION_MAJOR << 16) | AVER_SCENE_ABI_VERSION_MINOR)
 
@@ -57,6 +58,7 @@ AVER_SCENE_ABI int32_t aver_scene_abi_version(void);
 #define AVER_SCENE_COMP_SKELETAL_MESH 9
 #define AVER_SCENE_COMP_ANIMATOR      10
 #define AVER_SCENE_COMP_PARTICLE_EMITTER 11
+#define AVER_SCENE_COMP_ATTACHMENT    12
 
 /* Every entry point below acts on the single process-global World; no world handle crosses.
  * Strings are UTF-8 both ways, and an OUT pointer is owned by the world and must NOT be freed.

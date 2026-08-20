@@ -3,6 +3,7 @@
 #include "aver/formats/OcAnim.hpp"
 
 #include "aver/formats/Avr1.hpp"
+#include "aver/core/Hash.hpp"   // fnv1a64: how a component names a socket
 
 #include <cstring>
 #include "aver/platform/FileSystem.hpp"
@@ -106,6 +107,12 @@ bool OcSkeleton::valid() const {
 // is the only choice that is stable under an edit to a later entry.
 const OcSocket* OcSkeleton::socket(const std::string& name) const {
     for (const OcSocket& k : sockets) if (k.name == name) return &k;
+    return nullptr;
+}
+
+const OcSocket* OcSkeleton::socketById(u64 id) const {
+    if (id == 0) return nullptr;   // 0 is "unset", not a name that happens to hash to zero
+    for (const OcSocket& k : sockets) if (fnv1a64(k.name) == id) return &k;
     return nullptr;
 }
 

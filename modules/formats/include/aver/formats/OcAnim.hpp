@@ -63,6 +63,13 @@ struct OcSkeleton {
     // cost more to keep in step than the scan saves.
     const OcSocket* socket(const std::string& name) const;
 
+    // The socket whose name hashes to `id` under fnv1a64, or nullptr. Exists because a COMPONENT
+    // cannot hold a string -- the scene ABI marshals numbers, so an attachment names its socket by
+    // hash exactly as a mesh names its asset by ObjectId. Hashes every name per call rather than
+    // caching: a rig has a handful of short names, and a cache would have to be invalidated on
+    // every rename the editor performs.
+    const OcSocket* socketById(u64 id) const;
+
     // True when parents are in range, acyclic, and each precedes its children, and every socket
     // names a bone that exists.
     bool valid() const;

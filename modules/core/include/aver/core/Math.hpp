@@ -254,6 +254,68 @@ struct Transform {
     }
 };
 
+// The TRS a matrix was built from. THE INVERSE OF Transform::toMatrix, and only that: it assumes
+// the matrix is scale-then-rotate-then-translate with no shear, which is what every matrix in this
+// engine composed from a Transform is.
+//
+// A MIRRORED MATRIX CANNOT BE REPRESENTED and is not silently accepted: a negative determinant is
+// a reflection, no quaternion encodes one, and the usual trick of pushing the sign into one scale
+// axis picks an axis arbitrarily and produces a DIFFERENT matrix than the one passed in. The X
+// scale carries the sign here so the determinant at least survives, and the caller is expected to
+// know it is outside the contract -- a rig with a mirrored bone is a broken rig, not a case to
+// support.
+inline Transform transformFromMatrix(const Mat4& m) {
+    Transform t;
+    t.position = Vec3{m.m[3][0], m.m[3][1], m.m[3][2]};
+
+    Vec3 ax{m.m[0][0], m.m[0][1], m.m[0][2]};
+    Vec3 ay{m.m[1][0], m.m[1][1], m.m[1][2]};
+    Vec3 az{m.m[2][0], m.m[2][1], m.m[2][2]};
+    f32 sx = std::sqrt(ax.x*ax.x + ax.y*ax.y + ax.z*ax.z);
+    const f32 sy = std::sqrt(ay.x*ay.x + ay.y*ay.y + ay.z*ay.z);
+    const f32 sz = std::sqrt(az.x*az.x + az.y*az.y + az.z*az.z);
+
+    // det < 0 is a reflection; see the note above.
+    const f32 det = ax.x * (ay.y*az.z - ay.z*az.y)
+                  - ax.y * (ay.x*az.z - ay.z*az.x)
+                  + ax.z * (ay.x*az.y - ay.y*az.x);
+    if (det < 0.0f) sx = -sx;
+
+    t.scale = Vec3{sx, sy, sz};
+
+    // A ZERO SCALE AXIS LEAVES THE ROTATION UNDEFINED, so it falls back to identity rather than
+    // dividing by zero and filling the quaternion with NaN -- which would then propagate into every
+    // transform downstream and be attributed to something else entirely.
+    if (std::fabs(sx) < 1e-8f || sy < 1e-8f || sz < 1e-8f) return t;
+
+    Mat4 r = Mat4::identity();
+    r.m[0][0] = ax.x/sx; r.m[0][1] = ax.y/sx; r.m[0][2] = ax.z/sx;
+    r.m[1][0] = ay.x/sy; r.m[1][1] = ay.y/sy; r.m[1][2] = ay.z/sy;
+    r.m[2][0] = az.x/sz; r.m[2][1] = az.y/sz; r.m[2][2] = az.z/sz;
+
+    // Shepperd's method: pick the branch whose divisor is largest, so no branch divides by a small
+    // number. The naive single-branch form loses most of its precision near a 180-degree rotation.
+    const f32 tr = r.m[0][0] + r.m[1][1] + r.m[2][2];
+    if (tr > 0.0f) {
+        const f32 s = std::sqrt(tr + 1.0f) * 2.0f;
+        t.rotation = Quat{(r.m[1][2] - r.m[2][1]) / s, (r.m[2][0] - r.m[0][2]) / s,
+                          (r.m[0][1] - r.m[1][0]) / s, 0.25f * s};
+    } else if (r.m[0][0] > r.m[1][1] && r.m[0][0] > r.m[2][2]) {
+        const f32 s = std::sqrt(1.0f + r.m[0][0] - r.m[1][1] - r.m[2][2]) * 2.0f;
+        t.rotation = Quat{0.25f * s, (r.m[1][0] + r.m[0][1]) / s, (r.m[2][0] + r.m[0][2]) / s,
+                          (r.m[1][2] - r.m[2][1]) / s};
+    } else if (r.m[1][1] > r.m[2][2]) {
+        const f32 s = std::sqrt(1.0f + r.m[1][1] - r.m[0][0] - r.m[2][2]) * 2.0f;
+        t.rotation = Quat{(r.m[1][0] + r.m[0][1]) / s, 0.25f * s, (r.m[2][1] + r.m[1][2]) / s,
+                          (r.m[2][0] - r.m[0][2]) / s};
+    } else {
+        const f32 s = std::sqrt(1.0f + r.m[2][2] - r.m[0][0] - r.m[1][1]) * 2.0f;
+        t.rotation = Quat{(r.m[2][0] + r.m[0][2]) / s, (r.m[2][1] + r.m[1][2]) / s, 0.25f * s,
+                          (r.m[0][1] - r.m[1][0]) / s};
+    }
+    return t;
+}
+
 // An axis-aligned bounding box.
 struct AABB {
     Vec3 min{0, 0, 0};

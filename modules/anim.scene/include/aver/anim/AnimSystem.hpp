@@ -91,6 +91,11 @@ public:
     u32 loadedClips() const { return static_cast<u32>(clips_.size()); }
     u32 posedEntities() const { return static_cast<u32>(posed_.size()); }
 
+    // How many attachments the last tick actually placed. A test can assert on it, and a host can
+    // tell "the socket name is wrong" (0) from "nothing is attached" (also 0, but with no
+    // CAttachment anywhere) without guessing from a screenshot.
+    u32 attachmentsPlaced() const { return attachmentsPlaced_; }
+
 private:
     struct Posed {
         Pose pose;
@@ -123,6 +128,11 @@ private:
     // way would have inherited its GPU buffers with it. The generation is in the handle precisely
     // so a recycled slot is a different key.
     std::unordered_map<scene::Entity, Posed> posed_;
+    // Puts every CAttachment entity onto its parent's socket. Runs at the END of tick(), after
+    // every pose in the world exists -- an attachment reads a pose it does not own, so it cannot
+    // run inside the same loop that is still producing them.
+    void updateAttachments(scene::World& world);
+
     // Observes one animator's clock and fires whatever it passed. Split out of tick() because it
     // is the one part of that loop with nothing to do with posing, and because its own state
     // (clocks_) has a different lifetime rule than the pose cache beside it.
@@ -136,6 +146,7 @@ private:
     AnimNotifyFn notify_ = nullptr;
     void* notifyUser_ = nullptr;
     u64 fired_ = 0;
+    u32 attachmentsPlaced_ = 0;
     // Reused across entities and ticks so a frame of notifies costs no allocation after the first.
     std::vector<u32> crossed_;
 };

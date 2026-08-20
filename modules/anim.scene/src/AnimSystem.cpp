@@ -146,6 +146,50 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         }
         poseToSkinning(*skel, p.pose, p.skin);
     }
+
+    updateAttachments(world);
+}
+
+// A weapon in a hand. Reads the parent's posed rig and writes THIS entity's CLocal.
+void AnimSystem::updateAttachments(scene::World& world) {
+    attachmentsPlaced_ = 0;
+    scene::ComponentPool* pool = world.pool(scene::kComponentAttachment);
+    if (!pool) return;
+
+    for (usize i = 0; i < pool->size(); ++i) {
+        const scene::Entity e = pool->entityAt(i);
+        const auto* a = static_cast<const scene::CAttachment*>(pool->dataAt(i));
+        if (!a || a->socket == 0) continue;
+
+        // WHO IT RIDES IS THE PARENT LINK, not a second field -- see CAttachment's own comment.
+        const auto* h = world.component<scene::CHierarchy>(e, scene::kComponentHierarchy);
+        if (!h || h->parent == scene::kInvalidEntity) continue;
+
+        auto it = posed_.find(h->parent);
+        if (it == posed_.end() || !it->second.skel) continue;
+        const fmt::OcSocket* sock = it->second.skel->socketById(a->socket);
+        // A NAME THAT MATCHES NOTHING LEAVES THE ENTITY WHERE IT IS, silently, rather than
+        // snapping it to the parent's origin. A typo should look like "it did not attach", which
+        // is diagnosable, not like "it attached to the wrong place", which is not.
+        if (!sock) continue;
+
+        // Recomputed per attachment rather than cached on Posed: see socketModel's own comment.
+        // A character with three attachments walks its bones three times, which is nothing beside
+        // the sampling that produced the pose in the first place.
+        std::vector<Mat4> model;
+        poseToModel(*it->second.skel, it->second.pose, model);
+        Mat4 m;
+        if (!socketModelMatrix(model, *sock, m)) continue;
+
+        auto* loc = world.component<scene::CLocal>(e, scene::kComponentLocal);
+        if (!loc) continue;
+        loc->xf = transformFromMatrix(m);
+        // THE REVISION MUST BE BUMPED OR NOTHING DOWNSTREAM NOTICES. CWorld is recomposed only
+        // when composedLocalRev disagrees with this, so writing the transform and leaving the
+        // revision alone gives an attachment that is correct in memory and never moves on screen.
+        ++loc->rev;
+        ++attachmentsPlaced_;
+    }
 }
 
 void AnimSystem::stepNotifies(scene::Entity e, const scene::CAnimator& a, f32 step, bool paused) {

@@ -30,4 +30,8 @@ public enum Component
     Animator = 10,
     /// <summary>An effect id and this entity's own emission clock.</summary>
     ParticleEmitter = 11,
+
+    /// <summary>Rides a named socket on this entity's PARENT. Set the socket with
+    /// <see cref="Entity.AttachToSocket"/>; the parent link is what says WHO it rides.</summary>
+    Attachment = 12,
 }
