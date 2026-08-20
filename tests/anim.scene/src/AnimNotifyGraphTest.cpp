@@ -22,7 +22,10 @@
 #include "aver/platform/FileSystem.hpp"
 #include "aver/scripting/ScriptHost.hpp"
 
+#include "aver/core/Hash.hpp"
+
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -104,6 +107,39 @@ static const char* kGraphText =
     "LINK report.value move.x\n"
     "LINK zero.value move.y\n"
     "LINK zero.value move.z\n";
+
+// A graph whose OnAttach event hangs the entity it is bound to onto ANOTHER entity's Grip.
+//
+// THE HOLDER IS A ConstInt WITH A REAL HANDLE BAKED IN, not a second PARAM, and the refusal that
+// forced it is worth recording: GraphHost.Fire supplies only `entity`, `time` and `deltaTime` --
+// it refused a second int PARAM by name, which is the documented restriction and not a bug. A
+// baked handle is fine here because the test creates the carrier before it writes the graph.
+//
+// The two ends being DIFFERENT entities is what makes an argument-order bug visible at all:
+// swapping the emitter's two pin loads compiles perfectly and attaches the carrier to the gun.
+static std::string attachGraphText(i32 holder) {
+    return std::string(
+    "OCGRAPH 1\n"
+    "NAME AttachProbe\n"
+    "DESCRIPTION Hangs the bound entity on another entity Grip when OnAttach fires.\n"
+    "\n"
+    "PARAM entity int\n"
+    "NODE thing Param param=entity\n")
+    + "NODE holder ConstInt value=" + std::to_string(holder) + "\n"
+    + "\n"
+    + "ENTRY go OnAttach\n"
+    + "NODE go CustomEvent name=OnAttach\n"
+    + "\n"
+    + "NODE hang AttachToSocket socket=Grip\n"
+    + "PIN hang exec in exec\n"
+    + "PIN hang entity in int\n"
+    + "PIN hang parent in int\n"
+    + "PIN hang then out exec\n"
+    + "PIN hang success out bool\n"
+    + "LINK go.exec hang.exec\n"
+    + "LINK thing.value hang.entity\n"
+    + "LINK holder.value hang.parent\n";
+}
 
 int main() {
     AVER_INFO("AnimNotifyGraphTest");
@@ -260,6 +296,56 @@ int main() {
             aver_fw_destroy(actor);
             w.flush();
         }
+    }
+
+    AVER_INFO("the AttachToSocket NODE, invoked for real");
+    {
+        // WHY THIS IS NOT A COMPILE-ONLY TEST. Every other check of a new node in this codebase
+        // proves the four places were edited: the palette, the parser, the emitter and the pull
+        // output. None of them would notice the emitter pushing `parent` before `entity` -- that IL
+        // is perfectly valid, verifies, JITs, runs, and attaches the character to the gun. The only
+        // way to catch it is to invoke the thing and read the result back off the components.
+        const scene::Entity carrier = w.create("carrier");
+        const scene::Entity gun = w.create("gun");
+
+        const std::string graphText = attachGraphText(static_cast<i32>(carrier));
+        std::ofstream gf(g_dir + "/attach.ocgraph", std::ios::binary);
+        gf << graphText;
+        gf.close();
+
+        check(g_host->graphLoad(static_cast<i32>(gun), g_dir + "/attach.ocgraph"),
+              "the attach graph compiles -- so the emitter, the parser and the palette agree");
+        check(g_host->graphFire(static_cast<i32>(gun), "OnAttach"),
+              "and firing it runs the AttachToSocket node");
+
+        // THE GUN, NOT THE CARRIER. Fire supplies the entity PARAM as the entity the graph is bound
+        // to, so `thing` is the gun and `holder` is the baked carrier handle. Swapping the two pin
+        // loads in the emitter puts the CAttachment on the CARRIER instead, and every other check
+        // in this block still passes.
+        const auto* at = w.component<scene::CAttachment>(gun, scene::kComponentAttachment);
+        check(at != nullptr, "the node put a CAttachment on the GUN -- the FIRST pin is the thing");
+        if (at) check(at->socket == fnv1a64("Grip"),
+                      "carrying the socket named by the node's socket= attribute");
+        check(w.component<scene::CAttachment>(carrier, scene::kComponentAttachment) == nullptr,
+              "and NOT on the carrier -- which is what a swapped argument order would produce");
+
+        const auto* h = w.component<scene::CHierarchy>(gun, scene::kComponentHierarchy);
+        check(h && h->parent == carrier,
+              "and parented the gun TO THE CARRIER, because attaching IS parenting plus a socket");
+
+        // A node with no socket= is refused BY NAME at compile time, not left to attach to nothing.
+        std::string bad = graphText;
+        const usize at2 = bad.find(" socket=Grip");
+        if (at2 != std::string::npos) bad.erase(at2, std::strlen(" socket=Grip"));
+        std::ofstream bf(g_dir + "/attach_bad.ocgraph", std::ios::binary);
+        bf << bad;
+        bf.close();
+        const scene::Entity other = w.create("other");
+        check(!g_host->graphLoad(static_cast<i32>(other), g_dir + "/attach_bad.ocgraph"),
+              "a node with no socket= is REFUSED, rather than compiling and attaching to nothing");
+
+        w.destroy(other); w.destroy(gun); w.destroy(carrier);
+        w.flush();
     }
 
     sys.setNotifySink(nullptr, nullptr);

@@ -213,6 +213,21 @@ internal static class GraphInterop
     /// aver_scene_material(0, name) + SetInt, EntityScene.cs).</summary>
     internal static bool SetMaterialForGraph(int entity, string materialName) => new Entity(entity).SetMaterial(materialName);
 
+    /// <summary>AttachToSocket's own surface: hangs <paramref name="entity"/> on a named socket of
+    /// <paramref name="parent"/>'s rig. Wraps <see cref="Entity.AttachToSocket"/>, which is SetParent
+    /// plus a component field -- the same "needs Entity's internal constructor, which only
+    /// Aver.Framework code can call" reason SetMeshForGraph above has for existing at all.
+    ///
+    /// IDEMPOTENT, so this node is allowed in the PULL compiler alongside SetMesh/SetParent rather
+    /// than being push-only like Spawn: attaching to the same parent and socket twice is the same
+    /// state, not two attachments.
+    ///
+    /// TRUE MEANS THE FIELDS WERE WRITTEN, not that the socket resolved -- the parent's rig may not
+    /// even be loaded yet, and a name that matches nothing leaves the entity where it is. See
+    /// Entity.AttachToSocket's own comment for why that is the chosen failure.</summary>
+    internal static bool AttachToSocketForGraph(int entity, int parent, string socket) =>
+        new Entity(entity).AttachToSocket(new Entity(parent), socket);
+
     /// <summary>CharacterMove's own surface: the last Blueprint-parity node, one coarse exec call
     /// wrapping <see cref="AverCharacter"/>.DriveFromGraph -- itself a one-line forward to the
     /// existing <c>protected</c> Drive(dt, moveAxis, yawDeltaDeg, pitchDeltaDeg), which owns the

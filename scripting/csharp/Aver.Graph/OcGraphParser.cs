@@ -524,6 +524,12 @@ public class OcGraphParser
                     {
                         node.MeshPath = v;
                     }
+                    // socket= names the socket an "attachtosocket" node hangs its entity on (see
+                    // Node.SocketName).
+                    else if (k == "socket")
+                    {
+                        node.SocketName = v;
+                    }
                     // material= names the material a "setmaterial" node writes (see Node.MaterialName).
                     else if (k == "material")
                     {
@@ -2072,6 +2078,16 @@ public class OcGraphParser
             case "setmaterial":
                 // material= names the material (see Node.MaterialName).
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // ---- AttachToSocket ----------------------------------------------------------------
+            // TWO entity inputs, which no other Set*-shaped node here has: an attachment is a
+            // relationship between a thing and what it hangs from, and both ends are entities the
+            // graph already holds. socket= names which socket on the parent's rig.
+            case "attachtosocket":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "parent", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
         }

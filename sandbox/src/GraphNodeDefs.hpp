@@ -597,6 +597,15 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"SetMaterial", "Set Material", "Scene", {
         pin("entity", "int", false), pin("success", "bool", true)},
         {attr("material", "Material")}});
+
+    // -- AttachToSocket: hangs `entity` on a named socket of `parent`'s rig, so it rides the posed
+    //    bone every frame. TWO entity pins rather than one, unlike every Set* node above, because
+    //    an attachment is a relationship: the thing and what it hangs from. socket= names it, the
+    //    same NODE-line-attribute mechanism mesh=/material=/name= use, because PinType has no
+    //    string member and this is the only way a literal name reaches a node.
+    t.push_back({"AttachToSocket", "Attach To Socket", "Scene", {
+        pin("entity", "int", false), pin("parent", "int", false), pin("success", "bool", true)},
+        {attr("socket", "Socket")}});
     return t;
 }
 

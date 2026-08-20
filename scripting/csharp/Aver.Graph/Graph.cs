@@ -149,6 +149,14 @@ public class Node
     // literal event name FireEventForGraph passes to the target's GraphHost.Fire, not something
     // resolved against a table this file knows about). Null for every other node type.
     public string? EventName { get; set; }
+
+    // Which socket an "attachtosocket" node hangs its entity on, e.g. "Hand_R". Set from the NODE
+    // line's "socket=<name>" attribute -- the same key=value mechanism MeshPath/MaterialName/
+    // EventName use, and for the same reason: PinType has no String member, so a literal name has
+    // no other route into a node. Carries DATA, not a key resolved here: the name is hashed with
+    // fnv1a64 at invocation time and matched against the parent rig's own socket names by
+    // AnimSystem, which this assembly cannot see. Null for every other node type.
+    public string? SocketName { get; set; }
 }
 
 /// One parameter the compiled method accepts -- e.g. the entity a graph drives, or the current

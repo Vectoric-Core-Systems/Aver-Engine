@@ -547,6 +547,10 @@ public class GraphCompiler
                 EmitSetMaterial(node);
                 break;
 
+            case "attachtosocket":
+                EmitAttachToSocket(node);
+                break;
+
             case "sin":
                 EmitSin(node);
                 break;
@@ -1427,6 +1431,30 @@ public class GraphCompiler
         LoadPin(node.Id, "entity");
         _il.Emit(OpCodes.Ldstr, node.MeshPath);
         _il.Emit(OpCodes.Call, SetMeshMethod);
+
+        if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+        else
+            _il.Emit(OpCodes.Pop);
+    }
+
+    /// AttachToSocket(entity, parent) -> success: hangs `entity` on a named socket of `parent`'s rig.
+    /// Wraps GraphInterop.AttachToSocketForGraph(int,int,string).
+    ///
+    /// TWO PIN LOADS, in argument order, which is the one thing that makes this different from every
+    /// other Set*-shaped emitter here: the IL stack must carry entity then parent then the socket
+    /// string, and swapping the two entity pins compiles perfectly and attaches the rig to the gun.
+    private void EmitAttachToSocket(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.SocketName))
+            throw new InvalidOperationException($"AttachToSocket node '{node.Id}' has no socket= attribute naming which socket to hang on");
+
+        LoadPin(node.Id, "entity");
+        LoadPin(node.Id, "parent");
+        _il.Emit(OpCodes.Ldstr, node.SocketName);
+        _il.Emit(OpCodes.Call, AttachToSocketMethod);
 
         if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
             _il.Emit(OpCodes.Stloc, local);
@@ -2407,6 +2435,7 @@ public class GraphCompiler
                     else if (IsExecCapableSetNameType(node.Type)) EmitExecSetName(node);
                     else if (IsExecCapableSetMeshType(node.Type)) EmitExecSetMesh(node);
                     else if (IsExecCapableSetMaterialType(node.Type)) EmitExecSetMaterial(node);
+                    else if (IsExecCapableAttachToSocketType(node.Type)) EmitExecAttachToSocket(node);
                     else if (IsExecCapableCharacterMoveType(node.Type)) EmitExecCharacterMove(node);
                     else if (IsExecCapableJumpType(node.Type)) EmitJump(node);
                     else if (IsExecCapablePrintType(node.Type)) EmitExecPrint(node);
@@ -2929,6 +2958,13 @@ public class GraphCompiler
     private static bool IsExecCapableSetMaterialType(string type) =>
         type.Equals("setmaterial", StringComparison.OrdinalIgnoreCase);
 
+    /// AttachToSocket's own version. Grouped with SetMesh/SetMaterial rather than with Spawn because
+    /// it is IDEMPOTENT -- attaching to the same parent and socket twice is the same state, not two
+    /// attachments -- so it is allowed in the PULL compiler too and is NOT in
+    /// IsPushOnlySideEffectType.
+    private static bool IsExecCapableAttachToSocketType(string type) =>
+        type.Equals("attachtosocket", StringComparison.OrdinalIgnoreCase);
+
     /// CharacterMove's own version of IsExecCapableSpawnType -- a SIXTH, separate predicate/emitter
     /// pair, refused by the PULL compiler's topological pass ENTIRELY (see EmitNode's "charactermove"
     /// case, above), the same stricter-than-SetField treatment Spawn gets and SetParent/SetViewEntity/
@@ -3281,6 +3317,34 @@ public class GraphCompiler
         EmitPullInput(node, "entity");
         _il.Emit(OpCodes.Ldstr, node.MeshPath);
         _il.Emit(OpCodes.Call, SetMeshMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+        {
+            var successLocal = GetOrCreateExecLocal(node.Id, "success", typeof(bool));
+            _il.Emit(OpCodes.Stloc, successLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop);
+        }
+    }
+
+    /// Runs an AttachToSocket node exactly once, at the point the exec walk reaches it.
+    ///
+    /// EmitPullInput, NOT LoadPin, and this is the rule that made Jump dead from birth: on the exec
+    /// path a pin has no _pinLocals entry, so LoadPin reads an unset local and the node silently
+    /// attaches entity 0 to entity 0.
+    private void EmitExecAttachToSocket(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.SocketName))
+            throw new InvalidOperationException($"AttachToSocket node '{node.Id}' has no socket= attribute naming which socket to hang on");
+
+        EmitPullInput(node, "entity");
+        EmitPullInput(node, "parent");
+        _il.Emit(OpCodes.Ldstr, node.SocketName);
+        _il.Emit(OpCodes.Call, AttachToSocketMethod);
 
         if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
         {
@@ -4109,6 +4173,11 @@ public class GraphCompiler
     private static readonly MethodInfo SetMaterialMethod =
         typeof(GraphInterop).GetMethod("SetMaterialForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetMaterialForGraph was not found by reflection");
+    // AttachToSocket, reflected the same way -- Entity.AttachToSocket needs Entity's internal
+    // constructor, so the call has to enter through Aver.Framework rather than from here.
+    private static readonly MethodInfo AttachToSocketMethod =
+        typeof(GraphInterop).GetMethod("AttachToSocketForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.AttachToSocketForGraph was not found by reflection");
     // CharacterMove: the last Blueprint-parity node, reflected the same way every other GraphInterop
     // wrapper above is -- see GraphInterop.CharacterMoveForGraph's own comment for why this call, not
     // a cast onto AverCharacter.Drive, is the seam.

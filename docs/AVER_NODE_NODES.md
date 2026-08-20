@@ -273,6 +273,7 @@ different cost profiles depending on which compiler reaches it.
 | `SetName` | `entity` (in, int), `success` (out, bool) | `name=` | W | `aver_scene_set_name(entity, name)`. |
 | `SetMesh` | `entity` (in, int), `success` (out, bool) | `mesh=` | W | Ensures a mesh renderer on `entity`, pointed at `mesh=`'s asset path. |
 | `SetMaterial` | `entity` (in, int), `success` (out, bool) | `material=` | W | Sets the material on `entity`'s mesh renderer. |
+| `AttachToSocket` | `entity` (in, int), `parent` (in, int), `success` (out, bool) | `socket=` | W | Hangs `entity` on a named socket of `parent`'s rig, so it rides the posed bone every frame. **Two entity pins**: the thing, then what it hangs from. Attaching *is* parenting plus a socket, so this also reparents `entity`. A socket name the parent's rig does not declare leaves the entity where it is rather than snapping it to the parent's origin. |
 
 **No exec pins by default on the four field-access nodes** — `GetField`/`SetField`/`GetFieldVec3`/
 `SetFieldVec3` all get plain data pins only, including the two *writes*. This is the sharpest
