@@ -559,6 +559,87 @@ bool Gltf::importSkins(std::string* why) {
                 for (int cc = 0; cc < 4; ++cc) sorted.bones[i].inverseBind[rr * 4 + cc] = inv.m[rr][cc];
         }
 
+        // ---- SOCKETS ------------------------------------------------------------------------
+        //
+        // AN EMPTY PARENTED TO A BONE. That is how an artist authors an attachment point in Blender
+        // or Maya, and glTF carries it as an ordinary node: a child of a joint that is not itself a
+        // joint and holds no geometry. Nothing in glTF calls it a socket, so this is a RULE this
+        // importer applies rather than a field it reads -- which is why the rule is spelled out and
+        // why each rejection below is a separate, stated condition instead of one loose heuristic.
+        //
+        // A node qualifies when ALL of these hold:
+        //   1. its parent is a joint of THIS skin -- the socket has a bone to hang from;
+        //   2. it is not itself a joint -- a bone is a bone;
+        //   3. it carries no mesh, camera or skin -- a skinned mesh is routinely parented under the
+        //      armature, and treating it as a socket would make every character export sprout one;
+        //   4. no descendant of it is a joint. glTF permits non-joint nodes BETWEEN joints (see the
+        //      "nearest ancestor that is also in this skin" walk above), and such a spacer is part of
+        //      the hierarchy, not an attachment point. This is the condition a looser rule misses.
+        {
+            // Does this subtree contain a joint? Iterative, because a node graph from a DCC is not
+            // guaranteed shallow and a recursive walk over an untrusted file is a stack risk.
+            auto subtreeHasJoint = [&](usize root) {
+                std::vector<usize> stack{root};
+                std::vector<u8> seen(nodes.size(), 0);
+                while (!stack.empty()) {
+                    const usize n = stack.back(); stack.pop_back();
+                    if (n >= nodes.size() || seen[n]) continue;
+                    seen[n] = 1;
+                    if (n != root && boneOfNode[n] >= 0) return true;
+                    const JsonValue& kids = nodes[n]["children"];
+                    for (usize k = 0; k < kids.size(); ++k) {
+                        const i64 c = kids[k].asInt(-1);
+                        if (c >= 0) stack.push_back(usize(c));
+                    }
+                }
+                return false;
+            };
+
+            for (usize n = 0; n < nodes.size(); ++n) {
+                if (boneOfNode[n] >= 0) continue;                       // 2: it is a joint
+                const i32 parentNode = parentOfNode[n];
+                if (parentNode < 0 || boneOfNode[usize(parentNode)] < 0) continue;   // 1
+                const JsonValue& nd = nodes[n];
+                if (nd.has("mesh") || nd.has("camera") || nd.has("skin")) continue;  // 3
+                if (subtreeHasJoint(n)) continue;                       // 4
+
+                const i32 oldBone = boneOfNode[usize(parentNode)];
+                if (oldBone < 0 || usize(oldBone) >= newIndexOf.size()) continue;
+                const i32 bone = newIndexOf[usize(oldBone)];
+                if (bone < 0) continue;
+
+                OcSocket k;
+                k.bone = static_cast<u32>(bone);
+                k.name = nd.has("name") ? std::string(nd["name"].asString()) : std::string();
+                if (k.name.empty()) k.name = "Socket";
+                // MADE UNIQUE, matching what the editor does on add and for the same reason:
+                // OcSkeleton::socket() returns the FIRST match, so a duplicate name would leave the
+                // loser permanently unreachable. Noted, because a rename in the DCC is the real fix.
+                if (sorted.socket(k.name)) {
+                    note("two sockets named '" + k.name + "'; the second was renamed to keep both "
+                         "reachable by name");
+                    const std::string base = k.name;
+                    for (int i = 2; sorted.socket(k.name); ++i) k.name = base + std::to_string(i);
+                }
+
+                if (nd.has("matrix")) {
+                    note("a socket whose transform is a matrix rather than TRS (offset taken as zero)");
+                } else {
+                    f32 t[3] = {0,0,0}, r[4] = {0,0,0,1}, sc[3] = {1,1,1};
+                    if (nd.has("translation")) for (int i = 0; i < 3; ++i) t[i] = nd["translation"][usize(i)].asFloat();
+                    if (nd.has("rotation"))    for (int i = 0; i < 4; ++i) r[i] = nd["rotation"][usize(i)].asFloat();
+                    if (nd.has("scale"))       for (int i = 0; i < 3; ++i) sc[i] = nd["scale"][usize(i)].asFloat(1.0f);
+                    // THE SAME BASIS CHANGE THE BONES GET, not a hand-rolled one. A socket offset is
+                    // a bone-local transform exactly as a joint's rest transform is, so anything else
+                    // here would put attachments in a mirrored place on an otherwise correct rig.
+                    k.translation = toEngine(t[0], t[1], t[2], false);
+                    k.rotation    = toEngineQuat(r[0], r[1], r[2], r[3]);
+                    k.scale       = toEngineScale(sc[0], sc[1], sc[2]);
+                }
+                sorted.sockets.push_back(std::move(k));
+            }
+        }
+
         // The joint reorder has to reach every mesh THIS skin owns, or its JOINTS_0 indices now
         // name the wrong bone -- restricted to those meshes via meshRawSkin_ (set from the owning
         // node in run()), not applied to every mesh in the file: skin s's raw joint order is not

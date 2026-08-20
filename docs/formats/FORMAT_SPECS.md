@@ -369,6 +369,24 @@ JOINTS/WEIGHTS live in the vertex attribute buffers (`R8G8B8A8_UINT`/`R16G16B16A
 
 ---
 
+### 8.x `SOCK` — sockets (optional)
+`u32 Count`, then per socket: `u32 StringRef Name`, `u32 BoneIndex`, `f32[3] Translation`,
+`f32[4] Rotation` (quaternion xyzw), `f32[3] Scale`. 44 bytes each after the count.
+
+A **named attachment point on the rig** — a weapon in the hand, a muzzle to spawn a flash at. The
+transform is a **local offset from `BoneIndex`**, not a world transform and not a second bone, so it
+composes with whatever that bone is doing this frame. Sockets live on the skeleton rather than on a
+mesh: every clip, mesh and character sharing the rig gets the same `Hand_R` for free.
+
+**Optional, absent means absent.** A rig with no sockets emits no chunk, so a file written now is
+byte-identical to one written before they existed. Names are **not checked for uniqueness by the
+format**, but `OcSkeleton::socket()` returns the FIRST match — so both the editor and the glTF
+importer disambiguate on creation, because a duplicate would leave the loser unreachable by name.
+`OcSkeleton::valid()` **refuses a socket naming a bone that does not exist**, at write and at load:
+that is what a rig re-exported with fewer bones produces, and the alternative is indexing off the end
+the first time something attaches.
+
+**Imported from glTF as an Empty parented to a bone** — see `docs/ASSET_IMPORT.md`.
 ## 9. `.ocanim` — animation clip
 
 Subtype `'ANIM'`. Fixes the three fidelity losses from recon `assets §7/§9`: **no forced 30 fps resample**, **cubicspline tangents preserved**, **step curves preserved**. Chunks: `AHDR` (required), `TRKS` (track data), `NOTF` (notifies, optional), `STRT`.

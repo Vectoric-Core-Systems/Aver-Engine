@@ -391,6 +391,106 @@ int main() {
         }
     }
 
+    AVER_INFO("=== sockets: an Empty parented to a bone ===");
+    {
+        // Nothing in glTF calls anything a socket, so this is a RULE the importer applies rather
+        // than a field it reads. The rig below carries one node of every shape the rule has to
+        // decide about, and each is asserted individually -- a single "two sockets were found"
+        // check would pass while the importer accepted the wrong two.
+        //
+        //   0 root     joint
+        //   1 child    joint, under root
+        //   2 body     MESH under child                     -> rejected: geometry, not a socket
+        //   3 Grip     empty under child                    -> ACCEPTED
+        //   4 Muzzle   empty under root                     -> ACCEPTED
+        //   5 spacer   empty under root, WITH A JOINT UNDER -> rejected: a spacer between bones
+        //   6 loose    empty at the scene root              -> rejected: no bone to hang from
+        //   7 tip      joint, under spacer
+        //
+        // THE JSON IS A RAW STRING LITERAL. Every other fixture in this file escapes each quote by
+        // hand, which makes a nine-node hierarchy unreadable and was how the first attempt at this
+        // test was silently mangled. Only the base64 buffer is spliced in.
+        std::vector<u8> bin;
+        const usize posOff = bin.size();
+        putF(bin, 0); putF(bin, 0); putF(bin, 0);
+        putF(bin, 1); putF(bin, 0); putF(bin, 0);
+        putF(bin, 0); putF(bin, 0); putF(bin, -1);
+        const usize posLen = bin.size() - posOff;
+        const usize jOff = bin.size();
+        for (int v = 0; v < 3; ++v) { putU16(bin, 0); putU16(bin, 0); putU16(bin, 0); putU16(bin, 0); }
+        const usize jLen = bin.size() - jOff;
+        const usize wOff = bin.size();
+        for (int v = 0; v < 3; ++v) { putF(bin, 1); putF(bin, 0); putF(bin, 0); putF(bin, 0); }
+        const usize wLen = bin.size() - wOff;
+        const usize iOff = bin.size();
+        putU16(bin, 0); putU16(bin, 1); putU16(bin, 2);
+        const usize iLen = bin.size() - iOff;
+
+        auto view = [](usize off, usize len) {
+            return R"({"buffer":0,"byteOffset":)" + std::to_string(off) +
+                   R"(,"byteLength":)" + std::to_string(len) + "}";
+        };
+
+        const std::string json = std::string(R"JSON({
+          "asset":{"version":"2.0"}, "scene":0,
+          "scenes":[{"nodes":[0,6]}],
+          "nodes":[
+            {"name":"root",   "children":[1,4,5]},
+            {"name":"child",  "translation":[0,1,0], "children":[2,3]},
+            {"name":"body",   "mesh":0, "skin":0},
+            {"name":"Grip",   "translation":[0,0,2]},
+            {"name":"Muzzle"},
+            {"name":"spacer", "children":[7]},
+            {"name":"loose"},
+            {"name":"tip"}
+          ],
+          "skins":[{"name":"rig","joints":[0,1,7]}],
+          "meshes":[{"primitives":[{"attributes":
+            {"POSITION":0,"JOINTS_0":1,"WEIGHTS_0":2},"indices":3}]}],
+          "buffers":[{"uri":"data:application/octet-stream;base64,)JSON") + b64(bin)
+          + R"JSON(","byteLength":)JSON" + std::to_string(bin.size()) + "}],"
+          + R"JSON("bufferViews":[)JSON" + view(posOff,posLen) + "," + view(jOff,jLen) + ","
+          + view(wOff,wLen) + "," + view(iOff,iLen) + "],"
+          + R"JSON("accessors":[
+            {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},
+            {"bufferView":1,"componentType":5123,"count":3,"type":"VEC4"},
+            {"bufferView":2,"componentType":5126,"count":3,"type":"VEC4"},
+            {"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"}
+          ]})JSON";
+
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a rig with socket empties imports: " + why);
+        check(res.skeletons.size() == 1, "one skeleton");
+        if (res.skeletons.size() == 1) {
+            const fmt::OcSkeleton& sk = res.skeletons[0];
+            check(sk.sockets.size() == 2, "EXACTLY TWO sockets -- the two empties on bones, and no more");
+            check(sk.socket("Grip") != nullptr, "the empty under a bone is a socket");
+            check(sk.socket("Muzzle") != nullptr, "and so is the one under the root bone");
+            check(sk.socket("body") == nullptr,
+                  "A MESH PARENTED TO A BONE IS NOT A SOCKET -- every skinned character export has one");
+            check(sk.socket("spacer") == nullptr,
+                  "NOR IS A SPACER WITH A JOINT UNDER IT -- glTF allows non-joint nodes between bones");
+            check(sk.socket("loose") == nullptr, "nor an empty that is not on a bone at all");
+            check(sk.socket("tip") == nullptr, "and a joint is a bone, not a socket");
+
+            if (const fmt::OcSocket* g = sk.socket("Grip")) {
+                check(g->bone < sk.bones.size() && sk.bones[g->bone].name == "child",
+                      "Grip hangs from the bone it was parented to, by its POST-SORT index");
+                // 2 metres along glTF +Z. Whatever the engine basis does with that, it must be the
+                // SAME thing it did to the bone rest transforms -- a socket offset is a bone-local
+                // transform exactly as a joint's is.
+                const f32 mag = std::fabs(g->translation.x) + std::fabs(g->translation.y)
+                              + std::fabs(g->translation.z);
+                check(mag > 1.0f, "and carries a real converted offset, not zero");
+            }
+            if (const fmt::OcSocket* m = sk.socket("Muzzle"))
+                check(m->bone < sk.bones.size() && sk.bones[m->bone].name == "root",
+                      "Muzzle hangs from the root bone");
+            check(sk.valid(), "and the rig is still valid with sockets on it");
+        }
+    }
+
     AVER_INFO("=== two glTF skin OBJECTS naming the same joints collapse into ONE skeleton ===");
     {
         // Mirrors the shape a Kenney/Blender export produces when one armature is exported as a

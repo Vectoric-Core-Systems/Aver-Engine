@@ -47,6 +47,28 @@ data URIs.
 
 The editor exposes it at `SandboxApp.cpp:4036`, writing `Content/Meshes/<base>.ocmesh`.
 
+### Sockets: an Empty parented to a bone
+
+glTF has no socket concept, so this is a **rule the importer applies**, not a field it reads — and it
+is the way an artist already authors one in Blender or Maya. A node becomes a socket on the skeleton
+when **all four** of these hold:
+
+1. its parent is a joint of this skin — there is a bone to hang from;
+2. it is not itself a joint — a bone is a bone;
+3. it carries no `mesh`, `camera` or `skin`. **A skinned mesh is routinely parented under the
+   armature**, and a looser rule would make every character export sprout a socket called `body`;
+4. no descendant of it is a joint. glTF permits ordinary nodes *between* joints (the importer already
+   walks to the "nearest ancestor that is also in this skin"), and such a spacer is part of the
+   hierarchy rather than an attachment point. This is the condition a three-rule version misses.
+
+The node's name becomes the socket name and its TRS becomes the offset, **through the same basis
+change the bone rest transforms get** — anything else would put attachments in a mirrored place on an
+otherwise correct rig. A duplicate name is renamed with a numeric suffix and noted, because
+`OcSkeleton::socket()` returns the first match and the loser would otherwise be unreachable.
+
+To add one: in Blender, `Add > Empty`, then parent it to a bone in Pose mode (`Ctrl-P > Bone`), name
+it, and export. It arrives as a socket you can see and adjust in the engine's skeleton editor.
+
 ---
 
 ## Wavefront OBJ + MTL — `ObjImport.hpp`
