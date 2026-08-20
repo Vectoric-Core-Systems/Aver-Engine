@@ -9,17 +9,21 @@ parser might disagree, **the parser wins**; see [Parser vs. editor catalog](#par
 for how that was checked.
 
 Compile-path behaviour is read from `scripting/csharp/Aver.Graph/GraphCompiler.cs` — specifically
-the `IsExecOnlyNodeType` / `IsExecCapable*` predicate family (lines 1686–1812, 2189–2200) and
-`EmitPullOutput`'s side-effect refusal (lines 2221–2230).
+`EmitNode`'s topological switch (`:332`–`:638`), the `IsExecCapable*` predicate family
+(`:2386`–`:2580`), `IsExecOnlyNodeType` (`:3002`) and `EmitPullOutput`'s side-effect refusal
+(`:3037`–`:3045`). Those line numbers were re-derived for this revision; the ones this paragraph
+used to carry pointed into a version of the file about a thousand lines shorter.
 
 This page is about node *shapes* — what pins a `NODE` of a given type gets and what it does. For the
 class model, `PARAM`/`VAR`, and entry points, see **[the guide](VISUAL_SCRIPTING.md)**; for the
 `.ocgraph` file grammar itself (every record's syntax, and where the C++ and C# readers disagree),
 see **[`formats/FORMAT_SPECS.md` §10a](formats/FORMAT_SPECS.md)**.
 
-**37 node types.** `git log -p` on `OcGraphParser.cs` across its full history shows no `case`
-label for a node type ever removed — every commit that touched this file added to the vocabulary,
-never subtracted from it.
+**124 node types**, across 17 families — counted from `graphNodeCatalog()` rather than remembered,
+and every one of them has a row below. `git log -p` on `OcGraphParser.cs` across its full history
+shows no `case` label for a node type ever removed: every commit that touched this file added to
+the vocabulary, never subtracted from it. The count in this line has been wrong before (it said 37
+while the palette shipped 124), which is the argument for deriving it rather than typing it.
 
 ## Contents
 
@@ -32,10 +36,16 @@ never subtracted from it.
 7. [Param](#param)
 8. [Flow](#flow)
 9. [Actor](#actor)
-10. [Var](#var)
-11. [Aliases invisible to the palette](#aliases-invisible-to-the-palette)
-12. [Parser vs. editor catalog](#parser-vs-editor-catalog)
-13. [What a node cannot do](#what-a-node-cannot-do)
+10. [Character](#character)
+11. [Game](#game)
+12. [Convert](#convert)
+13. [Transform](#transform)
+14. [Physics — reads and queries](#physics--reads-and-queries)
+15. [Physics — writes and creation](#physics--writes-and-creation)
+16. [Var](#var)
+17. [Aliases invisible to the palette](#aliases-invisible-to-the-palette)
+18. [Parser vs. editor catalog](#parser-vs-editor-catalog)
+19. [What a node cannot do](#what-a-node-cannot-do)
 
 ### How to read a pin table
 
@@ -202,6 +212,7 @@ reads costs nothing.
 | Node | Pins | Attribute | Path | What it does |
 |---|---|---|---|---|
 | `Print` | `exec` (in), `value` (in, float), `then` (out, exec) | — | X | Writes `[Graph] <node id> = <value>` to the log. LABELLED BY THE NODE ID, so `NODE muzzleLen Print` prints `muzzleLen`. Refused if pulled as data, like every other side effect. |
+| `PrintInt` | `exec` (in), `value` (in, int), `then` (out, exec) | — | P | Writes `[Graph] <node id> = <value>` to the log for an INT value — the same log line `Print` writes, without ever routing the value through a `float`. |
 
 ## Logic
 
@@ -279,10 +290,11 @@ there is no reason to force an exec chain (`GraphCompiler.cs:756-759`).
   value inside a PUSH graph with no exec edge into them fails with a clear, node-naming
   `InvalidOperationException`: *"has a side effect and must be reached by wiring it directly into
   the exec chain"* (`GraphCompiler.cs:2221-2230`).
-- Pulling `Raycast` the same way fails too, but with a generic `NotSupportedException` — `Raycast`
-  has no case in `EmitPullOutput` at all, deliberately, so it falls to the `default` arm
-  (`GraphCompiler.cs:2333-2360`). The outcome is the same ("wire it into the exec chain"); the error
-  text does not say so.
+- Pulling `Raycast` the same way fails too, from a different place: `Raycast` has no case in
+  `EmitPullOutput` at all, deliberately, so it falls to that method's own `default` arm. This bullet
+  used to say the resulting error text did not explain itself; it does — *"cannot be pulled as a
+  data value inside an exec chain (it is not one of the pure expression kinds this compiler knows, and
+  has no exec pins reaching it directly either)"*.
 
 **`Raycast.entity` is a SCENE ENTITY id, not a physics body handle** — `GraphInterop.RaycastForGraph`
 (`Aver.Framework/GraphInterop.cs`) reads `RaycastHit.Entity`, the id `aver_phys_set_entity` stamped on
@@ -442,6 +454,7 @@ where it happens).
 | Node | Pins | Attribute | Path | What it does |
 |---|---|---|---|---|
 | `Spawn` | `exec` (in), `x`/`y`/`z` (in, float), `then` (out), `entity` (out, int) | `class=` | P | Creates a new entity of a registered class. |
+| `Jump` | `exec` (in), `entity` (in, int), `then` (out), `jumped` (out, bool) | — | P | Calls `AverCharacter.Jump` on the actor bound to `entity`, which sets vertical velocity to jump speed only if the character is currently standing on something. |
 | `CharacterMove` | `exec` (in), `entity` (in, int), `dt`/`forward`/`right`/`yawDelta`/`pitchDelta` (in, float), `then` (out), `success` (out, bool) | — | P | Drives an `AverCharacter`'s yaw/pitch and capsule velocity for one call. |
 | `SetViewEntity` | `entity` (in, int) — **no output pin at all** | — | W | `aver_fw_set_view_entity(entity)`. |
 | `FireEvent` | `exec` (in), `target` (in, int), `then` (out), `fired` (out, bool) | `event=` | P | Fires a named `ENTRY` event on **another entity's** graph. |
@@ -481,6 +494,131 @@ all: every one of its five scalar inputs is an ordinary pin, because a graph aut
 `CharacterMove.success` is a real outcome, not a stub: `false`, logged, never a throw, when `entity`
 isn't a live actor at all, or is a live actor that isn't an `AverCharacter`
 (`OcGraphParser.cs:929-932`).
+
+## Character
+
+The gameplay API of `AverCharacter`, reached by entity handle. Every one of these takes an
+`entity` pin rather than acting on "this" actor, because a graph class and the character it
+drives are not the same entity — see [Transform](#transform) for the same convention applied
+to scene entities generally.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `GetVelocity` | `entity` (in, int), `x`/`y`/`z` (out, float), `success` (out, bool) | — | D | Reads an AverCharacter's current velocity, in centimetres per second. **success is false and x/y/z stay 0 when the entity has no live AverCharacter bound to it, or is a character whose physics capsule hasn't been created yet (GraphInterop.cs:397-405) -- zero velocity and "no answer" read identically unless success is checked.** |
+| `IsGrounded` | `entity` (in, int), `grounded` (out, bool) | — | D | Reports whether an AverCharacter is currently standing on ground shallow enough to hold. **Returns false, silently, for an entity that isn't an AverCharacter at all -- unlike GetVelocity/SetVelocity/Teleport it bypasses the CharacterFor helper and logs no warning (GraphInterop.cs:420-423).** |
+| `SetVelocity` | `exec` (in), `entity` (in, int), `x`/`y`/`z` (in, float), `then` (out), `success` (out, bool) | — | P | Replaces an AverCharacter's velocity outright -- a launch pad, a dash, a dead stop, not an added force. **Does nothing and reports success = false on a character that has never been simulated (no physics capsule yet) -- unlike Teleport, it does not create one for you (GraphInterop.cs:410-416; Character.cs:120-138).** |
+| `Teleport` | `exec` (in), `entity` (in, int), `x`/`y`/`z` (in, float), `then` (out), `success` (out, bool) | — | P | Moves an AverCharacter and its physics capsule to a feet position, clearing velocity. **Not SetFieldVec3 on CLocal.position -- per the palette's own comment (GraphNodeDefs.hpp:135-139), setting the transform alone leaves the capsule behind and the character snaps back next step. Teleport moves both and zeroes velocity, and -- unlike SetVelocity/GetVelocity -- works even on a character that was never simulated, because it calls EnsureCapsule() itself (Character.cs:243-252, 263-271).** |
+
+`GetVelocity`/`IsGrounded` are pure reads, reachable from either compiler exactly like `GetFieldVec3`/`GetForward` — no exec pins, and each has a matching case in *both* `Compile()`'s topological switch and `EmitPullOutput`. `SetVelocity`/`Teleport` are Actor-family side effects instead, but they are **not** refused the way `Spawn`/`CharacterMove`/`FireEvent`/`SetVar` are — those four get their own hand-written, node-naming `InvalidOperationException` case inside `Compile()`'s own switch. `SetVelocity`/`Teleport` have no case there at all, so a stray, unwired one reached by `Compile()`'s topological pass (which walks every node in the graph, wired or not) falls through to the switch's `default` arm, which recognises a push-only node and refuses it with a node-naming `InvalidOperationException` saying the type IS supported and pointing at `CompileEntryPoint()`. The error a graph author actually sees in the common case — pulling `SetVelocity`/`Teleport`'s `success` output as data with no `exec` edge into the node — comes from a different place: `EmitPullOutput`'s own combined side-effect check, which groups `setvelocity`/`teleport` beside `Jump` and `FireEvent` (and `Print`, and the physics/transform writers) in one condition and raises a clear, node-naming `InvalidOperationException` there instead. Either way, `Compile()` cannot run them; only `CompileEntryPoint()`, through `EmitExecApiCall`, actually calls `SetVelocityForGraph`/`TeleportForGraph`.
+
+A second trap sits in `Aver.Framework` itself, invisible from the pin table. `GetVelocity`/`SetVelocity`/`Teleport` all resolve their entity through the same `CharacterFor` helper, which logs one warning and returns null for anything that isn't a live `AverCharacter`; `IsGrounded` does not — it reads `Actors.Get` directly and returns `false` with no log for the identical case. And `GetVelocity`/`SetVelocity` both require an *already-simulated* character (`success = false`, and for `GetVelocity` the vector left at zero, when the physics capsule doesn't exist yet) — `Teleport` does not, because it calls the character's own `EnsureCapsule()` internally and so works, and creates the capsule, even on a character that has never been simulated.
+
+## Game
+
+The `Game` statics: who is playing, what they are possessing, and the two nodes that change
+that. `index` on the player nodes is a PLAYER index, not a pawn or entity index.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `GetPlayerPawn` | `index` (in, int), `entity` (out, int) | — | D | Reads the pawn currently possessed by a player's controller, as an entity handle. **`index` is a player index, not a pawn index. The value returned is whatever pawn that player's controller currently possesses (via `aver_fw_controlled_pawn`), so it comes back 0/`Entity.None` whenever that player is unpossessed right now, not only when `index` is out of range.** |
+| `GetPlayerController` | `index` (in, int), `entity` (out, int) | — | D | Reads a player's controller entity by 0-based player index; `Entity.None` if there is none. |
+| `GetGameMode` | `entity` (out, int) | — | D | Reads the current GameMode's entity; `Entity.None` outside a play session. **Returns `Entity.None` any time there is no play session (editor), not specifically when a GameMode class is missing — this pin alone can't tell "no session" apart from "session with a null GameMode".** |
+| `IsPlaying` | `playing` (out, bool) | — | D | True only while a play session is actively ticking. **False while the session is Paused, not just in the editor — `State` has three values (Editor/Playing/Paused) and this pin collapses two of them to false. A graph that wants "is a session running at all" (paused or not) needs `Game.HasSession`, which no node currently wraps.** |
+| `Possess` | `exec` (in), `controller` (in, int), `pawn` (in, int), `then` (out), `success` (out, bool) | — | P | Makes the entity at `controller` take control of the entity at `pawn`, stealing it from another controller if one already holds it. **`controller` must resolve (via `Actors.Get`) to an actor that IS an `AverPlayerController` — pass a plain entity or a pawn there and it logs a warning and returns `false` rather than throwing. Also, `Possess`/`Unpossess` have no case at all in EmitNode's own topological switch, and are not in IsExecOnlyNodeType either, so Compile() calls EmitNode on them for EVERY node in the graph regardless of wiring and reaches its `default` arm. A `Compile()`-driven graph merely CONTAINING a Possess/Unpossess/SetVelocity/Teleport node — wired or not — therefore fails to compile, which is deliberate; the arm names the node and says the type is supported rather than claiming it is not.** |
+| `Unpossess` | `exec` (in), `controller` (in, int), `then` (out), `success` (out, bool) | — | P | Releases whatever pawn the entity at `controller` currently possesses. **`success` is false for two different reasons the pin can't distinguish: `controller` isn't an `AverPlayerController` at all, or it is one but had nothing possessed. Same EmitNode-has-no-case nuance as Possess above: any Compile()-driven graph merely containing an unwired Unpossess node fails outright with a generic "not supported" error, before its own more explicit PULL-refusal message would ever be reached.** |
+
+All six nodes' pins agree exactly between the palette (`GraphNodeDefs.hpp:144-149`) and `AddDefaultPins` (`OcGraphParser.cs:1023-1054`) — no palette/parser disagreement to report here. The four readers (`GetPlayerPawn`, `GetPlayerController`, `GetGameMode`, `IsPlaying`) are the simplest possible `D` shape: zero or one input, one output, dispatched through the shared `EmitSimpleApiRead` on the PUSH side and a direct `EmitPullOutput` case on the PULL side, with no branch or refusal anywhere.
+
+`Possess`/`Unpossess` are `P`-path by the task's own test — they sit in `IsExecCapableApiCallType`, which is OR'd into `EmitPullOutput`'s refusal chain on the exact same line as `IsExecCapableJumpType` and `IsExecCapableFireEventType` (`GraphCompiler.cs:3037-3045`). But unlike `Spawn`/`CharacterMove`/`FireEvent`/`SetVar` — which get their own hand-written `case` in `EmitNode`'s topological switch that throws a tailored, node-naming `InvalidOperationException` explaining *why* — `Possess`, `Unpossess`, and their siblings `SetVelocity`/`Teleport` have **no case in `EmitNode` at all**. Since none of the four are in `IsExecOnlyNodeType` either, `Compile()`'s topological pass calls `EmitNode` on them unconditionally for every node in the graph, wired or not, and they reach its `default` arm — before `EmitPullOutput`'s own refusal ever gets a chance to run. The practical trap: a `Compile()`-driven (no-`ENTRY`) graph that merely *contains* an unreferenced `Possess`/`Unpossess`/`SetVelocity`/`Teleport` node fails to compile at all, with a plain "not supported" message rather than the friendlier "has a side effect and must be reached by wiring it directly into the exec chain" text the four `EmitNode`-cased side effects give. The end state is the same (P-path, refused outright) but the diagnostic a graph author actually sees is worse for this family than for Spawn/CharacterMove/FireEvent/SetVar.
+
+## Convert
+
+**Conversion nodes are not a convenience.** `Graph.Validate()` compares `srcPin.Type` to
+`tgtPin.Type` and refuses a mismatch outright, so an `int` or `bool` output cannot reach a
+`float` input at all — every entity handle was unprintable and every bool uncomparable until
+these three existed. Unreal converts silently; here the cast has to be a node you can see.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `IntToFloat` | `a` (in, int), `result` (out, float) | — | D | Widens an int to a float. **Lossy above 2^24 — float32 has only 24 mantissa bits, so past 16777216 only even integers survive, and entity handles start exactly at 16777216. Converting a handle through this node silently rounds it to a neighbouring value; use `PrintInt` (not `Print` fed from this node) when the value being converted is a handle.** |
+| `BoolToFloat` | `a` (in, bool), `result` (out, float) | — | D | Converts a bool to float: `true` becomes `1.0`, `false` becomes `0.0`. |
+| `FloatToInt` | `a` (in, float), `result` (out, int) | — | D | Truncates a float to int, toward zero — the same rounding C#'s `(int)f` cast gives. **Truncates TOWARD ZERO, not floor — `-1.5` becomes `-1`, not `-2`. `Floor` (see Math) exists for the other rounding, specifically so an author never has to guess which one a given node gives them.** |
+
+All three share one code path both ways: `EmitNode`'s topological switch dispatches every one of them to the same `EmitSimpleApiRead` helper (`GraphCompiler.cs:467-471`), which does nothing but call `EmitPullOutput` per output pin and store the result — there's no separate "why it's safe to run unconditionally" story to learn here, because these are arithmetically identical to `RerouteFloat`/`RerouteInt`/`RerouteBool`: one input read, one conversion opcode, no side effect. `IntToFloat` and `BoolToFloat` even compile to the literal same instruction — `int` and `bool` are both `I4` on the CIL stack, so widening either to `float` is one `Conv_R4` either way; the two node types exist so the GRAPH can tell them apart, not because the generated code differs (`GraphCompiler.cs:3191`, its own comment). None of the three appear in either compiler's refusal list or exec-only dispatch, so — like every other `Convert` node — they're freely pullable from a dataflow graph with no `ENTRY` at all, and freely usable inside a PUSH chain too, with no wiring requirement beyond having something feed `a`.
+
+## Transform
+
+Reads and writes on a scene entity's TRANSFORM, plus the two liveness queries. **Local is not
+world**: `GetFieldVec3 CLocal.position` only ever gave the local half, and a parented
+object's local position never changes as its parent moves. The axis nodes report the
+TRANSFORM's orientation, deliberately not `GetForward`, which is an `AverCharacter`'s look
+direction with its pitch clamp already applied.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `GetWorldPosition` | `entity` (in, int), `x`/`y`/`z` (out, float), `success` (out, bool) | — | D | Reads an entity's WORLD-space position, composed through any parents, in centimetres. **LOCAL IS NOT WORLD: `GetFieldVec3` on `CLocal.position` reads local position only — a gun parented to a moving camera has the same local position forever. This node is the one that tracks where the entity actually is (GraphNodeDefs.hpp's own comment, lines 167-171).** |
+| `GetEntityForward` | `entity` (in, int), `x`/`y`/`z` (out, float), `success` (out, bool) | — | D | Reads the entity's WORLD-space forward axis (+X), composed through parents and normalised. **Not the same node as the existing `GetForward` (palette label "Get Forward (Look)", category Scene, GraphNodeDefs.hpp:311): that one reads an `AverCharacter`'s look direction including its pitch clamp. This node reads the raw WORLD-space +X axis of ANY entity's transform — the GraphInterop method's own comment says so explicitly (Aver.Framework/GraphInterop.cs:489-490).** |
+| `GetEntityRight` | `entity` (in, int), `x`/`y`/`z` (out, float), `success` (out, bool) | — | D | Reads the entity's WORLD-space right axis (+Y), composed through parents and normalised. |
+| `GetEntityUp` | `entity` (in, int), `x`/`y`/`z` (out, float), `success` (out, bool) | — | D | Reads the entity's WORLD-space up axis (+Z), composed through parents and normalised. |
+| `GetLocalScale` | `entity` (in, int), `x`/`y`/`z` (out, float), `success` (out, bool) | — | D | Reads the entity's local scale multipliers (unitless). **On a dead/invalid entity this reports `x=y=z=0, success=false` — NOT `Entity.LocalScale`'s own default of `(1,1,1)` a raw C# read would give. GraphInterop.LocalScaleForGraph checks `IsAlive` and zeroes the outputs BEFORE ever touching the property (GraphInterop.cs:501-509).** |
+| `IsAlive` | `entity` (in, int), `alive` (out, bool) | — | D | Whether the entity handle still names a live entity in the scene. **Asks the SCENE whether the handle still names anything, not merely whether it is non-zero — `Entity.IsValid` (handle != 0) is a weaker, different check. A graph holding a handle across frames wants IsAlive (GraphInterop.cs:530-531's own comment).** |
+| `IsActor` | `entity` (in, int), `isActor` (out, bool) | — | D | Whether a gameplay class owns this entity, rather than it being a plain scene node. |
+| `Translate` | `exec` (in), `entity` (in, int), `x`/`y`/`z` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Moves the entity by (x, y, z) centimetres, added to its current LOCAL position — a relative nudge, not an absolute set. **INCREMENTAL, not absolute, and LOCAL space, not world: `Entity.Translate(delta) => SetLocalPosition(LocalPosition + delta)` (Entity.cs:69). Moving along a world direction (e.g. `GetEntityForward`'s output) needs scaling that vector by a speed and wiring the result in yourself — this node does not convert a world-space delta for you.** |
+| `SetLocalScale` | `exec` (in), `entity` (in, int), `x`/`y`/`z` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Sets the entity's local scale multipliers outright. **An absolute 'set the value' write — the same shape as `SetFieldVec3`, which the parser runs safely unconditionally under Compile() (W, see Scene table) — yet `SetLocalScale` is bucketed with `Translate`/`DestroyEntity` as P because all three share one emitter (`EmitExecTransformWrite`) and one predicate (`IsExecCapableTransformWriteType`, GraphCompiler.cs:2552-2556). Compile() refuses it outright even though overwriting the same scale twice would in fact be harmless.** |
+| `DestroyEntity` | `exec` (in), `entity` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Destroys the entity and its subtree — the full framework teardown if it's an actor, a plain scene delete otherwise. **`success` is `false`, not a throw, when the entity is already dead (GraphInterop.cs:538-544 checks `IsAlive` first). Destroying an actor runs the full framework teardown (`Fw.aver_fw_destroy`); a plain scene entity gets a lighter `aver_scene_destroy` (Entity.cs:175-179) — either way the whole subtree goes with it, so a child spawned under an actor does not need its own `DestroyEntity` node.** |
+
+All ten types were added together (GraphNodeDefs.hpp's own comment at lines 167-171 calls this out as "THE ENTITY TRANSFORM, which `GetFieldVec3` on `CLocal.position` only half covered"), and the palette and `AddDefaultPins` agree, pin-for-pin, on every one of them — no mismatches found in this family.
+
+The seven readers (`GetWorldPosition`, `GetEntityForward`/`Right`/`Up`, `GetLocalScale`, `IsAlive`, `IsActor`) are all dispatched the same way twice over: `EmitNode`'s dataflow switch routes all seven to one shared case (`EmitSimpleApiRead`, `GraphCompiler.cs:457-465`), which itself calls `EmitPullOutput` for every output pin rather than computing anything directly — so the *real* per-type logic lives once, in `EmitPullOutput`'s own switch (`GraphCompiler.cs:3177-3190`). `GetEntityForward`/`Right`/`Up` share a single native surface, `GraphInterop.EntityAxisForGraph(entity, axis, ...)`, differing only in the axis index (0/1/2) the emitter hardcodes per node type (`GraphCompiler.cs:3179-3184`) — three node types, one method, by design (`GraphInterop.cs:485-488`). All seven readers zero their outputs and report `success=false` on a dead handle *before* ever touching the underlying `Entity` property, which matters because two of those properties have friendlier fallbacks a raw C# caller would see instead: `Entity.LocalScale` defaults to `(1,1,1)`, not `(0,0,0)`, and `Entity.WorldForward`/`Right`/`Up` fall back to the local (unrotated-by-world) axis rather than reporting failure. A graph reading these nodes never sees either fallback — dead means zero, full stop.
+
+The three writers (`Translate`, `SetLocalScale`, `DestroyEntity`) are **P**, but by a different mechanism than `Spawn`/`CharacterMove`/`FireEvent`/`SetVar` get. Those four each have their own explicit `case` in `EmitNode`'s topological switch that throws a hand-written `InvalidOperationException` naming the node and explaining why (`GraphCompiler.cs:562-611, 619-635`). `Translate`/`SetLocalScale`/`DestroyEntity` have **no case at all** in that switch, so `Compile()` reaches its `default` arm instead. The practical effect is identical (Compile() refuses a graph carrying any of the three, wired or not), and the message is not generic: the default arm tests for a push-only node first, and only then falls back to "not supported". Separately, all three also sit in `EmitPullOutput`'s side-effect refusal list via `IsExecCapableTransformWriteType` (`GraphCompiler.cs:3044`), so pulling one's `success` (or, for `Translate`/`SetLocalScale`, any output) as a bare data value from inside a PUSH graph with no exec edge fails with the same named `InvalidOperationException` the Scene writers give (`GraphCompiler.cs:3046-3050`).
+
+## Physics — reads and queries
+
+The `Body` handle and the queries over it. A `Body` is a physics handle, distinct from an
+entity handle — both arrive as `int` pins, and nothing in the type system stops you wiring one
+where the other belongs, which is the trap to know about in this whole family.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `GetBodyPosition` | `body` (in, int), `x`/`y`/`z` (out, float), `success` (out, bool) | — | D | Reads a physics body's centre-of-mass position, in centimetres. **`success` only means the handle is nonzero (`Body.IsValid` is literally `Handle != 0`, no native check — Physics.cs:131) — after `DestroyBody` runs, the same handle still reads `success = true` with `x = y = z = 0.0` (Body.Position's own silent-zero-on-native-failure, Physics.cs:139), indistinguishable from a live body genuinely sitting at the origin.** |
+| `GetBodyVelocity` | `body` (in, int), `x`/`y`/`z` (out, float), `success` (out, bool) | — | D | Reads a physics body's linear velocity, in centimetres per second. **Same trap as `GetBodyPosition`: `success` only proves the handle is nonzero, not that the body still exists — a destroyed body's handle reads `success = true`, `x = y = z = 0.0`, indistinguishable from a live body at rest (Physics.cs:131, 159).** |
+| `IsBodyValid` | `body` (in, int), `valid` (out, bool) | — | D | Reports whether a body handle currently names a body. **Checks only that the handle number is nonzero — it never calls into native physics, so a handle from a body already removed via `DestroyBody` still reads `valid = true` (Physics.cs:131).** |
+| `GetBodyCount` | `count` (out, int) | — | D | Returns how many physics bodies currently exist in the simulation. |
+| `RaycastAny` | `originX`/`originY`/`originZ` (in, float), `dirX`/`dirY`/`dirZ` (in, float), `maxDist` (in, float), `hit` (out, bool) | — | D | Casts a ray up to `maxDist` centimetres and reports only whether it hit anything, discarding the point, normal, and owner a full raycast would give. **Exposes no `body`/point/owner pin at all — even on a hit there is no way to learn what was struck from this node alone; reach for `Raycast` (scene entity) or `SphereCast` (physics body) when the graph needs to know what it hit, not just that something is there.** |
+| `SphereCast` | `exec` (in), `originX`/`originY`/`originZ` (in, float), `dirX`/`dirY`/`dirZ` (in, float), `maxDist` (in, float), `radius` (in, float), `then` (out, exec), `hit` (out, bool), `body` (out, int), `pointX`/`pointY`/`pointZ` (out, float) — 15 pins | — | P | Sweeps a sphere of `radius` outward from the origin along the given direction, up to `maxDist` centimetres, and reports the first physics body it touches. **The sweep never resolves an owning entity (`Physics.SphereCast`'s `RaycastHit.Entity` is hardcoded to `Entity.None`, Physics.cs:288) -- only the physics `body` handle comes back on this node's pins; stamp one with `SetBodyEntity` first if a graph needs the owner. And because SphereCast has no case at all in `EmitNode`'s switch (unlike `Raycast`, which does), a data-only graph merely containing an unwired SphereCast node fails Compile() with the bare 'Node type 'SphereCast' is not supported' -- not the purpose-written 'must be reached by wiring it into the exec chain' message Spawn/CharacterMove/FireEvent/SetVar give; give it an ENTRY-driven exec chain and reach it through CompileEntryPoint() instead.** |
+
+The physics family splits cleanly along the line `OcGraphParser.cs:1150`'s own comment states outright — *"Readers are pure; writers, creators and the sweep carry exec pins"* — and the palette agrees with the parser pin-for-pin on all six nodes here, so there is nothing to log in `mismatches`. `GetBodyPosition`, `GetBodyVelocity`, `IsBodyValid`, `GetBodyCount` and `RaycastAny` have no exec pins and are freely pullable from either compiler, `RaycastAny` included even though it runs a full `Physics.Raycast` internally on every pull and only keeps the bool — it simply has no exec pins to be cached against the way the Scene category's `Raycast` does. `SphereCast`, "the sweep", is the odd one out, and worth knowing before you hit it: it is not merely exec-only like `Branch`/`OnTick` (which `Compile()` silently skips), and it is not in the same handled bucket as `Raycast`, `MouseDelta`, `MoveAxis` either (all three of which DO have a case in `EmitNode`'s topological switch, so `Compile()` runs them once, unconditionally). `SphereCast` has no case anywhere in `EmitNode`, so a pure-dataflow graph merely *containing* one — wired or not — fails to compile, reaching the `default` arm rather than a hand-written case. The message it gets there names the node and points at `CompileEntryPoint()`, the same as the four hand-written refusals, just without their node-specific wording.
+
+Separately: `IsBodyValid` and the `success` pin on `GetBodyPosition`/`GetBodyVelocity` all bottom out in `Body.IsValid`, which is literally `Handle != 0` (`Physics.cs:131`) — none of the three ever asks native physics whether that handle still names a live body. A handle read after `DestroyBody` has already run reports `valid = true`, and `GetBodyPosition`/`GetBodyVelocity` on that same handle report `success = true` with `x = y = z = 0.0` (`Body.Position`/`Velocity`'s own native call fails silently to `Vec3.Zero`, `Physics.cs:139, 159`, with nothing upstream re-checking it) — a destroyed body reads exactly like one that is very much alive and sitting at the origin.
+
+## Physics — writes and creation
+
+Writes, and the five creators. Every one of these is `P`: a physics write ticked
+unconditionally by the dataflow compiler would run on every invocation with no way to gate
+it, and a CREATOR would make a new body every frame.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `SetBodyPosition` | `exec` (in), `body` (in, int), `x`, `y`, `z` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Teleports a body to a new position, in centimetres, ignoring collision on the way. **Moves through walls -- there is no collision response on the way, unlike driving the body by velocity.** |
+| `SetBodyVelocity` | `exec` (in), `body` (in, int), `x`, `y`, `z` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Replaces a body's linear velocity outright, in centimetres per second. |
+| `AddBodyVelocity` | `exec` (in), `body` (in, int), `x`, `y`, `z` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Adds to a body's current velocity -- a plain velocity change, not a mass-scaled impulse, so a heavy and a light body get the identical speed change for the same x/y/z input. **Reads like an impulse node (knockback, explosion, jump pad), but there is no mass division anywhere in the call chain -- it is SetVelocity(Velocity + delta), full stop. A 1 kg crate and a 1000 kg crate both get exactly the same delta-v.** |
+| `DestroyBody` | `exec` (in), `body` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Removes a body from the simulation; the handle is dead afterwards. |
+| `SetBodyEntity` | `exec` (in), `body`, `entity` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Stamps a scene entity as a physics body's owner, so a later Raycast against that body reports the entity through `RaycastHit.Entity` instead of 0 (unowned). **A body created by AddStaticBox/AddDynamicBox/AddDynamicSphere/AddSensorBox/AddSensorSphere reports NO owner to Raycast (entity 0, read as 'unowned') until this node runs on it -- the palette's own Physics section comment calls this out explicitly (GraphNodeDefs.hpp:183-184).** |
+| `SetGravity` | `exec` (in), `x`, `y`, `z` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Sets the whole simulation's gravity vector, in centimetres per second squared. The engine default is (0, 0, -980). **`success` is always true here -- SetGravityForGraph has no failure path to report (unlike the other five writers, whose `success` reflects whether `body` was a valid handle), because setting a global has nothing to be invalid against.** |
+| `AddStaticBox` | `exec` (in), `cx`, `cy`, `cz`, `hx`, `hy`, `hz` (in, float), `then` (out, exec), `body` (out, int) | — | P | Creates a box collider that never moves, centred at (cx, cy, cz) with half-extents (hx, hy, hz), both in centimetres. |
+| `AddDynamicBox` | `exec` (in), `cx`, `cy`, `cz`, `hx`, `hy`, `hz`, `mass` (in, float), `then` (out, exec), `body` (out, int) | — | P | Creates a box collider that falls and collides, with `mass` in kilograms; `mass` <= 0 derives the mass from the box's volume instead. **Leaving `mass` unwired is not an error -- an unwired float pin reads 0, which is exactly the "derive mass from volume" sentinel, not a zero-mass body (GraphInterop.cs:620-621).** |
+| `AddDynamicSphere` | `exec` (in), `cx`, `cy`, `cz`, `radius`, `mass` (in, float), `then` (out, exec), `body` (out, int) | — | P | Creates a sphere collider that falls and collides, `radius` in centimetres; `mass` <= 0 derives the mass from the sphere's volume instead. **Same unwired-mass rule as AddDynamicBox: 0 (an unwired pin's default) means "derive from volume", not "massless".** |
+| `AddSensorBox` | `exec` (in), `cx`, `cy`, `cz`, `hx`, `hy`, `hz` (in, float), `then` (out, exec), `body` (out, int) | — | P | Creates a box-shaped trigger volume that reports overlaps but never collides physically. |
+| `AddSensorSphere` | `exec` (in), `cx`, `cy`, `cz`, `radius` (in, float), `then` (out, exec), `body` (out, int) | — | P | Creates a spherical trigger volume that reports overlaps but never collides physically. |
+
+All eleven are `P`-path for the same reason `Spawn`/`CharacterMove`/`FireEvent`/`SetVar` are: each wraps a Jolt call that either mutates simulation state (`SetBodyPosition`, `SetBodyVelocity`, `AddBodyVelocity`, `DestroyBody`, `SetBodyEntity`, `SetGravity`) or creates a new body (`AddStaticBox`, `AddDynamicBox`, `AddDynamicSphere`, `AddSensorBox`, `AddSensorSphere`), and Compile()'s topological pass has no branch structure to gate any of that with. They are reached only from `EmitExecNode`'s default arm, through `IsExecCapablePhysicsWriteType`/`IsExecCapablePhysicsCreateType` (GraphCompiler.cs:2537-2547) dispatching to `EmitExecPhysicsWrite`/`EmitExecPhysicsCreate` (GraphCompiler.cs:1010-1067) -- give any of them an `ENTRY`-driven exec chain and reach them through `CompileEntryPoint()`.
+
+A **body is not an entity** (`GraphNodeDefs.hpp:182-186`): a body is a Jolt handle with a shape and a velocity; an entity is a scene node that may or may not own one. A body an `Add*` node creates reports **no owner** to `Raycast` until `SetBodyEntity` stamps one on -- a trigger the graph just built is invisible to the graph asking what it hit. Body handles ride on `int` pins throughout, same convention as scene entity handles, and `0` means invalid on both sides (`Physics.cs:124-131`).
+
+The five writers share one dispatch shape: `EmitExecPhysicsWrite` pulls `body` first for all of them except `SetGravity` (GraphCompiler.cs:1014, the one node in the family with no `body` pin), then the per-type inputs, then stores the returned bool into `success` or drops it. The five creators share the mirror shape: `EmitExecPhysicsCreate` always pulls `cx`/`cy`/`cz` first, then per-type extents/radius/mass, and stores the returned handle into an **exec-local**, not a pin-local -- the same reasoning `Raycast` uses, so the `body` pin any downstream node reads back is the *one* handle this creation produced, however many nodes read it. `AddStaticBox`/`AddSensorBox`/`AddSensorSphere` have no `mass` pin at all: a static body is immovable and a sensor never participates in dynamics, so mass has nothing to mean for either.
+
+`AddBodyVelocity`'s name invites reading it as an impulse -- knockback, an explosion, a jump pad -- but `Body.AddVelocity` is exactly `SetVelocity(Velocity + delta)` (`Physics.cs:169`): no mass division, no scaling, just a direct velocity change. `SetBodyVelocity` replaces the velocity outright; `AddBodyVelocity` adds to whatever it already had. Neither one is mass-aware.
 
 ## Var
 
@@ -531,10 +669,12 @@ or C#-authored `.ocgraph`, never appear in the GUI, and are otherwise identical 
 
 `sandbox/src/GraphNodeDefs.hpp` is a **deliberate, separate copy** of the parser's vocabulary,
 maintained by hand so the C++ editor never depends on a C# file
-(`GraphNodeDefs.hpp:20-27`, its own header comment). Every one of the 36 canonical node types' pin
-shape — name, type, direction, declared order — was hand-checked against `AddDefaultPins` for this
-document: **zero disagreements**, including the least obvious shapes (`Raycast`'s 14 pins,
-`CharacterMove`'s 9, `SetFieldVec3`'s 5-pin order).
+(`GraphNodeDefs.hpp:20-27`, its own header comment). Every node type's pin shape — name, type,
+direction, declared order — has been checked against `AddDefaultPins` for this document: **zero
+disagreements**, including the least obvious shapes (`Raycast`'s 14 pins, `SphereCast`'s 15,
+`CharacterMove`'s 9, `SetFieldVec3`'s 5-pin order). The most recent sweep covered the 42 nodes
+added since the previous one and re-derived each one's Path code from the compiler independently
+of the palette; it found no pin disagreement either.
 
 That parity is not enforced by anything automated, though. The one existing coverage test
 (`tests/editor/src/GraphEditorGeometryTest.cpp`, `testNodeCatalogCoversTheCompiler`) checks that

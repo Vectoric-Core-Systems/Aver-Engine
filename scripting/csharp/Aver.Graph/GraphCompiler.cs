@@ -635,6 +635,17 @@ public class GraphCompiler
                     "CompileEntryPoint() instead.");
 
             default:
+                // A PUSH-only node reaching the dataflow compiler is not an unknown node type, and
+                // saying so sent authors looking for a node they already had. See
+                // IsPushOnlySideEffectType for the full account.
+                if (IsPushOnlySideEffectType(node.Type))
+                    throw new InvalidOperationException(
+                        $"{node.Type} node '{node.Id}' cannot be compiled by Compile() -- it has a " +
+                        "side effect, and a pure-dataflow graph has no notion of WHEN to run one: " +
+                        "Compile()'s topological pass would run it unconditionally on every " +
+                        "invocation, with no branch structure available to gate it. The node type is " +
+                        "supported; this compiler is not the one that runs it. Give the node an " +
+                        "ENTRY-driven exec chain and reach it through CompileEntryPoint() instead.");
                 throw new NotSupportedException($"Node type '{node.Type}' is not supported");
         }
     }
@@ -2999,6 +3010,32 @@ public class GraphCompiler
     /// a data output somebody might wrongly try to read -- it needs to be reachable so it can refuse
     /// with its own explanatory error. The kinds below have no data output at all, so there is nothing
     /// for the pull compiler to do with them except fail.
+    // EVERY node type that only the PUSH compiler can run: a side effect, a write, or a creation
+    // with no meaning in a pure-dataflow graph.
+    //
+    // This was a seventeen-term disjunction written out inline in EmitPullOutput, and it was needed
+    // in TWO places -- there, and in EmitNode's default arm, which did not have it. The consequence
+    // was not a wrong answer but a wrong SENTENCE: a stray Jump, PrintInt, SetGravity, SetVelocity,
+    // Teleport, or any of the eleven physics writers, sitting in a graph compiled by Compile(),
+    // reached EmitNode's default arm and was told "Node type 'Jump' is not supported". The type is
+    // supported. It is supported by the OTHER compiler, which is the one thing that message could
+    // have said and did not, and the author is left believing the engine has no Jump node.
+    //
+    // Spawn/CharacterMove/FireEvent/SetVar keep their own hand-written cases above, deliberately:
+    // each says something specific and true about that node (Spawn would create an entity EVERY
+    // TICK), and collapsing them into this would trade four accurate sentences for one generic one.
+    // This predicate is the floor, not the ceiling.
+    private static bool IsPushOnlySideEffectType(string type) =>
+        IsExecCapableSideEffectType(type) || IsExecCapableVecSideEffectType(type) ||
+        IsExecCapableSpawnType(type) || IsExecCapableVarSideEffectType(type) ||
+        IsExecCapableSetParentType(type) || IsExecCapableSetViewEntityType(type) ||
+        IsExecCapableSetNameType(type) || IsExecCapableSetMeshType(type) ||
+        IsExecCapableSetMaterialType(type) || IsExecCapableCharacterMoveType(type) ||
+        IsExecCapableFireEventType(type) || IsExecCapableJumpType(type) ||
+        IsExecCapablePrintType(type) || IsExecCapableApiCallType(type) ||
+        IsExecCapableTransformWriteType(type) || IsExecCapablePhysicsWriteType(type) ||
+        IsExecCapablePhysicsCreateType(type);
+
     private static bool IsExecOnlyNodeType(string type) => type.ToLowerInvariant() switch
     {
         // "onhit" sits beside "onstart"/"ontick" here purely because it has the exact same SHAPE (a
@@ -3034,15 +3071,7 @@ public class GraphCompiler
         // condition, which is exactly the point of naming source.Type instead of hardcoding one. SetVar
         // sharing this refusal is the direct proof of the task's own instruction ("the PULL path must
         // REFUSE it... rather than fall back") -- see TestSetVarPulledWithoutExecVisitFailsClearly.
-        if (IsExecCapableSideEffectType(source.Type) || IsExecCapableVecSideEffectType(source.Type) ||
-            IsExecCapableSpawnType(source.Type) || IsExecCapableVarSideEffectType(source.Type) ||
-            IsExecCapableSetParentType(source.Type) || IsExecCapableSetViewEntityType(source.Type) ||
-            IsExecCapableSetNameType(source.Type) || IsExecCapableSetMeshType(source.Type) ||
-            IsExecCapableSetMaterialType(source.Type) || IsExecCapableCharacterMoveType(source.Type) ||
-            IsExecCapableFireEventType(source.Type) || IsExecCapableJumpType(source.Type) ||
-            IsExecCapablePrintType(source.Type) || IsExecCapableApiCallType(source.Type) ||
-            IsExecCapableTransformWriteType(source.Type) || IsExecCapablePhysicsWriteType(source.Type) ||
-            IsExecCapablePhysicsCreateType(source.Type))
+        if (IsPushOnlySideEffectType(source.Type))
             throw new InvalidOperationException(
                 $"'{source.Id}.{pinName}' cannot be read as a data value: {source.Type} has a side effect " +
                 "and must be reached by wiring it directly into the exec chain (give it exec pins), not " +

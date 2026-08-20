@@ -352,7 +352,11 @@ running. It is also new, and smaller than what it resembles. Specifically:
   other name a caller fires) via `Fire()`, but there is no node anywhere in the catalog that lets
   one entity's graph raise an event *on a different entity's* graph. `Fire()` is something a host
   calls into one specific `GraphHost`; it is not something a node can invoke.
-- **No HUD or 2D drawing from a graph.** Nothing in the 36-node vocabulary reaches `Aver.UI`.
+- **No HUD or 2D drawing from a graph.** Nothing in the palette reaches `Aver.UI` — still true,
+  checked against the catalog rather than remembered: 124 nodes across 17 families, none of them a
+  draw call. (This bullet used to say "the 36-node vocabulary", which was the count when it was
+  written. The claim survived; the number did not, and a stale number beside a true statement is
+  what teaches a reader to stop trusting the statement.)
 - **No `String` pin.** `PinType` has exactly four members — `Float`, `Int`, `Bool`, `Exec`. Every
   string a node needs (`field=`, `class=`, `var=`, `name=`, `mesh=`, `material=`) arrives as a
   `NODE`-line attribute, never as data an upstream node computes or a pin carries.

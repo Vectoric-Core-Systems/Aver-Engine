@@ -206,6 +206,11 @@ static int Main()
         // ways they got it wrong, and for why "absent" has to stay distinct from "unconnected".
         failures += MissingPinTests.RunAll();
 
+        // The SENTENCE a push-only node gives when it reaches the dataflow compiler. It used to say
+        // the node type was not supported, which is false for every one of the thirty-odd nodes that
+        // reach it -- see PushOnlyNodeMessageTests.cs.
+        failures += PushOnlyNodeMessageTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else
