@@ -543,6 +543,113 @@ internal static class GraphInterop
         return true;
     }
 
+    // ---- physics -------------------------------------------------------------------------------
+    //
+    // A BODY IS NOT AN ENTITY, and keeping them apart is the point of this whole block. A body is a
+    // Jolt handle with a position, a velocity and a shape; an entity is a scene node that may or may
+    // not own one. SetBodyEntity is the bridge, and it matters more than it looks: a body created
+    // from a graph reports NO owner to Raycast until something stamps one on, so a trap the graph
+    // built is invisible to the graph asking what it hit.
+    //
+    // Body handles ride on INT pins, never float -- see PrintInt for what a float does to a handle.
+
+    internal static bool BodyPositionForGraph(int body, out float x, out float y, out float z)
+    {
+        Body b = new Body(body);
+        x = y = z = 0.0f;
+        if (!b.IsValid) return false;
+        Vec3 v = b.Position; x = v.X; y = v.Y; z = v.Z;
+        return true;
+    }
+
+    internal static bool BodyVelocityForGraph(int body, out float x, out float y, out float z)
+    {
+        Body b = new Body(body);
+        x = y = z = 0.0f;
+        if (!b.IsValid) return false;
+        Vec3 v = b.Velocity; x = v.X; y = v.Y; z = v.Z;
+        return true;
+    }
+
+    internal static bool BodyValidForGraph(int body) => new Body(body).IsValid;
+    internal static int  BodyCountForGraph() => Physics.BodyCount;
+
+    internal static bool SetBodyPositionForGraph(int body, float x, float y, float z)
+    {
+        Body b = new Body(body);
+        return b.IsValid && b.SetPosition(new Vec3(x, y, z));
+    }
+
+    internal static bool SetBodyVelocityForGraph(int body, float x, float y, float z)
+    {
+        Body b = new Body(body);
+        return b.IsValid && b.SetVelocity(new Vec3(x, y, z));
+    }
+
+    /// <summary>Body.AddVelocity: an IMPULSE, added to what the body already had, where
+    /// SetBodyVelocity replaces it. Knockback, an explosion and a jump pad all want this one.</summary>
+    internal static bool AddBodyVelocityForGraph(int body, float x, float y, float z)
+    {
+        Body b = new Body(body);
+        return b.IsValid && b.AddVelocity(new Vec3(x, y, z));
+    }
+
+    internal static bool DestroyBodyForGraph(int body)
+    {
+        Body b = new Body(body);
+        return b.IsValid && b.Destroy();
+    }
+
+    /// <summary>Stamps the owning entity on a body so Raycast can report it. Without this a body a
+    /// graph created answers raycasts with entity 0, which reads as "hit unowned collision".</summary>
+    internal static bool SetBodyEntityForGraph(int body, int entity)
+    {
+        Body b = new Body(body);
+        return b.IsValid && b.SetEntity(new Entity(entity));
+    }
+
+    internal static bool SetGravityForGraph(float x, float y, float z)
+    {
+        Physics.SetGravity(new Vec3(x, y, z));
+        return true;
+    }
+
+    internal static int AddStaticBoxForGraph(float cx, float cy, float cz, float hx, float hy, float hz)
+        => Physics.AddStaticBox(new Vec3(cx, cy, cz), new Vec3(hx, hy, hz)).Handle;
+
+    /// <summary>massKg &lt;= 0 derives the mass from the volume, which is what Physics documents and
+    /// what a graph leaving the pin unwired gets, since an unwired float pin reads zero.</summary>
+    internal static int AddDynamicBoxForGraph(float cx, float cy, float cz, float hx, float hy, float hz, float massKg)
+        => Physics.AddDynamicBox(new Vec3(cx, cy, cz), new Vec3(hx, hy, hz), massKg).Handle;
+
+    internal static int AddDynamicSphereForGraph(float cx, float cy, float cz, float radius, float massKg)
+        => Physics.AddDynamicSphere(new Vec3(cx, cy, cz), radius, massKg).Handle;
+
+    internal static int AddSensorBoxForGraph(float cx, float cy, float cz, float hx, float hy, float hz)
+        => Physics.AddSensorBox(new Vec3(cx, cy, cz), new Vec3(hx, hy, hz)).Handle;
+
+    internal static int AddSensorSphereForGraph(float cx, float cy, float cz, float radius)
+        => Physics.AddSensorSphere(new Vec3(cx, cy, cz), radius).Handle;
+
+    internal static bool RaycastAnyForGraph(float ox, float oy, float oz, float dx, float dy, float dz, float maxDist)
+        => Physics.RaycastAny(new Vec3(ox, oy, oz), new Vec3(dx, dy, dz), maxDist);
+
+    /// <summary>Physics.SphereCast, shaped like RaycastForGraph above: all results out-parameters,
+    /// one call, so the exec compiler can cache them.
+    ///
+    /// THE ENTITY IS ALWAYS ZERO HERE and that is the engine's own documented limit, not an omission:
+    /// the native sweep does not resolve entities. The node therefore reports the BODY, which is
+    /// real, and a graph wanting the owner stamps one on with SetBodyEntity and reads it back.</summary>
+    internal static void SphereCastForGraph(
+        float ox, float oy, float oz, float dx, float dy, float dz, float maxDist, float radius,
+        out bool hit, out int body, out float px, out float py, out float pz)
+    {
+        RaycastHit r = Physics.SphereCast(new Vec3(ox, oy, oz), new Vec3(dx, dy, dz), maxDist, radius);
+        hit = r.Hit;
+        body = r.Body.Handle;
+        px = r.Point.X; py = r.Point.Y; pz = r.Point.Z;
+    }
+
     internal static bool JumpForGraph(int entity)
     {
         Entity e = new Entity(entity);

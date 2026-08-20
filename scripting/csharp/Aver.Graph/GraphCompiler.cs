@@ -440,6 +440,14 @@ public class GraphCompiler
                 EmitGetVelocity(node);
                 break;
 
+            case "getbodyposition":
+            case "getbodyvelocity":
+            case "isbodyvalid":
+            case "getbodycount":
+            case "raycastany":
+                EmitSimpleApiRead(node);
+                break;
+
             case "getworldposition":
             case "getentityforward":
             case "getentityright":
@@ -972,10 +980,11 @@ public class GraphCompiler
     /// A three-out-parameter read of an entity, for whichever component the caller asked for.
     /// `axis` is pushed only when it is not -1, which is how the three orientation nodes share one
     /// interop surface with the two that take no extra argument.
-    private void EmitPullVec3Read(Node node, string pinName, MethodInfo method, int axis)
+    private void EmitPullVec3Read(Node node, string pinName, MethodInfo method, int axis,
+                                  string inputPin = "entity")
     {
         if (_il == null) return;
-        EmitPullInput(node, "entity");
+        EmitPullInput(node, inputPin);
         if (axis >= 0) _il.Emit(OpCodes.Ldc_I4, axis);
         var xL = _il.DeclareLocal(typeof(float));
         var yL = _il.DeclareLocal(typeof(float));
@@ -990,6 +999,82 @@ public class GraphCompiler
     }
 
     /// The three transform writers. Same shape as EmitExecApiCall: push, call, keep or drop the bool.
+    /// The physics writers: push the body (or nothing, for SetGravity), push the vector, call,
+    /// keep or drop the bool.
+    private void EmitExecPhysicsWrite(Node node)
+    {
+        if (_il == null) return;
+        string t = node.Type.ToLowerInvariant();
+        if (t != "setgravity") EmitPullInput(node, "body");
+        switch (t)
+        {
+            case "setbodyposition":
+                EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, SetBodyPositionMethod); break;
+            case "setbodyvelocity":
+                EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, SetBodyVelocityMethod); break;
+            case "addbodyvelocity":
+                EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, AddBodyVelocityMethod); break;
+            case "setbodyentity":
+                EmitPullInput(node, "entity");
+                _il.Emit(OpCodes.Call, SetBodyEntityMethod); break;
+            case "setgravity":
+                EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, SetGravityMethod); break;
+            default:
+                _il.Emit(OpCodes.Call, DestroyBodyMethod); break;
+        }
+        if (_pinLocals.TryGetValue((node.Id, "success"), out var local)) _il.Emit(OpCodes.Stloc, local);
+        else                                                            _il.Emit(OpCodes.Pop);
+    }
+
+    /// The creators. Each returns a BODY HANDLE, which goes into an exec-local rather than a pin
+    /// local: the body pin is read AFTER this node runs, by whatever the exec chain reaches next,
+    /// and that is exactly the guarantee _execLocals exists to give -- one creation, however many
+    /// readers. A pin local would be right for the pull compiler and wrong here.
+    private void EmitExecPhysicsCreate(Node node)
+    {
+        if (_il == null) return;
+        EmitPullInput(node, "cx"); EmitPullInput(node, "cy"); EmitPullInput(node, "cz");
+        switch (node.Type.ToLowerInvariant())
+        {
+            case "addstaticbox":
+                EmitPullInput(node, "hx"); EmitPullInput(node, "hy"); EmitPullInput(node, "hz");
+                _il.Emit(OpCodes.Call, AddStaticBoxMethod); break;
+            case "adddynamicbox":
+                EmitPullInput(node, "hx"); EmitPullInput(node, "hy"); EmitPullInput(node, "hz");
+                EmitPullInput(node, "mass");
+                _il.Emit(OpCodes.Call, AddDynamicBoxMethod); break;
+            case "adddynamicsphere":
+                EmitPullInput(node, "radius"); EmitPullInput(node, "mass");
+                _il.Emit(OpCodes.Call, AddDynamicSphereMethod); break;
+            case "addsensorbox":
+                EmitPullInput(node, "hx"); EmitPullInput(node, "hy"); EmitPullInput(node, "hz");
+                _il.Emit(OpCodes.Call, AddSensorBoxMethod); break;
+            default:
+                EmitPullInput(node, "radius");
+                _il.Emit(OpCodes.Call, AddSensorSphereMethod); break;
+        }
+        _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "body", typeof(int)));
+    }
+
+    /// SphereCast, shaped exactly like EmitExecRaycast: one call, N results into N exec-locals, so
+    /// a sweep costs the same whether one output pin is read or six.
+    private void EmitExecSphereCast(Node node)
+    {
+        if (_il == null) return;
+        foreach (string a in new[] { "originX", "originY", "originZ", "dirX", "dirY", "dirZ", "maxDist", "radius" })
+            EmitPullInput(node, a);
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "hit", typeof(bool)));
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "body", typeof(int)));
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "pointX", typeof(float)));
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "pointY", typeof(float)));
+        _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "pointZ", typeof(float)));
+        _il.Emit(OpCodes.Call, SphereCastMethod);
+    }
+
     private void EmitExecTransformWrite(Node node)
     {
         if (_il == null) return;
@@ -1940,6 +2025,9 @@ public class GraphCompiler
                     else if (IsExecCapablePrintType(node.Type)) EmitExecPrint(node);
                     else if (IsExecCapableApiCallType(node.Type)) EmitExecApiCall(node);
                     else if (IsExecCapableTransformWriteType(node.Type)) EmitExecTransformWrite(node);
+                    else if (IsExecCapablePhysicsWriteType(node.Type)) EmitExecPhysicsWrite(node);
+                    else if (IsExecCapablePhysicsCreateType(node.Type)) EmitExecPhysicsCreate(node);
+                    else if (IsExecCapableSphereCastType(node.Type)) EmitExecSphereCast(node);
                     else if (IsExecCapableFireEventType(node.Type)) EmitExecFireEvent(node);
                     EmitExecFanOut(node);
                     return;
@@ -2437,6 +2525,24 @@ public class GraphCompiler
     /// what it matches.
     /// The three transform writers, grouped for the same reason the four API calls above are: they
     /// share one emitter exactly.
+    /// The physics writers, creators and the sweep. Three predicates because there are three
+    /// emitters: a write returns a bool, a creator returns a body handle, and the sweep fills
+    /// exec-locals the way Raycast does.
+    private static bool IsExecCapablePhysicsWriteType(string type)
+    {
+        string t = type.ToLowerInvariant();
+        return t == "setbodyposition" || t == "setbodyvelocity" || t == "addbodyvelocity" || t == "destroybody" || t == "setbodyentity" || t == "setgravity";
+    }
+
+    private static bool IsExecCapablePhysicsCreateType(string type)
+    {
+        string t = type.ToLowerInvariant();
+        return t == "addstaticbox" || t == "adddynamicbox" || t == "adddynamicsphere" || t == "addsensorbox" || t == "addsensorsphere";
+    }
+
+    private static bool IsExecCapableSphereCastType(string type) =>
+        type.Equals("spherecast", StringComparison.OrdinalIgnoreCase);
+
     private static bool IsExecCapableTransformWriteType(string type)
     {
         string t = type.ToLowerInvariant();
@@ -2929,7 +3035,8 @@ public class GraphCompiler
             IsExecCapableSetMaterialType(source.Type) || IsExecCapableCharacterMoveType(source.Type) ||
             IsExecCapableFireEventType(source.Type) || IsExecCapableJumpType(source.Type) ||
             IsExecCapablePrintType(source.Type) || IsExecCapableApiCallType(source.Type) ||
-            IsExecCapableTransformWriteType(source.Type))
+            IsExecCapableTransformWriteType(source.Type) || IsExecCapablePhysicsWriteType(source.Type) ||
+            IsExecCapablePhysicsCreateType(source.Type))
             throw new InvalidOperationException(
                 $"'{source.Id}.{pinName}' cannot be read as a data value: {source.Type} has a side effect " +
                 "and must be reached by wiring it directly into the exec chain (give it exec pins), not " +
@@ -3039,6 +3146,23 @@ public class GraphCompiler
                 EmitPullGetViewEntity(source, pinName); return;
             case "getvelocity":
                 EmitPullGetVelocity(source, pinName); return;
+            case "getbodyposition":
+                EmitPullVec3Read(source, pinName, BodyPositionMethod, -1, "body"); return;
+            case "getbodyvelocity":
+                EmitPullVec3Read(source, pinName, BodyVelocityMethod, -1, "body"); return;
+            case "isbodyvalid":
+                EmitPullInput(source, "body"); _il.Emit(OpCodes.Call, BodyValidMethod); return;
+            case "getbodycount":
+                _il.Emit(OpCodes.Call, BodyCountMethod); return;
+            case "raycastany":
+                EmitPullInput(source, "originX");
+                EmitPullInput(source, "originY");
+                EmitPullInput(source, "originZ");
+                EmitPullInput(source, "dirX");
+                EmitPullInput(source, "dirY");
+                EmitPullInput(source, "dirZ");
+                EmitPullInput(source, "maxDist");
+                _il.Emit(OpCodes.Call, RaycastAnyMethod); return;
             case "getworldposition":
                 EmitPullVec3Read(source, pinName, WorldPositionMethod, -1); return;
             case "getentityforward":
@@ -3508,6 +3632,58 @@ public class GraphCompiler
         typeof(GraphInterop).GetMethod("LookDirectionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.LookDirectionForGraph was not found by reflection");
     // GetViewEntity: the camera node a character looks through -- what a viewmodel parents to.
+    // The physics surfaces.
+    private static readonly MethodInfo BodyPositionMethod =
+        typeof(GraphInterop).GetMethod("BodyPositionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.BodyPositionForGraph was not found by reflection");
+    private static readonly MethodInfo BodyVelocityMethod =
+        typeof(GraphInterop).GetMethod("BodyVelocityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.BodyVelocityForGraph was not found by reflection");
+    private static readonly MethodInfo BodyValidMethod =
+        typeof(GraphInterop).GetMethod("BodyValidForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.BodyValidForGraph was not found by reflection");
+    private static readonly MethodInfo BodyCountMethod =
+        typeof(GraphInterop).GetMethod("BodyCountForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.BodyCountForGraph was not found by reflection");
+    private static readonly MethodInfo SetBodyPositionMethod =
+        typeof(GraphInterop).GetMethod("SetBodyPositionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetBodyPositionForGraph was not found by reflection");
+    private static readonly MethodInfo SetBodyVelocityMethod =
+        typeof(GraphInterop).GetMethod("SetBodyVelocityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetBodyVelocityForGraph was not found by reflection");
+    private static readonly MethodInfo AddBodyVelocityMethod =
+        typeof(GraphInterop).GetMethod("AddBodyVelocityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.AddBodyVelocityForGraph was not found by reflection");
+    private static readonly MethodInfo DestroyBodyMethod =
+        typeof(GraphInterop).GetMethod("DestroyBodyForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.DestroyBodyForGraph was not found by reflection");
+    private static readonly MethodInfo SetBodyEntityMethod =
+        typeof(GraphInterop).GetMethod("SetBodyEntityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetBodyEntityForGraph was not found by reflection");
+    private static readonly MethodInfo SetGravityMethod =
+        typeof(GraphInterop).GetMethod("SetGravityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetGravityForGraph was not found by reflection");
+    private static readonly MethodInfo AddStaticBoxMethod =
+        typeof(GraphInterop).GetMethod("AddStaticBoxForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.AddStaticBoxForGraph was not found by reflection");
+    private static readonly MethodInfo AddDynamicBoxMethod =
+        typeof(GraphInterop).GetMethod("AddDynamicBoxForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.AddDynamicBoxForGraph was not found by reflection");
+    private static readonly MethodInfo AddDynamicSphereMethod =
+        typeof(GraphInterop).GetMethod("AddDynamicSphereForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.AddDynamicSphereForGraph was not found by reflection");
+    private static readonly MethodInfo AddSensorBoxMethod =
+        typeof(GraphInterop).GetMethod("AddSensorBoxForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.AddSensorBoxForGraph was not found by reflection");
+    private static readonly MethodInfo AddSensorSphereMethod =
+        typeof(GraphInterop).GetMethod("AddSensorSphereForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.AddSensorSphereForGraph was not found by reflection");
+    private static readonly MethodInfo RaycastAnyMethod =
+        typeof(GraphInterop).GetMethod("RaycastAnyForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.RaycastAnyForGraph was not found by reflection");
+    private static readonly MethodInfo SphereCastMethod =
+        typeof(GraphInterop).GetMethod("SphereCastForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SphereCastForGraph was not found by reflection");
     // The entity transform surfaces.
     private static readonly MethodInfo WorldPositionMethod =
         typeof(GraphInterop).GetMethod("WorldPositionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
