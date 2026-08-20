@@ -193,6 +193,62 @@ static const char* kCurveGraphText =
     "LINK zero.value move.y\n"
     "LINK zero.value move.z\n";
 
+// Reads Translate's `success` pin through a Select and writes the answer into Z, so a native
+// reader can see whether the pin carried anything at all.
+//
+// WHAT THIS GRAPH DID BEFORE THE FIX, measured by putting the bug back and running it: it did not
+// compile. EmitExecTransformWrite stored `success` into _pinLocals, which is empty for the whole
+// of CompileEntryPoint, so nothing landed in _execLocals either -- and EmitPullOutput, finding
+// neither, fell through to its side-effect refusal:
+//
+//   'mv.success' cannot be read as a data value: Translate has a side effect and must be reached
+//   by wiring it directly into the exec chain (give it exec pins), not by pulling its output
+//
+// The author HAD wired it into the exec chain. That is the message EmitExecSideEffect's own
+// comment describes for the seven nodes it fixed first, and it is worse than a wrong value: it
+// tells someone who did exactly the right thing to do the thing they already did.
+static const char* kSuccessGraphText =
+    "OCGRAPH 1\n"
+    "NAME SuccessProbe\n"
+    "DESCRIPTION Translates, then writes Translate.success into Z as 7 or -7.\n"
+    "\n"
+    "PARAM entity int\n"
+    "NODE ent Param param=entity\n"
+    "\n"
+    "ENTRY go OnMove\n"
+    "NODE go CustomEvent name=OnMove\n"
+    "\n"
+    "NODE dx ConstFloat value=5.0\n"
+    "NODE zero ConstFloat value=0.0\n"
+    "NODE yes ConstFloat value=7.0\n"
+    "NODE no ConstFloat value=-7.0\n"
+    "\n"
+    "NODE mv Translate\n"
+    "LINK go.exec mv.exec\n"
+    "LINK ent.value mv.entity\n"
+    "LINK dx.value mv.x\n"
+    "LINK zero.value mv.y\n"
+    "LINK zero.value mv.z\n"
+    "\n"
+    "NODE pick Select\n"
+    "LINK mv.success pick.cond\n"
+    "LINK yes.value pick.ifTrue\n"
+    "LINK no.value pick.ifFalse\n"
+    "\n"
+    "NODE mark SetFieldVec3 field=CLocal.scale\n"
+    "PIN mark exec in exec\n"
+    "PIN mark entity in int\n"
+    "PIN mark x in float\n"
+    "PIN mark y in float\n"
+    "PIN mark z in float\n"
+    "PIN mark then out exec\n"
+    "PIN mark success out bool\n"
+    "LINK mv.then mark.exec\n"
+    "LINK ent.value mark.entity\n"
+    "LINK zero.value mark.x\n"
+    "LINK zero.value mark.y\n"
+    "LINK pick.result mark.z\n";
+
 int main() {
     AVER_INFO("AnimNotifyGraphTest");
 
@@ -479,6 +535,34 @@ int main() {
         g_host->graphUnload(static_cast<i32>(reader));
         aver_fw_set_anim_curve_provider(nullptr, nullptr);
         w.destroy(reader);
+        w.flush();
+    }
+
+    AVER_INFO("an exec node's `success` pin is READABLE");
+    {
+        // See kSuccessGraphText above for the exact compile error this graph used to produce, and
+        // why it was the misleading kind rather than the wrong-value kind.
+        std::ofstream sf(g_dir + "/success.ocgraph", std::ios::binary);
+        sf << kSuccessGraphText;
+        sf.close();
+
+        const scene::Entity mover = w.create("mover");
+        auto* ml = w.component<scene::CLocal>(mover, scene::kComponentLocal);
+        if (ml) { ml->xf.position = Vec3{0, 0, 0}; ml->xf.scale = Vec3{1, 1, 1}; }
+
+        check(g_host->graphLoad(static_cast<i32>(mover), g_dir + "/success.ocgraph"),
+              "the success probe compiles");
+        check(g_host->graphFire(static_cast<i32>(mover), "OnMove"), "and runs");
+
+        ml = w.component<scene::CLocal>(mover, scene::kComponentLocal);
+        check(ml && std::fabs(ml->xf.position.x - 5.0f) < 1e-3f,
+              "the Translate itself ran, so the chain reached the node at all");
+        check(ml && ml->xf.scale.z > 0.0f,
+              "AND `success` CAME BACK TRUE -- before the fix this graph would not compile at all");
+        if (ml) AVER_INFO("  success -> {:.1f} (7 = true, -7 = false)", ml->xf.scale.z);
+
+        g_host->graphUnload(static_cast<i32>(mover));
+        w.destroy(mover);
         w.flush();
     }
 

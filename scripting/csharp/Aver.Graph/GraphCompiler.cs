@@ -1087,8 +1087,14 @@ public class GraphCompiler
             default:
                 _il.Emit(OpCodes.Call, DestroyBodyMethod); break;
         }
-        if (_pinLocals.TryGetValue((node.Id, "success"), out var local)) _il.Emit(OpCodes.Stloc, local);
-        else                                                            _il.Emit(OpCodes.Pop);
+        // INTO AN EXEC LOCAL, NOT _pinLocals -- see EmitExecSideEffect's own comment for the full
+        // account. This emitter is reached ONLY from the exec dispatch, and _pinLocals is empty
+        // for the whole of CompileEntryPoint, so this lookup never hit: `success` on every physics
+        // writer fell to Pop and was a pin no graph could read. A body write that failed because
+        // the handle was stale looked identical to one that worked.
+        var successPin = node.Pins.FirstOrDefault(p => p.IsOutput && p.Name == "success" && p.Type == PinType.Bool);
+        if (successPin != null) _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "success", typeof(bool)));
+        else                    _il.Emit(OpCodes.Pop);
     }
 
     /// The creators. Each returns a BODY HANDLE, which goes into an exec-local rather than a pin
@@ -1151,8 +1157,13 @@ public class GraphCompiler
             default:
                 _il.Emit(OpCodes.Call, DestroyEntityMethod); break;
         }
-        if (_pinLocals.TryGetValue((node.Id, "success"), out var local)) _il.Emit(OpCodes.Stloc, local);
-        else                                                            _il.Emit(OpCodes.Pop);
+        // INTO AN EXEC LOCAL, NOT _pinLocals -- see EmitExecSideEffect's own comment for the full
+        // account. Identical to the physics writer above, and to EmitExecSideEffect which
+        // fixed the same mistake first. Translate/SetLocalScale/DestroyEntity each return a real
+        // bool that no graph could see.
+        var successPin = node.Pins.FirstOrDefault(p => p.IsOutput && p.Name == "success" && p.Type == PinType.Bool);
+        if (successPin != null) _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "success", typeof(bool)));
+        else                    _il.Emit(OpCodes.Pop);
     }
 
     private void EmitExecApiCall(Node node)
@@ -1199,11 +1210,18 @@ public class GraphCompiler
         // branch on whether the write landed -- which for Teleport (false on a character with no
         // capsule yet) is the difference between noticing a failure and silently continuing.
         //
-        // THE SAME BUG IS IN TEN OTHER EMITTERS (EmitSetField, EmitSetParent, EmitSetName, EmitSetMesh,
-        // EmitSetMaterial, EmitSetFieldVec3, EmitExecPhysicsWrite, EmitExecTransformWrite,
-        // EmitGetForward, EmitGetViewEntity) and is deliberately NOT fixed here. Each is a behaviour
-        // change to nodes this commit does not otherwise touch, and they deserve their own change with
-        // their own tests rather than riding along unexamined.
+        // THIS NOTE USED TO NAME TEN OTHER EMITTERS WITH THE SAME BUG. Checked one at a time, eight of
+        // them do not have it: EmitSetField, EmitSetParent, EmitSetName, EmitSetMesh, EmitSetMaterial,
+        // EmitSetFieldVec3, EmitGetForward and EmitGetViewEntity are reached ONLY from EmitNode -- the
+        // PULL compiler's switch -- where _pinLocals is exactly the right dictionary. The five of
+        // those that are also exec-capable already have their own twin (EmitExecSetParent,
+        // EmitExecSetName, EmitExecSetMesh, EmitExecSetMaterial, EmitExecSetFieldVec3), and every twin
+        // uses GetOrCreateExecLocal.
+        //
+        // The two that really did have it -- EmitExecPhysicsWrite and EmitExecTransformWrite, both
+        // reached ONLY from the exec dispatch -- are fixed, with the same shape as this block. Nothing
+        // is outstanding, and the count in the old note was the thing worth correcting: eight of the
+        // ten were never broken, so anyone acting on it would have "fixed" working code.
         var successPin = node.Pins.FirstOrDefault(p => p.IsOutput && p.Name == "success" && p.Type == PinType.Bool);
         if (successPin != null) _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "success", typeof(bool)));
         else                    _il.Emit(OpCodes.Pop);
