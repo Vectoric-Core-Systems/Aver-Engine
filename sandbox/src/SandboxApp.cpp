@@ -1332,24 +1332,41 @@ public:
             // frame. A NEGATIVE COUNT IS REPORTED rather than cast to a huge unsigned one and
             // clamped: the warning that came out of that read "4294967291 shadow rays clamped to
             // 32", which describes the cast and not the typo that caused it.
-            if (rtRaysOverride_ > 0) s.rtShadowRays = static_cast<u32>(rtRaysOverride_);
+            // TIERS FIRST, IN THEIR OWN CALL. Everything above sets a QUALITY TIER; everything below
+            // sets a KNOB that a tier DERIVES. Putting both in one setSettings is a trap, and it cost
+            // real measurements before it was understood:
+            //
+            //   voxi::Renderer::setSettings decides "did the caller set this knob" BY VALUE --
+            //   `n.rtShadowRays == settings_.rtShadowRays` means "unchanged, so derive it from the new
+            //   tier". A caller asking for a value the field ALREADY HOLDS is therefore indistinguishable
+            //   from a caller who never asked, and the tier silently wins. `--rt 4 --rt-rays 1` and
+            //   `--rt 4` alone both measured 17.4 ms: the explicit 1 was thrown away every time,
+            //   because rtShadowRays was already 1 when the flag arrived.
+            //
+            // Two calls fixes it without touching the derivation rule, which is right for the editor
+            // and for project manifests: apply the tiers, let them derive, read the result back, then
+            // apply the explicit knobs in a SECOND call where no tier is changing -- so the
+            // derivation cannot fire and cannot overwrite them.
+            voxi::Renderer::get().setSettings(s);
+            auto k = voxi::Renderer::get().settings();
+            if (rtRaysOverride_ > 0) k.rtShadowRays = static_cast<u32>(rtRaysOverride_);
             else if (rtRaysOverride_ < 0)
                 AVER_WARN("[Sandbox] --rt-rays {} is not a ray count; the default of {} stands",
-                          rtRaysOverride_, s.rtShadowRays);
+                          rtRaysOverride_, k.rtShadowRays);
             // >= 0, not > 0: 0 is a MEANING here (filter off), not "flag absent" -- the sentinel
             // is -1, unlike its two neighbours whose valid range starts at 1.
-            if (rtShadowDenoiseOverride_ >= 0) s.rtShadowDenoise = static_cast<u32>(rtShadowDenoiseOverride_);
-            if (rtRenderModeOverride_    >= 0) s.rtRenderMode    = static_cast<u32>(rtRenderModeOverride_);
-            if (ptBouncesOverride_       >= 0) s.ptBounces       = static_cast<u32>(ptBouncesOverride_);
-            if (rtPixelsPerRayOverride_ > 0) s.rtPixelsPerRayTile = static_cast<u32>(rtPixelsPerRayOverride_);
+            if (rtShadowDenoiseOverride_ >= 0) k.rtShadowDenoise = static_cast<u32>(rtShadowDenoiseOverride_);
+            if (rtRenderModeOverride_    >= 0) k.rtRenderMode    = static_cast<u32>(rtRenderModeOverride_);
+            if (ptBouncesOverride_       >= 0) k.ptBounces       = static_cast<u32>(ptBouncesOverride_);
+            if (rtPixelsPerRayOverride_ > 0) k.rtPixelsPerRayTile = static_cast<u32>(rtPixelsPerRayOverride_);
             else if (rtPixelsPerRayOverride_ < 0)
                 AVER_WARN("[Sandbox] --rt-pixels-per-ray {} is not a tile edge; the default of {} stands",
-                          rtPixelsPerRayOverride_, s.rtPixelsPerRayTile);
-            if (giUpdateIntervalOverride_ > 0) s.giUpdateInterval = static_cast<u32>(giUpdateIntervalOverride_);
+                          rtPixelsPerRayOverride_, k.rtPixelsPerRayTile);
+            if (giUpdateIntervalOverride_ > 0) k.giUpdateInterval = static_cast<u32>(giUpdateIntervalOverride_);
             else if (giUpdateIntervalOverride_ < 0)
                 AVER_WARN("[Sandbox] --gi-update-interval {} is not a frame count; the default of {} stands",
-                          giUpdateIntervalOverride_, s.giUpdateInterval);
-            voxi::Renderer::get().setSettings(s);
+                          giUpdateIntervalOverride_, k.giUpdateInterval);
+            voxi::Renderer::get().setSettings(k);
             AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
 
             // Registration is non-owning: voxiRenderer_ must outlive the device, torn down in onShutdown.
