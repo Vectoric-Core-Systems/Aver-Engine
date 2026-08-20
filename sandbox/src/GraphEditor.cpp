@@ -122,6 +122,11 @@ inline Vec2 fromIm(ImVec2 v) { return Vec2(v.x, v.y); }
 // The split is by what the node DOES, not by which family it is filed under: calling into the
 // engine is orange, computing a value is cool, ordering other nodes is neutral.
 ImU32 headerColorForCategory(const std::string& category) {
+    // A graph's OWN functions get the Aver orange the engine-call families use, because that is
+    // exactly what a Call Function node is from the caller's side: a call. Blueprint makes the
+    // same choice -- a user function call and an engine function call are drawn identically,
+    // because the distinction does not matter at the call site.
+    if (category == "Function") return IM_COL32(242, 101, 34, 255);
     std::string c = category;
     for (char& ch : c) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
 
@@ -208,6 +213,13 @@ void GraphEditor::loadFromDisk() {
     // Before layout: a node's box height comes from its pin count, so filling the pins in afterwards
     // would space the graph for nodes smaller than the ones actually drawn.
     synthesizeMissingPins();
+    // A FUNCTION NODE HAS NO CATALOG PINS TO SYNTHESISE, so the loop above cannot help it: a
+    // FuncEntry/FuncReturn/CallFunc takes its shape from a FUNC declaration, which is data, not a
+    // node type. Derived here for the same reason synthesizeMissingPins exists at all -- the file
+    // records PIN lines only where a pin carries something extra, so without this a call node
+    // loaded from disk has no pins, draws none, and every wire into it silently disappears. Which
+    // is exactly what the first screenshot of this feature showed.
+    for (const auto& f : graph_.functions) resyncFunctionNodePins(f.name);
 
     displayPos_.clear();
     for (const auto& n : graph_.nodes)
@@ -447,6 +459,11 @@ std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canv
         syncEventEntry(node.id, eventName);
     }
 
+    // A NODE DROPPED ONTO A FUNCTION'S CANVAS BELONGS TO THAT FUNCTION. Without this it would be
+    // created in the event graph and vanish the instant it was drawn -- present in the file,
+    // invisible on the canvas that made it.
+    if (!currentSubgraph_.empty()) setNodeAttribute(graph_.nodes.back(), "func", currentSubgraph_);
+
     displayPos_[node.id] = canvasPos;
     selectedNodes_ = {node.id};
     selectedLink_ = -1;
@@ -599,6 +616,398 @@ std::string GraphEditor::commentAtCanvas(Vec2 canvasPt, float dpi, bool* outOnGr
         if (canvasPt.y >= c.y && canvasPt.y <= c.y + barH) return c.id;
     }
     return {};
+}
+
+// ---------------------------------------------------------------- functions
+
+namespace {
+// A node's owning subgraph, read straight from its func= attribute. Empty means the event graph --
+// see GraphEditor::currentSubgraph() for why one convention is used everywhere rather than three.
+std::string subgraphOf(const fmt::OcGraphNode& n) {
+    const GraphNodeAttribute a = getNodeAttribute(n, "func");
+    return a.found ? a.value : std::string();
+}
+bool isFunctionNodeType(const std::string& t) {
+    return t == "FuncEntry" || t == "FuncReturn" || t == "CallFunc";
+}
+} // namespace
+
+fmt::OcGraphFunction* GraphEditor::findFunction(const std::string& name) {
+    for (auto& f : graph_.functions) if (f.name == name) return &f;
+    return nullptr;
+}
+
+void GraphEditor::setCurrentSubgraph(const std::string& funcName) {
+    if (currentSubgraph_ == funcName) return;
+    currentSubgraph_ = funcName;
+    // A selection in the subgraph you just left is a selection you can no longer see, and Delete
+    // would still act on it. Cleared, and the view re-framed onto whatever the new subgraph holds --
+    // which is the same "the view is the editor's until you touch it" rule the framing code follows,
+    // applied to a change of what there is to look at.
+    selectedNodes_.clear();
+    selectedLink_ = -1;
+    selectedComment_.clear();
+    pendingFrame_ = true;
+    viewTouched_ = false;
+}
+
+std::string GraphEditor::addFunction(const std::string& name) {
+    if (name.empty() || name.find_first_of(" \t") != std::string::npos) return {};
+    std::string unique = name;
+    for (int i = 2; findFunction(unique) != nullptr; ++i) unique = name + std::to_string(i);
+
+    pushUndo();
+    fmt::OcGraphFunction fn;
+    fn.name = unique;
+    fn.pure = true;   // a fresh function has no body, so it has no control flow to be impure about
+    graph_.functions.push_back(fn);
+
+    // The entry node, always. See the header for why this is not a convenience.
+    fmt::OcGraphNode entry;
+    entry.id = makeUniqueNodeId("FuncEntry");
+    entry.type = "FuncEntry";
+    entry.x = 0.0; entry.y = 0.0;
+    setNodeAttribute(entry, "func", unique);
+    graph_.nodes.push_back(entry);
+    displayPos_[entry.id] = Vec2{0.0f, 0.0f};
+
+    dirty_ = true;
+    return unique;
+}
+
+bool GraphEditor::renameFunction(const std::string& oldName, const std::string& newName) {
+    if (newName.empty() || newName.find_first_of(" \t") != std::string::npos) return false;
+    if (oldName == newName) return true;
+    if (findFunction(oldName) == nullptr) return false;
+    if (findFunction(newName) != nullptr) {
+        showRejectionBanner("cannot rename function '" + oldName + "': '" + newName + "' already exists");
+        return false;
+    }
+    pushUndo();
+    findFunction(oldName)->name = newName;
+    // EVERY REFERENCE MOVES IN THE SAME UNDO STEP -- both the func= that says where a node lives and
+    // the call= that says what a call node calls. A rename that left either behind would produce a
+    // file that parses and refuses to compile, which is the exact failure renameVariable was written
+    // to avoid for var=.
+    for (auto& n : graph_.nodes) {
+        const GraphNodeAttribute owner = getNodeAttribute(n, "func");
+        if (owner.found && owner.value == oldName) setNodeAttribute(n, "func", newName);
+        const GraphNodeAttribute target = getNodeAttribute(n, "call");
+        if (target.found && target.value == oldName) setNodeAttribute(n, "call", newName);
+    }
+    if (currentSubgraph_ == oldName) currentSubgraph_ = newName;
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::deleteFunction(const std::string& name, std::vector<std::string>* outBlockedBy) {
+    if (findFunction(name) == nullptr) return false;
+    std::vector<std::string> callers;
+    for (const auto& n : graph_.nodes) {
+        const GraphNodeAttribute target = getNodeAttribute(n, "call");
+        if (!target.found || target.value != name) continue;
+        // A call INSIDE the function being deleted goes with it, so it is not a blocker.
+        if (subgraphOf(n) == name) continue;
+        callers.push_back(n.id);
+    }
+    if (!callers.empty()) {
+        if (outBlockedBy) *outBlockedBy = callers;
+        std::string list;
+        for (const auto& c : callers) list += (list.empty() ? "" : ", ") + c;
+        showRejectionBanner("cannot delete function '" + name + "': still called by " + list);
+        return false;
+    }
+
+    pushUndo();
+    std::vector<std::string> doomed;
+    for (const auto& n : graph_.nodes) if (subgraphOf(n) == name) doomed.push_back(n.id);
+    const auto isDoomed = [&](const std::string& id) {
+        return std::find(doomed.begin(), doomed.end(), id) != doomed.end();
+    };
+    std::vector<fmt::OcGraphLink> keptLinks;
+    for (const auto& l : graph_.links)
+        if (!isDoomed(l.sourceNode) && !isDoomed(l.destNode)) keptLinks.push_back(l);
+    graph_.links = std::move(keptLinks);
+    std::vector<fmt::OcGraphNode> keptNodes;
+    for (auto& n : graph_.nodes) {
+        if (isDoomed(n.id)) { displayPos_.erase(n.id); continue; }
+        keptNodes.push_back(std::move(n));
+    }
+    graph_.nodes = std::move(keptNodes);
+    for (usize i = 0; i < graph_.functions.size(); ++i) {
+        if (graph_.functions[i].name != name) continue;
+        graph_.functions.erase(graph_.functions.begin() + static_cast<isize>(i));
+        break;
+    }
+    if (currentSubgraph_ == name) setCurrentSubgraph({});
+    selectedNodes_.clear();
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::addFunctionPin(const std::string& funcName, bool isInput, const std::string& pinName,
+                                  const std::string& type) {
+    fmt::OcGraphFunction* fn = findFunction(funcName);
+    if (!fn || pinName.empty() || pinName.find_first_of(" \t") != std::string::npos) return false;
+    auto& list = isInput ? fn->inputs : fn->outputs;
+    for (const auto& p : list) if (p.name == pinName) return false;
+    const std::string t = (type == "int" || type == "bool") ? type : std::string("float");
+
+    pushUndo();
+    fmt::OcGraphFunction* live = findFunction(funcName);
+    (isInput ? live->inputs : live->outputs).push_back(fmt::OcGraphFunctionPin{pinName, t});
+
+    // An OUTPUT needs somewhere to come from. The first one brings the FuncReturn node with it, for
+    // the same reason addFunction brings the FuncEntry: a function that declares an output and has no
+    // FuncReturn does not compile, and the error names a node type the author has not met yet.
+    if (!isInput && live->outputs.size() == 1) {
+        bool haveReturn = false;
+        for (const auto& n : graph_.nodes)
+            if (n.type == "FuncReturn" && subgraphOf(n) == funcName) { haveReturn = true; break; }
+        if (!haveReturn) {
+            fmt::OcGraphNode ret;
+            ret.id = makeUniqueNodeId("FuncReturn");
+            ret.type = "FuncReturn";
+            ret.x = 420.0; ret.y = 0.0;
+            setNodeAttribute(ret, "func", funcName);
+            graph_.nodes.push_back(ret);
+            displayPos_[ret.id] = Vec2{420.0f, 0.0f};
+        }
+    }
+    resyncFunctionNodePins(funcName);
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::removeFunctionPin(const std::string& funcName, bool isInput, const std::string& pinName) {
+    fmt::OcGraphFunction* fn = findFunction(funcName);
+    if (!fn) return false;
+    auto& list = isInput ? fn->inputs : fn->outputs;
+    usize idx = list.size();
+    for (usize i = 0; i < list.size(); ++i) if (list[i].name == pinName) { idx = i; break; }
+    if (idx == list.size()) return false;
+
+    pushUndo();
+    fmt::OcGraphFunction* live = findFunction(funcName);
+    auto& liveList = isInput ? live->inputs : live->outputs;
+    liveList.erase(liveList.begin() + static_cast<isize>(idx));
+    // EVERY WIRE INTO THE PIN THAT NO LONGER EXISTS GOES TOO, in the same undo step. Leaving them
+    // would ship a LINK naming a pin nothing declares, which the parser refuses on the next load --
+    // the editor writing a file it cannot reopen, which is the worst failure an authoring tool has.
+    std::vector<fmt::OcGraphLink> kept;
+    for (const auto& l : graph_.links) {
+        bool drop = false;
+        for (const auto& n : graph_.nodes) {
+            if (!isFunctionNodeType(n.type)) continue;
+            const bool aboutThis = (n.type == "CallFunc")
+                ? (getNodeAttribute(n, "call").found && getNodeAttribute(n, "call").value == funcName)
+                : (subgraphOf(n) == funcName);
+            if (!aboutThis) continue;
+            if (l.sourceNode == n.id && l.sourcePin == pinName) drop = true;
+            if (l.destNode == n.id && l.destPin == pinName) drop = true;
+        }
+        if (!drop) kept.push_back(l);
+    }
+    graph_.links = std::move(kept);
+    resyncFunctionNodePins(funcName);
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::setFunctionPure(const std::string& funcName, bool pure) {
+    fmt::OcGraphFunction* fn = findFunction(funcName);
+    if (!fn || fn->pure == pure) return fn != nullptr;
+    pushUndo();
+    findFunction(funcName)->pure = pure;
+    // Purity decides whether every one of this function's nodes has exec pins at all, so the pins
+    // have to be rebuilt -- and any exec wire that just stopped having a pin to land on has to go
+    // with them, or the file will not reopen.
+    resyncFunctionNodePins(funcName);
+    dirty_ = true;
+    return true;
+}
+
+void GraphEditor::resyncFunctionNodePins(const std::string& funcName) {
+    const fmt::OcGraphFunction* fn = findFunction(funcName);
+    if (!fn) return;
+
+    // ONE PLACE THAT KNOWS THE PIN SHAPE OF ALL THREE NODE TYPES, rather than three call sites that
+    // could drift apart -- and it has to agree exactly with OcGraphParser.AddDefaultPins on the C#
+    // side, which is the reader that actually runs the graph. The rules, in both: a pure function has
+    // no exec pins anywhere; an impure one has them on all three; a FuncEntry's OUTPUTS are the
+    // function's inputs; a FuncReturn's INPUTS are its outputs; a call node has both.
+    const auto pins = [&](const fmt::OcGraphNode& n) {
+        std::vector<fmt::OcGraphPin> out;
+        if (n.type == "FuncEntry") {
+            if (!fn->pure) out.push_back({"then", "exec", true, ""});
+            for (const auto& p : fn->inputs) out.push_back({p.name, p.type, true, ""});
+        } else if (n.type == "FuncReturn") {
+            if (!fn->pure) out.push_back({"exec", "exec", false, ""});
+            for (const auto& p : fn->outputs) out.push_back({p.name, p.type, false, ""});
+        } else {   // CallFunc
+            if (!fn->pure) {
+                out.push_back({"exec", "exec", false, ""});
+                out.push_back({"then", "exec", true, ""});
+            }
+            for (const auto& p : fn->inputs) out.push_back({p.name, p.type, false, ""});
+            for (const auto& p : fn->outputs) out.push_back({p.name, p.type, true, ""});
+        }
+        return out;
+    };
+
+    std::vector<std::string> touched;
+    for (auto& n : graph_.nodes) {
+        const bool mine = (n.type == "CallFunc")
+            ? (getNodeAttribute(n, "call").found && getNodeAttribute(n, "call").value == funcName)
+            : (isFunctionNodeType(n.type) && subgraphOf(n) == funcName);
+        if (!mine) continue;
+        n.pins = pins(n);
+        touched.push_back(n.id);
+        // MARKED SYNTHESISED, so save() strips them again. These pins are not information -- they
+        // are a restatement of the FUNC/FUNCIN/FUNCOUT records three lines up, and BOTH readers
+        // derive them the same way (this function and OcGraphParser.AddDefaultPins). Writing them
+        // would put a second copy of the signature in the file, free to disagree with the first
+        // after any edit, and would balloon a graph with one call node into a dozen PIN records the
+        // author never wrote -- the same damage synthesizedPins_ was created to prevent.
+        for (const auto& p : n.pins) synthesizedPins_.insert(pinKey(n.id, p.name, p.isOutput));
+    }
+
+    // Any wire whose end no longer exists on a rebuilt node is dropped -- see removeFunctionPin for
+    // why a dangling LINK is not survivable.
+    std::vector<fmt::OcGraphLink> kept;
+    for (const auto& l : graph_.links) {
+        const auto stillThere = [&](const std::string& nodeId, const std::string& pin, bool isOutput) {
+            if (std::find(touched.begin(), touched.end(), nodeId) == touched.end()) return true;
+            for (const auto& n : graph_.nodes) {
+                if (n.id != nodeId) continue;
+                for (const auto& p : n.pins) if (p.name == pin && p.isOutput == isOutput) return true;
+                return false;
+            }
+            return true;
+        };
+        if (stillThere(l.sourceNode, l.sourcePin, true) && stillThere(l.destNode, l.destPin, false))
+            kept.push_back(l);
+    }
+    graph_.links = std::move(kept);
+}
+
+std::string GraphEditor::addCallNode(const std::string& funcName, Vec2 canvasPos) {
+    if (findFunction(funcName) == nullptr) return {};
+    pushUndo();
+    fmt::OcGraphNode node;
+    node.id = makeUniqueNodeId("CallFunc");
+    node.type = "CallFunc";
+    node.x = canvasPos.x;
+    node.y = canvasPos.y;
+    setNodeAttribute(node, "call", funcName);
+    // A call node dropped while a function's canvas is open belongs to THAT function -- including
+    // when it calls the same one, which is how a recursive call is authored.
+    if (!currentSubgraph_.empty()) setNodeAttribute(node, "func", currentSubgraph_);
+    graph_.nodes.push_back(node);
+    displayPos_[node.id] = canvasPos;
+    resyncFunctionNodePins(funcName);
+    selectedNodes_ = {node.id};
+    selectedLink_ = -1;
+    dirty_ = true;
+    return node.id;
+}
+
+// ---------------------------------------------------------------- the Functions panel
+
+// Thin ImGui glue over addFunction/renameFunction/deleteFunction/addFunctionPin/removeFunctionPin/
+// setFunctionPure -- the same split the Variables panel above it draws, and for the same reason: the
+// model half is exercised headlessly by GraphEditorLoadSaveTest, against the exact calls this panel
+// makes rather than a hand-simulated approximation of them.
+void GraphEditor::drawFunctionsPanel(float dpi) {
+#if AVER_WITH_IMGUI
+    if (!ImGui::CollapsingHeader("Functions", ImGuiTreeNodeFlags_DefaultOpen)) return;
+
+    if (graph_.functions.empty()) ImGui::TextDisabled("No functions declared.");
+
+    static const char* kTypes[] = {"float", "int", "bool"};
+
+    for (usize fi = 0; fi < graph_.functions.size(); ++fi) {
+        const std::string fname = graph_.functions[fi].name;   // by VALUE: the loop body can delete it
+        ImGui::PushID(static_cast<int>(fi));
+
+        const bool open = ImGui::TreeNodeEx("##fn", ImGuiTreeNodeFlags_DefaultOpen, "%s", fname.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Open")) setCurrentSubgraph(fname);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Call")) {
+            // Dropped at the middle of wherever the canvas is looking, which is the only position
+            // available here -- the panel has no cursor of its own.
+            addCallNode(fname, screenToCanvas(view_, Vec2{lastCanvasSizePx_.x * 0.5f, lastCanvasSizePx_.y * 0.5f}));
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(currentSubgraph_.empty()
+                               ? "Add a node that calls this function, in the event graph"
+                               : "Add a node that calls this function, in the subgraph you are editing");
+
+        if (open) {
+            // ---- name
+            const std::string nameKey = "fnname\x1f" + fname;
+            if (funcEditRowKey_ != nameKey) std::snprintf(funcEditBuf_, sizeof funcEditBuf_, "%s", fname.c_str());
+            ImGui::SetNextItemWidth(150.0f * dpi);
+            if (ImGui::InputText("Name", funcEditBuf_, sizeof funcEditBuf_)) funcEditRowKey_ = nameKey;
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                renameFunction(fname, funcEditBuf_);
+                funcEditRowKey_.clear();
+            }
+
+            // ---- purity
+            bool pure = graph_.functions[fi].pure;
+            if (ImGui::Checkbox("Pure", &pure)) setFunctionPure(fname, pure);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Pure: no exec pins, callable from a data wire.\n"
+                                   "An impure function is the only kind that can RECURSE -- a pure one\n"
+                                   "has no Branch to stop with, and Select evaluates both of its sides.");
+
+            // ---- inputs and outputs
+            for (int side = 0; side < 2; ++side) {
+                const bool isInput = (side == 0);
+                ImGui::TextDisabled("%s", isInput ? "Inputs" : "Outputs");
+                const auto& list = isInput ? graph_.functions[fi].inputs : graph_.functions[fi].outputs;
+                for (usize pi = 0; pi < list.size(); ++pi) {
+                    ImGui::PushID(static_cast<int>(side * 1000 + pi));
+                    ImGui::TextUnformatted(list[pi].name.c_str());
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", list[pi].type.c_str());
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("X")) removeFunctionPin(fname, isInput, list[pi].name);
+                    ImGui::PopID();
+                }
+                ImGui::PushID(side);
+                ImGui::SetNextItemWidth(90.0f * dpi);
+                ImGui::InputTextWithHint("##newpin", isInput ? "new input" : "new output",
+                                          newFuncPinBuf_, sizeof newFuncPinBuf_);
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(70.0f * dpi);
+                ImGui::Combo("##newpintype", &newFuncPinType_, kTypes, IM_ARRAYSIZE(kTypes));
+                ImGui::SameLine();
+                if (ImGui::SmallButton("+") && newFuncPinBuf_[0] != 0) {
+                    addFunctionPin(fname, isInput, newFuncPinBuf_, kTypes[newFuncPinType_]);
+                    newFuncPinBuf_[0] = 0;
+                }
+                ImGui::PopID();
+            }
+
+            // ---- delete. deleteFunction raises its own rejection banner naming every caller, the
+            // same way deleteVariable does -- so this is one line and no error handling.
+            if (ImGui::SmallButton("Delete function")) deleteFunction(fname);
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+        ImGui::Separator();
+    }
+
+    if (ImGui::Button("+ New Function")) {
+        const std::string made = addFunction("NewFunction");
+        if (!made.empty()) setCurrentSubgraph(made);   // a new function you cannot see is not made
+    }
+#else
+    (void)dpi;
+#endif
 }
 
 // ---------------------------------------------------------------- framing and layout
@@ -1007,6 +1416,10 @@ void GraphEditor::recomputeLayouts(float dpi) {
     layouts_.clear();
     layouts_.reserve(graph_.nodes.size());
     for (const auto& n : graph_.nodes) {
+        // ONLY THE SUBGRAPH ON SCREEN. layouts_ is what the canvas draws, what hit-testing tests,
+        // what box-select selects and what framing measures -- so filtering here scopes all four
+        // at once, and there is no second place that could disagree about which nodes are visible.
+        if (subgraphOf(n) != currentSubgraph_) continue;
         fmt::OcGraphNode display = n; // layout reads position from the node it's given; substitute
                                        // the DISPLAY position so a live drag (which only touches
                                        // displayPos_, see below) affects drawing without touching
@@ -1065,6 +1478,24 @@ void GraphEditor::draw(Engine& e) {
     // FRAME ALL AND AUTO-LAYOUT ARE BUTTONS, not only key bindings, and that is the point of them.
     // The graph that opens on empty grid is found by someone who does not yet know this editor;
     // a binding they have to be told about does not reach them. The shortcut is in the label.
+    // ---- WHICH SUBGRAPH THE CANVAS IS SHOWING. A combo rather than a second tab bar, because the
+    // number of functions is unbounded and the tab bar above already means something else (what the
+    // actor DOES versus what it IS). Absent entirely until a graph declares its first function, so
+    // nothing changes for the graphs that have none -- which is every graph written before now.
+    if (!graph_.functions.empty()) {
+        const std::string label = currentSubgraph_.empty() ? std::string("Event Graph") : currentSubgraph_;
+        ImGui::SetNextItemWidth(180.0f * dpi);
+        if (ImGui::BeginCombo("##graphSubgraph", label.c_str())) {
+            if (ImGui::Selectable("Event Graph", currentSubgraph_.empty())) setCurrentSubgraph({});
+            for (const auto& f : graph_.functions) {
+                const bool sel = (currentSubgraph_ == f.name);
+                std::string row = f.name + (f.pure ? "  (pure)" : "");
+                if (ImGui::Selectable(row.c_str(), sel)) setCurrentSubgraph(f.name);
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+    }
     if (ImGui::Button("Frame All")) framePendingFromToolbar_ = true;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fit the whole graph in view  (Home)\n"
                                                    "F frames the selection instead");
@@ -1744,6 +2175,17 @@ void GraphEditor::drawEventGraph(float dpi) {
         // Above the categories, not inside one: a comment box is not a node, has no pins, and
         // filing it under a node family would be the first place an author looked and the last
         // place they found it.
+        // Every declared function gets a real "Call <name>" entry, regenerated from graph_.functions
+        // every frame -- so renaming one renames its palette row, and there is no second list to
+        // keep in step. A call node has no fixed pin shape (it takes the callee's), which is why
+        // these cannot live in the static catalog with everything else.
+        if (!graph_.functions.empty() && ImGui::BeginMenu("Call Function")) {
+            for (const auto& f : graph_.functions) {
+                std::string row = f.name + (f.pure ? "  (pure)" : "");
+                if (ImGui::MenuItem(row.c_str())) addCallNode(f.name, pendingSpawnCanvasPos_);
+            }
+            ImGui::EndMenu();
+        }
         if (ImGui::MenuItem("Comment Box", "C")) {
             const Vec2 a = pendingSpawnCanvasPos_;
             addComment(a, Vec2{a.x + 320.0f * dpi, a.y + 180.0f * dpi}, "Comment");
@@ -1755,6 +2197,10 @@ void GraphEditor::drawEventGraph(float dpi) {
                 categories.push_back(d.category);
         }
         for (const auto& cat : categories) {
+            // See GraphNodeDefs.hpp's Function block: these three exist in the catalog for their
+            // name and colour, and are created by the Functions panel, which knows which function
+            // they belong to. Dropping a bare one produces a node with no pins and no owner.
+            if (cat == "Function") continue;
             if (ImGui::BeginMenu(cat.c_str())) {
                 for (const auto& d : graphNodeCatalog()) {
                     if (d.category != cat) continue;
@@ -1779,6 +2225,8 @@ void GraphEditor::drawEventGraph(float dpi) {
     // ImGui context) by GraphEditorGeometryTest and GraphEditorLoadSaveTest.
     ImGui::SameLine();
     ImGui::BeginChild("##graphDetails", ImVec2(detailsW, std::max(avail.y, 80.0f * dpi)), true);
+
+    drawFunctionsPanel(dpi);
 
     // ---- Variables panel: declare / rename / retype / delete -----------------------------------------
     // Lives ABOVE the per-node section below, and is drawn regardless of selection (unlike everything

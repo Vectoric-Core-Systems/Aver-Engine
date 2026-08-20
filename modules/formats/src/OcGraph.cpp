@@ -45,7 +45,8 @@ bool isNumericToken(std::string_view s) {
 // path (see there) to replace each kind in place at its own first occurrence, rather than collapsing
 // every kind into one inserted block. `Other` covers blank lines, comments, and anything writeOcgraph
 // does not model; those are always copied through verbatim, at their original position.
-enum class OwnedLineKind { Header, Name, Description, Var, Comp, Comment, Node, Pin, Link, Entry, Out, Other };
+enum class OwnedLineKind { Header, Name, Description, Var, Comp, Comment, Func, FuncPin, Node, Pin, Link,
+                            Entry, Out, Other };
 
 // `sawHeader` is the caller's running state: only the FIRST line whose key is OCGRAPH counts as the
 // header; a later stray "OCGRAPH ..." line (malformed input, or inside an unrelated unknown record)
@@ -59,6 +60,8 @@ OwnedLineKind classifyLine(std::string_view line, bool sawHeaderYet) {
     if (equalsCI(t[0], "VAR"))         return OwnedLineKind::Var;
     if (equalsCI(t[0], "COMP"))        return OwnedLineKind::Comp;
     if (equalsCI(t[0], "COMMENT"))     return OwnedLineKind::Comment;
+    if (equalsCI(t[0], "FUNC"))        return OwnedLineKind::Func;
+    if (equalsCI(t[0], "FUNCIN") || equalsCI(t[0], "FUNCOUT")) return OwnedLineKind::FuncPin;
     if (equalsCI(t[0], "NODE"))        return OwnedLineKind::Node;
     if (equalsCI(t[0], "PIN"))         return OwnedLineKind::Pin;
     if (equalsCI(t[0], "LINK"))        return OwnedLineKind::Link;
@@ -220,6 +223,44 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
                 }
             }
             out.comments.push_back(std::move(cmt));
+        } else if (equalsCI(key, "FUNC")) {
+            // FUNC <name> [pure] -- see OcGraphFunction (OcGraph.hpp).
+            if (t.size() < 2) {
+                if (err) *err = "FUNC requires a name: FUNC name [pure]";
+                return false;
+            }
+            OcGraphFunction fn;
+            fn.name = std::string(t[1]);
+            for (usize i = 2; i < t.size(); ++i)
+                if (equalsCI(t[i], "pure")) fn.pure = true;
+            for (const auto& f : out.functions) {
+                if (equalsCI(f.name, fn.name)) {
+                    if (err) *err = "duplicate FUNC name: " + fn.name;
+                    return false;
+                }
+            }
+            out.functions.push_back(std::move(fn));
+        } else if (equalsCI(key, "FUNCIN") || equalsCI(key, "FUNCOUT")) {
+            // FUNCIN/FUNCOUT <func> <pin> <type>. Its function must already be declared: unlike a
+            // LINK naming a later NODE, nothing here does a second pass, and silently dropping the
+            // argument would give the function the wrong arity with no report of why.
+            const bool isIn = equalsCI(key, "FUNCIN");
+            if (t.size() < 4) {
+                if (err) *err = std::string(isIn ? "FUNCIN" : "FUNCOUT") +
+                                " requires a function, a pin name and a type";
+                return false;
+            }
+            OcGraphFunction* owner = nullptr;
+            for (auto& f : out.functions) if (equalsCI(f.name, t[1])) { owner = &f; break; }
+            if (!owner) {
+                if (err) *err = std::string(isIn ? "FUNCIN" : "FUNCOUT") + " names function '" +
+                                std::string(t[1]) + "', which no FUNC record declares above it";
+                return false;
+            }
+            OcGraphFunctionPin fp;
+            fp.name = std::string(t[2]);
+            fp.type = std::string(t[3]);
+            (isIn ? owner->inputs : owner->outputs).push_back(std::move(fp));
         } else if (equalsCI(key, "NODE")) {
             // `NODE id type` is the minimum; x and y are OPTIONAL and default to 0.
             //
@@ -476,8 +517,10 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // line of existing text; `used` is set once a line has claimed it, so a record is emitted exactly
     // once even if the file names it twice.
     struct Rec { std::string key; std::string text; bool used = false; };
-    std::vector<Rec> varRecs, compRecs, commentRecs, nodeRecs, pinRecs, linkRecs, entryRecs, outRecs;
-    std::string varBlock, compBlock, commentBlock, nodeBlock, pinBlock, linkBlock, entryBlock, outBlock;
+    std::vector<Rec> varRecs, compRecs, commentRecs, funcRecs, funcPinRecs, nodeRecs, pinRecs, linkRecs,
+                      entryRecs, outRecs;
+    std::string varBlock, compBlock, commentBlock, funcBlock, funcPinBlock, nodeBlock, pinBlock, linkBlock,
+                 entryBlock, outBlock;
     // VAR right after NAME/DESCRIPTION, ahead of NODE -- matching where a graph author naturally
     // writes it (declare what the graph remembers, then the nodes that read/write it) and where the
     // checked-in cross-language fixture (tests/formats/src/OcGraphTest.cpp's own VAR test) puts it.
@@ -506,6 +549,21 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         if (!c.text.empty()) line += " " + c.text;
         line += "\n";
         commentRecs.push_back({c.id, line, false});
+    }
+    // FUNC before its own FUNCIN/FUNCOUT records, and both before NODE: a reader (human or machine)
+    // meets the signature before the body that implements it. The two live in separate blocks rather
+    // than interleaved because they are claimed independently on the merge path below -- see keyOf.
+    for (const OcGraphFunction& fn : g.functions) {
+        std::string line = "FUNC " + fn.name;
+        if (fn.pure) line += " pure";
+        line += "\n";
+        funcRecs.push_back({fn.name, line, false});
+        for (const OcGraphFunctionPin& p : fn.inputs)
+            funcPinRecs.push_back({fn.name + " " + p.name + " in",
+                                    "FUNCIN " + fn.name + " " + p.name + " " + p.type + "\n", false});
+        for (const OcGraphFunctionPin& p : fn.outputs)
+            funcPinRecs.push_back({fn.name + " " + p.name + " out",
+                                    "FUNCOUT " + fn.name + " " + p.name + " " + p.type + "\n", false});
     }
     for (const OcGraphNode& node : g.nodes) {
         // Coordinates only if the node actually had them, then every token this implementation did
@@ -549,6 +607,8 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     for (const Rec& r : varRecs)   varBlock   += r.text;
     for (const Rec& r : compRecs)  compBlock  += r.text;
     for (const Rec& r : commentRecs) commentBlock += r.text;
+    for (const Rec& r : funcRecs)    funcBlock    += r.text;
+    for (const Rec& r : funcPinRecs) funcPinBlock += r.text;
     for (const Rec& r : nodeRecs)  nodeBlock  += r.text;
     for (const Rec& r : pinRecs)   pinBlock   += r.text;
     for (const Rec& r : linkRecs)  linkBlock  += r.text;
@@ -565,6 +625,8 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         if (!varBlock.empty())  { out += "\n"; out += varBlock; }
         if (!compBlock.empty()) { out += "\n"; out += compBlock; }
         if (!commentBlock.empty()) { out += "\n"; out += commentBlock; }
+        if (!funcBlock.empty())    { out += "\n"; out += funcBlock; }
+        if (!funcPinBlock.empty()) { out += "\n"; out += funcPinBlock; }
         if (!nodeBlock.empty()) { out += "\n"; out += nodeBlock; }
         if (!pinBlock.empty())  { out += "\n"; out += pinBlock; }
         if (!linkBlock.empty()) { out += "\n"; out += linkBlock; }
@@ -635,7 +697,13 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         case OwnedLineKind::Var:
         case OwnedLineKind::Comp:
         case OwnedLineKind::Comment:
+        case OwnedLineKind::Func:
         case OwnedLineKind::Node:  return tok(1);
+        // A FUNCIN and a FUNCOUT can name the same function AND the same pin name -- an `x` in
+        // and an `x` out is ordinary -- so the direction is part of the key or the two would
+        // claim each other's lines and one would be dropped.
+        case OwnedLineKind::FuncPin:
+            return tok(1) + " " + tok(2) + (equalsCI(tok(0), "FUNCIN") ? " in" : " out");
         case OwnedLineKind::Pin:
         case OwnedLineKind::Link:
         case OwnedLineKind::Entry:
@@ -674,6 +742,8 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         case OwnedLineKind::Var:   claim(varRecs,   keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Comp:  claim(compRecs,  keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Comment: claim(commentRecs, keyOf(kinds[i], lines[i]), out); break;
+        case OwnedLineKind::Func:    claim(funcRecs,    keyOf(kinds[i], lines[i]), out); break;
+        case OwnedLineKind::FuncPin: claim(funcPinRecs, keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Node:  claim(nodeRecs,  keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Pin:   claim(pinRecs,   keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Link:  claim(linkRecs,  keyOf(kinds[i], lines[i]), out); break;
@@ -700,6 +770,8 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     appendUnused(varRecs);
     appendUnused(compRecs);
     appendUnused(commentRecs);
+    appendUnused(funcRecs);
+    appendUnused(funcPinRecs);
     appendUnused(nodeRecs);
     appendUnused(pinRecs);
     appendUnused(linkRecs);

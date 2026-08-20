@@ -241,6 +241,71 @@ public class OcGraphParser
                 }
                 graph.Components.Add(comp);
             }
+            else if (key.Equals("FUNC", StringComparison.OrdinalIgnoreCase))
+            {
+                // FUNC <name> [pure] -- declares one user-defined function. See GraphFunction for why
+                // purity is DECLARED here rather than inferred from the body.
+                if (tokens.Count < 2)
+                {
+                    err = "FUNC requires a name: FUNC name [pure]";
+                    return false;
+                }
+                string funcName = tokens[1];
+                if (graph.Functions.Any(f => string.Equals(f.Name, funcName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    err = $"duplicate FUNC name '{funcName}'";
+                    return false;
+                }
+                var fn = new GraphFunction { Name = funcName };
+                for (int i = 2; i < tokens.Count; i++)
+                    if (tokens[i].Equals("pure", StringComparison.OrdinalIgnoreCase)) fn.IsPure = true;
+                graph.Functions.Add(fn);
+            }
+            else if (key.Equals("FUNCIN", StringComparison.OrdinalIgnoreCase) ||
+                     key.Equals("FUNCOUT", StringComparison.OrdinalIgnoreCase))
+            {
+                // FUNCIN <func> <pin> <type> / FUNCOUT <func> <pin> <type> -- one argument or one
+                // return, in declaration order. Two records rather than one with a direction token,
+                // because the ORDER of inputs and the ORDER of outputs are independent lists and a
+                // single interleaved record would make the file say which came first when nothing
+                // depends on that.
+                bool isIn = key.Equals("FUNCIN", StringComparison.OrdinalIgnoreCase);
+                if (tokens.Count < 4)
+                {
+                    err = $"{key.ToUpperInvariant()} requires a function, a pin name and a type: {key.ToUpperInvariant()} func pin float|int|bool";
+                    return false;
+                }
+                var owner = graph.Functions.FirstOrDefault(f => string.Equals(f.Name, tokens[1], StringComparison.OrdinalIgnoreCase));
+                if (owner == null)
+                {
+                    // Declared BEFORE its FUNC is a genuine error, not a forward reference: unlike a
+                    // LINK naming a later NODE, there is no second pass here that could resolve it,
+                    // and silently dropping the argument would produce a function with the wrong
+                    // arity and no report of why.
+                    err = $"{key.ToUpperInvariant()} names function '{tokens[1]}', which no FUNC record declares above it";
+                    return false;
+                }
+                if (!Enum.TryParse<PinType>(tokens[3], true, out PinType ft))
+                {
+                    err = $"{key.ToUpperInvariant()} '{tokens[2]}' has type '{tokens[3]}'; expected float, int or bool";
+                    return false;
+                }
+                if (ft == PinType.Exec)
+                {
+                    // Exec is not a value. A function's control flow is decided by its `pure` flag,
+                    // which is one place, rather than by an author declaring an exec argument here and
+                    // a `pure` flag there that could disagree.
+                    err = $"{key.ToUpperInvariant()} '{tokens[2]}' cannot be of type exec -- declare the function impure instead";
+                    return false;
+                }
+                var list = isIn ? owner.Inputs : owner.Outputs;
+                if (list.Any(p => p.Name == tokens[2]))
+                {
+                    err = $"function '{owner.Name}' already has {(isIn ? "an input" : "an output")} named '{tokens[2]}'";
+                    return false;
+                }
+                list.Add(new GraphParameter { Name = tokens[2], Type = ft });
+            }
             else if (key.Equals("CLASS", StringComparison.OrdinalIgnoreCase))
             {
                 // CLASS <name> [parentName] [mesh=<path>] [material=<name>] [view=firstperson|thirdperson]
@@ -431,6 +496,18 @@ public class OcGraphParser
                     else if (k == "var")
                     {
                         node.VarName = v;
+                    }
+                    // func= names the FUNCTION this node lives in; absent means the event graph. See
+                    // Node.FuncOwner for why ownership is an attribute rather than a list.
+                    else if (k == "func")
+                    {
+                        node.FuncOwner = v;
+                    }
+                    // call= names the function a "callfunc" node calls. Distinct from func= above,
+                    // which says where the call node itself LIVES -- see Node.CallTarget.
+                    else if (k == "call")
+                    {
+                        node.CallTarget = v;
                     }
                     // name= carries the literal string a "setname" node writes (see Node.NameValue) --
                     // the value itself, not a lookup key, unlike field=/class=/var= above. Nothing to
@@ -689,6 +766,21 @@ public class OcGraphParser
         }
 
         graph.Nodes = nodes;
+
+        // WHICH NODE STARTS AND ENDS EACH FUNCTION, resolved from the nodes rather than declared in
+        // the FUNC record. A function has exactly one FuncEntry and at most one FuncReturn (Validate
+        // refuses a second of either), so naming them on the FUNC line as well would be a second place
+        // for the file to disagree with itself. Runs BEFORE AddDefaultPins because the entry node's
+        // pins are the function's inputs and it has to know which function it belongs to first.
+        foreach (var node in graph.Nodes.Values)
+        {
+            if (string.IsNullOrEmpty(node.FuncOwner)) continue;
+            var owner = graph.Functions.FirstOrDefault(f => string.Equals(f.Name, node.FuncOwner, StringComparison.OrdinalIgnoreCase));
+            if (owner == null) continue;   // reported by Validate, which can name every offender at once
+            string t = node.Type.ToLowerInvariant();
+            if (t == "funcentry" && owner.EntryNodeId == null) owner.EntryNodeId = node.Id;
+            else if (t == "funcreturn" && owner.ReturnNodeId == null) owner.ReturnNodeId = node.Id;
+        }
 
         // Default pins for built-in node types if not explicitly declared.
         foreach (var node in graph.Nodes.Values)
@@ -1801,6 +1893,55 @@ public class OcGraphParser
             // the specific reason, more useful than a generic "no output pin 'value'" from whatever
             // LINK/OUT touches this node next -- the exact same reasoning "param"/"getparam" already
             // follows.
+            // ---- FUNCTIONS -------------------------------------------------------------------------
+            //
+            // All three of these derive their pins from a DECLARATION elsewhere in the file rather than
+            // from a fixed list, which is the same thing Param/GetVar/SetVar already do -- see their
+            // cases above. That is what makes a function's signature a single source of truth: change a
+            // FUNCIN and every call node's pins change with it on the next load, rather than drifting.
+            //
+            // A PURE function has no exec pins anywhere -- entry, return, or call site. An impure one
+            // has them in all three. There is no half-way state, which is the point of declaring purity
+            // once on the FUNC record instead of inferring it three times.
+            case "funcentry":
+            {
+                var fn = graph.Functions.FirstOrDefault(f => string.Equals(f.Name, node.FuncOwner, StringComparison.OrdinalIgnoreCase));
+                if (fn == null) break;   // undeclared owner: Validate names it; do not invent pins over the top
+                if (!fn.IsPure)
+                    node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                foreach (var p in fn.Inputs)
+                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = true, NodeId = node.Id });
+                break;
+            }
+
+            case "funcreturn":
+            {
+                var fn = graph.Functions.FirstOrDefault(f => string.Equals(f.Name, node.FuncOwner, StringComparison.OrdinalIgnoreCase));
+                if (fn == null) break;
+                if (!fn.IsPure)
+                    node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                foreach (var p in fn.Outputs)
+                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = false, NodeId = node.Id });
+                break;
+            }
+
+            case "callfunc":
+            {
+                // Keyed off call=, NOT func= -- see Node.CallTarget for why a call node needs both.
+                var fn = graph.Functions.FirstOrDefault(f => string.Equals(f.Name, node.CallTarget, StringComparison.OrdinalIgnoreCase));
+                if (fn == null) break;
+                if (!fn.IsPure)
+                {
+                    node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                    node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                }
+                foreach (var p in fn.Inputs)
+                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = false, NodeId = node.Id });
+                foreach (var p in fn.Outputs)
+                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = true, NodeId = node.Id });
+                break;
+            }
+
             case "getvar":
             {
                 var declaredVar = graph.Variables.FirstOrDefault(v => v.Name == node.VarName);

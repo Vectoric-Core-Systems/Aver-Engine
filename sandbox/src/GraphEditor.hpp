@@ -143,6 +143,48 @@ public:
     // for the Variables panel and the component tree -- thin ImGui glue, model in the class.
     std::string addNodeFromCatalog(const std::string& typeId, Vec2 canvasPos);
 
+    // ---- functions ----------------------------------------------------------------------------
+    // A .ocgraph holds ONE event graph and any number of named FUNCTIONS. They share a file, a node
+    // id namespace and a canvas coordinate space, but not a canvas: the editor shows exactly one
+    // subgraph at a time, and a wire cannot cross between them (the C# Validate refuses it, because
+    // they compile to separate methods).
+
+    // Which subgraph the canvas is showing. EMPTY MEANS THE EVENT GRAPH -- the same convention
+    // fmt::OcGraphNode's own `func=` attribute uses, where absent means "not in a function". Keeping
+    // one convention across the model and the editor is what stops a "" / "<none>" / null triple.
+    const std::string& currentSubgraph() const { return currentSubgraph_; }
+    void setCurrentSubgraph(const std::string& funcName);
+
+    const std::vector<fmt::OcGraphFunction>& functions() const { return graph_.functions; }
+
+    // Declares a function and lays down the nodes it cannot exist without: a FuncEntry always, and a
+    // FuncReturn as soon as it has an output. Returns the name actually used (uniquified), or empty
+    // if `name` is unusable.
+    //
+    // CREATING THE ENTRY NODE IS NOT A CONVENIENCE. A function with no FuncEntry does not compile --
+    // Validate refuses it by name -- so a "New Function" button that made only the FUNC record would
+    // hand the author a broken graph and no clue which of the three node types fixes it. This is the
+    // same lesson the palette already learned about dropping an On Tick with no ENTRY record.
+    std::string addFunction(const std::string& name);
+
+    bool renameFunction(const std::string& oldName, const std::string& newName);
+
+    // Deletes the function AND every node that lives in it, plus the links between them. REFUSES
+    // (false, no edit) while any CallFunc still names it -- the same rule deleteVariable follows, and
+    // for the same reason: a call to a function that no longer exists is a graph that stops compiling
+    // with no visible cause until someone runs the C# compiler.
+    bool deleteFunction(const std::string& name, std::vector<std::string>* outBlockedBy = nullptr);
+
+    // Adds or removes one argument / one return. Both rebuild the affected nodes' pins, because a
+    // FuncEntry's outputs ARE the function's inputs -- see the .cpp.
+    bool addFunctionPin(const std::string& funcName, bool isInput, const std::string& pinName, const std::string& type);
+    bool removeFunctionPin(const std::string& funcName, bool isInput, const std::string& pinName);
+    bool setFunctionPure(const std::string& funcName, bool pure);
+
+    // Drops a CallFunc node calling `funcName`. Separate from addNodeFromCatalog because a call node
+    // has no fixed pin shape -- it takes the callee's, which the catalog cannot know.
+    std::string addCallNode(const std::string& funcName, Vec2 canvasPos);
+
     // ---- comment boxes ------------------------------------------------------------------------
     // A comment box groups nodes visually and says WHY they are wired the way they are. It has no
     // pins, no links and no effect on what the graph does -- see fmt::OcGraphComment for the format
@@ -450,6 +492,19 @@ private:
     // except by an explicit Frame All / F / Home. Dragging a NODE does not set it: moving a thing is
     // not moving the camera, and a graph you have been tidying should stay framed.
     bool viewTouched_ = false;
+
+    // ---- function state ---------------------------------------------------------------------------
+    std::string currentSubgraph_;          // empty = the event graph
+    std::string funcEditRowKey_;           // in-flight text edit, keyed like varEditRowKey_
+    char funcEditBuf_[128] = {};
+    char newFuncPinBuf_[64] = {};
+    int newFuncPinType_ = 0;               // index into the same float/int/bool list the Variables panel uses
+    fmt::OcGraphFunction* findFunction(const std::string& name);
+    // Rebuilds the pins of every FuncEntry / FuncReturn / CallFunc that depends on `funcName`, from
+    // that function's current declaration. Called after ANY signature edit -- see the .cpp for why
+    // this is one function rather than three call sites that could drift.
+    void resyncFunctionNodePins(const std::string& funcName);
+    void drawFunctionsPanel(float dpi);
 
     // ---- comment box state ------------------------------------------------------------------------
     // Selected and drag targets are held BY ID, never by index, for the same reason varEditRowKey_ is

@@ -50,6 +50,20 @@ public class GraphCompiler
 
     private Graph _graph;
     private readonly FieldResolver _fieldResolver;
+
+    // ---- user-defined functions -----------------------------------------------------------------
+    //
+    // One DynamicMethod per FUNC, created for ALL functions before ANY body is emitted, so a call
+    // can reference a callee whose IL has not been written yet -- including itself. That forward
+    // reference is the whole basis of this design and it was established by spike before a line of
+    // it was written: on this toolchain a DynamicMethod can be the target of Emit(OpCodes.Call, ...)
+    // from another DynamicMethod, from itself, and from one emitted earlier than the callee.
+    private readonly Dictionary<string, DynamicMethod> _funcMethods = new(StringComparer.OrdinalIgnoreCase);
+    private bool _functionsCompiled;
+    // The function currently being emitted -- null while emitting the event graph. FuncEntry reads
+    // it to turn a pin name into an argument index; FuncReturn reads it to find its output locals.
+    private GraphFunction? _currentFunc;
+    private List<LocalBuilder> _funcOutLocals = new();
     private Dictionary<string, LocalBuilder> _nodeLocals = new();
     private Dictionary<(string, string), LocalBuilder> _pinLocals = new();
     private ILGenerator? _il;
@@ -137,6 +151,12 @@ public class GraphCompiler
             err = validateErr;
             return null;
         }
+
+        // FUNCTIONS BEFORE ANYTHING ELSE, because emitting one takes over _il and every local map
+        // this class owns -- see EnsureFunctionsCompiled. Doing it here, before this method
+        // creates its own DynamicMethod, is what keeps that from being a problem rather than a
+        // save/restore dance at every call site.
+        if (!EnsureFunctionsCompiled(out err)) return null;
 
         // An OUT record cannot name an exec pin -- "what the graph hands back" is a data question;
         // control flow has nothing to hand back. Checked explicitly, here, rather than letting
@@ -226,6 +246,12 @@ public class GraphCompiler
             // errors, so a typo in an unused subgraph is not silently swallowed.
             foreach (var node in sortedNodes)
             {
+                // A NODE THAT LIVES IN A FUNCTION IS NOT PART OF THIS METHOD. TopologicalSort walks
+                // every node in the FILE, and a function body is ordinary nodes in that same file --
+                // so without this, emitting the event graph would also emit every function's body
+                // into it, with that body's FuncEntry trying to Ldarg an argument this method does
+                // not have. The bodies were already emitted, into their own methods, above.
+                if (node.FuncOwner != null) continue;
                 if (IsExecOnlyNodeType(node.Type)) continue;
                 EmitNode(node);
             }
@@ -438,6 +464,14 @@ public class GraphCompiler
 
             case "getvelocity":
                 EmitGetVelocity(node);
+                break;
+
+            // A pure CallFunc sitting in the EVENT graph of a pure-dataflow file. Emitted through
+            // EmitSimpleApiRead, which is the existing "call something, store its results in this
+            // node's pin locals" shape -- see the pull path for the impure case, which never
+            // reaches here because Compile() has no exec walk to reach it with.
+            case "callfunc":
+                EmitCallFuncTopological(node);
                 break;
 
             case "reroutefloat":
@@ -1747,6 +1781,305 @@ public class GraphCompiler
         return true;
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // USER-DEFINED FUNCTIONS
+    // ---------------------------------------------------------------------------------------------
+
+    /// Creates a DynamicMethod for every declared function and emits each body. Idempotent, and
+    /// called at the TOP of both Compile() and CompileEntryPoint(), before either has created its own
+    /// method -- emitting a function body overwrites _il, _pinLocals, _execLocals and friends, so it
+    /// cannot run in the middle of another emission. (EmitFunctionBody saves and restores them anyway,
+    /// because a function body containing a CallFunc re-enters this class while it is already busy.)
+    private bool EnsureFunctionsCompiled(out string? err)
+    {
+        err = null;
+        if (_functionsCompiled || _graph.Functions.Count == 0) return true;
+        _functionsCompiled = true;   // set FIRST: a failure leaves the partial state, and retrying
+                                      // would emit every body a second time into fresh methods.
+
+        // PASS 1 -- every signature, before any body. See _funcMethods.
+        foreach (var fn in _graph.Functions)
+        {
+            Type[] argTypes = fn.Inputs.Select(p => PinTypeToCLRType(p.Type)).ToArray();
+            if (_graph.Variables.Count > 0)
+                argTypes = argTypes.Append(typeof(GraphVarStore)).ToArray();
+            Type ret = fn.Outputs.Count switch
+            {
+                0 => typeof(void),
+                1 => PinTypeToCLRType(fn.Outputs[0].Type),
+                // Several outputs box into an object[], exactly as Compile() does for several OUT
+                // records -- the same shape rather than a second convention, so a caller unpacking one
+                // has already seen how.
+                _ => typeof(object[]),
+            };
+            _funcMethods[fn.Name] = new DynamicMethod($"GraphFunc_{fn.Name}", ret, argTypes, restrictedSkipVisibility: true);
+        }
+
+        // PASS 2 -- the bodies.
+        foreach (var fn in _graph.Functions)
+        {
+            if (!EmitFunctionBody(fn, out err)) return false;
+        }
+        return true;
+    }
+
+    private bool EmitFunctionBody(GraphFunction fn, out string? err)
+    {
+        err = null;
+        var dm = _funcMethods[fn.Name];
+
+        // SAVE EVERYTHING, because a CallFunc inside this body does not re-enter here (bodies are
+        // emitted one at a time in pass 2) but Compile()/CompileEntryPoint() may already hold state if
+        // a future caller moves this. Restoring is cheap and removes a whole class of "why did the
+        // event graph get this function's locals" bug before it can exist.
+        var savedIl = _il;
+        var savedPin = _pinLocals;
+        var savedExec = _execLocals;
+        var savedNode = _nodeLocals;
+        var savedExecVisiting = _execVisiting;
+        var savedPullVisiting = _pullVisiting;
+        var savedVarStore = _varStoreArgIndex;
+        var savedFunc = _currentFunc;
+        var savedOutLocals = _funcOutLocals;
+        try
+        {
+            _il = dm.GetILGenerator();
+            _pinLocals = new Dictionary<(string, string), LocalBuilder>();
+            _execLocals = new Dictionary<(string, string), LocalBuilder>();
+            _nodeLocals = new Dictionary<string, LocalBuilder>();
+            _execVisiting = new HashSet<string>();
+            _pullVisiting = new HashSet<string>();
+            _varStoreArgIndex = _graph.Variables.Count > 0 ? fn.Inputs.Count : -1;
+            _currentFunc = fn;
+            _funcOutLocals = new List<LocalBuilder>();
+            foreach (var o in fn.Outputs) _funcOutLocals.Add(_il.DeclareLocal(PinTypeToCLRType(o.Type)));
+
+            // THE RECURSION GUARD, and why it is a helper call rather than IL. A recursive graph
+            // function with no base case would overflow the CLR stack, and a StackOverflowException
+            // cannot be caught -- it takes the process down, which in a running editor means the
+            // author loses their level. The guard counts depth in managed code and throws an ordinary
+            // catchable exception instead.
+            //
+            // NOT a try/finally in emitted IL, deliberately. A protected region has verifiability rules
+            // about branching out of it that the branch/loop emitters here would have to learn, for a
+            // guarantee that is not needed: GraphCallGuard resets to zero at the start of every
+            // top-level invocation, so a depth leaked by an exception unwinding past an Exit cannot
+            // accumulate across calls.
+            _il.Emit(OpCodes.Ldstr, fn.Name);
+            _il.Emit(OpCodes.Call, GraphCallGuardEnter);
+
+            if (fn.IsPure)
+            {
+                // No exec chain to walk: pull each declared output straight through the FuncReturn's
+                // matching input pin, which recursively evaluates the body's data graph.
+                if (fn.Outputs.Count > 0)
+                {
+                    if (fn.ReturnNodeId == null || !_graph.Nodes.TryGetValue(fn.ReturnNodeId, out var rn))
+                    {
+                        err = $"function '{fn.Name}' has outputs but no FuncReturn node";
+                        return false;
+                    }
+                    for (int i = 0; i < fn.Outputs.Count; i++)
+                    {
+                        EmitPullInput(rn, fn.Outputs[i].Name);
+                        _il.Emit(OpCodes.Stloc, _funcOutLocals[i]);
+                    }
+                }
+            }
+            else
+            {
+                if (fn.EntryNodeId == null || !_graph.Nodes.TryGetValue(fn.EntryNodeId, out var en))
+                {
+                    err = $"function '{fn.Name}' has no FuncEntry node";
+                    return false;
+                }
+                EmitExecNode(en);
+            }
+
+            _il.Emit(OpCodes.Call, GraphCallGuardExit);
+
+            // ONE Ret, always, reached after the whole body has run -- which is why a function has
+            // exactly one FuncReturn (Validate refuses a second): its job is to STORE into these
+            // locals when the exec walk reaches it, not to return, so branches inside the body all
+            // converge here.
+            if (fn.Outputs.Count == 1)
+            {
+                _il.Emit(OpCodes.Ldloc, _funcOutLocals[0]);
+            }
+            else if (fn.Outputs.Count > 1)
+            {
+                _il.Emit(OpCodes.Ldc_I4, fn.Outputs.Count);
+                _il.Emit(OpCodes.Newarr, typeof(object));
+                for (int i = 0; i < fn.Outputs.Count; i++)
+                {
+                    _il.Emit(OpCodes.Dup);
+                    _il.Emit(OpCodes.Ldc_I4, i);
+                    _il.Emit(OpCodes.Ldloc, _funcOutLocals[i]);
+                    _il.Emit(OpCodes.Box, _funcOutLocals[i].LocalType!);
+                    _il.Emit(OpCodes.Stelem_Ref);
+                }
+            }
+            _il.Emit(OpCodes.Ret);
+            return true;
+        }
+        finally
+        {
+            _il = savedIl;
+            _pinLocals = savedPin;
+            _execLocals = savedExec;
+            _nodeLocals = savedNode;
+            _execVisiting = savedExecVisiting;
+            _pullVisiting = savedPullVisiting;
+            _varStoreArgIndex = savedVarStore;
+            _currentFunc = savedFunc;
+            _funcOutLocals = savedOutLocals;
+        }
+    }
+
+    /// Loads a CallFunc node's arguments and emits the direct IL Call. Leaves the callee's return
+    /// value (or nothing, or an object[]) on the stack -- the two callers below decide what to do
+    /// with it, because a pure call inside a data pull wants ONE value while an exec call wants every
+    /// output stored into its own local.
+    private GraphFunction? EmitCallFuncInvoke(Node node)
+    {
+        if (_il == null) return null;
+        var fn = _graph.Functions.FirstOrDefault(f => string.Equals(f.Name, node.CallTarget, StringComparison.OrdinalIgnoreCase));
+        if (fn == null || !_funcMethods.TryGetValue(fn.Name, out var dm)) return null;
+        foreach (var p in fn.Inputs) EmitPullInput(node, p.Name);
+        // The variable store rides through every call, so a function can read and write the same
+        // per-instance VARs its caller can. Loaded from the CALLER's own store argument, which is why
+        // the argument exists on every function in a VAR-bearing graph whether that function touches
+        // one or not -- a uniform signature costs one argument and removes a whole conditional.
+        if (_graph.Variables.Count > 0 && _varStoreArgIndex >= 0)
+            _il.Emit(OpCodes.Ldarg, (short)_varStoreArgIndex);
+        _il.Emit(OpCodes.Call, dm);
+        return fn;
+    }
+
+    /// A CallFunc reached by the exec walk: call once, store every output into its own exec local, so
+    /// reading two of a function's outputs downstream does not call it twice.
+    private void EmitExecCallFunc(Node node)
+    {
+        if (_il == null) return;
+        var fn = EmitCallFuncInvoke(node);
+        if (fn == null) return;
+        if (fn.Outputs.Count == 0) return;
+        if (fn.Outputs.Count == 1)
+        {
+            _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, fn.Outputs[0].Name, PinTypeToCLRType(fn.Outputs[0].Type)));
+            return;
+        }
+        // object[] on the stack: keep it in a local, then unbox one element per output pin.
+        var arr = _il.DeclareLocal(typeof(object[]));
+        _il.Emit(OpCodes.Stloc, arr);
+        for (int i = 0; i < fn.Outputs.Count; i++)
+        {
+            Type t = PinTypeToCLRType(fn.Outputs[i].Type);
+            _il.Emit(OpCodes.Ldloc, arr);
+            _il.Emit(OpCodes.Ldc_I4, i);
+            _il.Emit(OpCodes.Ldelem_Ref);
+            _il.Emit(OpCodes.Unbox_Any, t);
+            _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, fn.Outputs[i].Name, t));
+        }
+    }
+
+    /// A CallFunc pulled as data -- only legal for a PURE function, which is exactly what "pure"
+    /// means here: safe to evaluate whenever, and as often as, a reader asks for it. Leaves the ONE
+    /// requested pin's value on the stack.
+    private void EmitPullCallFunc(Node node, string pinName)
+    {
+        if (_il == null) return;
+        var fn = EmitCallFuncInvoke(node);
+        if (fn == null) throw new InvalidOperationException(
+            $"CallFunc node '{node.Id}' calls '{node.CallTarget}', which is not a declared function");
+        int idx = fn.Outputs.FindIndex(o => o.Name == pinName);
+        if (idx < 0) throw new InvalidOperationException(
+            $"function '{fn.Name}' has no output named '{pinName}'");
+        if (fn.Outputs.Count == 1) return;   // already the value on the stack
+        Type t = PinTypeToCLRType(fn.Outputs[idx].Type);
+        _il.Emit(OpCodes.Ldc_I4, idx);
+        _il.Emit(OpCodes.Ldelem_Ref);
+        _il.Emit(OpCodes.Unbox_Any, t);
+    }
+
+    /// A CallFunc met by the PULL compiler's topological pass -- i.e. a call sitting in a graph with
+    /// no ENTRY records at all, which is the shape every pre-exec .ocgraph in this repo still has.
+    ///
+    /// AN IMPURE FUNCTION IS REFUSED HERE, and refused for the same reason Spawn/CharacterMove/
+    /// FireEvent/SetVar are: the topological pass runs every node exactly once per invocation, in an
+    /// order derived from data dependencies, with no branch structure available to gate anything. A
+    /// function with an exec chain has a notion of WHEN that this compiler cannot honour, so calling
+    /// one from here would run its side effects every invocation whether the author meant it or not.
+    /// Declaring a function `pure` is exactly the promise that this is safe.
+    private void EmitCallFuncTopological(Node node)
+    {
+        if (_il == null) return;
+        var fn = _graph.Functions.FirstOrDefault(f => string.Equals(f.Name, node.CallTarget, StringComparison.OrdinalIgnoreCase));
+        if (fn == null)
+            throw new InvalidOperationException(
+                $"CallFunc node '{node.Id}' calls '{node.CallTarget}', which is not a declared function");
+        if (!fn.IsPure)
+            throw new InvalidOperationException(
+                $"CallFunc node '{node.Id}' calls '{fn.Name}', which is not pure, and Compile() has no exec " +
+                "chain to run it from -- a pure-dataflow graph has no notion of WHEN to run a side effect. " +
+                "Either declare the function pure (FUNC " + fn.Name + " pure), or give this graph an ENTRY " +
+                "record and wire the call into its exec chain so CompileEntryPoint() runs it.");
+
+        // One call, results into this node's pin locals -- the same "call once, store every output"
+        // shape EmitExecCallFunc uses, against _pinLocals instead of _execLocals because that is what
+        // this compiler's readers (LoadPin) look in.
+        var invoked = EmitCallFuncInvoke(node);
+        if (invoked == null) return;
+        if (fn.Outputs.Count == 0) return;
+        if (fn.Outputs.Count == 1)
+        {
+            _il.Emit(OpCodes.Stloc, RequirePinLocal(node, fn.Outputs[0].Name));
+            return;
+        }
+        var arr = _il.DeclareLocal(typeof(object[]));
+        _il.Emit(OpCodes.Stloc, arr);
+        for (int i = 0; i < fn.Outputs.Count; i++)
+        {
+            _il.Emit(OpCodes.Ldloc, arr);
+            _il.Emit(OpCodes.Ldc_I4, i);
+            _il.Emit(OpCodes.Ldelem_Ref);
+            _il.Emit(OpCodes.Unbox_Any, PinTypeToCLRType(fn.Outputs[i].Type));
+            _il.Emit(OpCodes.Stloc, RequirePinLocal(node, fn.Outputs[i].Name));
+        }
+    }
+
+    /// A FuncReturn reached by the exec walk: pull each declared output and store it into the
+    /// enclosing function's output local. It does NOT return -- see EmitFunctionBody for why a
+    /// function has exactly one Ret, after the whole chain, rather than one per FuncReturn.
+    private void EmitFuncReturnStores(Node node)
+    {
+        if (_il == null || _currentFunc == null) return;
+        for (int i = 0; i < _currentFunc.Outputs.Count && i < _funcOutLocals.Count; i++)
+        {
+            EmitPullInput(node, _currentFunc.Outputs[i].Name);
+            _il.Emit(OpCodes.Stloc, _funcOutLocals[i]);
+        }
+    }
+
+    /// A FuncEntry's output pin IS an argument of the enclosing method. Same shape as EmitParam,
+    /// which does exactly this for a graph-level PARAM -- the index is the pin's position in the
+    /// function's declared input list, so a FUNCIN reordered in the file reorders the arguments and
+    /// the loads together.
+    private void EmitFuncEntryLoad(string pinName)
+    {
+        if (_il == null || _currentFunc == null) return;
+        int index = _currentFunc.Inputs.FindIndex(p => p.Name == pinName);
+        if (index < 0)
+            throw new InvalidOperationException(
+                $"function '{_currentFunc.Name}' has no input named '{pinName}' -- add 'FUNCIN {_currentFunc.Name} {pinName} <type>'");
+        _il.Emit(OpCodes.Ldarg, (short)index);
+    }
+
+    private static readonly MethodInfo GraphCallGuardEnter =
+        typeof(GraphCallGuard).GetMethod(nameof(GraphCallGuard.Enter))!;
+    private static readonly MethodInfo GraphCallGuardExit =
+        typeof(GraphCallGuard).GetMethod(nameof(GraphCallGuard.Exit))!;
+
     private static Type PinTypeToCLRType(PinType pt) => pt switch
     {
         PinType.Float => typeof(float),
@@ -1852,6 +2185,7 @@ public class GraphCompiler
             return null;
         }
         if (!ValidateOutputsAreData(out err)) return null;
+        if (!EnsureFunctionsCompiled(out err)) return null;   // see Compile() for why this is first
 
         string? startNodeId = null;
         foreach (var (entryNodeId, entryEventName) in _graph.EntryPoints)
@@ -2040,6 +2374,8 @@ public class GraphCompiler
                     else if (IsExecCapableCharacterMoveType(node.Type)) EmitExecCharacterMove(node);
                     else if (IsExecCapableJumpType(node.Type)) EmitJump(node);
                     else if (IsExecCapablePrintType(node.Type)) EmitExecPrint(node);
+                    else if (IsExecCapableCallFuncType(node.Type)) EmitExecCallFunc(node);
+                    else if (IsExecCapableFuncReturnType(node.Type)) EmitFuncReturnStores(node);
                     else if (IsExecCapableApiCallType(node.Type)) EmitExecApiCall(node);
                     else if (IsExecCapableTransformWriteType(node.Type)) EmitExecTransformWrite(node);
                     else if (IsExecCapablePhysicsWriteType(node.Type)) EmitExecPhysicsWrite(node);
@@ -2566,6 +2902,15 @@ public class GraphCompiler
         return t == "translate" || t == "setlocalscale" || t == "destroyentity";
     }
 
+    /// A CallFunc reached by the exec walk. Its own purity does not decide this -- calling a PURE
+    /// function from an exec chain is legal and useful (it just has no exec pins to wire, so it
+    /// never appears there); what this predicate answers is "is this node type a call at all".
+    private static bool IsExecCapableCallFuncType(string type) =>
+        type.Equals("callfunc", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsExecCapableFuncReturnType(string type) =>
+        type.Equals("funcreturn", StringComparison.OrdinalIgnoreCase);
+
     private static bool IsExecCapableApiCallType(string type)
     {
         string t = type.ToLowerInvariant();
@@ -3048,7 +3393,13 @@ public class GraphCompiler
         // "customevent" joins them for exactly the reason the paragraph above states -- it is a
         // bare exec-output trigger with no data value. Nothing here knows or needs to know that its
         // event name is author-chosen; that is the ENTRY record's business.
-        "onstart" or "ontick" or "onhit" or "customevent" or "branch" or "sequence" or "while" or "foreach" => true,
+        // "funcentry" joins them because it is a bare trigger too: its data outputs are the
+        // enclosing method's ARGUMENTS, which no topological pass can compute. It can only ever
+        // appear inside a function body, which the event graph's pass now skips wholesale anyway --
+        // this is the belt to that braces, and it is what makes a FuncEntry harmless if one is ever
+        // left behind in the event graph by a hand edit.
+        "onstart" or "ontick" or "onhit" or "customevent" or "branch" or "sequence" or "while" or "foreach"
+            or "funcentry" => true,
         _ => false,
     };
 
@@ -3181,6 +3532,12 @@ public class GraphCompiler
                 EmitPullGetViewEntity(source, pinName); return;
             case "getvelocity":
                 EmitPullGetVelocity(source, pinName); return;
+            // Inside a function body only. Both are legal to PULL: an argument is always available,
+            // and a pure call is by definition safe to evaluate whenever a reader asks.
+            case "funcentry":
+                EmitFuncEntryLoad(pinName); return;
+            case "callfunc":
+                EmitPullCallFunc(source, pinName); return;
             // A data reroute IS its input. No instruction of its own, in either compiler.
             case "reroutefloat":
             case "rerouteint":

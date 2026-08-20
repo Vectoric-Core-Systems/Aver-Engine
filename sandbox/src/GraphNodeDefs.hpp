@@ -201,6 +201,25 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"AddSensorBox", "Add Sensor Box", "Physics", {pin("exec", "exec", false), pin("cx", "float", false), pin("cy", "float", false), pin("cz", "float", false), pin("hx", "float", false), pin("hy", "float", false), pin("hz", "float", false), pin("then", "exec", true), pin("body", "int", true)}});
     t.push_back({"AddSensorSphere", "Add Sensor Sphere", "Physics", {pin("exec", "exec", false), pin("cx", "float", false), pin("cy", "float", false), pin("cz", "float", false), pin("radius", "float", false), pin("then", "exec", true), pin("body", "int", true)}});
     t.push_back({"SphereCast", "Sphere Cast", "Physics", {pin("exec", "exec", false), pin("originX", "float", false), pin("originY", "float", false), pin("originZ", "float", false), pin("dirX", "float", false), pin("dirY", "float", false), pin("dirZ", "float", false), pin("maxDist", "float", false), pin("radius", "float", false), pin("then", "exec", true), pin("hit", "bool", true), pin("body", "int", true), pin("pointX", "float", true), pin("pointY", "float", true), pin("pointZ", "float", true)}});
+    // -- FUNCTION. The three node types a user-defined function is made of. They are in this catalog
+    //    for their DISPLAY NAME and their HEADER COLOUR, and deliberately NOT for dropping: the
+    //    palette skips the whole "Function" category (see GraphEditor.cpp's Add Node popup), because
+    //    none of the three is a node an author places on its own.
+    //
+    //    A second FuncEntry breaks the function (Validate: "a function begins in exactly one place"),
+    //    a FuncReturn with no FUNCOUT to fill has nothing to do, and a CallFunc has no pin shape at
+    //    all until it knows its callee. All three are created by the Functions panel instead, which
+    //    knows which function they belong to and can give them the right pins immediately.
+    //
+    //    THEIR PINS HERE ARE EMPTY, and that is correct rather than lazy: every one of the three
+    //    takes its pins from a FUNC declaration elsewhere in the file, so a fixed list here would be
+    //    a second answer to a question that already has one. GraphEditor::resyncFunctionNodePins is
+    //    the single place that derives them, and it agrees pin-for-pin with the C# side's own
+    //    AddDefaultPins.
+    t.push_back({"FuncEntry", "Function Entry", "Function", {}});
+    t.push_back({"FuncReturn", "Return", "Function", {}});
+    t.push_back({"CallFunc", "Call Function", "Function", {}});
+
     // -- REROUTE. A node that returns exactly what it was given, and exists only so a WIRE can be
     //    bent around something. Blueprint draws these as a bare dot; here they are ordinary small
     //    nodes, because the pin-drawing code already knows how to put one pin on each side and a

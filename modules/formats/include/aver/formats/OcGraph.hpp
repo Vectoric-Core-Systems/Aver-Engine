@@ -142,6 +142,37 @@ std::string_view componentAttr(const OcGraphComponent& c, std::string_view key);
 // token whose meaning is "present but blank", and no reader of this format wants that third state.
 void setComponentAttr(OcGraphComponent& c, std::string_view key, std::string_view value);
 
+// One user-defined FUNCTION: `FUNC <name> [pure]`, plus its arguments and returns as separate
+// `FUNCIN <func> <pin> <type>` / `FUNCOUT <func> <pin> <type>` records.
+//
+// WHAT A FUNCTION IS HERE. A named, callable subgraph living in the SAME file as the event graph,
+// compiled by the C# runtime into its own method and reached by a direct call -- so it can recurse,
+// which is the one thing an inlined macro can never do. See scripting/csharp/Aver.Graph/Graph.cs's
+// GraphFunction for the semantics; this layer owns only the grammar.
+//
+// THE BODY IS NOT MODELLED HERE, and does not need to be. A function's nodes are ordinary NODE/PIN/
+// LINK records carrying a `func=<name>` attribute naming their owner -- which rides in the same
+// OcGraphNode::extraTokens that already carries `param=`/`field=`/`class=`/`var=`, so preserving a
+// function body across a load and save needed no change to this reader at all. Only the DECLARATION
+// is modelled, and only because the editor has to create and edit one; a record C++ can merely copy
+// verbatim is a record the editor cannot author. That is the same argument that moved VAR, COMP and
+// COMMENT out of the unknown-record passthrough before it.
+//
+// PURITY IS A FLAG ON THE RECORD, not something derived from the body, and the reason is in
+// GraphFunction's own comment: a function whose body is only a call to another function is pure or
+// impure transitively, which no rule that inspects the body's node types can see.
+struct OcGraphFunctionPin {
+    std::string name;
+    std::string type;   // "float" | "int" | "bool" -- opaque here, exactly as OcGraphVariable::type is
+};
+
+struct OcGraphFunction {
+    std::string name;
+    bool pure = false;
+    std::vector<OcGraphFunctionPin> inputs;    // in declaration order; the emitted method's arguments
+    std::vector<OcGraphFunctionPin> outputs;   // in declaration order
+};
+
 // One COMMENT BOX: a titled, coloured rectangle drawn behind the nodes, grouping them by whatever
 // the author says it groups them by. `COMMENT <id> <x> <y> <w> <h> <r> <g> <b> <text...>`.
 //
@@ -210,6 +241,11 @@ struct OcGraphData {
     // so anything walking this as a tree resolves parents by id rather than assuming a parent
     // precedes its children.
     std::vector<OcGraphComponent> components;
+
+    // Declared via top-level `FUNC` / `FUNCIN` / `FUNCOUT` records, in file order. See
+    // OcGraphFunction for what one IS and why only the declaration lives here while the body rides
+    // in ordinary nodes tagged `func=`.
+    std::vector<OcGraphFunction> functions;
 
     // Comment boxes, in file order. See OcGraphComment for what one IS and why it carries its
     // colour in the record. Modelled here rather than left in the unknown-record passthrough for

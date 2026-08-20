@@ -42,10 +42,11 @@ while the palette shipped 124), which is the argument for deriving it rather tha
 13. [Transform](#transform)
 14. [Physics — reads and queries](#physics--reads-and-queries)
 15. [Physics — writes and creation](#physics--writes-and-creation)
-16. [Var](#var)
-17. [Aliases invisible to the palette](#aliases-invisible-to-the-palette)
-18. [Parser vs. editor catalog](#parser-vs-editor-catalog)
-19. [What a node cannot do](#what-a-node-cannot-do)
+16. [Function](#function)
+17. [Var](#var)
+18. [Aliases invisible to the palette](#aliases-invisible-to-the-palette)
+19. [Parser vs. editor catalog](#parser-vs-editor-catalog)
+20. [What a node cannot do](#what-a-node-cannot-do)
 
 ### How to read a pin table
 
@@ -619,6 +620,34 @@ A **body is not an entity** (`GraphNodeDefs.hpp:182-186`): a body is a Jolt hand
 The five writers share one dispatch shape: `EmitExecPhysicsWrite` pulls `body` first for all of them except `SetGravity` (GraphCompiler.cs:1014, the one node in the family with no `body` pin), then the per-type inputs, then stores the returned bool into `success` or drops it. The five creators share the mirror shape: `EmitExecPhysicsCreate` always pulls `cx`/`cy`/`cz` first, then per-type extents/radius/mass, and stores the returned handle into an **exec-local**, not a pin-local -- the same reasoning `Raycast` uses, so the `body` pin any downstream node reads back is the *one* handle this creation produced, however many nodes read it. `AddStaticBox`/`AddSensorBox`/`AddSensorSphere` have no `mass` pin at all: a static body is immovable and a sensor never participates in dynamics, so mass has nothing to mean for either.
 
 `AddBodyVelocity`'s name invites reading it as an impulse -- knockback, an explosion, a jump pad -- but `Body.AddVelocity` is exactly `SetVelocity(Velocity + delta)` (`Physics.cs:169`): no mass division, no scaling, just a direct velocity change. `SetBodyVelocity` replaces the velocity outright; `AddBodyVelocity` adds to whatever it already had. Neither one is mass-aware.
+
+## Function
+
+The three node types a **user-defined function** is made of. None is placed from the palette — the
+Functions panel creates them, because each needs to know which function it belongs to before it has any
+pins at all. See [`formats/FORMAT_SPECS.md` §10a](formats/FORMAT_SPECS.md) for the `FUNC`/`FUNCIN`/
+`FUNCOUT` records they read their shape from.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `FuncEntry` | `then` (out, exec, impure only), then one output per `FUNCIN` | `func=` | X | Where a function begins. Its output pins **are** the enclosing method's arguments. |
+| `FuncReturn` | `exec` (in, impure only), then one input per `FUNCOUT` | `func=` | X | Stores the function's results. It does **not** return — a function has one `Ret`, after the whole body, so branches converge here. Exactly one per function. |
+| `CallFunc` | `exec` (in) / `then` (out) when the callee is impure, one input per `FUNCIN`, one output per `FUNCOUT` | `call=`, and `func=` for where it lives | D for a pure callee, P for an impure one | Calls a function by a direct IL call. |
+
+**All three take their pins from a declaration, not from a fixed list**, which is the same thing
+`Param`/`GetVar`/`SetVar` already do. That is what makes a function's signature a single source of truth:
+change a `FUNCIN` and every call node's pins change with it, in both readers — `AddDefaultPins` on the
+C# side, `GraphEditor::resyncFunctionNodePins` on the C++ side. Those derived pins are **never written to
+the file**: they would be a second copy of the signature, free to disagree with the first after any edit.
+
+**A PURE FUNCTION CANNOT RECURSE, and this is worth knowing before you try.** A pure function has no exec
+pins, so its only way to choose between a base case and a recursive step is `Select` — and `Select`
+evaluates **both** of its sides regardless of its condition (see [Flow](#flow); it is not short-circuiting
+the way `Branch`'s exec fan-out is). So a pure recursive function takes its recursive step on every call,
+including the base case, and never terminates. `Branch`, on the exec chain, is the only thing in this
+vocabulary that genuinely does not evaluate the path it did not take — so **recursion needs an impure
+function**. A runaway one is stopped by `GraphCallGuard` at depth 120 with an error naming the function,
+rather than a `StackOverflowException`, which cannot be caught and would take the process down.
 
 ## Var
 

@@ -211,6 +211,12 @@ static int Main()
         // reach it -- see PushOnlyNodeMessageTests.cs.
         failures += PushOnlyNodeMessageTests.RunAll();
 
+        // USER-DEFINED FUNCTIONS: FUNC/FUNCIN/FUNCOUT and the three node types that use them. These
+        // invoke the compiled delegate and check numbers, because a function is emitted into its own
+        // DynamicMethod and reached by a direct IL Call -- "it compiled" proves only that the IL was
+        // accepted, not that arguments arrived in order or that the callee ran at all.
+        failures += FunctionTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

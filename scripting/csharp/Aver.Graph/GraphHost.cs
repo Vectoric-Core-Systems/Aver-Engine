@@ -504,6 +504,7 @@ public class GraphHost
         // a hot path driving thousands of entities would want GraphHost to specialize by arity
         // (mirroring GetDelegateType's own by-name dispatch) instead of DynamicInvoke, and that is
         // a real, named limitation, not a hidden one.
+        GraphCallGuard.Reset();   // see the Tick() path for why -- same reason, other entry point
         object? result = _compiled.DynamicInvoke(args);
         ApplyResult(entityId, result);
     }
@@ -549,6 +550,13 @@ public class GraphHost
             if (_varStore != null) args[slots.Length] = _varStore;
             return args;
         }
+
+        // A COMPILED GRAPH FUNCTION COUNTS ITS OWN RECURSION DEPTH, and the counter is reset here,
+        // at every top-level entry, rather than unwound by a try/finally in emitted IL. See
+        // GraphCallGuard for the full argument; the short version is that an exception thrown out of
+        // a graph function skips the Exit() that would have decremented it, and without this line
+        // that leak would accumulate until an innocent later tick tripped the limit.
+        GraphCallGuard.Reset();
 
         // OnStart first, and only ever once: see _startInvoked's own comment for why this lazy site
         // (first Tick(), not inside Load()) is where "play begins" is decided for this class.
@@ -627,6 +635,7 @@ public class GraphHost
             callArgs[args.Length] = _varStore;
         }
 
+        GraphCallGuard.Reset();
         result = compiled.DynamicInvoke(callArgs);
         Console.WriteLine($"[GraphHost] '{_graph?.Name}': {eventName}(fired on demand) -> {DescribeResult(result)}");
         return true;

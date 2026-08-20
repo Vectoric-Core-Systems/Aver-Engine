@@ -338,6 +338,84 @@ static void testCommentBoxes() {
     check(writeOcgraph(gf2, fresh) == fresh, "second rewrite of COMMENT data is bit-identical");
 }
 
+static void testFunctionRecords() {
+    AVER_INFO("=== .ocgraph FUNC / FUNCIN / FUNCOUT (user-defined functions) ===");
+    using namespace fmt;
+
+    const std::string original =
+        "OCGRAPH 1\n"
+        "NAME FnTest\n"
+        "\n"
+        "FUNC Distance pure\n"
+        "FUNCIN Distance ax float\n"
+        "FUNCIN Distance ay float\n"
+        "FUNCOUT Distance result float\n"
+        "FUNC Fire\n"
+        "FUNCIN Fire power float\n"
+        "\n"
+        "NODE dEntry FuncEntry func=Distance\n"
+        "NODE dRet FuncReturn func=Distance\n"
+        "NODE tick OnTick\n"
+        "ENTRY tick OnTick\n";
+
+    OcGraphData g;
+    std::string err;
+    check(parseOcgraph(original, g, &err), "graph with FUNC records parses");
+    check(g.functions.size() == 2, "both FUNC records reached OcGraphData::functions");
+    if (g.functions.size() == 2) {
+        check(g.functions[0].name == "Distance" && g.functions[0].pure, "the pure flag is read");
+        check(g.functions[1].name == "Fire" && !g.functions[1].pure,
+              "a FUNC with no `pure` token is impure, not defaulted the other way");
+        check(g.functions[0].inputs.size() == 2 && g.functions[0].inputs[0].name == "ax" &&
+              g.functions[0].inputs[1].name == "ay",
+              "FUNCIN records land on the right function, in declaration order");
+        check(g.functions[0].outputs.size() == 1 && g.functions[0].outputs[0].type == "float",
+              "FUNCOUT is a separate list from FUNCIN");
+        check(g.functions[1].inputs.size() == 1 && g.functions[1].outputs.empty(),
+              "a second FUNC gets its own pins, not the first one's");
+    }
+
+    // THE BODY RIDES IN extraTokens, which is why this reader needed no change to preserve one.
+    const OcGraphNode* entry = nullptr;
+    for (const auto& n : g.nodes) if (n.id == "dEntry") entry = &n;
+    check(entry != nullptr && !entry->extraTokens.empty() && entry->extraTokens[0] == "func=Distance",
+          "a body node's func= attribute is preserved as an ordinary unmodelled token");
+
+    const std::string rewritten = writeOcgraph(g, original);
+    check(rewritten == original, "a load -> save with no edits reproduces a FUNC-bearing file byte for byte");
+
+    // Structurally short or out-of-order records are refused rather than half-read: a function with
+    // the wrong arity compiles into a method whose arguments do not line up with its call sites.
+    OcGraphData bad;
+    check(!parseOcgraph("OCGRAPH 1\nNAME B\nFUNCIN Ghost x float\n", bad, &err),
+          "a FUNCIN naming a function no FUNC declared is refused");
+    check(!parseOcgraph("OCGRAPH 1\nNAME B\nFUNC A\nFUNC A\n", bad, &err),
+          "two FUNC records with the same name are refused");
+    check(!parseOcgraph("OCGRAPH 1\nNAME B\nFUNC A\nFUNCIN A x\n", bad, &err),
+          "a FUNCIN with no type is refused");
+
+    // Fresh write, then re-read. AN INPUT AND AN OUTPUT MAY SHARE A NAME -- `x` in and `x` out is
+    // ordinary -- which is the case the writer's record keys have to keep apart, or one would claim
+    // the other's line on the merge path and a pin would silently vanish.
+    OcGraphData gf;
+    gf.name = "Fresh";
+    OcGraphFunction fn;
+    fn.name = "Clamp01";
+    fn.pure = true;
+    fn.inputs.push_back({"x", "float"});
+    fn.outputs.push_back({"x", "float"});
+    gf.functions.push_back(fn);
+    const std::string fresh = writeOcgraph(gf);
+    check(fresh.find("FUNC Clamp01 pure\n") != std::string::npos, "a fresh write emits the FUNC line");
+    check(fresh.find("FUNCIN Clamp01 x float\n") != std::string::npos, "...and its input");
+    check(fresh.find("FUNCOUT Clamp01 x float\n") != std::string::npos, "...and its identically-named output");
+    OcGraphData gf2;
+    check(parseOcgraph(fresh, gf2, &err), "the freshly written function parses back");
+    check(gf2.functions.size() == 1 && gf2.functions[0].inputs.size() == 1 && gf2.functions[0].outputs.size() == 1,
+          "the same-named input and output both survived, one each");
+    check(writeOcgraph(gf2, fresh) == fresh, "second rewrite of FUNC data is bit-identical");
+}
+
 // Tests that output is deterministic: same data written twice produces identical output.
 static void testForwardReferencedEntryAndOut() {
     AVER_INFO("=== ENTRY/OUT may name a node declared later in the file ===");
@@ -1056,6 +1134,7 @@ int main(int argc, char** argv) {
     testUnknownRecords();
     testVarRecordsSurviveRoundTrip();
     testCommentBoxes();
+    testFunctionRecords();
     testForwardReferencedEntryAndOut();
     testForwardReferencedLinkAndPin();
     testComponentTree();

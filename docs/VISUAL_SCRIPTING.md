@@ -126,11 +126,17 @@ If you know Unreal's Blueprints, most of Aver Node reads directly:
 | A function/event input | `PARAM` | Closed vocabulary, and it differs by which entry points the file wants (§4) — not free-form the way a Blueprint's own inputs are. |
 | SpawnActorFromClass | `Spawn` node, `class=` attribute | Resolved **by name** at invocation time, not baked to a handle at compile time. |
 | Get/Set on a component variable | `GetField`/`SetField` (scalar), `GetFieldVec3`/`SetFieldVec3` (vector) | Addressed by a `field=` string naming a scene field (e.g. `CLocal.position`), not a live pin reference to a component instance. |
+| A Blueprint **function** | `FUNC <name>` + `FUNCIN`/`FUNCOUT`, body tagged `func=`, called by a `CallFunc` node | Its own method, its own canvas, and it **can recurse** (bounded at depth 120). Float/int/bool signatures only. **A `pure` function cannot recurse** — `Select` evaluates both sides, so only an impure function's `Branch` can terminate one. |
+| A Blueprint **macro** | — | Not implemented. Functions are real calls, not inlined, so there is nothing macro-shaped to reach for. |
 | Branch / Sequence / For Loop / While Loop | `Branch` / `Sequence` / `ForEach` / `While` | `ForEach` is counted-repeat only — there is no array pin type, so no per-element iterator (§8). |
 
-**Where it deliberately differs, structurally:** one file is one graph, one class at most, no
-collapsed/macro sub-graphs and no separate event-graph-vs-function-graph split — `ENTRY` records
-just mark which nodes are starting points inside the one flat file. There is no Construction
+**Where it deliberately differs, structurally:** one file is one graph and one class at most, and there
+are no collapsed/macro sub-graphs. There IS now an event-graph-versus-function-graph split — this
+paragraph used to say there was not, and `FUNC` made that false. A file holds one event graph plus any
+number of named functions; the editor shows one subgraph at a time and a wire cannot cross between them,
+because they compile to separate methods. What is still true is that `ENTRY` records mark starting
+points rather than defining a graph of their own, and that node ids remain a single **file-wide**
+namespace rather than being scoped per function. There is no Construction
 Script equivalent either; see §5 for why the difference is more interesting than a missing
 feature.
 

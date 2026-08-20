@@ -1150,6 +1150,113 @@ static void testFramingAndAutoLayout() {
     }
 }
 
+// ============================================================================ functions in the editor ===
+static void testFunctionsInTheEditor() {
+    AVER_INFO("=== functions: declare, sign, call, rename, delete -- and the canvas that scopes to one ===");
+    const std::string text =
+        "OCGRAPH 1\n"
+        "NAME FnEditor\n"
+        "\n"
+        "NODE tick OnTick\n"
+        "ENTRY tick OnTick\n";
+
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "fn_editor.ocgraph").string();
+    writeFile(tmp, text);
+
+    // ---- declaring one brings its entry node with it. A FUNC record alone does not compile, and
+    // the error names a node type the author has not met yet -- see addFunction's own comment.
+    {
+        GraphEditor ed(tmp);
+        const std::string made = ed.addFunction("Distance");
+        check(made == "Distance", "addFunction returns the name it used");
+        check(ed.functions().size() == 1, "the function is declared");
+        check(ed.functions()[0].pure, "a fresh function is pure -- it has no body to be impure about");
+        bool haveEntry = false;
+        for (const auto& n : ed.graph().nodes) if (n.type == "FuncEntry") haveEntry = true;
+        check(haveEntry, "a FuncEntry node was created with it");
+
+        // ---- THE CANVAS SHOWS ONE SUBGRAPH. The entry node is in Distance; the OnTick is not.
+        ed.setCurrentSubgraph("Distance");
+        Vec2 lo, hi;
+        check(ed.contentBounds(1.0f, &lo, &hi), "the function's canvas has content");
+        check(ed.currentSubgraph() == "Distance", "the editor is showing the function");
+        ed.setCurrentSubgraph({});
+        check(ed.currentSubgraph().empty(), "and can go back to the event graph");
+
+        // ---- an output brings the FuncReturn with it, for the same reason.
+        check(ed.addFunctionPin("Distance", true, "ax", "float"), "an input is added");
+        check(ed.addFunctionPin("Distance", false, "result", "float"), "an output is added");
+        int returns = 0;
+        for (const auto& n : ed.graph().nodes) if (n.type == "FuncReturn") ++returns;
+        check(returns == 1, "the first output created exactly one FuncReturn");
+
+        // ---- the signature drives the pins of every node that depends on it.
+        for (const auto& n : ed.graph().nodes) {
+            if (n.type != "FuncEntry") continue;
+            bool hasAx = false;
+            for (const auto& p : n.pins) if (p.name == "ax" && p.isOutput) hasAx = true;
+            check(hasAx, "the FuncEntry gained an OUTPUT pin named after the function's INPUT");
+        }
+
+        std::string why;
+        check(ed.save(&why), "save() succeeds (why=" + why + ")");
+    }
+
+    // ---- reload from disk: the declaration and the body both came back.
+    std::string callId;
+    {
+        GraphEditor ed(tmp);
+        check(ed.functions().size() == 1, "the function survived a save and reload");
+        check(ed.functions()[0].inputs.size() == 1 && ed.functions()[0].outputs.size() == 1,
+              "so did its signature");
+        callId = ed.addCallNode("Distance", Vec2{500.0f, 0.0f});
+        check(!callId.empty(), "a call node can be added");
+        bool wired = false;
+        for (const auto& n : ed.graph().nodes) {
+            if (n.id != callId) continue;
+            for (const auto& p : n.pins) if (p.name == "ax" && !p.isOutput) wired = true;
+        }
+        check(wired, "the call node took the callee's signature as its pins, with no catalog entry to copy");
+        std::string why;
+        check(ed.save(&why), "save() with a call node succeeds (why=" + why + ")");
+    }
+
+    // ---- RENAMING MOVES EVERY REFERENCE, both kinds, in one undo step. A rename that left either
+    // behind produces a file that parses and refuses to compile.
+    {
+        GraphEditor ed(tmp);
+        check(ed.renameFunction("Distance", "Dist2D"), "rename succeeds");
+        std::string why;
+        check(ed.save(&why), "save() after rename succeeds (why=" + why + ")");
+        const std::string after = readFile(tmp);
+        check(after.find("FUNC Dist2D") != std::string::npos, "the FUNC record was renamed");
+        check(after.find("FUNCIN Dist2D ax float") != std::string::npos, "so was its FUNCIN");
+        check(after.find("func=Dist2D") != std::string::npos, "so was the body node's func=");
+        check(after.find("call=Dist2D") != std::string::npos, "so was the call node's call=");
+        check(after.find("Distance") == std::string::npos, "and no reference to the old name is left anywhere");
+    }
+
+    // ---- deleting is REFUSED while something still calls it, then works once it does not.
+    {
+        GraphEditor ed(tmp);
+        std::vector<std::string> blockers;
+        check(!ed.deleteFunction("Dist2D", &blockers), "delete is refused while a call node names it");
+        check(!blockers.empty(), "...and the refusal names the caller rather than just failing");
+        check(ed.selectNode(callId), "the call node selects");
+        ed.deleteSelection();
+        check(ed.deleteFunction("Dist2D"), "with the caller gone, delete succeeds");
+        check(ed.functions().empty(), "the function is gone");
+        bool anyBodyLeft = false;
+        for (const auto& n : ed.graph().nodes) if (n.type == "FuncEntry" || n.type == "FuncReturn") anyBodyLeft = true;
+        check(!anyBodyLeft, "its body went with it -- an orphaned FuncEntry would refuse to compile");
+        std::string why;
+        check(ed.save(&why), "save() after deleting a function succeeds (why=" + why + ")");
+        const std::string after = readFile(tmp);
+        check(after.find("NODE tick OnTick") != std::string::npos,
+              "the event graph the function sat beside is untouched");
+    }
+}
+
 static void testLoadFailure() {
     AVER_INFO("=== a missing file fails cleanly ===");
     const std::string missing = (std::filesystem::path(scratchDir()) / "does_not_exist.ocgraph").string();
@@ -1194,6 +1301,7 @@ int main() {
     testCustomEventKeepsItsNameAndEntryInStep();
     testCommentBoxesRoundTripAndCarryTheirContents();
     testFramingAndAutoLayout();
+    testFunctionsInTheEditor();
     testLoadFailure();
     testWrongExtensionIsRejectedByFactory();
 

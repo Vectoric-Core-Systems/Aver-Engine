@@ -76,6 +76,24 @@ public class Node
     // line's "param=<name>" attribute. Null for every other node type.
     public string? ParamName { get; set; }
 
+    // WHICH SUBGRAPH THIS NODE LIVES IN. Set from the NODE line's "func=<name>" attribute; null
+    // means the EVENT GRAPH, which is every node in every graph written before functions existed.
+    //
+    // Ownership is an attribute on the node rather than a list on the function, so that a node
+    // belongs to exactly one place by construction -- a node cannot appear in two functions' lists,
+    // and there is no second structure to keep in step when a node is deleted. It also means the
+    // C++ reader needed no change at all to preserve a function body: func= rides in the same
+    // extraTokens that already carry param=/field=/class=/var=.
+    public string? FuncOwner { get; set; }
+
+    // Which function a "callfunc" node CALLS. Set from the NODE line's "call=<name>" attribute.
+    //
+    // A SEPARATE ATTRIBUTE FROM func=, deliberately, because a call node has both: it LIVES in one
+    // subgraph (func=, possibly null for the event graph) and it CALLS another (call=). Overloading
+    // one attribute with both meanings would make a recursive call -- a node inside Fib that calls
+    // Fib -- indistinguishable from a node that merely lives there.
+    public string? CallTarget { get; set; }
+
     // Which scene field a "getfield"/"setfield" node addresses, e.g. "CLocal.position". Set from
     // the NODE line's "field=<qualifiedName>" attribute. Null for every other node type. The name
     // is resolved to a dense field id at COMPILE time (GraphCompiler), not here -- resolution needs
@@ -229,6 +247,53 @@ public class GraphComponent
 }
 
 /// A complete graph: nodes, links, pinned values, and output pins to evaluate.
+/// One user-defined FUNCTION: a named, callable subgraph living inside the same .ocgraph as the
+/// event graph, with its own inputs, its own outputs, and its own body of nodes.
+///
+/// WHY THIS IS A REAL CALL AND NOT AN INLINE EXPANSION. Inlining was the cheaper design and it was
+/// seriously considered -- it needs no new emission code at all, because the compiler already
+/// re-emits pure expressions inline in EmitPullOutput. It was rejected on one fact, established by
+/// spike rather than by argument: a DynamicMethod on this toolchain CAN emit a direct IL `Call` to
+/// another DynamicMethod, including to ITSELF and to one whose body has not been written yet.
+/// Recursion therefore costs nothing here, and an inlined function cannot recurse at all -- the
+/// expansion would not terminate. Blueprint draws that same line between a Function and a Macro,
+/// and this is the Function.
+///
+/// ONE FILE, MANY FUNCTIONS, and node ids stay a single FILE-WIDE namespace. A function's body is
+/// ordinary NODE/PIN/LINK records carrying a `func=` attribute naming their owner -- which means the
+/// C++ reader needed no change at all to preserve a function body, since `func=` rides in the same
+/// extraTokens every other attribute already uses. Scoping ids per function would have been tidier
+/// on paper and would have broken the one duplicate-id check the two readers already disagree about.
+public class GraphFunction
+{
+    public required string Name { get; init; }
+
+    /// Inputs, in declaration order -- the arguments of the emitted method. Read inside the body
+    /// from the function's FuncEntry node, whose output pins are exactly these.
+    public List<GraphParameter> Inputs { get; } = new();
+
+    /// Outputs, in declaration order. Written inside the body by a FuncReturn node, whose input pins
+    /// are exactly these, and read at the call site from the CallFunc node's output pins.
+    public List<GraphParameter> Outputs { get; } = new();
+
+    /// PURE means "no exec pins, callable from a data wire", exactly as Blueprint means it.
+    ///
+    /// DECLARED, NOT INFERRED, and that is a deliberate divergence from Blueprint, which decides by
+    /// looking at what the body contains. Inference has a hole that is invisible to its author: a
+    /// function whose body is only a call to ANOTHER function is pure or impure according to what
+    /// THAT one does, transitively, and a rule that inspects node types in the body alone gets it
+    /// wrong. Declaring it makes the author state the intent and lets Validate() check the body
+    /// against it -- including transitively, which is the case inference cannot see.
+    public bool IsPure { get; set; }
+
+    /// The node id of this function's FuncEntry, and of its FuncReturn if it has one. Resolved by
+    /// the parser from the `func=` attribute rather than declared in the FUNC record: a function has
+    /// exactly one of each by construction (Validate refuses a second), so naming them twice would
+    /// be two places to disagree.
+    public string? EntryNodeId { get; set; }
+    public string? ReturnNodeId { get; set; }
+}
+
 public class Graph
 {
     public string Name { get; set; } = "untitled";
@@ -246,6 +311,12 @@ public class Graph
     // before PARAM existed -- GraphCompiler only appends a GraphVarStore argument to the compiled
     // delegate when this list is non-empty, so a VAR-less graph's delegate shape is unchanged.
     public List<GraphVariable> Variables { get; set; } = new();
+
+    // Declared via top-level `FUNC` / `FUNCIN` / `FUNCOUT` records. Empty for every graph written
+    // before functions existed, exactly as Parameters was empty before PARAM existed -- and, as
+    // with every record before it, a reader that does not know FUNC skips it rather than failing,
+    // so an older runtime meeting a function-bearing graph loses the function and keeps the file.
+    public List<GraphFunction> Functions { get; set; } = new();
 
     // Declared via top-level `COMP <id> <Kind> [key=value]...` records, in FILE order -- which is
     // not tree order, because a component may name a parent declared below it. Empty for every
@@ -455,6 +526,149 @@ public class Graph
             if (!seenEvents.Add(eventName))
             {
                 err = $"duplicate ENTRY for event '{eventName}' -- only one node may handle a given event";
+                return false;
+            }
+        }
+
+        // ---- FUNCTIONS -----------------------------------------------------------------------------
+        //
+        // Runs BEFORE the Param/GetVar blocks below for the same reason those run before the Outputs
+        // check: a node whose func= names nothing gets no derived pins at all (see AddDefaultPins),
+        // so every later check would fail with a generic "no pin" message that names the symptom.
+        if (Functions.Count > 0 || Nodes.Values.Any(n => n.FuncOwner != null || n.CallTarget != null))
+        {
+            var byName = new Dictionary<string, GraphFunction>(System.StringComparer.OrdinalIgnoreCase);
+            foreach (var f in Functions) byName[f.Name] = f;
+
+            foreach (var node in Nodes.Values)
+            {
+                if (node.FuncOwner != null && !byName.ContainsKey(node.FuncOwner))
+                {
+                    err = $"Node '{node.Id}' has func={node.FuncOwner}, which no FUNC record declares";
+                    return false;
+                }
+                string t = node.Type.ToLowerInvariant();
+                if ((t == "funcentry" || t == "funcreturn") && node.FuncOwner == null)
+                {
+                    err = $"Node '{node.Id}' is a {node.Type} but has no func= attribute saying which function it belongs to";
+                    return false;
+                }
+                if (t == "callfunc")
+                {
+                    if (string.IsNullOrEmpty(node.CallTarget))
+                    {
+                        err = $"Node '{node.Id}' is a CallFunc but has no call= attribute naming which function it calls";
+                        return false;
+                    }
+                    if (!byName.ContainsKey(node.CallTarget))
+                    {
+                        err = $"Node '{node.Id}' calls '{node.CallTarget}', which no FUNC record declares";
+                        return false;
+                    }
+                }
+            }
+
+            foreach (var f in Functions)
+            {
+                int entries = Nodes.Values.Count(n => n.Type.Equals("funcentry", System.StringComparison.OrdinalIgnoreCase) &&
+                                                       string.Equals(n.FuncOwner, f.Name, System.StringComparison.OrdinalIgnoreCase));
+                int returns = Nodes.Values.Count(n => n.Type.Equals("funcreturn", System.StringComparison.OrdinalIgnoreCase) &&
+                                                       string.Equals(n.FuncOwner, f.Name, System.StringComparison.OrdinalIgnoreCase));
+                if (entries != 1)
+                {
+                    err = entries == 0
+                        ? $"function '{f.Name}' has no FuncEntry node -- a function needs somewhere to begin"
+                        : $"function '{f.Name}' has {entries} FuncEntry nodes; a function begins in exactly one place";
+                    return false;
+                }
+                if (returns > 1)
+                {
+                    // ONE return, not one per branch, and the reason is in the emitter: a function's
+                    // outputs are read from their locals AFTER the exec chain has finished, exactly as
+                    // CompileEntryPoint reads OUT records, so the emitted method has a single Ret. Two
+                    // FuncReturn nodes would be two nodes writing the same locals with no rule about
+                    // which ran last.
+                    err = $"function '{f.Name}' has {returns} FuncReturn nodes; a function returns from exactly one place " +
+                          "(branch INTO the single FuncReturn instead)";
+                    return false;
+                }
+                if (f.Outputs.Count > 0 && returns == 0)
+                {
+                    err = $"function '{f.Name}' declares {f.Outputs.Count} output(s) but has no FuncReturn node to produce them";
+                    return false;
+                }
+            }
+
+            // A WIRE MAY NOT LEAVE THE SUBGRAPH IT IS IN. This is the rule that makes a function a
+            // function rather than a naming convention: the event graph and each function compile to
+            // SEPARATE methods, so a link between them would be a link between two different method
+            // bodies' locals -- which the emitter cannot express and would either drop silently or
+            // read as garbage. Arguments cross the boundary through FuncEntry, results through
+            // FuncReturn, and nothing else crosses at all.
+            foreach (var link in Links)
+            {
+                if (!Nodes.TryGetValue(link.SourceNodeId, out var sn)) continue;
+                if (!Nodes.TryGetValue(link.TargetNodeId, out var tn)) continue;
+                if (string.Equals(sn.FuncOwner, tn.FuncOwner, System.StringComparison.OrdinalIgnoreCase)) continue;
+                string Where(Node n) => n.FuncOwner == null ? "the event graph" : $"function '{n.FuncOwner}'";
+                err = $"link '{link.SourceNodeId}.{link.SourcePinName}' -> '{link.TargetNodeId}.{link.TargetPinName}' " +
+                      $"crosses from {Where(sn)} into {Where(tn)}. A wire cannot leave the subgraph it is in -- " +
+                      "pass the value in through the function's FuncEntry, or back out through its FuncReturn.";
+                return false;
+            }
+
+            // ENTRY and OUT describe the EVENT GRAPH. An ENTRY naming a node inside a function would
+            // ask GraphHost to fire an event into a method it never compiled for that purpose.
+            foreach (var (entryNodeId, eventName) in EntryPoints)
+            {
+                if (Nodes.TryGetValue(entryNodeId, out var en) && en.FuncOwner != null)
+                {
+                    err = $"ENTRY '{eventName}' names node '{entryNodeId}', which lives inside function " +
+                          $"'{en.FuncOwner}'. An event begins in the event graph.";
+                    return false;
+                }
+            }
+            foreach (var (outNodeId, outPinName) in Outputs)
+            {
+                if (Nodes.TryGetValue(outNodeId, out var on) && on.FuncOwner != null)
+                {
+                    err = $"OUT '{outNodeId} {outPinName}' names a node inside function '{on.FuncOwner}'. " +
+                          "OUT is what the GRAPH hands back; a function hands its own results back through FuncReturn.";
+                    return false;
+                }
+            }
+
+            // PURITY IS CHECKED TRANSITIVELY, which is the whole reason it is declared rather than
+            // inferred. A rule that only looked at the node types physically present in a body would
+            // call a function pure when its body is a single call to an impure one -- the exact hole
+            // an inference-based design cannot see, and the one this loop closes. Iterating to a fixed
+            // point rather than recursing keeps a mutually recursive pair from spinning.
+            var impure = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                foreach (var f in Functions)
+                {
+                    if (impure.Contains(f.Name)) continue;
+                    foreach (var node in Nodes.Values)
+                    {
+                        if (!string.Equals(node.FuncOwner, f.Name, System.StringComparison.OrdinalIgnoreCase)) continue;
+                        bool bad = node.Pins.Any(p => p.Type == PinType.Exec) &&
+                                    !node.Type.Equals("funcentry", System.StringComparison.OrdinalIgnoreCase) &&
+                                    !node.Type.Equals("funcreturn", System.StringComparison.OrdinalIgnoreCase);
+                        if (!bad && node.Type.Equals("callfunc", System.StringComparison.OrdinalIgnoreCase) &&
+                            node.CallTarget != null && impure.Contains(node.CallTarget))
+                            bad = true;
+                        if (bad) { impure.Add(f.Name); changed = true; break; }
+                    }
+                }
+            }
+            foreach (var f in Functions)
+            {
+                if (!f.IsPure || !impure.Contains(f.Name)) continue;
+                err = $"function '{f.Name}' is declared pure, but its body has control flow or calls a function that does. " +
+                      "Remove the `pure` flag on its FUNC record, or move the side effect out of it.";
                 return false;
             }
         }
