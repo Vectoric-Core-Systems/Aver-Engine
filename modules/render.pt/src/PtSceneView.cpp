@@ -53,7 +53,7 @@ bool tanAndAxis(const Vec3& dir, const Vec3& forward, f32& tanOut, Vec3& axisOut
 constexpr const char* kPtPresentHLSL = R"(
 struct PtPresentIn { float4 pos : SV_POSITION; float2 ndc : TEXCOORD0; };
 
-cbuffer PtPresentCB : register(b1) { float4 gPtPresentInfo; };   // x width, y height, zw unused
+cbuffer PtPresentCB : register(b1) { float4 gPtPresentInfo; };   // x width, y height, z layout, w unused
 
 StructuredBuffer<float4> gPtAccumRead : register(t0);
 
@@ -92,22 +92,122 @@ float4 PSPathTracePresent(PtPresentIn i) : SV_TARGET {
     uint x1 = min(x0 + 1u, W - 1u), y1 = min(y0 + 1u, H - 1u);
     float tx = fx - float(x0), ty = fy - float(y0);
 
-    float4 r00 = gPtAccumRead[(y0 * W + x0) * 2 + 0];
-    float4 r10 = gPtAccumRead[(y0 * W + x1) * 2 + 0];
-    float4 r01 = gPtAccumRead[(y1 * W + x0) * 2 + 0];
-    float4 r11 = gPtAccumRead[(y1 * W + x1) * 2 + 0];
-    float  n00 = gPtAccumRead[(y0 * W + x0) * 2 + 1].z;
-    float  n10 = gPtAccumRead[(y0 * W + x1) * 2 + 1].z;
-    float  n01 = gPtAccumRead[(y1 * W + x0) * 2 + 1].z;
-    float  n11 = gPtAccumRead[(y1 * W + x1) * 2 + 1].z;
+    // TWO SOURCE LAYOUTS, chosen by gPtPresentInfo.z. The denoiser writes a one-element buffer of
+    // means, so there is nothing left to divide; without it this reads the raw two-element
+    // accumulator and divides, exactly as it did before the filter existed. Keeping the fallback
+    // is what lets a device that cannot compile the filter still show a path-traced image.
+    const bool denoised = gPtPresentInfo.z > 0.5;
 
-    float3 radTop = lerp(r00.rgb, r10.rgb, tx);
-    float3 radBot = lerp(r01.rgb, r11.rgb, tx);
-    float3 rad    = lerp(radTop, radBot, ty);
-    float  nTop   = lerp(n00, n10, tx);
-    float  nBot   = lerp(n01, n11, tx);
-    float  traced = max(lerp(nTop, nBot, ty), 1.0);
-    return float4(rad / traced, 1.0);
+    float3 c00, c10, c01, c11;
+    if (denoised) {
+        c00 = gPtAccumRead[y0 * W + x0].rgb;
+        c10 = gPtAccumRead[y0 * W + x1].rgb;
+        c01 = gPtAccumRead[y1 * W + x0].rgb;
+        c11 = gPtAccumRead[y1 * W + x1].rgb;
+    } else {
+        // The sample count is interpolated with the radiance rather than taken from one texel:
+        // the frame after a camera move has texels mid-update, and dividing one texel's radiance
+        // by another's count is how a blend seam becomes a band.
+        c00 = gPtAccumRead[(y0 * W + x0) * 2 + 0].rgb / max(gPtAccumRead[(y0 * W + x0) * 2 + 1].z, 1.0);
+        c10 = gPtAccumRead[(y0 * W + x1) * 2 + 0].rgb / max(gPtAccumRead[(y0 * W + x1) * 2 + 1].z, 1.0);
+        c01 = gPtAccumRead[(y1 * W + x0) * 2 + 0].rgb / max(gPtAccumRead[(y1 * W + x0) * 2 + 1].z, 1.0);
+        c11 = gPtAccumRead[(y1 * W + x1) * 2 + 0].rgb / max(gPtAccumRead[(y1 * W + x1) * 2 + 1].z, 1.0);
+    }
+
+    return float4(lerp(lerp(c00, c10, tx), lerp(c01, c11, tx), ty), 1.0);
+}
+)";
+
+// The DENOISER: one a-trous (Dammertz et al.) wavelet iteration per dispatch, over the accumulator.
+// See PtSceneView.hpp's denoise block for why this exists and why its strength is driven by the
+// per-pixel sample count rather than a fixed constant.
+//
+// TWO MODES IN ONE SHADER, chosen by gDnInfo.z, because they differ only in how the CENTRE and the
+// TAPS are read:
+//   0 RESOLVE -- the source is the two-element accumulator (summed radiance, then stats whose .z is
+//                the sample count). Divides to a mean and writes float4(mean.rgb, sampleCount).
+//   1 FILTER  -- the source is a one-element mean buffer in that same layout, written by a previous
+//                pass of this shader.
+// Carrying the sample count in .w rather than re-reading the accumulator is what lets every pass
+// after the first ignore the accumulator entirely, and what lets the LAST pass still know how much
+// to trust the pixel it is filtering.
+constexpr const char* kPtDenoiseHLSL = R"(
+cbuffer PtDenoiseCB : register(b1) {
+    uint4  gDnInfo;   // x width, y height, z mode (0 resolve / 1 filter), w step in source texels
+    float4 gDnTune;   // x colour sigma, y max samples, zw unused
+};
+
+StructuredBuffer<float4>   gDnSrc : register(t0);
+RWStructuredBuffer<float4> gDnDst : register(u0);
+
+float ptLum(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+
+// One source texel as (mean radiance, sample count), whichever layout the source is in.
+float4 ptDnFetch(uint x, uint y, uint W, uint mode) {
+    const uint p = y * W + x;
+    if (mode == 0u) {
+        const float4 rad = gDnSrc[p * 2 + 0];
+        const float  n   = max(gDnSrc[p * 2 + 1].z, 1.0);
+        return float4(rad.rgb / n, n);
+    }
+    return gDnSrc[p];
+}
+
+[numthreads(8, 8, 1)]
+void CSPtDenoise(uint3 tid : SV_DispatchThreadID) {
+    const uint W = gDnInfo.x, H = gDnInfo.y;
+    if (tid.x >= W || tid.y >= H) return;
+    const uint mode = gDnInfo.z;
+    const uint step = max(gDnInfo.w, 1u);
+
+    const float4 c = ptDnFetch(tid.x, tid.y, W, mode);
+
+    // RESOLVE ONLY CONVERTS. Filtering on the same pass would make the first iteration a special
+    // case with a different support from the other two, for no gain -- the chain is short enough
+    // that one extra dispatch over 130k pixels costs nothing worth counting.
+    if (mode == 0u) { gDnDst[tid.y * W + tid.x] = c; return; }
+
+    // A CONVERGED PIXEL IS PASSED THROUGH UNTOUCHED. The sigma below already tends to zero as the
+    // sample count rises, so this changes no pixel that the filter would have altered meaningfully
+    // -- it is here because this view exists to be a REFERENCE, and "the reference is bit-exact once
+    // converged" is a property worth being able to state without qualification rather than one that
+    // merely holds to several decimal places.
+    if (c.a >= gDnTune.y) { gDnDst[tid.y * W + tid.x] = c; return; }
+
+    // THE EDGE STOP. Expected Monte Carlo error falls as 1/sqrt(n), so the luminance difference that
+    // counts as "still the same surface" is scaled by exactly that: wide on the frame after a camera
+    // move, vanishing once the image has settled.
+    //
+    // RELATIVE TO LOCAL BRIGHTNESS, which is the half that matters for the problem this was built
+    // for. A shadow sits near 0.1 luminance and the sunlit floor near 0.8; an absolute threshold
+    // tuned on the floor does nothing in the shadow, and one tuned in the shadow flattens the floor.
+    const float lc    = ptLum(c.rgb);
+    const float sigma = gDnTune.x * rsqrt(max(c.a, 1.0)) * max(lc, 0.02);
+
+    // B3 spline, the standard a-trous kernel: [1 4 6 4 1]/16 as an outer product.
+    const float k[5] = { 0.0625, 0.25, 0.375, 0.25, 0.0625 };
+
+    float3 sum = float3(0, 0, 0);
+    float  wsum = 0.0;
+    [unroll] for (int dy = -2; dy <= 2; ++dy) {
+        [unroll] for (int dx = -2; dx <= 2; ++dx) {
+            const int sx = int(tid.x) + dx * int(step);
+            const int sy = int(tid.y) + dy * int(step);
+            // CLAMPED, not skipped. Skipping would renormalise the kernel differently at the border
+            // and leave a one-texel frame of differently-filtered pixels around the image.
+            const uint qx = (uint)clamp(sx, 0, int(W) - 1);
+            const uint qy = (uint)clamp(sy, 0, int(H) - 1);
+            const float4 q = ptDnFetch(qx, qy, W, mode);
+            const float wc = exp(-abs(ptLum(q.rgb) - lc) / (sigma + 1e-6));
+            const float w  = k[dx + 2] * k[dy + 2] * wc;
+            sum  += q.rgb * w;
+            wsum += w;
+        }
+    }
+
+    // wsum can never be zero -- the centre tap weighs k[2]*k[2] with wc == 1 -- but the guard costs
+    // nothing and a NaN here would propagate through every later pass.
+    gDnDst[tid.y * W + tid.x] = float4(wsum > 1e-6 ? sum / wsum : c.rgb, c.a);
 }
 )";
 
@@ -130,10 +230,18 @@ bool PtSceneView::init(rhi::IDevice& dev) {
 void PtSceneView::shutdown() {
     if (res_) {
         pt_.destroyTarget(target_);
+        if (denoisePso_) res_->destroyPipeline(denoisePso_);
+        for (rhi::BufferHandle& b : denoiseBuf_) { if (b) res_->destroyBuffer(b); b = 0; }
+        if (denoiseSetResolve_) res_->destroyBindingSet(denoiseSetResolve_);
+        if (denoiseSetAB_) res_->destroyBindingSet(denoiseSetAB_);
+        if (denoiseSetBA_) res_->destroyBindingSet(denoiseSetBA_);
         if (presentSet_) res_->destroyBindingSet(presentSet_);
         if (presentPso_) res_->destroyPipeline(presentPso_);
     }
     presentSet_ = 0;
+    denoisePso_ = 0;
+    denoiseSetResolve_ = denoiseSetAB_ = denoiseSetBA_ = 0;
+    denoiseReady_ = false;
     presentPso_ = 0;
     presentSampleCount_ = 0;
     presentColorFormat_ = rhi::Format::Unknown;
@@ -323,6 +431,189 @@ bool PtSceneView::rebuildScene(rhi::IRenderContext& ctx) {
     return true;
 }
 
+bool PtSceneView::ensureDenoiseResources() {
+    if (!res_ || !target_.valid()) return false;
+
+    if (!denoisePso_) {
+        rhi::ShaderDesc sd;
+        sd.source = kPtDenoiseHLSL;
+        sd.entry  = "CSPtDenoise";
+        sd.stage  = rhi::ShaderStage::Compute;
+        // NO PRELUDE, unlike the integrator: this shader touches no engine concept at all -- no sky,
+        // no material, no PI. It is arithmetic over a buffer, and including the prelude would bind it
+        // to declarations it never reads.
+        const rhi::ShaderHandle cs = res_->createShader(sd);
+        if (cs) {
+            rhi::ComputePipelineDesc pd;
+            pd.cs = cs;
+            pd.layout.srvCount = 1;
+            pd.layout.uavCount = 1;
+            pd.layout.constantDwords[kPresentConstantRegister] = 0;
+            denoisePso_ = res_->createComputePipeline(pd);
+            res_->destroyShader(cs);
+        }
+        if (!denoisePso_) {
+            // NOT FATAL. Presentation falls back to reading the accumulator directly, which is
+            // exactly what it did before this existed -- a device that cannot compile the filter
+            // still gets a path-traced image, just a noisier one.
+            AVER_WARN("[PT] scene view: the denoiser would not compile; presenting unfiltered");
+            return false;
+        }
+    }
+
+    const u32 pixels = target_.pixels();
+    if (!denoiseBuf_[0]) {
+        for (u32 i = 0; i < 2; ++i) {
+            rhi::BufferDesc bd;
+            bd.bytes = static_cast<u64>(pixels) * kPtAccumStride;   // one float4 per pixel
+            bd.kind  = rhi::BufferKind::Default;
+            bd.allowUnorderedAccess = true;
+            bd.debugName = i == 0 ? "pt denoise A" : "pt denoise B";
+            denoiseBuf_[i] = res_->createBuffer(bd);
+            if (!denoiseBuf_[i]) {
+                AVER_ERROR("[PT] scene view: could not allocate the denoise buffers");
+                return false;
+            }
+        }
+    }
+
+    const auto makeSet = [&](rhi::BindingSetHandle& set) {
+        if (set) return true;
+        rhi::BindingSetDesc bd;
+        bd.srvCount = 1;
+        bd.uavCount = 1;
+        bd.srvKinds[0] = rhi::SlotKind::StructuredBuffer;
+        bd.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
+        set = res_->createBindingSet(bd);
+        return set != 0;
+    };
+    if (!makeSet(denoiseSetResolve_) || !makeSet(denoiseSetAB_) || !makeSet(denoiseSetBA_)) {
+        AVER_ERROR("[PT] scene view: denoise binding sets unavailable");
+        return false;
+    }
+
+    // Rewritten every rebuild, because rebuildScene() always hands back a NEW accumulator handle --
+    // the same reason ensurePresentResources() rewrites its SRV rather than creating a set per target.
+    res_->setSrvBuffer(denoiseSetResolve_, 0, target_.accum, kPtAccumStride,
+                       pixels * kPtAccumElementsPerPixel, 0);
+    res_->setUavBuffer(denoiseSetResolve_, 0, denoiseBuf_[0], kPtAccumStride, pixels, 0);
+    res_->setSrvBuffer(denoiseSetAB_, 0, denoiseBuf_[0], kPtAccumStride, pixels, 0);
+    res_->setUavBuffer(denoiseSetAB_, 0, denoiseBuf_[1], kPtAccumStride, pixels, 0);
+    res_->setSrvBuffer(denoiseSetBA_, 0, denoiseBuf_[1], kPtAccumStride, pixels, 0);
+    res_->setUavBuffer(denoiseSetBA_, 0, denoiseBuf_[0], kPtAccumStride, pixels, 0);
+
+    // WHICH BUFFER HOLDS THE ANSWER IS A PARITY, not something the dispatch loop discovers. The
+    // chain starts at A and alternates once per pass, so after kDenoisePasses it is in A for an
+    // even count and B for an odd one. Deciding it HERE, at descriptor-write time, is what lets
+    // the present set be written once per rebuild rather than once per frame -- rewriting a
+    // descriptor the GPU may still be reading from the previous frame is the hazard
+    // PathTracer::createTarget's own comment warns about, and this sidesteps it entirely.
+    denoiseResult_ = kDenoisePasses % 2u;
+
+    denoiseReady_ = true;
+    return true;
+}
+
+void PtSceneView::runDenoise(rhi::IRenderContext& ctx) {
+    if (!denoiseReady_ || !denoisePso_ || !target_.valid()) return;
+
+    struct DenoiseCB { u32 info[4]; f32 tune[4]; } cb{};
+    cb.info[0] = target_.width;
+    cb.info[1] = target_.height;
+    cb.tune[0] = kDenoiseColorSigma;
+    cb.tune[1] = static_cast<f32>(kMaxSamples);
+
+    const u32 gx = (target_.width  + 7) / 8;
+    const u32 gy = (target_.height + 7) / 8;
+
+    ctx.pushMarker("Aver.PtDenoise");
+
+    // RESOLVE: accumulator -> A. The accumulator is read as an SRV here and written as a UAV by
+    // accumulate(); both bindings name the same buffer, which is why it has to be walked back to
+    // Common by whoever touched it last (PathTracer::accumulate does).
+    // THE ACCUMULATOR IS READ HERE AS AN SRV and was last written as a UAV, so it needs an explicit
+    // transition -- the RHI tracks buffer state and does not model D3D12's implicit Common promotion,
+    // the same reason scenePass() barriers what it samples. It happened to read correctly without
+    // this on the device it was written on, which is exactly the kind of luck that stops being luck
+    // on a different driver.
+    ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
+    // THE ACCUMULATOR IS READ HERE AS AN SRV and was last written as a UAV, so it needs an explicit
+    // transition -- the RHI tracks buffer state and does not model D3D12's implicit Common promotion,
+    // the same reason scenePass() barriers what it samples. It happened to read correctly without
+    // this on the device it was written on, which is exactly the kind of luck that stops being luck
+    // on a different driver.
+    ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
+    // THE ACCUMULATOR IS READ HERE AS AN SRV and was last written as a UAV, so it needs an explicit
+    // transition -- the RHI tracks buffer state and does not model D3D12's implicit Common promotion,
+    // the same reason scenePass() barriers what it samples. It happened to read correctly without
+    // this on the device it was written on, which is exactly the kind of luck that stops being luck
+    // on a different driver.
+    ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
+    // THE ACCUMULATOR IS READ HERE AS AN SRV and was last written as a UAV, so it needs an explicit
+    // transition -- the RHI tracks buffer state and does not model D3D12's implicit Common promotion,
+    // the same reason scenePass() barriers what it samples. It happened to read correctly without
+    // this on the device it was written on, which is exactly the kind of luck that stops being luck
+    // on a different driver.
+    ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
+    // THE ACCUMULATOR IS READ HERE AS AN SRV and was last written as a UAV, so it needs an explicit
+    // transition -- the RHI tracks buffer state and does not model D3D12's implicit Common promotion,
+    // the same reason scenePass() barriers what it samples. It happened to read correctly without
+    // this on the device it was written on, which is exactly the kind of luck that stops being luck
+    // on a different driver.
+    ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
+    // THE ACCUMULATOR IS READ HERE AS AN SRV and was last written as a UAV, so it needs an explicit
+    // transition -- the RHI tracks buffer state and does not model D3D12's implicit Common promotion,
+    // the same reason scenePass() barriers what it samples. It happened to read correctly without
+    // this on the device it was written on, which is exactly the kind of luck that stops being luck
+    // on a different driver.
+    ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
+    // THE ACCUMULATOR IS READ HERE AS AN SRV and was last written as a UAV, so it needs an explicit
+    // transition -- the RHI tracks buffer state and does not model D3D12's implicit Common promotion,
+    // the same reason scenePass() barriers what it samples. It happened to read correctly without
+    // this on the device it was written on, which is exactly the kind of luck that stops being luck
+    // on a different driver.
+    ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
+    ctx.bufferBarrier(denoiseBuf_[0], rhi::ResourceState::Common, rhi::ResourceState::UnorderedAccess);
+    ctx.setPipeline(denoisePso_);
+    ctx.setBindingSet(denoiseSetResolve_);
+    cb.info[2] = 0;   // resolve
+    cb.info[3] = 1;
+    ctx.setConstantBuffer(kPresentConstantRegister, &cb, sizeof(cb));
+    ctx.dispatch(gx, gy, 1);
+    ctx.bufferBarrier(denoiseBuf_[0], rhi::ResourceState::UnorderedAccess, rhi::ResourceState::Common);
+    ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
+    ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
+    ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
+    ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
+    ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
+    ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
+    ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
+
+    // FILTER: A -> B -> A -> ..., step doubling each pass. Each dispatch must SEE the previous one's
+    // writes, so the barriers are per pass and not hoisted out of the loop -- an a-trous chain whose
+    // passes overlap reads and writes of the same texels is not a wavelet transform, it is a race.
+    u32 src = 0;
+    for (u32 i = 0; i < kDenoisePasses; ++i) {
+        const u32 dst = 1u - src;
+        ctx.bufferBarrier(denoiseBuf_[dst], rhi::ResourceState::Common, rhi::ResourceState::UnorderedAccess);
+        ctx.setBindingSet(src == 0 ? denoiseSetAB_ : denoiseSetBA_);
+        cb.info[2] = 1;          // filter
+        cb.info[3] = 1u << i;    // 1, 2, 4 -- see kDenoisePasses
+        ctx.setConstantBuffer(kPresentConstantRegister, &cb, sizeof(cb));
+        ctx.dispatch(gx, gy, 1);
+        ctx.bufferBarrier(denoiseBuf_[dst], rhi::ResourceState::UnorderedAccess, rhi::ResourceState::Common);
+        src = dst;
+    }
+    // src is now kDenoisePasses % 2, which is what ensureDenoiseResources already bound. Checked at
+    // COMPILE time rather than assigned, so changing kDenoisePasses can never silently present a
+    // stale buffer -- there is nothing about this a run could discover that the constant does not
+    // already determine.
+    static_assert(kDenoisePasses % 2u == 1u,
+                  "the present set is bound to buffer B; an even pass count would leave the result in A");
+    (void)src;
+    ctx.popMarker();
+}
+
 bool PtSceneView::ensurePresentResources() {
     if (!res_) return false;
     if (!presentSet_) {
@@ -339,8 +630,17 @@ bool PtSceneView::ensurePresentResources() {
     // reasoning for a fresh set per scene -- there, TWO recorded dispatches could read the same shared
     // set at different times within one frame; here scenePass() runs at most once per frame and always
     // AFTER this rewrite for the frame's current target_, so there is nothing for two reads to race.
-    res_->setSrvBuffer(presentSet_, 0, target_.accum, kPtAccumStride,
-                       target_.pixels() * kPtAccumElementsPerPixel, 0);
+    // AFTER the denoiser has been given its chance, so the SRV names the buffer that will actually
+    // hold this frame's answer. ensureDenoiseResources() reports its own failure and leaves
+    // denoiseReady_ false, which is the fallback path -- not an error for the view as a whole.
+    ensureDenoiseResources();
+    if (denoiseReady_) {
+        res_->setSrvBuffer(presentSet_, 0, denoiseBuf_[denoiseResult_], kPtAccumStride,
+                           target_.pixels(), 0);
+    } else {
+        res_->setSrvBuffer(presentSet_, 0, target_.accum, kPtAccumStride,
+                           target_.pixels() * kPtAccumElementsPerPixel, 0);
+    }
     return true;
 }
 
@@ -410,6 +710,11 @@ void PtSceneView::prePass(rhi::IRenderContext& ctx) {
     d.firstSample = sampleCursor_;
     d.reset = (sampleCursor_ == 0);
     pt_.accumulate(ctx, target_, curCam_, d);
+    // Immediately after, in the same pass: the filter reads what accumulate() just wrote, and a
+    // frame that accumulated without re-filtering would present the PREVIOUS sample count's
+    // image. Skipped entirely on a converged frame, along with the accumulate() above it -- the
+    // denoise buffers persist, so the last result is still the right one.
+    runDenoise(ctx);
     sampleCursor_ += kSamplesPerStep;
 
     if (!loggedFirstFrame_) {
@@ -428,15 +733,20 @@ void PtSceneView::scenePass(rhi::IRenderContext& ctx) {
     // EXPLICIT transition -- the RHI tracks buffer state and does not model D3D12's implicit Common
     // promotion, the same reasoning PathTracer::buildScenes gives for its own explicit vertex/index
     // barriers.
-    ctx.bufferBarrier(target_.accum, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
+    // The buffer being READ is whichever one the present set was pointed at -- the denoiser's
+    // output when it is running, the accumulator when it is not. Barriering the accumulator while
+    // reading a different buffer would leave the one actually being sampled in the wrong state.
+    const rhi::BufferHandle shown = denoiseReady_ ? denoiseBuf_[denoiseResult_] : target_.accum;
+    ctx.bufferBarrier(shown, rhi::ResourceState::Common, rhi::ResourceState::ShaderResource);
     ctx.setPipeline(presentPso_);
     ctx.setBindingSet(presentSet_);
-    const f32 info[4] = {static_cast<f32>(target_.width), static_cast<f32>(target_.height), 0.0f, 0.0f};
+    const f32 info[4] = {static_cast<f32>(target_.width), static_cast<f32>(target_.height),
+                          denoiseReady_ ? 1.0f : 0.0f, 0.0f};
     ctx.setConstantBuffer(kPresentConstantRegister, info, sizeof(info));
     ctx.drawFullscreen();
-    // Back to Common, matching every other consumer of this buffer (accumulate(), copyForReadback()):
-    // the NEXT accumulate() dispatch assumes it starts there.
-    ctx.bufferBarrier(target_.accum, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
+    // Back to Common, matching every other consumer of these buffers (accumulate(), runDenoise(),
+    // copyForReadback()): the NEXT dispatch assumes it starts there.
+    ctx.bufferBarrier(shown, rhi::ResourceState::ShaderResource, rhi::ResourceState::Common);
 }
 
 void PtSceneView::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,

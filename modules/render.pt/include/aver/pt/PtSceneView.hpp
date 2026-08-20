@@ -144,6 +144,60 @@ private:
     bool sceneReady_ = false;
     u32  sampleCursor_ = 0;
 
+    // ---- the DENOISER ------------------------------------------------------------------------
+    //
+    // An edge-aware a-trous (Dammertz et al.) wavelet filter over the 480x270 accumulator, run
+    // after accumulation and before presentation.
+    //
+    // WHY THIS EXISTS, measured rather than assumed: a path-traced SHADOW carries roughly 18x the
+    // relative error of the sunlit floor beside it, at every sample count (10.9% vs 0.55% at 64
+    // spp). That is not a bug in the shadow test -- ptDirectSun is a single deterministic ray at a
+    // delta light, and it returns exactly zero when occluded. It is that a lit pixel gets a large
+    // noise-free direct term diluting its indirect noise, while a shadowed pixel's ENTIRE signal
+    // is the cosine-sampled indirect bounce. Shadows are structurally the noisiest thing in the
+    // image, and they are what an author notices.
+    //
+    // ITS STRENGTH IS DRIVEN BY THE PER-PIXEL SAMPLE COUNT, which is the part worth keeping. The
+    // expected noise of a Monte Carlo mean falls as 1/sqrt(n), so the colour edge-stop is widened
+    // by exactly that: strong filtering on the frame after a camera move (8 spp), and effectively
+    // identity once the image has converged. That matters here more than in a game renderer,
+    // because this view exists to be a REFERENCE -- blurring a converged reference would destroy
+    // the thing it is for. It also means there is no pop when convergence completes: the filter
+    // fades out continuously rather than switching off.
+    //
+    // NO GEOMETRY BUFFER, deliberately. A full SVGF stops on normal and depth as well as colour,
+    // and doing that here would mean either widening the accumulator (which the furnace test reads
+    // back at a hard-coded stride) or adding a second UAV to the integrator. Both change code this
+    // module is measured by, to buy edge preservation that the 1/sqrt(n) colour stop already
+    // provides most of at this resolution. If a later pass needs true geometric stops, THAT is
+    // when to pay for the G-buffer.
+    //
+    // PathTracer ITSELF IS UNTOUCHED by all of this -- the accumulator keeps its exact layout and
+    // semantics, so PtFurnaceTest's oracle reads the same bytes it always did. The denoiser reads
+    // that buffer and writes its own.
+    rhi::PipelineHandle   denoisePso_ = 0;
+    rhi::BufferHandle     denoiseBuf_[2] = {0, 0};
+    // Three sets, because the chain is accum -> A -> B -> A -> ... : the first pass RESOLVES (sum
+    // divided by count) out of the two-element accumulator, and the rest ping-pong between two
+    // one-element mean buffers. A binding set is read when the command EXECUTES, so these cannot
+    // be one set rebound between dispatches -- the same rule PathTracer::createTarget states.
+    rhi::BindingSetHandle denoiseSetResolve_ = 0;   // accum -> A
+    rhi::BindingSetHandle denoiseSetAB_ = 0;        // A -> B
+    rhi::BindingSetHandle denoiseSetBA_ = 0;        // B -> A
+    bool denoiseReady_ = false;
+    // Which of denoiseBuf_ holds the finished image after the last pass. Presentation binds it.
+    u32  denoiseResult_ = 0;
+    bool ensureDenoiseResources();
+    void runDenoise(rhi::IRenderContext& ctx);
+
+    // The a-trous step sizes, in source texels, one dispatch each. 1,2,4 gives a 5x5 kernel an
+    // effective support of about 33x33 for three passes rather than the 1089 taps a direct kernel
+    // that wide would cost -- which is the entire point of the a-trous construction.
+    static constexpr u32 kDenoisePasses = 3;
+    // How many multiples of the estimated noise level count as "the same surface". Tuned by
+    // measurement on the --pt-scene cast shadow, not by eye; see the .cpp.
+    static constexpr f32 kDenoiseColorSigma = 1.5f;
+
     // ---- the presentation pass: gPtAccum (a StructuredBuffer) drawn to the scene colour target ----
     rhi::PipelineHandle   presentPso_ = 0;
     rhi::BindingSetHandle presentSet_ = 0;
