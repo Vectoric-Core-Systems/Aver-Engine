@@ -318,6 +318,11 @@ bool GraphEditor::save(std::string* why) {
 void GraphEditor::onFileChanged() {
     if (dirty_) return; // never clobber unsaved edits behind the user's back
     loadFromDisk();
+    // A reload is a new set of positions, so the view is pointed at them again -- an externally
+    // edited graph that moved every node would otherwise reopen looking at empty grid. AFTER the
+    // dirty guard, deliberately: a notification that reloads nothing must move nothing either.
+    pendingFrame_ = true;
+    viewTouched_ = false;
 }
 
 // ======================================================================================= undo/redo =
@@ -594,6 +599,125 @@ std::string GraphEditor::commentAtCanvas(Vec2 canvasPt, float dpi, bool* outOnGr
         if (canvasPt.y >= c.y && canvasPt.y <= c.y + barH) return c.id;
     }
     return {};
+}
+
+// ---------------------------------------------------------------- framing and layout
+
+// Screen-space margin left around the content when framing. Enough that a node on the edge of the
+// graph does not sit flush against the canvas border, where its pins would be unclickable.
+namespace {
+constexpr float kFramePaddingPx = 40.0f;
+
+// THE ZOOM FLOOR IS A DPI-RELATIVE QUANTITY, and it was written as an absolute one. What a
+// minimum zoom is FOR is "do not let the graph shrink past the point where it is a smear" --
+// which is a statement about SCREEN pixels per logical pixel, i.e. about zoom * dpi, not about
+// zoom. A flat floor of 0.15 therefore bites three times too early on a 300% display.
+//
+// MEASURED, not reasoned: a real 63-node graph (AN_FPCharacter.ocgraph) auto-lays out to a
+// content span of 11907 x 5400 canvas units at dpi 3. Fitting that in an 1853 px canvas needs
+// zoom 0.135. The old floor clamped it to 0.15, so the content overflowed the viewport and the
+// button labelled "Frame All" did not frame all -- which is worse than having no button.
+//
+// ONLY THE FLOOR SCALES. The ceiling would be equally defensible in theory (zoom 4 at dpi 3 is
+// a 12x magnification nobody needs), but nothing is broken up there, and dividing it would
+// TAKE AWAY zoom range that works today on the display this engine is developed on. A fix that
+// removes a working capability to satisfy a symmetry is not a fix.
+constexpr float kMinScreenPxPerLogicalPx = 0.15f;
+constexpr float kMaxZoom = 4.0f;
+inline float minZoomForDpi(float dpi) { return kMinScreenPxPerLogicalPx / std::max(dpi, 0.25f); }
+} // namespace
+
+bool GraphEditor::contentBounds(float dpi, Vec2* outMin, Vec2* outMax) {
+    recomputeLayouts(dpi);
+    bool any = false;
+    Vec2 lo{}, hi{};
+    const auto grow = [&](Vec2 a, Vec2 b) {
+        if (!any) { lo = a; hi = b; any = true; return; }
+        lo.x = std::min(lo.x, a.x); lo.y = std::min(lo.y, a.y);
+        hi.x = std::max(hi.x, b.x); hi.y = std::max(hi.y, b.y);
+    };
+    for (const auto& nl : layouts_) grow(nl.min, nl.max);
+    // COMMENT BOXES COUNT. A box is content -- often the largest thing on the canvas, and a frame
+    // that cropped one would look like the box had been resized rather than the view moved.
+    for (const auto& c : graph_.comments) {
+        grow(Vec2{static_cast<f32>(c.x), static_cast<f32>(c.y)},
+             Vec2{static_cast<f32>(c.x + c.w), static_cast<f32>(c.y + c.h)});
+    }
+    if (!any) return false;
+    if (outMin) *outMin = lo;
+    if (outMax) *outMax = hi;
+    return true;
+}
+
+bool GraphEditor::selectionBounds(float dpi, Vec2* outMin, Vec2* outMax) {
+    recomputeLayouts(dpi);
+    bool any = false;
+    Vec2 lo{}, hi{};
+    const auto grow = [&](Vec2 a, Vec2 b) {
+        if (!any) { lo = a; hi = b; any = true; return; }
+        lo.x = std::min(lo.x, a.x); lo.y = std::min(lo.y, a.y);
+        hi.x = std::max(hi.x, b.x); hi.y = std::max(hi.y, b.y);
+    };
+    for (const auto& nl : layouts_) {
+        if (std::find(selectedNodes_.begin(), selectedNodes_.end(), nl.nodeId) == selectedNodes_.end()) continue;
+        grow(nl.min, nl.max);
+    }
+    for (const auto& c : graph_.comments) {
+        if (c.id != selectedComment_) continue;
+        grow(Vec2{static_cast<f32>(c.x), static_cast<f32>(c.y)},
+             Vec2{static_cast<f32>(c.x + c.w), static_cast<f32>(c.y + c.h)});
+    }
+    if (!any) return false;
+    if (outMin) *outMin = lo;
+    if (outMax) *outMax = hi;
+    return true;
+}
+
+void GraphEditor::frameAll(Vec2 viewportPx, float dpi) {
+    Vec2 lo, hi;
+    if (!contentBounds(dpi, &lo, &hi)) return;
+    // The same zoom limits the wheel enforces, passed in rather than re-declared, so a framed view is
+    // always a view the wheel could also have reached -- a frame that landed outside the wheel range
+    // would snap on the next scroll notch.
+    view_ = frameTransform(lo, hi, viewportPx, kFramePaddingPx * dpi, minZoomForDpi(dpi), kMaxZoom);
+}
+
+void GraphEditor::frameSelection(Vec2 viewportPx, float dpi) {
+    Vec2 lo, hi;
+    if (!selectionBounds(dpi, &lo, &hi)) { frameAll(viewportPx, dpi); return; }
+    // A SINGLE selected node would otherwise frame to a rectangle the size of one node and zoom to
+    // the 4x ceiling, which is disorienting rather than helpful -- you lose every neighbour and the
+    // wire you were following. Padding the box out to a minimum keeps some context in shot.
+    const f32 minSpan = 420.0f * dpi;
+    const f32 padX = std::max(0.0f, (minSpan - (hi.x - lo.x)) * 0.5f);
+    const f32 padY = std::max(0.0f, (minSpan * 0.6f - (hi.y - lo.y)) * 0.5f);
+    lo.x -= padX; hi.x += padX;
+    lo.y -= padY; hi.y += padY;
+    view_ = frameTransform(lo, hi, viewportPx, kFramePaddingPx * dpi, minZoomForDpi(dpi), kMaxZoom);
+}
+
+bool GraphEditor::applyAutoLayout(float dpi) {
+    if (graph_.nodes.empty()) return false;
+    pushUndo();
+    const auto pos = autoLayoutPositions(graph_, style_, dpi);
+    for (const auto& kv : pos) {
+        displayPos_[kv.first] = kv.second;
+        for (auto& n : graph_.nodes) {
+            if (n.id != kv.first) continue;
+            n.x = kv.second.x;
+            n.y = kv.second.y;
+            // A node that carried NO position now carries one. That is the intended effect of
+            // pressing the button -- see the header -- and it is also the one thing this does that
+            // runAutoLayoutIfUnpositioned refuses to do behind the user's back.
+            n.hasPosition = true;
+            break;
+        }
+    }
+    // The positions are the file's now, not an overlay, so the DPI-change re-layout in draw() must
+    // stop rewriting them -- it would fight every position the author just asked to keep.
+    autoLaidOut_ = false;
+    dirty_ = true;
+    return true;
 }
 
 void GraphEditor::deleteSelection() {
@@ -938,13 +1062,31 @@ void GraphEditor::draw(Engine& e) {
     if (ImGui::Button("Redo")) redo();
     ImGui::EndDisabled();
     ImGui::SameLine();
+    // FRAME ALL AND AUTO-LAYOUT ARE BUTTONS, not only key bindings, and that is the point of them.
+    // The graph that opens on empty grid is found by someone who does not yet know this editor;
+    // a binding they have to be told about does not reach them. The shortcut is in the label.
+    if (ImGui::Button("Frame All")) framePendingFromToolbar_ = true;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fit the whole graph in view  (Home)\n"
+                                                   "F frames the selection instead");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(graph_.nodes.empty());
+    if (ImGui::Button("Auto-Layout")) {
+        applyAutoLayout(dpi);
+        framePendingFromToolbar_ = true;   // a tidy graph you cannot see is not tidy
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Re-place every node in dependency columns, and SAVE those positions.\n"
+                           "One undo step. Undo restores exactly where everything was.");
+    ImGui::SameLine();
     // The pan hint lives HERE, on the status line the user is already reading for the zoom percentage,
     // deliberately instead of a tooltip: a tooltip only reaches someone already hovering the thing it
     // explains, which is exactly backwards for a gesture whose entire problem is that nobody knew to
     // reach for it. Lists every gesture that actually works today (this comment is not aspirational --
     // Right/Middle-drag and Space+drag are both wired in the block below).
-    ImGui::TextDisabled("%s  |  %zu nodes, %zu links  |  zoom %.0f%%  |  pan: right- or middle-drag, or Space+drag",
-                         path_.c_str(), graph_.nodes.size(), graph_.links.size(), view_.zoom * 100.0f);
+    ImGui::TextDisabled("%s  |  %zu nodes, %zu links, %zu comments  |  zoom %.0f%%  |  pan: right- or middle-drag, or Space+drag  |  C: comment box",
+                         path_.c_str(), graph_.nodes.size(), graph_.links.size(),
+                         graph_.comments.size(), view_.zoom * 100.0f);
 
     // ---- the two tabs an actor gets: what it DOES, and what it IS ------------------------------
     // Blueprint's own split, and the reason for it is not organisational. A class graph now carries
@@ -1010,6 +1152,33 @@ void GraphEditor::drawEventGraph(float dpi) {
         const Vec2 s = canvasToScreen(view_, canvasPt);
         return ImVec2(originIm.x + s.x, originIm.y + s.y);
     };
+
+    // ---- frame on first open, now that the canvas size is a real number -----------------------
+    // A graph whose nodes sit at large coordinates -- or one auto-laid-out at a DPI this display
+    // does not use -- opened showing empty grid, and the only way to find the content was to drag
+    // until it appeared. One shot, cleared whether or not it found anything, so an empty graph
+    // does not retry every frame and a graph the user has since panned is never yanked back.
+    // THE RULE IS "THE VIEW IS MINE UNTIL YOU TOUCH IT", not "frame once and hope".
+    //
+    // The first thing tried here was a one-shot on open, and it framed against a canvas 1853 px
+    // wide when the window settled at 2670 -- measured, not assumed -- leaving a correctly
+    // computed frame a third of a screen off. The second thing tried was "keep framing until two
+    // consecutive frames agree on the size", and it ALSO measured 1853 twice, because the window
+    // grows later than that and there is no frame count at which it is safe to stop looking.
+    //
+    // So stop guessing when the layout is final and track the thing that actually matters: has
+    // the AUTHOR chosen a view? Until they pan or zoom, the view is not theirs, it is this
+    // editor's best answer to "show me the graph" -- and the best answer to that changes when the
+    // canvas changes size. The moment they scroll or drag, it is theirs and nothing moves it
+    // again. This also fixes window resize and the details-panel split for free, which the
+    // one-shot never would have.
+    const bool canvasResized = canvasSize.x != lastCanvasSizePx_.x || canvasSize.y != lastCanvasSizePx_.y;
+    if (framePendingFromToolbar_ || (!viewTouched_ && (pendingFrame_ || canvasResized))) {
+        frameAll(Vec2{canvasSize.x, canvasSize.y}, dpi);
+        pendingFrame_ = false;
+        framePendingFromToolbar_ = false;
+    }
+    lastCanvasSizePx_ = Vec2{canvasSize.x, canvasSize.y};
 
     // ---- background grid ----------------------------------------------------------------------
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1134,7 +1303,9 @@ void GraphEditor::drawEventGraph(float dpi) {
         const bool stillDown = ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseDown(ImGuiMouseButton_Middle) ||
                                 ImGui::IsMouseDown(ImGuiMouseButton_Right);
         if (stillDown) {
-            view_.panPx = panAnchorPx_ + (mouseScreen - dragStartScreen_);
+            const Vec2 moved = mouseScreen - dragStartScreen_;
+            if (vecLen(moved) > 0.0f) viewTouched_ = true;
+            view_.panPx = panAnchorPx_ + moved;
         } else {
             // Right button only: resolve the click-vs-drag ambiguity now that the button is up. A
             // couple of screen pixels of "click threshold" absorbs the involuntary jitter a real mouse
@@ -1272,15 +1443,18 @@ void GraphEditor::drawEventGraph(float dpi) {
         // the same direction scrolling up in a text editor reveals earlier/upper content by pushing the
         // current view down -- NOT the "camera pans up" reading, which would be the opposite sign.
         constexpr f32 kWheelPanPxPerNotch = 60.0f;
+        viewTouched_ = true;
         view_.panPx.y += io.MouseWheel * kWheelPanPxPerNotch * dpi;
     } else if (hovered && io.MouseWheel != 0.0f) {
-        const f32 newZoom = std::clamp(view_.zoom * std::pow(1.1f, io.MouseWheel), 0.15f, 4.0f);
+        const f32 newZoom = std::clamp(view_.zoom * std::pow(1.1f, io.MouseWheel), minZoomForDpi(dpi), kMaxZoom);
+        viewTouched_ = true;
         view_ = zoomAroundScreenPoint(view_, newZoom, mouseScreen);
     }
     if (hovered && io.MouseWheelH != 0.0f) {
         // Always horizontal pan, no modifier needed: this axis has no existing zoom meaning to collide
         // with (the code above only ever reads io.MouseWheel), so it is free in every state.
         constexpr f32 kWheelPanPxPerNotch = 60.0f;
+        viewTouched_ = true;
         view_.panPx.x -= io.MouseWheelH * kWheelPanPxPerNotch * dpi;
     }
 
@@ -1294,6 +1468,12 @@ void GraphEditor::drawEventGraph(float dpi) {
             addCommentAroundSelection(dpi);
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) { if (io.KeyShift) redo(); else undo(); }
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y, false)) redo();
+        // F frames the selection (falling back to everything), Home always frames everything --
+        // the same two bindings Blueprint uses, and the reason for having both is that "show me
+        // what I just clicked" and "show me where I am" are different questions.
+        if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_F, false))
+            frameSelection(Vec2{canvasSize.x, canvasSize.y}, dpi);
+        if (ImGui::IsKeyPressed(ImGuiKey_Home, false)) frameAll(Vec2{canvasSize.x, canvasSize.y}, dpi);
     }
 
     // ---- draw: comment boxes at the back, then links, then nodes -- ImDrawListSplitter, not
@@ -1312,6 +1492,24 @@ void GraphEditor::drawEventGraph(float dpi) {
     // and leave an unconnected one hollow -- which is the one piece of information a node editor
     // can show for free and which this one was throwing away: an unwired `exec` input means the
     // node never runs, and that was previously indistinguishable from a wired one.
+    // ---- TEXT SCALES WITH ZOOM, AND STOPS BEING DRAWN WHEN IT STOPS BEING READABLE.
+    //
+    // Every label here used to be submitted at the UI font size regardless of zoom. Node BOXES
+    // shrink with zoom and text did not, so a graph zoomed out far enough to see whole -- which,
+    // for a real 63-node graph at 300% DPI, is about zoom 0.2 -- drew sixty full-size pin labels
+    // on top of each other and read as noise. The nodes were laid out correctly the whole time;
+    // it was the type that was wrong, which is why it looked like a layout bug and was not.
+    //
+    // Two thresholds, not one. Pin labels go first and go earlier: there are five times as many of
+    // them, they are the ones that collide, and "which pin is this" is a question you ask close up.
+    // A node TITLE survives further out, because at overview zoom the only question left is what
+    // the shapes ARE, and a graph of unlabelled boxes answers nothing.
+    const float uiFontPx     = ImGui::GetFontSize();
+    const float scaledFontPx = uiFontPx * view_.zoom;
+    const bool  showPinText  = scaledFontPx >= 7.0f;
+    const bool  showTitles   = scaledFontPx >= 4.5f;
+    ImFont* const font       = ImGui::GetFont();
+
     std::set<std::pair<std::string, std::string>> connectedPins;
     for (const auto& link : graph_.links) {
         connectedPins.emplace(link.sourceNode, link.sourcePin);
@@ -1342,9 +1540,15 @@ void GraphEditor::drawEventGraph(float dpi) {
             dl->AddLine(ImVec2(pMax.x - grip, pMax.y - 2.0f * dpi), ImVec2(pMax.x - 2.0f * dpi, pMax.y - grip), gc, 1.5f * dpi);
             dl->AddLine(ImVec2(pMax.x - grip * 0.5f, pMax.y - 2.0f * dpi), ImVec2(pMax.x - 2.0f * dpi, pMax.y - grip * 0.5f), gc, 1.5f * dpi);
         }
-        if (!c.text.empty()) {
+        // A comment title is a LANDMARK -- the thing you navigate a zoomed-out graph by -- so it
+        // gets a floor the node labels do not: it shrinks with the box, but never below the size
+        // at which it would stop doing its job. The clip rect it already had keeps an oversized
+        // title inside its own bar rather than letting it run across the canvas.
+        const float cmtFontPx = std::max(uiFontPx * view_.zoom, 11.0f);
+        if (!c.text.empty() && barH > 3.0f) {
             dl->PushClipRect(pMin, ImVec2(pMax.x, pMin.y + barH), true);
-            dl->AddText(ImVec2(pMin.x + 6.0f * dpi, pMin.y + 4.0f * dpi), IM_COL32(255, 255, 255, 255), c.text.c_str());
+            dl->AddText(font, cmtFontPx, ImVec2(pMin.x + 6.0f * dpi * view_.zoom, pMin.y + 2.0f * dpi * view_.zoom),
+                         IM_COL32(255, 255, 255, 255), c.text.c_str());
             dl->PopClipRect();
         }
     }
@@ -1405,10 +1609,13 @@ void GraphEditor::drawEventGraph(float dpi) {
         dl->AddLine(ImVec2(pMin.x, pMin.y + headerH), ImVec2(pMax.x, pMin.y + headerH),
                     IM_COL32(0, 0, 0, 90), 1.0f * dpi);
         dl->AddRect(pMin, pMax, selected ? IM_COL32(255, 220, 90, 255) : IM_COL32(12, 14, 18, 255), 5.0f * dpi, 0, selected ? 2.5f * dpi : 1.0f * dpi);
-        const std::string label = desc ? desc->displayName : (srcNode ? srcNode->type : nl.nodeId);
-        dl->PushClipRect(pMin, ImVec2(pMax.x, pMin.y + headerH), true);
-        dl->AddText(ImVec2(pMin.x + 6.0f * dpi, pMin.y + 3.0f * dpi), IM_COL32(255, 255, 255, 255), label.c_str());
-        dl->PopClipRect();
+        if (showTitles) {
+            const std::string label = desc ? desc->displayName : (srcNode ? srcNode->type : nl.nodeId);
+            dl->PushClipRect(pMin, ImVec2(pMax.x, pMin.y + headerH), true);
+            dl->AddText(font, scaledFontPx, ImVec2(pMin.x + 6.0f * dpi * view_.zoom, pMin.y + 3.0f * dpi * view_.zoom),
+                         IM_COL32(255, 255, 255, 255), label.c_str());
+            dl->PopClipRect();
+        }
 
         for (const auto& pl : nl.pins) {
             const ImVec2 dot = toScreenAbs(pl.pos);
@@ -1459,9 +1666,13 @@ void GraphEditor::drawEventGraph(float dpi) {
                 dl->AddCircle(dot, r - 1.0f * dpi, pinCol, 0, 2.0f * dpi);
             }
             if (isLinkEnd) dl->AddCircle(dot, r + 2.0f * dpi, IM_COL32(255, 220, 90, 255), 0, 2.0f * dpi);
-            const ImVec2 textSize = ImGui::CalcTextSize(pl.name.c_str());
+            if (!showPinText) continue;
+            // Measured at the SCALED size, not the UI size, or an output label would be positioned
+            // from a width it no longer has and would drift off its own node as you zoom out.
+            const ImVec2 textSize = font->CalcTextSizeA(scaledFontPx, FLT_MAX, 0.0f, pl.name.c_str());
             const f32 tx = pl.isOutput ? dot.x - textSize.x - r - 3.0f * dpi : dot.x + r + 3.0f * dpi;
-            dl->AddText(ImVec2(tx, dot.y - textSize.y * 0.5f), IM_COL32(220, 220, 220, 255), pl.name.c_str());
+            dl->AddText(font, scaledFontPx, ImVec2(tx, dot.y - textSize.y * 0.5f),
+                         IM_COL32(220, 220, 220, 255), pl.name.c_str());
         }
     }
     dl->ChannelsMerge();

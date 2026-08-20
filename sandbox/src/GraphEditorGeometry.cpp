@@ -316,6 +316,28 @@ CanvasTransform zoomAroundScreenPoint(const CanvasTransform& t, f32 newZoom, Vec
     return out;
 }
 
+CanvasTransform frameTransform(Vec2 contentMin, Vec2 contentMax, Vec2 viewportPx,
+                                f32 paddingPx, f32 minZoom, f32 maxZoom) {
+    CanvasTransform out;
+    // The viewport minus its margins is what the content actually has to fit into. Guarded at one
+    // pixel: a canvas child narrower than its own padding (a details panel dragged almost shut) would
+    // otherwise ask for a zero or negative fit and divide by it.
+    const f32 availW = std::max(viewportPx.x - 2.0f * paddingPx, 1.0f);
+    const f32 availH = std::max(viewportPx.y - 2.0f * paddingPx, 1.0f);
+    const f32 contentW = contentMax.x - contentMin.x;
+    const f32 contentH = contentMax.y - contentMin.y;
+    // Per-axis, independently, so one collapsed axis cannot poison the other.
+    const f32 zx = contentW > 0.0001f ? availW / contentW : maxZoom;
+    const f32 zy = contentH > 0.0001f ? availH / contentH : maxZoom;
+    out.zoom = std::clamp(std::min(zx, zy), minZoom, maxZoom);
+    // Centre AFTER clamping, from the zoom actually chosen -- see the header for why this ordering
+    // is the point of the function.
+    const Vec2 centre((contentMin.x + contentMax.x) * 0.5f, (contentMin.y + contentMax.y) * 0.5f);
+    out.panPx = Vec2(viewportPx.x * 0.5f - centre.x * out.zoom,
+                      viewportPx.y * 0.5f - centre.y * out.zoom);
+    return out;
+}
+
 // ---------------------------------------------------------------------------------------------------
 // Auto-layout
 // ---------------------------------------------------------------------------------------------------

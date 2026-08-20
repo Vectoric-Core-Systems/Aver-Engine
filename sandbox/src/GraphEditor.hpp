@@ -157,6 +157,46 @@ public:
     // is an editor state with no way out except a text edit.
     std::string addComment(Vec2 a, Vec2 b, const std::string& text);
 
+    // ---- framing and layout -------------------------------------------------------------------
+    // THE PROBLEM THESE CLOSE, stated plainly because it had gone unaddressed long enough to be
+    // treated as normal: a real graph opened showing whichever corner of it happened to sit at
+    // canvas (0,0), which for every graph in this repo is a column of Const nodes and nothing else.
+    // The content was never missing -- it was off-screen, at a zoom nobody had chosen, with no
+    // gesture to get to it short of dragging until something appeared.
+
+    // The canvas-space bounding box of everything drawn: every node box and every comment box. False
+    // when the graph is empty (nothing to frame, and a caller must not treat {0,0}..{0,0} as content).
+    //
+    // Takes a dpi and recomputes the layouts, for the reason nodesInsideComment does: a node box has
+    // no size without one, and reading whatever the last frame left would make this callable only
+    // from inside a frame.
+    bool contentBounds(float dpi, Vec2* outMin, Vec2* outMax);
+
+    // Same, restricted to the current selection -- selected nodes, or the selected comment box.
+    // False when nothing is selected.
+    bool selectionBounds(float dpi, Vec2* outMin, Vec2* outMax);
+
+    // Points the view at the whole graph (frameAll) or at the selection, falling back to the whole
+    // graph when nothing is selected (frameSelection). `viewportPx` is the canvas child's size in
+    // real pixels. No-op on an empty graph rather than jumping to the origin.
+    //
+    // VIEW-ONLY: neither touches graph_ or displayPos_, so neither dirties the file. Framing is
+    // where you are looking, not what the graph says.
+    void frameAll(Vec2 viewportPx, float dpi);
+    void frameSelection(Vec2 viewportPx, float dpi);
+
+    // Re-runs the layered auto-layout over the whole graph and COMMITS the result into graph_, as a
+    // single undoable edit that dirties the file.
+    //
+    // COMMITTING IS THE DIFFERENCE between this and runAutoLayoutIfUnpositioned(), which is display-
+    // only and deliberately so -- it fires on load, and a load followed by a save must stay byte-
+    // identical, so it must never invent position data nobody asked for. This one is a button the
+    // author pressed. They asked. Writing the positions is what makes the tidy graph still tidy the
+    // next time it opens, which is the entire value of pressing it.
+    //
+    // Returns false and changes nothing on an empty graph.
+    bool applyAutoLayout(float dpi);
+
     // Adds one box sized to enclose every currently selected node, with a margin. Returns empty and
     // does nothing when the selection is empty -- this is the C-key gesture, and wrapping nothing in
     // a box is not a thing an author ever means.
@@ -392,6 +432,24 @@ private:
     // in-flight edit buffer it never asked for.
     std::string varEditRowKey_;
     char varEditBuf_[256] = {};
+
+    // One-shot: frame the whole graph on the first draw that knows how big the canvas is. Set at
+    // load. NOT done in loadFromDisk itself, because the viewport size is an ImGui fact that does
+    // not exist yet there -- and framing to a guessed size is the same bug as not framing at all.
+    bool pendingFrame_ = true;
+    // Raised by the Frame All / Auto-Layout toolbar buttons, honoured by the canvas on the SAME
+    // frame. Separate from pendingFrame_ only so the two reasons stay legible: the toolbar draws
+    // before the canvas child exists, so it does not yet know how big the viewport is, and framing
+    // to a guessed size is the bug this whole block exists to fix.
+    bool framePendingFromToolbar_ = false;
+    // The canvas size the PREVIOUS frame saw, so a resize can be noticed. See the frame block in
+    // drawEventGraph.
+    Vec2 lastCanvasSizePx_{};
+    // Whether the AUTHOR has chosen this view -- set by pan and zoom, and by nothing else. While it
+    // is false the editor keeps the graph framed; once it is true the view is never moved again
+    // except by an explicit Frame All / F / Home. Dragging a NODE does not set it: moving a thing is
+    // not moving the camera, and a graph you have been tidying should stay framed.
+    bool viewTouched_ = false;
 
     // ---- comment box state ------------------------------------------------------------------------
     // Selected and drag targets are held BY ID, never by index, for the same reason varEditRowKey_ is

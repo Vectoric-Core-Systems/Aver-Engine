@@ -183,6 +183,24 @@ Vec2 screenToCanvas(const CanvasTransform& t, Vec2 screenPt);
 // adjusted transform; does not mutate `t`.
 CanvasTransform zoomAroundScreenPoint(const CanvasTransform& t, f32 newZoom, Vec2 screenPivot);
 
+// The pan/zoom that puts the canvas-space rectangle `contentMin`..`contentMax` fully inside a
+// viewport of `viewportPx` pixels, centred, with `paddingPx` of screen-space margin on every side.
+// Zoom is clamped to [minZoom, maxZoom] -- and the CENTRING STILL HOLDS when the clamp bites, which
+// is the whole reason this is not two lines at the call site. A graph of three nodes wants a zoom
+// far above 1.0 to fill the screen; clamping that to maxZoom and keeping the naive pan would leave
+// the content jammed in a corner, which reads as a broken button rather than a zoom limit.
+//
+// A DEGENERATE RECTANGLE IS NOT AN ERROR. A single node has zero height between its own edges only
+// if something upstream lost it, but one comment box collapsed to a line, or a content box exactly
+// as wide as the viewport, both produce a zero or infinite ratio on one axis. Each axis falls back
+// to maxZoom independently rather than the pair producing a NaN that silently blanks the canvas.
+//
+// Free function, not a method, for the reason every other piece of geometry here is: it is pure
+// arithmetic over numbers the editor happens to hold, so it can be checked without an ImGui context
+// or a loaded file. See GraphEditorGeometryTest.
+CanvasTransform frameTransform(Vec2 contentMin, Vec2 contentMax, Vec2 viewportPx,
+                                f32 paddingPx, f32 minZoom, f32 maxZoom);
+
 // ---------------------------------------------------------------------------------------------------
 // Auto-layout
 // ---------------------------------------------------------------------------------------------------

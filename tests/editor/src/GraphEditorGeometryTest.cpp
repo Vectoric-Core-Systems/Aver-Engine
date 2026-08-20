@@ -544,6 +544,81 @@ static void testCanvasTransform() {
     }
 }
 
+// ======================================================================================= framing ===
+static void testFrameTransform() {
+    AVER_INFO("=== frameTransform (fit content into a viewport) ===");
+
+    const Vec2 viewport(1000.0f, 600.0f);
+    const f32 pad = 40.0f;
+
+    // ---- the ordinary case: content larger than the viewport, so the zoom is the real fit.
+    {
+        const Vec2 lo(0.0f, 0.0f), hi(4000.0f, 1200.0f);
+        const CanvasTransform t = frameTransform(lo, hi, viewport, pad, 0.15f, 4.0f);
+        const Vec2 sLo = canvasToScreen(t, lo);
+        const Vec2 sHi = canvasToScreen(t, hi);
+        check(sLo.x >= pad - 0.5f && sLo.y >= pad - 0.5f,
+              "the top-left of the content lands inside the padding");
+        check(sHi.x <= viewport.x - pad + 0.5f && sHi.y <= viewport.y - pad + 0.5f,
+              "the bottom-right of the content lands inside the padding");
+        // Centred, which is the property a naive pan gets wrong on the axis that is NOT the
+        // limiting one -- here the content is much wider than tall, so y has slack to get wrong.
+        const f32 cx = (sLo.x + sHi.x) * 0.5f, cy = (sLo.y + sHi.y) * 0.5f;
+        check(std::abs(cx - viewport.x * 0.5f) < 0.5f, "content is horizontally centred");
+        check(std::abs(cy - viewport.y * 0.5f) < 0.5f, "content is vertically centred on the slack axis");
+    }
+
+    // ---- THE CLAMP CASE, and the reason this function exists. Three small nodes want a zoom far
+    // above the ceiling; the zoom must clamp AND the content must still be centred. A naive
+    // implementation that centres from the unclamped zoom leaves the content in a corner.
+    {
+        const Vec2 lo(0.0f, 0.0f), hi(60.0f, 40.0f);
+        const CanvasTransform t = frameTransform(lo, hi, viewport, pad, 0.15f, 4.0f);
+        check(std::abs(t.zoom - 4.0f) < 0.001f, "a tiny graph clamps to the maximum zoom, not past it");
+        const Vec2 sLo = canvasToScreen(t, lo), sHi = canvasToScreen(t, hi);
+        const f32 cx = (sLo.x + sHi.x) * 0.5f, cy = (sLo.y + sHi.y) * 0.5f;
+        check(std::abs(cx - viewport.x * 0.5f) < 0.5f && std::abs(cy - viewport.y * 0.5f) < 0.5f,
+              "...and the content is STILL centred after the clamp bit");
+    }
+    {
+        // The other end: content so large the fit falls under the floor. Same requirement.
+        const Vec2 lo(-50000.0f, -50000.0f), hi(50000.0f, 50000.0f);
+        const CanvasTransform t = frameTransform(lo, hi, viewport, pad, 0.15f, 4.0f);
+        check(std::abs(t.zoom - 0.15f) < 0.001f, "a vast graph clamps to the minimum zoom");
+        const Vec2 sLo = canvasToScreen(t, lo), sHi = canvasToScreen(t, hi);
+        const f32 cx = (sLo.x + sHi.x) * 0.5f, cy = (sLo.y + sHi.y) * 0.5f;
+        check(std::abs(cx - viewport.x * 0.5f) < 0.5f && std::abs(cy - viewport.y * 0.5f) < 0.5f,
+              "...and it is centred rather than pinned to a corner");
+    }
+
+    // ---- negative coordinates. A comment box drawn up and to the left of the nodes puts the
+    // content bounds in negative canvas space, which is ordinary and must not need a special case.
+    {
+        const Vec2 lo(-900.0f, -400.0f), hi(-100.0f, -50.0f);
+        const CanvasTransform t = frameTransform(lo, hi, viewport, pad, 0.15f, 4.0f);
+        const Vec2 sLo = canvasToScreen(t, lo), sHi = canvasToScreen(t, hi);
+        check(sLo.x >= pad - 0.5f && sHi.x <= viewport.x - pad + 0.5f,
+              "content entirely in negative canvas space still frames on screen");
+    }
+
+    // ---- DEGENERATE INPUTS. Each axis falls back independently; the failure being guarded against
+    // is a NaN pan, which does not throw -- it silently blanks the canvas and looks like data loss.
+    {
+        const CanvasTransform flat = frameTransform(Vec2(10.0f, 10.0f), Vec2(410.0f, 10.0f), viewport, pad, 0.15f, 4.0f);
+        check(std::isfinite(flat.panPx.x) && std::isfinite(flat.panPx.y) && std::isfinite(flat.zoom),
+              "a zero-HEIGHT content box produces a finite transform");
+        const CanvasTransform point = frameTransform(Vec2(7.0f, 7.0f), Vec2(7.0f, 7.0f), viewport, pad, 0.15f, 4.0f);
+        check(std::isfinite(point.panPx.x) && std::isfinite(point.panPx.y) && std::isfinite(point.zoom),
+              "a single-POINT content box produces a finite transform");
+        const Vec2 sp = canvasToScreen(point, Vec2(7.0f, 7.0f));
+        check(std::abs(sp.x - viewport.x * 0.5f) < 0.5f && std::abs(sp.y - viewport.y * 0.5f) < 0.5f,
+              "...and puts that point in the middle of the screen, which is the only sane answer");
+        const CanvasTransform tiny = frameTransform(Vec2(0.0f, 0.0f), Vec2(400.0f, 300.0f), Vec2(4.0f, 4.0f), pad, 0.15f, 4.0f);
+        check(std::isfinite(tiny.zoom) && tiny.zoom >= 0.15f,
+              "a viewport smaller than its own padding does not divide by zero");
+    }
+}
+
 // ==================================================================================== auto-layout ===
 static void testAutoLayout() {
     AVER_INFO("=== auto-layout ===");
@@ -846,6 +921,7 @@ int main() {
     testLinkRules();
     testCycleDetection();
     testCanvasTransform();
+    testFrameTransform();
     testAutoLayout();
     testNodeAttributeCatalog();
     testNodeAttributeReadWrite();

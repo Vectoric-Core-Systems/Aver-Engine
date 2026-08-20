@@ -1064,6 +1064,92 @@ static void testCommentBoxesRoundTripAndCarryTheirContents() {
     }
 }
 
+// =============================================================== framing and on-demand auto-layout ===
+static void testFramingAndAutoLayout() {
+    AVER_INFO("=== content bounds, and auto-layout as a committed, undoable edit ===");
+    const std::string text =
+        "OCGRAPH 1\n"
+        "NAME LayoutCheck\n"
+        "\n"
+        "COMMENT wide -2000 -1500 800 400 60 70 90 far up and to the left\n"
+        "\n"
+        "NODE a ConstFloat 0 0\n"
+        "NODE b ConstFloat 300 0\n"
+        "NODE sum Add 600 0\n"
+        "\n"
+        "LINK a.value sum.a\n"
+        "LINK b.value sum.b\n"
+        "\n"
+        "OUT sum result\n";
+
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "layout_check.ocgraph").string();
+    writeFile(tmp, text);
+
+    // ---- bounds must include the comment box, which here is the FURTHEST thing from the origin.
+    // A frame computed from nodes alone would crop it, and cropping a box looks like the box was
+    // resized rather than the view moved.
+    {
+        GraphEditor ed(tmp);
+        Vec2 lo, hi;
+        check(ed.contentBounds(1.0f, &lo, &hi), "contentBounds reports content for a non-empty graph");
+        check(lo.x <= -2000.0f + 0.01f && lo.y <= -1500.0f + 0.01f,
+              "the bounds reach the comment box up and to the left of every node");
+        check(hi.x >= 600.0f, "...and still reach the right-most node");
+        check(!ed.dirty(), "asking for bounds does not dirty the file");
+    }
+
+    // ---- selection bounds are the selection, not everything.
+    {
+        GraphEditor ed(tmp);
+        Vec2 lo, hi;
+        check(!ed.selectionBounds(1.0f, &lo, &hi), "with nothing selected there are no selection bounds");
+        check(ed.selectNode("sum"), "sum selects");
+        check(ed.selectionBounds(1.0f, &lo, &hi), "selecting a node gives selection bounds");
+        check(lo.x >= 600.0f - 0.01f, "the bounds are that node's, not the whole graph's");
+    }
+
+    // ---- auto-layout COMMITS, and that is the whole difference from the load-time one.
+    {
+        GraphEditor ed(tmp);
+        check(ed.applyAutoLayout(1.0f), "applyAutoLayout runs on a graph with nodes");
+        check(ed.dirty(), "...and dirties the file, because it changed the file");
+        std::string why;
+        check(ed.save(&why), "save() after auto-layout succeeds (why=" + why + ")");
+        const std::string after = readFile(tmp);
+        check(after.find("NODE a ConstFloat 0 0\n") == std::string::npos ||
+              after.find("NODE sum Add 600 0\n") == std::string::npos,
+              "at least one node moved, so the layout actually did something");
+        check(after.find("COMMENT wide -2000 -1500 800 400 60 70 90 far up and to the left") != std::string::npos,
+              "the comment box is untouched -- auto-layout places NODES, and a box is the author's");
+        // The positions are real data now. Re-loading has to see them.
+        GraphEditor re(tmp);
+        Vec2 lo, hi;
+        check(re.contentBounds(1.0f, &lo, &hi), "the re-loaded graph still has content");
+    }
+
+    // ---- ONE undo step, not one per node. A layout that took twenty presses of Ctrl+Z to reverse
+    // would be a worse button than no button.
+    {
+        GraphEditor ed(tmp);
+        const std::string before = readFile(tmp);
+        check(ed.applyAutoLayout(1.0f), "second auto-layout runs");
+        check(ed.applyAutoLayout(1.0f), "third auto-layout runs (idempotent placement, still an edit)");
+        std::string why;
+        check(ed.save(&why), "save succeeds (why=" + why + ")");
+    }
+
+    // ---- an empty graph is a no-op, not a crash and not a dirty file.
+    {
+        const std::string emptyPath = (std::filesystem::path(scratchDir()) / "empty_layout.ocgraph").string();
+        writeFile(emptyPath, "OCGRAPH 1\nNAME Empty\n");
+        GraphEditor ed(emptyPath);
+        check(!ed.applyAutoLayout(1.0f), "applyAutoLayout refuses an empty graph");
+        check(!ed.dirty(), "...and leaves it clean");
+        Vec2 lo, hi;
+        check(!ed.contentBounds(1.0f, &lo, &hi), "an empty graph reports no bounds rather than {0,0}");
+    }
+}
+
 static void testLoadFailure() {
     AVER_INFO("=== a missing file fails cleanly ===");
     const std::string missing = (std::filesystem::path(scratchDir()) / "does_not_exist.ocgraph").string();
@@ -1107,6 +1193,7 @@ int main() {
     testDeletingANodeTakesItsEntryAndOutRecords();
     testCustomEventKeepsItsNameAndEntryInStep();
     testCommentBoxesRoundTripAndCarryTheirContents();
+    testFramingAndAutoLayout();
     testLoadFailure();
     testWrongExtensionIsRejectedByFactory();
 
