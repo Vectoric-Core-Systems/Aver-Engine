@@ -154,9 +154,18 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    vocabulary has no such machinery, so the cast is a node you can see.
     //    FloatToInt TRUNCATES toward zero, which is what C# (int)f does -- Floor exists for the
     //    other rounding, and having both means neither has to be guessed.
+    // INT TO FLOAT IS LOSSY ABOVE 2^24, and in this engine that is not a corner case: a float32
+    // carries 24 mantissa bits, so past 16777216 only EVEN integers survive -- and ENTITY HANDLES
+    // START AT 16777216. Converting one to a float silently rounds it to its neighbour. That cost
+    // an hour: a graph printed a player controller as 16777224 while the ABI returned 16777225,
+    // and it read exactly like the engine handing back the wrong entity. Use PrintInt for handles.
     t.push_back({"IntToFloat", "Int To Float", "Convert", {pin("a", "int", false), pin("result", "float", true)}});
     t.push_back({"BoolToFloat", "Bool To Float", "Convert", {pin("a", "bool", false), pin("result", "float", true)}});
     t.push_back({"FloatToInt", "Float To Int", "Convert", {pin("a", "float", false), pin("result", "int", true)}});
+    // PrintInt exists because Print takes a float and a float cannot hold an entity handle --
+    // see the IntToFloat note above. Anything counting entities, indices or ids wants this one.
+    t.push_back({"PrintInt", "Print Int", "Debug", {
+        pin("exec", "exec", false), pin("value", "int", false), pin("then", "exec", true)}});
     t.push_back({"Print", "Print", "Debug", {
         pin("exec", "exec", false), pin("value", "float", false), pin("then", "exec", true)}});
     t.push_back({"Multiply", "Multiply", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});

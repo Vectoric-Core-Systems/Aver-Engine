@@ -1033,7 +1033,8 @@ public class GraphCompiler
         if (_il == null) return;
         _il.Emit(OpCodes.Ldstr, node.Id);
         EmitPullInput(node, "value");
-        _il.Emit(OpCodes.Call, PrintMethod);
+        _il.Emit(OpCodes.Call,
+                 node.Type.Equals("printint", StringComparison.OrdinalIgnoreCase) ? PrintIntMethod : PrintMethod);
     }
 
     /// GetViewEntity(entity) -> view + success. Same shape as EmitGetForward, one out-parameter wide.
@@ -2375,7 +2376,8 @@ public class GraphCompiler
     /// Print gets its own predicate for the reason every side effect above it does: one per type,
     /// so a predicate's name never stops describing what it matches.
     private static bool IsExecCapablePrintType(string type) =>
-        type.Equals("print", StringComparison.OrdinalIgnoreCase);
+        type.Equals("print", StringComparison.OrdinalIgnoreCase) ||
+        type.Equals("printint", StringComparison.OrdinalIgnoreCase);
 
     /// The four framework calls that WRITE. Grouped into ONE predicate where Jump and CharacterMove
     /// deliberately are not, and the difference is real: those two have separate emitters, while
@@ -3463,6 +3465,10 @@ public class GraphCompiler
     private static readonly MethodInfo UnpossessMethod =
         typeof(GraphInterop).GetMethod("UnpossessForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.UnpossessForGraph was not found by reflection");
+    // PrintInt: the same line for an INT pin, because a float cannot hold an entity handle.
+    private static readonly MethodInfo PrintIntMethod =
+        typeof(GraphInterop).GetMethod("PrintIntForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.PrintIntForGraph was not found by reflection");
     // Print: one line to the log, labelled with the node id the emitter pushes.
     private static readonly MethodInfo PrintMethod =
         typeof(GraphInterop).GetMethod("PrintForGraph", BindingFlags.NonPublic | BindingFlags.Static)

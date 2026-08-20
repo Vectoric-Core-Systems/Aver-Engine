@@ -368,6 +368,16 @@ internal static class GraphInterop
         Log.Info($"[Graph] {label} = {value}");
     }
 
+    /// <summary>Print for an INT pin, and it is not a convenience -- it is a correctness fix.
+    /// A float32 has 24 mantissa bits, so above 16777216 it can only hold EVEN integers, and this
+    /// engine's ENTITY HANDLES START AT 16777216. Routing a handle through IntToFloat to reach
+    /// Print silently rounds it to its neighbour, which reads exactly like the engine returning the
+    /// wrong entity. It cost an hour of chasing a framework bug that was never there.</summary>
+    internal static void PrintIntForGraph(string label, int value)
+    {
+        Log.Info($"[Graph] {label} = {value}");
+    }
+
     /// <summary>The character this entity is, or null with one warning line. Every character node
     /// below funnels through here so they all fail the same way and say the same thing -- the shape
     /// JumpForGraph and GetViewEntity already established.</summary>
